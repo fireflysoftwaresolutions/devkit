@@ -1,7 +1,11 @@
 # Copyright (c) 2026 Firefly Software Solutions Inc.
 # SPDX-License-Identifier: Apache-2.0
 """Delivery policy: detection, recommendation, gaps, recording and the tag rule. Run: python3 -m unittest -v"""
+import argparse
+import contextlib
+import io
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -9,7 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
-from devkit import core, delivery, guard, work  # noqa: E402
+from devkit import cli, core, delivery, gitx, guard, work  # noqa: E402
 
 IDENT = ["-c", "user.email=t@example.com", "-c", "user.name=t"]
 A = {"user": "ana", "host": "mbp1", "agent": "claude", "session": "s1"}
@@ -157,6 +161,55 @@ class CliFixTests(unittest.TestCase):
         self.assertIn("block", work.NEEDS_WHY)
         self.assertEqual(ap.parse_args(["delivery", "apply", "--why", "x", "--set", "versioning=semver"]).set,
                          ["versioning=semver"])
+
+
+class BranchCleanupTests(unittest.TestCase):
+    # GitHub's delete_branch_on_merge was off for devkit, so the branches of merged pull requests piled up on the
+    # remote. `dev delivery apply` (the developer's command) turns it on and records it in the delivery policy; on
+    # other hosts it says what applies there and changes nothing. gh is replaced; nothing reaches GitHub.
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        self.saved = (delivery.POLICIES, work.HANDOFF, gitx.GH, os.getcwd())
+        delivery.POLICIES = root / "policies"
+        work.HANDOFF = root
+        self.calls, self.answer = [], (0, '{"delete_branch_on_merge":true}', "")
+        gitx.GH = lambda args, cwd=None, timeout=60: (self.calls.append(list(args)), self.answer)[1]
+
+    def tearDown(self):
+        delivery.POLICIES, work.HANDOFF, gitx.GH, cwd = self.saved
+        os.chdir(cwd)
+        self.tmp.cleanup()
+
+    def apply(self, remote):
+        r = repo_with({"README.md": "x"})
+        core.sh(["git", "-C", str(r), "remote", "add", "origin", remote])
+        os.chdir(r)
+        a = argparse.Namespace(initiative=None, project=None, delivery_cmd="apply", set=[], tasks=False,
+                               why="the branches of merged pull requests pile up")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            rc = cli.cmd_delivery(a)
+        return rc, " ".join(out.getvalue().split()), delivery.load(delivery.scope_for(r)) or {}
+
+    def test_apply_turns_on_delete_branch_on_merge_on_github_and_records_it(self):
+        rc, out, rec = self.apply("https://github.com/acme/api.git")
+        self.assertEqual(rc, 0, out)
+        self.assertIn(["api", "-X", "PATCH", "repos/acme/api", "-F", "delete_branch_on_merge=true"], self.calls)
+        self.assertIs(rec.get("delete_branch_on_merge"), True)
+        self.assertIn("GitHub now deletes the branch of each merged pull request", out)
+
+    def test_a_setting_github_refuses_is_not_recorded_as_on(self):
+        self.answer = (1, "", "HTTP 403: Must have admin rights to Repository.")
+        rc, out, rec = self.apply("https://github.com/acme/api.git")
+        self.assertIsNone(rec.get("delete_branch_on_merge"))
+        self.assertIn("Must have admin rights", out)
+
+    def test_on_another_host_it_says_what_applies_and_changes_nothing(self):
+        rc, out, rec = self.apply("https://gitlab.com/acme/api.git")
+        self.assertEqual(self.calls, [])
+        self.assertIn("Delete source branch", out)
+        self.assertIsNone(rec.get("delete_branch_on_merge"))
 
 
 if __name__ == "__main__":

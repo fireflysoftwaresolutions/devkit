@@ -198,12 +198,20 @@ def update(les: dict, op: str, why: str = "", a=None, **changes) -> dict:
 
 
 def recur(les: dict, evidence: str = "", why: str = "", a=None) -> dict:
+    """Count a repeat. A retired or prevented lesson that happens again is open again: its prevention did not hold,
+    and recall shows only open lessons. The changelog line says which prevention failed."""
+    m = les["meta"]
     ev = les["sections"].get("Evidence") or ""
     if evidence:
         ev = (ev + "\n" if ev and ev != "_—_" else "") + f"- {work.now_iso()[:10]}: {evidence}"
-    return update(les, f"happened again (#{les['meta']['occurrences'] + 1})", why or evidence, a,
-                  occurrences=les["meta"]["occurrences"] + 1, last_seen=work.now_iso()[:10], Evidence=ev,
-                  status="open" if les["meta"].get("status") == "retired" else les["meta"].get("status"))
+    op = f"happened again (#{m['occurrences'] + 1})"
+    if m.get("status") == "prevented":
+        ref = f" ({m['prevention_ref']})" if m.get("prevention_ref") else ""
+        op += f"; reopened: its prevention by {m.get('prevention') or 'rule'}{ref} did not hold"
+    elif m.get("status") == "retired":
+        op += "; reopened: it was retired"
+    return update(les, op, why or evidence, a, occurrences=m["occurrences"] + 1, last_seen=work.now_iso()[:10],
+                  Evidence=ev, status="open" if m.get("status") in ("retired", "prevented") else m.get("status"))
 
 
 def prevent(les: dict, by: str, ref: str, why: str, a=None) -> dict:

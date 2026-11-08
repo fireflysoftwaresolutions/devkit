@@ -289,7 +289,7 @@ COMMAND_ARGS = {
     "audit": "audit_cmd:name? ref:name?",
     "backup": "branches:name*",
     "branch": "", "branch clean": "", "branch embargo": "branch:name?", "branch ls": "", "branch new": "name:name",
-    "branch rename": "name:name",
+    "branch prune": "", "branch rename": "name:name",
     "calver": "",
     "canary": "",
     "ci": "query:name?",
@@ -303,7 +303,9 @@ COMMAND_ARGS = {
     "crew": "", "crew answer": "id:select text:text+", "crew ask": "text:text+",
     "crew brief": "name:name task:text+", "crew decide": "id:select text:text+", "crew decisions": "",
     "crew decline": "step:select+", "crew delegate": "task:text+", "crew graph": "", "crew history": "",
-    "crew inbox": "", "crew mode": "mode:name?", "crew next": "", "crew raci": "work:roster?",
+    "crew withdraw": "id:select",
+    "crew inbox": "", "crew mode": "mode:name?", "crew next": "", "crew owner": "paths:name+",
+    "crew raci": "work:roster?",
     "crew route": "task:text*", "crew rules": "", "crew set": "name:name field:name value:text+",
     "crew show": "name:name+", "crew sync": "",
     "dashboard": "action:name?",
@@ -357,6 +359,7 @@ COMMAND_ARGS = {
     "pr view": "number:name?",
     "progress": "", "progress add": "spec:text+", "progress assign": "which:select",
     "progress begin": "which:select", "progress block": "text:text+", "progress done": "text:text+",
+    "progress confirm": "which:select",
     "progress history": "", "progress note": "text:text+", "progress reopen": "which:select",
     "progress skip": "which:select", "progress start": "goal:text+", "progress step": "text:text+",
     "progress time": "",
@@ -378,7 +381,7 @@ COMMAND_ARGS = {
     "task": "", "task add": "text:text+", "task block": "selector:select+", "task cancel": "selector:select+",
     "task claim": "selector:select+", "task delegate": "selector:select+", "task done": "selector:select+",
     "task edit": "selector:select+", "task history": "selector:select+", "task link": "selector:select+",
-    "task ls": "", "task move": "selector:select+", "task release": "selector:select+",
+    "task ls": "", "task reconcile": "", "task move": "selector:select+", "task release": "selector:select+",
     "task reopen": "selector:select+", "task show": "selector:select+", "task start": "selector:select+",
     "task unblock": "selector:select+",
     "team": "",
@@ -405,7 +408,7 @@ NAME_OPTIONS = frozenset({
     "--ext", "--fd", "--file", "--files", "--first", "--fold", "--format", "--from", "--glob", "--hours",
     "--initiative", "--interval", "--irreversible", "--kind", "--label", "--lang", "--license", "--limit", "--lines",
     "--max", "--max-per-file", "--member", "--min-severity", "--mode", "--model", "--notes-file", "--only", "--out",
-    "--outcome", "--owner", "--path", "--performs", "--priority", "--project", "--projects", "--provider",
+    "--outcome", "--owner", "--path", "--performs", "--pr", "--priority", "--project", "--projects", "--provider",
     "--recommend", "--ref", "--refs", "--renew", "--repo", "--rule", "--runner", "--runs", "--scope", "--section",
     "--session", "--set", "--severity", "--sha", "--since", "--size", "--slug", "--stack", "--state", "--step",
     "--step-timeout", "--steps", "--tag", "--target", "--ticket", "--timeout", "--to", "--type", "--undo",
@@ -424,13 +427,13 @@ FLAG_OPTIONS = frozenset((
     "--as-pinned --ast --auto --auto-only --cached --case-sensitive --changed --ci-passed --claim --commands --comment "
     "--comments --continue --count --cross --decision --discard --draft --dry-run --edit --fail-fast --failed --fill "
     "--finish --fixed --for-chat --force --force-in-use --force-with-lease --full-path --github --global --help "
-    "--history --ignore-case --include-heavy --json --keep-branch --keep-going --later --latest --lift --list "
+    "--history --ignore-case --include-heavy --json --keep-branch --keep-going --later --latest --lift --list --local "
     "--mark-passed --markdown --members --merge --mermaid --mine --move --name-only --names --no-check --no-copy "
     "--no-deps --no-git --no-index --no-open --no-prose --no-push --no-template --no-validate --now --offline --online "
     "--outside --patch --pending --prerelease --public --publish --quiet --ready --rebase --record --recursive "
-    "--refresh --regex --remove --replace --request-changes --resume --run --safe --scheduled --sign --skip "
+    "--refresh --regex --remote --remove --replace --request-changes --resume --run --safe --scheduled --sign --skip "
     "--skip-heavy --skip-packages --squash --staged --stat --status --stop --strict --syntax --tab --tasks --team "
-    "--tracked --unverified --unwip --verbose --watch --wip --word --yes -F -R -a -f -h -l -r -s -v -y").split())
+    "--tracked --unverified --unwip --verbose --wait --watch --wip --word --yes -F -R -a -f -h -l -r -s -v -y").split())
 DEV_OPTIONS = TEXT_OPTIONS | NAME_OPTIONS | FLAG_OPTIONS
 # dev note set's keys whose value is one of a fixed set: that value stays, every other key's value is masked
 PAIR_VALUES = {"status": frozenset(notes.STATUSES), "priority": frozenset(notes.PRIORITIES)}
@@ -1535,6 +1538,7 @@ ACTIONS = {
     "audit.verify": ("security", "info"), "audit.publish": ("security", "critical"),
     "guard": ("refusal", "warning"), "guard.ask": ("decision", "notice"), "guard.allow": ("decision", "info"),
     "git.backup": ("data", "info"), "git.backup-skipped": ("data", "notice"), "git.embargo": ("decision", "notice"),
+    "branch": ("data", "notice"),  # branch.pruned: a merged branch deleted (remote, local, its worktree) and how merged
     "stubs.gate": ("refusal", "warning"), "tests.gate": ("refusal", "warning"),
     "stop": ("refusal", "notice"), "stop.prevented": ("lifecycle", "info"),
     "config": ("config", "notice"), "config.blocked": ("security", "warning"),
@@ -2040,6 +2044,7 @@ READ_SUB = {("task", "ls"), ("task", "show"), ("task", "history"), ("task", None
             ("pr", "view"), ("pr", "checks"), ("pr", "diff"), ("run", "ls"), ("run", "view"), ("branch", "ls"),
             ("issue", "ls"), ("issue", "view"), ("sec", "scan"), ("desktop", "status"), ("crew", None),
             ("crew", "show"), ("crew", "brief"), ("crew", "inbox"), ("crew", "decisions"), ("crew", "next"),
+            ("crew", "owner"),
             ("ci", None), ("ci", "status"), ("ci", "audit"), ("session", "brief"), ("session", "compactions"),
             ("session", None), ("alias", None)}
 # `ci audit --fix` edits workflow files and `ci init` writes a pipeline (unless --dry-run): both are audited;
@@ -2067,6 +2072,8 @@ def _changes(argv: list) -> bool:
         return False
     if cmd in ("free", "gc"):  # the plan only reads; item numbers, --safe and --apply delete
         return any(x in ("--apply", "--safe") or x.isdigit() for x in argv[1:])
+    if cmd == "branch" and sub == "prune":  # the listing only reads; --apply deletes
+        return "--apply" in argv
     if cmd == "crew" and sub == "route":
         return "--apply" in argv
     if cmd == "ci":

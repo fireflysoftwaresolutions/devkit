@@ -1,6 +1,6 @@
 ---
 name: workspace
-description: How to work with the ~/Development layout and the `dev` CLI—clone or create projects, run parallel work in managed git worktrees, find projects, clean up disk, start Docker, and enable a project's vendor AI tooling (Laravel Boost, Symfony AI Mate, FastAPI library-skills, Next.js MCP, Angular AI config). Use when cloning, creating, moving or locating a repository, when parallel work needs a worktree, when disk is full, or when setting up a new project's agent tooling.
+description: How to work with the ~/Development layout and the `dev` CLI—clone or create projects, run parallel work in managed git worktrees, find projects, clean up disk, start Docker, and enable a project's vendor AI tooling (Laravel Boost, Symfony AI Mate, FastAPI library-skills, Next.js MCP, Angular AI config). Use when cloning, creating, moving or locating a repository, when parallel work needs a worktree, when merged branches or worktrees pile up, when disk is full, or when setting up a new project's agent tooling.
 ---
 
 # devkit workspace
@@ -19,6 +19,9 @@ description: How to work with the ~/Development layout and the `dev` CLI—clone
 Find a project: `dev go <query>` prints its path, and `dev go <query> <branch>` the path of its worktree for that
 branch; `dev ls` lists all; `dev status` describes the current one.
 
+Never make a sibling copy of a repository (`repo-pr12`, `repo-copy`, `repo-ci`) or clone outside this layout: a second
+branch at once is a worktree. Moving or renaming a repository is `dev adopt`, with the developer.
+
 ## Parallel work with worktrees
 
 Only when the user asks or two sessions must change the same repository at once:
@@ -32,6 +35,17 @@ dev wt rm feat/short-topic           # refuses if there are uncommitted or unpus
 
 `dev wt new` copies `node_modules` copy-on-write when the lockfile matches (no reinstall), and copies the files
 listed in `.worktreeinclude` (for example `.env`). Python: run `uv sync` in the new worktree.
+
+A worktree lives as long as its branch. Once the branch is merged (by ancestry, by a merged PR, or by content), it
+goes: `dev pr merge` deletes the branch with its clean worktree, `dev release` deletes the branches a release merged,
+and the nightly `gc` job removes an idle, clean, merged worktree with its branch, a merged local branch that has not
+moved for 24 hours, and a merged remote branch whose PR merged or that devkit backed up. `dev branch prune` lists
+every branch here and on origin with its state, and `--apply` deletes the merged ones with their clean worktrees; the
+current branch, a branch with an open PR, an embargoed branch, and a worktree with uncommitted changes or a live
+session are kept. Deleting on origin is irreversible: a crew member never runs `dev branch prune --apply` without
+`--local`, nor `dev sync --scheduled`. `dev free`, `dev wt ls`, and `dev branch clean` use the same merge test, so a
+squash- or cherry-pick-merged branch counts as merged, not unpushed, and a `dev sync --offline` or `--no-push`
+deletes nothing on origin. Remove the worktree of an abandoned branch with `dev wt rm <branch>`.
 
 ## Disk
 

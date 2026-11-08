@@ -430,6 +430,28 @@
           "learning-loop"
         ]
       }
+    },
+    {
+      "id": "work-state",
+      "why": "Work items, runs, lanes, decisions, CI watches and branches kept true: before a release, after a merge, and when work state drifts",
+      "activities": [
+        "release",
+        "plan"
+      ],
+      "commands": [
+        "dev task reconcile",
+        "dev branch prune",
+        "dev crew withdraw",
+        "dev progress confirm"
+      ],
+      "skills": {
+        "claude": [
+          "work-state"
+        ],
+        "codex": [
+          "work-state"
+        ]
+      }
     }
   ]
 }

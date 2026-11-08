@@ -87,7 +87,9 @@ def new(scope: str, title: str, a=None, kind: str = "plan") -> Path:
 
 
 def revise(path: Path, why: str, a=None, status: str = None) -> dict:
-    """Record a change of the plan: bump the version, log who/when/why and the size of the change, commit."""
+    """Record a change of the plan: bump the version, log who/when/why and the size of the change, commit. An
+    approval covers the text approved: an approved plan whose text changed goes back to draft when it is revised
+    without a `status`, and the changelog line names the version the approval covered."""
     if not why.strip():
         raise ValueError("a plan revision needs the reason: --why \"…\"")
     a = a or work.actor()
@@ -101,16 +103,20 @@ def revise(path: Path, why: str, a=None, status: str = None) -> dict:
         title = next((ln[2:].strip() for ln in body.splitlines() if ln.startswith("# ")), path.stem)
         meta = {"id": "P-" + work.new_id("task")[2:], "title": title, "scope": scope_of(path), "status": "draft",
                 "version": 0, "created": work.now_iso(), "created_by": f"{a['user']}@{a['host']}"}
+    unapproved = ""
     if status:
         if status not in STATUSES:
             raise ValueError(f"status must be one of {', '.join(STATUSES)}")
         meta["status"] = status
+    elif meta.get("status") == "approved" and meta.get("body_sha") != _sha(body):
+        unapproved = f"; back to draft: the approval covered v{int(meta.get('version') or 0)}"
+        meta["status"] = "draft"
     rel = str(path.relative_to(HANDOFF))
     stat = core.gitout(HANDOFF, "diff", "--shortstat", "HEAD", "--", rel) if not adopted else ""
     meta["version"] = int(meta.get("version") or 0) + 1
     meta["body_sha"] = _sha(body)
     meta["updated"], meta["updated_by"] = work.now_iso(), f"{a['user']}@{a['host']}"
-    change = "adopted into devkit format" if adopted else (status or "revised")
+    change = "adopted into devkit format" if adopted else (status or "revised") + unapproved
     detail = f" ({stat.strip()})" if stat.strip() else ""
     log.insert(0, f"v{meta['version']} · {work.now_iso()} · {work.actor_str(a)} · {change}{detail} — why: {why}")
     work.write_record(path, _render(meta, body, log, extra))

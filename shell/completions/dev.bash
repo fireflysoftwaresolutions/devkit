@@ -225,7 +225,7 @@ _dev_spec() {
     'handoff-import') o='-h --help --slug --dry-run' v='--slug=n' p='d' ;;
     'handoff') o='-h --help --edit --path --log --agent' v='--log=n --agent=n' p='l:projects:-::' ;;
     'session') o='-h --help --session --latest -p --project --for-chat --provider --from --members --all' v='--session=n -p=l:projects:ids:: --project=l:projects:ids:: --provider=n --from=n' p='c:brief,carry,compactions,forget f' ;;
-    'task') c='add start claim release done block unblock cancel reopen show history link delegate move edit ls' o='-h --help -p --project -i --initiative --all' v='-p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' ;;
+    'task') c='add start claim release done block unblock cancel reopen show history link delegate move edit reconcile ls' o='-h --help -p --project -i --initiative --all' v='-p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' ;;
     'task add') o='-h --help --now --next --later --type --priority --due --body --why --claim --done --no-template -p --project -i --initiative' v='--type=c:task,feature,bug,spike --priority=c:high,normal,low --due=n --body=n --why=n --done=n -p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' p='*n' ;;
     'task start') o='-h --help --why -p --project -i --initiative' v='--why=n -p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' p='*l:tasks:-::' ;;
     'task claim') o='-h --help --why -p --project -i --initiative' v='--why=n -p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' p='*l:tasks:-::' ;;
@@ -241,6 +241,7 @@ _dev_spec() {
     'task delegate') o='-h --help --to --why --due --no-copy -p --project -i --initiative' v='--to=n --why=n --due=n -p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' p='*l:tasks:-::' ;;
     'task move') o='-h --help --to --why -p --project -i --initiative' v='--to=c:now,next,later --why=n -p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' p='*l:tasks:-::' ;;
     'task edit') o='-h --help --title --body-file --priority --due --why -p --project -i --initiative' v='--title=n --body-file=f --priority=c:high,normal,low --due=n --why=n -p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' p='*l:tasks:-::' ;;
+    'task reconcile') o='-h --help --apply --json -p --project -i --initiative' v='-p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' ;;
     'task ls') o='-h --help -p --project -i --initiative' v='-p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' ;;
     'note') o='-h --help -p --project -i --initiative' v='-p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' p='c:set *n' ;;
     'plan') c='new revise approve supersede ls' o='-h --help -p --project -i --initiative' v='-p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' ;;
@@ -249,7 +250,7 @@ _dev_spec() {
     'plan approve') o='-h --help --why -p --project -i --initiative' v='--why=n -p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' p='l:plans:-::' ;;
     'plan supersede') o='-h --help --why -p --project -i --initiative' v='--why=n -p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' p='l:plans:-::' ;;
     'plan ls') o='-h --help -p --project -i --initiative' v='-p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' ;;
-    'progress') c='start note step block done assign begin add reopen skip history time' o='-h --help' ;;
+    'progress') c='start note step block done assign begin add reopen skip confirm history time' o='-h --help' ;;
     'progress start') o='-h --help --steps --estimate --mode --plan --replace --why' v='--steps=n --estimate=n --mode=c:guided,auto --plan=n --why=n' p='*n' ;;
     'progress note') o='-h --help --next' v='--next=n' p='*n' ;;
     'progress step') o='-h --help --next --check --step --force --no-check --approves' v='--next=n --check=n --step=l:steps:-:: --approves=l:steps:-::' p='*n' ;;
@@ -260,6 +261,7 @@ _dev_spec() {
     'progress add') o='-h --help --why' v='--why=n' p='*n' ;;
     'progress reopen') o='-h --help --why' v='--why=n' p='l:steps:-::' ;;
     'progress skip') o='-h --help --why' v='--why=n' p='l:steps:-::' ;;
+    'progress confirm') o='-h --help --why' v='--why=n' p='l:steps:-::' ;;
     'progress history') o='-h --help' ;;
     'progress time') o='-h --help --days -p --project' v='--days=n -p=l:projects:-:: --project=l:projects:-::' ;;
     'time') o='-h --help --days -p --project' v='--days=n -p=l:projects:-:: --project=l:projects:-::' ;;
@@ -322,12 +324,13 @@ _dev_spec() {
     'free') o='-h --help --safe -y --yes' p='*n' ;;
     'gc') o='-h --help --safe -y --yes --apply --auto-only -v --verbose' p='*n' ;;
     'canary') o='-h --help --days --limit' v='--days=n --limit=n' ;;
-    'ci') o='-h --help -p --project --sha --timeout --quiet --commands --runs --status --branch --all-branches --watch --limit --all-jobs --json --run --mark-passed --note --evidence --dry-run --keep-going --step-timeout --resume --provider --fix --strict --stack --force' v='-p=l:projects:-:: --project=l:projects:-:: --sha=n --timeout=n --branch=l:branches:-:: --limit=n --note=n --step-timeout=n --provider=c:github,gitlab,bitbucket,azure --stack=c:auto,python,node,java-maven,java-gradle,go,php,docker' p='l:projects:-:status,audit,init,watch:' ;;
-    'branch') c='new rename ls clean embargo' o='-h --help' ;;
+    'ci') o='-h --help -p --project --sha --wait --tag --pr --timeout --quiet --commands --runs --status --branch --all-branches --watch --limit --all-jobs --json --run --mark-passed --note --evidence --dry-run --keep-going --step-timeout --resume --provider --fix --strict --stack --force' v='-p=l:projects:-:: --project=l:projects:-:: --sha=n --tag=n --pr=n --timeout=n --branch=l:branches:-:: --limit=n --note=n --step-timeout=n --provider=c:github,gitlab,bitbucket,azure --stack=c:auto,python,node,java-maven,java-gradle,go,php,docker' p='l:projects:-:status,audit,init,watch,watches:' ;;
+    'branch') c='new rename ls clean prune embargo' o='-h --help' ;;
     'branch new') o='-h --help --ticket --base' v='--ticket=n --base=l:branches:-::' p='n' ;;
     'branch rename') o='-h --help --ticket' v='--ticket=n' p='n' ;;
     'branch ls') o='-h --help --offline --json' ;;
     'branch clean') o='-h --help --offline --json --apply' ;;
+    'branch prune') o='-h --help --apply --remote --local --offline --json' ;;
     'branch embargo') o='-h --help --why --until --lift --json' v='--why=n --until=n' p='l:branches:-::' ;;
     'commit') o='-h --help -m --message --why --body --verified --refs --breaking -a --all --amend --wip --unwip' v='-m=n --message=n --why=n --body=n --verified=n --refs=n --breaking=n' p='*f' ;;
     'rebase') o='-h --help --base --continue --abort --skip' v='--base=l:branches:-::' ;;
@@ -346,7 +349,7 @@ _dev_spec() {
     'run ls') o='-h --help --branch --all-branches --limit --json' v='--branch=l:branches:-:: --limit=n' ;;
     'run view') o='-h --help --failed --lines --json' v='--lines=n' p='n' ;;
     'run rerun') o='-h --help --flaky --all-jobs' v='--flaky=n' p='n' ;;
-    'release') o='-h --help --version --notes-file --ci-passed --sign --draft --prerelease --dry-run' v='--version=n --notes-file=f' ;;
+    'release') o='-h --help --version --notes-file --ci-passed --sign --draft --prerelease --dry-run --why' v='--version=n --notes-file=f --why=n' ;;
     'issue') c='ls view create' o='-h --help' ;;
     'issue ls') o='-h --help --mine --label --state --limit --json' v='--label=n --state=c:open,closed,all --limit=n' ;;
     'issue view') o='-h --help --comments --json' p='n' ;;
@@ -360,7 +363,7 @@ _dev_spec() {
     'test audit') o='-h --help --changed --since --json --min-severity --rule' v='--since=l:branches:-:: --min-severity=c:low,medium,high --rule=c:debug-output,duplicate-test,empty-test,mock-only,no-assertion,no-production-reference,skipped-without-reason,sleep-in-test,smoke-only,snapshot-only,swallowed-failure,trivial-assertion,vague-name' p='*f' ;;
     'mcp') o='-h --help' ;;
     'desktop') o='-h --help --no-validate --json' p='c:pack,status' ;;
-    'crew') c='raci set history rules graph show brief sync ask answer inbox mode decide decisions route delegate decline next' o='-h --help --json --latest' ;;
+    'crew') c='raci set history rules graph show brief sync ask answer inbox mode decide withdraw decisions route delegate decline owner next' o='-h --help --json --latest' ;;
     'crew raci') o='-h --help --set --why --markdown' v='--set=n --why=n' p='l:activities,crew:-::' ;;
     'crew set') o='-h --help --why' v='--why=n' p='l:crew:-:: n *n' ;;
     'crew history') o='-h --help' ;;
@@ -374,10 +377,12 @@ _dev_spec() {
     'crew inbox') o='-h --help' ;;
     'crew mode') o='-h --help --approve' v='--approve=n' p='c:guided,auto' ;;
     'crew decide') o='-h --help' p='n *n' ;;
+    'crew withdraw') o='-h --help --why' v='--why=n' p='n' ;;
     'crew decisions') o='-h --help --pending --ask --json' v='--ask=n' ;;
     'crew route') o='-h --help --files --plan --apply' v='--files=n' p='*n' ;;
     'crew delegate') o='-h --help --to --scope --after --estimate --files' v='--to=l:crew:-:: --scope=n --after=l:steps:-:: --estimate=n --files=n' p='*n' ;;
     'crew decline') o='-h --help --why' v='--why=n' p='*l:steps:-::' ;;
+    'crew owner') o='-h --help --json' p='*f' ;;
     'crew next') o='-h --help --first --why' v='--first=l:steps:-:: --why=n' ;;
     'ext') c='ls outdated update add remove enable disable ack' o='-h --help' ;;
     'ext ls') o='-h --help --agent --all --json -v --verbose' v='--agent=c:claude,codex' ;;
@@ -390,13 +395,13 @@ _dev_spec() {
     'ext ack') o='-h --help' ;;
     'impeccable') o='-h --help' p='*n' ;;
     'doctor') o='-h --help' ;;
-    'install') o='-h --help --only --version --unverified --why --commit-template' v='--only=m:config,tools,cli,git,handoff,instructions,skills,claude,codex,desktop,docker,docs,launchd,prompt,shell --version=l:versions:-:: --why=n --commit-template=c:yes,no' ;;
+    'install') o='-h --help --only --version --unverified --why --yes -y --commit-template' v='--only=m:config,tools,cli,git,handoff,instructions,skills,claude,codex,desktop,docker,docs,launchd,prompt,shell --version=l:versions:-:: --why=n --commit-template=c:yes,no' ;;
     'docs') o='-h --help --online --fix --no-prose' p='c:check *f' ;;
     'sec') o='-h --help --history --config -v --verbose' v='--config=n' p='c:scan l:projects:-::' ;;
     'diagram') o='-h --help' p='*l:-:-:render,check,new:f' ;;
     'setup') o='-h --help --remove -y --yes --skip-packages' p='c:prompt,commit-template,shell' ;;
     'prompt') o='-h --help' p='c:refresh' ;;
-    'update') o='-h --help --check --quiet --record' ;;
+    'update') o='-h --help --check --quiet --record --yes -y' ;;
     'docker') o='-h --help' p='c:up,down,status,trim,prune,autostart-on,autostart-off' ;;
     'version') o='-h --help' ;;
     'completion') o='-h --help' p='c:zsh,bash' ;;

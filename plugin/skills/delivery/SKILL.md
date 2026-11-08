@@ -36,8 +36,10 @@ dev pr ready             # once, when the local suite is green: starts the one C
   remote lacks for secrets. `--accept-ci` pushes anyway and counts against the push budget. `dev sync` backs up every
   hour and at the end of a session, for commits older than `backup.after_minutes` (30).
 - **The backup policy** is per project: `dev backup policy on|off|ask`. A private repository is on by default and a
-  public one ask, because a backup there publishes the branch. Changing it is the developer's own decision: it needs
-  their typed `grant backup <project>`, and so does `dev backup --public`.
+  public one ask, because a backup there publishes the branch. An `on` keeps the visibility it was decided for: when
+  the repository no longer reads as private and the visibility differs (or none was recorded), backups wait for the
+  developer again. Changing it is the developer's own decision: it needs their typed `grant backup <project>`, and
+  so does `dev backup --public`.
 - **Embargo** a branch that must not leave this Mac, such as an unshipped security fix:
   `dev branch embargo <branch> --why "…"`. Its commits stay held after a merge into another branch, and an unreadable
   handoff note stops every backup. Lifting it needs the developer's `grant embargo <branch>`.
@@ -48,7 +50,8 @@ dev pr ready             # once, when the local suite is green: starts the one C
 
 ## 2. Single change
 
-1. Branch from an up-to-date default: `dev branch new feat/x`.
+1. Start the work item, then branch from an up-to-date default: `dev task start <n>`, `dev branch new feat/x` (it
+   links the item to the branch, and the item's lock renews while you work there).
 2. Work in small verified steps (targeted tests while iterating), committing with `dev commit --why … --verified …`;
    back up as you go (`dev backup`).
 3. Before the first push that starts CI, run the full local equivalent of CI (lint, types, unit, integration, build,
@@ -75,13 +78,32 @@ dev pr checks --watch
   repository, so you can merge their local branches directly.
 - Never merge the individual PRs one by one to "see what CI says." The integration PR supersedes them: when it is
   merged, GitHub marks them merged (their commits are included) or close them with a link.
+- `dev pr merge` closes the items of the integration branch only. The branches it carried are merged too (by ancestry
+  or by content): `dev task reconcile --apply` closes their items, and `dev branch prune` lists them for deletion.
 
 ## CI is watched for you
 
-After `dev push`, `dev pr create`, `dev pr merge` or `dev release`, devkit follows the pipeline to the end in the
-background (`dev ci watch`) and tells this session how it ended: green, or red with the first error, its class and
-the one next action (`cicd` skill, section 6). Run `dev ci watch` yourself in the background when you want to be
-notified the moment it ends. Never poll.
+After `dev push`, `dev pr create`, `dev pr ready`, `dev pr merge` or `dev release`, devkit follows the pipeline to
+the end in the background (`dev ci watch`) and tells this session how it ended at its next hook: green, or red with
+the first error, its class and the one next action (`cicd` skill, section 6). A hook runs only when the session
+does something, so that watch never wakes an idle session. Never poll.
+
+**When you wait on the run, arm a watch that wakes you, in the same turn,** and name its task id in your reply:
+
+```bash
+dev ci watch --wait --branch <branch> --sha <sha> --timeout 28   # Claude Code: the Monitor tool, timeout_ms 1800000
+dev ci watch --wait --branch <branch> --sha <sha>                # Claude Code: Bash with run_in_background
+dev ci watch --wait --pr <n>                                     # a PR's head, or its merge commit once merged
+dev ci watch --wait --tag v<version>                             # a release tag
+dev ci watches                                                   # live and expired watches, with the re-arm command
+```
+
+It prints a line per finished job and a last line `CI <word> · …`, and exits 0 passed, 1 failed, 3 the watch ended
+first (re-arm it), 4 none. A Monitor expires after 30 minutes: when its last line says `CI still running`, re-arm it.
+Codex has no background wake-up: run the same command in the foreground with a timeout, and if the run is still
+going, say plainly that you check it again at the next turn. When the watch fires, report the result. The Stop hook
+sends back a turn that sent work to origin and leaves its unfinished run with nothing that wakes you, naming the
+exact command.
 
 When the fix is not trivial and you lead the crew, hand it to the Release engineer (Link):
 `dev crew brief link "Fix the failed CI run: <job>, <class>" --activity cicd`. In auto mode this happens at once.
@@ -101,12 +123,27 @@ signal to stop and reproduce locally.
 
 ## 5. Release
 
-1. From the verified, green integration branch: merge with the repository's strategy (squash vs merge commit).
-2. Version: the project's own scheme, otherwise CalVer `YY.MM.PATCH` (`dev calver` prints the next one). Tag
+1. From the verified, green integration branch: merge with the repository's strategy (squash vs merge commit):
+   `dev pr merge`. It marks the merged branch's open items done (the PR and the merge commit in their changelog) and
+   deletes the branch on origin and here, with its clean worktree; run inside that worktree, it names
+   `dev wt rm <branch>` instead. Arm a watch on the merge commit (`dev ci watch --wait --pr <n>`).
+2. Reconcile: `dev task reconcile`, then `--apply`, or reopen an item with what is left. `dev release` refuses while
+   items of branches merged since the previous tag are open; `--why "…"` overrides it on the record, only for an
+   item that truly stays open.
+3. Version: the project's own scheme, otherwise CalVer `YY.MM.PATCH` (`dev calver` prints the next one). Tag
    `vYY.MM.PATCH` (`git tag -s` if the project signs tags), push the tag, create the GitHub release with notes from the
-   CHANGELOG: `dev release` does all three (the guard refuses a raw `gh release create`).
-3. Verify the published artefact: download/install it from the release and smoke-test it.
-4. Update the handoff note: version, what shipped, follow-ups.
+   CHANGELOG: `dev release` does all three (the guard refuses a raw `gh release create`), and once the release is out
+   (not a `--draft`) deletes the branches it merged. Arm a watch on the tag (`dev ci watch --wait --tag v<version>`).
+4. Verify the published artefact: download/install it from the release and smoke-test it.
+5. Update the handoff note: version, what shipped, follow-ups. `dev branch prune` shows no merged branch left.
+
+**Merged branches go.** One merge test decides: the branch's tip is in `origin/<default>`, its PR from this repository
+merged (merge, squash, or rebase), or every commit has an equivalent there (cherry-picked, or carried by a release
+branch). `dev pr merge`, `dev release`, the nightly `gc`, `dev wt rm`, `dev free`, `dev wt ls`, and
+`dev branch clean` all use it, so a squash- or cherry-pick-merged branch reads as merged, not unpushed.
+`dev branch prune` lists the rest; `--apply` deletes on origin, an irreversible action that a crew member never runs
+and the main session runs under the gate (`--local` stays on this Mac). On GitHub, `dev delivery apply` sets
+`delete_branch_on_merge` and `dev doctor` reports it. A `dev sync --offline` or `--no-push` deletes nothing on origin.
 
 ## 6. GitOps rules
 

@@ -442,6 +442,7 @@ _dev__task() {
         'delegate:hand a task to a teammate'
         'move:move between Now / Next / Later'
         'edit:change title, description, priority or due date'
+        'reconcile:find stale items'
         'ls:list open items'
       )
       _describe -t commands 'dev task command' cmds && ret=0 ;;
@@ -463,6 +464,7 @@ _dev__task() {
         (delegate) _dev__task__delegate && ret=0 ;;
         (move) _dev__task__move && ret=0 ;;
         (edit) _dev__task__edit && ret=0 ;;
+        (reconcile) _dev__task__reconcile && ret=0 ;;
         (ls) _dev__task__ls && ret=0 ;;
       esac ;;
   esac
@@ -623,6 +625,15 @@ _dev__task__edit() {
     '*:task: _dev_live tasks -'
 }
 
+_dev__task__reconcile() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--apply[close the items of merged branches]' \
+    '--json[json]' \
+    '(--project -p)'{-p+,--project=}'[project (default: the one you are in)]:project: _dev_live projects -' \
+    '(--initiative -i)'{-i+,--initiative=}'[an initiative instead of a project]:initiative: _dev_live initiatives -'
+}
+
 _dev__task__ls() {
   _arguments -s -S : \
     '(- *)'{-h,--help}'[show this help message and exit]' \
@@ -736,6 +747,7 @@ _dev__progress() {
         'add:add a step found during the work'
         'reopen:undo a wrong close'
         'skip:skip a step on purpose'
+        'confirm:a step flagged recheck still holds after the step it used was redone'
         'history:every step change'
         'time:how long things take'
       )
@@ -753,6 +765,7 @@ _dev__progress() {
         (add) _dev__progress__add && ret=0 ;;
         (reopen) _dev__progress__reopen && ret=0 ;;
         (skip) _dev__progress__skip && ret=0 ;;
+        (confirm) _dev__progress__confirm && ret=0 ;;
         (history) _dev__progress__history && ret=0 ;;
         (time) _dev__progress__time && ret=0 ;;
       esac ;;
@@ -844,6 +857,13 @@ _dev__progress__reopen() {
 }
 
 _dev__progress__skip() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--why=[the reason (kept in the run'\''s history)]:why: ' \
+    ':plan step: _dev_live steps -'
+}
+
+_dev__progress__confirm() {
   _arguments -s -S : \
     '(- *)'{-h,--help}'[show this help message and exit]' \
     '--why=[the reason (kept in the run'\''s history)]:why: ' \
@@ -1576,6 +1596,9 @@ _dev__ci() {
     '(- *)'{-h,--help}'[show this help message and exit]' \
     '(--project -p)'{-p+,--project=}'[the project (id or a unique part of its name) for status, audit, init…]:project: _dev_live projects -' \
     '--sha=[watch: the commit whose runs to follow]:sha: ' \
+    '--wait[watch: for an agent that waits on the run]' \
+    '--tag=[watch --wait]:tag: ' \
+    '--pr=[watch --wait]:pr: ' \
     '--timeout=[watch: minutes before giving up]:timeout: ' \
     '--quiet[watch: no progress lines, only the result]' \
     '--commands[print only the run commands]' \
@@ -1600,7 +1623,7 @@ _dev__ci() {
     '--strict[audit: exit 1 on medium findings too]' \
     '--stack=[init: the stack]:stack:(auto python node java-maven java-gradle go php docker)' \
     '--force[init: overwrite an existing pipeline file]' \
-    '::project: _dev_live projects - status audit init watch'
+    '::project: _dev_live projects - status audit init watch watches'
 }
 
 _dev__branch() {
@@ -1618,6 +1641,7 @@ _dev__branch() {
         'rename:rename the current branch'
         'ls:local branches'
         'clean:delete local branches that are merged or gone upstream'
+        'prune:every local and remote branch with its state'
         'embargo:keep a branch off the remote'
       )
       _describe -t commands 'dev branch command' cmds && ret=0 ;;
@@ -1628,6 +1652,7 @@ _dev__branch() {
         (rename) _dev__branch__rename && ret=0 ;;
         (ls) _dev__branch__ls && ret=0 ;;
         (clean) _dev__branch__clean && ret=0 ;;
+        (prune) _dev__branch__prune && ret=0 ;;
         (embargo) _dev__branch__embargo && ret=0 ;;
       esac ;;
   esac
@@ -1662,6 +1687,16 @@ _dev__branch__clean() {
     '--offline[no fetch and no GitHub lookups]' \
     '--json[json]' \
     '--apply[delete them]'
+}
+
+_dev__branch__prune() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--apply[delete the merged branches nothing protects]' \
+    '(--local --remote)--remote[only the branches on origin]' \
+    '(--local --remote)--local[only the branches on this Mac]' \
+    '--offline[no fetch and no GitHub lookups]' \
+    '--json[json]'
 }
 
 _dev__branch__embargo() {
@@ -1902,7 +1937,8 @@ _dev__release() {
     '--sign[signed tag (default: git config tag.gpgSign)]' \
     '--draft[draft]' \
     '--prerelease[prerelease]' \
-    '--dry-run[dry run]'
+    '--dry-run[dry run]' \
+    '--why=[release although work items of the merged branches are still open]:reason: '
 }
 
 _dev__issue() {
@@ -2092,10 +2128,12 @@ _dev__crew() {
         'inbox:messages for you not delivered yet'
         'mode:guided (the developer decides) or auto'
         'decide:record the developer'\''s answer to a decision'
+        'withdraw:close a pending decision that no longer matters, with the reason'
         'decisions:this run'\''s decisions'
         'route:who should do a task, ranked with the reasons'
         'delegate:add a step for another crew member'
         'decline:hand a delegated step back to the tech lead, with the reason'
+        'owner:who holds these files before you edit them'
         'next:the dispatcher'
       )
       _describe -t commands 'dev crew command' cmds && ret=0 ;;
@@ -2115,10 +2153,12 @@ _dev__crew() {
         (inbox) _dev__crew__inbox && ret=0 ;;
         (mode) _dev__crew__mode && ret=0 ;;
         (decide) _dev__crew__decide && ret=0 ;;
+        (withdraw) _dev__crew__withdraw && ret=0 ;;
         (decisions) _dev__crew__decisions && ret=0 ;;
         (route) _dev__crew__route && ret=0 ;;
         (delegate) _dev__crew__delegate && ret=0 ;;
         (decline) _dev__crew__decline && ret=0 ;;
+        (owner) _dev__crew__owner && ret=0 ;;
         (next) _dev__crew__next && ret=0 ;;
       esac ;;
   esac
@@ -2223,6 +2263,13 @@ _dev__crew__decide() {
     '*:text: '
 }
 
+_dev__crew__withdraw() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--why=[why it no longer matters]:why: ' \
+    ':id: '
+}
+
 _dev__crew__decisions() {
   _arguments -s -S : \
     '(- *)'{-h,--help}'[show this help message and exit]' \
@@ -2256,6 +2303,13 @@ _dev__crew__decline() {
     '(- *)'{-h,--help}'[show this help message and exit]' \
     '--why=[why you cannot take it]:why: ' \
     '*:plan step: _dev_live steps -'
+}
+
+_dev__crew__owner() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--json[each path with its holders as JSON]' \
+    '*:paths:_files'
 }
 
 _dev__crew__next() {
@@ -2395,6 +2449,7 @@ _dev__install() {
     '--version=[switch to a pinned copy kept from an earlier install]:pinned copy: _dev_live versions -' \
     '--unverified[pin HEAD although it is neither a release nor tested]' \
     '--why=[the reason for --unverified, recorded in the audit]:why: ' \
+    '(--yes -y)'{--yes,-y}'[go on without asking when Claude Code or Codex sessions that use devkit…]' \
     '--commit-template=[dev setup'\''s answer for the commit template]:commit template:(yes no)'
 }
 
@@ -2444,7 +2499,8 @@ _dev__update() {
     '(- *)'{-h,--help}'[show this help message and exit]' \
     '--check[read-only: the newest release, what changes in it, and whether the…]' \
     '--quiet[with --check]' \
-    '--record[with --check]'
+    '--record[with --check]' \
+    '(--yes -y)'{--yes,-y}'[go on without asking when Claude Code or Codex sessions that use devkit…]'
 }
 
 _dev__docker() {

@@ -11,9 +11,11 @@ that push costs no CI run.
 A branch is pushed to its remote under the same name, fast-forward only and never forced, and only when every check
 holds, in this order: not the default branch nor a long-lived one (LONG_LIVED), a conforming name, the remote can be
 reached (what it has, from `git ls-remote`, decides which commits the push sends: every later check looks at exactly
-those, also when another remote has them), not a branch a workflow deploys from, no embargo (on the branch, or on any
-of the same commits: those its branch or its recorded tips reach, so they stay held after it is merged elsewhere and
-deleted; a handoff note devkit cannot read stops every backup, B2), the remote branch is not ahead or diverged, no WIP
+those, also when another remote has them), not merged by its own pull request (its tip is the head of a merged pull
+request of this repository, in the registry's cached list: a squash merge whose remote branch GitHub deleted; a
+fork's never counts), not a branch a workflow deploys from, no embargo (on the branch, or on any of the same
+commits: those its branch or its recorded tips reach, so they stay held after it is merged elsewhere and deleted; a
+handoff note devkit cannot read stops every backup, B2), the remote branch is not ahead or diverged, no WIP
 commit, the project's backup policy, no sign of a security fix on a public repository, the CI configuration of the
 commit it sends shows that the push starts no CI run (`pipelines.push_ci`), and last the secret scan (gitleaks) passes
 on exactly the commits it sends. A check that fails skips the branch with the reason and what to do. `dev sync` only
@@ -270,11 +272,11 @@ def crew_member() -> str:
         return ""
 
 
-def set_policy(pid, policy, why, branch="") -> dict:
-    """Record the project's backup policy in its handoff note, audit it (`dev.policy`, target backup/<project>) and
-    share it soon."""
+def set_policy(pid, policy, why, branch="", visibility=None) -> dict:
+    """Record the project's backup policy in its handoff note, with the visibility of the repository it is decided
+    for, audit it (`dev.policy`, target backup/<project>) and share it soon."""
     from . import audit, branches, work
-    rec = branches.set_backup_policy(pid, policy, why, work.actor()["user"])
+    rec = branches.set_backup_policy(pid, policy, why, work.actor()["user"], visibility=visibility)
     audit.record("dev.policy", f"backup/{pid}", f"{policy}: {why}", "ok", project=pid, branch=branch or None)
     branches._share(pid, "backup policy of")
     return rec
@@ -302,6 +304,9 @@ def _policy_gate(c, name, remote, ctx):
     vis, rec = ctx["vis"][remote], ctx["policy"]
     policy = rec["policy"] if rec else branches.default_policy(vis)
     ctx["policy_words"] = branches.policy_words(rec, vis)
+    outgrown = branches.outgrown_on(rec, vis)  # on, decided while the repository was private: ask again
+    if outgrown:
+        policy = "ask"
     if policy == "on" or ctx["public_ok"]:
         return None
     if policy == "ask" and not ctx["auto"] and not ctx["dry_run"] and not ctx["asked"] and developer_here():
@@ -309,7 +314,7 @@ def _policy_gate(c, name, remote, ctx):
         yes = _ask_policy(c.pid, _remote_id(c.top, remote), vis)
         if yes is not None:
             rec = ctx["policy"] = set_policy(c.pid, "on" if yes else "off", "the developer's answer to dev backup",
-                                             name)
+                                             name, visibility=vis)
             ctx["policy_words"] = branches.policy_words(rec, vis)
             if yes:
                 return None
@@ -318,6 +323,15 @@ def _policy_gate(c, name, remote, ctx):
         return _result(name, remote, SKIPPED, f"the backup policy of {c.pid} is {ctx['policy_words']}", [
             'dev backup policy on --why "…"   (the developer: back up this project\'s branches)',
             f"dev backup --public {name}   (the developer: this once)"])
+    if outgrown:
+        then = {"": "of a visibility devkit did not record", "unknown": "of a visibility devkit could not read"}.get(
+            rec.get("visibility") or "", rec.get("visibility"))
+        now = vis if vis in ("public", "private", "internal") else "of a visibility devkit cannot read"
+        return _result(name, remote, SKIPPED, f"the backup policy of {c.pid} is on, but it was set while the "
+                       f"repository was {then}, and it is {now} now: the developer has not answered again", [
+                           "dev backup, run by the developer in a terminal, asks once (agents are never asked, dev "
+                           "sync waits for the answer)",
+                           'dev backup policy on --why "…"   (or off: the developer\'s choice for this project)'])
     return _result(name, remote, SKIPPED, f"the backup policy of {c.pid} is {ctx['policy_words']}, and the developer "
                    f"has not answered", [
                        "dev backup, run by the developer in a terminal, asks once (agents are never asked, dev sync "
@@ -384,6 +398,17 @@ def _target(c, name, tip, ctx) -> str:
     return core.gitout(c.top, "rev-list", "-1", "--first-parent", f"--before={before}", tip) or ""
 
 
+def _merged_pr(c, name, tip, ctx):
+    """The merged pull request of this repository whose head is the branch's tip, or a later commit of it (the merge
+    test's pull-request leg, branches.pr_merge, against origin's default branch as the branch map reads it), from the
+    registry's cached list: no GitHub call. None without that list, as before 26.11.6."""
+    if not ctx["merged_prs"]:
+        return None
+    from . import branches
+    base = next((r for r in (f"refs/remotes/origin/{c.default}", f"refs/heads/{c.default}") if _sha(c.top, r)), "")
+    return branches.pr_merge(c.top, name, tip, base, ctx["merged_prs"]) if base else None
+
+
 def _ci_gate(c, name, target, remote_sha, ctx):
     """The CI check (R1) -> (push_ci result, skip result or None)."""
     from . import pipelines
@@ -406,7 +431,7 @@ def _ci_gate(c, name, target, remote_sha, ctx):
 
 def _one(c, name, ctx) -> dict:
     """Back up one branch (the checks in the module docstring, in that order)."""
-    from . import guard
+    from . import branches, guard
     top = c.top
     tip = _sha(top, f"refs/heads/{name}")
     remote = _remote_of(c, name)
@@ -448,6 +473,12 @@ def _one(c, name, ctx) -> dict:
             return _result(name, remote, WAITING, f"commits younger than {ctx['after']} min wait for the backup")
         return _result(name, remote, NOTHING, f"{remote} has every commit already" if remote_sha else
                        f"its commits are on {remote} already")
+    pr = _merged_pr(c, name, tip, ctx)
+    if pr:  # squash-merged with its remote branch deleted: a push would bring the merged branch back
+        words = branches.merge_words({"sha": tip, "how": "pr", "pr": pr.get("number")}, "")
+        return _result(name, remote, SKIPPED, f"{words}, so a backup would put the branch back on {remote}",
+                       ["dev branch prune --apply   (closes merged branches here and on origin)",
+                        f"dev push   (push {name} anyway)"])
     deploy = _deploys_from(top, name, target)
     if deploy:  # never, not even with --accept-ci or --public
         return _result(name, remote, SKIPPED, deploy, [f"dev push   (with local CI evidence: a push to {name} is a "
@@ -548,7 +579,9 @@ def run(repo, names=None, every: bool = False, auto: bool = False, accept_ci: bo
     ctx = {"auto": auto, "accept_ci": accept_ci and not auto, "dry_run": dry_run, "public_ok": public_ok and not auto,
            "now": now or time.time(), "after": branches.after_minutes(), "held": held,
            "local": set(local), "prs": prs or [], "prs_known": bool(prs_known), "vis": {},
-           "policy": branches.backup_policy(c.pid), "asked": False, "policy_words": "", "adv": {}, "remote_prs": {}}
+           "policy": branches.backup_policy(c.pid), "asked": False, "policy_words": "", "adv": {}, "remote_prs": {},
+           # every state, with the merge fields, for the merged-branch check: the registry's cache, never a gh call
+           "merged_prs": branches.cached_prs(c.slug) if c.provider == "github" and c.slug else None}
     last = branches.backups(c.pid) if record and not dry_run else {}
     out = []
     for name in names:
@@ -639,7 +672,8 @@ def cmd_policy(a) -> int:
     if a.dry_run:
         print(f"{ui.INFO} dry run: {pid}'s backup policy would be {args[0]} ({why})")
         return 0
-    rec = set_policy(pid, args[0], why)
+    top = c.top if here else core.DEV / pid  # the main checkout of a project named with -p
+    rec = set_policy(pid, args[0], why, visibility=_visibility(top) if Path(top, ".git").exists() else None)
     print(f"{ui.OK} {pid}: backup policy {branches.policy_words(rec)}")
     return 0
 

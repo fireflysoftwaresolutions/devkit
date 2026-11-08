@@ -23,7 +23,7 @@ jobs:
     name: tests (Python ${{ matrix.python }})
     if: github.event.pull_request.draft == false # drafts wait for ready_for_review
     runs-on: macos-latest
-    timeout-minutes: 15
+    timeout-minutes: 30 # the delivery policy's job timeout; the Python 3.9 suite outgrew 15 minutes on the runner
     strategy:
       fail-fast: false
       matrix:

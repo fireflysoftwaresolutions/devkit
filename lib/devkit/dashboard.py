@@ -226,7 +226,9 @@ def guard_rules(events: list) -> list:
 # --------------------------------------------------------------------------- health & actions
 
 def project_health(p: dict, now: float = None) -> dict:
-    """{level: ok|warn|risk, reasons: [...]} from PRs, note status, tasks and git state."""
+    """{level: ok|warn|risk, reasons: [...]} from PRs, note status, tasks and git state. Commits not pushed are those
+    with no equivalent on origin's default branch (registry.unpushed_work): a branch merged by content has none."""
+    from . import registry
     now = now or time.time()
     risk, warn = [], []
     for pr in p.get("prs_open") or []:
@@ -246,11 +248,11 @@ def project_health(p: dict, now: float = None) -> dict:
     dirty = (m.get("modified") or 0) + (m.get("untracked") or 0)
     if dirty and not m.get("active") and _idle(m.get("last_activity"), now) > IDLE_WORK_S:
         warn.append(f"{dirty} uncommitted change(s), idle {int(_idle(m.get('last_activity'), now) // 86400)}d")
-    if m.get("unpushed") and not m.get("active") and _idle(m.get("last_activity"), now) > 86400:
-        warn.append(f"{m['unpushed']} commit(s) not pushed")
+    if registry.unpushed_work(m) and not m.get("active") and _idle(m.get("last_activity"), now) > 86400:
+        warn.append(f"{registry.unpushed_work(m)} commit(s) not pushed")
     for w in p.get("worktrees") or []:
         wd = (w.get("modified") or 0) + (w.get("untracked") or 0)
-        if (wd or w.get("unpushed")) and not w.get("active") and _idle(w.get("last_activity"), now) > IDLE_WORK_S:
+        if (wd or registry.unpushed_work(w)) and not w.get("active") and _idle(w.get("last_activity"), now) > IDLE_WORK_S:
             warn.append(f"worktree {w.get('branch')} has unsaved work, idle")
     if p.get("canonical_ok") is False and p.get("local", True) is not False:
         warn.append("not at its canonical path")
@@ -280,6 +282,7 @@ def _task_flag(scope: str) -> str:
 
 def build_actions(reg: dict, now: float = None, items: list = None, colls: list = None) -> list:
     """The prioritised 'what needs me now' list. Each item carries the one command that moves it forward."""
+    from . import registry
     now = now or time.time()
     me = reg.get("github_user") or ""
     acts = []
@@ -346,13 +349,13 @@ def build_actions(reg: dict, now: float = None, items: list = None, colls: list 
                 add(60, "warn", "idle-work", pid, f"{dirty} uncommitted change(s) idle {int(idle // 86400)}d",
                     f"{p.get('name') or pid} · {branch}", f"cd {_sh(path)} && git status -sb", None,
                     co.get("last_activity"))
-            elif co.get("unpushed") and idle > 86400:
-                add(62, "warn", "idle-work", pid, f"{co['unpushed']} commit(s) not pushed",
+            elif registry.unpushed_work(co) and idle > 86400:
+                add(62, "warn", "idle-work", pid, f"{registry.unpushed_work(co)} commit(s) not pushed",
                     f"{p.get('name') or pid} · {branch}", f"cd {_sh(path)} && git status -sb", None,
                     co.get("last_activity"))
         for w in p.get("worktrees") or []:
             pr = w.get("pr") or {}
-            clean = not (w.get("modified") or w.get("untracked") or w.get("unpushed"))
+            clean = not (w.get("modified") or w.get("untracked") or registry.unpushed_work(w))
             if pr.get("state") in ("MERGED", "CLOSED") and not w.get("active") and clean and not w.get("missing"):
                 reclaim.append((pid, w.get("branch"), pr.get("number"), pr.get("state"), w.get("size_kb") or 0))
         if p.get("canonical_ok") is False and p.get("path") and p.get("local", True) is not False:
@@ -804,6 +807,18 @@ def _timing(now: float) -> dict:
         return timing_summary([], now)
 
 
+# A lane as the page draws it (progress.brief, progress.lane_states), the way dev status lists the crew: a member
+# that still works as "running" ("Working"), one that went stale as "lost" ("Stopped reporting"), and one that
+# ended as "ended", which is not under "Working now". The page's data keeps its keys: label, state, min.
+PAGE_LANE = {"stale": "lost"}
+
+
+def page_lane(a: dict) -> dict:
+    """A brief's lane ({label, state, min}) as the page draws it."""
+    st = a.get("state")
+    return {**{k: v for k, v in a.items() if k not in ("live", "why")}, "state": PAGE_LANE.get(st, st)}
+
+
 def run_seen(run: dict) -> int:
     """The run's latest sign of life: a report by the run or by any of its lanes (updates of every kind, lane updates,
     crew messages, step changes, decisions), a turn or a lane starting or ending, or a lane's last hook (`last_seen`,
@@ -858,6 +873,7 @@ def _runs(now: float, host: str = "", raw: list = None) -> list:
             b = progress.brief(r, now)
         except (KeyError, TypeError, ValueError):
             continue
+        b["agents"] = [page_lane(a) for a in b.get("agents") or []]
         lanes = r.get("agents") or {}
         for s, raw in zip(b.get("plan") or [], r.get("plan") or []):
             if isinstance(raw, dict):
@@ -868,11 +884,11 @@ def _runs(now: float, host: str = "", raw: list = None) -> list:
         b.update({"id": run_id(r), "agent": r.get("agent"), "session": r.get("session"), "project": r.get("project"),
                   "mode": r.get("mode") or "", "host": host, "estimate_cal": r.get("estimate_cal"), "finished": r.get("finished"),
                   "seen": run_seen(r), "total_min": plan_total(r, now),
+                  # only what still waits: open decisions (not moot) and questions nobody answered (never a notice)
                   "decisions": [{k: d.get(k) for k in ("id", "ts", "question", "options", "recommend", "irreversible", "from_name")}
-                                for d in r.get("decisions") or [] if isinstance(d, dict) and d.get("state") == "pending"],
-                  "questions": [{k: m.get(k) for k in ("id", "ts", "from_name", "text")} for m in r.get("messages") or []
-                                if isinstance(m, dict) and m.get("to") == "main" and not m.get("answered")
-                                and not m.get("reply_to") and m.get("from") != "ci"][-20:],
+                                for d in progress.pending_decisions(r)],
+                  "questions": [{k: m.get(k) for k in ("id", "ts", "from_name", "text")}
+                                for m in progress.waiting_messages(r)][-20:],
                   "updates": [{k: u.get(k) for k in ("ts", "kind", "text", "next")} for u in (r.get("updates") or [])[-8:]]})
         out.append(b)
     return out[:20]
@@ -981,13 +997,59 @@ def jobs_summary(now: float = None) -> list:
             except (ValueError, KeyError):
                 nxt = None
         failed = [r for r in rs if r.get("rc") not in (0, None)]
-        state = ("off" if not enabled else "never" if not last else "skipped" if last.get("rc") is None
-                 else "ok" if last.get("rc") == 0 else "failed")
+        # a skipped run (no exit code) says nothing: the newest run with one decides, so a failure stands until a run succeeds
+        ran = next((r for r in reversed(rs) if r.get("rc") is not None), None)
+        failure = ran if ran and ran.get("rc") != 0 else None
+        state = ("off" if not enabled else "never" if not last else "failed" if failure
+                 else "skipped" if last.get("rc") is None else "ok")
         out.append({"name": name, "about": j.get("about") or "", "schedule": jm.schedule_text(j), "enabled": enabled,
                     "notify": j.get("notify") or "", "timeout_min": j.get("timeout"), "next": round(nxt) if nxt else None,
                     "installed": (jm.AGENTS_DIR / f"{jm.LABEL.format(name)}.plist").exists(),
-                    "last": _job_run(last), "state": state, "runs": len(rs), "failed": len(failed)})
+                    "last": _job_run(last), "failure": _job_run(failure), "state": state, "runs": len(rs),
+                    "failed": len(failed)})
     return out
+
+
+WORK_GIT_S = 300          # a checkout's merges and latest tag, read at most this often (the data rebuilds on every change)
+WORK_CAP = 40             # projects whose work state is checked, the most recently active first
+WORK_MEMO = {}            # checkout path -> (read at, merges, latest tag)
+
+
+def work_drift(reg: dict, items: list, runs: list = None, now: float = None, memo: dict = None) -> dict:
+    """The Health view's work state: selfcheck.work_state, the rows and commands `dev doctor` shows, for each project
+    cloned here that has open work (an open item or an open run). Reads only. -> {"projects": the ones with something
+    stale, "checked": how many were read, "count": stale things in all}"""
+    from . import selfcheck
+    now = now or time.time()
+    memo = WORK_MEMO if memo is None else memo
+    runs = selfcheck.open_runs() if runs is None else runs
+    busy = {i.get("scope") for i in items or [] if i.get("status") in OPEN}
+    busy |= {r.get("project") for r in runs if isinstance(r, dict)}
+    here = sorted((p for p in reg.get("projects") or [] if isinstance(p, dict) and p.get("local") is not False
+                   and p.get("git") and p.get("path") and p.get("id") in busy),
+                  key=lambda p: -(p.get("last_activity") or 0))
+    out, checked = [], 0
+    for p in here[:WORK_CAP]:
+        top = p["path"]
+        try:
+            hit = memo.get(top)
+            if not hit or now - hit[0] >= WORK_GIT_S:
+                hit = memo[top] = (now, selfcheck.merges(top), selfcheck.latest_tag(top))
+            r = selfcheck.work_state(p["id"], top, runs=runs, now=now, merged=hit[1], tag=hit[2])
+        except Exception:  # a project it cannot read: the others still show
+            continue
+        checked += 1
+        if r["rows"]:
+            out.append(r)
+    return {"projects": out, "checked": checked, "count": sum(r["count"] for r in out)}
+
+
+def _work_state(reg: dict, items: list, now: float) -> dict:
+    """work_drift for the page; a run file it cannot read leaves the Health view with nothing checked, never broken."""
+    try:
+        return work_drift(reg, items, now=now)
+    except (OSError, ValueError, KeyError, TypeError):
+        return {"projects": [], "checked": 0, "count": 0}
 
 
 def jobs_detail(name: str = None, now: float = None):
@@ -1216,8 +1278,17 @@ def run_detail(rid: str, now: float = None):
                       "evidence": [{k: u.get(k) for k in ("ts", "kind", "text", "check", "next")} for u in updates
                                    if u.get("step") == name and (u.get("check") or u.get("kind") in ("step", "done", "blocked"))],
                       "history": [x for x in hist if x.get("step") == name]})
+    # each decision with the state the page shows (a pending one nobody waits for is moot, with why), and each message
+    # with whether it still waits for an answer (a notice, an answer or a replied question never does)
+    decisions = [dict(d, state=progress.decision_state(run, d),
+                      **({"moot": progress.moot_text(run, d)} if progress.is_moot(run, d) else {}))
+                 for d in run.get("decisions") or [] if isinstance(d, dict)]
+    msgs = [m for m in run.get("messages") or [] if isinstance(m, dict)]
+    waiting = {m.get("id") for to in {m.get("to") for m in msgs} for m in progress.waiting_messages(run, to)}
+    questions = [dict(m, waiting=m.get("id") in waiting) for m in msgs]
     running = run.get("state") == "running"
     lo, hi = safe(lambda: progress.eta_range(run, now), (None, None)) if running else (None, None)
+    live = safe(lambda: progress.lane_states(run, now), {})
     return {"id": rid, "agent": run.get("agent"), "session": run.get("session"), "project": run.get("project"),
             "goal": run.get("goal"), "mode": progress.mode_of(run), "state": run.get("state"),
             "started": run.get("started"), "finished": run.get("finished"), "estimate": run.get("estimate"),
@@ -1228,11 +1299,12 @@ def run_detail(rid: str, now: float = None):
             "seen": run_seen(run), "total_min": plan_total(run, now),
             "headline": safe(lambda: progress.headline(run, now), ""), "steps": steps,
             "lanes": [{"id": k, "label": a.get("label") or "", "type": a.get("type") or "", "persona": a.get("persona") or "",
-                       "state": a.get("state"), "started": a.get("started"), "finished": a.get("finished"),
+                       **page_lane({"state": progress._shown_lane(a, live.get(k))}),
+                       "started": a.get("started"), "finished": a.get("finished"),
                        "scope": a.get("scope"), "done": a.get("done") or 0,
                        "min": safe(lambda: round(progress.active_minutes(run, a.get("started"), a.get("finished") or now, now, k), 1)),
                        "updates": (a.get("updates") or [])[-20:]} for k, a in lanes.items() if isinstance(a, dict)],
-            "decisions": run.get("decisions") or [], "questions": run.get("messages") or [], "history": hist,
+            "decisions": decisions, "questions": questions, "history": hist,
             "updates": updates}
 
 
@@ -1414,6 +1486,7 @@ def collect(reg: dict, handoff: Path = None, now: float = None) -> dict:
         "guard": events[-120:],
         "guard_rules": guard_rules(events),
         "drift": reg.get("drift"),
+        "work_state": _work_state(reg, items, now),
         "jobs": jobs,
         "ci": ci,
         "crew": crew_roster(),

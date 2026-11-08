@@ -130,6 +130,35 @@ Every refusal is also written to the audit trail (`dev audit --action install`).
 | `pinned copy is the installed version` | `install.json` and the copy disagree on the version or commit | `dev install` |
 | `hooks run a pinned copy` | devkit was never pinned on this Mac, or the copy was deleted | `dev install` |
 
+### A session says it runs an older devkit
+
+```text
+devkit 26.11.5 runs in this session, but devkit 26.11.6 is installed, so this session's devkit changes no devkit-managed setting (the installed release keeps them). Restart the session to load devkit 26.11.6's hooks.
+```
+
+A session keeps the hooks of the release it started with. After `dev install` or `dev update` pinned a newer one,
+the older session leaves the agents' settings and hooks, `CLAUDE.md`, `AGENTS.md`, and the global git config as the
+new release wrote them, and records each skipped change as `config.repair-skipped`. Restart the session. A `dev`
+command run from an older copy says the same and names the installed `dev` to run instead.
+
+Copies from 26.11.5 and earlier have no such check, so `dev install` retires them: it turns the `bin/dev` of every
+other pinned copy into a link to the installed release's `bin/dev`, and keeps the copy's own `bin/dev` beside it
+(`bin/.dev.retired`). A session that started before the install then runs the installed release from its next hook,
+and its repair writes nothing older back. `dev config repair` retires a copy that an install missed. Each
+retirement is in the audit trail (`dev audit --action install.retire`). The guard refuses an agent's command that
+runs devkit from another release folder.
+
+`dev doctor` shows two rows for this in its Pinned install group:
+
+| Check that fails | Cause | Fix |
+| --- | --- | --- |
+| `agents run the pinned release` | A hook, the status line, `~/.claude/CLAUDE.md`, or `~/.codex/AGENTS.md` belongs to an older copy, which the row names with its version | `dev config repair`, then restart the sessions that started before `dev install` |
+| `older copies retired` | Another pinned copy's `bin/dev` still runs its own code, so a session that started before the install can write its hooks and instructions back | `dev config repair`: the installed release retires it |
+
+When `dev doctor` reports `out of date: an older devkit wrote it` for `~/.claude/CLAUDE.md` or `~/.codex/AGENTS.md`,
+the file holds the rules of an older release, for example one that a session on 26.11.5 or earlier rewrote after the
+update. Run the command it prints, `dev install --only instructions`.
+
 ### Go back to an earlier devkit
 
 devkit keeps the newest three pinned copies, and any copy still in use. To switch the hooks back to an earlier one:
@@ -139,8 +168,10 @@ ls ~/.local/share/devkit/releases     # the copies kept: <version>-<commit>
 dev install --version 26.11.2         # or the full name, 26.11.2-<commit>
 ```
 
-It checks the copy against its checksums before it uses it. The checkout stays where it is; `dev update` later moves
-it to the newest release again.
+It checks the copy against its checksums before it uses it. A copy that a newer install retired gets its own
+`bin/dev` back first, and only when that file matches the copy's manifest. The checkout stays where it is;
+`dev update` later moves it to the newest release again. Run these commands in your terminal: the guard refuses `dev install` and any command that names the releases
+folder to an agent.
 
 ## Sessions and agents
 
@@ -196,6 +227,7 @@ The Stop hook asks for one more pass, never in a loop, when:
 | A plan changed without a recorded reason | `dev plan revise <file> --why "…"` for each plan it names |
 | Files changed without a required skill | The agent loads the skill and reviews the change. `skills.enforce: false` turns this off |
 | Commits without a handoff update | The agent updates the note with the `handoff` skill. `handoff.enforce: false` turns this off |
+| Work sent to `origin` with nothing that wakes the agent when its CI run ends | The agent arms `dev ci watch --wait` on that commit: in a Monitor or a background command on Claude Code, in the foreground on Codex. The message names each run and the exact command; see [CI/CD pipelines › The end-of-turn check](ci-cd.md#the-end-of-turn-check) |
 | Unfinished work without a task | Build it for real, or record the task and name it on the line; see [A commit is refused for unfinished work](#a-commit-is-refused-for-unfinished-work) |
 | New or changed tests that cannot fail | Fix each test that `dev test audit` names, or delete it; a meaningless assertion is not a fix |
 
@@ -228,9 +260,20 @@ A step closes only with its evidence, and only the step that evidence is about. 
 | `step "<name>" waits for <steps>, not done yet` | Close those steps first; use `--force` only when the order really changed |
 | `step "<name>" belongs to <member>, still working on it` | It closes when the member finishes; use `--force` only when it is really done |
 | `step "<name>" is already done` | `dev progress reopen "<name>" --why "…"` |
-| `only Morpheus …` | A crew member asked to `assign`, `begin`, `reopen`, or `skip`: ask Morpheus with `dev crew ask` |
+| `only Morpheus …` | A crew member asked to `assign`, `begin`, `reopen`, `skip`, or `confirm`: ask Morpheus with `dev crew ask` |
 
 Every change, including a forced one, is in `dev progress history`.
+
+### `dev progress done` is refused
+
+A run ends only when it matches what happened (see [Work states › Runs](work-states.md#runs)):
+
+| Message | Fix |
+| --- | --- |
+| `crew members still work on steps of this run: …` | Wait for each member's report, or skip a step on purpose: `dev progress skip "<step>" --why "…"`. Neither `--force` nor `--why` passes this |
+| `not finished: "<step>" (pending), …` | Close each step with its evidence, or skip it with a reason |
+| An approval is owed, or `To recheck: "<step>" used "<step>", reopened since` | Get the approval, or reopen and redo the flagged step, or confirm that its work still holds: `dev progress confirm "<step>" --why "…"`. `dev progress done "<outcome>" --why "…"` ends the run anyway and records the reason |
+| `decisions still waiting for the developer: D<n> (…)` | Ask them, or withdraw one that no longer applies: `dev crew withdraw <id> --why "…"`. A moot decision never blocks the end, and every decision still pending closes with the run |
 
 ### Codex profile models are not available
 
@@ -247,9 +290,31 @@ Script Editor; allow its notifications in System Settings → Notifications.
 
 ### A task is claimed by someone who stopped working
 
-The session context and `dev team` show who holds it and until when. Ask them first. A lock that is not renewed
-expires after `work.lock_hours` (8) and the hourly sync on any machine releases it; after that anyone can claim it. A
+The session context and `dev team` show who holds it and until when. Ask them first. A lock is renewed only while
+one of the holder's sessions is on the item's branch. A lock that is not renewed expires after `work.lock_hours` (8),
+and the hourly sync on any machine releases it and sends the item back to todo; after that anyone can claim it. A
 lock that has not expired cannot be released by someone else.
+
+When your own item went back to todo while you were still working on it, your session was on another branch. Run
+`dev task start <n>` on the item's branch: it takes the lock again and links the branch, so the lock is renewed from
+then on.
+
+### `dev doctor` reports the work state as stale
+
+The `work state` check looks at the project you are in, and the dashboard's Health view shows the same rows for each
+project with open work. Each row names what is stale and the command that fixes it ([Work states](work-states.md)
+explains why each record drifts):
+
+| Row | Why | Fix |
+| --- | --- | --- |
+| _doing without a lock_ | The item is in progress, but no live session holds its lock | `dev task -p <project> reconcile --apply` sends it back to todo |
+| _open, but its branch is merged_ | The item's branch was merged into the default branch, as origin had it at the last fetch | The same command marks it done, with the merge commit as evidence |
+| _Same title_ | Two items share a title | Review them, then `dev task -p <project> cancel <id> --why "duplicate of <id>"` |
+| _Run … no step change for N h_ | An open run has not moved for longer than `work.lock_hours` (8) | In that run's session, `dev progress done "<outcome>"` when it is over, or `dev progress step` when a step finished |
+| _Run … began before vX_ | An open run started before the project's latest release tag | The same: end it, or record where it stands |
+
+Neither `dev doctor` nor the dashboard changes anything: run the fix yourself. `dev task reconcile` without `--apply`
+shows the items first.
 
 ### `dev task start` says the task was claimed on another machine first
 
@@ -312,7 +377,8 @@ dev jobs run gc         # run it now, with the output in the log
 
 `not loaded` means launchd does not have the job: run `dev jobs install`. Exit code `124` means the job ran out of
 time; give it more with `"jobs": {"gc": {"timeout": 60}}` and `dev jobs install`. A run recorded as skipped found the
-previous run still going. A job that should not run on this Mac can be turned off with `dev jobs disable <name>`.
+previous run still going; it has no exit code, so it leaves an earlier failure in place: the job stays failed until a
+run succeeds. A job that should not run on this Mac can be turned off with `dev jobs disable <name>`.
 
 ## Configuration
 
@@ -381,11 +447,23 @@ differently.
 
 | Result | What it means | Fix |
 | --- | --- | --- |
-| `none` (exit `4`): no pipeline run appeared for this commit within 5 minutes | The branch has no CI for this event, the workflow's triggers skip it, or the host was unreachable (the message adds the host's error) | Check the triggers with `dev ci` or `dev ci audit`, and the sign-in with `dev ci status` |
+| `none` (exit `4`): no run verified this commit | No run appeared within 5 minutes (the branch has no CI for this event, or the host was unreachable, which the message adds), or every run was `skipped`, `neutral`, or `stale` | Check the triggers with `dev ci` or `dev ci audit`, and the sign-in with `dev ci status` |
 | `timeout` (exit `3`): still running after the watch limit | The run takes longer than `--timeout` (default 90 minutes) | Follow it with `dev ci status --watch`; if it hangs, `dev ci audit` reports jobs without a timeout |
 
 The automatic watcher runs only for main sessions, once per repository, branch, and commit, and not for temporary
-folders. Its log is `~/.local/state/devkit/logs/ci-watch.log`; `DEVKIT_NO_CI_WATCH=1` turns it off.
+folders. It watches only what reached `origin`: a branch that was never pushed gets no watch. Its log is
+`~/.local/state/devkit/logs/ci-watch.log`; `DEVKIT_NO_CI_WATCH=1` turns it off.
+
+### An agent said it would report CI, and nothing came
+
+devkit's background watch reports at the session's next hook, and an idle session runs no hook, so a result can
+wait there unseen. Ask the agent for the status, or run `dev ci watches`: it lists the live watches and the ones that
+stopped before their runs ended, each with the command to arm it again. `dev ci status` shows the runs themselves.
+
+An agent that promises a report arms a wait that wakes it, `dev ci watch --wait`, and the Stop hook sends back a
+turn that pushed without one (see
+[CI/CD pipelines › Wait on a run](ci-cd.md#wait-on-a-run-a-watch-that-wakes-the-agent)). Each result is reported
+once: when you saw it already, in this session or another one, it does not come again.
 
 ### `dev push` says there is no local CI evidence
 

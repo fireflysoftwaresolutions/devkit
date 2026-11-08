@@ -7,7 +7,8 @@ any of the five areas (attention, runs, safety, since, as_of); an area may inste
 The rules: required keys present (absent values are null, never omitted), types and enums, the size caps, the queue
 order, instants as integer epoch seconds and durations as integer seconds in `_s` fields, copy commands without
 control characters, https links only, `type_to_answer` (consent, typed by the developer) never next to a `copy`,
-option keys never cut with `…`, a `branch` on every run and the uncapped `counts` on `since`.
+option keys never cut with `…`, a `branch` and a `moot` list on every run (a moot decision never waits in the queue)
+and the uncapped `counts` on `since`.
 Standard library only, Python 3.9.
 """
 from __future__ import annotations
@@ -27,7 +28,7 @@ SINCE_KINDS = ("release", "task_done", "pr_merged", "run_finished")
 SETUP_KEYS = ("agents", "project", "sync")
 DEGRADED_SOURCES = ("prs", "ci", "registry")
 EPOCH_MIN = 1_000_000_000          # 2001: anything smaller is not an epoch in seconds
-ITEMS_CAP, RUNS_CAP, REMOTE_RUNS_CAP, ROWS_CAP = 200, 20, 20, 50
+ITEMS_CAP, RUNS_CAP, REMOTE_RUNS_CAP, ROWS_CAP, MOOT_CAP = 200, 20, 20, 50, 50
 
 
 def _int(v) -> bool:
@@ -254,12 +255,13 @@ class _Checker:
             self.err(w, f"holds {len(local)} runs of this Mac and {len(runs) - len(local)} of others, over the caps")
         for i, r in enumerate(runs):
             wi = f"{w}[{i}]"
-            if not self.keys(wi, r, ("id", "goal", "project", "machine", "who", "branch", "waiting_on", "eta")):
+            if not self.keys(wi, r, ("id", "goal", "project", "machine", "who", "branch", "waiting_on", "eta", "moot")):
                 continue
             if not _str(r["id"]) or not r["id"]:
                 self.err(wi + ".id", "is not an id")
             if not _opt_str(r["machine"]) or not _opt_str(r["who"]) or not _opt_str(r["branch"]):
                 self.err(wi, "machine, who and branch are strings or null")
+            self.moot(wi + ".moot", r["moot"])
             wo = r["waiting_on"]
             if wo is not None and self.keys(wi + ".waiting_on", wo, ("kind", "ref", "since")):
                 if wo["kind"] not in WAITING_KINDS:
@@ -267,6 +269,23 @@ class _Checker:
                 if not _epoch(wo["since"]):
                     self.err(wi + ".waiting_on.since", "is not an epoch or null")
             self.eta(wi + ".eta", r["eta"], wo)
+
+    def moot(self, w, moot):
+        """A run's moot decisions: asked by a member that ended, and no step waits on them; shown on the run only."""
+        if not isinstance(moot, list) or len(moot) > MOOT_CAP:
+            self.err(w, f"is not a list of at most {MOOT_CAP}")
+            return
+        for j, m in enumerate(moot):
+            wm = f"{w}[{j}]"
+            if not self.keys(wm, m, ("id", "question", "asker", "since", "text")):
+                continue
+            if not _str(m["id"]) or not m["id"]:
+                self.err(wm + ".id", "is not a decision id")
+            self.text(wm + ".question", m["question"], 160)
+            self.text(wm + ".asker", m["asker"], 120, nullable=True)
+            self.text(wm + ".text", m["text"], 300)
+            if not _epoch(m["since"]):
+                self.err(wm + ".since", "is not an epoch or null")
 
     def eta(self, w, e, wo):
         if not self.keys(w, e, ("state", "basis", "remaining_s", "lands_at", "over_estimate", "text")):
@@ -398,4 +417,18 @@ def check(doc) -> list:
             continue
         getattr(c, k)(doc[k])
         c.units(k, doc[k])
+    _moot_not_queued(c, doc.get("attention"), doc.get("runs"))
     return c.errors
+
+
+def _moot_not_queued(c: _Checker, attention, runs):
+    """A moot decision waits for nobody: the queue never holds it (decision:<run>:<id>)."""
+    if not isinstance(attention, dict) or not isinstance(attention.get("items"), list) or not isinstance(runs, list):
+        return
+    queued = {it.get("id") for it in attention["items"] if isinstance(it, dict)}
+    for i, r in enumerate(runs):
+        moot = r.get("moot") if isinstance(r, dict) else None
+        for j, m in enumerate(moot if isinstance(moot, list) else []):
+            key = f"decision:{r.get('id')}:{m.get('id')}" if isinstance(m, dict) else None
+            if key in queued:
+                c.err(f"runs[{i}].moot[{j}]", f"{m.get('id')} is moot, but the queue holds {key}")

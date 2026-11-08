@@ -15,6 +15,8 @@ changes of scope — the reason, both in the item's Changelog and in a git commi
 """
 from __future__ import annotations
 
+import calendar
+import contextlib
 import json
 import os
 import re
@@ -37,6 +39,7 @@ STATUSES = ("todo", "doing", "blocked", "done", "cancelled")
 BUCKETS = ("now", "next", "later")
 PRIORITIES = ("high", "normal", "low")
 NEEDS_WHY = {"edit", "cancel", "priority", "move", "reopen", "scope", "block", "link"}
+OPEN_ONLY = {"move", "block", "cancel"}  # what changes an open item's place or state; a closed one is reopened first
 FIELDS = ("id", "type", "title", "scope", "status", "bucket", "priority", "assignee", "claimed_by", "claimed_at",
           "lock_expires", "due", "links", "version", "created", "created_by", "updated", "updated_by")
 LIST_FIELDS = ("links",)  # written as `[a, b]`; every other value is text, even one in brackets (a title like "[API] …")
@@ -44,8 +47,8 @@ LIST_FIELDS = ("links",)  # written as `[a, b]`; every other value is text, even
 
 # --------------------------------------------------------------------------- identity
 
-def actor(agent: str = None, session: str = None) -> dict:
-    user = core.github_user() or os.environ.get("USER", "unknown")
+def actor(agent: str = None, session: str = None, user: str = None) -> dict:
+    user = user or core.github_user() or os.environ.get("USER", "unknown")
     host = socket.gethostname().split(".")[0].lower()
     agent = agent or os.environ.get("DEVKIT_AGENT") or ("claude" if os.environ.get("CLAUDECODE") else
                                                         "codex" if os.environ.get("CODEX_SANDBOX") or
@@ -64,8 +67,9 @@ def now_iso(ts=None) -> str:
 
 
 def parse_iso(s: str) -> float:
+    """A `now_iso` text (UTC) -> seconds since the epoch, the same on any Mac in any season; 0.0 when unreadable."""
     try:
-        return time.mktime(time.strptime(s, "%Y-%m-%dT%H:%M:%SZ")) - time.timezone
+        return float(calendar.timegm(time.strptime(s, "%Y-%m-%dT%H:%M:%SZ")))
     except (TypeError, ValueError):
         return 0.0
 
@@ -292,13 +296,70 @@ def render(item: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
+_VERSION = re.compile(r"^v\d+ ")
+_BY_RULE = ("version", "updated", "updated_by")
+
+
+def _either(base, remote, mine):
+    """(True, the value) when at most one side changed it, or both the same way; (False, None) otherwise."""
+    if mine == base or mine == remote:
+        return True, remote
+    return (True, mine) if remote == base else (False, None)
+
+
+def _as_list(v) -> list:
+    return list(v) if isinstance(v, list) else [x.strip() for x in str(v or "").strip("[]").split(",") if x.strip()]
+
+
+def merge_item(base: str, remote: str, mine: str):
+    """This Mac's change to an item applied again to the remote's version, for a pull whose rebase stopped on the
+    item: `base` is the version both sides started from, `remote` the one pushed first, `mine` this Mac's. A field,
+    the title, the body and the frontmatter lines devkit does not know take the side that changed them; `links` keep
+    what either side added and lose what either removed; this Mac's changelog entries go on top of the remote's,
+    numbered after them, and the version counts both. -> the item's text, or None when both sides changed the same
+    thing differently (a lock taken on both Macs, the body edited on both), when the changelogs do not both start
+    from the base's, or when the result would drop a line either side added (`lost_lines`)."""
+    b, r, m = parse(base), parse(remote), parse(mine)
+    out = parse(remote)
+    for k in FIELDS:
+        if k in _BY_RULE:
+            continue
+        if k in LIST_FIELDS:
+            bl, rl, ml = (_as_list(x["meta"].get(k)) for x in (b, r, m))
+            out["meta"][k] = [x for x in rl if x in ml or x not in bl] + [x for x in ml if x not in bl + rl]
+            continue
+        ok, out["meta"][k] = _either(*(x["meta"].get(k, "") for x in (b, r, m)))
+        if not ok:
+            return None
+    for part in ("body", "extra"):
+        ok, out[part] = _either(b[part], r[part], m[part])
+        if not ok:
+            return None
+    n = len(b["changelog"])
+    if any(x["changelog"][len(x["changelog"]) - n:] != b["changelog"] for x in (r, m) if n):
+        return None
+    added = m["changelog"][:len(m["changelog"]) - n]
+    version = r["meta"]["version"] + m["meta"]["version"] - b["meta"]["version"]
+    out["changelog"] = [_VERSION.sub(f"v{version - i} ", e, count=1) for i, e in enumerate(added)] + r["changelog"]
+    out["meta"]["version"] = version
+    later = max((r, m), key=lambda x: x["meta"].get("updated") or "")
+    out["meta"]["updated"], out["meta"]["updated_by"] = later["meta"].get("updated", ""), later["meta"].get("updated_by", "")
+    text = render(out)
+    renumbered = [ln for e in added for ln in f"- {e}".split("\n")]
+    if lost_lines(remote, text, base.splitlines()) or lost_lines(mine, text, base.splitlines() + renumbered):
+        return None
+    return text
+
+
 def load(path: Path) -> dict:
+    recover_rebase("a read")  # a rebase left stopped leaves conflict markers in the items it stopped on
     it = parse(path.read_text())
     it["path"] = path
     return it
 
 
 def all_items(scope: str = None) -> list:
+    recover_rebase("a read")
     base = scope_dir(scope) if scope else ITEMS
     if not base.exists():
         return []
@@ -347,26 +408,185 @@ def ordered_open(items: list) -> list:
 
 
 # --------------------------------------------------------------------------- git (audit trail)
+# Every Mac pulls the handoff repository with a rebase. A rebase that stops (a conflict, a killed git) leaves the
+# repository on a detached HEAD: a commit made there is lost when the rebase ends, and every later pull and push
+# fails. So devkit's git writes to the repository run one at a time on a Mac (`_repo_lock`), a conflict in an item
+# is settled item by item (`merge_item`), any other conflict aborts the rebase, and a rebase found stopped is aborted
+# before the next pull or commit. Each abort is a sync problem: an audit record, kept at every audit level, and
+# handoff-push-failed.json, which `dev status` and the dashboard show until a push succeeds.
+
+_REBASE_DIRS = ("rebase-merge", "rebase-apply")
+_held = [0]
+
+
+@contextlib.contextmanager
+def _repo_lock(wait: float = 90):
+    """Run devkit's pulls, rebases, commits and pushes of the handoff repository one at a time on this Mac. Nested
+    uses share the outer one. -> whether it is held (False after `wait` seconds: another devkit process is busy)."""
+    if _held[0]:
+        _held[0] += 1
+        try:
+            yield True
+        finally:
+            _held[0] -= 1
+        return
+    with core.Lock("handoff-git", wait=wait) as got:
+        _held[0] += 1 if got else 0
+        try:
+            yield got
+        finally:
+            _held[0] -= 1 if got else 0
+
+
+def push_failed_file() -> Path:
+    return core.STATE / "handoff-push-failed.json"
+
+
+def sync_problem(problem: str, action: str = "handoff.push", target: str = "") -> None:
+    """Record a sync of the handoff repository that did not reach the remote: an audit record that every audit level
+    keeps (`target`: the files involved), and handoff-push-failed.json, shown as a problem until a push succeeds."""
+    from . import audit
+    audit.record(action, target or core.handoff_repo() or "handoff", problem[:300], outcome="blocked")
+    try:
+        f = push_failed_file()
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(json.dumps({"ts": int(time.time()), "error": problem[:300]}))
+    except OSError:
+        pass
+
+
+def _stopped() -> bool:
+    return any((HANDOFF / ".git" / d).exists() for d in _REBASE_DIRS)
+
+
+def _conflicted() -> list:
+    return core.gitout(HANDOFF, "diff", "--name-only", "--diff-filter=U").splitlines()
+
+
+def _abort(reason: str, files=(), keep=()) -> bool:
+    """Abort the rebase and record why. `keep`: files this process wrote after the rebase stopped, written back
+    after the abort (it restores the files of the commits it puts back). -> whether git aborted it."""
+    saved = {}
+    for p in keep:
+        try:
+            saved[Path(p)] = Path(p).read_text()
+        except OSError:
+            pass
+    rc, _, err = core.git(HANDOFF, "rebase", "--abort", timeout=60)
+    for p, text in saved.items():
+        try:
+            _replace(p, text)
+        except OSError:
+            pass
+    problem = reason + (f"; git rebase --abort failed: {err.strip()[:120]}" if rc != 0 else "")
+    sync_problem(problem, "handoff.rebase-aborted", ", ".join(files)[:300])
+    from . import ui
+    ui.warn(f"handoff repository: {problem}. See “The handoff repository stopped syncing” in docs/teams.md.")
+    return rc == 0
+
+
+def recover_rebase(where: str, keep=()) -> bool:
+    """A rebase of the handoff repository left stopped, with no devkit process working on it: abort it (its commits
+    come back as they were) and record it as a sync problem. `where`: what found it (`dev sync`, a commit). Runs
+    before every pull and commit. -> True when it aborted one."""
+    if not _stopped():
+        return False
+    with _repo_lock(wait=0) as got:  # busy: another devkit process is rebasing right now, so it is not stopped
+        if not got or not _stopped():
+            return False
+        files = _conflicted()
+        return _abort(f"a rebase of the handoff repository was left stopped"
+                      + (f" on a conflict in {', '.join(files)}" if files else "") + f"; {where} aborted it",
+                      files, keep)
+
+
+def _stage(rel: str, n: int):
+    rc, out, _ = core.git(HANDOFF, "show", f":{n}:{rel}")
+    return out + "\n" if rc == 0 else None
+
+
+def _settle(rel: str, retake: bool):
+    """The text of an item in conflict during the rebase: the remote's version with this Mac's change applied again
+    (`merge_item`). When both changed the same thing, the remote's version if `retake` (the caller applies its change
+    again), else None."""
+    base, remote, mine = _stage(rel, 1), _stage(rel, 2), _stage(rel, 3)  # in a rebase, 2 is the remote's side
+    if not (rel.startswith("items/") and remote and mine):
+        return None
+    merged = merge_item(base, remote, mine) if base else None
+    return merged if merged is not None else remote if retake else None
+
+
+def pull_rebase(retake=()) -> tuple:
+    """Pull the handoff repository, rebasing this Mac's commits on the remote's. A conflict in an item is settled
+    (`_settle`); any other conflict aborts the rebase, leaves the commits as they were and records a sync problem.
+    `retake`: item paths (relative) whose change the caller applies again itself. Call it under `_repo_lock`.
+    -> (ok, the problem when not ok)."""
+    rc, out, err = core.git(HANDOFF, "pull", "-q", "--rebase", "--autostash", timeout=60)
+    if rc == 0:
+        return True, ""
+    if not _stopped():  # the network or the remote: nothing changed here
+        return False, (err or out).strip()[:300] or "git pull failed"
+    for _ in range(200):  # one round per commit of this Mac that conflicts
+        files = _conflicted()
+        if not files:
+            break
+        for rel in files:
+            text = _settle(rel, rel in retake)
+            if text is None:
+                problem = f"a pull of the handoff repository stopped on a conflict in {', '.join(files)} that devkit " \
+                          f"cannot settle; it aborted the rebase and kept this Mac's commits unpushed"
+                _abort(problem, files)
+                return False, problem
+            _replace(HANDOFF / rel, text)
+            core.git(HANDOFF, "add", "--", rel)
+        nothing = core.git(HANDOFF, "diff", "--cached", "--quiet")[0] == 0
+        core.git(HANDOFF, "-c", "core.editor=true", "rebase", "--skip" if nothing else "--continue", timeout=60)
+        if not _stopped():
+            return True, ""
+    problem = "a pull of the handoff repository stopped and did not finish; devkit aborted the rebase"
+    _abort(problem, _conflicted())
+    return False, problem
+
+
+def _pushes() -> bool:
+    """Does this Mac push the handoff repository (a git repository with a remote, and sync.push on)?"""
+    return (HANDOFF / ".git").exists() and bool(core.gitout(HANDOFF, "remote")) and \
+        core.CFG.get("sync", {}).get("push", True)
+
+
+def push_now(retake=()) -> tuple:
+    """Pull (rebase), then push, now. -> (ok, the problem when not ok)."""
+    with _repo_lock() as got:
+        if not got:
+            return False, "another devkit process kept the handoff repository busy"
+        recover_rebase("a push")
+        ok, problem = pull_rebase(retake)
+        if not ok:
+            return False, problem
+        rc, _, err = core.git(HANDOFF, "push", "-q", timeout=60)
+        return rc == 0, (err.strip()[:300] if rc else "")
+
 
 def _commit(paths, message: str, push: bool = True, wait: bool = False):
-    """One commit per change (the audit trail); push in the background unless `wait` (locks)."""
+    """One commit per change (the audit trail); push in the background unless `wait` (push now)."""
     if not (HANDOFF / ".git").exists():
         return True
     rel = [str(Path(p).relative_to(HANDOFF)) for p in paths]
-    core.git(HANDOFF, "add", "--", *rel)
-    rc, _, _ = core.git(HANDOFF, "diff", "--cached", "--quiet")
-    if rc != 0:
-        core.git(HANDOFF, "commit", "-q", "-m", message, "--", *rel)
-        from . import audit
-        audit.record("handoff." + (rel[0].split("/")[0] if rel else "write"), ", ".join(rel)[:300], message)
-    if not push or not core.gitout(HANDOFF, "remote") or not core.CFG["sync"].get("push", True):
+    with _repo_lock() as got:
+        if got:
+            recover_rebase("a commit", keep=paths)
+        core.git(HANDOFF, "add", "--", *rel)
+        rc, _, _ = core.git(HANDOFF, "diff", "--cached", "--quiet")
+        if rc != 0:
+            core.git(HANDOFF, "commit", "-q", "-m", message, "--", *rel)
+            from . import audit
+            audit.record("handoff." + (rel[0].split("/")[0] if rel else "write"), ", ".join(rel)[:300], message)
+    if not push or not _pushes():
         return True
     if os.environ.get("DEVKIT_NO_AUTOSYNC") and not wait:  # bulk operations push once at the end
         return True
     if wait:
-        core.git(HANDOFF, "pull", "-q", "--rebase", "--autostash", timeout=60)
-        rc, _, _ = core.git(HANDOFF, "push", "-q", timeout=60)
-        return rc == 0
+        return push_now()[0]
     request_sync(message[:80], delay=10)
     return True
 
@@ -396,7 +616,7 @@ def request_sync(reason: str = "", delay: int = 15):
     except OSError:
         out = subprocess.DEVNULL
     try:
-        subprocess.Popen([sys.executable, "-I", "-S", str(core.DEVKIT_HOME / "bin" / "dev"), "sync", "--quiet",
+        subprocess.Popen([sys.executable, "-I", "-S", str(core.release_home() / "bin" / "dev"), "sync", "--quiet",
                           "--offline", "--delay", str(delay)], stdin=subprocess.DEVNULL, stdout=out, stderr=out,
                          start_new_session=True, close_fds=True)  # isolated, as its shebang runs it
     finally:
@@ -405,9 +625,18 @@ def request_sync(reason: str = "", delay: int = 15):
     return True
 
 
-def pull():
-    if (HANDOFF / ".git").exists() and core.gitout(HANDOFF, "remote"):
-        core.git(HANDOFF, "pull", "-q", "--rebase", "--autostash", timeout=60)
+def pull(retake=()) -> bool:
+    """Bring the remote's changes to this Mac (`pull_rebase`), after aborting a rebase left stopped. -> whether the
+    repository is now up to date with the remote (True when it has none)."""
+    if not (HANDOFF / ".git").exists():
+        return True
+    with _repo_lock() as got:
+        if not got:
+            return False
+        recover_rebase("a pull")
+        if not core.gitout(HANDOFF, "remote"):
+            return True
+        return pull_rebase(retake)[0]
 
 
 # --------------------------------------------------------------------------- operations
@@ -470,6 +699,12 @@ def update(it: dict, op: str, why: str = "", a=None, **changes) -> dict:
     if op in NEEDS_WHY and not why.strip():
         raise ValueError(f"`{op}` changes the scope or plan: give the reason with --why \"…\" (recorded in the "
                          f"item's changelog and the commit)")
+    iid, status = it["meta"].get("id"), it["meta"].get("status") or "todo"
+    if op in OPEN_ONLY and status not in OPEN:  # a closed item keeps the state it was closed in
+        raise ValueError(f"{iid} is {status}: `{op}` applies to open items; if work is left, reopen it first: "
+                         f"dev task reopen {iid} --why \"<what is left>\"")
+    if op == "unblock" and status != "blocked":
+        raise ValueError(f"{iid} is {status}, not blocked: there is nothing to unblock")
     holder, expired = lock_holder(it)
     if holder and not expired and not _owned_by(it, a) and op not in ("comment",):
         raise ValueError(f"{it['meta']['id']} is claimed by {holder} until {it['meta'].get('lock_expires')}; "
@@ -493,37 +728,86 @@ def update(it: dict, op: str, why: str = "", a=None, **changes) -> dict:
     return it
 
 
+def _has_entry(it: dict, entry: str) -> bool:
+    """Does the item's changelog have `entry`, whatever its version number (a merge renumbers it)?"""
+    want = _VERSION.sub("", entry, count=1)
+    return any(_VERSION.sub("", e, count=1) == want for e in it.get("changelog") or [])
+
+
+def _on_remote(path: Path):
+    """The item as this Mac last pushed or fetched it from the remote, or None."""
+    rc, out, _ = core.git(HANDOFF, "show", f"@{{u}}:{Path(path).relative_to(HANDOFF)}")
+    return parse(out + "\n") if rc == 0 else None
+
+
+def _push_change(path: Path, change, what: str, must_reach: bool) -> dict:
+    """Apply `change` to the item at `path`, commit it and push it now. `change(item)` checks the item as it is and
+    changes it (ValueError when it may not) -> the commit message. When another Mac pushed a change to the item
+    first and the two cannot be merged, the item is read again as the remote has it and `change` applied again, so
+    its checks run on the remote's version: a lock taken there first refuses this one. `must_reach`: raise when the
+    change is not on the remote after three tries (it stays committed here, and `dev sync` pushes it later); without
+    a remote the commit is the whole change. -> the item."""
+    remote, rel = _pushes(), str(Path(path).relative_to(HANDOFF))
+    entry, problem = None, ""
+    for attempt in range(3):
+        if remote and attempt == 0:
+            pull(retake=[rel])
+        it = load(path)
+        if entry is None or not _has_entry(it, entry):
+            message = change(it)
+            entry = it["changelog"][0]
+            write_record(path, render(it))
+            _commit([path], message, push=False)
+        if not remote:
+            return it
+        ok, problem = push_now(retake=[rel])
+        there = _on_remote(path) if ok else None
+        if there is not None and _has_entry(there, entry):
+            return load(path)
+    if must_reach:
+        raise ValueError(f"{it['meta']['id']}: {what} did not reach the remote ({problem or 'the push did not take it'}),"
+                         f" so other Macs do not see it. It is committed on this Mac and `dev sync` pushes it when the "
+                         f"remote answers; run the command again to confirm it.")
+    return load(path)
+
+
+def _refuse_closed(it: dict, what: str) -> None:
+    """A closed item keeps the state it was closed in: starting it, releasing it to todo or closing it again needs
+    dev task reopen first (ValueError)."""
+    iid, status = it["meta"].get("id"), it["meta"].get("status") or "todo"
+    if status not in OPEN:
+        raise ValueError(f"{iid} is {status}: `{what}` applies to open items; if work is left, reopen it first: "
+                         f"dev task reopen {iid} --why \"<what is left>\"")
+
+
 def claim(it: dict, a=None, hours: float = None, why: str = "", branch: str = "") -> dict:
-    """Take the lock (pull first, push immediately so other machines see it). `branch`: the branch the work happens
+    """Take the lock: pull first, then push at once so other Macs see it; it reports success only when the lock is on
+    the remote (a handoff repository without a remote: when it is committed). `branch`: the branch the work happens
     on, kept as `branch:<name>` in the item's links (the private handoff), so task ids never go into branch names
     and the branch map still finds the task (spec P-fy3bwa0pshk R7)."""
     a = a or actor()
     hours = hours or float(core.CFG.get("work", {}).get("lock_hours", 8))
-    pull()
-    it = load(it["path"])
-    holder, expired = lock_holder(it)
-    if holder and not expired and not _owned_by(it, a):
-        raise ValueError(f"{it['meta']['id']} is already claimed by {holder} (until {it['meta'].get('lock_expires')})")
-    m = it["meta"]
-    m["claimed_by"] = actor_str(a)
-    m["claimed_at"] = now_iso()
-    m["lock_expires"] = now_iso(time.time() + hours * 3600)
-    if m.get("status") == "todo":
-        m["status"], m["bucket"] = "doing", "now"
-    m["assignee"] = m.get("assignee") or a["user"]
-    links = [x for x in (m.get("links") or []) if x]
-    if branch and f"branch:{branch}" not in links:
-        m["links"] = links + [f"branch:{branch}"]
-    _touch(it, a, "claim", why, f"lock until {m['lock_expires']}" + (f", on {branch}" if branch else ""))
-    write_record(it["path"], render(it))
-    ok = _commit([it["path"]], f"{m['id']}: claim by {actor_str(a)}", wait=True)
-    if not ok:
-        pull()
-        it2 = load(it["path"])
-        h2, _ = lock_holder(it2)
-        if h2 and h2 != m["claimed_by"]:
-            raise ValueError(f"{m['id']} was claimed by {h2} on another machine first")
-    return it
+
+    def take(it):
+        _refuse_closed(it, "start")
+        holder, expired = lock_holder(it)
+        if holder and not expired and not _owned_by(it, a):
+            raise ValueError(f"{it['meta']['id']} is already claimed by {holder} (until "
+                             f"{it['meta'].get('lock_expires')})")
+        m = it["meta"]
+        m["claimed_by"] = actor_str(a)
+        m["claimed_at"] = now_iso()
+        m["lock_expires"] = now_iso(time.time() + hours * 3600)
+        if m.get("status") == "todo":
+            m["status"], m["bucket"] = "doing", "now"
+        m["assignee"] = m.get("assignee") or a["user"]
+        links = [x for x in (m.get("links") or []) if x]
+        if branch and f"branch:{branch}" not in links:
+            m["links"] = links + [f"branch:{branch}"]
+        _touch(it, a, "claim", why, f"lock until {m['lock_expires']}" + (f", on {branch}" if branch else ""))
+        return f"{m['id']}: claim by {actor_str(a)}"
+
+    return _push_change(it["path"], take, "the lock", must_reach=True)
 
 
 def reopen(it: dict, why: str, a=None) -> dict:
@@ -537,19 +821,25 @@ def reopen(it: dict, why: str, a=None) -> dict:
 
 
 def release(it: dict, a=None, why: str = "", status: str = None) -> dict:
+    """Give the lock back (and set `status`, such as done), pushed at once. When the push cannot reach the remote the
+    change stays committed here for `dev sync`: finishing work does not need the network."""
     a = a or actor()
-    if not _owned_by(it, a):
-        holder, _ = lock_holder(it)
-        raise ValueError(f"{it['meta']['id']} is claimed by {holder}; only they (or an expired lock) can release it")
-    m = it["meta"]
-    m["claimed_by"] = m["claimed_at"] = m["lock_expires"] = ""
-    if status:
-        m["status"] = status
-    _touch(it, a, "release" if not status else status, why)
-    write_record(it["path"], render(it))
-    _commit([it["path"]], f"{m['id']}: {'release' if not status else status} ({actor_str(a)})"
-            + (f" — {why}" if why else ""), wait=True)
-    return it
+
+    def give_back(it):
+        if status:  # without a status it only frees a lock, which a closed item may still hold
+            _refuse_closed(it, status)
+        if not _owned_by(it, a):
+            holder, _ = lock_holder(it)
+            raise ValueError(f"{it['meta']['id']} is claimed by {holder}; only they (or an expired lock) can release "
+                             f"it")
+        m = it["meta"]
+        m["claimed_by"] = m["claimed_at"] = m["lock_expires"] = ""
+        if status:
+            m["status"] = status
+        _touch(it, a, "release" if not status else status, why)
+        return f"{m['id']}: {'release' if not status else status} ({actor_str(a)})" + (f" — {why}" if why else "")
+
+    return _push_change(it["path"], give_back, f"the {status or 'release'}", must_reach=False)
 
 
 def _report_skipped(job: str, op: str, skipped: list) -> None:
@@ -572,15 +862,36 @@ def _report_skipped(job: str, op: str, skipped: list) -> None:
         audit.record("handoff.record-skipped", target, f"{err.path.stem}: {op}", outcome="blocked")
 
 
-def renew_locks(a=None, hours: float = None) -> int:
-    """Extend the locks this actor holds (called while a session is active)."""
+def _links(it: dict) -> list:
+    links = it["meta"].get("links") or []
+    return [x.strip() for x in links.strip("[]").split(",")] if isinstance(links, str) else list(links)
+
+
+def _live_branches(sessions) -> set:
+    """(project, branch) of each live session: the branches someone is working on now."""
+    return {(s.get("project"), s.get("branch")) for s in sessions or []
+            if s.get("active") and s.get("project") and s.get("branch")}
+
+
+def renew_locks(a=None, hours: float = None, sessions=None) -> int:
+    """Extend the locks this actor holds on open items (OPEN) linked to a branch (`branch:<name>`, set by `claim`)
+    that one of the live sessions on this machine is on now; a done or cancelled item's lock is never renewed.
+    `sessions`: `registry.live_sessions()` (read when None). Any other lock is left to run out after
+    `work.lock_hours`, and `expire_locks` then sends its item back to todo."""
     a = a or actor()
     hours = hours or float(core.CFG.get("work", {}).get("lock_hours", 8))
+    if sessions is None:
+        from .registry import live_sessions
+        sessions = live_sessions()
+    live = _live_branches(sessions)
     me = f"{a['user']}@{a['host']}"
     changed, skipped = [], []
     for it in all_items():
+        if (it["meta"].get("status") or "todo") not in OPEN:  # a done or cancelled item needs no lock kept alive
+            continue
         holder, expired = lock_holder(it)
-        if holder and holder.startswith(me) and not expired:
+        working = any((it["scope"], ln[len("branch:"):]) in live for ln in _links(it) if ln.startswith("branch:"))
+        if holder and holder.startswith(me) and not expired and working:
             if parse_iso(it["meta"]["lock_expires"]) - time.time() < hours * 1800:
                 it["meta"]["lock_expires"] = now_iso(time.time() + hours * 3600)
                 try:
@@ -596,25 +907,175 @@ def renew_locks(a=None, hours: float = None) -> int:
 
 
 def expire_locks() -> list:
-    """Release expired locks (run by the hourly sync on any machine)."""
-    out, skipped = [], []
+    """Release expired locks (run by the hourly sync on any machine). A doing item goes back to todo, so nobody's
+    board shows work in progress that nobody holds; a blocked item stays blocked. One commit for all."""
+    out, skipped, back = [], [], 0
     for it in all_items():
         holder, expired = lock_holder(it)
         if holder and expired:
             m = it["meta"]
-            it["changelog"].insert(0, f"v{m['version'] + 1} · {now_iso()} · devkit · lock of {holder} expired")
+            doing = m.get("status") == "doing"
+            it["changelog"].insert(0, f"v{m['version'] + 1} · {now_iso()} · devkit · lock of {holder} expired at "
+                                      f"{m.get('lock_expires')}" + (": back to todo" if doing else ""))
             m["version"] += 1
             m["claimed_by"] = m["claimed_at"] = m["lock_expires"] = ""
+            if doing:
+                m["status"] = "todo"
             try:
                 write_record(it["path"], render(it))
             except RecordLossError as e:
                 skipped.append(e)
                 continue
             out.append(it["path"])
+            back += 1 if doing else 0
     if out:
-        _commit(out, f"release {len(out)} expired lock(s)", push=False)
+        _commit(out, f"release {len(out)} expired lock(s)" + (f", {back} item(s) back to todo" if back else ""),
+                push=False)
     _report_skipped("expired-lock release", "lock-release-skipped", skipped)
     return out
+
+
+# --------------------------------------------------------------------------- items of merged branches
+
+OPEN = ("todo", "doing", "blocked")
+
+
+def _linked_at(it: dict, branch: str) -> float:
+    """When the item was tied to `branch`: the oldest changelog entry that links it (a claim `on <branch>`, a
+    `branch:<branch>` link), else its claim, else its creation. Seconds since the epoch."""
+    names = re.compile(r"(?:, on |branch:)" + re.escape(branch) + r"(?![\w./-])")
+    for entry in reversed(it.get("changelog") or []):
+        parts = entry.split(" · ")
+        if len(parts) > 1 and names.search(entry):
+            return parse_iso(parts[1])
+    m = it["meta"]
+    return parse_iso(m.get("claimed_at") or m.get("created") or "")
+
+
+def linked_open(scope: str, branches) -> list:
+    """The open items of `scope` linked to one of `branches` (`branch:<name>`, set by `claim`): [(item, branch)].
+    `branches` may map each name to its merge ({"at": seconds since the epoch, …}): a merge older than the item's link
+    to the branch was an earlier use of the same name, and does not count for the item."""
+    want = branches if isinstance(branches, dict) else dict.fromkeys(branches or (), None)
+    out = []
+    for it in all_items(scope):
+        if it["meta"].get("status") not in OPEN:
+            continue
+        for ln in _links(it):
+            name = ln[len("branch:"):]
+            if not ln.startswith("branch:") or name not in want:
+                continue
+            at = (want[name] or {}).get("at")
+            if at and at < _linked_at(it, name):
+                continue
+            out.append((it, name))
+            break
+    return out
+
+
+def linked_branches(scope: str) -> list:
+    """The branches the open items of `scope` are linked to."""
+    return sorted({ln[len("branch:"):] for it in all_items(scope) if it["meta"].get("status") in OPEN
+                   for ln in _links(it) if ln.startswith("branch:")})
+
+
+def link_new_branch(scope: str, branch: str, a=None) -> str:
+    """A branch was just created in `scope`'s repository: when the person holds a live lock on exactly one open item
+    of `scope` that no branch is linked to (claimed on the default branch, or before the branch existed), link it
+    (`branch:<branch>`), so its lock renews while they work there and the merge closes it. -> the line to print:
+    what was linked, how to choose when several items qualify, or "" when none does."""
+    a = a or actor()
+    held = [it for it in all_items(scope) if it["meta"].get("status") in OPEN
+            and (lock_holder(it)[0] or "").split("@")[0] == a["user"] and not lock_holder(it)[1]
+            and not any(ln.startswith("branch:") for ln in _links(it))]
+    if len(held) > 1:
+        return (f"{len(held)} items you hold have no branch ({', '.join(it['meta']['id'] for it in held[:5])}): run "
+                f"`dev task start <id>` on {branch} for the one it is for")
+    if not held:
+        return ""
+    it = held[0]
+    done = _apply([(it, "link", f"branch:{branch}, created while it was claimed",
+                    {"links": _links(it) + [f"branch:{branch}"]})], a, "branch link", "branch-link-skipped",
+                  lambda n: f"{it['meta']['id']}: link branch:{branch}")
+    if not done:
+        return ""
+    return (f"linked {it['meta']['id']} “{it['meta'].get('title')}” to {branch}: its lock renews while you work there, "
+            f"and the merge closes it")
+
+
+def _apply(changes, a: dict, job: str, op: str, message) -> list:
+    """Write each (item, op, detail, meta changes) through `write_record`, then one commit whose message is
+    `message(<items written>)`. An item the write would shrink is left as it is and reported (`_report_skipped`).
+    -> the written items."""
+    done, skipped = [], []
+    for it, verb, detail, meta in changes:
+        it["meta"].update(meta)
+        _touch(it, a, verb, detail=detail)
+        try:
+            write_record(it["path"], render(it))
+        except RecordLossError as e:
+            skipped.append(e)
+            continue
+        done.append(it)
+    if done:
+        _commit([it["path"] for it in done], message(len(done)) + f" ({actor_str(a)})")
+    _report_skipped(job, op, skipped)
+    return done
+
+
+UNLOCK = {"claimed_by": "", "claimed_at": "", "lock_expires": ""}
+
+
+def close_merged(scope: str, branch: str, detail: str, a=None) -> list:
+    """After `branch` is merged, every open item of `scope` linked to it is done and its lock cleared, whoever holds
+    it: the work landed. `detail` says where (`merged in PR #7 (abc1234)`) and goes in each changelog line. One
+    commit. -> the closed items."""
+    a = a or actor()
+    changes = [(it, "done", detail, dict(UNLOCK, status="done")) for it, _ in linked_open(scope, [branch])]
+    return _apply(changes, a, "merge", "merge-close-skipped", lambda n: f"close {n} item(s) of {branch}: {detail}")
+
+
+def normal_title(title: str) -> str:
+    """A title for comparison: lower case, words only (`Add the CSV export.` and `add the  csv export` match)."""
+    return " ".join(re.sub(r"[^\w]+", " ", (title or "").lower()).split())
+
+
+def _brief(it: dict, **extra) -> dict:
+    m = it["meta"]
+    return dict({"id": m.get("id"), "title": m.get("title") or it.get("title"), "status": m.get("status")}, **extra)
+
+
+def reconcile(scope: str, merged: dict, apply: bool = False, a=None) -> dict:
+    """What is stale in `scope`'s items: doing items without a live lock, open items linked to a branch in `merged`
+    (branch -> {"sha", "pr"}: the merges into the default branch, `gitx.merged_into_default`), and items that share a
+    normalized title (open ones, with any done one of the same title). `apply` closes the merged ones (done, with
+    the merge commit as evidence) and sends the lockless doing ones back to todo, each with a changelog line, in one
+    commit; the same titles are only reported. Without `apply` nothing is written.
+    -> {"scope", "lockless_doing", "merged", "duplicates", "changed": the ids written}"""
+    items = all_items(scope)
+    shipped = linked_open(scope, merged)
+    closing = {it["meta"]["id"] for it, _ in shipped}
+    lockless = [it for it in items if it["meta"].get("status") == "doing" and it["meta"]["id"] not in closing
+                and (not lock_holder(it)[0] or lock_holder(it)[1])]
+    groups = {}
+    for it in items:
+        if it["meta"].get("status") != "cancelled" and normal_title(it["meta"].get("title")):
+            groups.setdefault(normal_title(it["meta"].get("title")), []).append(it)
+    dups = [g for g in groups.values() if len(g) > 1 and any(i["meta"].get("status") in OPEN for i in g)]
+    report = {"scope": scope, "lockless_doing": [_brief(it) for it in lockless],
+              "merged": [_brief(it, branch=b, commit=merged[b]["sha"], pr=merged[b].get("pr")) for it, b in shipped],
+              "duplicates": [[_brief(it) for it in g] for g in dups], "changed": []}
+    if not apply:
+        return report
+    a = a or actor()
+    changes = [(it, "done", f"{b} merged in {merged[b]['sha'][:7]}" +
+                (f" (PR #{merged[b]['pr']})" if merged[b].get("pr") else ""), dict(UNLOCK, status="done"))
+               for it, b in shipped]
+    changes += [(it, "todo", "doing without a lock: back to todo", dict(UNLOCK, status="todo")) for it in lockless]
+    written = _apply(changes, a, "reconcile", "reconcile-skipped",
+                     lambda n: f"reconcile {n} item(s): {len(shipped)} merged, {len(lockless)} back to todo")
+    report["changed"] = [it["meta"]["id"] for it in written]
+    return report
 
 
 # --------------------------------------------------------------------------- sessions log and presence
@@ -643,7 +1104,8 @@ def recent_sessions(scope: str, limit: int = 12) -> list:
 
 
 def write_presence(sessions: list, a=None):
-    """presence/<user>@<host>.json: this machine's live sessions and held locks (written only by this machine)."""
+    """presence/<user>@<host>.json: this machine's tracked sessions, each with its `active` flag (a session still
+    tracked a while after its agent stopped is not active), and held locks (written only by this machine)."""
     a = a or actor("human")
     me = f"{a['user']}@{a['host']}"
     held = [{"id": i["meta"]["id"], "title": i["meta"]["title"], "scope": i["scope"],
@@ -651,7 +1113,7 @@ def write_presence(sessions: list, a=None):
             if (i["meta"].get("claimed_by") or "").startswith(me) and not lock_holder(i)[1]]
     data = {"user": a["user"], "host": a["host"], "updated": now_iso(),
             "sessions": [{k: s.get(k) for k in ("agent", "project", "branch", "started", "status", "last_seen",
-                                                "progress", "subagents", "turn_started")}
+                                                "progress", "subagents", "turn_started", "active")}
                          for s in sessions], "locks": held}
     f = PRESENCE / f"{me}.json"
     f.parent.mkdir(parents=True, exist_ok=True)
@@ -663,10 +1125,14 @@ def write_presence(sessions: list, a=None):
 
 
 def team(max_age_h: float = 24) -> list:
+    """The machines that published presence in the last `max_age_h` hours, each with its live sessions only: a
+    session marked not active has ended (presence from an older devkit has no flag, and its sessions stay)."""
     out = []
     for f in sorted(PRESENCE.glob("*.json")) if PRESENCE.exists() else []:
         d = core.read_json(f, None)
         if d and time.time() - parse_iso(d.get("updated")) < max_age_h * 3600:
+            if isinstance(d, dict) and isinstance(d.get("sessions"), list):
+                d["sessions"] = [s for s in d["sessions"] if not (isinstance(s, dict) and s.get("active") is False)]
             out.append(d)
     return out
 

@@ -1101,6 +1101,186 @@ class GuidedAndAutoTests(unittest.TestCase):
                 pg.set_mode("auto", approve="launch-missiles")
 
 
+NEO_REPORT = ("**[Firefly> DevKit · Senior engineer (Neo)]** acme/api · `main` · parser\n"
+              "- **Done:** parser\n- **Check:** {check}\n- **Next:** the tech lead")
+
+
+class OpenDecisionTests(unittest.TestCase):
+    # Nothing shows as needing the developer once it is answered, withdrawn, closed with its run, or moot: its asking
+    # lane ended and it blocks no open step. The Senior engineer's lane asks D1 and its step waits on it
+    T0 = 1_800_000_000.0
+
+    def m(self, minutes):
+        return self.T0 + minutes * 60
+
+    def setUp(self):
+        self.state = TempState().__enter__()
+        self.addCleanup(self.state.__exit__, None, None, None)
+        pg.start("Feature", plan=["parser", "docs"], now=self.m(0), mode="guided")
+        pg.assign("parser", "Neo", now=self.m(0))
+        launch("a1", "devkit:neo", "Neo: parser", self.m(1))
+        pg.crew_decision("Skip empty lines or reject the file?", options="A: skip | B: reject", recommend="A",
+                         from_agent="a1", now=self.m(2))
+
+    def run_(self):
+        return pg.load_run("claude", "s1")
+
+    def end_lane(self, at, check="✓ 12 parser tests pass"):
+        # the member stops (SubagentStop) with its report: its lane ends, and its step leaves the blocked state
+        pg.on_subagent("claude", {"session_id": "s1", "agent_id": "a1", "agent_type": "devkit:neo",
+                                  "last_assistant_message": NEO_REPORT.format(check=check)}, False, now=at)
+
+    def test_a_decision_whose_asking_lane_ended_and_blocks_no_step_is_moot(self):
+        self.end_lane(self.m(5))
+        run = self.run_()
+        self.assertEqual(pg.pending_decisions(run), [])
+        self.assertEqual([d["id"] for d in pg.moot_decisions(run)], ["D1"])
+
+    def test_a_decision_whose_asking_lane_closed_unverified_is_moot(self):
+        # the sweep closes a lane whose member Claude Code saw finish, with no report in this run, as unverified; its
+        # step leaves the blocked state with it, so nobody waits for the decision any more
+        run = self.run_()
+        run["agents"]["a1"].update(state="unverified", finished=self.m(5))
+        run["plan"][0].update(state="unverified")
+        run["plan"][0].pop("waiting", None)
+        pg._save(run, touch_session=False)
+        run = self.run_()
+        self.assertEqual(pg.pending_decisions(run), [])
+        self.assertEqual([d["id"] for d in pg.moot_decisions(run)], ["D1"])
+
+    def test_a_decision_that_still_blocks_a_step_needs_the_developer_after_its_lane_went_quiet(self):
+        run = self.run_()
+        self.assertTrue(pg.expire_stale(run, now=self.m(24 * 60)))  # the lane is lost; its step stays blocked on D1
+        pg._save(run, touch_session=False)
+        run = self.run_()
+        self.assertEqual(([d["id"] for d in pg.pending_decisions(run)], pg.moot_decisions(run)), (["D1"], []))
+
+    def test_answering_the_decision_of_a_lane_that_ended_does_not_revive_it(self):
+        # the lane went quiet while its step waited on D1: the answer set the lost lane back to running, inside a run
+        # that no agent worked on any more; its step waits for a new launch instead
+        from devkit import dispatch
+        run = self.run_()
+        self.assertTrue(pg.expire_stale(run, now=self.m(24 * 60)))
+        pg._save(run, touch_session=False)
+        pg.crew_decide("D1", "A: skip", now=self.m(24 * 60 + 1))
+        run = self.run_()
+        s = run["plan"][0]
+        self.assertEqual(run["agents"]["a1"]["state"], "lost")
+        self.assertEqual((s["state"], s["owner"], "waiting" in s), ("pending", "main", False))
+        self.assertIn("parser", dispatch.ready_context("claude", "s1"))
+
+    def test_a_moot_decision_does_not_stop_the_run_from_ending(self):
+        self.end_lane(self.m(5))
+        pg.reopen("docs", "not in this run", skip=True, now=self.m(6))
+        run = pg.step("feature finished", kind="done", why="the review is out of this test", now=self.m(7))
+        self.assertEqual(run["state"], "done")
+
+    def test_the_end_of_the_run_closes_its_pending_decisions_with_the_reason(self):
+        from devkit import audit
+        pg.crew_decision("Ship on Friday?", options="A: yes | B: no", recommend="A", now=self.m(3))  # D2: the lead's
+        pg.step("stopped early", kind="done", force=True, now=self.m(6))
+        run = self.run_()
+        by_id = {d["id"]: d for d in run["decisions"]}
+        self.assertEqual([by_id[i]["state"] for i in ("D1", "D2")], ["closed", "closed"])
+        self.assertIn("run ended", by_id["D2"]["reason"])
+        self.assertEqual([(h["from"], h["to"]) for h in run["history"] if h["step"] == "(decision D2)"],
+                         [("pending", "closed")])
+        self.assertEqual(sorted(r["target"] for r in audit.query(action="crew.decision-closed")), ["D1", "D2"])
+
+    def test_replacing_the_run_closes_its_pending_decisions_and_keeps_them_in_the_new_run(self):
+        from devkit import audit
+        pg.start("Feature, smaller", plan=["parser"], now=self.m(10), replace=True, why="the plan changed")
+        run = self.run_()
+        self.assertEqual(run["decisions"], [])
+        kept = run["replaced"]["decisions"]
+        self.assertEqual([(d["id"], d["state"], d["question"]) for d in kept],
+                         [("D1", "closed", "Skip empty lines or reject the file?")])
+        self.assertIn("run replaced: the plan changed", kept[0]["reason"])
+        self.assertEqual([(h["from"], h["to"]) for h in run["history"] if h["step"] == "(decision D1)"],
+                         [("pending", "closed")])
+        self.assertEqual([r["target"] for r in audit.query(action="crew.decision-closed")], ["D1"])
+
+    def test_withdrawing_a_decision_lets_the_asking_lane_work_again_and_tells_it(self):
+        from devkit import audit
+        d = pg.crew_withdraw("D1", "the parser keeps both behaviors", now=self.m(4))
+        run = self.run_()
+        self.assertEqual((d["state"], d["why"]), ("withdrawn", "the parser keeps both behaviors"))
+        self.assertEqual((run["plan"][0]["state"], run["agents"]["a1"].get("waiting")), ("running", None))
+        self.assertEqual([h["to"] for h in run["history"] if h["step"] == "(decision D1)"], ["withdrawn"])
+        self.assertEqual([r["target"] for r in audit.query(action="crew.withdrawn")], ["D1"])
+        mail = pg.on_tool_done("claude", {"session_id": "s1", "agent_id": "a1"})
+        self.assertIn("D1 was withdrawn by the tech lead: the parser keeps both behaviors", mail)
+
+    def test_a_withdrawn_decision_is_never_the_developers_answer(self):
+        pg.crew_decision("Push feat/parser?", irreversible="push", target="feat/parser", now=self.m(3))  # D2
+        pg.crew_withdraw("D2", "the push waits for the release branch", now=self.m(4))
+        self.assertFalse(pg.approves_action(pg._decision(self.run_(), "D2")))
+        with self.assertRaises(pg.StepError) as e:
+            pg.crew_decide("D2", "A: yes", now=self.m(5))
+        self.assertIn("withdrawn", str(e.exception))
+
+    def test_only_the_tech_lead_withdraws_a_decision_and_says_why(self):
+        with self.assertRaises(pg.StepError):
+            pg.crew_withdraw("D1", "  ", now=self.m(4))
+        with self.assertRaises(pg.StepError):
+            pg.crew_withdraw("D1", "not mine to drop", from_agent="a1", now=self.m(4))
+        self.assertEqual(pg._decision(self.run_(), "D1")["state"], "pending")
+
+    def test_the_status_block_asks_the_developer_only_for_open_decisions(self):
+        pg.crew_decision("Ship on Friday?", options="A: yes | B: no", recommend="A", now=self.m(3))  # D2: open
+        self.end_lane(self.m(5))  # D1 is moot
+        text = pg.render_update(self.run_(), branch="feat/x", now=self.m(6))
+        you = [ln for ln in text.splitlines() if ln.startswith("- **You:**")]
+        self.assertEqual(you, ["- **You:** decide “Ship on Friday?”"])
+        self.assertIn("Moot: D1", text)
+
+    def test_the_hooks_never_remind_the_tech_lead_of_a_moot_decision(self):
+        self.end_lane(self.m(5))
+        self.assertEqual(pg.decisions_context("claude", "s1"), "")
+        self.assertEqual(pg.waiting_context("claude", "s1", None, self.m(6)), "")
+
+
+class BlockedRunTests(unittest.TestCase):
+    def test_reopening_the_blocked_step_lets_the_run_run_again(self):
+        with TempState():
+            pg.start("Release", plan=["build", "ship"], now=time.time())
+            self.assertEqual(pg.step("the build server is down", kind="blocked")["state"], "blocked")
+            self.assertEqual(pg.reopen("build", "the build server is back")["state"], "running")
+
+    def test_a_run_blocked_on_a_step_runs_again_once_that_step_moves_and_not_on_a_note(self):
+        with TempState():
+            pg.start("Release", plan=["build", "ship"], now=time.time())
+            pg.step("the build server is down", kind="blocked")
+            self.assertEqual(pg.note("still waiting for the build server")["state"], "blocked")
+            self.assertEqual(pg.begin("build")["state"], "running")
+
+
+class CrewMessageWaitingTests(unittest.TestCase):
+    # a crew message to the tech lead is delivered once; it waits only while it asks a question nobody has answered
+    def test_a_notice_to_the_tech_lead_never_waits_for_an_answer(self):
+        with TempState():
+            pg.start("Release", plan=["build"])
+            pg.crew_ask("CI passed on feat/x", to="main", from_agent="ci")
+            self.assertIn("CI passed on feat/x", pg.messages_context("claude", "s1", "main"))
+            self.assertEqual(pg.waiting_messages(pg.load_run("claude", "s1")), [])
+
+    def test_a_question_to_the_tech_lead_waits_until_it_is_answered(self):
+        with TempState():
+            pg.start("Release", plan=["build"])
+            q = pg.crew_ask("may I change lib/x.py?", from_agent="a1")
+            pg.messages_context("claude", "s1", "main")  # delivered
+            self.assertEqual([m["id"] for m in pg.waiting_messages(pg.load_run("claude", "s1"))], [q["id"]])
+            pg.crew_answer(q["id"], "yes")
+            self.assertEqual(pg.waiting_messages(pg.load_run("claude", "s1")), [])
+
+    def test_a_question_to_the_tech_lead_by_role_reaches_the_main_session_once(self):
+        with TempState():
+            pg.start("Release", plan=["build"])
+            pg.crew_ask("may I change lib/x.py?", to="the tech lead", from_agent="a1")
+            self.assertIn("may I change lib/x.py?", pg.messages_context("claude", "s1", "main"))
+            self.assertEqual(pg.messages_context("claude", "s1", "main"), "")
+
+
 class CrewMessageIdTests(unittest.TestCase):
     def test_message_and_decision_ids_stay_unique_past_the_kept_200(self):
         with TempState():
@@ -1344,6 +1524,97 @@ class StepGrantTests(TranscriptCase):
         self.assertEqual(pg.load_run("claude", "s1")["plan"][0].get("allow"), [])
 
 
+class SessionAfterCompactionTests(unittest.TestCase):
+    # Live: Claude Code gave the running conversation a new session id (a compaction); the older record still held
+    # the process, ancestry picked it, and the hook wrote the call ledger under the new id, so every tech-lead command
+    # was refused as "caller unknown". A command's session is the one whose ledger holds an open call for it
+    ARGV = ["progress", "assign", "api", "--to", "Tank"]
+
+    def setUp(self):
+        self.state = TempState(real_caller=True).__enter__()
+        self.addCleanup(self.state.__exit__, None, None, None)
+        self.top = str(Path(self.state.tmp.name) / "repo")
+        for p in (mock.patch.object(pg, "_ancestor_pids", lambda: [4321, 67065, 1]),
+                  mock.patch.object(pg.core, "gitout", lambda *a, **k: self.top),
+                  mock.patch.dict(os.environ, {"DEVKIT_SESSION": "claude:old"})):
+            p.start()
+            self.addCleanup(p.stop)
+        self.record("old", pid=67065, age=3600)
+
+    def record(self, sid, pid=None, age=60):
+        rec = {"agent": "claude", "session": sid, "top": self.top, "cwd": self.top, "started": time.time() - age}
+        if pid:
+            rec["pid"] = pid
+        (pg.SESSIONS / f"claude-{sid}.json").write_text(json.dumps(rec))
+
+    def typed_in(self, sid):
+        # the PreToolUse hook of the tech lead's shell call, under the session id the conversation reports now
+        pg.call_opened("claude", {"session_id": sid, "tool_use_id": f"toolu_{sid}", "tool_name": "Bash",
+                                  "tool_input": {"command": "dev " + " ".join(self.ARGV)}})
+
+    def test_the_session_whose_ledger_holds_the_command_is_found_after_a_compaction(self):
+        self.record("new")  # registered without the process
+        self.typed_in("new")
+        who = pg.caller(argv=self.ARGV)
+        self.assertEqual((who["session"], who["caller"]), ("new", "main"))
+
+    def test_of_the_sessions_of_this_process_the_one_holding_the_command_wins(self):
+        self.record("new", pid=67065)  # DEVKIT_SESSION still names the older one
+        self.typed_in("new")
+        self.assertEqual(pg.resolve_session(argv=self.ARGV), ("claude", "new", "ancestry"))
+
+    def test_a_session_another_live_process_holds_is_not_taken_and_the_refusal_names_both(self):
+        self.record("other", pid=os.getpid())  # a live process this command does not run below
+        self.typed_in("other")
+        self.assertEqual(pg.resolve_session(argv=self.ARGV)[1], "old")
+        with mock.patch.object(sys, "argv", ["dev", *self.ARGV]), self.assertRaises(pg.StepError) as e:
+            pg._main_only(None, "assigns steps")
+        self.assertIn("claude:old", str(e.exception))
+        self.assertIn("claude:other", str(e.exception))
+
+    def test_two_sessions_without_a_process_that_hold_the_command_are_both_passed_over(self):
+        for sid in ("new", "twin"):
+            self.record(sid)
+            self.typed_in(sid)
+        self.assertEqual(pg.resolve_session(argv=self.ARGV)[1:], ("old", "ancestry"))
+
+
+class ProcessRunTests(unittest.TestCase):
+    # Live: after Claude Code gave the conversation a new session id in the same process, the open run stayed with the
+    # old id, so the new session's hooks found no run: the docs lane finished an hour earlier and still held its files
+    def setUp(self):
+        self.state = TempState().__enter__()
+        self.addCleanup(self.state.__exit__, None, None, None)
+        now = time.time()
+        for sid, rec in (("old", {"pid_superseded": 67065, "superseded_by": "new", "started": now - 3600}),
+                         ("new", {"pid": 67065, "started": now - 30})):
+            (pg.SESSIONS / f"claude-{sid}.json").write_text(json.dumps(
+                {"agent": "claude", "session": sid, "project": "acme/api", **rec}))
+        with mock.patch.dict(os.environ, {"DEVKIT_SESSION": "claude:old"}):
+            pg.start("Release", plan=["docs"])
+            pg.assign("docs", "Ghost", scope="docs/**", why="test")
+        launch("a_ghost", "devkit:ghost", "Ghost: docs", sid="old")
+
+    def test_the_older_sessions_run_moves_and_its_lane_closes_under_the_new_id(self):
+        pg.adopt_process_run("claude", "new", 67065)
+        self.assertIsNone(pg.load_run("claude", "old"))
+        pg.on_subagent("claude", {"session_id": "new", "agent_id": "a_ghost", "agent_type": "devkit:ghost",
+                                  "last_assistant_message": "done"}, False)
+        run = pg.load_run("claude", "new")
+        self.assertEqual((run["session"], run["agents"]["a_ghost"]["state"]), ("new", "done"))
+        # the tech lead may edit its files again
+        self.assertIsNone(pg.scope_holder("docs/crew.md", "claude", "new", cwd=self.state.tmp.name))
+        self.assertTrue(any("claude:old" in h.get("why", "") for h in run.get("history") or []))
+        self.assertEqual(json.loads((pg.SESSIONS / "claude-old.json").read_text()).get("run_moved_to"), "new")
+
+    def test_an_open_run_of_the_new_session_is_never_replaced(self):
+        with mock.patch.dict(os.environ, {"DEVKIT_SESSION": "claude:new"}):
+            pg.start("Its own work", plan=["a"])
+        pg.adopt_process_run("claude", "new", 67065)
+        self.assertEqual(pg.load_run("claude", "new")["goal"], "Its own work")
+        self.assertEqual(pg.load_run("claude", "old")["goal"], "Release")
+
+
 class EstimateRoundingTests(unittest.TestCase):
     # Trinity's 6c45efc and Link's 38a7c16: an estimate or a time left rounds like the dashboard's fmtAbout (to 5
     # minutes, to the minute under 10), while measured time stays exact; the status block and dev progress print both
@@ -1359,20 +1630,53 @@ class EstimateRoundingTests(unittest.TestCase):
 
 
 class ScopeWriteTests(unittest.TestCase):
-    # M292: Seraph (review-only) was flagged for docs/audit.md, which Neo, whose step scope holds it, changed during
-    # Seraph's shell call; a98d7f5 then dropped such a file, so a write the reviewer makes inside a working member's
-    # scope went unseen (the Code reviewer's batch 5). It is flagged "possible", naming whose scope holds it
-    def test_a_file_in_a_working_members_scope_is_flagged_possible_not_dropped(self):
-        with TempState():
-            pg.start("Work", plan=["audit docs", "review"])
-            pg.assign("audit docs", "Neo", scope="docs/audit.md", why="test")
-            pg.assign("review", "Seraph")
-            launch("a_neo", "devkit:neo", "Neo: audit docs")
-            launch("a_seraph", "devkit:seraph", "Seraph: review")
-            flagged = pg.scope_written("claude", "s1", "a_seraph", ["docs/audit.md"]) or {}
-            self.assertEqual((flagged.get("paths"), flagged.get("certainty")), (["docs/audit.md"], "possible"))
-            told = [m["text"] for m in pg.load_run("claude", "s1").get("messages") or [] if m.get("to") == "main"]
-            self.assertTrue(any("docs/audit.md is in the scope of" in t and "Neo" in t for t in told), told)
+    # The Code reviewer works review-only while the Senior engineer's step scope holds docs/audit.md. A review lane can
+    # write through a script in its own scratch folder, so a file that changed during its shell call inside a working
+    # member's scope is that member's only while the member had a call open in the call ledger
+    def setUp(self):
+        self.state = TempState().__enter__()
+        self.addCleanup(self.state.__exit__, None, None, None)
+        pg.start("Work", plan="audit docs=10m; review=10m after audit docs")
+        pg.assign("audit docs", "Neo", scope="docs/audit.md", why="test")
+        pg.assign("review", "Seraph")
+        launch("a_neo", "devkit:neo", "Neo: audit docs")
+        launch("a_seraph", "devkit:seraph", "Seraph: review")
+
+    def told(self):
+        return [m["text"] for m in pg.load_run("claude", "s1").get("messages") or [] if m.get("to") == "main"
+                and "shell call" in m["text"]]
+
+    def neo_call_open(self):
+        # the Senior engineer's shell call has started (PreToolUse) and has no result yet (PostToolUse)
+        pg.call_opened("claude", {"session_id": "s1", "tool_use_id": "toolu_neo_sh", "agent_id": "a_neo",
+                                  "tool_input": {"command": "python3 -m unittest tests.test_audit"}})
+
+    def test_a_file_in_a_build_scope_is_the_reviewers_own_write_when_that_lane_had_no_call_open(self):
+        from devkit import audit
+        flagged = pg.scope_written("claude", "s1", "a_seraph", ["docs/audit.md"]) or {}
+        self.assertEqual((flagged.get("paths"), flagged.get("certainty")), (["docs/audit.md"], "certain"))
+        (text,) = self.told()
+        self.assertIn("Code reviewer (Seraph)", text)
+        self.assertIn("Senior engineer (Neo)", text)
+        recs = audit.query(action="scope.write")
+        self.assertEqual([(r["target"], r["detail"]) for r in recs], [("Seraph", "certain: docs/audit.md")])
+
+    def test_a_file_in_a_build_scope_is_credited_to_that_lane_while_it_has_a_call_open(self):
+        from devkit import audit
+        self.neo_call_open()
+        flagged = pg.scope_written("claude", "s1", "a_seraph", ["docs/audit.md", "lib/x.py"]) or {}
+        self.assertEqual(flagged.get("paths"), ["lib/x.py"])
+        (text,) = self.told()
+        self.assertIn("docs/audit.md", text)  # the tech lead hears of the credited file too, with both lanes named
+        self.assertIn("Senior engineer (Neo)", text)
+        self.assertIn(("Neo", "attributed: docs/audit.md"),
+                      [(r["target"], r["detail"]) for r in audit.query(action="scope.write")])
+
+    def test_the_review_step_lists_the_files_another_lane_changed_in_the_scope_of_the_work_it_follows(self):
+        pg.scope_written("claude", "s1", "a_seraph", ["docs/audit.md"])
+        lines = pg.render_update(pg.load_run("claude", "s1"), branch="b").splitlines()
+        review = next(ln for ln in lines if " 2. review" in ln)
+        self.assertIn("changed by another lane: docs/audit.md (Code reviewer (Seraph), certain)", review)
 
 
 LANE_REPORT = ("**[Firefly> DevKit · Security engineer (The Keymaker)]** acme/api · `main` · {task}\n"
@@ -1495,6 +1799,37 @@ class ReconcileTranscriptTests(unittest.TestCase):
             pg.reconcile_hook("claude", {"session_id": "s1", "transcript_path": str(forged)})
             self.assertEqual(pg.load_run("claude", "s1")["agents"]["a_tank"]["state"], "unverified")
 
+    def test_the_reconciler_ends_a_lane_whose_last_transcript_record_is_its_interruption(self):
+        # a stopped agent's own transcript ends with Claude Code's interruption record, and its meta file never says
+        # finished: the lane ends stopped and its step waits for a new launch; a record after it means it works again
+        with TempState() as st, mock.patch.object(core, "CLAUDE_HOME", Path(st.tmp.name) / ".claude"):
+            own = Path(st.tmp.name) / ".claude" / "projects" / "-repo" / "s1.jsonl"
+            agent_log = own.with_suffix("") / "subagents" / "agent-a_tank.jsonl"
+            agent_log.parent.mkdir(parents=True)
+            own.write_text("")
+            agent_log.with_suffix(".meta.json").write_text(json.dumps({"agentType": "devkit:tank"}))
+            stop_at = time.time() - 30
+
+            def record(text, at):
+                return json.dumps({"type": "user", "agentId": "a_tank", "timestamp": time.strftime(
+                    "%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(at)), "message": {"role": "user", "content": [
+                        {"type": "text", "text": text}]}}) + "\n"
+            pg.start("Work", plan=["api"])
+            pg.assign("api", "Tank")
+            launch("a_tank", "devkit:tank", "Tank: api")
+            agent_log.write_text(record("Build the API.", stop_at - 60) + record("[Request interrupted by user]",
+                                                                               stop_at - 40)
+                                 + record("Go on with the API.", stop_at - 20))
+            pg.reconcile_hook("claude", {"session_id": "s1"})
+            self.assertEqual(pg.load_run("claude", "s1")["agents"]["a_tank"]["state"], "running")
+            with agent_log.open("a") as fh:
+                fh.write(record("[Request interrupted by user]", stop_at))
+            pg.reconcile_hook("claude", {"session_id": "s1"})
+            run = pg.load_run("claude", "s1")
+            self.assertEqual((run["agents"]["a_tank"]["state"], run["plan"][0]["state"], run["plan"][0]["owner"]),
+                             ("stopped", "pending", "main"))
+            self.assertAlmostEqual(run["agents"]["a_tank"]["finished"], stop_at, delta=1)
+
 
 class HookCallsTests(unittest.TestCase):
     def test_the_hooks_call_only_devkit_functions_that_exist(self):
@@ -1523,6 +1858,165 @@ class HookCallsTests(unittest.TestCase):
                         if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and n.value.id in mods
                         and not hasattr(importlib.import_module(f"devkit.{mods[n.value.id]}"), n.attr)}
         self.assertEqual(sorted(missing), [])
+
+
+class BusyStopTests(unittest.TestCase):
+    # a SubagentStop that found the session's lock busy was dropped whole (state.HOOK_WAIT), so the member's report
+    # was lost and its step later turned unverified: the stop waits in a pending file and is applied at the next hook
+    def setUp(self):
+        self.state = TempState().__enter__()
+        self.addCleanup(self.state.__exit__, None, None, None)
+        self.t0 = time.time() - 600
+        pg.start("Feature", plan=["parser"], now=self.t0)
+        pg.assign("parser", "Neo", now=self.t0)
+        launch("a1", "devkit:neo", "Neo: parser", self.t0 + 60)
+
+    def busy(self):
+        # another hook process holds the session's lock: a thread of this test holds it until the stop is in
+        import threading
+        from devkit import state
+        held, release = threading.Event(), threading.Event()
+
+        def hold():
+            with state.hold(pg.session_path("claude", "s1")):
+                held.set()
+                release.wait(5)
+        t = threading.Thread(target=hold)
+        t.start()
+        held.wait(5)
+        self.addCleanup(t.join)
+        self.addCleanup(release.set)
+        return release
+
+    def stop_while_busy(self):
+        from devkit import state
+        release = self.busy()
+        with mock.patch.object(state, "WAIT", 0.05):
+            pg.on_subagent("claude", {"session_id": "s1", "agent_id": "a1", "agent_type": "devkit:neo",
+                                      "last_assistant_message": NEO_REPORT.format(check="✓ 12 parser tests pass")},
+                           False, now=self.t0 + 300)
+        release.set()
+        self.assertEqual(pg.load_run("claude", "s1")["agents"]["a1"]["state"], "running")  # not applied yet
+
+    def test_a_stop_that_finds_the_lock_busy_is_applied_at_the_next_hook(self):
+        self.stop_while_busy()
+        pg.reconcile_hook("claude", {"session_id": "s1"})
+        pg.reconcile_hook("claude", {"session_id": "s1"})  # applied once
+        run = pg.load_run("claude", "s1")
+        self.assertEqual((run["agents"]["a1"]["state"], run["plan"][0]["state"]), ("done", "done"))
+        self.assertEqual(run["agents"]["a1"]["finished"], self.t0 + 300)
+        self.assertEqual([(h["from"], h["to"]) for h in run["history"] if h["step"] == "parser"][-1:],
+                         [("running", "done")])
+        self.assertEqual(len([h for h in run["history"] if h["step"] == "parser" and h["to"] == "done"]), 1)
+
+    def test_the_scheduled_sweep_applies_a_stop_that_found_the_lock_busy(self):
+        # a session that runs no more hooks: dev sync --scheduled applies its pending stop
+        from devkit import approvals
+        self.stop_while_busy()
+        approvals.sweep(now=self.t0 + 400, alive=lambda *a: True)
+        run = pg.load_run("claude", "s1")
+        self.assertEqual((run["agents"]["a1"]["state"], run["plan"][0]["state"]), ("done", "done"))
+
+
+class RecheckTests(unittest.TestCase):
+    # a step flagged recheck (a dependency it used was reopened) kept its flag forever, so the run could end only
+    # with --why: the flag clears when the step finishes after that dependency is done again, or when the tech lead
+    # confirms the step still holds
+    T0 = 1_800_000_000.0
+
+    def m(self, minutes):
+        return self.T0 + minutes * 60
+
+    def setUp(self):
+        self.state = TempState().__enter__()
+        self.addCleanup(self.state.__exit__, None, None, None)
+        pg.start("Feature", plan="design=10m; api=10m after design", now=self.m(0))
+        pg.step("design drafted", now=self.m(1))
+
+    def api(self):
+        return next(s for s in pg.load_run("claude", "s1")["plan"] if s["name"] == "api")
+
+    def test_a_step_that_finishes_after_its_reopened_dependency_is_done_again_clears_its_flag(self):
+        pg.reopen("design", "the contract changed", now=self.m(2))
+        self.assertEqual((self.api()["state"], self.api().get("recheck")), ("pending", ["design"]))
+        pg.step("design redone", now=self.m(3))
+        pg.step("api built on the new contract", now=self.m(4))
+        self.assertEqual((self.api()["state"], self.api().get("recheck")), ("done", None))
+
+    def test_the_end_of_the_run_closes_a_flagged_step_whose_reopened_dependency_is_done_again(self):
+        pg.reopen("design", "the contract changed", now=self.m(2))
+        pg.step("design redone", now=self.m(3))  # api runs again, still flagged
+        run = pg.step("feature finished", kind="done", now=self.m(4))
+        self.assertEqual((run["state"], self.api().get("recheck")), ("done", None))
+
+    def test_confirming_a_finished_step_clears_its_flag_and_lets_the_run_end(self):
+        pg.step("api built", now=self.m(2))
+        pg.reopen("design", "a field was renamed", now=self.m(3))
+        pg.step("design redone", now=self.m(4))
+        with self.assertRaises(pg.StepError) as e:
+            pg.step("feature finished", kind="done", now=self.m(5))
+        self.assertIn('dev progress confirm "api" --why', str(e.exception))
+        pg.confirm("api", why="the renamed field is not one the API reads", now=self.m(6))
+        self.assertIsNone(self.api().get("recheck"))
+        said = [h for h in pg.load_run("claude", "s1")["history"] if h["step"] == "api"][-1]
+        self.assertIn("the renamed field is not one the API reads", said["why"])
+        self.assertEqual(pg.step("feature finished", kind="done", now=self.m(7))["state"], "done")
+
+    def test_a_step_is_not_confirmed_while_the_dependency_it_used_is_open_again(self):
+        pg.step("api built", now=self.m(2))
+        pg.reopen("design", "a field was renamed", now=self.m(3))
+        with self.assertRaises(pg.StepError) as e:
+            pg.confirm("api", why="looks fine", now=self.m(4))
+        self.assertIn("“design”", str(e.exception))
+        self.assertEqual(self.api().get("recheck"), ["design"])
+
+
+class TimeReportTests(unittest.TestCase):
+    # dev time listed under "Runs now" every run of the last 12 hours, finished ones too
+    def test_runs_now_lists_only_the_runs_that_still_run(self):
+        with TempState():
+            pg.start("Parser shipped", plan=["parser"])
+            pg.step("parser shipped", kind="done", why="no reviewer in this test")
+            live = dict(pg.load_run("claude", "s1"), session="s2", goal="Exporter in flight", state="running",
+                        finished=None)
+            (pg.RUNS / "claude-s2.json").write_text(json.dumps(live))
+            out = pg.report(1)
+            self.assertIn("Exporter in flight", out)
+            self.assertNotIn("Parser shipped", out)
+
+
+class RunEndTests(unittest.TestCase):
+    # dev progress done marked every running step done after its approval check: a member's step closed while the
+    # member still worked (its lane stayed running inside a finished run), and no approval was ever owed for it
+    T0 = 1_800_000_000.0
+
+    def m(self, minutes):
+        return self.T0 + minutes * 60
+
+    def setUp(self):
+        self.state = TempState().__enter__()
+        self.addCleanup(self.state.__exit__, None, None, None)
+
+    def test_the_run_does_not_end_while_a_member_still_works_on_its_step(self):
+        pg.start("Feature", plan=["parser"], now=self.m(0))
+        pg.assign("parser", "Neo", now=self.m(0))
+        launch("a1", "devkit:neo", "Neo: parser", self.m(1))
+        with self.assertRaises(pg.StepError) as e:  # neither --force nor --why ends a member's work
+            pg.step("feature finished", kind="done", force=True, why="out of time", now=self.m(5))
+        self.assertIn("“parser”", str(e.exception))
+        self.assertIn("Senior engineer (Neo)", str(e.exception))
+        self.assertIn('dev progress skip "parser" --why', str(e.exception))
+        run = pg.load_run("claude", "s1")
+        self.assertEqual((run["state"], run["plan"][0]["state"], run["agents"]["a1"]["state"]),
+                         ("running", "running", "running"))
+
+    def test_a_step_the_end_of_the_run_closes_owes_its_approval(self):
+        pg.start("API", plan=["build the JSON API server"], now=self.m(0))  # the tech lead's own backend step, running
+        with self.assertRaises(pg.StepError) as e:
+            pg.step("API shipped", kind="done", now=self.m(5))
+        self.assertIn("Code reviewer (Seraph) approves “build the JSON API server”", str(e.exception))
+        run = pg.load_run("claude", "s1")
+        self.assertEqual((run["state"], run["plan"][0]["state"]), ("running", "running"))
 
 
 if __name__ == "__main__":

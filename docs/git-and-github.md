@@ -78,10 +78,82 @@ session-start context names the branches that exist only on this Mac and the emb
 `dev branch embargo` keeps one off the remote (agents' pushes from another project's copy are held from 26.11.4); see
 [Delivery › Back up early, CI once](delivery.md#back-up-early-ci-once).
 
-`dev branch clean` lists the local branches that can go: merged into the default branch, whose PR was merged at the
-same commit, or gone upstream with every commit on the remote. It keeps the current branch, permanent branches,
-branches checked out in a worktree, and branches with commits that exist only here, and says why. Nothing is deleted
-until you add `--apply`.
+`dev branch clean` lists the local branches that can go: merged by the merge test of `dev branch prune` (below), so
+also by squash or cherry-pick, or gone upstream with every commit on the remote. It keeps the current branch,
+permanent branches, branches checked out in a worktree, and branches with commits that exist only here and are not
+merged, and says why. Nothing is deleted until you add `--apply`. `dev branch prune` also covers remote branches and
+worktrees.
+
+### Close merged branches
+
+A merged branch has nothing left to give, so devkit closes it, on `origin` and on this Mac. One merge test decides
+when a branch counts as merged into the default branch (`origin/<default>`), and every output says which way it holds:
+
+| How | When | The output says |
+| --- | --- | --- |
+| Ancestor | The branch's tip is in the default branch: a merge commit or a fast-forward | `merged: its tip is in origin/main` |
+| Pull request | A merged PR of the branch (merge, squash, or rebase) had the branch's tip as its head, came from this repository (not a fork), and its merge commit is in the default branch | `merged: PR #7 was merged` |
+| Content | Every commit of the branch has an equivalent in the default branch (`git cherry` shows only `-`): it was cherry-picked, or a release branch that merged carried it | `merged by content: 8 commits have an equivalent in origin/main` |
+
+Anything else is not merged, with the count: `not merged: 1 of 3 commits not in origin/main`.
+
+`dev branch prune` lists every local and remote branch with its state: merged and how, an open PR, not merged (with
+its commits ahead and the age of its last commit), or protected. It fetches `origin` first and changes nothing else:
+
+```text
+fireflysoftwaresolutions/devkit · against origin/main · 18 local and 4 remote branches
+  delete local  fix/guard-last-fixes  merged by content: 11 commits have an equivalent in origin/main
+  delete remote fix/doctor-stacks-and-banner  merged by content: 11 commits have an equivalent in origin/main
+  delete local  release/26.11.5  merged: its tip is in origin/main
+  keep   local  hotfix/26.11.6  protected: the current branch
+  keep   local  main  protected: the default branch
+• dry run: nothing deleted · dev branch prune --apply deletes 18 branches and 14 worktrees
+```
+
+`dev branch prune --apply` deletes the merged branches: the remote branch (`git push origin --delete`, with a lease
+on the commit it listed, so a branch someone pushed to since stays), then the local branch and its worktree when the
+worktree is clean (the same check as `dev wt rm`). `--remote` or `--local` limits it to one side, `--offline` skips
+the fetch and GitHub and leaves remote branches alone, and `--json` prints the rows. It never deletes:
+
+- the default branch, `develop`, and the other permanent branches;
+- the current branch, or the branch checked out in the main checkout;
+- a branch with an open pull request, or a remote branch when devkit cannot read every open pull request (GitHub
+  unreachable, 1,000 or more open, or another host);
+- an embargoed branch, or anything while the embargo list cannot be read;
+- a branch whose worktree has uncommitted changes, is locked, belongs to the Codex app, or has a live session;
+- a branch created less than 24 hours ago that has no commit of its own yet;
+- a branch with a commit the default branch does not have by content.
+
+Each deletion is audited as `branch.pruned`, with how the branch was merged and its last commit
+(`dev audit --action branch.pruned`). Deleting on `origin` is an irreversible action: a crew member never runs
+`dev branch prune --apply` without `--local` or `--offline`, and the main session runs it under the
+[irreversible-action gate](guard.md#git). The listing, `--local`, and `--offline` need no grant.
+
+The same merge test closes branches at four other moments:
+
+- `dev pr merge` deletes the remote branch, then the local branch and its clean worktree.
+- `dev release`, once the release is out (not a `--draft`), deletes the branches the release merged (merged into it,
+  and not into the previous tag), remote and local, and prints them. Branches merged before stay for the nightly
+  job.
+- The nightly `gc` job deletes a merged local branch that has not moved for `gc.grace_hours` (24), with its idle
+  worktree. It deletes a merged remote branch only when its own pull request merged (from this repository, with
+  the branch's tip as its head; a fork's pull request of the same name never counts) or devkit pushed it as a backup
+  (`dev backup`, `dev sync`); anyone else's merged branch waits for `dev branch prune --apply`.
+- The hourly backup no longer pushes a branch merged by content, or squash-merged by its own pull request, back to
+  `origin`: the branch map counts it as merged, and `dev backup` skips it with the pull request's number
+  (`merged: PR #7 was merged`).
+
+`dev wt rm`, `dev free`, the unpushed count of `dev wt ls`, and `dev branch clean` use the same test, so a branch
+merged by squash or cherry-pick reads as merged, not as unpushed.
+[Disk and cleanup › Merged branches](disk-and-cleanup.md#merged-branches) has what the nightly job deletes and keeps.
+
+On GitHub, turn on the repository setting that deletes a pull request's branch when it merges:
+`dev delivery apply --why "…"` sets `delete_branch_on_merge` and records it in the delivery policy, and `dev doctor`
+lists each GitHub project you administer where it is off. GitLab, Bitbucket, and Azure DevOps have their own setting;
+`dev delivery apply` names it.
+
+To get a deleted branch back, take its last commit from the audit record or the output and recreate it:
+`git branch <name> <sha>` here, or `git push origin <sha>:refs/heads/<name>` on the remote.
 
 ## Commits
 
@@ -307,9 +379,11 @@ blocks it.
 It uses the method you ask for (`--squash`, `--merge`, `--rebase`) when the repository allows it, otherwise the only
 allowed method, otherwise your default. A squash commit gets the PR title and the "What and why" paragraph with the
 `Closes #n` lines, never attribution. The merge applies only to the commit you checked (`--match-head-commit`).
-Afterward devkit deletes the remote branch (unless `--keep-branch`), switches to the default branch, fast-forwards it,
-and deletes the local branch, unless a worktree or uncommitted changes still need it. `--dry-run` shows the method and
-the squash message.
+Afterward devkit deletes the remote branch (unless `--keep-branch`). When the merge test finds the branch merged, it
+also removes the branch's worktree if that is clean and idle, or switches this checkout to the default branch and
+fast-forwards it, and deletes the local branch; uncommitted changes or a commit the PR did not carry keep it, and the
+output says why. Run inside the branch's own worktree, it leaves that worktree and names `dev wt rm <branch>`.
+See [Close merged branches](#close-merged-branches). `--dry-run` shows the method and the squash message.
 
 ## CI runs
 
@@ -344,6 +418,10 @@ Then it creates the annotated tag `v<version>` (signed with `--sign` or when git
 and creates the GitHub release (`--draft` and `--prerelease` are passed on). It ends by asking you to download the
 published artifact, install it, and smoke-test it. `--dry-run` prints every step and the evidence without doing any of
 them. On other hosts it tags and pushes, and leaves the release page to you.
+
+Once the release is published, it deletes the branches it merged, remote and local, and names each with how it was
+merged (a draft release leaves them until you publish it). `--dry-run` lists them. See
+[Close merged branches](#close-merged-branches).
 
 Because the evidence follows the files, a squash merge of a tested branch that was up to date with `main` keeps its
 evidence on `main`. Otherwise, run `dev ci --run` on `main` before you release.

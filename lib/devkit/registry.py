@@ -317,12 +317,15 @@ def detect_commands(root: Path) -> list:
 
 
 def prs(slug: str, refresh=False, max_age=900):
-    """Recent PRs of `owner/repo` (cached). None when gh is unavailable."""
+    """Recent PRs of `owner/repo` (cached). None when gh is unavailable. Each has what the merge test's pull-request
+    leg reads (headRefOid, isCrossRepository, mergeCommit: branches.pr_merge), so the branch map, `dev free` and the
+    backup tell a squash-merged branch from the cache alone."""
     f = STATE / "prs" / (slug.replace("/", "__") + ".json")
     if not refresh and f.exists() and time.time() - f.stat().st_mtime < max_age:
         return read_json(f)
     rc, out, _ = sh(["gh", "pr", "list", "-R", slug, "--state", "all", "--limit", "200", "--json",
-                     "number,state,headRefName,title,url,updatedAt,isDraft"], timeout=30)
+                     "number,state,headRefName,title,url,updatedAt,isDraft,headRefOid,isCrossRepository,mergeCommit"],
+                    timeout=30)
     if rc == 0:  # open PRs: add CI checks, review state and author (one extra call, open PRs only)
         rc2, out2, _ = sh(["gh", "pr", "list", "-R", slug, "--state", "open", "--limit", "50", "--json",
                            "number,statusCheckRollup,reviewDecision,author,mergeable,additions,deletions"], timeout=45)
@@ -544,6 +547,7 @@ def inspect_repo(main: Path, with_prs=True, refresh_prs=False, pr_max_age=900) -
                                     checkouts=[co] + [w for w in wts if not w.get("missing")])
     except Exception:  # one broken repository must not break the map
         branch_rows = []
+    merge_states([co] + wts, branch_rows)
     canon = canonical_path(pid)
     activity = max([co.get("last_activity", 0)] + [w.get("last_activity", 0) for w in wts])
     return {
@@ -559,6 +563,30 @@ def inspect_repo(main: Path, with_prs=True, refresh_prs=False, pr_max_age=900) -
         "prs_known": pr_list is not None, "note": str(note_path(pid).relative_to(HANDOFF)),
         "last_activity": activity, "branches": branch_rows,
     }
+
+
+def merge_states(checkouts, rows) -> None:
+    """Each checkout's `merged` (how origin/<default> holds its branch, by the merge test on the cached pull requests,
+    without a GitHub call: "ancestor", "pr", "content" or None), `merged_pr` (with "pr", that pull request's number)
+    and `landed` (of its `unpushed` commits, those with an equivalent there), read from the branch map's rows, so a
+    branch merged by content or squash-merged by its own pull request is merged, not unpushed. No git calls."""
+    from . import branches as branchmap
+    how = branchmap.merged_default(rows)
+    by = {r["name"]: r for r in rows}
+    for c in checkouts:
+        b = c.get("branch")
+        row = (by.get(b) or {}) if b else {}
+        c["merged"] = how.get(b) if b else None
+        c["merged_pr"] = row.get("merged_pr") if c["merged"] == "pr" else None
+        c["landed"] = row.get("landed", 0)
+
+
+def unpushed_work(co: dict) -> int:
+    """The commits of a checkout that exist only here: on no remote and without an equivalent in origin's default
+    branch (none when its branch is merged there)."""
+    if co.get("merged"):
+        return 0
+    return max(0, (co.get("unpushed") or 0) - (co.get("landed") or 0))
 
 
 def _main_active(main: Path, wts) -> bool:
@@ -613,11 +641,7 @@ def build(with_prs=True, refresh_prs=False, with_sizes=False, refresh_sizes=Fals
             if w.get("missing"):
                 issues.append(("worktree", f"{p['id']}: worktree registered but missing on disk ({tilde(w['path'])}) "
                                            f"→ `dev gc --apply` prunes it"))
-            idle_d = (time.time() - w.get("last_activity", 0)) / 86400
-            if (w.get("modified") or w.get("untracked")) and idle_d > 7 and not w.get("active"):
-                issues.append(("work", f"{p['id']}: uncommitted work idle {int(idle_d)}d in {tilde(w['path'])}"))
-            if w.get("unpushed") and not w.get("active") and idle_d > 2:
-                issues.append(("work", f"{p['id']}: {w['unpushed']} unpushed commit(s) on {w.get('branch')}"))
+            issues += work_issues(p["id"], w)
     projects += note_only_projects({p["id"] for p in projects})
     for p in projects:
         p.setdefault("local", True)
@@ -637,6 +661,20 @@ def build(with_prs=True, refresh_prs=False, with_sizes=False, refresh_sizes=Fals
             "generated": int(time.time()), "projects": projects, "issues": issues,
             "sessions": live_sessions(), "providers": prov, "github_user": core.github_user(),
             "initiatives": inits, "team": _team()}
+
+
+def work_issues(pid: str, w: dict, now: float = None) -> list:
+    """The work at risk in one inspected worktree, as (kind, text) issues: uncommitted changes idle over 7 days, and
+    commits that exist only here (unpushed_work: a branch merged by content or by its own pull request has none) idle
+    over 2 days."""
+    out = []
+    idle_d = ((now or time.time()) - w.get("last_activity", 0)) / 86400
+    if (w.get("modified") or w.get("untracked")) and idle_d > 7 and not w.get("active"):
+        out.append(("work", f"{pid}: uncommitted work idle {int(idle_d)}d in {tilde(w['path'])}"))
+    n = unpushed_work(w)
+    if n and not w.get("active") and idle_d > 2:
+        out.append(("work", f"{pid}: {n} unpushed commit(s) on {w.get('branch')}"))
+    return out
 
 
 def _team():
@@ -970,8 +1008,13 @@ def _state(co: dict) -> str:
         bits.append(f"↑{co['ahead']}")
     if co.get("behind"):
         bits.append(f"↓{co['behind']}")
-    if co.get("unpushed") and not co.get("ahead"):
-        bits.append(f"{co['unpushed']} unpushed")
+    n = unpushed_work(co)
+    if co.get("merged") == "content":  # its commits are in the default branch by content: merged, not unpushed
+        bits.append("merged by content")
+    elif co.get("merged") == "pr":  # its own pull request merged it (a squash of several commits too)
+        bits.append(f"merged by PR #{co.get('merged_pr')}")
+    elif n and not co.get("ahead"):
+        bits.append(f"{n} unpushed")
     return ", ".join(bits) or "clean"
 
 

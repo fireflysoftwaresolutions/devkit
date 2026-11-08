@@ -79,9 +79,9 @@ COMMANDS = [
         ("stubs [--staged|--all]", "Unfinished work: stubs, placeholders, TODOs without a task (also checked on commit)"),
         ("test [run|plan|prove|audit]", "Tests: last failures first, then what your changes can affect; prove and "
                                         "audit check that tests can fail"),
-        ("crew [show|brief|route|delegate|next|ask|mode|decide|graph|rules|raci]",
-         "The specialist agents: who does what, briefs, routing, delegation, decisions, the live graph, the rules, "
-         "the RACI"),
+        ("crew [show|brief|route|delegate|next|owner|ask|mode|decide|graph|rules|raci]",
+         "The specialist agents: who does what, briefs, routing, delegation, who holds a file, decisions, the live "
+         "graph, the rules, the RACI"),
         ("ci status [--watch]", "Live CI/CD runs (GitHub, GitLab, Bitbucket, Azure): jobs, steps, elapsed, ETA"),
         ("calver [--next]", "Current and next CalVer version YY.MM.PATCH from the repository's tags"),
         ("sec scan [--history]", "Security: secrets (gitleaks), dependencies (osv-scanner), SAST (Semgrep), Trivy"),
@@ -177,35 +177,47 @@ def _state(co):
 
 
 def commit_push(push=True, quiet=False):
-    if not (HANDOFF / ".git").exists():
+    """Commit what changed in the handoff repository and push it. A rebase left stopped is aborted first, a pull
+    settles conflicts in items and stops cleanly on any other (work.pull_rebase), and every failure is recorded in
+    handoff-push-failed.json, which `dev status` shows until a push succeeds."""
+    from . import audit, work
+    root = work.HANDOFF  # the repository work.pull_rebase works on, read now (tests point it elsewhere)
+    if not (root / ".git").exists():
         return
-    core.git(HANDOFF, "add", "-A")
-    rc, _, _ = core.git(HANDOFF, "diff", "--cached", "--quiet")
-    if rc != 0:
-        n = len(core.gitout(HANDOFF, "diff", "--cached", "--name-only").splitlines())
-        core.git(HANDOFF, "commit", "-q", "-m", f"sync: {n} file(s) from {os.uname().nodename.split('.')[0]}")
-    if not push or not core.gitout(HANDOFF, "remote"):
-        return
-    from . import audit
-    failed = STATE / "handoff-push-failed.json"
-    core.git(HANDOFF, "fetch", "-q", "origin", timeout=60)
-    if core.gitout(HANDOFF, "rev-list", "--count", "HEAD..@{u}") not in ("", "0"):
-        core.git(HANDOFF, "pull", "-q", "--rebase", "--autostash", timeout=120)
-    ahead = core.gitout(HANDOFF, "rev-list", "--count", "@{u}..HEAD")
-    if ahead not in ("", "0"):
-        rc, _, err = core.git(HANDOFF, "push", "-q", timeout=120)
-        if rc != 0:  # someone pushed in between: rebase on it and try once more
-            core.git(HANDOFF, "pull", "-q", "--rebase", "--autostash", timeout=120)
-            rc, _, err = core.git(HANDOFF, "push", "-q", timeout=120)
-        if rc == 0:
-            audit.record("handoff.push", core.handoff_repo(), f"{ahead} commit(s)")
-            if failed.exists():
-                failed.unlink()
-        else:
-            audit.record("handoff.push", core.handoff_repo(), err[:300], "failed")
-            failed.write_text(json.dumps({"ts": int(time.time()), "error": err[:300]}))
+    failed = work.push_failed_file()
+    with work._repo_lock() as got:
+        if not got:
             if not quiet:
-                ui.warn(f"handoff push failed: {err}")
+                ui.warn("handoff sync skipped: another devkit process is using the handoff repository")
+            return
+        work.recover_rebase("dev sync")
+        core.git(root, "add", "-A")
+        rc, _, _ = core.git(root, "diff", "--cached", "--quiet")
+        if rc != 0:
+            n = len(core.gitout(root, "diff", "--cached", "--name-only").splitlines())
+            core.git(root, "commit", "-q", "-m", f"sync: {n} file(s) from {os.uname().nodename.split('.')[0]}")
+        if not push or not core.gitout(root, "remote"):
+            return
+        core.git(root, "fetch", "-q", "origin", timeout=60)
+        ok, err = True, ""
+        if core.gitout(root, "rev-list", "--count", "HEAD..@{u}") not in ("", "0"):
+            ok, err = work.pull_rebase()
+        ahead = core.gitout(root, "rev-list", "--count", "@{u}..HEAD")
+        if ok and ahead not in ("", "0"):
+            rc, _, err = core.git(root, "push", "-q", timeout=120)
+            if rc != 0:  # someone pushed in between: rebase on it and try once more
+                ok, err = work.pull_rebase()
+                rc, _, err = core.git(root, "push", "-q", timeout=120) if ok else (1, "", err)
+            ok = rc == 0
+            if ok:
+                audit.record("handoff.push", core.handoff_repo(), f"{ahead} commit(s)")
+                if failed.exists():
+                    failed.unlink()
+            else:
+                audit.record("handoff.push", core.handoff_repo(), err[:300], "failed")
+                failed.write_text(json.dumps({"ts": int(time.time()), "error": err[:300]}))
+        if not ok and not quiet:
+            ui.warn(f"handoff push failed: {err}")
 
 
 # --------------------------------------------------------------------------- dashboard & help
@@ -615,10 +627,14 @@ def _crew_now(runs: list, roster, now: float) -> dict:
     from . import crew as crew_mod, progress as pg
     working = [r for r in runs if registry.run_working(r, now)]
     out = {"working": bool(working), "members": [], "plan": None, "goal": ""}
+    facts = pg.agent_facts(runs) if working else None
     for run in working:
         plan = run.get("plan") or []
         for lid, lane in (run.get("agents") or {}).items():
             if lane.get("state") != "running":
+                continue
+            lv = pg.lane_state(run, lid, lane, facts, now)  # an ended member is not working; a stale one says so
+            if lv["state"] == "ended":
                 continue
             m = crew_mod._for_lane(lane, roster)
             who = crew_mod.who(m) if m else (lane.get("persona") or lane.get("label") or "a crew member")
@@ -628,7 +644,7 @@ def _crew_now(runs: list, roster, now: float) -> dict:
             if not steps and ":" in (lane.get("label") or ""):
                 what = [registry.plain_step(lane["label"].split(":", 1)[1])]
             what = [x for x in what if x]
-            out["members"].append({"who": who, "on": what, "member": (m or {}).get("id", "")})
+            out["members"].append({"who": who, "on": what, "member": (m or {}).get("id", ""), "state": lv["state"]})
         if plan and out["plan"] is None:
             done = sum(1 for s in plan if isinstance(s, dict) and s.get("state") in ("done", "skipped"))
             try:
@@ -681,11 +697,24 @@ def _layout_need(p: dict, alias: str, standalone: bool) -> dict:
             "command": f"dev adopt {tilde(p.get('path') or '')}", "project": p["id"]}
 
 
-def _decision_need(d: dict, roster) -> dict:
+def _asker(name, roster):
+    """-> (the crew member named `name` or None, how a sentence names them: "The backend engineer (Tank)")."""
     from . import crew as crew_mod
-    m = crew_mod.member(d.get("from_name"), roster) if d.get("from_name") else None
-    who = f"The {crew_mod.who(m)[:1].lower()}{crew_mod.who(m)[1:]}" if m and m.get("title") else (
-        (m or {}).get("name") or d.get("from_name") or "Morpheus")
+    m = crew_mod.member(name, roster) if name else None
+    return m, f"The {crew_mod.who(m)[:1].lower()}{crew_mod.who(m)[1:]}" if m and m.get("title") else (
+        (m or {}).get("name") or name or "Morpheus")
+
+
+def _message_need(msg: dict, roster) -> dict:
+    """A crew question to the tech lead that nobody answered yet (progress.waiting_messages)."""
+    _, who = _asker(msg.get("from_name"), roster)
+    return {"kind": "message", "id": msg.get("id"), "text": f"{who} asks: {(msg.get('text') or '').rstrip()} Answer it "
+                                                            "in the chat with the session, or:",
+            "command": f"dev crew answer {msg.get('id')} \"…\"", "ts": msg.get("ts")}
+
+
+def _decision_need(d: dict, roster) -> dict:
+    m, who = _asker(d.get("from_name"), roster)
     q = (d.get("question") or "").rstrip()
     rec = f" {m['name'] if m else who} recommends {d['recommend']}." if d.get("recommend") else ""
     answer = f"approve {d['id']}" + (f": {d['recommend']}" if d.get("recommend") else "")
@@ -717,11 +746,11 @@ def status_view(reg: dict, p: dict, w: dict = None, runs=None, ci=None, roster=N
     local = registry.is_local(p)
     runs = pg.active_runs() if runs is None else runs
     mine = [r for r in runs if r.get("project") == p["id"]]
+    # what needs you is what is open now; the saved block's You line is history once the developer acted on it
     needs = [_decision_need(d, roster) for r in mine for d in pg.pending_decisions(r)]
+    needs += [_message_need(m, roster) for r in mine for m in pg.waiting_messages(r)]
     sl = p.get("status_line") or registry.status_line(p["id"]) or {}
     parsed = canary.parse_line(sl.get("line") or "") if sl.get("line") else {}
-    if parsed.get("you"):
-        needs.append({"kind": "you", "text": parsed["you"], "command": "", "ts": sl.get("ts")})
     if local and not p.get("canonical_ok", True):
         needs.append(_layout_need(p, alias, True))
     needs += _issue_needs(reg, p) if local else []
@@ -774,9 +803,13 @@ def render_status(v: dict, cols: int = None) -> list:
         out.append(ui.command(ck["command"], 2 + ui.LABEL_W))
     cr = v["crew"]
     if cr["members"]:
-        out += ui.row("Crew", f"{ui.glyph('working')} {len(cr['members'])} working", cols, style=None)
+        busy = sum(1 for m in cr["members"] if m.get("state", "working") == "working")
+        stale = len(cr["members"]) - busy
+        out += ui.row("Crew", f"{ui.glyph('working')} {busy} working" + (f", {stale} stale" if stale else ""), cols,
+                      style=None)
         for m in cr["members"][:6]:
-            text = m["who"] + (" on " + ", ".join(m["on"]) if m["on"] else "")
+            text = m["who"] + (" · stale" if m.get("state") == "stale" else "") + \
+                (" on " + ", ".join(m["on"]) if m["on"] else "")
             out += ui.row("", text, cols)
         if len(cr["members"]) > 6:
             out += ui.row("", f"and {len(cr['members']) - 6} more (dev progress)", cols)
@@ -935,9 +968,9 @@ def devkit_needs(cwd: str = None) -> list:
 
 def cmd_branch(a):
     """`dev branch ls` is the branch map (branches.py, spec P-fy3bwa0pshk R7); new, rename and clean stay in gitx."""
-    if getattr(a, "branch_cmd", None) in ("ls", "embargo"):
+    if getattr(a, "branch_cmd", None) in ("ls", "embargo", "prune"):
         from . import branches as branchmap
-        return branchmap.cmd_ls(a) if a.branch_cmd == "ls" else branchmap.cmd_embargo(a)
+        return {"ls": branchmap.cmd_ls, "embargo": branchmap.cmd_embargo, "prune": branchmap.cmd_prune}[a.branch_cmd](a)
     from . import gitx
     return gitx.cmd_branch(a)
 
@@ -1174,6 +1207,10 @@ def wt_new(p, branch, base=None, quiet=False, deps=True):
     if rc != 0:
         ui.err(f"git worktree add failed: {err}")
         return None
+    from . import gitx
+    linked = gitx._link_new_branch(p.get("id"), branch)
+    if linked:  # always said: it changes a work item
+        print(f"{ui.OK} {linked}", file=sys.stderr)
     inc = main / ".worktreeinclude"
     if inc.exists():
         import fnmatch
@@ -1196,6 +1233,21 @@ def wt_new(p, branch, base=None, quiet=False, deps=True):
         if (path / "uv.lock").exists():
             print(f"{ui.INFO} Python: run `uv sync` (uv links from its cache; near-zero extra disk)", file=sys.stderr)
     return str(path)
+
+
+def _wt_merged(p: dict, branch: str):
+    """{base, sha, prs} when the worktree's branch is merged into origin/<default> as an ancestor, by its own pull
+    request or by content (the merge test of dev branch prune, on the registry's cached pull requests: no GitHub
+    call), so `dev wt rm` may remove it with commits on no remote."""
+    if not branch:
+        return None
+    from . import branches
+    default = p.get("default_branch") or "main"
+    base = f"origin/{default}" if core.git(p["path"], "rev-parse", "--verify", "-q",
+                                           f"refs/remotes/origin/{default}")[0] == 0 else default
+    prs = branches.cached_prs(p["github"]) if p.get("github") else None
+    m = branches.merge_test(p["path"], branch, base, prs=prs)
+    return {"base": base, "sha": m["sha"], "prs": prs} if m["merged"] else None
 
 
 def cmd_wt(a):
@@ -1242,7 +1294,8 @@ def cmd_wt(a):
                         core.git(p["path"], "worktree", "prune")
                         print(f"{ui.OK} pruned missing worktree {tilde(w['path'])}")
                         return 0
-                    ok, msg = gc.remove_worktree(p["path"], w["path"], w.get("branch"), p.get("github"))
+                    ok, msg = gc.remove_worktree(p["path"], w["path"], w.get("branch"), p.get("github"),
+                                                 merged=_wt_merged(p, w.get("branch")))
                     print(f"{ui.OK if ok else ui.FAIL} {msg}")
                     return 0 if ok else 1
         ui.err(f"no worktree matches “{target}” — `dev wt ls --all`")
@@ -1278,7 +1331,8 @@ def cmd_sync(a):
         results = []
         if a.scheduled and CFG["gc"].get("auto") and not (core.HOME / "Library" / "LaunchAgents" /
                                                           "com.devkit.job.gc.plist").exists():
-            results = gc.apply(gc.plan(reg, with_sizes=True), only_auto=True)  # only when the gc job is not installed
+            # only when the gc job is not installed; an offline or no-push sync deletes nothing on origin
+            results = gc.apply(gc.plan(reg, with_sizes=True), only_auto=True, remote=not (a.offline or a.no_push))
             if any(ok_ and m.startswith("removed") for ok_, m in results):
                 core._CWDS = None
                 reg = registry.build(with_prs=True, refresh_prs=False, with_sizes=False)
@@ -1313,10 +1367,19 @@ def cmd_sync(a):
             except Exception as e:  # never let a backup break the sync
                 if not a.quiet:
                     ui.warn(f"backup: {e}")
+        if a.session and a.finish:  # the session ended: off the map and the team's presence before they are written
+            agent, _, sid = a.session.partition(":")
+            from . import state as _state
+            for suffix in (".json", ".stop"):
+                f = STATE / "sessions" / f"{agent}-{sid}{suffix}"
+                if f.exists():  # under the record's lock, so a hook that already read it cannot write it back
+                    _state.remove(f) if suffix == ".json" else f.unlink()
+            reg["sessions"] = [s_ for s_ in reg.get("sessions") or []
+                               if not (s_.get("agent") == agent and s_.get("session") == sid)]
         try:
             from . import work
             if a.renew:
-                work.renew_locks(work.actor(a.renew))
+                work.renew_locks(work.actor(a.renew), sessions=reg.get("sessions"))
             if a.scheduled:
                 work.pull()
                 work.expire_locks()
@@ -1332,13 +1395,6 @@ def cmd_sync(a):
         except Exception as e:  # never let the view break the sync
             if not a.quiet:
                 ui.warn(f"dashboard: {e}")
-        if a.session and a.finish:
-            agent, _, sid = a.session.partition(":")
-            from . import state as _state
-            for suffix in (".json", ".stop"):
-                f = STATE / "sessions" / f"{agent}-{sid}{suffix}"
-                if f.exists():  # under the record's lock, so a hook that already read it cannot write it back
-                    _state.remove(f) if suffix == ".json" else f.unlink()
         commit_push(push=CFG["sync"].get("push", True) and not a.no_push, quiet=a.quiet)
         (STATE / "last-sync.json").write_text(json.dumps({"ts": time.time(), "changed": changed,
                                                          "gc": [m for _, m in results]}))
@@ -1396,7 +1452,8 @@ def _gc_unattended(a):
         print(ui.section(f"Reclaimable: {human_kb(pl['reclaimable_kb'])}"))
         for x in pl["actions"]:
             label = {"remove-worktree": "remove worktree", "prune-artefacts": "prune build output",
-                     "purge-temp": "purge temp", "prune-meta": "prune metadata"}[x["kind"]]
+                     "purge-temp": "purge temp", "prune-meta": "prune metadata",
+                     "prune-branch": f"delete {x.get('where', '')} branch"}[x["kind"]]
             print(f"  {ui.ARROW} {label:<19} {tilde(x['path'])}  {ui.dim(x['reason'] + ' · ' + human_kb(x.get('kb')))}")
     else:
         print(f"  {ui.OK} nothing to reclaim")
@@ -1418,7 +1475,7 @@ def _gc_unattended(a):
         if input(f"\n  Apply {len(pl['actions'])} action(s)? [y/N] ").strip().lower() not in ("y", "yes"):
             return 1
     print(ui.section("Applying"))
-    for ok, msg in gc.apply(pl, only_auto=getattr(a, "auto_only", False)):
+    for ok, msg in gc.apply(pl, only_auto=getattr(a, "auto_only", False), remote=True):
         print(f"  {ui.OK if ok else ui.WARN} {msg}")
     return cmd_sync(argparse.Namespace(session=None, finish=False, offline=True, scheduled=False, no_push=False,
                                        quiet=False, renew=None))
@@ -1465,7 +1522,8 @@ def cmd_install(a):
         return 2
     only = {x.strip() for x in a.only.split(",") if x.strip()} if a.only else None
     rc = setup.run_install(only=only, unverified_why=why if a.unverified else None, version=a.version,
-                           as_pinned=a.as_pinned, commit_template=getattr(a, "commit_template", None))
+                           as_pinned=a.as_pinned, commit_template=getattr(a, "commit_template", None),
+                           assume_yes=bool(getattr(a, "yes", False)))
     if rc == 0 and (not only or "claude" in only):  # what was installed: `dev config` tells new from removed
         try:
             write_install_record()
@@ -1525,13 +1583,18 @@ def cmd_update(a):
     if getattr(a, "quiet", False) or getattr(a, "record", False):
         ui.err("--quiet and --record go with --check")
         return 2
+    from . import hooks
+    if not hooks.confirm_restart(assume_yes=bool(getattr(a, "yes", False))):  # before anything changes
+        print(f"  {ui.FAIL} stopped before any change: restart those sessions, or run dev update again and go on")
+        return 1
     home = core.source_home()  # the checkout; `dev` itself may run from the pinned copy, which git never changes
     print(f"{ui.ARROW} updating {tilde(home)}")
     rc, message, install = update_checkout(home)
     print(f"  {ui.OK if rc == 0 else ui.FAIL} {message}")
     if rc != 0 or not install:
         return rc
-    os.execv(sys.executable, [sys.executable, "-I", "-S", str(home / "bin" / "dev"), "install"])  # pins the release
+    # pins the release; the developer already chose to go on above, so the install does not ask again
+    os.execv(sys.executable, [sys.executable, "-I", "-S", str(home / "bin" / "dev"), "install", "--yes"])
 
 
 def cmd_docker(a):
@@ -1620,11 +1683,17 @@ def cmd_ci_status(a, top):
 
 def cmd_ci(a):
     from . import ci
+    if a.query == "watches":  # the live watches, and the expired ones with the command to re-arm each
+        from . import ciwatch
+        return ciwatch.cmd_watches(a)
     top = core.gitout(os.getcwd(), "rev-parse", "--show-toplevel")
-    if a.query and a.query not in ("status", "audit", "init", "watch"):
+    if a.query and a.query not in ("status", "audit", "init", "watch", "watches"):
         top = _resolve(_reg(prs=False), a.query)["path"]
     if getattr(a, "project", None):
         top = _resolve(_reg(prs=False), a.project)["path"]
+    if a.query == "watch" and getattr(a, "wait", False):  # an agent waits on one run: its output wakes the agent
+        from . import ciwatch
+        return ciwatch.cmd_wait(a, top)
     if not top:
         ui.err("not inside a repository")
         return 2
@@ -1857,6 +1926,71 @@ def _task_branch(scope: str) -> str:
     return branch if pid == scope and branch != registry.default_branch(main) else ""
 
 
+def _checkout_of(scope: str) -> str:
+    """A checkout of the project on this Mac: the repository you are in when it is that project, else its folder in
+    the workspace. '' when there is none."""
+    top = core.gitout(os.getcwd(), "rev-parse", "--show-toplevel")
+    if top:
+        main = registry.main_of(Path(top)) or Path(top)
+        if core.project_identity(main, core.gitout(top, "config", "--get", "remote.origin.url"))[0] == scope:
+            return top
+    d = core.DEV / scope
+    return str(d) if (d / ".git").exists() else ""
+
+
+def reconcile_text(r: dict, label: str, applied: bool) -> str:
+    """`dev task reconcile`'s report: each kind of stale item, what --apply does with it, then what changed."""
+    def row(i, more=""):
+        return f"    {i['id']}  {i['title']}{more}"
+    out = [ui.section(f"{label} · reconcile")]
+    if r["lockless_doing"]:
+        out.append(f"  Doing without a lock ({len(r['lockless_doing'])}): back to todo with --apply")
+        out += [row(i) for i in r["lockless_doing"]]
+    if r["merged"]:
+        out.append(f"  Open, but their branch is merged ({len(r['merged'])}): done with --apply")
+        out += [row(i, f" · {i['branch']} merged in {i['commit'][:7]}" + (f" (PR #{i['pr']})" if i.get("pr") else ""))
+                for i in r["merged"]]
+    if r["duplicates"]:
+        out.append(f"  Same title ({len(r['duplicates'])} group(s)): review them, then "
+                   f"dev task cancel <id> --why \"duplicate of <id>\"")
+        out += [f"    {', '.join(i['id'] + ' (' + i['status'] + ')' for i in g)}  {g[0]['title']}"
+                for g in r["duplicates"]]
+    fixable = len(r["lockless_doing"]) + len(r["merged"])
+    if not fixable and not r["duplicates"]:
+        out.append(f"{ui.OK} nothing stale in {label}")
+    elif applied:
+        out.append(f"{ui.OK} changed {len(r['changed'])} of {fixable} item(s) in one commit")
+    elif fixable:
+        out.append(ui.dim(f"  nothing changed · dev task reconcile --apply fixes the {fixable} item(s) marked "
+                          f"\"with --apply\""))
+    return "\n".join(out)
+
+
+def _task_reconcile(a, scope: str, label: str) -> int:
+    """`dev task reconcile`: the stale items of a project, from its items and the merges on its default branch."""
+    from . import gitx, work
+    if scope.startswith("initiatives/"):
+        ui.err("dev task reconcile works on a project, whose git history says what was merged: use -p <project>")
+        return 2
+    top = _checkout_of(scope)
+    if not top:
+        ui.err(f"no checkout of {scope} on this Mac: run dev task reconcile inside it (dev go {scope})")
+        return 2
+    default = registry.default_branch(Path(top))
+    if core.gitout(top, "remote"):
+        rc, _, err = core.git(top, "fetch", "-q", "origin", default, timeout=60)
+        if rc != 0:
+            ui.warn(f"git fetch failed ({(err or '').strip()[:120]}); using the last known origin/{default}")
+    if a.apply:
+        work.pull()
+    r = work.reconcile(scope, gitx.merged_into_default(top, default, work.linked_branches(scope)), apply=a.apply)
+    if a.json:
+        print(json.dumps(r, indent=1, ensure_ascii=False))
+    else:
+        print(reconcile_text(r, label, a.apply))
+    return 0
+
+
 def cmd_task(a):
     from . import work
     scope, label = _scope(a)
@@ -1941,6 +2075,8 @@ def cmd_task(a):
                 core.sh(["pbcopy"], input=msg)
                 print(ui.dim("\n(copied to the clipboard — paste it to your teammate)"))
             return 0
+        elif act == "reconcile":
+            return _task_reconcile(a, scope, label)
         elif act in ("show", "history"):
             it = work.find(" ".join(a.selector), scope)
             m = it["meta"]
@@ -2061,7 +2197,7 @@ def cmd_progress(a):
             print(ui.dim("  changed: " + " · ".join(f"{i}. {s['name']} {before.get(s['name']) or 'new'} → "
                                                     f"{s.get('state')}" for i, s in changed)))
         return 0
-    if act in ("assign", "begin", "add", "reopen", "skip"):
+    if act in ("assign", "begin", "add", "reopen", "skip", "confirm"):
         try:
             if act == "assign":
                 extra = {}
@@ -2077,6 +2213,8 @@ def cmd_progress(a):
                 if from_agent:
                     print(f"{ui.OK} added to your lane's plan · {' '.join(a.spec)}")
                     return 0
+            elif act == "confirm":
+                run = pg.confirm(a.which, a.why or "", from_agent=from_agent)
             else:
                 run = pg.reopen(a.which, a.why or "", skip=act == "skip", from_agent=from_agent)
         except ValueError as e:
@@ -2156,6 +2294,14 @@ def cmd_delivery(a):
             except ValueError as e:
                 ui.err(str(e))
                 return 2
+        if not (a.why or "").strip():
+            ui.err("recording a delivery policy needs the reason: --why \"…\"")
+            return 2
+        if repo:  # the host deletes a merged pull request's branch, as the policy says (on unless set to false)
+            want = base.get("delete_branch_on_merge") is not False
+            got, line = delivery.branch_cleanup(repo, want)
+            print(f"{ui.OK if got is not None else ui.WARN} {line}")
+            base["delete_branch_on_merge"] = got
         try:
             rec = delivery.record(scope, base, a.why or "")
         except ValueError as e:
@@ -3252,6 +3398,11 @@ def build_parser():
     t.add_argument("--priority", dest="priority_set", choices=["high", "normal", "low"])
     t.add_argument("--due")
     t.add_argument("--why")
+    t = tsp.add_parser("reconcile", help="find stale items: doing without a lock, open although their branch is merged, "
+                                         "the same title twice; --apply fixes the first two")
+    t.add_argument("--apply", action="store_true", help="close the items of merged branches (done, the merge commit as "
+                                                        "evidence) and send doing items without a lock back to todo")
+    t.add_argument("--json", action="store_true")
     tsp.add_parser("ls", help="list open items")
     for sub in tsp.choices.values():
         sub.add_argument("-p", "--project", default=argparse.SUPPRESS, help="project (default: the one you are in)")
@@ -3322,7 +3473,8 @@ def build_parser():
     x.add_argument("spec", nargs="+")
     x.add_argument("--why", help="why it was not in the plan")
     for verb, h_ in (("reopen", "undo a wrong close: the step goes back to running"),
-                     ("skip", "skip a step on purpose")):
+                     ("skip", "skip a step on purpose"),
+                     ("confirm", "a step flagged recheck still holds after the step it used was redone")):
         x = gsp.add_parser(verb, help=h_)
         x.add_argument("which", help="step number or part of its name")
         x.add_argument("--why", required=True, help="the reason (kept in the run's history)")
@@ -3508,12 +3660,20 @@ def build_parser():
     p.add_argument("--days", type=int, default=7)
     p.add_argument("--limit", type=int, default=20)
     p = add("ci", cmd_ci, "What CI runs (to run it locally first), `dev ci status`: live runs on any host, "
-                          "`dev ci watch`: follow a run to the end and diagnose a failure, `dev ci audit`: diagnose "
-                          "pipelines, `dev ci init`: set one up")
-    p.add_argument("query", nargs="?", help="a project, or `status`, `audit`, `init` or `watch`")
+                          "`dev ci watch`: follow a run to the end and diagnose a failure (`--wait`: for an agent "
+                          "that waits on it), `dev ci watches`: the live and expired watches, `dev ci audit`: "
+                          "diagnose pipelines, `dev ci init`: set one up")
+    p.add_argument("query", nargs="?", help="a project, or `status`, `audit`, `init`, `watch` or `watches`")
     p.add_argument("-p", "--project", help="the project (id or a unique part of its name) for status, audit, init "
                                            "and watch")
-    p.add_argument("--sha", help="watch: the commit whose runs to follow (default: HEAD)")
+    p.add_argument("--sha", help="watch: the commit whose runs to follow (default: HEAD; with --wait, what this "
+                                 "session last sent to origin)")
+    p.add_argument("--wait", action="store_true",
+                   help="watch: for an agent that waits on the run: one line per finished job, then one line with "
+                        "the conclusion; exit 0 passed, 1 failed, 3 the watch ended first (re-arm it), 4 none. Run it "
+                        "as a Claude Code Monitor or background command, or in the foreground on Codex")
+    p.add_argument("--tag", help="watch --wait: the runs of this tag")
+    p.add_argument("--pr", help="watch --wait: the runs of this PR's head, or of its merge commit once merged")
     p.add_argument("--timeout", type=float, default=90, help="watch: minutes before giving up (default 90)")
     p.add_argument("--session", help=argparse.SUPPRESS)
     p.add_argument("--quiet", action="store_true", help="watch: no progress lines, only the result")
@@ -3552,6 +3712,9 @@ def build_parser():
                    help="pin HEAD although it is neither a release nor tested (`dev ci --run`); needs --why")
     p.add_argument("--why", help="the reason for --unverified, recorded in the audit")
     p.add_argument("--as-pinned", action="store_true", help=argparse.SUPPRESS)  # the second half, from the copy
+    p.add_argument("--yes", "-y", action="store_true",
+                   help="go on without asking when Claude Code or Codex sessions that use devkit run (they are "
+                        "listed; restart each to load the new hooks)")
     p.add_argument("--commit-template", choices=["yes", "no"],
                    help="dev setup's answer for the commit template: yes sets commit.template in the repositories "
                         "without one, no leaves them; the git step records it")
@@ -3585,6 +3748,9 @@ def build_parser():
     p.add_argument("--quiet", action="store_true", help="with --check: print nothing (the daily job)")
     p.add_argument("--record", action="store_true", help="with --check: record the result for the session start "
                                                           "and dev status")
+    p.add_argument("--yes", "-y", action="store_true",
+                   help="go on without asking when Claude Code or Codex sessions that use devkit run (they are "
+                        "listed; restart each to load the new hooks)")
     add("docker", cmd_docker, "Docker on Colima").add_argument(
         "action", choices=["up", "down", "status", "trim", "prune", "autostart-on", "autostart-off"])
     add("version", cmd_version, "Show version")

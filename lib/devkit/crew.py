@@ -478,6 +478,9 @@ ENFORCEMENT = (
     ("E-main-scope", "The main session does not edit a working member's files",
      "PreToolUse: the edit tools (DEVKIT_SCOPE_OVERRIDE=1 for an emergency)", "devkit.hooks._crew_limits",
      "enforced"),
+    ("E-owner", "An ended or stale member holds no file, in any session's run; dev crew owner says who holds a path "
+     "exactly as the edit check decides", "PreToolUse: the edit tools, and dev crew owner",
+     "devkit.progress.scope_holders", "enforced"),
     ("E-responsible", "A step goes to the member the RACI makes Responsible", "dev progress assign",
      "devkit.raci.check_assignment", "enforced"),
     ("E-any-language", "The RACI holds in any language",
@@ -501,7 +504,7 @@ ENFORCEMENT = (
     ("E-deps", "No step starts before its dependencies are done", "every step transition (start, add, assign, begin, "
      "advance, subagent start, close, launch readiness)", "devkit.progress.deps_open", "enforced"),
     ("E-recheck", "A reopened dependency's finished dependents are rechecked before the run ends", "dev progress done",
-     "F6 step endings and approvals", "planned"),
+     "devkit.approvals.recheck_open", "enforced"),
     ("E-fixable", "A step is reopened or skipped only with a reason, kept in the run's history",
      "dev progress reopen and dev progress skip", "devkit.progress.reopen", "enforced"),
     ("E-parallel", "At most progress.max_parallel members work in parallel (4 by default)",
@@ -755,9 +758,12 @@ def live_run(latest: bool = False):
 
 
 def open_messages(run: dict) -> list:
-    """Messages not delivered yet, and questions nobody has answered (an answer is closed once delivered)."""
-    return [m for m in (run or {}).get("messages") or []
-            if not m.get("delivered") or (not m.get("answered") and not m.get("reply_to"))]
+    """Messages not delivered yet, and questions nobody has answered. A notice (CI watch, a step or launch notice, a
+    decision's result) and an answer close once delivered."""
+    from . import progress
+    msgs = (run or {}).get("messages") or []
+    waiting = {m.get("id") for to in {m.get("to") for m in msgs} for m in progress.waiting_messages(run, to)}
+    return [m for m in msgs if not m.get("delivered") or m.get("id") in waiting]
 
 
 def run_view(run: dict, roster=None, now=None):
@@ -792,7 +798,9 @@ def run_view(run: dict, roster=None, now=None):
             "headline": b.get("headline"), "eta_min": b.get("eta_min"), "mode": progress.mode_of(run),
             "approved": list(run.get("approved") or []), "lanes": lanes, "assigned": assigned,
             "messages": [_msg(m) for m in open_messages(run)],
-            "decisions": [_decision(d) for d in progress.pending_decisions(run)], "ready": ready_view(run, roster)}
+            "decisions": [_decision(d) for d in progress.pending_decisions(run)],
+            "moot": [dict(_decision(d), text=progress.moot_text(run, d)) for d in progress.moot_decisions(run)],
+            "ready": ready_view(run, roster)}
 
 
 def _who_label(label, roster=None) -> str:
@@ -898,6 +906,8 @@ def run_text(view: dict) -> str:
     if ready.get("launch"):
         out.append(f"  Ready to launch: {', '.join((s.get('who') or s['member']) + ': ' + s['step'] for s in ready['launch'])}"
                    " · dev crew next")
+    for d in view.get("moot") or []:  # not the developer's: their own line, never in the section below
+        out.append(f"  {d.get('text')} It closes with the run, or: dev crew withdraw {d['id']} --why \"…\"")
     if view.get("decisions"):
         out.append(ui.section("Decisions waiting for the developer"))
         for d in view["decisions"]:
@@ -1034,6 +1044,9 @@ def brief_text(m: dict, task: str, scope: str = "", step=None, roster=None, cwd=
     else:
         b.append("The files this task needs and nothing beyond them. Ask the tech lead before you widen it: "
                  '`dev crew ask "<question>"`.')
+    # the guard lets a member write only in its own folder of the session scratchpad (guard.scratch_refusal)
+    b += ["", f"Your scratch folder is `scratchpad/{m['id']}/` in the session scratchpad: put logs, probes and other "
+              "temporary files there, never at the scratchpad's top level or in another member's folder."]
     from . import raci
     act = _brief_activity(m, task, step, roster, activity=activity, globs=globs)
     if act:  # the declaration the launch hook and the crew gates read, whatever language the task is written in
@@ -1518,6 +1531,18 @@ def _decide(a, me) -> int:
     return 0
 
 
+def _withdraw(a, me) -> int:
+    from . import progress
+    if me:
+        ui.err("only the tech lead withdraws a decision: if yours no longer matters, say so in your report or with "
+               "dev crew ask")
+        return 2
+    d = progress.crew_withdraw(a.id, a.why or "")
+    print(f"{ui.OK} {d['id']} withdrawn: {d['why']}")
+    print(ui.dim("  in the run's history and the audit trail; it is not the developer's answer and opens nothing"))
+    return 0
+
+
 def _ask(run, ids, as_json=False) -> int:
     """The decisions as question tool calls the tech lead can send as they are or reword (spec C5: the developer's
     answer to a question that names D<n> up front, with an option's letter, is their evidence E1)."""
@@ -1570,17 +1595,19 @@ def _decisions(a) -> int:
     if getattr(a, "ask_json", False):
         ui.err("--json goes with --ask: dev crew decisions --ask --json")
         return 2
-    decs = [d for d in (run or {}).get("decisions") or [] if not a.pending or d.get("state") == "pending"]
+    decs = progress.pending_decisions(run) if a.pending else [d for d in (run or {}).get("decisions") or []]
     if not decs:
         print("  no pending decisions" if a.pending else "  no decisions in this session's run")
         return 0
     rows = []
     for d in decs:
         answer = _option(d, d.get("answer")) + (f" (was {d['overrides']})" if d.get("overrides") else "")
+        if d.get("state") in ("withdrawn", "closed"):  # the reason stands where an answer would
+            answer = d.get("why") or d.get("reason") or ""
         by = "auto · review" if d.get("by") == "auto" else (d.get("by") or "") + \
             (" · unverified" if d.get("verified") is False else " ✓" if d.get("verified") else "")
-        rows.append([d["id"], who(d.get("from_name")) or "?", d.get("question") or "", d.get("state") or "",
-                     answer or "-", by or "-"])
+        rows.append([d["id"], who(d.get("from_name")) or "?", d.get("question") or "",
+                     progress.decision_state(run, d), answer or "-", by or "-"])
     print(ui.table(rows, ["ID", "FROM", "QUESTION", "STATE", "ANSWER", "BY"], max_widths={2: 56, 4: 36}))
     mode = progress.mode_of(run)
     print(ui.dim(f"  mode {mode} · override an automatic decision: dev crew decide <id> \"<other answer>\""))
@@ -1739,6 +1766,8 @@ def _messages(a, act) -> int:
             return _mode(a, me)
         if act == "decide":
             return _decide(a, me)
+        if act == "withdraw":
+            return _withdraw(a, me)
         if act == "decisions":
             return _decisions(a)
         if act == "ask" and a.decision:
@@ -1916,9 +1945,28 @@ def _raci_cmd(a) -> int:
     return 0
 
 
+def _owner_cmd(a) -> int:
+    """`dev crew owner <path>…`: who holds each path now, as the edit check decides it (progress.scope_holders):
+    exit 0 when every path is free, 1 while a working member holds one. Reads only."""
+    from . import progress
+    cwd, now = os.getcwd(), time.time()
+    agent, sid = progress.current_session(cwd)
+    me = progress._as_lane(os.environ.get("DEVKIT_FROM_AGENT"), cwd) or "main"
+    rows = []
+    for p in a.paths:
+        holders = progress.scope_holders(p, agent, sid, cwd, me=me, now=now)
+        rows.append({"path": p, "free": not any(h["state"] == "working" for h in holders), "holders": holders})
+    if a.owner_json:
+        print(json.dumps(rows, ensure_ascii=False, indent=1))
+    else:
+        print(progress.owner_text(rows, now))
+    return 0 if all(r["free"] for r in rows) else 1
+
+
 def cmd_crew(a) -> int:
     act = getattr(a, "crew_cmd", None)
-    if act in ("ask", "answer", "inbox", "decide", "decisions", "mode", "route", "delegate", "decline", "next"):
+    if act in ("ask", "answer", "inbox", "decide", "withdraw", "decisions", "mode", "route", "delegate", "decline",
+               "next"):
         return _messages(a, act)
     try:
         roster = load()
@@ -1927,6 +1975,8 @@ def cmd_crew(a) -> int:
         return 2
     if act == "raci":
         return _raci_cmd(a)
+    if act == "owner":
+        return _owner_cmd(a)
     if act == "graph":
         return _graph(a, roster)
     if act == "set":
@@ -2079,8 +2129,13 @@ def register(add):
     x = sp.add_parser("decide", help="record the developer's answer to a decision (the tech lead only)")
     x.add_argument("id", help="the decision id, e.g. D3")
     x.add_argument("text", nargs="+", help="the answer")
-    x = sp.add_parser("decisions", help="this run's decisions; automatic ones are marked for review")
-    x.add_argument("--pending", action="store_true", help="only those waiting for the developer")
+    x = sp.add_parser("withdraw", help="close a pending decision that no longer matters, with the reason (the tech "
+                                       "lead only; never the developer's answer)")
+    x.add_argument("id", help="the decision id, e.g. D3")
+    x.add_argument("--why", required=True, help="why it no longer matters (the run's history and the audit keep it)")
+    x = sp.add_parser("decisions", help="this run's decisions; automatic ones are marked for review, and one whose "
+                                        "asking lane ended and that blocks no step as moot")
+    x.add_argument("--pending", action="store_true", help="only those waiting for the developer (moot ones are not)")
     x.add_argument("--ask", nargs="*", metavar="ID", help="the question tool calls that ask the developer these "
                    "decisions, every pending one without IDs: at most 4 per call, the recommended option first. "
                    "Reword a reversible one as you like, keeping “D<n> ·” up front and the option letters (their "
@@ -2102,6 +2157,11 @@ def register(add):
     x = sp.add_parser("decline", help="hand a delegated step back to the tech lead, with the reason")
     x.add_argument("step", nargs="+", help="the step (number or part of its name)")
     x.add_argument("--why", help="why you cannot take it")
+    x = sp.add_parser("owner", help="who holds these files before you edit them: the crew member, run, session, step, "
+                                    "state (working, stale, ended) and what to do; exit 1 while a working member "
+                                    "holds one (reads only)")
+    x.add_argument("paths", nargs="+", help="the files you are about to edit or assign")
+    x.add_argument("--json", dest="owner_json", action="store_true", help="each path with its holders as JSON")
     x = sp.add_parser("next", help="the dispatcher: who to launch now and in what order, what is queued or waiting "
                                    "and why, who is busy, and the crew's slots")
     x.add_argument("--first", help="the tech lead: launch this step ahead of the order (with --why, recorded)")

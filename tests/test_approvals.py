@@ -208,6 +208,16 @@ class ReconcileTests(unittest.TestCase):
         self.assertEqual((run["agents"]["a-tank"]["state"], run["plan"][0]["state"]), ("unverified", "unverified"))
         self.assertEqual(ap.apply(run, moves, T), [])  # two hooks at once: each transition is a compare-and-set
 
+    def test_a_step_that_started_after_its_member_finished_waits_for_a_new_launch(self):
+        # delegated into the lane after its member finished (its stop never reached the run): nobody worked on it, so
+        # it goes back to Morpheus, never to unverified, where a later review's check mark could approve it
+        run = self.working()
+        run["plan"].append({"name": "export column", "state": "running", "owner": "a-tank", "activity": "backend",
+                            "started": T - 100, "after": []})
+        ap.apply(run, ap.reconcile(run, {"lanes": {"a-tank": {"meta_finished": T - 150}}}, T), T)
+        self.assertEqual({s["name"]: (s["state"], s["owner"]) for s in run["plan"]},
+                         {"api": ("unverified", "a-tank"), "export column": ("pending", "main")})
+
     def test_a_silent_lane_is_lost_and_recovers_at_its_next_hook(self):
         run = self.working(started=T - 95 * 60, updates=[{"ts": T - 91 * 60, "kind": "note", "text": "running"}])
         self.assertEqual(ap.reconcile(run, {}, T - 120), [])  # silent 89 minutes

@@ -26,6 +26,7 @@ Calibration: finished runs record estimate vs actual, so the next estimate is co
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
@@ -66,30 +67,44 @@ def current_session(cwd: str | None = None):
     return resolve_session(cwd)[:2]
 
 
-def resolve_session(cwd: str | None = None):
+def resolve_session(cwd: str | None = None, argv=None):
     """-> (agent, session id, how) of the session running this command (spec C4):
     ancestry  the nearest parent process whose pid a session record holds (the agent's own process, recorded at
-              SessionStart), so two sessions in one repository each find their own; DEVKIT_SESSION only chooses
-              among the sessions of that process (after /clear)
+              SessionStart), so two sessions in one repository each find their own; of that process's sessions, the
+              one whose call ledger holds an open call for this very command, else the one DEVKIT_SESSION names
+              (after /clear), else the newest
+    ledger    no session of this process holds an open call for it, and exactly one recent session of this
+              repository that no live process holds does: Claude Code gave the running conversation a new session id
+              (a compaction), and the older record still holds the process until the new one registers it
     env       DEVKIT_SESSION, which Claude Code exports to the session's shells (no parent matched)
     recency   the most recently active devkit session in the same repository (Codex without a recorded pid)
-    shell     none of these: a shell of the developer's, with a session of its own"""
+    shell     none of these: a shell of the developer's, with a session of its own
+    `argv`: the command's arguments, default sys.argv[1:] (the ledger's match, as caller reads it)."""
     env = os.environ.get("DEVKIT_SESSION", "")
+    args = [str(a) for a in (sys.argv[1:] if argv is None else argv)]
     pids = _ancestor_pids()
     held = {}
     for f in (SESSIONS.glob("*.json") if pids and SESSIONS.exists() else []):
         s = core.read_json(f, {}) or {}
         if isinstance(s.get("pid"), int) and s["pid"] in pids and s.get("agent") and s.get("session"):
             held.setdefault(s["pid"], []).append((s.get("started") or 0, s["agent"], s["session"]))
-    for pid in pids:
-        if pid in held:
-            named = [c for c in held[pid] if f"{c[1]}:{c[2]}" == env]
-            _, agent, sid = named[0] if named else max(held[pid])
+    mine = next((held[pid] for pid in pids if pid in held), None)
+    if mine:
+        typed = [c for c in mine if _ledger_holds(c[2], args)]
+        if typed:
+            _, agent, sid = max(typed)
             return agent, sid, "ancestry"
+    cwd = cwd or os.getcwd()
+    found = _pidless_typed(args, {c[2] for c in mine or []}, pids, cwd)
+    if found:
+        return found[0], found[1], "ledger"
+    if mine:
+        named = [c for c in mine if f"{c[1]}:{c[2]}" == env]
+        _, agent, sid = named[0] if named else max(mine)
+        return agent, sid, "ancestry"
     if ":" in env:
         agent, sid = env.split(":", 1)
         return agent, sid, "env"
-    cwd = cwd or os.getcwd()
     top = core.gitout(cwd, "rev-parse", "--show-toplevel") or cwd
     best = None
     for f in SESSIONS.glob("*.json") if SESSIONS.exists() else []:
@@ -99,6 +114,64 @@ def resolve_session(cwd: str | None = None):
     if best and time.time() - best[0] < 12 * 3600:
         return best[1], best[2], "recency"
     return os.environ.get("DEVKIT_AGENT") or "human", f"shell-{os.getppid()}", "shell"
+
+
+def _ledger_holds(sid: str, args: list) -> bool:
+    """Does this session's call ledger hold an open call whose own text typed these arguments? A cut call matches
+    only by the text it kept here: choosing a session needs the command itself."""
+    return bool([a for a in args if a]) and any(_names_args(dict(e, cut=False), args) for e in open_calls(sid))
+
+
+def _pid_running(pid) -> bool:
+    """A process with this pid runs (or devkit cannot tell, which counts as running: such a record is not taken)."""
+    try:
+        os.kill(int(pid), 0)
+    except ProcessLookupError:
+        return False
+    except (OSError, TypeError, ValueError):
+        return True
+    return True
+
+
+def _ledger_sessions(args: list) -> list:
+    """Every session whose call ledger holds an open call that typed these arguments, [(agent, session id)]."""
+    if not [a for a in args if a]:
+        return []
+    try:
+        dirs = sorted(d.name for d in CALLS.iterdir() if d.is_dir())
+    except OSError:
+        return []
+    out = []
+    for sid in dirs:
+        hit = next((e for e in open_calls(sid) if _names_args(dict(e, cut=False), args)), None)
+        if hit:
+            out.append((str(hit.get("agent") or ""), str(hit.get("session") or sid)))
+    return out
+
+
+def _pidless_typed(args: list, skip: set, pids: list, cwd: str):
+    """The one recent session (12 hours) of this repository that no live process holds and whose call ledger holds an
+    open call for this command -> (agent, session id), or None (none, or several). Only for a process that has a
+    parent besides launchd: a detached command is never matched by the ledger alone."""
+    if not pids:
+        return None
+    hits = [(a, s) for a, s in _ledger_sessions(args) if s not in skip]
+    found, top = [], None
+    for agent, sid in hits:
+        f = session_path(agent, sid)
+        rec = core.read_json(f, {}) or {}
+        pid = rec.get("pid")
+        if rec.get("agent") != agent or (isinstance(pid, int) and (pid in pids or _pid_running(pid))):
+            continue
+        try:
+            if time.time() - f.stat().st_mtime > 12 * 3600:
+                continue
+        except OSError:
+            continue
+        top = top or core.gitout(cwd, "rev-parse", "--show-toplevel") or cwd
+        if (rec.get("top") or rec.get("cwd")) == top:
+            found.append((agent, sid))
+    return found[0] if len(found) == 1 else None
 
 
 def _ps() -> dict:
@@ -281,13 +354,13 @@ def caller(cwd: str | None = None, argv=None, now: float | None = None) -> dict:
     most restrictive when several match), unknown (no open call holds the command, or the session was only
     guessed by recency), unverified (Codex, until its spawned agents' hooks carry agent_id: S3), or human (a
     developer's shell with no agent session). `argv`: the command's arguments, default sys.argv[1:]."""
-    agent, sid, how = resolve_session(cwd)
+    args = [str(a) for a in (sys.argv[1:] if argv is None else argv)]
+    agent, sid, how = resolve_session(cwd, args)
     out = {"agent": agent, "session": sid, "how": how, "caller": "unknown", "calls": []}
     if how == "shell":
         return dict(out, caller="human")
     if agent == "codex":
         return dict(out, caller="unverified")
-    args = [str(a) for a in (sys.argv[1:] if argv is None else argv)]
     hits = [c for c in open_calls(sid, now) if _names_args(c, args)]
     out["calls"] = [c.get("tool_use_id") for c in hits]
     members = sorted({str(c.get("caller")) for c in hits if c.get("caller") != "main"})
@@ -330,8 +403,25 @@ def _tx(agent: str, sid: str):
     return state.hold(run_path(agent, sid))
 
 
+def _settle(run: dict):
+    """What every save keeps true, whichever path changed the run (a command, a hook, the reconciler): a
+    ready-to-launch notice belongs to a pending step, so a step that leaves pending is announced again once it is
+    ready again; and a run blocked on a step (`blocked_on`) stays blocked only while that step is."""
+    for s in run.get("plan") or []:
+        if isinstance(s, dict) and s.get("ready_told") and s.get("state") != "pending":
+            s.pop("ready_told", None)
+    if run.get("state") != "blocked":
+        run.pop("blocked_on", None)
+    elif run.get("blocked_on"):
+        s = _by_name(run.get("plan") or []).get(run["blocked_on"])
+        if not s or s.get("state") != "blocked":
+            run["state"] = "running"
+            run.pop("blocked_on", None)
+
+
 def _save(run: dict, touch_session: bool = True):
-    """Write the run atomically through state. The caller loaded it inside the same _tx."""
+    """Write the run atomically through state, settled first (_settle). The caller loaded it inside the same _tx."""
+    _settle(run)
     p = run_path(run["agent"], run["session"])
     with state.hold(p):
         state.replace(p, run, indent=1)
@@ -807,8 +897,10 @@ def _project(cwd=None) -> str:
         return ""
 
 
-def headline(run: dict, now: float | None = None) -> str:
-    """'2/6 · 42m active (1h05m wall) of ~3h00m · ETA ~24m–37m · 2 agents working'"""
+def headline(run: dict, now: float | None = None, states=None) -> str:
+    """'2/6 · 42m active (1h05m wall) of ~3h00m · ETA ~24m–37m · 2 agents working · 1 agent stale': the members
+    that still work and those that went stale (lane_states, read when `states` is None); one that ended is not
+    counted."""
     now = now or time.time()
     run = normalize(run)
     plan = run.get("plan") or []
@@ -823,9 +915,11 @@ def headline(run: dict, now: float | None = None) -> str:
         parts.append(f"ETA {fmt_range(lo, hi)}")
     else:
         parts.append(run.get("state", ""))
-    working = sum(1 for a in (run.get("agents") or {}).values() if a.get("state") == "running")
-    if working:
-        parts.append(f"{working} agent{'s' if working > 1 else ''} working")
+    live = [v["state"] for v in (lane_states(run, now) if states is None else states).values()]
+    for word in ("working", "stale"):
+        n = live.count(word)
+        if n:
+            parts.append(f"{n} agent{'s' if n > 1 else ''} {word}")
     return " · ".join(parts)
 
 
@@ -878,9 +972,14 @@ def start(goal: str, steps: int = 0, estimate: str = "", cwd: str | None = None,
                 raise StepError(f"a run is live in this session: “{live['goal']}” ({done_} of "
                                 f"{len(live.get('plan') or [])} steps). Add to it (dev progress add), end it (dev "
                                 f"progress done), or replace it: dev progress start … --replace --why \"<reason>\"")
+            # its pending decisions belong to it: closed, and kept with the reason in the run that replaces it
+            closed = _close_decisions(live, f"run replaced: {why.strip()[:240]}", now, history_run=run)
             run["replaced"] = {"goal": live["goal"], "started": live.get("started"), "ts": round(now),
                                "why": why.strip()[:300]}
+            if closed:
+                run["replaced"]["decisions"] = closed
             _audit("progress.replace", live["goal"][:120], why.strip()[:300], project=run.get("project") or "")
+            _audit_closed(run, closed)
         _save(run)
     _publish()
     return run
@@ -907,10 +1006,21 @@ def _find_step(run, which):
         next((s for s in plan if lw in s["name"].lower()), None)
 
 
+def _rechecked(run, s) -> bool:
+    """A step flagged recheck that finishes now, after every reopened step it used is closed again, did its work on
+    their new version: its flag clears. -> whether it cleared"""
+    by_name = _by_name(run.get("plan") or [])
+    if s.get("recheck") and all((by_name.get(n) or {}).get("state", "done") in DONE for n in s["recheck"]):
+        s.pop("recheck")
+        return True
+    return False
+
+
 def _finish_step(run, s, now, agent, sid):
     if s.get("state") == "done":
         return
     s.update(state="done", finished=now)
+    _rechecked(run, s)
     s["started"] = s.get("started") or now
     record("step", agent, sid, s["name"], step_minutes(run, s, now) * 60, run.get("project", ""),
            estimate=s.get("est") or 0, est_auto=bool(s.get("est_auto")), owner="main" if s.get("owner") == "main"
@@ -942,8 +1052,19 @@ def _main_only(from_agent, what: str, cwd: str | None = None):
         _audit("caller.unverified", what, f"{who.get('agent')} session {str(who.get('session'))[:40]}: devkit cannot "
                f"verify who calls yet (spec C4, S3)", "allowed")
         return
-    _audit("caller.refused", what, f"caller {c}; session found by {who.get('how')}", "deny",
+    here = f"{who.get('agent')}:{who.get('session')}"
+    elsewhere = [f"{a}:{s}" for a, s in _ledger_sessions(sys.argv[1:]) if f"{a}:{s}" != here]
+    _audit("caller.refused", what, f"caller {c}; session found by {who.get('how')}"
+           + (f"; the open call is in {', '.join(x[:40] for x in elsewhere[:3])}" if elsewhere else ""), "deny",
            session=str(who.get("session"))[:40])
+    if (c == "unknown" or not c) and elsewhere:
+        raise StepError(f"only the tech lead {what}, and devkit took this command for session {here} (found by "
+                        f"{who.get('how')}), whose call ledger holds no open call for it; the open call that typed it "
+                        f"is in session {', '.join(elsewhere[:3])}, which devkit does not take: a live process other "
+                        f"than this one holds it, it belongs to another repository or is older than 12 hours, or "
+                        f"more than one session holds the call. If that is this "
+                        f"conversation under a new session id (a compaction), its next prompt records this process "
+                        f"on it: send one message, then run the command again")
     if c == "unknown" or not c:
         raise StepError(f"only the tech lead {what}, and no open call of this session typed this command: type the "
                         f"command itself, not through a script or another shell, as a command of its own (spec C4)")
@@ -991,8 +1112,9 @@ def assign(which, label: str, cwd: str | None = None, now: float | None = None, 
            from_agent: str | None = None, why: str = "", activity: str = "", allow: str = "") -> dict:
     """Hand a plan step to a subagent: the next subagent launched with this description owns it, or a working lane
     of that member whose launch names the step and that holds no other step (_launch_takes; never a lane busy with
-    another step, B-fy9639hfz5t), and its time is that subagent's time. `scope`: the files it owns (comma-separated
-    globs); the guard keeps that subagent's edits inside them. The crew's RACI must make the member Responsible for
+    another step, B-fy9639hfz5t, nor one whose member ended or went stale, working_agents), and its time is that
+    subagent's time. `scope`: the files it owns (comma-separated globs); the guard keeps that subagent's edits inside
+    them, and only a working member's scope can refuse it. The crew's RACI must make the member Responsible for
     the step's kind of work; `why` overrides it, recorded. `activity`: the step's kind of work, an id from dev crew
     raci, which then decides whatever language the step is written in. `allow`: the tier-1 actions (push, pr) the
     member may take in this step, each only with the developer's evidence for it (their grant, or a verified
@@ -1031,9 +1153,10 @@ def assign(which, label: str, cwd: str | None = None, now: float | None = None, 
             _audit("crew.allow", s["name"], f"{label} may {', '.join(s['allow']) or 'take no irreversible action'}"
                    + (f"; no grant of the developer for {', '.join(missing)}" if missing else ""),
                    project=run.get("project") or "")
+        live = working_agents(run, now, own=True)  # one that ended or went stale takes no step and holds no files
         if globs:
-            for k, lane in (run.get("agents") or {}).items():
-                if lane.get("state") == "running" and not _label_matches(label, lane):
+            for _, lane in live:
+                if not _label_matches(label, lane):
                     clash = [g for g in globs for h in lane.get("scope") or [] if _globs_overlap(g, h)]
                     if clash:
                         from . import crew
@@ -1042,8 +1165,7 @@ def assign(which, label: str, cwd: str | None = None, now: float | None = None, 
                                         f"({', '.join(lane.get('scope'))}). Give each member different files, or "
                                         f"wait until they finish.")
             s["scope"] = globs
-        working = [k for k, v in (run.get("agents") or {}).items()
-                   if v.get("state") == "running" and _label_matches(label, v)]
+        working = [k for k, v in live if _label_matches(label, v)]
         lane_id = None if deps_open(run, s) else next((k for k in working if s.get("owner") == k
                                                        or _launch_takes(run, k, s)), None)
         if working and not lane_id and not deps_open(run, s) and s.get("state") not in DONE:
@@ -1055,8 +1177,10 @@ def assign(which, label: str, cwd: str | None = None, now: float | None = None, 
         if lane_id:
             s.update(owner=lane_id, state="running", started=s.get("started") or now)
             lane = run["agents"][lane_id]
+            lane.pop("handed_over", None)  # Morpheus gives it a step of its own
             if s.get("scope"):
                 lane["scope"] = s["scope"]
+                _hand_scope(run, s, lane_id, now)
             if lane.get("binding") == "unbound":  # Morpheus confirms a lane devkit had no launch record of
                 lane["binding"] = "confirmed"
                 _audit("crew.confirm", lane.get("persona") or label, f"Morpheus assigned “{s['name']}” to a lane "
@@ -1162,16 +1286,6 @@ def _globs_overlap(a: str, b: str) -> bool:
     return pa.startswith(pb) or pb.startswith(pa)
 
 
-def scope_owner(run, rel_path: str, me: str = "main"):
-    """The running crew member (other than `me`) whose scope covers this path -> (lane id, lane) or (None, None)."""
-    for k, lane in (run.get("agents") or {}).items():
-        if k == me or lane.get("state") != "running":
-            continue
-        if _in_globs(rel_path, lane.get("scope") or []):
-            return k, lane
-    return None, None
-
-
 def _in_globs(rel_path: str, globs) -> bool:
     """A repo-relative path matches one of a scope's globs ("lib/parser/**", "docs/", "README.md")."""
     import fnmatch
@@ -1204,6 +1318,312 @@ def expire_stale(run, now=None) -> bool:
                     s.update(state="pending", owner="main")
             changed = True
     return changed
+
+
+# --------------------------------------------------------------------------- who holds a file (dev crew owner)
+#
+# A lane its run lists as running holds its files only while its member works (hotfix 26.11.6). The member ended when
+# devkit or Claude Code saw it end, whichever session id the end came under: its lane ended in any run of this Mac, or
+# Claude Code's own record of the agent (agent-<id>.meta.json, beside whichever session transcript it now sits) says
+# finished, or its transcript ends with its interruption, and nothing was written after. It is stale when its session
+# ended or its session's process is gone, or when it has been silent for progress.stale_agent_minutes. Neither holds a
+# file. scope_holders decides for the edit check (hooks._crew_limits) and for `dev crew owner` alike.
+
+END_GRACE = 5  # seconds: Claude Code writes an agent's finished record moments after the agent's last transcript line
+
+
+def _lane_activity(lane: dict) -> float:
+    """The last time a run saw this lane at work: its start or resume, its hooks (last_seen), its updates."""
+    seen = [lane.get("started"), lane.get("resumed_at"), lane.get("recovered"), lane.get("last_seen")]
+    seen += [u.get("ts") for u in lane.get("updates") or [] if isinstance(u, dict)]
+    return max([float(t) for t in seen if isinstance(t, (int, float))] or [0.0])
+
+
+def _known_transcripts(folder=None) -> list:
+    """The main transcripts of the sessions devkit has a record of on this Mac (`folder`: the session records,
+    SESSIONS by default): Claude Code keeps each agent's record in a folder beside the transcript of the session the
+    conversation runs in now, which a compaction can change."""
+    out = []
+    folder = Path(folder) if folder else SESSIONS
+    for f in sorted(folder.glob("*.json")) if folder.exists() else []:
+        t = (core.read_json(f, {}) or {}).get("transcript")
+        if isinstance(t, str) and t.endswith(".jsonl") and t not in out:
+            out.append(t)
+    return out
+
+
+def agent_facts(runs: list, transcripts=None):
+    """-> `facts(agent id)`: {"ended": when devkit or Claude Code last saw the agent end (None when neither did),
+    "how": what saw it, "active": its last activity anywhere}. Read across every run in `runs` (a lane of that agent
+    that ended there, and the activity each run records) and Claude Code's record of the agent beside every
+    transcript devkit knows (approvals.meta_reader: finished, interrupted, its own transcript's last write)."""
+    from . import approvals
+    paths = _known_transcripts() if transcripts is None else transcripts
+    readers = [r for r in (approvals.meta_reader(t) for t in paths) if r]
+    seen = {}
+
+    def facts(aid: str) -> dict:
+        if aid in seen:
+            return seen[aid]
+        ended, how, active = None, "", 0.0
+        for run in runs:
+            ln = (run.get("agents") or {}).get(aid) if isinstance(run, dict) else None
+            if not isinstance(ln, dict):
+                continue
+            active = max(active, _lane_activity(ln))
+            if ln.get("state") in ENDED_LANE + ("unverified",) and isinstance(ln.get("finished"), (int, float)):
+                if ended is None or ln["finished"] > ended:
+                    ended, how = float(ln["finished"]), (f"its lane ended {ln['state']} in "
+                                                         f"{run.get('agent') or 'claude'}:{str(run.get('session'))[:12]}")
+        for read in readers:
+            m = read(aid) or {}
+            if m.get("transcript_mtime"):
+                active = max(active, float(m["transcript_mtime"]))
+            t = float(m["mtime"]) if m.get("finished") and m.get("mtime") else m.get("stopped")
+            if t and (ended is None or t > ended):
+                ended, how = float(t), ("Claude Code recorded it finished" if m.get("finished") else
+                                        "its transcript ends with its interruption")
+        seen[aid] = {"ended": ended, "how": how, "active": active}
+        return seen[aid]
+    return facts
+
+
+def _session_gone(run: dict, alive=None) -> str:
+    """Why the session that holds this run no longer works, or '': its record is gone (SessionEnd deletes it), it
+    ended, or its process is gone (approvals.pid_alive). Unknown counts as working: a run that names no session, a
+    record without a pid, a process devkit cannot check."""
+    from . import approvals
+    if not run.get("session"):
+        return ""
+    rec = core.read_json(session_path(run.get("agent") or "claude", str(run["session"])), None)
+    if not isinstance(rec, dict):
+        return "its session ended (its record is gone)"
+    if rec.get("ended"):
+        return "its session ended"
+    pid = rec.get("pid")
+    if pid and (alive or approvals.pid_alive)(pid, rec.get("pid_start")) is False:
+        return "its session's process is gone"
+    return ""
+
+
+def _clock(ts: float, now: float) -> str:
+    """'23:41 (4 min ago)'."""
+    ago = max(0.0, now - ts) / 60
+    return time.strftime("%H:%M", time.localtime(ts)) + (" (just now)" if ago < 1 else f" ({fmt_min(ago)} ago)")
+
+
+def lane_ended(run: dict, lane: dict, f: dict):
+    """When and how the member of a lane its run lists as running ended -> {"at", "how"}, or None while it may still
+    work: devkit or Claude Code saw it end (`f`, agent_facts of its agent) at or after its last activity anywhere.
+    A lane with no activity recorded counts from its run's start."""
+    last = max(_lane_activity(lane), f["active"]) or float(run.get("started") or 0)
+    if f["ended"] is not None and f["ended"] + END_GRACE >= last:
+        return {"at": f["ended"], "how": f["how"]}
+    return None
+
+
+def lane_state(run: dict, aid: str, lane: dict, facts, now: float | None = None, alive=None, own: bool = False,
+               gone: str | None = None) -> dict:
+    """How a lane its run lists as running really is -> {"state": "working" | "stale" | "ended", "last": its last
+    activity, "why"}. ended: devkit or Claude Code saw it end after its last activity (lane_ended); stale: its
+    session ended or its process is gone (not asked for the caller's own session; `gone`, when given, is
+    _session_gone already read), or it has been silent for progress.stale_agent_minutes (a lane with no activity
+    recorded, in a run with no start, is unknown, never silent); working: anything else."""
+    from . import approvals
+    now = now or time.time()
+    f = facts(aid)
+    last = max(_lane_activity(lane), f["active"]) or float(run.get("started") or 0)  # none recorded: since its run began
+    end = lane_ended(run, lane, f)
+    if end:
+        return {"state": "ended", "last": last, "why": f"{end['how']} at {_clock(end['at'], now)}"}
+    gone = "" if own else (_session_gone(run, alive) if gone is None else gone)
+    if gone:
+        return {"state": "stale", "last": last, "why": gone}
+    quiet = approvals.limits()["stale_minutes"]
+    if last and now - last > quiet * 60:  # no activity known at all, not even its run's start: unknown, not silent
+        return {"state": "stale", "last": last, "why": f"silent for {fmt_min((now - last) / 60)} "
+                                                       f"(progress.stale_agent_minutes is {quiet:g})"}
+    return {"state": "working", "last": last, "why": ""}
+
+
+def lane_states(run: dict, now: float | None = None, facts=None, alive=None, own: bool = False) -> dict:
+    """{lane id: lane_state} for every lane `run` lists as running: whether its member still works, went stale or
+    ended, as scope_holders decides for the files it holds. Everything that counts or lists the crew at work
+    (headline, crew_summary, slot_use, brief, working_agents, the continuity brief, the dashboard) reads it, so they
+    agree with `dev crew owner`. `facts`: agent_facts over this Mac's live runs and `run`, read when None. `own`: the
+    run is the caller's own, whose session works since the caller runs in it, so its session is not asked (as
+    scope_holders reads its own run). Unknown counts as working."""
+    lanes = {k: v for k, v in ((run or {}).get("agents") or {}).items()
+             if isinstance(v, dict) and v.get("state") == "running"}
+    if not lanes:
+        return {}
+    now = now or time.time()
+    facts = agent_facts(active_runs() + [run]) if facts is None else facts
+    gone = "" if own else _session_gone(run, alive)
+    return {aid: lane_state(run, aid, lane, facts, now, alive, gone=gone) for aid, lane in lanes.items()}
+
+
+def working_agents(run, now: float | None = None, states=None, own: bool = False) -> list:
+    """The lanes `run` lists as running whose member still works (lane_states; `own`: the caller's own run) ->
+    [(id, lane)], as running_agents lists them; a member that ended or went stale is not busy and holds no slot."""
+    states = lane_states(run, now, own=own) if states is None else states
+    return [(k, v) for k, v in running_agents(run) if (states.get(k) or {}).get("state", "working") == "working"]
+
+
+def lane_gone(aid: str, lane, states: dict):
+    """("ended" | "stale", why) when the member of lane `aid` no longer works, as `dev crew owner` reads it, else
+    None: its run closed the lane (done, stopped, lost, unverified), or lists it as running while its member ended or
+    went stale (`states`, lane_states of its run). A lane the run does not know, or a state not read, counts as
+    working (unknown)."""
+    if not isinstance(lane, dict) or not lane.get("state"):
+        return None
+    if lane["state"] != "running":
+        return "ended", f"its lane is {lane['state']}"
+    lv = states.get(aid) or {}
+    return (lv["state"], lv.get("why") or "") if lv.get("state") in ("ended", "stale") else None
+
+
+def _member_lanes(run, ref: str, now: float | None = None) -> tuple:
+    """The lanes of the member `ref` names in the caller's own run -> (working, gone): [(id, lane)] whose member still
+    works, and [(id, lane, lane_gone)] whose member ended or went stale."""
+    hits = [(k, v) for k, v in (run.get("agents") or {}).items() if isinstance(v, dict) and _label_matches(ref, v)]
+    states = lane_states(run, now, own=True) if any(v.get("state") == "running" for _, v in hits) else {}
+    marks = [(k, v, lane_gone(k, v, states)) for k, v in hits]
+    return [(k, v) for k, v, g in marks if not g], [(k, v, g) for k, v, g in marks if g]
+
+
+def _holder(run: dict, aid: str, lane: dict, globs, facts, now: float, alive, own: bool) -> dict:
+    from . import crew
+    m = crew._for_lane(lane)
+    who = crew.who(m) if m else (lane.get("persona") or lane.get("label") or "a crew member")
+    st = next((s for s in run.get("plan") or [] if isinstance(s, dict) and s.get("owner") == aid
+               and s.get("state") not in DONE), None)
+    lv = lane_state(run, aid, lane, facts, now, alive, own)
+    to = m["id"] if m else shlex.quote(lane.get("label") or who)
+    do = {"working": f"wait until they finish, or ask: dev crew ask --to {to} \"…\"",
+          "stale": "nothing: a stale lane holds nothing",
+          "ended": "nothing: they ended, so they hold nothing"}[lv["state"]]
+    return {"who": who, "member": m["id"] if m else None, "lane": aid, "agent": run.get("agent") or "claude",
+            "session": str(run.get("session") or ""), "run": run.get("goal") or "",
+            "step": (st or {}).get("name") or "", "scope": sorted(g for g in globs if isinstance(g, str)),
+            "own": own, "to": to, "do": do, **lv}
+
+
+def scope_holders(path, agent: str, sid: str, cwd: str | None = None, me: str = "main", now: float | None = None,
+                  alive=None) -> list:
+    """Every crew lane its run lists as running whose files hold `path`, in the order the edit check reads them:
+    other sessions' live runs first (guard.scope_owner_across, given one lane at a time: the lane's scope and its
+    open steps' scopes, in the checkout that holds the path), then this session's own run (the lane's scope, counted
+    from the run's repository; `me`, the caller's own lane, excluded). Each holder: who, member, lane, agent,
+    session, run, step, scope, own, to, do, and its lane_state (state, last, why). Only a working holder holds the
+    file: the edit check refuses on the first one (scope_holder) and `dev crew owner` exits 1 for it."""
+    from . import guard
+    now = now or time.time()
+    cwd = str(cwd or os.getcwd())
+    ap = os.path.normpath(os.path.join(cwd, str(path)))
+    runs = [r for r in active_runs() if isinstance(r, dict)]
+    mine = load_run(agent, sid)
+    every = runs + ([mine] if isinstance(mine, dict) and not any(
+        str(r.get("session")) == str(sid) and r.get("agent") == agent for r in runs) else [])
+    facts, tops, out = agent_facts(every), {}, []
+
+    def top(run):
+        key = (run.get("agent"), str(run.get("session")), run.get("project"))
+        if key not in tops:
+            tops[key] = guard._run_checkout(run)
+        return tops[key]
+    for run in runs:
+        if run.get("state") == "done" or str(run.get("session") or "") == str(sid):
+            continue
+        for aid, lane in (run.get("agents") or {}).items():
+            if not isinstance(lane, dict) or lane.get("state") != "running":
+                continue
+            if guard.scope_owner_across(ap, runs=[dict(run, agents={aid: lane})], me_session=sid, checkout_of=top):
+                globs = set(lane.get("scope") or []) | {g for s in run.get("plan") or [] if isinstance(s, dict)
+                                                        and s.get("owner") == aid and s.get("state") not in DONE
+                                                        for g in s.get("scope") or []}
+                out.append(_holder(run, aid, lane, globs, facts, now, alive, own=False))
+    if isinstance(mine, dict) and mine.get("state") != "done":
+        run = normalize(mine)
+        expire_stale(run, now)
+        rel = guard.scope_rel(path, cwd, guard.scope_base(run.get("project"), cwd))
+        for aid, lane in (run.get("agents") or {}).items():
+            if aid != me and isinstance(lane, dict) and lane.get("state") == "running" and \
+                    _in_globs(rel, lane.get("scope") or []):
+                out.append(_holder(run, aid, lane, lane.get("scope") or [], facts, now, alive, own=True))
+    return out
+
+
+def scope_holder(path, agent: str, sid: str, cwd: str | None = None, me: str = "main", now: float | None = None):
+    """The first working holder of `path` (scope_holders), or None: what the edit check refuses on."""
+    return next((h for h in scope_holders(path, agent, sid, cwd, me, now) if h["state"] == "working"), None)
+
+
+def shown_path(path, cwd: str | None = None) -> str:
+    """A path as the developer reads it: relative to `cwd` when it lies inside it, else as given."""
+    cwd = str(cwd or os.getcwd())
+    ap = os.path.normpath(os.path.join(cwd, str(path)))
+    rel = os.path.relpath(ap, cwd)
+    return str(path) if rel.startswith("..") else rel
+
+
+def holder_refusal(h: dict, path, cwd: str | None = None, now: float | None = None) -> str:
+    """The edit check's refusal for a working holder: who, their scope, where (another session's run), their last
+    activity, how to ask them, and the command that checks again."""
+    shown = shown_path(path, cwd)
+    where = "" if h.get("own") else (f", in another session of this repository (run «{str(h.get('run'))[:60]}», "
+                                     f"session {h['session'][:12]})")
+    return (f"{shown} belongs to {h['who']} while they work (scope {', '.join(h['scope'])}){where}; last activity "
+            f"{_clock(h['last'], now or time.time())}. Ask them (dev crew ask --to {h['to']} \"…\") or wait until "
+            f"they finish, and check again with dev crew owner {shlex.quote(shown)}; DEVKIT_SCOPE_OVERRIDE=1 only "
+            f"for an emergency.")
+
+
+def owner_text(rows: list, now: float | None = None) -> str:
+    """`dev crew owner`: each path, free or held, and every lane whose scope covers it with its state and what to do."""
+    now = now or time.time()
+    lines = []
+    for r in rows:
+        lines.append(f"{r['path']}  " + (f"{ui.OK} free" if r["free"] else f"{ui.WARN} held"))
+        for h in r["holders"]:
+            why = f": {h['why']}" if h.get("why") else ""
+            lines.append(f"  {h['who']} · {h['state']}{why} · last activity {_clock(h['last'], now)}")
+            where = "this session's run" if h.get("own") else f"session {h['session'][:12]}"
+            lines.append(ui.dim(f"    run «{str(h['run'])[:60]}» · {where}" + (f" · step {h['step']}" if h['step'] else "")
+                                + f" · scope {', '.join(h['scope'])}"))
+            lines.append(f"    {h['do']}")
+    return "\n".join(lines)
+
+
+def close_quiet_lanes(run: dict, why: str, now: float | None = None, alive=None) -> list:
+    """The lanes this run lists as running whose member ended or went stale (lane_state) close, as the reconciler
+    closes them (approvals.apply): an interrupted one stopped (approvals.stop_moves), one that finished with no stop
+    in this run unverified with its running steps, a stale one lost with its running steps back with Morpheus. Each
+    transition's reason in the run's history starts with `why`. Changes the run in place. -> the transitions made"""
+    from . import approvals
+    now = now or time.time()
+    runs = [r for r in active_runs() if isinstance(r, dict)
+            and (r.get("agent"), str(r.get("session"))) != (run.get("agent"), str(run.get("session")))] + [run]
+    facts, moves = agent_facts(runs), []
+    for aid, lane in sorted((run.get("agents") or {}).items()):
+        if not isinstance(lane, dict) or lane.get("state") != "running":
+            continue
+        lv = lane_state(run, aid, lane, facts, now, alive)
+        if lv["state"] == "working":
+            continue
+        mine = [s for s in run.get("plan") or [] if s.get("owner") == aid and s.get("state") == "running"]
+        reason = f"{why}: {lv['why']}"
+        if lv["state"] == "ended" and "interruption" in lv["why"]:
+            moves += approvals.stop_moves(run, aid, reason, at=lv["last"])
+        elif lv["state"] == "ended":
+            reason += "; no report reached this run, so no evidence"
+            moves += [approvals._lane_move(aid, "running", "unverified", reason, at=facts(aid)["ended"])]
+            moves += [approvals._step_move(s, "unverified", aid, reason) for s in mine]
+        else:
+            reason += "; the step waits for a new owner"
+            moves += [approvals._lane_move(aid, "running", "lost", reason, at=lv["last"])]
+            moves += [approvals._step_move(s, "pending", "main", reason) for s in mine]
+    return approvals.apply(run, moves, now)
 
 
 def _label_matches(label: str, lane: dict) -> bool:
@@ -1243,19 +1663,52 @@ def lane_of(agent: str, sid: str, agent_id: str):
     return run, (run.get("agents") or {}).get(agent_id)
 
 
-def _addr(run, ref: str):
-    """'Morpheus'/'lead'/'main'/'' -> 'main'; a crew name or label -> that lane's id (or the name, for later)."""
-    r = (ref or "").strip()
-    if not r or r.lower() in ("main", "lead", "morpheus", "tech lead"):
+_TECH_LEAD = re.compile(r"(?:the\s+)?(?:main|lead|morpheus|tech[\s-]?lead)(?:\s*\((?:morpheus|(?:the\s+)?tech[\s-]?lead)"
+                        r"\))?", re.IGNORECASE)
+
+
+def _addr(run, ref: str, now: float | None = None):
+    """'Morpheus', 'the tech lead', 'Tech lead (Morpheus)', 'lead', 'main', '' -> 'main'; a lane id -> that lane; a
+    crew name or label -> the lane of that member that still works (_member_lanes, as `dev crew owner` reads it), or
+    the name, for their next launch: a member with no lane, or whose lanes ended or went stale, where nobody reads."""
+    r = " ".join((ref or "").split())
+    if not r or _TECH_LEAD.fullmatch(r):
         return "main"
     agents = run.get("agents") or {}
     if r in agents:
         return r
-    hits = [(k, v) for k, v in agents.items() if _label_matches(r, v)]
-    if hits:  # the member's working lane, bound to its launch, before an older or finished one
-        return max(hits, key=lambda kv: (kv[1].get("state") == "running", kv[1].get("binding", "exact") == "exact",
-                                         kv[1].get("started") or 0))[0]
+    working, _ = _member_lanes(run, r, now)
+    if working:  # the member's working lane, bound to its launch, before an older one
+        return max(working, key=lambda kv: (kv[1].get("binding", "exact") == "exact", kv[1].get("started") or 0))[0]
     return "name:" + r
+
+
+def _waits_notice(run, m: dict, frm: str, now: float | None = None) -> str:
+    """For a message addressed to a member's next launch (_addr) because the lanes they had ended or went stale: what
+    tells its sender so, and what to do (the tech lead launches them again; a member asks the tech lead to), or ''."""
+    _, gone = _member_lanes(run, m["to"][5:], now)
+    if not gone:
+        return ""
+    from . import crew
+    _, lane, (state, why) = max(gone, key=lambda x: x[1].get("started") or 0)
+    mem = crew._for_lane(lane)
+    who = crew.who(mem) if mem else crew.who(_lane_name(lane))
+    again = (f"launch them again (dev crew brief {mem['id'] if mem else shlex.quote(m['to'][5:])} \"…\")"
+             if frm == "main" else "ask the tech lead to launch them again (dev crew ask \"…\")")
+    return (f"{who} {'went stale' if state == 'stale' else 'ended'}: {why}. {m['id']} waits for their next launch: "
+            f"{again}, or ask someone else (dev crew ask --to <member> \"…\").")
+
+
+def _reply_to(run, aid: str, now: float | None = None) -> str:
+    """Where a reply to lane `aid` goes (the answer to its question, the result of its decision): that lane while its
+    member works, as `dev crew owner` reads it (lane_gone over lane_states of the caller's own run; a lane the run
+    does not know counts as working); else the member's name, which crew_ask addresses (_addr) to their working lane
+    or to their next launch, telling the sender (_waits_notice). A lane with no name to address keeps its id."""
+    lane = (run.get("agents") or {}).get(aid)
+    if not isinstance(lane, dict) or not (lane.get("persona") or lane.get("label")):
+        return aid
+    states = lane_states(run, now, own=True) if lane.get("state") == "running" else {}
+    return _lane_name(lane) if lane_gone(aid, lane, states) else aid
 
 
 def _name_of(run, addr: str) -> str:
@@ -1272,8 +1725,9 @@ def _name_of(run, addr: str) -> str:
 def crew_ask(text: str, to: str | None = None, from_agent: str | None = None, cwd: str | None = None, now: float | None = None,
              kind: str = "message") -> dict:
     """A question or request between crew members (default: to Morpheus, the main session). It reaches the recipient
-    with its next tool call (PostToolUse) or prompt. The audit trail keeps its kind and length, never its text (crew
-    messages quote the developer's requests)."""
+    with its next tool call (PostToolUse) or prompt. `kind`: "message" (a question, or a notice when CI watch or devkit
+    sends it), "notice" (it tells, and waits for no answer) or "answer". The audit trail keeps its kind and length,
+    never its text (crew messages quote the developer's requests)."""
     now = now or time.time()
     from_agent = _as_lane(from_agent, cwd)
     agent, sid = current_session(cwd)
@@ -1282,7 +1736,11 @@ def crew_ask(text: str, to: str | None = None, from_agent: str | None = None, cw
         if not run:
             raise ValueError("no progress run in this session: the tech lead starts one with dev progress start")
         run = normalize(run)
-        m = _post(run, from_agent or "main", _addr(run, to or ""), text, now)
+        frm = from_agent or "main"
+        m = _post(run, frm, _addr(run, to or "", now), text, now, kind=kind if kind in ("notice", "answer") else "")
+        told = _waits_notice(run, m, frm, now) if m["to"].startswith("name:") and frm not in NOTICE_SENDERS else ""
+        if told:  # never silently: the sender learns with its next tool call that nobody reads it now
+            _post(run, "devkit", frm, told, now, from_name="devkit", kind="notice")
         _save(run, touch_session=False)
     _audit("crew.message", f"{m['from_name']} → {m['to_name']}", "", project=run.get("project") or "", id=m["id"],
            type=kind, count=len(m["text"]))
@@ -1295,15 +1753,35 @@ def _next_id(items: list, prefix: str) -> str:
     return f"{prefix}{max(nums, default=0) + 1}"
 
 
-def _post(run, frm: str, to: str, text: str, now: float, from_name: str = "") -> dict:
-    """Add a message to the run (the caller saves it). -> the message."""
+NOTICE_SENDERS = ("ci", "devkit")  # CI watch and devkit itself tell; they never ask
+
+
+def _post(run, frm: str, to: str, text: str, now: float, from_name: str = "", kind: str = "") -> dict:
+    """Add a message to the run (the caller saves it). `kind`: question, notice or answer; without it, a notice from
+    CI watch or devkit, else a question. -> the message."""
     msgs = run.setdefault("messages", [])
     m = {"id": _next_id(msgs, "M"), "ts": round(now), "from": frm, "to": to, "text": text.strip()[:1500],
-         "delivered": False}
+         "delivered": False, "kind": kind or ("notice" if frm in NOTICE_SENDERS else "question")}
     m["from_name"], m["to_name"] = from_name or _name_of(run, frm), _name_of(run, to)
     msgs.append(m)
     run["messages"] = msgs[-200:]
     return m
+
+
+def _asks(m: dict) -> bool:
+    """Does the message ask something? A message written before messages had a kind asks unless CI watch or devkit
+    sent it or it answers another."""
+    if m.get("kind"):
+        return m["kind"] == "question"
+    return not (m.get("from") in NOTICE_SENDERS or m.get("from_name") == "devkit" or m.get("reply_to"))
+
+
+def waiting_messages(run, to: str = "main") -> list:
+    """The messages to `to` (the tech lead by default) that ask a question nobody has answered yet: delivered or
+    not, they wait. A notice (CI watch, a step or launch notice, a decision's result) never waits."""
+    msgs = [m for m in (run or {}).get("messages") or [] if isinstance(m, dict)]
+    replied = {m.get("reply_to") for m in msgs if m.get("reply_to")}
+    return [m for m in msgs if m.get("to") == to and _asks(m) and not m.get("answered") and m.get("id") not in replied]
 
 
 def crew_answer(msg_id: str, text: str, from_agent: str | None = None, cwd: str | None = None, now: float | None = None) -> dict:
@@ -1316,13 +1794,15 @@ def crew_answer(msg_id: str, text: str, from_agent: str | None = None, cwd: str 
             raise ValueError(f"no message {msg_id}")
         q["answered"] = True
         _save(run, touch_session=False)
-    a = crew_ask(text, to=q["from"] if q["from"] != "main" else "main", from_agent=from_agent, cwd=cwd, now=now,
-                 kind="answer")
+    to = _reply_to(run, q["from"], now)  # the asking lane while its member works, else the member by name
+    a = crew_ask(text, to=to, from_agent=from_agent, cwd=cwd, now=now, kind="answer")
     with _tx(agent, sid):
         run = normalize(load_run(agent, sid) or {})
         for m in run.get("messages") or []:
             if m["id"] == a["id"]:
-                m["reply_to"], m["to"], m["to_name"] = q["id"], q["from"], q["from_name"]
+                m["reply_to"] = q["id"]
+                if to == q["from"]:  # by the lane's id, even one the run no longer knows (_addr would read a name)
+                    m["to"], m["to_name"] = q["from"], q["from_name"]
         _save(run, touch_session=False)
     return a
 
@@ -1601,6 +2081,8 @@ def ask_calls(run: dict, ids=None) -> dict:
                 raise StepError(f"no decision {i} in this session's run: dev crew decisions")
             if d.get("state") == "decided" and d.get("verified"):
                 raise StepError(f"{d['id']} was already decided by the developer: “{d.get('answer')}”")
+            if _not_open(d):
+                raise StepError(_not_open(d))
             picked += [d] if d not in picked else []
         picked.sort(key=lambda x: int(x["id"][1:]))
     else:
@@ -1682,7 +2164,6 @@ def crew_decision(question: str, options=None, recommend: str = "", irreversible
             if from_agent:
                 lane = (run.get("agents") or {}).get(from_agent)
                 if lane:
-                    lane["state_before_wait"] = lane.get("state")
                     lane["waiting"] = d["id"]
                 for s in run.get("plan") or []:
                     if s.get("owner") == from_agent and s.get("state") == "running":
@@ -1704,9 +2185,10 @@ def crew_decision(question: str, options=None, recommend: str = "", irreversible
 
 def crew_decide(decision_id: str, answer: str, cwd: str | None = None, now: float | None = None) -> dict:
     """Record the developer's answer (Morpheus runs it after asking): the waiting member's step runs again, and a
-    message with the answer waits for that member (delivered when Morpheus resumes it). Who decided is computed,
-    never typed (spec C5): the developer, verified, when an unused piece of their evidence (E1, E2) given after the
-    decision was shown covers it; otherwise Morpheus, unverified, and an irreversible decision stays pending."""
+    message with the answer waits for that member (delivered when Morpheus resumes it, or to their next launch when
+    their lane ended: _reply_to). Who decided is computed, never typed (spec C5): the developer, verified, when an
+    unused piece of their evidence (E1, E2) given after the decision was shown covers it; otherwise Morpheus,
+    unverified, and an irreversible decision stays pending."""
     now = now or time.time()
     _main_only(None, "records the developer's answers", cwd)
     agent, sid = current_session(cwd)
@@ -1716,6 +2198,8 @@ def crew_decide(decision_id: str, answer: str, cwd: str | None = None, now: floa
         d = _decision(run, decision_id)
         if not d:
             raise StepError(f"no decision {decision_id}")
+        if _not_open(d):
+            raise StepError(_not_open(d))
         if d["state"] == "decided" and d.get("by") != "auto" and d.get("verified") is not False:
             raise StepError(f"{d['id']} was already decided by {d['by']}: “{d['answer']}”")
         return d
@@ -1745,22 +2229,96 @@ def crew_decide(decision_id: str, answer: str, cwd: str | None = None, now: floa
             d["chosen"] = _chosen(d, ev)  # the developer's own choice; it alone opens an action (approves_action)
         if prev and prev != d["answer"]:
             d["overrides"] = prev  # the developer changed an automatic decision
-        for s in run.get("plan") or []:
-            if s.get("waiting") == d["id"]:
-                _log_change(run, s, s.get("state"), "running", "main", f"{d['id']} decided: {d['answer'][:80]}", now)
-                s["state"] = "running"
-                s.pop("waiting", None)
-        for lane in (run.get("agents") or {}).values():
-            if lane.get("waiting") == d["id"]:
-                lane.pop("waiting", None)
-                lane["state"] = lane.pop("state_before_wait", None) or "running"
+        _unblock(run, d, now)
         _save(run, touch_session=False)
     _audit("crew.decided", d["id"], d["answer"][:300], project=run.get("project") or "", by=d["by"],
            overrides=d.get("overrides") or "", verified=d["verified"], channel=(ev or {}).get("channel") or "",
            transcript_uuid=(ev or {}).get("transcript_uuid") or "", session=f"{agent}:{sid}",
            options=d.get("options") or [])
-    if d["from"] != "main":
-        crew_ask(f"Decision {d['id']} — {d['question'][:120]} → {d['answer']}", to=d["from"], cwd=cwd, now=now)
+    if d["from"] != "main":  # the asking lane while its member works, else the member's working lane or next launch
+        crew_ask(f"Decision {d['id']} — {d['question'][:120]} → {d['answer']}", to=_reply_to(run, d["from"], now),
+                 cwd=cwd, now=now, kind="notice")
+    return d
+
+
+def _release(run, d: dict, why: str, now: float) -> list:
+    """The steps blocked on decision `d`, once it is decided or withdrawn (`why` says which): each runs again while
+    its member works, and waits for a new launch (pending, back with Morpheus, its scope kept, announced ready) when
+    its member ended or went stale, as `dev crew owner` reads it (lane_gone over lane_states of the caller's own run;
+    a lane the run does not know counts as working). A lane never runs again because of an answer (its wait never
+    changed its state); a step that moved on meanwhile stays as it is. -> the steps sent back for a new launch"""
+    from . import crew
+    agents, states, back = run.get("agents") or {}, None, []
+    for s in run.get("plan") or []:
+        if s.get("waiting") != d["id"]:
+            continue
+        s.pop("waiting", None)
+        if s.get("state") != "blocked":
+            continue
+        owner = s.get("owner") or "main"
+        lane = agents.get(owner)
+        if states is None and isinstance(lane, dict) and lane.get("state") == "running":
+            states = lane_states(run, now, own=True)
+        g = lane_gone(owner, lane, states or {}) if owner != "main" else None
+        if g:
+            _log_change(run, s, "blocked", "pending", "main", f"{why}; its owner {crew.who(_lane_name(lane))} had "
+                        f"{'gone stale' if g[0] == 'stale' else 'ended'}: {g[1]}, so the step waits for a new launch",
+                        now)
+            s.update(state="pending", owner="main")
+            if lane["state"] != "running":
+                s["lost_from"] = owner  # a lost lane seen again takes it back (approvals.reconcile)
+            else:  # never from a lane its run lists as running: approvals.reconcile counts that lane working through
+                s.pop("lost_from", None)  # finish_grace, and would hand the step back to it at the next hook
+            back.append(s)
+        else:
+            _log_change(run, s, "blocked", "running", "main", why, now)
+            s["state"] = "running"
+    for lane in agents.values():
+        if lane.get("waiting") == d["id"]:
+            lane.pop("waiting", None)
+            lane.pop("state_before_wait", None)  # kept by runs saved before an answer stopped reviving lanes
+    return back
+
+
+def _unblock(run, d: dict, now: float):
+    """A decided decision unblocks what waits on it (_release)."""
+    _release(run, d, f"{d['id']} decided: {d['answer'][:80]}", now)
+
+
+def crew_withdraw(decision_id: str, why: str, from_agent: str | None = None, cwd: str | None = None,
+                  now: float | None = None) -> dict:
+    """The tech lead withdraws a pending decision (`dev crew withdraw <id> --why`): state withdrawn, with the reason
+    in the run's history and the audit trail. A step blocked on it runs again, or waits for a new launch when its
+    member ended or went stale (_release); the asking member is told to go on without an answer when its run still
+    lists its lane as running, or when the step it blocked waits for a new launch: its lane while it works, else its
+    working lane or next launch (_reply_to). Never the developer's answer: no evidence, no `chosen`, so it opens no
+    irreversible action (approves_action and use_grant read decided ones only), and it takes no answer later."""
+    _main_only(from_agent, "withdraws decisions", cwd)
+    now = now or time.time()
+    why = " ".join(str(why or "").split())
+    if not why:
+        raise StepError("say why: dev crew withdraw <id> --why \"…\" (it goes into the run's history and the audit)")
+    agent, sid = current_session(cwd)
+    with _tx(agent, sid):
+        run = normalize(load_run(agent, sid) or {})
+        d = _decision(run, decision_id)
+        if not d:
+            raise StepError(f"no decision {decision_id} in this session's run: dev crew decisions")
+        if d.get("state") != "pending":
+            raise StepError(_not_open(d) or f"{d['id']} is already decided ({d.get('answer')}): only a pending "
+                                            f"decision is withdrawn")
+        d.update(state="withdrawn", withdrawn=round(now), why=why[:300])
+        _decision_history(run, d, "withdrawn", why, now)
+        back = _release(run, d, f"{d['id']} withdrawn: {why[:80]}", now)
+        lane = (run.get("agents") or {}).get(d.get("from") or "main")
+        tell = d.get("from") not in (None, "", "main") and isinstance(lane, dict) \
+            and (lane.get("state") == "running" or bool(back))  # it may wait, or the launch that takes its step will
+        _save(run, touch_session=False)
+    _audit("crew.withdrawn", d["id"], why[:300], "withdrawn", project=run.get("project") or "", by="morpheus",
+           why=why[:300], was="pending", session=f"{agent}:{sid}")
+    if tell:  # the asking lane while its member works, else the member's working lane or next launch
+        crew_ask(f"Decision {d['id']} was withdrawn by the tech lead: {why}. Go on without it; it is not the "
+                 f"developer's answer.", to=_reply_to(run, d["from"], now), cwd=cwd, now=now, kind="notice")
     return d
 
 
@@ -1778,8 +2336,87 @@ def _how_to_ask(d: dict) -> str:
             f"as you like, keeping “{d['id']} ·” up front and the option letters), or {typed}")
 
 
+ENDED_LANE = ("done", "stopped", "lost")  # a lost lane that is seen again runs again, and its decisions with it
+
+
+def _awaiting(run) -> list:
+    """Every decision in state pending, moot ones included: the developer's evidence is matched against these, so an
+    answer to a moot decision still counts and their latest word on it still voids an earlier yes."""
+    return [d for d in (run or {}).get("decisions") or [] if isinstance(d, dict) and d.get("state") == "pending"]
+
+
+def is_moot(run, d: dict) -> bool:
+    """A pending decision nobody waits for: the crew lane that asked it has ended (done, stopped, lost, or closed
+    unverified by the sweep) and no open step is blocked on it. The tech lead's own decisions, and those of a lane the run does not know, never are."""
+    if not isinstance(d, dict) or d.get("state") != "pending":
+        return False
+    lane = ((run or {}).get("agents") or {}).get(d.get("from") or "main")
+    if d.get("from") in (None, "", "main") or not isinstance(lane, dict) or \
+            lane.get("state") not in ENDED_LANE + ("unverified",):
+        return False
+    return not any(isinstance(s, dict) and s.get("waiting") == d.get("id") and s.get("state") == "blocked"
+                   for s in (run or {}).get("plan") or [])
+
+
 def pending_decisions(run) -> list:
-    return [d for d in (run or {}).get("decisions") or [] if d.get("state") == "pending"]
+    """The decisions that need the developer: pending and not moot. Closed, withdrawn and decided ones never do."""
+    return [d for d in _awaiting(run) if not is_moot(run, d)]
+
+
+def moot_decisions(run) -> list:
+    return [d for d in _awaiting(run) if is_moot(run, d)]
+
+
+def decision_state(run, d: dict) -> str:
+    """A decision's state as shown: "moot" for a pending one nobody waits for, else its recorded state."""
+    return "moot" if is_moot(run, d) else str(d.get("state") or "")
+
+
+def _moot_reason(run, d: dict) -> str:
+    from . import crew
+    return f"{crew.who(d.get('from_name') or _name_of(run, d.get('from') or 'main'))} ended, and no step waits on " \
+           f"{d.get('id')}"
+
+
+def moot_text(run, d: dict) -> str:
+    """Why a moot decision needs nobody, in one line: "Moot: Backend engineer (Tank) ended, and no step waits on
+    D1."."""
+    return f"Moot: {_moot_reason(run, d)}."
+
+
+def _decision_history(run, d: dict, to: str, why: str, now: float, was: str = "pending"):
+    run.setdefault("history", []).append({"ts": round(now), "step": f"(decision {d['id']})", "from": was, "to": to,
+                                          "by": "main", "why": (why or "")[:300]})
+    run["history"] = run["history"][-200:]
+
+
+def _close_decisions(run, reason: str, now: float, history_run=None) -> list:
+    """A run ends or is replaced: each of its pending decisions (moot ones too) becomes state closed with the
+    reason, and a line in the history of `history_run` (the run itself, or the run that replaces it). -> copies of
+    the closed decisions, for the audit after the save."""
+    closed = []
+    for d in _awaiting(run):
+        d.update(state="closed", closed=round(now), reason=reason[:300])
+        _decision_history(history_run if history_run is not None else run, d, "closed", reason, now)
+        closed.append(dict(d))
+    return closed
+
+
+def _audit_closed(run, closed: list):
+    for d in closed:
+        _audit("crew.decision-closed", d["id"], d.get("reason") or "", "closed", project=(run or {}).get("project") or "",
+               why=d.get("reason") or "", was="pending")
+
+
+def _not_open(d: dict) -> str:
+    """Why a closed or withdrawn decision takes no answer and no question any more; '' for any other."""
+    if d.get("state") == "withdrawn":
+        return f"{d['id']} was withdrawn by the tech lead ({d.get('why') or 'no reason'}): it takes no answer. Ask a " \
+               f"new decision if it matters again"
+    if d.get("state") == "closed":
+        return f"{d['id']} was closed ({d.get('reason') or 'its run ended'}): it takes no answer. Ask a new decision " \
+               f"if it matters again"
+    return ""
 
 
 def _ci(agent, sid) -> str:
@@ -2404,7 +3041,7 @@ def on_question(agent: str, data: dict, now: float | None = None) -> list:
     qs = [q for q in call or [] if isinstance(q, dict)]
     resp = data.get("tool_response") if isinstance(data.get("tool_response"), dict) else {}
     answers = resp.get("answers") if isinstance(resp.get("answers"), dict) else {}
-    pending = {d["id"] for d in pending_decisions(run)}
+    pending = {d["id"] for d in _awaiting(run)}
     ids = [asked_decision(q) for q in qs]
     shown, new, refused, voided = set(), [], {}, set()
     for q, did in ([] if member else zip(qs, ids)):
@@ -2435,7 +3072,7 @@ def on_question(agent: str, data: dict, now: float | None = None) -> list:
                           question=qt[:800], label=label[:300], session=sid))
     taken = {e["covers"] for e in new if not e.get("void")}
     notes = resp.get("annotations") if isinstance(resp.get("annotations"), dict) else {}
-    for d in pending_decisions(run):  # P16, P17: the developer's latest word on it too, fail closed
+    for d in _awaiting(run):  # P16, P17: the developer's latest word on it too, fail closed
         if not d.get("irreversible") or d["id"] in voided | taken or \
                 not any(_speaks_of(d, q, answers, notes) for q in qs):
             continue
@@ -2474,7 +3111,7 @@ def on_final_message(agent: str, sid: str, text: str, now: float | None = None):
         return
     ids = {f"D{n}" for n in _DECISION_REF.findall(str(text or ""))}
     run = load_run(agent, sid)
-    named = sorted((d["id"] for d in pending_decisions(run) if d["id"] in ids), key=lambda x: int(x[1:]))
+    named = sorted((d["id"] for d in _awaiting(run) if d["id"] in ids), key=lambda x: int(x[1:]))
     if named:
         _mark_shown(agent, sid, set(named), now)
     elif not ((state.read(f) or {}).get("last_shown") or {}).get("ids"):
@@ -3068,24 +3705,32 @@ def _log_change(run, s, old, new, who, why, now):
            by=_name_of(run, who or "main") if who != "devkit" else "devkit", was=old or "")
 
 
-def check_close(run, target, text, explicit, force=False):
-    """The safety checks before a step is closed. Raises StepError with what to do instead."""
+def check_close(run, target, text, explicit, force=False, now: float | None = None) -> str:
+    """The safety checks before a step is closed. Raises StepError with what to do instead. A running step its crew
+    member owns is refused while that member works; one whose member ended or went stale (lane_gone, as `dev crew
+    owner` reads it) closes on the tech lead's evidence like his own. -> '' or, for such a step, the words that tell
+    the run's history its owner had ended."""
     plan = run.get("plan") or []
     if target is None:
         raise StepError("no open step to close. Add the work as a step first: dev progress add \"<step>=<estimate>\"")
     if target.get("state") in ("done", "skipped"):
         raise StepError(f"step “{target['name']}” is already {target['state']}; to change it: "
                         f"dev progress reopen \"{target['name']}\" --why \"…\"")
-    if force:
-        return
     owner = target.get("owner") or "main"
+    gone = ""
     if owner != "main" and target.get("state") == "running":
         from . import crew
-        who = (run.get("agents") or {}).get(owner, {})
-        raise StepError(f"step “{target['name']}” belongs to "
-                        f"{crew.who(who.get('persona') or who.get('label') or 'a subagent')}, "
-                        f"still working on it; it closes when that agent finishes. Use --force only if it is "
-                        f"really done.")
+        lane = (run.get("agents") or {}).get(owner)
+        g = lane_gone(owner, lane, lane_states(run, now, own=True) if (lane or {}).get("state") == "running" else {})
+        if g:
+            gone = (f"its owner {crew.who(_lane_name(lane))} had {'gone stale' if g[0] == 'stale' else 'ended'}: "
+                    f"{g[1]}")
+        elif not force:
+            raise StepError(f"step “{target['name']}” belongs to {crew.who(_lane_name(lane or {}))}, "
+                            f"still working on it; it closes when that agent finishes. Use --force only if it is "
+                            f"really done.")
+    if force:
+        return gone
     waiting = deps_open(run, target)
     if waiting:
         raise StepError(f"step “{target['name']}” waits for {', '.join(waiting)}, not done yet. Close those first, "
@@ -3097,6 +3742,42 @@ def check_close(run, target, text, explicit, force=False):
         raise StepError(f"“{text[:80]}” does not describe step “{target['name']}”"
                         f"{' (you named it)' if explicit else ' (the running step)'}.{hint} Use --force if it really "
                         f"is that step.")
+    return gone
+
+
+def _refuse_members_working(run, now: float | None = None) -> dict:
+    """The run ends only when no crew member still works on a running step: ending it would close work its member
+    still does, and leave its lane running inside a finished run. A step whose owner ended or went stale (lane_gone
+    over lane_states of the caller's own run, as check_close and working_agents read it) does not hold the end; a
+    lane the run has no record of is unknown, which counts as working. Neither --force nor --why passes it. Raises
+    StepError naming each working member and step, and what to do instead. -> {step name: the words that tell the
+    run's history its owner had ended}, for the steps the end closes over an owner that ended"""
+    from . import crew
+    owned = [s for s in run.get("plan") or [] if s.get("state") == "running" and (s.get("owner") or "main") != "main"]
+    if not owned:
+        return {}
+    lanes_ = run.get("agents") or {}
+    states = lane_states(run, now, own=True) if any((lanes_.get(s["owner"]) or {}).get("state") == "running"
+                                                    for s in owned) else {}
+    working, gone = [], {}
+    for s in owned:
+        lane = lanes_.get(s["owner"])
+        g = lane_gone(s["owner"], lane, states)
+        if g:
+            gone[s["name"]] = (f"its owner {crew.who(_lane_name(lane))} had "
+                               f"{'gone stale' if g[0] == 'stale' else 'ended'}: {g[1]}")
+        else:
+            working.append(s)
+    if not working:
+        return gone
+    names = "; ".join(f"“{s['name']}” by {crew.who(_lane_name(lanes_.get(s['owner']) or {}))}" for s in working)
+    first = working[0]["name"]
+    raise StepError(f"crew members still work on steps of this run: {names}. Wait for their reports (each step closes "
+                    f"when its member stops), or skip a step on purpose: dev progress skip \"{first}\" --why \"…\"")
+
+
+def _lane_name(lane: dict) -> str:
+    return lane.get("persona") or lane.get("label") or "a subagent"
 
 
 def add_step(spec: str, cwd: str | None = None, now: float | None = None, why: str = "",
@@ -3181,6 +3862,44 @@ def reopen(which, why: str, cwd: str | None = None, now: float | None = None, sk
     return run
 
 
+def confirm(which, why: str, cwd: str | None = None, now: float | None = None, from_agent: str | None = None) -> dict:
+    """`dev progress confirm <step> --why "…"`: a step flagged recheck still holds with the new version of the
+    reopened steps it used, so its flag clears, with the reason in the run's history and the audit trail (the other
+    way out is to reopen and redo it). Refused without a reason, for a step with no flag, and while a step it used is
+    open again: there is nothing to check it against yet."""
+    _main_only(from_agent, "confirms the plan's steps", cwd)
+    now = now or time.time()
+    why = " ".join(str(why or "").split())
+    if not why:
+        raise StepError("say why it still holds: --why \"…\" (it goes into the run's history)")
+    agent, sid = current_session(cwd)
+    with _tx(agent, sid):
+        run = normalize(load_run(agent, sid) or {})
+        s = _find_step(run, which)
+        if not s:
+            raise StepError(f"no step “{which}” in the plan")
+        used = list(s.get("recheck") or [])
+        if not used:
+            raise StepError(f"step “{s['name']}” is not flagged recheck: nothing to confirm")
+        by_name = _by_name(run["plan"])
+        still = [n for n in used if (by_name.get(n) or {}).get("state", "done") not in DONE]
+        if still:
+            raise StepError(f"“{s['name']}” used {', '.join(f'“{n}”' for n in still)}, open again: confirm it once "
+                            f"{'that is' if len(still) == 1 else 'they are'} closed, or reopen “{s['name']}” and redo "
+                            f"it (dev progress reopen \"{s['name']}\" --why \"…\")")
+        s.pop("recheck")
+        run.setdefault("history", []).append({"ts": round(now), "step": s["name"], "from": s.get("state"),
+                                              "to": s.get("state"), "by": "main",
+                                              "why": f"confirmed after {', '.join(used)} changed: {why}"[:300]})
+        run["history"] = run["history"][-200:]
+        run["updates"].append({"ts": round(now), "kind": "confirm", "text": why, "step": s["name"]})
+        run["updates"] = run["updates"][-40:]
+        _save(run)
+    _audit("plan.confirmed", s["name"], f"after {', '.join(used)} changed: {why}"[:300],
+           project=run.get("project") or "", run=run.get("goal", "")[:80], by=_name_of(run, "main"))
+    return run
+
+
 def _recheck_dependents(run, s, now):
     """`s` was done (or skipped) and is open again. Its dependents, direct and further down, that are done or running
     stay so, flagged `recheck`: their work used the old version. A main-lane step running on `s` waits for it again."""
@@ -3261,9 +3980,12 @@ def step(text: str, nxt: str = "", cwd: str | None = None, kind: str = "step", c
          from_agent: str | None = None, now: float | None = None, force: bool = False, why: str = "",
          approves: str = "") -> dict:
     """Record a step of the run: Morpheus's closes a plan step, a member's goes to its lane; `approves` names the
-    finished steps the Check approves or sends back (approvals.record). kind "done" ends the run, refused while an
-    approval is owed or a step is flagged recheck, unless `why` (approvals.end_check)."""
+    finished steps the Check approves or sends back (approvals.record). kind "done" ends the run, refused while a
+    crew member still works on a step (_refuse_members_working), while an approval is owed or a step is flagged
+    recheck once the plan is closed, unless `why` (approvals.end_check), or while a decision still needs the
+    developer, unless `force`; the decisions still pending (moot ones too) close with the run."""
     now = now or time.time()
+    closed = []
     agent, sid = current_session(cwd)
     from_agent = _as_lane(from_agent, cwd)
     if kind == "done" and not from_agent:
@@ -3318,15 +4040,17 @@ def step(text: str, nxt: str = "", cwd: str | None = None, kind: str = "step", c
                 target = (running or [None])[0] or next((s for s in plan if s.get("state") in ("pending", "blocked")
                                                          and (s.get("owner") or "main") == "main"
                                                          and not s.get("label")), None)
+            gone = ""
             if not plan:  # a run without a plan: each step is recorded as it comes
                 target = _new_step(text[:60], est=None)
                 plan.append(target)
                 _allocate(run)
             else:
-                check_close(run, target, text, explicit, force)
+                gone = check_close(run, target, text, explicit, force, now)
             old_state = target.get("state")
             _finish_step(run, target, now, agent, sid)
-            _log_change(run, target, old_state, "done", "main", check or text, now)
+            _log_change(run, target, old_state, "done", "main",
+                        f"{gone}; closed on the tech lead's evidence: {check or text}" if gone else check or text, now)
             if approves:
                 _approve(run, "morpheus", approves, check, now)
             _advance_main(run, now)
@@ -3337,30 +4061,45 @@ def step(text: str, nxt: str = "", cwd: str | None = None, kind: str = "step", c
             if cur:
                 _log_change(run, cur, cur.get("state"), "blocked", "main", text, now)
                 cur["state"] = "blocked"
+                run["blocked_on"] = cur["name"]  # the run runs again once this step moves (_settle)
         elif kind == "done":
             waiting = pending_decisions(run)
             if waiting and not force:
                 raise StepError("decisions still waiting for the developer: " + ", ".join(
                     f"{d['id']} ({d['question'][:60]})" for d in waiting) + ". Ask, then dev crew decide <id> \"…\".")
-            from . import approvals
-            try:
-                over = approvals.end_check(run, why, now, lambda s_: member_of_step(run, s_))
-            except approvals.ApprovalError as e:
-                raise StepError(str(e))
-            if over:
-                run.setdefault("raci_overrides", []).append(over)
+            gone = _refuse_members_working(run, now)
             open_ = [s for s in plan if s.get("state") not in ("done", "skipped") and s.get("state") != "running"]
             if open_ and not force:
                 raise StepError("not finished: " + ", ".join(f"“{s['name']}” ({s.get('state')})" for s in open_) +
                                 ". Close or skip each one (dev progress skip \"<step>\" --why \"…\"), or use --force.")
+            closes = {s["name"] for s in plan if s.get("state") != "done" and (s.get("state") == "running" or s is target)}
+            from . import approvals
+            closed_plan = copy.deepcopy(run)  # the plan as this end leaves it: its approvals are checked on that
+            for s in closed_plan["plan"]:
+                if s["name"] in closes:
+                    s.update(state="done", finished=now)
+                elif s.get("state") not in DONE:
+                    s["state"] = "skipped"
+            for s in closed_plan["plan"]:
+                if s["name"] in closes:
+                    _rechecked(closed_plan, s)  # as _finish_step leaves it
+            try:
+                over = approvals.end_check(closed_plan, why, now, lambda s_: member_of_step(closed_plan, s_))
+            except approvals.ApprovalError as e:
+                raise StepError(str(e))
+            if over:
+                run.setdefault("raci_overrides", []).append(over)
             for s in plan:
                 if s.get("state") != "done":
                     old_state = s.get("state")
-                    if s.get("state") == "running" or s is target:
+                    if s["name"] in closes:
                         _finish_step(run, s, now, agent, sid)
                     else:
                         s["state"] = "skipped"
-                    _log_change(run, s, old_state, s["state"], "main", text, now)
+                    _log_change(run, s, old_state, s["state"], "main",
+                                f"{gone[s['name']]}; closed with the run's end: {text}" if s["name"] in gone else text,
+                                now)
+            closed = _close_decisions(run, "run ended", now)
             run.update(state="done", finished=now)
             _close(run, "turn", None, now)
             record("run", agent, sid, run.get("goal", ""), active_minutes(run, now=now) * 60, run.get("project", ""),
@@ -3372,6 +4111,7 @@ def step(text: str, nxt: str = "", cwd: str | None = None, kind: str = "step", c
                                "step": target["name"] if target else ""})
         run["updates"] = run["updates"][-40:]
         _save(run)
+    _audit_closed(run, closed)
     _publish()
     if kind in ("blocked", "done"):
         notify(f"{run.get('project') or 'devkit'} · {kind}", text)
@@ -3391,7 +4131,8 @@ def crew_summary(run: dict, limit: int = 4, now: float | None = None) -> str:
     (spec R7): "Tank ▸ the API · Kid ✓ installer · 1 of 4 slots in use". '' without crew members (the agent's own
     helpers are not the crew)."""
     from . import crew
-    lanes = []
+    now = now or time.time()
+    states, lanes = lane_states(run, now), []
     for aid, lane in (run.get("agents") or {}).items():
         m = crew._for_label(lane.get("persona") or "") if lane.get("persona") else None
         if not m:
@@ -3399,7 +4140,14 @@ def crew_summary(run: dict, limit: int = 4, now: float | None = None) -> str:
         step_ = next((s["name"] for s in run.get("plan") or [] if s.get("owner") == aid), "")
         what = step_ or (lane.get("label") or "").split(":", 1)[-1].strip()
         mark = {"running": "▸", "done": "✓", "lost": "✗", "stopped": "✗"}.get(lane.get("state"), "·")
-        lanes.append((lane.get("state") != "running", f"{crew.who(m)} {mark} {what}".strip()))
+        live = (states.get(aid) or {}).get("state", "working")
+        if lane.get("state") == "running" and live == "stale":  # a member that went quiet works no longer
+            mark, what = "✗", f"{what} (stale)"
+        elif lane.get("state") == "running" and live == "ended":  # its stop never reached the run, nor its report
+            stopped = "interruption" in states[aid]["why"]
+            mark, what = ("✗", f"{what} (stopped)") if stopped else ("⚠", f"{what} (ended, no report)")
+        works = lane.get("state") == "running" and live == "working"
+        lanes.append((not works, f"{crew.who(m)} {mark} {what}".strip()))
     if not lanes:
         return ""
     lanes.sort(key=lambda x: x[0])
@@ -3438,7 +4186,7 @@ def render_update(run: dict, branch: str | None = None, now: float | None = None
              f"- **Done:** {done or 'started'}",
              f"- **Check:** {check}",
              f"- **Progress:** {headline(run, now)}"]
-    crew_line = crew_summary(run)
+    crew_line = crew_summary(run, now=now)
     if crew_line:
         lines.append(f"- **Crew:** {crew_line}")
     waiting = pending_decisions(run)
@@ -3450,6 +4198,10 @@ def render_update(run: dict, branch: str | None = None, now: float | None = None
     if grants:  # what the developer granted, echoed in the status until it is used or expires (spec C5)
         lines += ["", "Granted: " + "; ".join(f"{e['covers']} by your prompt at {_when(e['ts'])}, until "
                                               f"{_when(e['expires'])}" for e in grants)]
+    moot = moot_decisions(run)
+    if moot:  # asked by a lane that ended, and no step waits on them: not the developer's, on a line of their own
+        lines += [""] + [f"Moot: {d['id']} · “{(d.get('question') or '')[:70]}”: {_moot_reason(run, d)}. It closes "
+                         f"with the run, or: dev crew withdraw {d['id']} --why \"…\"" for d in moot]
     if plan:
         lines.append("")
         for i, s in enumerate(plan, 1):
@@ -3464,6 +4216,10 @@ def render_update(run: dict, branch: str | None = None, now: float | None = None
                 parts.append(f"waiting for {_who_label(s['label'])}")
             if s.get("recheck"):
                 parts.append(f"recheck: {', '.join(s['recheck'])} reopened")
+            changed = other_writes_for(run, s) if s.get("state") not in DONE else []
+            if changed:
+                parts.append("changed by another lane: " + ", ".join(f"{p} ({by}, {c})" for p, by, c in changed[:5])
+                             + (f" and {len(changed) - 5} more" if len(changed) > 5 else ""))
             who = "".join(f" · {p}" for p in parts)
             if s.get("state") in ("done", "running"):
                 tm = f" · {fmt_min(step_minutes(run, s, now))} of ~{fmt_about(s.get('est') or 0)}"
@@ -3521,10 +4277,20 @@ def active_runs(max_age_h: float = 12) -> list:
     return sorted(out, key=lambda r: -r.get("started", 0))
 
 
+def _shown_lane(lane: dict, live) -> str:
+    """A lane's state as brief shows it: "running" only while its member works (`live`, its lane_state), "stale" or
+    "ended" for one its run still lists as running, else its recorded state."""
+    if lane.get("state") != "running" or not live:
+        return lane.get("state")
+    return {"working": "running"}.get(live["state"], live["state"])
+
+
 def brief(run: dict, now: float | None = None) -> dict:
-    """Compact form for presence and the dashboard."""
+    """Compact form for presence and the dashboard. A lane its run lists as running shows as its member really is
+    (lane_states): "running" while it works, else "stale" or "ended", with `live` and `why`."""
     now = now or time.time()
     run = normalize(run)
+    states = lane_states(run, now)
     last = next((u for u in reversed(run.get("updates") or []) if u.get("kind") != "agent"), {})
     lo, hi = eta_range(run, now) if run.get("state") == "running" else (None, None)
     return {"goal": run.get("goal"), "state": run.get("state"), "step": run.get("step"), "steps": run.get("steps"),
@@ -3537,10 +4303,11 @@ def brief(run: dict, now: float | None = None) -> dict:
                       "owner": "main" if (s.get("owner") or "main") == "main"
                       else ((run.get("agents") or {}).get(s["owner"], {}).get("label") or "subagent")}
                      for s in run.get("plan") or []],
-            "agents": [{"label": a.get("label") or a.get("type") or k[:8], "state": a.get("state"),
-                        "min": round(active_minutes(run, a.get("started"), a.get("finished") or now, now, k), 1)}
+            "agents": [{"label": a.get("label") or a.get("type") or k[:8], "state": _shown_lane(a, states.get(k)),
+                        "min": round(active_minutes(run, a.get("started"), a.get("finished") or now, now, k), 1),
+                        **({"live": states[k]["state"], "why": states[k]["why"]} if k in states else {})}
                        for k, a in (run.get("agents") or {}).items()],
-            "headline": headline(run, now), "last": last.get("text", ""), "next": last.get("next", ""),
+            "headline": headline(run, now, states), "last": last.get("text", ""), "next": last.get("next", ""),
             "updated": last.get("ts")}
 
 
@@ -3611,6 +4378,7 @@ def reconcile_hook(agent: str, data: dict, now: float | None = None) -> list:
     from . import approvals
     sid = data.get("session_id") or "-"
     now = now or time.time()
+    apply_stops(agent, sid)  # a member's report that found the lock busy, before its lane is judged without it
     stopped = agent_stopped(agent, data, now)
     run = load_run(agent, sid)
     if not isinstance(run, dict) or run.get("state") not in approvals.LIVE:
@@ -3657,10 +4425,7 @@ STOP_TOOLS = ("TaskStop", "KillShell")  # Claude Code's tool that stops a backgr
 
 def agent_stopped(agent: str, data: dict, now: float | None = None) -> list:
     """PostToolUse of TaskStop on a subagent's task (spec R6, B-fxsvxz9n78p): Claude Code fires no SubagentStop
-    for a stopped agent, so its slot is freed here, at the stop call's result. Its launch record stops holding a
-    slot; its working lane becomes stopped and the steps it owns unverified (no report, so no evidence), for
-    Morpheus to close with evidence or reopen. A stopped agent that works again (SendMessage) resumes its lane and
-    takes its slot back. -> the transitions made"""
+    for a stopped agent, so its lane ends here, at the stop call's result (lane_stopped). -> the transitions made"""
     resp = data.get("tool_response")
     if data.get("tool_name") not in STOP_TOOLS or not isinstance(resp, dict):
         return []  # PreToolUse has no result yet: the stop may still fail
@@ -3668,8 +4433,26 @@ def agent_stopped(agent: str, data: dict, now: float | None = None) -> list:
     tid = str(resp.get("task_id") or inp.get("task_id") or inp.get("shell_id") or "")
     if resp.get("task_type") not in (None, "local_agent") or not AGENT_ID.fullmatch(tid):
         return []
+    now = now or time.time()
+    return lane_stopped(tid, f"stopped by TaskStop at {time.strftime('%H:%M', time.localtime(now))}, before its report",
+                        agent=agent, sid=data.get("session_id") or "-", now=now)
+
+
+def lane_stopped(task_or_agent_id: str, reason: str, agent: str | None = None, sid: str | None = None,
+                 now: float | None = None) -> list:
+    """A subagent stopped before its report (TaskStop, an interruption): Claude Code fires no SubagentStop for it.
+    `task_or_agent_id`: its agent id (TaskStop's task id for an agent) or its launch's tool_use_id. Its launch stops
+    holding a crew slot; its lane ends stopped, which frees the lane's slot, and each open step it owns waits for a
+    new launch, unless a live lane of the same member holds it (approvals.stop_moves); the run's history and the
+    audit trail record each change with `reason`. A stopped agent that works again (SendMessage) resumes its lane and
+    takes its slot back. The session defaults to the current one. -> the transitions made"""
     from . import approvals
-    sid, now = data.get("session_id") or "-", now or time.time()
+    now = now or time.time()
+    if not (agent and sid):
+        agent, sid = current_session()
+    tid = str(task_or_agent_id or "")
+    if not AGENT_ID.fullmatch(tid):
+        return []
     f, aid = session_path(agent, sid), tid
     with state.hold(f):
         s = state.load(f)
@@ -3686,21 +4469,119 @@ def agent_stopped(agent: str, data: dict, now: float | None = None) -> list:
                        s.get("project") or "")
             state.replace(f, s)
     made = []
-    with _tx(agent, sid):
-        run = load_run(agent, sid)
-        lane = ((run or {}).get("agents") or {}).get(aid) if isinstance(run, dict) else None
-        if lane and lane.get("state") == "running":
-            why = f"stopped by TaskStop at {time.strftime('%H:%M', time.localtime(now))}, before its report: no evidence"
-            moves = [{"kind": "lane", "id": aid, "from": "running", "to": "stopped", "why": why, "at": now}]
-            moves += [{"kind": "step", "id": st["name"], "from": "running", "to": "unverified", "owner_from": aid,
-                       "owner": aid, "why": why} for st in run.get("plan") or []
-                      if st.get("owner") == aid and st.get("state") == "running"]
-            made = approvals.apply(run, moves, now)
-            if made:
+    for rsid in [sid] + runs_listing(agent, aid, sid):  # every run that lists it, whichever id the stop came under
+        why = reason if rsid == sid else f"{reason}; the stop came under {agent}:{sid[:12]}, the conversation's " \
+                                         f"newer session id"
+        with _tx(agent, rsid):
+            run = load_run(agent, rsid)
+            if not isinstance(run, dict):
+                continue
+            held = [st for st in run.get("plan") or [] if st.get("owner") == aid and st.get("state") not in DONE]
+            here = approvals.apply(run, approvals.stop_moves(run, aid, why, at=now), now)
+            for st in held:  # a live lane of its member took the step: its scope goes with it
+                if st.get("owner") not in (aid, "main", None):
+                    _hand_scope(run, st, st["owner"], now)
+            if here:
                 _save(run, touch_session=False)
-    if made:
-        approvals.audit_moves(run, made)
+        if here:
+            approvals.audit_moves(run, here)
+            made += here
     return made
+
+
+def live_holder(run: dict, aid: str, s: dict):
+    """The live lane of the same member that holds a stopped lane's step: another working lane of that member,
+    launched by Morpheus and bound to its launch, that holds no open step and whose launch names this step best (as
+    _bind_step chooses). None when there is none, or two name it equally."""
+    from . import crew
+    agents = run.get("agents") or {}
+    member = crew._for_lane(agents.get(aid) or {})
+    if not member:
+        return None
+    scored = []
+    for k, lane in agents.items():
+        if k == aid or lane.get("state") != "running" or lane.get("binding", "exact") not in ("exact", "confirmed") \
+                or (lane.get("parent") or "main") != "main" or (crew._for_lane(lane) or {}).get("id") != member["id"]:
+            continue
+        if any(st.get("owner") == k and st.get("state") not in DONE for st in run.get("plan") or []):
+            continue  # one step at a time
+        sc = _name_score(_task_text(lane.get("label") or ""), s["name"])
+        if sc[1]:
+            scored.append((sc, k))
+    if not scored:
+        return None
+    best = max(sc for sc, _ in scored)
+    top = [k for sc, k in scored if sc == best]
+    return top[0] if len(top) == 1 else None
+
+
+LIVE_RUN = ("running", "blocked", "orphaned")  # a run a session still works on, or one its ended session left
+
+
+def adopt_process_run(agent: str, new_sid: str, pid: int, now: float | None = None) -> dict | None:
+    """A session registered in agent process `pid` that an older session of the same agent holds, or held until this
+    registration superseded it (Claude Code gives a running conversation a new session id after a compaction): the
+    older session's open run moves to `new_sid`, as dev session carry moves one, working lanes included, since
+    their hooks now carry the new id; the older record's launches and subagents go with it, so a launch keeps its slot
+    and its agent binds and stops as before. Never over an open run of the new session (audited as refused). The run's
+    history and the audit trail (session.adopt) record the move, and the older record notes it (run_moved_to). The
+    registration path calls it (hooks._claim_process). -> {from, to, goal}, or None when nothing moved."""
+    now = now or time.time()
+    if not new_sid or not isinstance(pid, int) or isinstance(pid, bool):
+        return None
+    me = core.read_json(session_path(agent, new_sid), {}) or {}
+    olds = []
+    for f in SESSIONS.glob(f"{_safe_name(agent)}-*.json") if SESSIONS.exists() else []:
+        s = core.read_json(f, {}) or {}
+        sid = str(s.get("session") or "")
+        if s.get("agent") != agent or not sid or sid == new_sid or pid not in (s.get("pid"), s.get("pid_superseded")):
+            continue
+        if float(s.get("started") or 0) > float(me.get("started") or now):
+            continue  # a newer session never hands its run to an older one
+        if (core.read_json(run_path(agent, sid), {}) or {}).get("state") in LIVE_RUN:
+            olds.append((float(s.get("started") or 0), sid))
+    if not olds:
+        return None
+    old = max(olds)[1]
+    src, dst = run_path(agent, old), run_path(agent, new_sid)
+    a, b = sorted((src, dst), key=str)
+    refused, taken = None, False
+    with state.hold(a), state.hold(b):  # one lock per session covers its record and its run
+        run = state.load(src)
+        if not isinstance(run, dict) or run.get("state") not in LIVE_RUN:
+            return None
+        there = state.load(dst)
+        if isinstance(there, dict) and there.get("state") in LIVE_RUN:
+            refused = there.get("goal") or "a run"
+        else:
+            why = (f"moved from {agent}:{old} to {agent}:{new_sid}: Claude Code gave the conversation in process "
+                   f"{pid} a new session id")
+            taken = take_back(run, why, now)
+            run.update(session=new_sid, carried_from=old, carried_at=round(now))
+            run.setdefault("history", []).append({"ts": round(now), "step": "(run)", "from": run.get("state"),
+                                                  "to": run.get("state"), "by": "devkit", "why": why})
+            run["history"] = run["history"][-200:]
+            state.replace(dst, run, indent=1)
+            state.remove(src)
+            so, sn = state.load(session_path(agent, old)), state.load(session_path(agent, new_sid))
+            if isinstance(so, dict) and isinstance(sn, dict):
+                for key in ("launches", "subagents"):
+                    mine = sn.setdefault(key, {})
+                    for k, v in (so.pop(key, None) or {}).items():
+                        mine.setdefault(k, v)
+                so.update(run_moved_to=new_sid, run_moved_at=round(now))
+                state.replace(session_path(agent, old), so)
+                state.replace(session_path(agent, new_sid), sn)
+    project = (run or {}).get("project") or ""
+    if refused:
+        _audit("session.adopt", f"{agent}:{old[:12]}", f"the run «{str(run.get('goal'))[:80]}» stays: "
+               f"{agent}:{new_sid[:12]} already has an open run «{str(refused)[:80]}»", "refused", project=project)
+        return None
+    if taken:
+        audit_taken_back(run, f"moved to {agent}:{new_sid[:12]}")
+    _audit("session.adopt", f"{agent}:{new_sid[:12]}", f"run «{str(run.get('goal'))[:80]}» from {agent}:{old[:12]} "
+           f"(process {pid})", "ok", project=project, session=f"{agent}:{new_sid[:12]}")
+    return {"from": old, "to": new_sid, "goal": run.get("goal")}
 
 
 def resume_orphaned(agent: str, sid: str, now: float | None = None) -> bool:
@@ -3708,17 +4589,31 @@ def resume_orphaned(agent: str, sid: str, now: float | None = None) -> bool:
     now = now or time.time()
     with _tx(agent, sid):
         run = load_run(agent, sid)
-        if not isinstance(run, dict) or run.get("state") != "orphaned":
+        if not take_back(run, "its session resumed", now):
             return False
-        was = run.pop("orphaned", None) or {}
-        run["state"] = "running"
-        run.setdefault("history", []).append({"ts": round(now), "step": "(run)", "from": "orphaned", "to": "running",
-                                              "by": "devkit", "why": f"its session resumed (orphaned: "
-                                              f"{str(was.get('why') or 'its session ended')[:120]})"})
         _save(run, touch_session=False)
-    _audit("run.running", run.get("goal") or "run", "its session resumed", "running", project=run.get("project") or "",
-           by="devkit", was="orphaned")
+    audit_taken_back(run, "its session resumed")
     return True
+
+
+def take_back(run, why: str, now: float) -> bool:
+    """An orphaned run (its session ended, approvals.reconcile) runs again in a session that works on it: resumed, or
+    carried to the session /clear started. Its history says why. Changes the run in place; the caller saves it, then
+    calls audit_taken_back. -> whether it was orphaned"""
+    if not isinstance(run, dict) or run.get("state") != "orphaned":
+        return False
+    was = run.pop("orphaned", None) or {}
+    run["state"] = "running"
+    run.setdefault("history", []).append({"ts": round(now), "step": "(run)", "from": "orphaned", "to": "running",
+                                          "by": "devkit", "why": f"{why} (orphaned: "
+                                          f"{str(was.get('why') or 'its session ended')[:120]})"})
+    run["history"] = run["history"][-200:]
+    return True
+
+
+def audit_taken_back(run: dict, why: str):
+    _audit("run.running", run.get("goal") or "run", why, "running", project=run.get("project") or "", by="devkit",
+           was="orphaned")
 
 
 def tool_started(data: dict):
@@ -3966,14 +4861,41 @@ def _bind_step(run: dict, aid: str, lane: dict, now: float):
     st.update(owner=aid, state="running", started=st.get("started") or now)
     if st.get("scope"):
         lane["scope"] = st["scope"]
+        _hand_scope(run, st, aid, now)
 
 
-def _lane_event(run, aid, kind, tid, rec, binding, now, start, waiting, own=True):
+def _hand_scope(run: dict, st: dict, to: str, now: float):
+    """Step `st` and its scope now belong to lane `to`. Every other lane that holds no open step but keeps a scope of
+    its own that overlaps it (the scope of a step it held before, such as a stopped lane's) loses that scope and reads
+    only (`handed_over`) until Morpheus assigns it a step, so two lanes never write the same files, and a lane
+    without a scope is not left free to write anywhere."""
+    globs = st.get("scope") or []
+    if not globs:
+        return
+    plan = run.get("plan") or []
+    for k, lane in (run.get("agents") or {}).items():
+        own = lane.get("scope") or []
+        if k == to or not own or to in lane_chain(run, k):
+            continue
+        if any(x.get("owner") == k and x.get("state") not in DONE for x in plan):
+            continue  # it works on a step of its own
+        if not any(_globs_overlap(g, h) for g in globs for h in own):
+            continue
+        lane.pop("scope")
+        lane["handed_over"] = {"ts": round(now), "step": st.get("name"), "to": to[:16], "scope": own}
+        _audit("crew.scope-handed", lane.get("persona") or lane.get("label") or k[:8], f"“{st.get('name')}” and "
+               f"{', '.join(own)} went to {_name_of(run, to)}: this lane may read but not write until a step is "
+               f"assigned to it", "restricted", project=run.get("project") or "", agent_id=k[:16])
+
+
+def _lane_event(run, aid, kind, tid, rec, binding, now, start, waiting, own=True, sess=None):
     """The run's side of a binding (spec C3): the agent's lane, created provisional at its start when a launch is
     waiting (no step, no scope, until it binds), resumed when the agent works again after it had stopped, and bound
     to its launch: label, parent, depth, persona and the step the launch names (none for a member's helper, which
     works inside its member's step; spec F3). `own`: the hook is the agent's own start or tool
-    call, so a finished lane resumes; never for its launch's result or its stop."""
+    call, so a finished lane resumes; never for its launch's result or its stop. A resumed lane takes a crew slot
+    like a launch: while none is free it stays as it was, reads only (`waits_slot`), and Morpheus is told once with
+    the launch's message; each later call of the agent tries again. `sess`: the session record, held by the caller."""
     lane = run["agents"].get(aid)
     if lane is None:
         if not binding and not (start and waiting):
@@ -3984,10 +4906,23 @@ def _lane_event(run, aid, kind, tid, rec, binding, now, start, waiting, own=True
         _audit("crew.start", lane["persona"] or kind or aid[:8], "waits for its launch" if not binding else
                (rec or {}).get("label") or "", project=run.get("project") or "", agent_id=aid[:16], type=kind)
     elif own and lane.get("state") != "running":  # resumed (SendMessage): its own lane, and no other step
-        lane.update(state="running", finished=None, resumed=(lane.get("resumed") or 0) + 1, resumed_at=now)
-        _open(run, "agent", aid, now)
-        _audit("crew.resume", lane.get("persona") or lane.get("label") or aid[:8], lane.get("label") or "",
-               project=run.get("project") or "", agent_id=aid[:16])
+        why = _resume_refusal(run, aid, sess if isinstance(sess, dict) else {}, now)
+        if why:
+            if not lane.get("waits_slot"):
+                from . import crew
+                _post(run, "devkit", "main", f"devkit: {crew.who(lane.get('persona') or lane.get('label') or kind)} "
+                      f"works again, and a resumed member takes a crew slot like a launch. {why} Until a slot is "
+                      f"free it may read but not write; it takes its slot at its first tool call after one frees.",
+                      now, from_name="devkit", kind="notice")
+                _audit("crew.queued", lane.get("persona") or lane.get("label") or aid[:8], why[:300], "queued",
+                       project=run.get("project") or "", agent_id=aid[:16])
+            lane["waits_slot"] = {"ts": round(now), "why": why[:400]}
+        else:
+            lane.pop("waits_slot", None)
+            lane.update(state="running", finished=None, resumed=(lane.get("resumed") or 0) + 1, resumed_at=now)
+            _open(run, "agent", aid, now)
+            _audit("crew.resume", lane.get("persona") or lane.get("label") or aid[:8], lane.get("label") or "",
+                   project=run.get("project") or "", agent_id=aid[:16])
     if binding == "exact" and lane.get("binding") == "pending":
         label = rec.get("label") or lane.get("label") or kind
         parent = rec.get("parent") or "main"
@@ -4027,7 +4962,7 @@ def _attach(agent: str, sid: str, s: dict, data: dict, aid: str, kind: str, now:
         if binding == "exact":
             sub.update(label=rec.get("label") or sub.get("label"), launch=tid)
     _run_event(agent, sid, lambda run: _lane_event(run, aid, kind, tid, rec, binding, now, start, waiting,
-                                                   own=resume))
+                                                   own=resume, sess=s))
 
 
 def bind(agent: str, data: dict, now: float | None = None, resume: bool = True):
@@ -4151,7 +5086,8 @@ def step_cost(run, s: dict) -> float:
 def slot_use(run: dict, sess: dict | None = None, now: float | None = None) -> list:
     """The crew slots in use, [(id, name, cost)] (spec D2, R3): launches whose agent has not started yet, and working
     lanes bound to a launch (a resumed one too), each at its cost. A provisional lane counts through its launch.
-    Lanes bound before launch records existed count while they run."""
+    Lanes bound before launch records existed count while they run. A lane whose member ended or went stale
+    (lane_states) holds no slot, whatever its run still lists."""
     now = now or time.time()
     if sess is None:
         sess = core.read_json(session_path(run.get("agent") or "", run.get("session") or ""), {}) if run else {}
@@ -4172,8 +5108,11 @@ def slot_use(run: dict, sess: dict | None = None, now: float | None = None) -> l
         from . import crew
     except Exception:
         crew = None
-    for k, v in agents.items():
-        if v.get("state") == "running" and v.get("binding", "exact") in ("exact", "confirmed"):
+    bound = {k: v for k, v in agents.items()
+             if v.get("state") == "running" and v.get("binding", "exact") in ("exact", "confirmed")}
+    states = lane_states(run, now) if bound else {}
+    for k, v in bound.items():
+        if (states.get(k) or {}).get("state", "working") == "working":  # one that ended or went stale holds none
             m = crew._for_lane(v) if crew else None
             out.append((k, v.get("persona") or v.get("label") or k[:8], _cost(m, lane_tools(run, k))))
     return out
@@ -4252,8 +5191,11 @@ def lane_chain(run: dict, aid: str) -> list:
 def _lane_level(lane: dict) -> str:
     """One lane's own tool level: read for a lane whose launch another agent is bound to, that devkit has no launch
     record of (until Morpheus assigns it a step), or that has not met its launch yet (spec C3: a missing binding
-    grants nothing), else its crew member's `tools`, else all (an ad-hoc agent)."""
-    if lane.get("binding") in ("conflict", "unbound", "pending"):
+    grants nothing); read too for a lane whose step and scope another lane took (`handed_over`, until Morpheus
+    assigns it a step) and for a resumed lane that waits for a crew slot (`waits_slot`); else its crew member's
+    `tools`, else all (an ad-hoc agent)."""
+    if lane.get("binding") in ("conflict", "unbound", "pending") or lane.get("handed_over") or \
+            (lane.get("waits_slot") and lane.get("state") != "running"):
         return "read"
     try:
         from . import crew
@@ -4289,7 +5231,7 @@ def lane_scope(run: dict, aid: str) -> list:
 
 
 def in_scope(rel_path: str, layers: list) -> bool:
-    """A repo-relative path is inside every layer of a lane_scope (the same glob rules as scope_owner)."""
+    """A repo-relative path is inside every layer of a lane_scope (the same glob rules as scope_holders)."""
     return all(_in_globs(rel_path, layer) for layer in layers if layer)
 
 
@@ -4405,6 +5347,17 @@ def launch_verdict(agent: str, data: dict, run: dict, now: float | None = None):
     if cost <= 0:
         return None  # a scout lookup costs no slot (progress.slot_weights)
     b = slot_budget(agent, run, sess, now)
+    why = _slot_refusal(run, sess, b, cost, parent, kind, label)
+    if why is not None:
+        return why or None  # "": it took the slot kept for the developer's own request
+    if parent != "main" or (sess.get("turn_started") and _for_the_developer(run, sess, kind, label)):
+        return None  # the developer's request of this turn is not held back by the plan's order (R4)
+    return _order_verdict(run, sess, kind, label, b, cost, now)
+
+
+def _slot_refusal(run, sess: dict, b: dict, cost: float, parent: str, kind: str, label: str):
+    """The slot rules a launch and a resumed lane share (spec R3, R4): the reason no slot is free; "" when it takes
+    the slot progress.reserve keeps, for the developer's own request (audited); None when it fits below the reserve."""
     used, limit, reserve = b["used"], b["limit"], b["reserve"]
     if used + cost > limit + 1e-9:
         names = ", ".join(_who_label(name) for _, name, _ in b["busy"])
@@ -4420,13 +5373,30 @@ def launch_verdict(agent: str, data: dict, run: dict, now: float | None = None):
         if parent == "main" and _for_the_developer(run, sess, kind, label):
             _audit("crew.reserve", label or kind or "a launch", f"{_n(used + cost)} of {limit} slots: the slot "
                    f"progress.reserve keeps for the developer's own request", project=(run or {}).get("project") or "")
-            return None
+            return ""
         return (f"{_n(used)} of {limit} crew slots are in use, and the last {reserve} is kept for the developer's own "
                 f"request (progress.reserve): queued plan work waits for a free slot. Launch it when a member "
                 f"finishes (dev crew next), or give it to a working member (SendMessage / send_input).")
-    if parent != "main" or (sess.get("turn_started") and _for_the_developer(run, sess, kind, label)):
-        return None  # the developer's request of this turn is not held back by the plan's order (R4)
-    return _order_verdict(run, sess, kind, label, b, cost, now)
+    return None
+
+
+def _resume_refusal(run: dict, aid: str, sess: dict, now: float):
+    """Why lane `aid`, not working now, may not work again: a resumed lane takes a crew slot like a launch, at its
+    own cost, with the launch's message. None when a slot is free."""
+    lane = (run.get("agents") or {}).get(aid) or {}
+    try:
+        from . import crew
+        m = crew._for_lane(lane)
+    except Exception:
+        m = None
+    level = max((_lane_level(dict(run["agents"][k], state="running")) for k in lane_chain(run, aid)),
+                key=TOOL_LEVELS.index, default="all")  # its level once it works, whatever it waits for now
+    cost = _cost(m, level)
+    if cost <= 0:
+        return None
+    b = slot_budget(run.get("agent") or "claude", run, sess, now)
+    return _slot_refusal(run, sess, b, cost, lane.get("parent") or "main", lane.get("type") or "",
+                         lane.get("label") or "") or None
 
 
 def _for_the_developer(run, sess, kind: str, label: str) -> bool:
@@ -4457,9 +5427,73 @@ def _order_verdict(run, sess, kind: str, label: str, b: dict, cost: float, now: 
 
 def on_subagent(agent: str, data: dict, started: bool, now: float | None = None):
     """SubagentStart / SubagentStop; see _on_subagent. Serialized per session like note_agent_launch: one hold covers
-    the session record and the run (the run's save inside re-enters it)."""
-    with state.hold(session_path(agent, data.get("session_id") or "-")):
-        return _on_subagent(agent, data, started, now)
+    the session record and the run (the run's save inside re-enters it). The stops that found the lock busy earlier
+    go first. A stop that finds it busy now waits in a pending file (_defer_stop) instead of being dropped: the
+    member's report is its step's evidence."""
+    sid = data.get("session_id") or "-"
+    entered = False
+    try:
+        with state.hold(session_path(agent, sid)):
+            entered = True
+            _apply_stops(agent, sid)
+            return _on_subagent(agent, data, started, now)
+    except state.StateBusy:
+        if entered or started:
+            raise  # a record that does not parse, or a start: a start binds again at the agent's first tool call
+        _defer_stop(agent, sid, data, now or time.time())
+
+
+def _stops_dir(agent: str, sid: str) -> Path:
+    """The pending SubagentStops of one session, one file per agent: <state>/stops/<agent>-<sid>/<agent id>.json."""
+    return SESSIONS.parent / "stops" / f"{_safe_name(agent)}-{_safe_name(sid)}"
+
+
+def _defer_stop(agent: str, sid: str, data: dict, now: float):
+    """Keep a SubagentStop the session's lock could not take, with when it happened, for the next hook (apply_stops).
+    Without an agent id there is nothing to apply it to: it is dropped, as before, and audited."""
+    aid = str(data.get("agent_id") or data.get("subagent_id") or "")
+    if not AGENT_ID.fullmatch(aid):
+        _audit("crew.stop-dropped", aid or "?", "the session's lock was busy and the stop names no agent", "dropped")
+        return
+    _write_private(_stops_dir(agent, sid) / f"{aid}.json", {**data, "stopped_at": now})
+    _audit("crew.stop-deferred", aid[:16], "the session's lock was busy: applied at the next hook", "deferred")
+
+
+def apply_stops(agent: str, sid: str) -> int:
+    """The SubagentStops that found the session's lock busy, applied now in the order they happened, each once, at
+    the time it happened. Left for the next hook while the lock is still busy. Every hook calls it (reconcile_hook,
+    on_subagent), and so does the scheduled sweep. -> how many were applied"""
+    d = _stops_dir(agent, sid)
+    if not d.is_dir() or not any(d.glob("*.json")):
+        return 0  # the usual case, without the lock
+    try:
+        with state.hold(session_path(agent, sid)):
+            return _apply_stops(agent, sid)
+    except state.StateBusy:
+        return 0
+
+
+def _apply_stops(agent: str, sid: str) -> int:
+    """apply_stops under the session's hold."""
+    d = _stops_dir(agent, sid)
+    if not d.is_dir():
+        return 0
+    def when(stop):
+        data = stop[0]
+        return (data.get("stopped_at") or 0) if isinstance(data, dict) else 0
+    n = 0
+    for data, p in sorted(((core.read_json(p, None), p) for p in d.glob("*.json")), key=when):
+        if isinstance(data, dict):
+            try:
+                _on_subagent(agent, data, False, data.get("stopped_at"))
+            except state.StateBusy:
+                return n  # a record that does not parse: kept for the next hook
+            except Exception as e:
+                _audit("crew.stop-dropped", str(data.get("agent_id") or "?")[:16], f"could not be applied: {e}"[:300],
+                       "dropped")
+            n += 1
+        p.unlink(missing_ok=True)
+    return n
 
 
 def _stop_report(data: dict) -> str:
@@ -4489,7 +5523,7 @@ def _on_subagent(agent: str, data: dict, started: bool, now: float | None = None
             record("subagent", agent, sid, v.get("label") or v.get("type") or aid, now - v["started"],
                    s.get("project") or "")
 
-        def finish(run):
+        def finish(run, rsid=sid):
             _close(run, "agent", aid, now)
             lane = (run.get("agents") or {}).get(aid)
             if lane and lane.get("binding") == "pending" and not lane.get("updates") and \
@@ -4497,25 +5531,59 @@ def _on_subagent(agent: str, data: dict, started: bool, now: float | None = None
                 del run["agents"][aid]  # never bound, never reported: a helper that started while a launch waited
                 return
             if lane:
+                if rsid != sid:  # the stop came under the conversation's newer session id (a compaction)
+                    run.setdefault("history", []).append({
+                        "ts": round(now), "step": f"(lane {lane.get('persona') or lane.get('label') or aid})",
+                        "from": lane.get("state"), "to": "done", "by": "devkit",
+                        "why": f"ended: its stop came under {agent}:{sid[:12]}, the conversation's newer session id"})
+                    run["history"] = run["history"][-200:]
                 lane.update(state="done", finished=now)
+                lane.pop("waits_slot", None)  # it ended while it waited: a later resume asks for a slot anew
                 _audit("crew.finish", lane.get("persona") or lane.get("label") or aid,
                        f"{active_minutes(run, lane.get('started'), now, now, aid):.1f} active minutes",
                        project=run.get("project") or "", agent_id=aid[:16])
-            _end_lane_steps(run, lane or {}, aid, report, now, agent, sid)
+            _end_lane_steps(run, lane or {}, aid, report, now, agent, rsid)
             run["step"] = sum(1 for x in run.get("plan") or [] if x.get("state") in ("done", "skipped"))
             _advance_main(run, now)
         _run_event(agent, sid, finish)
+        for other in runs_listing(agent, aid, sid):  # every run that lists it frees its lane, whichever id it came under
+            _run_event(agent, other, lambda run, o=other: finish(run, o))
     state.replace(f, s)
 
 
+def runs_listing(agent: str, aid: str, skip_sid: str) -> list:
+    """The session ids of this agent's other live runs on this Mac that list agent `aid` as running: after a
+    compaction gives the conversation a new session id, a member's stop comes under the new id while the run that
+    launched it still lists it under the old one."""
+    if not AGENT_ID.fullmatch(str(aid or "")):
+        return []
+    out = []
+    for f in sorted(RUNS.glob(f"{_safe_name(agent)}-*.json")) if RUNS.exists() else []:
+        r = core.read_json(f, None)
+        if isinstance(r, dict) and r.get("state") in LIVE_RUN and r.get("agent", agent) == agent and \
+                str(r.get("session") or "") not in ("", str(skip_sid)) and \
+                ((r.get("agents") or {}).get(aid) or {}).get("state") == "running":
+            out.append(str(r["session"]))
+    return out
+
+
+def _shown(paths: list) -> str:
+    """'a.py, b.py and 4 more': up to five paths for a notice."""
+    return ", ".join(paths[:5]) + (f" and {len(paths) - 5} more" if len(paths) > 5 else "")
+
+
 def scope_written(agent: str, sid: str, aid: str, paths: list, now: float | None = None) -> dict | None:
-    """A review or read-only lane's shell call wrote these files (spec F7, write detection): the lane keeps them in
-    `scope_writes`, so its report is unverified and its step cannot end done on its word; Morpheus gets a crew
-    message; and the audit trail a scope.write record. "possible" when the file may be another lane's: it is in the
-    scope of a lane that works now (M292; the message names that lane, and the file is never left out, since the
-    review lane may have written it itself: the Code reviewer's batch 5 on a98d7f5), or another lane that may write
-    works in the run at the time (a file outside every scope may be its); else "certain". -> the lane's
-    scope_writes, or None without a lane."""
+    """A review or read-only lane's shell call wrote these files (write detection). A review or read-only lane can
+    write through a script in its own scratch folder, so the scope a file lies in is no alibi: a file in the scope
+    of a build lane that works now is credited to that lane only while it (or a helper of it) has a call open in the
+    call ledger (open_calls), whose run may have written it (scope.write, outcome attributed); otherwise it is the
+    review lane's own write, certain. Each file held against the lane it keeps in `scope_writes`, so its report is
+    unverified and its step cannot end done on its word; a file outside every working build scope is "possible"
+    when a lane that may write works in the run at the time, else "certain". The build lane's open step keeps each
+    file of its scope the call changed (`other_writes`, either way), which the review step after it lists; Morpheus
+    gets one crew notice naming the lanes; and the audit trail a scope.write record. -> the lane's scope_writes, or
+    None without a lane or when it has none."""
+    from . import crew
     now = now or time.time()
     paths = sorted({str(p) for p in paths or [] if p})
     if not paths:
@@ -4526,34 +5594,96 @@ def scope_written(agent: str, sid: str, aid: str, paths: list, now: float | None
         if not lane:
             return None
         chain = set(lane_chain(run, aid))
-        running = [k for k, v in run["agents"].items() if k not in chain and v.get("state") == "running"]
-        layers = {k: lane_scope(run, k) for k in running}
-        held = {p: [k for k in running if layers[k] and in_scope(p, layers[k])] for p in paths}
-        holders = [k for k in running if any(k in ks for ks in held.values())]
-        others = [k for k in running if lane_tools(run, k) in ("build", "all")]
-        certainty = "possible" if others or all(held.values()) else "certain"
-        level = lane_tools(run, aid)
-        had = lane.get("scope_writes") or {}
-        lane["scope_writes"] = {"ts": round(now), "paths": sorted(set(had.get("paths") or []) | set(paths))[:20],
-                                "certainty": "certain" if "certain" in (had.get("certainty"), certainty) else
-                                certainty}
+        builders = [k for k, v in run["agents"].items() if k not in chain and v.get("state") == "running"
+                    and lane_tools(run, k) in ("build", "all")]
+        layers = {k: lane_scope(run, k) for k in builders}
+        calling = {str(e.get("caller") or "") for e in open_calls(sid, now)} - {"main", ""}
+        busy = {k for k in builders if any(k in lane_chain(run, c) for c in calling)}
+        owned, crossed, loose = {}, {}, []  # credited to a lane with a call open; in a quiet lane's scope; elsewhere
+        for p in paths:
+            holders = [k for k in builders if layers[k] and in_scope(p, layers[k])]
+            if not holders:
+                loose.append(p)
+                continue
+            k = next((h for h in holders if h in busy), None)
+            (owned if k else crossed).setdefault(k or holders[0], []).append(p)
         who = lane.get("persona") or lane.get("label") or aid
-        shown = ", ".join(paths[:5]) + (f" and {len(paths) - 5} more" if len(paths) > 5 else "")
-        inside = [p for p in paths if held[p]]
-        bits = [f"{', '.join(inside[:3])} {'is' if len(inside) == 1 else 'are'} in the scope of "
-                f"{', '.join(_name_of(run, k) for k in holders[:3])}, who works now"] if inside else []
-        rest = [k for k in others if k not in holders]
-        bits += [f"{', '.join(_name_of(run, k) for k in rest[:3])} works too"] if rest else []
-        maybe = f" (possibly another member's: {'; '.join(bits)})" if bits else ""
-        _post(run, aid, "main", f"devkit: {who} works {'review-only' if level == 'review' else 'read-only'}, and "
-              f"its shell call wrote {shown}{maybe}. Its report counts as unverified: check the change (git diff), "
-              f"keep or revert it, then close its step with evidence.", now, from_name="devkit")
+        name = crew.who(who)
+        level = lane_tools(run, aid)
+        certainty = "possible" if builders else "certain"
+        held = [p for files in crossed.values() for p in files] + loose
+        if held:
+            had = lane.get("scope_writes") or {}
+            sure = bool(crossed) or certainty == "certain" or had.get("certainty") == "certain"
+            lane["scope_writes"] = {"ts": round(now), "paths": sorted(set(had.get("paths") or []) | set(held))[:20],
+                                    "certainty": "certain" if sure else "possible"}
+        parts = []
+        for k, files in owned.items():
+            _mark_other_writes(run, k, files, aid, name, "possible", now)
+            parts.append(f"{_shown(files)} changed during its shell call, inside the scope of "
+                         f"{crew.who(_name_of(run, k))}, who had a call open then, so devkit credits "
+                         f"{'them' if len(files) > 1 else 'it'} to {crew.who(_name_of(run, k))}")
+        for k, files in crossed.items():
+            _mark_other_writes(run, k, files, aid, name, "certain", now)
+            parts.append(f"its shell call wrote {_shown(files)}, inside the scope of {crew.who(_name_of(run, k))}, "
+                         f"who had no call open then, so devkit counts {'them' if len(files) > 1 else 'it'} as its "
+                         f"own write")
+        if loose:
+            maybe = (f" (possibly another member's: {', '.join(crew.who(_name_of(run, k)) for k in builders[:3])} "
+                     f"works too)" if builders else "")
+            parts.append(f"its shell call wrote {_shown(loose)}{maybe}")
+        reviews = sorted({crew.who(_name_of(run, k)) for k in [*owned, *crossed]})
+        listed = f" The review of {' and '.join(reviews)}'s work lists these files." if reviews else ""
+        tail = (" Its report counts as unverified: check the change (git diff), keep or revert it, then close its step "
+                "with evidence." if held else " Check the change (git diff) before that review approves it.")
+        _post(run, aid, "main", f"devkit: {name} works {'review-only' if level == 'review' else 'read-only'}, and "
+              + "; and ".join(parts) + "." + listed + tail, now, from_name="devkit", kind="notice")
         _save(run)
-        writes = dict(lane["scope_writes"])
-    _audit("scope.write", who, f"{certainty}: {', '.join(paths[:20])}"[:600], "detected", lane=aid[:16],
-           paths=paths[:20], certainty=certainty, count=len(paths), project=run.get("project") or "",
-           **({"severity": "warning"} if certainty == "certain" else {}))
+        writes = dict(lane.get("scope_writes") or {}) or None
+    for k, mine in owned.items():
+        _audit("scope.write", _name_of(run, k), f"attributed: {', '.join(mine[:20])}"[:600], "attributed",
+               lane=k[:16], paths=mine[:20], count=len(mine), project=run.get("project") or "",
+               why=f"changed during {who}'s shell call, inside the scope of {_name_of(run, k)}, who had a call open")
+    for k, mine in crossed.items():
+        _audit("scope.write", who, f"certain: {', '.join(mine[:20])}"[:600], "detected", lane=aid[:16],
+               paths=mine[:20], certainty="certain", count=len(mine), project=run.get("project") or "",
+               severity="warning",
+               why=f"inside the scope of {_name_of(run, k)} ({k[:16]}), who had no call open during {who}'s shell call")
+    if loose:
+        _audit("scope.write", who, f"{certainty}: {', '.join(loose[:20])}"[:600], "detected", lane=aid[:16],
+               paths=loose[:20], certainty=certainty, count=len(loose), project=run.get("project") or "",
+               **({"severity": "warning"} if certainty == "certain" else {}))
     return writes
+
+
+def _mark_other_writes(run: dict, holder: str, files: list, by: str, by_name: str, certainty: str, now: float):
+    """The open steps of a build lane (or of the member a helper works for) whose scope holds these files keep them
+    as changed by another lane (`other_writes`), so the review of that work lists them (other_writes_for)."""
+    lanes = lane_chain(run, holder)
+    for st in run.get("plan") or []:
+        if st.get("owner") not in lanes or st.get("state") in DONE:
+            continue
+        mine = [p for p in files if not st.get("scope") or in_scope(p, [st["scope"]])]
+        if mine:
+            marks = st.setdefault("other_writes", [])
+            marks.append({"ts": round(now), "by": by[:16], "by_name": by_name, "paths": mine[:20],
+                          "certainty": certainty})
+            st["other_writes"] = marks[-20:]
+
+
+def other_writes_for(run: dict, st: dict) -> list:
+    """For a review step: the files another lane changed in the scope of the steps it comes after, [(path, who,
+    certainty)], each path once, a certain record before a possible one. [] for any other step."""
+    if not is_review_step(st):
+        return []
+    steps, seen, out = _by_name(run.get("plan")), set(), []
+    marks = [m for n in st.get("after") or [] for m in (steps.get(n) or {}).get("other_writes") or []]
+    for m in sorted(marks, key=lambda m: m.get("certainty") != "certain"):
+        for p in m.get("paths") or []:
+            if p not in seen:
+                seen.add(p)
+                out.append((p, m.get("by_name") or "another lane", m.get("certainty") or "possible"))
+    return out
 
 
 def _verified_by_review(run: dict, st: dict, check: str, now: float, agent: str, sid: str, aid: str) -> list:
@@ -4713,7 +5843,7 @@ def report(days: int = 7, project: str | None = None) -> str:
         out.append(ui.section("Slowest commands (total time)"))
         out.append(ui.table([[k, n, f"{med:.0f}s", fmt_min(tot / 60)] for k, n, med, tot in rows],
                             ["COMMAND", "RUNS", "MEDIAN", "TOTAL"], max_widths={0: 70}))
-    runs = active_runs()
+    runs = [r for r in active_runs() if r.get("state") in ("running", "blocked")]  # a finished run is not "now"
     if runs:
         out.append(ui.section("Runs now"))
         for r in runs[:8]:

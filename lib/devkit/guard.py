@@ -1111,7 +1111,8 @@ def _check_bash_reading(cmd: str, cwd: str, agent: str):
         return None
     if _NUL in cmd:
         return deny(NUL_REASON)
-    v = protected_bash(cmd, cwd or os.getcwd()) or evidence_forgery(cmd, cwd or os.getcwd())
+    v = other_release(cmd, cwd or os.getcwd()) or protected_bash(cmd, cwd or os.getcwd()) or \
+        evidence_forgery(cmd, cwd or os.getcwd())
     if v:
         return v
     if PIPE_GATE.search(cmd):
@@ -1184,6 +1185,10 @@ def _check_segments(cmd: str, segs, ecwd: str, agent: str, depth: int = 0, outer
         while argv and argv[0] in _RESERVED:  # `if …; then rm -rf ~; fi` runs rm
             argv = _strip_prefix(argv[1:])
         envs = frozenset(a.split("=", 1)[0] for a in argv0[:len(argv0) - len(argv)] if "=" in a) | outer_envs
+        for w in list(redirs) + _candidates(argv0):  # a word read from the folder an earlier cd chose
+            v = other_release_word(w, ecwd)
+            if v:
+                return v
         for r in redirs:
             v = check_write_path(r, ecwd, agent)
             if v:
@@ -2055,6 +2060,79 @@ def dev_command_reason(p, verb="replace") -> str:
             f"`dev` earlier on PATH would run instead of it, for the developer, the hooks' shells and the jobs. Agents "
             f"may not {verb} it (spec C11, K1). `dev doctor` shows where it points; the developer fixes it in a "
             f"terminal with `dev install --only cli`. Reading it is fine (`readlink`, `ls -l`). {_TAIL}")
+
+
+# ---- the other devkit copies in the releases folder
+#
+# `dev install` keeps older pinned copies for a rollback. An older one may lack newer safeguards (26.11.5 and before
+# have no version check), and its repair writes its own hooks, guard and instructions back over the installed
+# release: an agent that runs one downgrades devkit for every session. A shell command may name the releases folder
+# only as the pinned release (core.runtime_home, core.release_home) or a file in it; any other copy, the folder
+# itself (a find, a glob or a cd chooses a copy from it) or a pattern is refused, however the path is written.
+
+_RELEASES_TEXT = re.compile(r"(?P<pre>[^\s;|&<>()`=]*?)\.local/+share/+devkit/+releases(?![\w.-])"
+                            r"(?:/+(?P<name>[^/\s;|&<>()`'\"]*))?")
+_WORD_ENDS = frozenset(" \t\n;|&<>()`'\"=")
+
+
+def _pinned_names() -> set:
+    """The folder names (case-folded) of the release the hooks and the installed `dev` run."""
+    out = set()
+    for h in (core.runtime_home(), core.release_home()):
+        if core.is_pinned(h):
+            out.add(Path(real(h)).name.casefold())
+    return out
+
+
+def other_release_reason(what) -> str:
+    pin = core.pinned_release()
+    named = f"devkit {pin['version']} ({pin['name']})" if pin else "one release"
+    return (f"{_code(what)} names a devkit copy in {tilde(core.pin_root())} other than the one `dev install` pinned, "
+            f"{named}. An older copy may lack the newer safeguards, and its repair writes its own hooks, guard and "
+            f"instructions back over the installed ones, for every session. Run the installed `dev` (on PATH) "
+            f"instead; read a copy's files with a file tool, not the shell; `dev doctor` lists the copies. {_TAIL}")
+
+
+def _releases_path(p, allowed) -> bool:
+    """True when the real path `p` is the releases folder itself or anything in a copy other than the pinned one."""
+    root = Path(real(core.pin_root()))
+    if p == UNKNOWN or not is_under(p, root):
+        return False
+    rel = Path(real(p)).relative_to(root).parts if real(p) != str(root) else ()
+    return not rel or rel[0].casefold() not in allowed
+
+
+def other_release(cmd: str, cwd):
+    """The guard's refusal when a shell command names another devkit copy than the pinned release (see above)."""
+    allowed = _pinned_names()
+    flat = re.sub(r"[\\'\"]", "", cmd)  # quotes and escapes do not change the path the shell builds
+    for text in dict.fromkeys((cmd, flat)):
+        for m in _RELEASES_TEXT.finditer(text):
+            base = resolve(m.group("pre") + ".local/share/devkit/releases", cwd)
+            if base != UNKNOWN and real(base) != real(core.pin_root()):
+                continue  # another HOME's releases folder (a test's sandbox), not this install
+            name = (m.group("name") or "").casefold()
+            if not name or name not in allowed:
+                return deny(other_release_reason(m.group(0)))
+    root = core.pin_root()
+    others = [d.name for d in root.iterdir() if not d.name.startswith(".") and d.name.casefold() not in allowed] \
+        if root.is_dir() else []
+    for name in others:  # a copy's name with the path built some other way ($R/<name>/bin/dev)
+        for m in re.finditer(re.escape(name), flat, re.I):
+            start = m.start()
+            while start and flat[start - 1] not in _WORD_ENDS:
+                start -= 1
+            if not _RELEASES_TEXT.search(flat[start:m.end()]):  # with the folder written out, the loop above judged it
+                return deny(other_release_reason(name))
+    return None
+
+
+def other_release_word(word: str, cwd):
+    """The refusal for one word of a command (a program, an argument, a redirect) whose path, read from the
+    command's working folder, is in another devkit copy or is the releases folder; else None."""
+    if not word or not _pathlike(word):
+        return None
+    return deny(other_release_reason(word)) if _releases_path(_lexical(word, cwd), _pinned_names()) else None
 
 
 # ---- the shell
@@ -4295,7 +4373,7 @@ def evidence_forgery(cmd: str, cwd):
 # text and stops the usual forms; an obfuscated call (a name built at run time) is for F4's call ledger (spec D3).
 
 _CREW_LANE = frozenset({"ask", "answer", "inbox", "decide", "decisions", "mode", "delegate", "decline", "route"})
-_CREW_READ = frozenset({"graph", "show", "rules", "history", "next"})
+_CREW_READ = frozenset({"graph", "show", "rules", "history", "next", "owner"})  # owner: who holds a file
 _LANE_TEXT = re.compile(r"\bdev\W{1,6}(?:progress|crew)\b")
 _DEV_IN_CODE = re.compile(r"(?<![\w.-])dev[\s'\",\[\]]{1,6}(progress|crew)\b(?:[\s'\",\]]{1,6}(-{0,2}[A-Za-z][\w-]*))?")
 _SPAWNS = re.compile(
@@ -5977,6 +6055,11 @@ def webfetch_verdict(tool_input):
 
 TIERS = {"push": 1, "pr": 1, "push-destructive": 2, "pr-write": 2, "merge": 2, "release": 2, "publish": 2,
          "deploy": 2, "api-write": 2, "external-message": 2, "unknown": 2, "developer-only": 2}
+# The targets of the bulk deletions on origin: `dev branch prune --apply` deletes the merged branches of the
+# repository it runs in; `dev gc --apply` and the scheduled sync, those of every project. A `:` is in no branch name,
+# so neither is ever a branch, and a branch glob never covers one (target_matches): only its exact grant does.
+PRUNE_TARGET = "origin:merged-branches"
+PRUNE_EVERY_TARGET = "origin:merged-branches-of-every-project"
 # a deploy may reach production, an unknown program may be anything, and a developer-only decision (B2: lifting an
 # embargo, publishing a branch that looks like a security fix, the backup policy) is theirs: they grant each one
 NEVER_PREAPPROVED = frozenset({"publish", "deploy", "unknown", "developer-only"})
@@ -6077,8 +6160,9 @@ _OPAQUE_NAME = re.compile(r"(?:^|[:_./-])(release|publish|deploy|push|ship)(?=$|
 _OPAQUE_CLASS = {"release": "release", "ship": "release", "publish": "publish", "deploy": "deploy", "push": "push"}
 _IRREV_TEXT = re.compile(
     r"\bgit\W+(?:-C\W+\S+\W+)?push\b|\bgh\W+(?:pr|issue|release|api|secret|variable|workflow|repo|gist|run|label)\b|"
-    r"\bdev\W+(?:push|release|pr|issue|gh|git)\b|\b(?:npm|pnpm|yarn|bun|twine|cargo|poetry|uv|gem|helm|docker)\W+"
-    r"(?:publish|upload|push|unpublish)\b|\b(?:kubectl|terraform|tofu|pulumi|vercel|netlify|firebase|flyctl|fly|"
+    r"\bdev\W+(?:push|release|pr|issue|gh|git|gc|sync|branch\W+prune)\b|"
+    r"\b(?:npm|pnpm|yarn|bun|twine|cargo|poetry|uv|gem|helm|docker)\W+(?:publish|upload|push|unpublish)\b|"
+    r"\b(?:kubectl|terraform|tofu|pulumi|vercel|netlify|firebase|flyctl|fly|"
     r"gcloud|aws|wrangler|cdk)\b|\bcurl\b.*\s-(?:X|d|F|T)\b")
 _VERSION_LIKE = re.compile(r"^v?\d+(?:\.\d+)+(?:[-+][\w.]+)?$")
 _GLOB = re.compile(r"[*?\[]")
@@ -6121,7 +6205,7 @@ _DEV_VALUES = frozenset({
     "-i", "--initiative", "--label", "--state", "--assignee", "--interval", "--timeout", "--lines", "--limit",
     "--branch", "--flaky", "--why", "--action", "--actor", "--agent", "--breaking", "--category", "--commit-template",
     "--days", "--delay", "--format", "--grep", "--lang", "--log", "--member", "--note", "--only", "--out", "--outcome",
-    "--provider", "--refs", "--renew", "--runner", "--search", "--session", "--severity", "--sha", "--since", "--stack",
+    "--pr", "--provider", "--refs", "--tag", "--renew", "--runner", "--search", "--session", "--severity", "--sha", "--since", "--stack",
     "--step-timeout", "--until", "--verified", "-n", "-o"})
 _CURL_VALUES = frozenset(
     "-X --request -H --header -d --data --data-raw --data-binary --data-ascii --data-urlencode --json -F --form "
@@ -6592,9 +6676,21 @@ def _dev_actions(dargs, cwd, depth=0) -> list:
     if cmd == "backup":  # pushes branches whose commits exist only here (spec P-fy3bwa0pshk R5): tier 1, per branch
         targets = list(pos[1:]) + (["all-branches"] if _dev_sets(dargs, "--all") else [])
         return [("push", t) for t in targets or [_branch(cwd)]]
-    if cmd == "sync" and _dev_sets(dargs, "--scheduled", "--finish") and \
-            not _dev_skips(dargs, "--offline", "--no-push"):
-        return [("push", "the branches of every project")]  # these runs back up branches (cmd_sync): no grant names it
+    if cmd == "branch" and sub == "prune" and _dev_sets(dargs, "--apply"):
+        # deletes merged branches on origin (with a lease) and here; --local or --offline (exact) leave origin as it
+        # is, and what is left here is merged into origin's default branch, which origin keeps
+        if _dev_skips(dargs, "--offline") or (_dev_skips(dargs, "--local") and not _dev_sets(dargs, "--remote")):
+            return []
+        return [("push-destructive", PRUNE_TARGET)]
+    if cmd == "gc" and _dev_sets(dargs, "--apply"):  # gc.apply deletes merged branches on origin in every project
+        return [("push-destructive", PRUNE_EVERY_TARGET)]
+    if cmd == "sync":
+        acts = []
+        if _dev_sets(dargs, "--scheduled", "--finish") and not _dev_skips(dargs, "--offline", "--no-push"):
+            acts.append(("push", "the branches of every project"))  # it backs up branches (cmd_sync): no grant names it
+        if _dev_sets(dargs, "--scheduled"):  # it may run gc.apply (no gc job on this Mac), whatever else it skips
+            acts.append(("push-destructive", PRUNE_EVERY_TARGET))
+        return acts
     if cmd == "jobs" and sub in ("run", "exec"):  # a job runs a dev command (the scheduled sync, a custom job)
         return _job_actions(pos[2] if len(pos) > 2 else "", cwd, depth)
     if cmd == "push":
@@ -7421,8 +7517,8 @@ def target_matches(action: str, pattern, target, default=None) -> bool:
     if not p or not t or _UNKNOWABLE.search(t) or _UNKNOWABLE.search(p):
         return False
     if action in ("push", "push-destructive", "pr"):
-        if _GLOB.search(p):
-            return fnmatch.fnmatchcase(t, p) and not _protected_branch(t, default)
+        if _GLOB.search(p):  # a branch glob covers branches: never a bulk deletion (no branch name holds a `:`)
+            return ":" not in t and fnmatch.fnmatchcase(t, p) and not _protected_branch(t, default)
         return p == t
     if _GLOB.search(p):
         return False

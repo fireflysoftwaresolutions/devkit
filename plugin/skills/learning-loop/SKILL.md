@@ -82,6 +82,10 @@ A lesson that is only text gets forgotten. Prefer, in this order:
 
 Then record the prevention: `dev lesson prevent <id> --by test --ref "tests/test_x.py::test_y" --why "…"`.
 
+A prevented or retired lesson that recurs (`dev lesson recur <id>`) goes back to open, and its changelog names the
+prevention that did not hold. Sessions recall it again. Find why the test, rule, or check missed it, fix that, and
+record the prevention again.
+
 Changes to devkit itself (a guard rule, skill rule or global rule) go through a devkit PR. Lessons in
 `lessons/global/` are the backlog for those PRs.
 

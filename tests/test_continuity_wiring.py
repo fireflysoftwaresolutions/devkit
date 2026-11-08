@@ -103,7 +103,7 @@ class HookTests(HookCase):
         self.assertIn("«rename the flag in `lib/flags.py`» (missing `lib/flags.py`)", got)
 
     def test_session_start_after_a_compaction_gives_the_brief_before_the_workspace_context(self):
-        self.make_run()
+        self.make_run(started=time.time() - 600)  # the hook reads the real clock: members that work now
         out = self.hook("session-start", self.payload("SessionStart.compact"))
         brief, _, rest = out.partition("\n\n")
         self.assertTrue(brief.startswith("devkit · this conversation was compacted"), out[:80])
@@ -166,7 +166,10 @@ class PromptRefreshTests(HookCase):
         p.start()
         self.addCleanup(p.stop)
         prompt.set_mode("zsh")  # the developer turned the helper on (dev setup prompt); off, the hooks write nothing
-        self.make_run(lanes=())
+        run = self.make_run(lanes=())
+        # no lane works, so D1 is the tech lead's own: it waits for the developer (a lane's that ended would be moot)
+        run["decisions"][0].update({"from": "main", "from_name": "Morpheus"})
+        state.replace(pg.run_path("claude", SID), run)
 
     def asks(self) -> str:
         return prompt.show(str(self.cwd), cols=200)[1]

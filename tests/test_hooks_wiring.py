@@ -480,6 +480,143 @@ class CommandTextRecordTests(WiringCase):
         self.assertNotIn("secret plan", self.stored())
 
 
+class CiWatchStartTests(WiringCase):
+    def setUp(self):
+        super().setUp()
+        from devkit import ciwatch, work
+        remote = self.root / "remote.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True, env=GIT_ENV)
+        git(self.repo, "remote", "add", "origin", str(remote))
+        git(self.repo, "push", "-q", "origin", "HEAD:refs/heads/main")
+        self.started, self.tops = [], []
+
+        def start(top, **kw):
+            self.tops.append(os.path.realpath(top))
+            self.started.append((kw.get("branch"), kw.get("sha")))
+            return True
+        for p in (mock.patch.object(ciwatch, "start_background", start),
+                  mock.patch.object(core, "is_temp", lambda path: False),  # the test's repository is a real one here
+                  mock.patch.object(work, "request_sync", lambda *a, **k: False)):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def commit(self, text):
+        (self.repo / "README.md").write_text(text)
+        git(self.repo, "commit", "-qam", text)
+        return subprocess.run(["git", "-C", str(self.repo), "rev-parse", "HEAD"], capture_output=True, text=True,
+                              check=True, env=GIT_ENV).stdout.strip()
+
+    def after(self, cmd, cwd=None):
+        call = self.tool("Bash", {"command": cmd}, tid="toolu_ci", cwd=cwd or self.repo, event="PostToolUse")
+        self.hook("post-tool", dict(call, tool_response={"stdout": ""}))
+        return self.started
+
+    def test_a_push_that_reached_the_remote_watches_that_commit(self):
+        git(self.repo, "switch", "-qc", "feat/x")
+        sha = self.commit("feature\n")
+        git(self.repo, "push", "-q", "-u", "origin", "feat/x")
+        self.assertEqual(self.after("git push -u origin feat/x"), [("feat/x", sha)])
+
+    def test_a_push_codex_runs_through_a_login_shell_watches_that_commit(self):
+        git(self.repo, "switch", "-qc", "feat/x")
+        sha = self.commit("feature\n")
+        git(self.repo, "push", "-q", "-u", "origin", "feat/x")
+        self.assertEqual(self.after(["bash", "-lc", "git push -u origin feat/x"]), [("feat/x", sha)])
+
+    def test_a_branch_the_remote_does_not_have_is_not_watched(self):
+        # made from the remote's main and tracking it: the same commit is on the remote, but not this branch
+        git(self.repo, "switch", "-qc", "hotfix/26.11.6", "--track", "origin/main")
+        self.assertEqual(self.after("dev pr create --fill"), [])
+
+    def test_a_merge_watches_the_merge_commit_on_the_default_branch(self):
+        git(self.repo, "switch", "-qc", "hotfix/26.11.6", "--track", "origin/main")
+        git(self.repo, "switch", "-qc", "fix/login")
+        merged = self.commit("fix\n")
+        git(self.repo, "push", "-q", "origin", "fix/login:main")  # the merge, as its fetch shows it here
+        git(self.repo, "switch", "-q", "hotfix/26.11.6")  # merged from another branch: HEAD's runs are not the merge's
+        self.assertEqual(self.after("dev pr merge 8"), [("main", merged)])
+
+    def test_a_merge_dry_run_watches_nothing(self):
+        git(self.repo, "switch", "-qc", "fix/login")
+        self.commit("fix\n")
+        git(self.repo, "push", "-q", "origin", "fix/login:main")
+        self.assertEqual(self.after("dev pr merge 8 --dry-run"), [])
+
+    def test_a_release_watches_its_tag_at_the_commit_it_tags(self):
+        git(self.repo, "switch", "-qc", "main", "--track", "origin/main")
+        sha = self.commit("26.11.6\n")
+        git(self.repo, "push", "-q", "origin", "main")
+        git(self.repo, "tag", "-a", "v26.11.6", "-m", "26.11.6")
+        git(self.repo, "push", "-q", "origin", "v26.11.6")
+        self.assertEqual(self.after("dev release"), [("v26.11.6", sha)])
+
+    def test_a_push_of_another_branch_watches_that_branch(self):
+        git(self.repo, "switch", "-qc", "feat/x")
+        self.commit("feature\n")
+        git(self.repo, "push", "-q", "-u", "origin", "feat/x")
+        git(self.repo, "switch", "-qc", "feat/y")
+        other = self.commit("other\n")
+        git(self.repo, "push", "-q", "origin", "feat/y")
+        git(self.repo, "switch", "-q", "feat/x")
+        self.assertEqual(self.after("git push origin feat/y"), [("feat/y", other)])
+
+    def test_a_push_with_git_dash_c_watches_that_repository(self):
+        git(self.repo, "switch", "-qc", "feat/x")
+        sha = self.commit("feature\n")
+        git(self.repo, "push", "-q", "-u", "origin", "feat/x")
+        elsewhere = self.root / "elsewhere"
+        elsewhere.mkdir()
+        self.assertEqual(self.after(f"git -C {self.repo} push origin feat/x", cwd=elsewhere), [("feat/x", sha)])
+        self.assertEqual(self.tops, [os.path.realpath(self.repo)])
+
+    def test_a_commit_that_did_not_reach_the_remote_is_not_watched(self):
+        git(self.repo, "switch", "-qc", "feat/x")
+        self.commit("feature\n")
+        git(self.repo, "push", "-q", "-u", "origin", "feat/x")
+        self.commit("more\n")  # the next push was rejected: the remote still has the commit before
+        self.assertEqual(self.after("git push"), [])
+
+
+class CrewNoticeOnceTests(WiringCase):
+    TOLD = "Code reviewer (Seraph) finished (agent `r1`)"
+
+    def setUp(self):
+        super().setUp()
+        from devkit import state
+        self.st, self.sf = state, hooks._session_file("claude", "s1")
+        state.update(self.sf, lambda s: s.update(crew_finished={"r1": "Code reviewer (Seraph)"}))
+
+    @contextlib.contextmanager
+    def busy(self):  # another devkit process holds the session's records
+        import fcntl
+        fd = os.open(str(self.st.lock_file(self.sf)), os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:  # each writer of the hook waits this long for the lock, instead of its 2 s
+            with mock.patch.object(self.st, "HOOK_WAIT", 0.05), mock.patch.object(self.st, "WAIT", 0.05):
+                yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
+    def told_after_a_tool(self):
+        call = self.tool("Bash", {"command": "git status"}, tid="toolu_n", event="PostToolUse")
+        return self.context(self.hook("post-tool", dict(call, tool_response={"stdout": ""})))
+
+    def told_at_a_prompt(self):
+        return self.context(self.hook("prompt", {"session_id": "s1", "hook_event_name": "UserPromptSubmit",
+                                                 "prompt": "go on", "cwd": str(self.root)}))
+
+    def test_a_crew_notice_after_a_tool_is_told_once_and_not_while_the_record_is_busy(self):
+        with self.busy():
+            self.assertNotIn(self.TOLD, self.told_after_a_tool())
+        self.assertEqual([self.TOLD in self.told_after_a_tool() for _ in range(2)], [True, False])
+
+    def test_a_crew_notice_at_a_prompt_is_told_once_and_not_while_the_record_is_busy(self):
+        with self.busy():
+            self.assertNotIn(self.TOLD, self.told_at_a_prompt())
+        self.assertEqual([self.TOLD in self.told_at_a_prompt() for _ in range(2)], [True, False])
+
+
 class ConfigTests(unittest.TestCase):
     def test_the_guard_hook_sees_webfetch_and_mcp_tools(self):
         conf = json.loads((HOME / "config" / "claude" / "settings.json").read_text())

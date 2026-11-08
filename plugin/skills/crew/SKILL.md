@@ -1,6 +1,6 @@
 ---
 name: crew
-description: How the main session leads devkit's crew of specialist agents (professional roles, each with a Matrix name)—who to send for each kind of work, when to run them in parallel and when in sequence, how to brief them, and how devkit coordinates them on Claude Code, Claude Desktop, Codex and the ChatGPT app (plan steps with dependencies and a declared kind of work, the RACI, the crew's slots, one lane per agent with its own time, file scopes and scratch folders the guard enforces, messages between members, and the checks every member's report must pass). Use when work needs more than one kind of expertise, before launching any subagent, when planning parallel work, and when a crew member asks for a decision.
+description: How the main session leads devkit's crew of specialist agents (professional roles, each with a Matrix name)—who to send for each kind of work, when to run them in parallel and when in sequence, how to brief them, and how devkit coordinates them on Claude Code, Claude Desktop, Codex and the ChatGPT app (plan steps with dependencies and a declared kind of work, the RACI, the crew's slots, one lane per agent with its own time, file scopes and scratch folders the guard enforces, messages between members, and the checks every member's report must pass). Use when work needs more than one kind of expertise, before launching any subagent, when planning parallel work, when a crew member asks for a decision, and when a member stopped or a decision no longer applies.
 ---
 
 # Leading the crew
@@ -112,6 +112,10 @@ dev crew graph                       # the session as one graph: steps, lanes, d
   member that needs more asks you. Write scopes repository-relative (`lib/**`): they match in every checkout of the
   repository. `assign` and `dev crew delegate --scope` rewrite an absolute or `~` path inside one checkout to that
   form and tell you, and refuse one that spans checkouts or names a worktree that is not there (deleted included).
+- **Check who holds the files first.** Before you assign a scope, or edit files outside your own lane, run
+  `dev crew owner <paths>`: it names the member whose step holds each path. A member whose lane ended or went stale
+  holds no files. When a step and its files go to another lane, a lane that kept those files may read but not write
+  until you assign it a step, so two lanes never write the same files.
 - Work you discover goes into the plan when it **starts** (`dev progress add`, then `dev progress begin`), so its
   time is its own; close a step only with its evidence and only the step it is about.
 - `dev crew brief` prints the brief and the exact spawn line. Launch every parallel member **in one message**. Then
@@ -139,21 +143,30 @@ files.
 
 - **Progress per member:** each member records steps with `dev progress step "…"`. devkit sees the call comes from a
   subagent (`agent_id` in the hook input) and writes it to that member's lane, never to your plan. `dev progress`,
-  the dashboard, `dev crew` and `dev crew graph` show every lane with its time. One launch makes one lane: a resumed
-  member keeps its lane, a failed launch holds no slot, and a member stopped with TaskStop frees its slot at once.
+  the dashboard, `dev crew` and `dev crew graph` show every lane with its time. One launch makes one lane, and one
+  step: name it in the launch. A failed launch holds no slot. A member stopped with TaskStop, or whose transcript
+  shows an interruption, ends `stopped`: its slot frees at once and its open steps go back to pending for a new
+  launch. A resumed member keeps its lane and takes a slot like a launch; while none is free it may read but not
+  write, and you are told once.
 - **Who is calling:** devkit records every shell call with the agent that made it. Your own plan commands
   (`dev progress start|assign|begin|reopen|skip|done`, `dev crew decide|mode`, `dev crew route --plan --apply`) count
   as yours only when you type them: run through a script or `bash -c`, they are refused. A member runs its lane
   commands on their own (not inside `&&`, a pipe, or `$(…)`; a message from a quoted heredoc is fine); read-only crew
   commands run anywhere: `dev crew graph`, `show`, `rules`, `history`, `next`, and `dev crew raci` without `--set`.
+  After a compaction, Claude Code gives your conversation a new session id; devkit moves your open run and its
+  working lanes to it (`session.adopt`), so your plan commands keep working.
 - **Helpers:** a member may launch a helper for a narrow lookup or a slice of its own files. The helper gets the
   member's tools and files, takes a slot, and no launch goes deeper than `progress.max_depth` (2). A member that needs
   another specialist asks you.
 - **Scratch folders:** each member writes and deletes only in `scratchpad/<member id>/` or
-  `scratchpad/<member id>-<task>/` of the session scratchpad. Name a member's folder in its brief.
+  `scratchpad/<member id>-<task>/` of the session scratchpad. `dev crew brief` names the folder in the brief's Scope
+  section, and devkit creates it when the lane opens, so a read-only member has one too. A brief you write by hand
+  names it the same way.
 - **Questions:** any member can ask anything: `dev crew ask "Should empty lines be skipped?"` (to the tech lead by
-  default, or `--to Seraph`). The message reaches the recipient with its next action. Answer with
-  `dev crew answer M1 "Yes, skip them"`. Answer quickly: a member waiting on you blocks a lane.
+  default, or `--to Seraph`; `--to "Tech lead"` and `--to Morpheus` reach the main session). The message reaches the
+  recipient with its next action. Answer with `dev crew answer M1 "Yes, skip them"`. Answer quickly: a member waiting
+  on you blocks a lane. Only a question waits: a notice (a CI result, a step or launch notice, a decision's result)
+  and an answer close once delivered, and `dev status` lists only the questions nobody answered.
 - **Decisions that are the developer's** (scope, behavior, cost, risk): you ask the developer with the decision
   template (`communicating` skill). Members never ask the developer directly.
 - **Updates to the developer** are yours: `dev progress step` prints the status block with every lane under it.
@@ -192,7 +205,22 @@ dev crew decide D1 "B: reject"                          # the tech lead records 
   (an embargo lift, a public backup, a backup policy) and commands the guard cannot name are never pre-approved.
 - In auto mode, the final report lists every automatic decision so the developer can review it; an override with
   `dev crew decide` is recorded next to the original.
-- A run cannot be closed while a decision is pending.
+- Recording an answer never brings back a lane that ended: the step it blocked goes back to pending, and the resume
+  or a new launch takes a slot.
+
+A decision belongs to its run, and only an open one needs the developer:
+
+- **Moot.** The member that asked has ended and no step is blocked on it. Nobody waits for the answer: leave it out
+  of the **You** line; it does not stop `dev progress done`, and the developer's answer still counts if they give one.
+- **Closed with its run.** `dev progress done` and `dev progress start --replace` close every decision still pending
+  in the run, moot ones included, with the reason.
+- **Withdrawn.** `dev crew withdraw <id> --why "…"` closes a pending decision that no longer applies: the plan
+  changed, the step went away, or it was asked by mistake. Only you run it, typed in the main session. It frees the
+  step blocked on it and tells the asking member. It is never the developer's answer and opens no irreversible
+  action: a decision that still matters waits for the developer.
+
+`dev progress done` is refused while a decision still needs the developer (`dev crew decisions --pending` lists
+them).
 
 ## 7. When a member finishes
 
@@ -214,7 +242,10 @@ dev crew decide D1 "B: reject"                          # the tech lead records 
 2. **The step ends on evidence.** It ends done only with a Check ✓ in the report or the member's own
    `dev progress step --check`; otherwise it shows as unverified, for you to close with evidence or reopen
    (`dev progress reopen <step> --why "…"`). A review or read-only member whose shell call wrote files ends
-   unverified too, until you check the diff.
+   unverified too, until you check the diff. Write detection credits a file in a working builder's scope to that
+   builder only while it has a call open; the review step after it lists the files another lane changed there.
+   Reopening a step flags the finished steps that used it for a recheck: the flag clears when they finish again, or
+   with `dev progress confirm <step> --why "…"` once you checked that their work still holds.
 3. **Review steps start on unverified work.** A review step (its kind of work is review, or its member works
    review-only) does not wait for the steps it follows to be verified, and its Check ✓ approves the ones its member
    is the approver for. Every other step waits for done or skipped, and the run cannot end while a step is unverified
@@ -222,6 +253,8 @@ dev crew decide D1 "B: reject"                          # the tech lead records 
 4. **Check the work, don't trust the report:** read the diff (`git diff --stat`, then the files that matter), run the
    affected tests yourself (`dev test`), and spot-check a cited `file:line`.
 5. **Integrate** in your own lane. Run the full suite once at the end (`dev ci --run`), not after each member.
+   `dev progress done` is refused while a member owns a running step: wait for its report, or skip the step on
+   purpose with `dev progress skip "<step>" --why "…"`.
 6. **Close the loop:** an independent review (the Code reviewer) for substantial changes, a security review (the
    Security engineer) for auth, data, money, files, or infrastructure.
 

@@ -40,6 +40,14 @@ class ProviderTests(unittest.TestCase):
                               "startedAt": "2026-11-06T04:00:00Z", "updatedAt": "2026-11-06T04:30:00Z"}, NOW)
         self.assertEqual(done["status"], "failed")
 
+    def test_a_finished_github_run_keeps_the_hosts_conclusion(self):
+        # the status reads neutral as success, stale as cancelled and timed_out as failed: the conclusion keeps the word
+        for raw in ("neutral", "stale", "timed_out"):
+            with self.subTest(raw):
+                run = cs.github_run({"databaseId": 5, "status": "completed", "conclusion": raw, "workflowName": "CI",
+                                     "startedAt": "2026-11-06T04:00:00Z", "updatedAt": "2026-11-06T04:30:00Z"}, NOW)
+                self.assertEqual(run["conclusion"], raw)
+
     def test_gitlab_pipeline_and_stages(self):
         run = cs.gitlab_run({"id": 9, "iid": 41, "status": "running", "ref": "main", "sha": "abc1234",
                              "created_at": "2026-11-06T05:10:00Z", "started_at": "2026-11-06T05:10:30Z",

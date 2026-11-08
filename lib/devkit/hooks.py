@@ -63,15 +63,103 @@ def _patch_quietly(path: Path, before: dict, after: dict):
 
 
 def _spawn(args, logname="sync.log"):
-    """Detached background `dev …` so the hook returns immediately."""
+    """Detached background `dev …` so the hook returns immediately. It runs the release install.json pins
+    (core.release_home): a session that still runs an older copy starts the installed release, never itself."""
     # The child gets its own copy of the log's descriptor; ours closes once it is started (an open one warns at exit).
     with open(STATE / "logs" / logname, "a") as log:
-        subprocess.Popen([sys.executable, "-I", "-S", str(core.DEVKIT_HOME / "bin" / "dev"), *args],  # as its shebang
+        subprocess.Popen([sys.executable, "-I", "-S", str(core.release_home() / "bin" / "dev"), *args],  # its shebang
                          stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True, close_fds=True)
+
+
+def _older_copy_notice(agent: str, sid: str, what: str) -> str:
+    """When this copy is older than the pinned release: record the skip (core.older_copy_skip) and return what the
+    session hears, the first time only for each session and pinned release; "" otherwise."""
+    old = core.older_copy_skip(what)
+    if not old:
+        return ""
+    who, first = f"{agent}:{sid or '-'}", []
+
+    def mark(d):
+        if d.get("pinned") != old["pinned"]:
+            d.clear()
+            d["pinned"] = old["pinned"]
+        told = d.setdefault("told", [])
+        if who in told:
+            return state.SKIP
+        told.append(who)
+        del told[:-200]
+        first.append(True)
+
+    try:
+        state.update(STATE / "older-copy.json", mark)
+    except state.StateBusy:
+        return ""
+    return core.older_copy_words(old) if first else ""
 
 
 def _spawn_sync(args):
     _spawn(["sync", "--quiet", *args])
+
+
+# --------------------------------------------------------------------------- sessions to restart after an install
+
+AGENT_NAMES = {"claude": "Claude Code", "codex": "Codex"}
+
+
+def sessions_to_restart(sessions_dir=None, alive=None) -> list:
+    """The Claude Code and Codex sessions that use devkit and still run, from devkit's session records (each holds the
+    agent process its SessionStart recorded): [{agent, session, project, branch, devkit, started}], oldest first. A
+    process devkit cannot check counts as running."""
+    if alive is None:
+        from .approvals import pid_alive as alive
+    d = Path(sessions_dir or core.STATE / "sessions")
+    out = []
+    for f in sorted(d.glob("*.json")) if d.is_dir() else []:
+        try:
+            s = json.loads(f.read_text())
+        except (OSError, ValueError):
+            continue
+        if not isinstance(s, dict) or s.get("agent") not in AGENT_NAMES or not s.get("pid"):
+            continue
+        if alive(s["pid"], s.get("pid_start")) is False:
+            continue
+        out.append({"agent": s["agent"], "session": str(s.get("session") or ""),
+                    "project": s.get("project") or tilde(s.get("top") or s.get("cwd") or "?"),
+                    "branch": s.get("branch") or "", "devkit": s.get("devkit") or "",
+                    "started": float(s.get("started") or 0)})
+    return sorted(out, key=lambda x: x["started"])
+
+
+def restart_lines(sessions: list) -> list:
+    return [f"  {AGENT_NAMES[s['agent']]} · {s['project']}" + (f" ({s['branch']})" if s["branch"] else "")
+            + (f" · devkit {s['devkit']}" if s["devkit"] else "") + f" · session {s['session'][:8]}"
+            + f" · since {core.fmt_ts(s['started'])}" for s in sessions]
+
+
+def confirm_restart(assume_yes=False, ask=None, say=print, interactive=None, sessions_dir=None, alive=None) -> bool:
+    """`dev install` and `dev update`, before they change anything: name the running sessions that use devkit, each
+    of which keeps its hooks until it is restarted -> whether to go on. With assume_yes, or with no terminal to ask
+    in, it prints the list and goes on; in a terminal it asks once (Enter goes on, n stops with nothing changed)."""
+    sessions = sessions_to_restart(sessions_dir, alive)
+    if not sessions:
+        return True
+    n = len(sessions)
+    say(f"{n} running session{'s use' if n > 1 else ' uses'} devkit; restart each after this to load the new "
+        f"hooks (until then it keeps the old ones, which change no setting):")
+    for line in restart_lines(sessions):
+        say(line)
+    if interactive is None:
+        try:
+            interactive = sys.stdin.isatty() and sys.stdout.isatty()
+        except (AttributeError, ValueError):
+            interactive = False
+    if assume_yes or not interactive:
+        return True
+    try:
+        answer = (ask or input)("  Go on? [Y/n] ")
+    except (EOFError, KeyboardInterrupt):
+        return False
+    return answer.strip().lower() not in ("n", "no")
 
 
 # --------------------------------------------------------------------------- session start
@@ -236,7 +324,7 @@ def _register_session(agent: str, sid: str, cwd: str, data: dict = None) -> Path
     if not f.exists():
         top = core.gitout(cwd, "rev-parse", "--show-toplevel")  # git before the lock
         from .canary import surface
-        rec = {"agent": agent, "session": sid, "cwd": cwd, "top": top, "started": time.time(),
+        rec = {"agent": agent, "session": sid, "cwd": cwd, "top": top, "started": time.time(), "devkit": core.VERSION,
                "surface": surface(agent, data),
                "head": core.gitout(top, "rev-parse", "HEAD") if top else "",
                "branch": core.gitout(top, "branch", "--show-current") if top else ""}
@@ -244,7 +332,54 @@ def _register_session(agent: str, sid: str, cwd: str, data: dict = None) -> Path
             state.update(f, lambda d: state.SKIP if d else rec)
         except state.StateBusy:
             pass
+    try:
+        _claim_process(agent, sid, f)
+    except Exception:
+        _log(f"register pid {agent}: {traceback.format_exc()[-300:]}")
     return f
+
+
+def _claim_process(agent: str, sid: str, f: Path):
+    """Record the agent process this session runs in (pid, pid_start), on every way a session registers: SessionStart,
+    or the first prompt of a session that had none (Claude Code gives a running conversation a new session id after a
+    compaction). A `dev` command below that process then finds this session by its parents (progress.resolve_session).
+    An older Claude Code record that holds the same process is kept, marked superseded_by this session, and gives the
+    pid up (pid_superseded): one Claude Code process runs one conversation, and its shells still name the older id
+    in DEVKIT_SESSION. Codex runs several threads in one process, so its records keep their pids."""
+    from . import approvals, progress
+    pid = progress.agent_pid()
+    if not pid:
+        return
+    rec = state.read(f) or {}
+    start = approvals.pid_start(pid)  # ps, before any lock
+    if rec.get("pid") != pid or rec.get("pid_start") != start:
+        state.update(f, lambda d: d.update(pid=pid, pid_start=start), create=False)
+    if agent != "claude":
+        return
+    took = False
+    for g in sorted(f.parent.glob(f"{agent}-*.json")):
+        if g == f:
+            continue
+        other = state.read(g) or {}
+        if other.get("agent") != agent or other.get("pid") != pid or \
+                (other.get("pid_start") and start and other["pid_start"] != start) or \
+                float(other.get("started") or 0) > float(rec.get("started") or time.time()):
+            continue
+
+        def supersede(d):
+            if d.get("pid") != pid:
+                return state.SKIP
+            d["pid_superseded"] = d.pop("pid")
+            d.update(superseded_by=sid, superseded_at=time.time())
+        try:
+            took = bool((state.update(g, supersede, create=False) or {}).get("superseded_by") == sid) or took
+        except state.StateBusy:
+            _log(f"register pid {agent}: {g.name} busy, still holds pid {pid}")
+    if took:
+        try:  # the older session's open run and its lanes go on in this one
+            progress.adopt_process_run(agent, sid, pid)
+        except Exception:
+            _log(f"register run {agent}: {traceback.format_exc()[-300:]}")
 
 
 def session_start(agent: str):
@@ -252,14 +387,10 @@ def session_start(agent: str):
     cwd = data.get("cwd") or os.getcwd()
     sid = data.get("session_id") or f"pid{os.getppid()}"
     f = _register_session(agent, sid, cwd, data)
-    try:  # the agent's own process: a `dev` command below it finds this session by its parents (spec C4)
+    try:  # the agent's own process (spec C4) is recorded by _register_session (_claim_process)
         from . import progress
-        from . import approvals
-        pid = progress.agent_pid()
         rec_ = state.read(f) or {}
         more = {"transcript": data["transcript_path"]} if data.get("transcript_path") else {}
-        if pid and rec_.get("pid") != pid:
-            more.update(pid=pid, pid_start=approvals.pid_start(pid))  # ps, before the lock
         if more and any(rec_.get(k) != v for k, v in more.items()):
             state.update(f, lambda d: d.update(more), create=False)
         progress.resume_orphaned(agent, sid)
@@ -280,7 +411,12 @@ def session_start(agent: str):
                 fh.write(f"export DEVKIT_SESSION={agent}:{sid}\nexport DEVKIT_AGENT={agent}\n")
     except Exception:
         _log(f"session-start env {agent}: {traceback.format_exc()[-300:]}")
-    _spawn(["config", "repair", "--quiet"])  # restore any devkit-managed setting changed outside devkit
+    try:  # an older copy than the pinned release repairs nothing itself: the session hears it once
+        older = _older_copy_notice(agent, sid, "the session-start repair")
+    except Exception:
+        older = ""
+        _log(f"session-start older copy {agent}: {traceback.format_exc()[-300:]}")
+    _spawn(["config", "repair", "--quiet"])  # the pinned release restores any devkit-managed setting changed outside
     try:
         from . import work
         work.request_sync("session start", delay=1)  # pull other machines' claims and publish this session
@@ -288,7 +424,8 @@ def session_start(agent: str):
         pass
     text = "\n\n".join(x for x in (_continuity("on_session_start", agent, data),
                                    _with_catalog(context_for(cwd, agent), agent)) if x)
-    shown = []  # the notices the developer must see too, not only the agent (Claude: a system message)
+    shown = [older] if older else []  # the notices the developer must see too, not only the agent (Claude: a system message)
+    text += f"\n\n{older}" if older else ""
     try:  # devkit notices from files only, no network (spec P-fym583l7sg1)
         from . import ext, updatecheck
         notices = ((lambda: updatecheck.session_line(installed=updatecheck.installed_version()), False),  # daily
@@ -688,6 +825,17 @@ def _test_gate(data: dict, sess: dict):
     return msg
 
 
+def _ci_watch_gate(agent: str, data: dict):
+    """A turn that sent work to origin and leaves its unfinished CI run with nothing watching it that wakes this agent
+    goes back with the command to start (ciwatch.stop_gate); the turn's stop.block names the rule. Fails open."""
+    try:
+        from . import ciwatch
+        return ciwatch.stop_gate(agent, data)
+    except Exception:
+        _log(f"stop ci watch: {traceback.format_exc()[-300:]}")
+        return None
+
+
 def turn_checklist(agent: str, data: dict, sess: dict) -> list:
     """What the Stop gate would ask at this point of the turn, so it reaches the agent before the end (threaded turn
     endings, R1) -> [(rule, text)] still open: handoff (the developer's commits newer than the project's note),
@@ -714,6 +862,9 @@ def turn_checklist(agent: str, data: dict, sess: dict) -> list:
         msg = find(data, sess)[1]
         if msg:
             items.append((rule, msg))
+    why = _ci_watch_gate(agent, data)  # right after a push, before the turn can end on a promise
+    if why:
+        items.append(("watch", why.replace("devkit: ", "", 1)))
     return items
 
 
@@ -796,6 +947,9 @@ def stop(agent: str):
                 why = gate(data, sess)
                 if why:
                     reasons.append((rule, why))
+            why = _ci_watch_gate(agent, data)  # Claude and Codex: each is told the watch that wakes it
+            if why:
+                reasons.append(("watch", why))
         try:  # lessons the reply names were applied: that use keeps them alive
             from . import lessons as _les
             said = data.get("last_assistant_message") or ""
@@ -900,6 +1054,21 @@ def config_change(agent: str):
         return
     ks = sorted({d.key for d in drift} | {f"env.{k}" for k in env_keys})
     keys = ", ".join(ks[:6]) + (f" (+{len(ks) - 6} more)" if len(ks) > 6 else "")
+    if not project and core.older_copy():
+        # The user settings differ from what this older copy would write, most likely because a newer release was
+        # installed. It writes nothing; the pinned release's repair (_spawn runs it) puts back what really drifted
+        # from the installed configuration, a tampered DEVKIT_* variable included.
+        notice = _older_copy_notice(agent, data.get("session_id") or "", f"{tilde(path)} ({keys})")
+        _log(f"config-change left to the pinned release ({agent}): {keys}")
+        _spawn(["config", "repair", "--quiet"])
+        if env_keys:
+            print(f"devkit's DEVKIT_* variables say who calls devkit and how its safeguards behave, so they change "
+                  f"only with devkit's configuration (spec C11): refused {', '.join(f'env.{k}' for k in env_keys)}. "
+                  f"{notice}".strip(), file=sys.stderr)
+            sys.exit(2)
+        if notice:
+            print(json.dumps({"systemMessage": notice}))
+        return
     _log(f"config-change blocked ({agent}): {keys}")
     from . import audit
     audit.record("config.blocked", path, keys, "blocked")
@@ -919,7 +1088,9 @@ def config_change(agent: str):
 def _devkit_env_change(path: str, settings: dict, managed: bool = True) -> list:
     """The DEVKIT_* variables of the settings' env block that differ from what devkit manages (spec C11: set,
     changed or removed), put back to devkit's values in the file. [] when none differ. `managed`: the user
-    settings, where devkit manages some; a project's settings get none."""
+    settings, where devkit manages some; a project's settings get none. A copy older than the pinned release reports
+    the user settings' variables but writes nothing: its values may be the older ones (the pinned release repairs).
+    A project's settings get every DEVKIT_* variable removed by any copy: that holds in every release."""
     from . import guard, policy
     flat = policy.claude_desired()[0] if managed else {}
     want = {p[1]: json.dumps(v) for p, v in flat.items() if len(p) == 2 and p[0] == "env"
@@ -929,7 +1100,7 @@ def _devkit_env_change(path: str, settings: dict, managed: bool = True) -> list:
     except OSError:
         return []
     changed = sorted(k for k in set(want) | set(have) if want.get(k) != have.get(k))
-    if changed:
+    if changed and (not managed or not core.older_copy()):
         env = {k: v for k, v in (settings.get("env") or {}).items() if not str(k).startswith("DEVKIT_")}
         settings["env"] = {**env, **{k: json.loads(v) for k, v in want.items()}}
         if not settings["env"]:
@@ -1395,8 +1566,9 @@ def _crew_limits(agent: str, data: dict):
       progress.quota_percent), each launch costing its progress.slot_weights (a scout lookup nothing), the helpers
       members launch included, progress.reserve kept for the developer's own request, and no launch deeper than
       progress.max_depth;
-    - the main session does not edit files a running crew member owns, in this session's run or in another live run
-      of the repository (spec F7, G13; DEVKIT_SCOPE_OVERRIDE=1 for an emergency)."""
+    - the main session does not edit files a working crew member owns, in another live run of the repository or in
+      this session's run (spec F7, G13; DEVKIT_SCOPE_OVERRIDE=1 for an emergency). A member that ended or went stale
+      holds nothing. progress.scope_holders decides, for this check and for `dev crew owner` alike."""
     from . import guard
     try:
         from . import progress
@@ -1406,33 +1578,20 @@ def _crew_limits(agent: str, data: dict):
         inp = data.get("tool_input") or {}
         path = (inp.get("file_path") or inp.get("notebook_path") or "") if main_edit else ""
         cwd = data.get("cwd") or os.getcwd()
-        if path:  # other sessions' members first: a session with no run respects them too
-            own = guard.scope_owner_across(os.path.normpath(os.path.join(cwd, path)), me_session=sid)
-            if own:
-                return ("deny", f"{path} belongs to {own[0]} while they work (scope {', '.join(own[1])}), in another "
-                                f"session of this repository. Ask them (dev crew ask --to \"{own[0]}\" \"…\") or wait "
-                                f"until they finish; DEVKIT_SCOPE_OVERRIDE=1 only for an emergency.")
+        if path:  # other sessions' members first (a session with no run respects them too), then this session's
+            h = progress.scope_holder(path, agent, sid, cwd)
+            if h:
+                return ("deny", progress.holder_refusal(h, path, cwd))
+        if tool not in ("Agent", "Task", "spawn_agent"):
+            return None
         run = progress.load_run(agent, sid)
         if not run or run.get("state") == "done":
             return None
         run = progress.normalize(run)
         progress.expire_stale(run)
-        if tool in ("Agent", "Task", "spawn_agent"):  # at every depth (spec F3): a member's helper takes a slot too
-            why = progress.launch_verdict(agent, data, run)
-            if why:
-                return ("deny", why)
-        if path:
-            top = guard.scope_base(run.get("project"), cwd)
-            rel = guard.scope_rel(path, cwd, top)
-            k, lane = progress.scope_owner(run, rel)
-            if lane:
-                from . import crew
-                m = crew._for_lane(lane)
-                who = crew.who(m) if m else (lane.get("persona") or lane.get("label") or "a crew member")
-                to = m["id"] if m else f"\"{lane.get('label') or who}\""
-                return ("deny", f"{rel} belongs to {who} while they work (scope {', '.join(lane['scope'])}). Ask "
-                                f"them (dev crew ask --to {to} \"…\") or wait until they finish; "
-                                f"DEVKIT_SCOPE_OVERRIDE=1 only for an emergency.")
+        why = progress.launch_verdict(agent, data, run)  # at every depth (spec F3): a member's helper takes a slot too
+        if why:
+            return ("deny", why)
     except Exception as e:
         guard.failopen("crew-limits", e)
     return None
@@ -1894,6 +2053,11 @@ def prompt(agent: str):
         _register_session(agent, sid, cwd, data)
         extra = _with_catalog(context_for(cwd, agent), agent)
         _log(f"prompt {agent}: session {sid[:12]} had no SessionStart; devkit context injected")
+    elif sid and agent == "claude" and not (state.read(_session_file(agent, sid)) or {}).get("pid"):
+        try:  # a record an earlier prompt made without its process
+            _claim_process(agent, sid, _session_file(agent, sid))
+        except Exception:
+            _log(f"prompt pid {agent}: {traceback.format_exc()[-300:]}")
     raw = (data.get("prompt") or "").lstrip()
     background = _background_told(agent, data)  # a member's completion notice is often this very prompt
     if raw.startswith(("<task-notification", "[SYSTEM NOTIFICATION", "<system-reminder", "<agent-message")) or \
@@ -1956,8 +2120,8 @@ def command_words(cmd: str) -> str:
     return re.sub(r'"(?:\\.|[^"\\])*"', '""', text)
 
 
-CI_TRIGGER = re.compile(r"\bgit\s+(?:-C\s+\S+\s+)?push\b|\bdev\s+push\b|\b(?:gh|dev)\s+pr\s+(?:create|merge)\b|"
-                        r"\bdev\s+release\b")
+CI_TRIGGER = re.compile(r"\bgit\s+(?:-C\s+\S+\s+)?push\b|\bdev\s+push\b|"
+                        r"\b(?:gh|dev)\s+pr\s+(?:create|merge|ready)\b|\bdev\s+release\b")
 
 
 # lesson L-fwyp0n9vzv6: regex rewrites of code and prose changed what they should not, twice
@@ -2120,7 +2284,9 @@ def crew_notices(sess: dict) -> str:
 
 
 def _background_told(agent: str, data: dict) -> str:
-    """crew_notices for a hook that has not read the session record (UserPromptSubmit)."""
+    """crew_notices for the main session, taken under the session record's lock (as ciwatch.pending_events takes CI
+    results): what it tells leaves the record in the same write, and a busy record tells nothing now and all of it
+    at the next hook. A copy read earlier and patched later told a notice again whenever the patch was dropped."""
     if data.get("agent_id"):
         return ""
     try:
@@ -2129,11 +2295,17 @@ def _background_told(agent: str, data: dict) -> str:
             return ""
         sess = state.read(sf) or {}
         if not (sess.get("crew_background") or sess.get("crew_finished")):
-            return ""
-        before = copy.deepcopy(sess)
-        text = crew_notices(sess)
-        _patch_quietly(sf, before, sess)
-        return text
+            return ""  # the usual case, without the lock
+        told = []
+
+        def take(s):
+            if not (s.get("crew_background") or s.get("crew_finished")):
+                return state.SKIP
+            told[:] = [crew_notices(s)]
+        state.update(sf, take, create=False)
+        return told[0] if told else ""
+    except state.StateBusy:
+        return ""  # audited by state; the notice stays for the next hook
     except Exception:
         _log(f"background notice {agent}: {traceback.format_exc()[-300:]}")
         return ""
@@ -2176,10 +2348,13 @@ def post_tool(agent: str):
             work.request_sync("delivery: " + DELIVERY.search(words).group(0))
         if data.get("tool_name") in SHELL_TOOLS and CI_TRIGGER.search(words) and not data.get("agent_id"):
             from . import ciwatch  # a push or PR starts CI: watch it, and tell this session how it ended
-            cwd = data.get("cwd") or os.getcwd()
-            top = core.gitout(cwd, "rev-parse", "--show-toplevel")
-            if top and not core.is_temp(top):
-                ciwatch.start_background(top, session=f"{agent}:{data.get('session_id') or ''}")
+            # what the command sent to the remote, in the repository it names: a pushed branch or tag, a merge
+            # commit on the base branch, a release tag. A local branch or an unpushed commit starts no pipeline
+            raw = (data.get("tool_input") or {}).get("command") or ""  # a list stays a list: its shell's script
+            for top, ref, sha in ciwatch.targets(raw, data.get("cwd") or os.getcwd()):
+                if not core.is_temp(top):
+                    ciwatch.start_background(top, session=f"{agent}:{data.get('session_id') or ''}", branch=ref,
+                                             sha=sha)
     except Exception:
         pass
     closing = background = ""
@@ -2189,11 +2364,11 @@ def post_tool(agent: str):
             sess = state.read(sf) or {}
             before = copy.deepcopy(sess)
             closing = closing_reminder(data, sess, time.time(), agent=agent)
-            background = "" if data.get("agent_id") else crew_notices(sess)
             if note_milestone(data, sess, time.time()) or sess != before:  # only what changed, on the fresh record:
                 _patch_quietly(sf, before, sess)  # a background launch's SubagentStart claims its entry meanwhile
     except Exception:
         _log(f"post-tool closing {agent}: {traceback.format_exc()[-300:]}")
+    background = _background_told(agent, data)  # under the lock: told once, nothing while the record is busy
     _context_out("PostToolUse", "\n\n".join(x for x in (carried, answered, background, _output_pitfalls(agent, data),
                                                         _bulk_rewrite_note(data), closing,
                                                         progress.on_tool_done(agent, data)) if x))
@@ -2216,7 +2391,35 @@ def subagent_start(agent: str):
     from . import progress
     data = _stdin_json()
     progress.on_subagent(agent, data, True)
+    _make_scratch_folder(agent, data)
     _prompt_refresh(data, force=True)  # a lane opened: the prompt's crew count follows
+
+
+def _claude_tmp() -> Path:
+    """Where Claude Code keeps its per-session folders, scratchpads among them."""
+    return Path("/tmp") / f"claude-{os.getuid()}"
+
+
+def _make_scratch_folder(agent: str, data: dict):
+    """Creates a crew member's own folder in the session scratchpad, scratchpad/<member id>/, when its lane opens: the
+    brief names it and the guard lets the member write only there, but a read-only member may not create a folder.
+    Only when Claude Code made the session's scratchpad (<tmp>/claude-<uid>/<project key>/<session id>/scratchpad),
+    and only for a crew member: a helper that names no member gets nothing."""
+    try:
+        sid, aid = str(data.get("session_id") or ""), str(data.get("agent_id") or "")
+        transcript = str(data.get("transcript_path") or "")
+        if agent != "claude" or not (sid and aid and transcript):
+            return
+        pad = _claude_tmp() / Path(transcript).parent.name / sid / "scratchpad"
+        if not pad.is_dir():
+            return
+        from . import progress
+        run = progress.load_run(agent, sid) or {}
+        member = _member_folder(run, aid)
+        if member and member != aid and re.fullmatch(r"[a-z0-9][a-z0-9-]*", member):
+            (pad / member).mkdir(exist_ok=True)
+    except Exception:
+        _log(f"scratch folder {agent}: {traceback.format_exc()[-300:]}")
 
 
 def _launch_meta(data: dict) -> dict:

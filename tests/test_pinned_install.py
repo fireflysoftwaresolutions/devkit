@@ -17,7 +17,9 @@ import shutil
 import stat
 import subprocess
 import sys
+import tarfile
 import tempfile
+import time
 import unittest
 from argparse import Namespace
 from pathlib import Path
@@ -27,7 +29,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from devkit import audit, cli, codexrpc, core, gitx, policy, registry, setup  # noqa: E402
+from devkit import approvals, audit, cli, codexrpc, core, gitx, guard, hooks, policy, progress  # noqa: E402
+from devkit import registry, setup  # noqa: E402
 from test_install import Machine  # noqa: E402  (install.sh against stub brew, gh and a local repository)
 
 ISOLATED = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
@@ -392,6 +395,372 @@ class RealTreeTests(Sandbox):
         copied = [f for f in handoff.iterdir() if f.is_file() and (pin / "templates" / "handoff" / f.name).exists()]
         self.assertTrue(copied)
         self.assertTrue(all(f.stat().st_mode & stat.S_IWUSR for f in copied), copied)  # the developer edits them
+
+
+class OlderCopyTests(Sandbox):
+    """An older devkit never overwrites a newer install. `self.old` is the pinned 26.11.3 that a session started
+    before the update still runs; install.json pins `self.new`, 26.11.4."""
+
+    def setUp(self):
+        super().setUp()
+        self.old = self.install()
+        commit(self.src, "26.11.4")
+        self.new = self.install(why="the next release")
+        for p in (mock.patch.object(core, "DEVKIT_HOME", self.old), mock.patch.object(core, "VERSION", "26.11.3"),
+                  mock.patch.object(hooks, "STATE", self.state)):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def skipped(self) -> list:
+        return [r for r in self.audits() if r["action"] == "config.repair-skipped"]
+
+    def test_an_older_pinned_copy_points_the_hooks_at_the_installed_release(self):
+        self.assertEqual(core.runtime_home(), self.new)  # the status line and hook paths it would write
+        setup.record_install(setup.select_pin("26.11.3"))  # rolled back: this copy is the installed one again
+        self.assertEqual(core.runtime_home(), self.old)
+
+    def test_background_commands_run_the_installed_release(self):
+        (self.state / "logs").mkdir(parents=True, exist_ok=True)
+        with mock.patch.object(hooks.subprocess, "Popen") as popen:
+            hooks._spawn(["config", "repair", "--quiet"])
+        self.assertEqual(popen.call_args[0][0][3:], [str(self.new / "bin" / "dev"), "config", "repair", "--quiet"])
+
+    def test_an_older_copy_repairs_nothing_and_records_both_versions(self):
+        (self.home / ".claude").mkdir()
+        (self.home / ".claude" / "settings.json").write_text("{}\n")  # every managed key drifted
+        self.assertEqual(policy.repair(quiet=True), [])
+        self.assertEqual((self.home / ".claude" / "settings.json").read_text(), "{}\n")
+        detail = self.skipped()[-1]["detail"]
+        self.assertIn("26.11.3", detail)
+        self.assertIn("26.11.4", detail)
+
+    def test_an_older_copy_writes_no_settings_instructions_codex_config_or_git_ignore(self):
+        git_calls = []
+        FakeCodexServer.trusted, FakeCodexServer.hooks_file = {}, self.home / ".codex" / "hooks.json"
+        with mock.patch.object(codexrpc, "CodexRPC", FakeCodexServer), \
+                mock.patch.object(registry, "discover", lambda: ([], [], [])), \
+                mock.patch.object(core, "gh_user", lambda: {"login": "ada", "name": "Ada", "id": 1}), \
+                mock.patch.object(setup, "sh", lambda argv, **k: git_calls.append(argv) or (0, "", "")):
+            self.assertFalse(setup.write_claude_settings())
+            setup.write_agent_instructions(quiet=True)
+            setup.write_codex_config(quiet=True)
+            setup.setup_git(quiet=True)
+        for f in (".claude/settings.json", ".claude/CLAUDE.md", ".codex/AGENTS.md", ".codex/hooks.json"):
+            self.assertFalse((self.home / f).exists(), f)
+        self.assertEqual(git_calls, [])
+        self.assertEqual(len(self.skipped()), 4)
+
+    def test_a_copy_equal_to_the_pin_writes_as_before(self):
+        with mock.patch.object(core, "DEVKIT_HOME", self.new), mock.patch.object(core, "VERSION", "26.11.4"):
+            self.assertTrue(setup.write_claude_settings())
+        self.assertIn(str(self.new), self.settings()["statusLine"]["command"])
+        self.assertEqual(self.skipped(), [])
+
+    def test_an_unverified_pin_counts_by_its_release_numbers(self):
+        self.assertEqual(core.version_key("26.12.0-dev"), (26, 12, 0))
+        self.assertIsNone(core.version_key("main"))
+
+    def test_install_json_that_names_a_copy_of_another_version_is_not_believed(self):
+        rec = json.loads(core.install_record_file().read_text())
+        core.install_record_file().write_text(json.dumps(dict(rec, version="99.1.0")))  # forged: a newer-looking pin
+        with mock.patch.object(core, "DEVKIT_HOME", self.new), mock.patch.object(core, "VERSION", "26.11.4"):
+            self.assertIsNone(core.older_copy())
+        core.install_record_file().write_text(json.dumps(dict(rec, manifest_sha256="0" * 64)))  # another manifest
+        self.assertIsNone(core.older_copy())
+        self.assertEqual(core.release_home(), self.old)  # nothing believable is pinned: this copy runs its own
+
+
+WHO_RUNS = "from pathlib import Path\n\n\ndef main():\n    print(Path(__file__).resolve().parents[2].name)\n    return 0\n"
+
+
+def run_dev(copy: Path, home: Path, *args):
+    """`<copy>/bin/dev <args>` as a hook or a background job starts it, in the sandbox HOME -> CompletedProcess."""
+    env = {"HOME": str(home), "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin", "LANG": "en_US.UTF-8",
+           "DEVKIT_NO_NOTIFY": "1", **ISOLATED}
+    return subprocess.run([sys.executable, "-I", "-S", str(copy / "bin" / "dev"), *args], capture_output=True,
+                          text=True, env=env, cwd=str(home), timeout=300)
+
+
+class RetireTests(Sandbox):
+    """The other pinned copies once a newer release is installed. `self.old` (26.11.3) has devkit's real bin/dev and
+    a cli that prints whose code runs; install.json pins `self.new` (26.11.4)."""
+
+    def setUp(self):
+        super().setUp()
+        commit(self.src, "26.11.3", **{"bin/dev": (ROOT / "bin" / "dev").read_text(), "lib/devkit/cli.py": WHO_RUNS})
+        self.old = self.install(why="the release before")
+        commit(self.src, "26.11.4")
+        self.new = self.install(why="the next release")
+
+    def runs(self, copy: Path) -> str:
+        p = run_dev(copy, self.home)
+        return p.stdout.strip() or p.stderr
+
+    def test_an_older_copy_runs_the_pinned_release_once_retired(self):
+        self.assertEqual(self.runs(self.old), self.old.name)  # what a session that started before the install runs
+        self.assertEqual(core.retire_other_pins(), [self.old.name])
+        self.assertEqual(self.runs(self.old), self.new.name)
+        self.assertEqual(self.runs(self.new), self.new.name)
+        self.assertEqual(core.retire_other_pins(), [])  # once
+        self.assertEqual(stat.S_IMODE((self.old / "bin").stat().st_mode), 0o555)  # read-only again
+        self.assertEqual([r["target"] for r in self.audits() if r["action"] == "install.retire"], [self.old.name])
+
+    def test_a_rollback_puts_the_copy_s_own_dev_back(self):
+        core.retire_other_pins()
+        self.assertIn("changed bin/dev", setup.verify_pin(self.old))
+        self.assertTrue(core.restore_pin(self.old))
+        self.assertEqual(setup.verify_pin(self.old), [])
+        self.assertEqual(self.runs(self.old), self.old.name)
+        self.assertFalse(core.restore_pin(self.old))  # nothing left to put back
+
+    def test_dev_install_version_rolls_back_to_a_retired_copy(self):
+        core.retire_other_pins()
+        self.assertEqual(Path(setup.select_pin("26.11.3")["path"]), self.old)
+        self.assertEqual(setup.verify_pin(self.old), [])
+        self.assertEqual(self.runs(self.old), self.old.name)
+
+    def test_nothing_is_retired_while_install_json_does_not_hold_up(self):
+        rec = json.loads(core.install_record_file().read_text())
+        core.install_record_file().write_text(json.dumps(dict(rec, manifest_sha256="0" * 64)))
+        self.assertEqual(core.retire_other_pins(), [])
+        self.assertFalse((self.old / "bin" / "dev").is_symlink())
+
+    def test_the_pinned_release_s_repair_retires_the_others_and_an_older_copy_s_does_not(self):
+        with mock.patch.object(policy, "diff", lambda **k: []):
+            with mock.patch.object(core, "DEVKIT_HOME", self.old), mock.patch.object(core, "VERSION", "26.11.3"):
+                policy.repair(quiet=True)
+            self.assertFalse((self.old / "bin" / "dev").is_symlink())
+            policy.repair(quiet=True)  # the checkout, which no hook runs
+            self.assertFalse((self.old / "bin" / "dev").is_symlink())
+            with mock.patch.object(core, "DEVKIT_HOME", self.new), mock.patch.object(core, "VERSION", "26.11.4"):
+                policy.repair(quiet=True)
+        self.assertEqual(core.retired_to(self.old), self.new)
+
+
+def _has_release(tag: str) -> bool:
+    return subprocess.run(["git", "-C", str(ROOT), "rev-parse", "--verify", "-q", f"{tag}^{{commit}}"],
+                          capture_output=True, env=GIT_ENV).returncode == 0
+
+
+@unittest.skipUnless(_has_release("v26.11.5"), "needs this checkout's v26.11.5 tag (git fetch --tags)")
+class RealOlderReleaseTests(Sandbox):
+    """The real devkit 26.11.5, which has no version check, pinned next to this working tree pinned as 26.11.6, and
+    each run as an older session's hook runs it: `<copy>/bin/dev config repair --quiet`."""
+
+    def pin_tree(self, name: str, version: str, files: bytes) -> Path:
+        src = self.root / name
+        src.mkdir()
+        with tarfile.open(fileobj=io.BytesIO(files)) as tf:
+            tf.extractall(str(src), **({"filter": "data"} if hasattr(tarfile, "data_filter") else {}))
+        (src / "VERSION").write_text(version + "\n")
+        git(src, "init", "-q", "-b", "main")
+        git(src, "add", "-A")
+        git(src, "commit", "-q", "-m", version)
+        return self.install(src, why="a pinned-install test")
+
+    def hook_copies(self) -> set:
+        s = self.settings()
+        cmds = [h["command"] for groups in s["hooks"].values() for g in groups for h in g["hooks"]]
+        cmds.append(s["statusLine"]["command"])
+        return {c.split("/releases/")[1].split("/")[0] for c in cmds if "/releases/" in c}
+
+    def test_a_session_on_26_11_5_no_longer_reverts_the_26_11_6_install(self):
+        parts = ["bin", "lib", "config", "agents", "VERSION"]
+        old = self.pin_tree("v26.11.5", "26.11.5", subprocess.run(
+            ["git", "-C", str(ROOT), "archive", "v26.11.5", *parts], capture_output=True, check=True).stdout)
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w") as tf:
+            for part in parts[:-1]:
+                tf.add(str(ROOT / part), arcname=part, filter=lambda t: None if "__pycache__" in t.name else t)
+        new = self.pin_tree("v26.11.6", "26.11.6", buf.getvalue())
+        conf = self.home / ".config" / "devkit" / "config.json"
+        conf.parent.mkdir(parents=True)
+        conf.write_text(json.dumps({"agents": {"claude": True, "codex": False}}) + "\n")
+        (self.home / ".claude").mkdir()
+        claude_md = self.home / ".claude" / "CLAUDE.md"
+
+        # what `dev install` of 26.11.6 writes; the old copy's bin/dev is still its own
+        with mock.patch.object(core, "DEVKIT_HOME", new), mock.patch.object(core, "VERSION", "26.11.6"):
+            setup.write_claude_settings()
+            setup.write_agent_instructions(quiet=True)
+        self.assertEqual(self.hook_copies(), {new.name})
+        reverted = run_dev(old, self.home, "config", "repair", "--quiet")
+        self.assertEqual(reverted.returncode, 0, reverted.stderr)
+        self.assertIn(old.name, self.hook_copies())  # the finding: the real 26.11.5 writes its own hooks back
+        self.assertIn("devkit 26.11.5 ", claude_md.read_text()[:200])
+
+        repaired = run_dev(new, self.home, "config", "repair", "--quiet")  # the installed release (dev install's step)
+        self.assertEqual(repaired.returncode, 0, repaired.stderr)
+        self.assertEqual(core.retired_to(old), new)
+        self.assertEqual(self.hook_copies(), {new.name})
+
+        for args in (("config", "repair", "--quiet"), ("config", "repair")):
+            again = run_dev(old, self.home, *args)
+            self.assertEqual(again.returncode, 0, again.stderr)
+        self.assertEqual(self.hook_copies(), {new.name})
+        self.assertIn("devkit 26.11.6 ", claude_md.read_text()[:200])
+
+
+class SessionProcessTests(unittest.TestCase):
+    """Claude Code gives a running conversation a new session id after a compaction, with no SessionStart: the first
+    prompt registers it. Process 600 is the Claude Code process; its shells still say DEVKIT_SESSION=claude:old."""
+
+    START = "Sat Nov  7 20:00:00 2026"
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name).resolve()
+        self.sessions = self.root / "sessions"
+        self.sessions.mkdir()
+        table = {os.getpid(): (700, "python3 bin/dev hook prompt --agent claude"),
+                 700: (600, "/bin/sh -c bin/dev hook prompt"), 600: (1, "claude --resume"), 1: (0, "/sbin/launchd")}
+        for p in (mock.patch.object(hooks, "STATE", self.root), mock.patch.object(progress, "SESSIONS", self.sessions),
+                  mock.patch.object(progress, "_ps", lambda: table),
+                  mock.patch.object(approvals, "pid_start", lambda pid: self.START),
+                  mock.patch.dict(os.environ, {"DEVKIT_SESSION": "claude:old"})):
+            p.start()
+            self.addCleanup(p.stop)
+        self.adopted = []
+        p = mock.patch.object(progress, "adopt_process_run", create=True,
+                              side_effect=lambda *a: self.adopted.append(a))
+        p.start()
+        self.addCleanup(p.stop)
+        self.record("claude", "old", pid=600, pid_start=self.START, started=time.time() - 3600)
+
+    def record(self, agent, sid, **fields):
+        (self.sessions / f"{agent}-{sid}.json").write_text(json.dumps(
+            {"agent": agent, "session": sid, "cwd": str(self.root), "top": "", **fields}))
+
+    def read(self, agent, sid) -> dict:
+        return json.loads((self.sessions / f"{agent}-{sid}.json").read_text())
+
+    def prompt(self, sid, agent="claude"):
+        payload = {"session_id": sid, "cwd": str(self.root), "prompt": "continue", "hook_event_name": "UserPromptSubmit"}
+        with mock.patch.object(hooks, "context_for", lambda *a, **k: ""), \
+                mock.patch("sys.stdin", io.StringIO(json.dumps(payload))), contextlib.redirect_stdout(io.StringIO()):
+            hooks.prompt(agent)
+
+    def test_the_session_a_prompt_registers_holds_the_process_and_the_older_one_is_superseded(self):
+        self.prompt("new")
+        self.assertEqual((self.read("claude", "new")["pid"], self.read("claude", "new")["pid_start"]), (600, self.START))
+        old = self.read("claude", "old")
+        self.assertNotIn("pid", old)
+        self.assertEqual((old["superseded_by"], old["pid_superseded"]), ("new", 600))
+        self.assertEqual(self.adopted, [("claude", "new", 600)])  # the older session's run goes on in this one
+        with mock.patch.object(progress, "_ancestor_pids", lambda: [4321, 700, 600, 1]):
+            self.assertEqual(progress.resolve_session(), ("claude", "new", "ancestry"))
+        self.prompt("new")
+        self.assertEqual(len(self.adopted), 1)  # once
+
+    def test_a_run_that_cannot_move_leaves_the_registration_in_place(self):
+        with mock.patch.object(progress, "adopt_process_run", create=True, side_effect=OSError("busy")):
+            self.prompt("new")
+        self.assertEqual(self.read("claude", "new")["pid"], 600)
+        self.assertEqual(self.read("claude", "old")["superseded_by"], "new")
+
+    def test_a_record_an_earlier_prompt_made_without_its_process_gets_it(self):
+        self.record("claude", "new", started=time.time())  # what the prompt hook wrote before this fix
+        self.prompt("new")
+        self.assertEqual(self.read("claude", "new")["pid"], 600)
+        self.assertEqual(self.read("claude", "old")["superseded_by"], "new")
+
+    def test_codex_threads_sharing_one_process_keep_their_pids(self):
+        self.record("codex", "t1", pid=600, pid_start=self.START, started=time.time() - 60)
+        hooks._register_session("codex", "t2", str(self.root))
+        self.assertEqual((self.read("codex", "t1")["pid"], self.read("codex", "t2")["pid"]), (600, 600))
+        self.assertEqual(self.read("claude", "old")["pid"], 600)  # another agent's record is not touched
+        self.assertEqual(self.adopted, [])
+
+
+class RestartListTests(unittest.TestCase):
+    """dev install and dev update name the running Claude Code and Codex sessions that use devkit before they change
+    anything: each keeps the hooks it started with until it is restarted."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.sessions = Path(tmp.name) / "sessions"
+        self.sessions.mkdir()
+        self.record("claude", "aaaa1111", 101, project="acme/widget", branch="feat/report", devkit="26.11.4")
+        self.record("codex", "bbbb2222", 102, project="acme/api", branch="main", devkit="26.11.4")
+        self.record("claude", "cccc3333", 103, project="acme/old", branch="main")  # its process has ended
+        self.alive = lambda pid, started=None: pid != 103
+
+    def record(self, agent, sid, pid, **kw):
+        rec = {"agent": agent, "session": sid, "pid": pid, "pid_start": "Sat Nov  7 09:00:00 2026", "started": 1, **kw}
+        (self.sessions / f"{agent}-{sid}.json").write_text(json.dumps(rec))
+
+    def confirm(self, **kw):
+        lines = []
+        go = hooks.confirm_restart(say=lines.append, sessions_dir=self.sessions, alive=self.alive, **kw)
+        return go, "\n".join(lines)
+
+    def test_with_yes_it_names_each_running_session_and_goes_on(self):
+        go, text = self.confirm(assume_yes=True, ask=mock.Mock(side_effect=AssertionError("no question with --yes")))
+        self.assertTrue(go)
+        self.assertIn("Claude Code · acme/widget (feat/report) · devkit 26.11.4", text)
+        self.assertIn("Codex · acme/api (main)", text)
+        self.assertNotIn("acme/old", text)
+        self.assertIn("restart", text)
+
+    def test_in_a_terminal_it_asks_once_and_a_no_stops_before_any_change(self):
+        ask = mock.Mock(return_value="n")
+        self.assertEqual(self.confirm(interactive=True, ask=ask)[0], False)
+        self.assertEqual(ask.call_count, 1)
+        ask = mock.Mock(return_value="")
+        self.assertEqual(self.confirm(interactive=True, ask=ask)[0], True)  # Enter goes on
+
+    def test_without_running_sessions_it_says_and_asks_nothing(self):
+        self.alive = lambda pid, started=None: False
+        go, text = self.confirm(interactive=True, ask=mock.Mock(side_effect=AssertionError("nothing to ask")))
+        self.assertEqual((go, text), (True, ""))
+
+
+class InstallAsksFirstTests(Sandbox):
+    """The answer to the restart list decides whether dev install and dev update change anything at all."""
+
+    def test_install_stops_before_pinning_when_the_developer_says_no(self):
+        answers = []
+
+        def confirm(assume_yes=False):
+            answers.append(assume_yes)
+            return assume_yes  # the developer says no unless --yes
+        with mock.patch.object(core, "source_home", lambda: self.src), mock.patch.object(hooks, "confirm_restart", confirm), \
+                mock.patch("os.execv", side_effect=Execd) as execv, contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(setup.run_install(), 1)
+            execv.assert_not_called()
+            self.assertEqual((core.install_record(), core.pin_root().exists()), ({}, False))  # nothing pinned
+            with self.assertRaises(Execd):
+                cli.cmd_install(cli.build_parser().parse_args(["install", "--yes"]))
+        self.assertEqual(answers, [False, True])
+        self.assertTrue(core.install_record())
+
+    def test_update_asks_before_it_moves_the_checkout(self):
+        with mock.patch.object(hooks, "confirm_restart", lambda assume_yes=False: False), \
+                mock.patch.object(cli, "update_checkout", side_effect=AssertionError("the checkout moved")), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            rc = cli.cmd_update(cli.build_parser().parse_args(["update"]))
+        self.assertEqual(rc, 1)
+        self.assertIn("stopped before any change", out.getvalue())
+
+
+class InstallRecordGuardTests(unittest.TestCase):
+    """The version check trusts install.json, so no agent may write it or plant a pinned copy: the guard refuses."""
+
+    def test_an_agent_cannot_write_install_json_or_plant_a_release(self):
+        share = core.HOME / ".local" / "share" / "devkit"
+        forged = json.dumps({"version": "99.1.0", "path": str(share / "releases" / "99.1.0-x")})
+        cwd = str(core.DEV)
+        for agent in ("claude", "codex"):
+            with self.subTest(agent=agent):
+                self.assertEqual(guard.check("Write", {"file_path": str(share / "install.json"), "content": forged},
+                                             cwd, agent)[0], "deny")
+                for cmd in (f"echo '{forged}' > ~/.local/share/devkit/install.json",
+                            "mkdir -p ~/.local/share/devkit/releases/99.1.0-x",
+                            "cp /tmp/x.json ~/.local/share/devkit/install.json",
+                            "dev install --yes", "dev update --yes"):  # only dev install writes the record
+                    self.assertEqual(guard.check("Bash", {"command": cmd}, cwd, agent)[0], "deny", cmd)
 
 
 class InstallScriptTests(unittest.TestCase):

@@ -15,9 +15,11 @@ import os
 import sys
 import tempfile
 import textwrap
+import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -557,6 +559,34 @@ Ran 2 tests in 0.001s
 FAILED (failures=1)
 """
 
+# a package run asked for a deleted test module and a renamed test (python 3.11+ names the loader's stand-in test
+# with its name; 3.9 does not)
+UNITTEST_NOT_LOADED = """test_gone_away (unittest.loader._FailedTest.test_gone_away) ... ERROR
+test_renamed (unittest.loader._FailedTest.test_renamed) ... ERROR
+
+======================================================================
+ERROR: test_gone_away (unittest.loader._FailedTest.test_gone_away)
+----------------------------------------------------------------------
+ImportError: Failed to import test module: test_gone_away
+Traceback (most recent call last):
+  File "/usr/lib/python3.12/unittest/loader.py", line 137, in loadTestsFromName
+    module = __import__(module_name)
+ModuleNotFoundError: No module named 'tests.test_gone_away'
+
+
+======================================================================
+ERROR: test_renamed (unittest.loader._FailedTest.test_renamed)
+----------------------------------------------------------------------
+AttributeError: type object 'CalcTests' has no attribute 'test_renamed'
+
+----------------------------------------------------------------------
+Ran 2 tests in 0.001s
+
+FAILED (errors=2)
+"""
+UNITTEST_NOT_LOADED_39 = UNITTEST_NOT_LOADED.replace("_FailedTest.test_gone_away)", "_FailedTest)").replace(
+    "_FailedTest.test_renamed)", "_FailedTest)")
+
 
 def failures(cases):
     return [(c["id"], c["file"], c["line"], c["message"]) for c in cases if c["status"] == "failed"]
@@ -632,6 +662,29 @@ class ParseTests(unittest.TestCase):
         self.assertEqual({i: c["file"] for i, c in cases.items() if i.startswith("tests.")},
                          {"tests.test_calc.CalcTests.test_add": "tests/test_calc.py",
                           "tests.test_calc.CalcTests.test_sub": "tests/test_calc.py"})
+
+    # unittest names a test it could not load by its last part only (test_renamed); the result keeps the name that
+    # was asked for, so a rerun selects the same test and not a module called test_renamed
+    def test_a_test_that_could_not_be_loaded_keeps_the_name_it_was_selected_by(self):
+        rn = {"name": "unittest", "root": ".", "start": "tests", "package": True}
+        asked = ["tests.test_gone_away", "tests.test_calc.CalcTests.test_renamed"]
+        for fmt, text in (("3.11+", UNITTEST_NOT_LOADED), ("3.9", UNITTEST_NOT_LOADED_39)):
+            with self.subTest(fmt):
+                cases = testx.parse_unittest(text, str(self.top), rn, names=asked)
+                self.assertEqual([(c["id"], c["status"]) for c in cases],
+                                 [("tests.test_calc.CalcTests.test_renamed", "failed"),
+                                  ("tests.test_gone_away", "failed")])
+
+    # with a docstring, unittest -v prints the test's name on one line and its first docstring line with the result
+    def test_a_result_printed_after_a_docstring_line_is_parsed(self):
+        rn = {"name": "unittest", "root": ".", "start": "tests", "package": True}
+        for fmt, head in (("3.11+", "test_sub (tests.test_calc.CalcTests.test_sub)"),
+                          ("3.9", "test_sub (tests.test_calc.CalcTests)")):
+            with self.subTest(fmt):
+                text = f"{head}\nSubtracts two numbers. ... ok\n\n{'-' * 70}\nRan 1 test in 0.001s\n\nOK\n"
+                cases = testx.parse_unittest(text, str(self.top), rn)
+                self.assertEqual([(c["id"], c["status"], c["file"]) for c in cases],
+                                 [("tests.test_calc.CalcTests.test_sub", "passed", "tests/test_calc.py")])
 
 
 
@@ -828,6 +881,118 @@ class RunTests(unittest.TestCase):
             self.assertEqual(rc, 1, out + err)
             self.assertIn("tests/test_calc.py:11", out + err)
             self.assertEqual(recorded(e), ["tests.test_calc.CalcTests.test_add"])
+
+    # each run writes its own log, so a run in another lane or worktree of the project cannot overwrite it
+    def test_each_run_keeps_its_own_log(self):
+        with Env() as e:
+            r = e.repo(PKG)
+            write(r, {"calc.py": BROKEN_ADD})
+            logs = []
+            for _ in range(2):
+                rc, out, err = dev(r, "run", "tests/test_calc.py", "--json")
+                self.assertEqual(rc, 1, out + err)
+                logs.append(json.loads(out)["steps"][0]["runs"][0]["log"])
+            self.assertNotEqual(logs[0], logs[1])
+            for log in logs:
+                self.assertIn("AssertionError: -1 != 3", Path(log).read_text())
+
+
+def seed(r, *fails):
+    """The record an earlier run left: failures as (id, file)."""
+    p = testx.state_path(r)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps({"failures": {str(r): [
+        {"runner": "unittest", "root": ".", "id": i, "file": f, "line": None, "message": "", "ts": 1}
+        for i, f in fails]}}))
+
+
+class StaleFailureTests(unittest.TestCase):
+    # a failure recorded by its bare name (an older run) and one whose test was renamed are rerun first; neither
+    # selects a test any more, so both leave the record and the output names them, while a real failure stays
+    def test_recorded_failures_that_no_longer_select_a_test_are_forgotten_and_named(self):
+        with Env() as e:
+            r = e.repo(PKG)
+            write(r, {"calc.py": BROKEN_ADD})
+            seed(r, ("test_gone_away", ""), ("tests.test_calc.CalcTests.test_renamed", "tests/test_calc.py"),
+                 ("tests.test_calc.CalcTests.test_add", "tests/test_calc.py"))
+            rc, out, err = dev(r)
+            self.assertEqual(rc, 1, out + err)
+            self.assertEqual(recorded(e), ["tests.test_calc.CalcTests.test_add"])
+            self.assertIn("forgotten", err)
+            self.assertIn("test_gone_away", err)
+            self.assertIn("tests.test_calc.CalcTests.test_renamed", err)
+
+    # when the stale failure was the only one, dev test goes on to the tests the changes affect
+    def test_a_stale_failure_alone_does_not_stop_the_affected_tests(self):
+        with Env() as e:
+            r = e.repo(PKG)
+            edit(r, {"calc.py": CALC["calc.py"] + "\n\ndef mul(a, b):\n    return a * b\n"})
+            seed(r, ("test_gone_away", ""))
+            rc, out, err = dev(r, "--json")
+            self.assertEqual(rc, 0, out + err)
+            self.assertEqual([s["kind"] for s in json.loads(out)["steps"]], ["failed", "affected"])
+            self.assertEqual(recorded(e), [])
+
+    # a test module whose own import fails is a real failure: it stays recorded under the name it was run by
+    def test_a_test_module_that_fails_to_import_stays_recorded(self):
+        with Env() as e:
+            r = e.repo(PKG)
+            edit(r, {"tests/test_calc.py": "import nothing_here\n" + textwrap.dedent(PKG["tests/test_calc.py"])})
+            seed(r, ("tests.test_calc.CalcTests.test_add", "tests/test_calc.py"))
+            rc, out, err = dev(r, "run", "--failed")
+            self.assertEqual(rc, 1, out + err)
+            self.assertIn("nothing_here", out + err)
+            self.assertEqual(recorded(e), ["tests.test_calc.CalcTests.test_add"])
+
+
+def result(fails, files):
+    """One run's results as run_tests returns them: `fails` as (id, file), `files` the test files it ran."""
+    cases = [testx._case(i, f, 3, "failed", "AssertionError: 1 != 2") for i, f in fails]
+    return {"runner": "unittest", "root": ".", "files": list(files), "ids": [], "related": [], "all": False,
+            "cases": cases, "failures": cases, "zero": False, "crash": False, "secs": 0.1, "count": len(cases),
+            "failed": len(cases)}
+
+
+class RecordTests(unittest.TestCase):
+    # a bare test name with no file cannot be rerun: unittest would import it as a module
+    def test_a_failure_without_its_module_or_file_is_not_recorded(self):
+        with Env() as e:
+            r = e.repo(PKG)
+            testx.record(r, [result([("test_add", ""), ("tests.test_calc.CalcTests.test_sub", "tests/test_calc.py")],
+                                    ["tests/test_calc.py"])])
+            self.assertEqual(recorded(e), ["tests.test_calc.CalcTests.test_sub"])
+
+    # two lanes record at the same time: the first has read the record when the second writes; both results stay
+    def test_two_concurrent_writers_both_keep_their_results(self):
+        with Env() as e:
+            r = e.repo(PKG)
+            real_load, first_read, second_wrote = testx.load_state, threading.Event(), threading.Event()
+
+            def load(top):
+                st = real_load(top)
+                if threading.current_thread().name == "first":
+                    first_read.set()
+                    second_wrote.wait(1)  # without a lock the second writer finishes here
+                return st
+
+            def first():
+                testx.record(r, [result([("tests.test_calc.CalcTests.test_add", "tests/test_calc.py")],
+                                        ["tests/test_calc.py"])])
+
+            def second():
+                first_read.wait(10)
+                testx.record(r, [result([("tests.test_other.OtherTests.test_truth", "tests/test_other.py")],
+                                        ["tests/test_other.py"])])
+                second_wrote.set()
+
+            with mock.patch.object(testx, "load_state", load):
+                threads = [threading.Thread(target=first, name="first"), threading.Thread(target=second)]
+                for t in threads:
+                    t.start()
+                for t in threads:
+                    t.join(30)
+            self.assertEqual(recorded(e), ["tests.test_calc.CalcTests.test_add",
+                                           "tests.test_other.OtherTests.test_truth"])
 
 
 class EstimateTests(unittest.TestCase):

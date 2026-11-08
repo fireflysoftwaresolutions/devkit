@@ -3,7 +3,8 @@
 """The dashboard's neutral fixture for Now (spec P-fyli4qqn0y7): made-up projects, people and runs, never real data.
 
 Three states, each the inputs of `dashnow.areas()` at a fixed clock (2026-11-06 15:15 UTC, read with TZ=UTC):
-  example  a run waits on D1 (Backend engineer (Tank) asks; two crew members wait), a run on another machine
+  example  a run waits on D1 (Backend engineer (Tank) asks; two crew members wait) and carries a moot D2 (its asking
+           Technical writer (Ghost) ended), a run on another machine
            (bob@studio), CI failed on feat/rules-engine, a PR with changes requested, housekeeping, branches in the
            backup states (only on this Mac, embargoed, waiting, on the remote, backed up, merged), a run finished
            this afternoon, tasks done and PRs merged since yesterday
@@ -99,8 +100,9 @@ def decision(did, question, options, recommend, ts, *, frm="main", from_name="Mo
             "answer": "", "by": ""}
 
 
-def invoice_run() -> dict:
-    """Invoice export: 3 of 6 steps done, the Backend engineer's step waits on D1 after 10 minutes of work."""
+def invoice_run(moot: bool = False) -> dict:
+    """Invoice export: 3 of 6 steps done, the Backend engineer's step waits on D1 after 10 minutes of work. With `moot`
+    (the example state), D2 is moot too: the Technical writer asked it, then ended, and no step waits on it."""
     plan = [step("contract", "done", 15, untimed=True), step("schema", "done", 20, untimed=True),
             step("api tests", "done", 15, untimed=True),
             step("export api", "blocked", 30, owner="a-tank", started=at(14, 50), waiting="D1",
@@ -113,8 +115,14 @@ def invoice_run() -> dict:
                         "last_seen": at(15, 6), "updates": [], "done": 0}}
     d1 = decision("D1", "Include cancelled invoices in the export?", ["A: Leave them out", "B: Include them"], "A",
                   at(15, 6), frm="a-tank", from_name="Tank")
+    decisions = [d1]
+    if moot:
+        lanes["a-ghost"] = {"label": "Ghost: export notes", "persona": "Ghost", "type": "devkit:ghost", "state": "done",
+                            "started": at(14, 20), "finished": at(14, 40), "last_seen": at(14, 40), "updates": [], "done": 0}
+        decisions.append(decision("D2", "List the CSV columns in the release notes?", ["A: List them", "B: Link the docs"],
+                                  "B", at(14, 35), frm="a-ghost", from_name="Ghost"))
     return raw_run("7f3a", "Invoice export", "acme/lending-core", plan, started=at(14, 0), estimate=100,
-                   decisions=[d1], agents=lanes,
+                   decisions=decisions, agents=lanes,
                    intervals=[[at(14, 0), at(14, 50), "turn", "main"], [at(14, 50), at(15, 0), "agent", "a-tank"],
                               [at(15, 5), at(15, 6), "turn", "main"]],
                    updates=[{"ts": at(15, 6), "kind": "note", "text": "D1 asked: cancelled invoices", "next": ""}])
@@ -314,9 +322,9 @@ def example() -> dict:
     mine = {"user": USER, "host": HOST, "updated": iso(at(15, 14)), "locks": [],
             "sessions": [{"agent": "claude", "project": "acme/lending-core", "branch": "feat/invoice-export",
                           "started": at(14, 0), "status": "", "last_seen": at(15, 14),
-                          "progress": progress.brief(invoice_run(), NOW)}]}
-    return _inputs(registry_example(), [invoice_run(), docs_run()], items_example(), ci_example(), jobs_example(),
-                   [mine, remote_presence()], pr_cache())
+                          "progress": progress.brief(invoice_run(moot=True), NOW)}]}
+    return _inputs(registry_example(), [invoice_run(moot=True), docs_run()], items_example(), ci_example(),
+                   jobs_example(), [mine, remote_presence()], pr_cache())
 
 
 def empty() -> dict:
@@ -332,9 +340,24 @@ def welcome() -> dict:
 STATES = {"example": example, "empty": empty, "welcome": welcome}
 
 
+@contextmanager
+def live_sessions(*sessions):
+    """A record for each (agent, session) of this Mac's runs, as a live session keeps one: progress.lane_states reads
+    a run whose session has no record as one whose session ended, and its members as stale. No pid: its process is
+    unknown, so it counts as live. The records sit in a folder of their own, removed after."""
+    import tempfile
+    from unittest import mock
+    with tempfile.TemporaryDirectory() as d:
+        for agent, sid in sessions:
+            (Path(d) / f"{agent}-{sid}.json").write_text(json.dumps({"agent": agent, "session": sid}))
+        with mock.patch.object(progress, "SESSIONS", Path(d)):
+            yield
+
+
 def document(state: str, memo=None) -> dict:
-    """The five areas for one state, at the fixed clock, in UTC, with a memo of its own."""
-    with utc():
+    """The five areas for one state, at the fixed clock, in UTC, with a memo of its own; this Mac's runs belong to
+    live sessions."""
+    with utc(), live_sessions(("claude", "7f3a")):
         kw = STATES[state]()
         return dashnow.areas(**kw, memo=memo or dashnow.LandingMemo(clock=lambda: NOW))
 

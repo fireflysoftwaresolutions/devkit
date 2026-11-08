@@ -391,6 +391,15 @@ class SettingsTests(unittest.TestCase):
         self.assertTrue(any(c.endswith("hook post-tool-failure --agent claude") for c in cmds), cmds)
         self.assertIn("post-tool-failure", hooks.HANDLERS)
 
+    def test_claude_settings_send_a_stopped_task_to_devkit(self):
+        # Claude Code fires no SubagentStop for an agent TaskStop ends: devkit frees its lane at the stop call's result,
+        # which reaches it only when the post-tool hook's matcher names TaskStop (a Release engineer lane stayed running
+        # and held its slot for hours without it)
+        import re
+        entries = json.loads(SETTINGS.read_text())["hooks"].get("PostToolUse") or []
+        cmds = [h["command"] for e in entries if re.fullmatch(e.get("matcher") or ".*", "TaskStop") for h in e["hooks"]]
+        self.assertTrue(any(c.endswith("hook post-tool --agent claude") for c in cmds), cmds)
+
 
 if __name__ == "__main__":
     unittest.main()

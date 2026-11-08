@@ -553,6 +553,93 @@ class MainTests(GateCase):
         self.assertIsNone(self.main("ls 'unclosed", setting="enforce"))
 
 
+PRUNE = ("push-destructive", 2, "origin:merged-branches")
+EVERY = ("push-destructive", 2, "origin:merged-branches-of-every-project")
+
+
+class BranchDeletionTests(GateCase):
+    # `dev branch prune --apply` deletes merged branches on origin (and here), and `dev gc --apply`, the
+    # scheduled sync and their jobs delete merged branches on origin in every project. A deleted remote branch cannot
+    # be taken back from this machine, so each is a destructive push, tier 2: crew members never run it, and the main
+    # session runs it with the developer's grant for its exact target. Deleting only local branches (`--local`,
+    # `--offline`, `dev wt rm`, `dev branch clean`) leaves origin as it is, and a listing deletes nothing.
+
+    def test_prune_is_a_destructive_push_only_when_it_can_delete_on_origin(self):
+        for cmd in ("dev branch prune --apply", "dev branch prune --json --apply", "dev branch prune --apply --remote",
+                    "dev branch prune --app", "bin/dev branch prune --apply", "python3 bin/dev branch prune --apply",
+                    "python3 -m devkit.cli branch prune --apply", "dev -- branch prune --apply",
+                    "env dev branch prune --apply", "env FOO=1 dev branch prune --apply",
+                    "env -C . dev branch prune --apply", "command dev branch prune --apply",
+                    "nohup dev branch prune --apply", "bash -c 'dev branch prune --apply'",
+                    "sh -c 'cd . && dev branch prune --apply --json'", "echo 'dev branch prune --apply' | sh",
+                    # a prefix of a flag that skips the deletion skips nothing, and after `--` it is an argument
+                    "dev branch prune --loc --apply", "dev branch prune --offl --apply",
+                    "dev branch prune --apply -- --local", "dev branch prune --apply -- --offline"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.acts(cmd), [PRUNE])
+        # a listing, or a deletion of local branches only, leaves origin as it is
+        for cmd in ("dev branch prune", "dev branch prune --json", "dev branch prune --remote --json",
+                    "dev branch prune --apply --local", "dev branch prune --local --json --apply",
+                    "dev branch prune --apply --offline", "env dev branch prune --offline --apply",
+                    "dev branch prune --help --apply", "dev branch ls", "dev branch clean --apply",
+                    "dev wt rm feat/x", "dev gc", "dev gc -v", "dev free --safe -y"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.acts(cmd), [])
+
+    def test_gc_apply_the_scheduled_sync_and_their_jobs_delete_on_origin_in_every_project(self):
+        for cmd in ("dev gc --apply", "dev gc --apply --yes --auto-only", "dev gc --app -y", "env dev gc --apply -y",
+                    "bash -c 'dev gc --apply --yes'", "dev jobs run gc", "dev jobs exec gc",
+                    "dev sync --scheduled --offline", "dev sync --sched --no-push"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.acts(cmd), [EVERY])
+        for cmd in ("dev sync --scheduled", "dev sync --scheduled --quiet", "dev jobs run sync", "dev jobs exec sync",
+                    "dev sync --scheduled --off"):  # a prefix of --offline skips nothing
+            with self.subTest(cmd=cmd):  # online, it also backs up branches (tier 1)
+                self.assertEqual(self.acts(cmd), [("push", 1, "the branches of every project"), EVERY])
+        self.assertEqual(self.acts("dev sync --finish"), [("push", 1, "the branches of every project")])
+        self.assertEqual(self.acts("dev sync --quiet --offline"), [])
+
+    def test_the_main_session_runs_prune_once_with_the_grant_its_refusal_names(self):
+        why = self.main("dev branch prune --apply")
+        self.assertIn("grant push-destructive origin:merged-branches", why or "")
+        self.assertEqual(self.gate_records()[-1][:2], ("origin:merged-branches", "deny"))
+        store = Store({"push-destructive origin:merged-branches": 1})
+        self.assertIsNone(self.main("dev branch prune --apply", grant=store))
+        self.assertEqual(self.gate_records()[-1][:2], ("origin:merged-branches", "granted"))
+        self.assertIsNotNone(self.main("dev branch prune --apply", grant=store))  # one use
+        self.assertIsNone(self.main("dev branch prune --apply", setting="audit"))
+        self.assertIsNone(self.main("dev branch prune --apply --local"))
+
+    def test_a_grant_for_one_repository_prune_does_not_open_the_cleanup_of_every_project(self):
+        store = Store({"push-destructive origin:merged-branches": 1})
+        self.assertIn("grant push-destructive origin:merged-branches-of-every-project",
+                      self.main("dev gc --apply --yes", grant=store) or "")
+        self.assertEqual(store.left, {"push-destructive origin:merged-branches": 1})
+
+    def test_a_branch_glob_grant_never_covers_a_bulk_deletion(self):
+        for pattern in ("*", "origin:*", "or*", "origin:merged-*"):
+            with self.subTest(pattern=pattern):
+                self.assertFalse(guard.target_matches("push-destructive", pattern, "origin:merged-branches"))
+                self.assertFalse(guard.target_matches("push-destructive", pattern,
+                                                      "origin:merged-branches-of-every-project"))
+        self.assertTrue(guard.target_matches("push-destructive", "origin:merged-branches", "origin:merged-branches"))
+        self.assertTrue(guard.target_matches("push-destructive", "feat/*", "feat/old"))  # branch globs still work
+
+    def test_a_crew_member_never_runs_a_deletion_on_origin(self):
+        for cmd in ("dev branch prune --apply", "env dev gc --apply -y", "bash -c 'dev branch prune --app'",
+                    "dev sync --scheduled --offline", "dev jobs run gc"):
+            with self.subTest(cmd=cmd):
+                self.assertIn("Crew members never run", self.member(cmd) or "")
+        self.assertIsNone(self.member("dev branch prune --apply --local"))
+        self.assertIsNone(self.member("dev branch prune --json"))
+
+    def test_an_unparseable_prune_or_gc_is_denied_in_enforce(self):
+        for cmd in ("dev branch prune --apply 'unclosed", "dev gc --apply 'unclosed"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNotNone(self.main(cmd, setting="enforce"))
+                self.assertIsNone(self.main(cmd, setting="audit"))
+
+
 class UnknownProgramTests(GateCase):
     # RT1/RT2: a program whose name the shell or an interpreter builds at run time is "unknown", tier 2, with a target
     # that names that one command, so a typed grant opens it and nothing else

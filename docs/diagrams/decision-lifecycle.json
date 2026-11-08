@@ -1,0 +1,98 @@
+{
+  "name": "decision-lifecycle",
+  "kind": "state",
+  "title": "Life of a crew decision",
+  "desc": "A crew member's dev crew ask --decision makes a pending decision, which waits for you. When the member that asked has ended and no step waits on it, the decision is moot: still pending, but it needs nobody. A pending or moot decision ends in one of three states: decided by your answer, withdrawn by the tech lead with a reason, or closed with the reason when its run ends or is replaced.",
+  "equal_widths": "all",
+  "nodes": [
+    {
+      "id": "start",
+      "initial": true,
+      "col": 0,
+      "row": 1
+    },
+    {
+      "id": "pending",
+      "label": "Pending",
+      "sub": "waits for you",
+      "col": 1,
+      "row": 1,
+      "emphasis": true
+    },
+    {
+      "id": "moot",
+      "label": "Moot",
+      "sub": "needs nobody",
+      "col": 2.5,
+      "row": 1
+    },
+    {
+      "id": "decided",
+      "label": "Decided",
+      "sub": "your answer",
+      "col": 1,
+      "row": 2,
+      "family": "olive"
+    },
+    {
+      "id": "withdrawn",
+      "label": "Withdrawn",
+      "sub": "by the tech lead",
+      "col": 1.75,
+      "row": 2,
+      "family": "olive"
+    },
+    {
+      "id": "closed",
+      "label": "Closed",
+      "sub": "with its run",
+      "col": 2.5,
+      "row": 2,
+      "family": "olive"
+    }
+  ],
+  "groups": [
+    {
+      "id": "open",
+      "title": "State pending",
+      "nodes": [
+        "pending",
+        "moot"
+      ],
+      "dashed": true
+    }
+  ],
+  "edges": [
+    {
+      "from": "start",
+      "to": "pending",
+      "label": "ask --decision"
+    },
+    {
+      "from": "pending",
+      "to": "moot",
+      "label": "asker ended · no step waits"
+    },
+    {
+      "from": "open",
+      "to": "decided",
+      "label": "decide",
+      "from_side": "bottom",
+      "to_side": "top"
+    },
+    {
+      "from": "open",
+      "to": "withdrawn",
+      "label": "withdraw --why",
+      "from_side": "bottom",
+      "to_side": "top"
+    },
+    {
+      "from": "open",
+      "to": "closed",
+      "label": "run ends · replaced",
+      "from_side": "bottom",
+      "to_side": "top"
+    }
+  ]
+}

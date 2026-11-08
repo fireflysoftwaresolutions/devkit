@@ -106,6 +106,18 @@ class LessonTests(unittest.TestCase):
         self.assertEqual(les["meta"]["status"], "retired")
         self.assertEqual(len(les["changelog"]), 4)
 
+    # Recall reads only open lessons: a prevented lesson that kept its status after it happened again was never shown
+    # again, although its prevention had just failed.
+    def test_a_prevented_lesson_that_happens_again_reopens_with_a_changelog_line_and_is_recalled(self):
+        les = lessons.add("acme/api", "Flaky clock test", kind="bug", cause="real clock", prevention="fixed clock",
+                          a=A)
+        les = lessons.prevent(les, "test", "tests/test_clock.py", "the test pins the clock", a=A)
+        self.assertEqual(lessons.relevant("acme/api"), [])
+        les = lessons.recur(les, "CI run 91", a=A)
+        self.assertEqual((les["meta"]["status"], les["meta"]["occurrences"]), ("open", 2))
+        self.assertIn("reopened: its prevention by test (tests/test_clock.py) did not hold", les["changelog"][0])
+        self.assertEqual([x["meta"]["id"] for x in lessons.relevant("acme/api")], [les["meta"]["id"]])
+
     def test_recall_ranks_open_severe_repeated_and_includes_global(self):
         low = lessons.add("acme/api", "Typo in docs", severity="low", cause="c", prevention="p", a=A)
         high = lessons.add("acme/api", "Data loss on migration", severity="high", cause="c", prevention="p", a=A)

@@ -93,8 +93,10 @@ guesses.
 
 The project you are in, or `<name>`, in the order of its questions:
 
-1. **Needs you:** what only you can do, or `✓ Nothing needs you right now.` A crew decision waiting for you, the last
-   update's You bullet, a project outside devkit's folder layout (with its `dev adopt` command), and work at risk.
+1. **Needs you:** what is open for you now, or `✓ Nothing needs you right now.` A crew decision waiting for you, a
+   crew question to the tech lead nobody answered yet (with its `dev crew answer` command), a project outside devkit's
+   folder layout (with its `dev adopt` command), and work at risk. The last status block's You bullet is not repeated
+   here: it may be done already.
 2. **Right now:** the checks of the branch or its open PR, the crew members working now (role, name, and what their
    step does, never its code), and the plan's steps done and time left while a run works. A run works while it or one
    of its crew reported in the last 30 minutes.
@@ -238,7 +240,7 @@ of the title. See [Teams and machines](teams.md) for locks, versions, and the ch
 | Verb | Effect |
 | --- | --- |
 | `add <title> [options]` | Creates a work item (see the next table) |
-| `start <selector> [--why]` | Claims the lock (8 hours by default), pushes it at once, and moves a todo item to Now as doing. Run in the project's checkout on a work branch, it links the branch (`branch:<name>` in the item's links, in the private handoff), so the branch map shows the task without its id in the branch name |
+| `start <selector> [--why]` | Claims the lock (8 hours by default), pushes it at once, and moves a todo item to Now as doing. Run in the project's checkout on a work branch, it links the branch (`branch:<name>` in the item's links, in the private handoff), so the branch map shows the task without its id in the branch name. The lock is renewed only while one of your live sessions is on that branch; otherwise it runs out and the item goes back to todo |
 | `claim <selector> [--why]` | Same as `start` |
 | `release <selector> [--why]` | Gives the lock back; the item returns to todo |
 | `done <selector> [--why]` | Marks the item done and releases the lock |
@@ -252,6 +254,7 @@ of the title. See [Teams and machines](teams.md) for locks, versions, and the ch
 | `link <selector> --to SLUG --why "…"` | Counts a project task toward an initiative (adds the link `initiative:<slug>`) |
 | `show <selector>` | The item's fields, its description, and its history |
 | `history <selector>` | The item's changelog only |
+| `reconcile [--apply] [--json]` | Reports the stale items of a project: doing without a lock, open although their branch is merged into the default branch on `origin` (by a merge commit, a squash or rebase merge of its PR, or a fast-forward, after the item was linked to it), and the same title more than once. It changes nothing; `--apply` closes the items of merged branches (done, the merge commit as evidence) and sends doing items without a lock back to todo, in one commit. See [Teams and machines › Shipped and stale items](teams.md#shipped-and-stale-items) |
 | `ls` | The open items (the default) |
 
 Options of `dev task add`:
@@ -325,7 +328,7 @@ Live progress of long agent work, with active time, a critical-path ETA and a pl
 | `dev progress add "<name>=<estimate> [after …] [<id>]" [--why "…"]` | Adds a step found during the work; add it when it starts. `[<id>]` declares its kind of work, as in a plan. From a crew member, the step goes to its own lane |
 | `dev progress assign <step> --to <member> [--scope "<globs>"] [--activity ID] [--allow push,pr] [--why "…"]` | Hands a step to a crew member; its time is that member's, and the guard keeps its edits inside the scope. `--activity` declares the step's kind of work (an id from `dev crew raci`, such as `backend` or `ux`), so the RACI check and the approver do not depend on the language of the step's name. `--allow` gives the member push and PR create in that step, each only with the developer's grant (`grant push <branch>`) or a verified decision. Refused when the crew's RACI does not make that member Responsible for the step's kind of work, unless `--why` gives the reason, which is recorded |
 | `dev progress begin <step>` | Starts a step in parallel with the running one |
-| `dev progress reopen <step> --why "…"` · `dev progress skip <step> --why "…"` | Undoes a wrong close, or skips a step on purpose |
+| `dev progress reopen <step> --why "…"` · `dev progress skip <step> --why "…"` · `dev progress confirm <step> --why "…"` | Undoes a wrong close, skips a step on purpose, or confirms a step whose dependencies were reopened and closed again |
 | `dev progress block "<why>" [--next "<what is needed>"]` | The run is blocked; prints the update and sends a desktop notification |
 | `dev progress done "<outcome>" [--why "…"]` | The run is finished; refused while steps are pending, decisions wait, or an Accountable member has not approved the work they own. `--why` ends it without that approval and records the reason. Records the active time against the estimate and sends a desktop notification |
 | `dev progress history` | Every step change: when, from → to, by whom (the tech lead (Morpheus), a crew member, devkit), why |
@@ -365,7 +368,7 @@ repository](initiatives.md#adopt-an-existing-handoff-repository).
 
 devkit's specialist agents. See [The crew](crew.md).
 
-### `dev crew [graph | raci | rules | show | brief | route | delegate | decline | next | ask | answer | inbox | mode | decide | decisions | set | history | sync]`
+### `dev crew [graph | raci | rules | show | brief | route | delegate | decline | next | owner | ask | answer | inbox | mode | decide | decisions | set | history | sync]`
 
 | Command | Effect |
 | --- | --- |
@@ -381,8 +384,10 @@ devkit's specialist agents. See [The crew](crew.md).
 | `dev crew route "<task>" [--files a,b]` · `dev crew route --plan [--apply]` | The best members for a task, with scores and reasons; or a member for every unowned plan step |
 | `dev crew delegate "<task>" [--to <name>\|auto] [--scope …] [--after <step>] [--estimate 30m] [--files a,b]` | A step for another member, with who asked; joins a working member's lane, or waits for the tech lead (Morpheus) to launch it |
 | `dev crew decline "<step>" --why "…"` | Hands a delegated step back to the tech lead (Morpheus) |
+| `dev crew withdraw <id> --why "…"` | Closes a pending decision that no longer applies (tech lead only): frees the step blocked on it, tells the asking member, and records why. It is never the developer's answer and never allows an irreversible action |
 | `dev crew next` | Ready to launch (with the commands), queued until a slot frees, waiting and why, and who is busy |
 | `dev crew next --first <step> --why "…"` | The tech lead (Morpheus) launches that step ahead of the order; the reason is recorded and audited. Both options are required |
+| `dev crew owner <path>… [--json]` | Who holds each file before you edit or assign it: the crew member, their run and session, their step, their lane state (working; stale when its session's process is gone or it has been silent for `progress.stale_agent_minutes`; ended when devkit or Claude Code saw it end) and last activity, and what to do (wait, `dev crew ask --to <id> "…"`, or nothing when the holder ended or is stale). It decides exactly as the edit check does. Exits with `1` while a working member holds a path, `0` when every path is free. Reads only |
 | `dev crew ask "<text>" [--to <name>]` · `dev crew answer <id> "<text>"` · `dev crew inbox` | Messages between members; delivered with the recipient's next action |
 | `dev crew ask --decision "<question>" --options "A: <choice> \| B: <choice>" --recommend A [--irreversible push] [--target v26.11.4] [--performs A] [--approves "api, screens"]` | A decision point: a question under 300 characters, 2 to 4 options each with its letter, and the recommended one (refused otherwise, with the corrected command; an irreversible action without options is asked as `A: yes \| B: no`). Decided at once in auto mode, waits for the developer in guided mode or for irreversible actions. `--target` is what the irreversible action acts on, and the question names it as a word of its own; the developer's answer opens that action on that target once, and only when it chooses the option that performs it: `--performs`, else the one option that reads yes or approve, else the recommended one ([The crew › Guided or automatic](crew.md#guided-or-automatic)). `--approves` names the finished steps the developer's answer approves, checked against the plan |
 | `dev crew mode [guided\|auto] [--approve "push feat/*, release v26.11.4"]` · `dev crew decide <id> "<answer>"` · `dev crew decisions [--pending] [--ask [<id>…] [--json]]` | The mode (`--approve` names each action with its target; publish and deploy never), the developer's answers (recorded by the tech lead (Morpheus) only), and every decision with who took it. `--ask` prints the pending decisions (or the ones named) as question tool calls, at most 4 per call and an irreversible one alone in its call, the recommended option first, `--json` for the tool's input; the tech lead may reword a reversible one. Only an answer to a question with `D<n> ·` up front (or the header `D<n>`) that picks one of its options by letter or words, or a typed `approve <id>[: <option>]`, makes the decision the developer's. An irreversible one counts only in devkit's exact call: one question, its own header (`D<n>` or empty), labels only (no description, preview, or other field), its question and labels word for word (the performing option's label says what it runs, `A: yes (release v26.11.4)`) |
@@ -516,13 +521,16 @@ go to stderr.
 ### `dev wt ls [--all]`
 
 The worktrees of the current project (or of every project with `--all`): branch, PR, state, location (`canonical`,
-`claude`, `codex`, `temp`, `stray`, `missing`), live session or idle time, size, and path.
+`claude`, `codex`, `temp`, `stray`, `missing`), live session or idle time, size, and path. A branch that the merge
+test of `dev branch prune` finds merged has no unpushed count, and its state says how: `merged by content`
+(cherry-picked) or `merged by PR #7` (its own pull request squash-merged it, read from the cached pull request list).
 
 ### `dev wt rm <branch | path>`
 
-Removes a worktree only when it has no uncommitted, untracked, or unpushed work and no process uses it. The local
-branch is deleted when all its commits are on a remote. A registered worktree whose folder is gone is pruned. Exits
-with `1` when removal was refused.
+Removes a worktree only when it has no uncommitted, untracked, or unpushed work and no process uses it. Commits on no
+remote do not stop it when the branch is merged into `origin/<default>`, as an ancestor or by content (the merge test
+of `dev branch prune`). The local branch is deleted when all its commits are on a remote or it is merged, and the
+output says how. A registered worktree whose folder is gone is pruned. Exits with `1` when removal was refused.
 
 ## Delivery
 
@@ -589,21 +597,39 @@ Tokens are read from the environment and never printed. A host that cannot be re
 `dev status` shows the latest run of the branch, and when you ask an agent for status, the prompt hook adds the
 branch's pipelines to its context.
 
-### `dev ci watch [-p PROJECT] [--branch B] [--sha S] [--timeout 90] [--json] [--quiet]`
+### `dev ci watch [-p PROJECT] [--branch B] [--sha S] [--timeout 90] [--json] [--quiet] [--wait [--pr N | --tag T]]`
 
 Follows the CI/CD runs of a branch for one commit (default: the current branch at HEAD) until they finish, on GitHub
 Actions, GitLab CI, Bitbucket Pipelines, or Azure Pipelines. A failure comes with the failed jobs and steps, the first
 error of the failed log (GitHub through `gh run view --log-failed`, GitLab through `glab ci trace`; Bitbucket and
 Azure give the job, step and link), its class (`test`, `lint`, `build`, `dependencies`, `pipeline`,
-`infrastructure`, `unknown`) and the one next action. The log excerpt is marked as untrusted output and has secrets
-redacted. Exit codes: 0 passed, 1 failed, 3 still running at the timeout, 4 no run appeared within five minutes.
+`infrastructure`, `cancelled`, `unknown`) and the one next action. The log excerpt is marked as untrusted output and
+has secrets redacted. Exit codes: 0 passed, 1 failed (cancelled and timed out count as failed), 3 still running at the
+timeout, 4 none (no run appeared within five minutes, or the runs were only skipped, neutral, or stale).
+
+With `--wait`, it is the watch an agent waits on, and its output wakes the agent. It follows one target, the first
+it is given of: `--pr N` (the PR's head, or its merge commit once merged), `--tag T`, `--sha S` (on `--branch B`), or
+`--branch B` as origin has it; by default, what the session last sent to origin. `--pr` and `--tag` work only with
+`--wait`. It prints one line per finished job, then one line that
+starts with `CI <word> ·` (passed, failed, cancelled, timed out, skipped, none, or still running with the command to
+re-arm it). It retries host errors and ends by itself at `--timeout`. Exit codes: 0 passed, 1 failed, 2 nothing to
+watch, 3 the watch ended first (re-arm it), 4 none. Claude Code runs it with the Monitor tool (`--timeout 28`,
+`timeout_ms` 1800000, re-armed on expiry) or as a background command; Codex runs it in the foreground with a timeout.
 
 devkit starts it in the background after every `git push`, `dev push`, `gh pr create`, `dev pr create`,
-`gh pr merge`, `dev pr merge`, and `dev release` that a main session runs (one watcher per repository, branch, and
-commit), and the result reaches that session with its next action: a crew message to the main agent when it has a
-progress run, otherwise a note on its next tool call or prompt. Each result is in `~/.local/state/devkit/ci/watch/`,
-the audit trail (`ci.watch`), and a desktop notification. `DEVKIT_NO_CI_WATCH=1` turns the automatic start off. See
-[CI/CD pipelines › Watch every run](ci-cd.md#watch-every-run).
+`gh pr ready`, `dev pr ready`, `gh pr merge`, `dev pr merge`, and `dev release` that a main session runs (one watcher
+per repository, branch, and commit), and the result reaches that session with its next action at its next hook: a
+crew message to the main agent when it has a progress run, otherwise a note on its next tool call or prompt. That
+wakes no idle session, so an agent that waits on the run arms `--wait`; the Stop hook sends back a turn that sent work
+to origin and leaves its unfinished run with nothing that wakes the agent. Each result is in
+`~/.local/state/devkit/ci/watch/`, the audit trail (`ci.watch`), and a desktop notification. `DEVKIT_NO_CI_WATCH=1`
+turns the automatic start off. See [CI/CD pipelines › Watch every run](ci-cd.md#watch-every-run).
+
+### `dev ci watches [--json]`
+
+Lists the live watches, and those that stopped before their runs ended with the command to re-arm each: devkit's
+background watches and the agents' `dev ci watch --wait`, with the repository, target, start, last event, expiry,
+agent, and session. See [CI/CD pipelines › List the watches](ci-cd.md#list-the-watches).
 
 ### `dev ci audit [--fix] [--strict] [--provider HOST] [--json] [-p PROJECT]`
 
@@ -672,7 +698,13 @@ one, or else the recommendation) in the handoff repository with the changes from
 | `--tasks` | Open a work item for every gap (high gaps go to Now, with high priority) |
 
 The fields are `versioning`, `tag_format`, `version_source`, `release_flow`, `changelog`, `test_gate`, `ci`,
-`branch_model`, `publish`, `deploy`, `kind`, `release_train`, and `bump`.
+`branch_model`, `publish`, `deploy`, `kind`, `release_train`, `delete_branch_on_merge`, and `bump`.
+
+In a project, `dev delivery apply` also makes the host delete a pull request's branch when it merges, as
+`delete_branch_on_merge` says (on unless you `--set delete_branch_on_merge=false`): on GitHub it sets the repository's
+setting (`gh api`, which needs a repository administrator) and records `true` only when GitHub took it; otherwise it prints why and
+records nothing. On GitLab, Bitbucket, and Azure DevOps it names the setting to change there. `dev doctor` lists each
+GitHub project you administer where the setting is off.
 
 ```bash
 dev delivery apply --why "first release policy: service, CalVer, Maven verify gate" --tasks
@@ -725,14 +757,15 @@ command prints one line or a short table, and a refusal exits with `2` with the 
 [Git and GitHub](git-and-github.md). `dev pr`, `dev run view`, `dev run rerun`, `dev issue`, and the release page
 of `dev release` need GitHub (or a host listed in `gitx.github_hosts`).
 
-### `dev branch new | rename | ls | clean | embargo`
+### `dev branch new | rename | ls | clean | prune | embargo`
 
 | Command | Effect |
 | --- | --- |
 | `dev branch new <type>/<topic> [--ticket KEY] [--base REF]` | Fetches, then creates the branch from `origin/<default>` (or `--base`) and switches to it; uncommitted changes come along. The name is normalized: `feat/Invoice Export --ticket PROJ-142` → `feat/PROJ-142-invoice-export` |
 | `dev branch rename <type>/<topic> [--ticket KEY]` | Renames the current branch before its first push (or names a detached HEAD); refuses permanent branches and branches already on `origin` |
 | `dev branch ls [--offline] [--json]` | The branch map: every local branch, where it lives (local only, or local and its remote), ahead and behind its upstream and `origin/<default>`, the branch that has its commits (`merged into …`), its last backup or why it is not backed up, its embargo, worktree, PR (draft or ready, checks) and linked task. `--offline` uses the cached PR list; `--json` prints the rows (below) |
-| `dev branch clean [--apply] [--offline] [--json]` | The local branches that are merged, whose PR was merged, or that are gone upstream with every commit on the remote; deleted only with `--apply` |
+| `dev branch clean [--apply] [--offline] [--json]` | The local branches that the merge test of `dev branch prune` finds merged (so also by squash or cherry-pick), or that are gone upstream with every commit on the remote; deleted only with `--apply` |
+| `dev branch prune [--apply] [--remote \| --local] [--offline] [--json]` | Every local and remote branch with its state: merged and how (its tip is in `origin/<default>`, its PR from this repository was merged, or every commit has an equivalent there), an open PR, not merged (commits ahead, age of the last commit), or protected. Fetches `origin` first and changes nothing else. `--apply` deletes the merged ones: the remote branch (with a lease on the listed commit), the local branch, and its worktree when that is clean. It never deletes the default or a permanent branch, the current branch or the main checkout's, a branch with an open PR, a remote branch whose open PRs it cannot read (GitHub unreachable, 1,000 or more open, or another host), an embargoed branch, a worktree that has uncommitted changes, is locked, belongs to the Codex app, or has a live session, a branch created in the last 24 hours with no commit of its own, or a branch with commits the default branch lacks. Each deletion is audited as `branch.pruned` with how it was merged. `--remote` or `--local` limits it to one side; `--offline` skips the fetch and GitHub and keeps remote branches. `--apply` without `--local` or `--offline` deletes on `origin`, an irreversible action: a crew member never runs it, and the main session runs it under the [irreversible-action gate](guard.md#git). Exits with `1` when a deletion failed. See [Git and GitHub › Close merged branches](git-and-github.md#close-merged-branches) |
 | `dev branch embargo <branch> --why "…" [--until "<step or date>"]` | Keeps the branch off the remote (see [Guard rules › The developer's own decisions](guard.md#the-developers-own-decisions) for what an agent's push is held from until 26.11.4): `dev backup` and `dev sync` never push it, nor a branch that holds any of its commits. Stored in the `embargo:` list of the handoff note's metadata (with who and when), so every machine sees it; audited as `git.embargo`. The record also keeps the branch's tips (`commits:`, updated by every backup run), so the embargo holds its commits after the branch is merged into another and deleted. Every branch view shows it. Without a branch, lists the embargoes (`--json` too) |
 | `dev branch embargo --lift <branch>` | Ends the embargo; the next backup may push the branch and the branches that carry its commits. The developer's own decision: devkit refuses it from a crew member's lane, and the guard asks the main session for the developer's grant (`grant embargo <branch>`) |
 
@@ -869,7 +902,7 @@ a fresh fetch, that `origin` has nothing you lack, no WIP or fixup commits, a fi
 | `dev pr view [n] [--body] [--json]` | One-line state: branches, checks, review, conflicts, size, author, age, address |
 | `dev pr ls [--all] [--all-projects [--offline]] [--json]` | Your open PRs and those waiting for your review; `--all` adds the others; `--all-projects` covers every project |
 | `dev pr checks [n] [--watch [--fail-fast] [--interval S] [--timeout MIN]] [--lines N] [--json]` | Pass, fail, and pending counts; each failing job with its trimmed log (25 lines). Exits with `0` (passed), `1` (failed), or `8` (pending). When every check was skipped (a draft's run skips the jobs with the draft gate), it reports no checks yet and exits with `8`, never passed. `--watch` waits and prints only the result; it also waits up to two minutes for the real run after `dev pr ready` |
-| `dev pr merge [n] [--squash \| --merge \| --rebase] [--auto] [--keep-branch] [--dry-run]` | Merges when the checks passed and the reviews allow it, with the repository's method (checks that were all skipped have not passed: it waits for the real run); a squash commit gets the PR title and its "What and why"; then deletes the branch and updates the default branch locally. `--auto` lets GitHub merge when the checks pass |
+| `dev pr merge [n] [--squash \| --merge \| --rebase] [--auto] [--keep-branch] [--dry-run]` | Merges when the checks passed and the reviews allow it, with the repository's method (checks that were all skipped have not passed: it waits for the real run); a squash commit gets the PR title and its "What and why"; then deletes the remote branch and, when the merge test finds it merged, the local branch with its clean worktree (or switches to the default branch and updates it), and marks the open work items linked to the merged branch as done (`merged in PR #<n> (<short sha>)` in their changelog; the output names them). `--auto` lets GitHub merge when the checks pass and closes no item |
 | `dev pr ready [n] [--ci-passed] [--lang L]` | Marks a draft ready after checking its title and required sections. Marking ready starts the one CI run, so for the current branch it also needs the PR's head to be your HEAD and local CI evidence for it (`--ci-passed` attests it) |
 | `dev pr comment [n] -m "…" \| --body-file F` | Comments on a PR |
 | `dev pr review [n] --approve \| --request-changes \| --comment [-m "…"]` | Reviews a PR; `--request-changes` and `--comment` need a message |
@@ -883,13 +916,24 @@ a fresh fetch, that `origin` has nothing you lack, no WIP or fixup commits, a fi
 | `dev run view [id] [--failed] [--lines N] [--json]` | A run's failing jobs and their failing step (default: the branch's latest run); `--failed` adds the trimmed logs (30 lines). Exits with `1` when a job failed |
 | `dev run rerun <id> --flaky "test and evidence" [--all-jobs]` | Re-runs the failed jobs of a run, only with a reason for a proven flaky test, which is recorded in `~/.local/state/devkit/flaky.jsonl` and the project's session log |
 
-### `dev release [--version V] [--notes-file F] [--ci-passed] [--sign] [--draft] [--prerelease] [--dry-run]`
+### `dev release [--version V] [--notes-file F] [--ci-passed] [--sign] [--draft] [--prerelease] [--dry-run] [--why REASON]`
 
 Tags and publishes a release from a clean default branch that is in step with `origin`, by the delivery policy:
 the next CalVer version unless `--version` (required for other schemes), version files that agree, local CI evidence,
 CI on GitHub not failing or running, and notes from the CHANGELOG section. It creates the annotated (or signed) tag,
 pushes it, and creates the GitHub release. A project that releases with release-please or semantic-release is
 refused. See [Git and GitHub › Releases](git-and-github.md#releases).
+
+It and `--dry-run` also list the open work items linked to the branches merged since the previous tag and refuse
+while any is open. A branch counts when a first-parent merge commit of `<previous tag>..HEAD` names it, or a squash or
+rebase merge of its PR, or (off GitHub) a fast-forward. On GitHub a merge commit counts only with the merged PR from
+the repository that made it, and its time is the PR's `mergedAt`; a merge dated in the future counts for nothing. Close the shipped ones (`dev task done`, or
+`dev task reconcile --apply`), or release anyway with `--why "<reason>"`, which the output and the audit
+(`dev.release.open-items`) record. See [Teams and machines › Shipped and stale items](teams.md#shipped-and-stale-items).
+
+Once the release is published (not a `--draft`), it deletes the branches the release merged (merged into it by the
+merge test of `dev branch prune`, and not into the previous tag), remote and local with their clean worktrees, prints
+each with how it was merged, and names the merged ones it kept and why. `--dry-run` lists them.
 
 ### `dev issue ls | view | create`
 
@@ -1122,7 +1166,7 @@ release, and handoff change (see [Teams and machines › Near-real-time sync](te
 | Option | Effect |
 | --- | --- |
 | `--offline` | No network; cached PR data of any age |
-| `--scheduled` | Background mode (the `sync` job): pull first, release expired locks, refresh PR states and sizes, rotate logs. When the `gc` or `sleep` job is not installed, it also applies the safe cleanup (with `gc.auto` on) or runs `dev sleep` once a day |
+| `--scheduled` | Background mode (the `sync` job): pull first, release expired locks, refresh PR states and sizes, rotate logs. When the `gc` or `sleep` job is not installed, it also applies the safe cleanup (with `gc.auto` on) or runs `dev sleep` once a day. With `--offline` or `--no-push`, that cleanup keeps every branch on `origin`. A crew member never runs it, in any form: the [irreversible-action gate](guard.md#git) counts it as a deletion on `origin` |
 | `--no-push` | Commit but do not push |
 | `--quiet` | No output |
 
@@ -1153,7 +1197,8 @@ files, commits that are not pushed, a program working in the folder), then repor
 why and what to do. A number always means the item you saw: if a newer measurement changed the plan, `dev free`
 prints the new plan and deletes nothing. It removes worktrees and copies with `git worktree remove`, deletes only
 folders git ignores, runs the tool's own command for a cache or Docker images (and says which), and never prunes
-Docker volumes. Every deletion is in the audit trail.
+Docker volumes. Every deletion is in the audit trail. A worktree whose branch the merge test of `dev branch prune`
+finds merged, also by squash or cherry-pick, counts as merged, not as unpushed.
 
 | Option | Effect |
 | --- | --- |
@@ -1167,6 +1212,11 @@ The same as `dev free`, under its old name, for scripts. `--apply` runs the unat
 fresh PR states, asks for confirmation in a terminal (skip it with `-y`), and then syncs. `-v` also lists what that
 cleanup keeps and why. `--auto-only` applies only the actions that are safe without a person, which is what the
 nightly `gc` job runs. The rules are in [Disk and cleanup](disk-and-cleanup.md).
+
+That cleanup also closes merged branches with the merge test of `dev branch prune`: an idle, clean worktree whose
+branch is merged (also by content) goes with its branch; a merged local branch that has not moved for
+`gc.grace_hours` goes; and a merged remote branch goes only when its pull request merged or devkit pushed it as a
+backup. Anyone else's merged remote branch is listed as kept: `dev branch prune --apply` deletes it.
 
 ### `dev jobs [ls | show | run | logs | journal | set | enable | disable | install]`
 
@@ -1455,23 +1505,25 @@ plugin have no on and off switch, so `disable` removes them and `enable` adds th
 unlinked by the skills step. When the managed-settings lock is on
 (`dev config lock`), it keeps devkit's plugin set: run `dev config lock` again after a Claude plugin change.
 
-### `dev install [--only STEPS | --version VERSION | --unverified --why "…"]`
+### `dev install [--yes] [--only STEPS | --version VERSION | --unverified --why "…"]`
 
 Pins devkit, then applies the configuration; safe to run again. It first makes a read-only, checksummed copy of the
 checkout's commit in `~/.local/share/devkit/releases/<version>-<commit>/` and runs every step from that copy, so the
 hooks, the guard, the status line, `~/.local/bin/dev`, the scheduled jobs, and the Claude Desktop extension run it,
 never the checkout. It pins only a release (a `vYY.MM.PATCH` tag that GitHub has on the same commit) or a commit whose
 `bin/dev ci --run` passed on this Mac, and refuses tracked files with uncommitted changes and code that does not
-compile. It keeps the newest three copies and any copy in use. Run it yourself, in a terminal: the guard refuses
+compile. It keeps the newest three copies and any copy in use, and retires the others: their `bin/dev` runs the
+installed release, so a session that started before the install runs it too. Run it yourself, in a terminal: the guard refuses
 `dev install`, `dev update`, and `install.sh` from an agent. See
 [Getting started › The pinned copy](getting-started.md#the-pinned-copy).
 
 | Option | Effect |
 | --- | --- |
 | `--only STEPS` | Re-applies only these steps from the installed copy, without pinning. `STEPS` is a comma-separated list of `config,tools,cli,git,handoff,instructions,skills,claude,codex,desktop,docker,docs,launchd,prompt,shell` |
-| `--version VERSION` | Switches to a copy pinned by an earlier install, for a rollback: `26.11.2`, or `26.11.2-<commit>`. It checks the copy against its checksums first |
+| `--version VERSION` | Switches to a copy pinned by an earlier install, for a rollback: `26.11.2`, or `26.11.2-<commit>`. It checks the copy against its checksums first, and gives a copy that a newer install retired its own `bin/dev` back |
 | `--unverified --why "…"` | Pins the checkout's commit although it is neither a release nor tested; the reason is recorded in the audit trail |
 | `--commit-template yes\|no` | The answer `dev setup` gives for the [commit template](git-and-github.md#the-template-in-your-editor): the git step records it, and `yes` sets `commit.template` in each repository that has none |
+| `--yes`, `-y` | Goes on without asking when Claude Code or Codex sessions that use devkit are still running. Without it, `dev install` lists those sessions first and asks once in a terminal; each must be restarted to load the new hooks, because a running session keeps the hooks of the release it started with |
 
 The `tools` step installs only the Homebrew and npm packages that are missing for your stacks, git hosts, and clouds
 (and the Azure DevOps CLI extension), unless `packages.auto` is off. The `desktop` step builds the Claude Desktop
@@ -1479,7 +1531,7 @@ extension and opens its installer when it is missing or out of date. The `launch
 [scheduled jobs](jobs-and-audit.md). See
 [Getting started › What dev install configures](getting-started.md#what-dev-install-configures).
 
-### `dev update [--check [--quiet] [--record]]`
+### `dev update [--yes | --check [--quiet] [--record]]`
 
 `dev update --check` tells you, without changing anything, whether a newer devkit release is out and what changes in
 it. Agents may run it.
@@ -1501,7 +1553,9 @@ exits with `1`; it never says up to date. The daily `update-check` job runs `dev
 the first session of the day and `dev status` show the result while a release is pending.
 
 `dev update` itself updates the devkit checkout, then runs `dev install`, which pins the new commit. It always updates the checkout,
-even when `dev` runs from the pinned copy. What it does depends on where the checkout is:
+even when `dev` runs from the pinned copy. Before it changes anything, it lists the Claude Code and Codex sessions that
+use devkit and still run, and asks once in a terminal: restart them after the update so they load the new hooks.
+`dev update --yes` goes on without asking and prints the list. What it does depends on where the checkout is:
 
 | The checkout is | `dev update` |
 | --- | --- |

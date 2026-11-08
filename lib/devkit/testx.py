@@ -23,7 +23,9 @@ full-run duration, the tree and the time. Python 3.9 compatible, stdlib only.
 from __future__ import annotations
 
 import ast
+import contextlib
 import fnmatch
+import hashlib
 import json
 import os
 import re
@@ -952,7 +954,7 @@ def build_command(top, runner, files=(), ids=(), report=None, related=(), all_=F
     name, ex = runner["name"], list(runner["exec"])
     files, ids, related = list(files), list(ids), list(related)
     rel = [_rel(top, runner, f) for f in files]
-    env = {}
+    env, names = {}, []
     if name == "pytest":
         argv = ex + ["-q"] + ([f"--junitxml={report}"] if report else []) + \
             ([] if all_ else rel + [_id(i) for i in ids])
@@ -963,7 +965,8 @@ def build_command(top, runner, files=(), ids=(), report=None, related=(), all_=F
         if all_:
             argv = ex + ["discover", "-v", "-s", start] + (["-t", "."] if runner.get("package") else [])
         else:
-            argv = ex + ["-v"] + [_ut_module(runner, r) for r in rel] + [_ut_name(runner, _id(i)) for i in ids]
+            names = [_ut_module(runner, r) for r in rel] + [_ut_name(runner, _id(i)) for i in ids]
+            argv = ex + ["-v"] + names
     elif name == "jest":
         argv = ex + ["--ci", "--json"] + ([f"--outputFile={report}"] if report else [])
         if related:
@@ -1037,7 +1040,7 @@ def build_command(top, runner, files=(), ids=(), report=None, related=(), all_=F
                 argv += ["--filter", "(" + "|".join(dict.fromkeys(pats)) + ")"]
     else:
         raise ValueError(f"unknown runner {name}")
-    return {"argv": argv, "cwd": _rootdir(top, runner), "env": env, "report": report}
+    return {"argv": argv, "cwd": _rootdir(top, runner), "env": env, "report": report, "names": names}
 
 
 # --------------------------------------------------------------------------- results
@@ -1226,17 +1229,36 @@ def parse_jest_json(text, top) -> list:
 
 
 _UT_HEAD = re.compile(r"^(FAIL|ERROR|UNEXPECTED SUCCESS): (\S+) \(([\w.]+)\)(.*)$")
-_UT_LINE = re.compile(r"^(\S+) \(([\w.]+)\)(?:[^\n]*?)? \.\.\. (ok|FAIL|ERROR|skipped.*|expected failure|"
-                      r"unexpected success)\s*$")
+_UT_RESULT = r" \.\.\. (ok|FAIL|ERROR|skipped.*|expected failure|unexpected success)\s*$"
+_UT_LINE = re.compile(r"^(\S+) \(([\w.]+)\)(?:[^\n]*?)?" + _UT_RESULT)
+_UT_NAME = re.compile(r"^(\S+) \(([\w.]+)\)\s*$")  # a test with a docstring: the result follows on the next line
+_UT_DOC = re.compile(r"^.*?" + _UT_RESULT)
 _UT_FRAME = re.compile(r'^\s*File "(.+?)", line (\d+), in ')
+_UT_LOADER = ("unittest.loader._FailedTest", "unittest.loader.ModuleImportFailure")
 
 
-def _ut_id(name: str, paren: str) -> str:
-    if paren.startswith(("unittest.loader._FailedTest", "unittest.loader.ModuleImportFailure")):
+def _ut_id(name: str, paren: str, names=None) -> str:
+    """A result's test id. A test unittest could not load carries only the last part of what it tried (test_x);
+    `names`, the names asked for in order, gives the full one back: the first unused name with that part."""
+    if paren.startswith(_UT_LOADER):
+        for i, asked in enumerate(names or []):
+            if name == asked or name in asked.split("."):
+                return names.pop(i)
         return name
     if name in ("setUpClass", "tearDownClass", "setUpModule", "tearDownModule"):
         return paren
     return paren if paren.endswith("." + name) else f"{paren}.{name}"
+
+
+def _ut_not_found(id_: str, message: str) -> bool:
+    """unittest could not find the test named `id_` itself (its module or an attribute on the way is missing), as
+    opposed to a test module that exists and fails to import."""
+    parts = id_.split(".")
+    m = re.match(r"(?:ModuleNotFoundError|ImportError): No module named '([\w.]+)'", message or "")
+    if m:
+        return parts[:len(m.group(1).split("."))] == m.group(1).split(".")
+    m = re.match(r"AttributeError: .* has no attribute '(\w+)'", message or "")
+    return bool(m) and m.group(1) in parts[1:]
 
 
 def _ut_file(top, runner, id_: str) -> str:
@@ -1252,25 +1274,30 @@ def _ut_file(top, runner, id_: str) -> str:
     return ""
 
 
-def parse_unittest(text, top, runner) -> list:
-    """unittest's verbose output (3.9 and 3.11+ formats) -> cases, failures with file:line and the error line."""
+def parse_unittest(text, top, runner, names=()) -> list:
+    """unittest's verbose output (3.9 and 3.11+ formats) -> cases, failures with file:line and the error line.
+    `names` are the test names the command asked for: a test unittest could not load is reported by one of them,
+    and marked `not_found` when the name itself no longer exists (renamed or deleted)."""
     lines = (text or "").splitlines()
-    cases = {}
-    for ln in lines:
+    cases, pending = {}, list(names)
+    for k, ln in enumerate(lines):
         m = _UT_LINE.match(ln)
-        if m:
-            id_ = _ut_id(m.group(1), m.group(2))
-            st = m.group(3)
+        name, paren, st = (m.group(1), m.group(2), m.group(3)) if m else (None, None, None)
+        if not m and (n := _UT_NAME.match(ln)) and k + 1 < len(lines) and (d := _UT_DOC.match(lines[k + 1])) \
+                and not _UT_LINE.match(lines[k + 1]):
+            name, paren, st = n.group(1), n.group(2), d.group(1)
+        if name:
+            id_ = _ut_id(name, paren, pending)
             status = "passed" if st in ("ok", "expected failure") else "skipped" if st.startswith("skipped") \
                 else "failed"
-            cases[id_] = _case(id_, _ut_file(top, runner, id_), None, status, "", 0, m.group(1))
-    i = 0
+            cases[id_] = _case(id_, _ut_file(top, runner, id_), None, status, "", 0, name)
+    i, pending = 0, list(names)
     while i < len(lines):
         m = _UT_HEAD.match(lines[i])
         if not m:
             i += 1
             continue
-        id_ = _ut_id(m.group(2), m.group(3))
+        id_ = _ut_id(m.group(2), m.group(3), pending)
         j = i + 1
         while j < len(lines) and re.fullmatch(r"-{20,}", lines[j]) is None:
             j += 1
@@ -1289,6 +1316,8 @@ def parse_unittest(text, top, runner) -> list:
             _first_line("\n".join(b for b in body if not b.startswith("Traceback")))
         prev = cases.get(id_)
         cases[id_] = _case(id_, file or (prev or {}).get("file", ""), line, "failed", msg, 0, m.group(2))
+        if m.group(3).startswith(_UT_LOADER) and _ut_not_found(id_, msg):
+            cases[id_]["not_found"] = True
         i = j
     return sorted(cases.values(), key=lambda c: c["id"])
 
@@ -1334,7 +1363,7 @@ def _collect(top, runner, cmd, output, t0) -> list:
     if name in ("jest", "vitest"):
         return parse_jest_json(_read(report), top) if report and os.path.exists(report) else []
     if name == "unittest":
-        return parse_unittest(output, top, runner)
+        return parse_unittest(output, top, runner, cmd.get("names") or ())
     if name == "go":
         return parse_go_json(output, top, runner)
     return _jvm_reports(top, runner, t0)
@@ -1356,7 +1385,8 @@ def run_tests(top, runner, files=(), ids=(), related=(), all_=False, env=None, s
     """Run one selection with one runner; stream the output when asked; parse the results.
 
     -> {runner, root, files, ids, related, all, argv, rc, secs, cases, count, passed, failed, skipped,
-        failures, zero (the selection ran no test), crash (no usable result), log}"""
+        failures, zero (the selection ran no test), crash (no usable result), not_found (names asked for that no
+        longer exist), log}"""
     top = str(top)
     files, ids, related = list(files), list(ids), list(related)
     tmpd = core.STATE / "tests" / "tmp"
@@ -1404,17 +1434,19 @@ def run_tests(top, runner, files=(), ids=(), related=(), all_=False, env=None, s
     for c in _collect(top, runner, cmd, text, t0):
         if c["id"] not in cases or c["status"] == "failed":
             cases[c["id"]] = c
-    cases = list(cases.values())
+    # a name asked for that no longer exists (renamed or deleted) selects no test: it is not a failure of this run
+    not_found = [c["id"] for c in cases.values() if c.get("not_found")]
+    cases = [c for c in cases.values() if not c.get("not_found")]
     shutil.rmtree(work, ignore_errors=True)
     failures = [c for c in cases if c["status"] == "failed"]
-    zero = not cases and (rc == 0 or rc == 5 or bool(_NO_TESTS.search(text)))
+    zero = not cases and (rc == 0 or rc == 5 or bool(not_found) or bool(_NO_TESTS.search(text)))
     crash = False
     if not cases and not zero:
         crash = True
         units = ids or files or [runner["name"]]
         failures = [_case(_id(u), (u.get("file") if isinstance(u, dict) else u if u in files else ""), None,
                           "failed", f"{runner['name']} exited {rc}: {_tail_line(text)}") for u in units]
-    elif rc != 0 and not failures:
+    elif rc != 0 and not failures and not not_found:
         crash = True
         failures = [_case(f"{runner['name']}:{runner['root']}", "", None, "failed",
                           f"{runner['name']} exited {rc} after {len(cases)} test(s): {_tail_line(text)}")]
@@ -1424,7 +1456,7 @@ def run_tests(top, runner, files=(), ids=(), related=(), all_=False, env=None, s
             "rc": rc, "secs": round(secs, 2), "cases": cases, "count": count,
             "passed": sum(c["status"] == "passed" for c in cases), "failed": len(failures),
             "skipped": sum(c["status"] == "skipped" for c in cases), "failures": failures, "zero": zero,
-            "crash": crash, "log": str(log) if log.parent != work else ""}
+            "crash": crash, "not_found": not_found, "log": str(log) if log.parent != work else ""}
 
 
 # --------------------------------------------------------------------------- recording
@@ -1450,11 +1482,37 @@ def load_state(top) -> dict:
     return data if isinstance(data, dict) else {}
 
 
+def _update_state(top, change) -> dict:
+    """Read, change and write the project's record under its lock: every worktree and lane of the project shares
+    it, so a write never drops another run's results, and readers never see a half-written file."""
+    path = state_path(top)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with core.Lock(f"tests-{project_key(top)[1]}", wait=30):
+        st = load_state(top)
+        change(st)
+        fd, tmp = tempfile.mkstemp(prefix=f".{path.stem}-", suffix=".tmp", dir=str(path.parent))
+        try:
+            with os.fdopen(fd, "w") as fh:
+                fh.write(json.dumps(st, indent=1))
+            os.replace(tmp, path)
+        finally:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+    return st
+
+
+def _rerunnable(res, case) -> bool:
+    """A failure can be recorded only with its module or file: a bare unittest name would rerun as a module."""
+    return bool(case["file"]) or res["runner"] != "unittest" or "." in case["id"]
+
+
 def record(top, results, kind="run") -> dict:
     """Fold run results into the project's record: failures replaced for what ran, durations, full-run time."""
     top = str(top)
-    path = state_path(top)
-    st = load_state(top)
+    return _update_state(top, lambda st: _fold(top, st, results, kind))
+
+
+def _fold(top, st, results, kind) -> None:
     st["project"] = project_key(top)[0]
     fails = list((st.get("failures") or {}).get(top) or [])
     from . import gitx
@@ -1472,7 +1530,8 @@ def record(top, results, kind="run") -> dict:
                 continue
             keep.append(f)
         fails = keep + [{"runner": res["runner"], "root": res["root"], "id": c["id"], "file": c["file"],
-                         "line": c["line"], "message": c["message"], "ts": now} for c in res["failures"]]
+                         "line": c["line"], "message": c["message"], "ts": now} for c in res["failures"]
+                        if _rerunnable(res, c)]
         rk = f"{res['runner']}:{res['root']}"
         durs = st.setdefault("durations", {}).setdefault(rk, {})
         per = {}
@@ -1489,22 +1548,15 @@ def record(top, results, kind="run") -> dict:
     st["last"] = {"top": top, "kind": kind, "tree": tree, "ts": now, "count": sum(r["count"] for r in results),
                   "failed": sum(r["failed"] for r in results), "secs": round(sum(r["secs"] for r in results), 2)}
     st["tree"], st["ts"] = tree, now
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(st, indent=1))
-    os.replace(tmp, path)
-    return st
 
 
 def _forget(top, stale) -> None:
     """Drop recorded failures that no longer select a test (renamed or deleted)."""
-    st = load_state(top)
-    fails = (st.get("failures") or {}).get(str(top)) or []
-    st.setdefault("failures", {})[str(top)] = [f for f in fails if (f.get("runner"), f.get("root"), f.get("id"))
-                                               not in stale]
-    p = state_path(top)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(st, indent=1))
+    def drop(st):
+        fails = (st.get("failures") or {}).get(str(top)) or []
+        st.setdefault("failures", {})[str(top)] = [f for f in fails if (f.get("runner"), f.get("root"), f.get("id"))
+                                                   not in stale]
+    _update_state(top, drop)
 
 
 def estimate(st, runner, files=(), all_=False, n_files=0):
@@ -1570,6 +1622,7 @@ def _show(res, top):
 def _summary(res) -> dict:
     out = {k: res[k] for k in ("runner", "root", "files", "ids", "related", "all", "argv", "rc", "secs", "count",
                                "passed", "failed", "skipped", "zero", "crash", "log")}
+    out["not_found"] = list(res.get("not_found") or [])
     out["failures"] = [{k: c[k] for k in ("id", "file", "line", "message")} for c in res["failures"]]
     return out
 
@@ -1655,10 +1708,23 @@ def _run_step(top, groups, stream, json_out, kind, header):
     return {"kind": kind, "runs": results}
 
 
+_LOGS_KEPT = 10  # per worktree, runner and root
+
+
 def _log_path(top, runner) -> Path:
+    """A log of its own for each run: in a folder per worktree (lanes share the project), named by time and
+    process. The oldest logs of the same worktree and runner beyond the newest few are removed."""
     key = project_key(top)[1]
+    tree = re.sub(r"[^A-Za-z0-9._-]+", "_", os.path.basename(os.path.normpath(str(top))))[:40]
+    tree += "-" + hashlib.sha256(os.path.realpath(str(top)).encode()).hexdigest()[:8]
     root = re.sub(r"[^A-Za-z0-9._-]+", "_", runner["root"])
-    return core.STATE / "tests" / "logs" / f"{key}-{runner['name']}-{root}.log"
+    d = core.STATE / "tests" / "logs" / key / tree
+    stem = f"{runner['name']}-{root}"
+    old = sorted(d.glob(f"{stem}-*.log")) if d.is_dir() else []
+    for f in old[:max(0, len(old) - _LOGS_KEPT + 1)]:
+        with contextlib.suppress(OSError):
+            f.unlink()
+    return d / f"{stem}-{time.strftime('%Y%m%d-%H%M%S')}-{time.time_ns() % 10 ** 9:09d}-{os.getpid()}.log"
 
 
 def _emit(data) -> None:
@@ -1742,8 +1808,12 @@ def _flow(a, top, runners):
             live = [r for r in step["runs"] if not r["zero"]]
             if stale:
                 _forget(top, {(r["runner"], r["root"], i) for r in stale for i in r["ids"]})
-                print(f"{ui.WARN} {sum(len(r['ids']) for r in stale)} recorded failure(s) no longer select a test "
-                      f"(renamed or deleted): forgotten", file=sys.stderr)
+            # a live run drops its missing names when it is recorded: they ran and did not fail
+            gone = [i for r in stale for i in r["ids"]] + [i for r in live for i in r.get("not_found") or []]
+            if gone:
+                print(f"{ui.WARN} {len(gone)} recorded failure(s) no longer select a test (renamed or deleted): "
+                      f"forgotten: {', '.join(gone[:5])}" + (f" and {len(gone) - 5} more" if len(gone) > 5 else ""),
+                      file=sys.stderr)
             if live:
                 record(top, live, "failed")
             if any(r["failures"] for r in live):

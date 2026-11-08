@@ -843,13 +843,189 @@ def is_pinned(path=None) -> bool:
 
 
 def runtime_home() -> Path:
-    """The devkit copy that hooks, the installed `dev`, the status line and the jobs run: this copy when it is pinned,
-    else the pinned copy that `dev install` recorded. Settings written from a checkout point there too, never at the
-    checkout. Before the first pinned install, the copy that runs now."""
-    if is_pinned(DEVKIT_HOME):
+    """The devkit copy that hooks, the installed `dev`, the status line and the jobs run: this copy when it is pinned
+    and not older than the release `dev install` recorded, else the pinned copy that `dev install` recorded. Settings
+    written from a checkout or an older copy point there too, never at the checkout or back at the older copy. Before
+    the first pinned install, the copy that runs now."""
+    if is_pinned(DEVKIT_HOME) and not older_copy():
         return DEVKIT_HOME
     path = install_record().get("path")
     return Path(path) if path and is_pinned(path) else DEVKIT_HOME
+
+
+# An older devkit never overwrites a newer install. A Claude Code or Codex session keeps the hooks it started with,
+# so after `dev install` pins a newer release, the sessions that were already open still run the older copy. That copy
+# sees the newer settings as drift; before this check it put its own back (hooks, CLAUDE.md, AGENTS.md, the git
+# ignore). Now every writer of devkit-managed configuration asks older_copy() first, and an older copy changes
+# nothing: it records config.repair-skipped with both versions, and the session is told to restart.
+#
+# install.json is believed only when the copy it names holds up: a pinned copy (a folder of the releases folder, with
+# its manifest) whose manifest names the same version and has the checksum the record keeps. Both live in
+# ~/.local/share/devkit, which no agent may write (the guard), so a forged record cannot stop a repair; and a record
+# that does not hold up counts as no pin, so this copy repairs as before.
+
+RELEASE_VERSION_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)(?:[-+][0-9A-Za-z.-]*)?")  # 26.11.5, 26.12.0-dev
+_PIN_SEEN = {}  # (install.json stat, manifest stat) -> pinned_release(); install.json changes only with dev install
+
+
+def version_key(version):
+    """A release version ("26.11.5", or "26.12.0-dev" for an unverified pin) as numbers to compare -> (26, 11, 5),
+    or None when it is not one."""
+    m = RELEASE_VERSION_RE.fullmatch(str(version or "").strip())
+    return tuple(int(x) for x in m.groups()) if m else None
+
+
+def _stat_key(path: Path):
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return st.st_mtime_ns, st.st_size, st.st_ino
+
+
+def pinned_release() -> dict:
+    """The release install.json pins, when the record holds up -> {version, path, name}, else {}."""
+    rec_f = install_record_file()
+    rec = install_record()
+    path = rec.get("path")
+    if not path or not is_pinned(path) or version_key(rec.get("version")) is None:
+        return {}
+    man_f = Path(path) / PIN_MANIFEST
+    key = (str(rec_f), _stat_key(rec_f), str(man_f), _stat_key(man_f))
+    if key in _PIN_SEEN:
+        return dict(_PIN_SEEN[key])
+    try:
+        raw = man_f.read_bytes()
+        man = json.loads(raw)
+    except (OSError, ValueError):
+        return {}
+    import hashlib
+    holds = isinstance(man, dict) and man.get("version") == rec["version"] and \
+        hashlib.sha256(raw).hexdigest() == rec.get("manifest_sha256")
+    out = {"version": rec["version"], "path": Path(path), "name": rec.get("name") or Path(path).name} if holds else {}
+    _PIN_SEEN.clear()
+    _PIN_SEEN[key] = out
+    return dict(out)
+
+
+def older_copy():
+    """When the copy that runs now is older than the release install.json pins -> {running, pinned, path}; else None
+    (equal, newer, nothing pinned, a record that does not hold up, or a version that is not a release)."""
+    pin = pinned_release()
+    running, pinned = version_key(VERSION), version_key(pin.get("version"))
+    if not pin or running is None or running >= pinned:
+        return None
+    return {"running": VERSION, "pinned": pin["version"], "path": str(pin["path"])}
+
+
+def older_copy_words(old: dict) -> str:
+    """What a session hears once when it runs an older devkit than the one installed."""
+    return (f"devkit {old['running']} runs in this session, but devkit {old['pinned']} is installed, so this session's "
+            f"devkit changes no devkit-managed setting (the installed release keeps them). Restart the session to "
+            f"load devkit {old['pinned']}'s hooks.")
+
+
+def older_copy_skip(what: str):
+    """For a writer of devkit-managed configuration: when this copy is older than the pinned release, record
+    config.repair-skipped (what was skipped, both versions) and return older_copy(); the writer then changes nothing.
+    None otherwise, with nothing recorded."""
+    old = older_copy()
+    if old:
+        from . import audit
+        audit.record("config.repair-skipped", what,
+                     f"devkit {old['running']} runs here and install.json pins devkit {old['pinned']}: the older copy "
+                     f"left {what} as it is", "skipped")
+    return old
+
+
+def release_home() -> Path:
+    """The copy background `dev` commands run: the release install.json pins (when the record holds up), else this
+    copy. A hook of an older session then starts the installed release, never itself."""
+    pin = pinned_release()
+    return pin["path"] if pin else DEVKIT_HOME
+
+
+# The other copies in the releases folder are kept for `dev install --version` (a rollback), but a copy older than
+# the version check above has no check at all: a session that started before `dev install` still runs it, and its
+# repair writes its own, older hooks, guard and instructions back. Its code cannot be changed, but its bin/dev reads
+# the code next to its real path (os.path.realpath), so `dev install` and a repair by the pinned release turn each
+# other copy's bin/dev into a link to the pinned release's bin/dev. Every hook, job and repair of an older session
+# then runs the installed release. The copy's own bin/dev stays beside it (bin/.dev.retired), so a rollback can put
+# it back (restore_pin). The releases folder is the guard's to protect, so no agent sets or undoes a link.
+
+RETIRED_DEV = ".dev.retired"
+
+
+def is_current_pin() -> bool:
+    """True when the copy that runs now is the release install.json pins (and the record holds up)."""
+    pin = pinned_release()
+    return bool(pin) and real(pin["path"]) == real(DEVKIT_HOME)
+
+
+def retired_to(path):
+    """The copy whose code another pinned copy's bin/dev runs once retired (a link) -> its folder, else None."""
+    dev = Path(path) / "bin" / "dev"
+    return Path(os.path.realpath(dev)).parent.parent if dev.is_symlink() else None
+
+
+def _with_writable(folder: Path, fn):
+    """Run fn() with `folder` (0555 in a pinned copy) writable by its owner for the moment; its mode comes back."""
+    mode = stat.S_IMODE(folder.stat().st_mode)
+    os.chmod(folder, mode | stat.S_IWUSR)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions (the owner's write, for one rename, then the read-only mode again)
+    try:
+        return fn()
+    finally:
+        os.chmod(folder, mode)
+
+
+def retire_other_pins() -> list:
+    """Point bin/dev of every other pinned copy at the pinned release's bin/dev (see above) -> the names changed now.
+    Nothing when install.json does not hold up: a link to a copy nobody verified would be worse than none."""
+    pin = pinned_release()
+    target = Path(pin["path"]) / "bin" / "dev" if pin else None
+    if not target or target.is_symlink() or not target.is_file():
+        return []
+    out = []
+    for d in sorted(pin_root().iterdir()):
+        if d.name.startswith(".") or d.is_symlink() or not d.is_dir() or real(d) == real(pin["path"]) \
+                or not is_pinned(d):
+            continue
+        dev, keep = d / "bin" / "dev", d / "bin" / RETIRED_DEV
+        if dev.is_symlink() and os.readlink(dev) == str(target):
+            continue
+
+        def link(dev=dev, keep=keep):
+            if not dev.is_symlink() and not os.path.lexists(keep):
+                os.link(dev, keep)  # the copy's own bin/dev, for a rollback
+            tmp = dev.with_name(f".dev.{os.getpid()}.tmp")
+            if os.path.lexists(tmp):
+                tmp.unlink()
+            os.symlink(str(target), tmp)
+            if hasattr(os, "lchmod"):  # macOS: the link reads 0555 like the rest of the copy
+                os.lchmod(tmp, 0o555)
+            os.replace(tmp, dev)  # one rename: a hook that starts now runs one bin/dev or the other, never none
+        _with_writable(d / "bin", link)
+        out.append(d.name)
+    if out:
+        from . import audit
+        audit.record("install.retire", ", ".join(out), f"their bin/dev runs the pinned release {pin['name']} now, so "
+                     f"a session that started before the install no longer writes their older settings back")
+    return out
+
+
+def restore_pin(path) -> bool:
+    """Undo retire_other_pins for one copy, before `dev install` uses it again: its own bin/dev back, when the one
+    kept beside it is what its manifest names. -> whether it was put back."""
+    d = Path(path)
+    dev, keep = d / "bin" / "dev", d / "bin" / RETIRED_DEV
+    if not dev.is_symlink() or not keep.is_file() or keep.is_symlink():
+        return False
+    want = ((read_json(d / PIN_MANIFEST, {}) or {}).get("files") or {}).get("bin/dev")
+    import hashlib
+    if not want or hashlib.sha256(keep.read_bytes()).hexdigest() != want:
+        return False
+    _with_writable(d / "bin", lambda: os.replace(keep, dev))
+    return True
 
 
 def source_home() -> Path:

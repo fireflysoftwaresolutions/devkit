@@ -50,7 +50,8 @@ The brief is at most 4 KB. It holds, in this order:
 2. The run: its goal, state, mode, current step, how many steps are done, and what comes next.
 3. The crew working now, each member by role with its step and minutes, marked not to relaunch: its result arrives
    as a notification.
-4. The decisions waiting, with their options and the recommendation, and the crew messages waiting.
+4. The decisions waiting, with their options and the recommendation, and the crew messages waiting: only the
+   questions that nobody answered yet.
 5. The last status block, so the next one keeps the task's title.
 6. Git: the branch, HEAD, and the uncommitted and unpushed changes.
 7. The rule: your final message starts with the status block.
@@ -67,6 +68,11 @@ oldest ones.
   run, its current step, and the members still running, whose results go to that session. To continue the run here,
   the tech lead runs `dev session carry`; to close it, `dev session carry` and then
   `dev progress done "<outcome>" --why "…"`. `carry` is refused while a member of that run is still running.
+
+When a session ends with its run still open, devkit marks the run orphaned, so that no view shows it as running.
+The run runs again in the session that works on it: when its own session resumes, or when `dev session carry` moves
+it into the session `/clear` started. Its history records why (`run.running` in the audit trail). See
+[Work states › Runs](work-states.md#runs).
 
 ## Read the record yourself
 

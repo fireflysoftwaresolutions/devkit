@@ -349,6 +349,7 @@ def pin(source=None, unverified_why: str = None) -> dict:
     name = f"{version}-{commit[:7]}"
     dest = core.pin_root() / name
     if dest.exists():  # rebuilt from git all the same: a manifest rewritten to match a change would look intact
+        core.restore_pin(dest)  # a copy a newer install retired gets its own bin/dev back first: that is no change
         problems = verify_pin(dest)
         rec = core.install_record()
         if rec.get("manifest_sha256") and core.real(rec.get("path") or "") == core.real(dest) \
@@ -468,6 +469,7 @@ def select_pin(version: str) -> dict:
     if not hits:
         raise PinError(f"no pinned copy of {version}; there are: {', '.join(d.name for _, d in copies) or 'none'}.")
     man, d = hits[0]
+    core.restore_pin(d)  # a rollback: the copy a newer install retired runs its own code again
     problems = verify_pin(d)
     if problems:
         raise PinError(f"{d.name} differs from its manifest ({'; '.join(problems[:4])}), so it is not used. Pin it "
@@ -626,7 +628,10 @@ def install_cli():
 
 
 def setup_git(quiet=False, commit_template=None):
-    """`commit_template`: dev setup's answer ("yes" or "no"), passed by `dev install --commit-template`."""
+    """`commit_template`: dev setup's answer ("yes" or "no"), passed by `dev install --commit-template`. A copy older
+    than the pinned release changes no global git setting (core.older_copy_skip)."""
+    if core.older_copy_skip("the global git config (core.excludesFile, include.path)"):
+        return
     with quiet_mode(quiet):
         _setup_git()
     if not quiet:  # a quiet run repairs drift: it never asks, so it never offers the template either
@@ -860,6 +865,9 @@ def setup_handoff():
                 shutil.copyfile(f, HANDOFF / f.name)
         remote = core.gitout(HANDOFF, "remote", "get-url", "origin")
         done(f"present · origin {remote or 'none'}")
+        from . import work
+        if work.recover_rebase("dev install"):  # a stopped rebase blocks every later sync
+            done("aborted a rebase of the handoff repository that was left stopped (docs/teams.md says why)")
     if (HANDOFF / ".git").exists():
         handoff_merge_rules()
         done("multi-machine merge rules (sessions union · generated views ours)")
@@ -886,6 +894,8 @@ def instructions_state(target: Path) -> str:
 
 
 def write_agent_instructions(quiet=False):
+    if core.older_copy_skip(f"{tilde(CLAUDE_HOME / 'CLAUDE.md')} and {tilde(CODEX_HOME / 'AGENTS.md')}"):
+        return
     with quiet_mode(quiet):
         step("Global agent instructions (Claude CLAUDE.md, Codex AGENTS.md)")
         text = render_instructions()
@@ -1320,8 +1330,11 @@ def _install_skills():
 
 
 def write_claude_settings(include_hooks=True):
-    """Merge devkit's managed keys into ~/.claude/settings.json (other keys untouched)."""
+    """Merge devkit's managed keys into ~/.claude/settings.json (other keys untouched). -> whether it changed. A copy
+    older than the pinned release writes nothing (core.older_copy_skip)."""
     f = CLAUDE_HOME / "settings.json"
+    if core.older_copy_skip(tilde(f)):
+        return False
     cur = read_json(f, {}) or {}
     frag = load_conf("claude/settings.json")
     plugins = load_conf("claude/plugins.json")
@@ -1414,7 +1427,10 @@ def setup_claude():
 
 
 def write_codex_config(quiet=False):
-    """hooks.json + managed config.toml keys (through Codex's API) + hook trust. No plugin installs."""
+    """hooks.json + managed config.toml keys (through Codex's API) + hook trust. No plugin installs. A copy older than
+    the pinned release writes nothing (core.older_copy_skip)."""
+    if core.older_copy_skip(f"{tilde(CODEX_HOME / 'hooks.json')} and {tilde(CODEX_HOME / 'config.toml')}"):
+        return
     from .codexrpc import CodexError, CodexRPC
     with quiet_mode(quiet):
         conf = load_conf("codex/config.json")
@@ -2132,12 +2148,19 @@ def install_shell():
         note("not set up yet: dev setup shell turns on the fzf pickers")
 
 
-def run_install(only=None, unverified_why=None, version=None, as_pinned=False, commit_template=None) -> int:
+def run_install(only=None, unverified_why=None, version=None, as_pinned=False, commit_template=None,
+                assume_yes=False) -> int:
     """`dev install`. From a checkout it pins the checkout (or switches to `version`), then starts itself again from
     that pinned copy (`--as-pinned`), which runs the steps, so every path they write names the copy; `only` re-applies
-    some steps from the installed copy without pinning. -> exit code (1 when the copy was refused)."""
+    some steps from the installed copy without pinning. Before it changes anything it names the running sessions that
+    use devkit, which must be restarted (hooks.confirm_restart; `assume_yes`: go on without asking). -> exit code (1
+    when the copy was refused or the developer stopped it)."""
     if not as_pinned:
         print(ui.banner("install"))
+        from . import hooks
+        if not hooks.confirm_restart(assume_yes=assume_yes):
+            fail("stopped before any change: restart those sessions, or run dev install again and go on")
+            return 1
     try:
         target = _choose_copy(only, unverified_why, version, as_pinned)
     except PinError as e:
@@ -2151,6 +2174,13 @@ def run_install(only=None, unverified_why=None, version=None, as_pinned=False, c
         sys.stdout.flush()
         sys.stderr.flush()
         os.execv(sys.executable, argv)
+    if core.is_current_pin():  # before any step: an older session's hooks run this release from now on
+        try:
+            retired = core.retire_other_pins()
+            if retired:
+                done(f"the other pinned copies run devkit {core.VERSION} now: {', '.join(retired)}")
+        except OSError as e:
+            fail(f"the other pinned copies still run their own code ({e}); `dev config repair` retries")
     steps = [("config", ensure_config), ("tools", setup_tools), ("cli", install_cli), ("git", lambda: setup_git(commit_template=commit_template)), ("handoff", setup_handoff),
              ("instructions", write_agent_instructions), ("skills", install_skills), ("claude", setup_claude),
              ("codex", setup_codex), ("desktop", setup_desktop), ("docker", setup_docker), ("docs", setup_docs_tools),
@@ -2266,6 +2296,57 @@ def tools_check(stacks, have=None) -> tuple:
     return "Toolchain", "required tools", not missing, detail, install_commands(tools[t] for t in missing)
 
 
+def branch_cleanup_checks(projects, gh=None) -> list:
+    """GitHub's delete_branch_on_merge for the GitHub projects on this Mac ([(project id, "owner/repo")]), read in one
+    GraphQL call. -> doctor rows: a failing one per project with it off that you administer, with the command that
+    turns it on (`dev delivery apply`), then one passing row for the rest (one you do not administer is named: only
+    its admins can change it)."""
+    projects = [(pid, slug) for pid, slug in projects if re.fullmatch(r"[\w.-]+/[\w.-]+", slug or "")]
+    if not projects:
+        return []
+    gh = gh or (lambda args: sh(["gh", *args], timeout=30))
+    query = "query { " + " ".join(
+        f'r{i}: repository(owner: "{slug.split("/")[0]}", name: "{slug.split("/")[1]}") '
+        f"{{ deleteBranchOnMerge viewerPermission }}" for i, (_, slug) in enumerate(projects)) + " }"
+    rc, out, err = gh(["api", "graphql", "-f", f"query={query}"])
+    try:
+        data = (json.loads(out or "{}") or {}).get("data") or {}
+    except (ValueError, AttributeError):
+        data = {}
+    if not data:
+        why = (err or "").strip().splitlines()[:1] or ["no answer"]
+        return [("GitHub", "delete merged branches", True, f"not checked: GitHub could not be read ({why[0][:120]})",
+                 "")]
+    rows, on, others, unread = [], 0, [], []
+    for i, (pid, slug) in enumerate(projects):
+        r = data.get(f"r{i}")
+        if not isinstance(r, dict):
+            unread.append(slug)
+        elif r.get("deleteBranchOnMerge"):
+            on += 1
+        elif r.get("viewerPermission") == "ADMIN":
+            rows.append(("GitHub", f"delete merged branches · {pid}", False,
+                         f"off in {slug}: the branch of each merged PR stays on GitHub",
+                         f'dev delivery apply -p {pid} --why "delete the branch of each merged PR"'))
+        else:
+            others.append(slug)
+    detail = f"on in {on} of {len(projects)} GitHub projects" + (
+        f"; off in {', '.join(others)}, which you do not administer" if others else "") + (
+        f"; not read: {', '.join(unread)}" if unread else "")
+    return rows + [("GitHub", "delete merged branches", True, detail, "")]
+
+
+def _github_projects(mains) -> list:
+    """[(project id, "owner/repo")] of the checkouts on github.com."""
+    out = []
+    for m in mains:
+        remote = core.gitout(m, "config", "--get", "remote.origin.url")
+        parsed = core.parse_remote(remote) if remote else None
+        if parsed and parsed[0] == "github.com" and parsed[1]:
+            out.append((core.project_identity(m, remote)[0], f"{parsed[1]}/{parsed[2]}"))
+    return out
+
+
 def doctor() -> int:
     print(ui.banner("doctor"))
     results = []
@@ -2275,6 +2356,7 @@ def doctor() -> int:
 
     check(*tools_check(CFG.get("stacks") or []))
     rc, out, err = sh(["gh", "auth", "status"], timeout=20)
+    gh_ok = rc == 0
     check("GitHub", "gh authenticated", rc == 0, (out + err).split("\n")[1].strip() if rc == 0 else err[:120],
           "gh auth login -s repo,read:org,workflow,gist")
     u = core.gh_user()
@@ -2306,6 +2388,12 @@ def doctor() -> int:
     check("Workspace", "canonical layout", not layout, f"{len(mains)} repos; " +
           (f"{len(layout)} not at their canonical path: {', '.join(tilde(m) for m in layout)}" if layout else "all in place"),
           "dev adopt <path> (when no sessions are open in it)")
+    if gh_ok:  # merged pull requests' branches must not pile up on GitHub
+        for row in branch_cleanup_checks(_github_projects(mains)):
+            check(*row)
+    from . import selfcheck
+    for row in selfcheck.work_state_checks():  # the project you are in: stale work items and runs, each with its fix
+        check(*row)
 
     for target in (CLAUDE_HOME / "CLAUDE.md", CODEX_HOME / "AGENTS.md"):
         state = instructions_state(target)
@@ -2341,6 +2429,8 @@ def doctor() -> int:
 
     for name, ok, detail, fix in pin_checks():
         check("Pinned install", name, ok, detail, fix)
+    for row in selfcheck.old_copy_checks(CLAUDE_HOME, CODEX_HOME):  # what an older session wrote back, and its copy
+        check(*row)
 
     s = read_json(CLAUDE_HOME / "settings.json", {}) or {}
     check("Claude", "bypassPermissions default", (s.get("permissions") or {}).get("defaultMode") == "bypassPermissions",

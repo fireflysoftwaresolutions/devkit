@@ -349,7 +349,8 @@ def message(owed_, rechecks=(), roster=None) -> str:
                          f"crew decide with their answer.")
     if rechecks:
         parts.append("To recheck: " + "; ".join(f"“{n}” used {_quoted(d)}, reopened since" for n, d in rechecks) +
-                     ". Reopen and redo it, or confirm it.")
+                     f". Reopen and redo it, or confirm it still holds: dev progress confirm \"{rechecks[0][0]}\" "
+                     f"--why \"…\".")
     parts.append("Or end with --why \"<reason>\".")
     return " ".join(parts)
 
@@ -385,7 +386,8 @@ def _iso(ts) -> str:
 
 
 def _last_activity(lane: dict, f: dict) -> float:
-    seen = [lane.get("started") or 0, lane.get("resumed_at") or 0, f.get("last_seen") or f.get("transcript_mtime") or 0]
+    seen = [lane.get("started") or 0, lane.get("resumed_at") or 0, f.get("last_seen") or f.get("transcript_mtime") or 0,
+            f.get("active") or 0]  # active: its last activity anywhere (progress.agent_facts), when the sweep read it
     return max(seen + [u.get("ts") or 0 for u in lane.get("updates") or []])
 
 
@@ -398,14 +400,35 @@ def _step_move(s, to, owner, why) -> dict:
             "owner": owner, "why": why}
 
 
+def stop_moves(run: dict, aid: str, why: str, at=None) -> list:
+    """A lane that stopped before its report (TaskStop, an interruption): the lane ends stopped, which frees its slot,
+    and each open step it owns (running, or blocked on a decision) waits for a new launch, back with Morpheus, unless
+    a live lane of the same member holds it (progress.live_holder). [] when the lane is not working or lost."""
+    from .progress import live_holder
+    lane = (run.get("agents") or {}).get(aid) or {}
+    if lane.get("state") not in ("running", "lost"):
+        return []
+    moves = [_lane_move(aid, lane["state"], "stopped", why, at=at)]
+    for s in run.get("plan") or []:
+        if s.get("owner") == aid and s.get("state") in ("running", "blocked"):
+            holder = live_holder(run, aid, s)
+            moves.append(_step_move(s, "running", holder, f"{why}; a live lane of its member holds it") if holder
+                         else _step_move(s, "pending", "main", f"{why}; the step waits for a new launch"))
+    return moves
+
+
 def reconcile(run: dict, facts: dict, now: float, lim: dict | None = None) -> list:
     """The transitions the facts call for (C7), without changing the run. Facts: per lane `meta_finished` (when its
-    meta file said finished), `meta_running`, `last_seen` (its last hook) and `transcript_mtime`; the session's
-    `ended` and `alive`; the session's `launches`. Rules: a working lane whose meta finished `finish_grace` ago with
-    no SubagentStop is unverified, its steps too, and frees its slot; one silent past `stale_minutes`, or whose
-    session ended while its meta does not say it runs, is lost, and its steps wait for an owner; a lost lane seen
-    again works again and takes back the steps it lost; the run of an ended session is orphaned; a launch pending
-    past `launch_ttl` fails."""
+    meta file said finished), `meta_running`, `stopped_at` (when its own transcript ended with its interruption),
+    `ended_how` (what saw the end, when it was not the meta file beside the session's own transcript), `last_seen`
+    (its last hook), `transcript_mtime` and `active` (its last activity anywhere); the session's `ended` and `alive`;
+    the session's `launches`.
+    Rules: a working lane whose meta finished `finish_grace` ago with no SubagentStop is unverified, its steps too
+    (a step that started after that finish, which nobody worked on, waits for a new launch instead), and frees its
+    slot; one whose transcript ends with its interruption stopped (stop_moves); one silent past `stale_minutes`, or
+    whose session ended while its meta does not say it runs, is lost, and its steps wait for an owner; a lost lane
+    seen again works again and takes back the steps it lost; the run of an ended session is orphaned; a launch
+    pending past `launch_ttl` fails."""
     lim = {**LIMITS, **(lim or {})}
     facts = facts or {}
     fl, sess = facts.get("lanes") or {}, facts.get("session") or {}
@@ -422,9 +445,17 @@ def reconcile(run: dict, facts: dict, now: float, lim: dict | None = None) -> li
             mf = f.get("meta_finished")
             silent = now - _last_activity(lane, f)
             if mf is not None and now - mf >= lim["finish_grace"]:
-                why = f"finished at {_iso(mf)} with no SubagentStop: no report, so no evidence"
+                how = f" ({f['ended_how']})" if f.get("ended_how") else ""
+                why = f"finished at {_iso(mf)} with no SubagentStop{how}: no report, so no evidence"
                 moves.append(_lane_move(aid, st, "unverified", why, at=mf))
-                moves += [_step_move(s, "unverified", aid, why) for s in mine]
+                late = f"it started after its member finished at {_iso(mf)}: nobody worked on it, so it waits for a " \
+                       f"new launch"  # delegated or assigned into a lane whose member had already ended
+                moves += [_step_move(s, "pending", "main", late) if (s.get("started") or 0) > mf
+                          else _step_move(s, "unverified", aid, why) for s in mine]
+            elif f.get("stopped_at") is not None:
+                how = f.get("ended_how") or "its transcript ends with its interruption"
+                moves += stop_moves(run, aid, f"interrupted at {_iso(f['stopped_at'])} ({how}), before its report",
+                                    at=f["stopped_at"])
             elif silent > lim["stale_minutes"] * 60 or (ended and not f.get("meta_running")):
                 why = (f"silent for {silent / 60:.0f} minutes" if silent > lim["stale_minutes"] * 60 else
                        "its session ended") + "; the step waits for a new owner"
@@ -476,6 +507,10 @@ def apply(run: dict, moves: list, now: float) -> list:
                 _interval(run, m["id"], lane["finished"], False)
                 if m["to"] == "lost":
                     lane["lost_at"] = now  # exact: rounded up, a hook moments later would not recover it
+            run.setdefault("history", []).append({
+                "ts": round(now), "step": f"(lane {lane.get('persona') or lane.get('label') or m['id']})",
+                "from": m["from"], "to": m["to"], "by": "devkit", "why": m["why"][:300]})
+            run["history"] = run["history"][-200:]
         elif m["kind"] == "step":
             s = steps.get(m["id"])
             if not s or s.get("state") != m["from"] or (s.get("owner") or "main") != m["owner_from"]:
@@ -483,6 +518,7 @@ def apply(run: dict, moves: list, now: float) -> list:
             s.update(state=m["to"], owner=m["owner"])
             if m["to"] == "pending" and m["owner"] == "main":
                 s["lost_from"] = m["owner_from"]
+                s.pop("waiting", None)  # back with Morpheus: no decision blocks it any more
             else:
                 s.pop("lost_from", None)
             run.setdefault("history", []).append({"ts": round(now), "step": s["name"], "from": m["from"],
@@ -521,10 +557,49 @@ def audit_moves(run: dict, moves: list):
                      project=run.get("project") or "", by="devkit", was=m.get("from") or "")
 
 
+INTERRUPTED = "[Request interrupted by user"  # Claude Code's record when an agent is stopped or interrupted
+TAIL_BYTES = 4096  # an interruption record is under 1 KB; a longer last line is something else
+
+
+def interrupted_at(path):
+    """When the agent whose transcript this is was stopped: the time of its last record when that record is Claude
+    Code's interruption (TaskStop, Esc), and None when the agent wrote anything after it (it works again), its last
+    record is another one, or the file cannot be read."""
+    try:
+        size = os.path.getsize(path)
+        with open(path, "rb") as fh:
+            fh.seek(max(0, size - TAIL_BYTES))
+            tail = fh.read().decode("utf-8", "replace")
+        mtime = os.path.getmtime(path)
+    except OSError:
+        return None
+    lines = [ln for ln in tail.split("\n") if ln.strip()]
+    if not lines or (size > TAIL_BYTES and len(lines) < 2):
+        return None  # the window starts inside the last record: too long to be an interruption
+    try:
+        rec = json.loads(lines[-1])
+    except ValueError:
+        return None
+    msg = rec.get("message") if isinstance(rec, dict) else None
+    if not isinstance(msg, dict) or rec.get("type") != "user":
+        return None
+    content = msg.get("content")
+    texts = [content] if isinstance(content, str) else \
+        [c.get("text") for c in content or [] if isinstance(c, dict) and c.get("type") == "text"]
+    if len(texts) != 1 or not str(texts[0] or "").startswith(INTERRUPTED):
+        return None
+    try:
+        import datetime as dt
+        return dt.datetime.fromisoformat(str(rec["timestamp"]).replace("Z", "+00:00")).timestamp()
+    except (KeyError, ValueError):
+        return mtime
+
+
 def meta_reader(transcript_path):
     """`meta(aid)` for `facts`, or None without a main transcript: Claude Code's
-    `<main transcript>/subagents/agent-<aid>.meta.json` (its `finished`, and the file's modification time as when)
-    and the modification time of the agent's own transcript. {} when the agent has no meta file."""
+    `<main transcript>/subagents/agent-<aid>.meta.json` (its `finished`, and the file's modification time as when),
+    the modification time of the agent's own transcript, and when that transcript says it was stopped
+    (interrupted_at). {} when the agent has no meta file."""
     t = str(transcript_path or "")
     if not t.endswith(".jsonl"):
         return None
@@ -538,19 +613,26 @@ def meta_reader(transcript_path):
             mtime, doc = p.stat().st_mtime, json.loads(p.read_text())
         except (OSError, ValueError):
             return {}
+        log = folder / f"agent-{aid}.jsonl"
         try:
-            tmt = (folder / f"agent-{aid}.jsonl").stat().st_mtime
+            tmt = log.stat().st_mtime
         except OSError:
             tmt = None
-        return {"finished": isinstance(doc, dict) and doc.get("finished") is True, "mtime": mtime,
-                "transcript_mtime": tmt}
+        finished = isinstance(doc, dict) and doc.get("finished") is True
+        return {"finished": finished, "mtime": mtime, "transcript_mtime": tmt,
+                "stopped": None if finished or tmt is None else interrupted_at(log)}
     return read
 
 
-def facts(run: dict, sess, now: float | None = None, meta=None, alive=None) -> dict:
+def facts(run: dict, sess, now: float | None = None, meta=None, alive=None, seen=None) -> dict:
     """What the reconciler needs, read outside any lock. `sess`: the session record, None when it is gone (SessionEnd
     deletes it). `meta(aid)`: a lane's meta file (`meta_reader`). `alive(pid, pid_start)`: whether the session's
-    process still runs (`pid_alive`); None leaves it unknown, as in the session's own hooks."""
+    process still runs (`pid_alive`); None leaves it unknown, as in the session's own hooks. `seen(aid)`:
+    progress.agent_facts, what devkit and Claude Code saw of the agent anywhere on this Mac (its lane in every run,
+    its records beside every session transcript devkit knows): a running lane whose member ended there, after its
+    last activity, ends as if its own meta file said so (`ended_how` says what saw it), and its last activity
+    anywhere (`active`) counts for its silence. After a compaction gives the conversation a new session id, Claude
+    Code writes the agent's records beside the new transcript, where the meta file beside the run's own never is."""
     now = now or time.time()
     subs = (sess or {}).get("subagents") or {}
     lanes = {}
@@ -559,9 +641,20 @@ def facts(run: dict, sess, now: float | None = None, meta=None, alive=None) -> d
             continue
         m = (meta(aid) if meta else None) or {}
         lanes[aid] = {"meta_finished": (m.get("mtime") or now) if m.get("finished") else None,
-                      "meta_running": bool(m) and not m.get("finished"),
+                      "meta_running": bool(m) and not m.get("finished") and m.get("stopped") is None,
+                      "stopped_at": m.get("stopped"),
                       "last_seen": lane.get("last_seen") or (subs.get(aid) or {}).get("last_seen"),
                       "transcript_mtime": m.get("transcript_mtime")}
+        if seen is None:
+            continue
+        from .progress import lane_ended
+        g = seen(aid)
+        lanes[aid]["active"] = g.get("active") or None
+        end = lane_ended(run, lane, g) if lane.get("state") == "running" else None
+        if end and lanes[aid]["meta_finished"] is None and lanes[aid]["stopped_at"] is None:
+            interrupted = "interruption" in end["how"]
+            lanes[aid].update(meta_running=False, ended_how=end["how"],
+                              **({"stopped_at": end["at"]} if interrupted else {"meta_finished": end["at"]}))
     if sess is None:
         session = {"ended": now, "alive": None, "why": "its session record is gone (the session ended)"}
     elif sess.get("ended"):
@@ -614,18 +707,30 @@ def pid_alive(pid, started=None):
 
 def sweep(runs_dir=None, sessions_dir=None, now: float | None = None, alive=pid_alive) -> dict:
     """`dev sync --scheduled`: reconcile every live run on this Mac (C7), each on its freshly read record ->
-    {run file name: [transitions made]}. The facts are read before the run's lock is taken."""
+    {run file name: [transitions made]}. The facts are read before the run's lock is taken, with what devkit and
+    Claude Code saw of each agent anywhere on this Mac (facts, `seen`), so a lane whose member ended under the
+    conversation's newer session id closes too, with the reason in the run's history."""
     from . import progress, state
     now = now or time.time()
     runs_dir = Path(runs_dir or progress.RUNS)
     sessions_dir = Path(sessions_dir or progress.SESSIONS)
     lim, out = limits(), {}
-    for f in sorted(runs_dir.glob("*.json")) if runs_dir.is_dir() else []:
+    stops = sessions_dir == Path(progress.SESSIONS)  # pending stops live beside devkit's own session records
+    files = sorted(runs_dir.glob("*.json")) if runs_dir.is_dir() else []
+    # what devkit and Claude Code saw of each agent anywhere on this Mac: every run here, and Claude Code's records
+    # beside every session transcript devkit knows (the run's own session may no longer be the conversation's)
+    seen = progress.agent_facts([r for r in (state.read(f) for f in files) if isinstance(r, dict)],
+                                progress._known_transcripts(sessions_dir))
+    for f in files:
         run = state.read(f)
         if not isinstance(run, dict) or run.get("state") not in LIVE:
             continue
+        if stops and run.get("agent") and run.get("session") and progress.apply_stops(run["agent"], run["session"]):
+            run = state.read(f)  # a member's report that found the lock busy, before its lane is judged without it
+            if not isinstance(run, dict) or run.get("state") not in LIVE:
+                continue
         sess = state.read(sessions_dir / f.name)
-        fx = facts(run, sess, now, meta=meta_reader((sess or {}).get("transcript")), alive=alive)
+        fx = facts(run, sess, now, meta=meta_reader((sess or {}).get("transcript")), alive=alive, seen=seen)
         if not reconcile(run, fx, now, lim):
             continue
         made = []

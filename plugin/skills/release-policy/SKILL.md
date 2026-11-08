@@ -49,16 +49,26 @@ dev delivery apply -i <initiative> --set release_train="bom → parent → servi
 Every change bumps the policy's version and records who changed it, when and why. `--tasks` opens a work item for
 each gap, such as no CI, no test gate, no changelog, or no release workflow.
 
+Branch cleanup is part of the policy: a merged branch is deleted. `dev pr merge` deletes the branch it merges with
+its clean worktree, `dev release` deletes the branches a release merged once it is out, the nightly `gc` closes
+merged branches, `dev branch prune` lists the rest (`--apply` deletes them with their clean worktrees; on origin
+that is an irreversible action), and GitHub's `delete_branch_on_merge` deletes a PR's branch when GitHub merges it.
+The policy field `delete_branch_on_merge` is on unless set to `false`: `dev delivery apply` sets it on GitHub (a
+repository administrator's right) and names the setting on other hosts, and `dev doctor` reports where it is off.
+
 ## 4. Release by the policy (delivery skill, global rules §7)
 
 1. **Integrate.** Bring everything that ships into `release/<version>` from an up-to-date `origin/<default>`.
 2. **Run the test gate locally,** then push once and open one PR.
 3. **Bump the version files the policy names,** and write the CHANGELOG section in the same branch.
-4. **Merge**, then tag on the default branch: `v<version>`, in the policy's format. The guard refuses others.
-5. **Publish and verify the artifact:** install or download it, and check the release notes.
-6. **Hotfix:** branch `hotfix/<version>` from the release tag. Fix it with a test, release the next patch, then
+4. **Reconcile the work items:** `dev task reconcile`, then close (`--apply`) or reopen what it lists. `dev release` and
+   `--dry-run` refuse while items of branches merged since the previous tag are open. `--why "…"` releases anyway and
+   is recorded in the audit and the output: use it only for an item that truly stays open.
+5. **Merge**, then tag on the default branch: `v<version>`, in the policy's format. The guard refuses others.
+6. **Publish and verify the artifact:** install or download it, and check the release notes.
+7. **Hotfix:** branch `hotfix/<version>` from the release tag. Fix it with a test, release the next patch, then
    merge the fix back to the default branch.
-7. **Rollback:** re-deploy the previous tag. Never move or delete a published tag; publish a new version instead.
+8. **Rollback:** re-deploy the previous tag. Never move or delete a published tag; publish a new version instead.
 
 ## 5. Release trains (initiatives)
 
@@ -72,3 +82,4 @@ each gap, such as no CI, no test gate, no changelog, or no release workflow.
 - `dev delivery` shows a recorded policy and no high gaps.
 - The release followed it: test gate green locally, one PR, one CI run, tag in the right format, CHANGELOG updated,
   artifact verified.
+- No open item of a merged branch, and no merged branch left (`dev task reconcile`, `dev branch prune`).

@@ -25,16 +25,23 @@ POLICIES = HANDOFF / "policies"
 CALVER_RE = re.compile(r"^v?(\d{2})\.(\d{1,2})\.(\d+)$")
 SEMVER_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)(?:[-+][0-9A-Za-z.-]+)?$")
 FIELDS = ("versioning", "tag_format", "version_source", "release_flow", "changelog", "test_gate", "ci", "branch_model",
-          "publish", "deploy", "kind", "release_train", "job_timeout_minutes")
+          "publish", "deploy", "kind", "release_train", "job_timeout_minutes", "delete_branch_on_merge")
 LIST_FIELDS = ("test_gate", "publish", "deploy")
+BOOL_FIELDS = ("delete_branch_on_merge",)  # the host deletes a pull request's branch when it merges
 TIMEOUT_RANGE = (5, 360)  # GitHub's hard limit is 6 hours
+_BOOLS = {"true": True, "on": True, "yes": True, "1": True, "false": False, "off": False, "no": False, "0": False}
 
 
 def set_field(policy: dict, key: str, value: str) -> dict:
-    """One `--set key=value`, validated: lists split on ';', the job timeout an integer of minutes."""
+    """One `--set key=value`, validated: lists split on ';', the job timeout an integer of minutes, switches
+    true/false."""
     if key not in FIELDS and key != "bump":
         raise ValueError(f"unknown field {key}: {', '.join(FIELDS)}")
-    if key in LIST_FIELDS:
+    if key in BOOL_FIELDS:
+        if value.strip().lower() not in _BOOLS:
+            raise ValueError(f"{key} is true or false, not {value!r}")
+        policy[key] = _BOOLS[value.strip().lower()]
+    elif key in LIST_FIELDS:
         policy[key] = [x.strip() for x in value.split(";") if x.strip()]
     elif key == "job_timeout_minutes":
         lo, hi = TIMEOUT_RANGE
@@ -209,7 +216,7 @@ def recommend(found: dict) -> dict:
         "ci": (found.get("ci") or ["none"])[0],
         "branch_model": "trunk" if "gitflow" not in (found.get("branch_model") or "") else found["branch_model"],
         "publish": found.get("publish") or [], "deploy": found.get("deploy") or [], "kind": found.get("kind"),
-        "release_train": None,
+        "release_train": None, "delete_branch_on_merge": True,
         "bump": "CalVer: `dev calver --next` (YY.MM.PATCH; PATCH restarts each month)" if scheme == "calver" else
         "SemVer from Conventional Commits: BREAKING CHANGE → major, feat → minor, fix/perf → patch",
     }
@@ -308,6 +315,42 @@ def tag_violation(scope: str, tag: str):
         return (f"`{tag}` is not a SemVer tag ({p.get('tag_format')}). Use vMAJOR.MINOR.PATCH, or change the policy "
                 f"with `dev delivery apply --set versioning=… --why \"…\"`.")
     return None
+
+
+# Where GitHub's delete_branch_on_merge has no API devkit drives, what the developer sets instead.
+OTHER_HOSTS = (
+    ("gitlab", "GitLab: Settings › Merge requests › “Enable ‘Delete source branch’ option by default” "
+               "(the project's remove_source_branch_after_merge)"),
+    ("bitbucket", "Bitbucket: tick “Delete source branch after merge” when you merge each pull request"),
+    ("azure", "Azure DevOps: choose “Delete <branch> after merging” when you complete each pull request"),
+    ("visualstudio", "Azure DevOps: choose “Delete <branch> after merging” when you complete each pull request"),
+)
+
+
+def branch_cleanup(repo, want: bool):
+    """Make the host delete a pull request's branch when it merges, as the policy says (GitHub's
+    delete_branch_on_merge, through `gh api`). -> (the value to record: `want` when GitHub took it, else None; the
+    line to print). Other hosts: what applies there, and nothing changed."""
+    from . import gitx
+    c = gitx.ctx(repo)
+    if c is None or not c.has_origin:
+        return None, "no origin remote: no host deletes merged branches here"
+    if c.provider == "github":
+        args = ["api", "-X", "PATCH", f"repos/{c.owner}/{c.repo}", "-F",
+                f"delete_branch_on_merge={'true' if want else 'false'}"]
+        if c.host != "github.com":
+            args += ["--hostname", c.host]
+        done, _, err = gitx.gh_do(args, c, timeout=60)
+        if done:
+            return want, ("GitHub now deletes the branch of each merged pull request (delete_branch_on_merge on)"
+                          if want else "GitHub keeps the branch of each merged pull request (delete_branch_on_merge off)")
+        return None, (f"GitHub's delete_branch_on_merge is unchanged: {err} · an admin of {c.owner}/{c.repo} turns it "
+                      f"on in Settings › General › “Automatically delete head branches”")
+    host = (c.host or "").lower()
+    words = next((w for key, w in OTHER_HOSTS if key in host), None)
+    if words:
+        return None, f"set it on the host, devkit does not: {words}; dev branch prune --apply deletes what is merged"
+    return None, f"{c.host or 'this remote'}: no setting devkit knows; dev branch prune --apply deletes merged branches"
 
 
 def scope_for(repo) -> str:

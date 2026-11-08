@@ -153,6 +153,11 @@ file. A prevented lesson leaves the session context, because the automation now 
 That guard rule is real: it was devkit's first lesson turned into automation (see
 [Guard rules › Git](guard.md#git)).
 
+A prevention can fail. When `dev lesson recur` counts a repeat of a prevented lesson, the lesson is open again, so
+every session recalls it once more, and its changelog line names the prevention that did not hold, such as
+`happened again (#3); reopened: its prevention by guard (guard.PIPE_GATE) did not hold`. A retired lesson that recurs
+reopens the same way. Fix or strengthen the automation, then run `dev lesson prevent` again.
+
 `dev lesson retire <id> --why "…"` marks a lesson that no longer applies. `dev lesson review` lists the lessons that
 recurred and are not prevented (automate them now) and the open lessons not seen for four months (retire them or
 confirm them); the `lessons` job runs it every Friday and notifies you of the result.

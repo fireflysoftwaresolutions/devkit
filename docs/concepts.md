@@ -85,7 +85,7 @@ nothing falls between them.
 | Review and PR | `/code-review`, `dev pr create` with the PR template | `communicating` | [Git and GitHub › Pull requests](git-and-github.md#pull-requests) |
 | Integrate | one `release/<version>` or `integration/<topic>` branch, `dev push` | `delivery` | [Delivery](delivery.md) |
 | Release | `dev pr merge`, `dev release`, `dev delivery` | `release-policy` | [Git and GitHub › Releases](git-and-github.md#releases) |
-| CI status | `dev ci watch`, `dev ci status --watch`, `dev ci audit` | `cicd`, `communicating` | [CI/CD pipelines](ci-cd.md) |
+| CI status | `dev ci watch`, `dev ci watch --wait`, `dev ci status --watch`, `dev ci audit` | `cicd`, `communicating` | [CI/CD pipelines](ci-cd.md) |
 | Deploy | a tag and its pipeline (GitOps) | `delivery` | [Delivery](delivery.md) |
 | Handoff | `dev handoff --log`, `dev lesson add` | `handoff`, `learning-loop` | [Concepts › Handoff notes](#handoff-notes), [Lessons](lessons.md) |
 
@@ -173,7 +173,12 @@ the locks that matter and the latest status, so it continues instead of rediscov
 Each task, feature, bug, or spike is one file, `items/<scope>/<ID>.md`, with an id like `T-fwk7a2…` that is unique
 across machines. Every change bumps its version, adds a changelog line (who, which machine, which agent, when and
 why) and makes one commit. `dev task start` takes a lock that other machines see at once, and changes of scope need a
-reason. The full model, with its lifecycle diagram, is in [Teams and machines](teams.md).
+reason. The lock is renewed only while a session works on the item's branch, and `dev pr merge` closes the items of
+the branch it merges. The full model is in [Teams and machines](teams.md).
+
+Work items, runs, crew lanes, decisions, CI watches, the pinned install, and branches each move through a few states,
+and devkit reports a record that no longer matches what happened. [Work states](work-states.md) explains what moves
+each one, where you see it, and how to repair it.
 
 ## Worktree lifecycle
 
@@ -338,4 +343,5 @@ because another machine pushed first is rebased and tried once more.
   <img src="images/diagrams/session-lifecycle-light.svg" alt="A session with devkit: at session start the hooks read the handoff note, tasks, locks, and the lessons that apply and give the agent its context; on each prompt they start the turn clock and add progress records when you ask for status; the guard allows or denies each tool call with the right way; after a commit, push, merge, tag, PR, or release the hooks sync the handoff repository within seconds, and after slow work they remind the agent to update you; every final message starts with the status block, which the Stop hook records with the session line and the lock renewal, and after a fix it asks once for a lesson; at session end devkit syncs and pushes the private handoff repo to GitHub." width="100%">
 </picture>
 
-See also [Commands](commands.md), [Agents](agents.md), [Guard rules](guard.md), and [Teams and machines](teams.md).
+See also [Commands](commands.md), [Agents](agents.md), [Guard rules](guard.md), [Teams and machines](teams.md), and
+[Work states](work-states.md).

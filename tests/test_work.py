@@ -3,6 +3,8 @@
 """Work items, locks, history, plans and handoff isolation. Run: python3 -m unittest discover -s tests -v"""
 import contextlib
 import io
+import json
+import os
 import re
 import sys
 import tempfile
@@ -129,6 +131,29 @@ class ItemTests(unittest.TestCase):
             self.assertEqual(work.recent_sessions("acme/api")[:2], ["second", "first"])
 
 
+class IsoTimeTests(unittest.TestCase):
+    # A lock time is UTC. Read on a Mac in Madrid, a summer time used to come out an hour late (local summer time
+    # was taken for standard time), so locks ran out an hour early or late for seven months of the year.
+    def test_a_utc_time_reads_the_same_in_summer_and_in_winter_wherever_the_mac_is(self):
+        saved = os.environ.get("TZ")
+
+        def restore():
+            if saved is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = saved
+            time.tzset()
+
+        self.addCleanup(restore)
+        os.environ["TZ"] = "Europe/Madrid"
+        time.tzset()
+        cases = {"summer": ("2026-07-01T12:00:00Z", 1782907200), "winter": ("2026-01-15T12:00:00Z", 1768478400)}
+        for season, (text, epoch) in cases.items():
+            with self.subTest(season):
+                self.assertEqual(work.parse_iso(text), epoch)
+                self.assertEqual(work.now_iso(epoch), text)
+
+
 class ItemRecordTests(unittest.TestCase):
     def test_an_item_body_keeps_text_that_looks_like_record_structure(self):
         shapes = {
@@ -185,6 +210,50 @@ class ItemRecordTests(unittest.TestCase):
             self.assertEqual((again["meta"]["bucket"], again["meta"]["status"]), ("now", "done"))
             self.assertEqual(again["meta"]["links"], ["initiative:billing"])
             self.assertIn(f"\n# {title}\n", it["path"].read_text())
+
+    def test_a_closed_item_keeps_its_state_until_it_is_reopened(self):
+        with TempHandoff():
+            for closed in ("done", "cancelled"):
+                it = work.create("acme/api", f"Export invoices ({closed})", why="a reason", a=A)
+                work.release(work.load(it["path"]), a=A, status=closed)
+                for op, changes in (("move", {"bucket": "later"}), ("block", {"status": "blocked"}),
+                                    ("cancel", {"status": "cancelled"}), ("unblock", {"status": "todo"})):
+                    with self.subTest(closed=closed, op=op):
+                        with self.assertRaises(ValueError) as cm:
+                            work.update(work.load(it["path"]), op, why="a reason", a=A, **changes)
+                        self.assertIn(f"is {closed}", str(cm.exception))
+                again = work.load(it["path"])
+                self.assertEqual((again["meta"]["status"], again["meta"]["bucket"]), (closed, "next"))
+                work.reopen(again, why="one case is left", a=A)
+                work.update(work.load(it["path"]), "move", why="start now", a=A, bucket="now")
+                self.assertEqual(work.load(it["path"])["meta"]["bucket"], "now")
+
+    def test_a_closed_item_is_neither_released_finished_again_nor_claimed(self):
+        # dev task release, done and start on a closed item: each one would reopen or rewrite how it was closed
+        with TempHandoff():
+            for closed in ("done", "cancelled"):
+                it = work.create("acme/api", f"Export invoices ({closed})", why="a reason", a=A)
+                work.release(work.load(it["path"]), a=A, status=closed)
+                for what, call in (("release", lambda: work.release(work.load(it["path"]), a=A, status="todo")),
+                                   ("done", lambda: work.release(work.load(it["path"]), a=A, status="done")),
+                                   ("start", lambda: work.claim(work.load(it["path"]), a=A))):
+                    with self.subTest(closed=closed, command=what):
+                        with self.assertRaises(ValueError) as cm:
+                            call()
+                        self.assertIn(f"is {closed}", str(cm.exception))
+                        self.assertIn("dev task reopen", str(cm.exception))
+                again = work.load(it["path"])["meta"]
+                self.assertEqual((again["status"], again.get("claimed_by") or ""), (closed, ""))
+
+    def test_only_a_blocked_item_can_be_unblocked(self):
+        with TempHandoff():
+            it = work.create("acme/api", "Export invoices", why="a reason", a=A)
+            with self.assertRaises(ValueError) as cm:
+                work.update(work.load(it["path"]), "unblock", why="a reason", a=A, status="doing")
+            self.assertIn("is todo, not blocked", str(cm.exception))
+            work.update(work.load(it["path"]), "block", why="waits on the API", a=A, status="blocked")
+            work.update(work.load(it["path"]), "unblock", why="the API is ready", a=A, status="todo")
+            self.assertEqual(work.load(it["path"])["meta"]["status"], "todo")
 
     def test_a_write_keeps_the_frontmatter_lines_devkit_does_not_know(self):
         extra = ["estimate: 3", "labels: [api, export]", "reviewers:", "  - bob", "# set by the sprint tool"]
@@ -247,14 +316,15 @@ class LockJobReportTests(unittest.TestCase):
         def misreading(item):  # a parser bug: a line of the body goes missing
             return real(item).replace("\nKeep this line.\n", "\n", 1)
 
-        jobs = {"lock renewal": (1, lambda: work.renew_locks(A, hours=8), "lock-renewal-skipped"),
+        live = [{"project": "acme/api", "branch": "feat/lock-job", "active": True}]
+        jobs = {"lock renewal": (1, lambda: work.renew_locks(A, hours=8, sessions=live), "lock-renewal-skipped"),
                 "expired-lock release": (-1, work.expire_locks, "lock-release-skipped")}
         with TempHandoff() as h, mock.patch.object(audit, "AUDIT", h.root / "audit"), \
                 mock.patch.object(audit, "policy_file", lambda: h.root / "no-policy.json"):
             for job, (hours, run, op) in jobs.items():
                 with self.subTest(job):
                     it = work.create("acme/api", f"Item for the {job}", body="Context.\n\nKeep this line.", a=A)
-                    it = work.claim(it, a=A, hours=hours)
+                    it = work.claim(it, a=A, hours=hours, branch="feat/lock-job")
                     before = it["path"].read_text()
                     err = io.StringIO()
                     with mock.patch.object(work, "render", misreading), contextlib.redirect_stderr(err):
@@ -271,6 +341,382 @@ class LockJobReportTests(unittest.TestCase):
                             if r["target"] == f"items/acme/api/{it['path'].name}"]
                     self.assertEqual([(r["outcome"], r["detail"]) for r in recs],
                                      [("blocked", f"{it['meta']['id']}: {op}")])
+
+
+def _git_handoff(root: Path) -> None:
+    """The temporary handoff as a git repository without a remote, so `work._commit` really commits."""
+    for args in (["init", "-q"], ["config", "user.name", "Ana Dev"], ["config", "user.email", "ana@example.com"],
+                 ["commit", "-q", "--allow-empty", "-m", "start"]):
+        rc, out, err = core.sh(["git", "-C", str(root), *args])
+        if rc != 0:
+            raise AssertionError(f"git {' '.join(args)} failed: {err or out}")
+
+
+def _subjects(root: Path) -> list:
+    return core.gitout(root, "log", "--format=%s").splitlines()
+
+
+class StaleLockTests(unittest.TestCase):
+    LIVE = {"project": "acme/api", "branch": "feat/export", "active": True}
+
+    def claimed(self, hours=1.0, branch="feat/export", title="Export invoices"):
+        return work.claim(work.create("acme/api", title, a=A), a=A, hours=hours, branch=branch)
+
+    def test_a_lock_renews_while_a_live_session_is_on_its_branch(self):
+        with TempHandoff():
+            it = self.claimed(hours=1)  # an hour left of 8: renewal is due
+            self.assertEqual(work.renew_locks(A, hours=8, sessions=[self.LIVE]), 1)
+            left = work.parse_iso(work.load(it["path"])["meta"]["lock_expires"]) - time.time()
+            self.assertGreater(left, 7.9 * 3600)
+
+    def test_a_closed_items_lock_does_not_renew_while_a_live_session_is_on_its_branch(self):
+        # an item closed with its lock still set (an older devkit, or two Macs' changes merged): staying on its
+        # branch must not keep a finished item locked
+        for status in ("done", "cancelled"):
+            with self.subTest(status), TempHandoff():
+                it = self.claimed(hours=1)
+                work.update(work.load(it["path"]), "edit", why="closed with its lock", a=A, status=status)
+                before = work.load(it["path"])["meta"]["lock_expires"]
+                self.assertEqual(work.renew_locks(A, hours=8, sessions=[self.LIVE]), 0)
+                self.assertEqual(work.load(it["path"])["meta"]["lock_expires"], before)
+
+    def test_a_lock_runs_out_when_no_live_session_is_on_its_branch(self):
+        cases = {"no session": ("feat/export", []),
+                 "a session on another branch": ("feat/export", [dict(self.LIVE, branch="feat/other")]),
+                 "an ended session on the branch": ("feat/export", [dict(self.LIVE, active=False)]),
+                 "the same branch in another project": ("feat/export", [dict(self.LIVE, project="acme/web")]),
+                 "an item claimed on no branch": ("", [self.LIVE])}
+        for case, (branch, sessions) in cases.items():
+            with self.subTest(case), TempHandoff():
+                it = self.claimed(hours=1, branch=branch)
+                before = work.load(it["path"])["meta"]["lock_expires"]
+                self.assertEqual(work.renew_locks(A, hours=8, sessions=sessions), 0)
+                self.assertEqual(work.load(it["path"])["meta"]["lock_expires"], before)
+
+    def test_an_expired_lock_sends_a_doing_item_back_to_todo_and_says_whose_lock_ran_out_when(self):
+        with TempHandoff():
+            doing = self.claimed(hours=-1)
+            blocked = self.claimed(hours=-1, title="Import invoices")
+            work.update(work.load(blocked["path"]), "block", why="waits for the bank's API", a=A, status="blocked")
+            holder, expires = doing["meta"]["claimed_by"], doing["meta"]["lock_expires"]
+            self.assertEqual(len(work.expire_locks()), 2)
+            after = work.load(doing["path"])
+            self.assertEqual((after["meta"]["status"], after["meta"]["claimed_by"], after["meta"]["lock_expires"]),
+                             ("todo", "", ""))
+            self.assertIn(f"lock of {holder} expired at {expires}", after["changelog"][0])
+            self.assertIn("back to todo", after["changelog"][0])
+            kept = work.load(blocked["path"])
+            self.assertEqual((kept["meta"]["status"], kept["meta"]["claimed_by"]), ("blocked", ""))
+            self.assertNotIn("back to todo", kept["changelog"][0])
+
+    def test_expired_locks_are_released_in_one_commit_that_counts_the_items_back_to_todo(self):
+        with TempHandoff() as h, mock.patch.object(audit, "AUDIT", h.root / "audit"):
+            _git_handoff(h.root)
+            doing = self.claimed(hours=-1)
+            blocked = self.claimed(hours=-1, title="Import invoices")
+            work.update(work.load(blocked["path"]), "block", why="waits for the bank's API", a=A, status="blocked")
+            before = _subjects(h.root)
+            work.expire_locks()
+            self.assertEqual(_subjects(h.root)[1:], before)  # exactly one new commit
+            self.assertEqual(_subjects(h.root)[0], "release 2 expired lock(s), 1 item(s) back to todo")
+            files = core.gitout(h.root, "show", "--name-only", "--format=", "HEAD").splitlines()
+            self.assertEqual(sorted(files), sorted(str(p["path"].relative_to(h.root)) for p in (doing, blocked)))
+
+
+class ReconcileTests(unittest.TestCase):
+    SHA = "abc1234" + "0" * 33
+    MERGED = {"feat/export": {"sha": SHA, "pr": 7}}
+
+    def backlog(self):
+        """A doing item an old expiry left without a lock, an item of a merged branch, two items with one title,
+        and a claimed item on a branch that is not merged."""
+        lockless = work.create("acme/api", "Fix login", a=A)
+        lockless["meta"]["status"] = "doing"
+        work.write_record(lockless["path"], work.render(lockless))
+        merged = work.claim(work.create("acme/api", "Export invoices", a=A), a=A, branch="feat/export")
+        dups = [work.create("acme/api", "Add the CSV export", a=A), work.create("acme/api", "add the  CSV export.", a=A)]
+        held = work.claim(work.create("acme/api", "Refunds", a=A), a=A, branch="feat/refunds")
+        return lockless, merged, dups, held
+
+    def test_reconcile_reports_the_stale_items_and_changes_nothing(self):
+        with TempHandoff():
+            lockless, merged, dups, held = self.backlog()
+            files = {p: p.read_text() for p in (work.ITEMS / "acme" / "api").glob("*.md")}
+            r = work.reconcile("acme/api", self.MERGED)
+            self.assertEqual([i["id"] for i in r["lockless_doing"]], [lockless["meta"]["id"]])
+            self.assertEqual([(i["id"], i["branch"], i["commit"], i["pr"]) for i in r["merged"]],
+                             [(merged["meta"]["id"], "feat/export", self.SHA, 7)])
+            self.assertEqual([sorted(i["id"] for i in g) for g in r["duplicates"]],
+                             [sorted(d["meta"]["id"] for d in dups)])
+            self.assertEqual(r["changed"], [])
+            self.assertEqual({p: p.read_text() for p in files}, files)
+
+    def test_reconcile_apply_closes_the_items_of_merged_branches_with_the_merge_commit(self):
+        with TempHandoff():
+            _, merged, _, held = self.backlog()
+            r = work.reconcile("acme/api", self.MERGED, apply=True, a=A)
+            self.assertIn(merged["meta"]["id"], r["changed"])
+            after = work.load(merged["path"])
+            self.assertEqual((after["meta"]["status"], after["meta"]["claimed_by"]), ("done", ""))
+            self.assertIn("feat/export merged in abc1234 (PR #7)", after["changelog"][0])
+            self.assertEqual(work.load(held["path"])["meta"]["status"], "doing")
+
+    def test_reconcile_apply_sends_doing_items_without_a_lock_back_to_todo(self):
+        with TempHandoff():
+            lockless, _, dups, held = self.backlog()
+            work.reconcile("acme/api", self.MERGED, apply=True, a=A)
+            after = work.load(lockless["path"])
+            self.assertEqual(after["meta"]["status"], "todo")
+            self.assertIn("doing without a lock: back to todo", after["changelog"][0])
+            self.assertEqual([work.load(d["path"])["meta"]["version"] for d in dups], [1, 1])  # reported, not changed
+            self.assertTrue(work.load(held["path"])["meta"]["claimed_by"].startswith("ana@mbp1"))
+
+
+class PresenceTests(unittest.TestCase):
+    # Ended sessions showed as live to the team: presence dropped each session's `active` flag, and the sync that
+    # finishes a session published presence before it removed that session.
+    def test_a_session_that_ended_is_not_shown_to_the_team_as_working(self):
+        import argparse
+        from devkit import cli, dashboard, hooks, registry
+        sessions = [dict(agent="claude", session="ended1", project="acme/api", branch="feat/a", active=True),
+                    dict(agent="codex", session="live2", project="acme/api", branch="feat/b", active=True),
+                    dict(agent="claude", session="idle3", project="acme/web", branch="fix/c", active=False)]
+        with TempHandoff() as h:
+            state = h.root.parent / "state"
+            (state / "sessions").mkdir(parents=True)
+            (state / "sessions" / "claude-ended1.json").write_text("{}")
+            args = argparse.Namespace(session="claude:ended1", finish=True, offline=True, scheduled=False,
+                                      no_push=True, quiet=True, renew=None, delay=0)
+            with mock.patch.object(cli, "STATE", state), mock.patch.object(core, "STATE", state), \
+                    mock.patch.object(registry, "build", lambda **kw: {"projects": [], "sessions": list(sessions)}), \
+                    mock.patch.object(registry, "write_outputs", lambda reg: []), \
+                    mock.patch.object(dashboard, "write", lambda reg: None), \
+                    mock.patch.object(hooks, "record_session", lambda s: None), \
+                    mock.patch.object(cli, "commit_push", lambda **kw: None):
+                self.assertEqual(cli.cmd_sync(args), 0)
+            self.assertEqual([(s["agent"], s["branch"]) for t in work.team() for s in t["sessions"]],
+                             [("codex", "feat/b")])
+            self.assertFalse((state / "sessions" / "claude-ended1.json").exists())
+
+
+class ReusedBranchTests(unittest.TestCase):
+    # Branch names come back (fix/login-timeout): a merge of the name's earlier use closed a new item linked to it.
+    def test_a_merge_counts_for_an_item_only_when_it_is_newer_than_the_items_link_to_the_branch(self):
+        sha = "def5678" + "0" * 33
+        with TempHandoff():
+            it = work.claim(work.create("acme/api", "Fix the login timeout again", a=A), a=A, branch="fix/login-timeout")
+            linked = work.parse_iso(it["meta"]["claimed_at"])
+            old = {"fix/login-timeout": {"sha": sha, "pr": 3, "at": linked - 30 * 86400}}
+            self.assertEqual(work.reconcile("acme/api", old, apply=True, a=A)["merged"], [])
+            self.assertEqual(work.load(it["path"])["meta"]["status"], "doing")
+            new = {"fix/login-timeout": {"sha": sha, "pr": 9, "at": linked + 60}}
+            self.assertEqual([i["pr"] for i in work.reconcile("acme/api", new)["merged"]], [9])
+
+
+class ReconcileReportTests(unittest.TestCase):
+    REPORT = {"scope": "acme/api", "lockless_doing": [{"id": "T-1", "title": "Fix login", "status": "doing"}],
+              "merged": [{"id": "T-2", "title": "Export invoices", "status": "doing", "branch": "feat/export",
+                          "commit": "abc1234" + "0" * 33, "pr": 7}],
+              "duplicates": [[{"id": "T-3", "title": "Add the CSV export", "status": "todo"},
+                              {"id": "T-4", "title": "add the CSV export.", "status": "done"}]], "changed": []}
+
+    def test_the_report_names_each_stale_item_and_what_apply_does_with_it(self):
+        from devkit import cli
+        text = cli.reconcile_text(self.REPORT, "acme/api", applied=False)
+        self.assertIn("Doing without a lock (1): back to todo with --apply\n    T-1  Fix login", text)
+        self.assertIn("Open, but their branch is merged (1): done with --apply\n"
+                      "    T-2  Export invoices · feat/export merged in abc1234 (PR #7)", text)
+        self.assertIn("    T-3 (todo), T-4 (done)  Add the CSV export", text)
+        self.assertIn("nothing changed · dev task reconcile --apply fixes the 2 item(s)", text)
+
+
+def _git(root: Path, *args) -> str:
+    rc, out, err = core.sh(["git", "-C", str(root), *args])
+    if rc != 0:
+        raise AssertionError(f"git {' '.join(args)} failed: {err or out}")
+    return out
+
+
+class TwoMacs:
+    """The handoff repository on a remote and on two Macs: this one (the module's HANDOFF) and another one, where
+    `on_other()` runs devkit as that Mac would. Sync problems, audit records and locks stay in the test's folder,
+    and no background sync starts."""
+
+    def __enter__(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.base = Path(self.tmp.name)
+        remote = self.base / "remote.git"
+        self.here, self.other = self.base / "here" / ".handoff", self.base / "other" / ".handoff"
+        _git(self.base, "init", "-q", "--bare", "-b", "main", str(remote))
+        _git(self.base, "init", "-q", "-b", "main", str(self.here))
+        for root, (name, email) in ((self.here, ("Ana Dev", "ana@example.com")),
+                                    (self.other, ("Bob Dev", "bob@example.com"))):
+            if root == self.other:
+                _git(self.base, "clone", "-q", str(remote), str(root))
+            _git(root, "config", "user.name", name)
+            _git(root, "config", "user.email", email)
+            if root == self.here:
+                _git(root, "remote", "add", "origin", str(remote))
+                _git(root, "commit", "-q", "--allow-empty", "-m", "start")
+                _git(root, "push", "-q", "-u", "origin", "main")
+        self.saved = (core.HANDOFF, work.HANDOFF, work.ITEMS, work.SESSIONS, work.PRESENCE, plans.PLANS,
+                      plans.HANDOFF)
+        self._point(self.here)
+        self.stack = contextlib.ExitStack()
+        from devkit import cli
+        self.stack.enter_context(mock.patch.object(cli, "HANDOFF", self.here))  # never the real one
+        self.stack.enter_context(mock.patch.object(core, "STATE", self.base / "state"))
+        self.stack.enter_context(mock.patch.object(audit, "AUDIT", self.base / "audit"))
+        self.stack.enter_context(mock.patch.object(audit, "policy_file", lambda: self.base / "no-policy.json"))
+        self.stack.enter_context(mock.patch.object(work, "request_sync", lambda *a, **k: False))
+        self.stack.enter_context(mock.patch.dict(core.CFG.setdefault("sync", {}), {"push": True}))
+        return self
+
+    def __exit__(self, *exc):
+        self.stack.close()
+        (core.HANDOFF, work.HANDOFF, work.ITEMS, work.SESSIONS, work.PRESENCE, plans.PLANS, plans.HANDOFF) = self.saved
+        self.tmp.cleanup()
+
+    @staticmethod
+    def _point(root: Path) -> None:
+        core.HANDOFF = work.HANDOFF = plans.HANDOFF = root
+        work.ITEMS, work.SESSIONS, work.PRESENCE, plans.PLANS = root / "items", root / "sessions", \
+            root / "presence", root / "plans"
+
+    @contextlib.contextmanager
+    def on_other(self):
+        self._point(self.other)
+        try:
+            yield
+        finally:
+            self._point(self.here)
+
+    def shared_item(self, title: str) -> str:
+        """An item created on this Mac, pushed, and pulled on the other one. -> its id."""
+        iid = work.create("acme/api", title, why="a reason", a=A)["meta"]["id"]
+        _git(self.here, "push", "-q")
+        _git(self.other, "pull", "-q")
+        return iid
+
+    def item(self, iid: str) -> dict:
+        return work.load(work.item_path("acme/api", iid))
+
+    def remote_item(self, iid: str) -> dict:
+        return work.parse(_git(self.here, "show", f"origin/main:items/acme/api/{iid}.md") + "\n")
+
+    def stopped(self, root: Path = None) -> list:
+        """The rebase git left stopped in a handoff repository, if any."""
+        return [d for d in ("rebase-merge", "rebase-apply") if ((root or self.here) / ".git" / d).exists()]
+
+    def problem(self) -> str:
+        """The sync problem devkit recorded last (git's own error when an abort failed), for failure messages."""
+        f = work.push_failed_file()
+        return json.loads(f.read_text())["error"] if f.exists() else "no sync problem recorded"
+
+
+class HandoffSyncTests(unittest.TestCase):
+    def test_a_rebase_left_stopped_is_aborted_before_the_next_commit_and_recorded_as_a_sync_problem(self):
+        with TwoMacs() as m:
+            iid = m.shared_item("Export invoices")
+            with m.on_other():
+                work.update(m.item(iid), "edit", why="their wording", a=B, body="Their text.")
+                _git(m.other, "push", "-q")
+            work.update(m.item(iid), "edit", why="our wording", a=A, body="Our text.")
+            rc, _, _ = core.git(m.here, "pull", "-q", "--rebase")  # an older sync: it stops on the conflict
+            self.assertNotEqual(rc, 0)
+            self.assertEqual(m.stopped(), ["rebase-merge"])
+            nxt = work.create("acme/api", "Import invoices", a=A)
+            self.assertEqual(m.stopped(), [], m.problem())
+            self.assertEqual(_git(m.here, "branch", "--show-current"), "main")
+            self.assertTrue(_subjects(m.here)[0].startswith(f"{nxt['meta']['id']}: create task"))
+            self.assertEqual(m.item(iid)["body"], "Our text.")  # this Mac's change is kept, still to push
+            recs = audit.query(days=1, action="handoff.rebase-aborted")
+            self.assertEqual([(r["outcome"], r["target"]) for r in recs], [("blocked", f"items/acme/api/{iid}.md")])
+            problem = json.loads(work.push_failed_file().read_text())["error"]
+            self.assertIn(f"stopped on a conflict in items/acme/api/{iid}.md", problem)
+
+    def test_an_item_read_while_a_rebase_was_left_stopped_is_read_as_this_mac_committed_it(self):
+        with TwoMacs() as m:
+            iid = m.shared_item("Export invoices")
+            with m.on_other():
+                work.update(m.item(iid), "edit", why="their wording", a=B, body="Their text.")
+                _git(m.other, "push", "-q")
+            work.update(m.item(iid), "edit", why="our wording", a=A, body="Our text.")
+            core.git(m.here, "pull", "-q", "--rebase")  # stops with conflict markers in the item
+            self.assertIn("<<<<<<<", work.item_path("acme/api", iid).read_text())
+            self.assertEqual([i["body"] for i in work.all_items("acme/api")], ["Our text."])
+            self.assertEqual(m.stopped(), [], m.problem())
+
+    def test_a_change_to_an_item_the_other_mac_changed_first_is_applied_again_to_its_version(self):
+        from devkit import cli
+        with TwoMacs() as m:
+            iid = m.shared_item("Export invoices")
+            with m.on_other():
+                work.update(m.item(iid), "move", why="start now", a=B, bucket="now")
+                _git(m.other, "push", "-q")
+            work.update(m.item(iid), "edit", why="CSV only", a=A, body="Only CSV.")
+            cli.commit_push(quiet=True)  # the background `dev sync`
+            self.assertEqual(m.stopped(), [], m.problem())
+            pushed = m.remote_item(iid)
+            self.assertEqual((pushed["meta"]["bucket"], pushed["body"], pushed["meta"]["version"]),
+                             ("now", "Only CSV.", 3))
+            self.assertEqual([e.split(" · ")[0] for e in pushed["changelog"]], ["v3", "v2", "v1"])
+            self.assertIn("ana@mbp1 (claude:s1) · edit:  (body edited) — why: CSV only", pushed["changelog"][0])
+            self.assertIn("· move: bucket=now — why: start now", pushed["changelog"][1])
+            self.assertFalse(work.push_failed_file().exists())
+
+    def test_dev_sync_reports_a_conflict_it_cannot_settle_and_leaves_the_commits_as_they_were(self):
+        from devkit import cli
+        with TwoMacs() as m:
+            note = m.here / "projects" / "acme" / "api.md"
+            note.parent.mkdir(parents=True)
+            note.write_text("# acme/api\n\nState: draft.\n")
+            work._commit([note], "note: acme/api", push=False)
+            _git(m.here, "push", "-q")
+            _git(m.other, "pull", "-q")
+            (m.other / "projects" / "acme" / "api.md").write_text("# acme/api\n\nState: their words.\n")
+            _git(m.other, "commit", "-qam", "note: their words")
+            _git(m.other, "push", "-q")
+            note.write_text("# acme/api\n\nState: our words.\n")
+            work._commit([note], "note: our words", push=False)
+            cli.commit_push(quiet=True)
+            self.assertEqual(m.stopped(), [], m.problem())
+            self.assertEqual(_git(m.here, "branch", "--show-current"), "main")
+            self.assertEqual(_git(m.here, "rev-list", "--count", "@{u}..HEAD"), "1")
+            self.assertEqual(note.read_text(), "# acme/api\n\nState: our words.\n")
+            problem = json.loads(work.push_failed_file().read_text())["error"]
+            self.assertIn("conflict in projects/acme/api.md", problem)
+
+
+class ClaimReachesRemoteTests(unittest.TestCase):
+    def test_a_claim_that_loses_the_race_for_the_lock_fails_and_names_who_holds_it(self):
+        with TwoMacs() as m:
+            iid = m.shared_item("Export invoices")
+            real, raced = work.write_record, []
+
+            def write_then_the_other_mac_claims(path, text, edited=()):
+                real(path, text, edited)
+                if not raced:  # between this Mac's pull and its push, the other Mac claims and pushes
+                    raced.append(True)
+                    with m.on_other():
+                        work.claim(m.item(iid), a=B)
+
+            with mock.patch.object(work, "write_record", write_then_the_other_mac_claims):
+                with self.assertRaises(ValueError) as cm:
+                    work.claim(m.item(iid), a=A)
+            self.assertIn("claimed by bob@mbp2", str(cm.exception))
+            self.assertEqual(m.stopped(), [], m.problem())
+            self.assertEqual(_git(m.here, "rev-list", "--count", "@{u}..HEAD"), "0")  # nothing left to conflict again
+            self.assertTrue(m.item(iid)["meta"]["claimed_by"].startswith("bob@mbp2"))
+
+    def test_a_claim_whose_lock_does_not_reach_the_remote_does_not_report_success(self):
+        with TwoMacs() as m:
+            iid = m.shared_item("Export invoices")
+            _git(m.here, "remote", "set-url", "origin", str(m.base / "unreachable.git"))
+            with self.assertRaises(ValueError) as cm:
+                work.claim(m.item(iid), a=A)
+            self.assertIn("the lock did not reach the remote", str(cm.exception))
+            self.assertEqual(m.stopped(), [], m.problem())
 
 
 class PlanTests(unittest.TestCase):
