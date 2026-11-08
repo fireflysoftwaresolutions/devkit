@@ -1961,6 +1961,12 @@ class ScopeWriteTests(unittest.TestCase):
                           ("Seraph", "certain: lib/x.py")])
         self.assertNotIn("changed by another lane", pg.render_update(pg.load_run("claude", "s1"), branch="b"))
 
+    def test_a_dotfile_a_member_edited_during_the_readers_call_is_theirs(self):
+        self.edited("a_neo", ".github/workflows/ci.yml", self.t0 + 5)
+        self.edited("a_neo", ".env.example", self.t0 + 6)
+        self.assertIsNone(self.written([".github/workflows/ci.yml", "./.env.example"]))
+        self.assertEqual(self.told(), [])
+
     def test_a_shell_call_that_only_overlaps_other_members_edits_tells_nobody(self):
         self.edited("a_neo", "docs/audit.md", self.t0 + 5)
         self.assertIsNone(self.written(["docs/audit.md"]))

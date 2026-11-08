@@ -342,7 +342,9 @@ def edits_since(sid: str, since: float, now: float | None = None) -> list:
 
 def _edited(edit_path: str, rel: str) -> bool:
     """Does an edit call's file (absolute, as the tool names it) name `rel`, a path relative to the repository?"""
-    e, r = str(edit_path or "").replace("\\", "/"), str(rel or "").replace("\\", "/").lstrip("./")
+    e, r = str(edit_path or "").replace("\\", "/"), str(rel or "").replace("\\", "/")
+    while r.startswith("./"):  # only a leading "./": a dotfile (.github/…, .env) keeps its dot
+        r = r[2:]
     return bool(r) and (e == r or e.endswith("/" + r))
 
 
