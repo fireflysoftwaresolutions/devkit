@@ -119,14 +119,18 @@ class WaitRuleTests(StopRuleCase):
 
     def test_a_live_background_wait_lets_the_turn_end(self):
         self.member_works()
+        self.assertIn("dev watch --wait", self.stop().get("reason") or "")  # nothing armed yet
         self.shell("dev watch --wait", "toolu_w", "Command running in background with ID: bw1. Output is being "
                                                   "written to: /tmp/bw1.output", background=True)
         self.assertNotIn("dev watch --wait", self.stop().get("reason") or "")
 
-    def test_nothing_that_can_arrive_asks_for_no_wait(self):
+    def test_a_wait_is_asked_only_once_something_can_arrive(self):
         os.environ["DEVKIT_SESSION"] = "claude:s1"
         pg.start("API", plan=["api"], now=self.now - 300)  # a run, but no member works and nothing is launched
+        pg.assign("api", "Tank", now=self.now - 300)
         self.assertNotIn("dev watch --wait", self.stop().get("reason") or "")
+        launch("a1", "devkit:tank", "Tank: api", self.now - 60)
+        self.assertIn("dev watch --wait", self.stop().get("reason") or "")
 
 
 class CiRuleTests(StopRuleCase):
