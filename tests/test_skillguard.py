@@ -134,6 +134,35 @@ class RuleFixtures(unittest.TestCase):
     def test_changelog_is_docs_and_version_is_release(self):
         self.assert_rules(["CHANGELOG.md", "VERSION"])
 
+    # the UI rule fires on code that renders a page, never on a test that holds HTML or on a Spring @Component("x")
+    def test_ui_rule_fires_on_ui_code_only(self):
+        self.assert_rules(["tests/test_page.py", "lib/report.py", "lib/tool.py", "src/main/java/acme/AuditSink.java",
+                           "web/src/app/hero.component.ts"])
+
+
+class OutsideTheRepository(unittest.TestCase):
+    def setUp(self):
+        self._installed = sg.installed
+        sg.installed = lambda agent: {"frontend-design", "impeccable", "testing", "docs"}
+
+    def tearDown(self):
+        sg.installed = self._installed
+
+    # a scratch file outside every repository is not delivered work: no rule asks for a skill at Stop
+    def test_stop_does_not_judge_a_scratch_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            scratch = Path(d) / "scratchpad" / "probe.py"
+            scratch.parent.mkdir()
+            scratch.write_text('HTML = "<!doctype html><style>p{}</style>"\n')
+            repo = make_repo(Path(d) / "repo", {"lib/page.py": 'PAGE = "<style>p{}</style>"\n'})
+            t = Path(d) / "t.jsonl"
+            t.write_text(tool_use("Write", file_path=str(scratch), content="x") + "\n")
+            self.assertIsNone(sg.on_stop("claude", {"transcript_path": str(t)}, {}))
+            t.write_text(tool_use("Write", file_path=str(repo / "lib" / "page.py"), content="x") + "\n")
+            why = sg.on_stop("claude", {"transcript_path": str(t)}, {})
+            self.assertIn("`frontend-design`", why or "")
+            self.assertIn("page.py", why or "")
+
 
 if __name__ == "__main__":
     unittest.main()

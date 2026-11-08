@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import fnmatch
 import json
+import os
 import re
 from pathlib import Path
 
@@ -85,14 +86,34 @@ def _match_path(path: str, pattern: str) -> bool:
     return fnmatch.fnmatch(Path(p).name, pattern)
 
 
+def repo_top(path: str):
+    """The repository a path belongs to (the nearest folder above it that holds `.git`), or None."""
+    d = Path(os.path.abspath(os.path.expanduser(str(path or "")))).parent
+    for folder in [d, *d.parents]:
+        if (folder / ".git").exists():
+            return folder
+    return None
+
+
+def delivered(paths) -> list:
+    """The paths a skill rule may judge: a file on disk outside every repository is scratch work (a probe in a
+    scratch folder), not delivered work. A path that is not on disk (deleted, or named relative to another folder)
+    is judged by its path."""
+    return [p for p in paths if not (os.path.exists(str(p)) and repo_top(p) is None)]
+
+
 def rules_for_files(paths) -> list:
+    """[(rule, [the paths it matches])]: a path matches a rule's `files` globs by name; a path that matches its
+    `content_files` and none of its `content_exclude` globs matches when its text matches `content`."""
     hits = []
     for r in rules():
         files = [p for p in paths if any(_match_path(p, g) for g in r.get("files") or [])]
         if r.get("content") and r.get("content_files"):
             rx = re.compile(r["content"], re.I)
+            skip = r.get("content_exclude") or []
             for p in paths:
-                if p in files or not any(_match_path(p, g) for g in r["content_files"]):
+                if p in files or not any(_match_path(p, g) for g in r["content_files"]) or \
+                        any(_match_path(p, g) for g in skip):
                     continue
                 try:
                     if rx.search(Path(p).read_text(errors="ignore")[:400_000]):
@@ -279,7 +300,7 @@ def on_stop(agent: str, data: dict, sess: dict):
     have = installed(agent)
     nudged = set(sess.get("skills_nudged") or [])
     missing = []
-    for r, matched in rules_for_files(files):
+    for r, matched in rules_for_files(delivered(files)):
         for s in required(r, agent):
             if s in have and s not in sess["skills_loaded"] and s not in nudged:
                 missing.append((s, r["why"], matched))

@@ -358,7 +358,7 @@ def _skill_findings(m, invocations, loaded, changed, top, kinds=()) -> list:
             continue
         for s in x.get("skills") or []:
             need.setdefault(skillguard.short(s), (s, []))[1].append(f"the {x.get('phase')} phase of your procedure")
-    for rule, matched in skillguard.rules_for_files(changed):
+    for rule, matched in skillguard.rules_for_files(skillguard.delivered(changed)):
         names = ", ".join(_rel(f, top) for f in matched[:3]) + (" …" if len(matched) > 3 else "")
         for s in skillguard.required(rule, "claude"):
             need.setdefault(s, (s, []))[1].append(f"your change to {names} ({rule.get('why') or rule.get('id')})")

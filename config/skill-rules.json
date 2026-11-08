@@ -1,5 +1,5 @@
 {
-  "_comment": "Which skills a kind of work requires. devkit enforces them: (1) the session catalog lists them by kind of work, (2) briefs for Claude subagents get the skills appended, (3) the Stop hook refuses to finish a turn that changed matching files without loading the skills, once per skill per session. `files` are globs on changed paths; `content` is a regex checked in changed files that match `files`; `activities` are the kinds of work (ids from the crew's RACI) the model declares for a step or a brief; `commands` are command words the agent runs. Nothing matches the developer's words: they can be in any language (crew gap review, C13), and the model picks skills from the catalog it gets at session start. Extend or override with `skills.rules` in ~/.config/devkit/config.json; turn enforcement off with `skills.enforce: false`.",
+  "_comment": "Which skills a kind of work requires. devkit enforces them: (1) the session catalog lists them by kind of work, (2) briefs for Claude subagents get the skills appended, (3) the Stop hook refuses to finish a turn that changed matching files without loading the skills, once per skill per session. `files` are globs on changed paths; `content` is a regex checked in changed files that match `files` (or `content_files`, except those matching `content_exclude`, such as tests that hold HTML); a file on disk outside every repository is scratch work and matches no rule; `activities` are the kinds of work (ids from the crew's RACI) the model declares for a step or a brief; `commands` are command words the agent runs. Nothing matches the developer's words: they can be in any language (crew gap review, C13), and the model picks skills from the catalog it gets at session start. Extend or override with `skills.rules` in ~/.config/devkit/config.json; turn enforcement off with `skills.enforce: false`.",
   "rules": [
     {
       "id": "ui",
@@ -33,7 +33,22 @@
         "*.java",
         "*.php"
       ],
-      "content": "<style[\\s>]|<!doctype html|className=|styled\\.|@Component\\(",
+      "content_exclude": [
+        "test_*.py",
+        "*_test.py",
+        "tests/**",
+        "test/**",
+        "__tests__/**",
+        "*.spec.*",
+        "*.test.*",
+        "*Test.java",
+        "*Tests.java",
+        "*IT.java",
+        "*_test.go",
+        "*Test.php",
+        "conftest.py"
+      ],
+      "content": "<style[\\s>]|<!doctype html|className=|styled\\.|@Component\\(\\s*\\{",
       "skills": {
         "claude": [
           "frontend-design",
