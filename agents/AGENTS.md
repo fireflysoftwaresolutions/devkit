@@ -145,7 +145,10 @@ The developer should never have to ask "how is it going?" Follow the `communicat
   (≤ 5 lines: done · now · next · ETA). Never close a step that is not finished. The hooks remind you after a long
   silence.
 - **Background work.** When you launch subagents, parallel sessions, or long commands, say what runs, what it
-  produces, and when you expect it. Relay each result when it lands. Never sleep or poll.
+  produces, and when you expect it. Relay each result when it lands. Never sleep or poll. After a push, PR, merge,
+  release, or any wait you promise, arm a watch that wakes you in the same turn and name its task id: in Claude Code
+  a Monitor or background command running `dev ci watch --wait`; in Codex, that command in the foreground with a
+  timeout. Report the result when it fires.
 - **Decisions.** Ask only when the decision is the developer's (scope, behavior, cost, risk, and actions that are
   irreversible or have external effects). Use the decision template: context, options with trade-offs, your
   recommendation, and what you plan to do if they don't answer. Explanations lead with the answer, then how it
@@ -300,8 +303,10 @@ minutes) and can re-trigger the CI of every other open PR. Follow the devkit `de
 4. **Push once, open one PR.** Only after the whole local suite is green. The PR closes or supersedes the
    individual PRs. Do not merge PRs one after another to "see what CI says."
 5. **Watch, don't poll:** devkit follows the pipeline after every push, PR, merge or release (`dev ci watch`, in the
-   background) and tells your session how it ended: green, or red with the first error, its class and the one next
-   action. Act on it: reproduce locally and fix, or hand it to the Release engineer (`dev crew brief link …`).
+   background) and tells your session at its next hook how it ended: green, or red with the first error, its class
+   and the one next action. That wakes no idle session: to wait on it, arm `dev ci watch --wait` (section 3,
+   Background work). Act on it: reproduce locally and fix, or hand it to the Release engineer
+   (`dev crew brief link …`).
 6. **If CI fails:** read the failing log (`dev run view <id> --failed`), reproduce it locally, fix, re-run the
    local suite, then push once. Never chain speculative "try this" pushes. Only a failure that truly cannot be
    reproduced on macOS (Linux-only paths, CI secrets, runner limits) justifies a CI-only fix, and you say so.

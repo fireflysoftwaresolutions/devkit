@@ -782,6 +782,17 @@ def _test_gate(data: dict, sess: dict):
     return msg
 
 
+def _ci_watch_gate(agent: str, data: dict):
+    """A turn that sent work to origin and leaves its unfinished CI run with nothing watching it that wakes this agent
+    goes back with the command to start (ciwatch.stop_gate); the turn's stop.block names the rule. Fails open."""
+    try:
+        from . import ciwatch
+        return ciwatch.stop_gate(agent, data)
+    except Exception:
+        _log(f"stop ci watch: {traceback.format_exc()[-300:]}")
+        return None
+
+
 def turn_checklist(agent: str, data: dict, sess: dict) -> list:
     """What the Stop gate would ask at this point of the turn, so it reaches the agent before the end (threaded turn
     endings, R1) -> [(rule, text)] still open: handoff (the developer's commits newer than the project's note),
@@ -808,6 +819,9 @@ def turn_checklist(agent: str, data: dict, sess: dict) -> list:
         msg = find(data, sess)[1]
         if msg:
             items.append((rule, msg))
+    why = _ci_watch_gate(agent, data)  # right after a push, before the turn can end on a promise
+    if why:
+        items.append(("watch", why.replace("devkit: ", "", 1)))
     return items
 
 
@@ -890,6 +904,9 @@ def stop(agent: str):
                 why = gate(data, sess)
                 if why:
                     reasons.append((rule, why))
+            why = _ci_watch_gate(agent, data)  # Claude and Codex: each is told the watch that wakes it
+            if why:
+                reasons.append(("watch", why))
         try:  # lessons the reply names were applied: that use keeps them alive
             from . import lessons as _les
             said = data.get("last_assistant_message") or ""
@@ -2067,8 +2084,8 @@ def command_words(cmd: str) -> str:
     return re.sub(r'"(?:\\.|[^"\\])*"', '""', text)
 
 
-CI_TRIGGER = re.compile(r"\bgit\s+(?:-C\s+\S+\s+)?push\b|\bdev\s+push\b|\b(?:gh|dev)\s+pr\s+(?:create|merge)\b|"
-                        r"\bdev\s+release\b")
+CI_TRIGGER = re.compile(r"\bgit\s+(?:-C\s+\S+\s+)?push\b|\bdev\s+push\b|"
+                        r"\b(?:gh|dev)\s+pr\s+(?:create|merge|ready)\b|\bdev\s+release\b")
 
 
 # lesson L-fwyp0n9vzv6: regex rewrites of code and prose changed what they should not, twice

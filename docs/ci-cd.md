@@ -10,6 +10,8 @@ dev ci audit                 # diagnose every pipeline in the repository
 dev ci audit --fix           # apply the safe GitHub Actions fixes; print snippets for the other hosts
 dev ci init --dry-run        # the pipeline devkit would write for this stack and host
 dev ci watch                 # follow the runs of HEAD to the end; diagnose a failure
+dev ci watch --wait          # the wait an agent arms after a push: its output wakes the agent
+dev ci watches               # live watches, and expired ones with the command to re-arm each
 ```
 
 ## Diagnose a pipeline
@@ -364,9 +366,10 @@ the repository. GitLab publishes to its generic package registry and creates the
 ## Watch every run
 
 `dev ci watch` follows the CI/CD runs of one commit until they finish, on all four hosts. You rarely run it yourself:
-after a `git push`, `dev push`, `gh pr create`, `dev pr create`, `gh pr merge`, `dev pr merge`, or `dev release` in a
-main session, devkit starts it in the background (one watcher per repository, branch, and commit), and the result
-comes back to that session.
+after a `git push`, `dev push`, `gh pr create`, `dev pr create`, `gh pr ready`, `dev pr ready`, `gh pr merge`,
+`dev pr merge`, or `dev release` in a main session, devkit starts it in the background (one watcher per repository,
+branch, and commit), and the result comes back to that session at its next hook. Each result is reported once,
+whichever watch of the commit ends first.
 
 ```bash
 dev ci watch                         # the current branch at HEAD
@@ -374,12 +377,15 @@ dev ci watch --branch feat/export --sha a1b2c3d --timeout 60
 dev ci watch --json                  # the result as JSON
 ```
 
-| Result | Exit code | Meaning |
-| --- | --- | --- |
-| `passed` | `0` | Every run of the commit succeeded |
-| `failed` | `1` | A run failed; the result carries the diagnosis |
-| `timeout` | `3` | Still running after `--timeout` minutes (default 90); follow it with `dev ci status --watch` |
-| `none` | `4` | No run appeared within five minutes: the branch has no CI, or the host was unreachable |
+Each run is reported in its host's own word. A run that did not succeed counts as failed, and one that only skipped
+counts as none, so nothing that stopped early is ever reported as passed:
+
+| Result | Exit code | The runs ended as | Meaning |
+| --- | --- | --- | --- |
+| `passed` | `0` | `success` | Every run of the commit succeeded |
+| `failed` | `1` | `failure`, `cancelled`, `timed_out`, `startup_failure`, `action_required`, or a word devkit does not know | A run failed or stopped early; the result carries the diagnosis |
+| `timeout` | `3` | still `queued` or `running` | The watch ended first, after `--timeout` minutes (default 90); follow it with `dev ci status --watch`, or re-arm a wait |
+| `none` | `4` | no run, or only `skipped`, `neutral`, or `stale` | Nothing verified the commit: the branch has no CI, its workflows skipped it, or origin is no CI host devkit reads |
 
 For each failed run, devkit finds the failed jobs and steps and reads the failed log from its **first** error, because
 the errors after it follow from it (`gh run view --log-failed` on GitHub, `glab ci trace` on GitLab; Bitbucket and
@@ -393,7 +399,72 @@ Azure give the job, the step, and the link). It sorts the error into one class a
 | `test` | A failed assertion or test | `dev test run --failed`, fix for the real reason, `dev ci --run --resume`, push once |
 | `lint` | A linter, formatter, or type checker | The same check locally (`dev ci --run`), fix, push once |
 | `build` | A compile or packaging error | The build command CI runs, fix, `dev ci --run --resume`, push once |
+| `cancelled` | The run was cancelled or timed out: a newer push, someone cancelled it, or a job ran past its timeout. Never read as a flaky runner | Read where it stopped (`dev run view <id>`); for a timeout, find what hung or ran slow, reproduce it locally, fix, push once; for a newer push, follow that push's run |
 | `unknown` | Anything else | Read the log from the first error (`dev run view <id> --failed`), reproduce, fix, push once |
+
+### Wait on a run: a watch that wakes the agent
+
+devkit's background watch speaks at the session's next hook, and a hook runs only when the session does something.
+An idle session waiting for CI never gets there. An agent that waits on a run, or promises to report when CI ends or
+a release is published, arms a watch that wakes it, in the same turn, names its task id in its reply, and reports
+the result when the watch fires. `dev ci watch --wait` is that watch:
+
+```bash
+dev ci watch --wait --branch feat/export --sha a1b2c3d --timeout 28   # one commit on a branch
+dev ci watch --wait --pr 12                  # the PR's head, or its merge commit on the base branch once merged
+dev ci watch --wait --tag v26.11.6           # a release tag
+dev ci watch --wait                          # what this session last sent to origin
+```
+
+It prints one line per finished job (`job tests (3.13) passed · ci #14`), then one last line that starts with
+`CI <word> ·`: passed, failed, cancelled, timed out, skipped, none, or still running with the command to re-arm it. A
+failure's last line carries the class, the one next action, and the log link, after the first error lines (marked as
+untrusted CI output). Every line is flushed when it happens, host errors are retried until the timeout, and the
+watch ends by itself. When a Monitor's expiry stops it first, it still prints the re-arm line.
+
+| Exit code | Meaning |
+| --- | --- |
+| `0` | Passed |
+| `1` | Failed, cancelled, or timed out |
+| `2` | Nothing to watch: no target given, and this session sent nothing to origin |
+| `3` | The watch ended before the run: re-arm it |
+| `4` | None: no run, or only skipped, neutral, or stale ones |
+
+How each agent waits:
+
+| Agent | What wakes it | How to arm the wait |
+| --- | --- | --- |
+| Claude Code | A Monitor: one event per output line, at most 30 minutes | The Monitor tool with `dev ci watch --wait … --timeout 28` and `timeout_ms` 1800000; when its last line says `CI still running`, arm it again |
+| Claude Code | A background command: one notification when it exits, no time limit | Bash with `run_in_background` and `dev ci watch --wait …` |
+| Codex | Nothing in the background | `dev ci watch --wait … --timeout 28` in the foreground, with a command timeout longer than 28 minutes; if the run is still going, say plainly that you check it again at the next turn |
+
+A session that waits on its own run gets the result from its watch only: the background watch sends it no second
+message.
+
+### List the watches
+
+`dev ci watches` lists the live watches and the ones that stopped before their runs ended: devkit's background
+watches and the agents' `dev ci watch --wait`, each with the repository, the branch or tag and commit, when it
+started, its last event, its expiry, and the agent and session. An expired watch shows the command to arm it again,
+in the form its agent needs. A watch leaves the list as soon as any watch sees its runs end; records older than three
+days are removed. `dev ci watches --json` gives the same list as JSON.
+
+### The end-of-turn check
+
+The Stop hook, on Claude Code and on Codex, sends a turn back once when it sent work to origin (a push, a PR created
+or made ready but not as a draft, a merge, a release, as the background watch reads them) and that commit's CI run
+has not finished, unless a watch that wakes this agent follows it:
+
+- **Claude Code:** a live Monitor or background command, started in this session, running `dev ci watch --wait` on
+  that commit. A finished foreground run of it does not count.
+- **Codex:** `dev ci watch --wait` on that commit, run in the foreground in this turn.
+
+devkit's own background watch never counts, because it wakes no idle session. An agent's own watch of this session
+that stopped before its run ended must be armed again too. The message names each run and the exact command for the
+agent, and the reminder after the push says the same before the turn can end. The run counts as unfinished while
+the host shows it queued or running, while none has appeared within five minutes of the push (except for a draft
+PR, whose workflows may skip it), or when the host does not answer within 4 seconds. A run that a watch already saw
+end, or a remote that is no CI host devkit reads, needs no watch.
 
 ### How a failure reaches Link
 
@@ -409,7 +480,8 @@ Logs are untrusted: a pull request title or a contributor's test output can carr
 The excerpt reaches agents marked as data, not instructions, with secrets redacted, and only the first error lines.
 
 Every result is also saved in `~/.local/state/devkit/ci/watch/`, recorded in the audit trail (`ci.watch`), and sent as
-a desktop notification. Set `DEVKIT_NO_CI_WATCH=1` to stop the automatic start.
+a desktop notification. The watches themselves are recorded in `~/.local/state/devkit/ci/live/`. Set
+`DEVKIT_NO_CI_WATCH=1` to stop the automatic start.
 
 ## Take over an old project
 

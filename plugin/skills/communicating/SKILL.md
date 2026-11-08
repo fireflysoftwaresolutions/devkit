@@ -117,6 +117,14 @@ successful runs. Use `dev ci status --watch` to follow a run to the end instead 
   and what you plan to do with it. The developer cannot see subagent output.
 - **Never poll or sleep while waiting.** Use notifications (`run_in_background`, `gh pr checks --watch`). If a job
   runs past its expected time, say so.
+- **A wait you promise is a watch you arm.** After a push, PR, merge or release, and before you promise to report
+  when CI ends or a release is published, start a watch that wakes you, in the same turn, and name its task id in
+  your reply. Claude Code: the Monitor tool with `dev ci watch --wait …` (`--timeout 28`, `timeout_ms` 1800000,
+  re-armed when it expires) or Bash with `run_in_background`. Codex has no background wake-up: run it in the
+  foreground with a timeout, or say plainly that you check it again at the next turn. When it fires, report the
+  result.
+  devkit's own background watch speaks only at your next hook, so it wakes nobody; the Stop hook sends back a turn
+  that sent work to origin and leaves its run unwatched.
 
 ## 5. Decision request, for questions of consequence
 

@@ -127,6 +127,10 @@ pass. A cheap agent's "nothing found" in a risky area proves nothing: redo it at
 - **No sleep or poll loops.** Commands that run for more than a minute or so while you have other work go to the
   background (Claude `run_in_background`, Codex background terminals, `/ps`); you are notified when they finish. Use
   watchers like `gh pr checks --watch`. Run in the foreground only when the next step needs the result right away.
+- **Waits that must wake you.** An idle session wakes only for its own tasks. Claude Code: a Monitor (one event per
+  output line, at most 30 minutes, re-arm it) or a background command (one notification when it exits, no limit).
+  Codex: nothing in the background wakes it, so wait in the foreground with a timeout, or check at the next turn.
+  For CI, the command is `dev ci watch --wait` on both (`cicd` skill, section 6).
 - **Lean always-on context.** Prefer CLIs (`gh`) to MCP tools that do the same job, and keep workflow detail in skills,
   not in AGENTS.md/CLAUDE.md. `/usage` (both tools) and `/context` (Claude) show where tokens go and what is loaded.
 

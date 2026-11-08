@@ -92,13 +92,25 @@ integration and end-to-end tests in their own job; build once and pass the artif
 ## 6. Watch every run, and fix a failure the right way
 
 devkit watches the pipeline after every push, PR, merge or release: the PostToolUse hook starts `dev ci watch` in
-the background, and the result reaches the session that pushed with its next action. You can run it yourself too
-(in the background, so you are notified when it ends):
+the background, and the result reaches the session that pushed, with its next action, at the session's next hook.
+That wakes no idle session. When you wait on a run, arm a watch whose output wakes you, in the same turn, and name
+its task id:
 
 ```bash
 dev ci watch            # follow the runs of the branch for HEAD to the end; on failure: the diagnosis
 dev ci watch --json     # the same, for reasoning
+dev ci watch --wait --branch <b> --sha <sha> --timeout 28   # the agent's wait: a Monitor, timeout_ms 1800000
+dev ci watch --wait --pr <n> | --tag <tag>                  # a PR (its merge commit once merged), a release tag
+dev ci watches          # live watches, and expired ones with the command to re-arm each
 ```
+
+`--wait` prints one line per finished job, then one line `CI <word> · …` with the conclusion, retries host errors,
+and ends by itself. Exit codes: `0` passed; `1` failed (cancelled, timed out, startup failure, and action required
+count as failed); `2` nothing to watch; `3` the watch ended before the run (re-arm it); `4` none (no run, or only
+skipped, neutral, or stale ones). Claude Code: the Monitor tool (one event per line, at most 30 minutes, re-armed on
+expiry) or Bash with `run_in_background` (one notification at exit). Codex has no background wake-up: run it in the
+foreground with a timeout, or say that you check it again at the next turn. The Stop hook sends back a turn that
+sent work to origin and leaves its unfinished run with nothing watching it that wakes the agent.
 
 A failure comes with the failed jobs and steps, **the first error of the log** (not the tail: later errors
 follow from it), a class and one next action:
@@ -111,6 +123,7 @@ follow from it), a class and one next action:
 | dependencies | resolution or install | install from the lockfile locally with CI's versions, fix, push once |
 | pipeline | the workflow file itself | `dev ci audit`, fix, `actionlint`, push once |
 | infrastructure | network, rate limit, runner: possibly flaky | prove it is not the change (the same job on the base branch, or a second failure in the same place), then rerun once with `dev run rerun <id> --flaky "<evidence>"` |
+| cancelled | the run was cancelled or timed out: a newer push, someone cancelled it, or a job ran past its timeout | read where it stopped (`dev run view <id>`); for a timeout, find what hung or ran slow, reproduce it locally, fix, push once; for a newer push, follow that push's run |
 
 Rules that hold for every failure:
 

@@ -78,10 +78,27 @@ dev pr checks --watch
 
 ## CI is watched for you
 
-After `dev push`, `dev pr create`, `dev pr merge` or `dev release`, devkit follows the pipeline to the end in the
-background (`dev ci watch`) and tells this session how it ended: green, or red with the first error, its class and
-the one next action (`cicd` skill, section 6). Run `dev ci watch` yourself in the background when you want to be
-notified the moment it ends. Never poll.
+After `dev push`, `dev pr create`, `dev pr ready`, `dev pr merge` or `dev release`, devkit follows the pipeline to
+the end in the background (`dev ci watch`) and tells this session how it ended at its next hook: green, or red with
+the first error, its class and the one next action (`cicd` skill, section 6). A hook runs only when the session
+does something, so that watch never wakes an idle session. Never poll.
+
+**When you wait on the run, arm a watch that wakes you, in the same turn,** and name its task id in your reply:
+
+```bash
+dev ci watch --wait --branch <branch> --sha <sha> --timeout 28   # Claude Code: the Monitor tool, timeout_ms 1800000
+dev ci watch --wait --branch <branch> --sha <sha>                # Claude Code: Bash with run_in_background
+dev ci watch --wait --pr <n>                                     # a PR's head, or its merge commit once merged
+dev ci watch --wait --tag v<version>                             # a release tag
+dev ci watches                                                   # live and expired watches, with the re-arm command
+```
+
+It prints a line per finished job and a last line `CI <word> · …`, and exits 0 passed, 1 failed, 3 the watch ended
+first (re-arm it), 4 none. A Monitor expires after 30 minutes: when its last line says `CI still running`, re-arm it.
+Codex has no background wake-up: run the same command in the foreground with a timeout, and if the run is still
+going, say plainly that you check it again at the next turn. When the watch fires, report the result. The Stop hook
+sends back a turn that sent work to origin and leaves its unfinished run with nothing that wakes you, naming the
+exact command.
 
 When the fix is not trivial and you lead the crew, hand it to the Release engineer (Link):
 `dev crew brief link "Fix the failed CI run: <job>, <class>" --activity cicd`. In auto mode this happens at once.
