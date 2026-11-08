@@ -376,7 +376,7 @@ class Budgets(Sandbox):
 
 class Honesty(Sandbox):
     def test_hostile_text_loses_escapes_backticks_ids_and_emoji_but_keeps_letters(self):
-        q = "\x1b[31mShip `B-fyk3x4xfl6v` to the ‮auditors\x1b[0m now? \U0001F680"
+        q = "\x1b[31mShip `B-fyk3x4xfl6v` to the \u202eauditors\x1b[0m now? \U0001F680"
         lines = self.lines(runs=[self.make_run(decisions=[self.decision(q),
                                                      self.decision("¿Exportar también las anuladas?", "D2")])])
         self.assertEqual(lines[1:3], ["! Decision waits: ship to the auditors now?",
