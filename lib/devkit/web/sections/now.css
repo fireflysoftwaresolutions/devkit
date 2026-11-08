@@ -82,6 +82,8 @@
 .now-out.you{border-top-color:currentColor}
 .now-bracket{flex:none;padding:0 var(--s2);border-left:1px solid var(--ink-2);border-right:1px solid var(--ink-2);font-size:var(--fs-meta);font-weight:600;line-height:1.4;color:var(--ink-strong);white-space:nowrap}
 .now-rest{flex:none;font-size:var(--fs-meta);color:var(--ink-2);white-space:nowrap}
+.now-moot{margin:var(--s2) 0 0;max-width:80ch;font-size:var(--fs-meta);line-height:1.5;color:var(--ink-2);overflow-wrap:anywhere}   /* waits for nobody: quiet ink, never amber */
+.now-moot .now-mid{font-weight:600}
 .now-done{display:flex;align-items:flex-start;gap:var(--s2);margin:var(--s3) 0 0;font-size:var(--fs-body);color:var(--ink-2)}
 .now-more{display:inline-block;margin-top:var(--s3);font-size:var(--fs-body)}
 .now-team{margin:var(--s4) 0 0;font-size:var(--fs-body);color:var(--ink-2)}

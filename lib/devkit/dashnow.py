@@ -683,7 +683,9 @@ def _job_items(jobs) -> list:
         if not isinstance(j, dict) or j.get("state") != "failed":
             continue
         name = _line(j.get("name"), 40)
-        last = j.get("last") if isinstance(j.get("last"), dict) else {}
+        # the failed run that stands (dashboard.jobs_summary): a run skipped after it is the last run, not the failure
+        fail = j.get("failure") or j.get("last")
+        last = fail if isinstance(fail, dict) else {}
         ts = last.get("start") or last.get("end")
         ok = bool(dashboard.JOB_RE.fullmatch(name))
         out.append(_item(id=f"job_failed:{name}", rank=4, kind="job_failed", tone="alert",

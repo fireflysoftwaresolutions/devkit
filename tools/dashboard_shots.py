@@ -199,7 +199,7 @@ def main(argv=None) -> int:
                     print(shoot(link("/" + hash_.lstrip("#/"), theme), a.out / f"{name}-{width}-{theme}.png", width, h, env, budget=False))
         return 0
     with tempfile.TemporaryDirectory() as t:
-        data = T.fixture_data(Path(t) / "handoff")
+        data = T.fixture_data(Path(t) / "handoff", T.NOW)
     if a.doc:
         import test_dashboard_now as N   # the tests folder is on the path (tests/__init__.py)
         data = N.with_doc(data, a.doc)

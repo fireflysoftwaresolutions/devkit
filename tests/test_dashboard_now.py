@@ -32,6 +32,9 @@ DOCS = {n: json.loads((GOLDEN / f"now-{n}.json").read_text(encoding="utf-8")) fo
 ITEM = lambda **kw: dict({"id": "", "rank": 5, "kind": "work", "tone": "ink", "count": 1, "title": "", "clause": "", "lines": [], "since": None,  # noqa: E731
                           "project": None, "run_id": None, "asker": None, "blocks": None, "options": None, "irreversible": None,
                           "type_to_answer": None, "copy": None, "open": None, "url": None}, **kw)
+# a moot decision as the server sends it on its run (runs[].moot): its asking member ended and no step waits on it
+MOOT = lambda did, question, since: {"id": did, "question": question, "asker": "Frontend engineer (Trinity)", "since": since,  # noqa: E731
+                                     "text": f"Moot: Frontend engineer (Trinity) ended, and no step waits on {did}."}
 
 # the page's clock is the document's: every `new Date()` and `Date.now()` reads it (relative ages, the date line)
 FREEZE = ('<script>(() => { const T = %d * 1000, R = Date; class F extends R { constructor(...a) { super(...(a.length ? a : [T])); } '
@@ -294,6 +297,21 @@ class NowScreenTests(unittest.TestCase):
         self.assertLessEqual(out["page"][0], out["page"][1])
         self.assertLess(out["order"][0], out["order"][1])
 
+    # a decision whose asking member ended and that blocks no step: one quiet line per decision under its run, never a queue row
+    def test_a_moot_decision_has_its_own_quiet_line_under_its_run_and_never_a_queue_row(self):
+        def moot(d):
+            d["runs"][0]["moot"] = [MOOT("D2", "Keep the old export URL?", CLOCK - 1500), MOOT("D3", "Split the CSV by month?", CLOCK - 1200)]
+        out = self.probe("""const run = $('[data-key="run:claude-7f3a"]'); out.lines = $$(".now-moot", run).map(text);
+            out.queue = $$(".now-item").map(text).filter(t => /D2|D3|[Mm]oot/.test(t)); out.quiet = [getComputedStyle($(".now-moot", run)).color, getComputedStyle($(".now-meta", run)).color];
+            out.amber = $$(".now-moot *", run).filter(e => getComputedStyle(e).color === getComputedStyle($(".now-id")).color).length;
+            out.after = $(".now-moot", run).previousElementSibling.className;""", change=moot)
+        self.assertEqual(out["lines"], ["D2 · Keep the old export URL? Moot: Frontend engineer (Trinity) ended, and no step waits on D2.",
+                                        "D3 · Split the CSV by month? Moot: Frontend engineer (Trinity) ended, and no step waits on D3."])
+        self.assertEqual(out["queue"], [])
+        self.assertEqual(out["quiet"][0], out["quiet"][1])                                     # the meta line's quiet ink
+        self.assertEqual(out["amber"], 0)                                                     # amber is only for what waits for you
+        self.assertEqual(out["after"], "now-lands")                                           # under the run, after its landing line
+
     def test_before_the_first_snapshot_now_shows_shapes_and_says_it_loads(self):
         out = self.probe("""out.shapes = $$(".now-loading .now-shape").length; out.sr = text($(".now-loading .sr")); out.spin = $$(".spinner,[role=progressbar]").length;""",
                          change=lambda d: [d.pop(k) for k in ("attention", "safety")])
@@ -462,6 +480,41 @@ class NowSnapshotTests(unittest.TestCase):
         self.assertFalse(out["d1"])
         self.assertEqual((out["open"], out["title"], out["hash"]), (True, "Invoice export", "#/now?modal=run%3Aclaude-s1"))
         self.assertEqual(out["focus"], [True, "All3"])                   # the same control, though controls above it left
+
+
+class NowJobRowTests(unittest.TestCase):
+    # a run skipped after the failure is the job's last run; the queue row still names the failure: its time and its summary
+    def test_a_job_row_names_the_failure_that_stands_not_the_skipped_run_after_it(self):
+        import dashfixture as fx
+        from devkit import dashnow
+        skip = {"start": fx.at(7, 0), "end": fx.at(7, 0), "rc": None, "duration": 0, "summary": "skipped: the previous run is still going"}
+        fail = {"start": fx.at(6, 0), "end": fx.at(6, 1), "rc": 2, "duration": 41, "summary": "2 checks failed"}
+        with fx.utc():
+            kw = fx.example()
+            kw["jobs"] = [dict(kw["jobs"][0], state="failed", last=skip, failure=fail, failed=1)]
+            d = dashnow.areas(**kw, memo=dashnow.LandingMemo(clock=lambda: fx.NOW))
+        row = next(it for it in d["attention"]["items"] if it["id"] == "job_failed:doctor")
+        self.assertEqual((row["title"], row["lines"], row["since"]), ("The doctor job failed at 06:00", ["2 checks failed"], fx.at(6, 0)))
+
+
+class NowMootContractTests(unittest.TestCase):
+    """The contract's rules for runs[].moot: every run carries the list, each entry whole, and a moot decision never waits
+    in the queue."""
+
+    def test_every_run_carries_a_moot_list_of_whole_entries(self):
+        d = doc("example")
+        d["runs"][0]["moot"] = [dict(MOOT("D2", "Keep the old export URL?", CLOCK - 1500), text="Moot:\nsplit"), {"id": "D3"}]
+        d["runs"][1].pop("moot")
+        errs = "\n".join(now_contract.check(d))
+        self.assertIn("runs[0].moot[0].text: holds a newline", errs)
+        self.assertIn("runs[0].moot[1]: misses question, asker, since, text", errs)
+        self.assertIn("runs[1]: misses moot", errs)
+
+    def test_a_moot_decision_never_waits_in_the_queue(self):
+        d = doc("example")
+        d["runs"][0]["moot"] = [MOOT("D1", "Include cancelled invoices in the export?", CLOCK - 540)]
+        errs = "\n".join(now_contract.check(d))
+        self.assertIn("runs[0].moot[0]: D1 is moot, but the queue holds decision:claude-7f3a:D1", errs)
 
 
 class NowSectionTests(unittest.TestCase):

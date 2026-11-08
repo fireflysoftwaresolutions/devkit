@@ -848,6 +848,28 @@ class DetailTests(unittest.TestCase):
         self.assertEqual((out["lessons"]["state"], out["lessons"]["next"]), ("off", None))
         self.assertEqual([out[n]["installed"] for n in ("sync", "gc")], [True, False])
 
+    # a skipped run has no exit code: it says nothing about the failure before it, which stands until a run succeeds
+    def test_a_failure_stands_through_skipped_runs_until_a_run_succeeds(self):
+        from devkit import jobs
+        now = local_ts(2026, 11, 6, 10, 0)
+        defs = {"sync": {"enabled": True, "every": 60, "cmd": ["sync"], "timeout": 20}}
+        runs = [{"job": "sync", "start": now - 7200, "end": now - 7100, "rc": 1, "duration": 100, "summary": "push failed"},
+                {"job": "sync", "start": now - 3600, "end": now - 3600, "rc": None, "duration": 0,
+                 "summary": "skipped: the previous run is still going"}]
+        jobs.JOURNAL.parent.mkdir(parents=True)
+
+        def summary():
+            jobs.JOURNAL.write_text("".join(json.dumps(r) + "\n" for r in runs))
+            with mock.patch.object(jobs, "jobs", lambda: defs), mock.patch("time.time", lambda: now):
+                return dashboard.jobs_summary(now)[0]
+        sync = summary()
+        self.assertEqual((sync["state"], sync["failure"]["summary"], sync["failure"]["rc"]), ("failed", "push failed", 1))
+        self.assertEqual(sync["last"]["summary"], "skipped: the previous run is still going")   # the last run stays the last
+        self.assertEqual(sync["next"], round(now - 3600 + 3600))                                 # every 60 min from the last start
+        runs.append({"job": "sync", "start": now - 600, "end": now - 590, "rc": 0, "duration": 10, "summary": "ok"})
+        sync = summary()
+        self.assertEqual((sync["state"], sync["failure"]), ("ok", None))
+
     def test_one_job_has_its_history_newest_first_and_its_log_tail(self):
         from devkit import jobs
         now = time.time()
@@ -951,6 +973,44 @@ class DetailTests(unittest.TestCase):
         self.assertEqual((runs[0]["id"], runs[0]["host"], runs[0]["mode"]), ("claude-s1", "testmac", "auto"))
         self.assertEqual(([q["id"] for q in runs[0]["questions"]], [x["id"] for x in runs[0]["decisions"]]), (["M1"], ["D1"]))
         self.assertEqual(runs[0]["plan"][1]["after"], ["api"])
+
+    def settled_run(self, now):
+        # a run whose lane ended after asking D1 (moot: no step waits on it), with D2 open, D3 decided, a notice, a question
+        # answered, a question replied to, and one question still waiting
+        from devkit import progress
+        progress.RUNS.mkdir(exist_ok=True)
+        q = lambda mid, **kw: dict({"id": mid, "ts": now - 300, "from": "a1", "from_name": "Tank", "to": "main", "kind": "question"}, **kw)  # noqa: E731
+        run = {"v": 2, "agent": "claude", "session": "s3", "project": "acme/widget", "goal": "Ship", "state": "running",
+               "started": now - 1200, "intervals": [[now - 1200, None, "turn", "main"]],
+               "plan": [{"name": "api", "state": "done", "owner": "a1", "est": 20, "started": now - 1200, "finished": now - 600},
+                        {"name": "ui", "state": "running", "owner": "main", "est": 20, "started": now - 600}],
+               "agents": {"a1": {"label": "Tank: the API", "persona": "Tank", "state": "done", "started": now - 1200, "finished": now - 600}},
+               "updates": [], "history": [],
+               "decisions": [{"id": "D1", "ts": now - 900, "state": "pending", "from": "a1", "from_name": "Tank", "question": "Keep the old URL?"},
+                             {"id": "D2", "ts": now - 800, "state": "pending", "from": "main", "question": "Ship on Friday?"},
+                             {"id": "D3", "ts": now - 700, "state": "decided", "from": "main", "question": "Use JSON?", "answer": "A"}],
+               "messages": [q("M1", text="Tank started", kind="notice", **{"from": "devkit", "from_name": "devkit"}),
+                            q("M2", text="may I touch cli.py?"), q("M3", text="which port?", answered=True),
+                            q("M4", text="which schema?"), q("M5", text="the v2 one", kind="answer", reply_to="M4", **{"from": "main", "to": "a1"})]}
+        (progress.RUNS / "claude-s3.json").write_text(json.dumps(run))
+        return run
+
+    def test_a_run_brief_lists_only_the_decisions_and_questions_that_still_wait(self):
+        now = time.time()
+        self.settled_run(now)
+        r = dashboard._runs(now, "testmac")[0]
+        self.assertEqual([d["id"] for d in r["decisions"]], ["D2"])                    # D1 is moot, D3 decided
+        self.assertEqual([m["id"] for m in r["questions"]], ["M2"])                    # a notice, an answer and a reply never wait
+
+    # the whole run keeps every decision and message, each with the state the page shows: moot, and waiting or not
+    def test_the_whole_run_marks_moot_decisions_and_the_questions_that_wait(self):
+        now = time.time()
+        self.settled_run(now)
+        d = dashboard.run_detail("claude-s3", now=now)
+        self.assertEqual([(x["id"], x["state"]) for x in d["decisions"]], [("D1", "moot"), ("D2", "pending"), ("D3", "decided")])
+        self.assertEqual(d["decisions"][0]["moot"], "Moot: Backend engineer (Tank) ended, and no step waits on D1.")
+        self.assertEqual([m["id"] for m in d["questions"] if m["waiting"]], ["M2"])
+        self.assertEqual(len(d["questions"]), 5)
 
     def crew_run(self, now):
         # the live release run of 2026-11-06 in small: the lead's own last update is 78 minutes old, a crew lane reports
@@ -1546,6 +1606,46 @@ class PageBehaviorTests(unittest.TestCase):
             self.assertIn(text, out["ci"])
         self.assertEqual((out["ciFoot"], out["imgs"]), ("Open the log on GitHub Copy dev run view 18562211 --failed", 0))
 
+    # Health lists the work state dev doctor shows (selfcheck.work_state), each row with its fix: a command to copy, or
+    # the words to run in a run's own session; with nothing stale it says how many projects it checked
+    def test_health_lists_the_stale_work_with_the_commands_that_fix_it(self):
+        def stale(d):
+            d["work_state"] = {"checked": 2, "count": 3, "projects": [{"project": "acme/widget", "count": 3, "rows": [
+                {"kind": "lockless_doing", "text": "1 doing without a lock: T-a9 Fix login", "fix": "dev task -p acme/widget reconcile --apply"},
+                {"kind": "duplicates", "text": "Same title: T-a3 (todo), T-a4 (todo) “Add the CSV export”",
+                 "fix": 'dev task -p acme/widget cancel T-a4 --why "duplicate of T-a3"'},
+                {"kind": "run", "run": "claude-rel", "text": "Run “Release 26.11.3 (T-a1)” (claude-rel): no step change for 10 h",
+                 "fix": 'dev progress done "<outcome>" in its session, or dev progress step'}]}]}
+        self.assertEqual(set(self.data["work_state"]), {"projects", "checked", "count"})       # collect() reads it for the page
+        steps = """const s = $("section[aria-label='Work state']"); out.count = text($(".ph .count", s)); out.rows = $$("li", s).map(text);
+            out.copies = $$("li button", s).map(b => b.getAttribute("aria-label"));"""
+        out = self.probe(steps, 1440, "#/health", page=self.variant(stale))
+        self.assertEqual(out["count"], "3")
+        self.assertIn("1 doing without a lock: T-a9 Fix login", out["rows"][0])
+        self.assertIn("widget · Fix: dev task -p acme/widget reconcile --apply", out["rows"][0])     # readable without hovering
+        self.assertEqual(out["copies"], ["Copy the fix: dev task -p acme/widget reconcile --apply",
+                                         'Copy the fix: dev task -p acme/widget cancel T-a4 --why "duplicate of T-a3"'])
+        self.assertIn('Fix: dev progress done "<outcome>" in its session, or dev progress step', out["rows"][2])
+        out = self.probe(steps, 390, "#/health", page=self.variant(lambda d: d.update(work_state={"checked": 2, "count": 0, "projects": []})))
+        self.assertEqual(out["rows"], [])
+        self.assertIsNone(out["count"])
+        out = self.probe("""out.text = text($("section[aria-label='Work state']"));""", 390, "#/health",
+                         page=self.variant(lambda d: d.update(work_state={"checked": 2, "count": 0, "projects": []})))
+        self.assertIn("No stale work items or runs in the 2 projects with open work.", out["text"])
+
+    # a run skipped after the failure is the last run, and the failure that stands is still the one the page names
+    def test_a_job_whose_last_run_was_skipped_still_names_its_failure(self):
+        def skipped(d):
+            doctor = d["jobs"][0]
+            doctor.update(failure=doctor["last"], last={"start": NOW - 600, "end": NOW - 600, "rc": None, "duration": 0,
+                                                       "summary": "skipped: the previous run is still going"})
+        out = self.probe("""out.row = $$("#view .act").map(text).find(t => t.includes("Job doctor")) || "";
+            await go("#/background?modal=job%3Adoctor"); out.job = text($("#modal .pline:last-of-type"));""",
+                         1440, "#/now?all=1&kind=Job", page=self.variant(skipped))
+        self.assertEqual(out["job"], "Failed (exit 2) Mondays at 09:00 On")
+        self.assertIn("Job doctor failed (exit 2)", out["row"])
+        self.assertIn("2 checks failed", out["row"])
+
     def test_a_drawer_opens_from_its_row_traps_focus_and_esc_returns_it(self):
         out = self.probe("""const a = $("#runs .rcard .rh a"); a.focus(); a.click(); await tick(200); out.open = $("#modal").open; out.focus = document.activeElement.getAttribute("aria-label");
             out.inside = $("#modal").contains(document.activeElement); const cs = getComputedStyle($("#modal")); out.side = [cs.right, cs.top, Math.round(parseFloat(cs.height)) === innerHeight, parseFloat(cs.width) <= 760];
@@ -1866,6 +1966,41 @@ class LivePageTests(unittest.TestCase):
         self.assertEqual(out["title"], "Ship export")
         self.assertEqual(out["flash"], ["task~T-a2"])                                            # only the row that changed
         self.assertIn("Decision waiting: Drop the old importer?, asked by Backend engineer (Tank).", out["said"])
+
+    # the run drawer reads the server's states: a moot decision and a notice never show as waiting for anyone
+    @unittest.skipUnless(CHROME, NO_CHROME)
+    def test_the_run_drawer_never_shows_a_moot_decision_or_a_notice_as_waiting(self):
+        t = int(time.time())
+        msg = lambda mid, text, waiting, **kw: dict({"id": mid, "ts": t - 300, "from": "a1", "from_name": "Tank", "to": "main", "to_name": "Morpheus",  # noqa: E731
+                                                     "kind": "question", "text": text, "delivered": True, "waiting": waiting}, **kw)
+        detail = {"id": "claude-rel", "agent": "claude", "session": "rel", "project": "acme/widget", "goal": "Release 26.11.3 (T-a1)", "mode": "guided",
+                  "state": "running", "started": t - 9600, "steps": [], "lanes": [], "history": [], "updates": [],
+                  "decisions": [{"id": "D1", "ts": t - 900, "state": "moot", "from": "a1", "from_name": "Tank", "question": "Keep the old URL?",
+                                 "options": ["A: Keep it", "B: Drop it"], "moot": "Moot: Backend engineer (Tank) ended, and no step waits on D1."},
+                                {"id": "D2", "ts": t - 800, "state": "pending", "from": "main", "question": "Ship on Friday?", "options": ["A: Yes", "B: No"]}],
+                  "questions": [msg("M1", "Tank started", False, kind="notice", **{"from": "devkit", "from_name": "devkit"}),
+                                msg("M2", "may I touch cli.py?", True)]}
+        steps = """await tick(1500); out.waiting = text($("#waiting-for-you")); out.decisions = text($$("#modal .msec").find(s => text($("h3", s)) === "Decisions"));
+            out.questions = $$("#modal .msec").find(s => text($("h3", s)).startsWith("Questions")); out.qcount = text($(".count", out.questions)); out.qrows = $$("li", out.questions).map(text); delete out.questions;"""
+
+        def routes(path):
+            if path == "/":
+                return 200, "text/html", self.page(steps)
+            if path == "/api/v1/runs/claude-rel":
+                return 200, "application/json", json.dumps(detail).encode()
+            if path.startswith("/api/v1/events"):
+                return 200, "text/event-stream", b"retry: 60000\n\n"
+            if path == "/api/v1/health":
+                return 200, "application/json", json.dumps({"ok": True, "version": self.data["version"]}).encode()
+            return 404, "application/problem+json", b'{"title": "Not found"}'
+        out = chrome(self.serve(routes) + "/#/background?modal=run%3Aclaude-rel", 1440, budget=10000)
+        self.assertIn("D2", out["waiting"])
+        self.assertNotIn("D1", out["waiting"])
+        self.assertIn("D1 Keep the old URL? Moot: Backend engineer (Tank) ended, and no step waits on D1.", out["decisions"])
+        self.assertEqual(out["qcount"], "2 · 1 open")
+        self.assertTrue(out["qrows"][0].startswith("M2"), out["qrows"])                          # the open question first
+        self.assertIn("Notice", out["qrows"][1])
+        self.assertNotIn("Open", out["qrows"][1])
 
     @unittest.skipUnless(CHROME, NO_CHROME)
     def test_the_branches_tab_reads_git_now_shows_its_error_and_tries_again(self):

@@ -157,6 +157,11 @@
      "label": "Tank: export API",
      "min": 10.0,
      "state": "running"
+    },
+    {
+     "label": "Ghost: export notes",
+     "min": 0.0,
+     "state": "done"
     }
    ],
    "branch": null,
@@ -198,7 +203,15 @@
    "last": "D1 asked: cancelled invoices",
    "machine": null,
    "mode": "guided",
-   "moot": [],
+   "moot": [
+    {
+     "asker": "Technical writer (Ghost)",
+     "id": "D2",
+     "question": "List the CSV columns in the release notes?",
+     "since": 1793975700,
+     "text": "Moot: Technical writer (Ghost) ended, and no step waits on D2."
+    }
+   ],
    "next": "",
    "pace": 1.0,
    "plan": [

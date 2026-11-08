@@ -26,12 +26,19 @@ as devkit grows (D1-D11 of the crew gap review 2).
 Each check returns findings: (check, item, evidence, fix). `item` is stable across runs (no line numbers), so a known
 finding can be listed by it. The checks read files and import devkit's modules only: no network and no subprocess.
 `run()` returns every finding; `run(machine=False)` only those that depend on the repository alone (CI).
+
+The work state of a project (`work_state`, for `dev doctor` and the dashboard's Health view) is machine state, not a
+drift between devkit's parts: the work items `dev task reconcile` would fix, and the open runs that stopped moving
+or began before the latest release, each with the command that fixes it. It reads git and the run files, and never
+writes.
 """
 from __future__ import annotations
 
 import ast
 import fnmatch
+import os
 import re
+import time
 from collections import namedtuple
 from pathlib import Path
 
@@ -859,6 +866,128 @@ def d13_completion(home=None, parser=None) -> list:
     from . import completion
     root = completion.tree(parser or _parser())
     return [Finding("D13", item, evidence, fix) for item, evidence, fix in completion.drift(_home(home), root)]
+
+
+# --------------------------------------------------------------------------- work state (dev doctor, the dashboard)
+
+RUN_OPEN = ("running", "blocked")
+RUN_FIX = 'dev progress done "<outcome>" in its session, or dev progress step'
+
+
+def open_runs() -> list:
+    """This Mac's progress runs that are still open (running or blocked), however long ago they last moved: the run
+    files as stored."""
+    from . import progress
+    out = []
+    for f in sorted(progress.RUNS.glob("*.json")) if progress.RUNS.is_dir() else []:
+        r = core.read_json(f, None)
+        if isinstance(r, dict) and r.get("state") in RUN_OPEN:
+            out.append(r)
+    return out
+
+
+def last_step_change(run: dict) -> float:
+    """When the run's plan last moved: its newest step change, a step starting or finishing, or the run starting.
+    A decision's line in the history is not a step change."""
+    ts = [run.get("started")]
+    ts += [x.get("ts") for x in run.get("history") or []
+           if isinstance(x, dict) and not str(x.get("step") or "").startswith("(")]
+    ts += [s.get(k) for s in run.get("plan") or [] if isinstance(s, dict) for k in ("started", "finished")]
+    return max((t for t in ts if isinstance(t, (int, float)) and not isinstance(t, bool)), default=0)
+
+
+def latest_tag(top) -> tuple:
+    """(name, epoch seconds) of the repository's newest tag, ("", 0) when it has none."""
+    out = core.gitout(str(top), "for-each-ref", "--sort=-creatordate", "--count=1",
+                      "--format=%(refname:short)%09%(creatordate:unix)", "refs/tags")
+    name, _, at = out.partition("\t")
+    try:
+        return name, int(at)
+    except ValueError:
+        return "", 0
+
+
+def merges(top) -> dict:
+    """The branches merged into the checkout's default branch, as origin has it at the last fetch (never fetched
+    here): gitx.merged_into_default."""
+    from . import gitx, registry
+    return gitx.merged_into_default(str(top), registry.default_branch(Path(top)))
+
+
+def _listed(items: list, more: str = "", n: int = 3) -> str:
+    shown = ", ".join(f"{i['id']} {i['title']}" + (more and more.format(**i)) for i in items[:n])
+    return shown + (f", +{len(items) - n} more" if len(items) > n else "")
+
+
+def _stale_runs(scope: str, runs: list, now: float, hours: float, tag: tuple) -> list:
+    name, tag_at = tag
+    rows = []
+    for r in sorted((r for r in runs if isinstance(r, dict)), key=lambda r: f"{r.get('agent')}-{r.get('session')}"):
+        if r.get("project") != scope or r.get("state") not in RUN_OPEN:
+            continue
+        why = []
+        if tag_at and (r.get("started") or 0) < tag_at:
+            why.append(f"began before {name}, the latest release")
+        quiet = now - last_step_change(r)
+        if quiet > hours * 3600:
+            why.append(f"no step change for {int(quiet // 3600)} h")
+        if why:
+            rid = f"{r.get('agent')}-{r.get('session')}"
+            rows.append({"kind": "run", "run": rid, "text": f"Run “{r.get('goal') or rid}” ({rid}): " + ", and ".join(why),
+                         "fix": RUN_FIX})
+    return rows
+
+
+def work_state(scope: str, top, *, runs=None, now=None, lock_hours=None, merged=None, tag=None) -> dict:
+    """What is stale in `scope`'s work, from its checkout `top`: items doing without a live lock, open items of a
+    branch merged into the default branch and items that share a title (work.reconcile, without --apply), and the
+    project's open runs whose plan has not moved for more than `work.lock_hours` or that began before the latest
+    release tag. Reads only. `runs`: run records (default: open_runs()); `merged`, `tag`: the git facts (default:
+    merges(top), latest_tag(top)). -> {"project", "rows": [{"kind", "text", "fix"}], "count"}"""
+    from . import work
+    now = now or time.time()
+    hours = float(lock_hours or (core.CFG.get("work") or {}).get("lock_hours", 8))
+    rep = work.reconcile(scope, merges(top) if merged is None else merged)
+    rows, apply = [], f"dev task -p {scope} reconcile --apply"
+    if rep["lockless_doing"]:
+        rows.append({"kind": "lockless_doing", "fix": apply,
+                     "text": f"{len(rep['lockless_doing'])} doing without a lock: {_listed(rep['lockless_doing'])}"})
+    if rep["merged"]:
+        more = [dict(i, pr_=f", PR #{i['pr']}" if i.get("pr") else "") for i in rep["merged"]]
+        rows.append({"kind": "merged", "fix": apply, "text": f"{len(more)} open, but "
+                     f"{'its branch is' if len(more) == 1 else 'their branches are'} merged: "
+                     f"{_listed(more, ' ({branch}{pr_})')}"})
+    for g in rep["duplicates"]:
+        keep = next((i for i in g if i.get("status") == "done"), None) or min(g, key=lambda i: i["id"])
+        cancel = [i for i in sorted(g, key=lambda i: i["id"]) if i is not keep and i.get("status") in work.OPEN]
+        rows.append({"kind": "duplicates", "text": "Same title: " + ", ".join(f"{i['id']} ({i['status']})" for i in g)
+                     + f" “{g[0]['title']}”", "fix": " · ".join(f'dev task -p {scope} cancel {i["id"]} --why "duplicate of '
+                                                              f'{keep["id"]}"' for i in cancel)})
+    rows += _stale_runs(scope, open_runs() if runs is None else runs, now, hours,
+                        latest_tag(top) if tag is None else tag)
+    count = len(rep["lockless_doing"]) + len(rep["merged"]) + len(rep["duplicates"]) + \
+        sum(1 for x in rows if x["kind"] == "run")
+    return {"project": scope, "rows": rows, "count": count}
+
+
+def work_state_checks(top=None, scope=None, *, runs=None, now=None) -> list:
+    """`dev doctor`'s "work state" row for the project you are in, [] outside one: (group, name, ok, detail, fix)."""
+    top = top or core.gitout(os.getcwd(), "rev-parse", "--show-toplevel")
+    if not top or core.real(top) == core.real(core.HANDOFF):
+        return []
+    if scope is None:
+        from . import registry
+        main = registry.main_of(Path(top)) or Path(top)
+        scope = core.project_identity(main, core.gitout(str(main), "config", "--get", "remote.origin.url"))[0]
+    try:
+        r = work_state(scope, top, runs=runs, now=now)
+    except (OSError, ValueError, KeyError) as e:  # an item or run file it cannot read: say so, never stop the doctor
+        return [("Workspace", "work state", False, f"{scope}: the work state could not be read ({e})",
+                 f"dev task -p {scope} reconcile")]
+    if not r["rows"]:
+        return [("Workspace", "work state", True, f"{scope}: no stale work items or runs", "")]
+    return [("Workspace", "work state", False, f"{scope}: " + "; ".join(x["text"] for x in r["rows"]),
+             " · ".join(dict.fromkeys(x["fix"] for x in r["rows"] if x["fix"])))]
 
 
 # --------------------------------------------------------------------------- all of them

@@ -868,11 +868,11 @@ def _runs(now: float, host: str = "", raw: list = None) -> list:
         b.update({"id": run_id(r), "agent": r.get("agent"), "session": r.get("session"), "project": r.get("project"),
                   "mode": r.get("mode") or "", "host": host, "estimate_cal": r.get("estimate_cal"), "finished": r.get("finished"),
                   "seen": run_seen(r), "total_min": plan_total(r, now),
+                  # only what still waits: open decisions (not moot) and questions nobody answered (never a notice)
                   "decisions": [{k: d.get(k) for k in ("id", "ts", "question", "options", "recommend", "irreversible", "from_name")}
-                                for d in r.get("decisions") or [] if isinstance(d, dict) and d.get("state") == "pending"],
-                  "questions": [{k: m.get(k) for k in ("id", "ts", "from_name", "text")} for m in r.get("messages") or []
-                                if isinstance(m, dict) and m.get("to") == "main" and not m.get("answered")
-                                and not m.get("reply_to") and m.get("from") != "ci"][-20:],
+                                for d in progress.pending_decisions(r)],
+                  "questions": [{k: m.get(k) for k in ("id", "ts", "from_name", "text")}
+                                for m in progress.waiting_messages(r)][-20:],
                   "updates": [{k: u.get(k) for k in ("ts", "kind", "text", "next")} for u in (r.get("updates") or [])[-8:]]})
         out.append(b)
     return out[:20]
@@ -981,13 +981,59 @@ def jobs_summary(now: float = None) -> list:
             except (ValueError, KeyError):
                 nxt = None
         failed = [r for r in rs if r.get("rc") not in (0, None)]
-        state = ("off" if not enabled else "never" if not last else "skipped" if last.get("rc") is None
-                 else "ok" if last.get("rc") == 0 else "failed")
+        # a skipped run (no exit code) says nothing: the newest run with one decides, so a failure stands until a run succeeds
+        ran = next((r for r in reversed(rs) if r.get("rc") is not None), None)
+        failure = ran if ran and ran.get("rc") != 0 else None
+        state = ("off" if not enabled else "never" if not last else "failed" if failure
+                 else "skipped" if last.get("rc") is None else "ok")
         out.append({"name": name, "about": j.get("about") or "", "schedule": jm.schedule_text(j), "enabled": enabled,
                     "notify": j.get("notify") or "", "timeout_min": j.get("timeout"), "next": round(nxt) if nxt else None,
                     "installed": (jm.AGENTS_DIR / f"{jm.LABEL.format(name)}.plist").exists(),
-                    "last": _job_run(last), "state": state, "runs": len(rs), "failed": len(failed)})
+                    "last": _job_run(last), "failure": _job_run(failure), "state": state, "runs": len(rs),
+                    "failed": len(failed)})
     return out
+
+
+WORK_GIT_S = 300          # a checkout's merges and latest tag, read at most this often (the data rebuilds on every change)
+WORK_CAP = 40             # projects whose work state is checked, the most recently active first
+WORK_MEMO = {}            # checkout path -> (read at, merges, latest tag)
+
+
+def work_drift(reg: dict, items: list, runs: list = None, now: float = None, memo: dict = None) -> dict:
+    """The Health view's work state: selfcheck.work_state, the rows and commands `dev doctor` shows, for each project
+    cloned here that has open work (an open item or an open run). Reads only. -> {"projects": the ones with something
+    stale, "checked": how many were read, "count": stale things in all}"""
+    from . import selfcheck
+    now = now or time.time()
+    memo = WORK_MEMO if memo is None else memo
+    runs = selfcheck.open_runs() if runs is None else runs
+    busy = {i.get("scope") for i in items or [] if i.get("status") in OPEN}
+    busy |= {r.get("project") for r in runs if isinstance(r, dict)}
+    here = sorted((p for p in reg.get("projects") or [] if isinstance(p, dict) and p.get("local") is not False
+                   and p.get("git") and p.get("path") and p.get("id") in busy),
+                  key=lambda p: -(p.get("last_activity") or 0))
+    out, checked = [], 0
+    for p in here[:WORK_CAP]:
+        top = p["path"]
+        try:
+            hit = memo.get(top)
+            if not hit or now - hit[0] >= WORK_GIT_S:
+                hit = memo[top] = (now, selfcheck.merges(top), selfcheck.latest_tag(top))
+            r = selfcheck.work_state(p["id"], top, runs=runs, now=now, merged=hit[1], tag=hit[2])
+        except Exception:  # a project it cannot read: the others still show
+            continue
+        checked += 1
+        if r["rows"]:
+            out.append(r)
+    return {"projects": out, "checked": checked, "count": sum(r["count"] for r in out)}
+
+
+def _work_state(reg: dict, items: list, now: float) -> dict:
+    """work_drift for the page; a run file it cannot read leaves the Health view with nothing checked, never broken."""
+    try:
+        return work_drift(reg, items, now=now)
+    except (OSError, ValueError, KeyError, TypeError):
+        return {"projects": [], "checked": 0, "count": 0}
 
 
 def jobs_detail(name: str = None, now: float = None):
@@ -1216,6 +1262,14 @@ def run_detail(rid: str, now: float = None):
                       "evidence": [{k: u.get(k) for k in ("ts", "kind", "text", "check", "next")} for u in updates
                                    if u.get("step") == name and (u.get("check") or u.get("kind") in ("step", "done", "blocked"))],
                       "history": [x for x in hist if x.get("step") == name]})
+    # each decision with the state the page shows (a pending one nobody waits for is moot, with why), and each message
+    # with whether it still waits for an answer (a notice, an answer or a replied question never does)
+    decisions = [dict(d, state=progress.decision_state(run, d),
+                      **({"moot": progress.moot_text(run, d)} if progress.is_moot(run, d) else {}))
+                 for d in run.get("decisions") or [] if isinstance(d, dict)]
+    msgs = [m for m in run.get("messages") or [] if isinstance(m, dict)]
+    waiting = {m.get("id") for to in {m.get("to") for m in msgs} for m in progress.waiting_messages(run, to)}
+    questions = [dict(m, waiting=m.get("id") in waiting) for m in msgs]
     running = run.get("state") == "running"
     lo, hi = safe(lambda: progress.eta_range(run, now), (None, None)) if running else (None, None)
     return {"id": rid, "agent": run.get("agent"), "session": run.get("session"), "project": run.get("project"),
@@ -1232,7 +1286,7 @@ def run_detail(rid: str, now: float = None):
                        "scope": a.get("scope"), "done": a.get("done") or 0,
                        "min": safe(lambda: round(progress.active_minutes(run, a.get("started"), a.get("finished") or now, now, k), 1)),
                        "updates": (a.get("updates") or [])[-20:]} for k, a in lanes.items() if isinstance(a, dict)],
-            "decisions": run.get("decisions") or [], "questions": run.get("messages") or [], "history": hist,
+            "decisions": decisions, "questions": questions, "history": hist,
             "updates": updates}
 
 
@@ -1414,6 +1468,7 @@ def collect(reg: dict, handoff: Path = None, now: float = None) -> dict:
         "guard": events[-120:],
         "guard_rules": guard_rules(events),
         "drift": reg.get("drift"),
+        "work_state": _work_state(reg, items, now),
         "jobs": jobs,
         "ci": ci,
         "crew": crew_roster(),

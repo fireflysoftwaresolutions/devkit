@@ -4,15 +4,21 @@
 # `dev doctor`'s crew checks (lib/devkit/setup.py): each skill the crew names but this Mac has not installed for an
 # agent (selfcheck D8) shows as a failed check with the line that fixes it. The tests use a small roster and agent
 # folders of their own, never the developer's. Run: python3 -m unittest tests.test_doctor
+import os
+import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
-from devkit import setup  # noqa: E402
+import test_work  # noqa: E402  (TempHandoff: work items in a temporary handoff repository)
+from devkit import selfcheck, setup, work  # noqa: E402
+
+A = {"user": "ana", "host": "mbp1", "agent": "claude", "session": "s1"}
 
 ROSTER = {"members": [{"id": "niobe", "skills": ["testing", "terraform-style-guide"],
                        "procedure": [{"phase": "Plan", "skills": ["superpowers:brainstorming"]}]}],
@@ -145,6 +151,118 @@ class CrewRaciCheckTests(unittest.TestCase):
     def test_team_changes_without_raci_errors_pass(self):
         [(_, _, ok, _, _)] = setup.crew_raci_checks(base=self.BASE, team=self.BASE)
         self.assertTrue(ok)
+
+
+def git(top, *args, at=None):
+    # git in a test repository, with a fixed author and, with `at`, the commit's date (epoch seconds)
+    env = dict(os.environ, GIT_AUTHOR_DATE=f"@{at} +0000", GIT_COMMITTER_DATE=f"@{at} +0000") if at else None
+    subprocess.run(["git", "-C", str(top), "-c", "user.name=Ana", "-c", "user.email=ana@example.com", *args], check=True,
+                   capture_output=True, env=env)
+
+
+def run(rid, project, *, started, moved=None, state="running"):
+    # a progress run as stored: one step, started at `started`, whose last state change was at `moved`
+    agent, session = rid.split("-", 1)
+    hist = [{"ts": moved, "step": "build", "from": "pending", "to": "running", "by": "main"}] if moved else []
+    return {"v": 2, "agent": agent, "session": session, "project": project, "goal": f"Goal of {session}", "state": state,
+            "started": started, "plan": [{"name": "build", "state": "running", "owner": "main", "est": 30,
+                                          "started": moved or started}], "history": hist, "decisions": [],
+            "messages": [], "agents": {}, "updates": [], "intervals": []}
+
+
+class WorkStateTests(unittest.TestCase):
+    # dev doctor's "work state" row and the dashboard's Health list (selfcheck.work_state): what is stale in the
+    # current project's work items and runs, each with the command that fixes it; reading only, never writing
+    def setUp(self):
+        self.t = int(time.time())
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.top = Path(self.tmp.name) / "api"
+        self.top.mkdir()
+        git(self.top, "init", "-q", "-b", "main")
+        git(self.top, "commit", "-q", "--allow-empty", "-m", "start", at=self.t - 50 * 3600)
+        git(self.top, "commit", "-q", "--allow-empty", "-m", "release", at=self.t - 30 * 3600)
+        git(self.top, "tag", "v26.11.5")
+        self.h = test_work.TempHandoff().__enter__()
+        self.addCleanup(self.h.__exit__)
+
+    def merge(self, branch, pr, at):
+        git(self.top, "checkout", "-q", "-b", branch)
+        git(self.top, "commit", "-q", "--allow-empty", "-m", "work", at=at - 60)
+        git(self.top, "checkout", "-q", "main")
+        git(self.top, "merge", "-q", "--no-ff", branch, "-m", f"Merge pull request #{pr} from acme/{branch}", at=at)
+
+    def backlog(self):
+        # a doing item with no lock, an open item of a branch merged after its claim, and two items with one title
+        lockless = work.create("acme/api", "Fix login", a=A)
+        lockless["meta"]["status"] = "doing"
+        work.write_record(lockless["path"], work.render(lockless))
+        merged = work.claim(work.create("acme/api", "Export invoices", a=A), a=A, branch="feat/export")
+        dups = [work.create("acme/api", "Add the CSV export", a=A), work.create("acme/api", "add the  CSV export.", a=A)]
+        self.merge("feat/export", 7, self.t + 60)
+        return lockless, merged, dups
+
+    def test_stale_items_are_listed_with_the_command_that_fixes_them_and_nothing_is_written(self):
+        lockless, merged, dups = self.backlog()
+        files = {p: p.read_text() for p in (work.ITEMS / "acme" / "api").glob("*.md")}
+        r = selfcheck.work_state("acme/api", self.top, runs=[], now=self.t)
+        self.assertEqual([x["kind"] for x in r["rows"]], ["lockless_doing", "merged", "duplicates"])
+        rows = {x["kind"]: x for x in r["rows"]}
+        self.assertEqual(rows["lockless_doing"]["text"], f"1 doing without a lock: {lockless['meta']['id']} Fix login")
+        self.assertEqual(rows["merged"]["text"], f"1 open, but its branch is merged: {merged['meta']['id']} Export invoices "
+                                                 "(feat/export, PR #7)")
+        self.assertEqual([rows[k]["fix"] for k in ("lockless_doing", "merged")], ["dev task -p acme/api reconcile --apply"] * 2)
+        first, second = sorted(d["meta"]["id"] for d in dups)
+        self.assertEqual(rows["duplicates"]["fix"], f'dev task -p acme/api cancel {second} --why "duplicate of {first}"')
+        self.assertEqual(r["count"], 3)                                                  # items, title groups and runs
+        self.assertEqual({p: p.read_text() for p in files}, files)                       # reading only
+
+    def test_a_run_is_stale_after_lock_hours_without_a_step_change_or_when_it_began_before_the_latest_release(self):
+        t = self.t
+        runs = [run("claude-quiet", "acme/api", started=t - 20 * 3600, moved=t - 10 * 3600),
+                run("claude-pre", "acme/api", started=t - 40 * 3600, moved=t - 3600),
+                run("claude-fresh", "acme/api", started=t - 2 * 3600, moved=t - 1800),
+                run("claude-web", "acme/web", started=t - 40 * 3600),
+                run("claude-shipped", "acme/api", started=t - 40 * 3600, state="done")]
+        r = selfcheck.work_state("acme/api", self.top, runs=runs, now=t, lock_hours=8)
+        self.assertEqual([x["text"] for x in r["rows"]],
+                         ["Run “Goal of pre” (claude-pre): began before v26.11.5, the latest release",
+                          "Run “Goal of quiet” (claude-quiet): no step change for 10 h"])
+        self.assertEqual({x["fix"] for x in r["rows"]}, {'dev progress done "<outcome>" in its session, or dev progress step'})
+
+    def test_doctor_shows_the_work_state_row_with_its_fixes_and_passes_when_nothing_is_stale(self):
+        self.backlog()
+        quiet = run("claude-quiet", "acme/api", started=self.t - 20 * 3600, moved=self.t - 10 * 3600)
+        [(group, name, ok, detail, fix)] = selfcheck.work_state_checks(self.top, "acme/api", runs=[quiet], now=self.t)
+        self.assertEqual((group, name, ok), ("Workspace", "work state", False))
+        self.assertTrue(detail.startswith("acme/api: 1 doing without a lock"), detail)
+        self.assertIn("no step change for 10 h", detail)
+        self.assertEqual(fix.split(" · ")[0], "dev task -p acme/api reconcile --apply")
+        self.assertIn("dev progress done", fix)
+        [(_, _, ok, detail, fix)] = selfcheck.work_state_checks(self.top, "acme/web", runs=[quiet], now=self.t)
+        self.assertEqual((ok, detail, fix), (True, "acme/web: no stale work items or runs", ""))
+
+    # the dashboard's Health view: the same rows for each project cloned here that has open work, and git read at most
+    # once per project in five minutes (the page rebuilds its data on every file change)
+    def test_the_dashboard_lists_each_projects_work_state_and_reads_git_once_per_project(self):
+        from devkit import dashboard
+        self.backlog()
+        quiet = run("claude-quiet", "acme/api", started=self.t - 20 * 3600, moved=self.t - 10 * 3600)
+        reg = {"projects": [{"id": "acme/api", "path": str(self.top), "local": True, "git": True},
+                            {"id": "acme/idle", "path": str(self.top), "local": True, "git": True},
+                            {"id": "acme/remote", "path": None, "local": False, "git": True}]}
+        items = dashboard.read_items(self.h.root, self.t)
+        calls = []
+        real = selfcheck.merges
+        memo = {}
+        with mock.patch.object(selfcheck, "merges", lambda top: calls.append(top) or real(top)):
+            ws = dashboard.work_drift(reg, items, runs=[quiet], now=self.t, memo=memo)
+            again = dashboard.work_drift(reg, items, runs=[quiet], now=self.t + 60, memo=memo)
+        self.assertEqual([p["project"] for p in ws["projects"]], ["acme/api"])          # acme/idle has no open work
+        self.assertEqual([x["kind"] for x in ws["projects"][0]["rows"]], ["lockless_doing", "merged", "duplicates", "run"])
+        self.assertEqual((ws["checked"], ws["count"]), (1, 4))
+        self.assertEqual(again["projects"], ws["projects"])
+        self.assertEqual(len(calls), 1)
 
 
 if __name__ == "__main__":

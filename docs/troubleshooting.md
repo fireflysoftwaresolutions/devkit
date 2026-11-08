@@ -251,6 +251,22 @@ The session context and `dev team` show who holds it and until when. Ask them fi
 expires after `work.lock_hours` (8) and the hourly sync on any machine releases it; after that anyone can claim it. A
 lock that has not expired cannot be released by someone else.
 
+### `dev doctor` reports the work state as stale
+
+The `work state` check looks at the project you are in, and the dashboard's Health view shows the same rows for each
+project with open work. Each row names what is stale and the command that fixes it:
+
+| Row | Why | Fix |
+| --- | --- | --- |
+| _doing without a lock_ | The item is in progress, but no live session holds its lock | `dev task -p <project> reconcile --apply` sends it back to todo |
+| _open, but its branch is merged_ | The item's branch was merged into the default branch, as origin had it at the last fetch | The same command marks it done, with the merge commit as evidence |
+| _Same title_ | Two items share a title | Review them, then `dev task -p <project> cancel <id> --why "duplicate of <id>"` |
+| _Run … no step change for N h_ | An open run has not moved for longer than `work.lock_hours` (8) | In that run's session, `dev progress done "<outcome>"` when it is over, or `dev progress step` when a step finished |
+| _Run … began before vX_ | An open run started before the project's latest release tag | The same: end it, or record where it stands |
+
+Neither `dev doctor` nor the dashboard changes anything: run the fix yourself. `dev task reconcile` without `--apply`
+shows the items first.
+
 ### `dev task start` says the task was claimed on another machine first
 
 Two machines claimed the same item within seconds; the first push won. Pick another task, or talk to the holder.
@@ -312,7 +328,8 @@ dev jobs run gc         # run it now, with the output in the log
 
 `not loaded` means launchd does not have the job: run `dev jobs install`. Exit code `124` means the job ran out of
 time; give it more with `"jobs": {"gc": {"timeout": 60}}` and `dev jobs install`. A run recorded as skipped found the
-previous run still going. A job that should not run on this Mac can be turned off with `dev jobs disable <name>`.
+previous run still going; it has no exit code, so it leaves an earlier failure in place: the job stays failed until a
+run succeeds. A job that should not run on this Mac can be turned off with `dev jobs disable <name>`.
 
 ## Configuration
 
