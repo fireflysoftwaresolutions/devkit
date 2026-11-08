@@ -38,5 +38,22 @@ class ScratchFiles(GateCase):
                          ["frontend-design", "impeccable"])
 
 
+class RealRoster(GateCase):
+    # the gates on config/crew.json as it ships, with every skill it names installed
+    def setUp(self):
+        super().setUp()
+        skillguard.installed = lambda agent: {"devsecops", "semgrep", "github-actions-hardening", "communicating",
+                                              "testing", "threat-model-analyst", "sharp-edges"}
+
+    def skills_owed(self, member):
+        return sorted(i for r, i in self.rules(self.gates(member)) if r == "skills")
+
+    # the Security engineer's scan owes devsecops and its proof, not a developer-approved Semgrep run or workflow
+    # hardening with no workflow in scope
+    def test_the_security_engineers_scan_owes_devsecops(self):
+        self.tx.skill("devkit:communicating").bash("dev sec scan")
+        self.assertEqual(self.skills_owed("keymaker"), ["devsecops"])
+
+
 if __name__ == "__main__":
     unittest.main()

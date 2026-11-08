@@ -1866,7 +1866,6 @@
         "devsecops",
         "sharp-edges",
         "supply-chain-risk-auditor",
-        "semgrep",
         "github-actions-hardening",
         "testing",
         "communicating"
@@ -1931,10 +1930,9 @@
         },
         {
           "phase": "Scan",
-          "do": "Scan secrets, dependencies, code, containers and infrastructure.",
+          "do": "Scan secrets, dependencies, code, containers and infrastructure with `dev sec scan`; harden the workflow files you change with github-actions-hardening; run a full Semgrep audit (the semgrep skill) only when the developer asks for one, since its scan plan needs the developer's approval.",
           "skills": [
-            "semgrep",
-            "github-actions-hardening"
+            "devsecops"
           ],
           "devkit": [
             "dev sec scan",
