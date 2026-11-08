@@ -478,6 +478,9 @@ ENFORCEMENT = (
     ("E-main-scope", "The main session does not edit a working member's files",
      "PreToolUse: the edit tools (DEVKIT_SCOPE_OVERRIDE=1 for an emergency)", "devkit.hooks._crew_limits",
      "enforced"),
+    ("E-owner", "An ended or stale member holds no file, in any session's run; dev crew owner says who holds a path "
+     "exactly as the edit check decides", "PreToolUse: the edit tools, and dev crew owner",
+     "devkit.progress.scope_holders", "enforced"),
     ("E-responsible", "A step goes to the member the RACI makes Responsible", "dev progress assign",
      "devkit.raci.check_assignment", "enforced"),
     ("E-any-language", "The RACI holds in any language",
@@ -1942,6 +1945,24 @@ def _raci_cmd(a) -> int:
     return 0
 
 
+def _owner_cmd(a) -> int:
+    """`dev crew owner <path>…`: who holds each path now, as the edit check decides it (progress.scope_holders):
+    exit 0 when every path is free, 1 while a working member holds one. Reads only."""
+    from . import progress
+    cwd, now = os.getcwd(), time.time()
+    agent, sid = progress.current_session(cwd)
+    me = progress._as_lane(os.environ.get("DEVKIT_FROM_AGENT"), cwd) or "main"
+    rows = []
+    for p in a.paths:
+        holders = progress.scope_holders(p, agent, sid, cwd, me=me, now=now)
+        rows.append({"path": p, "free": not any(h["state"] == "working" for h in holders), "holders": holders})
+    if a.owner_json:
+        print(json.dumps(rows, ensure_ascii=False, indent=1))
+    else:
+        print(progress.owner_text(rows, now))
+    return 0 if all(r["free"] for r in rows) else 1
+
+
 def cmd_crew(a) -> int:
     act = getattr(a, "crew_cmd", None)
     if act in ("ask", "answer", "inbox", "decide", "withdraw", "decisions", "mode", "route", "delegate", "decline",
@@ -1954,6 +1975,8 @@ def cmd_crew(a) -> int:
         return 2
     if act == "raci":
         return _raci_cmd(a)
+    if act == "owner":
+        return _owner_cmd(a)
     if act == "graph":
         return _graph(a, roster)
     if act == "set":
@@ -2134,6 +2157,11 @@ def register(add):
     x = sp.add_parser("decline", help="hand a delegated step back to the tech lead, with the reason")
     x.add_argument("step", nargs="+", help="the step (number or part of its name)")
     x.add_argument("--why", help="why you cannot take it")
+    x = sp.add_parser("owner", help="who holds these files before you edit them: the crew member, run, session, step, "
+                                    "state (working, stale, ended) and what to do; exit 1 while a working member "
+                                    "holds one (reads only)")
+    x.add_argument("paths", nargs="+", help="the files you are about to edit or assign")
+    x.add_argument("--json", dest="owner_json", action="store_true", help="each path with its holders as JSON")
     x = sp.add_parser("next", help="the dispatcher: who to launch now and in what order, what is queued or waiting "
                                    "and why, who is busy, and the crew's slots")
     x.add_argument("--first", help="the tech lead: launch this step ahead of the order (with --why, recorded)")

@@ -1590,7 +1590,8 @@ class ProcessRunTests(unittest.TestCase):
                                   "last_assistant_message": "done"}, False)
         run = pg.load_run("claude", "new")
         self.assertEqual((run["session"], run["agents"]["a_ghost"]["state"]), ("new", "done"))
-        self.assertEqual(pg.scope_owner(run, "docs/crew.md"), (None, None))  # the tech lead may edit its files again
+        # the tech lead may edit its files again
+        self.assertIsNone(pg.scope_holder("docs/crew.md", "claude", "new", cwd=self.state.tmp.name))
         self.assertTrue(any("claude:old" in h.get("why", "") for h in run.get("history") or []))
         self.assertEqual(json.loads((pg.SESSIONS / "claude-old.json").read_text()).get("run_moved_to"), "new")
 

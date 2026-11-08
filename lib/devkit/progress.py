@@ -1281,16 +1281,6 @@ def _globs_overlap(a: str, b: str) -> bool:
     return pa.startswith(pb) or pb.startswith(pa)
 
 
-def scope_owner(run, rel_path: str, me: str = "main"):
-    """The running crew member (other than `me`) whose scope covers this path -> (lane id, lane) or (None, None)."""
-    for k, lane in (run.get("agents") or {}).items():
-        if k == me or lane.get("state") != "running":
-            continue
-        if _in_globs(rel_path, lane.get("scope") or []):
-            return k, lane
-    return None, None
-
-
 def _in_globs(rel_path: str, globs) -> bool:
     """A repo-relative path matches one of a scope's globs ("lib/parser/**", "docs/", "README.md")."""
     import fnmatch
@@ -1323,6 +1313,251 @@ def expire_stale(run, now=None) -> bool:
                     s.update(state="pending", owner="main")
             changed = True
     return changed
+
+
+# --------------------------------------------------------------------------- who holds a file (dev crew owner)
+#
+# A lane its run lists as running holds its files only while its member works (hotfix 26.11.6). The member ended when
+# devkit or Claude Code saw it end, whichever session id the end came under: its lane ended in any run of this Mac, or
+# Claude Code's own record of the agent (agent-<id>.meta.json, beside whichever session transcript it now sits) says
+# finished, or its transcript ends with its interruption, and nothing was written after. It is stale when its session
+# ended or its session's process is gone, or when it has been silent for progress.stale_agent_minutes. Neither holds a
+# file. scope_holders decides for the edit check (hooks._crew_limits) and for `dev crew owner` alike.
+
+END_GRACE = 5  # seconds: Claude Code writes an agent's finished record moments after the agent's last transcript line
+
+
+def _lane_activity(lane: dict) -> float:
+    """The last time a run saw this lane at work: its start or resume, its hooks (last_seen), its updates."""
+    seen = [lane.get("started"), lane.get("resumed_at"), lane.get("recovered"), lane.get("last_seen")]
+    seen += [u.get("ts") for u in lane.get("updates") or [] if isinstance(u, dict)]
+    return max([float(t) for t in seen if isinstance(t, (int, float))] or [0.0])
+
+
+def _known_transcripts() -> list:
+    """The main transcripts of the sessions devkit has a record of on this Mac: Claude Code keeps each agent's record
+    in a folder beside the transcript of the session the conversation runs in now, which a compaction can change."""
+    out = []
+    for f in sorted(SESSIONS.glob("*.json")) if SESSIONS.exists() else []:
+        t = (core.read_json(f, {}) or {}).get("transcript")
+        if isinstance(t, str) and t.endswith(".jsonl") and t not in out:
+            out.append(t)
+    return out
+
+
+def agent_facts(runs: list, transcripts=None):
+    """-> `facts(agent id)`: {"ended": when devkit or Claude Code last saw the agent end (None when neither did),
+    "how": what saw it, "active": its last activity anywhere}. Read across every run in `runs` (a lane of that agent
+    that ended there, and the activity each run records) and Claude Code's record of the agent beside every
+    transcript devkit knows (approvals.meta_reader: finished, interrupted, its own transcript's last write)."""
+    from . import approvals
+    paths = _known_transcripts() if transcripts is None else transcripts
+    readers = [r for r in (approvals.meta_reader(t) for t in paths) if r]
+    seen = {}
+
+    def facts(aid: str) -> dict:
+        if aid in seen:
+            return seen[aid]
+        ended, how, active = None, "", 0.0
+        for run in runs:
+            ln = (run.get("agents") or {}).get(aid) if isinstance(run, dict) else None
+            if not isinstance(ln, dict):
+                continue
+            active = max(active, _lane_activity(ln))
+            if ln.get("state") in ENDED_LANE + ("unverified",) and isinstance(ln.get("finished"), (int, float)):
+                if ended is None or ln["finished"] > ended:
+                    ended, how = float(ln["finished"]), (f"its lane ended {ln['state']} in "
+                                                         f"{run.get('agent') or 'claude'}:{str(run.get('session'))[:12]}")
+        for read in readers:
+            m = read(aid) or {}
+            if m.get("transcript_mtime"):
+                active = max(active, float(m["transcript_mtime"]))
+            t = float(m["mtime"]) if m.get("finished") and m.get("mtime") else m.get("stopped")
+            if t and (ended is None or t > ended):
+                ended, how = float(t), ("Claude Code recorded it finished" if m.get("finished") else
+                                        "its transcript ends with its interruption")
+        seen[aid] = {"ended": ended, "how": how, "active": active}
+        return seen[aid]
+    return facts
+
+
+def _session_gone(run: dict, alive=None) -> str:
+    """Why the session that holds this run no longer works, or '': its record is gone (SessionEnd deletes it), it
+    ended, or its process is gone (approvals.pid_alive). Unknown counts as working: a run that names no session, a
+    record without a pid, a process devkit cannot check."""
+    from . import approvals
+    if not run.get("session"):
+        return ""
+    rec = core.read_json(session_path(run.get("agent") or "claude", str(run["session"])), None)
+    if not isinstance(rec, dict):
+        return "its session ended (its record is gone)"
+    if rec.get("ended"):
+        return "its session ended"
+    pid = rec.get("pid")
+    if pid and (alive or approvals.pid_alive)(pid, rec.get("pid_start")) is False:
+        return "its session's process is gone"
+    return ""
+
+
+def _clock(ts: float, now: float) -> str:
+    """'23:41 (4 min ago)'."""
+    ago = max(0.0, now - ts) / 60
+    return time.strftime("%H:%M", time.localtime(ts)) + (" (just now)" if ago < 1 else f" ({fmt_min(ago)} ago)")
+
+
+def lane_state(run: dict, aid: str, lane: dict, facts, now: float | None = None, alive=None, own: bool = False) -> dict:
+    """How a lane its run lists as running really is -> {"state": "working" | "stale" | "ended", "last": its last
+    activity, "why"}. ended: devkit or Claude Code saw it end after its last activity (agent_facts); stale: its
+    session ended or its process is gone (not asked for the caller's own session), or it has been silent for
+    progress.stale_agent_minutes; working: anything else."""
+    from . import approvals
+    now = now or time.time()
+    f = facts(aid)
+    last = max(_lane_activity(lane), f["active"]) or float(run.get("started") or 0)  # none recorded: since its run began
+    if f["ended"] is not None and f["ended"] + END_GRACE >= last:
+        return {"state": "ended", "last": last, "why": f"{f['how']} at {_clock(f['ended'], now)}"}
+    gone = "" if own else _session_gone(run, alive)
+    if gone:
+        return {"state": "stale", "last": last, "why": gone}
+    quiet = approvals.limits()["stale_minutes"]
+    if now - last > quiet * 60:
+        return {"state": "stale", "last": last, "why": f"silent for {fmt_min((now - last) / 60)} "
+                                                       f"(progress.stale_agent_minutes is {quiet:g})"}
+    return {"state": "working", "last": last, "why": ""}
+
+
+def _holder(run: dict, aid: str, lane: dict, globs, facts, now: float, alive, own: bool) -> dict:
+    from . import crew
+    m = crew._for_lane(lane)
+    who = crew.who(m) if m else (lane.get("persona") or lane.get("label") or "a crew member")
+    st = next((s for s in run.get("plan") or [] if isinstance(s, dict) and s.get("owner") == aid
+               and s.get("state") not in DONE), None)
+    lv = lane_state(run, aid, lane, facts, now, alive, own)
+    to = m["id"] if m else shlex.quote(lane.get("label") or who)
+    do = {"working": f"wait until they finish, or ask: dev crew ask --to {to} \"…\"",
+          "stale": "nothing: a stale lane holds nothing",
+          "ended": "nothing: they ended, so they hold nothing"}[lv["state"]]
+    return {"who": who, "member": m["id"] if m else None, "lane": aid, "agent": run.get("agent") or "claude",
+            "session": str(run.get("session") or ""), "run": run.get("goal") or "",
+            "step": (st or {}).get("name") or "", "scope": sorted(g for g in globs if isinstance(g, str)),
+            "own": own, "to": to, "do": do, **lv}
+
+
+def scope_holders(path, agent: str, sid: str, cwd: str | None = None, me: str = "main", now: float | None = None,
+                  alive=None) -> list:
+    """Every crew lane its run lists as running whose files hold `path`, in the order the edit check reads them:
+    other sessions' live runs first (guard.scope_owner_across, given one lane at a time: the lane's scope and its
+    open steps' scopes, in the checkout that holds the path), then this session's own run (the lane's scope, counted
+    from the run's repository; `me`, the caller's own lane, excluded). Each holder: who, member, lane, agent,
+    session, run, step, scope, own, to, do, and its lane_state (state, last, why). Only a working holder holds the
+    file: the edit check refuses on the first one (scope_holder) and `dev crew owner` exits 1 for it."""
+    from . import guard
+    now = now or time.time()
+    cwd = str(cwd or os.getcwd())
+    ap = os.path.normpath(os.path.join(cwd, str(path)))
+    runs = [r for r in active_runs() if isinstance(r, dict)]
+    mine = load_run(agent, sid)
+    every = runs + ([mine] if isinstance(mine, dict) and not any(
+        str(r.get("session")) == str(sid) and r.get("agent") == agent for r in runs) else [])
+    facts, tops, out = agent_facts(every), {}, []
+
+    def top(run):
+        key = (run.get("agent"), str(run.get("session")), run.get("project"))
+        if key not in tops:
+            tops[key] = guard._run_checkout(run)
+        return tops[key]
+    for run in runs:
+        if run.get("state") == "done" or str(run.get("session") or "") == str(sid):
+            continue
+        for aid, lane in (run.get("agents") or {}).items():
+            if not isinstance(lane, dict) or lane.get("state") != "running":
+                continue
+            if guard.scope_owner_across(ap, runs=[dict(run, agents={aid: lane})], me_session=sid, checkout_of=top):
+                globs = set(lane.get("scope") or []) | {g for s in run.get("plan") or [] if isinstance(s, dict)
+                                                        and s.get("owner") == aid and s.get("state") not in DONE
+                                                        for g in s.get("scope") or []}
+                out.append(_holder(run, aid, lane, globs, facts, now, alive, own=False))
+    if isinstance(mine, dict) and mine.get("state") != "done":
+        run = normalize(mine)
+        expire_stale(run, now)
+        rel = guard.scope_rel(path, cwd, guard.scope_base(run.get("project"), cwd))
+        for aid, lane in (run.get("agents") or {}).items():
+            if aid != me and isinstance(lane, dict) and lane.get("state") == "running" and \
+                    _in_globs(rel, lane.get("scope") or []):
+                out.append(_holder(run, aid, lane, lane.get("scope") or [], facts, now, alive, own=True))
+    return out
+
+
+def scope_holder(path, agent: str, sid: str, cwd: str | None = None, me: str = "main", now: float | None = None):
+    """The first working holder of `path` (scope_holders), or None: what the edit check refuses on."""
+    return next((h for h in scope_holders(path, agent, sid, cwd, me, now) if h["state"] == "working"), None)
+
+
+def shown_path(path, cwd: str | None = None) -> str:
+    """A path as the developer reads it: relative to `cwd` when it lies inside it, else as given."""
+    cwd = str(cwd or os.getcwd())
+    ap = os.path.normpath(os.path.join(cwd, str(path)))
+    rel = os.path.relpath(ap, cwd)
+    return str(path) if rel.startswith("..") else rel
+
+
+def holder_refusal(h: dict, path, cwd: str | None = None, now: float | None = None) -> str:
+    """The edit check's refusal for a working holder: who, their scope, where (another session's run), their last
+    activity, how to ask them, and the command that checks again."""
+    shown = shown_path(path, cwd)
+    where = "" if h.get("own") else (f", in another session of this repository (run «{str(h.get('run'))[:60]}», "
+                                     f"session {h['session'][:12]})")
+    return (f"{shown} belongs to {h['who']} while they work (scope {', '.join(h['scope'])}){where}; last activity "
+            f"{_clock(h['last'], now or time.time())}. Ask them (dev crew ask --to {h['to']} \"…\") or wait until "
+            f"they finish, and check again with dev crew owner {shlex.quote(shown)}; DEVKIT_SCOPE_OVERRIDE=1 only "
+            f"for an emergency.")
+
+
+def owner_text(rows: list, now: float | None = None) -> str:
+    """`dev crew owner`: each path, free or held, and every lane whose scope covers it with its state and what to do."""
+    now = now or time.time()
+    lines = []
+    for r in rows:
+        lines.append(f"{r['path']}  " + (f"{ui.OK} free" if r["free"] else f"{ui.WARN} held"))
+        for h in r["holders"]:
+            why = f": {h['why']}" if h.get("why") else ""
+            lines.append(f"  {h['who']} · {h['state']}{why} · last activity {_clock(h['last'], now)}")
+            where = "this session's run" if h.get("own") else f"session {h['session'][:12]}"
+            lines.append(ui.dim(f"    run «{str(h['run'])[:60]}» · {where}" + (f" · step {h['step']}" if h['step'] else "")
+                                + f" · scope {', '.join(h['scope'])}"))
+            lines.append(f"    {h['do']}")
+    return "\n".join(lines)
+
+
+def close_quiet_lanes(run: dict, why: str, now: float | None = None, alive=None) -> list:
+    """The lanes this run lists as running whose member ended or went stale (lane_state) close, as the reconciler
+    closes them (approvals.apply): an interrupted one stopped (approvals.stop_moves), one that finished with no stop
+    in this run unverified with its running steps, a stale one lost with its running steps back with Morpheus. Each
+    transition's reason in the run's history starts with `why`. Changes the run in place. -> the transitions made"""
+    from . import approvals
+    now = now or time.time()
+    runs = [r for r in active_runs() if isinstance(r, dict)
+            and (r.get("agent"), str(r.get("session"))) != (run.get("agent"), str(run.get("session")))] + [run]
+    facts, moves = agent_facts(runs), []
+    for aid, lane in sorted((run.get("agents") or {}).items()):
+        if not isinstance(lane, dict) or lane.get("state") != "running":
+            continue
+        lv = lane_state(run, aid, lane, facts, now, alive)
+        if lv["state"] == "working":
+            continue
+        mine = [s for s in run.get("plan") or [] if s.get("owner") == aid and s.get("state") == "running"]
+        reason = f"{why}: {lv['why']}"
+        if lv["state"] == "ended" and "interruption" in lv["why"]:
+            moves += approvals.stop_moves(run, aid, reason, at=lv["last"])
+        elif lv["state"] == "ended":
+            reason += "; no report reached this run, so no evidence"
+            moves += [approvals._lane_move(aid, "running", "unverified", reason, at=facts(aid)["ended"])]
+            moves += [approvals._step_move(s, "unverified", aid, reason) for s in mine]
+        else:
+            reason += "; the step waits for a new owner"
+            moves += [approvals._lane_move(aid, "running", "lost", reason, at=lv["last"])]
+            moves += [approvals._step_move(s, "pending", "main", reason) for s in mine]
+    return approvals.apply(run, moves, now)
 
 
 def _label_matches(label: str, lane: dict) -> bool:
@@ -4075,18 +4310,23 @@ def lane_stopped(task_or_agent_id: str, reason: str, agent: str | None = None, s
                        s.get("project") or "")
             state.replace(f, s)
     made = []
-    with _tx(agent, sid):
-        run = load_run(agent, sid)
-        if isinstance(run, dict):
+    for rsid in [sid] + runs_listing(agent, aid, sid):  # every run that lists it, whichever id the stop came under
+        why = reason if rsid == sid else f"{reason}; the stop came under {agent}:{sid[:12]}, the conversation's " \
+                                         f"newer session id"
+        with _tx(agent, rsid):
+            run = load_run(agent, rsid)
+            if not isinstance(run, dict):
+                continue
             held = [st for st in run.get("plan") or [] if st.get("owner") == aid and st.get("state") not in DONE]
-            made = approvals.apply(run, approvals.stop_moves(run, aid, reason, at=now), now)
+            here = approvals.apply(run, approvals.stop_moves(run, aid, why, at=now), now)
             for st in held:  # a live lane of its member took the step: its scope goes with it
                 if st.get("owner") not in (aid, "main", None):
                     _hand_scope(run, st, st["owner"], now)
-            if made:
+            if here:
                 _save(run, touch_session=False)
-    if made:
-        approvals.audit_moves(run, made)
+        if here:
+            approvals.audit_moves(run, here)
+            made += here
     return made
 
 
@@ -4828,7 +5068,7 @@ def lane_scope(run: dict, aid: str) -> list:
 
 
 def in_scope(rel_path: str, layers: list) -> bool:
-    """A repo-relative path is inside every layer of a lane_scope (the same glob rules as scope_owner)."""
+    """A repo-relative path is inside every layer of a lane_scope (the same glob rules as scope_holders)."""
     return all(_in_globs(rel_path, layer) for layer in layers if layer)
 
 
@@ -5120,7 +5360,7 @@ def _on_subagent(agent: str, data: dict, started: bool, now: float | None = None
             record("subagent", agent, sid, v.get("label") or v.get("type") or aid, now - v["started"],
                    s.get("project") or "")
 
-        def finish(run):
+        def finish(run, rsid=sid):
             _close(run, "agent", aid, now)
             lane = (run.get("agents") or {}).get(aid)
             if lane and lane.get("binding") == "pending" and not lane.get("updates") and \
@@ -5128,16 +5368,40 @@ def _on_subagent(agent: str, data: dict, started: bool, now: float | None = None
                 del run["agents"][aid]  # never bound, never reported: a helper that started while a launch waited
                 return
             if lane:
+                if rsid != sid:  # the stop came under the conversation's newer session id (a compaction)
+                    run.setdefault("history", []).append({
+                        "ts": round(now), "step": f"(lane {lane.get('persona') or lane.get('label') or aid})",
+                        "from": lane.get("state"), "to": "done", "by": "devkit",
+                        "why": f"ended: its stop came under {agent}:{sid[:12]}, the conversation's newer session id"})
+                    run["history"] = run["history"][-200:]
                 lane.update(state="done", finished=now)
                 lane.pop("waits_slot", None)  # it ended while it waited: a later resume asks for a slot anew
                 _audit("crew.finish", lane.get("persona") or lane.get("label") or aid,
                        f"{active_minutes(run, lane.get('started'), now, now, aid):.1f} active minutes",
                        project=run.get("project") or "", agent_id=aid[:16])
-            _end_lane_steps(run, lane or {}, aid, report, now, agent, sid)
+            _end_lane_steps(run, lane or {}, aid, report, now, agent, rsid)
             run["step"] = sum(1 for x in run.get("plan") or [] if x.get("state") in ("done", "skipped"))
             _advance_main(run, now)
         _run_event(agent, sid, finish)
+        for other in runs_listing(agent, aid, sid):  # every run that lists it frees its lane, whichever id it came under
+            _run_event(agent, other, lambda run, o=other: finish(run, o))
     state.replace(f, s)
+
+
+def runs_listing(agent: str, aid: str, skip_sid: str) -> list:
+    """The session ids of this agent's other live runs on this Mac that list agent `aid` as running: after a
+    compaction gives the conversation a new session id, a member's stop comes under the new id while the run that
+    launched it still lists it under the old one."""
+    if not AGENT_ID.fullmatch(str(aid or "")):
+        return []
+    out = []
+    for f in sorted(RUNS.glob(f"{_safe_name(agent)}-*.json")) if RUNS.exists() else []:
+        r = core.read_json(f, None)
+        if isinstance(r, dict) and r.get("state") in LIVE_RUN and r.get("agent", agent) == agent and \
+                str(r.get("session") or "") not in ("", str(skip_sid)) and \
+                ((r.get("agents") or {}).get(aid) or {}).get("state") == "running":
+            out.append(str(r["session"]))
+    return out
 
 
 def _shown(paths: list) -> str:

@@ -1566,8 +1566,9 @@ def _crew_limits(agent: str, data: dict):
       progress.quota_percent), each launch costing its progress.slot_weights (a scout lookup nothing), the helpers
       members launch included, progress.reserve kept for the developer's own request, and no launch deeper than
       progress.max_depth;
-    - the main session does not edit files a running crew member owns, in this session's run or in another live run
-      of the repository (spec F7, G13; DEVKIT_SCOPE_OVERRIDE=1 for an emergency)."""
+    - the main session does not edit files a working crew member owns, in another live run of the repository or in
+      this session's run (spec F7, G13; DEVKIT_SCOPE_OVERRIDE=1 for an emergency). A member that ended or went stale
+      holds nothing. progress.scope_holders decides, for this check and for `dev crew owner` alike."""
     from . import guard
     try:
         from . import progress
@@ -1577,33 +1578,20 @@ def _crew_limits(agent: str, data: dict):
         inp = data.get("tool_input") or {}
         path = (inp.get("file_path") or inp.get("notebook_path") or "") if main_edit else ""
         cwd = data.get("cwd") or os.getcwd()
-        if path:  # other sessions' members first: a session with no run respects them too
-            own = guard.scope_owner_across(os.path.normpath(os.path.join(cwd, path)), me_session=sid)
-            if own:
-                return ("deny", f"{path} belongs to {own[0]} while they work (scope {', '.join(own[1])}), in another "
-                                f"session of this repository. Ask them (dev crew ask --to \"{own[0]}\" \"…\") or wait "
-                                f"until they finish; DEVKIT_SCOPE_OVERRIDE=1 only for an emergency.")
+        if path:  # other sessions' members first (a session with no run respects them too), then this session's
+            h = progress.scope_holder(path, agent, sid, cwd)
+            if h:
+                return ("deny", progress.holder_refusal(h, path, cwd))
+        if tool not in ("Agent", "Task", "spawn_agent"):
+            return None
         run = progress.load_run(agent, sid)
         if not run or run.get("state") == "done":
             return None
         run = progress.normalize(run)
         progress.expire_stale(run)
-        if tool in ("Agent", "Task", "spawn_agent"):  # at every depth (spec F3): a member's helper takes a slot too
-            why = progress.launch_verdict(agent, data, run)
-            if why:
-                return ("deny", why)
-        if path:
-            top = guard.scope_base(run.get("project"), cwd)
-            rel = guard.scope_rel(path, cwd, top)
-            k, lane = progress.scope_owner(run, rel)
-            if lane:
-                from . import crew
-                m = crew._for_lane(lane)
-                who = crew.who(m) if m else (lane.get("persona") or lane.get("label") or "a crew member")
-                to = m["id"] if m else f"\"{lane.get('label') or who}\""
-                return ("deny", f"{rel} belongs to {who} while they work (scope {', '.join(lane['scope'])}). Ask "
-                                f"them (dev crew ask --to {to} \"…\") or wait until they finish; "
-                                f"DEVKIT_SCOPE_OVERRIDE=1 only for an emergency.")
+        why = progress.launch_verdict(agent, data, run)  # at every depth (spec F3): a member's helper takes a slot too
+        if why:
+            return ("deny", why)
     except Exception as e:
         guard.failopen("crew-limits", e)
     return None

@@ -304,7 +304,8 @@ COMMAND_ARGS = {
     "crew brief": "name:name task:text+", "crew decide": "id:select text:text+", "crew decisions": "",
     "crew decline": "step:select+", "crew delegate": "task:text+", "crew graph": "", "crew history": "",
     "crew withdraw": "id:select",
-    "crew inbox": "", "crew mode": "mode:name?", "crew next": "", "crew raci": "work:roster?",
+    "crew inbox": "", "crew mode": "mode:name?", "crew next": "", "crew owner": "paths:name+",
+    "crew raci": "work:roster?",
     "crew route": "task:text*", "crew rules": "", "crew set": "name:name field:name value:text+",
     "crew show": "name:name+", "crew sync": "",
     "dashboard": "action:name?",
@@ -2043,6 +2044,7 @@ READ_SUB = {("task", "ls"), ("task", "show"), ("task", "history"), ("task", None
             ("pr", "view"), ("pr", "checks"), ("pr", "diff"), ("run", "ls"), ("run", "view"), ("branch", "ls"),
             ("issue", "ls"), ("issue", "view"), ("sec", "scan"), ("desktop", "status"), ("crew", None),
             ("crew", "show"), ("crew", "brief"), ("crew", "inbox"), ("crew", "decisions"), ("crew", "next"),
+            ("crew", "owner"),
             ("ci", None), ("ci", "status"), ("ci", "audit"), ("session", "brief"), ("session", "compactions"),
             ("session", None), ("alias", None)}
 # `ci audit --fix` edits workflow files and `ci init` writes a pipeline (unless --dry-run): both are audited;

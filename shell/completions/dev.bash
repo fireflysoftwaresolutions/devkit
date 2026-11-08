@@ -363,7 +363,7 @@ _dev_spec() {
     'test audit') o='-h --help --changed --since --json --min-severity --rule' v='--since=l:branches:-:: --min-severity=c:low,medium,high --rule=c:debug-output,duplicate-test,empty-test,mock-only,no-assertion,no-production-reference,skipped-without-reason,sleep-in-test,smoke-only,snapshot-only,swallowed-failure,trivial-assertion,vague-name' p='*f' ;;
     'mcp') o='-h --help' ;;
     'desktop') o='-h --help --no-validate --json' p='c:pack,status' ;;
-    'crew') c='raci set history rules graph show brief sync ask answer inbox mode decide withdraw decisions route delegate decline next' o='-h --help --json --latest' ;;
+    'crew') c='raci set history rules graph show brief sync ask answer inbox mode decide withdraw decisions route delegate decline owner next' o='-h --help --json --latest' ;;
     'crew raci') o='-h --help --set --why --markdown' v='--set=n --why=n' p='l:activities,crew:-::' ;;
     'crew set') o='-h --help --why' v='--why=n' p='l:crew:-:: n *n' ;;
     'crew history') o='-h --help' ;;
@@ -382,6 +382,7 @@ _dev_spec() {
     'crew route') o='-h --help --files --plan --apply' v='--files=n' p='*n' ;;
     'crew delegate') o='-h --help --to --scope --after --estimate --files' v='--to=l:crew:-:: --scope=n --after=l:steps:-:: --estimate=n --files=n' p='*n' ;;
     'crew decline') o='-h --help --why' v='--why=n' p='*l:steps:-::' ;;
+    'crew owner') o='-h --help --json' p='*f' ;;
     'crew next') o='-h --help --first --why' v='--first=l:steps:-:: --why=n' ;;
     'ext') c='ls outdated update add remove enable disable ack' o='-h --help' ;;
     'ext ls') o='-h --help --agent --all --json -v --verbose' v='--agent=c:claude,codex' ;;

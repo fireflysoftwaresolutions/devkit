@@ -2133,6 +2133,7 @@ _dev__crew() {
         'route:who should do a task, ranked with the reasons'
         'delegate:add a step for another crew member'
         'decline:hand a delegated step back to the tech lead, with the reason'
+        'owner:who holds these files before you edit them'
         'next:the dispatcher'
       )
       _describe -t commands 'dev crew command' cmds && ret=0 ;;
@@ -2157,6 +2158,7 @@ _dev__crew() {
         (route) _dev__crew__route && ret=0 ;;
         (delegate) _dev__crew__delegate && ret=0 ;;
         (decline) _dev__crew__decline && ret=0 ;;
+        (owner) _dev__crew__owner && ret=0 ;;
         (next) _dev__crew__next && ret=0 ;;
       esac ;;
   esac
@@ -2301,6 +2303,13 @@ _dev__crew__decline() {
     '(- *)'{-h,--help}'[show this help message and exit]' \
     '--why=[why you cannot take it]:why: ' \
     '*:plan step: _dev_live steps -'
+}
+
+_dev__crew__owner() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--json[each path with its holders as JSON]' \
+    '*:paths:_files'
 }
 
 _dev__crew__next() {

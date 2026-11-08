@@ -79,9 +79,9 @@ COMMANDS = [
         ("stubs [--staged|--all]", "Unfinished work: stubs, placeholders, TODOs without a task (also checked on commit)"),
         ("test [run|plan|prove|audit]", "Tests: last failures first, then what your changes can affect; prove and "
                                         "audit check that tests can fail"),
-        ("crew [show|brief|route|delegate|next|ask|mode|decide|graph|rules|raci]",
-         "The specialist agents: who does what, briefs, routing, delegation, decisions, the live graph, the rules, "
-         "the RACI"),
+        ("crew [show|brief|route|delegate|next|owner|ask|mode|decide|graph|rules|raci]",
+         "The specialist agents: who does what, briefs, routing, delegation, who holds a file, decisions, the live "
+         "graph, the rules, the RACI"),
         ("ci status [--watch]", "Live CI/CD runs (GitHub, GitLab, Bitbucket, Azure): jobs, steps, elapsed, ETA"),
         ("calver [--next]", "Current and next CalVer version YY.MM.PATCH from the repository's tags"),
         ("sec scan [--history]", "Security: secrets (gitleaks), dependencies (osv-scanner), SAST (Semgrep), Trivy"),
@@ -627,10 +627,14 @@ def _crew_now(runs: list, roster, now: float) -> dict:
     from . import crew as crew_mod, progress as pg
     working = [r for r in runs if registry.run_working(r, now)]
     out = {"working": bool(working), "members": [], "plan": None, "goal": ""}
+    facts = pg.agent_facts(runs) if working else None
     for run in working:
         plan = run.get("plan") or []
         for lid, lane in (run.get("agents") or {}).items():
             if lane.get("state") != "running":
+                continue
+            lv = pg.lane_state(run, lid, lane, facts, now)  # an ended member is not working; a stale one says so
+            if lv["state"] == "ended":
                 continue
             m = crew_mod._for_lane(lane, roster)
             who = crew_mod.who(m) if m else (lane.get("persona") or lane.get("label") or "a crew member")
@@ -640,7 +644,7 @@ def _crew_now(runs: list, roster, now: float) -> dict:
             if not steps and ":" in (lane.get("label") or ""):
                 what = [registry.plain_step(lane["label"].split(":", 1)[1])]
             what = [x for x in what if x]
-            out["members"].append({"who": who, "on": what, "member": (m or {}).get("id", "")})
+            out["members"].append({"who": who, "on": what, "member": (m or {}).get("id", ""), "state": lv["state"]})
         if plan and out["plan"] is None:
             done = sum(1 for s in plan if isinstance(s, dict) and s.get("state") in ("done", "skipped"))
             try:
@@ -799,9 +803,13 @@ def render_status(v: dict, cols: int = None) -> list:
         out.append(ui.command(ck["command"], 2 + ui.LABEL_W))
     cr = v["crew"]
     if cr["members"]:
-        out += ui.row("Crew", f"{ui.glyph('working')} {len(cr['members'])} working", cols, style=None)
+        busy = sum(1 for m in cr["members"] if m.get("state", "working") == "working")
+        stale = len(cr["members"]) - busy
+        out += ui.row("Crew", f"{ui.glyph('working')} {busy} working" + (f", {stale} stale" if stale else ""), cols,
+                      style=None)
         for m in cr["members"][:6]:
-            text = m["who"] + (" on " + ", ".join(m["on"]) if m["on"] else "")
+            text = m["who"] + (" · stale" if m.get("state") == "stale" else "") + \
+                (" on " + ", ".join(m["on"]) if m["on"] else "")
             out += ui.row("", text, cols)
         if len(cr["members"]) > 6:
             out += ui.row("", f"and {len(cr['members']) - 6} more (dev progress)", cols)

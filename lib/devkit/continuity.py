@@ -1468,8 +1468,9 @@ def latest(cwd=None, project=None, now=None):
 
 
 def carry(agent: str, from_sid: str, to_sid: str, now=None) -> dict:
-    """Move the open run of `from_sid` (the session /clear ended) to `to_sid`, under both sessions' locks. Refused
-    while a member of that run is still running (its results go to the old session) and when this session already
+    """Move the open run of `from_sid` (the session /clear ended) to `to_sid`, under both sessions' locks. Its lanes
+    whose member ended or went stale close first, with the reason in the run's history (progress.close_quiet_lanes);
+    refused while a member of that run still works (its results go to the old session) and when this session already
     has an open run. A run the reconciler orphaned when that session ended runs again here, with the reason in its
     history (progress.take_back). Audited as session.carry."""
     now = now or time.time()
@@ -1477,10 +1478,12 @@ def carry(agent: str, from_sid: str, to_sid: str, now=None) -> dict:
         raise ValueError("nothing to carry: name the cleared session with --from <session id>")
     src, dst = progress.run_path(agent, from_sid), progress.run_path(agent, to_sid)
     a, b = sorted((src, dst), key=str)
+    closed = []
     with state.hold(a), state.hold(b):
         run = state.load(src)
         if not run:
             raise ValueError(f"no run to carry in {agent}:{from_sid[:12]}")
+        closed = progress.close_quiet_lanes(run, f"carried to {agent}:{to_sid[:12]}", now)
         busy = [lane.get("persona") or lane.get("label") or k for k, lane in progress.running_agents(run)]
         if busy:
             raise ValueError(f"{', '.join(busy)} still running in {agent}:{from_sid[:12]}: carry the run once they "
@@ -1494,6 +1497,9 @@ def carry(agent: str, from_sid: str, to_sid: str, now=None) -> dict:
         taken = progress.take_back(run, why, now)
         state.replace(dst, run, indent=1)
         state.remove(src)
+    if closed:
+        from . import approvals
+        approvals.audit_moves(run, closed)
     if taken:
         progress.audit_taken_back(run, why)
     audit.record("session.carry", run.get("project") or f"{agent}:{to_sid[:12]}",
