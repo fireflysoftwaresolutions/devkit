@@ -22,6 +22,9 @@ as devkit grows (D1-D11 of the crew gap review 2).
       discovers tests/ runs it as a package (`-t .`), the only way unittest imports tests/__init__.py
   D13 the shell completion checked in (shell/completions/_dev and dev.bash) is what the parser generates now, and
       every completion rule (lib/devkit/completion.py RULES) names an argument the parser has
+  D14 every skill devkit names (the crew, the skill rules, the using-devkit table, AGENTS.md section 9) comes from
+      a source devkit installs, and none that the crew, a rule or the table asks a model to load is one only the
+      developer can run (`disable-model-invocation`)
 
 Each check returns findings: (check, item, evidence, fix). `item` is stable across runs (no line numbers), so a known
 finding can be listed by it. The checks read files and import devkit's modules only: no network and no subprocess.
@@ -734,6 +737,102 @@ def d8_uninstalled_skills(agent: str = "claude", roster=None, home=None, agent_h
     return out
 
 
+SKILL_TOKEN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*(?::[a-z0-9]+(?:-[a-z0-9]+)*)?$")
+NOT_SKILLS = {"dev"}  # backticked words in the skill lists that name a program, not a skill
+
+
+def _plugin_names(home: Path) -> set:
+    """The plugins devkit installs for either agent: `superpowers` from `superpowers@claude-plugins-official`."""
+    out = set()
+    for agent in ("claude", "codex"):
+        conf = core.read_json(home / "config" / agent / "plugins.json", {}) or {}
+        out |= {str(p).split("@")[0] for p in list(conf.get("plugins") or []) + list(conf.get("disabled") or [])}
+    return out
+
+
+def _frontmatter_user_only(path: Path) -> bool:
+    head = _read(path)[:2000]
+    return bool(re.search(r"^disable-model-invocation:\s*true\s*$", head.split("\n---", 1)[0], re.M | re.I))
+
+
+def user_only_skills(home=None) -> set:
+    """Skills only the developer can run (their SKILL.md sets `disable-model-invocation: true`, so a model cannot load
+    them): those config/skills.json lists as `user_only`, and devkit's own skills whose frontmatter says so."""
+    home = _home(home)
+    out = set()
+    for src in (core.read_json(home / "config" / "skills.json", {}) or {}).get("sources") or []:
+        out |= set(src.get("user_only") or [])
+    for f in sorted((home / "plugin" / "skills").glob("*/SKILL.md")):
+        if _frontmatter_user_only(f):
+            out.add(f.parent.name)
+    return out
+
+
+def skill_resolves(name: str, home=None) -> bool:
+    """A source devkit installs provides the skill: devkit's own plugin, config/skills.json, a plugin of
+    config/<agent>/plugins.json (`superpowers:brainstorming`, or `frontend-design` from its own plugin), or the
+    packages step (playwright-cli)."""
+    home = _home(home)
+    if ":" in name:
+        plugin, skill = name.split(":", 1)
+        if plugin == "devkit":
+            return (home / "plugin" / "skills" / skill / "SKILL.md").exists()
+        return plugin in _plugin_names(home)
+    if skill_group(name, home) != "unknown" or name in _plugin_names(home):
+        return True
+    from . import ext
+    return name in ext._devkits_skill_names()
+
+
+def _table_skills(text: str, heading: str) -> list:
+    """The backticked skill names in the last column of the first table after `heading`."""
+    out = []
+    for row in _table(text, heading):
+        out += [t for t in re.findall(r"`([^`]+)`", row[-1]) if SKILL_TOKEN.match(t) and t not in NOT_SKILLS]
+    return out
+
+
+def skill_names(home=None, roster=None) -> dict:
+    """{skill: [where devkit names it]}: the crew (members, phases, kinds of work), the skill rules (every rule, its
+    group on or not), the Skills column of the using-devkit table, and section 9 of AGENTS.md ("AGENTS.md §9")."""
+    home = _home(home)
+    out = {k: list(v) for k, v in crew_skills(_roster(roster)).items()}
+    rules = (core.read_json(home / "config" / "skill-rules.json", {}) or {}).get("rules") or []
+    commands = {c for r in rules for c in r.get("commands") or [] if " " not in c}  # `pytest` is a command
+    for r in rules:
+        for agent, names in (r.get("skills") or {}).items():
+            for s in names:
+                out.setdefault(s, []).append(f"skill rule {r.get('id')} ({agent})")
+    using = _read(home / "plugin" / "skills" / "using-devkit" / "SKILL.md")
+    for s in _table_skills(using, "## Which tool for which job"):
+        out.setdefault(s, []).append("the using-devkit table")
+    agents = _read(home / "agents" / "AGENTS.md")
+    m = re.search(r"^## 9\..*?(?=^## 10\.)", agents, re.M | re.S)
+    for t in re.findall(r"`([^`]+)`", m.group(0) if m else ""):
+        if SKILL_TOKEN.match(t) and t not in NOT_SKILLS and t not in commands:
+            out.setdefault(t, []).append("AGENTS.md §9")
+    return {k: sorted(set(v)) for k, v in out.items()}
+
+
+def d14_skill_names(home=None, roster=None) -> list:
+    """D14: a skill devkit names that no source it installs provides, or one only the developer can run
+    (`user_only_skills`) that the crew, a skill rule or the using-devkit table asks a model to load. AGENTS.md may
+    name such a skill as the developer's own slash command."""
+    home = _home(home)
+    out = []
+    user_only = user_only_skills(home)
+    for name, where in sorted(skill_names(home, roster).items()):
+        if not skill_resolves(name, home):
+            out.append(Finding("D14", f"unknown: {name}", f"no source devkit installs provides {name}; named by "
+                               f"{', '.join(where[:4])}", "fix the name, or add its source to config/skills.json"))
+        asked = [w for w in where if w != "AGENTS.md §9"]
+        if name.split(":")[-1] in user_only and asked:
+            out.append(Finding("D14", f"user-only: {name}", f"{name} is the developer's slash command (a model cannot "
+                               f"load it), but {', '.join(asked[:4])} ask a model to load it",
+                               "name a skill a model can load there, and suggest the slash command to the developer"))
+    return out
+
+
 def d9_phase_proofs(roster=None) -> list:
     """D9: a procedure phase whose proof is not in its own `devkit` list, or whose gate names a `dev …` command (in
     backticks) that is not in that list."""
@@ -1068,7 +1167,8 @@ def old_copy_checks(claude_home=None, codex_home=None, managed=None) -> list:
 
 REPO_CHECKS = (("D1", d1_enforced_rows), ("D3", d3_unwired), ("D4", d4_commands), ("D5", d5_hook_events),
                ("D6", d6_config_keys), ("D7", d7_raci_hygiene), ("D9", d9_phase_proofs), ("D10", d10_file_anchors),
-               ("D11", d11_guardrails), ("D12", d12_hermetic_tests), ("D13", d13_completion))
+               ("D11", d11_guardrails), ("D12", d12_hermetic_tests), ("D13", d13_completion),
+               ("D14", d14_skill_names))
 MACHINE_CHECKS = (("D2", d2_planned_rows), ("D7", d7_team_raci),
                   ("D8", lambda: d8_uninstalled_skills("claude") + d8_uninstalled_skills("codex")),
                   ("D10", d10_lesson_anchors))

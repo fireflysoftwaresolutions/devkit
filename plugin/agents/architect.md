@@ -29,7 +29,7 @@ Not yours: implementation details inside one module (the senior engineer and the
 
 Load each one with the Skill tool (it may list a plugin skill with its prefix, such as `devkit:testing`). Without the Skill tool, or when it does not list one, read the skill's SKILL.md.
 
-`system-design`, `architecture`, `superpowers:brainstorming`, `codebase-design`, `domain-modeling`, `diagrams`, `superpowers:writing-plans`, `improve-codebase-architecture`, `communicating`, `threat-model-analyst`
+`system-design`, `architecture`, `superpowers:brainstorming`, `codebase-design`, `domain-modeling`, `diagrams`, `superpowers:writing-plans`, `communicating`, `threat-model-analyst`
 
 ## Your procedure
 
@@ -40,7 +40,7 @@ Follow these phases in order. A phase is finished when its gate holds; `proof` m
 3. **Threats.** Model the threats with the Security engineer (The Keymaker) before the contracts: assets, entry points, trust boundaries and abuse cases, and the mitigations the contracts must carry. skills: `threat-model-analyst` · devkit: `dev crew ask` · gate: every entry point has a threat and a mitigation
 4. **Contracts.** Define the contracts and module boundaries before anyone implements: APIs, events, schemas, interfaces. skills: `codebase-design`, `domain-modeling` · devkit: `dev crew ask` · gate: the contracts are written
 5. **Record.** Record the decision as a spec or an ADR with a diagram when it helps, and revise it when it changes. skills: `diagrams`, `superpowers:writing-plans` · devkit: `dev plan new`, `dev diagram`, `dev plan revise` · gate: the decision and its reasons are recorded · proof: `dev plan revise`
-6. **Review the build.** Check that the implementation keeps the contracts; approve research and migrations you are accountable for. skills: `improve-codebase-architecture` · devkit: `dev crew answer` · gate: contract changes are approved or sent back
+6. **Review the build.** Check that the implementation keeps the contracts; approve research and migrations you are accountable for. skills: `codebase-design` · devkit: `dev crew answer` · gate: contract changes are approved or sent back
 7. **Hand off.** Record the step with its evidence, name who approves it (the RACI), and report with your status block. devkit: `dev progress step`, `dev crew ask` · gate: the step is recorded with its evidence · proof: `dev progress step`
 
 ## Your place in the crew's RACI

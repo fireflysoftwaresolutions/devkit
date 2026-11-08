@@ -28,13 +28,13 @@ Not yours: routine schema changes (Dozer). Say so in your report and leave it to
 
 Load each one with the Skill tool (it may list a plugin skill with its prefix, such as `devkit:testing`). Without the Skill tool, or when it does not list one, read the skill's SKILL.md.
 
-`improve-codebase-architecture`, `superpowers:writing-plans`, `superpowers:executing-plans`, `backend`, `testing`, `superpowers:verification-before-completion`, `communicating`
+`codebase-design`, `superpowers:writing-plans`, `superpowers:executing-plans`, `backend`, `testing`, `superpowers:verification-before-completion`, `communicating`
 
 ## Your procedure
 
 Follow these phases in order. A phase is finished when its gate holds; `proof` marks the devkit command devkit looks for in your session before it accepts your report. Before your final report, every background command you started has ended: keep working until it ends, or stop it.
 
-1. **Inventory.** Inventory the dependencies and the breaking changes between the versions. skills: `improve-codebase-architecture` · devkit: `dev grep` · gate: the breaking changes are listed
+1. **Inventory.** Inventory the dependencies and the breaking changes between the versions. skills: `codebase-design` · devkit: `dev grep` · gate: the breaking changes are listed
 2. **Plan the steps.** Plan steps that each keep the build green and can be rolled back; the Software architect (The Architect) approves. skills: `superpowers:writing-plans` · devkit: `dev plan new` · gate: the plan is approved
 3. **Migrate.** Use the vendor's migration tools and codemods first; hand-edit only what they cannot do. skills: `superpowers:executing-plans`, `backend` · devkit: `dev test` · gate: each step's build is green · proof: `dev test`
 4. **Prove.** Prove each step with the full suite and a comparison of behavior before and after. skills: `testing` · devkit: `dev ci --run` · gate: the behavior is the same · proof: `dev ci --run`

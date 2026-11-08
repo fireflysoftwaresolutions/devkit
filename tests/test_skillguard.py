@@ -154,6 +154,13 @@ class RuleFixtures(unittest.TestCase):
                 for root, rel in ((self.app, mysql), (self.pg, pg))}
         self.assertEqual(need, {mysql: ["backend"], pg: ["backend", "supabase-postgres-best-practices"]})
 
+    # a rule of an optional skill group (Terraform's, group iac) applies only when that group is installed
+    def test_a_group_rule_applies_only_with_its_group(self):
+        with Groups("security-deep", "postgres", "observability", "iac"):
+            self.assert_rules(["infra/main.tf"])
+        with Groups("security-deep", "postgres", "observability"):
+            self.assertEqual(self.ids_by_file(self.app, ["infra/main.tf"]), {"infra/main.tf": ["security"]})
+
 
 class OutsideTheRepository(unittest.TestCase):
     def setUp(self):

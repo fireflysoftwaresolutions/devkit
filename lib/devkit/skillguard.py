@@ -34,13 +34,16 @@ def enabled() -> bool:
 
 
 def rules() -> list:
+    """devkit's rules with the developer's (`skills.rules`) on top; a rule of an optional skill group (`group`)
+    only when that group is installed (`skills.groups`)."""
     base = (core.read_json(RULES_FILE, {}) or {}).get("rules", [])
     extra = (CFG.get("skills") or {}).get("rules") or []
     by_id = {r["id"]: r for r in base}
     for r in extra:  # user rules extend or replace devkit's by id
         if r.get("id"):
             by_id[r["id"]] = {**by_id.get(r["id"], {}), **r}
-    return list(by_id.values())
+    groups = set((CFG.get("skills") or {}).get("groups") or [])
+    return [r for r in by_id.values() if not r.get("group") or r["group"] in groups]
 
 
 def short(name: str) -> str:

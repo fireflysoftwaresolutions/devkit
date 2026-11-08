@@ -1,5 +1,5 @@
 {
-  "_comment": "Third-party skills fetched at install time from upstream at a pinned commit, then linked into ~/.claude/skills and ~/.agents/skills (Codex). Sources without `group` are always installed; a `group` source is installed when the group is listed in devkit config `skills.groups` (default: security-deep, postgres, observability). Bump a ref with `dev install --only skills` after review. `why` says why each source is here (`dev ext ls -v`); more in docs/skills-and-plugins.md.",
+  "_comment": "Third-party skills fetched at install time from upstream at a pinned commit, then linked into ~/.claude/skills and ~/.agents/skills (Codex). Sources without `group` are always installed; a `group` source is installed when the group is listed in devkit config `skills.groups` (default: security-deep, postgres, observability). Bump a ref with `dev install --only skills` after review. `user_only` lists a source's skills that set disable-model-invocation: the developer runs them as slash commands, and no crew procedure or skill rule may ask a model to load them. `why` says why each source is here (`dev ext ls -v`); more in docs/skills-and-plugins.md.",
   "sources": [
     {
       "repo": "anthropics/claude-plugins-official",
@@ -35,7 +35,11 @@
         "domain-modeling": "skills/engineering/domain-modeling",
         "codebase-design": "skills/engineering/codebase-design",
         "improve-codebase-architecture": "skills/engineering/improve-codebase-architecture"
-      }
+      },
+      "user_only": [
+        "grill-with-docs",
+        "improve-codebase-architecture"
+      ]
     },
     {
       "repo": "anthropics/knowledge-work-plugins",

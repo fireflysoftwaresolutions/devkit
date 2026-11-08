@@ -119,10 +119,25 @@ class RepositoryDrift(unittest.TestCase):
     def test_d12_the_suite_runs_hermetic(self):
         self.assert_known("D12", selfcheck.d12_hermetic_tests())
 
-    # run() covers D1 to D13, so a check added to the module is also one `dev doctor` and CI run
+    # D14: every skill devkit asks a model to load (the crew, the skill rules, the using-devkit table) and every
+    # skill AGENTS.md names comes from a source devkit installs; those a model must load are model-loadable
+    def test_d14_skill_names_resolve_and_load(self):
+        self.assert_known("D14", selfcheck.d14_skill_names())
+
+    # D14 on a small roster: a name no source provides and a skill only the developer can run are drift
+    def test_d14_finds_an_unknown_and_a_user_only_skill(self):
+        roster = {"members": [{"id": "oracle", "skills": ["grill-with-docs", "no-such-skill", "testing",
+                                                           "superpowers:brainstorming"]}], "activities": []}
+        found = {f.item: f for f in selfcheck.d14_skill_names(roster=roster)
+                 if "grill-with-docs" in f.item or "no-such-skill" in f.item or "testing" in f.item
+                 or "brainstorming" in f.item}
+        self.assertEqual(sorted(found), ["unknown: no-such-skill", "user-only: grill-with-docs"])
+        self.assertIn("oracle", found["user-only: grill-with-docs"].evidence)
+
+    # run() covers D1 to D14, so a check added to the module is also one `dev doctor` and CI run
     def test_run_covers_every_check(self):
         ids = {cid for cid, _ in selfcheck.REPO_CHECKS + selfcheck.MACHINE_CHECKS}
-        self.assertEqual(ids, {f"D{i}" for i in range(1, 14)})
+        self.assertEqual(ids, {f"D{i}" for i in range(1, 15)})
 
 
 class CommandResolution(unittest.TestCase):
