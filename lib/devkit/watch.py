@@ -766,12 +766,25 @@ def stop_gate(agent: str, data: dict, now=None) -> str | None:
 # --------------------------------------------------------------------------- dev watch, dev watches
 
 def _consumer(a) -> str:
-    """The caller's own consumer: its crew lane (as `dev crew inbox` resolves it), else the main session."""
+    """The caller's own consumer. A call the hooks routed to a crew lane (DEVKIT_FROM_AGENT) is that member's. Else
+    `--for me` is the member the call ledger names, refused when it names none; and a wait without it is always the
+    main session's: a member's open `dev watch --wait` in the ledger must never turn the tech lead's wait into the
+    member's, which would take the member's answers and leave the tech lead's events waking nobody."""
     from . import progress
-    if getattr(a, "for_", None) not in (None, "me"):
+    for_ = getattr(a, "for_", None)
+    if for_ not in (None, "me"):
         raise ValueError("--for takes `me`: a wait is always for its caller (the main session, or the member's own "
                          "lane)")
-    return progress._as_lane(os.environ.get("DEVKIT_FROM_AGENT") or None) or "main"
+    routed = os.environ.get("DEVKIT_FROM_AGENT") or None
+    if routed:
+        return routed
+    if for_ == "me":
+        lane = progress._as_lane(None)
+        if not lane:
+            raise ValueError("--for me is for a crew member's own wait, and devkit cannot tell which member calls: "
+                             "run it as a command of its own from the member's lane")
+        return lane
+    return "main"
 
 
 def _only(a) -> list:

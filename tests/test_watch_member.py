@@ -52,3 +52,27 @@ class MemberView(WatchCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WhoseWait(unittest.TestCase):
+    # a member blocked on `dev watch --wait --for me` keeps an open call in the ledger; the tech lead's own
+    # `dev watch --wait` then matched it and became the member's wait, so nothing woke the tech lead any more
+    def consumer(self, for_=None, env=None, ledger="a_tank"):
+        args = type("Args", (), {"for_": for_})()
+        with mock.patch.dict(os.environ, env or {}, clear=False), \
+                mock.patch.object(pg, "caller", return_value={"caller": ledger}):
+            if not env:
+                os.environ.pop("DEVKIT_FROM_AGENT", None)
+            return watch._consumer(args)
+
+    def test_a_wait_without_for_me_is_the_main_sessions_whatever_the_ledger_says(self):
+        self.assertEqual(self.consumer(), "main")
+
+    def test_a_routed_member_call_is_the_members_with_or_without_for_me(self):
+        self.assertEqual(self.consumer(env={"DEVKIT_FROM_AGENT": "a_ghost"}), "a_ghost")
+        self.assertEqual(self.consumer(for_="me", env={"DEVKIT_FROM_AGENT": "a_ghost"}), "a_ghost")
+
+    def test_for_me_falls_back_to_the_ledger_and_refuses_when_it_names_no_member(self):
+        self.assertEqual(self.consumer(for_="me"), "a_tank")
+        with self.assertRaises(ValueError):
+            self.consumer(for_="me", ledger="main")
