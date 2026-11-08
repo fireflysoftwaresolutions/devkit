@@ -378,6 +378,17 @@ def _is_live(rec: dict, now: float) -> bool:
     return rec.get("state") == "live" and _alive(rec.get("pid")) and now < (rec.get("expires") or 0) + 60
 
 
+def _stale(rec: dict, now: float) -> bool:
+    """A record started more than LIVE_DAYS ago is removed, by every new wait and by `dev watches`. -> was it."""
+    if now - (rec.get("started") or 0) <= LIVE_DAYS * 86400:
+        return False
+    try:
+        (LIVE / f"{rec['id']}.json").unlink(missing_ok=True)
+    except OSError:
+        pass
+    return True
+
+
 def register(agent: str, sid: str, me: str, pid, timeout_min: float, now=None) -> str:
     """Record a wait, and mark every older live wait of the same session and consumer superseded: one live wait per
     consumer, so the older one ends with one line (exit 5). -> its id, "" when it cannot be written."""
@@ -385,6 +396,8 @@ def register(agent: str, sid: str, me: str, pid, timeout_min: float, now=None) -
     rid = re.sub(r"[^A-Za-z0-9_.-]+", "_", f"global-{agent}-{sid[:16]}-{me[:24]}-{pid}-{int(now)}-"
                                            f"{os.urandom(3).hex()}")[:200]
     for rec in _records():
+        if _stale(rec, now):
+            continue
         if (rec.get("agent"), rec.get("session"), rec.get("consumer")) == (agent, sid, me) and \
                 rec.get("state") == "live":
             _update(rec["id"], state="superseded", superseded_by=rid, ended=round(now))
@@ -406,8 +419,7 @@ def records(now=None) -> list:
     now = now or time.time()
     out = []
     for rec in _records():
-        if now - (rec.get("started") or 0) > LIVE_DAYS * 86400:
-            (LIVE / f"{rec['id']}.json").unlink(missing_ok=True)
+        if _stale(rec, now):
             continue
         st = rec.get("state")
         status = ("live" if _is_live(rec, now) else "expired") if st == "live" else st

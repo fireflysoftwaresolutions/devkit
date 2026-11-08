@@ -187,6 +187,16 @@ class WaitWakesTests(WatchCase):
         self.assertEqual(script.calls, 0)
 
 
+class WaitRecordTests(WatchCase):
+    # each wait writes a record and every re-arm a new one; only `dev watches` removed old ones, so a session that
+    # never ran it kept every record it ever wrote
+    def test_a_new_wait_removes_the_records_older_than_the_days_kept(self):
+        watch.register("claude", "s9", "main", os.getpid(), 5, now=self.t0 - (watch.LIVE_DAYS + 1) * 86400)
+        watch.register("claude", "s8", "main", os.getpid(), 5, now=self.t0 - 3600)
+        watch.register("claude", "s1", "main", os.getpid(), 5, now=self.t0)
+        self.assertEqual(sorted(r["session"] for r in watch._records()), ["s1", "s8"])
+
+
 class ChangesTests(unittest.TestCase):
     # The wait's default file-change function sees a state file replaced by an atomic rename, and the next one after
     # it, with kqueue and with the stat fallback alike.

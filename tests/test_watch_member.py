@@ -50,9 +50,6 @@ class MemberView(WatchCase):
         self.assertEqual(script.calls, 0)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class WhoseWait(unittest.TestCase):
     # a member blocked on `dev watch --wait --for me` keeps an open call in the ledger; the tech lead's own
@@ -76,3 +73,7 @@ class WhoseWait(unittest.TestCase):
         self.assertEqual(self.consumer(for_="me"), "a_tank")
         with self.assertRaises(ValueError):
             self.consumer(for_="me", ledger="main")
+
+
+if __name__ == "__main__":
+    unittest.main()
