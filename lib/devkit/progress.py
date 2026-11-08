@@ -1291,7 +1291,7 @@ def assign(which, label: str, cwd: str | None = None, now: float | None = None, 
             s["scope"] = globs
         working = [k for k, v in live if _label_matches(label, v)]
         # its launch's lane first; else a working lane of the member with no other open step (a member resumed
-        # with SendMessage keeps its first launch's words: B-fxriigsni7c, B-fyj09eek926)
+        # with SendMessage keeps its first launch's words)
         lane_id = None if deps_open(run, s) else next(
             (k for k in working if s.get("owner") == k or _launch_takes(run, k, s)),
             next((k for k in working if not _open_step_of(run, k, s)), None))
@@ -6202,7 +6202,7 @@ def scope_written(agent: str, sid: str, aid: str, paths: list, now: float | None
     """A review or read-only lane's shell call wrote these files (write detection). A file is credited to whoever's
     own Write, Edit or MultiEdit call touched that path during the call (note_edit: a build lane, its helper or the
     tech lead, never the reading lane itself): devkit audits it as attributed and flags nothing, since an edit opens
-    no shell call and the edit record is exact (B-fy1ae3k2ao6). Every other file is held against the reading lane in
+    no shell call and the edit record is exact. Every other file is held against the reading lane in
     `scope_writes`, so its report is unverified and its step cannot end done on its word: a script of the reading
     lane can write into a working member's scope, so a scope is no alibi. A held file is "possible" when a build lane
     that works now and whose scope holds it, or any working build lane for a file outside every scope, had a shell

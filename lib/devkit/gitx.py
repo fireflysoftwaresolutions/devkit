@@ -781,7 +781,7 @@ def _commit_refs(c, a, text: str):
     return [], None, ""
 
 
-# Crew members who work in one checkout share one git index (lesson L-g1ha6djvhfp). In a crew lane `dev commit` commits
+# Crew members who work in one checkout share one git index. In a crew lane `dev commit` commits
 # from a temporary index that holds HEAD plus the lane's own staged entries, so the shared index keeps every other
 # staged entry exactly as it was, for its owner. The main session, a developer's shell and `dev commit <paths>` commit
 # as before.
