@@ -3,7 +3,14 @@
 All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH restarts at 0 each month); tags are
 `vYY.MM.PATCH`. Sections follow [Keep a Changelog](https://keepachangelog.com/).
 
-## [26.11.5] - Unreleased
+## [26.11.5] - 2026-11-07
+
+This release hardens the guard against more than twenty ways a command could pass unjudged, including commands taken
+from another program's input, deep nesting, scripts it could not read, and the Monitor tool; when the guard itself
+fails while judging a call that acts, it now refuses the call. Audit records keep only the words devkit knows to be
+safe. `dev doctor` asks only for the tools of the languages you chose, the setup wizard reads on light terminals, the
+installer stops early on an Intel Mac or in a Rosetta terminal, plans and tasks keep every line when devkit writes
+them, and the tech lead hears when each crew member finishes.
 
 ### Changed
 
