@@ -127,7 +127,7 @@ class QueueTests(unittest.TestCase):
             "blocks": {"run": "Invoice export", "lanes": 2}, "irreversible": None,
             "options": [{"key": "A", "text": "Leave them out", "recommended": True},
                         {"key": "B", "text": "Include them", "recommended": False}],
-            "type_to_answer": ["approve D1", "approve D1: B"], "copy": None,
+            "type_to_answer": ["approve D1@7f3a", "approve D1@7f3a: B"], "copy": None,
             "open": {"kind": "run", "id": "claude-7f3a", "anchor": "D1"}, "url": None})
 
     def test_blocked_lanes_count_crew_lanes_downstream_of_the_decision_but_not_the_lead(self):
@@ -200,7 +200,7 @@ class QueueTests(unittest.TestCase):
         d = fx.decision("D1", "How do we ship it?", [long, "Wait for\nthe audit"], "", NOW - 300)
         it = row(areas(with_runs(fx.welcome(), statement_run(decisions=[d]))), "decision:claude-9c1d:D1")
         self.assertEqual(len(long), 120)
-        self.assertEqual(it["type_to_answer"], [f"approve D1: {long}", "approve D1: Wait for the audit"])
+        self.assertEqual(it["type_to_answer"], [f"approve D1@9c1d: {long}", "approve D1@9c1d: Wait for the audit"])
 
     def test_the_ci_copy_runs_in_the_projects_folder_and_needs_a_local_path(self):
         rid = "ci_failed:acme/lending-rules:feat/rules-engine"

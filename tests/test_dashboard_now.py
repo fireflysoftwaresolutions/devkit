@@ -115,9 +115,9 @@ class NowScreenTests(unittest.TestCase):
         self.assertEqual((out["key"], out["you"]), ("decision:claude-7f3a:D1", True))
         self.assertEqual(out["id"], ["D1@7f3a"])                                               # the id names its run, in the id's ink
         for part in ("D1@7f3a · Include cancelled invoices in the export?", "9 min", "Backend engineer (Tank) asks · pauses Invoice export, 2 crew members wait",
-                     "Options: A Leave them out (recommended) · B Include them", "In the session, type: approve D1 or approve D1: B"):
+                     "Options: A Leave them out (recommended) · B Include them", "In the session, type: approve D1@7f3a or approve D1@7f3a: B"):
             self.assertIn(part, out["row"])
-        self.assertEqual(out["kbd"], ["approve D1", "approve D1: B"])
+        self.assertEqual(out["kbd"], ["approve D1@7f3a", "approve D1@7f3a: B"])  # only its own session takes it
         self.assertEqual(out["copies"], [])                                                     # consent is typed, never pasted
         self.assertEqual(out["open"], ["Open the run"])
         self.assertEqual(out["others"], 0)                                                      # the only amber bar is the first row's

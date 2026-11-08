@@ -1427,6 +1427,21 @@ class CrossRunIdTests(unittest.TestCase):
         self.assertEqual([d["state"] for d in self.run_of(RUN_A)["decisions"] + self.run_of(RUN_B)["decisions"]],
                          ["pending", "pending"])
 
+    def test_dev_status_gives_another_runs_decision_the_approve_line_of_its_own_session(self):
+        from devkit import cli, crew, registry
+        with self.in_(RUN_A):
+            pg.crew_decision("Keep the old error format?", options="A: keep | B: drop", recommend="A",
+                             from_agent="a1", now=self.m(3))
+        p = {"id": "acme/api", "owner": "acme", "name": "api", "path": None, "local": False, "main": {},
+             "worktrees": [], "canonical_ok": True, "prs_open": [], "status_line": {"line": ""}}
+        with mock.patch.object(registry, "alias_map", lambda projects: {}):
+            v = cli.status_view({"projects": [p], "issues": [], "sessions": []}, p, None,
+                                runs=[self.run_of(RUN_A)], ci={"runs": []}, roster=crew.load(team=False),
+                                now=self.m(5), caller=("claude", RUN_B))
+        (need,) = [n for n in v["needs_you"] if n["kind"] == "decision"]
+        self.assertEqual(need["command"], "approve D1@5e1f0a2b: A")
+        self.assertTrue(need["text"].endswith("Answer it in the chat with session 5e1f0a2b:"), need["text"])
+
     def test_decide_takes_the_callers_own_qualified_id(self):
         with self.in_(RUN_B):
             pg.crew_decision("Tag on Friday?", options="A: yes | B: no", recommend="A", now=self.m(3))
@@ -1652,6 +1667,23 @@ class EvidenceReplayTests(TranscriptCase):
     def test_a_codex_entry_is_never_confirmed_by_the_hook_alone(self):
         # The Keymaker: devkit reads no Codex transcript yet, so a Codex entry has nothing behind it but the hook event
         self.assertFalse(pg.confirmed({"agent": "codex", "channel": "E2", "transcript_uuid": "p-1", "covers": "D1"}))
+
+
+class QualifiedApproveTests(TranscriptCase):
+    # A bare `approve D1` typed in another session's chat counts for that session's own D1. A decision listed outside
+    # its own session shows `approve D1@<session>`, which is evidence only in the session it names
+    def typed(self, text, pid):
+        self.write({"type": "user", "promptId": pid, "uuid": f"u-{pid}", "isSidechain": False,
+                    "origin": {"kind": "human"}, "message": {"role": "user", "content": text}})
+        return self.prompt(text, pid)
+
+    def test_a_qualified_approve_line_counts_only_in_the_session_it_names(self):
+        pg.crew_decision("Skip empty lines or reject the file?", options="A: skip | B: reject", recommend="A")
+        pg.on_final_message("claude", "s1", "**[Firefly> DevKit]** … D1 waits for you: skip empty lines?")
+        self.assertEqual(self.typed("approve D1@5e1f0a2b: B", "p-1"), [])  # another session's D1, typed here
+        self.assertEqual([(e["covers"], e["answer"]) for e in self.typed("approve D1@s1: A", "p-2")], [("D1", "A")])
+        d = pg.crew_decide("D1", "A: skip")
+        self.assertEqual((d["by"], d["verified"], d["answer"]), ("developer", True, "A: skip"))
 
 
 class UnknownCommandGrantTests(TranscriptCase):

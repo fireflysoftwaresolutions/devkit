@@ -2748,7 +2748,15 @@ GRANT_CLASSES = ("push", "pr", "push-destructive", "pr-write", "merge", "release
                  "developer-only", "backup", "embargo")  # B2: the developer's own decisions (guard.DEVELOPER_GRANTS)
 HEADLESS_SURFACES = ("SDK", "claude -p", "codex exec")  # nobody at the keyboard: DEVKIT_PREAPPROVE only
 TRANSCRIPT_DAYS = 30  # Claude Code's default cleanupPeriodDays: older evidence may have lost its transcript
-_APPROVE_LINE = re.compile(r"(?i)^approve\s+(D\d+)\s*(?::\s*(\S.*?))?\s*$")
+# `approve D3`, or `approve D3@9448c4d0` as a decision listed outside its own session shows it (shown_id): groups are
+# the decision, the session prefix it names, and the answer
+_APPROVE_LINE = re.compile(r"(?i)^approve\s+(D\d+)(?:@([0-9a-z][0-9a-z._-]*))?\s*(?::\s*(\S.*?))?\s*$")
+
+
+def _names_session(prefix: str, sid: str) -> bool:
+    """Does the session prefix of a qualified approve line name session `sid`? At least 8 characters of it, or all."""
+    p, s = str(prefix or "").lower(), str(sid or "").lower()
+    return len(p) >= min(SESSION_PREFIX, len(s)) and bool(s) and s.startswith(p)
 _GRANT_LINE = re.compile(r"(?i)^grant\s+([a-z][a-z-]*)\s+(\S+)\s*$")
 _PLAIN_YES = re.compile(r"(?i)^\s*yes\s*[.!]?\s*$")
 _RELAYED = re.compile(r"^\s*(?:\[[^\]\n]{0,120}\bsent to (?:Claude|Codex)\b[^\]\n]*\]|\[SYSTEM NOTIFICATION|"
@@ -3186,7 +3194,9 @@ def _refuse_forged(agent: str, sid: str, named, what: str):
 def on_human_prompt(agent: str, data: dict, now: float | None = None) -> list:
     """UserPromptSubmit: the E2 lines of the developer's prompt -> the entries recorded. A line of its own, outside
     code blocks and quotes: `approve D<n>[: <option>]` or `grant <action> <target>`; a plain "yes" covers the one
-    decision the last final message showed. Relayed comments, notifications and headless sessions record nothing."""
+    decision the last final message showed. `approve D<n>@<session>[: <option>]`, as a decision listed outside its
+    own session shows it, counts only in the session it names, and records nothing typed in another. Relayed
+    comments, notifications and headless sessions record nothing."""
     now = now or time.time()
     sid = data.get("session_id") or ""
     sess = state.read(session_path(agent, sid)) if sid else None
@@ -3205,9 +3215,11 @@ def on_human_prompt(agent: str, data: dict, now: float | None = None) -> list:
     repo = sess.get("project") or (live or {}).get("project") or ""  # a grant holds in this repository only
     for ln in _own_lines(text):
         mt = _APPROVE_LINE.match(ln)
+        if mt and mt.group(2) and not _names_session(mt.group(2), sid):
+            continue  # a decision of another session's run, typed here: it is evidence only in that session
         if mt and live:
             new.append(_entry(agent, "E2", mt.group(1).upper(), ln, uuid, tp, live, now,
-                              answer=(mt.group(2) or "").strip()[:300], repo=repo, session=sid))
+                              answer=(mt.group(3) or "").strip()[:300], repo=repo, session=sid))
             continue
         mt = _GRANT_LINE.match(ln)
         if mt and mt.group(1).lower() in GRANT_CLASSES:
@@ -3439,7 +3451,8 @@ def _speaks_of(d: dict, q: dict, answers: dict, notes: dict) -> bool:
 def _word_on(d: dict, r: dict) -> bool:
     """Is transcript record `r` a word of the developer on irreversible decision `d`: a question tool result, the main
     session's or a crew member's, with a question that speaks of it (_speaks_of), or a prompt they typed with an
-    `approve D<n>` line for it?"""
+    `approve D<n>` line for it? A line qualified with any session counts too: a word that may be on it ends an
+    earlier yes rather than letting it stand."""
     res = r.get("toolUseResult")
     if isinstance(res, dict) and isinstance(res.get("questions"), list):
         answers = res.get("answers") if isinstance(res.get("answers"), dict) else {}

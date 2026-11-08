@@ -484,9 +484,11 @@ A decision belongs to its run, and only an open one needs you:
   never your answer, so it opens no irreversible action.
 - **Closed with its run.** When the run ends (`dev progress done`) or is replaced (`dev progress start --replace`),
   each decision still pending in it, moot ones included, closes with the reason (`crew.decision-closed`).
-- **Answered in its own session.** A decision of another session's run shows as `D3@9448c4d0`. Answer it in that
-  session's chat (`approve D3: <option>`), where devkit reads your evidence; its tech lead records it there.
-  `dev crew decide` and `dev crew withdraw` refuse another session's qualified id, and take your own run's.
+- **Answered in its own session.** A decision of another session's run shows as `D3@9448c4d0`, and `dev status`
+  and the dashboard give its approve line in that form: `approve D3@9448c4d0: <option>`. Type it in that
+  session's chat, where devkit reads your evidence; typed in any other session it counts for nothing, so it never
+  answers that session's own `D3`. Its tech lead records it there: `dev crew decide` and `dev crew withdraw`
+  refuse another session's qualified id, and take your own run's.
 
 [Work states › Decisions](work-states.md#decisions) draws the whole lifecycle.
 

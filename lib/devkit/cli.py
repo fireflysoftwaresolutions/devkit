@@ -724,14 +724,15 @@ def _message_need(msg: dict, roster, ref: str = "") -> dict:
 
 def _decision_need(d: dict, roster, ref: str = "") -> dict:
     """A decision that needs the developer; `ref`: its id as shown to the caller (progress.shown_id). Its answer is
-    typed in the chat of the session that owns it, whose evidence reads the bare `approve D<n>` line."""
+    typed in the chat of the session that owns it: `approve D3`, or `approve D3@9448c4d0` for another session's run,
+    which that session alone takes as the developer's evidence."""
     m, who = _asker(d.get("from_name"), roster)
     q = (d.get("question") or "").rstrip()
     rec = f" {m['name'] if m else who} recommends {d['recommend']}." if d.get("recommend") else ""
-    answer = f"approve {d['id']}" + (f": {d['recommend']}" if d.get("recommend") else "")
     ref = ref or d.get("id")
+    answer = f"approve {ref}" + (f": {d['recommend']}" if d.get("recommend") else "")
     where = "Answer in the chat with the session:" if ref == d.get("id") else \
-        f"Answer {ref} in the chat with {_session_of(ref)}:"
+        f"Answer it in the chat with {_session_of(ref)}:"
     return {"kind": "decision", "id": ref, "text": f"{who} asks: {q}{rec} {where}", "command": answer,
             "ts": d.get("ts")}
 

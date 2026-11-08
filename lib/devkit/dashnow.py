@@ -594,8 +594,8 @@ def _decision_items(run: dict, rid: str, roster) -> list:
     goal = _line(run.get("goal") or "the run", 80)
     out = []
     for d in _pending(run):
-        # `did` is what the run's own session reads (the item's key, the run's anchor, the typed approve line);
-        # `shown` names the run too, since the page belongs to no session (progress.shown_id)
+        # `did` keys the item and anchors the run; `shown` names the run too (progress.shown_id), since the page
+        # belongs to no session, and so does the approve line it gives, which only that run's session takes
         did, shown = _line(d.get("id"), 20), _line(progress.shown_id(run, d.get("id")), 20)
         asker = _who(d.get("from_name") or d.get("from") or "main", roster)
         lanes = _lanes_waiting(run, d.get("id"))
@@ -608,12 +608,12 @@ def _decision_items(run: dict, rid: str, roster) -> list:
             out.append(_item(**common, kind="grant", irreversible=act, title=f"{what} waits for your grant",
                              lines=[f"{asker} asked at {_clock(d.get('ts') or 0)} for {goal}.", d.get("question")],
                              type_to_answer=[f"grant {act} {target}"] if target and " " not in target
-                             else _type_to_answer(did, common["options"])))
+                             else _type_to_answer(shown, common["options"])))
             continue
         waits = f", {_plural(lanes, 'crew member waits', 'crew members wait')}" if lanes else ""
         out.append(_item(**common, kind="decision", title=f"{shown} · {d.get('question') or ''}",
                          lines=[f"{asker} asks · pauses {goal}{waits}"],
-                         type_to_answer=_type_to_answer(did, common["options"])))
+                         type_to_answer=_type_to_answer(shown, common["options"])))
     return out
 
 
