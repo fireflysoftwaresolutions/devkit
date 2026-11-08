@@ -1667,8 +1667,9 @@ def _check_segments(cmd: str, segs, ecwd: str, agent: str, depth: int = 0, outer
             res = _check_segments(line, inner, ecwd, agent, depth + 1, envs) if inner else None
             if res:
                 return res
-    # what `<(…)` and `>(…)` run: the tokenizer leaves their words in the command around them (`$(…)` it splits)
-    subs = _process_substitutions(cmd)
+    # what `<(…)`, `>(…)` and the `$(…)` and backticks inside a word run: the tokenizer leaves their words in the
+    # command around them (it splits only a bare `$(…)`)
+    subs = _process_substitutions(cmd) + _command_substitutions(cmd)
     if subs and depth >= 4:
         return deny(NESTED_REASON)
     for line in subs:
@@ -3305,9 +3306,10 @@ class _Shell:
                 self.bodies = heredocs
             if v:
                 return v
-        # what `<(…)` and `>(…)` run, from the folder the command starts in and the one it ends in (the tokenizer
-        # leaves their words in the command around them, where `$(…)` it splits into commands of their own)
-        for text in _process_substitutions(self.cmd):
+        # what `<(…)`, `>(…)` and the `$(…)` and backticks inside a word run, from the folder the command starts in
+        # and the one it ends in (the tokenizer leaves their words in the command around them; it splits only a bare
+        # `$(…)` into commands of their own)
+        for text in _process_substitutions(self.cmd) + _command_substitutions(self.cmd):
             for where in dict.fromkeys((self.cwd, cwd)):
                 v = self.nested(text, where)
                 if v:
@@ -5395,7 +5397,7 @@ def _subst(s: str, quotes: bool, procs: list | None = None) -> list:
         elif s.startswith("$(", i) or (quotes and q is None and _proc_subst_at(s, i)):
             # `<(…)`, `>(…)` and zsh's `=(…)`: process substitutions, which the shell runs as `$(…)` (never in double
             # quotes or in a heredoc body, where they are text)
-            j, depth, qq = i + 2, 1, None
+            j, depth, qq, pending = i + 2, 1, None, []
             while j < n and depth:
                 d = s[j]
                 if qq:
@@ -5411,6 +5413,15 @@ def _subst(s: str, quotes: bool, procs: list | None = None) -> list:
                     depth += 1
                 elif d == ")":
                     depth -= 1
+                elif d == "<" and s.startswith("<<", j) and not s.startswith("<<<", j) and s[j - 1:j] != "<" and \
+                        (m := _HEREDOC_AT.match(s, j)):  # the shell reads a heredoc inside `$(…)`, even in "…"
+                    pending.append(m.group(1) or m.group(2) or m.group(3))
+                    j = m.end()
+                    continue
+                elif d == "\n" and pending:  # its body is text: an apostrophe there opens no quote
+                    j = _past_heredoc_bodies(s, j + 1, pending)
+                    pending = []
+                    continue
                 j += 1
             out.append(s[i + 2:j - 1] if depth == 0 else s[i + 2:])
             if procs is not None:
@@ -5436,6 +5447,24 @@ def _subst(s: str, quotes: bool, procs: list | None = None) -> list:
     return out
 
 
+def _past_heredoc_bodies(s: str, i: int, delims) -> int:
+    """The index after the bodies of heredocs whose bodies start at `i`, one per delimiter in order, each ending at
+    its terminator line, or, as bash 3.2 reads it in a `$(…)`, right after a delimiter a `)` follows (_split_heredocs
+    reads them the same way)."""
+    n = len(s)
+    for delim in delims:
+        while i < n:
+            j = s.find("\n", i)
+            j = n if j < 0 else j
+            ln, start, i = s[i:j], i, j + 1
+            if ln.strip() == delim:
+                break
+            if ln.startswith(delim + ")"):
+                i = start + len(delim)
+                break
+    return min(i, n)
+
+
 def _process_substitutions(cmd: str) -> list:
     """The command lines of the `<(…)` and `>(…)` the shell runs in `cmd`, also inside a `$(…)` or backticks: the
     tokenizer leaves their words in the command around them, where `$(…)` it splits into commands of their own."""
@@ -5456,6 +5485,20 @@ def _expansions(cmd: str) -> list:
     double quotes too), and in heredoc bodies whose delimiter is unquoted."""
     text, bodies = _split_heredocs(cmd)
     out = _subst(text, True)
+    for body, expands in bodies:
+        if expands:
+            out += _subst(body, False)
+    return out
+
+
+def _command_substitutions(cmd: str) -> list:
+    """The command lines of the `$(…)` and backticks the shell runs in `cmd` (outside single quotes and comments, in
+    double quotes, here-strings and expanding heredoc bodies too), not its `<(…)`: the tokenizer splits only a bare
+    `$(…)` into segments of their own, and keeps the rest inside one word, where no rule would see them (`echo
+    "$(dev install)"`, a parse-only `bash -n -c "$(…)"`). Each rule walks these as lines one level down."""
+    text, bodies = _split_heredocs(cmd)
+    procs = []
+    out = [body for body, proc in zip(_subst(text, True, procs), procs) if not proc]
     for body, expands in bodies:
         if expands:
             out += _subst(body, False)
@@ -9142,7 +9185,7 @@ def _text_actions(text, cwd, depth=0, from_code=False, expand=True):
                 cwd, shell_env["GIT_DIR"] = str(UNKNOWN), "$(source)"
                 continue
             pagers, unknown = [], False
-            if name == "git":  # the pager it runs through the shell is a command like any other (RT3)
+            if name == "git":  # the pager it runs through the shell is a command like any other
                 pagers, unknown = _git_pagers(argv, {**shell_env, **assigns})
             elif name == "gh":  # gh starts GH_PAGER, else PAGER, for its output
                 env = {**shell_env, **assigns}
