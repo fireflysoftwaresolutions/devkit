@@ -120,7 +120,9 @@ explains what moves each record and how to repair one that drifted.
   scheduled sweep reads Claude Code's records beside every session transcript devkit knows, so it closes such
   lanes, with the reason in the run's history. `dev crew delegate` and `dev progress assign` give no step to such a
   member and refuse no scope it held: the step waits for a new launch, and the sweep sends a step that started after
-  its member ended back to pending, never to unverified.
+  its member ended back to pending, never to unverified. A message for such a member (`dev crew ask --to tank`) waits
+  for their next launch instead of their old lane, and devkit tells the sender; a step such a member owned closes on
+  the tech lead's evidence (`dev progress step --step`), and the run's history says its owner had ended.
 - **The dashboard no longer warns about commits merged by content.** A project's health, its actions, and the
   worktrees to reclaim count only commits with no equivalent on `origin`'s default branch.
 - **A stopped rebase no longer stops every handoff sync without a word.** devkit ends it before reads, pulls, commits,

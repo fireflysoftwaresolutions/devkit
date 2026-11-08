@@ -310,7 +310,8 @@ dev crew inbox
 ```
 
 A message reaches its recipient with the recipient's next action (the PostToolUse hook adds it to the context), or
-with the main session's next prompt. A message to a member who has not started yet waits for them. A message to the
+with the main session's next prompt. A message to a member who has not started yet, or whose lane ended or went
+stale, waits for their next launch; devkit tells the sender when the member ended or went stale. A message to the
 tech lead by role, such as `--to "Tech lead"` or `--to Morpheus`, reaches the main session.
 
 Each message has a kind, and only a question waits:
