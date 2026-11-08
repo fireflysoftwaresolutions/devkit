@@ -1843,9 +1843,10 @@ class EstimateRoundingTests(unittest.TestCase):
 
 class ScopeWriteTests(unittest.TestCase):
     # The Code reviewer works review-only while the Senior engineer's step scope holds docs/audit.md. A file that
-    # changed during the reviewer's shell call inside a working member's scope is that member's write, call open or
-    # not: an Edit opens no shell call (B-fy1ae3k2ao6: the Security engineer's and the QA engineer's edits were held
-    # against the Business analyst). Only a file no working member's scope holds is the reviewer's to answer for
+    # changed during the reviewer's shell call is the write of whoever's own Write, Edit or MultiEdit touched it
+    # during that call (B-fy1ae3k2ao6: the Security engineer's and the QA engineer's edits were held against the
+    # Business analyst). Every other file is the reviewer's, even inside a working member's scope: a script of the
+    # reviewer can write there, so a scope is no alibi
     def setUp(self):
         self.state = TempState().__enter__()
         self.addCleanup(self.state.__exit__, None, None, None)
@@ -1854,50 +1855,66 @@ class ScopeWriteTests(unittest.TestCase):
         pg.assign("review", "Seraph")
         launch("a_neo", "devkit:neo", "Neo: audit docs")
         launch("a_seraph", "devkit:seraph", "Seraph: review")
+        self.t0 = time.time()
+        # the reviewer's shell call has started (PreToolUse): the window its written files are judged in
+        pg.call_opened("claude", {"session_id": "s1", "tool_use_id": "toolu_seraph_sh", "agent_id": "a_seraph",
+                                  "tool_input": {"command": "python3 scratch/check.py"}}, now=self.t0)
 
     def told(self):
         return [m["text"] for m in pg.load_run("claude", "s1").get("messages") or [] if m.get("to") == "main"
                 and "shell call" in m["text"]]
 
-    def neo_call_open(self):
-        # the Senior engineer's shell call has started (PreToolUse) and has no result yet (PostToolUse)
-        pg.call_opened("claude", {"session_id": "s1", "tool_use_id": "toolu_neo_sh", "agent_id": "a_neo",
-                                  "tool_input": {"command": "python3 -m unittest tests.test_audit"}})
+    def edited(self, aid, path, at):
+        # a member's Edit call ends (PostToolUse) at `at`, as the hook hands it to progress
+        with mock.patch.object(pg.time, "time", lambda: at):
+            pg.on_tool_done("claude", {"session_id": "s1", "tool_name": "Edit", "tool_use_id": f"toolu_{aid}",
+                                       "agent_id": aid, "tool_input": {"file_path": f"/repo/{path}"}})
 
-    def test_files_in_working_build_scopes_are_those_lanes_writes_and_only_the_rest_is_held(self):
-        # two members edit with their Edit tool (no shell call open) while the reviewer's shell call runs
+    def written(self, paths):
+        return pg.scope_written("claude", "s1", "a_seraph", paths, now=self.t0 + 30)
+
+    def test_files_members_edited_during_the_readers_call_are_theirs_and_only_the_rest_is_held(self):
+        # this run's case: two members edit with their Edit tool (no shell call open) while the reader's call runs
         from devkit import audit
         pg.add_step("audit tests=10m")
         pg.assign("audit tests", "Mouse", scope="tests/test_audit.py", why="test")
         launch("a_mouse", "devkit:mouse", "Mouse: audit tests")
-        flagged = pg.scope_written("claude", "s1", "a_seraph", ["docs/audit.md", "tests/test_audit.py", "lib/x.py"])
-        self.assertEqual((flagged["paths"], flagged["certainty"]), (["lib/x.py"], "possible"))
+        self.edited("a_neo", "docs/audit.md", self.t0 + 5)
+        self.edited("a_mouse", "tests/test_audit.py", self.t0 + 6)
+        flagged = self.written(["docs/audit.md", "tests/test_audit.py", "lib/x.py"])
+        self.assertEqual((flagged["paths"], flagged["certainty"]), (["lib/x.py"], "certain"))
         self.assertEqual(sorted((r["target"], r["detail"]) for r in audit.query(action="scope.write")),
                          [("Mouse", "attributed: tests/test_audit.py"), ("Neo", "attributed: docs/audit.md"),
-                          ("Seraph", "possible: lib/x.py")])
+                          ("Seraph", "certain: lib/x.py")])
         self.assertNotIn("changed by another lane", pg.render_update(pg.load_run("claude", "s1"), branch="b"))
 
     def test_a_shell_call_that_only_overlaps_other_members_edits_tells_nobody(self):
-        self.assertIsNone(pg.scope_written("claude", "s1", "a_seraph", ["docs/audit.md"]))
+        self.edited("a_neo", "docs/audit.md", self.t0 + 5)
+        self.assertIsNone(self.written(["docs/audit.md"]))
         self.assertEqual(self.told(), [])
         self.assertNotIn("scope_writes", pg.load_run("claude", "s1")["agents"]["a_seraph"])
 
-    def test_a_file_in_a_build_scope_is_credited_to_that_lane_while_it_has_a_call_open(self):
+    def test_a_readers_write_into_a_working_members_scope_with_no_edit_of_theirs_is_held(self):
+        # the hiding case: the reader's script writes docs/audit.md; the Senior engineer edited it before the call
         from devkit import audit
-        self.neo_call_open()
-        flagged = pg.scope_written("claude", "s1", "a_seraph", ["docs/audit.md", "lib/x.py"]) or {}
-        self.assertEqual(flagged.get("paths"), ["lib/x.py"])
+        self.edited("a_neo", "docs/audit.md", self.t0 - 60)
+        flagged = self.written(["docs/audit.md"])
+        self.assertEqual((flagged["paths"], flagged["certainty"]), (["docs/audit.md"], "certain"))
         (text,) = self.told()
-        self.assertIn("docs/audit.md", text)  # the tech lead hears of the credited file too, with both lanes named
-        self.assertIn("Senior engineer (Neo)", text)
-        self.assertIn(("Neo", "attributed: docs/audit.md"),
-                      [(r["target"], r["detail"]) for r in audit.query(action="scope.write")])
+        self.assertIn("Code reviewer (Seraph)", text)
+        self.assertEqual([(r["target"], r["detail"]) for r in audit.query(action="scope.write")],
+                         [("Seraph", "certain: docs/audit.md")])
+
+    def test_a_file_in_the_scope_of_a_member_whose_shell_call_was_open_is_held_as_possible(self):
+        pg.call_opened("claude", {"session_id": "s1", "tool_use_id": "toolu_neo_sh", "agent_id": "a_neo",
+                                  "tool_input": {"command": "python3 -m unittest tests.test_audit"}}, now=self.t0 + 1)
+        flagged = self.written(["docs/audit.md"])
+        self.assertEqual((flagged["paths"], flagged["certainty"]), (["docs/audit.md"], "possible"))
+        (text,) = self.told()
+        self.assertIn("possibly the shell call of Senior engineer (Neo)", text)
 
     def test_the_review_step_lists_the_files_another_lane_changed_in_the_scope_of_the_work_it_follows(self):
-        run = pg.load_run("claude", "s1")  # the Senior engineer's lane stopped: nobody works on docs/audit.md now
-        run["agents"]["a_neo"]["state"] = "stopped"
-        pg._save(run, touch_session=False)
-        pg.scope_written("claude", "s1", "a_seraph", ["docs/audit.md"])
+        self.written(["docs/audit.md"])
         lines = pg.render_update(pg.load_run("claude", "s1"), branch="b").splitlines()
         review = next(ln for ln in lines if " 2. review" in ln)
         self.assertIn("changed by another lane: docs/audit.md (Code reviewer (Seraph), certain)", review)
