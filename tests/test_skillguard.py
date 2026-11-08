@@ -139,6 +139,21 @@ class RuleFixtures(unittest.TestCase):
         self.assert_rules(["tests/test_page.py", "lib/report.py", "lib/tool.py", "src/main/java/acme/AuditSink.java",
                            "web/src/app/hero.component.ts"])
 
+    # service code in PHP, Python and Node needs the backend skill, like a Java controller does; a plain module not
+    def test_service_code_needs_the_backend_skill(self):
+        self.assert_rules(["app/Http/Controllers/UserController.php", "routes/api.php", "service/main.py",
+                           "server/routes.ts", "lib/tool.py"])
+
+    # a migration needs the backend skill everywhere, and the Postgres skill only where the project uses Postgres
+    def test_postgres_skill_only_where_the_project_uses_postgres(self):
+        mysql = "database/migrations/2024_01_01_create_users_table.php"
+        pg = "src/main/resources/db/migration/V1__init.sql"
+        self.assert_rules([mysql])
+        self.assert_rules([pg], root=self.pg, expect=EXPECT_PG)
+        need = {rel: sorted({s for r, _ in sg.rules_for_files([str(root / rel)]) for s in sg.required(r, "claude")})
+                for root, rel in ((self.app, mysql), (self.pg, pg))}
+        self.assertEqual(need, {mysql: ["backend"], pg: ["backend", "supabase-postgres-best-practices"]})
+
 
 class OutsideTheRepository(unittest.TestCase):
     def setUp(self):

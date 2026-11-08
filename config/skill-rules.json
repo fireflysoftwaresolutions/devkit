@@ -1,5 +1,5 @@
 {
-  "_comment": "Which skills a kind of work requires. devkit enforces them: (1) the session catalog lists them by kind of work, (2) briefs for Claude subagents get the skills appended, (3) the Stop hook refuses to finish a turn that changed matching files without loading the skills, once per skill per session. `files` are globs on changed paths; `content` is a regex checked in changed files that match `files` (or `content_files`, except those matching `content_exclude`, such as tests that hold HTML); a file on disk outside every repository is scratch work and matches no rule; `activities` are the kinds of work (ids from the crew's RACI) the model declares for a step or a brief; `commands` are command words the agent runs. Nothing matches the developer's words: they can be in any language (crew gap review, C13), and the model picks skills from the catalog it gets at session start. Extend or override with `skills.rules` in ~/.config/devkit/config.json; turn enforcement off with `skills.enforce: false`.",
+  "_comment": "Which skills a kind of work requires. devkit enforces them: (1) the session catalog lists them by kind of work, (2) briefs for Claude subagents get the skills appended, (3) the Stop hook refuses to finish a turn that changed matching files without loading the skills, once per skill per session. `files` are globs on changed paths; `content` is a regex checked in changed files that match `files` (or `content_files`, except those matching `content_exclude`, such as tests that hold HTML); a file on disk outside every repository is scratch work and matches no rule; `project` limits a rule's files to repositories whose project files (`files`, at the repository's top) match `content` (a project that uses Postgres); `activities` are the kinds of work (ids from the crew's RACI) the model declares for a step or a brief; `commands` are command words the agent runs. Nothing matches the developer's words: they can be in any language (crew gap review, C13), and the model picks skills from the catalog it gets at session start. Extend or override with `skills.rules` in ~/.config/devkit/config.json; turn enforcement off with `skills.enforce: false`.",
   "rules": [
     {
       "id": "ui",
@@ -192,7 +192,7 @@
     },
     {
       "id": "api",
-      "why": "Contract first, RFC 9457 errors, compatibility, pagination, idempotency",
+      "why": "Contract first, RFC 9457 errors, compatibility, pagination, idempotency; service code in every backend stack",
       "activities": [
         "backend",
         "sso"
@@ -203,9 +203,34 @@
         "openapi*.json",
         "*.graphql",
         "*Controller.java",
+        "*Controller.php",
         "*controller.ts",
         "*.proto"
       ],
+      "content_files": [
+        "*.py",
+        "*.php",
+        "*.ts",
+        "*.js",
+        "*.mjs",
+        "*.cjs"
+      ],
+      "content_exclude": [
+        "test_*.py",
+        "*_test.py",
+        "tests/**",
+        "test/**",
+        "__tests__/**",
+        "*.spec.*",
+        "*.test.*",
+        "*Test.java",
+        "*Tests.java",
+        "*IT.java",
+        "*_test.go",
+        "*Test.php",
+        "conftest.py"
+      ],
+      "content": "@(?:app|api|router|bp|blueprint|[a-z_]+_router)\\.(?:get|post|put|patch|delete|route|api_route|websocket)\\(|\\bAPIRouter\\(|\\bFastAPI\\(|\\bFlask\\(__name__|\\burlpatterns\\s*=|Route::(?:get|post|put|patch|delete|any|match|resource|apiResource|group|middleware|prefix|controller)\\b|#\\[Route\\(|\\b(?:app|router|server|fastify)\\.(?:get|post|put|patch|delete|all|route)\\(\\s*['\"`]/|from\\s+['\"]@nestjs/|require\\(['\"]express['\"]\\)|from\\s+['\"]express['\"]|\\bnew\\s+Hono\\(",
       "skills": {
         "claude": [
           "backend"
@@ -217,7 +242,7 @@
     },
     {
       "id": "database",
-      "why": "Postgres schema, migrations, indexes and locking",
+      "why": "Schema changes as migrations: forward-only, expand, migrate and contract, data migrations apart from schema",
       "activities": [
         "database"
       ],
@@ -225,7 +250,6 @@
         "alembic",
         "flyway",
         "liquibase",
-        "psql",
         "prisma migrate"
       ],
       "files": [
@@ -237,12 +261,64 @@
       ],
       "skills": {
         "claude": [
-          "supabase-postgres-best-practices",
           "backend"
         ],
         "codex": [
-          "supabase-postgres-best-practices",
           "backend"
+        ]
+      }
+    },
+    {
+      "id": "postgres",
+      "why": "Postgres schema, migrations, indexes and locking, in a project that uses Postgres",
+      "commands": [
+        "psql",
+        "pg_dump",
+        "pg_restore"
+      ],
+      "files": [
+        "*.sql",
+        "**/db/migration/**",
+        "**/migrations/**",
+        "**/alembic/**",
+        "*.changelog.xml"
+      ],
+      "project": {
+        "files": [
+          "docker-compose*.yml",
+          "docker-compose*.yaml",
+          "compose*.yml",
+          "compose*.yaml",
+          ".env.example",
+          ".env.sample",
+          "pom.xml",
+          "build.gradle",
+          "build.gradle.kts",
+          "package.json",
+          "pyproject.toml",
+          "requirements*.txt",
+          "Pipfile",
+          "composer.json",
+          "Gemfile",
+          "go.mod",
+          "Cargo.toml",
+          "alembic.ini",
+          "prisma/schema.prisma",
+          "supabase/config.toml",
+          "config/database.php",
+          "config/database.yml",
+          "src/main/resources/application*.yml",
+          "src/main/resources/application*.yaml",
+          "src/main/resources/application*.properties"
+        ],
+        "content": "postgres|psycopg|asyncpg|pgsql|jdbc:postgresql|pg8000|\"pg\"\\s*:|jackc/pgx|lib/pq|supabase"
+      },
+      "skills": {
+        "claude": [
+          "supabase-postgres-best-practices"
+        ],
+        "codex": [
+          "supabase-postgres-best-practices"
         ]
       }
     },
@@ -378,6 +454,12 @@
         "gh pr create",
         "gh release"
       ],
+      "files": [
+        "VERSION",
+        "cliff.toml",
+        ".release-please-manifest.json",
+        "release-please-config.json"
+      ],
       "skills": {
         "claude": [
           "delivery",
@@ -387,13 +469,7 @@
           "delivery",
           "release-policy"
         ]
-      },
-      "files": [
-        "VERSION",
-        "cliff.toml",
-        ".release-please-manifest.json",
-        "release-please-config.json"
-      ]
+      }
     },
     {
       "id": "crew",

@@ -104,8 +104,9 @@ def delivered(paths) -> list:
 
 def rules_for_files(paths) -> list:
     """[(rule, [the paths it matches])]: a path matches a rule's `files` globs by name; a path that matches its
-    `content_files` and none of its `content_exclude` globs matches when its text matches `content`."""
-    hits = []
+    `content_files` and none of its `content_exclude` globs matches when its text matches `content`. A rule with a
+    `project` condition keeps only the paths of repositories whose project files match it (`project_uses`)."""
+    hits, seen = [], {}
     for r in rules():
         files = [p for p in paths if any(_match_path(p, g) for g in r.get("files") or [])]
         if r.get("content") and r.get("content_files"):
@@ -123,9 +124,38 @@ def rules_for_files(paths) -> list:
         elif r.get("content") and files:  # files match only when their content matches too (e.g. Spring code)
             rx = re.compile(r["content"], re.I)
             files = [p for p in files if _read_matches(p, rx)]
+        if files and r.get("project"):
+            files = [p for p in files if project_uses(p, r["project"], seen)]
         if files:
             hits.append((r, files))
     return hits
+
+
+def project_uses(path: str, spec: dict, seen=None) -> bool:
+    """A rule's `project` condition: a project file of the path's repository (`files`, globs at the repository's
+    top) has text that matches `content`, such as a project that uses Postgres. False outside a repository.
+    `seen` caches the answer per repository and condition."""
+    top = repo_top(path)
+    if top is None:
+        return False
+    key = (str(top), spec.get("content") or "", tuple(spec.get("files") or ()))
+    if seen is not None and key in seen:
+        return seen[key]
+    rx = re.compile(spec.get("content") or r"(?!)", re.I)
+    found = False
+    for g in spec.get("files") or []:
+        for f in sorted(top.glob(g)):
+            try:
+                if f.is_file() and rx.search(f.read_text(errors="ignore")[:200_000]):
+                    found = True
+                    break
+            except OSError:
+                continue
+        if found:
+            break
+    if seen is not None:
+        seen[key] = found
+    return found
 
 
 def _read_matches(p, rx) -> bool:
