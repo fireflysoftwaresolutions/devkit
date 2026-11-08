@@ -295,6 +295,65 @@ class LaneStoppedTests(unittest.TestCase):
         self.assertEqual((run["plan"][0]["state"], run["plan"][0]["owner"]), ("running", "a_link2"))
         self.assertEqual([k for k, _ in pg.slots(run)], ["a_link2"])
 
+    def test_a_stopped_lane_whose_step_a_live_lane_took_loses_its_scope(self):
+        pg.assign("ciwatch reports once", "Link", scope="lib/devkit/ciwatch.py", why="test", now=self.t0 + 70)
+        launch("a_link2", "devkit:link", "Link: ciwatch reports once", at=self.t0 + 90)
+        pg.lane_stopped("a_link", "stopped by the tech lead: a second launch took over", agent="claude", sid="s1",
+                        now=self.t0 + 120)
+        run = pg.load_run("claude", "s1")
+        self.assertEqual(pg.lane_scope(run, "a_link2"), [["lib/devkit/ciwatch.py"]])
+        self.assertEqual((pg.lane_scope(run, "a_link"), pg.lane_tools(run, "a_link")), ([], "read"))
+
+
+class ResumeSlotTests(unittest.TestCase):
+    # With two crew slots, the Backend engineer and the Frontend engineer work; TaskStop ends the Backend engineer's
+    # lane and frees its slot; when SendMessage resumes the stopped lane later, it must take a slot like a launch, and
+    # a stopped lane whose step a new launch took must not write in that step's files again
+    def setUp(self):
+        self.state = TempState().__enter__()
+        self.addCleanup(self.state.__exit__, None, None, None)
+        limit = config(max_parallel=2, reserve=0)
+        limit.start()
+        self.addCleanup(limit.stop)
+        pg.start("Work", plan=["api", "ui", "docs"])
+        pg.assign("api", "Tank", scope="services/**", why="test")
+        pg.assign("ui", "Trinity", scope="web/**", why="test")
+        pg.assign("docs", "Ghost", scope="docs/**", why="test")
+        launch("a_tank", "devkit:tank", "Tank: api")
+        launch("a_tri", "devkit:trinity", "Trinity: ui")
+        pg.reconcile_hook("claude", {"session_id": "s1", "hook_event_name": "PostToolUse", "tool_name": "TaskStop",
+                                     "tool_input": {"task_id": "a_tank"},
+                                     "tool_response": {"task_id": "a_tank", "task_type": "local_agent"}})
+
+    def resume_tank(self):
+        # SendMessage resumes the stopped agent, and its next tool call binds it again
+        pg.bind("claude", {"session_id": "s1", "agent_id": "a_tank", "agent_type": "devkit:tank"})
+        return pg.load_run("claude", "s1")
+
+    def test_a_resumed_lane_waits_read_only_while_no_slot_is_free(self):
+        launch("a_ghost", "devkit:ghost", "Ghost: docs")
+        refusal = pg.launch_verdict("claude", call("Tank: api", "devkit:tank"), pg.load_run("claude", "s1"))
+        run = self.resume_tank()
+        self.assertEqual([k for k, _ in pg.slots(run)], ["a_tri", "a_ghost"])
+        self.assertEqual(pg.lane_tools(run, "a_tank"), "read")
+        told = [m["text"] for m in run.get("messages") or [] if m.get("to") == "main"]
+        self.assertTrue(refusal and any(refusal in t for t in told), (refusal, told))
+
+    def test_a_waiting_lane_takes_its_slot_at_its_next_call_once_one_is_free(self):
+        launch("a_ghost", "devkit:ghost", "Ghost: docs")
+        self.assertNotIn("a_tank", [k for k, _ in pg.slots(self.resume_tank())])  # it waits
+        pg.on_subagent("claude", {"session_id": "s1", "agent_id": "a_ghost", "agent_type": "devkit:ghost",
+                                  "last_assistant_message": "done"}, False)
+        run = self.resume_tank()
+        self.assertEqual([k for k, _ in pg.slots(run)], ["a_tank", "a_tri"])
+        self.assertEqual(pg.lane_tools(run, "a_tank"), "all")  # the Backend engineer's own level again
+
+    def test_a_stopped_lane_whose_step_a_new_launch_took_loses_its_scope(self):
+        launch("a_tank2", "devkit:tank", "Tank: api")
+        run = pg.load_run("claude", "s1")
+        self.assertEqual(run["plan"][0]["owner"], "a_tank2")
+        self.assertEqual((pg.lane_scope(run, "a_tank"), pg.lane_tools(run, "a_tank")), ([], "read"))
+
 
 class VisibleTests(unittest.TestCase):
     # R7 (acceptance): dev crew and the status block's Crew line say how many slots are in use, and why the limit is

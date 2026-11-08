@@ -67,30 +67,44 @@ def current_session(cwd: str | None = None):
     return resolve_session(cwd)[:2]
 
 
-def resolve_session(cwd: str | None = None):
+def resolve_session(cwd: str | None = None, argv=None):
     """-> (agent, session id, how) of the session running this command (spec C4):
     ancestry  the nearest parent process whose pid a session record holds (the agent's own process, recorded at
-              SessionStart), so two sessions in one repository each find their own; DEVKIT_SESSION only chooses
-              among the sessions of that process (after /clear)
+              SessionStart), so two sessions in one repository each find their own; of that process's sessions, the
+              one whose call ledger holds an open call for this very command, else the one DEVKIT_SESSION names
+              (after /clear), else the newest
+    ledger    no session of this process holds an open call for it, and exactly one recent session of this
+              repository that no live process holds does: Claude Code gave the running conversation a new session id
+              (a compaction), and the older record still holds the process until the new one registers it
     env       DEVKIT_SESSION, which Claude Code exports to the session's shells (no parent matched)
     recency   the most recently active devkit session in the same repository (Codex without a recorded pid)
-    shell     none of these: a shell of the developer's, with a session of its own"""
+    shell     none of these: a shell of the developer's, with a session of its own
+    `argv`: the command's arguments, default sys.argv[1:] (the ledger's match, as caller reads it)."""
     env = os.environ.get("DEVKIT_SESSION", "")
+    args = [str(a) for a in (sys.argv[1:] if argv is None else argv)]
     pids = _ancestor_pids()
     held = {}
     for f in (SESSIONS.glob("*.json") if pids and SESSIONS.exists() else []):
         s = core.read_json(f, {}) or {}
         if isinstance(s.get("pid"), int) and s["pid"] in pids and s.get("agent") and s.get("session"):
             held.setdefault(s["pid"], []).append((s.get("started") or 0, s["agent"], s["session"]))
-    for pid in pids:
-        if pid in held:
-            named = [c for c in held[pid] if f"{c[1]}:{c[2]}" == env]
-            _, agent, sid = named[0] if named else max(held[pid])
+    mine = next((held[pid] for pid in pids if pid in held), None)
+    if mine:
+        typed = [c for c in mine if _ledger_holds(c[2], args)]
+        if typed:
+            _, agent, sid = max(typed)
             return agent, sid, "ancestry"
+    cwd = cwd or os.getcwd()
+    found = _pidless_typed(args, {c[2] for c in mine or []}, pids, cwd)
+    if found:
+        return found[0], found[1], "ledger"
+    if mine:
+        named = [c for c in mine if f"{c[1]}:{c[2]}" == env]
+        _, agent, sid = named[0] if named else max(mine)
+        return agent, sid, "ancestry"
     if ":" in env:
         agent, sid = env.split(":", 1)
         return agent, sid, "env"
-    cwd = cwd or os.getcwd()
     top = core.gitout(cwd, "rev-parse", "--show-toplevel") or cwd
     best = None
     for f in SESSIONS.glob("*.json") if SESSIONS.exists() else []:
@@ -100,6 +114,64 @@ def resolve_session(cwd: str | None = None):
     if best and time.time() - best[0] < 12 * 3600:
         return best[1], best[2], "recency"
     return os.environ.get("DEVKIT_AGENT") or "human", f"shell-{os.getppid()}", "shell"
+
+
+def _ledger_holds(sid: str, args: list) -> bool:
+    """Does this session's call ledger hold an open call whose own text typed these arguments? A cut call matches
+    only by the text it kept here: choosing a session needs the command itself."""
+    return bool([a for a in args if a]) and any(_names_args(dict(e, cut=False), args) for e in open_calls(sid))
+
+
+def _pid_running(pid) -> bool:
+    """A process with this pid runs (or devkit cannot tell, which counts as running: such a record is not taken)."""
+    try:
+        os.kill(int(pid), 0)
+    except ProcessLookupError:
+        return False
+    except (OSError, TypeError, ValueError):
+        return True
+    return True
+
+
+def _ledger_sessions(args: list) -> list:
+    """Every session whose call ledger holds an open call that typed these arguments, [(agent, session id)]."""
+    if not [a for a in args if a]:
+        return []
+    try:
+        dirs = sorted(d.name for d in CALLS.iterdir() if d.is_dir())
+    except OSError:
+        return []
+    out = []
+    for sid in dirs:
+        hit = next((e for e in open_calls(sid) if _names_args(dict(e, cut=False), args)), None)
+        if hit:
+            out.append((str(hit.get("agent") or ""), str(hit.get("session") or sid)))
+    return out
+
+
+def _pidless_typed(args: list, skip: set, pids: list, cwd: str):
+    """The one recent session (12 hours) of this repository that no live process holds and whose call ledger holds an
+    open call for this command -> (agent, session id), or None (none, or several). Only for a process that has a
+    parent besides launchd: a detached command is never matched by the ledger alone."""
+    if not pids:
+        return None
+    hits = [(a, s) for a, s in _ledger_sessions(args) if s not in skip]
+    found, top = [], None
+    for agent, sid in hits:
+        f = session_path(agent, sid)
+        rec = core.read_json(f, {}) or {}
+        pid = rec.get("pid")
+        if rec.get("agent") != agent or (isinstance(pid, int) and (pid in pids or _pid_running(pid))):
+            continue
+        try:
+            if time.time() - f.stat().st_mtime > 12 * 3600:
+                continue
+        except OSError:
+            continue
+        top = top or core.gitout(cwd, "rev-parse", "--show-toplevel") or cwd
+        if (rec.get("top") or rec.get("cwd")) == top:
+            found.append((agent, sid))
+    return found[0] if len(found) == 1 else None
 
 
 def _ps() -> dict:
@@ -282,13 +354,13 @@ def caller(cwd: str | None = None, argv=None, now: float | None = None) -> dict:
     most restrictive when several match), unknown (no open call holds the command, or the session was only
     guessed by recency), unverified (Codex, until its spawned agents' hooks carry agent_id: S3), or human (a
     developer's shell with no agent session). `argv`: the command's arguments, default sys.argv[1:]."""
-    agent, sid, how = resolve_session(cwd)
+    args = [str(a) for a in (sys.argv[1:] if argv is None else argv)]
+    agent, sid, how = resolve_session(cwd, args)
     out = {"agent": agent, "session": sid, "how": how, "caller": "unknown", "calls": []}
     if how == "shell":
         return dict(out, caller="human")
     if agent == "codex":
         return dict(out, caller="unverified")
-    args = [str(a) for a in (sys.argv[1:] if argv is None else argv)]
     hits = [c for c in open_calls(sid, now) if _names_args(c, args)]
     out["calls"] = [c.get("tool_use_id") for c in hits]
     members = sorted({str(c.get("caller")) for c in hits if c.get("caller") != "main"})
@@ -976,8 +1048,19 @@ def _main_only(from_agent, what: str, cwd: str | None = None):
         _audit("caller.unverified", what, f"{who.get('agent')} session {str(who.get('session'))[:40]}: devkit cannot "
                f"verify who calls yet (spec C4, S3)", "allowed")
         return
-    _audit("caller.refused", what, f"caller {c}; session found by {who.get('how')}", "deny",
+    here = f"{who.get('agent')}:{who.get('session')}"
+    elsewhere = [f"{a}:{s}" for a, s in _ledger_sessions(sys.argv[1:]) if f"{a}:{s}" != here]
+    _audit("caller.refused", what, f"caller {c}; session found by {who.get('how')}"
+           + (f"; the open call is in {', '.join(x[:40] for x in elsewhere[:3])}" if elsewhere else ""), "deny",
            session=str(who.get("session"))[:40])
+    if (c == "unknown" or not c) and elsewhere:
+        raise StepError(f"only the tech lead {what}, and devkit took this command for session {here} (found by "
+                        f"{who.get('how')}), whose call ledger holds no open call for it; the open call that typed it "
+                        f"is in session {', '.join(elsewhere[:3])}, which devkit does not take: a live process other "
+                        f"than this one holds it, it belongs to another repository or is older than 12 hours, or "
+                        f"more than one session holds the call. If that is this "
+                        f"conversation under a new session id (a compaction), its next prompt records this process "
+                        f"on it: send one message, then run the command again")
     if c == "unknown" or not c:
         raise StepError(f"only the tech lead {what}, and no open call of this session typed this command: type the "
                         f"command itself, not through a script or another shell, as a command of its own (spec C4)")
@@ -1089,8 +1172,10 @@ def assign(which, label: str, cwd: str | None = None, now: float | None = None, 
         if lane_id:
             s.update(owner=lane_id, state="running", started=s.get("started") or now)
             lane = run["agents"][lane_id]
+            lane.pop("handed_over", None)  # Morpheus gives it a step of its own
             if s.get("scope"):
                 lane["scope"] = s["scope"]
+                _hand_scope(run, s, lane_id, now)
             if lane.get("binding") == "unbound":  # Morpheus confirms a lane devkit had no launch record of
                 lane["binding"] = "confirmed"
                 _audit("crew.confirm", lane.get("persona") or label, f"Morpheus assigned “{s['name']}” to a lane "
@@ -3748,6 +3833,10 @@ def render_update(run: dict, branch: str | None = None, now: float | None = None
                 parts.append(f"waiting for {_who_label(s['label'])}")
             if s.get("recheck"):
                 parts.append(f"recheck: {', '.join(s['recheck'])} reopened")
+            changed = other_writes_for(run, s) if s.get("state") not in DONE else []
+            if changed:
+                parts.append("changed by another lane: " + ", ".join(f"{p} ({by}, {c})" for p, by, c in changed[:5])
+                             + (f" and {len(changed) - 5} more" if len(changed) > 5 else ""))
             who = "".join(f" · {p}" for p in parts)
             if s.get("state") in ("done", "running"):
                 tm = f" · {fmt_min(step_minutes(run, s, now))} of ~{fmt_about(s.get('est') or 0)}"
@@ -3989,7 +4078,11 @@ def lane_stopped(task_or_agent_id: str, reason: str, agent: str | None = None, s
     with _tx(agent, sid):
         run = load_run(agent, sid)
         if isinstance(run, dict):
+            held = [st for st in run.get("plan") or [] if st.get("owner") == aid and st.get("state") not in DONE]
             made = approvals.apply(run, approvals.stop_moves(run, aid, reason, at=now), now)
+            for st in held:  # a live lane of its member took the step: its scope goes with it
+                if st.get("owner") not in (aid, "main", None):
+                    _hand_scope(run, st, st["owner"], now)
             if made:
                 _save(run, touch_session=False)
     if made:
@@ -4021,6 +4114,75 @@ def live_holder(run: dict, aid: str, s: dict):
     best = max(sc for sc, _ in scored)
     top = [k for sc, k in scored if sc == best]
     return top[0] if len(top) == 1 else None
+
+
+LIVE_RUN = ("running", "blocked", "orphaned")  # a run a session still works on, or one its ended session left
+
+
+def adopt_process_run(agent: str, new_sid: str, pid: int, now: float | None = None) -> dict | None:
+    """A session registered in agent process `pid` that an older session of the same agent holds, or held until this
+    registration superseded it (Claude Code gives a running conversation a new session id after a compaction): the
+    older session's open run moves to `new_sid`, as dev session carry moves one, working lanes included, since
+    their hooks now carry the new id; the older record's launches and subagents go with it, so a launch keeps its slot
+    and its agent binds and stops as before. Never over an open run of the new session (audited as refused). The run's
+    history and the audit trail (session.adopt) record the move, and the older record notes it (run_moved_to). The
+    registration path calls it (hooks._claim_process). -> {from, to, goal}, or None when nothing moved."""
+    now = now or time.time()
+    if not new_sid or not isinstance(pid, int) or isinstance(pid, bool):
+        return None
+    me = core.read_json(session_path(agent, new_sid), {}) or {}
+    olds = []
+    for f in SESSIONS.glob(f"{_safe_name(agent)}-*.json") if SESSIONS.exists() else []:
+        s = core.read_json(f, {}) or {}
+        sid = str(s.get("session") or "")
+        if s.get("agent") != agent or not sid or sid == new_sid or pid not in (s.get("pid"), s.get("pid_superseded")):
+            continue
+        if float(s.get("started") or 0) > float(me.get("started") or now):
+            continue  # a newer session never hands its run to an older one
+        if (core.read_json(run_path(agent, sid), {}) or {}).get("state") in LIVE_RUN:
+            olds.append((float(s.get("started") or 0), sid))
+    if not olds:
+        return None
+    old = max(olds)[1]
+    src, dst = run_path(agent, old), run_path(agent, new_sid)
+    a, b = sorted((src, dst), key=str)
+    refused, taken = None, False
+    with state.hold(a), state.hold(b):  # one lock per session covers its record and its run
+        run = state.load(src)
+        if not isinstance(run, dict) or run.get("state") not in LIVE_RUN:
+            return None
+        there = state.load(dst)
+        if isinstance(there, dict) and there.get("state") in LIVE_RUN:
+            refused = there.get("goal") or "a run"
+        else:
+            why = (f"moved from {agent}:{old} to {agent}:{new_sid}: Claude Code gave the conversation in process "
+                   f"{pid} a new session id")
+            taken = take_back(run, why, now)
+            run.update(session=new_sid, carried_from=old, carried_at=round(now))
+            run.setdefault("history", []).append({"ts": round(now), "step": "(run)", "from": run.get("state"),
+                                                  "to": run.get("state"), "by": "devkit", "why": why})
+            run["history"] = run["history"][-200:]
+            state.replace(dst, run, indent=1)
+            state.remove(src)
+            so, sn = state.load(session_path(agent, old)), state.load(session_path(agent, new_sid))
+            if isinstance(so, dict) and isinstance(sn, dict):
+                for key in ("launches", "subagents"):
+                    mine = sn.setdefault(key, {})
+                    for k, v in (so.pop(key, None) or {}).items():
+                        mine.setdefault(k, v)
+                so.update(run_moved_to=new_sid, run_moved_at=round(now))
+                state.replace(session_path(agent, old), so)
+                state.replace(session_path(agent, new_sid), sn)
+    project = (run or {}).get("project") or ""
+    if refused:
+        _audit("session.adopt", f"{agent}:{old[:12]}", f"the run «{str(run.get('goal'))[:80]}» stays: "
+               f"{agent}:{new_sid[:12]} already has an open run «{str(refused)[:80]}»", "refused", project=project)
+        return None
+    if taken:
+        audit_taken_back(run, f"moved to {agent}:{new_sid[:12]}")
+    _audit("session.adopt", f"{agent}:{new_sid[:12]}", f"run «{str(run.get('goal'))[:80]}» from {agent}:{old[:12]} "
+           f"(process {pid})", "ok", project=project, session=f"{agent}:{new_sid[:12]}")
+    return {"from": old, "to": new_sid, "goal": run.get("goal")}
 
 
 def resume_orphaned(agent: str, sid: str, now: float | None = None) -> bool:
@@ -4300,14 +4462,41 @@ def _bind_step(run: dict, aid: str, lane: dict, now: float):
     st.update(owner=aid, state="running", started=st.get("started") or now)
     if st.get("scope"):
         lane["scope"] = st["scope"]
+        _hand_scope(run, st, aid, now)
 
 
-def _lane_event(run, aid, kind, tid, rec, binding, now, start, waiting, own=True):
+def _hand_scope(run: dict, st: dict, to: str, now: float):
+    """Step `st` and its scope now belong to lane `to`. Every other lane that holds no open step but keeps a scope of
+    its own that overlaps it (the scope of a step it held before, such as a stopped lane's) loses that scope and reads
+    only (`handed_over`) until Morpheus assigns it a step, so two lanes never write the same files, and a lane
+    without a scope is not left free to write anywhere."""
+    globs = st.get("scope") or []
+    if not globs:
+        return
+    plan = run.get("plan") or []
+    for k, lane in (run.get("agents") or {}).items():
+        own = lane.get("scope") or []
+        if k == to or not own or to in lane_chain(run, k):
+            continue
+        if any(x.get("owner") == k and x.get("state") not in DONE for x in plan):
+            continue  # it works on a step of its own
+        if not any(_globs_overlap(g, h) for g in globs for h in own):
+            continue
+        lane.pop("scope")
+        lane["handed_over"] = {"ts": round(now), "step": st.get("name"), "to": to[:16], "scope": own}
+        _audit("crew.scope-handed", lane.get("persona") or lane.get("label") or k[:8], f"“{st.get('name')}” and "
+               f"{', '.join(own)} went to {_name_of(run, to)}: this lane may read but not write until a step is "
+               f"assigned to it", "restricted", project=run.get("project") or "", agent_id=k[:16])
+
+
+def _lane_event(run, aid, kind, tid, rec, binding, now, start, waiting, own=True, sess=None):
     """The run's side of a binding (spec C3): the agent's lane, created provisional at its start when a launch is
     waiting (no step, no scope, until it binds), resumed when the agent works again after it had stopped, and bound
     to its launch: label, parent, depth, persona and the step the launch names (none for a member's helper, which
     works inside its member's step; spec F3). `own`: the hook is the agent's own start or tool
-    call, so a finished lane resumes; never for its launch's result or its stop."""
+    call, so a finished lane resumes; never for its launch's result or its stop. A resumed lane takes a crew slot
+    like a launch: while none is free it stays as it was, reads only (`waits_slot`), and Morpheus is told once with
+    the launch's message; each later call of the agent tries again. `sess`: the session record, held by the caller."""
     lane = run["agents"].get(aid)
     if lane is None:
         if not binding and not (start and waiting):
@@ -4318,10 +4507,23 @@ def _lane_event(run, aid, kind, tid, rec, binding, now, start, waiting, own=True
         _audit("crew.start", lane["persona"] or kind or aid[:8], "waits for its launch" if not binding else
                (rec or {}).get("label") or "", project=run.get("project") or "", agent_id=aid[:16], type=kind)
     elif own and lane.get("state") != "running":  # resumed (SendMessage): its own lane, and no other step
-        lane.update(state="running", finished=None, resumed=(lane.get("resumed") or 0) + 1, resumed_at=now)
-        _open(run, "agent", aid, now)
-        _audit("crew.resume", lane.get("persona") or lane.get("label") or aid[:8], lane.get("label") or "",
-               project=run.get("project") or "", agent_id=aid[:16])
+        why = _resume_refusal(run, aid, sess if isinstance(sess, dict) else {}, now)
+        if why:
+            if not lane.get("waits_slot"):
+                from . import crew
+                _post(run, "devkit", "main", f"devkit: {crew.who(lane.get('persona') or lane.get('label') or kind)} "
+                      f"works again, and a resumed member takes a crew slot like a launch. {why} Until a slot is "
+                      f"free it may read but not write; it takes its slot at its first tool call after one frees.",
+                      now, from_name="devkit", kind="notice")
+                _audit("crew.queued", lane.get("persona") or lane.get("label") or aid[:8], why[:300], "queued",
+                       project=run.get("project") or "", agent_id=aid[:16])
+            lane["waits_slot"] = {"ts": round(now), "why": why[:400]}
+        else:
+            lane.pop("waits_slot", None)
+            lane.update(state="running", finished=None, resumed=(lane.get("resumed") or 0) + 1, resumed_at=now)
+            _open(run, "agent", aid, now)
+            _audit("crew.resume", lane.get("persona") or lane.get("label") or aid[:8], lane.get("label") or "",
+                   project=run.get("project") or "", agent_id=aid[:16])
     if binding == "exact" and lane.get("binding") == "pending":
         label = rec.get("label") or lane.get("label") or kind
         parent = rec.get("parent") or "main"
@@ -4361,7 +4563,7 @@ def _attach(agent: str, sid: str, s: dict, data: dict, aid: str, kind: str, now:
         if binding == "exact":
             sub.update(label=rec.get("label") or sub.get("label"), launch=tid)
     _run_event(agent, sid, lambda run: _lane_event(run, aid, kind, tid, rec, binding, now, start, waiting,
-                                                   own=resume))
+                                                   own=resume, sess=s))
 
 
 def bind(agent: str, data: dict, now: float | None = None, resume: bool = True):
@@ -4586,8 +4788,11 @@ def lane_chain(run: dict, aid: str) -> list:
 def _lane_level(lane: dict) -> str:
     """One lane's own tool level: read for a lane whose launch another agent is bound to, that devkit has no launch
     record of (until Morpheus assigns it a step), or that has not met its launch yet (spec C3: a missing binding
-    grants nothing), else its crew member's `tools`, else all (an ad-hoc agent)."""
-    if lane.get("binding") in ("conflict", "unbound", "pending"):
+    grants nothing); read too for a lane whose step and scope another lane took (`handed_over`, until Morpheus
+    assigns it a step) and for a resumed lane that waits for a crew slot (`waits_slot`); else its crew member's
+    `tools`, else all (an ad-hoc agent)."""
+    if lane.get("binding") in ("conflict", "unbound", "pending") or lane.get("handed_over") or \
+            (lane.get("waits_slot") and lane.get("state") != "running"):
         return "read"
     try:
         from . import crew
@@ -4739,6 +4944,17 @@ def launch_verdict(agent: str, data: dict, run: dict, now: float | None = None):
     if cost <= 0:
         return None  # a scout lookup costs no slot (progress.slot_weights)
     b = slot_budget(agent, run, sess, now)
+    why = _slot_refusal(run, sess, b, cost, parent, kind, label)
+    if why is not None:
+        return why or None  # "": it took the slot kept for the developer's own request
+    if parent != "main" or (sess.get("turn_started") and _for_the_developer(run, sess, kind, label)):
+        return None  # the developer's request of this turn is not held back by the plan's order (R4)
+    return _order_verdict(run, sess, kind, label, b, cost, now)
+
+
+def _slot_refusal(run, sess: dict, b: dict, cost: float, parent: str, kind: str, label: str):
+    """The slot rules a launch and a resumed lane share (spec R3, R4): the reason no slot is free; "" when it takes
+    the slot progress.reserve keeps, for the developer's own request (audited); None when it fits below the reserve."""
     used, limit, reserve = b["used"], b["limit"], b["reserve"]
     if used + cost > limit + 1e-9:
         names = ", ".join(_who_label(name) for _, name, _ in b["busy"])
@@ -4754,13 +4970,30 @@ def launch_verdict(agent: str, data: dict, run: dict, now: float | None = None):
         if parent == "main" and _for_the_developer(run, sess, kind, label):
             _audit("crew.reserve", label or kind or "a launch", f"{_n(used + cost)} of {limit} slots: the slot "
                    f"progress.reserve keeps for the developer's own request", project=(run or {}).get("project") or "")
-            return None
+            return ""
         return (f"{_n(used)} of {limit} crew slots are in use, and the last {reserve} is kept for the developer's own "
                 f"request (progress.reserve): queued plan work waits for a free slot. Launch it when a member "
                 f"finishes (dev crew next), or give it to a working member (SendMessage / send_input).")
-    if parent != "main" or (sess.get("turn_started") and _for_the_developer(run, sess, kind, label)):
-        return None  # the developer's request of this turn is not held back by the plan's order (R4)
-    return _order_verdict(run, sess, kind, label, b, cost, now)
+    return None
+
+
+def _resume_refusal(run: dict, aid: str, sess: dict, now: float):
+    """Why lane `aid`, not working now, may not work again: a resumed lane takes a crew slot like a launch, at its
+    own cost, with the launch's message. None when a slot is free."""
+    lane = (run.get("agents") or {}).get(aid) or {}
+    try:
+        from . import crew
+        m = crew._for_lane(lane)
+    except Exception:
+        m = None
+    level = max((_lane_level(dict(run["agents"][k], state="running")) for k in lane_chain(run, aid)),
+                key=TOOL_LEVELS.index, default="all")  # its level once it works, whatever it waits for now
+    cost = _cost(m, level)
+    if cost <= 0:
+        return None
+    b = slot_budget(run.get("agent") or "claude", run, sess, now)
+    return _slot_refusal(run, sess, b, cost, lane.get("parent") or "main", lane.get("type") or "",
+                         lane.get("label") or "") or None
 
 
 def _for_the_developer(run, sess, kind: str, label: str) -> bool:
@@ -4896,6 +5129,7 @@ def _on_subagent(agent: str, data: dict, started: bool, now: float | None = None
                 return
             if lane:
                 lane.update(state="done", finished=now)
+                lane.pop("waits_slot", None)  # it ended while it waited: a later resume asks for a slot anew
                 _audit("crew.finish", lane.get("persona") or lane.get("label") or aid,
                        f"{active_minutes(run, lane.get('started'), now, now, aid):.1f} active minutes",
                        project=run.get("project") or "", agent_id=aid[:16])
@@ -4906,14 +5140,23 @@ def _on_subagent(agent: str, data: dict, started: bool, now: float | None = None
     state.replace(f, s)
 
 
+def _shown(paths: list) -> str:
+    """'a.py, b.py and 4 more': up to five paths for a notice."""
+    return ", ".join(paths[:5]) + (f" and {len(paths) - 5} more" if len(paths) > 5 else "")
+
+
 def scope_written(agent: str, sid: str, aid: str, paths: list, now: float | None = None) -> dict | None:
-    """A review or read-only lane's shell call wrote these files (write detection). A file in the scope of
-    another lane that works now is that lane's write: the audit trail records it as that lane's (scope.write,
-    outcome attributed), and the read-only lane is neither flagged nor reported for it. Each other file the lane
-    keeps in `scope_writes`, so its report is unverified and its step cannot end done on its word; Morpheus gets a
-    crew notice naming those files; and the audit trail a scope.write record, "possible" when another lane that may
-    write works in the run at the time (a file outside every scope may be its), else "certain". -> the lane's
-    scope_writes, or None without a lane or when it has none."""
+    """A review or read-only lane's shell call wrote these files (write detection). A review or read-only lane can
+    write through a script in its own scratch folder, so the scope a file lies in is no alibi: a file in the scope
+    of a build lane that works now is credited to that lane only while it (or a helper of it) has a call open in the
+    call ledger (open_calls), whose run may have written it (scope.write, outcome attributed); otherwise it is the
+    review lane's own write, certain. Each file held against the lane it keeps in `scope_writes`, so its report is
+    unverified and its step cannot end done on its word; a file outside every working build scope is "possible"
+    when a lane that may write works in the run at the time, else "certain". The build lane's open step keeps each
+    file of its scope the call changed (`other_writes`, either way), which the review step after it lists; Morpheus
+    gets one crew notice naming the lanes; and the audit trail a scope.write record. -> the lane's scope_writes, or
+    None without a lane or when it has none."""
+    from . import crew
     now = now or time.time()
     paths = sorted({str(p) for p in paths or [] if p})
     if not paths:
@@ -4924,41 +5167,96 @@ def scope_written(agent: str, sid: str, aid: str, paths: list, now: float | None
         if not lane:
             return None
         chain = set(lane_chain(run, aid))
-        running = [k for k, v in run["agents"].items() if k not in chain and v.get("state") == "running"]
-        layers = {k: lane_scope(run, k) for k in running}
-        owned, loose = {}, []
+        builders = [k for k, v in run["agents"].items() if k not in chain and v.get("state") == "running"
+                    and lane_tools(run, k) in ("build", "all")]
+        layers = {k: lane_scope(run, k) for k in builders}
+        calling = {str(e.get("caller") or "") for e in open_calls(sid, now)} - {"main", ""}
+        busy = {k for k in builders if any(k in lane_chain(run, c) for c in calling)}
+        owned, crossed, loose = {}, {}, []  # credited to a lane with a call open; in a quiet lane's scope; elsewhere
         for p in paths:
-            holder = next((k for k in running if layers[k] and in_scope(p, layers[k])), None)
-            if holder:
-                owned.setdefault(holder, []).append(p)
-            else:
+            holders = [k for k in builders if layers[k] and in_scope(p, layers[k])]
+            if not holders:
                 loose.append(p)
+                continue
+            k = next((h for h in holders if h in busy), None)
+            (owned if k else crossed).setdefault(k or holders[0], []).append(p)
         who = lane.get("persona") or lane.get("label") or aid
-        others = [k for k in running if lane_tools(run, k) in ("build", "all")]
-        certainty = "possible" if others else "certain"
-        if loose:
-            level = lane_tools(run, aid)
+        name = crew.who(who)
+        level = lane_tools(run, aid)
+        certainty = "possible" if builders else "certain"
+        held = [p for files in crossed.values() for p in files] + loose
+        if held:
             had = lane.get("scope_writes") or {}
-            lane["scope_writes"] = {"ts": round(now), "paths": sorted(set(had.get("paths") or []) | set(loose))[:20],
-                                    "certainty": "certain" if "certain" in (had.get("certainty"), certainty) else
-                                    certainty}
-            shown = ", ".join(loose[:5]) + (f" and {len(loose) - 5} more" if len(loose) > 5 else "")
-            maybe = (f" (possibly another member's: {', '.join(_name_of(run, k) for k in others[:3])} works too)"
-                     if others else "")
-            _post(run, aid, "main", f"devkit: {who} works {'review-only' if level == 'review' else 'read-only'}, and "
-                  f"its shell call wrote {shown}{maybe}. Its report counts as unverified: check the change (git diff), "
-                  f"keep or revert it, then close its step with evidence.", now, from_name="devkit", kind="notice")
-            _save(run)
+            sure = bool(crossed) or certainty == "certain" or had.get("certainty") == "certain"
+            lane["scope_writes"] = {"ts": round(now), "paths": sorted(set(had.get("paths") or []) | set(held))[:20],
+                                    "certainty": "certain" if sure else "possible"}
+        parts = []
+        for k, files in owned.items():
+            _mark_other_writes(run, k, files, aid, name, "possible", now)
+            parts.append(f"{_shown(files)} changed during its shell call, inside the scope of "
+                         f"{crew.who(_name_of(run, k))}, who had a call open then, so devkit credits "
+                         f"{'them' if len(files) > 1 else 'it'} to {crew.who(_name_of(run, k))}")
+        for k, files in crossed.items():
+            _mark_other_writes(run, k, files, aid, name, "certain", now)
+            parts.append(f"its shell call wrote {_shown(files)}, inside the scope of {crew.who(_name_of(run, k))}, "
+                         f"who had no call open then, so devkit counts {'them' if len(files) > 1 else 'it'} as its "
+                         f"own write")
+        if loose:
+            maybe = (f" (possibly another member's: {', '.join(crew.who(_name_of(run, k)) for k in builders[:3])} "
+                     f"works too)" if builders else "")
+            parts.append(f"its shell call wrote {_shown(loose)}{maybe}")
+        reviews = sorted({crew.who(_name_of(run, k)) for k in [*owned, *crossed]})
+        listed = f" The review of {' and '.join(reviews)}'s work lists these files." if reviews else ""
+        tail = (" Its report counts as unverified: check the change (git diff), keep or revert it, then close its step "
+                "with evidence." if held else " Check the change (git diff) before that review approves it.")
+        _post(run, aid, "main", f"devkit: {name} works {'review-only' if level == 'review' else 'read-only'}, and "
+              + "; and ".join(parts) + "." + listed + tail, now, from_name="devkit", kind="notice")
+        _save(run)
         writes = dict(lane.get("scope_writes") or {}) or None
     for k, mine in owned.items():
         _audit("scope.write", _name_of(run, k), f"attributed: {', '.join(mine[:20])}"[:600], "attributed",
                lane=k[:16], paths=mine[:20], count=len(mine), project=run.get("project") or "",
-               why=f"changed during {who}'s shell call, inside the scope of {_name_of(run, k)}, who works now")
+               why=f"changed during {who}'s shell call, inside the scope of {_name_of(run, k)}, who had a call open")
+    for k, mine in crossed.items():
+        _audit("scope.write", who, f"certain: {', '.join(mine[:20])}"[:600], "detected", lane=aid[:16],
+               paths=mine[:20], certainty="certain", count=len(mine), project=run.get("project") or "",
+               severity="warning",
+               why=f"inside the scope of {_name_of(run, k)} ({k[:16]}), who had no call open during {who}'s shell call")
     if loose:
         _audit("scope.write", who, f"{certainty}: {', '.join(loose[:20])}"[:600], "detected", lane=aid[:16],
                paths=loose[:20], certainty=certainty, count=len(loose), project=run.get("project") or "",
                **({"severity": "warning"} if certainty == "certain" else {}))
     return writes
+
+
+def _mark_other_writes(run: dict, holder: str, files: list, by: str, by_name: str, certainty: str, now: float):
+    """The open steps of a build lane (or of the member a helper works for) whose scope holds these files keep them
+    as changed by another lane (`other_writes`), so the review of that work lists them (other_writes_for)."""
+    lanes = lane_chain(run, holder)
+    for st in run.get("plan") or []:
+        if st.get("owner") not in lanes or st.get("state") in DONE:
+            continue
+        mine = [p for p in files if not st.get("scope") or in_scope(p, [st["scope"]])]
+        if mine:
+            marks = st.setdefault("other_writes", [])
+            marks.append({"ts": round(now), "by": by[:16], "by_name": by_name, "paths": mine[:20],
+                          "certainty": certainty})
+            st["other_writes"] = marks[-20:]
+
+
+def other_writes_for(run: dict, st: dict) -> list:
+    """For a review step: the files another lane changed in the scope of the steps it comes after, [(path, who,
+    certainty)], each path once, a certain record before a possible one. [] for any other step."""
+    if not is_review_step(st):
+        return []
+    steps, seen, out = _by_name(run.get("plan")), set(), []
+    marks = [m for n in st.get("after") or [] for m in (steps.get(n) or {}).get("other_writes") or []]
+    for m in sorted(marks, key=lambda m: m.get("certainty") != "certain"):
+        for p in m.get("paths") or []:
+            if p not in seen:
+                seen.add(p)
+                out.append((p, m.get("by_name") or "another lane", m.get("certainty") or "possible"))
+    return out
 
 
 def _verified_by_review(run: dict, st: dict, check: str, now: float, agent: str, sid: str, aid: str) -> list:

@@ -1512,6 +1512,96 @@ class StepGrantTests(TranscriptCase):
         self.assertEqual(pg.load_run("claude", "s1")["plan"][0].get("allow"), [])
 
 
+class SessionAfterCompactionTests(unittest.TestCase):
+    # Live: Claude Code gave the running conversation a new session id (a compaction); the older record still held
+    # the process, ancestry picked it, and the hook wrote the call ledger under the new id, so every tech-lead command
+    # was refused as "caller unknown". A command's session is the one whose ledger holds an open call for it
+    ARGV = ["progress", "assign", "api", "--to", "Tank"]
+
+    def setUp(self):
+        self.state = TempState(real_caller=True).__enter__()
+        self.addCleanup(self.state.__exit__, None, None, None)
+        self.top = str(Path(self.state.tmp.name) / "repo")
+        for p in (mock.patch.object(pg, "_ancestor_pids", lambda: [4321, 67065, 1]),
+                  mock.patch.object(pg.core, "gitout", lambda *a, **k: self.top),
+                  mock.patch.dict(os.environ, {"DEVKIT_SESSION": "claude:old"})):
+            p.start()
+            self.addCleanup(p.stop)
+        self.record("old", pid=67065, age=3600)
+
+    def record(self, sid, pid=None, age=60):
+        rec = {"agent": "claude", "session": sid, "top": self.top, "cwd": self.top, "started": time.time() - age}
+        if pid:
+            rec["pid"] = pid
+        (pg.SESSIONS / f"claude-{sid}.json").write_text(json.dumps(rec))
+
+    def typed_in(self, sid):
+        # the PreToolUse hook of the tech lead's shell call, under the session id the conversation reports now
+        pg.call_opened("claude", {"session_id": sid, "tool_use_id": f"toolu_{sid}", "tool_name": "Bash",
+                                  "tool_input": {"command": "dev " + " ".join(self.ARGV)}})
+
+    def test_the_session_whose_ledger_holds_the_command_is_found_after_a_compaction(self):
+        self.record("new")  # registered without the process
+        self.typed_in("new")
+        who = pg.caller(argv=self.ARGV)
+        self.assertEqual((who["session"], who["caller"]), ("new", "main"))
+
+    def test_of_the_sessions_of_this_process_the_one_holding_the_command_wins(self):
+        self.record("new", pid=67065)  # DEVKIT_SESSION still names the older one
+        self.typed_in("new")
+        self.assertEqual(pg.resolve_session(argv=self.ARGV), ("claude", "new", "ancestry"))
+
+    def test_a_session_another_live_process_holds_is_not_taken_and_the_refusal_names_both(self):
+        self.record("other", pid=os.getpid())  # a live process this command does not run below
+        self.typed_in("other")
+        self.assertEqual(pg.resolve_session(argv=self.ARGV)[1], "old")
+        with mock.patch.object(sys, "argv", ["dev", *self.ARGV]), self.assertRaises(pg.StepError) as e:
+            pg._main_only(None, "assigns steps")
+        self.assertIn("claude:old", str(e.exception))
+        self.assertIn("claude:other", str(e.exception))
+
+    def test_two_sessions_without_a_process_that_hold_the_command_are_both_passed_over(self):
+        for sid in ("new", "twin"):
+            self.record(sid)
+            self.typed_in(sid)
+        self.assertEqual(pg.resolve_session(argv=self.ARGV)[1:], ("old", "ancestry"))
+
+
+class ProcessRunTests(unittest.TestCase):
+    # Live: after Claude Code gave the conversation a new session id in the same process, the open run stayed with the
+    # old id, so the new session's hooks found no run: the docs lane finished an hour earlier and still held its files
+    def setUp(self):
+        self.state = TempState().__enter__()
+        self.addCleanup(self.state.__exit__, None, None, None)
+        now = time.time()
+        for sid, rec in (("old", {"pid_superseded": 67065, "superseded_by": "new", "started": now - 3600}),
+                         ("new", {"pid": 67065, "started": now - 30})):
+            (pg.SESSIONS / f"claude-{sid}.json").write_text(json.dumps(
+                {"agent": "claude", "session": sid, "project": "acme/api", **rec}))
+        with mock.patch.dict(os.environ, {"DEVKIT_SESSION": "claude:old"}):
+            pg.start("Release", plan=["docs"])
+            pg.assign("docs", "Ghost", scope="docs/**", why="test")
+        launch("a_ghost", "devkit:ghost", "Ghost: docs", sid="old")
+
+    def test_the_older_sessions_run_moves_and_its_lane_closes_under_the_new_id(self):
+        pg.adopt_process_run("claude", "new", 67065)
+        self.assertIsNone(pg.load_run("claude", "old"))
+        pg.on_subagent("claude", {"session_id": "new", "agent_id": "a_ghost", "agent_type": "devkit:ghost",
+                                  "last_assistant_message": "done"}, False)
+        run = pg.load_run("claude", "new")
+        self.assertEqual((run["session"], run["agents"]["a_ghost"]["state"]), ("new", "done"))
+        self.assertEqual(pg.scope_owner(run, "docs/crew.md"), (None, None))  # the tech lead may edit its files again
+        self.assertTrue(any("claude:old" in h.get("why", "") for h in run.get("history") or []))
+        self.assertEqual(json.loads((pg.SESSIONS / "claude-old.json").read_text()).get("run_moved_to"), "new")
+
+    def test_an_open_run_of_the_new_session_is_never_replaced(self):
+        with mock.patch.dict(os.environ, {"DEVKIT_SESSION": "claude:new"}):
+            pg.start("Its own work", plan=["a"])
+        pg.adopt_process_run("claude", "new", 67065)
+        self.assertEqual(pg.load_run("claude", "new")["goal"], "Its own work")
+        self.assertEqual(pg.load_run("claude", "old")["goal"], "Release")
+
+
 class EstimateRoundingTests(unittest.TestCase):
     # Trinity's 6c45efc and Link's 38a7c16: an estimate or a time left rounds like the dashboard's fmtAbout (to 5
     # minutes, to the minute under 10), while measured time stays exact; the status block and dev progress print both
@@ -1527,12 +1617,13 @@ class EstimateRoundingTests(unittest.TestCase):
 
 
 class ScopeWriteTests(unittest.TestCase):
-    # The Code reviewer works read-only while the Senior engineer, whose step scope holds docs/audit.md, writes it:
-    # a file that changed during the reviewer's shell call inside a working member's scope is that member's write
+    # The Code reviewer works review-only while the Senior engineer's step scope holds docs/audit.md. A review lane can
+    # write through a script in its own scratch folder, so a file that changed during its shell call inside a working
+    # member's scope is that member's only while the member had a call open in the call ledger
     def setUp(self):
         self.state = TempState().__enter__()
         self.addCleanup(self.state.__exit__, None, None, None)
-        pg.start("Work", plan=["audit docs", "review"])
+        pg.start("Work", plan="audit docs=10m; review=10m after audit docs")
         pg.assign("audit docs", "Neo", scope="docs/audit.md", why="test")
         pg.assign("review", "Seraph")
         launch("a_neo", "devkit:neo", "Neo: audit docs")
@@ -1540,22 +1631,39 @@ class ScopeWriteTests(unittest.TestCase):
 
     def told(self):
         return [m["text"] for m in pg.load_run("claude", "s1").get("messages") or [] if m.get("to") == "main"
-                and "shell call wrote" in m["text"]]
+                and "shell call" in m["text"]]
 
-    def test_a_file_in_a_working_members_scope_is_recorded_as_that_members_write(self):
+    def neo_call_open(self):
+        # the Senior engineer's shell call has started (PreToolUse) and has no result yet (PostToolUse)
+        pg.call_opened("claude", {"session_id": "s1", "tool_use_id": "toolu_neo_sh", "agent_id": "a_neo",
+                                  "tool_input": {"command": "python3 -m unittest tests.test_audit"}})
+
+    def test_a_file_in_a_build_scope_is_the_reviewers_own_write_when_that_lane_had_no_call_open(self):
         from devkit import audit
-        pg.scope_written("claude", "s1", "a_seraph", ["docs/audit.md"])
-        self.assertNotIn("scope_writes", pg.load_run("claude", "s1")["agents"]["a_seraph"])
-        self.assertEqual(self.told(), [])
+        flagged = pg.scope_written("claude", "s1", "a_seraph", ["docs/audit.md"]) or {}
+        self.assertEqual((flagged.get("paths"), flagged.get("certainty")), (["docs/audit.md"], "certain"))
+        (text,) = self.told()
+        self.assertIn("Code reviewer (Seraph)", text)
+        self.assertIn("Senior engineer (Neo)", text)
         recs = audit.query(action="scope.write")
-        self.assertEqual([(r["target"], r["detail"]) for r in recs], [("Neo", "attributed: docs/audit.md")])
+        self.assertEqual([(r["target"], r["detail"]) for r in recs], [("Seraph", "certain: docs/audit.md")])
 
-    def test_only_the_files_outside_every_working_scope_flag_the_read_only_lane(self):
+    def test_a_file_in_a_build_scope_is_credited_to_that_lane_while_it_has_a_call_open(self):
+        from devkit import audit
+        self.neo_call_open()
         flagged = pg.scope_written("claude", "s1", "a_seraph", ["docs/audit.md", "lib/x.py"]) or {}
         self.assertEqual(flagged.get("paths"), ["lib/x.py"])
         (text,) = self.told()
-        self.assertIn("wrote lib/x.py", text)
-        self.assertNotIn("docs/audit.md", text)
+        self.assertIn("docs/audit.md", text)  # the tech lead hears of the credited file too, with both lanes named
+        self.assertIn("Senior engineer (Neo)", text)
+        self.assertIn(("Neo", "attributed: docs/audit.md"),
+                      [(r["target"], r["detail"]) for r in audit.query(action="scope.write")])
+
+    def test_the_review_step_lists_the_files_another_lane_changed_in_the_scope_of_the_work_it_follows(self):
+        pg.scope_written("claude", "s1", "a_seraph", ["docs/audit.md"])
+        lines = pg.render_update(pg.load_run("claude", "s1"), branch="b").splitlines()
+        review = next(ln for ln in lines if " 2. review" in ln)
+        self.assertIn("changed by another lane: docs/audit.md (Code reviewer (Seraph), certain)", review)
 
 
 LANE_REPORT = ("**[Firefly> DevKit · Security engineer (The Keymaker)]** acme/api · `main` · {task}\n"
