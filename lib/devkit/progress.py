@@ -301,6 +301,8 @@ def call_closed(data: dict):
 
 EDIT_TOOLS = ("Write", "Edit", "MultiEdit")  # the tools that name the one file they change (tool_input.file_path)
 EDIT_SLACK = 2.0  # seconds an edit may precede a shell call's start and still fall in its window (hook ordering)
+EDIT_KEEP = 12 * 3600  # seconds the edit record keeps a call: a lane's whole life, which the crew gates read
+EDIT_MAX = 1000  # edit calls the record keeps at most, newest last
 
 
 def _edits_path(sid: str) -> Path:
@@ -310,8 +312,9 @@ def _edits_path(sid: str) -> Path:
 
 def note_edit(agent: str, data: dict, now: float | None = None):
     """PostToolUse of a Write, Edit or MultiEdit: the file it changed, who changed it (the agent_id, or main) and when,
-    kept for twice the longest shell call, so write detection credits a file to whoever really edited it
-    (scope_written). Under the record's lock; a busy lock drops this one record (state audits it)."""
+    kept for EDIT_KEEP, so write detection credits a file to whoever really edited it (scope_written) and the crew
+    gates credit a member only with what it wrote (gates.crew_gates). Under the record's lock; a busy lock drops this
+    one record (state audits it)."""
     if data.get("tool_name") not in EDIT_TOOLS:
         return
     path, sid = (data.get("tool_input") or {}).get("file_path"), _safe_name(data.get("session_id"))
@@ -321,8 +324,8 @@ def note_edit(agent: str, data: dict, now: float | None = None):
     who = str(data.get("agent_id") or "main")[:80]
 
     def add(doc):
-        kept = [e for e in doc.get("edits") or [] if isinstance(e, dict) and now - (e.get("ts") or 0) <= 2 * CALL_TTL]
-        doc["edits"] = (kept + [{"ts": round(now, 3), "caller": who, "path": path[:1024]}])[-200:]
+        kept = [e for e in doc.get("edits") or [] if isinstance(e, dict) and now - (e.get("ts") or 0) <= EDIT_KEEP]
+        doc["edits"] = (kept + [{"ts": round(now, 3), "caller": who, "path": path[:1024]}])[-EDIT_MAX:]
     try:
         state.update(_edits_path(sid), add)
     except state.StateBusy:

@@ -15,8 +15,12 @@ agent (`agent_of`: a Claude Code transcript or a Codex rollout), whose commands 
            tool call, or a read of the skill's SKILL.md
   stubs    the files it changed leave no unfinished work and no untracked deferrals (the `stubs` module)
   tests    the test files it changed hold no test that cannot fail (`testaudit`, high findings)
-The files it changed are those of its Write and Edit calls and, for what it wrote through its shell, the checkout's
-worktree diff since its lane started; only its own lines are blamed on it (`_mine`).
+The files it changed are those of its Write and Edit calls and, for what it wrote through its shell, the files of the
+checkout's worktree diff since its lane started that one of its commands writes (`_shell_write`: a redirection into
+the file, or a command naming it that the guard's read-only allowlist does not hold); a command that only reads a
+file (cat, grep, sed -n, git diff) does not make it the member's, and neither does a file another caller edited with
+its own edit tool during the lane (the session's edit record, progress.edits_since), unless a redirection of the
+member wrote into it. Only its own lines are blamed on it (`_mine`).
   lessons  two or more guard refusals are answered with `dev lesson add` or `dev lesson recur`
   background  every command it put in the background has ended: Claude Code keeps a member in its agent list while
            one still runs, after its report. Ended means its task notification arrived, a TaskStop (or KillShell)
@@ -34,6 +38,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 from pathlib import Path
 
 from . import core, skillguard
@@ -266,22 +271,75 @@ def _lane_start(path):
     return None
 
 
-def _shell_written(top, path, commands, known) -> dict:
-    """What the member may have written through its shell: the paths of the checkout's worktree diff
-    (`guard.worktree_state`) changed since its lane started, other than `known` (its Write and Edit files), as
-    {real path: (whole file?, [its shell commands])}. Whole when the file is new (untracked) and a command names its
-    path; otherwise only lines its commands hold are its (a heredoc's body, a sed expression). {} without a start."""
+def _shell_written(top, path, commands, known, session: str = "", lane: str = "") -> dict:
+    """What the member wrote through its shell: the paths of the checkout's worktree diff (`guard.worktree_state`)
+    changed since its lane started, other than `known` (its Write and Edit files), that one of its commands writes
+    (`_shell_write`), as {real path: (whole file?, [its shell commands])}. A file another caller of `session` edited
+    with its own edit tool during the lane (`_edited_by_others`) is that caller's unless a redirection of the member
+    wrote into it. Whole when the file is new (untracked); otherwise only lines its commands hold are its (a
+    heredoc's body, a sed expression). {} without a start."""
     start = _lane_start(path) if commands else None
     if start is None:
         return {}
     from . import guard
+    others = _edited_by_others(session, lane, start)
     out = {}
     for rel, (status, _, mtime_ns) in (guard.worktree_state(top) or {}).items():
         real = os.path.realpath(os.path.join(top, rel))
         if mtime_ns is None or mtime_ns < (start - 1) * 1e9 or real in known or not os.path.isfile(real):
             continue
-        out[real] = (status == "??" and _named(top, real, commands), list(commands))
+        how = max((_shell_write(top, real, c) for c in commands), key=WRITE_RANK.index, default="")
+        if not how or (how != "redirect" and real in others):
+            continue
+        out[real] = (status == "??", list(commands))
     return out
+
+
+WRITE_RANK = ("", "program", "redirect")  # how a command writes a file, weakest first (`_shell_write`)
+
+
+def _shell_write(top, real, cmd: str) -> str:
+    """How one shell command writes this file: "redirect" when one of its redirections writes into it (`> f`,
+    `>> f`); "program" when a command naming it runs a program the guard's read-only allowlist does not hold (sed -i,
+    cp, a script, a check with --fix: it may write it), or when only a heredoc's body names it and the command is not
+    read-only; '' when it only reads it (cat, grep, sed -n, git diff) or does not name it."""
+    if not _named(top, real, [cmd]):
+        return ""
+    from . import guard
+    segs = guard.split_commands(cmd)
+    if segs is None:
+        return "program"  # the guard cannot read it: it may write anything it names
+    here, named, how = str(top), False, ""
+    for argv, redirs in segs:
+        for r in redirs:
+            p = guard.resolve(r, here)
+            if p != guard.UNKNOWN and os.path.realpath(str(p)) == real:
+                return "redirect"
+        if argv and os.path.basename(argv[0]) in ("cd", "pushd") and len(argv) > 1 and argv[1] != "-":
+            p = guard.resolve(argv[1], here)
+            here = str(p) if p != guard.UNKNOWN else here
+            continue
+        words = " ".join(shlex.quote(a) for a in argv)
+        if _named(top, real, [words]):
+            named = True
+            if guard.readonly_refusal(words, here):
+                how = "program"
+    if not named and guard.readonly_refusal(cmd, top):  # named only in a heredoc's body: a script may write it
+        how = "program"
+    return how
+
+
+def _edited_by_others(session: str, lane: str, start) -> set:
+    """The real paths that callers of `session` other than `lane` changed with their own Write, Edit or MultiEdit
+    call since `start` (the session's edit record, progress.note_edit). Empty without a session or a lane."""
+    if not (session and lane and start):
+        return set()
+    try:
+        from . import progress
+        return {os.path.realpath(str(e.get("path"))) for e in progress.edits_since(session, start)
+                if str(e.get("caller") or "") != lane and e.get("path")}
+    except Exception:
+        return set()  # fails open: without the record, the member's commands decide
 
 
 def _named(top, real, commands) -> bool:
@@ -452,11 +510,13 @@ def _test_findings(top, files, written=None) -> list:
                      + " ".join(where) + "`")]
 
 
-def crew_gates(member, transcript_path, cwd, roster=None, agent: str = "") -> list:
+def crew_gates(member, transcript_path, cwd, roster=None, agent: str = "", session: str = "",
+               lane: str = "") -> list:
     """What a crew member still owes, from its own transcript: [{rule, item, evidence, fix}], in the order of
     RULES. `member` is a roster entry or a name (`Kid`, `DevEx engineer (Kid)`, `devkit:kid`); an unknown name
     still gets the gates that need no procedure. `agent`: the member's agent ("claude" or "codex"; default: the one
-    that wrote the transcript), whose transcript format and installed skills the gates read."""
+    that wrote the transcript), whose transcript format and installed skills the gates read. `session`, `lane`: the
+    session and the member's agent id, whose edit record tells which files other callers edited meanwhile."""
     m = _member(member, roster)
     read_only = (m or {}).get("tools") == "read"
     agent = agent or agent_of(transcript_path)
@@ -467,8 +527,9 @@ def crew_gates(member, transcript_path, cwd, roster=None, agent: str = "") -> li
     top = core.gitout(cwd, "rev-parse", "--show-toplevel") if cwd and os.path.isdir(cwd) else ""
     # real paths: git names the top as /private/var/… where the member wrote /var/… (macOS temp folders)
     in_repo = [os.path.realpath(f) for f in paths if top and os.path.isfile(f) and core.is_under(f, top)]
-    shell = _shell_written(top, transcript_path, commands, set(in_repo)) if top and not read_only else {}
-    touched = [r for r in shell if _named(top, r, commands)]  # shell writes it named: the phases count them
+    shell = _shell_written(top, transcript_path, commands, set(in_repo), session, lane) if top and not read_only \
+        else {}
+    touched = list(shell)  # what its shell wrote: the phases count it
     kinds = [_rel(f, top) for f in dict.fromkeys(in_repo + touched)] + [f for f in paths if f not in in_repo
                                                                          and not (top and core.is_under(f, top))]
     found = []
@@ -553,7 +614,8 @@ def check(name, data: dict, sess: dict, pid: str = "", roster=None, lead_name: s
                 _keep_for_lead(sess, key, lead_name, tasks)
             return None
         m = _member(name, roster)
-        findings = crew_gates(m or name, transcript, data.get("cwd") or "", roster, agent)
+        findings = crew_gates(m or name, transcript, data.get("cwd") or "", roster, agent,
+                              session=data.get("session_id") or "", lane=data.get("agent_id") or "")
         if not findings:
             return None
         who = crew.who(m) if m else str(name or "Agent")
