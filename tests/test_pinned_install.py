@@ -341,11 +341,13 @@ class DoctorTests(Sandbox):
         self.install()
         setup.write_claude_settings(include_hooks=True)
         s = self.settings()
-        s["hooks"]["PreToolUse"][0]["hooks"][0]["command"] = f"'{core.DEVKIT_HOME}/bin/dev' hook guard --agent claude"
+        # the hook runs the checkout the copy was pinned from (the sandbox's, so the check does not depend on where
+        # the tree under test sits: an exported copy's folder need not be named devkit)
+        s["hooks"]["PreToolUse"][0]["hooks"][0]["command"] = f"'{self.src}/bin/dev' hook guard --agent claude"
         (self.home / ".claude" / "settings.json").write_text(json.dumps(s))
         ok, detail, _ = self.checks()["hooks run the pinned copy"]
         self.assertFalse(ok)
-        self.assertIn(f"Claude PreToolUse runs {core.tilde(core.DEVKIT_HOME)}", detail)
+        self.assertIn(f"Claude PreToolUse runs {core.tilde(self.src)} (the checkout)", detail)
 
 
 class RealTreeTests(Sandbox):
