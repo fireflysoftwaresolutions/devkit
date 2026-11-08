@@ -1405,12 +1405,28 @@ def _route_subagent_progress(data: dict, agent: str = "claude"):
     if not aid or data.get("tool_name") not in SHELL_TOOLS or not isinstance(cmd, str):
         return None
     from . import guard
-    new = guard.lane_route(cmd, str(aid))
+    new = guard.lane_route(cmd, str(aid)) or _watch_route(cmd, str(aid))
     if new is None:
         return None
     if not guard.runs_one_command(cmd) and _lane_verdict(data, agent, cmd, routed=True):
         return None  # _unroutable_lane_command gives the refusal
     return {**inp, "command": new}
+
+
+def _watch_route(cmd: str, aid: str):
+    """A member's `dev watch …` call that is the whole command: with DEVKIT_FROM_AGENT=<aid> in front, so its wait
+    takes the member's own events, never the main session's. The call ledger names the member only while the call
+    is open, and a background command's call closes as soon as it starts. None for any other command."""
+    from . import guard
+    if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,80}", aid) or not guard.runs_one_command(cmd):
+        return None
+    try:
+        argv = shlex.split(cmd)
+    except ValueError:
+        return None
+    if not argv or os.path.basename(argv[0]) != "dev" or argv[1:2] != ["watch"]:
+        return None
+    return f"DEVKIT_FROM_AGENT={aid} {cmd.strip()}"
 
 
 _HOOK_TEXT = re.compile(r"\bdevkit\.hooks\b|\bfrom\s+devkit\s+import\b[^\n]*\bhooks\b|(?:^|[\s;&|(`'\"])(?:\S*/)?dev\s+"

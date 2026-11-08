@@ -143,5 +143,27 @@ class SendMessageAnswerTests(RequestCase):
         self.assertIn("SendMessage", json.dumps(done[0]))
 
 
+class MemberWaitRouteTests(RequestCase):
+    def test_a_members_wait_names_its_own_lane_even_in_the_background(self):
+        # a background command's call leaves the ledger as soon as it starts, so a member's background wait found no
+        # caller, counted as the main session and could take the tech lead's events; the PreToolUse hook gives each
+        # member's `dev watch` call its lane, as it does its `dev crew` calls
+        def pre(cmd, background):
+            out = io.StringIO()
+            inp = dict({"command": cmd}, **({"run_in_background": True} if background else {}))
+            payload = {"session_id": "s1", "hook_event_name": "PreToolUse", "tool_name": "Bash", "agent_id": "a_tank",
+                       "tool_use_id": "toolu_w", "tool_input": inp, "cwd": str(self.root)}
+            with mock.patch("sys.stdin", io.StringIO(json.dumps(payload))), contextlib.redirect_stdout(out):
+                hooks.run("guard", "claude")
+            text = out.getvalue().strip()
+            return ((json.loads(text) if text else {}).get("hookSpecificOutput") or {}).get("updatedInput") or {}
+        for background in (False, True):
+            with self.subTest(background=background):
+                got = pre("dev watch --wait --for me --timeout 9", background)
+                self.assertEqual(got.get("command"), "DEVKIT_FROM_AGENT=a_tank dev watch --wait --for me --timeout 9")
+                self.assertEqual(got.get("run_in_background", False), background)
+        self.assertEqual(pre("dev watch --wait; rm -rf build", False), {})  # only a call of its own is routed
+
+
 if __name__ == "__main__":
     unittest.main()
