@@ -48,7 +48,7 @@ EXPECT_APP = {
     "docs/guides/setup.md": ["docs"],
     "README.md": ["docs"],
     "CHANGELOG.md": ["docs"],
-    "VERSION": ["delivery"],
+    "VERSION": ["release"],
     "plugin/skills/testing/SKILL.md": ["docs"],
     "plugin/skills/delivery/references/flow.md": ["docs"],
     "plugin/agents/neo.md": ["docs"],
@@ -177,6 +177,50 @@ class OutsideTheRepository(unittest.TestCase):
             why = sg.on_stop("claude", {"transcript_path": str(t)}, {})
             self.assertIn("`frontend-design`", why or "")
             self.assertIn("page.py", why or "")
+
+
+class CommandsAtStop(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self._installed = sg.installed
+        sg.installed = lambda agent: {"delivery", "release-policy", "testing", "learning-loop", "cicd",
+                                      "github-actions-hardening"}
+
+    def tearDown(self):
+        sg.installed = self._installed
+        self.tmp.cleanup()
+
+    def stop(self, *lines, agent="claude", sess=None):
+        t = Path(self.tmp.name) / "t.jsonl"
+        t.write_text("\n".join(lines) + "\n")
+        return sg.on_stop(agent, {"transcript_path": str(t)}, {} if sess is None else sess)
+
+    # a turn that pushed and ran the tests owes delivery and testing, named with the command that needs each
+    def test_a_turn_that_ran_commands_owes_their_skills(self):
+        why = self.stop(tool_use("Bash", command="git push -u origin fix/x"),
+                        tool_use("Bash", command="cd /repo && bin/dev test"))
+        self.assertIn("`delivery`", why or "")
+        self.assertIn("`testing`", why or "")
+        self.assertIn("git push", why or "")
+        self.assertNotIn("release-policy", why or "")  # a push is not a release
+
+    # a tag is a release; Codex's shell calls count the same way
+    def test_a_codex_turn_that_tagged_owes_the_release_skills(self):
+        call = json.dumps({"type": "response_item", "payload": {
+            "type": "function_call", "name": "exec_command", "arguments": json.dumps({"cmd": "git tag v26.11.7"})}})
+        why = self.stop(call, agent="codex")
+        self.assertIn("`release-policy`", why or "")
+        self.assertIn("`delivery`", why or "")
+
+    # text that only mentions a command, reading a CI run and listing lessons owe nothing; each skill is asked once
+    def test_mentions_and_reads_owe_nothing_and_each_skill_is_asked_once(self):
+        self.assertIsNone(self.stop(tool_use("Bash", command='echo "git push"'),
+                                    tool_use("Bash", command="gh run view 42 --log-failed"),
+                                    tool_use("Bash", command="dev lesson ls")))
+        sess = {}
+        self.assertIn("`learning-loop`", self.stop(tool_use("Bash", command='dev lesson add "x" --cause y'),
+                                                   sess=sess) or "")
+        self.assertIsNone(self.stop(tool_use("Bash", command='dev lesson add "z" --cause w'), sess=sess))
 
 
 if __name__ == "__main__":
