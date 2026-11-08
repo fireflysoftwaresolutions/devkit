@@ -1347,6 +1347,27 @@ def on_prompt(agent: str, data: dict, now=None) -> str:
     return _deliver_main(agent, sid, data, now)
 
 
+def on_midturn(agent: str, sid: str, text: str, ts=None, now=None) -> None:
+    """A message the developer typed while the session worked (progress.note_midturn: Claude Code runs no
+    UserPromptSubmit for it): a prompt of the current turn, pending like the turn's own prompt until Stop classes the
+    turn, and kept once. It moves continuity's latest requests only, never approval evidence."""
+    now = now or time.time()
+    if not sid or not str(text or "").strip() or str(text).lstrip().startswith(_BACKGROUND):
+        return None
+    entry = {"ts": round(float(ts or now), 3), "prompt_id": "", "text": _clean(text), "pending": True,
+             "midturn": True}
+
+    def add(r):
+        cp = r.setdefault("checkpoint", {})
+        prompts = cp.get("prompts") or []
+        if any(p.get("text") == entry["text"] and abs((p.get("ts") or 0) - entry["ts"]) < 1 for p in prompts):
+            return state.SKIP
+        cp["prompts"] = (prompts + [entry])[-PROMPTS:]
+        r["checkpoint"] = _fit(cp)
+    _quietly(agent, sid, add, now)
+    return None
+
+
 def _deliver_main(agent: str, sid: str, data: dict, now: float) -> str:
     try:
         taken = _detect_and_take(agent, sid, "main", data.get("transcript_path"), now)

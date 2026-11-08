@@ -1264,6 +1264,7 @@ def assign(which, label: str, cwd: str | None = None, now: float | None = None, 
             _log_change(run, s, s.get("state"), "pending", "main", f"reassigned from {old} to {label}", now)
             s.update(owner="main", state="pending")  # the other member's lane no longer owns it
         s["label"] = label
+        s["assigned_at"] = round(now, 3)  # a step assigned after the developer's mid-turn message is their request
         if wanted:
             held = dict(s.get("allow_evidence") or {})
             for act in wanted:
@@ -2169,6 +2170,42 @@ def crew_inbox(from_agent: str | None = None, cwd: str | None = None, mark: bool
     agent, sid = current_session(cwd)
     run = load_run(agent, sid)
     return _take_messages(agent, sid, from_agent or "main", mark) if run else []
+
+
+def answered_by_sendmessage(agent: str, data: dict, now: float | None = None) -> list:
+    """PostToolUse of a SendMessage from the main session: its text answers the open questions that the member it went
+    to (a lane id, or a name its lanes answer to) asked the tech lead. Each is marked answered via SendMessage, the
+    text is kept as the answer (delivered already: SendMessage carried it), and the audit trail records
+    crew.message-answered with the channel. -> the ids answered"""
+    inp = data.get("tool_input") or {}
+    to, text = str(inp.get("to") or "").strip(), str(inp.get("message") or "").strip()
+    resp = data.get("tool_response")
+    sid = data.get("session_id") or ""
+    if data.get("agent_id") or not sid or not to or not text or to == "main" or \
+            (isinstance(resp, dict) and resp.get("success") is False):
+        return []
+    now = now or time.time()
+    with _tx(agent, sid):
+        run = load_run(agent, sid)
+        if not isinstance(run, dict) or run.get("state") not in ("running", "blocked"):
+            return []
+        run = normalize(run)
+        agents = run.get("agents") or {}
+        lanes = [to] if to in agents else [k for k, v in agents.items() if isinstance(v, dict) and
+                                           _label_matches(to, v)]
+        asked = [m for m in _unanswered(run) if m.get("to") == "main" and m.get("from") in lanes]
+        if not asked:
+            return []
+        for q in asked:
+            q.update(answered=True, via="SendMessage")
+        a = _post(run, "main", asked[-1]["from"], text, now, kind="answer")
+        a.update(reply_to=asked[-1]["id"], delivered=True, via="SendMessage", to_name=asked[-1].get("from_name") or
+                 a.get("to_name"))
+        _save(run, touch_session=False)
+    for q in asked:  # never the text: crew messages quote the developer's requests
+        _audit("crew.message-answered", q["id"], f"answered via SendMessage to {q.get('from_name') or q['from']}",
+               "answered", project=run.get("project") or "", id=a["id"], channel="SendMessage", count=len(text))
+    return [q["id"] for q in asked]
 
 
 def _take_messages(agent, sid, me: str, mark=True, select=None, limit=None) -> list:
@@ -4769,7 +4806,7 @@ def on_prompt(agent: str, data: dict, now: float | None = None):
     if f.exists():
         try:
             state.update(f, lambda d: d.update({"turn_started": now, "last_update": now, "nudges": 0,
-                                                "last_prompt": now}), create=False)
+                                                "last_prompt": now, "request_ts": None}), create=False)
         except state.StateBusy:
             pass  # audited by state: this prompt's clock is dropped, the hook still answers
     _run_event(agent, sid, lambda run: (_close(run, "turn", None, now), _open(run, "turn", "main", now)))
@@ -5606,10 +5643,117 @@ def named_step(run: dict, kind: str = "", label: str = ""):
 
 
 def is_latest_request(run: dict, sess: dict, s: dict) -> bool:
-    """A step the developer asked for in the current turn: added since its prompt, by Morpheus (not delegated by a
-    member). True for every step when the turn is unknown (no prompt recorded)."""
+    """A step the developer asked for in the current turn, by Morpheus (not delegated by a member): added since its
+    prompt, or added or assigned since a message they typed mid-turn (`request_ts`, note_midturn). True for every step
+    when the turn is unknown (no prompt recorded). A plan step merely assigned in the turn, with no newer request,
+    stays plan work."""
     turn = (sess or {}).get("turn_started")
-    return not turn or (_step_added(run, s) >= float(turn) and (s.get("requested_by") or "main") == "main")
+    if not turn:
+        return True
+    if (s.get("requested_by") or "main") != "main":
+        return False
+    if _step_added(run, s) >= float(turn):
+        return True
+    req = (sess or {}).get("request_ts")
+    return bool(req) and float(s.get("assigned_at") or 0) >= float(req)
+
+
+MIDTURN_READ = 400_000  # bytes of new transcript lines one hook reads at most; the rest waits for the next hook
+_WAKE_PROMPTS = ("<task-notification", "[SYSTEM NOTIFICATION", "<system-reminder", "<agent-message")
+
+
+def midturn_requests(transcript, offset=None, since=None) -> tuple:
+    """The messages the developer typed while the session worked, in the transcript lines after `offset` -> ([{"text",
+    "ts"}], the offset to keep). Claude Code runs no UserPromptSubmit for them: it records each as an attachment of
+    type queued_command with commandMode "prompt" and origin.kind "human". Never a task notification, nor any other
+    queued command. A line cut mid-write is read at the next call, whole; a transcript shorter than `offset` (rotated)
+    is read from its start; with no offset, only its last MIDTURN_READ bytes. `since`: only messages at or after it
+    (the turn's prompt). They move the request clock and continuity only, never approval evidence: the attachment is
+    the harness's format, not a contract."""
+    try:
+        size = os.path.getsize(transcript)
+    except (OSError, TypeError, ValueError):
+        return [], offset
+    start = offset if isinstance(offset, int) and 0 <= offset <= size else (0 if isinstance(offset, int) else
+                                                                           max(0, size - MIDTURN_READ))
+    try:
+        with open(transcript, "rb") as fh:
+            fh.seek(start)
+            data = fh.read(MIDTURN_READ)
+    except OSError:
+        return [], offset
+    if start and not isinstance(offset, int):  # a tail read starts mid-line: from the next whole one
+        cut = data.find(b"\n")
+        data, start = (data[cut + 1:], start + cut + 1) if cut >= 0 else (b"", start)
+    end = data.rfind(b"\n")
+    if end < 0:
+        return [], start
+    out = []
+    import datetime as dt
+    for raw in data[:end + 1].splitlines():
+        if b"queued_command" not in raw:
+            continue
+        try:
+            rec = json.loads(raw)
+        except ValueError:
+            continue
+        a = rec.get("attachment") if isinstance(rec, dict) else None
+        if not isinstance(a, dict) or a.get("type") != "queued_command" or a.get("commandMode") != "prompt" or \
+                not isinstance(a.get("origin"), dict) or a["origin"].get("kind") != "human":
+            continue
+        text = str(a.get("prompt") or "")
+        if not text.strip() or text.lstrip().startswith(_WAKE_PROMPTS):
+            continue
+        try:
+            ts = dt.datetime.fromisoformat(str(a.get("timestamp") or rec.get("timestamp")).replace("Z", "+00:00")
+                                           ).timestamp()
+        except ValueError:
+            continue
+        if since and ts < float(since):
+            continue
+        out.append({"text": text, "ts": ts})
+    return out, start + end + 1
+
+
+def note_midturn(agent: str, data: dict) -> list:
+    """The main session's hooks (PreToolUse of a launch, PostToolUse): the messages the developer typed mid-turn
+    since the last hook (midturn_requests, from the offset the session record keeps, read and moved under its lock so
+    each is counted once) become the developer's latest request: `request_ts`, which is_latest_request reads, and a
+    prompt of the turn in continuity. -> the messages found"""
+    if data.get("agent_id") or agent != "claude":
+        return []
+    sid = data.get("session_id") or ""
+    f = session_path(agent, sid)
+    if not sid or not f.exists():
+        return []
+    sess = state.read(f) or {}
+    try:  # the usual case: nothing written since the last hook read it, without the lock
+        if os.path.getsize(data.get("transcript_path") or sess.get("transcript")) == sess.get("midturn_offset"):
+            return []
+    except (OSError, TypeError, ValueError):
+        return []
+    found = []
+
+    def read(s):
+        transcript = data.get("transcript_path") or s.get("transcript")
+        if not transcript:
+            return state.SKIP
+        new, off = midturn_requests(transcript, s.get("midturn_offset"), since=s.get("turn_started"))
+        if off == s.get("midturn_offset") and not new:
+            return state.SKIP
+        s["midturn_offset"] = off
+        if new:
+            s["request_ts"] = max([float(s.get("request_ts") or 0)] + [r["ts"] for r in new])
+            found.extend(new)
+    try:
+        state.update(f, read, create=False)
+    except state.StateBusy:
+        return []  # audited by state; the next hook reads them
+    if found:
+        from . import continuity
+        for r in found:
+            continuity.on_midturn(agent, sid, r["text"], r["ts"])
+    return found
 
 
 # Nested agents (spec F3, contract C3). A subagent can launch agents of its own; such a helper gets its parent's

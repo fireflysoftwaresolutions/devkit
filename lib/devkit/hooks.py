@@ -1595,6 +1595,7 @@ def _crew_limits(agent: str, data: dict):
                 return ("deny", progress.holder_refusal(h, path, cwd))
         if tool not in ("Agent", "Task", "spawn_agent"):
             return None
+        progress.note_midturn(agent, data)  # a request typed mid-turn may take the slot kept for the developer
         run = progress.load_run(agent, sid)
         if not run or run.get("state") == "done":
             return None
@@ -2329,6 +2330,12 @@ def post_tool(agent: str):
     # main: a compaction only the transcript shows (its brief) or "Not in the summary"; a member: its reminder after
     # its own compaction. Each once
     carried = _continuity("on_tool", agent, data)
+    try:  # the main session: what the developer typed mid-turn is their latest request (no prompt hook ran for it)
+        progress.note_midturn(agent, data)
+        if data.get("tool_name") == "SendMessage":  # the tech lead answered a member's question outside devkit
+            progress.answered_by_sendmessage(agent, data)
+    except Exception:
+        _log(f"post-tool requests {agent}: {traceback.format_exc()[-300:]}")
     answered = ""
     if data.get("tool_name") in progress.QUESTION_TOOLS:  # the developer's answer to a decision (spec C5, E1)
         try:
