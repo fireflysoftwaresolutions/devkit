@@ -1473,7 +1473,7 @@ def _gc_unattended(a):
         if input(f"\n  Apply {len(pl['actions'])} action(s)? [y/N] ").strip().lower() not in ("y", "yes"):
             return 1
     print(ui.section("Applying"))
-    for ok, msg in gc.apply(pl, only_auto=getattr(a, "auto_only", False)):
+    for ok, msg in gc.apply(pl, only_auto=getattr(a, "auto_only", False), remote=True):
         print(f"  {ui.OK if ok else ui.WARN} {msg}")
     return cmd_sync(argparse.Namespace(session=None, finish=False, offline=True, scheduled=False, no_push=False,
                                        quiet=False, renew=None))

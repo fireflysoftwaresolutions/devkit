@@ -55,7 +55,7 @@ class GcWorktreeTests(GcCase):
         pl = self.plan()
         [act] = self.actions(pl, "remove-worktree")
         self.assertIn("merged by content: 1 commit has an equivalent in origin/main", act["reason"])
-        results = gc.apply(pl)
+        results = gc.apply(pl, remote=True)
         self.assertFalse(wt.exists(), results)
         self.assertEqual(self.local("fix/picked"), "")
 
@@ -76,7 +76,7 @@ class GcWorktreeTests(GcCase):
         pl = self.plan()
         self.assertEqual(self.actions(pl, "remove-worktree"), [])
         self.assertTrue(any("feat/wip" in n and "not on any remote" in n for n in pl["notes"]), pl["notes"])
-        gc.apply(pl)
+        gc.apply(pl, remote=True)
         self.assertTrue(wt.is_dir())
 
 
@@ -86,7 +86,7 @@ class GcBranchTests(GcCase):
         pl = self.plan()
         [act] = [a for a in self.actions(pl, "prune-branch") if a["branch"] == "fix/old"]
         self.assertEqual(act["where"], "local")
-        gc.apply(pl)
+        gc.apply(pl, remote=True)
         self.assertEqual(self.local("fix/old"), "")
         self.assertEqual([r["target"] for r in self.records("branch.pruned")], ["fix/old"])
 
@@ -101,7 +101,7 @@ class GcBranchTests(GcCase):
         self.backed_up("fix/backed")
         pl = self.plan()
         self.assertIn(("remote", "fix/backed"), [(a["where"], a["branch"]) for a in self.actions(pl, "prune-branch")])
-        gc.apply(pl)
+        gc.apply(pl, remote=True)
         self.assertEqual(self.on_origin("fix/backed"), "")
 
     def test_a_run_that_may_not_reach_origin_keeps_every_remote_branch(self):
@@ -119,7 +119,7 @@ class GcBranchTests(GcCase):
         self.assertNotIn(("remote", "fix/theirs"), [(a["where"], a["branch"]) for a in self.actions(pl, "prune-branch")])
         self.assertTrue(any("origin/fix/theirs" in n and "dev branch prune --apply" in n for n in pl["notes"]),
                         pl["notes"])
-        gc.apply(pl)
+        gc.apply(pl, remote=True)
         self.assertTrue(self.on_origin("fix/theirs"))
 
     def test_a_remote_branch_whose_pull_request_merged_goes(self):
@@ -130,7 +130,7 @@ class GcBranchTests(GcCase):
         pl = self.plan()
         self.assertIn(("remote", "feat/squashed"),
                       [(a["where"], a["branch"]) for a in self.actions(pl, "prune-branch")])
-        gc.apply(pl)
+        gc.apply(pl, remote=True)
         self.assertEqual(self.on_origin("feat/squashed"), "")
         self.assertIn("merged: PR #7 was merged", " ".join(r["detail"] for r in self.records("branch.pruned")))
 

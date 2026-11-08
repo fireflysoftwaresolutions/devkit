@@ -256,9 +256,9 @@ def remove_worktree(main: str, path: str, branch: str = None, github: str = None
     return True, msg
 
 
-def apply(pl: dict, only_auto=True, remote=True) -> list:
-    """Carry out the plan's actions (only the automatic ones by default) -> [(ok, message)]. With remote False it keeps
-    every branch on origin, for a run that may not reach it (dev sync --offline or --no-push)."""
+def apply(pl: dict, only_auto=True, *, remote: bool) -> list:
+    """Carry out the plan's actions (only the automatic ones by default) -> [(ok, message)]. Every caller says
+    whether the run may delete on origin: remote False keeps every branch there (dev sync --offline or --no-push)."""
     results = []
     for a in pl["actions"]:
         if only_auto and not a.get("auto"):
