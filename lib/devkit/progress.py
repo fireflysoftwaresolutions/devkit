@@ -1892,8 +1892,13 @@ def crew_ask(text: str, to: str | None = None, from_agent: str | None = None, cw
     """A question or request between crew members (default: to Morpheus, the main session). It reaches the recipient
     with its next tool call (PostToolUse) or prompt. `kind`: "message" (a question, or a notice when CI watch or devkit
     sends it), "notice" (it tells, and waits for no answer) or "answer". The audit trail keeps its kind and length,
-    never its text (crew messages quote the developer's requests)."""
+    never its text (crew messages quote the developer's requests). A message longer than MESSAGE_MAX is refused whole,
+    never cut: the reader would get half a text without knowing it."""
     now = now or time.time()
+    size = len((text or "").strip())
+    if size > MESSAGE_MAX:
+        raise ValueError(f"the message is {size} characters and a crew message holds at most {MESSAGE_MAX}: send it "
+                         "in parts, or write the long text to a file in your scratch folder and send its path")
     from_agent = _as_lane(from_agent, cwd)
     agent, sid = current_session(cwd)
     return _ask_into(agent, sid, text, to, from_agent or "main", now, kind)
@@ -1923,13 +1928,14 @@ def _next_id(items: list, prefix: str) -> str:
 
 
 NOTICE_SENDERS = ("ci", "devkit")  # CI watch and devkit itself tell; they never ask
+MESSAGE_MAX = 1500  # characters in one crew message; crew_ask refuses a longer one, devkit's own notices stay under it
 
 
 def _post(run, frm: str, to: str, text: str, now: float, from_name: str = "", kind: str = "") -> dict:
     """Add a message to the run (the caller saves it). `kind`: question, notice or answer; without it, a notice from
     CI watch or devkit, else a question. -> the message."""
     msgs = run.setdefault("messages", [])
-    m = {"id": _next_id(msgs, "M"), "ts": round(now), "from": frm, "to": to, "text": text.strip()[:1500],
+    m = {"id": _next_id(msgs, "M"), "ts": round(now), "from": frm, "to": to, "text": text.strip()[:MESSAGE_MAX],
          "delivered": False, "kind": kind or ("notice" if frm in NOTICE_SENDERS else "question")}
     m["from_name"], m["to_name"] = from_name or _name_of(run, frm), _name_of(run, to)
     msgs.append(m)

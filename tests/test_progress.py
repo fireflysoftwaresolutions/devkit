@@ -1539,6 +1539,26 @@ class AddStepSpecTests(unittest.TestCase):
         self.assertEqual([n for n, *_ in self.plan()], ["build"])
 
 
+class CrewMessageLengthTests(unittest.TestCase):
+    # a message over the limit was cut at 1,500 characters with no word to anyone, so the reader got half a text
+    def test_a_message_over_the_limit_is_refused_whole_and_nothing_is_posted(self):
+        with TempState():
+            pg.start("Release", plan=["build"])
+            with self.assertRaises(ValueError) as caught:
+                pg.crew_ask("Docs text for the writer: " + "x" * 1600, from_agent="a1")
+            self.assertIn("1626 characters", str(caught.exception))
+            self.assertIn("1500", str(caught.exception))
+            self.assertEqual(pg.load_run("claude", "s1").get("messages") or [], [])
+
+    def test_a_message_at_the_limit_arrives_whole(self):
+        with TempState():
+            pg.start("Release", plan=["build"])
+            text = "may I change lib/x.py? " + "y" * (1500 - 23)
+            q = pg.crew_ask(text, from_agent="a1")
+            self.assertEqual(len(text), 1500)
+            self.assertEqual(q["text"], text)
+
+
 class CrewMessageAuditTests(unittest.TestCase):
     def test_a_message_is_audited_by_its_kind_and_length_never_its_text(self):
         from devkit import audit
