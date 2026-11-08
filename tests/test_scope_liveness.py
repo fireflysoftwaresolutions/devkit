@@ -255,10 +255,10 @@ class CarryTests(OwnerCase):
         self.assertEqual(pg.load_run("claude", "s2")["agents"]["a_kid"]["state"], "running")
 
 
-class EndedMemberTakesNoStepTests(OwnerCase):
+class EndedTankCase(OwnerCase):
     # this session's run still lists the Backend engineer (Tank) as running, but Claude Code recorded him finished
     # beside this session's transcript ten minutes ago, after his last activity: `dev crew owner` and the Crew line
-    # show him ended, so no new step goes to his lane and the files he held are free (Code reviewer, second pass)
+    # show him ended (Code reviewer, second pass)
     def ended_tank(self, plan, label, assign=None):
         pg.start("Export", plan=plan, now=self.now - 3600)
         if assign:
@@ -269,6 +269,27 @@ class EndedMemberTakesNoStepTests(OwnerCase):
         self.assertEqual(run["agents"]["a_tank"]["state"], "running")
         self.assertEqual(pg.lane_states(run, self.now)["a_tank"]["state"], "ended")
 
+    def stale_tank(self, plan, label, assign=None):
+        # the same lane, silent past progress.stale_agent_minutes, with nothing that says it ended
+        quiet = (approvals.limits()["stale_minutes"] + 20) * MIN
+        pg.start("Export", plan=plan, now=self.now - quiet)
+        if assign:
+            pg.assign(assign, "Tank", scope="lib/api/**", now=self.now - quiet)
+        launch("a_tank", "devkit:tank", label, self.now - quiet)
+        run = pg.load_run("claude", "s1")
+        self.assertEqual(run["agents"]["a_tank"]["state"], "running")
+        self.assertEqual(pg.lane_states(run, self.now)["a_tank"]["state"], "stale")
+
+    def lead_mail(self):
+        # what reaches the tech lead with his next tool call
+        return pg.on_tool_done("claude", {"session_id": "s1"}) or ""
+
+    def mail_of(self, aid):
+        return pg.on_tool_done("claude", {"session_id": "s1", "agent_id": aid}) or ""
+
+
+class EndedMemberTakesNoStepTests(EndedTankCase):
+    # so no new step goes to his lane and the files he held are free
     def test_a_step_delegated_to_an_ended_member_waits_for_a_new_launch(self):
         self.ended_tank(["api"], "Tank: api", assign="api")
         r = dispatch.delegate("add a nullable column for the export date", to="Tank", now=self.now)
@@ -290,6 +311,99 @@ class EndedMemberTakesNoStepTests(OwnerCase):
         pg.assign("parser", "Neo", scope="lib/api/**", now=self.now)
         self.assertEqual(pg.load_run("claude", "s1")["plan"][1]["scope"], ["lib/api/**"])
         self.assertEqual(self.owner("lib/api/routes.py")[0], 0)  # as dev crew owner says
+
+
+class MessageToAMemberWhoEndedTests(EndedTankCase):
+    # a message for a member that ended or went stale waits for their next launch, as for a member with no lane,
+    # and the sender is told; it never waits silently in the dead lane, where nobody reads it
+    def test_a_message_for_a_member_who_ended_reaches_their_next_launch_and_the_sender_is_told(self):
+        self.ended_tank(["api"], "Tank: api", assign="api")
+        m = pg.crew_ask("Add the export date to the API", to="Tank", now=self.now)
+        told = self.lead_mail()
+        self.assertIn("Backend engineer (Tank) ended: Claude Code recorded it finished", told)
+        self.assertIn(f"{m['id']} waits for their next launch: launch them again", told)
+        launch("a_tank2", "devkit:tank", "Tank: export date", self.now + 60)
+        self.assertIn("Add the export date to the API", self.mail_of("a_tank2"))
+
+    def test_a_message_for_a_member_who_went_stale_reaches_their_next_launch_and_the_sender_is_told(self):
+        self.stale_tank(["api"], "Tank: api", assign="api")
+        m = pg.crew_ask("Add the export date to the API", to="Tank", now=self.now)
+        told = self.lead_mail()
+        self.assertIn("Backend engineer (Tank) went stale: silent for", told)
+        self.assertIn(f"{m['id']} waits for their next launch", told)
+        launch("a_tank2", "devkit:tank", "Tank: export date", self.now + 60)
+        self.assertIn("Add the export date to the API", self.mail_of("a_tank2"))
+
+    def test_a_member_who_asks_one_that_ended_is_told_to_ask_the_tech_lead_to_launch_them(self):
+        self.ended_tank(["api", "ui"], "Tank: api", assign="api")
+        pg.assign("ui", "Trinity", scope="web/**", now=self.now - 60)
+        launch("a_tri", "devkit:trinity", "Trinity: ui", self.now - 60)
+        m = pg.crew_ask("Which field holds the export date?", to="Tank", from_agent="a_tri", now=self.now)
+        told = self.mail_of("a_tri")
+        self.assertIn(f"{m['id']} waits for their next launch: ask the tech lead to launch them again", told)
+        self.assertNotIn("waits for their next launch", self.lead_mail())  # the notice is the sender's, not his
+
+    def test_a_message_for_a_member_goes_to_their_working_lane_not_to_a_newer_one_that_ended(self):
+        # two lanes of the Backend engineer (Tank): the older one still works, the newer one ended
+        pg.start("Export", plan=["api", "csv"], now=self.now - 20 * MIN)
+        launch("a_old", "devkit:tank", "Tank: api", self.now - 20 * MIN)
+        launch("a_new", "devkit:tank", "Tank: csv", self.now - 10 * MIN)
+        self.claude_meta("s1", "a_new", finished=True, at=self.now - 2 * MIN, log_at=self.now - 3 * MIN)
+        self.assertEqual({k: v["state"] for k, v in pg.lane_states(pg.load_run("claude", "s1"), self.now).items()},
+                         {"a_old": "working", "a_new": "ended"})
+        pg.crew_ask("Add the export date to the API", to="Tank", now=self.now)
+        self.assertIn("Add the export date to the API", self.mail_of("a_old"))
+        self.assertNotIn("waits for their next launch", self.lead_mail())
+
+
+class StepOfAMemberWhoEndedTests(EndedTankCase):
+    # a step whose owner ended or went stale closes with the tech lead's evidence, like one of his own, and the run's
+    # history says its owner had ended (a step whose owner still works is still refused: test_progress,
+    # test_a_subagents_step_is_not_closed_from_outside)
+    def test_a_step_whose_owner_ended_closes_with_the_tech_leads_evidence(self):
+        self.ended_tank(["export api"], "Tank: export api", assign="export api")
+        step = pg.load_run("claude", "s1")["plan"][0]
+        self.assertEqual((step["owner"], step["state"]), ("a_tank", "running"))
+        run = pg.step("export api endpoint returns the CSV", which="export api", check="tests.test_export: 4 OK",
+                      now=self.now)
+        self.assertEqual(run["plan"][0]["state"], "done")
+        h = run["history"][-1]
+        self.assertEqual((h["step"], h["from"], h["to"], h["by"]), ("export api", "running", "done", "main"))
+        self.assertIn("its owner Backend engineer (Tank) had ended: Claude Code recorded it finished", h["why"])
+        self.assertIn("tests.test_export: 4 OK", h["why"])
+
+    def test_a_step_whose_owner_went_stale_closes_with_the_tech_leads_evidence(self):
+        self.stale_tank(["export api"], "Tank: export api", assign="export api")
+        run = pg.step("export api endpoint returns the CSV", which="export api", check="tests.test_export: 4 OK",
+                      now=self.now)
+        self.assertEqual(run["plan"][0]["state"], "done")
+        self.assertIn("its owner Backend engineer (Tank) had gone stale: silent for", run["history"][-1]["why"])
+
+
+class OwnRunTests(OwnerCase):
+    # the caller's own run: the caller works in its session, so that session works even when its record is missing,
+    # as scope_holders reads it (own=True); assign, delegate, a message and a step close read their own run so too
+    # (Code reviewer, recheck)
+    def working_tank_without_the_sessions_record(self):
+        pg.start("Export", plan=["api", "csv"], now=self.now - 10 * MIN)
+        pg.assign("api", "Tank", scope="lib/api/**", now=self.now - 10 * MIN)
+        launch("a_tank", "devkit:tank", "Tank: api", self.now - 10 * MIN)
+        pg.session_path("claude", "s1").unlink()
+
+    def test_delegate_gives_the_step_to_this_sessions_working_member_when_the_sessions_record_is_missing(self):
+        self.working_tank_without_the_sessions_record()
+        r = dispatch.delegate("add a nullable column for the export date", to="Tank", now=self.now)
+        self.assertEqual(r["lane"], "a_tank")
+
+    def test_this_sessions_working_member_still_works_when_the_sessions_record_is_missing(self):
+        self.working_tank_without_the_sessions_record()
+        with self.assertRaises(pg.StepError) as e:
+            pg.assign("csv", "Neo", scope="lib/api/export.py", now=self.now)
+        self.assertIn("overlaps the files Backend engineer (Tank) owns while working", str(e.exception))
+        self.assertEqual(pg.crew_ask("Add the export date", to="Tank", now=self.now)["to"], "a_tank")
+        with self.assertRaises(pg.StepError) as e:
+            pg.step("api endpoint done", which="api", now=self.now)
+        self.assertIn("still working on it", str(e.exception))
 
 
 class SweepTests(OwnerCase):

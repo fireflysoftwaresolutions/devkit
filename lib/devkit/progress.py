@@ -1153,7 +1153,7 @@ def assign(which, label: str, cwd: str | None = None, now: float | None = None, 
             _audit("crew.allow", s["name"], f"{label} may {', '.join(s['allow']) or 'take no irreversible action'}"
                    + (f"; no grant of the developer for {', '.join(missing)}" if missing else ""),
                    project=run.get("project") or "")
-        live = working_agents(run, now)  # a member that ended or went stale takes no step and holds no files
+        live = working_agents(run, now, own=True)  # one that ended or went stale takes no step and holds no files
         if globs:
             for _, lane in live:
                 if not _label_matches(label, lane):
@@ -1446,27 +1446,50 @@ def lane_state(run: dict, aid: str, lane: dict, facts, now: float | None = None,
     return {"state": "working", "last": last, "why": ""}
 
 
-def lane_states(run: dict, now: float | None = None, facts=None, alive=None) -> dict:
+def lane_states(run: dict, now: float | None = None, facts=None, alive=None, own: bool = False) -> dict:
     """{lane id: lane_state} for every lane `run` lists as running: whether its member still works, went stale or
     ended, as scope_holders decides for the files it holds. Everything that counts or lists the crew at work
     (headline, crew_summary, slot_use, brief, working_agents, the continuity brief, the dashboard) reads it, so they
-    agree with `dev crew owner`. `facts`: agent_facts over this Mac's live runs and `run`, read when None. Unknown
-    counts as working."""
+    agree with `dev crew owner`. `facts`: agent_facts over this Mac's live runs and `run`, read when None. `own`: the
+    run is the caller's own, whose session works since the caller runs in it, so its session is not asked (as
+    scope_holders reads its own run). Unknown counts as working."""
     lanes = {k: v for k, v in ((run or {}).get("agents") or {}).items()
              if isinstance(v, dict) and v.get("state") == "running"}
     if not lanes:
         return {}
     now = now or time.time()
     facts = agent_facts(active_runs() + [run]) if facts is None else facts
-    gone = _session_gone(run, alive)
+    gone = "" if own else _session_gone(run, alive)
     return {aid: lane_state(run, aid, lane, facts, now, alive, gone=gone) for aid, lane in lanes.items()}
 
 
-def working_agents(run, now: float | None = None, states=None) -> list:
-    """The lanes `run` lists as running whose member still works (lane_states) -> [(id, lane)], as running_agents
-    lists them; a member that ended or went stale is not busy and holds no slot."""
-    states = lane_states(run, now) if states is None else states
+def working_agents(run, now: float | None = None, states=None, own: bool = False) -> list:
+    """The lanes `run` lists as running whose member still works (lane_states; `own`: the caller's own run) ->
+    [(id, lane)], as running_agents lists them; a member that ended or went stale is not busy and holds no slot."""
+    states = lane_states(run, now, own=own) if states is None else states
     return [(k, v) for k, v in running_agents(run) if (states.get(k) or {}).get("state", "working") == "working"]
+
+
+def lane_gone(aid: str, lane, states: dict):
+    """("ended" | "stale", why) when the member of lane `aid` no longer works, as `dev crew owner` reads it, else
+    None: its run closed the lane (done, stopped, lost, unverified), or lists it as running while its member ended or
+    went stale (`states`, lane_states of its run). A lane the run does not know, or a state not read, counts as
+    working (unknown)."""
+    if not isinstance(lane, dict) or not lane.get("state"):
+        return None
+    if lane["state"] != "running":
+        return "ended", f"its lane is {lane['state']}"
+    lv = states.get(aid) or {}
+    return (lv["state"], lv.get("why") or "") if lv.get("state") in ("ended", "stale") else None
+
+
+def _member_lanes(run, ref: str, now: float | None = None) -> tuple:
+    """The lanes of the member `ref` names in the caller's own run -> (working, gone): [(id, lane)] whose member still
+    works, and [(id, lane, lane_gone)] whose member ended or went stale."""
+    hits = [(k, v) for k, v in (run.get("agents") or {}).items() if isinstance(v, dict) and _label_matches(ref, v)]
+    states = lane_states(run, now, own=True) if any(v.get("state") == "running" for _, v in hits) else {}
+    marks = [(k, v, lane_gone(k, v, states)) for k, v in hits]
+    return [(k, v) for k, v, g in marks if not g], [(k, v, g) for k, v, g in marks if g]
 
 
 def _holder(run: dict, aid: str, lane: dict, globs, facts, now: float, alive, own: bool) -> dict:
@@ -1644,20 +1667,36 @@ _TECH_LEAD = re.compile(r"(?:the\s+)?(?:main|lead|morpheus|tech[\s-]?lead)(?:\s*
                         r"\))?", re.IGNORECASE)
 
 
-def _addr(run, ref: str):
-    """'Morpheus', 'the tech lead', 'Tech lead (Morpheus)', 'lead', 'main', '' -> 'main'; a crew name or label -> that
-    lane's id (or the name, for later)."""
+def _addr(run, ref: str, now: float | None = None):
+    """'Morpheus', 'the tech lead', 'Tech lead (Morpheus)', 'lead', 'main', '' -> 'main'; a lane id -> that lane; a
+    crew name or label -> the lane of that member that still works (_member_lanes, as `dev crew owner` reads it), or
+    the name, for their next launch: a member with no lane, or whose lanes ended or went stale, where nobody reads."""
     r = " ".join((ref or "").split())
     if not r or _TECH_LEAD.fullmatch(r):
         return "main"
     agents = run.get("agents") or {}
     if r in agents:
         return r
-    hits = [(k, v) for k, v in agents.items() if _label_matches(r, v)]
-    if hits:  # the member's working lane, bound to its launch, before an older or finished one
-        return max(hits, key=lambda kv: (kv[1].get("state") == "running", kv[1].get("binding", "exact") == "exact",
-                                         kv[1].get("started") or 0))[0]
+    working, _ = _member_lanes(run, r, now)
+    if working:  # the member's working lane, bound to its launch, before an older one
+        return max(working, key=lambda kv: (kv[1].get("binding", "exact") == "exact", kv[1].get("started") or 0))[0]
     return "name:" + r
+
+
+def _waits_notice(run, m: dict, frm: str, now: float | None = None) -> str:
+    """For a message addressed to a member's next launch (_addr) because the lanes they had ended or went stale: what
+    tells its sender so, and what to do (the tech lead launches them again; a member asks the tech lead to), or ''."""
+    _, gone = _member_lanes(run, m["to"][5:], now)
+    if not gone:
+        return ""
+    from . import crew
+    _, lane, (state, why) = max(gone, key=lambda x: x[1].get("started") or 0)
+    mem = crew._for_lane(lane)
+    who = crew.who(mem) if mem else crew.who(_lane_name(lane))
+    again = (f"launch them again (dev crew brief {mem['id'] if mem else shlex.quote(m['to'][5:])} \"…\")"
+             if frm == "main" else "ask the tech lead to launch them again (dev crew ask \"…\")")
+    return (f"{who} {'went stale' if state == 'stale' else 'ended'}: {why}. {m['id']} waits for their next launch: "
+            f"{again}, or ask someone else (dev crew ask --to <member> \"…\").")
 
 
 def _name_of(run, addr: str) -> str:
@@ -1685,8 +1724,11 @@ def crew_ask(text: str, to: str | None = None, from_agent: str | None = None, cw
         if not run:
             raise ValueError("no progress run in this session: the tech lead starts one with dev progress start")
         run = normalize(run)
-        m = _post(run, from_agent or "main", _addr(run, to or ""), text, now,
-                  kind=kind if kind in ("notice", "answer") else "")
+        frm = from_agent or "main"
+        m = _post(run, frm, _addr(run, to or "", now), text, now, kind=kind if kind in ("notice", "answer") else "")
+        told = _waits_notice(run, m, frm, now) if m["to"].startswith("name:") and frm not in NOTICE_SENDERS else ""
+        if told:  # never silently: the sender learns with its next tool call that nobody reads it now
+            _post(run, "devkit", frm, told, now, from_name="devkit", kind="notice")
         _save(run, touch_session=False)
     _audit("crew.message", f"{m['from_name']} → {m['to_name']}", "", project=run.get("project") or "", id=m["id"],
            type=kind, count=len(m["text"]))
@@ -3638,24 +3680,32 @@ def _log_change(run, s, old, new, who, why, now):
            by=_name_of(run, who or "main") if who != "devkit" else "devkit", was=old or "")
 
 
-def check_close(run, target, text, explicit, force=False):
-    """The safety checks before a step is closed. Raises StepError with what to do instead."""
+def check_close(run, target, text, explicit, force=False, now: float | None = None) -> str:
+    """The safety checks before a step is closed. Raises StepError with what to do instead. A running step its crew
+    member owns is refused while that member works; one whose member ended or went stale (lane_gone, as `dev crew
+    owner` reads it) closes on the tech lead's evidence like his own. -> '' or, for such a step, the words that tell
+    the run's history its owner had ended."""
     plan = run.get("plan") or []
     if target is None:
         raise StepError("no open step to close. Add the work as a step first: dev progress add \"<step>=<estimate>\"")
     if target.get("state") in ("done", "skipped"):
         raise StepError(f"step “{target['name']}” is already {target['state']}; to change it: "
                         f"dev progress reopen \"{target['name']}\" --why \"…\"")
-    if force:
-        return
     owner = target.get("owner") or "main"
+    gone = ""
     if owner != "main" and target.get("state") == "running":
         from . import crew
-        who = (run.get("agents") or {}).get(owner, {})
-        raise StepError(f"step “{target['name']}” belongs to "
-                        f"{crew.who(who.get('persona') or who.get('label') or 'a subagent')}, "
-                        f"still working on it; it closes when that agent finishes. Use --force only if it is "
-                        f"really done.")
+        lane = (run.get("agents") or {}).get(owner)
+        g = lane_gone(owner, lane, lane_states(run, now, own=True) if (lane or {}).get("state") == "running" else {})
+        if g:
+            gone = (f"its owner {crew.who(_lane_name(lane))} had {'gone stale' if g[0] == 'stale' else 'ended'}: "
+                    f"{g[1]}")
+        elif not force:
+            raise StepError(f"step “{target['name']}” belongs to {crew.who(_lane_name(lane or {}))}, "
+                            f"still working on it; it closes when that agent finishes. Use --force only if it is "
+                            f"really done.")
+    if force:
+        return gone
     waiting = deps_open(run, target)
     if waiting:
         raise StepError(f"step “{target['name']}” waits for {', '.join(waiting)}, not done yet. Close those first, "
@@ -3667,6 +3717,7 @@ def check_close(run, target, text, explicit, force=False):
         raise StepError(f"“{text[:80]}” does not describe step “{target['name']}”"
                         f"{' (you named it)' if explicit else ' (the running step)'}.{hint} Use --force if it really "
                         f"is that step.")
+    return gone
 
 
 def _refuse_members_working(run):
@@ -3948,15 +3999,17 @@ def step(text: str, nxt: str = "", cwd: str | None = None, kind: str = "step", c
                 target = (running or [None])[0] or next((s for s in plan if s.get("state") in ("pending", "blocked")
                                                          and (s.get("owner") or "main") == "main"
                                                          and not s.get("label")), None)
+            gone = ""
             if not plan:  # a run without a plan: each step is recorded as it comes
                 target = _new_step(text[:60], est=None)
                 plan.append(target)
                 _allocate(run)
             else:
-                check_close(run, target, text, explicit, force)
+                gone = check_close(run, target, text, explicit, force, now)
             old_state = target.get("state")
             _finish_step(run, target, now, agent, sid)
-            _log_change(run, target, old_state, "done", "main", check or text, now)
+            _log_change(run, target, old_state, "done", "main",
+                        f"{gone}; closed on the tech lead's evidence: {check or text}" if gone else check or text, now)
             if approves:
                 _approve(run, "morpheus", approves, check, now)
             _advance_main(run, now)
