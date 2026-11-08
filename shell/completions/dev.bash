@@ -393,13 +393,13 @@ _dev_spec() {
     'ext ack') o='-h --help' ;;
     'impeccable') o='-h --help' p='*n' ;;
     'doctor') o='-h --help' ;;
-    'install') o='-h --help --only --version --unverified --why --commit-template' v='--only=m:config,tools,cli,git,handoff,instructions,skills,claude,codex,desktop,docker,docs,launchd,prompt,shell --version=l:versions:-:: --why=n --commit-template=c:yes,no' ;;
+    'install') o='-h --help --only --version --unverified --why --yes -y --commit-template' v='--only=m:config,tools,cli,git,handoff,instructions,skills,claude,codex,desktop,docker,docs,launchd,prompt,shell --version=l:versions:-:: --why=n --commit-template=c:yes,no' ;;
     'docs') o='-h --help --online --fix --no-prose' p='c:check *f' ;;
     'sec') o='-h --help --history --config -v --verbose' v='--config=n' p='c:scan l:projects:-::' ;;
     'diagram') o='-h --help' p='*l:-:-:render,check,new:f' ;;
     'setup') o='-h --help --remove -y --yes --skip-packages' p='c:prompt,commit-template,shell' ;;
     'prompt') o='-h --help' p='c:refresh' ;;
-    'update') o='-h --help --check --quiet --record' ;;
+    'update') o='-h --help --check --quiet --record --yes -y' ;;
     'docker') o='-h --help' p='c:up,down,status,trim,prune,autostart-on,autostart-off' ;;
     'version') o='-h --help' ;;
     'completion') o='-h --help' p='c:zsh,bash' ;;

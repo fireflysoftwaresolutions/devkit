@@ -611,7 +611,8 @@ class BackupCommandTests(BackupCase):
         self.ci(CI_PR_AND_MAIN)
         git(self.repo, "switch", "-q", "-c", "fix/hole", "main")
         tip = self.commit("fix(security): close the path traversal in the upload handler")
-        branches.set_backup_policy(PID, "on", "open source", "ana")  # this public repository's branches: backed up
+        # this public repository's branches: backed up
+        branches.set_backup_policy(PID, "on", "open source", "ana", visibility="public")
         with mock.patch.object(backup, "_visibility", return_value="public"):
             rc, out = self.dev("backup")
             self.assertEqual(rc, 1)
@@ -726,6 +727,38 @@ class PolicyTests(BackupCase):
         self.branch("feat/later", 2 * HOUR)
         self.assertEqual(self.sync(), [("feat/later", "skipped")])
 
+    def test_an_on_set_while_private_stops_the_hourly_backup_once_the_repository_is_public(self):
+        # the policy keeps the visibility it was decided for; public now (this class's setUp), so dev sync publishes
+        # nothing until the developer answers again
+        self.branch("feat/x", 2 * HOUR)
+        with mock.patch.object(backup, "_visibility", return_value="private"):
+            self.assertEqual(self.backup("policy", "on", "--why", "a client's private repository")[0], 0)
+        self.assertEqual(branches.backup_policy(PID)["visibility"], "private")
+        with self.never_asked():
+            done = backup.sync({"projects": [self.project()]})
+        self.assertEqual([(r["branch"], r["state"]) for r in done], [("feat/x", "skipped")])
+        self.assertIn("was set while the repository was private, and it is public now", done[0]["reason"])
+        self.assertEqual(self.on_origin("feat/x"), "")
+        self.assertEqual(branches.backup_policy(PID)["policy"], "on")  # nothing changed without the developer
+
+    def test_the_developer_answers_again_in_a_terminal_and_the_answer_keeps_the_new_visibility(self):
+        tip = self.branch("feat/x", 2 * HOUR)[-1]
+        branches.set_backup_policy(PID, "on", "private then", "ana", visibility="private")
+        with self.terminal("y") as asked:
+            rc, out = self.backup()
+        self.assertEqual((rc, asked.call_count, self.on_origin("feat/x")), (0, 1, tip), out)
+        self.assertEqual(branches.backup_policy(PID)["visibility"], "public")
+        self.branch("feat/y", 2 * HOUR)
+        self.assertEqual(self.sync(), [("feat/y", "pushed")])  # decided for public: no second question
+
+    def test_an_on_recorded_without_its_visibility_asks_again_on_a_public_repository(self):
+        # a record from before devkit kept the visibility: it may have been decided while the repository was private
+        self.branch("feat/x", 2 * HOUR)
+        branches.set_backup_policy(PID, "on", "recorded by an older devkit", "ana")
+        self.assertEqual(self.sync(), [("feat/x", "skipped")])
+        with mock.patch.object(backup, "_visibility", return_value="private"):
+            self.assertEqual(self.sync(), [("feat/x", "pushed")])  # private: the record still holds
+
     def test_public_pushes_once_whatever_the_policy_and_a_crew_member_cannot_use_it(self):
         tip = self.branch("feat/x", HOUR)[-1]
         self.assertEqual(self.backup("policy", "off", "--why", "a client's fork")[0], 0)
@@ -837,7 +870,7 @@ class PushTargetTests(BackupCase):
             res = backup.run(self.repo, ["feat/x"])[0]
             self.assertEqual((res["remote"], res["state"]), ("fork", "skipped"))
             self.assertIn("is ask, the default for a public repository", res["reason"])
-            branches.set_backup_policy(PID, "on", "the fork is public on purpose", "ana")
+            branches.set_backup_policy(PID, "on", "the fork is public on purpose", "ana", visibility="public")
             res = backup.run(self.repo, ["feat/x"])[0]
         self.assertEqual(res["reason"], "a push to this branch starts CI (ci.yml runs on PR #3)")
         self.assertIn(["repo", "view", "ana/widget", "--json", "visibility", "-q", ".visibility"], asked)

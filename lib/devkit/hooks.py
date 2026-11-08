@@ -63,15 +63,103 @@ def _patch_quietly(path: Path, before: dict, after: dict):
 
 
 def _spawn(args, logname="sync.log"):
-    """Detached background `dev …` so the hook returns immediately."""
+    """Detached background `dev …` so the hook returns immediately. It runs the release install.json pins
+    (core.release_home): a session that still runs an older copy starts the installed release, never itself."""
     # The child gets its own copy of the log's descriptor; ours closes once it is started (an open one warns at exit).
     with open(STATE / "logs" / logname, "a") as log:
-        subprocess.Popen([sys.executable, "-I", "-S", str(core.DEVKIT_HOME / "bin" / "dev"), *args],  # as its shebang
+        subprocess.Popen([sys.executable, "-I", "-S", str(core.release_home() / "bin" / "dev"), *args],  # its shebang
                          stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True, close_fds=True)
+
+
+def _older_copy_notice(agent: str, sid: str, what: str) -> str:
+    """When this copy is older than the pinned release: record the skip (core.older_copy_skip) and return what the
+    session hears, the first time only for each session and pinned release; "" otherwise."""
+    old = core.older_copy_skip(what)
+    if not old:
+        return ""
+    who, first = f"{agent}:{sid or '-'}", []
+
+    def mark(d):
+        if d.get("pinned") != old["pinned"]:
+            d.clear()
+            d["pinned"] = old["pinned"]
+        told = d.setdefault("told", [])
+        if who in told:
+            return state.SKIP
+        told.append(who)
+        del told[:-200]
+        first.append(True)
+
+    try:
+        state.update(STATE / "older-copy.json", mark)
+    except state.StateBusy:
+        return ""
+    return core.older_copy_words(old) if first else ""
 
 
 def _spawn_sync(args):
     _spawn(["sync", "--quiet", *args])
+
+
+# --------------------------------------------------------------------------- sessions to restart after an install
+
+AGENT_NAMES = {"claude": "Claude Code", "codex": "Codex"}
+
+
+def sessions_to_restart(sessions_dir=None, alive=None) -> list:
+    """The Claude Code and Codex sessions that use devkit and still run, from devkit's session records (each holds the
+    agent process its SessionStart recorded): [{agent, session, project, branch, devkit, started}], oldest first. A
+    process devkit cannot check counts as running."""
+    if alive is None:
+        from .approvals import pid_alive as alive
+    d = Path(sessions_dir or core.STATE / "sessions")
+    out = []
+    for f in sorted(d.glob("*.json")) if d.is_dir() else []:
+        try:
+            s = json.loads(f.read_text())
+        except (OSError, ValueError):
+            continue
+        if not isinstance(s, dict) or s.get("agent") not in AGENT_NAMES or not s.get("pid"):
+            continue
+        if alive(s["pid"], s.get("pid_start")) is False:
+            continue
+        out.append({"agent": s["agent"], "session": str(s.get("session") or ""),
+                    "project": s.get("project") or tilde(s.get("top") or s.get("cwd") or "?"),
+                    "branch": s.get("branch") or "", "devkit": s.get("devkit") or "",
+                    "started": float(s.get("started") or 0)})
+    return sorted(out, key=lambda x: x["started"])
+
+
+def restart_lines(sessions: list) -> list:
+    return [f"  {AGENT_NAMES[s['agent']]} · {s['project']}" + (f" ({s['branch']})" if s["branch"] else "")
+            + (f" · devkit {s['devkit']}" if s["devkit"] else "") + f" · session {s['session'][:8]}"
+            + f" · since {core.fmt_ts(s['started'])}" for s in sessions]
+
+
+def confirm_restart(assume_yes=False, ask=None, say=print, interactive=None, sessions_dir=None, alive=None) -> bool:
+    """`dev install` and `dev update`, before they change anything: name the running sessions that use devkit, each
+    of which keeps its hooks until it is restarted -> whether to go on. With assume_yes, or with no terminal to ask
+    in, it prints the list and goes on; in a terminal it asks once (Enter goes on, n stops with nothing changed)."""
+    sessions = sessions_to_restart(sessions_dir, alive)
+    if not sessions:
+        return True
+    n = len(sessions)
+    say(f"{n} running session{'s use' if n > 1 else ' uses'} devkit; restart each after this to load the new "
+        f"hooks (until then it keeps the old ones, which change no setting):")
+    for line in restart_lines(sessions):
+        say(line)
+    if interactive is None:
+        try:
+            interactive = sys.stdin.isatty() and sys.stdout.isatty()
+        except (AttributeError, ValueError):
+            interactive = False
+    if assume_yes or not interactive:
+        return True
+    try:
+        answer = (ask or input)("  Go on? [Y/n] ")
+    except (EOFError, KeyboardInterrupt):
+        return False
+    return answer.strip().lower() not in ("n", "no")
 
 
 # --------------------------------------------------------------------------- session start
@@ -236,7 +324,7 @@ def _register_session(agent: str, sid: str, cwd: str, data: dict = None) -> Path
     if not f.exists():
         top = core.gitout(cwd, "rev-parse", "--show-toplevel")  # git before the lock
         from .canary import surface
-        rec = {"agent": agent, "session": sid, "cwd": cwd, "top": top, "started": time.time(),
+        rec = {"agent": agent, "session": sid, "cwd": cwd, "top": top, "started": time.time(), "devkit": core.VERSION,
                "surface": surface(agent, data),
                "head": core.gitout(top, "rev-parse", "HEAD") if top else "",
                "branch": core.gitout(top, "branch", "--show-current") if top else ""}
@@ -280,7 +368,12 @@ def session_start(agent: str):
                 fh.write(f"export DEVKIT_SESSION={agent}:{sid}\nexport DEVKIT_AGENT={agent}\n")
     except Exception:
         _log(f"session-start env {agent}: {traceback.format_exc()[-300:]}")
-    _spawn(["config", "repair", "--quiet"])  # restore any devkit-managed setting changed outside devkit
+    try:  # an older copy than the pinned release repairs nothing itself: the session hears it once
+        older = _older_copy_notice(agent, sid, "the session-start repair")
+    except Exception:
+        older = ""
+        _log(f"session-start older copy {agent}: {traceback.format_exc()[-300:]}")
+    _spawn(["config", "repair", "--quiet"])  # the pinned release restores any devkit-managed setting changed outside
     try:
         from . import work
         work.request_sync("session start", delay=1)  # pull other machines' claims and publish this session
@@ -288,7 +381,8 @@ def session_start(agent: str):
         pass
     text = "\n\n".join(x for x in (_continuity("on_session_start", agent, data),
                                    _with_catalog(context_for(cwd, agent), agent)) if x)
-    shown = []  # the notices the developer must see too, not only the agent (Claude: a system message)
+    shown = [older] if older else []  # the notices the developer must see too, not only the agent (Claude: a system message)
+    text += f"\n\n{older}" if older else ""
     try:  # devkit notices from files only, no network (spec P-fym583l7sg1)
         from . import ext, updatecheck
         notices = ((lambda: updatecheck.session_line(installed=updatecheck.installed_version()), False),  # daily
@@ -900,6 +994,21 @@ def config_change(agent: str):
         return
     ks = sorted({d.key for d in drift} | {f"env.{k}" for k in env_keys})
     keys = ", ".join(ks[:6]) + (f" (+{len(ks) - 6} more)" if len(ks) > 6 else "")
+    if not project and core.older_copy():
+        # The user settings differ from what this older copy would write, most likely because a newer release was
+        # installed. It writes nothing; the pinned release's repair (_spawn runs it) puts back what really drifted
+        # from the installed configuration, a tampered DEVKIT_* variable included.
+        notice = _older_copy_notice(agent, data.get("session_id") or "", f"{tilde(path)} ({keys})")
+        _log(f"config-change left to the pinned release ({agent}): {keys}")
+        _spawn(["config", "repair", "--quiet"])
+        if env_keys:
+            print(f"devkit's DEVKIT_* variables say who calls devkit and how its safeguards behave, so they change "
+                  f"only with devkit's configuration (spec C11): refused {', '.join(f'env.{k}' for k in env_keys)}. "
+                  f"{notice}".strip(), file=sys.stderr)
+            sys.exit(2)
+        if notice:
+            print(json.dumps({"systemMessage": notice}))
+        return
     _log(f"config-change blocked ({agent}): {keys}")
     from . import audit
     audit.record("config.blocked", path, keys, "blocked")
@@ -919,7 +1028,9 @@ def config_change(agent: str):
 def _devkit_env_change(path: str, settings: dict, managed: bool = True) -> list:
     """The DEVKIT_* variables of the settings' env block that differ from what devkit manages (spec C11: set,
     changed or removed), put back to devkit's values in the file. [] when none differ. `managed`: the user
-    settings, where devkit manages some; a project's settings get none."""
+    settings, where devkit manages some; a project's settings get none. A copy older than the pinned release reports
+    the user settings' variables but writes nothing: its values may be the older ones (the pinned release repairs).
+    A project's settings get every DEVKIT_* variable removed by any copy: that holds in every release."""
     from . import guard, policy
     flat = policy.claude_desired()[0] if managed else {}
     want = {p[1]: json.dumps(v) for p, v in flat.items() if len(p) == 2 and p[0] == "env"
@@ -929,7 +1040,7 @@ def _devkit_env_change(path: str, settings: dict, managed: bool = True) -> list:
     except OSError:
         return []
     changed = sorted(k for k in set(want) | set(have) if want.get(k) != have.get(k))
-    if changed:
+    if changed and (not managed or not core.older_copy()):
         env = {k: v for k, v in (settings.get("env") or {}).items() if not str(k).startswith("DEVKIT_")}
         settings["env"] = {**env, **{k: json.loads(v) for k, v in want.items()}}
         if not settings["env"]:

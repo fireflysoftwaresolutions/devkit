@@ -626,7 +626,10 @@ def install_cli():
 
 
 def setup_git(quiet=False, commit_template=None):
-    """`commit_template`: dev setup's answer ("yes" or "no"), passed by `dev install --commit-template`."""
+    """`commit_template`: dev setup's answer ("yes" or "no"), passed by `dev install --commit-template`. A copy older
+    than the pinned release changes no global git setting (core.older_copy_skip)."""
+    if core.older_copy_skip("the global git config (core.excludesFile, include.path)"):
+        return
     with quiet_mode(quiet):
         _setup_git()
     if not quiet:  # a quiet run repairs drift: it never asks, so it never offers the template either
@@ -889,6 +892,8 @@ def instructions_state(target: Path) -> str:
 
 
 def write_agent_instructions(quiet=False):
+    if core.older_copy_skip(f"{tilde(CLAUDE_HOME / 'CLAUDE.md')} and {tilde(CODEX_HOME / 'AGENTS.md')}"):
+        return
     with quiet_mode(quiet):
         step("Global agent instructions (Claude CLAUDE.md, Codex AGENTS.md)")
         text = render_instructions()
@@ -1323,8 +1328,11 @@ def _install_skills():
 
 
 def write_claude_settings(include_hooks=True):
-    """Merge devkit's managed keys into ~/.claude/settings.json (other keys untouched)."""
+    """Merge devkit's managed keys into ~/.claude/settings.json (other keys untouched). -> whether it changed. A copy
+    older than the pinned release writes nothing (core.older_copy_skip)."""
     f = CLAUDE_HOME / "settings.json"
+    if core.older_copy_skip(tilde(f)):
+        return False
     cur = read_json(f, {}) or {}
     frag = load_conf("claude/settings.json")
     plugins = load_conf("claude/plugins.json")
@@ -1417,7 +1425,10 @@ def setup_claude():
 
 
 def write_codex_config(quiet=False):
-    """hooks.json + managed config.toml keys (through Codex's API) + hook trust. No plugin installs."""
+    """hooks.json + managed config.toml keys (through Codex's API) + hook trust. No plugin installs. A copy older than
+    the pinned release writes nothing (core.older_copy_skip)."""
+    if core.older_copy_skip(f"{tilde(CODEX_HOME / 'hooks.json')} and {tilde(CODEX_HOME / 'config.toml')}"):
+        return
     from .codexrpc import CodexError, CodexRPC
     with quiet_mode(quiet):
         conf = load_conf("codex/config.json")
@@ -2135,12 +2146,19 @@ def install_shell():
         note("not set up yet: dev setup shell turns on the fzf pickers")
 
 
-def run_install(only=None, unverified_why=None, version=None, as_pinned=False, commit_template=None) -> int:
+def run_install(only=None, unverified_why=None, version=None, as_pinned=False, commit_template=None,
+                assume_yes=False) -> int:
     """`dev install`. From a checkout it pins the checkout (or switches to `version`), then starts itself again from
     that pinned copy (`--as-pinned`), which runs the steps, so every path they write names the copy; `only` re-applies
-    some steps from the installed copy without pinning. -> exit code (1 when the copy was refused)."""
+    some steps from the installed copy without pinning. Before it changes anything it names the running sessions that
+    use devkit, which must be restarted (hooks.confirm_restart; `assume_yes`: go on without asking). -> exit code (1
+    when the copy was refused or the developer stopped it)."""
     if not as_pinned:
         print(ui.banner("install"))
+        from . import hooks
+        if not hooks.confirm_restart(assume_yes=assume_yes):
+            fail("stopped before any change: restart those sessions, or run dev install again and go on")
+            return 1
     try:
         target = _choose_copy(only, unverified_why, version, as_pinned)
     except PinError as e:

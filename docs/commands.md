@@ -1465,7 +1465,7 @@ plugin have no on and off switch, so `disable` removes them and `enable` adds th
 unlinked by the skills step. When the managed-settings lock is on
 (`dev config lock`), it keeps devkit's plugin set: run `dev config lock` again after a Claude plugin change.
 
-### `dev install [--only STEPS | --version VERSION | --unverified --why "…"]`
+### `dev install [--yes] [--only STEPS | --version VERSION | --unverified --why "…"]`
 
 Pins devkit, then applies the configuration; safe to run again. It first makes a read-only, checksummed copy of the
 checkout's commit in `~/.local/share/devkit/releases/<version>-<commit>/` and runs every step from that copy, so the
@@ -1482,6 +1482,7 @@ compile. It keeps the newest three copies and any copy in use. Run it yourself, 
 | `--version VERSION` | Switches to a copy pinned by an earlier install, for a rollback: `26.11.2`, or `26.11.2-<commit>`. It checks the copy against its checksums first |
 | `--unverified --why "…"` | Pins the checkout's commit although it is neither a release nor tested; the reason is recorded in the audit trail |
 | `--commit-template yes\|no` | The answer `dev setup` gives for the [commit template](git-and-github.md#the-template-in-your-editor): the git step records it, and `yes` sets `commit.template` in each repository that has none |
+| `--yes`, `-y` | Goes on without asking when Claude Code or Codex sessions that use devkit are still running. Without it, `dev install` lists those sessions first and asks once in a terminal; each must be restarted to load the new hooks, because a running session keeps the hooks of the release it started with |
 
 The `tools` step installs only the Homebrew and npm packages that are missing for your stacks, git hosts, and clouds
 (and the Azure DevOps CLI extension), unless `packages.auto` is off. The `desktop` step builds the Claude Desktop
@@ -1489,7 +1490,7 @@ extension and opens its installer when it is missing or out of date. The `launch
 [scheduled jobs](jobs-and-audit.md). See
 [Getting started › What dev install configures](getting-started.md#what-dev-install-configures).
 
-### `dev update [--check [--quiet] [--record]]`
+### `dev update [--yes | --check [--quiet] [--record]]`
 
 `dev update --check` tells you, without changing anything, whether a newer devkit release is out and what changes in
 it. Agents may run it.
@@ -1511,7 +1512,9 @@ exits with `1`; it never says up to date. The daily `update-check` job runs `dev
 the first session of the day and `dev status` show the result while a release is pending.
 
 `dev update` itself updates the devkit checkout, then runs `dev install`, which pins the new commit. It always updates the checkout,
-even when `dev` runs from the pinned copy. What it does depends on where the checkout is:
+even when `dev` runs from the pinned copy. Before it changes anything, it lists the Claude Code and Codex sessions that
+use devkit and still run, and asks once in a terminal: restart them after the update so they load the new hooks.
+`dev update --yes` goes on without asking and prints the list. What it does depends on where the checkout is:
 
 | The checkout is | `dev update` |
 | --- | --- |

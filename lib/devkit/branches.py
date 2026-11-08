@@ -876,17 +876,28 @@ def backup_policy(pid: str):
     for rec in reversed(found if isinstance(found, list) else []):
         if isinstance(rec, dict) and rec.get("policy") in POLICIES:
             return {"policy": rec["policy"], "why": rec.get("why") or "", "who": rec.get("who") or "",
-                    "when": rec.get("when") or ""}
+                    "when": rec.get("when") or "", "visibility": rec.get("visibility") or ""}
     return None
 
 
-def set_backup_policy(pid: str, policy: str, why: str, who: str) -> dict:
-    """Record the project's choice (it replaces the one before) -> the record."""
+def set_backup_policy(pid: str, policy: str, why: str, who: str, visibility=None) -> dict:
+    """Record the project's choice (it replaces the one before) with the visibility of the repository it was decided
+    for ("public", "private", "internal"; None when devkit could not read it) -> the record."""
     if policy not in POLICIES:
         raise ValueError(f"the backup policy is one of {', '.join(POLICIES)}, not {policy!r}")
     rec = {"policy": policy, "why": why, "who": who, "when": _now_iso()}
+    if visibility:
+        rec["visibility"] = visibility
     _edit_records(pid, POLICY_KEY, lambda recs: [rec])
-    return rec
+    return dict(rec, visibility=visibility or "")
+
+
+def outgrown_on(rec, visibility) -> bool:
+    """True when a recorded on no longer holds: the repository is not private now (public, or devkit cannot read it)
+    and on was decided for another visibility, or before devkit kept it. Backups then wait for the developer's answer
+    again, so a repository made public stops publishing its branches with the hourly dev sync."""
+    return bool(rec) and rec.get("policy") == "on" and visibility not in ("private", "internal") and \
+        (rec.get("visibility") or "") != (visibility or "")
 
 
 def default_policy(visibility) -> str:

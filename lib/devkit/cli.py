@@ -1496,7 +1496,8 @@ def cmd_install(a):
         return 2
     only = {x.strip() for x in a.only.split(",") if x.strip()} if a.only else None
     rc = setup.run_install(only=only, unverified_why=why if a.unverified else None, version=a.version,
-                           as_pinned=a.as_pinned, commit_template=getattr(a, "commit_template", None))
+                           as_pinned=a.as_pinned, commit_template=getattr(a, "commit_template", None),
+                           assume_yes=bool(getattr(a, "yes", False)))
     if rc == 0 and (not only or "claude" in only):  # what was installed: `dev config` tells new from removed
         try:
             write_install_record()
@@ -1556,13 +1557,18 @@ def cmd_update(a):
     if getattr(a, "quiet", False) or getattr(a, "record", False):
         ui.err("--quiet and --record go with --check")
         return 2
+    from . import hooks
+    if not hooks.confirm_restart(assume_yes=bool(getattr(a, "yes", False))):  # before anything changes
+        print(f"  {ui.FAIL} stopped before any change: restart those sessions, or run dev update again and go on")
+        return 1
     home = core.source_home()  # the checkout; `dev` itself may run from the pinned copy, which git never changes
     print(f"{ui.ARROW} updating {tilde(home)}")
     rc, message, install = update_checkout(home)
     print(f"  {ui.OK if rc == 0 else ui.FAIL} {message}")
     if rc != 0 or not install:
         return rc
-    os.execv(sys.executable, [sys.executable, "-I", "-S", str(home / "bin" / "dev"), "install"])  # pins the release
+    # pins the release; the developer already chose to go on above, so the install does not ask again
+    os.execv(sys.executable, [sys.executable, "-I", "-S", str(home / "bin" / "dev"), "install", "--yes"])
 
 
 def cmd_docker(a):
@@ -3658,6 +3664,9 @@ def build_parser():
                    help="pin HEAD although it is neither a release nor tested (`dev ci --run`); needs --why")
     p.add_argument("--why", help="the reason for --unverified, recorded in the audit")
     p.add_argument("--as-pinned", action="store_true", help=argparse.SUPPRESS)  # the second half, from the copy
+    p.add_argument("--yes", "-y", action="store_true",
+                   help="go on without asking when Claude Code or Codex sessions that use devkit run (they are "
+                        "listed; restart each to load the new hooks)")
     p.add_argument("--commit-template", choices=["yes", "no"],
                    help="dev setup's answer for the commit template: yes sets commit.template in the repositories "
                         "without one, no leaves them; the git step records it")
@@ -3691,6 +3700,9 @@ def build_parser():
     p.add_argument("--quiet", action="store_true", help="with --check: print nothing (the daily job)")
     p.add_argument("--record", action="store_true", help="with --check: record the result for the session start "
                                                           "and dev status")
+    p.add_argument("--yes", "-y", action="store_true",
+                   help="go on without asking when Claude Code or Codex sessions that use devkit run (they are "
+                        "listed; restart each to load the new hooks)")
     add("docker", cmd_docker, "Docker on Colima").add_argument(
         "action", choices=["up", "down", "status", "trim", "prune", "autostart-on", "autostart-off"])
     add("version", cmd_version, "Show version")

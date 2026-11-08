@@ -27,7 +27,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from devkit import audit, cli, codexrpc, core, gitx, policy, registry, setup  # noqa: E402
+from devkit import audit, cli, codexrpc, core, gitx, guard, hooks, policy, registry, setup  # noqa: E402
 from test_install import Machine  # noqa: E402  (install.sh against stub brew, gh and a local repository)
 
 ISOLATED = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
@@ -392,6 +392,169 @@ class RealTreeTests(Sandbox):
         copied = [f for f in handoff.iterdir() if f.is_file() and (pin / "templates" / "handoff" / f.name).exists()]
         self.assertTrue(copied)
         self.assertTrue(all(f.stat().st_mode & stat.S_IWUSR for f in copied), copied)  # the developer edits them
+
+
+class OlderCopyTests(Sandbox):
+    """An older devkit never overwrites a newer install. `self.old` is the pinned 26.11.3 that a session started
+    before the update still runs; install.json pins `self.new`, 26.11.4."""
+
+    def setUp(self):
+        super().setUp()
+        self.old = self.install()
+        commit(self.src, "26.11.4")
+        self.new = self.install(why="the next release")
+        for p in (mock.patch.object(core, "DEVKIT_HOME", self.old), mock.patch.object(core, "VERSION", "26.11.3"),
+                  mock.patch.object(hooks, "STATE", self.state)):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def skipped(self) -> list:
+        return [r for r in self.audits() if r["action"] == "config.repair-skipped"]
+
+    def test_an_older_pinned_copy_points_the_hooks_at_the_installed_release(self):
+        self.assertEqual(core.runtime_home(), self.new)  # the status line and hook paths it would write
+        setup.record_install(setup.select_pin("26.11.3"))  # rolled back: this copy is the installed one again
+        self.assertEqual(core.runtime_home(), self.old)
+
+    def test_background_commands_run_the_installed_release(self):
+        (self.state / "logs").mkdir(parents=True, exist_ok=True)
+        with mock.patch.object(hooks.subprocess, "Popen") as popen:
+            hooks._spawn(["config", "repair", "--quiet"])
+        self.assertEqual(popen.call_args[0][0][3:], [str(self.new / "bin" / "dev"), "config", "repair", "--quiet"])
+
+    def test_an_older_copy_repairs_nothing_and_records_both_versions(self):
+        (self.home / ".claude").mkdir()
+        (self.home / ".claude" / "settings.json").write_text("{}\n")  # every managed key drifted
+        self.assertEqual(policy.repair(quiet=True), [])
+        self.assertEqual((self.home / ".claude" / "settings.json").read_text(), "{}\n")
+        detail = self.skipped()[-1]["detail"]
+        self.assertIn("26.11.3", detail)
+        self.assertIn("26.11.4", detail)
+
+    def test_an_older_copy_writes_no_settings_instructions_codex_config_or_git_ignore(self):
+        git_calls = []
+        FakeCodexServer.trusted, FakeCodexServer.hooks_file = {}, self.home / ".codex" / "hooks.json"
+        with mock.patch.object(codexrpc, "CodexRPC", FakeCodexServer), \
+                mock.patch.object(registry, "discover", lambda: ([], [], [])), \
+                mock.patch.object(core, "gh_user", lambda: {"login": "ada", "name": "Ada", "id": 1}), \
+                mock.patch.object(setup, "sh", lambda argv, **k: git_calls.append(argv) or (0, "", "")):
+            self.assertFalse(setup.write_claude_settings())
+            setup.write_agent_instructions(quiet=True)
+            setup.write_codex_config(quiet=True)
+            setup.setup_git(quiet=True)
+        for f in (".claude/settings.json", ".claude/CLAUDE.md", ".codex/AGENTS.md", ".codex/hooks.json"):
+            self.assertFalse((self.home / f).exists(), f)
+        self.assertEqual(git_calls, [])
+        self.assertEqual(len(self.skipped()), 4)
+
+    def test_a_copy_equal_to_the_pin_writes_as_before(self):
+        with mock.patch.object(core, "DEVKIT_HOME", self.new), mock.patch.object(core, "VERSION", "26.11.4"):
+            self.assertTrue(setup.write_claude_settings())
+        self.assertIn(str(self.new), self.settings()["statusLine"]["command"])
+        self.assertEqual(self.skipped(), [])
+
+    def test_an_unverified_pin_counts_by_its_release_numbers(self):
+        self.assertEqual(core.version_key("26.12.0-dev"), (26, 12, 0))
+        self.assertIsNone(core.version_key("main"))
+
+    def test_install_json_that_names_a_copy_of_another_version_is_not_believed(self):
+        rec = json.loads(core.install_record_file().read_text())
+        core.install_record_file().write_text(json.dumps(dict(rec, version="99.1.0")))  # forged: a newer-looking pin
+        with mock.patch.object(core, "DEVKIT_HOME", self.new), mock.patch.object(core, "VERSION", "26.11.4"):
+            self.assertIsNone(core.older_copy())
+        core.install_record_file().write_text(json.dumps(dict(rec, manifest_sha256="0" * 64)))  # another manifest
+        self.assertIsNone(core.older_copy())
+        self.assertEqual(core.release_home(), self.old)  # nothing believable is pinned: this copy runs its own
+
+
+class RestartListTests(unittest.TestCase):
+    """dev install and dev update name the running Claude Code and Codex sessions that use devkit before they change
+    anything: each keeps the hooks it started with until it is restarted."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.sessions = Path(tmp.name) / "sessions"
+        self.sessions.mkdir()
+        self.record("claude", "aaaa1111", 101, project="acme/widget", branch="feat/report", devkit="26.11.4")
+        self.record("codex", "bbbb2222", 102, project="acme/api", branch="main", devkit="26.11.4")
+        self.record("claude", "cccc3333", 103, project="acme/old", branch="main")  # its process has ended
+        self.alive = lambda pid, started=None: pid != 103
+
+    def record(self, agent, sid, pid, **kw):
+        rec = {"agent": agent, "session": sid, "pid": pid, "pid_start": "Sat Nov  7 09:00:00 2026", "started": 1, **kw}
+        (self.sessions / f"{agent}-{sid}.json").write_text(json.dumps(rec))
+
+    def confirm(self, **kw):
+        lines = []
+        go = hooks.confirm_restart(say=lines.append, sessions_dir=self.sessions, alive=self.alive, **kw)
+        return go, "\n".join(lines)
+
+    def test_with_yes_it_names_each_running_session_and_goes_on(self):
+        go, text = self.confirm(assume_yes=True, ask=mock.Mock(side_effect=AssertionError("no question with --yes")))
+        self.assertTrue(go)
+        self.assertIn("Claude Code · acme/widget (feat/report) · devkit 26.11.4", text)
+        self.assertIn("Codex · acme/api (main)", text)
+        self.assertNotIn("acme/old", text)
+        self.assertIn("restart", text)
+
+    def test_in_a_terminal_it_asks_once_and_a_no_stops_before_any_change(self):
+        ask = mock.Mock(return_value="n")
+        self.assertEqual(self.confirm(interactive=True, ask=ask)[0], False)
+        self.assertEqual(ask.call_count, 1)
+        ask = mock.Mock(return_value="")
+        self.assertEqual(self.confirm(interactive=True, ask=ask)[0], True)  # Enter goes on
+
+    def test_without_running_sessions_it_says_and_asks_nothing(self):
+        self.alive = lambda pid, started=None: False
+        go, text = self.confirm(interactive=True, ask=mock.Mock(side_effect=AssertionError("nothing to ask")))
+        self.assertEqual((go, text), (True, ""))
+
+
+class InstallAsksFirstTests(Sandbox):
+    """The answer to the restart list decides whether dev install and dev update change anything at all."""
+
+    def test_install_stops_before_pinning_when_the_developer_says_no(self):
+        answers = []
+
+        def confirm(assume_yes=False):
+            answers.append(assume_yes)
+            return assume_yes  # the developer says no unless --yes
+        with mock.patch.object(core, "source_home", lambda: self.src), mock.patch.object(hooks, "confirm_restart", confirm), \
+                mock.patch("os.execv", side_effect=Execd) as execv, contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(setup.run_install(), 1)
+            execv.assert_not_called()
+            self.assertEqual((core.install_record(), core.pin_root().exists()), ({}, False))  # nothing pinned
+            with self.assertRaises(Execd):
+                cli.cmd_install(cli.build_parser().parse_args(["install", "--yes"]))
+        self.assertEqual(answers, [False, True])
+        self.assertTrue(core.install_record())
+
+    def test_update_asks_before_it_moves_the_checkout(self):
+        with mock.patch.object(hooks, "confirm_restart", lambda assume_yes=False: False), \
+                mock.patch.object(cli, "update_checkout", side_effect=AssertionError("the checkout moved")), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            rc = cli.cmd_update(cli.build_parser().parse_args(["update"]))
+        self.assertEqual(rc, 1)
+        self.assertIn("stopped before any change", out.getvalue())
+
+
+class InstallRecordGuardTests(unittest.TestCase):
+    """The version check trusts install.json, so no agent may write it or plant a pinned copy: the guard refuses."""
+
+    def test_an_agent_cannot_write_install_json_or_plant_a_release(self):
+        share = core.HOME / ".local" / "share" / "devkit"
+        forged = json.dumps({"version": "99.1.0", "path": str(share / "releases" / "99.1.0-x")})
+        cwd = str(core.DEV)
+        for agent in ("claude", "codex"):
+            with self.subTest(agent=agent):
+                self.assertEqual(guard.check("Write", {"file_path": str(share / "install.json"), "content": forged},
+                                             cwd, agent)[0], "deny")
+                for cmd in (f"echo '{forged}' > ~/.local/share/devkit/install.json",
+                            "mkdir -p ~/.local/share/devkit/releases/99.1.0-x",
+                            "cp /tmp/x.json ~/.local/share/devkit/install.json",
+                            "dev install --yes", "dev update --yes"):  # only dev install writes the record
+                    self.assertEqual(guard.check("Bash", {"command": cmd}, cwd, agent)[0], "deny", cmd)
 
 
 class InstallScriptTests(unittest.TestCase):

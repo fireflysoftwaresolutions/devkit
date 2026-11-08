@@ -270,11 +270,11 @@ def crew_member() -> str:
         return ""
 
 
-def set_policy(pid, policy, why, branch="") -> dict:
-    """Record the project's backup policy in its handoff note, audit it (`dev.policy`, target backup/<project>) and
-    share it soon."""
+def set_policy(pid, policy, why, branch="", visibility=None) -> dict:
+    """Record the project's backup policy in its handoff note, with the visibility of the repository it is decided
+    for, audit it (`dev.policy`, target backup/<project>) and share it soon."""
     from . import audit, branches, work
-    rec = branches.set_backup_policy(pid, policy, why, work.actor()["user"])
+    rec = branches.set_backup_policy(pid, policy, why, work.actor()["user"], visibility=visibility)
     audit.record("dev.policy", f"backup/{pid}", f"{policy}: {why}", "ok", project=pid, branch=branch or None)
     branches._share(pid, "backup policy of")
     return rec
@@ -302,6 +302,9 @@ def _policy_gate(c, name, remote, ctx):
     vis, rec = ctx["vis"][remote], ctx["policy"]
     policy = rec["policy"] if rec else branches.default_policy(vis)
     ctx["policy_words"] = branches.policy_words(rec, vis)
+    outgrown = branches.outgrown_on(rec, vis)  # on, decided while the repository was private: ask again
+    if outgrown:
+        policy = "ask"
     if policy == "on" or ctx["public_ok"]:
         return None
     if policy == "ask" and not ctx["auto"] and not ctx["dry_run"] and not ctx["asked"] and developer_here():
@@ -309,7 +312,7 @@ def _policy_gate(c, name, remote, ctx):
         yes = _ask_policy(c.pid, _remote_id(c.top, remote), vis)
         if yes is not None:
             rec = ctx["policy"] = set_policy(c.pid, "on" if yes else "off", "the developer's answer to dev backup",
-                                             name)
+                                             name, visibility=vis)
             ctx["policy_words"] = branches.policy_words(rec, vis)
             if yes:
                 return None
@@ -318,6 +321,14 @@ def _policy_gate(c, name, remote, ctx):
         return _result(name, remote, SKIPPED, f"the backup policy of {c.pid} is {ctx['policy_words']}", [
             'dev backup policy on --why "…"   (the developer: back up this project\'s branches)',
             f"dev backup --public {name}   (the developer: this once)"])
+    if outgrown:
+        then = rec.get("visibility") or "of a visibility devkit did not record"
+        now = vis if vis in ("public", "private", "internal") else "of a visibility devkit cannot read"
+        return _result(name, remote, SKIPPED, f"the backup policy of {c.pid} is on, but it was set while the "
+                       f"repository was {then}, and it is {now} now: the developer has not answered again", [
+                           "dev backup, run by the developer in a terminal, asks once (agents are never asked, dev "
+                           "sync waits for the answer)",
+                           'dev backup policy on --why "…"   (or off: the developer\'s choice for this project)'])
     return _result(name, remote, SKIPPED, f"the backup policy of {c.pid} is {ctx['policy_words']}, and the developer "
                    f"has not answered", [
                        "dev backup, run by the developer in a terminal, asks once (agents are never asked, dev sync "
@@ -639,7 +650,8 @@ def cmd_policy(a) -> int:
     if a.dry_run:
         print(f"{ui.INFO} dry run: {pid}'s backup policy would be {args[0]} ({why})")
         return 0
-    rec = set_policy(pid, args[0], why)
+    top = c.top if here else core.DEV / pid  # the main checkout of a project named with -p
+    rec = set_policy(pid, args[0], why, visibility=_visibility(top) if Path(top, ".git").exists() else None)
     print(f"{ui.OK} {pid}: backup policy {branches.policy_words(rec)}")
     return 0
 

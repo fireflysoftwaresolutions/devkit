@@ -225,9 +225,24 @@ def _log(msg: str):
         f.write(f"{core.fmt_ts(time.time())} {msg}\n")
 
 
+def _older_refuses(what: str, quiet: bool = False) -> bool:
+    """True when this copy is older than the release `dev install` pinned (core.older_copy_skip records it): it then
+    writes no devkit-managed setting, and says so unless quiet."""
+    import sys
+    old = core.older_copy_skip(what)
+    if old and not quiet:
+        print(f"devkit {old['running']} runs here, older than devkit {old['pinned']} that `dev install` pinned, so it "
+              f"changes no devkit-managed setting. Run the installed `dev` ({tilde(core.dev_link())}) instead.",
+              file=sys.stderr)
+    return bool(old)
+
+
 def repair(quiet=False, include_codex=True) -> list:
-    """Restore every drifted managed key. Returns the list of Drift that was repaired."""
+    """Restore every drifted managed key. Returns the list of Drift that was repaired. A copy older than the pinned
+    release repairs nothing: what it would restore are its own, older values."""
     from . import setup
+    if _older_refuses("dev config repair", quiet):
+        return []
     drifts = diff(include_codex=include_codex)
     if not drifts:
         return []
@@ -281,6 +296,8 @@ def lock_status() -> str:
 
 def lock() -> int:
     """Install the managed-settings drop-in (asks for the admin password via sudo)."""
+    if _older_refuses("dev config lock"):
+        return 1
     payload = json.dumps(managed_payload(), indent=2, ensure_ascii=False) + "\n"
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as tf:
         tf.write(payload)
@@ -296,6 +313,8 @@ def lock() -> int:
 
 
 def unlock() -> int:
+    if _older_refuses("dev config unlock"):
+        return 1
     rc = subprocess.call(["sudo", "rm", "-f", str(MANAGED_FILE)])
     if rc == 0:
         from . import setup

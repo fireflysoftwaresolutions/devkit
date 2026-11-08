@@ -2425,6 +2425,7 @@ _dev__install() {
     '--version=[switch to a pinned copy kept from an earlier install]:pinned copy: _dev_live versions -' \
     '--unverified[pin HEAD although it is neither a release nor tested]' \
     '--why=[the reason for --unverified, recorded in the audit]:why: ' \
+    '(--yes -y)'{--yes,-y}'[go on without asking when Claude Code or Codex sessions that use devkit…]' \
     '--commit-template=[dev setup'\''s answer for the commit template]:commit template:(yes no)'
 }
 
@@ -2474,7 +2475,8 @@ _dev__update() {
     '(- *)'{-h,--help}'[show this help message and exit]' \
     '--check[read-only: the newest release, what changes in it, and whether the…]' \
     '--quiet[with --check]' \
-    '--record[with --check]'
+    '--record[with --check]' \
+    '(--yes -y)'{--yes,-y}'[go on without asking when Claude Code or Codex sessions that use devkit…]'
 }
 
 _dev__docker() {

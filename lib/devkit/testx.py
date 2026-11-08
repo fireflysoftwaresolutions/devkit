@@ -1716,7 +1716,7 @@ def _log_path(top, runner) -> Path:
     process. The oldest logs of the same worktree and runner beyond the newest few are removed."""
     key = project_key(top)[1]
     tree = re.sub(r"[^A-Za-z0-9._-]+", "_", os.path.basename(os.path.normpath(str(top))))[:40]
-    tree += "-" + hashlib.sha1(os.path.realpath(str(top)).encode()).hexdigest()[:8]
+    tree += "-" + hashlib.sha256(os.path.realpath(str(top)).encode()).hexdigest()[:8]
     root = re.sub(r"[^A-Za-z0-9._-]+", "_", runner["root"])
     d = core.STATE / "tests" / "logs" / key / tree
     stem = f"{runner['name']}-{root}"
