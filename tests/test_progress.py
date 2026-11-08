@@ -1136,6 +1136,18 @@ class OpenDecisionTests(unittest.TestCase):
         self.assertEqual(pg.pending_decisions(run), [])
         self.assertEqual([d["id"] for d in pg.moot_decisions(run)], ["D1"])
 
+    def test_a_decision_whose_asking_lane_closed_unverified_is_moot(self):
+        # the sweep closes a lane whose member Claude Code saw finish, with no report in this run, as unverified; its
+        # step leaves the blocked state with it, so nobody waits for the decision any more
+        run = self.run_()
+        run["agents"]["a1"].update(state="unverified", finished=self.m(5))
+        run["plan"][0].update(state="unverified")
+        run["plan"][0].pop("waiting", None)
+        pg._save(run, touch_session=False)
+        run = self.run_()
+        self.assertEqual(pg.pending_decisions(run), [])
+        self.assertEqual([d["id"] for d in pg.moot_decisions(run)], ["D1"])
+
     def test_a_decision_that_still_blocks_a_step_needs_the_developer_after_its_lane_went_quiet(self):
         run = self.run_()
         self.assertTrue(pg.expire_stale(run, now=self.m(24 * 60)))  # the lane is lost; its step stays blocked on D1

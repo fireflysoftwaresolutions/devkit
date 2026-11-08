@@ -621,6 +621,18 @@ class DecisionTests(unittest.TestCase):
         p["main"].update(merged=False, landed=2)  # two of the three have an equivalent on origin's default branch
         self.assertEqual(warned(), (["1 commit(s) not pushed"], ["1 commit(s) not pushed"]))
 
+    def test_a_merged_worktree_is_not_unsaved_work_and_can_be_reclaimed(self):
+        # fix/y: its PR merged and its branch was squash-merged, so its 4 commits exist here by count only
+        reg = registry()
+        p = reg["projects"][0]
+        p["worktrees"][0].update(unpushed=4, merged=True, last_activity=int(NOW - 30 * 86400))
+        reasons = dashboard.project_health(p, NOW)["reasons"]
+        self.assertEqual([r for r in reasons if "fix/y" in r], [])
+        self.assertIn("dev wt rm fix/y", [a.get("cmd") for a in dashboard.build_actions(reg, NOW)])
+        p["worktrees"][0].update(merged=False)  # not merged: its 4 commits are work only this Mac has
+        self.assertIn("worktree fix/y has unsaved work, idle", dashboard.project_health(p, NOW)["reasons"])
+        self.assertNotIn("dev wt rm fix/y", [a.get("cmd") for a in dashboard.build_actions(reg, NOW)])
+
     def test_health(self):
         h = dashboard.project_health(self.reg["projects"][0], NOW)
         self.assertEqual(h["level"], "risk")

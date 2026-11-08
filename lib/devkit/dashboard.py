@@ -252,7 +252,7 @@ def project_health(p: dict, now: float = None) -> dict:
         warn.append(f"{registry.unpushed_work(m)} commit(s) not pushed")
     for w in p.get("worktrees") or []:
         wd = (w.get("modified") or 0) + (w.get("untracked") or 0)
-        if (wd or w.get("unpushed")) and not w.get("active") and _idle(w.get("last_activity"), now) > IDLE_WORK_S:
+        if (wd or registry.unpushed_work(w)) and not w.get("active") and _idle(w.get("last_activity"), now) > IDLE_WORK_S:
             warn.append(f"worktree {w.get('branch')} has unsaved work, idle")
     if p.get("canonical_ok") is False and p.get("local", True) is not False:
         warn.append("not at its canonical path")
@@ -355,7 +355,7 @@ def build_actions(reg: dict, now: float = None, items: list = None, colls: list 
                     co.get("last_activity"))
         for w in p.get("worktrees") or []:
             pr = w.get("pr") or {}
-            clean = not (w.get("modified") or w.get("untracked") or w.get("unpushed"))
+            clean = not (w.get("modified") or w.get("untracked") or registry.unpushed_work(w))
             if pr.get("state") in ("MERGED", "CLOSED") and not w.get("active") and clean and not w.get("missing"):
                 reclaim.append((pid, w.get("branch"), pr.get("number"), pr.get("state"), w.get("size_kb") or 0))
         if p.get("canonical_ok") is False and p.get("path") and p.get("local", True) is not False:

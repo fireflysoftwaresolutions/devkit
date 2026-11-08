@@ -2278,12 +2278,13 @@ def _awaiting(run) -> list:
 
 
 def is_moot(run, d: dict) -> bool:
-    """A pending decision nobody waits for: the crew lane that asked it has ended (done, stopped or lost) and no
-    open step is blocked on it. The tech lead's own decisions, and those of a lane the run does not know, never are."""
+    """A pending decision nobody waits for: the crew lane that asked it has ended (done, stopped, lost, or closed
+    unverified by the sweep) and no open step is blocked on it. The tech lead's own decisions, and those of a lane the run does not know, never are."""
     if not isinstance(d, dict) or d.get("state") != "pending":
         return False
     lane = ((run or {}).get("agents") or {}).get(d.get("from") or "main")
-    if d.get("from") in (None, "", "main") or not isinstance(lane, dict) or lane.get("state") not in ENDED_LANE:
+    if d.get("from") in (None, "", "main") or not isinstance(lane, dict) or \
+            lane.get("state") not in ENDED_LANE + ("unverified",):
         return False
     return not any(isinstance(s, dict) and s.get("waiting") == d.get("id") and s.get("state") == "blocked"
                    for s in (run or {}).get("plan") or [])
