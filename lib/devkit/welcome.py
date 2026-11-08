@@ -41,6 +41,7 @@ LINE_MAX = 70  # every other line, under a 5-column hanging indent, with room to
 BRANCH_MAX = 38  # a branch in the footer, cut in the middle past this
 BRANCH_MIN = 20  # how far a branch is cut before the footer drops its CI segment
 GOAL_MIN = 16  # a run's goal is never cut below this: the crew count, then the time left go first
+NAME_MAX = 17  # a project id in a line outside a project, as the headline's room holds it (cut_id)
 BUDGET = {"startup": 5, "workspace": 4, "resume": 3, "clear": 1, "compact": 1}
 KINDS = ("startup", "resume", "clear", "compact")
 RAIL = ("!", "▸", "✓", "›", "·", "+")
@@ -181,6 +182,19 @@ def cut_name(s: str, room: int) -> str:
     return s if width(s) <= room else _prefix(s, max(0, room - 1)) + "…"
 
 
+def cut_id(name: str, room: int) -> str:
+    """A project's name at most `room` columns, its repository name whole: a project id (owner/repo, which names a
+    project whose repository name another project shares) loses its owner from the left, as in "…solutions/devkit";
+    only a repository name longer than `room` by itself is cut, at its end."""
+    if width(name) <= room:
+        return name
+    repo = name.rsplit("/", 1)[-1]
+    if width(repo) > room:
+        return cut_name(repo, room)
+    tail = _prefix(name[::-1], max(0, room - 1))[::-1]
+    return "…" + tail if len(tail) > len(repo) else repo
+
+
 def cut_middle(s: str, room: int) -> str:
     """A branch at most `room` columns, cut in the middle: the type prefix and the tail stay."""
     if width(s) <= room:
@@ -295,9 +309,12 @@ def _needs(me, runs, flags, layout=(), workspace: dict = None) -> list:
     return out
 
 
-def _alias(aliases: dict, pid) -> str:
-    """A project's short name: its alias, else the repository name."""
-    return clean((aliases or {}).get(pid) or str(pid or "").rsplit("/", 1)[-1])
+def _alias(aliases: dict, pid, room: int = None) -> str:
+    """A project's short name: its alias, else the repository name. A project id, which names a project whose
+    repository name another project shares, is cut to `room` columns (NAME_MAX by default), its repository name
+    whole (cut_id)."""
+    name = clean((aliases or {}).get(pid) or str(pid or "").rsplit("/", 1)[-1])
+    return cut_id(name, NAME_MAX if room is None else room) if "/" in name else name
 
 
 def _checkout(repo: dict, cwd: str):
@@ -316,9 +333,10 @@ def _working_run(mine: list, now: float):
     return next((r for r in working if r.get("plan")), working[0] if working else None)
 
 
-def _run_line(run: dict, crew_now: dict, me, now: float, prefix: str = "") -> tuple:
+def _run_line(run: dict, crew_now: dict, me, now: float, name: str = "") -> tuple:
     """-> (the run line without its rail mark, its "step N of M" or ""). The goal is cut last: under GOAL_MIN
-    columns, the crew count goes, then the time left; the step and "in another session" always stay."""
+    columns, the crew count goes, then the time left, then the project's `name` that opens the line outside a
+    project (cut_id); the step and "in another session" always stay."""
     from . import progress
     plan = (crew_now or {}).get("plan") or {}
     step = f"step {min(plan['done'] + 1, plan['total'])} of {plan['total']}" if plan.get("total") else ""
@@ -328,14 +346,17 @@ def _run_line(run: dict, crew_now: dict, me, now: float, prefix: str = "") -> tu
     other = (run.get("agent") or "claude", str(run.get("session") or "")) != me and not progress._session_gone(run)
     there = "in another session" if other else ""
     goal = clean(run.get("goal")) or "Work in progress"
-    room = LINE_MAX - 2 - width(prefix)
+    room = LINE_MAX - 2 - (width(name) + 3 if name else 0)
     for drop in ((), ("crew",), ("crew", "left")):
         rest = [x for k, x in (("step", step), ("left", left), ("crew", crew), ("there", there))
                 if x and k not in drop]
         fixed = sum(width(" · " + x) for x in rest)
         if width(goal) + fixed <= room or room - fixed >= GOAL_MIN or drop == ("crew", "left"):
             break
-    return prefix + " · ".join([cut(goal, max(1, room - fixed))] + rest), step
+    if name and width(goal) + fixed > room and room - fixed < GOAL_MIN:
+        name = cut_id(name, max(1, LINE_MAX - 2 - 3 - fixed - min(GOAL_MIN, width(goal))))
+        room = LINE_MAX - 2 - width(name) - 3
+    return (f"{name} · " if name else "") + " · ".join([cut(goal, max(1, room - fixed))] + rest), step
 
 
 def _ci(repo: dict, co: dict, now: float) -> tuple:
@@ -439,7 +460,7 @@ def _since(run: dict, me, repo: dict, co: dict, roster, now: float) -> str:
 
 def _headline(name: str, verdict: str) -> str:
     room = HEAD_MAX - width(SPEAKER) - width(" · " + verdict)
-    return f"{SPEAKER}{cut_name(clean(name) or 'project', room)} · {verdict}"
+    return f"{SPEAKER}{cut_id(clean(name) or 'project', room)} · {verdict}"
 
 
 def _verdict(found, working: bool, new: bool) -> str:
@@ -528,14 +549,14 @@ def _workspace(kind, me, reg, runs, roster, flags, mode, now) -> list:
     run_line = ""
     if run:
         run_line = _try("run line", lambda: _run_line(run, cli._crew_now([run], roster, now), me, now,
-                                                      prefix=f"{_alias(alias, run.get('project'))} · ")[0], "")
+                                                      name=_alias(alias, run.get("project"), LINE_MAX))[0], "")
     head = _headline("workspace", _verdict(found, bool(run_line), False))
     if kind == "clear":
         return [head] if found else []
     if kind == "resume":
         return _assemble(head, found, [], [], BUDGET["resume"], mode)
     recent = sorted(here, key=lambda p: -float(p.get("last_activity") or 0))[:3]
-    items = [f"{clean(alias.get(p['id'], p['id']))} {ago(p.get('last_activity'), now)}" for p in recent
+    items = [f"{_alias(alias, p['id'])} {ago(p.get('last_activity'), now)}" for p in recent
              if p.get("last_activity")]
     while items and width("Recent: " + " · ".join(items)) > LINE_MAX - 2:
         items.pop()
