@@ -32,7 +32,9 @@ RECORDED = (
     "py=python3; $py -m unittest tests.test_guard",
     'C=/usr/bin/python3; "$C" --version',
     "py=/usr/bin/python3; $py -m unittest \\\n  tests.test_guard",
-    "for PY in python3 /usr/bin/python3; do\n  $PY -m unittest tests.test_guard\ndone")
+    "for PY in python3 /usr/bin/python3; do\n  $PY -m unittest tests.test_guard\ndone",
+    "git status --short lib/devkit/guard.py; for py in python3 /usr/bin/python3; do echo \"== $py\"; "
+    "$py -m unittest tests.test_guard 2>&1 | grep -E '^Ran|^OK'; done")
 
 # the value comes from outside the command, or the guard cannot say which: still a program known only when it runs
 UNKNOWN = (
@@ -45,6 +47,7 @@ UNKNOWN = (
     "for P in python3 \\$X; do $P -m unittest tests.test_guard; done",
     "py=python3; py=$1; $py -m unittest tests.test_guard", "py=python3; ${py:-perl} -e 1",
     "py=python3; IFS=/; $py -m unittest tests.test_guard", "py=python3; eval py=perl; $py -e 1",
+    "py=python3; declare -n r=py; r=perl; $py -e 1", "py=python3; (( py = 1 )); $py -e 1",
     "py=python3; (py=perl); $py -e 1", "py=python3; printf -v py perl; $py -e 1",
     'py="python3"; $py -m unittest tests.test_guard', "py=python3; f() { py=perl; }; f; $py -e 1",
     "for P in a b; do :; done; $P -m unittest tests.test_guard", "py=python3; $py[1] -e 1")

@@ -8021,7 +8021,9 @@ def literal_variants(cmd: str) -> list:
     for name, uses in refs.items():
         evs = sorted(events.get(name) or [], key=lambda e: e[0])
         spans = [(a, b) for a, b, _ in uses] + touched.get(name, [])
-        bare = [m.start() for m in re.finditer(rf"(?<![A-Za-z0-9_$]){re.escape(name)}(?![A-Za-z0-9_])", code)
+        # any other mention of the name as a shell word (read py, unset py, printf -v py, (( py )), r=py); a name
+        # inside a longer word (guard.py, ./py/x, -py) is no mention
+        bare = [m.start() for m in re.finditer(rf"(?<![A-Za-z0-9_$./-]){re.escape(name)}(?![A-Za-z0-9_./-])", code)
                 if not any(a <= m.start() < b for a, b in spans)]
         if not evs or bare or any(bad for _, _, bad in uses) or any(e[1] is None for e in evs):
             continue
