@@ -484,7 +484,23 @@ def _branch_new(c, a) -> int:
         return fail(f"could not create `{name}` from {base}", err)
     sha = core.gitout(c.top, "rev-parse", "--short", "HEAD")
     ok(f"{name} from {base} @ {sha}" + (f" · carried {dirty} uncommitted change(s)" if dirty else ""))
+    linked = _link_new_branch(c.pid, name)
+    if linked:
+        ok(linked)
     return 0
+
+
+def _link_new_branch(pid: str, branch: str) -> str:
+    """Link the claimed item of `pid` that has no branch to the new `branch` (work.link_new_branch). A problem with
+    the handoff repository only warns: the branch exists either way."""
+    if not pid:
+        return ""
+    from . import work
+    try:
+        return work.link_new_branch(pid, branch, a=work.actor(user=_me() or None))
+    except Exception as e:
+        ui.warn(f"work items not linked to {branch}: {e} (dev task start <id> on the branch links one)")
+        return ""
 
 
 def _branch_rename(c, a) -> int:
@@ -2016,7 +2032,20 @@ def _pr_create(c, a) -> int:
        (f" · removed {removed} AI-attribution line(s)" if removed else "") +
        (" · no CI runs on the draft: after `dev ci --run`, `dev pr ready` starts the one run" if draft and not ev
         else " · watch: dev pr checks --watch"))
+    _refresh_prs(c)
     return 0
+
+
+def _refresh_prs(c) -> None:
+    """Read the repository's PRs from GitHub again into the cache the dashboard and `dev status` show (kept 15
+    minutes otherwise), right after dev changed one. Never fails the command that changed it."""
+    if c.provider != "github":
+        return
+    try:
+        from . import registry
+        registry.prs(c.slug, refresh=True)
+    except Exception:
+        pass
 
 
 def _edit(text: str):
@@ -2326,6 +2355,7 @@ def _pr_merge(c, a) -> int:
         tail.append("remote branch deleted")
         tail.append(_after_merge(c, p.get("headRefName")))
     ok(" · ".join(x for x in tail if x))
+    _refresh_prs(c)
     _close_merged_items(c, p.get("headRefName"), n)
     return 0
 
@@ -2370,22 +2400,56 @@ def merged_branch(subject: str):
 
 
 def merged_branches(top, rev: str) -> dict:
-    """branch -> {"sha", "pr"} for the merge commits of `rev` (a range such as `v26.11.5..HEAD`, or a ref), the
-    newest merge of each branch."""
+    """branch -> {"sha", "pr", "at"} for the merge commits of `rev` (a range such as `v26.11.5..HEAD`, or a ref),
+    the newest merge of each branch; `at`: its commit time, in seconds since the epoch."""
     out = {}
-    for ln in core.gitout(top, "log", "--merges", "--format=%H%x09%s", rev).splitlines():
-        sha, _, subject = ln.partition("\t")
+    for ln in core.gitout(top, "log", "--merges", "--format=%H%x09%ct%x09%s", rev).splitlines():
+        sha, _, rest = ln.partition("\t")
+        at, _, subject = rest.partition("\t")
         branch, pr = merged_branch(subject)
         if branch and branch not in out:
-            out[branch] = {"sha": sha, "pr": pr}
+            out[branch] = {"sha": sha, "pr": pr, "at": int(at or 0)}
     return out
 
 
-def merged_into_default(top, default: str) -> dict:
+def merged_without_merge_commit(top, ref: str, branches, since: str = None) -> dict:
+    """Which of `branches` reached `ref` without a merge commit that names them: a squash or rebase merge (a merged
+    PR of the branch whose commit is in `ref`) or a fast-forward (the branch's tip is in `ref`). `since`: a tag; a
+    merge already in it does not count. branch -> {"sha", "pr", "at"}, `at` being when it was merged (the PR) or
+    committed (the tip), which `work.linked_open` compares with each item's link to the branch."""
+    from . import work
+    branches, out = list(branches or ()), {}
+    by_head = {}
+    c = ctx(top) if branches else None
+    if c is not None and c.provider == "github":  # one call for every branch: the recent merged PRs
+        prs, _ = gh_json(["pr", "list", "-R", c.slug, "--state", "merged", "--limit", "200", "--json",
+                          "number,mergedAt,mergeCommit,headRefName"], c)
+        for p in prs if isinstance(prs, list) else []:
+            sha = (p.get("mergeCommit") or {}).get("oid") or ""
+            if sha and p.get("headRefName") in branches:
+                by_head.setdefault(p["headRefName"], []).append((sha, p.get("number"),
+                                                                 work.parse_iso(p.get("mergedAt") or "")))
+    for b in branches:
+        found = sorted(by_head.get(b, []), key=lambda x: -x[2])  # the newest merge of the name first
+        for name in (f"refs/heads/{b}", f"refs/remotes/origin/{b}"):
+            tip = _ref_sha(top, name)
+            if tip:
+                found.append((tip, None, int(core.gitout(top, "log", "-1", "--format=%ct", tip) or 0)))
+        for sha, pr, at in found:
+            if _is_ancestor(top, sha, ref) and not (since and _is_ancestor(top, sha, since)):
+                out[b] = {"sha": sha, "pr": pr, "at": at}
+                break
+    return out
+
+
+def merged_into_default(top, default: str, branches=()) -> dict:
     """The branches merged into the default branch as origin has it (the local branch when there is no origin):
-    a merge that only exists on this Mac has not shipped. branch -> {"sha", "pr"}."""
+    a merge that only exists on this Mac has not shipped. `branches`: those to look for also among merges without a
+    merge commit (`merged_without_merge_commit`). branch -> {"sha", "pr", "at"}."""
     ref = f"origin/{default}" if _ref_sha(top, f"refs/remotes/origin/{default}") else default
-    return merged_branches(top, ref)
+    merged = merged_branches(top, ref)
+    merged.update(merged_without_merge_commit(top, ref, [b for b in branches if b not in merged]))
+    return merged
 
 
 def _merge_ref(m: dict) -> str:
@@ -2444,6 +2508,7 @@ def _pr_ready(c, a) -> int:
     if not done:
         return fail(f"gh pr ready failed: {err}")
     ok(f"#{p['number']} is ready for review · {p['url']} · its CI runs now: dev pr checks --watch")
+    _refresh_prs(c)
     return 0
 
 
@@ -2842,13 +2907,16 @@ def cmd_release(a) -> int:
 
 def release_open_items(c, since) -> list:
     """The open work items linked to the branches merged since the tag `since` (every merge of HEAD without one):
-    [(item, branch, {"sha", "pr"})]. The merges are the merge commits of `since..HEAD`."""
+    [(item, branch, {"sha", "pr", "at"})]. The merges are the merge commits of `since..HEAD`, and the squash, rebase
+    and fast-forward merges of the linked branches (`merged_without_merge_commit`)."""
     if not c.pid:
         return []
+    from . import work
     merged = merged_branches(c.top, f"{since}..HEAD" if since else "HEAD")
+    linked = [b for b in work.linked_branches(c.pid) if b not in merged]
+    merged.update(merged_without_merge_commit(c.top, "HEAD", linked, since))
     if not merged:
         return []
-    from . import work
     return [(it, b, merged[b]) for it, b in work.linked_open(c.pid, merged)]
 
 

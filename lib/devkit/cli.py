@@ -177,35 +177,47 @@ def _state(co):
 
 
 def commit_push(push=True, quiet=False):
-    if not (HANDOFF / ".git").exists():
+    """Commit what changed in the handoff repository and push it. A rebase left stopped is aborted first, a pull
+    settles conflicts in items and stops cleanly on any other (work.pull_rebase), and every failure is recorded in
+    handoff-push-failed.json, which `dev status` shows until a push succeeds."""
+    from . import audit, work
+    root = work.HANDOFF  # the repository work.pull_rebase works on, read now (tests point it elsewhere)
+    if not (root / ".git").exists():
         return
-    core.git(HANDOFF, "add", "-A")
-    rc, _, _ = core.git(HANDOFF, "diff", "--cached", "--quiet")
-    if rc != 0:
-        n = len(core.gitout(HANDOFF, "diff", "--cached", "--name-only").splitlines())
-        core.git(HANDOFF, "commit", "-q", "-m", f"sync: {n} file(s) from {os.uname().nodename.split('.')[0]}")
-    if not push or not core.gitout(HANDOFF, "remote"):
-        return
-    from . import audit
-    failed = STATE / "handoff-push-failed.json"
-    core.git(HANDOFF, "fetch", "-q", "origin", timeout=60)
-    if core.gitout(HANDOFF, "rev-list", "--count", "HEAD..@{u}") not in ("", "0"):
-        core.git(HANDOFF, "pull", "-q", "--rebase", "--autostash", timeout=120)
-    ahead = core.gitout(HANDOFF, "rev-list", "--count", "@{u}..HEAD")
-    if ahead not in ("", "0"):
-        rc, _, err = core.git(HANDOFF, "push", "-q", timeout=120)
-        if rc != 0:  # someone pushed in between: rebase on it and try once more
-            core.git(HANDOFF, "pull", "-q", "--rebase", "--autostash", timeout=120)
-            rc, _, err = core.git(HANDOFF, "push", "-q", timeout=120)
-        if rc == 0:
-            audit.record("handoff.push", core.handoff_repo(), f"{ahead} commit(s)")
-            if failed.exists():
-                failed.unlink()
-        else:
-            audit.record("handoff.push", core.handoff_repo(), err[:300], "failed")
-            failed.write_text(json.dumps({"ts": int(time.time()), "error": err[:300]}))
+    failed = work.push_failed_file()
+    with work._repo_lock() as got:
+        if not got:
             if not quiet:
-                ui.warn(f"handoff push failed: {err}")
+                ui.warn("handoff sync skipped: another devkit process is using the handoff repository")
+            return
+        work.recover_rebase("dev sync")
+        core.git(root, "add", "-A")
+        rc, _, _ = core.git(root, "diff", "--cached", "--quiet")
+        if rc != 0:
+            n = len(core.gitout(root, "diff", "--cached", "--name-only").splitlines())
+            core.git(root, "commit", "-q", "-m", f"sync: {n} file(s) from {os.uname().nodename.split('.')[0]}")
+        if not push or not core.gitout(root, "remote"):
+            return
+        core.git(root, "fetch", "-q", "origin", timeout=60)
+        ok, err = True, ""
+        if core.gitout(root, "rev-list", "--count", "HEAD..@{u}") not in ("", "0"):
+            ok, err = work.pull_rebase()
+        ahead = core.gitout(root, "rev-list", "--count", "@{u}..HEAD")
+        if ok and ahead not in ("", "0"):
+            rc, _, err = core.git(root, "push", "-q", timeout=120)
+            if rc != 0:  # someone pushed in between: rebase on it and try once more
+                ok, err = work.pull_rebase()
+                rc, _, err = core.git(root, "push", "-q", timeout=120) if ok else (1, "", err)
+            ok = rc == 0
+            if ok:
+                audit.record("handoff.push", core.handoff_repo(), f"{ahead} commit(s)")
+                if failed.exists():
+                    failed.unlink()
+            else:
+                audit.record("handoff.push", core.handoff_repo(), err[:300], "failed")
+                failed.write_text(json.dumps({"ts": int(time.time()), "error": err[:300]}))
+        if not ok and not quiet:
+            ui.warn(f"handoff push failed: {err}")
 
 
 # --------------------------------------------------------------------------- dashboard & help
@@ -681,11 +693,24 @@ def _layout_need(p: dict, alias: str, standalone: bool) -> dict:
             "command": f"dev adopt {tilde(p.get('path') or '')}", "project": p["id"]}
 
 
-def _decision_need(d: dict, roster) -> dict:
+def _asker(name, roster):
+    """-> (the crew member named `name` or None, how a sentence names them: "The backend engineer (Tank)")."""
     from . import crew as crew_mod
-    m = crew_mod.member(d.get("from_name"), roster) if d.get("from_name") else None
-    who = f"The {crew_mod.who(m)[:1].lower()}{crew_mod.who(m)[1:]}" if m and m.get("title") else (
-        (m or {}).get("name") or d.get("from_name") or "Morpheus")
+    m = crew_mod.member(name, roster) if name else None
+    return m, f"The {crew_mod.who(m)[:1].lower()}{crew_mod.who(m)[1:]}" if m and m.get("title") else (
+        (m or {}).get("name") or name or "Morpheus")
+
+
+def _message_need(msg: dict, roster) -> dict:
+    """A crew question to the tech lead that nobody answered yet (progress.waiting_messages)."""
+    _, who = _asker(msg.get("from_name"), roster)
+    return {"kind": "message", "id": msg.get("id"), "text": f"{who} asks: {(msg.get('text') or '').rstrip()} Answer it "
+                                                            "in the chat with the session, or:",
+            "command": f"dev crew answer {msg.get('id')} \"…\"", "ts": msg.get("ts")}
+
+
+def _decision_need(d: dict, roster) -> dict:
+    m, who = _asker(d.get("from_name"), roster)
     q = (d.get("question") or "").rstrip()
     rec = f" {m['name'] if m else who} recommends {d['recommend']}." if d.get("recommend") else ""
     answer = f"approve {d['id']}" + (f": {d['recommend']}" if d.get("recommend") else "")
@@ -717,11 +742,11 @@ def status_view(reg: dict, p: dict, w: dict = None, runs=None, ci=None, roster=N
     local = registry.is_local(p)
     runs = pg.active_runs() if runs is None else runs
     mine = [r for r in runs if r.get("project") == p["id"]]
+    # what needs you is what is open now; the saved block's You line is history once the developer acted on it
     needs = [_decision_need(d, roster) for r in mine for d in pg.pending_decisions(r)]
+    needs += [_message_need(m, roster) for r in mine for m in pg.waiting_messages(r)]
     sl = p.get("status_line") or registry.status_line(p["id"]) or {}
     parsed = canary.parse_line(sl.get("line") or "") if sl.get("line") else {}
-    if parsed.get("you"):
-        needs.append({"kind": "you", "text": parsed["you"], "command": "", "ts": sl.get("ts")})
     if local and not p.get("canonical_ok", True):
         needs.append(_layout_need(p, alias, True))
     needs += _issue_needs(reg, p) if local else []
@@ -1174,6 +1199,10 @@ def wt_new(p, branch, base=None, quiet=False, deps=True):
     if rc != 0:
         ui.err(f"git worktree add failed: {err}")
         return None
+    from . import gitx
+    linked = gitx._link_new_branch(p.get("id"), branch)
+    if linked:  # always said: it changes a work item
+        print(f"{ui.OK} {linked}", file=sys.stderr)
     inc = main / ".worktreeinclude"
     if inc.exists():
         import fnmatch
@@ -1313,6 +1342,15 @@ def cmd_sync(a):
             except Exception as e:  # never let a backup break the sync
                 if not a.quiet:
                     ui.warn(f"backup: {e}")
+        if a.session and a.finish:  # the session ended: off the map and the team's presence before they are written
+            agent, _, sid = a.session.partition(":")
+            from . import state as _state
+            for suffix in (".json", ".stop"):
+                f = STATE / "sessions" / f"{agent}-{sid}{suffix}"
+                if f.exists():  # under the record's lock, so a hook that already read it cannot write it back
+                    _state.remove(f) if suffix == ".json" else f.unlink()
+            reg["sessions"] = [s_ for s_ in reg.get("sessions") or []
+                               if not (s_.get("agent") == agent and s_.get("session") == sid)]
         try:
             from . import work
             if a.renew:
@@ -1332,13 +1370,6 @@ def cmd_sync(a):
         except Exception as e:  # never let the view break the sync
             if not a.quiet:
                 ui.warn(f"dashboard: {e}")
-        if a.session and a.finish:
-            agent, _, sid = a.session.partition(":")
-            from . import state as _state
-            for suffix in (".json", ".stop"):
-                f = STATE / "sessions" / f"{agent}-{sid}{suffix}"
-                if f.exists():  # under the record's lock, so a hook that already read it cannot write it back
-                    _state.remove(f) if suffix == ".json" else f.unlink()
         commit_push(push=CFG["sync"].get("push", True) and not a.no_push, quiet=a.quiet)
         (STATE / "last-sync.json").write_text(json.dumps({"ts": time.time(), "changed": changed,
                                                          "gc": [m for _, m in results]}))
@@ -1914,7 +1945,7 @@ def _task_reconcile(a, scope: str, label: str) -> int:
             ui.warn(f"git fetch failed ({(err or '').strip()[:120]}); using the last known origin/{default}")
     if a.apply:
         work.pull()
-    r = work.reconcile(scope, gitx.merged_into_default(top, default), apply=a.apply)
+    r = work.reconcile(scope, gitx.merged_into_default(top, default, work.linked_branches(scope)), apply=a.apply)
     if a.json:
         print(json.dumps(r, indent=1, ensure_ascii=False))
     else:

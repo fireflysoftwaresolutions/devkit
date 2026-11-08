@@ -860,6 +860,9 @@ def setup_handoff():
                 shutil.copyfile(f, HANDOFF / f.name)
         remote = core.gitout(HANDOFF, "remote", "get-url", "origin")
         done(f"present · origin {remote or 'none'}")
+        from . import work
+        if work.recover_rebase("dev install"):  # a stopped rebase blocks every later sync
+            done("aborted a rebase of the handoff repository that was left stopped (docs/teams.md says why)")
     if (HANDOFF / ".git").exists():
         handoff_merge_rules()
         done("multi-machine merge rules (sessions union · generated views ours)")
@@ -2306,6 +2309,9 @@ def doctor() -> int:
     check("Workspace", "canonical layout", not layout, f"{len(mains)} repos; " +
           (f"{len(layout)} not at their canonical path: {', '.join(tilde(m) for m in layout)}" if layout else "all in place"),
           "dev adopt <path> (when no sessions are open in it)")
+    from . import selfcheck
+    for row in selfcheck.work_state_checks():  # the project you are in: stale work items and runs, each with its fix
+        check(*row)
 
     for target in (CLAUDE_HOME / "CLAUDE.md", CODEX_HOME / "AGENTS.md"):
         state = instructions_state(target)

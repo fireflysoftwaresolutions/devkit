@@ -93,8 +93,10 @@ guesses.
 
 The project you are in, or `<name>`, in the order of its questions:
 
-1. **Needs you:** what only you can do, or `✓ Nothing needs you right now.` A crew decision waiting for you, the last
-   update's You bullet, a project outside devkit's folder layout (with its `dev adopt` command), and work at risk.
+1. **Needs you:** what is open for you now, or `✓ Nothing needs you right now.` A crew decision waiting for you, a
+   crew question to the tech lead nobody answered yet (with its `dev crew answer` command), a project outside devkit's
+   folder layout (with its `dev adopt` command), and work at risk. The last status block's You bullet is not repeated
+   here: it may be done already.
 2. **Right now:** the checks of the branch or its open PR, the crew members working now (role, name, and what their
    step does, never its code), and the plan's steps done and time left while a run works. A run works while it or one
    of its crew reported in the last 30 minutes.
@@ -252,7 +254,7 @@ of the title. See [Teams and machines](teams.md) for locks, versions, and the ch
 | `link <selector> --to SLUG --why "…"` | Counts a project task toward an initiative (adds the link `initiative:<slug>`) |
 | `show <selector>` | The item's fields, its description, and its history |
 | `history <selector>` | The item's changelog only |
-| `reconcile [--apply] [--json]` | Reports the stale items of a project: doing without a lock, open although their branch is merged into the default branch on `origin`, and the same title more than once. It changes nothing; `--apply` closes the items of merged branches (done, the merge commit as evidence) and sends doing items without a lock back to todo, in one commit. See [Teams and machines › Shipped and stale items](teams.md#shipped-and-stale-items) |
+| `reconcile [--apply] [--json]` | Reports the stale items of a project: doing without a lock, open although their branch is merged into the default branch on `origin` (by a merge commit, a squash or rebase merge of its PR, or a fast-forward, after the item was linked to it), and the same title more than once. It changes nothing; `--apply` closes the items of merged branches (done, the merge commit as evidence) and sends doing items without a lock back to todo, in one commit. See [Teams and machines › Shipped and stale items](teams.md#shipped-and-stale-items) |
 | `ls` | The open items (the default) |
 
 Options of `dev task add`:
@@ -326,7 +328,7 @@ Live progress of long agent work, with active time, a critical-path ETA and a pl
 | `dev progress add "<name>=<estimate> [after …] [<id>]" [--why "…"]` | Adds a step found during the work; add it when it starts. `[<id>]` declares its kind of work, as in a plan. From a crew member, the step goes to its own lane |
 | `dev progress assign <step> --to <member> [--scope "<globs>"] [--activity ID] [--allow push,pr] [--why "…"]` | Hands a step to a crew member; its time is that member's, and the guard keeps its edits inside the scope. `--activity` declares the step's kind of work (an id from `dev crew raci`, such as `backend` or `ux`), so the RACI check and the approver do not depend on the language of the step's name. `--allow` gives the member push and PR create in that step, each only with the developer's grant (`grant push <branch>`) or a verified decision. Refused when the crew's RACI does not make that member Responsible for the step's kind of work, unless `--why` gives the reason, which is recorded |
 | `dev progress begin <step>` | Starts a step in parallel with the running one |
-| `dev progress reopen <step> --why "…"` · `dev progress skip <step> --why "…"` | Undoes a wrong close, or skips a step on purpose |
+| `dev progress reopen <step> --why "…"` · `dev progress skip <step> --why "…"` · `dev progress confirm <step> --why "…"` | Undoes a wrong close, skips a step on purpose, or confirms a step whose dependencies were reopened and closed again |
 | `dev progress block "<why>" [--next "<what is needed>"]` | The run is blocked; prints the update and sends a desktop notification |
 | `dev progress done "<outcome>" [--why "…"]` | The run is finished; refused while steps are pending, decisions wait, or an Accountable member has not approved the work they own. `--why` ends it without that approval and records the reason. Records the active time against the estimate and sends a desktop notification |
 | `dev progress history` | Every step change: when, from → to, by whom (the tech lead (Morpheus), a crew member, devkit), why |
@@ -893,8 +895,9 @@ CI on GitHub not failing or running, and notes from the CHANGELOG section. It cr
 pushes it, and creates the GitHub release. A project that releases with release-please or semantic-release is
 refused. See [Git and GitHub › Releases](git-and-github.md#releases).
 
-It and `--dry-run` also list the open work items linked to the branches merged since the previous tag (the merge
-commits of `<previous tag>..HEAD`) and refuse while any is open. Close the shipped ones (`dev task done`, or
+It and `--dry-run` also list the open work items linked to the branches merged since the previous tag (by a merge
+commit of `<previous tag>..HEAD`, a squash or rebase merge of the branch's PR, or a fast-forward) and refuse while any
+is open. Close the shipped ones (`dev task done`, or
 `dev task reconcile --apply`), or release anyway with `--why "<reason>"`, which the output and the audit
 (`dev.release.open-items`) record. See [Teams and machines › Shipped and stale items](teams.md#shipped-and-stale-items).
 

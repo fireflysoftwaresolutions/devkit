@@ -256,18 +256,31 @@ class StatusTests(Sandbox):
         self.assertEqual([h.split(" from")[0] for h in heads], ["Needs you", "Right now", "Last update", "Details"])
         self.assertIn("More: dev status --all (tasks and plans), dev status --json (for tools)", lines[-1])
 
-    def test_the_you_bullet_moves_up_and_live_crew_replaces_the_saved_crew(self):
+    def test_live_crew_replaces_the_saved_crew_in_the_last_update(self):
         text = "\n".join(cli.render_status(self.view(), cols=80))
-        needs = text.split("Right now")[0]
-        self.assertIn("approve the push of the release branch.", needs)
         last = " ".join(text.split("Last update")[1].split("Details")[0].split())
         self.assertNotIn("Backend engineer (Tank)", last)
         self.assertNotIn("42 of 70", last)
         self.assertIn("Next", last)
 
-    def test_nothing_needs_you_is_said_in_words(self):
-        line = LONG.replace(" ❯ you → approve the push of the release branch.", "")
-        self.assertIn("✓  Nothing needs you right now.", "\n".join(cli.render_status(self.view(line=line), cols=80)))
+    # The saved block's You line was repeated until the next status block, after the developer had acted on it: what
+    # needs you is what is open now, the decisions and the crew's questions waiting for an answer.
+    def test_a_saved_you_line_alone_is_not_shown_as_needing_you_now(self):
+        text = "\n".join(cli.render_status(self.view(), cols=80))
+        self.assertIn("✓  Nothing needs you right now.", text)
+        self.assertNotIn("approve the push of the release branch.", text)
+
+    def test_a_crew_question_waiting_for_an_answer_needs_you_with_the_answer_command(self):
+        now = time.time()
+        run = live_run("fireflysoftwaresolutions/devkit", now)
+        run["messages"] = [{"id": "M3", "from": "lane1", "from_name": "Tank", "to": "main", "kind": "question",
+                            "text": "may I change services/api.py?", "ts": now - 60},
+                           {"id": "M4", "from": "lane2", "from_name": "Neo", "to": "main", "kind": "notice",
+                            "text": "the evidence step finished", "ts": now - 30}]
+        text = " ".join("\n".join(cli.render_status(self.view(runs=[run]), 80)).split())
+        self.assertIn("Needs you · 1 ! The backend engineer (Tank) asks: may I change services/api.py? Answer it in "
+                      "the chat with the session, or: dev crew answer M3 \"…\"", text)
+        self.assertNotIn("the evidence step finished", text)
 
     def test_crew_rows_show_plain_step_titles_never_codes(self):
         now = time.time()
@@ -349,7 +362,8 @@ class StatusTests(Sandbox):
         self.assertEqual(rc, 0)
         data = json.loads(out)
         self.assertEqual(data["alias"], "devkit")
-        self.assertEqual(data["needs_you"][0]["text"], "approve the push of the release branch.")
+        # the saved You line is history, not something open now
+        self.assertNotIn("approve the push of the release branch.", [n["text"] for n in data["needs_you"]])
         self.assertIn("Kid builds the terminal work", data["last_update"]["next"])
 
 

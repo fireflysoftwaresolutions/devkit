@@ -19,7 +19,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
-from devkit import audit, cistatus, core, delivery, gitx, guard, work  # noqa: E402
+from devkit import audit, cistatus, core, delivery, gitx, guard, registry, work  # noqa: E402
 
 GITHUB_URL = "https://github.com/acme/widget.git"
 ISOLATE = {"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1", "GIT_AUTHOR_NAME": "Ana Dev",
@@ -106,6 +106,10 @@ class Sandbox:
         work.ITEMS = self.root / "handoff" / "items"
         audit.AUDIT = self.root / "audit"
         self.gh = gitx.GH = FakeGH()
+        real_sh = registry.sh
+        self.saved_registry = (registry.sh, registry.STATE)
+        registry.STATE = core.STATE  # the PR cache the dashboard reads; its gh calls go to the fake too
+        registry.sh = lambda args, **kw: self.gh(list(args)[1:]) if list(args)[:1] == ["gh"] else real_sh(args, **kw)
         self.gh.on(["pr", "view"], rc=1, err="no pull requests found")
         self.gh.on(["pr", "list"], [])
         self.execs = []
@@ -133,6 +137,7 @@ class Sandbox:
         os.chdir(self.cwd)
         (core.STATE, core.HANDOFF, gitx.GH, gitx.EXEC, gitx.SLEEP, gitx._me, gitx._handoff_log, gitx.TEMPLATE_DIR,
          cistatus.runs_for, delivery.POLICIES, work.HANDOFF, work.ITEMS, audit.AUDIT) = self.saved
+        registry.sh, registry.STATE = self.saved_registry
         for k, v in self.saved_git_env.items():
             if v is None:
                 core.GIT_ENV.pop(k, None)
@@ -231,6 +236,27 @@ class BranchTests(unittest.TestCase):
             self.assertEqual(s.head(), s.head("origin/main"))
             self.assertNotEqual(s.head(), local_main)
             self.assertIn("from origin/main", out)
+
+    # An item claimed on main, before its branch existed, had no branch link: its lock never renewed while someone
+    # worked on the branch, and the merge never closed it.
+    def test_a_new_branch_links_the_claimed_item_that_has_no_branch_yet(self):
+        from devkit import cli
+        for command in ("dev branch new", "dev wt new"):
+            with self.subTest(command), Sandbox() as s:
+                held = work.claim(work.create("acme/widget", "Export invoices", a=ME), a=ME)
+                other = work.claim(work.create("acme/widget", "Refunds", a=ME), a=ME, branch="feat/refunds")
+                if command == "dev branch new":
+                    rc, said, err = dev("branch", "new", "feat/export")
+                    self.assertEqual(rc, 0, err)
+                else:
+                    p = {"path": str(s.repo), "id": "acme/widget", "remote": True, "default_branch": "main"}
+                    err = io.StringIO()
+                    with mock.patch.object(cli, "WT_ROOT", s.root / "worktrees"), contextlib.redirect_stderr(err):
+                        self.assertTrue(cli.wt_new(p, "feat/export", deps=False))
+                    said = err.getvalue()
+                self.assertEqual(work.load(held["path"])["meta"]["links"], ["branch:feat/export"])
+                self.assertEqual(work.load(other["path"])["meta"]["links"], ["branch:feat/refunds"])
+                self.assertIn(f"linked {held['meta']['id']} “Export invoices” to feat/export", said)
 
     def test_new_refuses_bad_names_and_duplicates(self):
         with Sandbox():
@@ -933,6 +959,45 @@ class PrTests(unittest.TestCase):
         self.assertEqual(rc, 0, err)
         return out
 
+    # The dashboard and `dev status` read the PR cache, kept for 15 minutes: a PR opened, made ready or merged with dev
+    # showed its old state there until the cache ran out.
+    def test_the_pr_cache_shows_the_new_state_right_after_dev_pr_create_ready_and_merge(self):
+        def github_lists(s, **pr):  # what `gh pr list` answers now, for the registry's refresh only
+            s.gh.on(["pr", "list"], [dict({"number": 7, "headRefName": "feat/invoice", "title": "feat: x"}, **pr)],
+                    when=lambda args: "200" in args or "50" in args)
+
+        for command in ("create", "ready", "merge"):
+            with self.subTest(command), Sandbox() as s:
+                cache = registry.STATE / "prs" / "acme__widget.json"
+                cache.parent.mkdir(parents=True)
+                cache.write_text(json.dumps([] if command == "create" else
+                                            [{"number": 7, "state": "OPEN", "isDraft": command == "ready"}]))
+                self.pushed(s)
+                if command == "create":
+                    github_lists(s, state="OPEN", isDraft=False)
+                    text, _ = gitx.pr_template(s.repo)
+                    body = s.write("../body.md", text.replace("## Changes", "Exports CSV.\n\n## Changes").replace(
+                        "## Risk and rollback", "- Ran python3 -m unittest: 42 passed\n\n## Risk and rollback"))
+                    rc, _, err = dev("pr", "create", "--body-file", body)
+                    want = {"state": "OPEN", "isDraft": False}
+                elif command == "ready":
+                    git(s.repo, "push", "-q", "-u", "origin", "feat/invoice")
+                    text, _ = gitx.pr_template(s.repo)
+                    s.gh.on(["pr", "view"], _pr(isDraft=True, headRefOid=s.head(), body=text.replace(
+                        "## Changes", "Exports CSV.\n\n## Changes").replace(
+                        "## Risk and rollback", "- Ran python3 -m unittest: 42 passed\n\n## Risk and rollback")))
+                    s.gh.on(["pr", "ready"], "")
+                    github_lists(s, state="OPEN", isDraft=False)
+                    rc, _, err = dev("pr", "ready")
+                    want = {"state": "OPEN", "isDraft": False}
+                else:
+                    github_lists(s, state="MERGED", isDraft=False)
+                    self.merge(s)
+                    rc, err, want = 0, "", {"state": "MERGED", "isDraft": False}
+                self.assertEqual(rc, 0, err)
+                listed = {p["number"]: p for p in json.loads(cache.read_text())}
+                self.assertEqual({k: listed.get(7, {}).get(k) for k in want}, want)
+
     def test_merge_closes_the_open_items_linked_to_the_merged_branch(self):
         with Sandbox() as s:
             s.branch("feat/invoice")
@@ -1120,6 +1185,8 @@ class ReleaseTests(unittest.TestCase):
     def merged_since_the_last_tag(self, s):
         """feat/old is merged and tagged v<YY>.<MM>.0, then feat/invoice is merged; an item is open on each.
         -> (the item on feat/invoice, the item on feat/old)"""
+        new = work.claim(work.create("acme/widget", "Export invoices", a=ME), a=ME, branch="feat/invoice")
+        old = work.claim(work.create("acme/widget", "Old work", a=ME), a=ME, branch="feat/old")
         for n, branch in ((5, "feat/old"), (7, "feat/invoice")):
             s.branch(branch)
             s.commit(f"feat: work on {branch}")
@@ -1128,8 +1195,6 @@ class ReleaseTests(unittest.TestCase):
             if branch == "feat/old":
                 git(s.repo, "tag", f"v{YY}.{MM}.0")
         git(s.repo, "push", "-q", "origin", "main")
-        new = work.claim(work.create("acme/widget", "Export invoices", a=ME), a=ME, branch="feat/invoice")
-        old = work.claim(work.create("acme/widget", "Old work", a=ME), a=ME, branch="feat/old")
         dev("ci", "--mark-passed")
         s.gh.on(["run", "list"], [])
         return new, old
@@ -1255,6 +1320,39 @@ class ReconcileTests(unittest.TestCase):
             self.assertEqual(list(merged), ["feat/invoice"])
             self.assertEqual((merged["feat/invoice"]["pr"], merged["feat/invoice"]["sha"]),
                              (7, s.head("origin/main")))
+
+    # A squash or rebase merge on GitHub leaves no merge commit that names the branch, and neither does a fast-forward:
+    # their items stayed open until someone closed them by hand.
+    def test_task_reconcile_closes_the_items_of_a_branch_merged_without_a_merge_commit(self):
+        from devkit import cli
+        for how in ("squash merge (the PR says merged)", "fast-forward (the branch's tip is on main)"):
+            with self.subTest(how), Sandbox() as s:
+                it = work.claim(work.create("acme/widget", "Export invoices", a=ME), a=ME, branch="feat/invoice")
+                s.branch("feat/invoice")
+                tip = s.commit("feat(invoice): add csv export")
+                git(s.repo, "switch", "-q", "main")
+                if how.startswith("squash"):
+                    git(s.repo, "merge", "-q", "--squash", "feat/invoice")
+                    git(s.repo, "commit", "-q", "-m", "feat(invoice): add csv export (#7)")
+                    landed, pr = s.head(), 7
+                    s.gh.on(["pr", "list"], [{"number": 7, "mergedAt": work.now_iso(), "headRefName": "feat/invoice",
+                                              "mergeCommit": {"oid": landed}},
+                                             {"number": 3, "mergedAt": "2026-01-10T09:00:00Z", "headRefName": "feat/other",
+                                              "mergeCommit": {"oid": "0" * 40}}],
+                            when=lambda args: "merged" in args)
+                else:
+                    git(s.repo, "merge", "-q", "--ff-only", "feat/invoice")
+                    landed, pr = tip, None
+                git(s.repo, "push", "-q", "origin", "main")
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    rc = cli._task_reconcile(argparse.Namespace(apply=True, json=True), "acme/widget", "acme/widget")
+                self.assertEqual(rc, 0)
+                self.assertEqual(json.loads(out.getvalue())["changed"], [it["meta"]["id"]])
+                after = work.load(it["path"])
+                self.assertEqual(after["meta"]["status"], "done")
+                self.assertIn(f"feat/invoice merged in {landed[:7]}" + (f" (PR #{pr})" if pr else ""),
+                              after["changelog"][0])
 
     def test_task_reconcile_apply_closes_the_items_of_a_branch_merged_on_origin(self):
         from devkit import cli

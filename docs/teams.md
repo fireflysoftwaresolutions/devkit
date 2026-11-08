@@ -138,15 +138,20 @@ Claiming a blocked item keeps it blocked; run `dev task unblock <n>` when the bl
 </picture>
 
 1. **Claim.** `dev task start` pulls the handoff repository, checks the lock, writes it, commits, and pushes before it
-   returns. If another machine claimed the item first, the push fails, devkit pulls again, and the claim is refused
-   with the name of the holder.
+   returns, and it reports success only when the lock is on the remote. If another machine pushed a change to the
+   item first, devkit reads the item again as the remote has it and claims it again, so a lock taken there first
+   refuses yours with the name of the holder. When the remote cannot be reached, the claim fails with "the lock did
+   not reach the remote": the lock is committed on your Mac only, other machines do not see it, and the next
+   `dev sync` pushes it. Run `dev task start <n>` again to confirm it.
 2. **Respect.** Each session's context lists your claimed tasks and the tasks claimed by others with the line
    `Claimed by others — do NOT work on these`. It also names the people working on the same project right now.
    Changing an item that someone else holds is refused until the lock expires.
 3. **Renew.** While a session works, the Stop hook's background sync (at most every 2 minutes) extends a lock your
    machine holds once less than half of the lock time is left, but only when one of your live sessions is on the
-   item's branch: `dev task start` on a work branch links it (`branch:<name>`). An item claimed on the default
-   branch, or whose branch nobody works on, is not renewed.
+   item's branch: `dev task start` on a work branch links it (`branch:<name>`). When you claimed the item on the
+   default branch, or before its branch existed, `dev branch new` and `dev wt new` link it to the branch they create
+   and say so, if it is the only item you hold with no branch; with more than one, they name them, and `dev task start <n>`
+   on the branch links the one it is for. An item with no branch, or whose branch nobody works on, is not renewed.
 4. **Expire.** The hourly `sync` job on any machine releases locks whose time has run out, in one commit. A doing item
    goes back to todo, a blocked one stays blocked, and the changelog says whose lock expired and when.
 5. **Finish.** `done` and `release` give the lock back and push at once. `dev pr merge` does it for every open item
@@ -161,13 +166,20 @@ The board shows only work that is really open, because three commands close or r
 | Command | What it does with work items |
 | --- | --- |
 | `dev pr merge <n>` | After the merge, marks every open item linked to the merged branch as done, clears its lock, and writes `merged in PR #<n> (<short sha>)` in its changelog. The output names the items it closed. `--auto` closes nothing until GitHub merges |
-| `dev release` · `dev release --dry-run` | Lists the open items linked to the branches merged since the previous tag (the merge commits of `<previous tag>..HEAD`) and refuses to tag while any is open. `--why "<reason>"` releases anyway; the reason goes in the audit (`dev.release.open-items`) and the output |
+| `dev release` · `dev release --dry-run` | Lists the open items linked to the branches merged since the previous tag and refuses to tag while any is open. `--why "<reason>"` releases anyway; the reason goes in the audit (`dev.release.open-items`) and the output |
 | `dev task reconcile` | Reports the project's doing items without a lock, its open items linked to a branch already merged into the default branch on `origin`, and items that share a title. It changes nothing |
 | `dev task reconcile --apply` | Closes the items of merged branches (done, the merge commit as evidence) and sends the doing items without a lock back to todo, each with a changelog line, in one commit. Items that share a title are only reported |
 
-A branch counts as merged when a merge commit names it, such as GitHub's `Merge pull request #7 from owner/feat/x` or
-git's `Merge branch 'feat/x'`. A squash or rebase merge leaves no such commit, so `dev pr merge` closes those items when it
-merges; for a squash merge made elsewhere, close the item with `dev task done <n>`.
+A branch counts as merged when one of these shows it reached the default branch (for `dev release`, since the
+previous tag):
+
+- a merge commit names it, such as GitHub's `Merge pull request #7 from owner/feat/x` or git's `Merge branch 'feat/x'`;
+- for a squash or rebase merge, which leaves no such commit, a merged pull request of the branch whose commit is in the
+  default branch;
+- for a fast-forward, the branch's last commit is in the default branch.
+
+Branch names come back, such as a second `fix/login-timeout`. A merge counts for an item only when it is newer than the
+moment the item was linked to the branch, so the merge of the name's earlier use never closes the new item.
 
 To recover:
 
@@ -231,6 +243,11 @@ dev plan supersede <file> --why "replaced by the v2 spec"
 dev plan ls                                             # flags plans edited without a revision
 ```
 
+An approval covers the text that was approved. When an approved plan's text changes, `dev plan revise` puts it back to
+draft and its changelog line names the version the approval covered, such as `revised; back to draft: the approval
+covered v3`; run `dev plan approve` again when the new text is agreed. A revision that leaves the text as it was keeps
+the approval.
+
 devkit compares the body with the hash it recorded. When the body changed without `dev plan revise`, `dev plan ls`
 shows `✎ needs dev plan revise`, and the Stop hook does not let the agent finish its turn until it records the reason
 for each plan it changed in that session. A plan written by another tool (Superpowers writes to the same folder) is
@@ -253,9 +270,10 @@ there is one per scope and month, so concurrent machines never conflict.
 
 ## Presence and `dev team`
 
-Each machine writes only its own file, `presence/<user>@<host>.json`, on every sync: its live sessions (agent,
-project, branch, start time, latest status, progress of the current run, running subagents, turn start) and the locks
-it holds.
+Each machine writes only its own file, `presence/<user>@<host>.json`, on every sync: its tracked sessions (agent,
+project, branch, start time, latest status, progress of the current run, running subagents, turn start, and whether
+the session is still active) and the locks it holds. A session that has ended is removed before the sync that ends it
+publishes presence, and a session marked not active is left out wherever presence is read.
 
 ```bash
 dev team               # machines active in the last 24 hours
@@ -299,8 +317,40 @@ merge driver:
 | `PROJECTS.md`, `TASKS.md`, `ACTIVITY.md`, `registry.json` | `ours` | Generated views: the local copy is kept and regenerated after the pull |
 
 Work items are separate files, and syncs pull with `--rebase --autostash` before they push, so conflicts are rare. When
-two people change the same item at the same moment, git reports the conflict in the handoff repository; resolve it
-there like any other conflict.
+two machines change the same item at the same moment, devkit settles it item by item: it takes the version pushed
+first and applies your change to it again. Each field, the title, and the description take the side that changed
+them, the links keep what either side added, and your changelog lines go on top of the other machine's, numbered after
+them. Two changes to the same thing, such as a lock taken on both machines or a description edited on both, cannot be
+settled that way: a claim reads the item again and is refused with the holder's name, and any other change stops the
+sync as described next. On this Mac, devkit runs its pulls, commits, and pushes of the handoff repository one at a
+time.
+
+### The handoff repository stopped syncing
+
+A pull that stops on a conflict leaves git in the middle of a rebase. Before this was handled, every later pull,
+commit, and push then failed without a word, and a commit made in that state was lost. Now devkit:
+
+1. Ends a rebase it finds stopped (`git rebase --abort`) before any read of the items, pull, or commit, and when
+   `dev sync` or `dev install` runs. Your commits come back as they were.
+2. Ends at once a pull whose conflict it cannot settle: a file other than a work item, such as a project note, or an
+   item whose same field or description both machines changed. Your commits stay on your Mac, unpushed.
+3. Records each of these as a sync problem: a `handoff.rebase-aborted` record in the audit trail, kept at every audit
+   level, with the files in conflict as its target, and the problem under "Needs attention" in `dev status` and the
+   dashboard until a push succeeds.
+
+To recover from a conflict devkit cannot settle, resolve it by hand in the handoff repository, then sync:
+
+```bash
+cd ~/Development/.handoff
+git pull --rebase            # stops on the conflict again
+git status                   # the files in conflict
+$EDITOR <file>               # keep the lines both sides need, remove the conflict markers
+git add <file>
+git rebase --continue
+dev sync
+```
+
+`dev audit --action handoff.rebase-aborted` lists every rebase devkit ended, with the files in conflict.
 
 ## What the guard protects
 

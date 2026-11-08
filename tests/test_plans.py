@@ -129,6 +129,21 @@ class ReviseTests(unittest.TestCase):
                 self.assertEqual((meta["title"], meta["id"][:2]), ("Plan", "P-"))
                 self.assertFalse(plans.needs_revision(path))
 
+    # An approval covers the version that was approved. A plan changed after it used to stay "approved", so the
+    # dashboard and `dev plan ls` showed an approval nobody gave to the new text.
+    def test_an_approved_plan_revised_without_a_status_goes_back_to_draft_and_says_which_version_was_approved(self):
+        with TempPlans() as t:
+            path = t.raw(record("# Plan\n\nShip CSV."))
+            self.assertEqual(plans.revise(path, "the team agreed", a=A, status="approved")["status"], "approved")
+            self.assertEqual(plans.revise(path, "a reason, the text unchanged", a=A)["status"], "approved")
+            path.write_text(path.read_text().replace("Ship CSV.", "Ship CSV and XLSX."))
+            meta = plans.revise(path, "customer asked for XLSX too", a=A)
+            self.assertEqual((meta["status"], meta["version"]), ("draft", 4))
+            again, _, log = plans._split(path.read_text())
+            self.assertEqual(again["status"], "draft")
+            self.assertIn("revised; back to draft: the approval covered v3 — why: customer asked for XLSX too", log[0])
+            self.assertEqual(plans.revise(path, "approved again", a=A, status="approved")["status"], "approved")
+
     def test_revise_keeps_the_frontmatter_lines_devkit_does_not_know(self):
         extra = ["owner: ana", "reviewers:", "  - bob"]
         with TempPlans() as t:
