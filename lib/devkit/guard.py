@@ -467,13 +467,16 @@ def strip_heredocs(cmd: str) -> str:
     return _split_heredocs(cmd)[0]
 
 
-def split_commands(cmd: str, ops: bool = False, newline: str = ";", inputs: list | None = None):
+def split_commands(cmd: str, ops: bool = False, newline: str = ";", inputs: list | None = None,
+                   stripped: bool = False):
     """-> list of (argv, redirect_targets). None when the command cannot be tokenised. With `ops`, each entry is
     (argv, redirect_targets, the operator after the segment ('|', '&&', ';', … or ''), its here-strings (<<< …)).
     `newline`: the operator a newline outside quotes becomes (`&` for tmux_list_refusal only). `inputs`: a list that
-    gets, for each segment, the files its input is redirected from (`< f`, `0< f`, `<> f`)."""
+    gets, for each segment, the files its input is redirected from (`< f`, `0< f`, `<> f`). `stripped`: `cmd` is
+    already without its heredoc bodies (strip_heredocs); stripping it again would read the line after a `<<EOF` as
+    a body and hide it."""
     try:
-        lex = shlex.shlex(_newlines_to_semicolons(strip_heredocs(cmd), newline), posix=True,
+        lex = shlex.shlex(_newlines_to_semicolons(cmd if stripped else strip_heredocs(cmd), newline), posix=True,
                           punctuation_chars=";&|()<>")
         lex.whitespace_split = True
         lex.commenters = ""
@@ -4769,6 +4772,8 @@ _RO_READERS = frozenset({
     "readlink", "which", "type", "echo", "printf", "date", "diff", "cmp", "comm", "cut", "tr", "sort", "uniq",
     "column", "nl", "od", "xxd", "strings", "jq", "grep", "egrep", "fgrep", "rg", "find", "sed", "yq", "shasum",
     "md5", "sha256sum", "cksum", "uname",
+    # what the machine runs and is: no option of these writes or runs a program (sysctl is judged in _ro_reader)
+    "ps", "pgrep", "sw_vers", "id", "whoami", "printenv", "uptime", "groups", "locale", "getconf", "sysctl", "seq",
     # shell builtins that change nothing outside the shell
     "cd", "pushd", "popd", "true", "false", "test", "[", "[[", "read", "set", "wait", "sleep", "export", "unset",
     "local", "declare", "typeset", "readonly", "for", "select", "case", "in", "esac"})
@@ -4799,7 +4804,8 @@ _RO_GIT_GLOBAL = frozenset({"--no-pager", "-P", "--no-optional-locks", "--litera
 _RO_GH_READ = frozenset({"view", "list", "diff", "checks", "status"})
 _RO_DEV = {"status": None, "grep": None, "find": None, "files": None, "diff": None, "stubs": None, "help": None,
            "version": None, "sec": ("scan",), "test": ("", "run", "plan", "audit", "prove"), "plan": ("show",),
-           "lesson": ("add", "recur"), "task": ("", "ls", "list", "show"), "ci": ("", "status", "ls", "list"),
+           "lesson": ("", "ls", "list", "show", "add", "recur"), "task": ("", "ls", "list", "show"),
+           "ci": ("", "status", "ls", "list"), "guard": ("check",),
            "delivery": ("", "show"), "audit": ("", "verify", "show", "stats", "config"), "completion": None,
            "__complete": None}
 _SED_ADDR = r"(?:\d+|\$|/(?:[^/\\\n]|\\.)*/I?)"
@@ -4896,13 +4902,99 @@ def _ro_sed(args) -> str | None:
         i += 1
     if not scripts and files:
         scripts = files[:1]
-    if not quiet:
-        return "`sed` without -n is for editing; print lines with `sed -n '1,20p' file` or `sed -n '/re/p' file`"
     for s in scripts:
-        for part in re.split(r"[;\n]", s):
-            if part.strip() and not _SED_PRINT.match(part.strip()):
-                return f"the sed command {_code(part.strip())} can write or run (only line ranges and /re/ with p)"
+        if quiet and all(not p.strip() or _SED_PRINT.match(p.strip()) for p in re.split(r"[;\n]", s)):
+            continue
+        if not _sed_prints_only(s):
+            return (f"the sed script {_code(s.strip())} can write or run a file (its w, r or e command, or a form the "
+                    f"guard does not read); print with sed -n and a line range, or a substitution to standard output")
     return None
+
+
+_SED_FLAGS = frozenset("gpiIMm0123456789")
+
+
+def _sed_part(s: str, i: int, delim: str) -> int:
+    """The index after the next unescaped `delim` from i (a sed regex or replacement), or -1."""
+    while i < len(s):
+        if s[i] == "\\":
+            i += 2
+            continue
+        if s[i] == "\n":
+            return -1
+        if s[i] == delim:
+            return i + 1
+        i += 1
+    return -1
+
+
+def _sed_address(s: str, i: int) -> int:
+    """The index after one sed address at i (a line number, `$`, `/re/`, `\\cREc`, or `first~step`), i when none,
+    -1 when it does not end."""
+    if i < len(s) and s[i] == "$":
+        return i + 1
+    m = re.match(r"\d+(?:~\d+)?", s[i:])
+    if m:
+        return i + m.end()
+    if i < len(s) and s[i] == "/":
+        j = _sed_part(s, i + 1, "/")
+        return j if j < 0 else j + (1 if s[j:j + 1] in ("I", "M") else 0)
+    if s[i:i + 1] == "\\" and i + 1 < len(s) and s[i + 1] not in "\n\\":
+        return _sed_part(s, i + 2, s[i + 1])
+    return i
+
+
+def _sed_prints_only(script: str) -> bool:
+    """True when a sed script only prints what it reads to standard output: addresses, blocks, labels and branches,
+    and the commands s (without the w and e flags), y, d, D, p, P, n, N, g, G, h, H, x, l, =, q, Q and z. False for w,
+    W, r, R, e, F, v and anything the guard does not read here, so it fails closed."""
+    s, i, n = script, 0, len(script)
+    while i < n:
+        if s[i] in " \t\n;{}!":
+            i += 1
+            continue
+        if s[i] == "#":
+            j = s.find("\n", i)
+            i = n if j < 0 else j
+            continue
+        j = _sed_address(s, i)
+        if j < 0:
+            return False
+        if j > i and j < n and s[j] == ",":
+            j = _sed_address(s, j + 1)
+            if j < 0:
+                return False
+        while j < n and s[j] in " \t!":
+            j += 1
+        if j >= n:
+            return j > i
+        c, i = s[j], j + 1
+        if c in "dDpPnNgGhHxlz={}":
+            continue
+        if c in "qQ":
+            while i < n and s[i].isdigit():
+                i += 1
+            continue
+        if c in ":bt":
+            while i < n and s[i] not in ";\n}":
+                i += 1
+            continue
+        if c in "sy":
+            if i >= n or s[i] in "\\\n ":
+                return False
+            d = s[i]
+            i = _sed_part(s, i + 1, d)
+            i = _sed_part(s, i, d) if i > 0 else -1
+            if i < 0:
+                return False
+            if c == "s":
+                while i < n and s[i] in _SED_FLAGS:
+                    i += 1
+            if i < n and s[i] not in " \t;\n}":
+                return False  # a w or e flag, or a file name after it
+            continue
+        return False
+    return True
 
 
 def _ro_git(args) -> str | None:
@@ -5443,6 +5535,8 @@ def _ro_program(argv0, cwd, member=None) -> str | None:
     for k, a in enumerate(pre):
         n = os.path.basename(a)
         if _ASSIGN.match(a):
+            if not argv and _SHELL_VAR.match(a.split("=", 1)[0]):
+                continue  # `S=/path` alone sets a shell variable no program reads (not exported, no known name)
             why = _ro_env(*a.split("=", 1))
             if why:
                 return why
@@ -5458,6 +5552,8 @@ def _ro_program(argv0, cwd, member=None) -> str | None:
     if why:
         return why
     name, args = os.path.basename(argv[0]), argv[1:]
+    if argv[0] == _SUBST_WORD:
+        return "a program named by a command substitution"
     if argv[0][:1] in ("$", "`") or name.startswith("#"):
         return None if name.startswith("#") else "a program named by a variable"
     dev = _dev_args(argv)
@@ -5467,14 +5563,86 @@ def _ro_program(argv0, cwd, member=None) -> str | None:
     if why is not None:
         if not why and _INTERP.match(name) and not runner and _own_scratch_script(argv, cwd, member):
             return None
+        if not why and not runner and (_INTERP.match(name) or name in _SHELLS) and _version_only(name, args):
+            return None
+        if not why and not runner and _family(name) in ("awk", "gawk", "mawk", "nawk"):
+            return _ro_awk(args)
         return why or (f"{_code(name)} is not on the read-only allowlist" if runner or _INTERP.match(name) or
                        name in _SHELLS or name in ("eval", "source", ".") else _ro_reader(name, args, cwd, member))
     return None
 
 
+# a shell variable a read-only lane may set alone (`S=/path; ls $S`): a lowercase name, or one capital letter with
+# digits, which no program reads from its environment; PATH, PAGER, IFS and the other known names stay refused
+_SHELL_VAR = re.compile(r"^(?!(?:path|fpath|cdpath|manpath|module_path|mailpath|histchars|fignore|psvar)$)"
+                        r"(?:[a-z_][a-z0-9_]*|[A-Z][0-9]*)$")  # zsh ties path to PATH, fpath to FPATH, …
+
+
+def _version_only(name: str, args) -> bool:
+    """`python3 --version`, `bash --version`, `node --version`, `python3 -V`: an interpreter or shell asked only for
+    its version, which runs no program."""
+    return list(args) == ["--version"] or (_family(name) in ("python", "pypy") and list(args) in (["-V"], ["-VV"]))
+
+
+_AWK_RUNS = re.compile(r"\bsystem\b|\bgetline\b|[|>]|@(?:load|include|namespace)\b|\bclose\b|\bfflush\b")
+
+
+def _ro_awk(args) -> str | None:
+    """Why an awk call of a read-only lane is refused, or None: its program (inline, `-e` or `--source`) may only read
+    its input and print to standard output: no `>` or `|` (a file or a command it writes to, and comparisons with `>`,
+    which read the same), no system(), getline, @load or @include; no program file and no option that loads one."""
+    progs, i, inline = [], 0, True
+    while i < len(args):
+        a = args[i]
+        if a in ("-F", "-v", "--field-separator", "--assign"):
+            i += 2
+            continue
+        if a.startswith(("-F", "-v", "--field-separator=", "--assign=")):
+            i += 1
+            continue
+        if a in ("-e", "--source"):
+            progs.append(args[i + 1] if i + 1 < len(args) else "")
+            inline = False
+            i += 2
+            continue
+        if a == "--":
+            i += 1
+            break
+        if a.startswith("-"):
+            return f"{_code(f'awk {a}')} reads a program file, loads an extension or changes how awk runs"
+        break
+    if inline:
+        if i >= len(args):
+            return "`awk` without a program"
+        progs.append(args[i])
+    for p in progs:
+        if _AWK_RUNS.search(p):
+            return ("the awk program writes to a file or a command, or runs one (`>`, `|`, system(), getline); "
+                    "print to standard output only, and compare with `<`")
+    return None
+
+
+def _ro_mkdir(args, cwd, member) -> str | None:
+    """`mkdir [-p] <folder>…` of a read-only lane: every folder in crew member `member`'s own scratch folder."""
+    paths = [a for a in args if not a.startswith("-")]
+    if not member or not paths or any(a not in ("-p", "-v", "-pv", "-vp") for a in args if a.startswith("-")):
+        return "`mkdir` is not on the read-only allowlist (only `mkdir -p` inside your scratch folder)"
+    for a in paths:
+        p = resolve(a, cwd)
+        m = _SCRATCHPAD.match(str(real(str(p)))) if p != UNKNOWN else None
+        if not m or not m.group(2) or scratch_refusal(p, member):
+            return f"{_code(f'mkdir {a}')} is outside your scratch folder, scratchpad/{member}/"
+    return None
+
+
 def _ro_reader(name, args, cwd, member=None) -> str | None:
+    if name == "mkdir":
+        return _ro_mkdir(args, cwd, member)
     if name not in _RO_READERS and name not in ("git", "gh", "xargs"):
         return f"{_code(name)} is not on the read-only allowlist"
+    if name == "sysctl" and any("=" in a or a in ("-w", "-f", "-p", "--write", "--load", "--system") or
+                                (a[:1] == "-" and a[1:2] != "-" and set(a[1:]) & set("wfp")) for a in args):
+        return "`sysctl` with a value, -w, -f or -p changes the kernel's settings"
     f = _flag_hits(args, _RO_FLAGS.get(name, ()))
     if f:
         return f"{_code(f'{name} {f}')} writes a file or runs a program"
@@ -5508,26 +5676,6 @@ def _ro_reader(name, args, cwd, member=None) -> str | None:
     return None
 
 
-def _proc_subst(text: str) -> bool:
-    """True when the shell runs a process substitution, `<(…)` or `>(…)`, outside quotes."""
-    q, i = None, 0
-    while i < len(text):
-        c = text[i]
-        if q:
-            q = None if c == q else q
-            i += 2 if c == "\\" and q == '"' else 1
-            continue
-        if c == "\\":
-            i += 2
-            continue
-        if c in "'\"":
-            q = c
-        elif c in "<>" and text[i + 1:i + 2] == "(":
-            return True
-        i += 1
-    return False
-
-
 def _redirect_ok(target, cwd) -> bool:
     if target in ("/dev/null", "/dev/stdout", "/dev/stderr", "-"):
         return True
@@ -5535,16 +5683,106 @@ def _redirect_ok(target, cwd) -> bool:
     return p != UNKNOWN and is_temp(p)
 
 
-def readonly_refusal(cmd: str, cwd, member=None) -> str | None:
+_SUBST_WORD = "/dev/fd/63"  # what a substitution stands for while the command around it is read
+
+
+def _close_paren(s: str, j: int) -> int:
+    """The index after the `)` that closes a `(` just before j, or -1."""
+    depth, q = 1, None
+    while j < len(s):
+        d = s[j]
+        if q:
+            if d == "\\" and q == '"':
+                j += 1
+            elif d == q:
+                q = None
+        elif d == "\\":
+            j += 1
+        elif d in "'\"":
+            q = d
+        elif d == "(":
+            depth += 1
+        elif d == ")":
+            depth -= 1
+            if not depth:
+                return j + 1
+        j += 1
+    return -1
+
+
+def _mask_substitutions(s: str):
+    """(the command with each `$(…)`, backtick and `<(…)`/`>(…)` the shell runs replaced by a placeholder word, the
+    commands inside them), or None for an arithmetic `$((…))` (zsh evaluates the variables in it as code) or a
+    substitution that does not end. Single quotes and comments are text."""
+    out, inner, i, n, q = [], [], 0, len(s), None
+    while i < n:
+        c = s[i]
+        if q == "'":
+            q = None if c == "'" else q
+            out.append(c)
+            i += 1
+            continue
+        if c == "\\":
+            out.append(s[i:i + 2])
+            i += 2
+            continue
+        if s.startswith("$((", i):
+            return None
+        if s.startswith("$(", i) or (q is None and c in "<>" and s[i + 1:i + 2] == "("):
+            j = _close_paren(s, i + 2)
+            if j < 0:
+                return None
+            inner.append(s[i + 2:j - 1])
+            out.append(_SUBST_WORD)
+            i = j
+            continue
+        if c == "`":
+            j = i + 1
+            while j < n and s[j] != "`":
+                j += 2 if s[j] == "\\" else 1
+            if j >= n:
+                return None
+            inner.append(s[i + 1:j])
+            out.append(_SUBST_WORD)
+            i = j + 1
+            continue
+        if q is None and c == "'":
+            q = "'"
+        elif c == '"':
+            q = None if q == '"' else '"'
+        elif q is None and c == "#" and (i == 0 or s[i - 1] in " \t\n;&|()"):
+            j = s.find("\n", i)
+            j = n if j < 0 else j
+            out.append(s[i:j])
+            i = j
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out), inner
+
+
+def readonly_refusal(cmd: str, cwd, member=None, depth: int = 0) -> str | None:
     """Why a review or read-only lane may not run `cmd` (spec F7, consultation §4), or None when every segment is on
-    the read-only allowlist: no command substitution or process substitution, a command that parses, redirects only to
-    /dev/null or a temp folder, and each program a reader, a read of git, gh or dev, one of the project's checks, or a
-    script from crew member `member`'s own scratch folder."""
+    the read-only allowlist: a command that parses, redirects only to /dev/null or a temp folder, and each program a
+    reader, a read of git, gh or dev, one of the project's checks, or a script from crew member `member`'s own scratch
+    folder. A command substitution (`$(…)`, backticks) or process substitution (`<(…)`, `>(…)`) passes when the
+    command inside it does, by the same rules; never as the program a command runs, and never arithmetic."""
     if not cmd or not str(cmd).strip():
         return None
-    if _expansions(cmd) or _proc_subst(strip_heredocs(cmd)):
-        return READONLY_REASON.format(what="`$(…)`, backticks, `<(…)` and `>(…)` run commands the guard cannot judge")
-    segs = split_commands(cmd)
+    readings = _continued_readings(cmd)
+    if readings:  # a backslash-newline: the readings shells use (joined; a comment ended at its newline), each judged
+        return next((why for why in (readonly_refusal(r, cwd, member, depth) for r in readings) if why), None)
+    masked = _mask_substitutions(strip_heredocs(cmd)) if depth < 3 else None
+    if masked is None:
+        return READONLY_REASON.format(what="`$((…))` and substitutions nested deeper than three levels run code the "
+                                           "guard cannot judge")
+    text, inner = masked
+    inner += [t for body, expands in _split_heredocs(cmd)[1] if expands for t in _subst(body, False)]
+    for sub in inner:
+        why = readonly_refusal(sub, cwd, member, depth + 1)
+        if why:
+            return why
+    segs = split_commands(text, stripped=True)
     if segs is None:
         return READONLY_REASON.format(what="the guard cannot parse this command, so it cannot tell what it writes")
     here = str(cwd or os.getcwd())

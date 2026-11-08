@@ -69,7 +69,7 @@ WRITERS = [
     "tee out.txt < a", "cp a b", "mv a b", "tsc", "semgrep --autofix .", "markdownlint --fix .", "uniq a b",
     "xxd a b", "tree -o out.txt", "git reflog expire --all", "gh pr comment 12 -b x",
     "gh api -X POST repos/o/r/issues", "gh api repos/o/r/issues -f title=x", "gh run download 5",
-    "dev task add 'x'", "dev ci --run", "cat $(echo a)", "cat `echo a`", "diff <(ls a) <(ls b)",
+    "dev task add 'x'", "dev ci --run", "cat $(touch a)", "cat `touch a`", "diff <(rm a) <(ls b)",
     "GIT_EXTERNAL_DIFF=./x.sh git diff", "sudo cat a",
 ]
 # writers the main session's guard refuses for its own reasons (deletes, branch and tag names, the shared stash)
@@ -94,14 +94,20 @@ class AllowlistTests(unittest.TestCase):
             with self.subTest(cmd=cmd):
                 self.assertIsNotNone(lane(cmd))
 
+    def test_a_substitution_whose_command_only_reads_runs_in_a_review_lane(self):
+        # its twins in WRITERS (cat $(touch a), diff <(rm a) <(ls b)) stay refused
+        for cmd in ("cat $(echo a)", "cat `echo a`", "diff <(ls a) <(ls b)"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(lane(cmd))
+
     def test_sed_prints_a_line_range_or_a_match_but_never_writes_or_runs(self):
         for cmd in ("sed -n '1,20p' f", "sed -n '/def check/p' lib/devkit/guard.py", "sed -n '$p' f",
                     "sed -n -e '1p' -e '3,4p' f", "sed -ne '10,20p' f", "sed -n '120,$p' f", "sed -En '/^[a-z]+$/p' f",
-                    "sed -n '1p;5p' f"):
+                    "sed -n '1p;5p' f", "sed '1,5p' f"):  # without -n it prints those lines twice: still a read
             with self.subTest(cmd=cmd):
                 self.assertIsNone(lane(cmd))
         for cmd in ("sed -n '1w out' f", "sed -n '1,5p;w x' f", "sed -n 's/a/b/w out' f", "sed -n '1e date' f",
-                    "sed '1,5p' f", "sed -n -f script.sed f", "sed -n -i '1p' f", "sed -n --in-place '1p' f"):
+                    "sed '1,5w out' f", "sed -n -f script.sed f", "sed -n -i '1p' f", "sed -n --in-place '1p' f"):
             with self.subTest(cmd=cmd):
                 self.assertIsNotNone(lane(cmd))
 
