@@ -69,12 +69,13 @@ WRITERS = [
     "tee out.txt < a", "cp a b", "mv a b", "tsc", "semgrep --autofix .", "markdownlint --fix .", "uniq a b",
     "xxd a b", "tree -o out.txt", "git reflog expire --all", "gh pr comment 12 -b x",
     "gh api -X POST repos/o/r/issues", "gh api repos/o/r/issues -f title=x", "gh run download 5",
-    "dev task add 'x'", "dev ci --run", "cat $(touch a)", "cat `touch a`", "diff <(rm a) <(ls b)",
+    "dev task add 'x'", "dev ci --run", "cat $(touch a)", "cat `touch a`", "diff <(touch a) <(ls b)",
     "GIT_EXTERNAL_DIFF=./x.sh git diff", "sudo cat a",
 ]
-# writers the main session's guard refuses for its own reasons (deletes, branch and tag names, the shared stash)
+# writers the main session's guard refuses for its own reasons (deletes, also inside a process substitution, branch
+# and tag names, the shared stash)
 MAIN_REFUSES = ["find . -name '*.pyc' -delete", "git clean -fd", "git tag v9.9.9", "git stash", "git branch x",
-                "gh pr merge 12"]
+                "gh pr merge 12", "diff <(rm a) <(ls b)"]
 
 
 class AllowlistTests(unittest.TestCase):
@@ -95,7 +96,7 @@ class AllowlistTests(unittest.TestCase):
                 self.assertIsNotNone(lane(cmd))
 
     def test_a_substitution_whose_command_only_reads_runs_in_a_review_lane(self):
-        # its twins in WRITERS (cat $(touch a), diff <(rm a) <(ls b)) stay refused
+        # its twins in WRITERS (cat $(touch a), diff <(touch a) <(ls b)) stay refused
         for cmd in ("cat $(echo a)", "cat `echo a`", "diff <(ls a) <(ls b)"):
             with self.subTest(cmd=cmd):
                 self.assertIsNone(lane(cmd))

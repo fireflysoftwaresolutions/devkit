@@ -1381,6 +1381,15 @@ def _check_segments(cmd: str, segs, ecwd: str, agent: str, depth: int = 0, outer
             res = _check_segments(line, inner, ecwd, agent, depth + 1, envs) if inner else None
             if res:
                 return res
+    # what `<(…)` and `>(…)` run: the tokenizer leaves their words in the command around them (`$(…)` it splits)
+    subs = _process_substitutions(cmd)
+    if subs and depth >= 4:
+        return deny(NESTED_REASON)
+    for line in subs:
+        inner = split_commands(line)
+        res = _check_segments(line, inner, ecwd, agent, depth + 1, outer_envs) if inner else None
+        if res:
+            return res
     return None
 
 
@@ -2898,6 +2907,13 @@ class _Shell:
                 self.bodies = heredocs
             if v:
                 return v
+        # what `<(…)` and `>(…)` run, from the folder the command starts in and the one it ends in (the tokenizer
+        # leaves their words in the command around them, where `$(…)` it splits into commands of their own)
+        for text in _process_substitutions(self.cmd):
+            for where in dict.fromkeys((self.cwd, cwd)):
+                v = self.nested(text, where)
+                if v:
+                    return v
         if self.unresolved and self.mentions:
             return deny(f"This command writes to {_code(self.unresolved[0])}, which depends on a variable or a "
                         f"subshell the guard cannot see, and it names devkit's state, configuration or install (spec "
@@ -4800,7 +4816,10 @@ def _routed_lanes(cmd: str) -> int:
     return 1 if runs_one_command(cmd) else len(_route_plan(cmd) or [])
 
 
-def _subst(s: str, quotes: bool) -> list:
+def _subst(s: str, quotes: bool, procs: list | None = None) -> list:
+    """The bodies of the substitutions the shell runs in `s`: `$(…)`, backticks, and with `quotes` (a command line,
+    not a heredoc body) `<(…)` and `>(…)` outside quotes. `procs`: a list that gets, for each body, whether it is a
+    process substitution."""
     out, i, n, q = [], 0, len(s), None
     while i < n:
         c = s[i]
@@ -4819,7 +4838,9 @@ def _subst(s: str, quotes: bool) -> list:
             j = s.find("\n", i)
             i = n if j < 0 else j
             continue
-        elif s.startswith("$(", i):
+        elif s.startswith("$(", i) or (quotes and q is None and c in "<>" and s[i + 1:i + 2] == "("):
+            # `<(…)` and `>(…)`: process substitutions, which the shell runs as `$(…)` (never in double quotes or in a
+            # heredoc body, where they are text)
             j, depth, qq = i + 2, 1, None
             while j < n and depth:
                 d = s[j]
@@ -4838,6 +4859,8 @@ def _subst(s: str, quotes: bool) -> list:
                     depth -= 1
                 j += 1
             out.append(s[i + 2:j - 1] if depth == 0 else s[i + 2:])
+            if procs is not None:
+                procs.append(c != "$")
             i = j
             continue
         elif c == "`":
@@ -4845,9 +4868,26 @@ def _subst(s: str, quotes: bool) -> list:
             while j < n and s[j] != "`":
                 j += 2 if s[j] == "\\" else 1
             out.append(s[i + 1:j])
+            if procs is not None:
+                procs.append(False)
             i = j + 1
             continue
         i += 1
+    return out
+
+
+def _process_substitutions(cmd: str) -> list:
+    """The command lines of the `<(…)` and `>(…)` the shell runs in `cmd`, also inside a `$(…)` or backticks: the
+    tokenizer leaves their words in the command around them, where `$(…)` it splits into commands of their own."""
+    out, todo = [], [(strip_heredocs(cmd), 0)]
+    while todo:
+        text, level = todo.pop()
+        procs = []
+        for body, proc in zip(_subst(text, True, procs), procs):
+            if proc:
+                out.append(body)
+            elif level < 4:
+                todo.append((body, level + 1))
     return out
 
 
