@@ -1096,6 +1096,10 @@ def alone(cmd) -> bool:
         words = list(lex)
     except ValueError:
         return False
+    # `cd <checkout> && dev watch --wait`: a cd ends at once, so the wait is still the last thing the command runs;
+    # any other work before it would hold the wake back as work after it does
+    while len(words) >= 3 and words[0] == "cd" and words[2] in ("&&", ";"):
+        words = words[3:]
     stages, cur, drop = [], [], False
     for w in words:
         if drop:  # the target of a redirection

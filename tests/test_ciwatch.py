@@ -613,8 +613,11 @@ class StopGateTests(WatchCase):
                            (wait + "; npm run release", False), (wait + " && echo ok", False),
                            (wait + " || echo failed", False), (wait + " &", False), (wait + "\nls dist", False),
                            (wait + " | head -1", False),  # head can end the wait before its result
-                           (wait + " | sed -i s/x/y/ notes.txt", False), ("cd /repo && " + wait, False),
-                           ("npm run release", False)):
+                           (wait + " | sed -i s/x/y/ notes.txt", False),
+                           # a cd before the wait ends at once; work before it would hold the wake back like work after
+                           ("cd /repo && " + wait, True), ("cd /repo; " + wait + " 2>&1 | tail -3", True),
+                           ("npm run build && " + wait, False), ("cd /repo && npm test && " + wait, False),
+                           ("cd /repo && " + wait + "; ls", False), ("npm run release", False)):
             with self.subTest(cmd):
                 self.assertIs(ciwatch.alone(cmd), whole)
 
