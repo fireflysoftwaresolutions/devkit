@@ -231,14 +231,15 @@ the lane check, which refuses a crew member's command it cannot check. The full 
 ## The status block
 
 The global instructions (section 0 of `agents/AGENTS.md`) require the final message of every development turn to
-start with the status block: a bold header with the `[Firefly> DevKit]` marker, then three short bullets (four while
-a `dev progress` run is active).
+start with the status block: a bold header with the `[Firefly> DevKit]` marker, then short bullets (Done, Check, and
+Next always; Progress while a `dev progress` run is active; Crew and You only when they apply).
 
 ```markdown
 **[Firefly> DevKit]** kit-consulting · `release/26.11.4` · Release 26.11.4
 - **Done:** merged PRs 12, 17 and 22 into the release branch and fixed the two conflicts.
 - **Check:** ✓ local suite green, 214 tests
-- **Next:** push once and open the release PR.
+- **Progress:** 3 of 5 steps · 1 skipped · now 5. review of the merge · 48m active of ~1h00m · ETA ~10m–20m
+- **Next:** the Code reviewer finishes the review, then the tech lead pushes once and opens the release PR.
 ```
 
 | Part | Rule |
@@ -246,7 +247,9 @@ a `dev progress` run is active).
 | Header | `**[Firefly> DevKit]**` exactly (bold, square brackets, `Firefly>` with the chevron), then the repository name, the branch in backticks and the task's title in a few plain words. `-` for a part that does not apply |
 | **Done:** | What the agent did or found, in one sentence |
 | **Check:** | A glyph, then the evidence: `✓` verified in this session, `⚠` partly verified or not verified, `✗` failed, `–` nothing to verify (a question or a plan) |
-| **Progress:** | Only while a `dev progress` run is active: `3 of 7 steps · 24 min of ~40` |
+| **Progress:** | Required while a `dev progress` run is active (running or blocked), copied as `dev progress step` or `dev progress note` prints it: `3 of 7 steps · now 4. the API · 24m active of ~40m · ETA ~15m–25m`. A final message without it, or with other step counts than the run's, is sent back once with the line to use (see [Progress and communication › The Progress line](progress-and-communication.md#the-progress-line)) |
+| **Crew:** | Only when crew members worked in this turn or are working: each as `<Role> (<Name>)` with what it works on, `▸` working, `✓` done, `✗` failed or lost |
+| **You:** | Only when there is something only the developer can do or decide: an open decision, an approval, or an action on their machine or account |
 | **Next:** | The next step, and who takes it |
 
 Each bullet is one plain sentence of about 100 characters at most, with no internal ids unless they help the reader
