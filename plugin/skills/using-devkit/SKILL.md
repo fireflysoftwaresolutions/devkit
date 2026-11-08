@@ -14,7 +14,8 @@ this skill is the how.
 ### Start
 
 1. Read the injected _devkit · workspace context_: project, branch, git state, commands, initiatives, Now tasks, last
-   status and the handoff digest. It replaces exploration—do not rediscover it.
+   status and the handoff digest. It replaces exploration—do not rediscover it. The developer already saw devkit's
+   short welcome (the context names its lines): do not repeat it, and ask the decisions that wait first.
 2. Pick up where the last session stopped: the first Now task, or what the user asked. `dev task` shows the board.
 3. Unsure about the portfolio? `dev overview` (add `--json` to compute with it).
 

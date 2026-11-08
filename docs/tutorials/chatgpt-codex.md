@@ -64,6 +64,18 @@ The reply starts with a bold line that begins with `[Firefly> DevKit]`, followed
 That block is the **status block**. Every development reply starts with it, so it also proves that Codex loaded
 devkit's rules. If the reply has no such line, go to [When something goes wrong](#when-something-goes-wrong).
 
+With its first reply, Codex also shows devkit's welcome, the message of devkit's session-start hook. For this new
+project it reads:
+
+```text
+devkit · reading-list · new project
+› No history yet: say what you want to build
+· main · no commits yet
+```
+
+It is `dev status` in a few lines: what needs you, what runs, what is next, and where you are. [Concepts › The
+session-start welcome](../concepts.md#the-session-start-welcome) explains each line.
+
 ## Step 4: give the crew a task
 
 Type this request and press Return:

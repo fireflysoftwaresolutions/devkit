@@ -45,6 +45,17 @@ It creates `~/Development/_local/reading-list` and prints that path. For a proje
 
 ## Step 3: check that devkit is active
 
+Before you type, look at the top of the session: devkit shows a short welcome there. For this new project it reads:
+
+```text
+devkit · reading-list · new project
+› No history yet: say what you want to build
+· main · no commits yet
+```
+
+It is `dev status` in a few lines: what needs you, what runs, what is next, and where you are. [Concepts › The
+session-start welcome](../concepts.md#the-session-start-welcome) explains each line.
+
 Type this and press Return:
 
 ```text

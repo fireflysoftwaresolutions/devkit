@@ -325,6 +325,73 @@ tab, the ChatGPT app's Codex, or an IDE). The results are in `dev canary`, on th
 fails below 90% over 7 days), in `dev overview`, and in `PROJECTS.md`; the last three break the rate down by surface
 and count the replies corrected after a reminder.
 
+## The session-start welcome
+
+When a session starts in Claude Code or Codex, devkit shows you a short welcome: `dev status` in at most five lines,
+said once. It answers your first questions in this order: whether anything needs you, what is running, what is
+next, and where you are.
+
+```text
+devkit · billing · 1 thing needs you
+! Decision waits: export cancelled invoices too?
+▸ Invoice export · step 3 of 7 · ~15 min left · 2 crew working
+› Next: wire the export endpoint once the index migration lands
+· feat/invoice-export · 3 changed files · CI running, watched
+```
+
+The first line carries the verdict on its own, because some apps show only that line. Every other line starts with
+a mark, always in this order:
+
+| Mark | Line | What it shows |
+| --- | --- | --- |
+| — | The headline | `devkit · <project> · <verdict>`. The verdict is `1 thing needs you`, `N things need you`, `work in progress`, `nothing needs you`, `new project`, or `see dev status` when devkit could not read what needs you |
+| `!` | Needs you | Only what you alone can do: the guard is off in this session, the session runs an older devkit, a decision waits for you (oldest first; `in another session` when its run belongs to another one), extensions were accepted or changed outside devkit, or the project is outside the folder layout. From the third, the second line reads `And N more: dev status lists them` |
+| `▸` | Running | The run: its goal, its step of the total, the time left, and how many crew members work; `in another session` when another live session owns it. After a resume, what happened since you left |
+| `✓` | Last | The latest status block's Done, with its age |
+| `›` | Next | The run's next step, else the latest status block's Next, else the first task of the handoff note |
+| `·` | Where | The branch, its changes, and the last CI result devkit recorded: `CI passed 2 days ago`, `CI failed: unit tests`, or `CI running, watched` when a CI watch follows the run |
+| `+` | Update | A newer devkit release, at most once a day: `run dev update in a terminal` |
+
+### What each start shows
+
+| Start | Lines | What it shows |
+| --- | --- | --- |
+| Startup in a project | 1 to 5 | The headline, what needs you, the run, Last, Next, the branch, and the update. When they do not all fit, the update goes first, then Next, then Last |
+| Startup outside a project | 1 to 4 | `devkit · workspace · <verdict>`, what needs you and the run with their project's name, and `Recent:` the three projects active last, with their age |
+| Resume | 1 to 3 | The headline, what needs you, and `Since you left:` the crew members that finished and the CI result recorded after your last turn |
+| `/clear` | 0 or 1 | The headline when something needs you, `run open, step N of M` while a run works, and nothing otherwise |
+| Compaction | 0 or 1 | What devkit carried into the new context, such as `devkit · kept 3 requests, the run, 1 decision`, and nothing when it carried nothing |
+
+A brand-new repository reads `devkit · reading-list · new project`, then `› No history yet: say what you want to
+build` and `· main · no commits yet`.
+
+### Where it shows
+
+| App | Where you see the welcome |
+| --- | --- |
+| Claude Code in a terminal | At the top of the session, after `SessionStart:startup says:` (or `resume`, `clear`, `compact`) |
+| Claude Desktop, Code tab | At the top of a Local session, the same text |
+| Codex CLI and Codex in the ChatGPT app | With the first turn, as the message of devkit's session-start hook, before the reply |
+| Claude Desktop chat and Cowork | Nowhere: they run no hooks. Ask for the status; the devkit extension's `devkit_project_status` and `devkit_resume` give the same facts |
+
+### What it never does
+
+The welcome reads devkit's recorded state only: no network, no model call, and no second look at the repository (it
+reuses the session context's). A source it cannot read leaves its line out, and when it cannot read what needs you,
+the verdict is `see dev status`, never `nothing needs you`. It never fails the hook. It shows no ids, paths, or
+Markdown, and names crew members by role and name. Headless runs (`claude -p`, `codex exec`, devkit's own model
+calls), crew members' sessions, and scratch repositories in a temporary folder get none. The agent's context says
+which lines you saw, so its first reply does not repeat them and asks the waiting decisions first.
+
+### The welcome and the wait
+
+The welcome tells you once what waited while no session was there. After that, the one wait wakes the agent when
+something new arrives (see
+[Progress and communication › Waiting and waking](progress-and-communication.md#waiting-and-waking)), and both
+start their lines with the same `devkit ·` prefix. On a resume, `Since you left` lists what finished while the session was closed, which no
+wait could tell it. `CI running, watched` means a CI watch follows that run, so its result reaches the session that
+waits on it.
+
 ## Background sync and scheduled jobs
 
 | Trigger | What runs |
