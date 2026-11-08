@@ -14,7 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
-from devkit import audit, core, gates, skillguard  # noqa: E402
+from devkit import audit, core, gates, guard, skillguard  # noqa: E402
 
 # Skills "installed" on this test machine: the gate asks only for skills a member can load.
 HAVE = {"test-driven-development", "testing", "docs", "communicating"}
@@ -510,6 +510,23 @@ class BackgroundWorkTests(GateCase):
         self.assertIsNone(gates.check("Kid", self.data("a3"), sess, "owner/repo", roster={"members": [KID]}))
         self.assertNotIn("crew_background", sess)
         self.assertIn("background: bin/dev test", audit.records(1, action="crew.gate")[0]["detail"])
+
+
+class CrewOwnerReadTests(unittest.TestCase):
+    # `dev crew owner <path>… [--json]` only says which lane holds a file, so a member asks it before an edit; a crew
+    # command that changes the team (`dev crew set`) stays the tech lead's
+
+    def verdict(self, cmd):
+        v = guard.crew_shell_verdict(cmd, str(Path(__file__).resolve().parents[1]), None, "tank")
+        return v[1] if v else None
+
+    def test_a_member_may_ask_who_owns_a_file_but_not_change_the_team(self):
+        for cmd in ("dev crew owner lib/x.py", "dev crew owner --json lib/x.py", "bin/dev crew owner lib/x.py docs/a.md"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(guard._crew_kind(cmd.split()[1:]), "read")
+                self.assertIsNone(self.verdict(cmd))
+        self.assertEqual(guard._crew_kind(["crew", "set", "tank", "title", "x", "--why", "y"]), "team")
+        self.assertIsNotNone(self.verdict("dev crew set tank title x --why y"))
 
 
 if __name__ == "__main__":

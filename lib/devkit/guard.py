@@ -4373,7 +4373,7 @@ def evidence_forgery(cmd: str, cwd):
 # text and stops the usual forms; an obfuscated call (a name built at run time) is for F4's call ledger (spec D3).
 
 _CREW_LANE = frozenset({"ask", "answer", "inbox", "decide", "decisions", "mode", "delegate", "decline", "route"})
-_CREW_READ = frozenset({"graph", "show", "rules", "history", "next"})
+_CREW_READ = frozenset({"graph", "show", "rules", "history", "next", "owner"})  # owner: who holds a file
 _LANE_TEXT = re.compile(r"\bdev\W{1,6}(?:progress|crew)\b")
 _DEV_IN_CODE = re.compile(r"(?<![\w.-])dev[\s'\",\[\]]{1,6}(progress|crew)\b(?:[\s'\",\]]{1,6}(-{0,2}[A-Za-z][\w-]*))?")
 _SPAWNS = re.compile(
@@ -6055,6 +6055,11 @@ def webfetch_verdict(tool_input):
 
 TIERS = {"push": 1, "pr": 1, "push-destructive": 2, "pr-write": 2, "merge": 2, "release": 2, "publish": 2,
          "deploy": 2, "api-write": 2, "external-message": 2, "unknown": 2, "developer-only": 2}
+# The targets of the bulk deletions on origin: `dev branch prune --apply` deletes the merged branches of the
+# repository it runs in; `dev gc --apply` and the scheduled sync, those of every project. A `:` is in no branch name,
+# so neither is ever a branch, and a branch glob never covers one (target_matches): only its exact grant does.
+PRUNE_TARGET = "origin:merged-branches"
+PRUNE_EVERY_TARGET = "origin:merged-branches-of-every-project"
 # a deploy may reach production, an unknown program may be anything, and a developer-only decision (B2: lifting an
 # embargo, publishing a branch that looks like a security fix, the backup policy) is theirs: they grant each one
 NEVER_PREAPPROVED = frozenset({"publish", "deploy", "unknown", "developer-only"})
@@ -6155,8 +6160,9 @@ _OPAQUE_NAME = re.compile(r"(?:^|[:_./-])(release|publish|deploy|push|ship)(?=$|
 _OPAQUE_CLASS = {"release": "release", "ship": "release", "publish": "publish", "deploy": "deploy", "push": "push"}
 _IRREV_TEXT = re.compile(
     r"\bgit\W+(?:-C\W+\S+\W+)?push\b|\bgh\W+(?:pr|issue|release|api|secret|variable|workflow|repo|gist|run|label)\b|"
-    r"\bdev\W+(?:push|release|pr|issue|gh|git)\b|\b(?:npm|pnpm|yarn|bun|twine|cargo|poetry|uv|gem|helm|docker)\W+"
-    r"(?:publish|upload|push|unpublish)\b|\b(?:kubectl|terraform|tofu|pulumi|vercel|netlify|firebase|flyctl|fly|"
+    r"\bdev\W+(?:push|release|pr|issue|gh|git|gc|sync|branch\W+prune)\b|"
+    r"\b(?:npm|pnpm|yarn|bun|twine|cargo|poetry|uv|gem|helm|docker)\W+(?:publish|upload|push|unpublish)\b|"
+    r"\b(?:kubectl|terraform|tofu|pulumi|vercel|netlify|firebase|flyctl|fly|"
     r"gcloud|aws|wrangler|cdk)\b|\bcurl\b.*\s-(?:X|d|F|T)\b")
 _VERSION_LIKE = re.compile(r"^v?\d+(?:\.\d+)+(?:[-+][\w.]+)?$")
 _GLOB = re.compile(r"[*?\[]")
@@ -6670,9 +6676,21 @@ def _dev_actions(dargs, cwd, depth=0) -> list:
     if cmd == "backup":  # pushes branches whose commits exist only here (spec P-fy3bwa0pshk R5): tier 1, per branch
         targets = list(pos[1:]) + (["all-branches"] if _dev_sets(dargs, "--all") else [])
         return [("push", t) for t in targets or [_branch(cwd)]]
-    if cmd == "sync" and _dev_sets(dargs, "--scheduled", "--finish") and \
-            not _dev_skips(dargs, "--offline", "--no-push"):
-        return [("push", "the branches of every project")]  # these runs back up branches (cmd_sync): no grant names it
+    if cmd == "branch" and sub == "prune" and _dev_sets(dargs, "--apply"):
+        # deletes merged branches on origin (with a lease) and here; --local or --offline (exact) leave origin as it
+        # is, and what is left here is merged into origin's default branch, which origin keeps
+        if _dev_skips(dargs, "--offline") or (_dev_skips(dargs, "--local") and not _dev_sets(dargs, "--remote")):
+            return []
+        return [("push-destructive", PRUNE_TARGET)]
+    if cmd == "gc" and _dev_sets(dargs, "--apply"):  # gc.apply deletes merged branches on origin in every project
+        return [("push-destructive", PRUNE_EVERY_TARGET)]
+    if cmd == "sync":
+        acts = []
+        if _dev_sets(dargs, "--scheduled", "--finish") and not _dev_skips(dargs, "--offline", "--no-push"):
+            acts.append(("push", "the branches of every project"))  # it backs up branches (cmd_sync): no grant names it
+        if _dev_sets(dargs, "--scheduled"):  # it may run gc.apply (no gc job on this Mac), whatever else it skips
+            acts.append(("push-destructive", PRUNE_EVERY_TARGET))
+        return acts
     if cmd == "jobs" and sub in ("run", "exec"):  # a job runs a dev command (the scheduled sync, a custom job)
         return _job_actions(pos[2] if len(pos) > 2 else "", cwd, depth)
     if cmd == "push":
@@ -7499,8 +7517,8 @@ def target_matches(action: str, pattern, target, default=None) -> bool:
     if not p or not t or _UNKNOWABLE.search(t) or _UNKNOWABLE.search(p):
         return False
     if action in ("push", "push-destructive", "pr"):
-        if _GLOB.search(p):
-            return fnmatch.fnmatchcase(t, p) and not _protected_branch(t, default)
+        if _GLOB.search(p):  # a branch glob covers branches: never a bulk deletion (no branch name holds a `:`)
+            return ":" not in t and fnmatch.fnmatchcase(t, p) and not _protected_branch(t, default)
         return p == t
     if _GLOB.search(p):
         return False

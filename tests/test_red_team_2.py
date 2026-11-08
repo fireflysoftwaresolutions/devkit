@@ -400,11 +400,13 @@ class RedTeam2(unittest.TestCase):
         self.assertIsNone(self.member("dev backup --dry-run"))
 
     def test_m381_a_sync_that_backs_up_branches_is_a_tier_1_push(self):
-        for cmd in ("dev sync --scheduled --quiet", "dev sync --session claude:s1 --finish"):
-            with self.subTest(cmd=cmd):
-                self.assertEqual(self.acts(cmd), ["push"])
-                self.assert_tier_1(cmd)
-        for cmd in ("dev sync --scheduled --offline", "dev sync --finish --no-push", "dev sync --quiet --offline"):
+        self.assertEqual(self.acts("dev sync --session claude:s1 --finish"), ["push"])
+        self.assert_tier_1("dev sync --session claude:s1 --finish")
+        # the scheduled sync may also run gc.apply (no gc job on this Mac), which deletes merged branches on origin in
+        # every project, offline or not: tier 2
+        self.assertEqual(self.acts("dev sync --scheduled --quiet"), ["push", "push-destructive"])
+        self.assertEqual(self.acts("dev sync --scheduled --offline"), ["push-destructive"])
+        for cmd in ("dev sync --finish --no-push", "dev sync --quiet --offline"):
             with self.subTest(cmd=cmd):  # no backup runs: cmd_sync backs up only scheduled or finishing, online
                 self.assertEqual(self.acts(cmd), [])
 
@@ -412,8 +414,8 @@ class RedTeam2(unittest.TestCase):
         from devkit import jobs
         for cmd in ("dev jobs run sync", "dev jobs exec sync"):  # the scheduled sync, typed by hand
             with self.subTest(cmd=cmd):
-                self.assertEqual(self.acts(cmd), ["push"])
-                self.assert_tier_1(cmd)
+                self.assertEqual(self.acts(cmd), ["push", "push-destructive"])
+                self.assertIn("Crew members never run", self.member(cmd) or "")
         self.assertEqual(self.acts("dev jobs run doctor"), [])
         self.assertEqual(self.acts("dev jobs run no-such-job"), [])
         custom = {"ship": {"cmd": ["release", "--version", "26.11.9"]}, "loop": {"cmd": ["jobs", "run", "loop"]}}
@@ -464,11 +466,15 @@ class RedTeam2(unittest.TestCase):
         return v[1] if v else None
 
     def test_b1_a_prefix_of_a_flag_that_pushes_is_the_flag(self):
-        self.assertEqual(self.acts("dev sync --scheduled"), ["push"])  # baseline: the full flag is caught
-        for cmd in ("dev sync --sched", "dev sync --fin", "bin/dev sync --sch --quiet", "dev sync --scheduled --off"):
+        self.assertEqual(self.acts("dev sync --finish"), ["push"])  # baseline: the full flag is caught
+        for cmd in ("dev sync --fin", "bin/dev sync --fin --quiet", "dev sync --finish --off"):
             with self.subTest(cmd=cmd):  # a prefix of the flag that skips the push (--offline) skips nothing
                 self.assertEqual(self.acts(cmd), ["push"])
                 self.assert_tier_1(cmd)
+        for cmd in ("dev sync --sched", "bin/dev sync --sch --quiet", "dev sync --scheduled --off"):
+            with self.subTest(cmd=cmd):  # the scheduled sync also deletes merged branches on origin (gc.apply)
+                self.assertEqual(self.acts(cmd), ["push", "push-destructive"])
+                self.assertIn("Crew members never run", self.member(cmd) or "")
         self.assertEqual(self.targets("dev backup --al"), [("push", "all-branches")])
         self.assertEqual(self.targets("dev push --force-w"), [("push-destructive", "feat/x")])
         self.assertEqual(self.acts("dev backup --dry-run --al"), [])  # the exact flag that skips the push still does
