@@ -159,6 +159,85 @@ def roles_reason(names: list, roster=None) -> str:
             f"header and Crew line too. Names in code spans and commands are fine.")
 
 
+# The Progress rule (the developer, 2026-11-08: "the canary message must always print the progress step number of
+# total steps"): while the session's `dev progress` run is running or blocked, the status block carries the Progress
+# bullet, and its step counts are the run's (progress.step_counts: skipped steps count in neither number).
+ACTIVE_RUN = ("running", "blocked")
+# "14 of 21", "14/21", "14 de 21": the first step count of a Progress bullet, in any language. "1h05m" and "~40m"
+# are times, never a count.
+STEP_COUNT_RE = re.compile(r"(?<![\w.:~])(\d+)\s*(?:/|\s[^\W\d_]{1,6}\s)\s*(\d+)(?![\w:])")
+
+
+def step_count(progress: str):
+    """(done, total) the Progress bullet states, or None when it gives no step count."""
+    m = STEP_COUNT_RE.search(progress or "")
+    return (int(m.group(1)), int(m.group(2))) if m else None
+
+
+def progress_reason(text: str, run, now=None) -> str:
+    """What the final message's status block must fix while `run` is running or blocked, with the exact Progress
+    line to use; '' when it carries the run's step counts, or when no run is active."""
+    if not isinstance(run, dict) or run.get("state") not in ACTIVE_RUN:
+        return ""
+    from . import progress
+    done, total, _ = progress.step_counts(run)
+    want = "`- **Progress:** " + progress.headline(run, now).replace("`", "") + "`"
+    goal = (run.get("goal") or "").strip()[:80]
+    p = parse_status(text)
+    if not p or p.get("legacy"):
+        return (f"devkit: the `dev progress` run “{goal}” is active, so the status block your final message opens "
+                f"with carries its Progress bullet after Check: {want}.")
+    if not p.get("progress"):
+        return (f"devkit: your status block has no Progress bullet while the `dev progress` run “{goal}” is active. "
+                f"Add it after Check, as it is: {want}. Reply again with the message fixed.")
+    said = step_count(p["progress"])
+    if said is None:
+        return (f"devkit: your status block's Progress bullet has no step count (“{p['progress'][:60]}”); while a "
+                f"run is active it starts with the steps done of the total. Use the run's line: {want}. Reply again "
+                f"with the message fixed.")
+    if said != (done, total):
+        return (f"devkit: your status block's Progress says {said[0]} of {said[1]} steps, but the run has {done} of "
+                f"{total} (skipped steps count in neither number). Use the run's line: {want}. Reply again with the "
+                f"message fixed.")
+    return ""
+
+
+def progress_line(agent: str, sid: str, now=None) -> str:
+    """The Progress line of the session's run while it is running or blocked (progress.headline), for the reminders
+    that show the status block before the turn ends; '' without an active run or on any error."""
+    try:
+        from . import progress
+        run = progress.load_run(agent, sid or "")
+        if isinstance(run, dict) and run.get("state") in ACTIVE_RUN:
+            return progress.headline(run, now)
+    except Exception:
+        pass
+    return ""
+
+
+_UNTOLD = object()
+
+
+def progress_gate(agent: str, data: dict, sess: dict, now=None) -> str:
+    """Stop, main session: progress_reason on the session's own run, once per turn (`sess["progress_told"]` keeps
+    the turn it was told in) and never on the reply to a send-back (`stop_hook_active`), so it joins the turn's first
+    send-back and cannot loop. '' when nothing is wrong, with canary.enforce off, or on any error (fails open)."""
+    if data.get("stop_hook_active") or sess.get("progress_told", _UNTOLD) == sess.get("turn_started"):
+        return ""
+    if not (core.CFG.get("canary") or {}).get("enforce", True):
+        return ""
+    try:
+        from . import progress
+        run = progress.load_run(agent, data.get("session_id") or "")
+        text = data.get("last_assistant_message") or last_assistant_text(data.get("transcript_path")) or ""
+        why = progress_reason(text, run, now)
+    except Exception:
+        return ""
+    if why:
+        sess["progress_told"] = sess.get("turn_started")
+    return why
+
+
 STATUS_RE = re.compile(r"^[*`_\s]*" + _MARK + r"[*`\s]*[·:—-]?\s*(.*)$", re.I)
 
 
@@ -173,7 +252,7 @@ def _clean(s: str) -> str:
 
 def parse_status(text: str):
     """The status block -> {project, branch, task, done, check, progress, crew, you, next}, or None without the
-    marker. Progress, Crew and You are optional.
+    marker. Crew and You are optional; Progress is too, except while the session's run is active (progress_reason).
 
     **[Firefly> DevKit]** api · `main` · Invoice export
     - **Done:** …   - **Check:** ✓ …   - **Progress:** …   - **Crew:** …   - **You:** …   - **Next:** …"""

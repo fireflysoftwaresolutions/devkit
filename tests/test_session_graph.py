@@ -143,7 +143,7 @@ class SessionGraphTests(unittest.TestCase):
         self.assertEqual(missing, [], "\n".join(lines))
         self.assertEqual([lines.index(ln) for ln in expected], sorted(lines.index(ln) for ln in expected))
         status = lines[lines.index("  ├─ Run · Checkout flow (F-fxcheckout1)") + 1]
-        self.assertTrue(status.startswith("  │  running · mode guided · 3/5 · "), status)
+        self.assertTrue(status.startswith("  │  running · mode guided · 2 of 4 steps · 1 skipped · "), status)
         self.assertIn("ETA ~", status)
         self.assertNotIn("Unrelated now task", "\n".join(lines))  # the run links its tasks: no Now list
 

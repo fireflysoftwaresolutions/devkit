@@ -935,6 +935,9 @@ def stop(agent: str):
                 sess["roles_told"] = sess.get("turn_started")
                 reasons.append(("roles", f"devkit: your final message {canary.roles_reason(names)} Reply again with "
                                          f"the message fixed."))
+        why = canary.progress_gate(agent, data, sess) if dev_turn else ""  # the Progress rule, once per turn
+        if why:
+            reasons.append(("progress", why))
         try:
             from . import skillguard
             why = skillguard.on_stop(agent, data, sess) if dev_turn else None
@@ -2202,10 +2205,15 @@ def closing_reminder(data: dict, sess: dict, now: float, agent: str = "claude") 
     else:
         project = (sess.get("project") or "").rstrip("/").rsplit("/", 1)[-1] or "<project>"
     branch = (core.gitout(top, "branch", "--show-current") if top else "") or "-"
+    from . import canary
+    line = canary.progress_line(agent, data.get("session_id") or "", now)  # '' without an active run
     block = (f"devkit · after {what}: if you end the turn here (to wait, or because the work is done), your final "
              f"message opens with the status block: **[Firefly> DevKit]** {project} · `{branch}` · <task>, then "
-             f"Done / Check / Next. Nothing above it: a waiting note or a comment on this output goes below the block. "
-             f"Name crew members as <role> (<Name>), such as Backend engineer (Tank), never by the name alone.")
+             f"Done / Check / {'Progress / ' if line else ''}Next. Nothing above it: a waiting note or a comment on "
+             f"this output goes below the block. Name crew members as <role> (<Name>), such as Backend engineer "
+             f"(Tank), never by the name alone."
+             + (f" The run is active, so the block carries its Progress bullet as it is: - **Progress:** {line}"
+                if line else ""))
     return "\n\n".join(x for x in (block, todo) if x)
 
 

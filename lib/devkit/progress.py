@@ -974,17 +974,56 @@ def _project(cwd=None) -> str:
         return ""
 
 
+STEP_NAME_MAX = 40  # characters of a step's name on the Progress line, so the line stays one line
+STEPS_NAMED = 3  # running steps the Progress line names; the rest are counted ("+2")
+
+
+def step_counts(run: dict) -> tuple:
+    """(done, the steps that count, skipped): a skipped step counts in neither of the first two numbers, so
+    "2 of 5 steps" means two finished steps of the five that will be worked on."""
+    plan = (normalize(run) or {}).get("plan") or []
+    skipped = sum(1 for s in plan if s.get("state") == "skipped")
+    return sum(1 for s in plan if s.get("state") == "done"), len(plan) - skipped, skipped
+
+
+def _short(name: str, limit: int = STEP_NAME_MAX) -> str:
+    """A step's name within `limit` characters, cut at a word with "…"."""
+    name = " ".join(str(name or "").split())
+    if len(name) <= limit:
+        return name
+    cut = name[:limit - 1]
+    cut = cut[:cut.rfind(" ")] if " " in cut else cut
+    return cut.rstrip(" ,;:·") + "…"
+
+
+def _steps_in(plan: list, state: str) -> str:
+    """The plan's steps in `state` as "2. guard findings, 4. welcome research" (their number in the plan, as the
+    checklist under the status block shows them), at most STEPS_NAMED and "+N" for the rest; '' when none."""
+    hits = [f"{i}. {_short(s.get('name'))}" for i, s in enumerate(plan, 1) if s.get("state") == state]
+    if len(hits) > STEPS_NAMED:
+        return ", ".join(hits[:STEPS_NAMED]) + f" +{len(hits) - STEPS_NAMED}"
+    return ", ".join(hits)
+
+
 def headline(run: dict, now: float | None = None, states=None) -> str:
-    """'2/6 · 42m active (1h05m wall) of ~3h00m · ETA ~24m–37m · 2 agents working · 1 agent stale': the members
-    that still work and those that went stale (lane_states, read when `states` is None); one that ended is not
-    counted."""
+    """The status block's Progress line, also what dev status, dev crew and the dashboard show for a run:
+    '14 of 21 steps · 11 skipped · now 28. guard findings, 33. welcome research · 42m active (1h05m wall) of ~3h00m
+    · ETA ~24m–37m · 2 agents working · 1 agent stale'. Skipped steps count in neither number (step_counts); the
+    running steps (or the blocked ones) carry their number in the plan; then the members that still work and those
+    that went stale (lane_states, read when `states` is None); one that ended is not counted."""
     now = now or time.time()
     run = normalize(run)
     plan = run.get("plan") or []
-    done = sum(1 for s in plan if s.get("state") in ("done", "skipped"))
+    done, counted, skipped = step_counts(run)
     act, wall = active_minutes(run, now=run.get("finished") or now), wall_minutes(run, now)
-    parts = [f"{done}/{len(plan)}" if plan else "no plan",
-             f"{fmt_min(act)} active" + (f" ({fmt_min(wall)} wall)" if wall - act >= 5 else "")]
+    parts = [f"{done} of {counted} steps" if plan else "no plan"]
+    if skipped:
+        parts.append(f"{skipped} skipped")
+    for state, word in (("running", "now"), ("blocked", "blocked")):
+        named = _steps_in(plan, state)
+        if named:
+            parts.append(f"{word} {named}")
+    parts.append(f"{fmt_min(act)} active" + (f" ({fmt_min(wall)} wall)" if wall - act >= 5 else ""))
     if run.get("estimate"):
         parts[-1] += f" of ~{fmt_about(run.get('estimate_cal') or run['estimate'])}"
     if run.get("state") == "running":

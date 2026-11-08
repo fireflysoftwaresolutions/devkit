@@ -158,7 +158,7 @@ class ProgressTests(unittest.TestCase):
             text = pg.render_update(run, branch="feat/export")
             self.assertTrue(canary.has_marker(text), text)  # the update is the status block: it passes the canary
             self.assertEqual(canary.format_issues(text), [], text)
-            self.assertIn("1/3", text)
+            self.assertIn("- **Progress:** 1 of 3 steps · now 2. step 2 · ", text)
             self.assertIn("**Next:** wire the endpoint", text)
             self.assertIn("**Check:** ✓ 12 tests pass", text)
             self.assertIn("⚠ not verified", pg.render_update(pg.step("endpoint wired"), branch="x"))
@@ -188,7 +188,7 @@ class ProgressTests(unittest.TestCase):
                 with self.subTest(q=q):
                     ctx = pg.on_prompt("claude", {"session_id": "s1", "prompt": q})
                     self.assertIn("Release", ctx)
-                    self.assertIn("1/4", ctx)
+                    self.assertIn("1 of 4 steps", ctx)
             self.assertIsNone(pg.on_prompt("claude", {"session_id": "s1", "prompt": "add a CSV export"}))
 
     def test_silence_nudge_and_tool_timing(self):
@@ -217,6 +217,59 @@ class ProgressTests(unittest.TestCase):
             pg.on_turn_end("claude", "s1", {"turn_started": time.time() - 90, "status": "DevKit · x"})
             self.assertEqual(len(pg.records(1, "turn")), 1)
             self.assertIn("Time", pg.report(1))
+
+
+class ProgressLineTests(unittest.TestCase):
+    # The status block's Progress bullet (the developer, 2026-11-08): the steps done of the steps that count, skipped
+    # steps in neither number, the running steps by their number in the plan, the active time against the estimate
+    # and the ETA, on one line. Every view that shows the block (dev progress, the reminders, dev status, the
+    # dashboard) prints this line, and the Stop hook compares a final message's numbers with it.
+    T0 = 1_800_000_000.0
+
+    def run_(self, states, names=None, state="running"):
+        names = names or [f"step {i}" for i in range(1, len(states) + 1)]
+        plan = [dict(pg._new_step(n, 10), state=st) for n, st in zip(names, states)]
+        return {"v": 2, "goal": "Hotfix", "state": state, "started": self.T0, "estimate": 120, "plan": plan,
+                "intervals": [[self.T0, None, "turn", "main"]], "agents": {}, "updates": []}
+
+    def line(self, run):
+        with TempState():
+            return pg.headline(run, self.T0 + 30 * 60)
+
+    def test_skipped_steps_count_in_neither_number(self):
+        run = self.run_(["done", "skipped", "done", "skipped", "skipped", "running", "pending", "pending"])
+        self.assertTrue(self.line(run).startswith("2 of 5 steps · 3 skipped · "), self.line(run))
+        self.assertEqual(pg.step_counts(run), (2, 5, 3))
+
+    def test_a_plan_without_skipped_steps_does_not_mention_them(self):
+        line = self.line(self.run_(["done", "running", "pending"]))
+        self.assertTrue(line.startswith("1 of 3 steps · now 2. step 2 · "), line)
+        self.assertNotIn("skipped", line)
+
+    def test_the_running_steps_are_named_by_their_number_in_the_plan(self):
+        names = ["roadmap", "guard findings", "lessons", "welcome research"]
+        line = self.line(self.run_(["skipped", "running", "done", "running"], names))
+        self.assertIn(" · now 2. guard findings, 4. welcome research · ", line)
+
+    def test_more_than_three_running_steps_name_three_and_count_the_rest(self):
+        line = self.line(self.run_(["running"] * 5, list("abcde")))
+        self.assertIn(" · now 1. a, 2. b, 3. c +2 · ", line)
+
+    def test_a_blocked_step_is_named_like_a_running_one(self):
+        line = self.line(self.run_(["done", "blocked", "pending"], ["design", "api", "ui"], state="blocked"))
+        self.assertIn(" · blocked 2. api · ", line)
+        self.assertTrue(line.endswith(" · blocked"), line)  # a blocked run has no ETA
+
+    def test_a_long_step_name_is_cut_so_the_line_stays_one_line(self):
+        name = "write the migration that moves every invoice to the new ledger table"
+        line = self.line(self.run_(["running"], [name]))
+        self.assertIn(" · now 1. write the migration that moves every… · ", line)  # at a word, within 40 characters
+
+    def test_time_against_the_estimate_and_the_eta_follow_the_steps(self):
+        parts = self.line(self.run_(["done", "running", "pending"])).split(" · ")
+        self.assertEqual(parts[2], "30m active of ~2h00m")
+        self.assertTrue(parts[3].startswith("ETA ~"), parts)
+        self.assertEqual(len(parts), 4, parts)
 
 
 class TimeModelTests(unittest.TestCase):

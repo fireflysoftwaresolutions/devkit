@@ -29,7 +29,7 @@ require:
 **[Firefly> DevKit]** billing · `feat/invoice-export` · Export invoices as CSV
 - **Done:** the API endpoint streams CSV
 - **Check:** ✓ 12 tests pass
-- **Progress:** 1/4 · 24m active of ~1h35m · ETA ~1h00m–1h35m
+- **Progress:** 1 of 4 steps · now 2. ui · 24m active of ~1h35m · ETA ~1h00m–1h35m
 - **Next:** UI button
 
 ✓ 1. api · 24m of ~30m
@@ -40,6 +40,27 @@ require:
 
 `--check` fills the Check bullet with the evidence for the step (`✓` is added when you give no glyph). A blocked run
 shows `✗ blocked` and `Next: unblock: …`.
+
+### The Progress line
+
+The Progress bullet is one line, in this order:
+
+| Part | Example | What it says |
+| --- | --- | --- |
+| Steps | `14 of 21 steps` | The steps done of the steps that count. A skipped step counts in neither number |
+| Skipped | `11 skipped` | How many steps were skipped, only when any were |
+| Running | `now 28. guard findings, 33. welcome research` | The running steps by their number in the plan, as the checklist shows them: at most three, then `+N`. A blocked step shows as `blocked 5. api` |
+| Time | `2h10m active of ~3h00m` | The active time against the estimate, with the wall-clock time when it differs by 5 minutes or more |
+| ETA | `ETA ~40m–1h00m` | The time left, from the real pace; `blocked` or `done` when the run is not running |
+| Crew | `2 agents working` | Crew members that still work or went stale, when any do |
+
+The same line shows in `dev progress`, `dev crew`, the dashboard, and the reminder the agent gets after a call that
+can end its turn.
+
+While a run is active (running or blocked), the Progress bullet is required in every final message on Claude Code
+and on Codex. When a final message has no Progress bullet, or its step counts are not the run's, the Stop hook sends it
+back once with the line to use. It asks once per turn, together with any other reason it sends the turn back, so it
+never loops. Without an active run, no Progress bullet is needed. `canary.enforce: false` turns the check off.
 
 | Command | What it records |
 | --- | --- |
@@ -131,7 +152,7 @@ Agents are told to use that number, to re-plan at 1.5 times the estimate, and to
 | Where | What you see |
 | --- | --- |
 | The agent's messages | The status block that `dev progress step` prints, with the plan's checklist |
-| The status block | The `Progress:` bullet, while a run is active (see [Concepts › The status block](concepts.md#the-status-block)) |
+| The status block | The `Progress:` bullet, required while a run is active (see [The Progress line](#the-progress-line)) |
 | `dev progress` | Runs on this Mac, and other machines' runs from their presence |
 | `dev team`, the dashboard | Each live session with its run, steps, ETA, and subagents |
 | Desktop notifications | A run blocks or finishes; a long turn finishes |
@@ -219,7 +240,7 @@ runs in Next.
 
 | Template | When the agent uses it | Shape |
 | --- | --- | --- |
-| Kickoff | Before any task longer than a few minutes | The status block (Progress `0 of N steps`), then the plan with the estimate and steps; checks, risks, what it needs from you |
+| Kickoff | Before any task longer than a few minutes | The status block (Progress `0 of N steps · now 1. <step>`), then the plan with the estimate and steps; checks, risks, what it needs from you |
 | Progress update | After each step, every 8–10 minutes of tool work, when background work finishes | The status block that `dev progress step` (a finished step) or `dev progress note` (a step still running) prints: done, check, progress with ETA, next, and the checklist |
 | Status answer | When you ask "how is it going?" or "what's left?" | The status block, then a one-line verdict, a table per workstream (state, evidence, ETA), the CI/CD pipelines (state, current job and step, elapsed, ETA), what is left, risks, what it needs from you |
 | Background work | When subagents, parallel sessions, or long commands start and end | What runs, what it produces, and when; then the result in one or two lines |

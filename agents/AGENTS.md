@@ -23,8 +23,8 @@ devkit's process. In a session that mixes both, apply the rules to the developme
 
 Start the **final message of every development turn, without exception**, with this status block. That includes short answers,
 questions back to the developer, status updates, replies while background work runs, and replies in any language: a
-header line, then the bullets: Done, Check, and Next always; Progress, Crew, and You only when they apply. Leave a
-blank line after it, then write the rest of the message.
+header line, then the bullets: Done, Check, and Next always; Progress while a `dev progress` run is active; Crew and
+You only when they apply. Leave a blank line after it, then write the rest of the message.
 
 **Nothing comes before the block.** Not the verdict, a correction, a greeting or a comment on the last command's
 output: those go right after it. "Lead with the point" (section 3) applies to the text below the block. The final
@@ -35,7 +35,7 @@ for background work. `dev progress step` prints an update that already is the bl
 **[Firefly> DevKit]** <project> · `<branch>` · <the task, in a few plain words>
 - **Done:** <what you did or found, in one sentence>
 - **Check:** <✓ | ⚠ | ✗ | –> <the evidence: tests run, command output, CI result>
-- **Progress:** <3 of 7 steps · 24 min of ~40 · ETA 15–25 min> (only while a `dev progress` run is active)
+- **Progress:** <3 of 7 steps · now 4. the API · 24m active of ~40m · ETA ~15m–25m> (required while a `dev progress` run is active)
 - **Crew:** <Backend engineer (Tank) ▸ the API · UX designer (Sati) ✓ the screens> (only when crew members worked in this turn or are working)
 - **You:** <what only the developer can do or decide now> (only when there is something)
 - **Next:** <the next step, and who takes it>
@@ -47,6 +47,7 @@ For example:
 
 - **Done:** merged PRs 12, 17 and 22 into the release branch and fixed the two conflicts.
 - **Check:** ✓ local suite green, 214 tests
+- **Progress:** 3 of 5 steps · 1 skipped · now 5. review of the merge · 48m active of ~1h00m · ETA ~10m–20m
 - **Crew:** Release engineer (Link) ✓ release branch · Code reviewer (Seraph) ▸ review of the merge
 - **You:** approve the push of the release branch.
 - **Next:** the Code reviewer finishes the review, then the tech lead pushes once and opens the release PR.
@@ -56,6 +57,10 @@ For example:
   any part that does not apply.
 - **Check glyphs.** `✓` means verified in this session, `⚠` partly verified or not verified, `✗` failed, and `–` nothing
   to verify (a question or a plan).
+- **Progress.** Required in every final message while a `dev progress` run is active (running or blocked): the steps
+  done of the steps that count (skipped steps count in neither number), the running steps by their number and
+  name, the active time against the estimate, and the ETA. `dev progress step` and `dev progress note` print the
+  line; copy it as it is. A final message without it, or with other step counts, is sent back once with the line.
 - **Bullets.** Each bullet is one plain sentence of at most about 100 characters. Use no internal IDs unless they
   help the reader (a PR number does; a task ID does not).
 - **Crew.** Each member with what it works on: `▸` working, `✓` done, `✗` failed or lost. `dev progress step` writes it

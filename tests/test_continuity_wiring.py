@@ -76,6 +76,7 @@ class HookCase(Base):
 
     def stop(self, decide) -> None:
         with mock.patch("devkit.scope.decide", decide), mock.patch.object(canary, "check", lambda *a: None), \
+                mock.patch.object(canary, "progress_gate", lambda *a, **k: ""), \
                 mock.patch.object(skillguard, "on_stop", lambda *a: None), \
                 mock.patch.object(hooks, "_stub_gate", lambda *a: None), \
                 mock.patch.object(hooks, "_test_gate", lambda *a: None), \

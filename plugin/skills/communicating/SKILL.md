@@ -15,8 +15,12 @@ them or for their team, follows the same rules:
   instructions §0); nothing comes before it, not even a correction or a note about the last command. Right below the
   block, lead with the answer: the outcome, the verdict, or the question. Details come after. Every template
   below goes under the block when it ends the turn.
-- **The block's bullets.** **Done**, **Check**, and **Next** always. **Progress** only while a `dev progress` run is
-  active. **Crew** only when crew members worked in this turn or are working, each with what it works on (`▸`
+- **The block's bullets.** **Done**, **Check**, and **Next** always. **Progress** in every final message while a
+  `dev progress` run is active (none without a run): the steps done of the steps that count (skipped steps count
+  in neither number, `· 2 skipped` says how many), the running steps by their number and name (`now 4. the API`, at
+  most three and `+N`), the active time against the estimate, and the ETA, as `dev progress step` prints it. The
+  Stop hook sends back once a final message without it, or with other step counts than the run, with the line to
+  use. **Crew** only when crew members worked in this turn or are working, each with what it works on (`▸`
   working, `✓` done, `✗` failed or lost): `Backend engineer (Tank) ▸ the API · UX designer (Sati) ✓ the screens`.
   **You** only when there is something only the developer can do or decide: a decision, an approval, or an action on
   their own machine or account. Work the crew can do never goes in **You**.
@@ -53,7 +57,7 @@ The command prints how long similar work took here. Use that to set the estimate
 **[Firefly> DevKit]** <project> · `<branch>` · <goal>
 - **Done:** planned the work; similar work here took ~<median>
 - **Check:** – nothing to verify yet
-- **Progress:** 0 of <n> steps · ~<estimate>
+- **Progress:** 0 of <n> steps · now 1. <step> · 0m active of ~<estimate> · ETA ~<range>
 - **Next:** step 1, <step>
 
 **Plan · <goal>** — ~<estimate> (<n> steps)
@@ -80,7 +84,7 @@ plan's checklist under it:
 **[Firefly> DevKit]** billing · `feat/invoice-export` · Invoice export
 - **Done:** the CSV writer streams 10,000 rows in 1.2 s
 - **Check:** ✓ 12 new tests pass
-- **Progress:** 3/7 · 24m elapsed of ~40m · ETA ~15m
+- **Progress:** 3 of 7 steps · now 4. the endpoint · 24m active of ~40m · ETA ~10m–20m
 - **Crew:** Database engineer (Dozer) ▸ the export index migration (6 min of ~10) · Frontend engineer (Trinity) ✓ the export button · 2 of 4 slots in use
 - **Next:** wire the endpoint once the Database engineer's migration lands
 ```
@@ -343,7 +347,7 @@ structure, instead of free text.
 | Task | `dev task add "<title>" --type task\|feature\|bug\|spike --why "…" --done "…"` | Depends on the type: a Context, Why, Symptom, or Question section · Scope · Steps to reproduce · Done when (testable checkboxes) |
 | Steps of a run | `dev progress start "<goal>" --plan "step 1; step 2; step 3" --estimate 1h` | Checklist ✓ ▸ ○ with elapsed, estimate, and ETA |
 | Session activity | `dev handoff --log "<outcome; next>"` | `YYYY-MM-DD HH:MM · user@host · agent · branch · outcome · next` |
-| Status block | the start of every final message | `` **[Firefly> DevKit]** <project> · `<branch>` · <task> ``, then **Done:** · **Check:** ✓/⚠/✗ evidence · **Progress:** (when a run is active) · **Crew:** (when members worked or work) · **You:** (when only the developer can act) · **Next:** |
+| Status block | the start of every final message | `` **[Firefly> DevKit]** <project> · `<branch>` · <task> ``, then **Done:** · **Check:** ✓/⚠/✗ evidence · **Progress:** (required while a run is active) · **Crew:** (when members worked or work) · **You:** (when only the developer can act) · **Next:** |
 | Status report | `dev report [--days 7] [-i <initiative>]` | Summary table, then per initiative: health with reason · progress · milestone · done · in progress · next · blockers and risks · team |
 | Commit, PR, merge, review, handover | `dev commit`, `dev pr create`, `dev task delegate` | Sections 9–13 of this skill |
 

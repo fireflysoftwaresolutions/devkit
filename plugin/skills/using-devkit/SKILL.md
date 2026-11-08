@@ -50,7 +50,8 @@ this skill is the how.
    block automatically.
 2. Start your final message with
    the status block: `` **[Firefly> DevKit]** <project> · `<branch>` · <task> ``, then the bullets **Done:**,
-   **Check:** (✓/⚠/✗ with the evidence) and **Next:** (global instructions §0 has the rules).
+   **Check:** (✓/⚠/✗ with the evidence), **Progress:** while a `dev progress` run is active, and **Next:** (global
+   instructions §0 has the rules).
 
 ## Required skills
 
@@ -115,3 +116,10 @@ It is how the user sees, reply by reply, that you follow these instructions—an
 status, the session log, the dashboard, and the next session. Make it specific and true: name the branch, the outcome,
 the evidence (`tests green`, `CI not run`, `not verified`) and the next step. If a rule could not be followed, say so
 there.
+
+While a `dev progress` run is active (running or blocked), every final message carries the **Progress:** bullet as
+`dev progress step` and `dev progress note` print it, for example `14 of 21 steps · 11 skipped · now 28. guard
+findings, 33. welcome research · 2h10m active of ~3h00m · ETA ~40m–1h00m`: the steps done of the steps that count
+(skipped steps count in neither number), the running steps by their number in the plan, the active time against the
+estimate, and the ETA. On Claude Code and on Codex, the Stop hook sends back once a final message that lacks it or
+has other step counts than the run, with the line to use. Without an active run there is no Progress bullet.

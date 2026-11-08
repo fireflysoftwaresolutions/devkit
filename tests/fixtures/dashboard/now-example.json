@@ -197,7 +197,7 @@
    "eta_min": 50,
    "finished": null,
    "goal": "Invoice export",
-   "headline": "3/6 · 1h01m active (1h15m wall) of ~1h40m · ETA ~35m–1h10m · 1 agent working",
+   "headline": "3 of 6 steps · blocked 4. export api · 1h01m active (1h15m wall) of ~1h40m · ETA ~35m–1h10m · 1 agent working",
    "host": "mac",
    "id": "claude-7f3a",
    "last": "D1 asked: cancelled invoices",
