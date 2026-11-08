@@ -2,8 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Skill enforcement: the right skills are loaded for the work being done (config/skill-rules.json).
 
-1. Catalog  the session's catalog (`crew.catalog`) lists the skills by kind of work; the model picks them, whatever
-            language the developer writes in. Rules never match the developer's words, which can be in any language.
+1. Catalog  the session's catalog (`hooks.catalog_context`) is an index of the kinds of work the model declares by
+            id, whatever language the developer writes in, and points to config/skill-rules.json for the skills each
+            one requires. Rules never match the developer's words, which can be in any language.
 2. Brief    PreToolUse on Claude's Agent/Task tool appends the required skills to a subagent's brief (updatedInput):
             those of the brief's declared kind of work, else of its member's Responsible one.
 3. Finish   Stop refuses to end a turn that changed files matching a rule, or ran a shell command of a rule's
