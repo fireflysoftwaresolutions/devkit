@@ -211,6 +211,33 @@ class ItemRecordTests(unittest.TestCase):
             self.assertEqual(again["meta"]["links"], ["initiative:billing"])
             self.assertIn(f"\n# {title}\n", it["path"].read_text())
 
+    def test_a_closed_item_keeps_its_state_until_it_is_reopened(self):
+        with TempHandoff():
+            for closed in ("done", "cancelled"):
+                it = work.create("acme/api", f"Export invoices ({closed})", why="a reason", a=A)
+                work.release(work.load(it["path"]), a=A, status=closed)
+                for op, changes in (("move", {"bucket": "later"}), ("block", {"status": "blocked"}),
+                                    ("cancel", {"status": "cancelled"}), ("unblock", {"status": "todo"})):
+                    with self.subTest(closed=closed, op=op):
+                        with self.assertRaises(ValueError) as cm:
+                            work.update(work.load(it["path"]), op, why="a reason", a=A, **changes)
+                        self.assertIn(f"is {closed}", str(cm.exception))
+                again = work.load(it["path"])
+                self.assertEqual((again["meta"]["status"], again["meta"]["bucket"]), (closed, "next"))
+                work.reopen(again, why="one case is left", a=A)
+                work.update(work.load(it["path"]), "move", why="start now", a=A, bucket="now")
+                self.assertEqual(work.load(it["path"])["meta"]["bucket"], "now")
+
+    def test_only_a_blocked_item_can_be_unblocked(self):
+        with TempHandoff():
+            it = work.create("acme/api", "Export invoices", why="a reason", a=A)
+            with self.assertRaises(ValueError) as cm:
+                work.update(work.load(it["path"]), "unblock", why="a reason", a=A, status="doing")
+            self.assertIn("is todo, not blocked", str(cm.exception))
+            work.update(work.load(it["path"]), "block", why="waits on the API", a=A, status="blocked")
+            work.update(work.load(it["path"]), "unblock", why="the API is ready", a=A, status="todo")
+            self.assertEqual(work.load(it["path"])["meta"]["status"], "todo")
+
     def test_a_write_keeps_the_frontmatter_lines_devkit_does_not_know(self):
         extra = ["estimate: 3", "labels: [api, export]", "reviewers:", "  - bob", "# set by the sprint tool"]
         with TempHandoff():

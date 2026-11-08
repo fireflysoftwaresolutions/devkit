@@ -39,6 +39,7 @@ STATUSES = ("todo", "doing", "blocked", "done", "cancelled")
 BUCKETS = ("now", "next", "later")
 PRIORITIES = ("high", "normal", "low")
 NEEDS_WHY = {"edit", "cancel", "priority", "move", "reopen", "scope", "block", "link"}
+OPEN_ONLY = {"move", "block", "cancel"}  # what changes an open item's place or state; a closed one is reopened first
 FIELDS = ("id", "type", "title", "scope", "status", "bucket", "priority", "assignee", "claimed_by", "claimed_at",
           "lock_expires", "due", "links", "version", "created", "created_by", "updated", "updated_by")
 LIST_FIELDS = ("links",)  # written as `[a, b]`; every other value is text, even one in brackets (a title like "[API] …")
@@ -698,6 +699,12 @@ def update(it: dict, op: str, why: str = "", a=None, **changes) -> dict:
     if op in NEEDS_WHY and not why.strip():
         raise ValueError(f"`{op}` changes the scope or plan: give the reason with --why \"…\" (recorded in the "
                          f"item's changelog and the commit)")
+    iid, status = it["meta"].get("id"), it["meta"].get("status") or "todo"
+    if op in OPEN_ONLY and status not in OPEN:  # a closed item keeps the state it was closed in
+        raise ValueError(f"{iid} is {status}: `{op}` applies to open items; if work is left, reopen it first: "
+                         f"dev task reopen {iid} --why \"<what is left>\"")
+    if op == "unblock" and status != "blocked":
+        raise ValueError(f"{iid} is {status}, not blocked: there is nothing to unblock")
     holder, expired = lock_holder(it)
     if holder and not expired and not _owned_by(it, a) and op not in ("comment",):
         raise ValueError(f"{it['meta']['id']} is claimed by {holder} until {it['meta'].get('lock_expires')}; "
