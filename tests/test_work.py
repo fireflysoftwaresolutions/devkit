@@ -228,6 +228,23 @@ class ItemRecordTests(unittest.TestCase):
                 work.update(work.load(it["path"]), "move", why="start now", a=A, bucket="now")
                 self.assertEqual(work.load(it["path"])["meta"]["bucket"], "now")
 
+    def test_a_closed_item_is_neither_released_finished_again_nor_claimed(self):
+        # dev task release, done and start on a closed item: each one would reopen or rewrite how it was closed
+        with TempHandoff():
+            for closed in ("done", "cancelled"):
+                it = work.create("acme/api", f"Export invoices ({closed})", why="a reason", a=A)
+                work.release(work.load(it["path"]), a=A, status=closed)
+                for what, call in (("release", lambda: work.release(work.load(it["path"]), a=A, status="todo")),
+                                   ("done", lambda: work.release(work.load(it["path"]), a=A, status="done")),
+                                   ("start", lambda: work.claim(work.load(it["path"]), a=A))):
+                    with self.subTest(closed=closed, command=what):
+                        with self.assertRaises(ValueError) as cm:
+                            call()
+                        self.assertIn(f"is {closed}", str(cm.exception))
+                        self.assertIn("dev task reopen", str(cm.exception))
+                again = work.load(it["path"])["meta"]
+                self.assertEqual((again["status"], again.get("claimed_by") or ""), (closed, ""))
+
     def test_only_a_blocked_item_can_be_unblocked(self):
         with TempHandoff():
             it = work.create("acme/api", "Export invoices", why="a reason", a=A)

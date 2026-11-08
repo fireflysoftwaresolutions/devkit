@@ -30,9 +30,10 @@ item to the work branch you are on; `dev branch new` and `dev wt new` link the o
 lock renews only while one of your live sessions is on that branch. Work elsewhere and the lock runs out: the item goes
 back to todo, and someone else may take it.
 
-**A closed item keeps the state it was closed in.** `dev task move`, `block`, and `cancel` need an open item (todo,
-doing, or blocked) and refuse a done or cancelled one; `dev task unblock` takes only a blocked one. A done item with
-work left comes back with `dev task reopen <n> --why "<what is left>"`, then moves like any open item.
+**A closed item keeps the state it was closed in.** `dev task start`, `release`, `done`, `move`, `block`, and `cancel`
+need an open item (todo, doing, or blocked) and refuse a done or cancelled one; `dev task unblock` takes only a blocked
+one. A done item with work left comes back with `dev task reopen <n> --why "<what is left>"`, then moves like any open
+item.
 
 **A decision is open only while someone waits for it.** It is moot when the member that asked has ended and no step
 is blocked on it: it needs no answer, never goes in the status block's **You** line, and does not stop

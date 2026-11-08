@@ -52,7 +52,7 @@ it takes a lock: your name and an expiry time, pushed to the handoff repository 
 | `dev pr merge` | Marks the open items linked to the merged branch done, with the pull request and the merge commit in their changelog |
 | `dev release` | Refuses to tag while items linked to branches merged since the previous tag are open, unless you give `--why` |
 | `dev task reconcile --apply` | Sends doing items without a lock back to todo, and marks open items of merged branches done, in one commit |
-| `dev task move`, `block`, `cancel`, `unblock` | `move`, `block`, and `cancel` apply to open items only: a done or cancelled item keeps the state it was closed in, and the refusal names `dev task reopen <id> --why "<what is left>"`. `unblock` applies only to a blocked item |
+| `dev task start`, `release`, `done`, `move`, `block`, `cancel`, `unblock` | `start`, `release`, `done`, `move`, `block`, and `cancel` apply to open items only: a done or cancelled item keeps the state it was closed in, and the refusal names `dev task reopen <id> --why "<what is left>"`. `unblock` applies only to a blocked item |
 
 Renewal follows the branch because the branch is where the work happens. When every live session renewed every lock
 its machine held, a lock on work nobody touched stayed for days, and its item stayed doing. Now a lock lives only as

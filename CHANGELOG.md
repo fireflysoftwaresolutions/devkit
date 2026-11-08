@@ -149,9 +149,10 @@ explains what moves each record and how to repair one that drifted.
   the older session's open run moves to the new id with its working lanes (`session.adopt` in the audit trail). A
   `dev` command finds its session by the open call that typed it.
 - **A closed work item stays closed until you reopen it.** `dev task unblock` on a done item set it back to todo or
-  doing, and `move`, `block`, and `cancel` changed done and cancelled items too. Now `move`, `block`, and `cancel`
-  apply to open items only (todo, doing, blocked) and name `dev task reopen <id> --why "<what is left>"`, and
-  `unblock` applies only to a blocked item.
+  doing, `dev task release` set it back to todo, `dev task done` turned a cancelled item into done, `dev task start`
+  locked a done item, and `move`, `block`, and `cancel` changed done and cancelled items too. Now `start`,
+  `release`, `done`, `move`, `block`, and `cancel` apply to open items only (todo, doing, blocked) and name
+  `dev task reopen <id> --why "<what is left>"`, and `unblock` applies only to a blocked item.
 - **A branch merged by content is no longer pushed back to `origin`.** The branch map, `dev gc`, and `dev wt rm`
   knew only ancestry, so a cherry-picked branch, or one a release branch carried, read as unpushed, and the hourly
   backup pushed it back after its remote branch was deleted. They use the merge test now, and so do `dev free`, the

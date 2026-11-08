@@ -771,6 +771,15 @@ def _push_change(path: Path, change, what: str, must_reach: bool) -> dict:
     return load(path)
 
 
+def _refuse_closed(it: dict, what: str) -> None:
+    """A closed item keeps the state it was closed in: starting it, releasing it to todo or closing it again needs
+    dev task reopen first (ValueError)."""
+    iid, status = it["meta"].get("id"), it["meta"].get("status") or "todo"
+    if status not in OPEN:
+        raise ValueError(f"{iid} is {status}: `{what}` applies to open items; if work is left, reopen it first: "
+                         f"dev task reopen {iid} --why \"<what is left>\"")
+
+
 def claim(it: dict, a=None, hours: float = None, why: str = "", branch: str = "") -> dict:
     """Take the lock: pull first, then push at once so other Macs see it; it reports success only when the lock is on
     the remote (a handoff repository without a remote: when it is committed). `branch`: the branch the work happens
@@ -780,6 +789,7 @@ def claim(it: dict, a=None, hours: float = None, why: str = "", branch: str = ""
     hours = hours or float(core.CFG.get("work", {}).get("lock_hours", 8))
 
     def take(it):
+        _refuse_closed(it, "start")
         holder, expired = lock_holder(it)
         if holder and not expired and not _owned_by(it, a):
             raise ValueError(f"{it['meta']['id']} is already claimed by {holder} (until "
@@ -816,6 +826,8 @@ def release(it: dict, a=None, why: str = "", status: str = None) -> dict:
     a = a or actor()
 
     def give_back(it):
+        if status:  # without a status it only frees a lock, which a closed item may still hold
+            _refuse_closed(it, status)
         if not _owned_by(it, a):
             holder, _ = lock_holder(it)
             raise ValueError(f"{it['meta']['id']} is claimed by {holder}; only they (or an expired lock) can release "
