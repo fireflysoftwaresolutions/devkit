@@ -975,12 +975,14 @@ class DetailTests(unittest.TestCase):
                "started": now - 1200, "estimate": 40, "intervals": [[now - 1200, None, "turn", "main"]],
                "plan": [{"name": "api", "state": "done", "owner": "a1", "est": 20, "started": now - 1200, "finished": now - 600},
                         {"name": "ui", "state": "running", "owner": "main", "est": 20, "after": ["api"], "started": now - 600}],
-               "agents": {"a1": {"label": "Tank: the API", "persona": "Tank", "state": "done", "scope": "lib/**", "started": now - 1200, "finished": now - 600}},
+               "agents": {"a1": {"label": "Tank: the API", "persona": "Tank", "state": "done", "scope": "lib/**", "started": now - 1200, "finished": now - 600},
+                          "a2": {"label": "Mouse: the UI tests", "persona": "Mouse", "state": "running", "started": now - 300}},
                "updates": [{"ts": now - 600, "kind": "step", "text": "api done", "check": "12 tests green", "step": "api"},
                            {"ts": now - 300, "kind": "note", "text": "styling", "step": "ui"}],
                "history": [{"ts": now - 600, "step": "api", "from": "running", "to": "done", "by": "a1"}],
                "decisions": [{"id": "D1", "state": "pending", "question": "Keep the old URL?"}],
-               "messages": [{"id": "M1", "from": "a1", "to": "main", "text": "may I touch cli.py?"}]}
+               # asked by a member that still works: a question of a lane that ended, owning no open step, is moot
+               "messages": [{"id": "M1", "from": "a2", "to": "main", "text": "may I touch cli.py?"}]}
         (progress.RUNS / "claude-s1.json").write_text(json.dumps(run))
         d = dashboard.run_detail("claude-s1", now=now)
         api, ui = d["steps"]
@@ -1000,7 +1002,8 @@ class DetailTests(unittest.TestCase):
 
     def settled_run(self, now):
         # a run whose lane ended after asking D1 (moot: no step waits on it), with D2 open, D3 decided, a notice, a question
-        # answered, a question replied to, and one question still waiting
+        # answered, a question replied to, one question still waiting (from a member that works) and one moot (its asker
+        # ended, owning no open step)
         from devkit import progress
         progress.RUNS.mkdir(exist_ok=True)
         q = lambda mid, **kw: dict({"id": mid, "ts": now - 300, "from": "a1", "from_name": "Tank", "to": "main", "kind": "question"}, **kw)  # noqa: E731
@@ -1008,14 +1011,17 @@ class DetailTests(unittest.TestCase):
                "started": now - 1200, "intervals": [[now - 1200, None, "turn", "main"]],
                "plan": [{"name": "api", "state": "done", "owner": "a1", "est": 20, "started": now - 1200, "finished": now - 600},
                         {"name": "ui", "state": "running", "owner": "main", "est": 20, "started": now - 600}],
-               "agents": {"a1": {"label": "Tank: the API", "persona": "Tank", "state": "done", "started": now - 1200, "finished": now - 600}},
+               "agents": {"a1": {"label": "Tank: the API", "persona": "Tank", "state": "done", "started": now - 1200, "finished": now - 600},
+                          "a2": {"label": "Mouse: the UI tests", "persona": "Mouse", "state": "running", "started": now - 300}},
                "updates": [], "history": [],
                "decisions": [{"id": "D1", "ts": now - 900, "state": "pending", "from": "a1", "from_name": "Tank", "question": "Keep the old URL?"},
                              {"id": "D2", "ts": now - 800, "state": "pending", "from": "main", "question": "Ship on Friday?"},
                              {"id": "D3", "ts": now - 700, "state": "decided", "from": "main", "question": "Use JSON?", "answer": "A"}],
                "messages": [q("M1", text="Tank started", kind="notice", **{"from": "devkit", "from_name": "devkit"}),
-                            q("M2", text="may I touch cli.py?"), q("M3", text="which port?", answered=True),
-                            q("M4", text="which schema?"), q("M5", text="the v2 one", kind="answer", reply_to="M4", **{"from": "main", "to": "a1"})]}
+                            q("M2", text="may I touch cli.py?", **{"from": "a2", "from_name": "Mouse"}),
+                            q("M3", text="which port?", answered=True),
+                            q("M4", text="which schema?"), q("M5", text="the v2 one", kind="answer", reply_to="M4", **{"from": "main", "to": "a1"}),
+                            q("M6", text="which branch?")]}
         (progress.RUNS / "claude-s3.json").write_text(json.dumps(run))
         return run
 
@@ -1034,7 +1040,12 @@ class DetailTests(unittest.TestCase):
         self.assertEqual([(x["id"], x["state"]) for x in d["decisions"]], [("D1@s3", "moot"), ("D2@s3", "pending"), ("D3@s3", "decided")])
         self.assertEqual(d["decisions"][0]["moot"], "Moot: Backend engineer (Tank) ended, and no step waits on D1.")
         self.assertEqual([m["id"] for m in d["questions"] if m["waiting"]], ["M2@s3"])
-        self.assertEqual(len(d["questions"]), 5)
+        self.assertEqual(len(d["questions"]), 6)
+        from devkit import progress
+        run = progress.load_run("claude", "s3")
+        m6 = next(m for m in run["messages"] if m["id"] == "M6")  # the ended lane's question waits for nobody
+        self.assertEqual((progress.is_moot_message(run, m6), progress.moot_message_reason(run, m6)),
+                         (True, "Backend engineer (Tank) ended (done) and holds no open step"))
 
     def crew_run(self, now):
         # the live release run of 2026-11-06 in small: the lead's own last update is 78 minutes old, a crew lane reports

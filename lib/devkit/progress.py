@@ -1944,11 +1944,45 @@ def _asks(m: dict) -> bool:
     return not (m.get("from") in NOTICE_SENDERS or m.get("from_name") == "devkit" or m.get("reply_to"))
 
 
-def _open_questions(run) -> list:
+def _unanswered(run) -> list:
     """The messages of `run` that ask a question nobody has answered, and that did not close with their run."""
     msgs = [m for m in (run or {}).get("messages") or [] if isinstance(m, dict)]
     replied = {m.get("reply_to") for m in msgs if m.get("reply_to")}
     return [m for m in msgs if _asks(m) and not m.get("answered") and not m.get("closed") and m.get("id") not in replied]
+
+
+def _open_questions(run) -> list:
+    """The unanswered questions of `run` that someone still waits on: never a moot one (is_moot_message)."""
+    return [m for m in _unanswered(run) if not is_moot_message(run, m)]
+
+
+def is_moot_message(run, m: dict) -> bool:
+    """A question to the tech lead that nobody waits on any more: the lane that asked it has ended (done, stopped,
+    lost, or closed unverified) and owns no running or blocked step. Not answered and not closed, it is moot: never
+    waiting, never waking, shown as moot. A question of the tech lead's, or of a lane the run does not know, never
+    is."""
+    if not isinstance(m, dict) or m.get("to") != "main" or not _asks(m) or m.get("answered") or m.get("closed"):
+        return False
+    lane = ((run or {}).get("agents") or {}).get(m.get("from") or "")
+    if m.get("from") in (None, "", "main") or not isinstance(lane, dict) or \
+            lane.get("state") not in ENDED_LANE + ("unverified",):
+        return False
+    return not any(isinstance(s, dict) and s.get("owner") == m.get("from") and s.get("state") in ("running", "blocked")
+                   for s in (run or {}).get("plan") or [])
+
+
+def moot_messages(run) -> list:
+    """The unanswered questions to the tech lead nobody waits on any more (is_moot_message)."""
+    return [m for m in _unanswered(run) if is_moot_message(run, m)]
+
+
+def moot_message_reason(run, m: dict) -> str:
+    """Why a moot question needs nobody, in one clause: "Backend engineer (Tank) ended (done) and holds no open
+    step"."""
+    from . import crew
+    lane = ((run or {}).get("agents") or {}).get(m.get("from") or "") or {}
+    return f"{crew.who(m.get('from_name') or _name_of(run, m.get('from') or ''))} ended ({lane.get('state') or '?'}) " \
+           f"and holds no open step"
 
 
 def waiting_messages(run, to: str = "main") -> list:
@@ -2504,7 +2538,21 @@ def crew_decision(question: str, options=None, recommend: str = "", irreversible
            by=d.get("by") or "", answer=d.get("answer") or "", irreversible=d.get("irreversible") or "",
            mode=mode_of(run), asked_by=d["from_name"], options=d.get("options") or [],
            labels=" | ".join(ask_labels(d)), session=f"{agent}:{sid}")  # verify reruns the matcher against them
+    if d["state"] == "pending":
+        _notify_idle(agent, sid, d)
     return d
+
+
+def _notify_idle(agent: str, sid: str, d: dict):
+    """A decision for the developer while the main session is idle (its turn ended): a desktop notification too, so
+    the developer hears of it when nobody looks at the terminal. In a turn, the tech lead asks it."""
+    try:
+        sess = state.read(session_path(agent, sid)) or {}
+    except Exception:
+        return
+    if sess and not sess.get("turn_started"):
+        from . import crew
+        notify(f"Decision {d['id']} waits for you", f"{crew.who(d.get('from_name') or '')}: {d.get('question') or ''}")
 
 
 def crew_decide(decision_id: str, answer: str, cwd: str | None = None, now: float | None = None) -> dict:
@@ -2868,18 +2916,21 @@ def messages_context(agent: str, sid: str, me: str, select=None, limit=None, tak
     msgs = _take_messages(agent, sid, me, select=select, limit=limit)
     if taken is not None:
         taken.extend(msgs)
-    return messages_text(msgs)
+    return messages_text(msgs, normalize(load_run(agent, sid) or {}) if msgs and me == "main" else None)
 
 
-def messages_text(msgs: list) -> str:
-    """The hook text for crew messages taken for their recipient: how to answer, then one line each."""
+def messages_text(msgs: list, run=None) -> str:
+    """The hook text for crew messages taken for their recipient: how to answer, then one line each; with the run, a
+    question nobody waits on any more says it is moot, and why."""
     if not msgs:
         return ""
     from . import crew
     lines = ["devkit · crew messages for you (answer with `dev crew answer <id> \"…\"`):"]
     for m in msgs:
+        moot = run is not None and is_moot_message(run, m)
         lines.append(f"- {m['id']} from {crew.who(m.get('from_name'))}: {m['text']}"
-                     + (f" (answer to {m['reply_to']})" if m.get("reply_to") else ""))
+                     + (f" (answer to {m['reply_to']})" if m.get("reply_to") else "")
+                     + (f" (moot: {moot_message_reason(run, m)})" if moot else ""))
     return "\n".join(lines)
 
 
@@ -5717,6 +5768,12 @@ def _note_limit(agent: str, limit: int, why: str, configured: int, now: float | 
     if old != limit:
         _audit("crew.limit", f"{limit} crew slots", f"{old} → {limit}: {why or 'progress.max_parallel'}",
                project="")
+        try:  # it rides along with the next wake of each live run's main session: slots frees or holds queued steps
+            from . import watch
+            watch.notice_all("notice", f"limit:{agent}:{limit}:{round(now or time.time())}",
+                             f"crew slots {old} → {limit}: {why or 'progress.max_parallel'}", agent=agent)
+        except Exception:
+            pass
 
 
 def launch_verdict(agent: str, data: dict, run: dict, now: float | None = None):

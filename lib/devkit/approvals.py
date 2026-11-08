@@ -546,7 +546,14 @@ def apply_session(sess: dict, moves: list, now: float) -> list:
 
 
 def audit_moves(run: dict, moves: list):
-    """One audit record per transition made (crew.<state>, plan.<state>, run.<state>, crew.launch-<state>)."""
+    """One audit record per transition made (crew.<state>, plan.<state>, run.<state>, crew.launch-<state>), and for
+    each lane that stopped, was lost or ended unverified a notice that wakes the run's main session
+    (watch.lane_notices): the hooks and the sweep reach here after the run's lock is released."""
+    try:
+        from . import watch
+        watch.lane_notices(run, moves)
+    except Exception:
+        pass  # a notice never fails a transition
     try:
         from . import audit
     except Exception:

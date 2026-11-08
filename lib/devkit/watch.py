@@ -94,6 +94,11 @@ def _message_event(run: dict, m: dict, me: str) -> dict:
     if frm == "ci":
         return _ev("ci", mid, True, _ci_line(m.get("text")), m.get("ts"))
     if progress._asks(m):
+        if m.get("answered") or m.get("closed"):  # answered or closed before anyone read it: nothing to act on
+            return _ev("question", mid, False, "", m.get("ts"))
+        if me == "main" and progress.is_moot_message(run, m):
+            return _ev("question", mid, False, f"devkit · moot: question {mid} from {who} (“{text}”): "
+                                               f"{progress.moot_message_reason(run, m)}", m.get("ts"))
         return _ev("question", mid, True, f"devkit · question {mid} from {who}: “{text}” · answer: dev crew answer "
                                           f"{mid} \"…\"", m.get("ts"))
     if m.get("reply_to") or m.get("kind") == "answer":
@@ -107,6 +112,7 @@ def _messages(agent, sid, me, mark, want, limit):
     run = progress.load_run(agent, sid)
     if not run:
         return [], ""
+
     def pick(r, m):
         return want(_message_event(r, m, me))
     msgs, text = [], ""
@@ -117,7 +123,13 @@ def _messages(agent, sid, me, mark, want, limit):
     if not msgs:
         return [], ""
     run = progress.normalize(progress.load_run(agent, sid) or run)
-    return [_message_event(run, m, me) for m in msgs], text
+    evs = [_message_event(run, m, me) for m in msgs]
+    if mark:
+        for ev in evs:  # a moot question leaves the record told as moot, with why
+            if ev["line"].startswith("devkit · moot:"):
+                progress._audit("crew.message-moot", ev["id"], ev["line"][:300], "moot",
+                                project=run.get("project") or "", why=ev["line"].split("): ", 1)[-1][:300])
+    return evs, text
 
 
 def _decisions(agent, sid, mark, want):
@@ -269,8 +281,9 @@ def mail(agent: str, sid: str, me: str = "main", mark: bool = True, only=None, w
 
 
 def pending(agent: str, sid: str, me: str = "main") -> list:
-    """A peek, marking nothing: [{"kind", "id", "wakes", "line"}] of what the next take would give `me`."""
-    return [ev for evs, _ in _collect(agent, sid, me, mark=False, limit=10 ** 6) for ev in evs]
+    """A peek, marking nothing: [{"kind", "id", "wakes", "line"}] of what the next take would give `me` (a question
+    answered or closed before anyone read it is taken with no line)."""
+    return [ev for evs, _ in _collect(agent, sid, me, mark=False, limit=10 ** 6) for ev in evs if ev["line"]]
 
 
 # --------------------------------------------------------------------------- what may still arrive
@@ -583,7 +596,7 @@ def wait(agent: str, sid: str, me: str, timeout_min: float, only=None, out=None,
 
 def _deliver(agent, sid, me, only, emit, rid, arm, start, clock):
     """Take what wakes this consumer, with what rides along, and print it -> 0, or None when nothing woke it."""
-    taken = [ev for evs, _ in _collect(agent, sid, me, True, only, wakes_only=True) for ev in evs]
+    taken = [ev for evs, _ in _collect(agent, sid, me, True, only, wakes_only=True) for ev in evs if ev["line"]]
     if not taken:
         return None
     for ev in taken:
@@ -641,6 +654,42 @@ def notice(agent: str, sid: str, kind: str, key: str, text: str) -> bool:
     return bool(added)
 
 
+def notice_all(kind: str, key: str, text: str, agent: str | None = None) -> int:
+    """notice() to the main session of every live run on this Mac (of `agent`'s runs only, when given). -> how many"""
+    from . import progress
+    n = 0
+    for r in progress.active_runs():
+        if r.get("state") in ("running", "blocked") and r.get("session") and (not agent or r.get("agent") == agent):
+            n += notice(r.get("agent") or "claude", r["session"], kind, key, text)
+    return n
+
+
+def lane_notices(run: dict, moves: list):
+    """approvals' transitions: each lane that stopped, was lost or ended unverified is a member notice for the main
+    session of its run, with the steps that moved with it."""
+    if not isinstance(run, dict) or not run.get("session"):
+        return
+    words = {"stopped": "was stopped", "lost": "was lost", "unverified": "ended unverified"}
+    for m in moves or []:
+        if m.get("kind") != "lane" or m.get("to") not in words:
+            continue
+        aid = m.get("id") or ""
+        lane = (run.get("agents") or {}).get(aid) or {}
+        steps = [x for x in moves if x.get("kind") == "step" and x.get("owner_from") == aid]
+        waits = [x["id"] for x in steps if x.get("to") == "pending"]
+        held = [x["id"] for x in steps if x.get("to") == "running"]
+        bad = [x["id"] for x in steps if x.get("to") == "unverified"]
+        tail = "".join([f"; {'its steps' if len(waits) > 1 else 'its step'} {', '.join(waits)} "
+                        f"wait{'' if len(waits) > 1 else 's'} for a new launch" if waits else "",
+                        f"; a live lane of its member holds {', '.join(held)}" if held else "",
+                        f"; {', '.join(bad)} unverified: no report, so no evidence" if bad else ""])
+        why = str(m.get("why") or "").split(";")[0].strip()
+        text = f"{_who(lane.get('persona') or lane.get('label') or aid)} {words[m['to']]}" + \
+               (f" ({why})" if why else "") + tail
+        notice(run.get("agent") or "claude", run["session"], "member",
+               f"lane:{aid}:{m['to']}:{int(m.get('at') or time.time())}", text)
+
+
 # --------------------------------------------------------------------------- dev watch, dev watches
 
 def _consumer(a) -> str:
@@ -677,14 +726,22 @@ def cmd_watch(a) -> int:
         return wait(agent, sid, me, timeout, only=only)
     now = time.time()
     evs = [ev for ev in pending(agent, sid, me) if not only or ev["kind"] in only]
+    run = progress.normalize(progress.load_run(agent, sid) or {})
+    moot = progress.moot_messages(run) if run and me == "main" else []
     why = can_arrive(agent, sid, now, me)
     live = armed(agent, sid, me, None, now)
     if getattr(a, "json", False):
         print(json.dumps({"session": f"{agent}:{sid}", "consumer": me, "events": evs, "can_arrive": why,
-                          "armed": live}, ensure_ascii=False))
+                          "armed": live, "moot": [{"id": m.get("id"), "why": progress.moot_message_reason(run, m)}
+                                                  for m in moot]}, ensure_ascii=False))
         return 0
     print(f"watch · {agent}:{sid[:12]} · for {'the main session' if me == 'main' else _who(me)}")
     print("\n".join(f"  {ev['line']}" + ("" if ev["wakes"] else "  (rides along)") for ev in evs) or "  nothing new")
+    seen = {ev["id"] for ev in evs}
+    for m in moot:  # told already, and still unanswered: nobody waits on it any more
+        if m.get("id") not in seen:
+            print(f"  devkit · moot: question {m.get('id')} from {_who(m.get('from_name'))} "
+                  f"(“{clean(m.get('text'))}”): {progress.moot_message_reason(run, m)}")
     print("can still arrive: " + ("; ".join(why) if why else "nothing"))
     print("armed: " + (", ".join(w["id"] for w in live) if live else f"no wait · arm one: {again(agent, me)}"))
     return 0

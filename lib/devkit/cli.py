@@ -218,6 +218,14 @@ def commit_push(push=True, quiet=False):
             else:
                 audit.record("handoff.push", core.handoff_repo(), err[:300], "failed")
                 failed.write_text(json.dumps({"ts": int(time.time()), "error": err[:300]}))
+                try:  # each live session hears of it once, with its next wake or hook
+                    from . import watch
+                    watch.notice_all("notice", f"push:{int(time.time())}",
+                                     f"the handoff push failed at {time.strftime('%H:%M')}: "
+                                     f"{' '.join(err.split())[:200] or 'no reason given'}. dev status shows it; "
+                                     "the next dev sync tries again")
+                except Exception:
+                    pass
         if not ok and not quiet:
             ui.warn(f"handoff push failed: {err}")
 

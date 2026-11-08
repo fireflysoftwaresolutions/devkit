@@ -2050,8 +2050,15 @@ def prompt(agent: str):
     background = _background_told(agent, data)  # a member's completion notice is often this very prompt
     if raw.startswith(("<task-notification", "[SYSTEM NOTIFICATION", "<system-reminder", "<agent-message")) or \
             "<task-notification>" in raw[:400]:
-        # background events are not the developer's request
-        _context_out("UserPromptSubmit", "\n\n".join(x for x in (extra, background) if x))
+        # background events are not the developer's request; what waits for the woken session comes with them
+        mail = ""
+        if sid and _session_file(agent, sid).exists():  # a prompt is the main session's
+            try:
+                from . import watch
+                mail = watch.mail(agent, sid, "main")
+            except Exception:
+                _log(f"prompt wake mail {agent}: {traceback.format_exc()[-300:]}")
+        _context_out("UserPromptSubmit", "\n\n".join(x for x in (extra, background, mail) if x))
         return
     # the prompt waits as pending in the checkpoint until Stop classes the turn; then what waits for the main session
     # (a late compaction's brief, "Not in the summary"), first in the context
