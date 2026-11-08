@@ -572,6 +572,7 @@ A review or read-only member runs only what its allowlist names: readers, reads 
 checks. These run as well:
 
 - An interpreter or shell asked only for its version: `python3 --version`, `bash --version`, `python3 -V`.
+- `command -v` and `command -V`, which only look names up and run none of them: `command -v gh dev`.
 - A shell that only parses its program: `bash -n x.sh`, `zsh -n -c '…'` (see
   [Commands the guard cannot name](#commands-the-guard-cannot-name)).
 - Machine diagnostics: `ps`, `pgrep`, `sw_vers`, `id`, `whoami`, `printenv`, `uptime`, `groups`, `locale`,

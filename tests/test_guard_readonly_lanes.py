@@ -54,6 +54,12 @@ class ReadOnlyLanes(unittest.TestCase):
         self.assert_refused('python3 -c "print(1)"', "bash -c 'echo x'", "python3 --version x.py",
                             "bash --version; bash", "node -v -e 1")
 
+    def test_command_v_only_looks_names_up(self):
+        self.assert_runs("command -v gh dev", "command -v python3", "command -V git", "command -pv ls")
+        # twins: command without -v runs the program, and a program after the lookup is judged on its own
+        self.assert_refused("command gh pr merge 12", "command -p gh pr merge 12", "command -v gh; gh pr merge 12",
+                            "command -v $(touch x)", "command -- -v gh")
+
     def test_the_machine_diagnostics_run_and_sysctl_never_sets_a_value(self):
         self.assert_runs("/usr/sbin/sysctl -n machdep.cpu.brand_string; uname -m", "sysctl hw.ncpu",
                          "ps -ax -o pid,command | grep dev", "pgrep -fl python", "sw_vers", "id -u", "whoami")

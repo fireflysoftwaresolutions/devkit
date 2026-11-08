@@ -5981,6 +5981,9 @@ def _ro_program(argv0, cwd, member=None) -> str | None:
             return "`sudo` runs the command as another user"
         elif n == "env" and any(x.startswith("-") for x in pre[k + 1:k + 2]):
             return "`env` with options changes the command's environment"
+        elif n == "command" and any(re.fullmatch(r"-[pvV]*[vV][pvV]*", x) for x in
+                                    itertools.takewhile(lambda x: x.startswith("-") and x != "--", pre[k + 1:])):
+            return None  # `command -v gh dev`, `command -V x`: it only looks the names up and runs none of them
         elif n in _RO_RUNNERS:
             runner = True
     if not argv:
