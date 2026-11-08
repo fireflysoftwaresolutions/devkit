@@ -167,6 +167,18 @@ explains what moves each record and how to repair one that drifted.
   knew only ancestry, so a cherry-picked branch, or one a release branch carried, read as unpushed, and the hourly
   backup pushed it back after its remote branch was deleted. They use the merge test now, and so do `dev free`, the
   unpushed count of `dev wt ls`, and `dev branch clean`, so a branch merged by squash or cherry-pick reads as merged.
+- **A squash-merged branch is no longer pushed back to `origin`.** A branch squash-merged from two or more commits
+  has no ancestor and no equivalent in the default branch, so once GitHub deleted its remote branch, `dev wt ls`
+  and the session context counted its commits as unpushed, `dev free` and `dev wt rm` asked to push them first, and
+  the hourly backup pushed the branch back. The registry's pull request list now carries each pull request's head,
+  merge commit, and origin (the same one `gh` call and cache), and a branch whose own merged pull request had its tip
+  as head reads as merged everywhere (`merged by PR #7`); `dev backup` skips it and names the pull request. A fork's
+  pull request never counts, and without the cached list nothing changes.
+- **`dev branch prune` keeps the branch of every open pull request.** It read only the 200 newest pull requests, so
+  in a busy repository an older open pull request whose commits the default branch had cherry-picked lost its branch
+  on `origin`, and GitHub closed the pull request. Open pull requests now come with a call of their own, and remote
+  branches stay when GitHub cannot list them or there are 1,000 or more. The nightly cleanup counts only a branch's own
+  merged pull request, never a fork's of the same name.
 - **`dev sync --offline` and `--no-push` delete nothing on `origin`.** When the `gc` job is not installed, the hourly
   sync applies the cleanup itself, and the cleanup deletes merged branches on `origin`. An offline or no-push run now
   keeps every remote branch and says so.

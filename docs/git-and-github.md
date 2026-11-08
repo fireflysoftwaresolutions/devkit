@@ -117,8 +117,8 @@ the fetch and GitHub and leaves remote branches alone, and `--json` prints the r
 
 - the default branch, `develop`, and the other permanent branches;
 - the current branch, or the branch checked out in the main checkout;
-- a branch with an open pull request, or a remote branch when the open pull requests cannot be read (GitHub
-  unreachable, or another host);
+- a branch with an open pull request, or a remote branch when devkit cannot read every open pull request (GitHub
+  unreachable, 1,000 or more open, or another host);
 - an embargoed branch, or anything while the embargo list cannot be read;
 - a branch whose worktree has uncommitted changes, is locked, belongs to the Codex app, or has a live session;
 - a branch created less than 24 hours ago that has no commit of its own yet;
@@ -138,7 +138,9 @@ The same merge test closes branches at four other moments:
 - The nightly `gc` job deletes a merged local branch that has not moved for `gc.grace_hours` (24), with its idle
   worktree. It deletes a merged remote branch only when its pull request merged or devkit pushed it as a backup
   (`dev backup`, `dev sync`); anyone else's merged branch waits for `dev branch prune --apply`.
-- The hourly backup no longer pushes a branch merged by content back to `origin`: the branch map counts it as merged.
+- The hourly backup no longer pushes a branch merged by content, or squash-merged by its own pull request, back to
+  `origin`: the branch map counts it as merged, and `dev backup` skips it with the pull request's number
+  (`merged: PR #7 was merged`).
 
 `dev wt rm`, `dev free`, the unpushed count of `dev wt ls`, and `dev branch clean` use the same test, so a branch
 merged by squash or cherry-pick reads as merged, not as unpushed.

@@ -41,7 +41,8 @@ pull request, and an embargoed branch.
 - An idle, clean worktree whose branch is merged goes with its branch, even when its commits are on no remote.
 - A merged local branch without a worktree goes once it has not moved for `gc.grace_hours` (24): its newest reflog
   entry, or else its last commit, is older than that.
-- A merged remote branch goes only when its pull request merged or devkit pushed it as a backup (`dev backup`,
+- A merged remote branch goes only when its own pull request merged (from this repository, with the branch's tip as
+  its head; a fork's pull request of the same name never counts) or devkit pushed it as a backup (`dev backup`,
   `dev sync`). Anyone else's merged branch on `origin` is listed as kept, with `dev branch prune --apply` to delete
   it. Off GitHub, remote branches stay: devkit does not read the host's merge requests, and an open one would lose
   its branch.
