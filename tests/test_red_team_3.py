@@ -124,6 +124,22 @@ class ZshFileSubstitution(Case):
         self.assertIsNone(member("diff =(git show HEAD:README.md) =(git log -1)", level="review", who="seraph"))
 
 
+class RedirectIntoASubstitution(Case):
+    """`cmd > >(…)` writes into a process substitution: its command is judged, and `>(` is no file the lane writes."""
+
+    def test_the_command_is_judged_and_no_file_is_written(self):
+        for cmd in ("echo x > >(gh pr merge 12)", "bash -n -c 'x' > >(gh pr merge 12)"):
+            with self.subTest(cmd=cmd):
+                self.assertIn("merges PR 12", member(cmd, cwd=self.dev) or "")
+        self.assertIsNone(member("git log -1 > >(wc -l)", cwd=self.dev))
+        # in the home folder a write of a file asks first; writing into a substitution writes no file there
+        self.assertIsNone(guard.check("Bash", {"command": "git log -1 > >(wc -l)"}, str(core.HOME), "claude"))
+        self.assertIsNotNone(guard.check("Bash", {"command": "git log -1 > out.txt"}, str(core.HOME), "claude"))
+
+    def setUp(self):
+        self.dev = str(core.DEV / "fireflysoftwaresolutions" / "devkit")  # a project of the run's dev root
+
+
 class SourcedFilesAreResolved(Case):
     """The file `source` or `.` reads is resolved as the system opens it (after `--`, in the folder the command runs
     in, with `//`, `.`, `..` and symbolic links read) before the guard asks whether it is the command's input; where

@@ -20,7 +20,7 @@ the directory used to resolve later paths, leading `VAR=value`, `sudo`, `env`, `
 (`>`, `>>`) are checked as writes. The guard also reads what the shell runs inside a command: `$(…)` and backtick
 substitutions, process substitutions (`<(…)` and `>(…)` outside quotes, and zsh's `=(…)` at the start of a word,
 which runs its command the same way and stands for a file that holds its output, so `cat <(gh pr merge 12)` is a
-merge and `. =(echo …)` runs what echo writes),
+merge and `. =(echo …)` runs what echo writes; a redirect into one, `cmd > >(…)`, writes no file),
 `sh -c` and `eval` strings (with the words after a `sh -c` line in place of its `$0`, `$1`, and
 `"$@"`, unless the line, read as the shell reads its words once quotes are removed (`s""hift` is `shift`), holds
 anything that can bind them again: `shift`, `getopts`, `eval`, `source` or `.`, `set` with operands, zsh's `argv` or

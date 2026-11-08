@@ -608,7 +608,7 @@ def split_commands(cmd: str, ops: bool = False, newline: str = ";", inputs: list
         if expect_redir is not False:
             if stdin:
                 ins.append(t)
-            if expect_redir:
+            if expect_redir and t not in ("<(", ">("):  # `> >(…)` writes into a substitution, whose command is read
                 redirs.append(t)
             elif herestr:
                 here.append(t)
