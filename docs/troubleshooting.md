@@ -317,6 +317,11 @@ explains why each record drifts):
 Neither `dev doctor` nor the dashboard changes anything: run the fix yourself. `dev task reconcile` without `--apply`
 shows the items first.
 
+A **handoff note** row of its own warns when the project's handoff note is longer than the handoff skill allows
+(about 150 lines), with its length. Rewrite Current state as it stands now and move history and long material into
+the project's `plans/` folder (the `handoff` skill, `/devkit:handoff`); the next session reads less and finds the
+current state first.
+
 ### `dev task start` says the task was claimed on another machine first
 
 Two machines claimed the same item within seconds; the first push won. Pick another task, or talk to the holder.

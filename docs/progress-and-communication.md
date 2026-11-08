@@ -166,6 +166,8 @@ machine's presence file and session line.
 devkit sends a macOS notification when:
 
 - a run is blocked (`dev progress block`) or done (`dev progress done`);
+- a crew decision waits for you while the session is idle (its turn ended), so the crew does not stall on you
+  without your knowing;
 - an agent turn that lasted `progress.notify_after_minutes` (10) or more finishes;
 - a scheduled job fails, and after every run of a job with `"notify": "always"`, such as the weekly lesson review (see
   [Scheduled jobs and the audit trail](jobs-and-audit.md)).
