@@ -22,9 +22,11 @@ substitutions, process substitutions (`<(…)` and `>(…)` outside quotes, and 
 which runs its command the same way and stands for a file that holds its output, so `cat <(gh pr merge 12)` is a
 merge and `. =(echo …)` runs what echo writes),
 `sh -c` and `eval` strings (with the words after a `sh -c` line in place of its `$0`, `$1`, and
-`"$@"`, unless the line can bind them again with `shift`, `set` with operands, zsh's `argv` or `1=…`, or a function:
-then they stay variables, and one that names the program is `unknown`, so `bash -c 'shift; $1 pr merge 12' sh echo
-gh` is refused; the line is the first word after all the shell's options, as bash, zsh, sh, dash, and ksh read them, so
+`"$@"`, unless the line, read as the shell reads its words once quotes are removed (`s""hift` is `shift`), holds
+anything that can bind them again: `shift`, `getopts`, `eval`, `source` or `.`, `set` with operands, zsh's `argv` or
+`1=…`, a function or zsh's anonymous function `() { … }`, or a `for` or `select` loop without an `in` list (`for a do`
+loops over them). Then they stay variables, and one that names the program is `unknown`, so
+`bash -c 'shift; $1 pr merge 12' sh echo gh` is refused; the line is the first word after all the shell's options, as bash, zsh, sh, dash, and ksh read them, so
 `bash -c -e 'line'` and `zsh -c -o errexit 'line'` run `line`, while `csh` and `tcsh` take the word right after
 `-c`; `bash` and `sh` read a long option with one dash before any short one, so `bash -norc -c 'line'` is
 `bash --norc -c 'line'` and `-rcfile f` takes `f`, and they read `+c` as `-c`), `xargs` and `find -exec` commands, and a pager that git or gh starts. The shells it reads this way are

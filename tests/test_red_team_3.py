@@ -170,5 +170,45 @@ class SourcedFilesAreResolved(Case):
                 self.assertIsNone(member(cmd, cwd=self.tmp))
 
 
+class PositionalsReadAsWords(Case):
+    """A -c line gets the words after it in place of $1… only when, read as the shell reads its words once quotes
+    are removed, nothing in it can bind them again; otherwise they stay variables, unknown where they name a
+    program."""
+
+    def test_a_rebind_split_by_quotes_or_hidden_in_a_loop_or_function_keeps_them_unknown(self):
+        for cmd in ("bash -c 'eval s\"\"hift; $1 pr merge 12' sh echo gh", "bash -c 'sh\"\"ift; $1 pr merge 12' sh echo gh",
+                    "bash -c 's\"\"et -- gh pr merge 12; \"$@\"' sh echo hi",
+                    "bash -c 'builtin s\"\"et -- gh pr merge 12; \"$@\"' sh echo hi",
+                    "zsh -c '(){ $1 pr merge 12 } gh' zsh echo", "bash -c 'for a do $a pr merge 12; break; done' sh gh",
+                    "bash -c 'select a do $a pr merge 12; break; done' sh gh",
+                    "bash -c \"eval 'f(' ') { $1 pr merge 12; }'; f gh\" sh echo",
+                    "bash -c 'getopts x o; $1 pr merge 12' sh echo gh", "bash -c '. /dev/null; $1 pr merge 12' sh echo gh",
+                    "bash -s echo gh <<< 's\"\"hift; $1 pr merge 12'",
+                    "bash -c 'function f { $1 pr merge 12; }; f gh' sh echo",
+                    "bash -c 'while :; do $1 pr merge 12; shift; done' sh echo gh"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNotNone(main(cmd))
+                self.assertIsNotNone(member(cmd))
+
+    def test_the_first_command_of_a_function_or_a_loop_without_a_list_is_read(self):
+        # `function f {` and `for a do` need no `;` before the command they hold
+        for cmd in ("function f { gh pr merge 12; }; f", "function f { gh pr merge 12; }",
+                    "for a do gh pr merge 12; done"):
+            with self.subTest(cmd=cmd):
+                self.assertRefusedEverywhere(cmd)
+
+    def test_a_line_that_binds_nothing_still_gets_the_words(self):
+        self.assertIn("plugin", check("sh -c 'claude \"$@\"' _ plugin install x") or "")
+        self.assertIn("merges PR 12", main("bash -c 'set -euo pipefail; \"$@\"' sh gh pr merge 12") or "")
+        self.assertIn("merges PR 12", main("bash -c 'set -o pipefail; \"$@\" pr merge 12' sh gh") or "")
+        for cmd in ("bash -c 'echo \"$1\"' sh hi", "bash -c 'set -e; \"$@\"' sh echo hi",
+                    "bash -c 'set -o pipefail; \"$@\"' sh echo hi", "bash -c 'for f in a b; do echo $f; done'",
+                    "bash -c 'for f in a b; do echo $f; done; \"$@\"' sh echo hi", "bash -c 'cd \"$1\" && ls .' sh /tmp",
+                    "bash -n -c 'gh pr merge 12'"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(main(cmd))
+                self.assertIsNone(member(cmd))
+
+
 if __name__ == "__main__":
     unittest.main()

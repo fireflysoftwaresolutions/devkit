@@ -3379,7 +3379,11 @@ def _unwrap(argv, more: bool = False, stop=()):
         if not argv:
             return argv
         n = os.path.basename(argv[0])
-        if argv[0] in _RESERVED:
+        if argv[0] in ("for", "select") and argv[2:3] == ["do"]:  # `for a do $a …`: a loop over $@ needs no `;`
+            argv = argv[3:]
+        elif argv[0] == "function" and len(argv) > 2:  # `function f { gh …; }`: the body's first command
+            argv = argv[2:]
+        elif argv[0] in _RESERVED:
             argv = argv[1:]
         elif n in ("timeout", "gtimeout"):
             rest = argv[1:]
@@ -4180,25 +4184,65 @@ def _dev_words(args) -> list:
 _POSITIONAL = re.compile(r'"\$[@*]"|\$[@*]|\$\{(\d+)\}|\$(\d)')
 
 
-# what can give a line's $1… other values than the words after it: shift, set with operands (`set -- gh`, `set x`; a
-# `set` with options only, such as `set -e` or `set -o pipefail`, changes none), zsh's argv and `1=…`, getopts' shift,
-# and a function, whose $1… are its own arguments
-_REBINDS = re.compile(r"\b(?:shift|argv|function)\b|(?<![\w$])\d+\+?=|\w\s*\(\s*\)")
-_SET_WORD = re.compile(r"(?<![\w.$/-])set(?![\w.-])")
-_SET_OPTIONS_ONLY = re.compile(r"(?<![\w.$/-])set((?:[ \t]+[-+][A-Za-z]*o[ \t]+[\w-]+|[ \t]+[-+][A-Za-z]+)*)[ \t]*(?:$|[;&|\n)}])")
+# the words that can give a line's $1… other values than the words after it, wherever they stand once quotes are
+# removed (`s""hift` is shift): shift, getopts' shift, eval and source, which run text the guard reads as a string,
+# zsh's argv, and a function, whose $1… are its own arguments
+_REBINDERS = frozenset({"shift", "getopts", "eval", "source", "function", "argv"})
+_FUNCTION_DEF = re.compile(r"\([ \t]*\)")  # `f() …`, `f ()`, zsh's anonymous `() { … }`
 
 
-def _rebinds_positionals(line: str) -> bool:
-    return bool(_REBINDS.search(line)) or \
-        len(_SET_WORD.findall(line)) != len(_SET_OPTIONS_ONLY.findall(line))
+_LOOPS = frozenset({"while", "until", "for", "select", "repeat", "foreach"})
+
+
+def _rebind_cut(line: str) -> int:
+    """How much of a -c line sees the words after it as $0, $1…: the index where the first thing that may give them
+    other values takes effect, read as the shell reads its words once quotes are removed (`s""hift` is shift). That
+    is the end of the command holding shift, getopts, source, `.`, set with operands, zsh's argv or `1=…` (their own
+    words still see the old values); the start of eval, whose text may define a function, of a function (`function
+    f`, the `(` of `f()` or of zsh's anonymous `() { … }`), and of a for or select loop without an `in` list, which
+    loops over them. 0 when a loop before that point may run its text
+    again after it, or when the guard cannot read the line's words (backticks, `$'…'`); len(line) when nothing can."""
+    words, ck = _shell_words(line), _code_kinds(line)
+    if words is None or ck is None:
+        return 0
+    code = "".join(c if k == "C" else " " for c, k in zip(line, ck[0]))
+    m = _FUNCTION_DEF.search(code)
+    cut = m.start() if m else len(line)
+    for k, (text, offs, _, at_cmd) in enumerate(words):
+        if not offs or offs[0] >= cut:
+            continue
+        rest = [w[0] for w in words[k + 1:]]
+        if (at_cmd and text in ("for", "select") and (len(rest) < 2 or rest[1] != "in")) or \
+                text in ("eval", "function"):  # text that runs later, maybe as a function with its own $1
+            cut = min(cut, offs[0])
+            break
+        rebinds = text in _REBINDERS or bool(re.match(r"(?:\d+|argv(?:\[[^]]*\])?)\+?=", text)) or \
+            (at_cmd and text == ".")
+        if at_cmd and text == "set":
+            j = 0
+            while j < len(rest) and not words[k + 1 + j][3]:
+                opt = rest[j]
+                if not re.fullmatch(r"[-+][A-Za-z]+", opt) or "A" in opt:  # an operand, `--`, `-` or zsh's -A
+                    rebinds = True
+                    break
+                j += 2 if opt.endswith("o") else 1  # `-o pipefail`: the option's name
+        if rebinds:
+            end = re.search(r"[;&|\n]", code[offs[-1]:])
+            cut = min(cut, offs[-1] + end.start() if end else len(line))
+            break
+    if cut < len(line) and any(at_cmd and text in _LOOPS and offs and offs[0] < cut
+                               for text, offs, _, at_cmd in words):
+        return 0
+    return cut
 
 
 def _with_positionals(line: str, words) -> str:
     """A shell's -c line with the words after it in place of $0, $1…, ${1} and "$@" or $* (the words after $0),
     quoted as the shell passes them, so the guard reads what runs (`sh -c 'claude "$@"' _ plugin install x`). A line
-    that can bind them to other values first (_REBINDS: `shift; $1 …`, `set -- gh; $1 …`) keeps them as variables,
-    which the gate judges as unknown where they name a program."""
-    if not words or _rebinds_positionals(line):
+    that can bind them to other values (_rebind_cut: `shift; $1 …`, `s""et -- gh; "$@"`) keeps them as variables from
+    there on, which the gate judges as unknown where they name a program."""
+    cut = _rebind_cut(line) if words else 0
+    if not cut:
         return line
 
     def sub(m):
@@ -4206,7 +4250,7 @@ def _with_positionals(line: str, words) -> str:
         if n is None:
             return " ".join(shlex.quote(w) for w in words[1:])
         return shlex.quote(words[int(n)]) if int(n) < len(words) else ""
-    return _POSITIONAL.sub(sub, line)
+    return _POSITIONAL.sub(sub, line[:cut]) + line[cut:]
 
 
 # the files that are a command's input or another of its descriptors: what `source`, `.`, a shell or an interpreter
