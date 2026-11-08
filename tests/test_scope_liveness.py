@@ -380,6 +380,47 @@ class StepOfAMemberWhoEndedTests(EndedTankCase):
         self.assertIn("its owner Backend engineer (Tank) had gone stale: silent for", run["history"][-1]["why"])
 
 
+class RunEndWithAMemberWhoEndedTests(EndedTankCase):
+    # dev progress done refused while any running step had a crew member as owner, even one that had ended or gone
+    # stale (the tech lead, on the previous session's run): only a member that still works, or one devkit knows
+    # nothing about, holds the run's end; a step whose owner ended closes with the run, and its history says so
+    def end_history(self, run, name):
+        return [h for h in run["history"] if h["step"] == name and h["to"] == "done"][-1]
+
+    def test_the_run_ends_when_the_owner_of_its_running_step_ended(self):
+        self.ended_tank(["export api"], "Tank: export api", assign="export api")
+        run = pg.step("export shipped", kind="done", why="the review is out of this test", now=self.now)
+        self.assertEqual((run["state"], run["plan"][0]["state"]), ("done", "done"))
+        h = self.end_history(run, "export api")
+        self.assertEqual((h["from"], h["by"]), ("running", "main"))
+        self.assertIn("its owner Backend engineer (Tank) had ended: Claude Code recorded it finished", h["why"])
+        self.assertIn("export shipped", h["why"])
+
+    def test_the_run_ends_when_the_owner_of_its_running_step_went_stale(self):
+        self.stale_tank(["export api"], "Tank: export api", assign="export api")
+        run = pg.step("export shipped", kind="done", why="the review is out of this test", now=self.now)
+        self.assertEqual((run["state"], run["plan"][0]["state"]), ("done", "done"))
+        self.assertIn("its owner Backend engineer (Tank) had gone stale: silent for",
+                      self.end_history(run, "export api")["why"])
+
+    def test_only_a_member_that_works_or_that_devkit_knows_nothing_about_holds_the_run_end(self):
+        # the Backend engineer (Tank) ended, the Senior engineer (Neo) works, and the csv step names a lane this run
+        # has no record of: unknown, which counts as working
+        self.ended_tank(["export api", "parser", "csv"], "Tank: export api", assign="export api")
+        pg.assign("parser", "Neo", now=self.now - MIN)
+        launch("a_neo", "devkit:neo", "Neo: parser", self.now - MIN)
+        run = pg.load_run("claude", "s1")
+        run["plan"][2].update(owner="a_gone", state="running", started=self.now - MIN)
+        pg.run_path("claude", "s1").write_text(json.dumps(run))
+        with self.assertRaises(pg.StepError) as e:  # neither --force nor --why ends a member's work
+            pg.step("export shipped", kind="done", force=True, why="out of time", now=self.now)
+        self.assertIn("“parser” by Senior engineer (Neo)", str(e.exception))
+        self.assertIn("“csv”", str(e.exception))
+        self.assertNotIn("export api", str(e.exception))
+        run = pg.load_run("claude", "s1")
+        self.assertEqual((run["state"], [s["state"] for s in run["plan"]]), ("running", ["running"] * 3))
+
+
 class OwnRunTests(OwnerCase):
     # the caller's own run: the caller works in its session, so that session works even when its record is missing,
     # as scope_holders reads it (own=True); assign, delegate, a message and a step close read their own run so too

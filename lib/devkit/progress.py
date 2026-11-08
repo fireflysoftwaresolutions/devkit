@@ -3720,15 +3720,31 @@ def check_close(run, target, text, explicit, force=False, now: float | None = No
     return gone
 
 
-def _refuse_members_working(run):
-    """The run ends only when no crew member owns a running step: ending it would close work its member still does,
-    and leave its lane running inside a finished run. Neither --force nor --why passes it. Raises StepError naming
-    each member and step, and what to do instead."""
+def _refuse_members_working(run, now: float | None = None) -> dict:
+    """The run ends only when no crew member still works on a running step: ending it would close work its member
+    still does, and leave its lane running inside a finished run. A step whose owner ended or went stale (lane_gone
+    over lane_states of the caller's own run, as check_close and working_agents read it) does not hold the end; a
+    lane the run has no record of is unknown, which counts as working. Neither --force nor --why passes it. Raises
+    StepError naming each working member and step, and what to do instead. -> {step name: the words that tell the
+    run's history its owner had ended}, for the steps the end closes over an owner that ended"""
     from . import crew
-    working = [s for s in run.get("plan") or [] if s.get("state") == "running" and (s.get("owner") or "main") != "main"]
-    if not working:
-        return
+    owned = [s for s in run.get("plan") or [] if s.get("state") == "running" and (s.get("owner") or "main") != "main"]
+    if not owned:
+        return {}
     lanes_ = run.get("agents") or {}
+    states = lane_states(run, now, own=True) if any((lanes_.get(s["owner"]) or {}).get("state") == "running"
+                                                    for s in owned) else {}
+    working, gone = [], {}
+    for s in owned:
+        lane = lanes_.get(s["owner"])
+        g = lane_gone(s["owner"], lane, states)
+        if g:
+            gone[s["name"]] = (f"its owner {crew.who(_lane_name(lane))} had "
+                               f"{'gone stale' if g[0] == 'stale' else 'ended'}: {g[1]}")
+        else:
+            working.append(s)
+    if not working:
+        return gone
     names = "; ".join(f"“{s['name']}” by {crew.who(_lane_name(lanes_.get(s['owner']) or {}))}" for s in working)
     first = working[0]["name"]
     raise StepError(f"crew members still work on steps of this run: {names}. Wait for their reports (each step closes "
@@ -4026,7 +4042,7 @@ def step(text: str, nxt: str = "", cwd: str | None = None, kind: str = "step", c
             if waiting and not force:
                 raise StepError("decisions still waiting for the developer: " + ", ".join(
                     f"{d['id']} ({d['question'][:60]})" for d in waiting) + ". Ask, then dev crew decide <id> \"…\".")
-            _refuse_members_working(run)
+            gone = _refuse_members_working(run, now)
             open_ = [s for s in plan if s.get("state") not in ("done", "skipped") and s.get("state") != "running"]
             if open_ and not force:
                 raise StepError("not finished: " + ", ".join(f"“{s['name']}” ({s.get('state')})" for s in open_) +
@@ -4055,7 +4071,9 @@ def step(text: str, nxt: str = "", cwd: str | None = None, kind: str = "step", c
                         _finish_step(run, s, now, agent, sid)
                     else:
                         s["state"] = "skipped"
-                    _log_change(run, s, old_state, s["state"], "main", text, now)
+                    _log_change(run, s, old_state, s["state"], "main",
+                                f"{gone[s['name']]}; closed with the run's end: {text}" if s["name"] in gone else text,
+                                now)
             closed = _close_decisions(run, "run ended", now)
             run.update(state="done", finished=now)
             _close(run, "turn", None, now)
