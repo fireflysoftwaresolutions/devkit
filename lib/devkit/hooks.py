@@ -1343,8 +1343,9 @@ def identity_change(cmd: str, cwd=None) -> list:
         if name == "unset":
             found += [a for a in argv[1:] if a.startswith("DEVKIT_") or "$" in a]
         found += [x for x in g._exports(name, argv[1:]) if x.startswith("DEVKIT_") or x == "?"]
-        if name in g._SHELLS:
-            texts += [argv[k + 1] for k in range(1, len(argv) - 1) if re.fullmatch(r"-[A-Za-z]*c[A-Za-z]*", argv[k])]
+        if name in g._SHELLS:  # the script of -c, and of +c, which bash 3.2 (macOS's /bin/bash) runs the same way
+            texts += [argv[k + 1] for k in range(1, len(argv) - 1)
+                      if re.fullmatch(r"[-+][A-Za-z]*c[A-Za-z]*", argv[k])]
         elif name == "eval":
             texts.append(" ".join(argv[1:]))
     seen = set()
