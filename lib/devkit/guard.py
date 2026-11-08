@@ -1161,6 +1161,43 @@ def _pipe_gate_open(cmd) -> str:
     return "hatch" if "DEVKIT_PIPE_OK" in names else ""
 
 
+# A wait for devkit's events or a CI run wakes the session when its command ends; work joined after it in the same
+# command line delays that wake until the work ends too, and runs whatever the wait reported.
+WAIT_REASON = ("This command waits for an event (`dev watch --wait` or `dev ci watch --wait`) and then does more work "
+               "in the same command line: the wait wakes you only when everything after it has ended, and what follows "
+               "runs whatever the wait reports. Run the wait on its own (a read-only filter such as `| tail -3` may "
+               "follow it), and act after it wakes you.")
+_FILTERS = frozenset({"tail", "head", "grep", "egrep", "fgrep", "rg", "cat", "wc", "jq", "cut", "sort", "uniq", "tr",
+                      "less", "more"})
+
+
+def _waits(argv) -> bool:
+    """A wait that ends when an event or a CI run does: `dev watch --wait`, `dev ci watch --wait`."""
+    dev = _dev_args(argv)
+    if not dev or not any(a == "--wait" or a.startswith("--wait=") for a in dev):
+        return False
+    return dev[:1] == ["watch"] or dev[:2] == ["ci", "watch"]
+
+
+def wait_then_work_refusal(cmd: str) -> str | None:
+    """WAIT_REASON when a wait (_waits) is followed in the same command line by anything but read-only filters it
+    pipes into: a command after `;`, `&&`, `||`, `&` or a new line."""
+    segs = split_commands(cmd, ops=True)
+    if not segs:
+        return None
+    for k, (argv0, _, op, _) in enumerate(segs):
+        if not _waits(_unwrap(argv0)):
+            continue
+        j = k
+        while segs[j][2] in ("|", "|&") and j + 1 < len(segs):
+            j += 1
+            if os.path.basename((_unwrap(segs[j][0]) or [""])[0]) not in _FILTERS:
+                return WAIT_REASON
+        if j + 1 < len(segs):
+            return WAIT_REASON
+    return None
+
+
 # The variables that tell a program an agent runs it (core.AGENT_MARKERS): a project's own tools read them to act
 # differently for agents, so an agent must not hide them.
 IDENTITY_REASON = ("This command hides from what it runs that an agent runs it: it unsets or blanks {name} (`unset`, "
@@ -1245,6 +1282,9 @@ def _check_bash_reading(cmd: str, cwd: str, agent: str):
         evidence_forgery(cmd, cwd or os.getcwd())
     if v:
         return v
+    why = wait_then_work_refusal(cmd)
+    if why:
+        return deny(why)
     if PIPE_GATE.search(cmd):
         how = _pipe_gate_open(cmd)
         if not how:

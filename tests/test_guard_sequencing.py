@@ -26,6 +26,25 @@ def check(cmd, agent="claude"):
     return v[1] if v and v[0] == "deny" else None
 
 
+class WaitAlone(unittest.TestCase):
+
+    def test_work_joined_after_a_wait_is_refused(self):
+        for cmd in ("dev ci watch --wait --branch main --sha 4aa253e 2>&1 | tail -3; echo next",
+                    "dev watch --wait && git status", "dev watch --wait; echo done", "dev watch --wait || true",
+                    "dev ci watch --wait --pr 12\nls", "dev watch --wait & ls",
+                    "dev ci watch --wait --pr 12 | python3 x.py"):
+            for agent in ("claude", "codex"):
+                with self.subTest(cmd=cmd, agent=agent):
+                    self.assertIn("act after it wakes you", check(cmd, agent) or "")
+
+    def test_a_wait_alone_or_with_read_only_filters_runs(self):
+        for cmd in ("dev ci watch --wait --branch main --sha 4aa253e 2>&1 | tail -3", "dev watch --wait",
+                    "dev watch --wait | grep -v x | tail -3", "dev watch --wait &", "cd lib && dev watch --wait",
+                    "dev ci watch --pr 12; echo done"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(check(cmd))
+
+
 class AgentIdentityStays(unittest.TestCase):
 
     def test_unsetting_or_blanking_an_identity_variable_is_refused(self):
