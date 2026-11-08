@@ -564,8 +564,8 @@ def parse_plan(plan) -> list:
         m = re.match(r"^(.*?)\s*[=@]\s*(\d[\dhm.\s]*)$", raw)
         name, est = (m.group(1).strip(), parse_minutes(m.group(2))) if m and parse_minutes(m.group(2)) else (raw, None)
         if "=" in name or re.search(r"@\s*\d", name):
-            raise StepError(f"step “{name}” holds another estimate: give each step as its own quoted spec "
-                            f"(dev progress add \"a=5h\" \"b=2h\") or separate the steps with ; (\"a=5h; b=2h\")")
+            raise StepError(f"step “{name}” holds another estimate: separate the steps with ; "
+                            f"(dev progress add \"a=5h; b=2h\")")
         out.append((name, est, after, act))
     return out
 

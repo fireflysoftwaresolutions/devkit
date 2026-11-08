@@ -1538,6 +1538,17 @@ class AddStepSpecTests(unittest.TestCase):
         self.assertIn("“a=5h b” holds another estimate", err)
         self.assertEqual([n for n, *_ in self.plan()], ["build"])
 
+    def test_the_command_the_refusal_suggests_adds_both_steps(self):
+        import re
+        import shlex
+        _, err = progress_cli("add", "a=5h", "b=2h")
+        suggested = re.findall(r"dev progress add ([^)]+)\)", err)
+        self.assertTrue(suggested, err)
+        for args in suggested:
+            pg.start("Release", plan=["build"], replace=True, why="test")
+            self.assertEqual(progress_cli("add", *shlex.split(args))[0], 0, args)
+            self.assertEqual(self.plan()[1:], [("a", 300.0, None), ("b", 120.0, None)])
+
 
 class CrewMessageLengthTests(unittest.TestCase):
     # a message over the limit was cut at 1,500 characters with no word to anyone, so the reader got half a text

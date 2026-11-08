@@ -112,9 +112,10 @@ The status, the dashboard, the handoff and the next session all read the plan, s
 `--force` skips the checks when the description really does mean that step.
 
 Add a step when the work **starts**, not when it ends: `dev progress add "<step>=30m"`, then `dev progress begin
-<step>`. Quote each step: `dev progress add "a=5h" "b=2h"` adds two steps, and a name that still holds an
-estimate, such as `a=5h b` from two specs run together, is refused. Time is measured per step from its start, so a step added after the fact gets no time of its own, and its
-minutes count for the step that was running.
+<step>`. Separate several steps with `;` (`dev progress add "a=5h; b=2h"`), or quote each spec that has a space
+in it (`dev progress add "guard lessons=5h" "test env=2h"`). Words without quotes make one spec, so a name that still
+holds an estimate, such as `a=5h b` from `dev progress add a=5h b=2h`, is refused. Time is measured per step from its
+start, so a step added after the fact gets no time of its own, and its minutes count for the step that was running.
 
 ### Time and estimates
 
