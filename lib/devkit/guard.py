@@ -1843,7 +1843,7 @@ _KNOWN_PROGRAMS = ("bash", "sh", "zsh", "dash", "ksh", "fish", "csh", "tcsh", "p
 _PROGRAM_DIRS = ("/bin", "/usr/bin", "/usr/local/bin", "/opt/homebrew/bin")
 
 
-def _family(name) -> str:
+def _program_family(name) -> str:
     """A program's name without its version and folder: python3.13 and python3 are python, ksh93 is ksh."""
     fam = re.sub(r"[0-9.]+$", "", os.path.basename(str(name or ""))).casefold()
     return {"pypy": "python", "nodejs": "node"}.get(fam, fam)
@@ -1852,7 +1852,7 @@ def _family(name) -> str:
 def _reads_programs(name) -> bool:
     """True for a shell or an interpreter the guard reads by its name."""
     base = os.path.basename(str(name or ""))
-    return base in _SHELLS or bool(_INTERP.match(base)) or _family(base) in _SHELLS
+    return base in _SHELLS or bool(_INTERP.match(base)) or _program_family(base) in _SHELLS
 
 
 @functools.lru_cache(maxsize=1)
@@ -1917,7 +1917,7 @@ def _as_run(argv, cwd) -> list:
     refusal of either stands: a binary that picks what to be by the name it is called by runs as written, any other
     as what it is."""
     real = _identify(argv[0], cwd) if argv else ""
-    return [argv, [real, *argv[1:]]] if real and _family(real) != _family(argv[0]) else [argv]
+    return [argv, [real, *argv[1:]]] if real and _program_family(real) != _program_family(argv[0]) else [argv]
 
 
 def _unknown_binary(argv, cwd) -> bool:
