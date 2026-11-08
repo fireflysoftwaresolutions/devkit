@@ -349,15 +349,36 @@ def _rel(path, top) -> str:
         return str(path)
 
 
+def gated_skills(member, roster=None) -> list:
+    """The skills the skills gate checks from a member's procedure, for its brief and for the gate itself:
+    [{"skill", "phase", "always"}], one per phase and skill, in procedure order. `always`: the phase's proof is owed
+    whatever files the member changes (a proof about files, FILE_PROOFS, is owed only for changes of its kind), so
+    every stop owes the skill; otherwise only a stop after work in that phase does (one of its devkit commands ran,
+    or its proof became owed). The skill rules add the skills of the files the member changes
+    (`skillguard.rules_for_files`)."""
+    m = _member(member, roster) or {}
+    out = []
+    for x in m.get("procedure") or []:
+        if not isinstance(x, dict):
+            continue
+        proof = " ".join(str(x.get("proof") or "").split())
+        for s in x.get("skills") or []:
+            out.append({"skill": s, "phase": x.get("phase"), "always": bool(proof) and proof not in FILE_PROOFS})
+    return out
+
+
 def _skill_findings(m, invocations, loaded, changed, top, kinds=()) -> list:
     """`changed`: the paths the skill rules match; `kinds`: the changed paths as the phases see them (repository
     paths), which decide the phases the member worked in."""
     need = {}  # short name -> (name as written, [why])
+    phases = {}
     for x in (m or {}).get("procedure") or []:
-        if not isinstance(x, dict) or not _phase_applied(x, invocations, kinds):
-            continue
-        for s in x.get("skills") or []:
-            need.setdefault(skillguard.short(s), (s, []))[1].append(f"the {x.get('phase')} phase of your procedure")
+        if isinstance(x, dict):
+            phases.setdefault(x.get("phase"), x)
+    for g in gated_skills(m or {}):
+        if g["always"] or _phase_applied(phases.get(g["phase"]) or {}, invocations, kinds):
+            need.setdefault(skillguard.short(g["skill"]), (g["skill"], []))[1].append(
+                f"the {g['phase']} phase of your procedure")
     for rule, matched in skillguard.rules_for_files(skillguard.delivered(changed)):
         names = ", ".join(_rel(f, top) for f in matched[:3]) + (" …" if len(matched) > 3 else "")
         for s in skillguard.required(rule, "claude"):

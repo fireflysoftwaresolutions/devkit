@@ -9,8 +9,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
-from devkit import skillguard  # noqa: E402
-from tests.test_crew_gates import KID, GateCase  # noqa: E402
+from devkit import gates, skillguard  # noqa: E402
+from tests.test_crew_gates import KID, KID_DOCS, GateCase  # noqa: E402
 
 UI_HAVE = {"test-driven-development", "testing", "docs", "communicating", "frontend-design", "impeccable"}
 
@@ -60,6 +60,20 @@ class RealRoster(GateCase):
         self.tx.bash('dev progress step "done" --check "12 tests pass"')
         self.assertEqual({m: self.skills_owed(m) for m in ("neo", "seraph", "sati", "hamann")},
                          {"neo": [], "seraph": [], "sati": [], "hamann": []})
+
+
+class GatedSkills(unittest.TestCase):
+    # what the brief tells a member the gate checks is what the gate checks: each phase's skills, and whether every
+    # stop owes them (a proof that is not about files) or only work in that phase does
+    def test_each_phase_names_its_skills_and_whether_every_stop_owes_them(self):
+        got = [(g["phase"], g["skill"], g["always"]) for g in gates.gated_skills(KID_DOCS)]
+        self.assertEqual(got, [("Build", "superpowers:test-driven-development", False), ("Document", "docs", False),
+                               ("Verify", "testing", False), ("Hand off", "communicating", True)])
+
+    # its scan proof is owed at every stop, so devsecops is the one skill every stop owes
+    def test_the_security_engineer_owes_devsecops_at_every_stop(self):
+        always = {g["skill"] for g in gates.gated_skills("keymaker") if g["always"]}
+        self.assertEqual(always, {"devsecops"})
 
 
 if __name__ == "__main__":
