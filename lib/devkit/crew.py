@@ -1041,6 +1041,9 @@ def brief_text(m: dict, task: str, scope: str = "", step=None, roster=None, cwd=
     else:
         b.append("The files this task needs and nothing beyond them. Ask the tech lead before you widen it: "
                  '`dev crew ask "<question>"`.')
+    # the guard lets a member write only in its own folder of the session scratchpad (guard.scratch_refusal)
+    b += ["", f"Your scratch folder is `scratchpad/{m['id']}/` in the session scratchpad: put logs, probes and other "
+              "temporary files there, never at the scratchpad's top level or in another member's folder."]
     from . import raci
     act = _brief_activity(m, task, step, roster, activity=activity, globs=globs)
     if act:  # the declaration the launch hook and the crew gates read, whatever language the task is written in

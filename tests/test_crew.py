@@ -444,6 +444,19 @@ class BriefTests(unittest.TestCase):
         a = cli.build_parser().parse_args(argv)  # the printed command is one the progress CLI accepts
         self.assertEqual((a.progress_cmd, a.which, a.to, a.scope), ("assign", "2", ["Neo"], "lib/parser/**,tests/test_parser.py"))
 
+    def test_every_brief_names_the_member_s_own_scratch_folder(self):
+        # the guard lets a member write only in scratchpad/<its id>/ of the session scratchpad; a brief that does not
+        # say so sends members to the shared top level, where the guard refuses them (lesson L-fxs9q5evz83)
+        with tempfile.TemporaryDirectory() as d:
+            for mid, scope in (("neo", "lib/parser/**"), ("seraph", ""), ("smith", "")):
+                with self.subTest(member=mid):
+                    text = ui.ANSI_RE.sub("", crew.brief_text(crew.member(mid), "Fix it.", scope, cwd=d))
+                    scope_part = text.split("## Scope", 1)[1].split("## Skills", 1)[0]
+                    self.assertIn(f"`scratchpad/{mid}/`", scope_part)
+                    for other in ("neo", "seraph", "smith"):
+                        if other != mid:
+                            self.assertNotIn(f"scratchpad/{other}/", scope_part)
+
     def test_every_brief_and_agent_file_has_the_member_end_its_background_work_before_it_reports(self):
         # Claude Code kept members listed for hours after their report while a background command they started ran
         rule = ("Before your final report, every background command you started has ended: keep working until it ends, "
