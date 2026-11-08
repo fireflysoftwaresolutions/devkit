@@ -48,7 +48,7 @@ EXPECT_APP = {
     "docs/guides/setup.md": ["docs"],
     "README.md": ["docs"],
     "CHANGELOG.md": ["docs"],
-    "VERSION": ["release"],
+    "VERSION": ["delivery"],
     "plugin/skills/testing/SKILL.md": ["docs"],
     "plugin/skills/delivery/references/flow.md": ["docs"],
     "plugin/agents/neo.md": ["docs"],
@@ -129,6 +129,10 @@ class RuleFixtures(unittest.TestCase):
         self.assert_rules(["docs/crew.md", "docs/guides/setup.md", "README.md", "plugin/skills/testing/SKILL.md",
                            "plugin/skills/delivery/references/flow.md", "plugin/agents/neo.md",
                            "plugin/commands/ship.md", "agents/AGENTS.md"])
+
+    # a changelog entry is documentation; a version bump or a release config is release work
+    def test_changelog_is_docs_and_version_is_release(self):
+        self.assert_rules(["CHANGELOG.md", "VERSION"])
 
 
 if __name__ == "__main__":

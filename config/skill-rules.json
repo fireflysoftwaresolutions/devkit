@@ -374,7 +374,6 @@
         ]
       },
       "files": [
-        "CHANGELOG.md",
         "VERSION",
         "cliff.toml",
         ".release-please-manifest.json",
