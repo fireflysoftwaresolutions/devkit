@@ -386,6 +386,8 @@ def _newlines_to_semicolons(cmd: str, op: str = ";") -> str:
             q = ch
         elif ch == "\n":
             ch = op
+        elif ch == "=" and _proc_subst_at(cmd, i):  # zsh's `=(…)` is read as the `<(…)` it runs as
+            ch = "<"
         out.append(ch)
         i += 1
     return "".join(out)
@@ -411,6 +413,12 @@ def _paren_kind(s: str, k: int) -> str:
     if not prev or prev in _COMMENT_AFTER or _FUNCTION_PARENS.match(s, k):
         return "o"
     return "?"
+
+
+def _proc_subst_at(s: str, i: int) -> bool:
+    """True when s[i] opens a process substitution: `<(…)`, `>(…)`, or zsh's `=(…)` at the start of a word, which runs
+    its command as `<(…)` does and stands for a temporary file that holds what it wrote (`. =(echo …)` runs it)."""
+    return s[i + 1:i + 2] == "(" and (s[i] in "<>" or (s[i] == "=" and (i == 0 or s[i - 1] in _COMMENT_AFTER)))
 
 
 class _Parens:
@@ -4939,8 +4947,8 @@ def _routed_lanes(cmd: str) -> int:
 
 def _subst(s: str, quotes: bool, procs: list | None = None) -> list:
     """The bodies of the substitutions the shell runs in `s`: `$(…)`, backticks, and with `quotes` (a command line,
-    not a heredoc body) `<(…)` and `>(…)` outside quotes. `procs`: a list that gets, for each body, whether it is a
-    process substitution."""
+    not a heredoc body) `<(…)`, `>(…)` and zsh's `=(…)` outside quotes. `procs`: a list that gets, for each body,
+    whether it is a process substitution."""
     out, i, n, q, parens = [], 0, len(s), None, _Parens(s)
     while i < n:
         c = s[i]
@@ -4959,9 +4967,9 @@ def _subst(s: str, quotes: bool, procs: list | None = None) -> list:
             j = s.find("\n", i)
             i = n if j < 0 else j
             continue
-        elif s.startswith("$(", i) or (quotes and q is None and c in "<>" and s[i + 1:i + 2] == "("):
-            # `<(…)` and `>(…)`: process substitutions, which the shell runs as `$(…)` (never in double quotes or in a
-            # heredoc body, where they are text)
+        elif s.startswith("$(", i) or (quotes and q is None and _proc_subst_at(s, i)):
+            # `<(…)`, `>(…)` and zsh's `=(…)`: process substitutions, which the shell runs as `$(…)` (never in double
+            # quotes or in a heredoc body, where they are text)
             j, depth, qq = i + 2, 1, None
             while j < n and depth:
                 d = s[j]
@@ -6239,8 +6247,8 @@ def _close_paren(s: str, j: int) -> int:
 
 
 def _mask_substitutions(s: str):
-    """(the command with each `$(…)`, backtick and `<(…)`/`>(…)` the shell runs replaced by a placeholder word, the
-    commands inside them), or None for an arithmetic `$((…))` (zsh evaluates the variables in it as code) or a
+    """(the command with each `$(…)`, backtick and `<(…)`/`>(…)`/`=(…)` the shell runs replaced by a placeholder
+    word, the commands inside them), or None for an arithmetic `$((…))` (zsh evaluates the variables in it as code) or a
     substitution that does not end. Single quotes and comments are text."""
     out, inner, i, n, q, parens = [], [], 0, len(s), None, _Parens(s)
     while i < n:
@@ -6256,7 +6264,7 @@ def _mask_substitutions(s: str):
             continue
         if s.startswith("$((", i):
             return None
-        if s.startswith("$(", i) or (q is None and c in "<>" and s[i + 1:i + 2] == "("):
+        if s.startswith("$(", i) or (q is None and _proc_subst_at(s, i)):
             j = _close_paren(s, i + 2)
             if j < 0:
                 return None

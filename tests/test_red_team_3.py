@@ -96,5 +96,30 @@ class HeredocsOutsideExpansions(Case):
                 self.assertIsNone(member(cmd))
 
 
+class ZshFileSubstitution(Case):
+    """zsh's `=(…)` at the start of a word runs its command as `<(…)` does and stands for a temporary file that holds
+    what it wrote, so `. =(…)` sources that output."""
+
+    def test_its_command_and_the_program_it_feeds_source_are_judged(self):
+        for cmd in ("cat =(gh pr merge 12)", "diff =(true) =(gh pr merge 12)", "echo x =(true)# =(gh pr merge 12)"):
+            with self.subTest(cmd=cmd):
+                self.assertRefusedEverywhere(cmd)
+        for cmd in (". =(echo gh pr merge 12)", "source =(echo gh pr merge 12)"):
+            with self.subTest(sourced=cmd):
+                self.assertIn("merges PR 12", main(cmd) or "")
+                self.assertIn("merges PR 12", member(cmd) or "")
+                self.assertIsNotNone(member(cmd, level="review", who="seraph"))
+        self.assertIsNotNone(check(". =(echo dev install)"))
+
+    def test_quoted_text_an_array_and_reads_stay_open(self):
+        for cmd in ('echo "=(gh pr merge 12)"', "echo '=(gh pr merge 12)'", "arr=(a b); echo $arr",
+                    "diff =(git show HEAD:README.md) =(git show HEAD~1:README.md)"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(main(cmd))
+                self.assertIsNone(check(cmd))
+                self.assertIsNone(member(cmd))
+        self.assertIsNone(member("diff =(git show HEAD:README.md) =(git log -1)", level="review", who="seraph"))
+
+
 if __name__ == "__main__":
     unittest.main()

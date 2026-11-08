@@ -18,7 +18,9 @@ Shell commands are tokenized: chains (`&&`, `||`, `;`, `|`, new lines) are check
 the directory used to resolve later paths, leading `VAR=value`, `sudo`, `env`, `command`, `nohup`, `time`, `exec`,
 `builtin`, `nice`, and `caffeinate` prefixes are skipped, heredoc bodies are treated as data, and output redirections
 (`>`, `>>`) are checked as writes. The guard also reads what the shell runs inside a command: `$(…)` and backtick
-substitutions, process substitutions (`<(…)` and `>(…)` outside quotes, so `cat <(gh pr merge 12)` is a merge),
+substitutions, process substitutions (`<(…)` and `>(…)` outside quotes, and zsh's `=(…)` at the start of a word,
+which runs its command the same way and stands for a file that holds its output, so `cat <(gh pr merge 12)` is a
+merge and `. =(echo …)` runs what echo writes),
 `sh -c` and `eval` strings (with the words after a `sh -c` line in place of its `$0`, `$1`, and
 `"$@"`, unless the line can bind them again with `shift`, `set` with operands, zsh's `argv` or `1=…`, or a function:
 then they stay variables, and one that names the program is `unknown`, so `bash -c 'shift; $1 pr merge 12' sh echo
