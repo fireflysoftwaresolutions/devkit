@@ -265,18 +265,41 @@ class WriteDetectionTests(unittest.TestCase):
 
 class ScopeBaseTests(unittest.TestCase):
 
+    def workspace(self):
+        # a workspace laid out like the developer's, built for the test so it holds wherever the tree under test sits
+        # (a main checkout, a managed worktree, an exported copy without .git): the run's repository under its
+        # two-part id <dev>/<owner>/<repo>, whose origin names that id, and a managed worktree of it below
+        # <dev>/.worktrees/<owner>/<repo>/. It sits in the run's home: devkit gives a checkout in a temp folder no
+        # project
+        d = tempfile.mkdtemp(dir=str(core.HOME))
+        self.addCleanup(shutil.rmtree, d, True)
+        dev = Path(d) / "Development"
+        main = dev / "fireflysoftwaresolutions" / "devkit"
+        (main / "lib" / "devkit").mkdir(parents=True)
+        (main / "lib" / "devkit" / "guard.py").write_text("DENY = True\n")
+        (main / "README.md").write_text("devkit\n")
+        _git(main, "init", "-q")
+        _git(main, "remote", "add", "origin", "https://github.com/fireflysoftwaresolutions/devkit.git")
+        _git(main, "-c", "user.email=t@example.com", "-c", "user.name=t", "add", ".")
+        _git(main, "-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-qm", "init")
+        wt = dev / ".worktrees" / "fireflysoftwaresolutions" / "devkit" / "test-x"
+        _git(main, "worktree", "add", "-q", "-b", "test/x", str(wt))
+        return dev, "fireflysoftwaresolutions/devkit", main, wt
+
     def test_scope_globs_are_relative_to_the_runs_repository_whatever_the_session_folder(self):
-        path = str(ROOT / "lib" / "devkit" / "guard.py")
+        dev, project, main, wt = self.workspace()
+        path = str(main / "lib" / "devkit" / "guard.py")
         home = str(core.HOME)
         self.assertFalse(guard.scope_holds(path, home, ["lib/devkit/guard.py"]))  # what the session's cwd gives
-        # the workspace and the run's project id that name this checkout, wherever it sits (a main checkout at
-        # <dev>/<owner>/<repo> or a managed worktree below .worktrees/)
-        with mock.patch.object(guard, "DEV", ROOT.parent):
-            base = guard.scope_base(ROOT.name, home)
-            self.assertEqual(os.path.realpath(base), os.path.realpath(ROOT))
+        # the run's two-part project id names the main checkout from a session outside it, and a session in the
+        # checkout or in its managed worktree counts from the folder it works in
+        with mock.patch.object(guard, "DEV", dev):
+            base = guard.scope_base(project, home)
+            self.assertEqual(os.path.realpath(base), os.path.realpath(main))
             self.assertTrue(guard.scope_holds(path, home, ["lib/devkit/guard.py"], base=base))
             self.assertFalse(guard.scope_holds(path, home, ["tests/**"], base=base))
-            self.assertEqual(os.path.realpath(guard.scope_base(ROOT.name, CWD + "/lib")), os.path.realpath(ROOT))
+            self.assertEqual(os.path.realpath(guard.scope_base(project, str(main / "lib"))), os.path.realpath(main))
+            self.assertEqual(os.path.realpath(guard.scope_base(project, str(wt / "lib"))), os.path.realpath(wt))
 
     def test_a_session_in_a_worktree_of_the_runs_repository_counts_from_that_worktree(self):
         with tempfile.TemporaryDirectory() as d:
@@ -291,10 +314,11 @@ class ScopeBaseTests(unittest.TestCase):
     def test_a_plan_named_by_the_scope_is_exempt_from_a_session_in_home(self):
         plan = core.HANDOFF / "plans" / "fireflysoftwaresolutions" / "devkit" / "f7-probe.md"
         scope = [str(core.HANDOFF / "plans" / "fireflysoftwaresolutions" / "devkit") + "/**"]
-        with mock.patch.object(guard, "DEV", ROOT.parent):
-            base = guard.scope_base(ROOT.name, str(core.HOME))
+        dev, project, main, _ = self.workspace()
+        with mock.patch.object(guard, "DEV", dev):
+            base = guard.scope_base(project, str(core.HOME))
             self.assertTrue(guard.member_write_exempt(str(plan), str(core.HOME), scope, "oracle", base=base))
-            self.assertFalse(guard.member_write_exempt(str(ROOT / "README.md"), str(core.HOME), scope, "oracle",
+            self.assertFalse(guard.member_write_exempt(str(main / "README.md"), str(core.HOME), scope, "oracle",
                                                        base=base))
 
 
