@@ -4209,21 +4209,89 @@ def _with_positionals(line: str, words) -> str:
     return _POSITIONAL.sub(sub, line)
 
 
-# the files that are a command's input or another of its descriptors: what `source` or `.` reads from them is fed in
-_FED_FILES = re.compile(r"/dev/(?:stdin|fd/\d+)|/proc/self/fd/\d+")
+# the files that are a command's input or another of its descriptors: what `source`, `.`, a shell or an interpreter
+# reads from them is what the command feeds it
+_FED_FILES = re.compile(r"/dev/(?:stdin|fd/\d+)|/proc/(?:self|thread-self|\d+)/fd/\d+")
+
+
+def _descriptor(word, cwd):
+    """The descriptor file `word` opens (`/dev/stdin`, `/dev/fd/3`, `/proc/self/fd/0`) as the system opens it: made
+    absolute in the folder the command runs in, with `//`, `.` and `..` read as the kernel reads them and each
+    symbolic link followed, so `/dev/fd//0`, `//dev/stdin`, `cd /dev && . stdin` and a link to /dev/stdin are all
+    its input. False for any other file; None when the guard cannot tell which file it is (a variable, a
+    substitution, a glob, a folder only the run knows, a loop of links)."""
+    word = str(word)
+    if not word or re.search(r"[$`*?\[]", word):
+        return None
+    p = _path_text(word)
+    if p is None:
+        return None
+    if not os.path.isabs(p):
+        if cwd is None or str(cwd) == str(UNKNOWN):
+            return None
+        p = os.path.join(_c_path(cwd), p)
+    parts, at, hops = [x for x in p.split("/") if x], "/", 0
+    while True:
+        whole = os.path.normpath(os.path.join(at, *parts))
+        if _FED_FILES.fullmatch(whole):
+            return whole
+        if not parts:
+            return False
+        part = parts.pop(0)
+        if part == ".":
+            continue
+        if part == "..":
+            at = os.path.dirname(at)
+            continue
+        step = os.path.join(at, part)
+        try:
+            link = os.readlink(step)
+        except (OSError, ValueError):  # no link (or nothing there): the path goes on from it
+            at = step
+            continue
+        hops += 1
+        if hops > 40:
+            return None
+        parts, at = [x for x in link.split("/") if x] + parts, "/" if link.startswith("/") else at
+
+
+def _source_args(args) -> list:
+    """The words of `source` or `.` after `--`, which ends their options in bash and zsh."""
+    return list(args[1:]) if list(args[:1]) == ["--"] else list(args)
+
+
+def _source_target(args, cwd):
+    """Which file `source` or `.` reads, as _descriptor tells: its path ("<(" for a process substitution), False for
+    a file the guard reads, None when the guard cannot tell (also after an option it does not read)."""
+    args = _source_args(args)
+    if not args:
+        return False
+    if args[0] == "<(":
+        return "<("
+    if args[0].startswith("-") and args[0] != "-":
+        return None
+    return _descriptor(args[0], cwd)
+
+
+def _reads_input(word, cwd) -> bool:
+    """True when the file `word` names is the command's input (_descriptor: `/dev/stdin`, `/dev/fd/0`, `//dev/stdin`,
+    a link to it)."""
+    d = word if isinstance(word, str) and _FED_FILES.fullmatch(word) else _descriptor(word, cwd)
+    return bool(d) and bool(re.search(r"/(?:stdin|0)\Z", d))
 
 
 def _sourced(args, cwd, bodies) -> list:
     """What `source` or `.` runs -> [(text, typed, path)], as for a shell's script (_shell_sources): the file it
     names; for its input or another descriptor (`. /dev/stdin <<< '…'`, `source /dev/fd/3`), the command's heredocs
-    and here-strings and what a pipe feeds it (`bodies`); for a process substitution (`source <(echo …)`), what its
-    command writes (_produced)."""
+    and here-strings and what a pipe feeds it (`bodies`), also when the guard cannot tell which file it reads
+    (`source $f <<< '…'`); for a process substitution (`source <(echo …)`), what its command writes (_produced)."""
+    target, args = _source_target(args, cwd), _source_args(args)
     if not args:
         return []
-    if args[0] == "<(":
+    if target == "<(":
         sub = _unwrap(args[1:])
         return [(_produced(sub, cwd), False, _cat_path(sub, cwd))] if sub else []
-    if _FED_FILES.fullmatch(args[0]):
+    if target is not False:
         return [(b, True, None) for b in bodies]
     path = resolve(args[0], cwd)
     return [(_read_small(path), False, path)]
@@ -4246,9 +4314,11 @@ def _shell_sources(args, cwd, bodies, name="bash") -> list:
         return [(_with_positionals(args[k], args[k + 1:]), True, None)]
     if kind == "stdin":
         return [(_with_positionals(b, ["sh", *args[k:]]), True, None) for b in bodies]
-    if kind == "script":
+    if kind == "script" and _descriptor(args[k], cwd) is False:
         path = resolve(args[k], cwd)
         return [(_read_small(path), False, path)]
+    if kind == "script":  # `bash /dev/stdin <<< '…'`, `bash $f <<< '…'`: what the command feeds it, as for source
+        return [(b, True, None) for b in bodies]
     return [(b, True, None) for b in bodies]
 
 
@@ -4314,7 +4384,7 @@ def _program(argv, cwd, bodies):
             script, i = a, i + 1
         break
     rest = args[i:]
-    if script in ("/dev/stdin", "/dev/fd/0"):  # its input, as `-` is
+    if script and script != "-" and _reads_input(script, cwd):  # its input, as `-` is
         script = "-"
     if script and script != "-":
         code.append(_read_small(resolve(script, cwd)))
@@ -4630,7 +4700,7 @@ def _forged_argv(argv, cwd, bodies, here, prev, depth) -> str:
             texts += here + ([_produced(prev, cwd)] if prev else [])
     elif name in ("source", ".") and args:
         texts = [t for t, _, _ in _sourced(args, cwd, bodies)]
-        if _FED_FILES.fullmatch(args[0]):
+        if _source_target(args, cwd) not in (False, "<("):
             texts += here + ([_produced(prev, cwd)] if prev else [])
     elif name == "eval":
         texts = [" ".join(args)]
@@ -6893,6 +6963,12 @@ def _unknown(text) -> tuple:
     return ("unknown", "cmd-" + hashlib.sha256(str(text).encode()).hexdigest()[:10])
 
 
+def _unsure_action(argv, what) -> tuple:
+    """_unknown for a command the guard cannot be sure of, with what it cannot tell, which the refusal names."""
+    action, target = _unknown(" ".join(argv))
+    return action, target, "", ("unsure", what)
+
+
 def _unread_action(argv, path) -> tuple:
     """_unknown for a command whose program or script the gate must read and cannot, with the file it left
     unread, which the refusal names."""
@@ -7878,7 +7954,7 @@ def _fed_program(argv, segs, k, files, cwd) -> tuple:
     program given in the words (`sh -c …`, `python3 x.py`) is fed nothing here. `source` and `.` are fed the same
     way when their file is their input (`echo '…' | . /dev/stdin`, `source /dev/stdin < f`)."""
     name = os.path.basename(argv[0]) if argv else ""
-    sourced = name in ("source", ".") and len(argv) > 1 and bool(_FED_FILES.fullmatch(argv[1]))
+    sourced = name in ("source", ".") and len(argv) > 1 and _source_target(argv[1:], cwd) not in (False, "<(")
     if not argv or (name not in _SHELLS and not _INTERP.match(name) and not sourced) or \
             (name in _SHELLS and _shell_args(argv[1:], name)[2]):  # `bash -n < f` only parses what it reads
         return argv, [], []
@@ -7894,7 +7970,7 @@ def _fed_program(argv, segs, k, files, cwd) -> tuple:
                 argv = [*argv[:j], "-"]
         stdin = sourced or (_reads_stdin(argv[1:], name) if name in _SHELLS else
                             _program_source(argv, whole=True) == "none") or \
-            any(a in ("/dev/stdin", "/dev/fd/0") for a in argv[1:])
+            any(_reads_input(a, cwd) for a in argv[1:])
         if stdin:
             prev = _unwrap(segs[k - 1][0]) if k else []
             if prev and segs[k - 1][2] in ("|", "|&"):
@@ -8130,8 +8206,9 @@ def _argv_actions(argv, cwd, bodies, depth):
             texts = [(text, path) for text, _, path in _shell_sources(args, cwd, bodies, name)]
         elif name in ("source", ".") and args:
             texts = [(text, path) for text, _, path in _sourced(args, cwd, bodies)]
-            if _FED_FILES.fullmatch(args[0]) and args[0] not in ("/dev/stdin", "/dev/fd/0", "/proc/self/fd/0") \
-                    and not texts:  # `exec 3< f; . /dev/fd/3`: a descriptor the command does not show may hold anything
+            target = _source_target(args, cwd)
+            if target and target != "<(" and not _reads_input(target, cwd) and not texts:
+                # `exec 3< f; . /dev/fd/3`: a descriptor the command does not show may hold anything
                 out += _found([_unknown(" ".join(argv))], argv, cwd)
     if unread:  # `sh big.sh`, `source big.sh`: a script too large or unreadable may do anything
         out += _found([_unread_action(argv, unread[0])], argv, cwd)
@@ -8681,6 +8758,12 @@ def _text_actions(text, cwd, depth=0, from_code=False, expand=True):
         argv, fed, unread = _fed_program(argv, segs, k, ins[k] if k < len(ins) else [], cwd)
         if unread:  # `sh < big.sh`, `cat big.py | python3`: a program too large or unreadable may do anything
             out += _found([_unread_action(argv, unread[0])], argv0, cwd)
+        if name in ("source", ".") and _source_target(argv[1:], cwd) is None and \
+                (bodies or fed or (ins[k] if k < len(ins) else []) or (k and segs[k - 1][2] in ("|", "|&"))):
+            # `source $f <<< '…'`: it may read what the command feeds it, which the guard cannot tell
+            word = (_source_args(argv[1:]) or [""])[0]
+            out += _found([_unsure_action(argv, f"what it reads from {_code(word)}, a file the guard cannot place, "
+                                                f"which may be the input the command feeds it")], argv0, cwd)
         more = _argv_actions(argv, here, bodies + [t for t, _ in fed]
                              if _INTERP.match(name) or name in ("source", ".") else bodies, depth)
         if more is None:
@@ -8864,6 +8947,8 @@ def _what(a) -> str:
     if (a.get("why") or ("",))[0] == "unread":  # a program or script too large or unreadable to judge
         return (f"runs {tilde(a['why'][1])}, which the guard cannot read (too large or unreadable), so it may be any "
                 f"action, tier 2 included (command {a['target']})")
+    if (a.get("why") or ("",))[0] == "unsure":  # the guard cannot tell what runs
+        return f"runs {a['why'][1]}, so it may be any action, tier 2 included (command {a['target']})"
     if a.get("why"):  # B2b: a push of an embargoed branch, or of a branch while the note cannot be read
         return (f"sends an embargoed branch or its commits to the remote, a decision only the developer makes "
                 f"({a['target']})")

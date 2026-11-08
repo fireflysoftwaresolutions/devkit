@@ -4,7 +4,10 @@
 # holds one rule of how the shells read a command, the refused forms it closes (each ran its harmless twin, with
 # `echo PROOF >&2` in place of the action, in /bin/bash and /bin/zsh), and the ordinary commands it must leave alone.
 # Run: python3 -m unittest tests.test_red_team_3 -v
+import os
+import shutil
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -119,6 +122,52 @@ class ZshFileSubstitution(Case):
                 self.assertIsNone(check(cmd))
                 self.assertIsNone(member(cmd))
         self.assertIsNone(member("diff =(git show HEAD:README.md) =(git log -1)", level="review", who="seraph"))
+
+
+class SourcedFilesAreResolved(Case):
+    """The file `source` or `.` reads is resolved as the system opens it (after `--`, in the folder the command runs
+    in, with `//`, `.`, `..` and symbolic links read) before the guard asks whether it is the command's input; where
+    it cannot tell which file it is and the command feeds it a here-string, a heredoc, a redirect or a pipe, the
+    command is unknown."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="rt3-")
+        self.addCleanup(shutil.rmtree, self.tmp)
+        os.symlink("/dev/stdin", os.path.join(self.tmp, "stdin-link"))
+        os.symlink("/dev/fd/0", os.path.join(self.tmp, "fd0-link"))
+        os.symlink("/dev", os.path.join(self.tmp, "devdir"))
+        Path(self.tmp, "script.sh").write_text("echo hi\n")
+        Path(self.tmp, "fed.txt").write_text("gh pr merge 12\n")
+
+    def test_a_descriptor_written_another_way_is_the_input(self):
+        t = self.tmp
+        for cmd in ("source -- /dev/stdin <<< 'gh pr merge 12'", ". -- /dev/stdin <<< 'gh pr merge 12'",
+                    "source /dev/fd//0 <<< 'gh pr merge 12'", "source //dev/stdin <<< 'gh pr merge 12'",
+                    "source /dev/./stdin <<< 'gh pr merge 12'", "source /dev/../dev/stdin <<< 'gh pr merge 12'",
+                    "cd /dev && source stdin <<< 'gh pr merge 12'", "cd /dev/fd && . ./0 <<< 'gh pr merge 12'",
+                    f"source {t}/stdin-link <<< 'gh pr merge 12'", f". {t}/fd0-link <<< 'gh pr merge 12'",
+                    f"source {t}/devdir/stdin <<< 'gh pr merge 12'", f"source /dev/stdin < {t}/fed.txt",
+                    "echo 'gh pr merge 12' | . //dev/stdin", "bash //dev/stdin <<< 'gh pr merge 12'",
+                    "python3 //dev/stdin <<< 'import os; os.system(\"gh pr merge 12\")'"):
+            with self.subTest(cmd=cmd):
+                self.assertIn("merges PR 12", main(cmd) or "")
+                self.assertIn("merges PR 12", member(cmd) or "")
+
+    def test_a_file_the_guard_cannot_place_that_is_fed_is_unknown(self):
+        t = self.tmp
+        for cmd in ("f=/dev/stdin; source $f <<< 'gh pr merge 12'", "source $f <<< 'gh pr merge 12'",
+                    "echo 'gh pr merge 12' | source \"$F\"", f"source \"$F\" < {t}/fed.txt",
+                    "source -p /dev stdin <<< 'gh pr merge 12'", "source /dev/fd//3 3<<< 'gh pr merge 12'"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNotNone(main(cmd))
+                self.assertIsNotNone(member(cmd))
+
+    def test_a_file_it_can_read_and_an_unfed_variable_stay_open(self):
+        for cmd in ("source ./script.sh", "source -- ./script.sh", ". ./script.sh", "source $VENV/bin/activate",
+                    "source /dev/stdin <<< 'echo hi'", "read -r line < script.sh", "cat script.sh | sh"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(main(cmd, cwd=self.tmp))
+                self.assertIsNone(member(cmd, cwd=self.tmp))
 
 
 if __name__ == "__main__":
