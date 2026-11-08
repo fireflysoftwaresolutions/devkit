@@ -303,10 +303,16 @@
       ],
       "files": [
         "README.md",
+        "docs/*.md",
         "docs/**/*.md",
         "*.mdx",
         "CHANGELOG.md",
-        "CONTRIBUTING.md"
+        "CONTRIBUTING.md",
+        "plugin/skills/**",
+        "**/SKILL.md",
+        "plugin/agents/*.md",
+        "plugin/commands/*.md",
+        "agents/AGENTS.md"
       ],
       "skills": {
         "claude": [
