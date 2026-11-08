@@ -173,7 +173,8 @@ class RefusalRecordTests(HookCase):
     def test_guard_refusals_name_the_crew_member(self):
         pg.start("Work", plan=["parser"])
         self.hook("guard", self.bash("echo '{}' | dev hook prompt --agent claude", aid="a_tank"), real_guard=True)
-        self.hook("guard", self.bash("cd lib && dev progress step x --check y", aid="a_neo", tid="toolu_2"))
+        # a lane call inside a substitution, which the lane router never routes, stays refused for a crew member
+        self.hook("guard", self.bash('echo "$(dev progress step x --check y)"', aid="a_neo", tid="toolu_2"))
         lanes = {(r.get("crew") or {}).get("lane") for r in audit.records(1, action="guard.deny")}
         self.assertTrue({"a_tank", "a_neo"} <= lanes, lanes)
 
