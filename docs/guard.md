@@ -477,7 +477,8 @@ These rules apply while a progress run has crew members working ([The crew](crew
 | A fifth crew member launched while four work (`progress.max_parallel`) | deny, with who is working |
 | A crew member edits a file outside the scope of its step (`dev progress assign … --scope`) | deny, and how to ask for more |
 | The main session edits a file inside a working member's scope | deny, and how to ask that member |
-| A crew member records a decision (`dev crew decide`) | refused by `dev crew`: only Morpheus records the developer's answers |
+| A crew member records or withdraws a decision (`dev crew decide`, `dev crew withdraw`) | refused by `dev crew`: only Morpheus records the developer's answers and withdraws a decision |
+| A crew member writes or deletes in the session scratchpad outside its own folder, `scratchpad/<member id>/` (a file tool, a redirect, `rm`, `mv`, `find -delete`, a nested shell) | deny, with the folder to use. The member's brief names that folder, and devkit creates it when the lane opens (see [The crew › Scratch folders](crew.md#scratch-folders)) |
 | A crew member runs `dev progress …` or `dev crew ask\|answer\|…` | routed to its own lane when the shell runs only that one command; otherwise refused, since it would act as Morpheus |
 
 A message is data, so quoted operators in it (`dev crew ask "x; y && z"`) keep the call a single command. A `$(…)` or

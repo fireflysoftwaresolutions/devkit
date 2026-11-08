@@ -3,6 +3,141 @@
 All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH restarts at 0 each month); tags are
 `vYY.MM.PATCH`. Sections follow [Keep a Changelog](https://keepachangelog.com/).
 
+## [26.11.6] - Unreleased
+
+This release makes what devkit shows match what happened. One project listed 261 open work items next to 65 closed
+ones, though much of the open work had shipped; locks stayed held for days; decisions you had answered, or that no
+longer mattered, still showed as needing you; one CI run sent the same result five times; a session still on an older
+devkit undid an update; merged branches piled up; and agents promised to report CI with nothing watching it. Now
+work items close when their branch merges and go back to todo when nobody works on them, only open decisions and
+unanswered questions wait for you, each CI result is reported once, an older session changes no setting, merged
+branches are pruned, and an agent that waits on CI arms a watch that wakes it. [Work states](docs/work-states.md)
+explains what moves each record and how to repair one that drifted.
+
+### Added
+
+- **`dev task reconcile` finds stale work items.** It lists the project's doing items without a lock, its open items
+  whose branch is already merged into the default branch on `origin`, and items that share a title, and changes
+  nothing. `--apply` sends the first back to todo and closes the second with the merge commit as evidence, in one
+  commit. See [Teams and machines › Shipped and stale items](docs/teams.md#shipped-and-stale-items).
+- **`dev crew withdraw <id> --why "…"` closes a decision that no longer applies.** Only the tech lead runs it. It
+  frees the step blocked on the decision, tells the asking member, and records the reason in the run's history and
+  the audit trail.
+- **`dev progress confirm <step> --why "…"` clears a recheck flag.** Reopening a step flags the finished steps that
+  used it; once the reopened steps are closed again, confirm a flagged step whose work still holds instead of
+  redoing it.
+- **`dev ci watch --wait` wakes an agent that waits on CI, and `dev ci watches` lists the watches.** The wait follows
+  one commit, branch, pull request, merge, or tag (by default, what the session last sent to `origin`), prints a line
+  per finished job and a last line with the result, retries host errors, and ends on its own; its exit code says
+  passed, failed, nothing to watch, ended first, or none. `dev ci watches` lists the live watches and the ones that
+  stopped before their runs ended, each with the command to arm it again. See
+  [CI/CD pipelines › Wait on a run](docs/ci-cd.md#wait-on-a-run-a-watch-that-wakes-the-agent).
+- **`dev branch prune` removes merged branches.** It lists the local and remote branches that one merge test finds
+  merged (by ancestry, a merged pull request, or equivalent content), each with the way the test held, and `--apply`
+  deletes the ones nothing protects, with their clean worktrees. The nightly `gc` job,
+  `dev pr merge`, and `dev release` prune too; `dev doctor` reports whether GitHub deletes a pull request's branch when
+  it merges, and `dev delivery apply` turns that setting on. See [Git and GitHub](docs/git-and-github.md).
+- **`dev doctor` checks the work state, and the dashboard's Health view shows it.** The `work state` check lists doing
+  items without a lock, open items of merged branches, duplicate titles, runs with no step change for
+  `work.lock_hours`, and runs begun before the latest release tag, each with its fix, and changes nothing. See
+  [Troubleshooting](docs/troubleshooting.md#dev-doctor-reports-the-work-state-as-stale).
+- **`dev install` and `dev update` name the sessions to restart.** Before they change anything, both list the running
+  Claude Code and Codex sessions that use devkit and ask once in a terminal; `--yes` goes on without asking. See
+  [Getting started › Updating](docs/getting-started.md#updating).
+- **[Work states](docs/work-states.md)**, a new page on the states of work items, runs, crew lanes, decisions, CI
+  watches, the install, and branches, with a diagram of a decision's life.
+
+### Changed
+
+- **A lock is renewed only while someone works on the item's branch.** Every live session used to renew every lock
+  its machine held, so locks on untouched work stayed for days. Now the background sync renews a lock only while one
+  of your live sessions is on the item's linked branch, and an expired lock sends a doing item back to todo, in one
+  commit. `dev branch new` and `dev wt new` link the one item you hold that has no branch.
+- **`dev pr merge` closes the work items of the branch it merges.** Each open item linked to the merged branch becomes
+  done, with the pull request and the merge commit in its changelog; `--auto` closes nothing until GitHub merges.
+- **`dev release` refuses while items of merged branches are open.** It and `--dry-run` list the open items linked to
+  the branches merged since the previous tag; `--why "<reason>"` releases anyway and records the reason in the output
+  and the audit trail.
+- **Only what is open needs you.** A decision belongs to its run: ending or replacing the run closes its pending
+  decisions, with the reason. A decision whose asking member ended and that no step waits on is moot: it shows on a
+  quiet line under its run, never under Needs you, and no longer stops `dev progress done`. `dev status`, the
+  dashboard, and the continuity brief list only open decisions and unanswered questions.
+- **Crew messages have a kind.** A question waits until someone answers it. A notice and an answer close once
+  delivered; CI results and the results of decisions are notices. A message to the tech lead by role name reaches the
+  main session.
+- **`dev status` lists the crew questions nobody answered**, each with its `dev crew answer` command, and no longer
+  repeats the last status block's You bullet, which may be done already.
+- **`dev progress done` refuses while a crew member owns a running step**, and names each member and step; neither
+  `--force` nor `--why` passes it.
+- **A prevented lesson that recurs reopens.** `dev lesson recur` on a prevented or retired lesson makes it open
+  again, so sessions recall it, and its changelog line names the prevention that did not hold.
+- **A revised approved plan goes back to draft when its text changed.** The changelog line names the version the
+  approval covered; a revision that leaves the text as it was keeps the approval.
+- **The end of a turn checks that something wakes the agent when its CI ends.** The Stop hook, on Claude Code and
+  Codex, sends back once a turn that sent work to `origin` and leaves its unfinished CI run with nothing that wakes
+  the agent, and the reminder after the push says the same.
+- **CI results use the host's own words.** Cancelled, timed out, startup failure, and action required count as
+  failed; skipped, neutral, and stale are named and count as none; a cancelled or timed-out run has its own failure
+  class.
+
+### Fixed
+
+- **A stopped rebase no longer stops every handoff sync without a word.** devkit ends it before reads, pulls, commits,
+  `dev sync`, and `dev install`, records it as `handoff.rebase-aborted`, and shows the problem under Needs attention
+  until a push succeeds. Changes to one item from two machines are settled field by field. See
+  [Teams and machines › The handoff repository stopped syncing](docs/teams.md#the-handoff-repository-stopped-syncing).
+- **A claim reports success only when its lock is on the remote.**
+- **Lock times are right in summer.** They were read one hour off during daylight saving time.
+- **Squash, rebase, and fast-forward merges and reused branch names close the right items.** A merge counts for an
+  item only when it is newer than the item's link to the branch.
+- **One CI result reaches you once.** One run used to send five identical messages. A ledger of reported runs and
+  conclusions now keeps a result from coming back across watches, sessions, and restarts, and a failure that a later
+  passing run supersedes is dropped.
+- **A run cancelled by its job timeout is no longer reported as passed.**
+- **The CI watch follows only what reached `origin`:** the pushed branch or tag, the merge commit on the default
+  branch, and the release tag. A branch that was never pushed is no longer watched.
+- **A stopped crew member frees its lane and slot at once.** TaskStop fires no SubagentStop, so a stopped agent held
+  its lane and crew slot for hours; the hook now ends the lane, and its step waits for a new launch. A lane whose
+  transcript says it was interrupted ends the same way.
+- **A crew member's report is never dropped.** A SubagentStop that met a busy hook is saved and applied at the next
+  one.
+- **An answer no longer brings back a crew lane that ended.** The step the decision blocked goes back to pending,
+  ready to launch.
+- **`dev session carry` takes back an orphaned run,** and a resumed session takes back its own, with the reason in the
+  run's history.
+- **`dev progress start --replace` no longer drops a run's pending decisions without a trace.** They close with the
+  reason.
+- **A step that goes back to pending is announced again, and a run blocked on a step runs again once the step moves.**
+- **A file that a read-only member's shell call changed inside a working member's scope counts as that member's
+  write**, so the read-only member's step is no longer marked unverified for it.
+- **Crew members have their scratch folder.** Briefs never named it, so members wrote at the scratchpad's top level
+  and were refused, and read-only members could not create theirs. Briefs now name `scratchpad/<member id>/`, and
+  devkit creates it when the member's lane opens.
+- **`dev test` forgets a renamed test.** A recorded failure that no longer selects a test is named and removed,
+  instead of failing every rerun with `ModuleNotFoundError`. Parallel runs no longer overwrite each other's record or
+  log: each run writes its own log, and the newest 10 per runner stay. `dev test prove` counts tests with a docstring.
+- **The dashboard shows standing failures and hides what is over.** A job failure stands until a run succeeds, even
+  when a later run was skipped; moot decisions and notices no longer show as waiting; Now shows a CI failure only
+  while it is the newest settled result of its branch.
+- **`dev time` lists only live runs, presence drops ended sessions, and `dev pr create`, `ready`, and `merge` refresh
+  the pull request cache.**
+- **An older devkit no longer overwrites a newer install.** Sessions still on 26.11.4 rewrote the hooks, `CLAUDE.md`,
+  `AGENTS.md`, and the global git config right after `dev install` pinned 26.11.5. A copy older than the pinned
+  release now changes no devkit-managed setting, records `config.repair-skipped`, and tells you once to restart, and
+  background commands run the pinned release. See
+  [Troubleshooting](docs/troubleshooting.md#a-session-says-it-runs-an-older-devkit).
+
+### Security
+
+- **A backup policy keeps the visibility it was decided for.** A policy set to `on` while a repository was private
+  kept publishing its branches after the repository became public. Such a policy now counts as `ask` until you
+  answer again in a terminal. See [Delivery](docs/delivery.md#back-up-early-ci-once).
+- **devkit trusts its install record only when it holds up.** `install.json` counts only when it names a pinned copy
+  whose manifest and checksums match, so an edited record cannot make an older copy, with older guard rules, look
+  current.
+- **A withdrawn decision never counts as your answer**, so it cannot open a push, a merge, a release, or any other
+  irreversible action.
+
 ## [26.11.5] - 2026-11-07
 
 This release hardens the guard against more than twenty ways a command could pass unjudged, including commands taken
@@ -21,7 +156,7 @@ them, and the tech lead hears when each crew member finishes.
   entry. The 16 command blocks whose `#` comments held an apostrophe, which the guard refused when an agent copied one
   whole, are reworded. Pages that promised guard fixes, a kernel-level terminal check, and an audit re-seal for
   26.11.5 now say they are planned. The Next.js MCP server is added with `dev ext add`, because agents cannot run
-  `claude mcp add`. [The crew](docs/crew.md#rooms-planned-for-26116) describes rooms, planned for 26.11.6 and not
+  `claude mcp add`. [The crew](docs/crew.md#rooms-planned) describes rooms, planned for 26.11.6 and not
   available yet. Disk use is in the index, and `skills.optional` is in Configuration.
 - **The installer says Apple silicon, and stops early on an Intel Mac without Homebrew or in a Rosetta terminal.**
   Homebrew's own installer stops on Intel Macs since September 2026 (Homebrew/install PR #1140), and its `.pkg` is

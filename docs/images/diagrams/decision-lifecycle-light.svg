@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1160" height="504" viewBox="0 0 1160 504" role="img" aria-labelledby="dk-title dk-desc">
+<title id="dk-title">Life of a crew decision</title>
+<desc id="dk-desc">A crew member's dev crew ask --decision makes a pending decision, which waits for you. When the member that asked has ended and no step waits on it, the decision is moot: still pending, but it needs nobody. A pending or moot decision ends in one of three states: decided by your answer, withdrawn by the tech lead with a reason, or closed with the reason when its run ends or is replaced.</desc>
+<rect width="1160" height="504" fill="#F3F1EB"/>
+<g font-family="Manrope, 'Manrope Variable', system-ui, -apple-system, 'Segoe UI', Arial, sans-serif">
+<circle cx="68" cy="74" r="4" fill="#FFB34A"/>
+<text x="80" y="78.5" font-size="12" font-weight="600" fill="#62645B" letter-spacing="0.48">LIFE OF A CREW DECISION</text>
+<g transform="translate(12.0,152.0)">
+<rect x="312.0" y="-48.0" width="768.0" height="160.0" rx="12" fill="#EAE7DF" stroke="#D8D4CA" stroke-width="1" stroke-dasharray="6 4"/>
+<text x="328.0" y="-24.0" font-size="12" font-weight="600" fill="#62645B" text-anchor="start" letter-spacing="0.48">STATE PENDING</text>
+<path d="M76.0,40.0 L328.5,40.0" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="336.0,40.0 328.0,44.0 328.0,36.0" fill="#62645B"/>
+<rect x="156.1" y="28.0" width="99.8" height="24.0" rx="11.0" fill="#F3F1EB"/>
+<text x="206.0" y="44.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">ask --decision</text>
+<path d="M480.0,40.0 L904.5,40.0" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="912.0,40.0 904.0,44.0 904.0,36.0" fill="#62645B"/>
+<rect x="605.2" y="28.0" width="181.6" height="24.0" rx="11.0" fill="#EAE7DF"/>
+<text x="696.0" y="44.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">asker ended · no step waits</text>
+<path d="M408.0,112.0 L408.0,200.5" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="408.0,208.0 404.0,200.0 412.0,200.0" fill="#62645B"/>
+<rect x="380.0" y="148.0" width="56.1" height="24.0" rx="11.0" fill="#F3F1EB"/>
+<text x="408.0" y="164.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">decide</text>
+<path d="M696.0,112.0 L696.0,200.5" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="696.0,208.0 692.0,200.0 700.0,200.0" fill="#62645B"/>
+<rect x="642.7" y="148.0" width="106.7" height="24.0" rx="11.0" fill="#F3F1EB"/>
+<text x="696.0" y="164.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">withdraw --why</text>
+<path d="M984.0,112.0 L984.0,200.5" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="984.0,208.0 980.0,200.0 988.0,200.0" fill="#62645B"/>
+<rect x="917.8" y="148.0" width="132.5" height="24.0" rx="11.0" fill="#F3F1EB"/>
+<text x="984.0" y="164.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">run ends · replaced</text>
+<circle cx="64.0" cy="40.0" r="10" fill="#272820"/>
+<rect x="336.0" y="0.0" width="144.0" height="80.0" rx="40.0" fill="#FFB34A" stroke="#F0A33C" stroke-width="2"/>
+<text x="408.0" y="34.0" font-size="16" font-weight="600" fill="#272820" text-anchor="middle">Pending</text>
+<text x="408.0" y="56.0" font-size="13" font-weight="400" fill="#272820" text-anchor="middle">waits for you</text>
+<rect x="912.0" y="0.0" width="144.0" height="80.0" rx="40.0" fill="#FFFFFF" stroke="#BFB8AB" stroke-width="1.5"/>
+<text x="984.0" y="34.0" font-size="16" font-weight="600" fill="#272820" text-anchor="middle">Moot</text>
+<text x="984.0" y="56.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">needs nobody</text>
+<rect x="336.0" y="208.0" width="144.0" height="80.0" rx="40.0" fill="#DBDBCF" stroke="#7A8460" stroke-width="1.5"/>
+<text x="408.0" y="242.0" font-size="16" font-weight="600" fill="#272820" text-anchor="middle">Decided</text>
+<text x="408.0" y="264.0" font-size="13" font-weight="400" fill="#4A5040" text-anchor="middle">your answer</text>
+<rect x="624.0" y="208.0" width="144.0" height="80.0" rx="40.0" fill="#DBDBCF" stroke="#7A8460" stroke-width="1.5"/>
+<text x="696.0" y="242.0" font-size="16" font-weight="600" fill="#272820" text-anchor="middle">Withdrawn</text>
+<text x="696.0" y="264.0" font-size="13" font-weight="400" fill="#4A5040" text-anchor="middle">by the tech lead</text>
+<rect x="912.0" y="208.0" width="144.0" height="80.0" rx="40.0" fill="#DBDBCF" stroke="#7A8460" stroke-width="1.5"/>
+<text x="984.0" y="242.0" font-size="16" font-weight="600" fill="#272820" text-anchor="middle">Closed</text>
+<text x="984.0" y="264.0" font-size="13" font-weight="400" fill="#4A5040" text-anchor="middle">with its run</text>
+</g>
+</g>
+</svg>

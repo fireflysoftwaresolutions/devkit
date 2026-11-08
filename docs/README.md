@@ -30,15 +30,16 @@ block, progress updates, approvals, the crew graph, and the dashboard.
 
 | Guide | What it covers |
 | --- | --- |
-| [Teams and machines](teams.md) | Sharing a handoff repository: work items, locks, reasons, and history, delegation, versioned plans, session logs, presence, merge rules |
+| [Teams and machines](teams.md) | Sharing a handoff repository: work items, locks, reasons, and history, shipped and stale items and `dev task reconcile`, delegation, versioned plans, session logs, presence, merge rules, a handoff repository that stopped syncing |
+| [Work states](work-states.md) | The states of work items and locks, runs, steps, and crew lanes, decisions and crew messages, CI watches, the pinned install, and branches after a merge: what moves each, where you see it, and how to repair drift |
 | [Initiatives](initiatives.md) | Cross-project initiatives: creating them, who may write what, progress, adopting an older handoff repository |
-| [The crew](crew.md) | devkit's 25 specialist agents and the tech lead (Morpheus): who does what, parallel or in sequence, slots, lanes, scopes, messages, delegation, guided or automatic decisions, how your answers to irreversible decisions count, the crew canary, and rooms (planned for 26.11.6, not available yet) |
-| [Progress and communication](progress-and-communication.md) | `dev progress`, ETA and calibrated estimates, notifications, what the hooks add, `dev time`, the message templates, status reports |
+| [The crew](crew.md) | devkit's 25 specialist agents and the tech lead (Morpheus): who does what, parallel or in sequence, slots, lanes, scopes, messages, delegation, guided or automatic decisions, moot and withdrawn decisions, how your answers to irreversible decisions count, the crew canary, and rooms (planned, not available yet) |
+| [Progress and communication](progress-and-communication.md) | `dev progress`, when a run may end and `dev progress confirm`, ETA and calibrated estimates, notifications, what the hooks add, waits that wake the agent, `dev time`, the message templates, status reports |
 | [Continuity](continuity.md) | What devkit keeps of a session through compaction, resume, and `/clear`, the continuity brief, `dev session`, and `devkit_resume` in chat |
 | [Dashboard](dashboard.md) | The live command center: `dev dashboard` and its server, Now (the view it opens on: does anything need you), the views, Background work, the crew, drawers, live and honest states, search, shortcuts, routes |
 | [Git and GitHub](git-and-github.md) | `dev branch`, `commit`, `rebase`, `push`, `pr`, `run`, `release`, and `issue`: local CI evidence, the PR template, safe merges, releases by the policy |
 | [Testing](testing.md) | `dev test`: failed first, then the blast radius of your changes; `dev test audit` and `dev test prove`: tests that can fail; `dev ci --run --resume` |
-| [CI/CD pipelines](ci-cd.md) | `dev ci audit` and `dev ci init` on GitHub Actions, GitLab, Bitbucket, and Azure; `dev ci watch`: every run followed to the end, failures diagnosed |
+| [CI/CD pipelines](ci-cd.md) | `dev ci audit` and `dev ci init` on GitHub Actions, GitLab, Bitbucket, and Azure; `dev ci watch`: every run followed to the end, each result reported once, failures diagnosed; `dev ci watch --wait` and `dev ci watches`: a wait that wakes the agent |
 | [Delivery](delivery.md) | The delivery policy, local-first GitOps (one integration branch, one push, one CI run), following CI with `dev ci status`, releases |
 | [Lessons](lessons.md) | Learning from mistakes: recording, recalling, counting repeats, automating prevention, and `dev sleep` |
 | [Scheduled jobs and the audit trail](jobs-and-audit.md) | `dev jobs`: the background jobs, their schedules, logs, and journal; `dev audit`: everything devkit changed or decided |
@@ -59,7 +60,7 @@ block, progress updates, approvals, the crew graph, and the dashboard.
 | [Models and tokens](models-and-tokens.md) | Models, effort, and subagents; the Lookup scout (Sparks); Codex profiles; the routing rules |
 | [Templates](templates.md) | Plan, spec, spike, bug-fix, and ADR templates; task templates; the pull request template |
 | [Guard rules](guard.md) | Every rule the guard enforces, per agent, including devkit's own state and the forged-environment rules, typing into a terminal session, and commands it cannot read, with example messages, and escape hatches |
-| [Troubleshooting](troubleshooting.md) | Logs, common problems (among them pin refusals and rollback, a command the guard cannot read, and a refused `tmux send-keys`), and how to reset |
+| [Troubleshooting](troubleshooting.md) | Logs, common problems (among them pin refusals and rollback, a session that runs an older devkit, stale work in `dev doctor`, a CI result that never came, a command the guard cannot read, and a refused `tmux send-keys`), and how to reset |
 
 ## Maintain devkit
 

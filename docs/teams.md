@@ -191,6 +191,10 @@ To recover:
   `dev task reconcile --apply`), or release anyway with `dev release --why "<reason>"`.
 - **Two items share a title.** Keep one and cancel the other: `dev task cancel <n> --why "duplicate of <id>"`.
 
+`dev doctor` and the dashboard's Health view report the same stale items, each with its fix.
+[Work states](work-states.md) explains how work items, runs, decisions, and the other records drift, and what moves
+each back.
+
 ### Reasons and history
 
 `edit`, `move`, `block`, `cancel`, and `link` refuse to run without `--why`. Every other verb accepts it too. The reason goes into the
@@ -368,5 +372,5 @@ dev sync
 A portfolio-level session (started in `~/Development` or in the handoff repository) may work across projects when you
 ask it to. The full rules are in [Guard rules](guard.md#the-handoff-repository).
 
-See also [Initiatives](initiatives.md), [Progress and communication](progress-and-communication.md) and
-[Commands › dev task](commands.md#dev-task--p-project---i-slug---all-verb-).
+See also [Initiatives](initiatives.md), [Progress and communication](progress-and-communication.md),
+[Work states](work-states.md), and [Commands › dev task](commands.md#dev-task--p-project---i-slug---all-verb-).

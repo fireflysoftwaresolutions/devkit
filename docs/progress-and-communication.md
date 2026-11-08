@@ -49,13 +49,17 @@ shows `✗ blocked` and `Next: unblock: …`.
 | `assign <step> --to <member> [--scope "<globs>"]` | Hands a step to a crew member ([The crew](crew.md)); its time is that member's time |
 | `begin <step>` | Starts a step in parallel with the running one (work you do yourself) |
 | `reopen <step> --why "…"` · `skip <step> --why "…"` | Undoes a wrong close, or skips a step on purpose |
+| `confirm <step> --why "…"` | Clears the recheck flag of a finished step whose reopened dependencies are closed again, when its work still holds |
 | `history` | Every step change: when, from → to, by whom, why |
 | `block "<why>" [--next "…"]` | The run is blocked; you get a desktop notification |
-| `done "<outcome>"` | The run is finished; the actual time is recorded against the estimate; you get a notification |
+| `done "<outcome>"` | The run is finished; the actual time is recorded against the estimate; you get a notification. Its decisions still pending close with it |
 
 A run belongs to the agent session that started it. Claude Code sessions export `DEVKIT_SESSION` at session start, so
 devkit knows exactly which session runs the command. For Codex, devkit uses the most recent devkit session in the same
-repository (within 12 hours); from a plain shell, the run belongs to that shell.
+repository (within 12 hours); from a plain shell, the run belongs to that shell. When a session ends with its run
+still open, the run is orphaned; it runs again when that session resumes, or in the session `/clear` started after
+`dev session carry` (see [Continuity](continuity.md#resume-and-clear)). [Work states](work-states.md) explains every
+state of a run, a step, and a crew lane.
 
 ### Keeping the plan true
 
@@ -69,6 +73,16 @@ The status, the dashboard, the handoff and the next session all read the plan, s
 - **Not someone else's step,** while the crew member who owns it is still working, and **not before its
   dependencies** are done.
 - **Not finished with open steps:** `dev progress done` refuses while steps are pending; close or skip each one.
+- **Not finished over working members:** `dev progress done` refuses while a crew member owns a running step, and
+  names each member and step. Wait for the reports, or skip a step on purpose with `dev progress skip`; neither
+  `--force` nor `--why` passes this check.
+- **Not finished while a decision waits for you.** A moot decision, whose asking member ended and that no step waits
+  on, does not count, and every decision still pending closes with the run (see
+  [The crew › Guided or automatic](crew.md#guided-or-automatic)).
+- **Rechecked after a reopen:** reopening a step flags the finished steps that used it, because their work used the
+  old version. The flag clears when such a step finishes again after the reopened steps are closed; when its work
+  still holds, `dev progress confirm <step> --why "…"` clears it with the reason. The run cannot end while a step is
+  flagged, unless `dev progress done --why "…"` records why.
 - **Fixable and visible:** `reopen` and `skip` need a reason, and every change (by you, by a crew member, or by
   devkit) is in `dev progress history`. The output of `step` ends with the exact change it made, for example
   `changed: 2. ui running → done`.
@@ -143,7 +157,7 @@ Turn them off with `progress.notify: false` in [Configuration](configuration.md)
 | UserPromptSubmit | Starts the turn clock. When your prompt asks for status, devkit adds the real records to the agent's context (the session's runs with their headline, last update, and running subagents, and the CI/CD runs of the branch with their current job, step, elapsed time, and ETA) and asks for the overall status template. It understands English and Spanish phrasings such as `how is it going?`, `where are we`, `what's left`, `status?`, `ETA`, `give me an update`, `¿cómo va?`, or `¿qué falta?`. Background notifications (subagent results, system notices) are not treated as your request |
 | PostToolUse | Times each tool call and records the ones slower than `progress.slow_tool_seconds` (20). After `progress.nudge_minutes` (8) without an update to you, it reminds the agent to send one: `dev progress note` while the step runs, `dev progress step` when it is finished; at most six times per turn |
 | SubagentStart, SubagentStop | Track running subagents (shown in progress and status answers) and record how long each one took |
-| Stop | Records the turn's duration and sends the long-turn notification |
+| Stop | Records the turn's duration and sends the long-turn notification. Sends back, once, a turn that sent work to `origin` and leaves its CI run with nothing that wakes the agent |
 
 The same UserPromptSubmit hook is also a safety net: a session that never ran SessionStart (a hook failure, an
 untrusted Codex hook, an old client) is registered at its first prompt and receives the full devkit context then.
@@ -160,6 +174,23 @@ CI/CD: ci #142 running · job tests (Python 3.13) step 4/7 "Unit tests" · 12m e
 `dev ci status` gives them the facts for GitHub Actions, GitLab CI, Bitbucket Pipelines, and Azure Pipelines, with
 an ETA from the last successful runs, and `dev ci status --watch` follows a run to the end instead of polling (see
 [Commands › dev ci status](commands.md#dev-ci-status---watch---branch-name----all-branches---all-jobs---limit-n---json)).
+
+### Waits that wake the agent
+
+A promise to report later is kept only when something wakes the agent. devkit's background CI watch speaks at the
+session's next hook, and an idle session runs none, so an agent that waits on a run, or says it reports when CI ends
+or a release is published, arms a watch of its own in the same turn and names it in its reply:
+
+```bash
+dev ci watch --wait --pr 12      # one line per finished job, then one line with the result
+dev ci watches                   # the live watches, and the expired ones with the command to arm each again
+```
+
+On Claude Code, a Monitor or a background command runs the wait, and its output wakes the session. Codex has no
+background wake-up, so it runs the wait in the foreground. The Stop hook sends back, once, a turn that sent work to
+`origin` and leaves its unfinished CI run with nothing that wakes the agent.
+[CI/CD pipelines › Wait on a run](ci-cd.md#wait-on-a-run-a-watch-that-wakes-the-agent) has the options, the exit
+codes, and how each agent arms the wait.
 
 ## Where the time goes: `dev time`
 

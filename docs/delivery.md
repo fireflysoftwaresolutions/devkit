@@ -151,7 +151,11 @@ public repository publishes the branch at once. With `ask`, the first `dev backu
 whether the project's branches may be backed up and records your answer as `on` or `off`; `dev sync` never asks and
 never pushes such a branch, and an agent's call is never asked. Choose it yourself with
 `dev backup policy on --why "open source: the code is public anyway"` (or `off`, or `ask`); `dev backup policy`
-shows it, and so do `dev status`, `dev branch ls`, the handoff note and the messages of `dev backup`.
+shows it, and so do `dev status`, `dev branch ls`, the handoff note and the messages of `dev backup`. The policy
+records the repository's visibility when it was set. An `on` set while the repository was private, or before devkit
+recorded the visibility, no longer holds once the repository is public or its visibility cannot be read: devkit
+treats it as `ask` and backs up nothing until you answer again in a terminal, because a backup would now publish the
+branch.
 `dev backup --public` pushes once, whatever the policy. With `on`, embargoes still hold, and on a public repository a
 branch whose new commits read as a security fix or change a red-team test still waits for an embargo or
 `--public`. Setting the policy, `dev backup --public` and `dev branch embargo --lift` are your own decisions: type
@@ -241,12 +245,16 @@ Release by the recorded policy (see [The delivery policy](#the-delivery-policy))
 1. Run `dev sec scan` on the integration branch and fix or justify every finding.
 2. From the verified, green integration branch, merge with the repository's strategy: `dev pr merge` (squash or merge
    commit). A squash message repeats the PR title and says what changed and why in one or two sentences, with no
-   attribution lines; `dev pr merge` writes it from the PR.
+   attribution lines; `dev pr merge` writes it from the PR, and marks the open work items linked to the merged
+   branch done.
 3. Tag with the policy's format (signed if the project signs tags), push the tag, and create the release with notes
    from the CHANGELOG: `dev release` (`--dry-run` first) does all three, after it checks the version files, the local
-   CI evidence, and the CI of the commit. `dev calver` gives the next CalVer version.
+   CI evidence, and the CI of the commit. It also refuses while work items linked to branches merged since the
+   previous tag are still open: close the shipped ones (`dev task reconcile --apply`), or give `--why "<reason>"`.
+   `dev calver` gives the next CalVer version.
 4. Download or install the published artifact and smoke-test it.
-5. Update the handoff note (version, what shipped, follow-ups) and mark the tasks done with `dev task done <n>`.
+5. Update the handoff note (version, what shipped, follow-ups), and mark done with `dev task done <n>` any task that
+   shipped without a branch of its own.
 
 ## 7. GitOps rules
 

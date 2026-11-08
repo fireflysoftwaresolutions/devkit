@@ -490,8 +490,24 @@ before it.
 Run `dev update` and `dev install` yourself, in Terminal. They change what every hook and the guard run, so the guard
 refuses them from an agent: ask Claude or Codex for anything else, but not for these.
 
-Restart running Claude Code and Codex sessions afterward; they read instructions and hooks at session start. To change
-the choices you made in the wizard, run `dev setup` again.
+A Claude Code or Codex session reads its instructions and hooks when it starts, and keeps them until it ends. That
+is why `dev install` and `dev update`, before they change anything, list the sessions that use devkit and still run,
+and ask once in a terminal:
+
+```text
+2 running sessions use devkit; restart each after this to load the new hooks (until then it keeps the old ones, which change no setting):
+  Claude Code · acme/billing (feat/invoice-export) · devkit 26.11.5 · session 3f9a1c2e · since 2026-11-07 09:12
+  Codex · acme/web · devkit 26.11.5 · session 7b2d04aa · since 2026-11-07 10:40
+  Go on? [Y/n]
+```
+
+Press Return to go on, or type `n` to stop with nothing changed; `--yes` goes on without asking. Then restart each
+session on the list. Until you do, a session still on the older devkit leaves every setting devkit manages alone:
+the agents' settings and hooks, `CLAUDE.md`, `AGENTS.md`, and the global git config stay as the new release wrote
+them.
+It tells you once to restart, and its background work (the sync, the CI watch, the repair) runs the new release (see
+[Work states › The install pin](work-states.md#the-install-pin)). To change the choices you made in the wizard, run
+`dev setup` again.
 
 ## What devkit touches (and how to undo it)
 

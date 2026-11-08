@@ -197,6 +197,14 @@ that launch alone, so two members launched together never swap lanes:
 - **A resumed agent** keeps its own lane and takes nothing else.
 - **A launch whose record was lost** gets a restricted lane: read-only, no step, no scope, no slot, recorded as
   `crew.unbound`, until the tech lead assigns it a step.
+- **A stopped or silent member.** TaskStop fires no SubagentStop, so the PostToolUse hook ends the lane of an agent
+  TaskStop stopped; devkit does the same when a member's transcript ends with its interruption. The lane ends
+  `stopped`, and its open steps go back to pending for a new launch. A lane that stops reporting is `lost`, and its
+  steps go back to pending too.
+- **A report that meets a busy hook.** When SubagentStop finds the run locked by another hook, it saves the stop and
+  applies it at the next hook, so no report is dropped (`crew.stop-deferred` in the audit trail).
+
+[Work states](work-states.md#crew-lanes) explains every state of a lane and what moves it.
 
 ### Slots
 
@@ -216,7 +224,7 @@ The crew shares a number of slots, and a launch that does not fit is refused wit
 
 `dev crew`, `dev crew next`, and the status block's Crew line show the slots in use and why the limit is lower
 ("2 of 3 slots in use (lowered from 6: weekly usage at 89 %)"), and each change of the limit is audited
-(`crew.limit`). A member stopped with TaskStop frees its slot at once, and its step waits unverified. You change
+(`crew.limit`). A member stopped with TaskStop frees its slot at once, and its step waits for a new launch. You change
 these keys in a terminal with `dev config set`; agents are refused. The keys are in
 [Configuration](configuration.md#work-progress-and-display).
 
@@ -240,8 +248,9 @@ command then looks for the open calls that hold its own arguments: it acts as th
 is the main session's, and as a member when any is a member's. No environment variable, parent process, or recent
 activity can make a caller the tech lead. These commands need the tech lead:
 
-- `dev progress start` and `start --replace` in the main session, and `assign`, `begin`, `reopen`, `skip`, and `done`;
-- `dev crew route --plan --apply`, `decide`, and `mode`.
+- `dev progress start` and `start --replace` in the main session, and `assign`, `begin`, `reopen`, `skip`, `confirm`,
+  and `done`;
+- `dev crew route --plan --apply`, `decide`, `withdraw`, and `mode`.
 
 Type them yourself. Run through a script, `bash -c`, or another program, no open call holds them as typed, so devkit
 refuses them and says how to run them (`caller.refused` in the audit trail). On Codex, devkit cannot verify the caller
@@ -271,6 +280,11 @@ shell command writes or deletes (`rm`, `mv`, redirects, `find -delete`, nested s
 folder. The shared top level and the other members' folders hold their work, so a cleanup by one member can never
 delete another's files.
 
+Each brief names the member's folder in its Scope section and tells the member to keep logs, probes, and temporary
+files there. devkit creates the folder when the member's lane opens (SubagentStart), so a read-only member, which may
+not create folders, has one too. Nothing is created when the session has no scratchpad, or for a helper that names no
+crew member.
+
 ### Messages
 
 Any member can ask anything, of the tech lead (the default) or of another member:
@@ -283,7 +297,19 @@ dev crew inbox
 ```
 
 A message reaches its recipient with the recipient's next action (the PostToolUse hook adds it to the context), or
-with the main session's next prompt. A message to a member who has not started yet waits for them.
+with the main session's next prompt. A message to a member who has not started yet waits for them. A message to the
+tech lead by role, such as `--to "Tech lead"` or `--to Morpheus`, reaches the main session.
+
+Each message has a kind, and only a question waits:
+
+| Kind | Sent by | Waits |
+| --- | --- | --- |
+| Question | `dev crew ask` by a member or the tech lead | Until someone answers it |
+| Notice | CI watch and devkit: a CI result, a step or launch notice, a decision's result | Never: it closes once delivered |
+| Answer | `dev crew answer <id> "…"` | Never: it closes once delivered and settles the question it names |
+
+`dev status` and the dashboard list the questions to the tech lead that nobody answered, each with its
+`dev crew answer` command; a notice or an answer is never listed as open.
 
 ### Every report is checked
 
@@ -325,8 +351,9 @@ main session launched: a member's own helpers, and agents with no launch record,
 
 When the member stops for good, its step ends on evidence: done with a Check ✓ in its report or its own
 `dev progress step --check`, otherwise unverified, for the tech lead to close with evidence or reopen. A review-only or
-read-only member whose shell call wrote files ends unverified too; a file inside a working member's scope is flagged
-as possible, and the message names that member. Keeping the step open while gate findings remain is planned.
+read-only member whose shell call wrote files ends unverified too. A file that changed during that call inside a
+working member's scope counts as that member's write (`scope.write` in the audit trail), so only the files outside
+every working scope count against the read-only member. Keeping the step open while gate findings remain is planned.
 
 **Review steps start on unverified work.** A step whose dependencies ended unverified waits, except a review step
 (its kind of work is review, or its member works review-only): it starts, and its Check ✓ ends done the steps it
@@ -384,8 +411,10 @@ public backup, a backup policy) and commands the guard cannot name are never pre
 dev progress start "Invoice export" --plan "…" --mode auto
 dev crew mode auto --approve "push, pr"     # switch, and pre-approve what may happen without you
 dev crew mode guided                        # back to asking first
-dev crew decisions                          # every decision: pending, decided automatically, decided by you
+dev crew decisions                          # every decision: pending, moot, decided, withdrawn, closed
+dev crew decisions --pending                # only those that wait for you (moot ones do not)
 dev crew decide D3 "B: reject the file"     # your answer (or an override of an automatic one)
+dev crew withdraw D4 --why "the export no longer needs a date column"   # the tech lead closes one that no longer applies
 ```
 
 How a decision travels:
@@ -401,8 +430,23 @@ How a decision travels:
 3. **Guided:** the member's step is blocked, the member stops and reports that it waits for D3, and no tokens are
    spent while it waits. The tech lead sees the decision with his next action and asks you with Claude Code's
    question dialog (see [How the tech lead asks you](#how-the-tech-lead-asks-you)). Your answer is recorded with
-   `dev crew decide`, and the tech lead resumes the member with it; the member keeps everything it knew.
-4. The run cannot be closed while a decision is pending, and the final report lists the automatic decisions.
+   `dev crew decide`, and the tech lead resumes the member with it; the member keeps everything it knew. Recording
+   the answer never brings back a lane that ended: the step it blocked goes back to pending, ready to launch.
+4. The run cannot be closed while a decision waits for you, and the final report lists the automatic decisions.
+
+A decision belongs to its run, and only an open one needs you:
+
+- **Moot.** When the member that asked has ended and no step is blocked on the decision, nobody waits for the
+  answer. The decision stays pending but is moot: it shows on a quiet line under its run, never under **Needs you**,
+  and it does not stop `dev progress done`. Your answer to it still counts if you give one.
+- **Withdrawn.** `dev crew withdraw <id> --why "…"` closes a pending decision that no longer applies. Only the tech
+  lead runs it. It frees the step blocked on the decision, tells the asking member when it still works, and records
+  the reason in the run's history and the audit trail (`crew.withdrawn`). It is never your answer, so it opens no
+  irreversible action.
+- **Closed with its run.** When the run ends (`dev progress done`) or is replaced (`dev progress start --replace`),
+  each decision still pending in it, moot ones included, closes with the reason (`crew.decision-closed`).
+
+[Work states › Decisions](work-states.md#decisions) draws the whole lifecycle.
 
 A decision that leads to an irreversible action (`--irreversible release --target v26.11.4`) opens that action once,
 on that target, and only when your own answer chooses the option that performs it. That option is the one named
@@ -492,7 +536,7 @@ Each guardrail cites the rule of `dev crew rules` that enforces it. A rule marke
 | Mistakes are fixable and visible | `dev progress reopen` or `dev progress skip` with `--why`, and `dev progress add`; every change is in `dev progress history` (`E-fixable`) |
 | A member that never reports back | after `progress.stale_agent_hours` (6) its lane is closed as lost and its step goes back to the main session (`E-lost-lane`) |
 | Every report is checked | the status block, the step's record, and the crew gates at SubagentStop (`E-status-block`, `E-step-records`, `E-proofs`, `E-skills`, `E-stubs`, `E-tests-fail`, `E-lessons`, `E-background`) |
-| Only the tech lead plans, assigns, and decides | from a lane, `assign`, `begin`, `reopen`, `skip`, `done`, `decide`, and `mode` are refused, and in the main session they must be typed as commands, not run by a script (`E-main-only`, `E-caller`) |
+| Only the tech lead plans, assigns, and decides | from a lane, `assign`, `begin`, `reopen`, `skip`, `confirm`, `done`, `decide`, `withdraw`, and `mode` are refused, and in the main session they must be typed as commands, not run by a script (`E-main-only`, `E-caller`) |
 | Decisions that are yours | guided mode waits for you (`E-decisions`), and the irreversible-action gate holds merges, releases, force pushes, and the other irreversible actions for your typed grant or decision (`E-irreversible`) |
 | No escape hatches for members | members are refused devkit's escape hatches (`DEVKIT_*` variables, `--ci-passed`, `--no-verify`, `dev config set`), and each refusal is audited (`E-escape`) |
 | devkit's own state is protected | the guard refuses agents' writes to devkit's state and configuration, and a forged `HOME`, `DEVKIT_CONFIG`, or `dev` link (`E-protected`, `E-forged-env`) |
@@ -505,11 +549,14 @@ dashboard and the handoff read, and devkit's audit trail (`dev audit`), publishe
 | Audit action | When |
 | --- | --- |
 | `plan.done`, `plan.running`, `plan.pending`, `plan.blocked`, `plan.skipped` | every step change, by the tech lead, a member, or devkit |
-| `crew.start`, `crew.finish`, `crew.lost` | a member starts, finishes (with its active minutes), or stops reporting |
+| `crew.start`, `crew.finish`, `crew.lost`, `crew.stopped` | a member starts, finishes (with its active minutes), stops reporting, or is stopped before its report |
+| `crew.stop-deferred` | a member's stop met a busy hook and is applied at the next one |
 | `crew.bind`, `crew.resume`, `crew.launch-failed`, `crew.unbound` | a lane binds to its launch, a member resumes, a launch fails, or a lane runs restricted because its launch record was lost |
 | `crew.limit`, `crew.reserve` | the effective slot limit changes, or a launch takes the slot kept for your request |
 | `crew.message` | a question or answer between members |
 | `crew.decision`, `crew.decided`, `crew.mode` | a decision point, its answer (and by whom), a change of mode |
+| `crew.withdrawn`, `crew.decision-closed` | the tech lead withdrew a decision, or its run ended or was replaced, each with the reason |
+| `scope.write` | a file a read-only member's shell call changed, counted for the working member whose scope holds it, or flagged for the read-only member |
 | `crew.delegate`, `crew.decline` | work handed to another member, or handed back |
 | `raci.override` | a step assigned to a member the RACI does not make Responsible, with the reason |
 | `caller.refused`, `caller.unverified` | a tech lead's command refused because it did not come from the main session, or allowed on Codex without verification |
@@ -545,7 +592,7 @@ dev install --only claude,codex  # reinstall the plugin and write the Codex role
 `dev crew sync --check` reports generated files that are out of date; `dev doctor` runs it too. Never edit
 `plugin/agents/*.md` by hand: the next sync overwrites them.
 
-## Rooms (planned for 26.11.6)
+## Rooms (planned)
 
 Rooms are not available yet. This section describes what is planned, so you know what is coming; no command or
 setting for rooms exists today.
