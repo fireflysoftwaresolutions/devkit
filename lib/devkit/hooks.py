@@ -179,9 +179,15 @@ def _clone_node_modules(wt: Path, main: Path):
     return None
 
 
+_SEEN = {}  # cwd -> what context_for inspected there last ("top", "repo"): the welcome reuses that one inspection
+
+
 def context_for(cwd: str, agent: str) -> str:
+    """The workspace context the model reads at session start. What it inspects stays in _SEEN for the welcome:
+    "top" (the checkout's root, "" outside a repository) and "repo" (the project, as registry.inspect_repo gave it)."""
     from . import registry
     top = core.gitout(cwd, "rev-parse", "--show-toplevel")
+    seen = _SEEN[cwd] = {"top": top or ""}
     lines = ["## devkit · workspace context", "",
              "For development work only (code, debugging, tests, builds, deploys, releases, developer tools). If a "
              "request is something else (a recipe, a general question, consulting work with the Firefly consulting "
@@ -201,6 +207,7 @@ def context_for(cwd: str, agent: str) -> str:
         return "\n".join(lines)
     main = registry.main_of(Path(top)) or Path(top)
     p = registry.inspect_repo(main, with_prs=True, refresh_prs=False, pr_max_age=86400)
+    seen["repo"] = p
     p["main"]["active"] = True
     if registry.update_note(p):
         pass
@@ -422,23 +429,27 @@ def session_start(agent: str):
         work.request_sync("session start", delay=1)  # pull other machines' claims and publish this session
     except Exception:
         pass
+    _SEEN.pop(cwd, None)
     text = "\n\n".join(x for x in (_continuity("on_session_start", agent, data),
                                    _with_catalog(context_for(cwd, agent), agent)) if x)
-    shown = [older] if older else []  # the notices the developer must see too, not only the agent (Claude: a system message)
+    seen = _SEEN.pop(cwd, {})  # what context_for inspected, for the welcome
+    shown = [older] if older else []  # the notices the developer must see when no welcome carries them
     text += f"\n\n{older}" if older else ""
-    try:  # devkit notices from files only, no network (spec P-fym583l7sg1)
-        from . import ext, updatecheck
-        notices = ((lambda: updatecheck.session_line(installed=updatecheck.installed_version()), False),  # daily
-                   (lambda: ext.session_line(cwd), False),  # extensions changed outside devkit, each audited once
-                   (lambda: ext.accepted_line(), True),  # extensions accepted since the developer's last ack
-                   (lambda: ext.last_ack_line(), True))  # that last ack, once, with its terminal
+    said = set()  # the notices this start has: the welcome turns them into need lines
+    try:  # devkit notices from files only, no network; the daily update line is the welcome's
+        from . import ext
+        notices = (("ext_changed", lambda: ext.session_line(cwd), False),  # changed outside devkit, audited once
+                   ("ext_accepted", lambda: ext.accepted_line(), True),  # accepted since the developer's last ack
+                   ("ext_ack", lambda: ext.last_ack_line(), True))  # that last ack, once, with its terminal
     except Exception:
         notices = ()
         _log(f"session-start notices {agent}: {traceback.format_exc()[-300:]}")
-    for notice, to_developer in notices:
+    for key, notice, to_developer in notices:
         try:
             line = notice()
             text += f"\n\n{line}" if line else ""
+            if line:
+                said.add(key)
             if line and to_developer:
                 shown.append(line)
         except Exception:
@@ -448,13 +459,45 @@ def session_start(agent: str):
                 "workspace rules, the crew's limits and the irreversible-action gate do not hold. That is recorded "
                 "once as guard.off in the audit trail. Start the session without it to turn the guard back on.\n\n"
                 + text)
-    if agent == "codex":
-        print(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": text}}))
-    elif shown:  # Claude Code shows a system message to the developer, as the canary does at the Stop hook
-        print(json.dumps({"systemMessage": "\n\n".join(shown),
-                          "hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": text}}))
+    wanted, hello = _welcome(agent, data, cwd, seen, bool(older), said)
+    if hello:  # first of all, in the part of the context a preview keeps when the whole is too long
+        from . import welcome
+        text = welcome.for_model(hello) + "\n\n" + text
+    else:  # no welcome to show it (and mark the day only then): the model hears the daily update line, as before
+        try:
+            from . import updatecheck
+            line = updatecheck.session_line(installed=updatecheck.installed_version())
+            text += f"\n\n{line}" if line else ""
+        except Exception:
+            _log(f"session-start update notice {agent}: {traceback.format_exc()[-300:]}")
+    # the developer reads the welcome (Claude Code at the session's top, Codex above its first reply); without one,
+    # the notices themselves. A headless run, a crew member's session and a scratch repository get neither.
+    message = hello or ("\n\n".join(shown) if wanted else "")
+    if agent == "codex" or message:
+        out = {"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": text}}
+        print(json.dumps(dict({"systemMessage": message}, **out) if message else out))
     else:
         print(text)
+
+
+def _welcome(agent: str, data: dict, cwd: str, seen: dict, older: bool, said: set) -> tuple:
+    """-> (whether this start gets a welcome, the welcome or ""). Not wanted for a headless run, a crew member's
+    session or a scratch repository (welcome.wanted). "" when context_for did not say where the session is (then
+    the notices show as before), and on any error: the hook never fails for it."""
+    try:
+        from . import welcome
+        from .canary import surface
+        if not welcome.wanted(agent, data, seen.get("top", "")):
+            return False, ""
+        if "top" not in seen:
+            return True, ""
+        return True, welcome.text(agent, str(data.get("source") or "startup"), cwd, data=data,
+                                  repo=seen.get("repo"), top=seen["top"], older=older,
+                                  ext_changed="ext_changed" in said, ext_ack="ext_ack" in said,
+                                  mode=welcome.mode_for(surface(agent, data)))
+    except Exception:
+        _log(f"session-start welcome {agent}: {traceback.format_exc()[-300:]}")
+        return True, ""
 
 
 def _continuity(fn: str, agent: str, data: dict, **kw):
