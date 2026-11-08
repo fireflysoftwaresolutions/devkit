@@ -19,7 +19,9 @@ the directory used to resolve later paths, leading `VAR=value`, `sudo`, `env`, `
 `builtin`, `nice`, and `caffeinate` prefixes are skipped, heredoc bodies are treated as data, and output redirections
 (`>`, `>>`) are checked as writes. The guard also reads what the shell runs inside a command: `$(…)` and backtick
 substitutions, `sh -c` and `eval` strings (with the words after a `sh -c` line in place of its `$0`, `$1`, and
-`"$@"`), `xargs` and `find -exec` commands, and a pager that git or gh starts. The shells it reads this way are
+`"$@"`; the line is the first word after all the shell's options, as bash, zsh, sh, dash, and ksh read them, so
+`bash -c -e 'line'` and `zsh -c -o errexit 'line'` run `line`, while `csh` and `tcsh` take the word right after
+`-c`), `xargs` and `find -exec` commands, and a pager that git or gh starts. The shells it reads this way are
 `sh`, `bash`, `zsh`, `dash`, `ksh`, `fish`, `csh`, and `tcsh`, run by name, by path, or by a script's shebang. It
 reads every one of them with POSIX shell quoting, which `csh` and `tcsh` do not follow in every case (a backslash
 before a closing double quote). Every rule applies at each of these

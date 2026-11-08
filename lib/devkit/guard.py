@@ -1137,17 +1137,54 @@ def _check_bash_reading(cmd: str, cwd: str, agent: str):
 _PATH_TAKERS = frozenset({"rm", "unlink", "mkdir", "touch", "cp", "mv", "rsync", "ditto"})
 
 
-def _shell_line(args):
-    """The -c line of a shell's arguments, or None (a script file or its input is not a line given here)."""
-    k = 0
-    while k < len(args):
-        a = args[k]
-        if a == "--" or not a.startswith(("-", "+")):
-            return None
-        if a.startswith("-") and not a.startswith("--") and "c" in a[1:]:
-            return _with_positionals(args[k + 1], args[k + 2:]) if k + 1 < len(args) else None
-        k += 2 if a in ("-o", "+o", "-O", "+O", "--rcfile", "--init-file") else 1
-    return None
+_POSIX_SHELLS = frozenset({"bash", "sh", "zsh", "dash", "ksh"})
+
+
+def _shell_args(args, name="bash") -> tuple:
+    """How a shell reads its words -> (kind, k). kind: "line" (the -c command line is args[k], its $0, $1… follow
+    it), "script" (a script file at args[k]), "stdin" (-s: its program comes from its input, and its $1… start at
+    args[k]), "input" (no word left: it reads its input) or "none" (-c and no line). bash, zsh, sh, dash and ksh read
+    options up to the first word that is not one, -c among them, so the line is the first word after all of them
+    (`bash -c -e 'line'`, `bash -c +x 'line'`, `zsh -c -o errexit 'line'`); csh, tcsh and fish take the word right
+    after -c."""
+    posix = name in _POSIX_SHELLS
+    line = stdin = False
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a in ("--", "-"):
+            i += 1
+            break
+        if a.startswith("--"):
+            i += 2 if a in ("--rcfile", "--init-file") else 1
+            continue
+        if len(a) < 2 or a[0] not in "-+":
+            break
+        on, names = a[0] == "-", 0
+        for ch in a[1:]:
+            if ch in "oO":  # its option name is the next word: -o errexit, -eo pipefail, -O extglob
+                names += 1
+            elif on and ch == "c":
+                line = True
+            elif on and ch == "s":
+                stdin = True
+        i += 1 + names
+        if line and not posix:  # csh, tcsh, fish: the word after -c is the line
+            break
+    if line:
+        return ("line" if i < len(args) else "none"), i
+    if stdin:
+        return "stdin", i
+    return ("script" if i < len(args) else "input"), i
+
+
+def _shell_line(args, name="bash"):
+    """The -c line of a shell's arguments (_shell_args), or None: a script file or its input is not a line given
+    here."""
+    kind, k = _shell_args(args, name)
+    if kind != "line":
+        return None
+    return _with_positionals(args[k], args[k + 1:])
 
 
 def _nested_lines(argv) -> list:
@@ -1159,7 +1196,7 @@ def _nested_lines(argv) -> list:
     argv = run
     name, args = os.path.basename(argv[0]), argv[1:]
     if name in _SHELLS:
-        line = _shell_line(args)
+        line = _shell_line(args, name)
         return [line] if line else []
     if name == "eval":
         return [" ".join(args)] if args else []
@@ -2922,12 +2959,12 @@ class _Shell:
         dev = _dev_args(argv)
         if dev is not None:
             return self.dev(dev, cwd, set(names) | self.exported)
-        installer = argv[0] if name == "install.sh" else next(
-            (a for a in args if not a.startswith(("-", "+"))), "") if name in _SHELLS else ""
+        shell = _shell_args(args, name) if name in _SHELLS else ("", 0)
+        installer = argv[0] if name == "install.sh" else args[shell[1]] if shell[0] == "script" else ""
         if installer and _devkit_installer(resolve(installer, cwd)):
             return deny(INSTALL_REASON)
         if name in _SHELLS:
-            for text, typed, _ in _shell_sources(args, cwd, self.bodies):
+            for text, typed, _ in _shell_sources(args, cwd, self.bodies, name):
                 v = self.nested(text, cwd, names=names, typed=typed)
                 if v:
                     return v
@@ -3785,8 +3822,10 @@ def _program_source(run, whole: bool = False) -> str | None:
         if a == "-" or (shell and a.startswith("-") and not a.startswith("--") and "s" in a[1:]):
             return "none"  # it reads its program from its input
         if shell and a.startswith("-") and not a.startswith("--") and "c" in a[1:]:
-            # a line the input is only part of is read word by word where it runs (_input_runs, the walker)
-            line = args[i + 1].strip() if i + 1 < len(args) else None
+            # a line the input is only part of is read word by word where it runs (_input_runs, the walker); the
+            # line is the first word after the options (_shell_args)
+            kind, k = _shell_args(args, name)
+            line = args[k].strip() if kind == "line" else None
             return "none" if line is None else "filled" if _RUNNER_FILLS.fullmatch(line) else "given"
         if shell and a in _SHELL_VALUE_OPTS:
             i += 2
@@ -3842,7 +3881,7 @@ def _input_runs(words, depth: int = 0) -> bool:
     if depth >= 4:  # too deep to read: it may run what its input names (fails closed)
         return True
     name = os.path.basename(run[0])
-    line = _shell_line(run[1:]) if name in _SHELLS else " ".join(run[1:]) if name == "eval" else None
+    line = _shell_line(run[1:], name) if name in _SHELLS else " ".join(run[1:]) if name == "eval" else None
     if not line:
         return False
     segs = split_commands(line)
@@ -3972,35 +4011,24 @@ def _with_positionals(line: str, words) -> str:
     return _POSITIONAL.sub(sub, line)
 
 
-def _shell_inputs(args, cwd, bodies) -> list:
+def _shell_inputs(args, cwd, bodies, name="bash") -> list:
     """The scripts a shell runs: its -c string, a script file, or its input (the command's heredocs). With -s it reads
     its input even when words follow, and they are its $1, $2 … (`bash -s plugin install x <<< 'claude "$@"'`)."""
-    return [text for text, _, _ in _shell_sources(args, cwd, bodies)]
+    return [text for text, _, _ in _shell_sources(args, cwd, bodies, name)]
 
 
-def _shell_sources(args, cwd, bodies) -> list:
+def _shell_sources(args, cwd, bodies, name="bash") -> list:
     """_shell_inputs as (text, typed, path): typed when the command holds the text (a -c line, a heredoc), False for a
     script file read from disk, whose resolved path is the third item (None for the others)."""
-    i, stdin = 0, False
-    while i < len(args):
-        a = args[i]
-        if a == "--":
-            i += 1
-            break
-        if a.startswith("-") and not a.startswith("--") and "c" in a[1:]:
-            return [(_with_positionals(args[i + 1], args[i + 2:]), True, None)] if i + 1 < len(args) else []
-        if a in ("-o", "+o", "-O", "+O", "--rcfile", "--init-file"):
-            i += 2
-            continue
-        if a.startswith(("-", "+")):
-            stdin = stdin or (a.startswith("-") and not a.startswith("--") and "s" in a[1:])
-            i += 1
-            continue
-        break
-    if stdin:
-        return [(_with_positionals(b, ["sh", *args[i:]]), True, None) for b in bodies]
-    if i < len(args):
-        path = resolve(args[i], cwd)
+    kind, k = _shell_args(args, name)
+    if kind == "none":
+        return []
+    if kind == "line":
+        return [(_with_positionals(args[k], args[k + 1:]), True, None)]
+    if kind == "stdin":
+        return [(_with_positionals(b, ["sh", *args[k:]]), True, None) for b in bodies]
+    if kind == "script":
+        path = resolve(args[k], cwd)
         return [(_read_small(path), False, path)]
     return [(b, True, None) for b in bodies]
 
@@ -4365,8 +4393,8 @@ def _forged_argv(argv, cwd, bodies, here, prev, depth) -> str:
         return fn
     texts, inners = [], []
     if name in _SHELLS:
-        texts = _shell_inputs(args, cwd, bodies)
-        if _reads_stdin(args):
+        texts = _shell_inputs(args, cwd, bodies, name)
+        if _reads_stdin(args, name):
             texts += here + ([_produced(prev, cwd)] if prev else [])
     elif name in ("source", ".") and args:
         texts = [_read_small(resolve(args[0], cwd))]
@@ -4789,7 +4817,7 @@ def _program_calls(argv, cwd, bodies, depth, where=False):
         return [call(argv, None if _repo_script(argv, cwd) else _program(argv, cwd, bodies)[0])]
     out, texts, inners = [call(argv, None)], [], []
     if name in _SHELLS:
-        texts = _shell_inputs(args, cwd, bodies)
+        texts = _shell_inputs(args, cwd, bodies, name)
     elif name in ("source", ".") and args:
         texts = [_read_small(resolve(args[0], cwd))]
     elif name == "eval":
@@ -6285,7 +6313,7 @@ def _walk_argv(argv0, cwd, bodies, depth):
     name, args = os.path.basename(argv[0]), argv[1:]
     texts, inners = [], []
     if name in _SHELLS:
-        texts = _shell_inputs(args, cwd, bodies)
+        texts = _shell_inputs(args, cwd, bodies, name)
     elif name in ("source", ".") and args:
         texts = [_read_small(resolve(args[0], cwd))]
     elif name == "eval":
@@ -7430,7 +7458,11 @@ def _opaque_actions(name, argv, cwd) -> list:
             names = pos[1:2]
         elif pos and ((name == "pnpm" and pos[0] not in _PNPM_BUILTIN) or (name == "yarn" and pos[0] not in _YARN_BUILTIN)):
             names = pos[:1]
-    elif name in _SHELLS or _INTERP.match(name):  # before the path test: /usr/bin/python3 scripts/deploy.py
+    elif name in _SHELLS:  # before the path test: bash scripts/deploy.sh
+        kind, k = _shell_args(args, name)
+        if kind == "script":
+            names = [os.path.splitext(os.path.basename(args[k]))[0]]
+    elif _INTERP.match(name):  # before the path test: /usr/bin/python3 scripts/deploy.py
         script = next((a for a in args if not a.startswith("-")), "")
         if script and "-c" not in args and not any(a.startswith("-") and not a.startswith("--") and "c" in a[1:]
                                                    for a in args[:args.index(script)]):
@@ -7547,25 +7579,10 @@ def code_session_refusal(argv, cwd, bodies, depth: int = 0) -> str | None:
     return None
 
 
-def _reads_stdin(args) -> bool:
-    """True when a shell with these arguments reads its program from its input: no -c and no script file (or -s)."""
-    i = 0
-    while i < len(args):
-        a = args[i]
-        if a == "--":
-            return i + 1 >= len(args)
-        if a.startswith("-") and not a.startswith("--") and "c" in a[1:]:
-            return False
-        if a in ("-o", "+o", "-O", "+O", "--rcfile", "--init-file"):
-            i += 2
-            continue
-        if a.startswith(("-", "+")):
-            if not a.startswith("--") and "s" in a[1:]:
-                return True
-            i += 1
-            continue
-        return False
-    return True
+def _reads_stdin(args, name="bash") -> bool:
+    """True when a shell with these arguments reads its program from its input: no -c and no script file (or -s)
+    (_shell_args)."""
+    return _shell_args(args, name)[0] in ("stdin", "input")
 
 
 def _fed_program(argv, segs, k, files, cwd) -> tuple:
@@ -7585,7 +7602,7 @@ def _fed_program(argv, segs, k, files, cwd) -> tuple:
                 sub = _unwrap(argv[j + 1:])
                 texts.append((_produced(sub, cwd), _cat_path(sub, cwd)) if sub else ("", None))
                 argv = [*argv[:j], "-"]
-        stdin = (_reads_stdin(argv[1:]) if name in _SHELLS else _program_source(argv, whole=True) == "none") or \
+        stdin = (_reads_stdin(argv[1:], name) if name in _SHELLS else _program_source(argv, whole=True) == "none") or \
             any(a in ("/dev/stdin", "/dev/fd/0") for a in argv[1:])
         if stdin:
             prev = _unwrap(segs[k - 1][0]) if k else []
@@ -7819,7 +7836,7 @@ def _argv_actions(argv, cwd, bodies, depth):
     texts, inners = [], []  # texts: (script, the path of a script file or None for a line the command holds)
     with _skipped_reads() as unread:
         if name in _SHELLS:
-            texts = [(text, path) for text, _, path in _shell_sources(args, cwd, bodies)]
+            texts = [(text, path) for text, _, path in _shell_sources(args, cwd, bodies, name)]
         elif name in ("source", ".") and args:
             texts = [(_read_small(resolve(args[0], cwd)), resolve(args[0], cwd))]
     if unread:  # `sh big.sh`, `source big.sh`: a script too large or unreadable may do anything
