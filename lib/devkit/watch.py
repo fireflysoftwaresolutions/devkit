@@ -403,10 +403,26 @@ def records(now=None) -> list:
 
 
 def armed(agent: str, sid: str, me: str = "main", transcript=None, now=None) -> list:
-    """The live waits of this consumer -> [{"id", "how"}]: a recorded `dev watch --wait` whose process runs."""
+    """The live waits of this consumer -> [{"id", "how"}]: a recorded `dev watch --wait` whose process runs; with the
+    session's transcript, the main session's background command or Monitor running one that no notification or stop
+    has ended (Claude Code), or one run in the foreground in this turn (Codex, which has no background wake-up)."""
     now = now or time.time()
-    return [{"id": r["id"], "how": "record"} for r in _records()
-            if (r.get("agent"), r.get("session"), r.get("consumer")) == (agent, sid, me) and _is_live(r, now)]
+    out = [{"id": r["id"], "how": "record"} for r in _records()
+           if (r.get("agent"), r.get("session"), r.get("consumer")) == (agent, sid, me) and _is_live(r, now)]
+    if transcript and me == "main":
+        try:
+            from .ciwatch import _shell_calls
+            calls, turn = _shell_calls(transcript, now)
+        except Exception:
+            calls, turn = [], 0
+        for i, c in enumerate(calls):
+            if not c.get("global"):
+                continue
+            if c["wake"] != "foreground" and c["live"]:
+                out.append({"id": c.get("task") or c.get("id") or "", "how": c["wake"]})
+            elif c["wake"] == "foreground" and agent == "codex" and i >= turn:
+                out.append({"id": c.get("id") or "", "how": "foreground"})
+    return out
 
 
 def default_timeout(agent: str, me: str) -> float:
@@ -688,6 +704,31 @@ def lane_notices(run: dict, moves: list):
                (f" ({why})" if why else "") + tail
         notice(run.get("agent") or "claude", run["session"], "member",
                f"lane:{aid}:{m['to']}:{int(m.get('at') or time.time())}", text)
+
+
+# --------------------------------------------------------------------------- the end of a turn
+
+def stop_gate(agent: str, data: dict, now=None) -> str | None:
+    """The Stop hook, for the main session, once per turn. A turn that ends while events can still arrive (a member
+    works, a launch is pending, a step waits for a slot, CI this session sent has not finished) must leave a wait
+    that wakes the session: on Claude Code a live `dev watch --wait` (its record, or a background command or Monitor
+    of the transcript); on Codex one run in the foreground in this turn. -> the message that sends the turn back
+    once, or None."""
+    if data.get("stop_hook_active") or data.get("agent_id"):
+        return None
+    now = now or time.time()
+    sid = data.get("session_id") or ""
+    why = can_arrive(agent, sid, now)
+    if not why or armed(agent, sid, "main", data.get("transcript_path"), now):
+        return None
+    head = "devkit: " + "; ".join(why) + ": their questions and results can arrive while you are idle, and nothing " \
+                                         "wakes you."
+    if agent == "codex":
+        return (head + f" Codex has no background wake-up: run `dev watch --wait --timeout {CODEX_MIN}` in the "
+                "foreground now and act on what it prints, or end the turn saying what still runs and that you check "
+                "it at the developer's next message.")
+    return (head + " Before you end the turn, run `dev watch --wait` with Bash run_in_background, name its task id, and "
+            "arm it again after each wake. One wait covers the CI results too.")
 
 
 # --------------------------------------------------------------------------- dev watch, dev watches

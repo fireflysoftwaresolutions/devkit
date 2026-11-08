@@ -836,6 +836,18 @@ def _ci_watch_gate(agent: str, data: dict):
         return None
 
 
+def _wait_gate(agent: str, data: dict):
+    """A main-session turn that ends while events can still arrive (a member works, a launch is pending, a step waits
+    for a slot, CI it sent has not finished) and leaves nothing armed that wakes it goes back once with the wait to
+    arm (watch.stop_gate); the turn's stop.block names the rule. Fails open."""
+    try:
+        from . import watch
+        return watch.stop_gate(agent, data)
+    except Exception:
+        _log(f"stop wait: {traceback.format_exc()[-300:]}")
+        return None
+
+
 def turn_checklist(agent: str, data: dict, sess: dict) -> list:
     """What the Stop gate would ask at this point of the turn, so it reaches the agent before the end (threaded turn
     endings, R1) -> [(rule, text)] still open: handoff (the developer's commits newer than the project's note),
@@ -865,6 +877,9 @@ def turn_checklist(agent: str, data: dict, sess: dict) -> list:
     why = _ci_watch_gate(agent, data)  # right after a push, before the turn can end on a promise
     if why:
         items.append(("watch", why.replace("devkit: ", "", 1)))
+    why = _wait_gate(agent, dict(data, stop_hook_active=False))  # members at work: arm the wait before the end
+    if why:
+        items.append(("wait", why.replace("devkit: ", "", 1)))
     return items
 
 
@@ -953,6 +968,9 @@ def stop(agent: str):
             why = _ci_watch_gate(agent, data)  # Claude and Codex: each is told the watch that wakes it
             if why:
                 reasons.append(("watch", why))
+            why = _wait_gate(agent, data)  # members or CI can still answer: one wait wakes the idle session
+            if why:
+                reasons.append(("wait", why))
         try:  # lessons the reply names were applied: that use keeps them alive
             from . import lessons as _les
             said = data.get("last_assistant_message") or ""

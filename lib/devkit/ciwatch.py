@@ -1063,6 +1063,20 @@ def _wait_spec(cmd):
     return None
 
 
+def global_wait(cmd) -> bool:
+    """Does a command line run `dev watch --wait`, the one wait for every devkit event (watch.py)?"""
+    for words in _commands(_script(cmd)):
+        while words and (words[0] in _WRAPPERS or re.match(r"[A-Za-z_]\w*=", words[0])):
+            words = words[1:]
+        if words and re.fullmatch(r"python[\d.]*", os.path.basename(words[0])):  # python3 -I -S <devkit>/bin/dev
+            words = words[1:]
+            while words and words[0].startswith("-"):
+                words = words[1:]
+        if words and os.path.basename(words[0]) == "dev" and words[1:2] == ["watch"] and "--wait" in words:
+            return True
+    return False
+
+
 def _covers(spec: dict, sent: dict) -> bool:
     """A watch with these options follows what was sent: none of them names another commit, tag or branch."""
     want, have = (spec.get("sha") or "").lower(), (sent.get("sha") or "").lower()
@@ -1075,14 +1089,14 @@ def _shell_calls(path, now: float) -> tuple:
     """The shell calls of a session transcript (Claude Code or Codex) in order, and the index of the first one of
     the last turn. Each: {"command", "cwd", "at", "wait": the options of the `dev ci watch --wait` it runs or None,
     "wake": monitor | background | foreground, "live"}. Live: a Monitor or background task that no notification,
-    stop call or Monitor deadline has ended."""
+    stop call or Monitor deadline has ended; "global": it runs `dev watch --wait`."""
     from .gates import BG_LAUNCH_RE, DENIAL_RE, ENDED, STOP_TOOLS, _notifications, _records, _tag, _task_of, _text
     from .hooks import SHELL_TOOLS
     from .scope import _is_prompt
 
     def call(cmd, cwd, ts):
-        return {"command": cmd, "cwd": cwd, "at": _epoch(ts), "wait": _wait_spec(cmd), "task": "", "id": "",
-                "monitor": False, "limit": 0}
+        return {"command": cmd, "cwd": cwd, "at": _epoch(ts), "wait": _wait_spec(cmd), "global": global_wait(cmd),
+                "task": "", "id": "", "monitor": False, "limit": 0}
     calls, by_use, stops, gone, turn = [], {}, {}, set(), 0
     for rec in _records(path):
         if _is_prompt(rec):
@@ -1192,8 +1206,9 @@ def stop_gate(agent: str, data: dict, runs_fn=None, now: float | None = None) ->
     wakes this agent, started in this session: on Claude Code a live Monitor or background command running
     `dev ci watch --wait`; on Codex, which has no background wake-up, that command run in the foreground in this
     turn. So must an agent's own watch of this session that stopped before its run ended. devkit's background watch
-    does not count: it reports at the next hook, which an idle session never reaches. -> the message that sends the
-    turn back once, naming each run and the command to start, or None."""
+    does not count alone: it reports at the next hook, which an idle session never reaches; with a live `dev watch
+    --wait` of this session's main session (watch.armed), which takes that report when it lands, it does. -> the
+    message that sends the turn back once, naming each run and the command to start, or None."""
     now = now or time.time()
     calls, turn = _shell_calls(data.get("transcript_path"), now)
     sent = []
@@ -1216,11 +1231,24 @@ def stop_gate(agent: str, data: dict, runs_fn=None, now: float | None = None) ->
     fits = WAKES.get(agent, WAKES["claude"])
     watching = [c["wait"] for i, c in enumerate(calls) if c["wait"] is not None and c["wake"] in fits
                 and (c["live"] if c["wake"] != "foreground" else i >= turn)]
-    missing = []
+    missing, armed = [], None
     for s in sent:
         if any(_covers(w, s) for w in watching):
             continue
         still, runs = _unfinished(s, runs_fn, now)
-        if still:
-            missing.append((s, runs))
+        if not still:
+            continue
+        if armed is None:  # one global wait covers the result devkit's background watch delivers to this session
+            from . import watch
+            armed = bool(watch.armed(agent, sid, "main", data.get("transcript_path"), now))
+        if armed and _devkit_watches(agent, sid, s, now):
+            continue
+        missing.append((s, runs))
     return _gate_message(agent, missing, data.get("cwd")) if missing else None
+
+
+def _devkit_watches(agent: str, sid: str, sent: dict, now: float) -> bool:
+    """devkit's background watch of what was sent runs for this session: its result reaches the session's run."""
+    return any(w.get("by") == "devkit" and w.get("status") == "live" and (w.get("agent"), w.get("session")) ==
+               (agent, sid) and w.get("ref") == sent["ref"] and (w.get("sha") or "")[:7] == (sent["sha"] or "")[:7]
+               for w in watches(now))
