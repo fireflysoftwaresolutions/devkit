@@ -164,6 +164,29 @@ class SendMessageAnswerTests(RequestCase):
         self.assertEqual(len(done), 1, rows[-3:])
         self.assertIn("SendMessage", json.dumps(done[0]))
 
+    def send(self, to, text):
+        return pg.answered_by_sendmessage("claude", {"session_id": "s1", "tool_input": {"to": to, "message": text},
+                                                     "tool_response": {"success": True}}, now=self.now)
+
+    def open_ids(self):
+        return sorted(m["id"] for m in pg.waiting_messages(pg.load_run("claude", "s1")))
+
+    def test_a_name_two_lanes_answer_to_closes_neither_lanes_questions(self):
+        # the name matched both Backend engineer lanes: both questions closed, and the answer reached only one
+        launch("a_tank2", "devkit:tank", "Tank: migration", self.now - 300)
+        pg.crew_ask("May I rename the column?", from_agent="a_tank", now=self.now - 200)
+        pg.crew_ask("May I drop the index?", from_agent="a_tank2", now=self.now - 100)
+        self.assertEqual(self.send("tank", "Yes"), [])
+        self.assertEqual(self.open_ids(), ["M1", "M2"])
+        self.assertEqual(self.send("a_tank2", "Yes, drop it"), ["M2"])
+        self.assertEqual(self.open_ids(), ["M1"])
+
+    def test_a_message_that_names_a_question_answers_only_that_one(self):
+        pg.crew_ask("May I rename the column?", from_agent="a_tank", now=self.now - 200)
+        pg.crew_ask("Should the export skip empty rows?", from_agent="a_tank", now=self.now - 100)
+        self.assertEqual(self.send("a_tank", "M2: yes, skip them"), ["M2"])
+        self.assertEqual(self.open_ids(), ["M1"])
+
 
 class MemberWaitRouteTests(RequestCase):
     def test_a_members_wait_names_its_own_lane_even_in_the_background(self):

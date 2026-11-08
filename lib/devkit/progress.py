@@ -2182,9 +2182,10 @@ def crew_inbox(from_agent: str | None = None, cwd: str | None = None, mark: bool
 
 def answered_by_sendmessage(agent: str, data: dict, now: float | None = None) -> list:
     """PostToolUse of a SendMessage from the main session: its text answers the open questions that the member it went
-    to (a lane id, or a name its lanes answer to) asked the tech lead. Each is marked answered via SendMessage, the
-    text is kept as the answer (delivered already: SendMessage carried it), and the audit trail records
-    crew.message-answered with the channel. -> the ids answered"""
+    to (a lane id, or a name its lanes answer to) asked the tech lead: the ones it names (M12), else all of them.
+    A name that fits several lanes with open questions answers none: SendMessage reached only one of them. Each is
+    marked answered via SendMessage, the text is kept as the answer (delivered already: SendMessage carried it), and
+    the audit trail records crew.message-answered with the channel. -> the ids answered"""
     inp = data.get("tool_input") or {}
     to, text = str(inp.get("to") or "").strip(), str(inp.get("message") or "").strip()
     resp = data.get("tool_response")
@@ -2202,6 +2203,11 @@ def answered_by_sendmessage(agent: str, data: dict, now: float | None = None) ->
         lanes = [to] if to in agents else [k for k, v in agents.items() if isinstance(v, dict) and
                                            _label_matches(to, v)]
         asked = [m for m in _unanswered(run) if m.get("to") == "main" and m.get("from") in lanes]
+        if len({m.get("from") for m in asked}) > 1:  # the name fits several lanes that asked: SendMessage reached one
+            return []
+        named = set(re.findall(r"\b(M\d+)(?:@[\w.:-]+)?\b", text))
+        if named:  # the questions it names, not every open one of that member
+            asked = [m for m in asked if m.get("id") in named]
         if not asked:
             return []
         for q in asked:
