@@ -123,6 +123,24 @@ class MidTurnRequestTests(RequestCase):
         self.assertAlmostEqual(sess.get("request_ts") or 0, self.now - 30, delta=1)
 
 
+class LongTranscriptLineTests(unittest.TestCase):
+    # one transcript line longer than a read (a screenshot, base64) held the reading position, so every message the
+    # developer typed after it, mid-turn, was never seen and every hook re-read the same bytes
+    def test_a_message_after_a_line_longer_than_a_read_is_still_found(self):
+        import json
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "t.jsonl"
+            long = json.dumps({"type": "user", "message": {"content": "x" * (pg.MIDTURN_READ + 100_000)}})
+            path.write_text(long + "\n" + json.dumps(queued("Release it after the review", 1_700_000_000.0)) + "\n")
+            found, offset = pg.midturn_requests(str(path), 0)
+            for _ in range(3):  # one hook per call: the message arrives within a few hooks, never stuck
+                if found:
+                    break
+                found, offset = pg.midturn_requests(str(path), offset)
+            self.assertEqual([m["text"] for m in found], ["Release it after the review"])
+
+
 class SendMessageAnswerTests(RequestCase):
     def test_sendmessage_to_a_member_with_an_open_question_answers_it_via_sendmessage(self):
         # 26.11.6 did not see SendMessage at all: the question stayed open, on the developer's list, until the run

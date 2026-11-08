@@ -5668,6 +5668,24 @@ MIDTURN_READ = 400_000  # bytes of new transcript lines one hook reads at most; 
 _WAKE_PROMPTS = ("<task-notification", "[SYSTEM NOTIFICATION", "<system-reminder", "<agent-message")
 
 
+def _past_line(transcript, pos: int, start: int) -> int:
+    """The offset just after the line that runs on past `pos`, so the next read starts at a whole line; `start` while
+    that line is still being written (no end yet)."""
+    try:
+        with open(transcript, "rb") as fh:
+            fh.seek(pos)
+            while True:
+                chunk = fh.read(MIDTURN_READ)
+                if not chunk:
+                    return start
+                i = chunk.find(b"\n")
+                if i >= 0:
+                    return pos + i + 1
+                pos += len(chunk)
+    except OSError:
+        return start
+
+
 def midturn_requests(transcript, offset=None, since=None) -> tuple:
     """The messages the developer typed while the session worked, in the transcript lines after `offset` -> ([{"text",
     "ts"}], the offset to keep). Claude Code runs no UserPromptSubmit for them: it records each as an attachment of
@@ -5693,7 +5711,9 @@ def midturn_requests(transcript, offset=None, since=None) -> tuple:
         data, start = (data[cut + 1:], start + cut + 1) if cut >= 0 else (b"", start)
     end = data.rfind(b"\n")
     if end < 0:
-        return [], start
+        if len(data) < MIDTURN_READ:
+            return [], start  # a line still being written: read it whole at the next call
+        return [], _past_line(transcript, start + len(data), start)  # one line longer than a read: skip to its end
     out = []
     import datetime as dt
     for raw in data[:end + 1].splitlines():
