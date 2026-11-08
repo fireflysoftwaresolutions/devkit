@@ -57,7 +57,7 @@ MAX_EVENTS = 20  # events one wake takes and prints; the rest waits for the next
 NOTICES_MAX = 20  # notices kept in a session record
 LINE_MAX = 300  # characters of a member's or CI's text in one line
 _ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?|\x1b[@-Z\\-_]")
-_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f​-‏  ‪-‮⁠-⁤⁦-⁩﻿]")
+_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028\u2029\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]")
 
 
 def clean(text, limit: int = LINE_MAX) -> str:
