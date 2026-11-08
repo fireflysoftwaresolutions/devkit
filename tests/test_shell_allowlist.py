@@ -23,18 +23,18 @@ sys.path.insert(0, str(ROOT / "lib"))
 
 from devkit import core, guard  # noqa: E402
 
-CWD = str(ROOT)
+# the main session works in a project of the dev root (the run's, below its temporary home), where the guard allows
+# its writes, whatever folder this checkout lives in (~/Development on the developer's Mac, a runner folder in CI)
+MAIN_CWD = str(core.DEV / "fireflysoftwaresolutions" / "devkit")
+# a member's lane works there too: in this checkout's own folder the verdicts would follow where the tree sits (in a
+# session scratchpad, an exported copy there, the guard's scratch-folder rule judges every write first)
+CWD = MAIN_CWD
 REVIEWER = "seraph"  # a review-only member in config/crew.json: its lane gets the allowlist without a level
 
 
 def lane(cmd, member=REVIEWER, cwd=CWD, **kw):
     v = guard.crew_shell_verdict(cmd, cwd, None, member, **kw)
     return v[1] if v else None
-
-
-# the main session works in a project of the dev root (the run's, below its temporary home), where the guard allows
-# its writes, whatever folder this checkout lives in (~/Development on the developer's Mac, a runner folder in CI)
-MAIN_CWD = str(core.DEV / "fireflysoftwaresolutions" / "devkit")
 
 
 def main_session(cmd, cwd=MAIN_CWD):
