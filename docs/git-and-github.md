@@ -136,7 +136,8 @@ The same merge test closes branches at four other moments:
   and not into the previous tag), remote and local, and prints them. Branches merged before stay for the nightly
   job.
 - The nightly `gc` job deletes a merged local branch that has not moved for `gc.grace_hours` (24), with its idle
-  worktree. It deletes a merged remote branch only when its pull request merged or devkit pushed it as a backup
+  worktree. It deletes a merged remote branch only when its own pull request merged (from this repository, with
+  the branch's tip as its head; a fork's pull request of the same name never counts) or devkit pushed it as a backup
   (`dev backup`, `dev sync`); anyone else's merged branch waits for `dev branch prune --apply`.
 - The hourly backup no longer pushes a branch merged by content, or squash-merged by its own pull request, back to
   `origin`: the branch map counts it as merged, and `dev backup` skips it with the pull request's number
