@@ -1501,10 +1501,19 @@ class CrewMessageAuditTests(unittest.TestCase):
 
 class CrewSafetyTests(unittest.TestCase):
     def test_a_subagent_cannot_act_as_morpheus_through_a_compound_command(self):
+        # the lane router (guard.lane_route) routes a lane call joined only to cd or to reads, as its own lane; any
+        # other compound stays refused, so it never runs as the tech lead
         from devkit import hooks
         sub = {"agent_id": "a1", "tool_name": "Bash"}
-        for cmd in ('cd lib && dev progress step "x" --check y', 'dev crew decide D1 "A"; echo ok',
-                    'echo $(dev crew mode auto)'):
+        for cmd, routed in (('cd lib && dev progress step "x" --check y',
+                             'cd lib && DEVKIT_FROM_AGENT=a1 dev progress step "x" --check y'),
+                            ('dev crew decide D1 "A"; echo ok', 'DEVKIT_FROM_AGENT=a1 dev crew decide D1 "A"; echo ok')):
+            with self.subTest(cmd=cmd):
+                self.assertEqual((hooks._route_subagent_progress(dict(sub, tool_input={"command": cmd})) or {})
+                                 .get("command"), routed)
+                self.assertIsNone(hooks._unroutable_lane_command(dict(sub, tool_input={"command": cmd})))
+        for cmd in ('echo $(dev crew mode auto)', 'dev progress step x && rm -rf build', 'echo y | dev crew decide D1 A',
+                    'cd lib && dev progress step x | tee /tmp/out', 'cd lib && env dev crew decide D1 A'):
             with self.subTest(cmd=cmd):
                 self.assertIsNone(hooks._route_subagent_progress(dict(sub, tool_input={"command": cmd})))
                 self.assertIn("command of its own", hooks._unroutable_lane_command(dict(sub, tool_input={"command": cmd})))
