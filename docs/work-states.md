@@ -81,9 +81,10 @@ history records why it ran again.
 
 `dev progress done` refuses to end a run that does not match what happened:
 
-- **A crew member still owns a running step.** Ending the run would close work its member is still doing. Wait for
-  the report, or skip the step on purpose with `dev progress skip "<step>" --why "…"`. Neither `--force` nor `--why`
-  passes this check.
+- **A crew member still works on a running step.** Ending the run would close work its member is still doing. Wait
+  for the report, or skip the step on purpose with `dev progress skip "<step>" --why "…"`. Neither `--force` nor
+  `--why` passes this check. A step whose member ended or went stale, as `dev crew owner` reads it, does not hold
+  the run: it closes with the run, and the run's history says its owner had ended.
 - **A step is pending**, or an Accountable member has not approved the work they own, or a step is flagged for a
   recheck. `--why` ends the run anyway, and the reason is recorded.
 - **A decision still needs you.** A moot decision does not count (see [Decisions](#decisions)).

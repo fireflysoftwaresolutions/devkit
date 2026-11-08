@@ -123,6 +123,8 @@ explains what moves each record and how to repair one that drifted.
   its member ended back to pending, never to unverified. A message for such a member (`dev crew ask --to tank`) waits
   for their next launch instead of their old lane, and devkit tells the sender; a step such a member owned closes on
   the tech lead's evidence (`dev progress step --step`), and the run's history says its owner had ended.
+  `dev progress done` no longer waits for such a member either: their running step closes with the run, and its
+  history says its owner had ended; a member that still works still holds the run's end.
 - **The dashboard no longer warns about commits merged by content.** A project's health, its actions, and the
   worktrees to reclaim count only commits with no equivalent on `origin`'s default branch.
 - **A stopped rebase no longer stops every handoff sync without a word.** devkit ends it before reads, pulls, commits,
