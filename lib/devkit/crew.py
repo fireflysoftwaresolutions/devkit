@@ -387,9 +387,11 @@ def body(m: dict, roster=None, alias=None) -> str:
                 "", ", ".join(f"`{s}`" for s in m["skills"]), ""]
     else:
         out += ["None. Load a skill only when your brief names one.", ""]
+    rule = str(roster.get("procedure_rule") or "").strip()  # every member's, with the phases
     out += ["## Your procedure", "",
             "Follow these phases in order. A phase is finished when its gate holds; `proof` marks the devkit command "
-            "devkit looks for in your session before it accepts your report.", ""]
+            "devkit looks for in your session before it accepts your report." + (f" {_sentence(rule)}" if rule else ""),
+            ""]
     for i, x in enumerate(m["procedure"], 1):
         line = f"{i}. **{x['phase']}.** {_sentence(x['do'])}"
         extras = []
@@ -528,6 +530,9 @@ ENFORCEMENT = (
      "enforced"),
     ("E-lessons", "A member records a lesson after a repeated refusal", "SubagentStop: the crew gates",
      "devkit.gates.crew_gates", "enforced"),
+    ("E-background", "A member's background commands have ended before it reports (Claude Code; the tech lead is "
+     "told of a member let through with one still running)", "SubagentStop: the crew gates",
+     "devkit.gates.background_work", "enforced"),
     ("E-pitfalls", "Members get the known pitfalls for their task", "dev crew brief and the Claude launch hook",
      "devkit.lessons.for_task", "enforced"),
     ("E-knowledge", "Members get the knowledge of their kind of work", "dev crew brief and the Claude launch hook",
@@ -616,10 +621,11 @@ def _raci_section(m: dict, roster) -> list:
             line += (f" Consult {raci.names([x for x in a['C'] if x != m['id']], roster)} before decisions that affect "
                      "them (`dev crew ask --to <name>`).")
         out.append(line)
-    for a in r["A"]:
-        if m["id"] not in (a.get("R") or []):
-            out.append(f"- **You approve** {raci._lower(a['name'])} done by {raci.names(a.get('R'), roster)}: review it "
-                       "with evidence, and approve it or send it back with the fixes.")
+    approves = [f"- **You approve** {raci._lower(a['name'])} done by {raci.names(a.get('R'), roster)}."
+                for a in r["A"] if m["id"] not in (a.get("R") or [])]
+    if approves:  # said once: a reviewer approves a dozen kinds of work, and its agent file must stay short
+        out += approves + ["- **When you approve,** review the work with evidence, and approve it or send it back "
+                           "with the fixes."]
     if r["C"]:
         out.append("- **You are consulted on** " + "; ".join(raci._lower(a["name"]) for a in r["C"])
                    + ": answer questions from the crew promptly (`dev crew answer <id> \"<text>\"`).")
@@ -1050,6 +1056,8 @@ def brief_text(m: dict, task: str, scope: str = "", step=None, roster=None, cwd=
     if m.get("procedure"):
         b += ["", "## Procedure", "", "Follow your procedure's phases (your agent instructions); before you report, "
               "devkit checks that you ran: " + (", ".join(f"`{p}`" for p in proofs(m)) or "nothing in particular") + "."]
+        if str(roster.get("procedure_rule") or "").strip():  # the crew gates check it at SubagentStop
+            b.append(_sentence(roster["procedure_rule"]))
     try:
         from . import lessons
         picked = lessons.for_task(pid, activity=(act or {}).get("id"), files=globs) if pid else []
@@ -2074,8 +2082,10 @@ def register(add):
     x = sp.add_parser("decisions", help="this run's decisions; automatic ones are marked for review")
     x.add_argument("--pending", action="store_true", help="only those waiting for the developer")
     x.add_argument("--ask", nargs="*", metavar="ID", help="the question tool calls that ask the developer these "
-                   "decisions, every pending one without IDs: at most 4 per call, the recommended option first; reword "
-                   "freely, keeping “D<n> ·” up front and the option letters (their evidence, spec C5)")
+                   "decisions, every pending one without IDs: at most 4 per call, the recommended option first. "
+                   "Reword a reversible one as you like, keeping “D<n> ·” up front and the option letters (their "
+                   "evidence, spec C5); send an irreversible one word for word, alone in its call: it counts only in "
+                   "devkit's exact call")
     x.add_argument("--json", dest="ask_json", action="store_true", help="with --ask: the tool input as JSON")
     x = sp.add_parser("route", help="who should do a task, ranked with the reasons; --plan: a member for each open step")
     x.add_argument("task", nargs="*", help="the task, in a sentence")

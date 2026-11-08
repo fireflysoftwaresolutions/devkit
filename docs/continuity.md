@@ -75,10 +75,10 @@ Where no hook runs, or to check what a session gets back, read the record with `
 
 ```bash
 dev session brief                             # what devkit kept for this session
-dev session brief --latest                    # the project's newest session with an open run or requests (12 hours)
+dev session brief --latest                    # the newest session of the project with an open run or requests (12 hours)
 dev session carry                             # after /clear: move the open run into this session
-dev session compactions <transcript>          # count a transcript's compactions; reads only
-dev session forget --session claude:<id>      # delete one session's records (--all: every record here)
+dev session compactions <transcript>          # count the compactions in a transcript; reads only
+dev session forget --session claude:<id>      # delete the records of one session (--all: every record here)
 ```
 
 `dev session compactions` lists each compaction with its time, trigger, and tokens:

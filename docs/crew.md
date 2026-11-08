@@ -96,6 +96,11 @@ short version:
    dev progress assign ui --to Trinity --scope "web/src/invoices/**" --activity frontend
    ```
 
+   Write scopes relative to the repository: they match the same files in every checkout of it, the main checkout
+   and each worktree. `assign` and `dev crew delegate --scope` rewrite an absolute or `~` path inside one checkout to
+   that form and tell you. They refuse a path that spans more than one checkout or names a worktree that is not
+   there, a deleted one included; give the files relative to the repository instead.
+
 3. **Brief and launch** them, all parallel members in one message:
 
    ```bash
@@ -306,11 +311,17 @@ each check that fails, naming every missing item and the command that fixes it:
    | Unfinished work | No stubs, placeholders, or untracked TODOs in the files it changed |
    | Tests | No test that cannot fail in the test files it changed |
    | Lessons | Two or more guard refusals answered with `dev lesson add` or `dev lesson recur` |
+   | Background work | Every command it put in the background has ended (its task notification arrived, `TaskStop` stopped it, or a read of its output showed it exited), because Claude Code keeps a member in its agent list while one runs; Codex transcripts have no such launch, so this gate finds nothing there |
 
 Members with read-only tools have no shell, so they skip the proofs and lessons gates. The unfinished-work and test
 gates count only what the member wrote itself: another member's uncommitted lines in a shared file are not its
 findings. Every gate finding goes to the audit trail as `crew.gate`. With `crew.gates.enforce` set to `false`, the
-gates only record; with `canary.enforce` set to `false`, the first two checks do not send the member back.
+gates only record; with `canary.enforce` set to `false`, the first two checks do not send the member back. A member
+let through with background work still running (sent back once already, or with the gates not enforced) is named once
+in the tech lead's next context, with the agent id to stop it: `TaskStop <agent id>`. Every other member the tech lead
+launched that finishes is named once too, in one line with its agent id, because Claude Code can still list a
+finished member as running: `TaskStop <agent id>` ends it. devkit names only an agent its launch records show the
+main session launched: a member's own helpers, and agents with no launch record, get no line.
 
 When the member stops for good, its step ends on evidence: done with a Check ✓ in its report or its own
 `dev progress step --check`, otherwise unverified, for the tech lead to close with evidence or reopen. A review-only or
@@ -480,7 +491,7 @@ Each guardrail cites the rule of `dev crew rules` that enforces it. A rule marke
 | Steps change only with evidence | closing a step needs `--check`, and a member's step ends done only on its evidence, otherwise unverified (`E-evidence`); a step whose dependencies are open is refused, except a review step after unverified work (`E-deps`); keeping a step open while gate findings remain and rechecking the dependents of a reopened step are planned (`E-gate-findings`, `E-recheck`) |
 | Mistakes are fixable and visible | `dev progress reopen` or `dev progress skip` with `--why`, and `dev progress add`; every change is in `dev progress history` (`E-fixable`) |
 | A member that never reports back | after `progress.stale_agent_hours` (6) its lane is closed as lost and its step goes back to the main session (`E-lost-lane`) |
-| Every report is checked | the status block, the step's record, and the crew gates at SubagentStop (`E-status-block`, `E-step-records`, `E-proofs`, `E-skills`, `E-stubs`, `E-tests-fail`, `E-lessons`) |
+| Every report is checked | the status block, the step's record, and the crew gates at SubagentStop (`E-status-block`, `E-step-records`, `E-proofs`, `E-skills`, `E-stubs`, `E-tests-fail`, `E-lessons`, `E-background`) |
 | Only the tech lead plans, assigns, and decides | from a lane, `assign`, `begin`, `reopen`, `skip`, `done`, `decide`, and `mode` are refused, and in the main session they must be typed as commands, not run by a script (`E-main-only`, `E-caller`) |
 | Decisions that are yours | guided mode waits for you (`E-decisions`), and the irreversible-action gate holds merges, releases, force pushes, and the other irreversible actions for your typed grant or decision (`E-irreversible`) |
 | No escape hatches for members | members are refused devkit's escape hatches (`DEVKIT_*` variables, `--ci-passed`, `--no-verify`, `dev config set`), and each refusal is audited (`E-escape`) |
@@ -507,7 +518,7 @@ dashboard and the handoff read, and devkit's audit trail (`dev audit`), publishe
 | `stop.block`, `canary.crew-roles` | a final message sent back, with the rule (`roles` for names without their role), or a member's report that names crew members without their role |
 
 ```bash
-dev audit --action crew        # the crew's coordination
+dev audit --action crew        # how the crew coordinated
 dev audit --action plan        # every step change
 ```
 
@@ -519,7 +530,7 @@ devkit ships the roster and the RACI in `config/crew.json`. A team changes them 
 ```bash
 dev crew set Tank skills "backend; java-springboot" --why "the services are Spring"
 dev crew raci compliance --set "R=persephone A=keymaker C=… I=…" --why "nobody approves their own work"
-dev crew history                 # the team's changes, newest first
+dev crew history                 # the changes the team made, newest first
 ```
 
 To change what devkit ships for everyone, edit `config/crew.json` in the devkit repository: a member's role, summary,
@@ -533,6 +544,38 @@ dev install --only claude,codex  # reinstall the plugin and write the Codex role
 
 `dev crew sync --check` reports generated files that are out of date; `dev doctor` runs it too. Never edit
 `plugin/agents/*.md` by hand: the next sync overwrites them.
+
+## Rooms (planned for 26.11.6)
+
+Rooms are not available yet. This section describes what is planned, so you know what is coming; no command or
+setting for rooms exists today.
+
+Today the crew talks one to one: a member asks the tech lead or one other member with `dev crew ask`, and when three
+members need each other's views, the tech lead relays them by hand. A **room** is a short, moderated working session
+that puts 2 to 4 crew members on one question that gains from more than one angle: a review panel on one change, a
+choice between designs, or a bug with competing explanations.
+
+- **A charter first.** The tech lead opens the room with the question, what it must produce (a decision, a ranked
+  list, a verdict, or a root cause), the exit criteria, and a budget of minutes, tokens, and rounds.
+- **Independent answers, then challenges.** Each member answers alone, without seeing the others, so the first answer
+  does not anchor the rest. Then the members may challenge each other, for at most two rounds.
+- **A shared board, with evidence.** Members talk only through short posts. devkit stamps each post with its author
+  and chains it to the one before, so no post can be changed or removed. A claim cites its evidence, such as a file
+  and line or a command the member ran, or is marked as an opinion.
+- **Bounded by devkit.** devkit, not a model, moves the room from phase to phase and closes it when its budget runs
+  out, so a room never runs on.
+- **One outcome, dissent kept.** The decider closes the room with one outcome, and any disagreement stays in the
+  record. The outcome becomes the evidence for a plan step, a revised spec, or a decision put to you.
+
+What a room gives you: two to four independent views on a hard question, disagreement kept instead of smoothed over,
+and a cost you can see and cap. What does not change: a post is never your consent, an approval, or a grant, because
+your decisions still come only from your own answers (see [How the tech lead asks you](#how-the-tech-lead-asks-you)).
+A room never widens a member's tools or files: members stay read-only unless the room names one writer, and parallel
+edits to shared files never go to a room.
+
+Rooms start as a trial, for review panels only. On real changes, a three-member review room is compared with a single
+reviewer: the real problems each finds, the false alarms, and the time and tokens spent. After the trial, you decide
+whether rooms become a regular route.
 
 ## Keeping the rules true
 

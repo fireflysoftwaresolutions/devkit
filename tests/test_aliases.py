@@ -133,14 +133,14 @@ class AliasTests(Sandbox):
 
     def test_a_set_alias_is_kept_in_the_handoff_repository_and_listed(self):
         reg = self.mac()
-        registry.set_alias("kit", "fireflysoftwaresolutions/devkit", reg["projects"], by="ancongui")
+        registry.set_alias("kit", "fireflysoftwaresolutions/devkit", reg["projects"], by="devuser")
         saved = json.loads((self.handoff / "aliases.json").read_text())
         self.assertEqual(saved["aliases"]["kit"]["project"], "fireflysoftwaresolutions/devkit")
         self.assertEqual(registry.alias_map(reg["projects"])["fireflysoftwaresolutions/devkit"], "kit")
         rc, out, _ = run_cli(cli.cmd_alias, argparse.Namespace(alias=None, project=None, move=False), reg)
         self.assertEqual(rc, 0)
         self.assertIn("kit", out)
-        self.assertIn("ancongui", out)
+        self.assertIn("devuser", out)
         self.assertIn("repository name", out)  # kit-consulting keeps its default alias
 
     def test_an_alias_in_use_is_refused_with_the_command_that_moves_it(self):

@@ -1169,6 +1169,12 @@ def find_chrome():
 
 CHROME = find_chrome()
 NO_CHROME = "the page's behavior tests need Chrome or Chromium (set DEVKIT_TEST_CHROME to its binary)"
+# runs before any of the page's scripts: Date.now() and new Date() start at the fixture's "now" (ms) and run on Chrome's
+# virtual time from there, so "No update for 47 min" stays 47 however late a slow machine renders the page (an 83 s
+# delay read 48 on the real clock). The clock keeps running: the page's own timers, such as the 30 s offline switch, still work
+CLOCK = """<script>(() => { const Real = Date, shift = %d - Real.now();
+class Clock extends Real { constructor(...a) { if (a.length) super(...a); else super(Real.now() + shift); } static now() { return Real.now() + shift; } }
+window.Date = Clock; })();</script>"""
 # runs after the app's own script: `steps` fill `out`, which comes back as JSON in the dumped DOM
 PROBE = """<script>(async () => { const out = {}; const tick = ms => new Promise(r => setTimeout(r, ms));
 const $ = (s, r) => (r || document).querySelector(s), $$ = (s, r) => Array.from((r || document).querySelectorAll(s));
@@ -1180,6 +1186,29 @@ try { %s } catch (e) { out.probeError = String(e && e.stack || e); }
 out.pageError = text($("#dk-error"));
 const pre = document.createElement("pre"); pre.id = "probe-out"; pre.textContent = JSON.stringify(out); document.body.append(pre);
 if (window.parent !== window) parent.postMessage(pre.textContent, "*"); })();</script>"""
+# The page's web fonts come from Google Fonts. On CI one arrives after the first fit while another is still loading,
+# and headless Chrome on a virtual-time budget draws no frame after the load event, so the page's refit (a
+# ResizeObserver and requestAnimationFrame) never runs there, though it does in a real browser: the views row overflowed.
+# Every page under test renders with the local fallback fonts from the first fit instead: no network, no late font.
+# test_the_row_fits_again_when_a_font_arrives_after_the_last_fit brings a late font on purpose
+WEB_FONTS = re.compile(r'<link rel="(?:stylesheet|preconnect)" href="https://fonts\.(?:googleapis|gstatic)\.com[^"]*"[^>]*>\n?')
+
+
+def without_web_fonts(page: str) -> str:
+    """The page without its Google Fonts links. It fails when a tag still names a font host, so a new way of loading
+    the fonts cannot bring the network back into the page tests unnoticed."""
+    page = WEB_FONTS.sub("", page)
+    left = re.findall(r"<[^<>]*fonts\.(?:googleapis|gstatic)\.com[^<>]*>", page)
+    if left:
+        raise AssertionError(f"the page under test still loads web fonts: {left}")
+    return page
+
+
+def under_test(page: str, steps: str) -> str:
+    """The page as the harness serves it: no web fonts, and the probe's `steps` after the app's own script."""
+    return without_web_fonts(page).replace("</body>", PROBE % steps + "</body>")
+
+
 CHROME_MIN_WIDTH = 500  # a full Chrome never makes its window narrower, headless or not: a 390 window is 500 wide
 # a narrower width: the page in an iframe that wide (its media queries and widths are a phone's), whose probe hands
 # `out` to this page, the one Chrome dumps
@@ -1219,12 +1248,16 @@ def chrome(url: str, width: int, height: int = 900, budget: int = 6000) -> str:
     return json.loads(htmlmod.unescape(m.group(1)))
 
 
-def browse(page: str, steps: str, width: int = 1440, hash_: str = "", budget: int = 6000) -> dict:
+def browse(page: str, steps: str, width: int = 1440, hash_: str = "", budget: int = 6000, now: float = None) -> dict:
     """Load a page in headless Chromium at a width, run the probe's `steps` (JS that fills `out`) and return `out`.
-    Below CHROME_MIN_WIDTH the page runs in an iframe of that width (NARROW)."""
+    Below CHROME_MIN_WIDTH the page runs in an iframe of that width (NARROW). With `now` (epoch seconds), the page's
+    clock starts there (CLOCK) instead of at the real time."""
+    if now is not None:
+        head = page.index("<head>") + len("<head>")
+        page = page[:head] + CLOCK % int(now * 1000) + page[head:]
     with tempfile.TemporaryDirectory() as t:
         f = Path(t) / "page.html"
-        f.write_text(page.replace("</body>", PROBE % steps + "</body>"), encoding="utf-8")
+        f.write_text(under_test(page, steps), encoding="utf-8")
         if width >= CHROME_MIN_WIDTH:
             return chrome(f.as_uri() + hash_, width, budget=budget)
         narrow = Path(t) / "narrow.html"
@@ -1232,9 +1265,10 @@ def browse(page: str, steps: str, width: int = 1440, hash_: str = "", budget: in
         return chrome(narrow.as_uri(), CHROME_MIN_WIDTH, budget=budget)
 
 
-def fixture_data(root: Path) -> dict:
-    """The page's data for the behavior tests: the registry fixture, plus runs, jobs, CI watches and a crew, all fixed."""
-    t = time.time()
+def fixture_data(root: Path, now: float) -> dict:
+    """The page's data for the behavior tests: the registry fixture, plus runs, jobs, CI watches and a crew, all fixed.
+    The runs, jobs, CI watches and bob's progress are `now` minus their ages; the registry and the handoff are NOW's."""
+    t = now
     make_handoff(root)
     (root / "projects/acme/old.md").write_text("# acme/old\n\n| Workstream | Owner | Milestone | Status | Next step | Notes |\n|---|---|---|---|---|---|\n"
                                                "| Underwriting | Platform | Pilot readiness | Running | Integration tests | Waiting on the bank |\n")
@@ -1330,10 +1364,12 @@ class PageBehaviorTests(unittest.TestCase):
     """The page's behavior from fixture data, in headless Chromium: what each view shows, the honest states, role-first names,
     the navigation at every width, the drawers, and the live states."""
 
+    # One clock for the data and the page: the fixture is built at NOW and every probe pins the page's clock to NOW, so
+    # an age in the data ("47 min") is the age the page shows, however long the suite took to get here
     @classmethod
     def setUpClass(cls):
         cls.tmp = tempfile.TemporaryDirectory()
-        cls.data = fixture_data(Path(cls.tmp.name) / "handoff")
+        cls.data = fixture_data(Path(cls.tmp.name) / "handoff", NOW)
         cls.page = dashboard.page(cls.data)
 
     @classmethod
@@ -1341,7 +1377,7 @@ class PageBehaviorTests(unittest.TestCase):
         cls.tmp.cleanup()
 
     def probe(self, steps, width=1440, hash_="#/overview", budget=6000, page=None):
-        out = browse(page or self.page, steps, width, hash_, budget)
+        out = browse(page or self.page, steps, width, hash_, budget, now=NOW)
         self.assertIsNone(out.get("probeError"), out.get("probeError"))
         self.assertIsNone(out.get("pageError"), out.get("pageError"))
         return out
@@ -1412,6 +1448,33 @@ class PageBehaviorTests(unittest.TestCase):
                 self.assertEqual(out["more"], "Health", width)                                  # the current view inside More names itself
         out = self.probe(steps, 390, "#/overview")
         self.assertEqual((out["row"][:3], out["menu"][-1], out["more"]), (["now", "tasks", "background"], "health", "More"))
+
+    # A web font that lands after the last fit widens the views with no resize: document.fonts.ready waits for the slowest font, so the
+    # nav's own font can arrive long before it (CI: Inter in, Source Serif 4 still loading, the row 276 px in 273). The page here has no
+    # web font, so fonts.ready has settled; then the page's text font arrives, half as wide again, and the row must fit again.
+    def test_the_row_fits_again_when_a_font_arrives_after_the_last_fit(self):
+        views = ["now", "tasks", "background", "team", "projects", "initiatives", "activity", "explorer", "health"]
+        page = without_web_fonts(self.page)
+        self.assertNotEqual(page, self.page)
+        steps = """const fit = () => ({row: $$("#tabs .tab").map(a => a.getAttribute("data-view")), menu: $$("#moremenu a").map(a => a.getAttribute("data-view")),
+                tabs: [$("#tabs").scrollWidth, $("#tabs").clientWidth]});
+            out.before = fit();
+            const face = new FontFace("Late Wide", 'local("Arial"), local("ArialMT"), local("Helvetica"), local("DejaVu Sans"), local("Liberation Sans")', {sizeAdjust: "150%"});
+            document.fonts.add(face);
+            const css = document.createElement("style"); css.textContent = 'body { font-family: "Late Wide", ' + getComputedStyle(document.body).fontFamily + " }";
+            document.head.append(css);
+            out.status = await face.load().then(() => "loaded", () => "error");
+            await tick(100);
+            out.after = fit();"""
+        for width in (390, 1440):
+            out = self.probe(steps, width, "#/health", page=page)
+            if out["status"] != "loaded":
+                self.skipTest("no local Arial, Helvetica, DejaVu Sans or Liberation Sans to load as the late font")
+            before, after = out["before"], out["after"]
+            self.assertEqual(before["row"] + before["menu"], views, width)
+            self.assertLess(len(after["row"]), len(before["row"]), (width, before, after))       # the wider font moved views into More
+            self.assertEqual(after["row"] + after["menu"], views, width)                          # every view, in order, once
+            self.assertLessEqual(after["tabs"][0], after["tabs"][1], (width, after))             # and the row does not scroll sideways
 
     def test_the_more_menu_works_with_the_keyboard(self):
         out = self.probe("""const b = $("#morebtn"); out.menu = $$("#moremenu a").map(a => a.getAttribute("data-view")); b.focus(); key(b, "ArrowDown"); out.expanded = b.getAttribute("aria-expanded");
@@ -1540,7 +1603,7 @@ class PageBehaviorTests(unittest.TestCase):
     def test_a_run_whose_crew_reports_is_running_though_its_lead_was_quiet(self):
         # the live run of 2026-11-06: the lead's last update 47 min ago, a lane reported 3 min ago, the session not in presence
         def change(d):
-            d["runs"][1].update(seen=int(time.time() - 180), agents=[{"label": "Neo: importer mapping", "state": "running", "min": 20}])
+            d["runs"][1].update(seen=int(NOW - 180), agents=[{"label": "Neo: importer mapping", "state": "running", "min": 20}])
         out = self.probe("""out.cards = $$("#runs .rcard").map(text); out.dot = $('#tabs [data-view="background"] .n').getAttribute("aria-label");
             await go("#/health"); out.flags = $$("section[aria-label=Contradictions] li").map(text);""", hash_="#/background", page=self.variant(change))
         card = next(c for c in out["cards"] if c.startswith("Migrate the importer"))
@@ -1551,7 +1614,7 @@ class PageBehaviorTests(unittest.TestCase):
     def test_of_about_is_the_plans_current_total_beside_the_time_left(self):
         # the live card read "4h09m active of about 26m" beside "3h14m–5h04m left": 26m was the first estimate, calibrated
         def change(d):
-            d["runs"][1].update(seen=int(time.time() - 180), active_min=256, wall_min=256, eta_min=236, eta_lo=189, eta_hi=295.2,
+            d["runs"][1].update(seen=int(NOW - 180), active_min=256, wall_min=256, eta_min=236, eta_lo=189, eta_hi=295.2,
                                 estimate=60, estimate_cal=25.8, total_min=492)
         out = self.probe("""out.card = text($$("#runs .rcard").find(c => text(c).startsWith("Migrate the importer"))); await go("#/background?modal=run%3Acodex-old"); out.figs = text($("#modal .mfigs"));""",
                          hash_="#/background", page=self.variant(change))
@@ -1565,7 +1628,7 @@ class PageBehaviorTests(unittest.TestCase):
         # "of about 1h59m" claimed a precision no estimate has: an estimate or a time left rounds to 5 minutes, under 10 minutes
         # to the minute; active, wall and elapsed time are measured and stay exact
         def change(d):
-            d["runs"][1].update(seen=int(time.time() - 180), active_min=84, wall_min=84, total_min=119, eta_min=35, eta_lo=27.4, eta_hi=43,
+            d["runs"][1].update(seen=int(NOW - 180), active_min=84, wall_min=84, total_min=119, eta_min=35, eta_lo=27.4, eta_hi=43,
                                 estimate=60, estimate_cal=156)
             d["runs"][1]["plan"][1].update(est=12, min=7)
             d["runs"][0].update(eta_min=5, eta_lo=3.2, eta_hi=7.4)
@@ -1628,7 +1691,7 @@ class PageBehaviorTests(unittest.TestCase):
     @staticmethod
     def with_branches(d):
         # acme/widget's branch map: backed up, only on this Mac, embargoed, the default branch, and five merged branches
-        t = time.time()
+        t = NOW
         w = next(p for p in d["projects"] if p["id"] == "acme/widget")
         merged = [branch_row(f"fix/old-{i}", "merged", "its commits are in main", merged_into="main", last_commit=int(t - (10 + i) * 86400)) for i in range(5)]
         merged[0]["pr"] = {"number": 30, "state": "merged", "draft": False, "checks": None, "url": "javascript:alert(1)", "title": "Old fix"}
@@ -1732,14 +1795,14 @@ class LivePageTests(unittest.TestCase):
     def setUpClass(cls):
         cls.tmp = tempfile.TemporaryDirectory()
         cls.root = Path(cls.tmp.name) / "handoff"
-        cls.data = dict(fixture_data(cls.root), live=True, snapshot=1)
+        cls.data = dict(fixture_data(cls.root, time.time()), live=True, snapshot=1)   # the live page reads the real clock
 
     @classmethod
     def tearDownClass(cls):
         cls.tmp.cleanup()
 
     def page(self, steps):
-        return dashboard.page(self.data).replace("</body>", PROBE % steps + "</body>").encode()
+        return under_test(dashboard.page(self.data), steps).encode()
 
     @unittest.skipUnless(CHROME, NO_CHROME)
     def test_a_401_ends_the_session_and_says_how_to_sign_in_again(self):
@@ -1819,7 +1882,7 @@ class LivePageTests(unittest.TestCase):
 
         def routes(path):
             if path == "/":
-                return 200, "text/html", dashboard.page(data).replace("</body>", PROBE % steps + "</body>").encode()
+                return 200, "text/html", under_test(dashboard.page(data), steps).encode()
             if path.startswith("/api/v1/branches/"):
                 asked.append(path)
                 if len(asked) == 1:

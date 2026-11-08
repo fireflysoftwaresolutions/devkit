@@ -18,8 +18,11 @@ from __future__ import annotations
 import json
 import os
 import re
+import secrets
 import socket
+import stat
 import time
+from collections import Counter
 from pathlib import Path
 
 from . import core
@@ -36,6 +39,7 @@ PRIORITIES = ("high", "normal", "low")
 NEEDS_WHY = {"edit", "cancel", "priority", "move", "reopen", "scope", "block", "link"}
 FIELDS = ("id", "type", "title", "scope", "status", "bucket", "priority", "assignee", "claimed_by", "claimed_at",
           "lock_expires", "due", "links", "version", "created", "created_by", "updated", "updated_by")
+LIST_FIELDS = ("links",)  # written as `[a, b]`; every other value is text, even one in brackets (a title like "[API] …")
 
 
 # --------------------------------------------------------------------------- identity
@@ -99,28 +103,177 @@ def item_path(scope: str, iid: str) -> Path:
     return scope_dir(scope) / f"{iid}.md"
 
 
-def parse(text: str) -> dict:
-    meta, body = {}, text
+# --------------------------------------------------------------------------- record files (items, plans)
+# A record is frontmatter, a body, and the record's own changelog: a `## Changelog` heading at the end with one
+# `- ` line per entry. Bodies are free Markdown, so the same heading can appear in them (a code example, a section
+# about a product's changelog): only the last one outside fenced code, followed by nothing but entries, is the
+# record's. The frontmatter keeps the lines devkit does not know (another tool's keys, a person's notes) after its
+# own fields. A write never drops text of the record on disk that it does not edit (`write_record`).
+
+CHANGELOG = "## Changelog"
+_FENCE = re.compile(r"^[ \t]*(`{3,}|~{3,})(.*)$")
+_HEADING = re.compile(r"^ {0,3}#{1,6}(\s|$)")
+_KEY = re.compile(r"^([A-Za-z_][\w.-]*)[ \t]*:(.*)$")
+
+
+class RecordLossError(ValueError):
+    """A write would drop text of the record on disk that it does not edit. `path`: the file; `lost`: those lines."""
+
+    def __init__(self, path, lost):
+        self.path, self.lost = Path(path), list(lost)
+        super().__init__(
+            f"refused to write {path}: it would drop {len(self.lost)} line(s) of the record that this change does not "
+            f"edit, first “{self.lost[0][:100]}”. Nothing was written. If the file changed after devkit read it, run "
+            f"the command again; otherwise devkit misread the record: leave the file as it is and report the bug with "
+            f"it.")
+
+
+def split_frontmatter(text: str):
+    """-> (frontmatter text, the rest). Frontmatter runs from a first line `---` to the next `---` line."""
     if text.startswith("---\n"):
-        end = text.find("\n---\n", 4)
+        end = text.find("\n---\n", 3)
         if end != -1:
-            for ln in text[4:end].splitlines():
-                k, _, v = ln.partition(":")
-                v = v.strip()
-                if v.startswith("[") and v.endswith("]"):
-                    meta[k.strip()] = [x.strip() for x in v[1:-1].split(",") if x.strip()]
-                else:
-                    meta[k.strip()] = v
-            body = text[end + 5:]
+            return text[4:end], text[end + 5:]
+    return "", text
+
+
+def _key(line: str):
+    m = _KEY.match(line)
+    return m.group(1) if m else None
+
+
+def read_frontmatter(front: str, fields=FIELDS, lists=LIST_FIELDS):
+    """-> (meta, extra). `meta`: the value of each `key: value` line, as a list for the `lists` fields written as
+    `[a, b]`; `extra`: every line that is not one of devkit's `fields`, as it is, for the render to put back."""
+    meta, extra = {}, []
+    for ln in front.splitlines():
+        m = _KEY.match(ln)
+        if m:
+            k, v = m.group(1), m.group(2).strip()
+            meta[k] = [x.strip() for x in v[1:-1].split(",") if x.strip()] \
+                if k in lists and v.startswith("[") and v.endswith("]") else v
+        if not m or m.group(1) not in fields:
+            extra.append(ln)
+    return meta, extra
+
+
+def _closes(line: str, mark: str) -> bool:
+    m = _FENCE.match(line)
+    return bool(m) and m.group(1)[0] == mark[0] and len(m.group(1)) >= len(mark) and not m.group(2).strip()
+
+
+def _fenced(lines: list) -> set:
+    """Indexes of the lines in fenced code blocks (``` or ~~~, fence lines included). A fence closes on a line of the
+    same character, at least as long, with nothing after it; a fence that never closes hides nothing."""
+    inside, i = set(), 0
+    while i < len(lines):
+        m = _FENCE.match(lines[i])
+        if m and not (m.group(1)[0] == "`" and "`" in m.group(2)):
+            end = next((j for j in range(i + 1, len(lines)) if _closes(lines[j], m.group(1))), None)
+            if end is not None:
+                inside.update(range(i, end + 1))
+                i = end + 1
+                continue
+        i += 1
+    return inside
+
+
+def split_changelog(body: str):
+    """-> (the body without the record's changelog, its entries). The record's changelog is the last `## Changelog`
+    heading outside fenced code, when only entries follow it: `- ` lines, each with the lines under it that are not
+    headings. Otherwise the record has no changelog yet and the whole body is text."""
+    lines = body.split("\n")
+    fenced = _fenced(lines)
+    head = next((i for i in range(len(lines) - 1, -1, -1) if lines[i].rstrip() == CHANGELOG and i not in fenced), None)
+    if head is None:
+        return body, []
+    entries = []
+    for ln in lines[head + 1:]:
+        if ln.startswith("- "):
+            entries.append(ln[2:].strip())
+        elif entries and ln.strip() and not _HEADING.match(ln):
+            entries[-1] += "\n" + ln.rstrip()
+        elif ln.strip():
+            return body, []
+    return "\n".join(lines[:head]), entries
+
+
+def _missing(old, new) -> list:
+    """The non-blank lines of `old` that `new` does not have, spacing aside; each line of `new` counts once."""
+    have = Counter(" ".join(ln.split()) for ln in new if ln.strip())
+    lost = []
+    for ln in old:
+        n = " ".join(ln.split())
+        if not n:
+            continue
+        if have[n] > 0:
+            have[n] -= 1
+        else:
+            lost.append(n)
+    return lost
+
+
+def lost_lines(before: str, after: str, edited=()) -> list:
+    """The lines of `before` that `after` no longer has, apart from the `edited` lines (the old text a change
+    replaces). Spacing and line order are not compared. When `before` is a devkit record (its frontmatter has `id:`),
+    its body is compared with the new body, and in its frontmatter the values are the record's to change: a `key:` line
+    counts as kept while the new frontmatter has that key, and any other line must stay in the frontmatter. Any other
+    file is compared whole, so another tool's frontmatter, or a first `---` rule and what follows it, cannot be lost."""
+    fb, bb = split_frontmatter(before)
+    if "id" not in {_key(ln) for ln in fb.splitlines()}:
+        return _missing(before.splitlines(), after.splitlines() + list(edited))
+    fa, ba = split_frontmatter(after)
+    keys = {_key(ln) for ln in fa.splitlines()} - {None}
+    return _missing([ln for ln in fb.splitlines() if _key(ln) not in keys], fa.splitlines()) + \
+        _missing(bb.splitlines(), ba.splitlines() + list(edited))
+
+
+def _replace(path: Path, text: str) -> None:
+    """Write `text` to a new file in the same folder, then swap it in (os.replace): a reader sees the old record or
+    the new one, never part of one. The temporary name ends in `.tmp`, which the handoff repository ignores."""
+    tmp = path.with_name(f".{path.name}.{secrets.token_hex(4)}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)  # the umask applies, as to a plain write
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        try:
+            os.chmod(tmp, stat.S_IMODE(path.stat().st_mode))  # keep the record's own permissions
+        except FileNotFoundError:
+            pass
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def write_record(path: Path, text: str, edited=()) -> None:
+    """Write a record file, but refuse (RecordLossError, the file unchanged) when the text would drop lines of the
+    version on disk that this change does not edit: a misread record must stop the command, never shrink."""
+    path = Path(path)
+    try:
+        before = path.read_text()
+    except FileNotFoundError:
+        before = ""
+    lost = lost_lines(before, text, edited)
+    if lost:
+        raise RecordLossError(path, lost)
+    _replace(path, text)
+
+
+def parse(text: str) -> dict:
+    front, body = split_frontmatter(text)
+    meta, extra = read_frontmatter(front)
     title_m = re.search(r"^# (.+)$", body, re.M)
-    desc, changelog = body, []
-    if "\n## Changelog" in body:
-        desc, _, log = body.partition("\n## Changelog")
-        changelog = [ln[2:].strip() for ln in log.splitlines() if ln.startswith("- ")]
+    desc, changelog = split_changelog(body)
     desc = re.sub(r"^# .+\n?", "", desc.strip(), count=1).strip()
     meta["version"] = int(meta.get("version") or 1)
-    return {"meta": meta, "title": meta.get("title") or (title_m.group(1) if title_m else ""), "body": desc,
-            "changelog": changelog}
+    return {"meta": meta, "extra": extra, "title": meta.get("title") or (title_m.group(1) if title_m else ""),
+            "body": desc, "changelog": changelog}
 
 
 def render(item: dict) -> str:
@@ -131,6 +284,7 @@ def render(item: dict) -> str:
         if isinstance(v, list):
             v = "[" + ", ".join(v) + "]"
         lines.append(f"{k}: {v}".rstrip())
+    lines += list(item.get("extra") or [])
     lines += ["---", f"# {m.get('title') or item.get('title')}", ""]
     if item.get("body"):
         lines += [item["body"].rstrip(), ""]
@@ -292,7 +446,7 @@ def create(scope: str, title: str, kind="task", bucket="next", priority="normal"
     _touch(it, a, "create", why, f"{kind} “{title.strip()}” in {bucket}")
     p = item_path(scope, iid)
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(render(it))
+    write_record(p, render(it))
     it["path"] = p
     _commit([p], f"{iid}: create {kind} “{title.strip()[:60]}” ({actor_str(a)})" + (f" — {why}" if why else ""))
     return it
@@ -322,6 +476,9 @@ def update(it: dict, op: str, why: str = "", a=None, **changes) -> dict:
                          f"coordinate with them or wait for the lock to expire")
     detail = ", ".join(f"{k}={v}" for k, v in changes.items() if k not in ("body",)) + \
         (" (body edited)" if "body" in changes else "")
+    edited = (it.get("body") or "").splitlines() if "body" in changes else []
+    if "title" in changes:
+        edited.append(f"# {it['meta'].get('title') or it.get('title')}")
     for k, v in changes.items():
         if k == "body":
             it["body"] = v
@@ -330,7 +487,7 @@ def update(it: dict, op: str, why: str = "", a=None, **changes) -> dict:
         else:
             it["meta"][k] = v
     _touch(it, a, op, why, detail)
-    it["path"].write_text(render(it))
+    write_record(it["path"], render(it), edited)
     _commit([it["path"]], f"{it['meta']['id']}: {op}{(' ' + detail) if detail else ''} ({actor_str(a)})"
             + (f" — {why}" if why else ""))
     return it
@@ -358,7 +515,7 @@ def claim(it: dict, a=None, hours: float = None, why: str = "", branch: str = ""
     if branch and f"branch:{branch}" not in links:
         m["links"] = links + [f"branch:{branch}"]
     _touch(it, a, "claim", why, f"lock until {m['lock_expires']}" + (f", on {branch}" if branch else ""))
-    it["path"].write_text(render(it))
+    write_record(it["path"], render(it))
     ok = _commit([it["path"]], f"{m['id']}: claim by {actor_str(a)}", wait=True)
     if not ok:
         pull()
@@ -389,10 +546,30 @@ def release(it: dict, a=None, why: str = "", status: str = None) -> dict:
     if status:
         m["status"] = status
     _touch(it, a, "release" if not status else status, why)
-    it["path"].write_text(render(it))
+    write_record(it["path"], render(it))
     _commit([it["path"]], f"{m['id']}: {'release' if not status else status} ({actor_str(a)})"
             + (f" — {why}" if why else ""), wait=True)
     return it
+
+
+def _report_skipped(job: str, op: str, skipped: list) -> None:
+    """A lock job leaves an item it cannot rewrite (RecordLossError) as it is. Say so where someone will see it: a
+    warning on stderr, which is the sync's log when the job runs in the background, and an audit record kept at every
+    audit level (`dev audit --action handoff.record-skipped`): the file, and `<item id>: <op>`. Neither quotes the
+    item: the background sync keeps its last log line as the job's audit detail, so the warning names the file and
+    the number of lines, and `dev task show` shows them."""
+    if not skipped:
+        return
+    from . import audit, ui
+    for err in skipped:
+        try:
+            target = str(err.path.relative_to(HANDOFF))
+        except ValueError:
+            target = str(err.path)
+        ui.warn(f"{job}: left {core.tilde(err.path)} as it is: it would drop {len(err.lost)} line(s) that the job does "
+                f"not change; `dev task show {err.path.stem}` shows the item. See “devkit refused to write a task or "
+                f"plan file” in docs/troubleshooting.md.")
+        audit.record("handoff.record-skipped", target, f"{err.path.stem}: {op}", outcome="blocked")
 
 
 def renew_locks(a=None, hours: float = None) -> int:
@@ -400,22 +577,27 @@ def renew_locks(a=None, hours: float = None) -> int:
     a = a or actor()
     hours = hours or float(core.CFG.get("work", {}).get("lock_hours", 8))
     me = f"{a['user']}@{a['host']}"
-    changed = []
+    changed, skipped = [], []
     for it in all_items():
         holder, expired = lock_holder(it)
         if holder and holder.startswith(me) and not expired:
             if parse_iso(it["meta"]["lock_expires"]) - time.time() < hours * 1800:
                 it["meta"]["lock_expires"] = now_iso(time.time() + hours * 3600)
-                it["path"].write_text(render(it))
+                try:
+                    write_record(it["path"], render(it))
+                except RecordLossError as e:
+                    skipped.append(e)
+                    continue
                 changed.append(it["path"])
     if changed:
         _commit(changed, f"renew {len(changed)} lock(s) held by {me}")
+    _report_skipped("lock renewal", "lock-renewal-skipped", skipped)
     return len(changed)
 
 
 def expire_locks() -> list:
     """Release expired locks (run by the hourly sync on any machine)."""
-    out = []
+    out, skipped = [], []
     for it in all_items():
         holder, expired = lock_holder(it)
         if holder and expired:
@@ -423,10 +605,15 @@ def expire_locks() -> list:
             it["changelog"].insert(0, f"v{m['version'] + 1} · {now_iso()} · devkit · lock of {holder} expired")
             m["version"] += 1
             m["claimed_by"] = m["claimed_at"] = m["lock_expires"] = ""
-            it["path"].write_text(render(it))
+            try:
+                write_record(it["path"], render(it))
+            except RecordLossError as e:
+                skipped.append(e)
+                continue
             out.append(it["path"])
     if out:
         _commit(out, f"release {len(out)} expired lock(s)", push=False)
+    _report_skipped("expired-lock release", "lock-release-skipped", skipped)
     return out
 
 

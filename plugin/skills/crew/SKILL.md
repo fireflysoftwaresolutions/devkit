@@ -109,7 +109,9 @@ dev crew graph                       # the session as one graph: steps, lanes, d
   delegated into a working lane closes only on that lane's own evidence: the member names it with
   `dev progress step "…" --step "<name>" --check "…"`.
 - The step's time is its member's own time, and its `--scope` is the set of files the guard lets that member edit. A
-  member that needs more asks you.
+  member that needs more asks you. Write scopes repository-relative (`lib/**`): they match in every checkout of the
+  repository. `assign` and `dev crew delegate --scope` rewrite an absolute or `~` path inside one checkout to that
+  form and tell you, and refuse one that spans checkouts or names a worktree that is not there (deleted included).
 - Work you discover goes into the plan when it **starts** (`dev progress add`, then `dev progress begin`), so its
   time is its own; close a step only with its evidence and only the step it is about.
 - `dev crew brief` prints the brief and the exact spawn line. Launch every parallel member **in one message**. Then
@@ -171,17 +173,20 @@ The run's mode says who takes the decisions that are the developer's (scope, beh
 dev progress start "…" --plan "…" --mode auto          # or: dev crew mode auto --approve "push, pr"
 dev crew ask --decision "Skip empty lines or reject the file?" --options "A: skip | B: reject" --recommend A
 dev crew decisions                                      # pending and decided, with who decided
-dev crew decide D1 "B: reject"                          # the tech lead records the developer's answer
+dev crew decide D1 "B: reject"                          # the tech lead records the answer of the developer
 ```
 
 - **A member at a decision point** runs `dev crew ask --decision` with options and a recommendation, and
   `--approves "<steps>"` when the answer approves finished work. In auto mode it gets the answer at once and goes on.
   In guided mode its step is blocked and it **stops**: it ends its report (Check: `– waiting for D1`), so no tokens
   burn while it waits.
-- **You** see each pending decision with your next action. Ask the developer with your question tool
-  (AskUserQuestion in Claude Code, `request_user_input` in Codex) using the decision template (`communicating`),
-  record the answer with `dev crew decide`, then **resume the member** that asked (Claude `SendMessage`, Codex
-  `send_input`) with the answer. It keeps its context.
+- **You** see each pending decision with your next action. Run `dev crew decisions --ask` and send the call it prints
+  with your question tool (AskUserQuestion in Claude Code): at most 4 questions per call, `D<n> ·` up front. You may
+  reword a reversible question; send a decision that leads to an irreversible action exactly as printed, in a call
+  of its own, or the developer's answer counts for nothing (`communicating`, section 5, has the rules). In Codex,
+  whose question tool does not reach devkit yet, show the decisions in your reply and ask the developer to type
+  `approve D<n>: <letter>`. Record the answer with `dev crew decide`, then **resume the member** that asked (Claude
+  `SendMessage`, Codex `send_input`) with the answer. It keeps its context.
 - Change modes when the developer says so: "go ahead on your own" → `dev crew mode auto`; a request to be asked first →
   `dev crew mode guided`. Pre-approve only the irreversible actions the developer named; developer-only actions
   (an embargo lift, a public backup, a backup policy) and commands the guard cannot name are never pre-approved.
@@ -198,9 +203,14 @@ dev crew decide D1 "B: reject"                          # the tech lead records 
      Next, and names crew members by role;
    - the member recorded its work with `dev progress step "…" --check "…"`;
    - the crew gates, from its own transcript: the proofs of its procedure ran as commands, it loaded its skills, its
-     files hold no unfinished work, its new tests can fail, and two guard refusals got a lesson (`dev lesson add`).
+     files hold no unfinished work, its new tests can fail, two guard refusals got a lesson (`dev lesson add`), and
+     every command it put in the background has ended (Claude Code lists a member until then).
 
-   `dev canary` counts the crew apart (`crew 12/13`), and `dev audit --action crew.gate` lists the gate findings.
+   `dev canary` counts the crew apart (`crew 12/13`), and `dev audit --action crew.gate` lists the gate findings. A
+   member let through with background work still running is named once in your next context: stop it with
+   `TaskStop <agent id>` if you no longer need it. Every other member you launched that finishes is named once too,
+   in one line with its agent id: if Claude Code still lists it as running, `TaskStop <agent id>` ends it. A
+   member's own helpers, and agents devkit has no launch record of, get no line.
 2. **The step ends on evidence.** It ends done only with a Check ✓ in the report or the member's own
    `dev progress step --check`; otherwise it shows as unverified, for you to close with evidence or reopen
    (`dev progress reopen <step> --why "…"`). A review or read-only member whose shell call wrote files ends

@@ -96,7 +96,7 @@ the background, and the result reaches the session that pushed with its next act
 (in the background, so you are notified when it ends):
 
 ```bash
-dev ci watch            # follow the branch's runs for HEAD to the end; on failure: the diagnosis
+dev ci watch            # follow the runs of the branch for HEAD to the end; on failure: the diagnosis
 dev ci watch --json     # the same, for reasoning
 ```
 

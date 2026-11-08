@@ -8,6 +8,7 @@ import io
 import json
 import os
 import re
+import shlex
 import socket
 import stat
 import subprocess
@@ -16,6 +17,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
@@ -420,24 +422,26 @@ class PersonalDataTests(AuditCase):
         self.assertIn("300+ characters", audit.query(action="crew.message")[-1]["detail"])
 
     def test_dev_crew_ask_and_answer_keep_their_arguments_but_not_the_message(self):
-        # cli.py records `dev crew …` with its arguments joined by spaces
-        cases = {
-            "ask --to Persephone please confirm the Acme roadmap": "ask --to Persephone",
-            "answer M12 yes, the roadmap for Acme is fine": "answer M12",
-            "ask --decision which roadmap for Acme? --options A: ship | B: wait --recommend A --irreversible push":
-                "ask --decision --recommend A --irreversible push",
-            "--json ask --to=neo the roadmap": "--json ask --to=neo",
-        }
-        for target, kept in cases.items():
-            with self.subTest(target=target[:20]):
-                audit.record("dev.crew", target, "", "ok")
+        # cli.py records `dev crew …` with its arguments, one word each (26.11.5)
+        cases = [
+            (["ask", "--to", "Persephone", "please confirm the Acme roadmap"], "ask --to Persephone"),
+            (["answer", "M12", "yes, the roadmap for Acme is fine"], "answer M12"),
+            # 26.11.5: each text is replaced where it stands, so the option names stay (compliance review, change 1)
+            (["ask", "--decision", "which roadmap for Acme?", "--options", "A: ship | B: wait", "--recommend", "A",
+              "--irreversible", "push"], "ask --decision [message text not recorded: 23 characters] --options"),
+            (["--json", "ask", "--to=neo", "the roadmap"], "--json ask --to=neo"),
+            (["delegate", "the Acme roadmap", "--to", "Tank"], "delegate"),  # what the member should do is free text
+        ]
+        for argv, kept in cases:
+            with self.subTest(argv=argv[:2]):
+                audit.record("dev.crew", argv, "", "ok")
                 got = audit.query(action="dev.crew")[-1]["target"]
                 self.assertTrue(got.startswith(kept + " "), got)
                 self.assertNotIn("roadmap", got)
                 self.assertIn("characters", got)
-        for target in ("mode auto --approve push", "delegate api --to Tank"):
+        for target in ("mode auto --approve push", "decline 3 --why"):
             with self.subTest(target=target):
-                audit.record("dev.crew", target, "", "ok")
+                audit.record("dev.crew", target.split(), "", "ok")
                 self.assertEqual(audit.query(action="dev.crew")[-1]["target"], target)
 
     def test_dev_crew_decide_keeps_the_decision_id_but_not_the_answer(self):
@@ -561,7 +565,8 @@ class PersonalDataTests(AuditCase):
                          ("[approval line not recorded: 19 characters]", {"answer": "B: wait for Acme"}))
         self.assertEqual((sealed[0]["detail"], sealed[0]["ref"]), ("[message text not recorded: 36 characters]",
                                                                    {"id": "M3"}))
-        self.assertEqual(sealed[1]["target"], "ask --to persephone [message text not recorded: 24 characters]")
+        # joined by spaces before 26.11.5, a word cannot tell where the member's name ends and the message starts
+        self.assertEqual(sealed[1]["target"], "ask --to [message text not recorded: 35 characters]")
         self.assertEqual((sealed[2]["target"], sealed[2]["evidence"]), ("~/Development/acme/build",
                                                                         {"cwd": "~/Development"}))
         new = [r for r in recs if r["actor"]["user"] != "fixture-user" and r["action"] != "audit.config"]
@@ -661,6 +666,563 @@ class PersonalDataTests(AuditCase):
                 self.assertNotIn(VALUE, out)
                 self.assertNotIn("/Users/fixture-user", out)
                 self.assertIn("fixture-host", out)  # who acted stays: the actor is not text people wrote
+
+
+class CommandTextTests(AuditCase):
+    # the compliance review of 2026-11-07, change 1: under D6 = A the records go to the handoff repository for 13
+    # months and are never rewritten. A record that keeps a command line keeps only the words known to be safe (the
+    # program and its subcommands, option names, the values that name something, ids and numbers, operators) and
+    # each other word as its length: the Code reviewer's second review found five ways around a masker that looked
+    # for the free text, so it now keeps the safe words instead (L-fz3qnrebvm5). Tests carry comments, not docstrings.
+    def stored(self) -> str:
+        return (audit.AUDIT / time.strftime("%Y-%m.jsonl")).read_text()
+
+    def t(self, n) -> str:
+        return f"[text not recorded: {n} characters]"
+
+    def m(self, n) -> str:
+        return f"[message text not recorded: {n} characters]"
+
+    def denied(self, cmd: str, **extra) -> str:
+        audit.record("guard.deny", cmd, "refused for the test", "deny", **extra)
+        return audit.query(action="guard.deny")[-1]["target"]
+
+    def unmarked(self):
+        # each record the current rules wrote reads back as it was stored
+        recs = [r for r in audit.query(days=1) if r["action"] != "audit.config"]
+        self.assertEqual([r for r in recs if r.get("cleaned")], [])
+
+    def test_dev_task_add_keeps_its_options_but_not_the_title_or_the_reason(self):
+        argv = shlex.split('task add "Fix the Acme invoice export" --why "Ana asked on Friday" --type bug')
+        audit.record("dev." + argv[0], argv[1:], "", "ok")  # cli.py passes dev's arguments as a list
+        self.assertEqual(audit.query(action="dev.task")[-1]["target"],
+                         f"add {self.t(27)} --why {self.t(19)} --type bug")
+        for words in ("Acme", "Ana", "Friday"):
+            self.assertNotIn(words, self.stored())
+
+    def test_each_argument_of_a_dev_command_is_one_word_so_a_text_option_takes_exactly_one(self):
+        # M3: cli.py joined dev's arguments with spaces, so a text holding " -n " or " --to " read as an option and the
+        # words after it stayed; the masker now gets the list, so an option's value is one argument, whatever it holds
+        cases = [
+            ("task", ["done", "3", "--why", "ran it with -n to check SECRET"], f"done 3 --why {self.t(30)}"),
+            ("task", ["done", "3", "--why", "moved --to SECRET"], f"done 3 --why {self.t(17)}"),
+            ("task", ["done", "3", "--why", "-e SECRET"], f"done 3 --why {self.t(9)}"),
+            ("task", ["add", "-e SECRET plan"], f"add {self.t(14)}"),
+            ("task", ["add", "--", "-secret SECRET"], f"add -- {self.t(14)}"),
+            ("task", ["done", "3", "--why", f"{self.t(1)} SECRET"], f"done 3 --why {self.t(40)}"),
+            ("crew", ["set", "tank", "mission", "SECRET mission", "--why", "x"],
+             f"set tank mission {self.t(14)} --why {self.t(1)}"),
+            ("crew", ["ask", "--to", "The Keymaker", "SECRET"], f"ask --to {self.m(12)} {self.m(6)}"),
+            ("note", ["set", "milestone=SECRET launch", "status=blocked"], f"set milestone={self.t(13)} status=blocked"),
+            ("progress", ["step", "done", "--check", "SECRET", "-p", "x"], f"step {self.t(4)} --check {self.t(6)} -p x"),
+        ]
+        for cmd, argv, kept in cases:
+            with self.subTest(argv=argv[:3]):
+                audit.record("dev." + cmd, argv, "", "ok")
+                self.assertEqual(audit.query(action="dev." + cmd)[-1]["target"], kept)
+        self.unmarked()
+        self.assertNotIn("SECRET", self.stored())
+
+    def test_the_cli_records_a_dev_command_from_its_argument_list(self):
+        # M3, through cli.main: dev crew decline fails here (no run), and every audited dev command is recorded anyway
+        from devkit import cli
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            cli.main(["crew", "decline", "3", "--why", "ran it with -n to check SECRET"])
+        self.assertEqual(audit.query(action="dev.crew")[-1]["target"], f"decline 3 --why {self.t(30)}")
+        self.assertNotIn("SECRET", self.stored())
+
+    def test_a_text_joined_before_26_11_5_keeps_only_the_path_option_names_and_ids(self):
+        # records sealed by cli.py before 26.11.5 hold the arguments joined by spaces, where a word cannot tell where
+        # an argument ends: once a word there is free text, only the command, option names, markers and ids stay
+        cases = {("task", "done 3 --why ran it with -n to check SECRET"): f"done 3 --why {self.t(11)} -n {self.t(15)}",
+                 ("task", "add -e SECRET plan"): f"add -e {self.t(11)}",
+                 ("task", "done SECRET Acme export --why x"): f"done {self.t(18)} --why {self.t(1)}",
+                 ("crew", "ask --to Persephone [message text not recorded: 44 characters]"):
+                     "ask --to Persephone [message text not recorded: 44 characters]",  # a marker: read as stored
+                 # there only the option names dev's parser knows stay, and numbers of up to
+                 # six digits (a phone number is no task number)
+                 ("task", "done 3 --why called Ana at 6505551234 about --acme-merger --json"):
+                     f"done 3 --why {self.t(44)} --json",
+                 ("task", "done 1234567"): f"done {self.t(7)}"}
+        for (cmd, joined), kept in cases.items():
+            with self.subTest(joined=joined[:16]):
+                self.assertEqual(audit.mask_command(joined, "argv", ("dev", cmd), 300), kept)
+        # free text starts after the last subcommand: an option before it keeps its name, so the subcommand reads the
+        # same when the record is read again
+        once = audit.mask_command("-u note set milestone=x --why a --acme-merger", "argv", ("dev",), 300)
+        self.assertEqual(once, f"-u note {self.t(15)} --why {self.t(15)}")
+        self.assertEqual(audit.mask_command(once, "argv", ("dev",), 300), once)
+
+    def test_a_selector_stays_only_when_it_is_an_id_or_a_number(self):
+        # M2: dev task done "Acme export" selects a task by a part of its title
+        cases = [("task", ["done", "3"], "done 3"), ("task", ["done", "T-fwk7a2abc"], "done T-fwk7a2abc"),
+                 ("task", ["done", "SECRET", "Acme", "export"], f"done {self.t(18)}"),
+                 ("lesson", ["recur", "L-fz3qnrebvm5", "--evidence", "SECRET"], f"recur L-fz3qnrebvm5 --evidence {self.t(6)}"),
+                 ("crew", ["answer", "M12", "yes"], f"answer M12 {self.m(3)}"),
+                 ("crew", ["decline", "SECRET step", "--why", "x"], f"decline {self.t(11)} --why {self.t(1)}"),
+                 ("progress", ["assign", "2", "--to", "Tank", "--scope", "lib/**"], "assign 2 --to Tank --scope lib/**"),
+                 ("task", ["done", "6505551234"], f"done {self.t(10)}")]  # L2: a number of more than six digits
+        for cmd, argv, kept in cases:
+            with self.subTest(argv=argv[:2]):
+                audit.record("dev." + cmd, argv, "", "ok")
+                self.assertEqual(audit.query(action="dev." + cmd)[-1]["target"], kept)
+        self.assertEqual(self.denied("dev task done 3 --why called 6505551234", tool="Bash"),
+                         f"dev task done 3 --why {self.t(6)} {self.t(10)}")
+        self.assertNotIn("SECRET", self.stored())
+        self.assertNotIn("6505551234", self.stored())
+
+    def test_crew_raci_keeps_a_kind_of_work_or_a_crew_id_and_masks_anything_else(self):
+        # dev crew raci also classifies a task given in words. Its argument stays only as a
+        # kind of work or a crew id of devkit's roster, and its --set value only as R/A/C/I pairs of crew ids
+        t = self.t
+        cases = [(["raci", "backend"], "raci backend"), (["raci", "tank"], "raci tank"), (["raci", "Scout"], "raci Scout"),
+                 (["raci", "SECRET-merger"], f"raci {t(13)}"),
+                 (["raci", "classify the Acme SECRET merger work"], f"raci {t(36)}"),
+                 (["raci", "review", "--set", "R=seraph,neo A=morpheus", "--why", "x"],
+                  f"raci review --set R=seraph,neo A=morpheus --why {t(1)}"),
+                 (["raci", "review", "--set", "R=seraph A=SECRET", "--why", "x"], f"raci review --set {t(17)} --why {t(1)}")]
+        for argv, kept in cases:
+            with self.subTest(argv=argv[1]):
+                audit.record("dev.crew", argv, "", "ok")
+                self.assertEqual(audit.query(action="dev.crew")[-1]["target"], kept)
+        self.assertEqual(self.denied('dev crew raci "classify the Acme SECRET merger work"', tool="Bash"),
+                         f"dev crew raci {t(36)}")
+        self.assertEqual(self.denied("dev crew raci review --set 'R=seraph A=SECRET'", tool="Bash"),
+                         f"dev crew raci review --set {t(17)}")
+        self.assertNotIn("SECRET", self.stored())
+        self.unmarked()
+
+    def test_dev_note_set_keeps_a_value_only_from_a_keys_fixed_set(self):
+        # status and priority take a value from a fixed set; a milestone, a due date or tags
+        # are the developer's words
+        t = self.t
+        audit.record("dev.note", ["set", "status=blocked", "priority=high", "milestone=3", "due=2026-12-01",
+                                  "status=SECRET", "tags=acme"], "", "ok")
+        self.assertEqual(audit.query(action="dev.note")[-1]["target"],
+                         f"set status=blocked priority=high milestone={t(1)} due={t(10)} status={t(6)} tags={t(4)}")
+        self.assertNotIn("SECRET", self.stored())
+
+    def test_a_shell_command_keeps_its_options_and_ids_but_not_its_free_text(self):
+        # what the hooks keep of a refused call: the shell text, quotes, operators and redirections included
+        cases = {
+            'dev crew answer M12 "yes, ship the Acme roadmap"': f"dev crew answer M12 {self.m(26)}",
+            'dev crew decide D3 "after the Acme call"': "dev crew decide D3 [free text: 19 characters]",
+            'dev progress step "Acme parser done" --check="12 tests pass" --next "review"':
+                f"dev progress step {self.t(16)} --check={self.t(13)} --next {self.t(6)}",
+            'cd ~/x && dev handoff --log "shipped; next: Acme rooms" > /dev/null 2>&1':
+                f"cd {self.t(3)} && dev handoff --log {self.t(25)} > /dev/null 2>&1",
+            "git commit -am \"fix: keep Acme's totals\" && git push": f"git commit -am {self.t(23)} && git push",
+            "gh pr create --title \"Acme export\" --body \"Ana's notes\" --base main":
+                f"gh pr create --title {self.t(11)} --body {self.t(11)} --base main",
+            'git commit -m "-WIP SECRET"': f"git commit -m {self.t(11)}",  # L2: a value that starts with -
+            'dev task add "-e SECRET plan"': f"dev task add {self.t(14)}",
+            'dev task add -- "-secret SECRET"': f"dev task add -- {self.t(14)}",
+            "gh api repos/a/b/issues -f body='SECRET'": f"gh api {self.t(16)} -f {self.t(11)}",
+            'dev crew set tank mission "SECRET mission" --why x': f"dev crew set tank mission {self.t(14)} --why {self.t(1)}",
+            'dev note set milestone="SECRET launch"': f"dev note set milestone={self.t(13)}",
+        }
+        for cmd, kept in cases.items():
+            with self.subTest(cmd=cmd[:24]):
+                self.assertEqual(self.denied(cmd, tool="Bash"), kept)
+        for words in ("Acme", "Ana", "roadmap", "shipped", "SECRET"):
+            self.assertNotIn(words, self.stored())
+        self.unmarked()
+
+    def test_a_shell_line_finds_its_program_behind_reserved_words_wrappers_and_nested_shells(self):
+        # H2: the Code reviewer's forms; the program is found and its free text masked, and the words around it that
+        # are not known to be safe become their length. The program is the word at command position: a
+        # wrapper's options and their values come before it
+        t, m = self.t, self.m
+        cases = {
+            '{ dev crew ask "SECRET plan"; }': f"{{ dev crew ask {m(11)}; }}",
+            'if true; then dev crew ask "SECRET plan"; fi': f"if true; then dev crew ask {m(11)}; fi",
+            'for x in a; do dev task add "SECRET plan"; done':
+                f"for {t(1)} {t(2)} {t(1)}; do dev task add {t(11)}; done",
+            '! dev crew ask "SECRET plan"': f"! dev crew ask {m(11)}",
+            'timeout 60 dev crew ask "SECRET plan"': f"timeout 60 dev crew ask {m(11)}",
+            'timeout -s KILL 5 dev crew ask "SECRET"': f"timeout -s {t(4)} 5 dev crew ask {m(6)}",
+            'env -i -u HOME PATH=/x dev crew ask "SECRET"': f"env -i -u {t(4)} PATH={t(2)} dev crew ask {m(6)}",
+            'uv run --with rich dev crew ask "SECRET"': f"uv run --with {t(4)} dev crew ask {m(6)}",
+            'echo 1 | xargs -n 1 dev crew ask "SECRET plan"': f"echo {t(1)} | xargs -n 1 dev crew ask {m(11)}",
+            'bash -c \'dev crew ask "SECRET plan"\'': f"bash -c 'dev crew ask {m(11)}'",
+            "eval 'dev crew ask SECRET'": f"eval 'dev crew ask {m(6)}'",
+            'zsh -lc "git commit -m \\"SECRET fix\\" && git push"': f'zsh -lc "git commit -m {t(10)} && git push"',
+            'sudo -u root dev crew ask "SECRET"': f"sudo -u {t(4)} dev crew ask {m(6)}",
+            'nice -n 5 dev crew ask "SECRET"': f"nice -n 5 dev crew ask {m(6)}",
+            'uv run dev crew ask "SECRET"': f"uv run dev crew ask {m(6)}",
+            'python3 -I -m devkit crew ask "SECRET"': f"python3 -I -m devkit crew ask {m(6)}",
+            '~/Development/x/bin/dev crew ask "SECRET"': f"{t(19)}/dev crew ask {m(6)}",
+            'dev crew ask <<< "SECRET"': f"dev crew ask <<< {t(6)}",
+            'time -p dev --json crew ask "SECRET"': f"time -p dev --json crew ask {m(6)}",
+        }
+        for cmd, kept in cases.items():
+            with self.subTest(cmd=cmd[:24]):
+                self.assertEqual(self.denied(cmd, tool="Bash"), kept)
+        self.denied("dev task done 3 --why $'Ana\\'s SECRET review'")  # L1's form: an escaped quote in $'…'
+        self.assertNotIn("SECRET", self.stored())
+        self.unmarked()
+
+    def test_a_line_without_a_known_program_keeps_its_operators_its_programs_name_and_each_words_length(self):
+        # the program's name stays, its arguments become their length; a program run by its
+        # path keeps only its base name, and a word that names no program (a variable, a quoted text) is masked
+        t = self.t
+        cases = {
+            "ls -la /tmp # SECRET notes": f"ls {t(3)} {t(4)} # {t(12)}",
+            "rm -rf src && python3 -m unittest tests.test_audit > out.log 2>&1":
+                f"rm {t(3)} {t(3)} && python3 {t(2)} {t(8)} {t(16)} > {t(7)} 2>&1",
+            "cat > notes.md <<'EOF'\nAna's salary review\nEOF": f"cat > {t(8)} <<'EOF'\n{t(19)}\nEOF",
+            "cat <<\\EOF\nSECRET line\nEOF": f"cat <<\\EOF\n{t(11)}\nEOF",  # L3: a heredoc whose delimiter is escaped
+            "echo SECRET | tee -a notes.md >/dev/null": f"echo {t(6)} | tee {t(2)} {t(8)} >/dev/null",
+            "sleep 900": f"sleep {t(3)}",
+            "/opt/homebrew/bin/python3 ~/acme/run.py": f"{t(17)}/python3 {t(13)}",
+            "./gradlew build": f"{t(1)}/gradlew {t(5)}",
+            '"$RUN" SECRET': f"{t(4)} {t(6)}",
+            "'Ana notes' x": f"{t(9)} {t(1)}",
+        }
+        for cmd, kept in cases.items():
+            with self.subTest(cmd=cmd[:24]):
+                self.assertEqual(self.denied(cmd, tool="Bash"), kept)
+        for words in ("SECRET", "Ana", "unittest", "notes.md", "homebrew", "acme"):
+            self.assertNotIn(words, self.stored())
+        self.unmarked()
+
+    def test_dev_is_a_program_only_at_command_position(self):
+        # `dev` as another program's argument (a context, a container, a script, a host, an
+        # echoed word, a file) is no program, so the words after it are masked like that program's other arguments
+        t = self.t
+        cases = {
+            "kubectl --context dev -n globex-payroll get pods": f"kubectl {t(9)} {t(3)} {t(2)} {t(14)} {t(3)} {t(4)}",
+            "docker run --name dev -e CLIENT=globex-payroll nginx":
+                f"docker {t(3)} {t(6)} {t(3)} {t(2)} {t(21)} {t(5)}",
+            "cd ~/w && pnpm dev --open --to globex-payroll": f"cd {t(3)} && pnpm {t(3)} {t(6)} {t(4)} {t(14)}",
+            "ssh dev -t tmux attach -t globex-payroll": f"ssh {t(3)} {t(2)} {t(4)} {t(6)} {t(2)} {t(14)}",
+            "echo dev crew show globex-payroll": f"echo {t(3)} {t(4)} {t(4)} {t(14)}",
+            "cat notes/dev": f"cat {t(9)}",
+            "sudo -u dev kubectl get ns globex-payroll": f"sudo -u {t(3)} kubectl {t(3)} {t(2)} {t(14)}",
+            "grep -rn git log globex-payroll": f"grep {t(3)} {t(3)} {t(3)} {t(14)}",
+            "npm run gh -- --repo globex-payroll": f"npm {t(3)} {t(2)} {t(2)} {t(6)} {t(14)}",
+        }
+        for cmd, kept in cases.items():
+            with self.subTest(cmd=cmd[:24]):
+                self.assertEqual(self.denied(cmd, tool="Bash"), kept)
+        audit.record("guard.irreversible", "?", "kubectl --context dev delete ns globex-payroll", "deny", tier=2)
+        self.assertEqual(audit.query(action="guard.irreversible")[-1]["detail"],
+                         f"kubectl {t(9)} {t(3)} {t(6)} {t(2)} {t(14)}")
+        self.assertNotIn("globex", self.stored())
+        self.unmarked()
+
+    def test_an_assignment_keeps_its_name_and_only_a_short_devkit_setting_keeps_its_value(self):
+        # M4: a variable can carry the text the command then uses ("$MSG")
+        t, m = self.t, self.m
+        cases = {'MSG="SECRET plan"; dev crew ask "$MSG"': f"MSG={t(11)}; dev crew ask {m(4)}",
+                 'MSG="SECRET plan" dev crew ask "$MSG"': f"MSG={t(11)} dev crew ask {m(4)}",
+                 'DEVKIT_GUARD=off DEVKIT_X="1" dev sync': 'DEVKIT_GUARD=off DEVKIT_X="1" dev sync',
+                 'DEVKIT_NOTE="SECRET plan" dev sync': f"DEVKIT_NOTE={t(11)} dev sync",
+                 "exec env A=SECRET dev sync": f"exec env A={t(6)} dev sync"}
+        for cmd, kept in cases.items():
+            with self.subTest(cmd=cmd[:24]):
+                self.assertEqual(self.denied(cmd, tool="Bash"), kept)
+        self.assertNotIn("SECRET", self.stored())
+
+    def test_a_guard_refusal_records_the_commands_it_quotes_masked(self):
+        # H1: guard.deny's detail is the refusal the agent reads, and it quotes the irreversible command's words in
+        # backticks; the record masks each quoted command, and the agent still reads it whole
+        from devkit import guard
+        words = "gh pr merge 12 --squash --body SECRET release notes for Acme"
+        reason = guard._main_reason({"action": "merge", "tier": 2, "target": "#12", "repo": "acme/app", "words": words})
+        self.assertIn(words, reason)
+        audit.record("guard.deny", 'gh pr merge 12 --squash --body "SECRET release notes for Acme"', reason[:400],
+                     "deny", tool="Bash")
+        detail = audit.query(action="guard.deny")[-1]["detail"]
+        self.assertTrue(detail.startswith(f"`gh pr merge 12 --squash --body {self.t(29)}` merges PR #12"), detail)
+        # an irreversible command the guard cannot parse: its words are the shell text the agent ran
+        audit.record("guard.irreversible", "?", "cat <<'EOF' | gh pr merge 12 --body-file -\nSECRET notes\nEOF", "deny",
+                     irreversible="unparsed", tier=2)
+        self.assertEqual(audit.query(action="guard.irreversible")[-1]["detail"],
+                         f"cat <<'EOF' | gh pr merge 12 --body-file -\n{self.t(12)}\nEOF")
+        # a record that does not say what it holds is masked as words; only the gate's own errors are kept as they are
+        audit.record("guard.irreversible", "#12", "gh pr merge 12 --body SECRET notes", "deny")
+        audit.record("guard.irreversible", "", "RuntimeError: state busy", "deny", rule="gate-error")
+        self.assertEqual([r["detail"] for r in audit.query(action="guard.irreversible")[-2:]],
+                         [f"gh pr merge 12 --body {self.t(12)}", "RuntimeError: state busy"])
+        for text in ("SECRET", "Acme"):
+            self.assertNotIn(text, self.stored())
+        self.unmarked()
+
+    def test_a_guard_detail_keeps_devkits_own_wording(self):
+        # a refusal also quotes devkit's own words. A quoted span is read as a shell line, so
+        # its operators stay, and `…` stays; a one-word span stays only as a program on devkit's list (a project
+        # id is the developer's name too). A quoted command holds the words joined by
+        # spaces, so once one is free text only known option names stay after it. The rule reads only the detail,
+        # so the stored detail reads back as it was stored
+        t, m = self.t, self.m
+        kept = ["Run `dev progress …` and `dev crew …` as a command of its own (no `&&`, `;`, pipes, `$(…)`, "
+                "`<(…)`, `bash -c`, `env` or `timeout` around it); quote it: `dev crew ask \"…\"`.",
+                "read-only lane: `cat` is not on the read-only allowlist."]
+        masked = {"`cd ~/x && dev crew ask \"SECRET plan\"` is refused": f"`cd {t(3)} && dev crew ask {m(11)}` is refused",
+                  "`gh pr merge 12 --squash --body SECRET notes --head acme-x --acme-merger` merges PR #12":
+                      f"`gh pr merge 12 --squash --body {t(12)} --head {t(20)}` merges PR #12",
+                  "`Ana Smith` is no crew member; `SECRET-plan` is unknown":
+                      f"`{t(9)}` is no crew member; `{t(11)}` is unknown",
+                  "This session works on `signature-organization/devkit`; it must not change "
+                  "`fireflysoftwaresolutions/devkit`'s handoff note.":
+                      # a path keeps its base name only when devkit's list has it
+                      f"This session works on `{t(22)}/devkit`; it must not change `{t(24)}/devkit`'s handoff note."}
+        for detail in kept + list(masked):
+            audit.record("guard.deny", "Bash", detail, "deny", tool="Bash")
+        details = [r["detail"] for r in audit.query(action="guard.deny")]
+        self.assertEqual(details, kept + list(masked.values()))
+        for text in ("SECRET", "Ana", "acme"):
+            self.assertNotIn(text, self.stored())
+        self.unmarked()
+
+    def test_a_program_keeps_its_name_only_when_devkits_list_has_it(self):
+        # a lowercase word at command position can be a client's
+        # name, a file or a password, so a program's name stays only from devkit's fixed list (audit.PROGRAMS), and
+        # a program run by its path keeps its base name only when the list has it. 2a: a name written with quotes
+        # or an escape stays in neither case
+        t = self.t
+        cases = {
+            "globex-payroll.acme-merger-q3 --x": f"{t(29)} {t(3)}",
+            "john.smith --x": f"{t(10)} {t(3)}",
+            "hunter2 --x": f"{t(7)} {t(3)}",
+            "sudo globex-payroll": f"sudo {t(14)}",
+            "timeout 5 globex-payroll": f"timeout 5 {t(14)}",
+            "acme-layoffs-list-2026.csv": t(26),
+            "CLIENT=globex globex-payroll": f"CLIENT={t(6)} {t(14)}",
+            "cat x | acme-merger-tool": f"cat {t(1)} | {t(16)}",
+            "./clients/globex/run.sh x": f"{t(23)} {t(1)}",
+            "/opt/globex-payroll/bin/python3 x.py": f"{t(23)}/python3 {t(4)}",
+            '"globex-payroll" --flag': f"{t(14)} {t(6)}",
+            '"cat" notes': f"{t(3)} {t(5)}",
+            "kubectl get pods": f"kubectl {t(3)} {t(4)}",
+        }
+        for cmd, kept in cases.items():
+            with self.subTest(cmd=cmd[:24]):
+                self.assertEqual(self.denied(cmd, tool="Bash"), kept)
+        for words in ("globex", "acme", "john", "hunter2", "payroll", "layoffs", "clients"):
+            self.assertNotIn(words, self.stored())
+        self.unmarked()
+
+    def test_the_program_list_is_the_same_on_every_machine(self):
+        # the list is fixed, so a program on this machine's PATH changes nothing; it holds the guard's read-only
+        # allowlist, its checks, runners and wrappers, and the programs the masker reads
+        from devkit import guard
+        with tempfile.TemporaryDirectory() as d:
+            tool = Path(d) / "globex-payroll"
+            tool.write_text("#!/bin/sh\n")
+            tool.chmod(0o755)
+            with mock.patch.dict(os.environ, {"PATH": d}):
+                self.assertEqual(audit.mask_command("globex-payroll x"), f"{self.t(14)} {self.t(1)}")
+        known = (guard._READERS | guard._RO_READERS | guard._RO_RUNNERS | guard._PACKAGE_MANAGERS | guard._WRAPPERS
+                 | guard._SHELLS | guard._CREATORS | guard._CHANGERS | guard._COPIERS | guard._MOVERS
+                 | {p for p, _, _ in guard._RO_CHECKS} | {k.split()[0] for k in audit._WRAPPERS}
+                 | set(audit._OTHER) | {"dev", "devkit", "eval"})
+        self.assertEqual(sorted(known - audit.PROGRAMS), [])
+
+    def test_a_program_run_by_its_path_keeps_only_its_base_name(self):
+        # dev, git, gh, a wrapper, a shell or python run by its path kept the folder, which
+        # can name a client; the folder becomes its length. A program run by a quoted path is no program devkit
+        # knows, so the line is masked like another program's
+        t, m = self.t, self.m
+        cases = {
+            '/opt/globex-payroll/bin/dev crew ask "SECRET plan"': f"{t(23)}/dev crew ask {m(11)}",
+            '/srv/acme-merger/bin/git commit -m "SECRET plan"': f"{t(20)}/git commit -m {t(11)}",
+            "/opt/acme/bin/gh pr merge 12 --squash": f"{t(13)}/gh pr merge 12 --squash",
+            "/opt/globex/bin/sudo -u root dev sync": f"{t(15)}/sudo -u {t(4)} dev sync",
+            "/opt/globex/bin/python3 -m devkit sync": f"{t(15)}/python3 -m devkit sync",
+            '/opt/globex/bin/bash -c "dev sync"': f'{t(15)}/bash -c "dev sync"',
+            '"/opt/globex payroll/bin/dev" crew ask x': f"{t(27)} {t(4)} {t(3)} {t(1)}",
+        }
+        for cmd, kept in cases.items():
+            with self.subTest(cmd=cmd[:24]):
+                self.assertEqual(self.denied(cmd, tool="Bash"), kept)
+        for words in ("globex", "acme", "SECRET"):
+            self.assertNotIn(words, self.stored())
+        self.unmarked()
+
+    def test_an_option_before_the_program_keeps_its_name_and_only_a_value_that_names_nothing(self):
+        # nice's -10 and xargs' {} name nothing and stay; a value attached to an option of
+        # python or a shell before the program (a path) is masked
+        t = self.t
+        cases = {
+            'nice -10 dev crew ask "SECRET"': f"nice -10 dev crew ask {self.m(6)}",
+            'xargs -I{} dev crew ask "SECRET {}"': f"xargs -I{{}} dev crew ask {self.m(9)}",
+            "xargs -I {} dev sync": "xargs -I {} dev sync",
+            "python3 -X/opt/globex -m devkit sync": f"python3 -X{t(11)} -m devkit sync",
+            "bash --rcfile=/opt/globex/rc -c 'dev sync'": f"bash --rcfile={t(14)} -c 'dev sync'",
+        }
+        for cmd, kept in cases.items():
+            with self.subTest(cmd=cmd[:24]):
+                self.assertEqual(self.denied(cmd, tool="Bash"), kept)
+        # a shell's option before its -c keeps its decision in a quote, so the record reads back as it was stored
+        audit.record("guard.deny", "Bash", "Run `xargs eval bash -I{} -c sudo _local/x` now", "deny", tool="Bash")
+        for words in ("globex", "SECRET", "_local/x"):
+            self.assertNotIn(words, self.stored())
+        self.unmarked()
+
+    def test_a_quote_keeps_a_word_only_when_devkits_list_has_it(self):
+        # a refusal's one-word quote stays only as a program on the list; a quote whose first word is not on it
+        # is free text, recorded as its length; a path keeps its base name only when the list has it
+        t = self.t
+        cases = {"`john` takes only a, b": f"`{t(4)}` takes only a, b",
+                 "Crew members never run `globex-payroll`: it runs a program": f"Crew members never run `{t(14)}`: it "
+                                                                                "runs a program",
+                 "Crew members never run `acme payroll cuts`: it runs a program": f"Crew members never run `{t(17)}`: "
+                                                                                   "it runs a program",
+                 "the sed command `s/john.smith/x/w out` can write": f"the sed command `{t(20)}` can write",
+                 "the sed command `s/globex payroll/acme/w out` can write": f"the sed command `{t(27)}` can write",
+                 "Branch `feat/globex-payroll-q3` does not follow": f"Branch `{t(22)}` does not follow",
+                 "`clients/globex/payroll/q3/salaries` names a path outside": f"`{t(34)}` names a path outside",
+                 "`sed` and `dev` and `/usr/bin/git` run": f"`sed` and `dev` and `{t(8)}/git` run"}
+        for detail in cases:
+            audit.record("guard.deny", "Bash", detail, "deny", tool="Bash")
+        self.assertEqual([r["detail"] for r in audit.query(action="guard.deny")], list(cases.values()))
+        for words in ("john", "globex", "acme", "payroll", "clients"):
+            self.assertNotIn(words, self.stored())
+        self.unmarked()
+
+    def test_a_value_with_a_backtick_of_its_own_cannot_end_the_quote_early(self):
+        # a refusal quoted a value in single backticks, so a backtick inside it ended the
+        # quote and the rest stayed as prose. The guard now fences the value so it reads as one quote, and a record
+        # written before (prose that touches a quote on both sides, as in `a`b`c`) masks that prose too
+        from devkit import guard
+        values = [("path", "--out reports/`cat globex-payroll-q3.txt`/x", "reports/`cat globex-payroll-q3.txt`/x"),
+                  ("url", "--url http://localhost/`echo acme merger secret`", "http://localhost/`echo acme merger secret`")]
+        for kind, shown, value in values:
+            msg = guard._impeccable_value(kind, shown, value)
+            self.assertIn(shown, msg)  # the agent still reads the value whole
+            audit.record("guard.deny", "Bash", msg, "deny", tool="Bash")
+            audit.record("guard.deny", "Bash", f"`{shown}` has a character the shell expands", "deny", tool="Bash")
+        audit.record("guard.deny", "Bash", "`--name a`b`c globex` has a character the shell expands", "deny", tool="Bash")
+        details = [r["detail"] for r in audit.query(action="guard.deny")]
+        self.assertTrue(details[0].startswith(f"``{self.t(43)}`` has a character the shell expands"), details[0])
+        self.assertEqual(details[-1], f"`{self.t(8)}`{self.t(1)}`{self.t(8)}` has a character the shell expands")
+        for words in ("globex", "payroll", "cat ", "echo", "acme", "merger", "secret", "reports", "localhost"):
+            self.assertNotIn(words, self.stored())
+        self.unmarked()
+
+    def test_a_delegated_task_and_a_handoff_commit_keep_no_text(self):
+        # M1: crew.delegate keeps what a member should do only as its length, and a handoff commit's record keeps the
+        # item's id and the operation, not its title or reason
+        audit.record("crew.delegate", "Morpheus → Tank", "SECRET: fix the Acme invoice export", "ok", step="api")
+        audit.record("handoff.tasks", "tasks/acme/app/T-1.md", "T-1: create task “SECRET Acme export” (me) — Ana asked")
+        audit.record("handoff.tasks", "tasks/acme/app/T-fwk7a2abc.md", "T-fwk7a2abc: done (ana@mac)")
+        audit.record("handoff.sessions", "sessions/acme/app.md", "session log: acme/app (ana@mac)")
+        recs = [r for r in audit.query(days=1) if r["action"] != "audit.config"]
+        self.assertEqual([(r["target"], r["detail"]) for r in recs], [
+            ("Morpheus → Tank", self.t(35)), ("tasks/acme/app/T-1.md", f"T-1: create {self.t(42)}"),
+            ("tasks/acme/app/T-fwk7a2abc.md", f"T-fwk7a2abc: done {self.t(9)}"), ("sessions/acme/app.md", self.t(31))])
+        for text in ("SECRET", "Ana", "ana@mac"):
+            self.assertNotIn(text, self.stored())
+        self.unmarked()
+
+    def test_a_heredoc_body_is_free_text(self):
+        cases = {"git commit -m \"$(cat <<'EOF'\nfix: Acme's totals\n\nIt's Ana's fix\nEOF\n)\"":
+                 f"git commit -m {self.t(54)}"}
+        for cmd, kept in cases.items():
+            with self.subTest(cmd=cmd[:12]):
+                self.assertEqual(self.denied(cmd), kept)
+        self.assertNotIn("Ana", self.stored())
+
+    def test_a_command_cut_inside_its_text_records_a_lower_bound(self):
+        # the hooks cut a refused command at 200 characters, here inside the quoted message
+        audit.record("guard.deny", ('dev crew ask "' + "x" * 190 + '"')[:200], "", "deny")
+        self.assertEqual(audit.query(action="guard.deny")[-1]["target"],
+                         "dev crew ask [message text not recorded: 186+ characters]")
+
+    def test_the_evidence_command_is_masked_like_the_target(self):
+        audit.record("guard.deny", "Bash", "", "deny", command='dev crew ask "a secret plan for acme"')
+        self.assertEqual(audit.query(action="guard.deny")[-1]["evidence"]["command"],
+                         "dev crew ask [message text not recorded: 22 characters]")
+        self.assertNotIn("secret plan", self.stored())
+
+    def test_a_record_of_safe_words_is_kept_as_it_is(self):
+        cases = [("guard.deny", "gh pr merge 12 --squash", "", {}),
+                 ("guard.deny", "dev task done T-fwk7a2abc --json && git push --force-with-lease", "", {}),
+                 ("guard.ask", "git -C ~/x push --force-with-lease", "", {"tool": "Bash"}),
+                 ("guard.deny", "~/Development/acme/app/notes.md", "", {"tool": "Write"}),  # a file tool: its path
+                 ("guard.deny", "mcp__claude_ai_Gmail__send", "", {"tool": "mcp__claude_ai_Gmail__send"}),
+                 ("guard.irreversible", "#12", "gh pr merge 12 --squash", {}),  # its target is no command line
+                 ("calls.unclosed", "main", "dev sync --quiet (no result within 120 s)", {}),
+                 ("dev.wt", ["new", "feat/invoice-export"], "", {}),
+                 ("dev.task", ["done", "3"], "", {}),
+                 ("job.sync", "sync --scheduled --quiet", "", {})]
+        for action, target, detail, extra in cases:
+            audit.record(action, target, detail, "ok", **extra)
+        stored = [json.loads(ln) for ln in self.stored().splitlines() if '"audit.config"' not in ln]
+        self.assertEqual([(r["action"], r["target"], r["detail"]) for r in stored],
+                         [(a, " ".join(t) if isinstance(t, list) else t, d) for a, t, d, _ in cases])
+        read = [r for r in audit.query(days=1) if r["action"] != "audit.config"]
+        self.assertEqual(read, stored)  # read back as stored, not marked cleaned
+
+    def test_a_record_sealed_before_the_rule_is_masked_on_read_and_still_verifies(self):
+        # records written by 26.11.3 and 26.11.4 hold the text; the current rules write a record that reads back as
+        # it was stored
+        old = [("guard.deny", 'DEVKIT_X=1 dev crew ask "a secret plan for acme"', "refused"),
+               ("guard.deny", "rm -rf src", "refused"),
+               ("calls.unclosed", "main", 'dev crew ask "a secret plan for acme" (no result within 120 s)'),
+               ("dev.task", "add a secret plan for acme --why Ana asked", "")]
+        for action, target, detail in old:
+            ts = round(time.time(), 3)
+            audit._append({"v": 2, "id": audit.new_id(ts), "ts": ts, "time": audit.iso(ts),
+                           "actor": {"user": "fixture-user", "host": "fixture-host", "agent": "claude", "session": ""},
+                           "action": action, "category": "change", "severity": "info", "target": target,
+                           "detail": detail, "outcome": "ok"})
+        for action, target, detail in old:
+            audit.record(action, target, detail, "deny")
+        recs = [r for r in audit.query(days=1) if r["action"] != "audit.config"]
+        sealed, new = recs[:4], recs[4:]
+        self.assertEqual([r.get("cleaned") for r in sealed], [True] * 4)
+        self.assertEqual([(r["target"], r["detail"]) for r in sealed],
+                         [("DEVKIT_X=1 dev crew ask [message text not recorded: 22 characters]", "refused"),
+                          (f"rm {self.t(3)} {self.t(3)}", "refused"),
+                          ("main", "dev crew ask [message text not recorded: 22 characters] (no result within 120 s)"),
+                          (f"add {self.t(22)} --why {self.t(9)}", "")])
+        self.assertEqual([(r["target"], r["detail"]) for r in new], [(r["target"], r["detail"]) for r in sealed])
+        stored_new = [json.loads(ln) for ln in self.stored().splitlines()][-4:]
+        self.assertEqual(new, stored_new)  # a record the current rules wrote reads back as stored, unmarked
+        self.assertNotIn("secret plan", self.stored().split("\n", 4)[-1])
+        self.assertTrue(audit.verify(team=False)["ok"])
+
+    def test_every_dev_command_positional_and_valued_option_is_classified(self):
+        # M2: the tables follow dev's parser. Every command is listed with each positional, in the parser's order,
+        # with its nargs and a class (text, name, select or pair); every option that takes a value is free text or
+        # names something; and a NAME option a command reads as a flag is listed for that command. A new command,
+        # positional or valued option fails here until it is classified. Whether a class is right is not checked
+        # here: the masking tests above check the classes that hold text. FLAG_OPTIONS lists the options that take
+        # no value, the rest of the names dev's parser knows
+        import argparse
+        from devkit import cli
+        valued, bare, commands, flags = set(), set(), {}, {}
+
+        def walk(p, path):
+            here = []
+            for act in p._actions:
+                if isinstance(act, argparse._SubParsersAction):
+                    for name, sub in act.choices.items():
+                        walk(sub, path + [name])
+                elif not act.option_strings:
+                    here.append((act.dest, {None: "", argparse.REMAINDER: "..."}.get(act.nargs, act.nargs)))
+                elif isinstance(act, argparse._HelpAction):
+                    bare.update(act.option_strings)
+                else:
+                    (valued if act.nargs != 0 else bare).update(act.option_strings)
+                    if act.nargs in (0, "?", "*"):
+                        flags.setdefault(" ".join(path), set()).update(o for o in act.option_strings
+                                                                       if o in audit.NAME_OPTIONS)
+            commands[" ".join(path)] = here
+        walk(cli.build_parser(), [])
+        self.assertEqual(sorted(valued - audit.TEXT_OPTIONS - audit.NAME_OPTIONS), [])
+        self.assertEqual(sorted(audit.TEXT_OPTIONS & audit.NAME_OPTIONS), [])
+        self.assertEqual(sorted(audit.FLAG_OPTIONS), sorted(bare - audit.TEXT_OPTIONS - audit.NAME_OPTIONS))
+        self.assertEqual(sorted(set(commands) ^ set(audit.COMMAND_ARGS)), [])
+        for path, positionals in commands.items():
+            with self.subTest(command=path):
+                slots = audit.command_slots(path)
+                self.assertEqual([(dest, nargs) for dest, _, nargs in slots], positionals)
+                self.assertEqual([c for _, c, _ in slots if c not in audit.ARG_CLASSES], [])
+        self.assertEqual({k: v for k, v in flags.items() if v}, {k: set(v) for k, v in audit.NAME_FLAGS.items()})
 
 
 class IntegrityTests(AuditCase):
@@ -893,8 +1455,9 @@ class ExportTests(AuditCase):
     # R5: JSONL (canonical), CSV for a spreadsheet, OCSF and CEF for a SIEM, and audit.forward
     def setUp(self):
         super().setUp()
-        audit.record("dev.task", "=HYPERLINK(\"http://x\")", 'a "quoted", comma\nand a new line', "ok")
-        audit.record("guard.deny", "rm -rf src | tee", "key=value \\ back", "deny", tool="Bash")
+        # free text that reaches an export: a formula in the reason; a command line the masker keeps whole, with a pipe
+        audit.record("dev.task", ["done", "3"], 'a "quoted", comma\nand a new line', "ok", why="=HYPERLINK(\"http://x\")")
+        audit.record("guard.deny", "dev sync | dev status", "key=value \\ back", "deny", tool="Bash")
 
     def test_ocsf_events_are_valid(self):
         events = [json.loads(ln) for ln in audit.export("ocsf", action="dev.task").splitlines()]
@@ -920,7 +1483,7 @@ class ExportTests(AuditCase):
         self.assertEqual({len(r) for r in rows}, {len(rows[0])})
         col = rows[0].index
         self.assertEqual(rows[1][col("detail")], 'a "quoted", comma\nand a new line')
-        self.assertEqual(rows[1][col("target")], "'=HYPERLINK(\"http://x\")")  # no formula runs in the sheet
+        self.assertEqual(rows[1][col("why")], "'=HYPERLINK(\"http://x\")")  # no formula runs in the sheet
 
     def test_cef_lines_escape_their_separators(self):
         lines = audit.export("cef", action="guard").splitlines()
@@ -928,7 +1491,7 @@ class ExportTests(AuditCase):
         head = re.split(r"(?<!\\)\|", lines[0])
         self.assertEqual(head[:4], ["CEF:0", "Firefly Software Solutions", "devkit", core.VERSION])
         self.assertEqual((head[4], head[6]), ("guard.deny", "6"))
-        self.assertIn(r"rm -rf src \| tee", lines[0])
+        self.assertIn(r"dev sync \| dev status", lines[0])
         self.assertIn(r"key\=value \\ back", lines[0])
 
     def test_jsonl_is_the_stored_records_and_the_window_filters(self):
@@ -947,15 +1510,15 @@ class ExportTests(AuditCase):
     def test_forward_to_a_file_and_to_syslog(self):
         sink = self.root / "siem" / "devkit.jsonl"
         core.CFG["audit"]["forward"] = str(sink)
-        audit.record("dev.task", "add z")
-        self.assertEqual(json.loads(sink.read_text().splitlines()[-1])["target"], "add z")
+        audit.record("dev.task", "done 7")
+        self.assertEqual(json.loads(sink.read_text().splitlines()[-1])["target"], "done 7")
         srv = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         srv.bind(("127.0.0.1", 0))
         srv.settimeout(5)
         core.CFG["audit"]["forward"] = f"syslog://127.0.0.1:{srv.getsockname()[1]}"
-        audit.record("dev.task", "add w")
+        audit.record("dev.task", "done 8")
         data = ""
-        while "add w" not in data:  # the settings change is forwarded first
+        while "done 8" not in data:  # the settings change is forwarded first
             data = srv.recv(65536).decode()
         srv.close()
         self.assertIn("CEF:0|Firefly Software Solutions|devkit|", data)
@@ -966,7 +1529,7 @@ class QueryTests(AuditCase):
     def setUp(self):
         super().setUp()
         audit.record("dev.task", "add x", "", "ok", project="acme/app")
-        audit.record("guard.deny", "rm -rf src", "", "deny", project="acme/web")
+        audit.record("guard.deny", "git push --force", "", "deny", project="acme/web")
         audit.record("dev.push", "origin feat/x", "rejected", "exit 1", project="acme/app")
 
     def q(self, **kw) -> list:
@@ -983,7 +1546,7 @@ class QueryTests(AuditCase):
 
     def test_show_finds_a_record_by_id_or_unique_prefix(self):
         r = audit.query(action="guard")[0]
-        self.assertEqual(audit.show(r["id"])["target"], "rm -rf src")
+        self.assertEqual(audit.show(r["id"])["target"], "git push --force")
         ids = [x["id"] for x in audit.query()]
         n = next(n for n in range(1, 27) if sum(i.startswith(r["id"][:n]) for i in ids) == 1)
         self.assertEqual(audit.show(r["id"][:n].lower())["id"], r["id"])
@@ -1018,11 +1581,11 @@ class CommandTests(AuditCase):
         return rc, out.getvalue()
 
     def test_verify_exits_1_at_a_broken_link_and_records_the_check(self):
-        audit.record("dev.task", "add 1")
-        audit.record("dev.task", "add 2")
+        audit.record("dev.task", "done 1")
+        audit.record("dev.task", "done 2")
         self.assertEqual(self.run_cmd("verify")[0], 0)
         f = audit.AUDIT / time.strftime("%Y-%m.jsonl")
-        f.write_text(f.read_text().replace("add 1", "add 9"))
+        f.write_text(f.read_text().replace("done 1", "done 9"))
         rc, out = self.run_cmd("verify")
         self.assertEqual(rc, 1)
         self.assertIn("line 1", out)
@@ -1044,10 +1607,10 @@ class CommandTests(AuditCase):
         self.assertEqual(self.run_cmd("--since", "yesterday")[0], 2)
 
     def test_queries_print_their_records(self):
-        audit.record("dev.task", "add x", "", "ok", project="acme/app")
+        audit.record("dev.task", "done 3", "", "ok", project="acme/app")
         rc, text = self.run_cmd("--project", "acme/app", "--format", "csv")
         rows = list(csv.reader(io.StringIO(text)))
-        self.assertEqual((rc, len(rows), rows[1][rows[0].index("target")]), (0, 2, "add x"))
+        self.assertEqual((rc, len(rows), rows[1][rows[0].index("target")]), (0, 2, "done 3"))
         rc, text = self.run_cmd("stats", "--json")
         self.assertEqual((rc, json.loads(text)["categories"]["change"]), (0, 1))
         rc, text = self.run_cmd("config")

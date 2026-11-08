@@ -383,7 +383,7 @@ you want it (the devkit `workspace` skill knows these commands):
 | Laravel | `composer require laravel/boost --dev && php artisan boost:install` (choose Claude Code and Codex) |
 | Symfony | `composer require --dev symfony/ai-mate && vendor/bin/mate init` |
 | FastAPI | `uvx library-skills` (Codex) and `uvx library-skills --claude` (Claude Code) |
-| Next.js 16+ | `claude mcp add -s local next-devtools -- npx next-devtools-mcp@latest` · `codex mcp add next-devtools -- npx next-devtools-mcp@latest` |
+| Next.js 16+ | You add the `next-devtools` MCP server, in your terminal, for every project on this Mac: `dev ext add mcp next-devtools --command "npx -y next-devtools-mcp@<exact version>" --license <its license> --why "…"`. Agents cannot run `claude mcp add` or `codex mcp add`, and a server added that way shows as drift |
 | New Angular app | `ng new <name> --ai-config=claude-code,open-ai-codex` |
 | Large Java codebases | IntelliJ IDEA → Settings → AI → MCP Server → configure it automatically for Claude Code and Codex |
 
@@ -487,10 +487,10 @@ process tree and the terminal, and a process an agent starts through a launcher 
 guard refuses typing into a `screen` or `tmux` session outright, so no key or escape can edit a typed line, and
 reads the command each launcher starts, in the forms it can read: a script file or a program that builds the
 command at run time gets through. Quoting or brace expansion around the command word (`$'dev'`, `$"dev"`,
-`dev {ext,} ack`, `$'screen'`) is not read by the guard's rules until 26.11.5; devkit's own terminal check
+`dev {ext,} ack`, `$'screen'`) is not read by the guard's rules yet (a fix is planned); devkit's own terminal check
 (`set_by_developer()`) still refuses those `dev` commands when an agent runs them directly. The desktop
 notification, the session-start message, and the audit trail are the backstop until a kernel-level check of who
-typed the command lands in 26.11.5.
+typed the command is built; it is planned, not available yet.
 
 The acceptance notification is a security notice: `DEVKIT_NO_NOTIFY=1` and `progress.notify: false`, which an agent
 can set, do not turn it off. It shows only on macOS, and only while notifications are allowed for Script Editor, the

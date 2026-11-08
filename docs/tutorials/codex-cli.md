@@ -135,7 +135,8 @@ shows a full example.
 ### The dashboard
 
 Run `dev dashboard`. Your browser opens devkit's dashboard, a page on your Mac that updates by itself while it is open.
-Open **Background** (or press `g` then `b`): your run is there with every step, who owns it, and anything waiting for
+It opens on **Now**, which says in one sentence whether anything needs you and when your run lands. Open
+**Background** (or press `g` then `b`): your run is there with every step, who owns it, and anything waiting for
 you. **Team**, then **Crew** (`g c`), lists the crew members working now. The [Dashboard](../dashboard.md) guide
 describes every view.
 

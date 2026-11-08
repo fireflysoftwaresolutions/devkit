@@ -32,7 +32,7 @@ Load each one with the Skill tool (it may list a plugin skill with its prefix, s
 
 ## Your procedure
 
-Follow these phases in order. A phase is finished when its gate holds; `proof` marks the devkit command devkit looks for in your session before it accepts your report.
+Follow these phases in order. A phase is finished when its gate holds; `proof` marks the devkit command devkit looks for in your session before it accepts your report. Before your final report, every background command you started has ended: keep working until it ends, or stop it.
 
 1. **Inventory.** Inventory the dependencies and the breaking changes between the versions. skills: `improve-codebase-architecture` · devkit: `dev grep` · gate: the breaking changes are listed
 2. **Plan the steps.** Plan steps that each keep the build green and can be rolled back; the Software architect (The Architect) approves. skills: `superpowers:writing-plans` · devkit: `dev plan new` · gate: the plan is approved

@@ -16,7 +16,8 @@ description: How to work with the ~/Development layout and the `dev` CLI—clone
 | Scratch | session scratchpad or `~/Development/.tmp/` | — |
 | Map / notes / plans | `~/Development/.handoff/` | `dev sync` (automatic) |
 
-Find a project: `dev go <query>` prints its path; `dev ls` lists all; `dev status` describes the current one.
+Find a project: `dev go <query>` prints its path, and `dev go <query> <branch>` the path of its worktree for that
+branch; `dev ls` lists all; `dev status` describes the current one.
 
 ## Parallel work with worktrees
 
@@ -48,8 +49,10 @@ nightly `gc` job applies the safe cases automatically. `dev du` reports usage, D
 - **Laravel:** `composer require laravel/boost --dev && php artisan boost:install` (choose Claude Code and Codex).
 - **Symfony:** `composer require --dev symfony/ai-mate && vendor/bin/mate init`.
 - **FastAPI:** `uvx library-skills` (Codex) and `uvx library-skills --claude` (Claude)—version-matched skill.
-- **Next.js 16+:** `claude mcp add -s local next-devtools -- npx next-devtools-mcp@latest` /
-  `codex mcp add next-devtools -- npx next-devtools-mcp@latest` (set `NEXT_TELEMETRY_DISABLED=1`).
+- **Next.js 16+:** the `next-devtools` MCP server. Only the developer adds it, in a terminal, and it then runs in
+  every project on this Mac: `dev ext add mcp next-devtools --command "npx -y next-devtools-mcp@<exact version>"
+  --license <its license> --why "…"`. The guard refuses `claude mcp add` and `codex mcp add` to agents, and a server
+  added that way shows as drift.
 - **New Angular app:** `ng new <name> --ai-config=claude-code,open-ai-codex`.
 - **Large Java codebase:** in IntelliJ IDEA, go to Settings → AI → MCP Server → Auto-configure (Claude Code + Codex).
 

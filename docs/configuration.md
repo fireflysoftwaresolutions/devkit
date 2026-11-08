@@ -32,7 +32,7 @@ Run `dev config edit` to open it and validate it, `dev config show` to print the
 | `default_host` | `github.com` | Host whose repositories live at `<owner>/<repo>`; all others live at `<host>/<group…>/<repo>` |
 | `host_dirs` | `{}` | Folder aliases for hosts, for example `{"gitlab.com": "gitlab"}` → `~/Development/gitlab/<group>/<repo>` |
 | `editor` | `code` | Editor for `dev open` (and for `dev handoff --edit` and `dev config edit` when `$EDITOR` is unset) |
-| `stacks` | `["java", "python", "php", "node"]` | The stacks whose packages `dev setup` and `dev install --only tools` install |
+| `stacks` | `["java", "python", "php", "node"]` | The stacks whose packages `dev setup` and `dev install --only tools` install, and whose tools and language servers `dev doctor` requires. `dev doctor` lists the other stacks as not chosen, not as failures |
 | `hosts` | `["github"]` | Git hosts you use: `github`, `gitlab`, `bitbucket`, `azure-devops`. devkit installs their CLIs, `dev doctor` checks the sign-in, and `dev ci status` reads their pipelines |
 | `clouds` | `[]` | Clouds and infrastructure tools you use: `aws`, `azure`, `gcp`, `digitalocean`, `kubernetes`, `terraform` (OpenTofu). devkit installs their CLIs and `dev doctor` checks the sign-in |
 | `packages.auto` | `true` | `dev install` installs missing packages for your stacks, hosts, and clouds; `false` only reports them |
@@ -64,6 +64,7 @@ Apply agent changes with `dev install --only claude` or `dev install --only code
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `skills.groups` | `["security-deep", "postgres", "observability"]` | Optional skill groups to install in addition to the core set: `security-deep`, `codeql`, `postgres`, `observability`, `iac`, `load-testing`, `contract-testing`, `skill-review`, or `all`. See [Skills and plugins › Optional groups](skills-and-plugins.md#optional-groups) |
+| `skills.optional` | `{"iac": ["terraform"]}` | Skill groups the setup wizard offers, but never installs by default, each with the tools that bring the offer: when you pick Terraform, the wizard offers `iac` and adds it to `skills.groups` unless you say no |
 | `skills.enforce` | `true` | Enforce the skills each kind of work requires (see [Skills and plugins › Required skills](skills-and-plugins.md#required-skills)) |
 | `skills.rules` | `[]` | Your own skill rules. A rule with the same `id` as a devkit rule changes the fields you give; a new `id` adds a rule |
 
@@ -292,7 +293,7 @@ Never edit the generated files directly; the next install overwrites them, and `
 | `BITBUCKET_TOKEN`, or `BITBUCKET_USERNAME` and `BITBUCKET_APP_PASSWORD` | `dev ci status` for Bitbucket Pipelines, and the Bitbucket sign-in check of `dev doctor` |
 | `AZURE_DEVOPS_EXT_PAT` | `dev ci status` for Azure Pipelines and the `az devops` CLI (`AZURE_DEVOPS_PAT` works too for `dev ci status`) |
 | `DEVKIT_NO_NOTIFY=1` | No progress notifications from that process; security notices, such as an extension accepted, still show |
-| `DEVKIT_THEME=dark\|light` | The wordmark's ink: paper on dark, charcoal on light (otherwise taken from `COLORFGBG`, default dark) |
+| `DEVKIT_THEME=dark\|light` | The colors of the banner and the `dev setup` wizard for a dark or a light terminal. Otherwise devkit reads `COLORFGBG`; when neither is set, as in macOS Terminal, it uses colors that read on both light and dark backgrounds |
 | `DEVKIT_ALLOW_STUBS=1` | One commit may take unfinished work the developer accepted |
 | `DEVKIT_SCOPE_OVERRIDE=1` | In the agent's environment: the main session may edit files a working crew member owns (emergencies) |
 | `DEVKIT_FROM_AGENT=<id>` | Set by the hooks on a subagent's `dev progress` and `dev crew` commands, so they write to its lane; never set it yourself |

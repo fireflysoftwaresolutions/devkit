@@ -29,7 +29,7 @@ with `dev doctor`: every failed check prints the command that fixes it.
 
 ```bash
 dev jobs                                                  # every scheduled job: loaded, last run, next run
-dev jobs show sync                                        # one job's recent runs
+dev jobs show sync                                        # the recent runs of one job
 launchctl print gui/$UID/com.devkit.job.sync | head -30  # what launchd knows about it
 tail -50 ~/.local/state/devkit/logs/sync.log
 dev sync                                                  # run a sync in the foreground
@@ -42,6 +42,24 @@ dev sync                                                  # run a sync in the fo
 The installer names the step that failed and the command to run it again; it is safe to repeat, and it skips what is
 done already. The lines before the message are the failing command's own output (Homebrew's, git's, or the GitHub
 CLI's). Fix that cause, then run the same command again.
+
+### The installer stops on an Intel Mac or in a Rosetta terminal
+
+The first step of the installer (**This Mac**) stops before it downloads or changes anything in two cases. The message
+says which one it is.
+
+- **"This terminal runs under Rosetta"**: your Mac has Apple silicon, but the terminal runs as an Intel program, so it
+  reports an `x86_64` processor and would use the Intel Homebrew in `/usr/local`, or none. A new window of a terminal
+  app that still runs stays under Rosetta, so quit the app first. Open a native terminal and run the installer again:
+  1. Quit Terminal (Command-Q). In Finder, open **Applications** > **Utilities**, select **Terminal**, choose
+     **File** > **Get Info**, and clear **Open using Rosetta**. Other terminal apps, such as iTerm2, have the same
+     checkbox in their Get Info window: quit the app the same way before you clear it.
+  2. If you started the shell with `arch -x86_64`, type `exit` to leave it.
+  3. Open Terminal again, check that `uname -m` prints `arm64`, and run the installer command again.
+- **"devkit needs a Mac with Apple silicon for a new install"**: the Mac has an Intel processor and no Homebrew.
+  Homebrew's installer no longer runs on Intel Macs, so running devkit's installer again fails the same way. An Intel
+  Mac that already has Homebrew (on its `PATH` or in `/usr/local`) can run it, with one warning line. Otherwise,
+  install devkit on a Mac with Apple silicon.
 
 ### The installer says there is no terminal
 
@@ -59,13 +77,14 @@ gh auth login -h github.com -p https -w -s repo,read:org,workflow,gist
 In a terminal, `curl … | bash` is interactive: the installer reads the answers from the terminal (`/dev/tty`), not
 from the pipe.
 
-### `brew` is not found in a new terminal (Apple Silicon or Intel)
+### `brew` is not found in a new terminal
 
-Homebrew lives in `/opt/homebrew` on Apple Silicon and in `/usr/local` on Intel Macs. The installer finds either one.
-`/usr/local/bin` is on the default `PATH` of macOS, so Intel needs nothing more. On Apple Silicon, the installer adds
-`eval "$(/opt/homebrew/bin/brew shellenv)"` to `~/.zprofile` when Homebrew was not on your `PATH`; if you keep your
-`PATH` in another file, add that line there, then open a new terminal. A terminal that runs under Rosetta reports
-`x86_64` and uses the Intel Homebrew in `/usr/local`: open a native terminal for devkit.
+Homebrew lives in `/opt/homebrew` on Apple silicon, and in `/usr/local` on an Intel Mac that already has it. The
+installer finds either one. `/usr/local/bin` is on the default `PATH` of macOS, so an Intel Mac needs nothing more. On
+Apple silicon, the installer adds `eval "$(/opt/homebrew/bin/brew shellenv)"` to `~/.zprofile` when Homebrew was not on
+your `PATH`; if you keep your `PATH` in another file, add that line there, then open a new terminal. In a terminal that
+runs under Rosetta, the installer stops instead: see
+[The installer stops on an Intel Mac or in a Rosetta terminal](#the-installer-stops-on-an-intel-mac-or-in-a-rosetta-terminal).
 
 ### The installer left an existing checkout as it is
 
@@ -138,7 +157,7 @@ contains devkit's hooks (`dev doctor`, Claude section), that Codex trusts them (
 the hook's definition.
 
 ```bash
-dev install --only codex      # trusts devkit's hooks again through Codex's API
+dev install --only codex      # trusts the devkit hooks again through the Codex API
 ```
 
 Or review them in Codex with `/hooks` (CLI) or Settings → Hooks (app). Restart open Codex sessions.
@@ -239,6 +258,30 @@ Two machines claimed the same item within seconds; the first push won. Pick anot
 ### A change is refused with "give the reason with --why"
 
 `edit`, `move`, and `cancel` change the scope or the plan, so devkit records why. Add `--why "…"`.
+
+### devkit refused to write a task or plan file
+
+The message starts with `refused to write <file>: it would drop N line(s) of the record that this change does not
+edit` and quotes the first of those lines. devkit checks each write of a work item or a plan against the file on
+disk, and stops when the new text would lose lines that the command does not change. Nothing was written.
+
+1. If the file changed after the command read it (you edited it, or a sync pulled a teammate's change), run the
+   command again. It reads the current file.
+2. If the quoted line is the task's `#` heading, the heading was edited by hand. devkit writes the heading from the
+   `title` field, so set the title to that heading, then run your command again:
+
+   ```bash
+   dev task edit <id> --title "<that heading>" --why "the heading was edited by hand"
+   ```
+
+3. If it still refuses, devkit misread the file. Leave the file as it is, and report the bug with the file and the
+   message.
+
+The sync's lock jobs, which renew your locks and release expired ones, skip an item they can't write for the same
+reason and leave it as it is. They say so in `~/.local/state/devkit/logs/sync.log` (`dev jobs logs sync` for the
+hourly run), in a line that starts with `lock renewal: left <file> as it is` or `expired-lock release: left <file> as
+it is`, and in the audit log: `dev audit --action handoff.record-skipped` lists each one. Fix the file with the steps
+in the preceding list, and the next sync renews or releases its lock.
 
 ### The handoff repository does not push
 
@@ -396,6 +439,30 @@ devkit does not know.
 
 ## Workspace
 
+### The guard says it cannot read a command
+
+The refusal starts with _The guard cannot read this command: it holds a quote that is never closed_. The usual cause
+is an apostrophe in a `#` comment, such as `dev ci watch  # follow the branch's runs`. bash ignores the comment, but
+the guard reads the apostrophe as an opening quote, so it cannot tell which commands run, and it refuses the whole
+command. Remove the comment or the apostrophe (`# follow the runs of the branch`), or close the quote. Text with
+apostrophes can go in a heredoc body, which the guard does not read (`cat <<'EOF' > notes.txt`). See
+[Guard rules › Fail-open design](guard.md#fail-open-design).
+
+### The guard refuses `tmux send-keys` or `screen -X`
+
+Agents cannot type into a terminal session; you can. A command typed into a `screen` or `tmux` session looks like
+your own terminal to devkit, and the guard cannot read it, so it refuses every way of typing or sending a command to
+a session (`send-keys`, `screen -X stuff`, and the rest). Have the agent run the command through its shell tool, or
+start it in a session of its own, where the guard reads the command:
+
+```bash
+tmux new -d -s work 'npm test'
+screen -dmS work npm test
+```
+
+The full list is in
+[Guard rules › devkit's own state, configuration, and install](guard.md#devkits-own-state-configuration-and-install).
+
 ### The guard blocked something legitimate
 
 Read the reason in the agent's output or in `hooks.log`. Most denials describe the intended way (`dev wt new`,
@@ -419,8 +486,8 @@ Conversations opened at the old path do not resume there. Start new ones from th
 ### An LSP plugin does nothing
 
 The Claude Code LSP plugins need their language servers: `typescript-language-server` and `typescript`, `pyright`,
-`jdtls` (which needs a Java 25 runtime) and `intelephense`. `dev doctor` checks that they are installed, and
-`dev setup` installs them for your stacks.
+`jdtls` (which needs a Java 25 runtime) and `intelephense`. `dev doctor` checks the ones for the stacks you chose
+(config `stacks`), and `dev setup` installs them.
 
 TypeScript 7 (the native port) ships no `tsserver.js`; `typescript-language-server` then falls back to another
 TypeScript install, so diagnostics may not match a TypeScript 7 project.

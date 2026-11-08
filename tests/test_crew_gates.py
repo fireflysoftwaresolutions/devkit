@@ -89,6 +89,29 @@ class Transcript:
     def refused(self, command):
         return self.bash(command, DENIAL, is_error=True)
 
+    def background(self, command, task_id):
+        # A Bash call with run_in_background: Claude Code answers at once with the task's id; returns the call's id
+        self.call("Bash", f"Command running in background with ID: {task_id}. Output is being written to: "
+                          f"/private/tmp/claude-501/tasks/{task_id}.output You will be notified when it completes.",
+                  command=command, run_in_background=True)
+        return f"toolu_{self.n:04d}"
+
+    def notified(self, task_id, tool_use_id, status="completed", as_message=False):
+        # The task's end, as Claude Code writes it into the member's transcript: a queued_command attachment, or (as
+        # some versions do) a meta user message with the same <task-notification> text
+        text = (f"<task-notification>\n<task-id>{task_id}</task-id>\n<tool-use-id>{tool_use_id}</tool-use-id>\n"
+                f"<output-file>/private/tmp/claude-501/tasks/{task_id}.output</output-file>\n<status>{status}</status>\n"
+                f"<summary>Background command \"run\" {status} (exit code 0)</summary>\n</task-notification>")
+        origin = {"kind": "task-notification", "producer": "session-task"}
+        if as_message:
+            self.records.append({"type": "user", "isSidechain": True, "isMeta": True, "origin": origin,
+                                 "message": {"role": "user", "content": "[SYSTEM NOTIFICATION - NOT USER INPUT]\n"
+                                                                        + text}})
+        else:
+            self.records.append({"type": "attachment", "isSidechain": True, "attachment": {
+                "type": "queued_command", "prompt": text, "commandMode": "task-notification", "origin": origin}})
+        return self
+
     def save(self):
         self.records.append({"type": "assistant", "isSidechain": True, "message": {"role": "assistant", "content": [
             {"type": "text", "text": "**[Firefly> DevKit · DevEx engineer (Kid)]** repo · `main` · task"}]}})
@@ -376,6 +399,117 @@ class SendBackTests(GateCase):
     def test_the_hook_entry_fails_open_without_the_member_transcript(self):
         data = {"agent_id": "a3", "transcript_path": "/elsewhere/main.jsonl", "cwd": str(self.repo)}
         self.assertIsNone(gates.check("Kid", data, {}, "owner/repo", roster={"members": [KID]}))
+
+
+class BackgroundWorkTests(GateCase):
+    # Claude Code keeps a member in its agent list while a background command it started still runs, though the
+    # member reported and devkit closed its lane. The gate sends it back once to wait for the work or stop it.
+    def data(self, aid="a1", **over):
+        return {"agent_id": aid, "agent_transcript_path": self.tx.save(), "cwd": str(self.repo), **over}
+
+    def test_a_background_command_still_running_sends_the_member_back_naming_it(self):
+        self.complete()
+        self.tx.background("bin/dev test", "b7k2m9x1q")
+        sess = {}
+        out = gates.check("Kid", self.data(), sess, "owner/repo", roster={"members": [KID]})
+        self.assertEqual(out["decision"], "block")
+        self.assertIn("`bin/dev test` (task `b7k2m9x1q`)", out["reason"])
+        self.assertIn("TaskStop `b7k2m9x1q`", out["reason"])
+        recs = audit.records(1, action="crew.gate")
+        self.assertEqual([r["outcome"] for r in recs], ["blocked"])
+        self.assertIn("background: bin/dev test", recs[0]["detail"])
+        self.assertNotIn("crew_background", sess)  # sent back: its lane stays open, the tech lead is not told yet
+
+    def test_a_command_moved_to_the_background_after_some_output_is_found_by_its_result_id(self):
+        # the commonest real shape has output before Claude Code's
+        # "Command was moved to the background" line, and the id only in the result record's backgroundTaskId
+        self.complete()
+        self.tx.call("Bash", "Ran 1595 tests in 212s\nCommand was moved to the background (ID: m0v3d4w4y). "
+                     "You will be notified when it completes.", command="bin/dev test", description="run")
+        self.tx.records[-1]["toolUseResult"] = {"stdout": "Ran 1595 tests in 212s", "backgroundTaskId": "m0v3d4w4y"}
+        out = gates.check("Kid", self.data(), {}, "owner/repo", roster={"members": [KID]})
+        self.assertEqual(out["decision"], "block")
+        self.assertIn("`bin/dev test` (task `m0v3d4w4y`)", out["reason"])
+        self.assertIn("do not end your turn to wait", out["reason"])
+
+    def test_a_notification_that_the_task_ended_counts_whatever_its_status(self):
+        self.complete()
+        tests = self.tx.background("bin/dev test", "b7k2m9x1q")
+        self.tx.notified("b7k2m9x1q", tests, "failed")
+        probe = self.tx.background("python3 probe.py", "c3p0r2d2x")
+        self.tx.notified("c3p0r2d2x", probe, "completed", as_message=True)
+        self.tx.background("npm run watch", "q9w8e7r6t")  # nothing ever ended it
+        self.assertEqual(self.rules(self.gates()),
+                         [("background", "npm run watch")])
+
+    def test_taskstop_or_killshell_ends_it_unless_the_guard_refused_the_stop(self):
+        self.complete()
+        self.tx.background("bin/dev test", "b7k2m9x1q")
+        self.tx.call("TaskStop", json.dumps({"message": "Successfully stopped task: b7k2m9x1q (bin/dev test)",
+                                             "task_id": "b7k2m9x1q", "task_type": "local_bash"}),
+                     task_id="b7k2m9x1q")
+        self.tx.background("python3 probe.py", "c3p0r2d2x")
+        self.tx.call("KillShell", "Task c3p0r2d2x is not running (status: completed)", True, shell_id="c3p0r2d2x")
+        self.tx.background("tail -f build.log", "q9w8e7r6t")
+        self.tx.call("TaskStop", DENIAL, True, task_id="q9w8e7r6t")  # refused: the command still runs
+        found = self.gates()
+        self.assertEqual(self.rules(found), [("background", "tail -f build.log")])
+        self.assertEqual(found[0]["task"], "q9w8e7r6t")
+        self.assertIn("TaskStop `q9w8e7r6t`", found[0]["fix"])
+
+    def test_a_read_of_its_output_that_shows_it_exited_ends_it(self):
+        self.complete()
+        self.tx.background("bin/dev test", "b7k2m9x1q")
+        self.tx.call("TaskOutput", "<retrieval_status>success</retrieval_status>\n<task_id>b7k2m9x1q</task_id>\n"
+                                   "<status>completed</status>\n<exit_code>0</exit_code>\n<output>OK</output>",
+                     task_id="b7k2m9x1q")
+        self.tx.background("python3 probe.py", "c3p0r2d2x")
+        self.tx.call("BashOutput", "<status>running</status>\n<stdout>still going</stdout>", bash_id="c3p0r2d2x")
+        self.assertEqual(self.rules(self.gates()), [("background", "python3 probe.py")])
+
+    def test_a_member_that_started_no_background_work_owes_none(self):
+        self.complete()
+        # a foreground command whose output quotes Claude Code's launch text, and a notification of another task
+        self.tx.bash("grep -r 'running in background' docs",
+                     "docs/x.md: Command running in background with ID: zz9yy8xx7. Output is being written to: f")
+        self.tx.notified("zz9yy8xx7", "toolu_9999")
+        self.assertEqual(gates.background_work(self.tx.save()), [])
+        self.assertEqual(self.gates(), [])
+
+    def test_sent_back_once_it_is_let_through_with_the_work_still_running_audited_and_kept_for_the_tech_lead(self):
+        self.complete()
+        self.tx.background("bin/dev test", "b7k2m9x1q")
+        sess = {}
+        roster = {"members": [KID]}
+        self.assertEqual(gates.check("Kid", self.data(), sess, "owner/repo", roster=roster)["decision"], "block")
+        self.assertIsNone(gates.check("Kid", self.data(stop_hook_active=True), sess, "owner/repo", roster=roster,
+                                      lead_name="a helper of DevEx engineer (Kid)"))
+        recs = audit.records(1, action="crew.gate")
+        self.assertEqual([(r["outcome"], (r.get("ref") or {}).get("result")) for r in recs],
+                         [("blocked", None), ("recorded", "let through")])
+        self.assertIn("b7k2m9x1q", recs[1]["detail"])
+        self.assertEqual(sess["crew_background"]["a1"]["who"], "a helper of DevEx engineer (Kid)")
+        self.assertEqual(sess["crew_background"]["a1"]["tasks"], [{"id": "b7k2m9x1q", "command": "bin/dev test"}])
+
+    def test_with_enforce_off_a_member_with_background_work_is_recorded_for_the_tech_lead(self):
+        core.CFG["crew"] = {**(self._crew_cfg or {}), "gates": {"enforce": False}}
+        self.complete()
+        self.tx.background("bin/dev test", "b7k2m9x1q")
+        sess = {}
+        self.assertIsNone(gates.check("Kid", self.data("a2"), sess, "owner/repo", roster={"members": [KID]},
+                                      lead_name="DevEx engineer (Kid)"))
+        self.assertEqual([t["id"] for t in sess["crew_background"]["a2"]["tasks"]], ["b7k2m9x1q"])
+
+    def test_without_a_name_from_devkits_records_nothing_is_kept_for_the_tech_lead(self):
+        # the hook passes the name its launch records give the agent; with none, the work is audited but no line
+        # reaches the tech lead, since the member's own name may come from a description another member wrote
+        core.CFG["crew"] = {**(self._crew_cfg or {}), "gates": {"enforce": False}}
+        self.complete()
+        self.tx.background("bin/dev test", "b7k2m9x1q")
+        sess = {}
+        self.assertIsNone(gates.check("Kid", self.data("a3"), sess, "owner/repo", roster={"members": [KID]}))
+        self.assertNotIn("crew_background", sess)
+        self.assertIn("background: bin/dev test", audit.records(1, action="crew.gate")[0]["detail"])
 
 
 if __name__ == "__main__":

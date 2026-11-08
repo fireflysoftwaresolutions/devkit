@@ -1011,6 +1011,8 @@ def assign(which, label: str, cwd: str | None = None, now: float | None = None, 
         s = _find_step(run, which)
         if not s:
             raise ValueError(f"no step “{which}” in the plan")
+        globs, rewrites = _scope_globs(globs, run.get("project") or "", cwd)
+        _tell_rewrites(run, s["name"], rewrites, now)
         _raci_assign(run, s, label, why, now, activity=activity, files=globs or None)
         owner = s.get("owner") or "main"
         if owner != "main" and s.get("state") != "done" and not _label_matches(label, (run.get("agents") or {}).get(owner)
@@ -1080,6 +1082,75 @@ def _launch_takes(run: dict, aid: str, s: dict) -> bool:
     rivals = [x for x in plan if x is not s and x.get("state") not in DONE and x.get("label")
               and (x.get("owner") or "main") == "main" and _label_matches(x["label"], lane)]
     return bool(mine[1]) and all(mine >= _name_score(text, x["name"]) for x in rivals)
+
+
+def _checkouts(base: str) -> list:
+    """The real paths of every checkout of the repository at `base` (its main checkout and its worktrees) that is
+    still there, deepest first, so a worktree inside the main checkout wins over it. git lists a worktree whose
+    folder was deleted, marked prunable, until `git worktree prune`; it holds no files, so it is left out, and a glob
+    into it is refused like one into any worktree that is not there. [] outside a repository: nothing to count from."""
+    out = core.gitout(base, "worktree", "list", "--porcelain") if base and os.path.isdir(base) else ""
+    tops = []
+    for block in out.split("\n\n"):  # one block per checkout: "worktree <path>", then HEAD, branch, prunable, …
+        lines = block.splitlines()
+        path = next((ln[len("worktree "):] for ln in lines if ln.startswith("worktree ")), "")
+        if path and os.path.isdir(path) and not any(ln.startswith("prunable") for ln in lines):
+            tops.append(core.real(path))
+    return sorted(tops, key=len, reverse=True)
+
+
+def _scope_globs(globs: list, project: str, cwd: str | None) -> tuple:
+    """Step scopes count from the run's repository: the Edit guard matches a member's file by its path relative to
+    the checkout that holds it (hooks._scope_violation), so an absolute or ~ glob inside a checkout never matched
+    (L-fzi4pkv6bbh). -> (globs, rewrites): such a glob in its repository-relative form, with "old → new" for the
+    tech lead; absolute globs outside the repository (a scratch folder, the project's plans) as given. A glob is
+    rewritten only when that is exact: its fixed folder (the part before the first wildcard) lies in one checkout.
+    Raises StepError when it is not: the fixed folder holds checkouts (a wildcard or the folder spans several), or it
+    is a managed worktree folder of the project with no checkout there (a removed worktree, a typo). A guess there
+    could cover files the tech lead did not name, or keep a scope that never matches."""
+    if not any(g.startswith(("/", "~")) for g in globs):
+        return globs, []
+    from . import guard
+    base = guard.scope_base(project, cwd or os.getcwd())
+    tops = _checkouts(base)
+    managed = core.real(core.WT_ROOT / project) if project else ""
+    fix = ("Give the files repository-relative instead, such as lib/** or tests/test_x.py: a repository-relative "
+           f"scope matches them in every checkout of {project or 'the repository'}.")
+    out, rewrites = [], []
+    for g in globs:
+        if not g.startswith(("/", "~")):
+            out.append(g)
+            continue
+        ga = os.path.expanduser(g)
+        parts = ga.rstrip("/").split("/")
+        k = next((i for i, p in enumerate(parts) if re.search(r"[*?\[]", p)), len(parts))
+        fixed, rest = core.real("/".join(parts[:k]) or "/"), "/".join(parts[k:])
+        top = next((t for t in tops if core.is_under(fixed, t)), "")
+        if top:
+            rel = os.path.relpath(fixed, top)
+            new = "/".join(x for x in (rel if rel != "." else "", rest) if x) or "**"
+            new += "/" if ga.endswith("/") and not rest and new != "**" else ""
+            out.append(new)
+            rewrites.append(f"{g} → {new}")
+            continue
+        held = [t for t in tops if core.is_under(t, fixed)]
+        if held:
+            raise StepError(f"--scope {g} holds {len(held)} checkout{'s' if len(held) > 1 else ''} of "
+                            f"{project or 'the repository'} ({', '.join(core.tilde(t) for t in held[:3])}), so devkit "
+                            f"cannot tell which files you mean. {fix}")
+        if managed and core.is_under(fixed, managed):
+            raise StepError(f"--scope {g} points into {core.tilde(managed)}, but no checkout of {project} is there "
+                            f"(git worktree list). {fix}")
+        out.append(g)
+    return out, rewrites
+
+
+def _tell_rewrites(run: dict, step: str, rewrites: list, now: float):
+    """Tell the tech lead which globs of a step's scope _scope_globs kept repository-relative (assign, delegate)."""
+    if rewrites:
+        _post(run, "devkit", "main", f"the scope of “{step}” is kept repository-relative, the form the Edit guard "
+              f"matches: {'; '.join(rewrites)}. It holds those files in every checkout of "
+              f"{run.get('project') or 'the repository'}.", now, from_name="devkit")
 
 
 def _globs_overlap(a: str, b: str) -> bool:

@@ -47,7 +47,8 @@ COMMANDS = [
         ("time [--days 7]", "How long things take: turns, slow commands, subagents, estimate accuracy"),
         ("handoff-import <dir> --slug s", "Adopt an old handoff repository as an initiative (from a staging folder)"),
         ("lesson add|ls|scan|review", "Learn from mistakes: lessons recalled in every session, repeats automated"),
-        ("jobs [show|run|set|enable|disable|journal]", "Scheduled jobs (sync, sleep, gc, repair, audit, doctor, lessons)"),
+        ("jobs [show|run|set|enable|disable|journal]",
+         "Scheduled jobs (sync, sleep, gc, repair, audit, update-check, doctor, lessons)"),
         ("audit [--days 7] [--team]", "The audit trail: every change, decision and job run, per machine and team"),
         ("sleep [--dry-run]", "Consolidate and forget (daily): unused lessons fade, duplicates merge, old records go"),
         ("report [--days 7]", "Status report for initiatives and projects (Markdown, for the team or management)"),
@@ -57,6 +58,7 @@ COMMANDS = [
         ("codex [query] [-w branch]", "Start Codex in a project (optionally in its own worktree)"),
         ("impeccable <verb> [args…]", "Run the impeccable design engine devkit installed (its digest checked, no shell)"),
         ("handoff [query] [--edit|--log …]", "Show, edit or append to the project's handoff note"),
+        ("session brief|carry", "What devkit kept through compaction, /clear and resume; carry moves the run here"),
     ]),
     ("Worktrees", [
         ("wt new <branch>", "Create a managed worktree in ~/Development/.worktrees/<owner>/<repo>/<branch>"),
@@ -75,6 +77,8 @@ COMMANDS = [
         ("issue ls|view|create", "Issues, compact"),
         ("git … · gh …", "Escape hatches to git and gh, with the same policy checks"),
         ("stubs [--staged|--all]", "Unfinished work: stubs, placeholders, TODOs without a task (also checked on commit)"),
+        ("test [run|plan|prove|audit]", "Tests: last failures first, then what your changes can affect; prove and "
+                                        "audit check that tests can fail"),
         ("crew [show|brief|route|delegate|next|ask|mode|decide|graph|rules|raci]",
          "The specialist agents: who does what, briefs, routing, delegation, decisions, the live graph, the rules, "
          "the RACI"),
@@ -90,6 +94,7 @@ COMMANDS = [
         ("backup [<branch>…] [--all]", "Copy branches with commits only on this Mac to the remote (no CI run)"),
         ("du [<name>] [--plan|--refresh]", "What fills your disk, why, and the plan to free it safely"),
         ("free [<n>…|--safe]", "Free items of the dev du plan: asks first, refuses work not committed or pushed"),
+        ("gc [--apply]", "The same as dev free; --apply runs the unattended cleanup of the nightly gc job"),
     ]),
     ("Environment", [
         ("setup [--yes]", "The installation and configuration wizard (first install, or to change choices)"),
@@ -104,7 +109,8 @@ COMMANDS = [
          "Third-party plugins, skills and MCP servers: pins, updates, drift, your own set"),
         ("desktop pack|status", "Claude Desktop extension: build the .mcpb bundle, check what is installed"),
         ("install [--only step]", "Pin the checkout read-only for the hooks, then apply the configuration"),
-        ("update", "Move devkit to the newest release (or pull its branch), pin it and re-apply it"),
+        ("update [--check]", "Move devkit to the newest release (or pull its branch), pin it and re-apply it; "
+                             "--check only tells what is new"),
         ("docker up|down|status|trim|prune", "Run Docker on a Colima VM; trim returns its free space to macOS"),
         ("version", "Show the devkit version"),
     ]),
@@ -3625,7 +3631,8 @@ def main(argv=None) -> int:
                 here = core.tilde(os.getcwd())
             except OSError:  # the folder was removed while the command ran (scratch folders)
                 here = "(removed folder)"
-            audit.record("dev." + argv[0], " ".join(argv[1:])[:300], "", "ok" if rc == 0 else f"exit {rc}",
+            # the arguments as a list, one word each, so the masker reads each argument whole (Code reviewer, M3)
+            audit.record("dev." + argv[0], list(argv[1:]), "", "ok" if rc == 0 else f"exit {rc}",
                          duration=round(time.time() - start, 2), cwd=here)
             if rc == 0 and argv[0] in ("commit", "push", "pr", "release", "branch", "rebase", "wt", "adopt", "clone",
                                        "new", "delivery", "initiative", "note"):

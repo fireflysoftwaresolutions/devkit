@@ -3,6 +3,165 @@
 All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH restarts at 0 each month); tags are
 `vYY.MM.PATCH`. Sections follow [Keep a Changelog](https://keepachangelog.com/).
 
+## [26.11.5] - 2026-11-07
+
+This release hardens the guard against more than twenty ways a command could pass unjudged, including commands taken
+from another program's input, deep nesting, scripts it could not read, and the Monitor tool; when the guard itself
+fails while judging a call that acts, it now refuses the call. Audit records keep only the words devkit knows to be
+safe. `dev doctor` asks only for the tools of the languages you chose, the setup wizard reads on light terminals, the
+installer stops early on an Intel Mac or in a Rosetta terminal, plans and tasks keep every line when devkit writes
+them, and the tech lead hears when each crew member finishes.
+
+### Changed
+
+- **The documentation matches what devkit does.** The README, the docs index, and the guides now show what 26.11.4
+  added where you look for it: `dev ext`, `dev update --check`, Tab completion and the zsh helpers, `dev impeccable`,
+  the dashboard's Now view (the tutorials say the dashboard opens on it), how your answers to irreversible decisions
+  count, and the guard's refusals of terminal typing and of commands it cannot read, each with a Troubleshooting
+  entry. The 16 command blocks whose `#` comments held an apostrophe, which the guard refused when an agent copied one
+  whole, are reworded. Pages that promised guard fixes, a kernel-level terminal check, and an audit re-seal for
+  26.11.5 now say they are planned. The Next.js MCP server is added with `dev ext add`, because agents cannot run
+  `claude mcp add`. [The crew](docs/crew.md#rooms-planned-for-26116) describes rooms, planned for 26.11.6 and not
+  available yet. Disk use is in the index, and `skills.optional` is in Configuration.
+- **The installer says Apple silicon, and stops early on an Intel Mac without Homebrew or in a Rosetta terminal.**
+  Homebrew's own installer stops on Intel Macs since September 2026 (Homebrew/install PR #1140), and its `.pkg` is
+  for Apple silicon only. A fresh Intel Mac failed at the installer's Homebrew step with Homebrew's message, and the
+  advice to run the installer again, which failed the same way. Now the first step stops before it downloads or
+  changes anything, and says that a new install needs Apple silicon and why. An Intel Mac that already has Homebrew
+  (on its `PATH` or in `/usr/local`) still installs, with one warning line. A terminal that runs under Rosetta makes
+  a Mac with Apple silicon report an `x86_64` processor; the first step tells it apart from an Intel Mac
+  (`sysctl hw.optional.arm64`) and stops, asking for a native terminal, instead of installing with the Intel Homebrew
+  in `/usr/local` or refusing as if the Mac were Intel. The installer's first line and `--help`, the README, and
+  [Getting started](docs/getting-started.md#requirements) say Apple silicon, and
+  [Troubleshooting](docs/troubleshooting.md#the-installer-stops-on-an-intel-mac-or-in-a-rosetta-terminal) says what
+  to do when the installer stops.
+- **`dev --help` lists what it missed:** the `update-check` job, `dev test`, `dev gc`, `dev session`, and
+  `dev update --check`. `dev crew decisions --help` no longer says to reword the questions freely: an irreversible
+  decision counts only in devkit's exact call.
+
+### Fixed
+
+- **Crew members no longer stay in Claude Code's agent list after they report.** Claude Code keeps a member alive
+  while a command it put in the background still runs, so finished members stayed listed for hours (one for 16
+  hours), the main session got "waiting on its own background work" notices, and the tech lead had to stop them by
+  hand, while devkit had already closed their lanes. A new crew gate reads the member's transcript at SubagentStop:
+  a background command counts as ended when its task notification arrived, `TaskStop` stopped it, or a read of its
+  output showed it exited. A member with one still running is sent back once, naming each command and its task id,
+  to keep working until it ends or stop it. A member let through with work still running is audited as `crew.gate` and named once
+  in the tech lead's next context, with the agent id `TaskStop` takes. Every brief and agent file now tells members
+  to end their background work before they report, and a reviewer's agent file says how to approve once instead of
+  on every line, which keeps every agent file under 8,000 characters. Codex transcripts have no such launch, so the
+  gate finds nothing there.
+- **The tech lead hears when each crew member finishes.** Claude Code can keep listing a finished member as running
+  (a Code reviewer stayed listed for 26 minutes after its report), and only `TaskStop` on its agent id removes it.
+  When a member the tech lead launched finishes, the tech lead's next tool call or prompt now carries one line with
+  its agent id and `TaskStop <agent id>`. devkit checks its own launch records, so a member's helpers, agents it has
+  no launch record of, a member sent back, and the compaction summarizer get no line.
+- **Absolute step scopes match again.** `dev progress assign --scope` and `dev crew delegate --scope` with a worktree's
+  absolute or `~` path never matched a file in it, so the member was refused every edit. Both now rewrite such a glob
+  to its repository-relative form and say so, and refuse one that spans more than one checkout or points into a
+  worktree that was deleted.
+- **`dev doctor` requires only the tools you chose.** The required-tools row listed 24 tools, the Java and PHP ones
+  included, so the wizard's Recommended setup with Python and Node ended with `✗ required tools · 17/24 present`. The
+  row now requires the base tools on every Mac, a stack's tools and language server only for the stacks in config
+  `stacks`, and `claude` or `codex` only when that agent is on in config `agents`. Stacks not chosen and agents turned
+  off show as information, and a missing tool's fix is the exact install command.
+- **The banner and the setup wizard read on light terminals.** macOS Terminal sets no `COLORFGBG`, so devkit took its
+  light profile for dark: the wizard drew the selected option, the chosen answer, the pointer, and the progress bar
+  in an amber at 1.78:1 on white, and with 256 colors the wizard's one-line logo used the terminal's light cyan. When
+  the theme is unknown or light, the wordmark, the logo's text, the focused option, and the chosen answer use the
+  terminal's own text color, and the spark, the pointer, the progress bar, and the spinner a deep amber (4.71:1 on
+  white with 256 colors, 5.0:1 with 24-bit color). On a light theme, the banner's tagline is 6.0:1 on white. Dark
+  terminals look as before.
+- **The dashboard's views row fits again when a web font lands late.** On a phone-width window the row could scroll
+  sideways by a few pixels when one web font arrived while another was still loading, because nothing fitted the row
+  again after the first fit. The row now fits again whenever its space or its views change size, and when any font
+  finishes loading.
+- **Plans and tasks keep every line when devkit writes them.** `dev plan new` and `dev plan revise` cut a plan at its
+  first `## Changelog` line, even one in a code example (a 1,000-line spec kept 303 lines), and work items had the same
+  flaw. devkit now takes only the record's own changelog at the end, keeps frontmatter lines it doesn't know, keeps
+  another tool's frontmatter or a first `---` rule when `dev plan revise` adopts a plan, and reads a title such as
+  `[API] Export invoices [v2]` as text. Every write refuses to drop a line it does not change and swaps in a complete
+  file, and the sync's lock jobs report an item they can't write in the sync log and the audit log. See
+  [Troubleshooting](docs/troubleshooting.md#devkit-refused-to-write-a-task-or-plan-file).
+
+### Security
+
+- **Audit records keep only the words of a command line that devkit knows to be safe.** A refused call
+  (`guard.deny`, and the commands its refusal quotes), a call that got no result (`calls.unclosed`), every `dev`
+  command, and an irreversible command's words now keep the program (`dev`, `git`, or `gh`, at command position) and
+  its subcommands, the option names, the values that name something (a crew member, a branch, a path), the ids, and
+  numbers of up to six digits. Every other word is recorded only as its length, such as
+  `[text not recorded: 22 characters]`, and a line with another program keeps its operators, the program's name, and
+  each other word's length. A program's name stays only when devkit's fixed list of known programs has it: devkit's
+  own, the guard's read-only allowlist with its checks, runners, and wrappers, and common developer tools such as
+  `python3`, `npm`, `make`, and `docker`, the same on every machine. Any other name, and a refusal's quote that
+  starts with one, is recorded as its length, since it can be a client's name, a file, or a password; a program run
+  by its path keeps only its last part, and only when the list has it. A refusal keeps devkit's own wording around
+  the commands it quotes, such as `…` and `&&`, and the guard quotes each value as one Markdown code span, so a value
+  with a backtick of its own cannot end the quote early. A delegated step (`crew.delegate`) keeps what the member
+  should do only as its length, and a commit to the handoff repository (`handoff.*`) keeps only the item's id and the
+  operation. Until now, a `dev crew ask` message, the text of `--why`, `--check`, `-m`, or `dev handoff --log`, a
+  heredoc's body, and a task's title could reach these records, which go to the handoff repository for 13 months and
+  can then be removed only by a git history purge; since 26.11.3 only `dev crew` arguments were masked. A name given
+  as a value that names something, such as a step's name, still reaches a record. Records written earlier are masked
+  when they are read. The guard decides as before, and an agent still reads the whole refusal.
+  [What a record holds](docs/audit.md#what-a-record-holds-and-what-it-never-holds) lists what stays.
+- **Crew notices name members only from devkit's own records.** The background-work notice took a helper's name from
+  the launch description its member wrote, so a member could plant a line that read like devkit's in the tech lead's
+  context. It now names a member only from devkit's launch records, a helper only as "a helper of <member>" (or not
+  at all), and shows each command on one line of at most 80 characters, without backticks.
+- **The guard refuses a call it crashes on, and no longer crashes on an `xargs` with no command.** In 26.11.4 an
+  `xargs` with no command inside a program's code (`python3 -c "import os; os.system('echo a | xargs')"`) crashed
+  the guard, and the crash let the whole call run unjudged, including a force push or `dev install` written after
+  it. A crash while the guard judges a shell command, a file write or patch, or an MCP call now refuses that call
+  (rule `guard-error` in the audit trail) instead of failing open; reads and subagent launches still fail open.
+- **A command that xargs, parallel or find takes from its input is refused.** `xargs env`, `xargs nohup`, `xargs sudo`
+  and `xargs timeout 5` ran what they read as the command, so `echo git push --force origin main | xargs env` passed
+  every rule. The same holds for a placeholder where the command goes (`xargs -I{} {}`, `parallel env`,
+  `find -exec {} \;`) and a shell line the input fills in (`xargs sh -c`). xargs's options are read as xargs reads
+  them, so `xargs -tn 1 dev` is the `dev` call it runs. `xargs` with no command runs echo and stays allowed.
+- **A file tool's path is read literally.** `$` and a backtick are ordinary characters in a Write, Edit, MultiEdit,
+  NotebookEdit, `apply_patch` or MCP path, so `/private/tmp/$X/../../…/.config/devkit/config.json` is refused like the
+  plain path.
+- **A script too large for the guard to read is an unknown action.** A program or script past the read limit, or one
+  that cannot be read, is refused while the irreversible gate enforces, instead of passing as empty.
+- **Monitor's command is judged like Bash.** Claude Code's Monitor tool runs a shell command; the guard now sees it,
+  applies the shell rules and the irreversible gate, and refuses it if the guard fails.
+- **The handoff rules ignore case.** On macOS `~/development/.HANDOFF/projects/other/repo.MD` is another project's
+  note, and is refused.
+- **A guard failure never refuses a call that was already judged, and never records a refusal twice.** A crew
+  member's routed `dev progress` call still reaches its lane, a refusal is recorded once under its own rule, and
+  WebFetch fails closed.
+- **GNU parallel's replacement strings count as the input's placeholder.** `-I`, `--replace`, `--er`, `--bnr`,
+  `--dnr`, `--bner`, `--seqreplace`, `--slotreplace`, `--rpl` and any `{…}` in its command, so
+  `parallel -I % % install` is refused.
+- **A Bash or Monitor command that starts with `*** Begin Patch` is judged as a shell command,** and `apply_patch` is
+  judged by its patch under `input`, `patch` or `command`.
+- **A shell or interpreter whose program comes from a runner's input is refused:** its script, code or module filled
+  in by xargs, find -exec or parallel, or no program at all (`xargs sh`, `xargs python3 -c`, `find … -exec sh {} \;`).
+- **The irreversible-action gate reads a program from a redirect or process substitution** (`sh < f`,
+  `sh <(cat f)`, `python3 < f`) as it does from a pipe, and a subcommand that a runner fills in for npm, cargo,
+  docker, twine, terraform, gem, make or another publish or deploy tool, or a `git push` with words from the input,
+  is an unknown action.
+- **A program run by its path is read as the system runs it:** a python or node shebang as that interpreter's
+  script, and an executable text file with no shebang as `sh`, with the same read limit; a path the system cannot
+  encode counts as unreadable.
+- **Paths with a leading `~` from `apply_patch` and MCP tools, and paths with a link followed by `..`, are judged both
+  ways,** and `xargs rm` and `xargs unlink` are refused in temporary folders too.
+- **The guard treats `csh` and `tcsh` as shells,** run by name, by path or from a `#!/bin/csh` shebang, so
+  `tcsh -c 'git push --force origin main'` is a destructive push and `csh -c 'dev install'` is refused.
+- **Outside the workspace, a shell script the guard cannot parse is an unknown action however it runs** (`sh y.sh`,
+  `bash y.sh`, `. y.sh`, `source y.sh`, `sh < y.sh`, `cat y.sh | bash`), the same as `./y.sh`; a repository's own
+  script that the guard cannot parse, such as one with `# it's a test` in a comment, is no longer refused.
+- **The guard reads a shell tool's command from `cmd` as well as `command`** (Codex's `exec_command` may send either,
+  as a string or a list) and refuses the call if either is refused.
+- **A command nested deeper than the guard reads is refused,** such as five levels of `sh -c`, `bash -lc`, `eval`,
+  `env` or `nohup`, and the irreversible-action gate counts it as an unknown action. Before, it passed every rule.
+- **An `apply_patch` file path that holds a control character or a line separator is refused** (`\r`, `\x0b`,
+  `\x1c`, `\x85`, U+2028), and patches are split into lines the way Codex splits them, so the guard judges the path
+  Codex writes.
+
 ## [26.11.4] - 2026-11-07
 
 This release adds `dev ext` to see, update, and add the third-party plugins, skills, and MCP servers devkit installs,

@@ -205,9 +205,9 @@ release branch name when the project uses CalVer.
 Watch the single run instead of polling it:
 
 ```bash
-dev ci status            # the branch's runs: state, jobs, current step, elapsed, ETA
+dev ci status            # the runs of the branch: state, jobs, current step, elapsed, ETA
 dev ci status --watch    # refresh every 15 seconds until nothing runs
-dev pr checks --watch    # the PR's checks; prints only the result, with the failing jobs' logs
+dev pr checks --watch    # the checks of the PR; prints only the result, with the logs of failed jobs
 ```
 
 `dev ci status` works with GitHub Actions, GitLab CI, Bitbucket Pipelines and Azure Pipelines; the ETA comes from

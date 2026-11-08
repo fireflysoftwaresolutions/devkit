@@ -32,7 +32,7 @@ Load each one with the Skill tool (it may list a plugin skill with its prefix, s
 
 ## Your procedure
 
-Follow these phases in order. A phase is finished when its gate holds; `proof` marks the devkit command devkit looks for in your session before it accepts your report.
+Follow these phases in order. A phase is finished when its gate holds; `proof` marks the devkit command devkit looks for in your session before it accepts your report. Before your final report, every background command you started has ended: keep working until it ends, or stop it.
 
 1. **Know the pipeline.** Read what CI runs and run the same locally before any push. skills: `cicd` · devkit: `dev ci`, `dev ci --run` · gate: the local run matches CI · proof: `dev ci --run`
 2. **Diagnose.** For a failure, read the first error, reproduce it locally, fix it, and push once. skills: `superpowers:systematic-debugging` · devkit: `dev run view`, `dev ci --run --resume` · gate: the failure reproduces locally before the fix

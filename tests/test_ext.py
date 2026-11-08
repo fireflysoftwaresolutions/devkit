@@ -1361,6 +1361,20 @@ class HelpTests(unittest.TestCase):
         for verb in ("ls", "outdated", "update", "add", "remove", "enable", "disable", "ack"):
             self.assertIn(verb, line)
 
+    # the help screen names every scheduled job, dev test, dev gc, dev session, and dev update's --check
+    def test_dev_help_lists_every_job_and_the_test_gc_session_and_update_check_commands(self):
+        from devkit import jobs
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.print_help()
+        lines = [ln.strip() for ln in plain(out.getvalue()).splitlines()]
+        (job_line,) = [ln for ln in lines if ln.startswith("dev jobs ")]
+        self.assertIn("Scheduled jobs (" + ", ".join(jobs.DEFAULT_JOBS) + ")", job_line)
+        for cmd in ("dev test ", "dev gc ", "dev session "):
+            self.assertEqual(len([ln for ln in lines if ln.startswith(cmd)]), 1, cmd)
+        (update,) = [ln for ln in lines if ln.startswith("dev update ")]
+        self.assertIn("--check", update)
+
 
 class DoctorEffectiveSetTests(unittest.TestCase):
     """`dev doctor` checks the effective set (the team's, then the dev ext overlay), not the team list: a plugin the

@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Who does what: routing, delegation between crew members, declines and dispatch of ready work."""
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -9,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from devkit import dispatch  # noqa: E402
 from devkit import progress as pg  # noqa: E402
-from test_progress import TempState  # noqa: E402
+from test_progress import TempState, repo_with_worktrees  # noqa: E402
 
 T0 = 1_800_000_000.0
 
@@ -64,6 +65,27 @@ class DelegationTests(unittest.TestCase):
             mail = pg.on_tool_done("claude", {"session_id": "s1", "agent_id": "a2"})
             self.assertIn("Senior engineer (Neo) delegates", mail)
             self.assertIn("dev crew decline", mail)
+
+    def test_delegate_keeps_an_absolute_scope_repository_relative(self):
+        # like dev progress assign (L-fzi4pkv6bbh): the Edit guard matches a member's files relative to the checkout
+        # that holds them, so an absolute scope inside one is kept in that form, and one devkit cannot place is refused
+        with TempState(), tempfile.TemporaryDirectory() as d:
+            main, wt = repo_with_worktrees(d)
+            pg.start("Feature", plan=["parser=30m"], now=m(0))
+            launch("a1", "devkit:neo", "Neo: parser", m(1))
+            launch("a2", "devkit:dozer", "Dozer: schema", m(1))
+            dispatch.delegate("add a nullable column for the export date", to="Dozer", from_agent="a1",
+                              scope=f"{wt}/db/**", cwd=str(main), now=m(2))
+            run = pg.load_run("claude", "s1")
+            self.assertEqual(run["plan"][-1]["scope"], ["db/**"])
+            self.assertIn("db/**", run["agents"]["a2"]["scope"])
+            told = [x["text"] for x in run.get("messages") or [] if x["from"] == "devkit"]
+            self.assertTrue(any(f"{wt}/db/** → db/**" in t for t in told), told)
+            with self.assertRaises(pg.StepError) as e:
+                dispatch.delegate("index the export date", to="Dozer", from_agent="a1", scope=f"{d}/**",
+                                  cwd=str(main), now=m(3))
+            self.assertIn("2 checkouts", str(e.exception))
+            self.assertEqual(len(pg.load_run("claude", "s1")["plan"]), 2)  # the refused step was not added
 
     def test_delegate_to_an_idle_member_asks_morpheus_to_launch_it(self):
         with TempState():

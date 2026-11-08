@@ -961,7 +961,8 @@ def session_end(agent: str):
 
 # --------------------------------------------------------------------------- guard
 
-SHELL_TOOLS = ("Bash", "exec_command", "shell", "local_shell", "unified_exec")
+# Claude Code's Monitor runs its `command` in the same shell as Bash: it is judged, gated and counted as one
+SHELL_TOOLS = ("Bash", "Monitor", "exec_command", "shell", "local_shell", "unified_exec")
 # what a subagent runs as itself: dev progress …, and dev crew ask, answer, inbox, decide, decisions, mode, delegate,
 # decline and route
 DEV_LANE_CMD = re.compile(r"^\s*(?:\S*/)?dev\s+(?:progress(?:\s|$)|"
@@ -1645,6 +1646,17 @@ def guard(agent: str):
             _log(f"guard off {agent}: {traceback.format_exc()[-300:]}")
         return
     data = _stdin_json()
+    held = {}
+    try:
+        _guard(agent, data, held)
+    except Exception as e:
+        if not _guard_failed(agent, data, held, e):
+            raise  # run() logs it and records guard.failopen: the call runs
+
+
+def _guard(agent: str, data: dict, held: dict):
+    """The guard hook's judgment of one call. `held` keeps what it has decided so far for _guard_failed: the verdict
+    (`verdict`) and whether every rule has run on an allowed call (`done`)."""
     headless = _headless()  # devkit's own headless call: judged, never recorded
     try:
         from . import progress
@@ -1671,6 +1683,8 @@ def guard(agent: str):
     if not verdict:
         verdict = _identity_verdict(data) or _crew_limits(agent, data) or _stub_commit_gate(data) or \
             _irreversible_main(agent, data)
+    held["verdict"] = verdict
+    held["rule"] = None  # a verdict of the guard's own rules is recorded with no rule of its own
     if verdict and (verdict[0] == "deny" or agent == "codex"):  # Codex turns ask into deny below
         _close_call(data)  # a refused call never runs: it leaves no open entry
     if not verdict:
@@ -1682,29 +1696,40 @@ def guard(agent: str):
                 pass
         why = _scope_violation(agent, data)
         if why:
+            held["verdict"], held["rule"] = ("deny", why), "crew-scope"
             _log(f"guard {agent} deny: {why[:160]}")
             _close_call(data)
             from . import audit
             audit.record("guard.deny", (data.get("tool_input") or {}).get("file_path") or data.get("tool_name") or "",
                          why[:400], "deny", tool=data.get("tool_name") or "", rule="crew-scope",
                          agent_id=data.get("agent_id") or "")
+            held["recorded"] = True  # a failure after this keeps the refusal, and records it no second time
             print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
                                                      "permissionDecisionReason": _with_pitfalls(agent, data, why)}}))
             return
         routed = _route_subagent_progress(data)
         if routed:
+            out = _rewrite(agent, routed)
+            held["done"] = True  # judged and routed to its lane: a failure adding its context must not refuse it
+            try:
+                out = _with_context(agent, out, data)
+            except Exception as e:  # without the pitfalls, the call still goes to its lane
+                g.failopen("guard-context", e)
             _log(f"progress {agent}: a subagent's dev progress call goes to its lane")
-            print(json.dumps({"hookSpecificOutput": _with_context(agent, _rewrite(agent, routed), data)}))
+            print(json.dumps({"hookSpecificOutput": out}))
             return
         why = _unroutable_lane_command(data, agent)
         if why:
+            held["verdict"], held["rule"] = ("deny", why), _lane_rule(why)
             _close_call(data)
             from . import audit
             audit.record("guard.deny", (data.get("tool_input") or {}).get("command", "")[:200], why, "deny",
-                         tool=data.get("tool_name") or "", rule=_lane_rule(why), agent_id=data.get("agent_id") or "")
+                         tool=data.get("tool_name") or "", rule=held["rule"], agent_id=data.get("agent_id") or "")
+            held["recorded"] = True
             print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
                                                      "permissionDecisionReason": _with_pitfalls(agent, data, why)}}))
             return
+        held["done"] = True  # every rule has run and allowed the call: a later failure only loses context
         if data.get("tool_name") in ("Agent", "Task"):  # subagent briefs get the skills their work requires
             try:
                 from . import skillguard
@@ -1735,8 +1760,66 @@ def guard(agent: str):
     tin = data.get("tool_input") or {}
     audit.record(f"guard.{decision}", tin.get("command") or tin.get("file_path") or data.get("tool_name") or "",
                  reason[:400], decision, tool=data.get("tool_name") or "", agent_id=data.get("agent_id") or "")
+    held["recorded"] = True
     print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": decision,
                                              "permissionDecisionReason": reason}}))
+
+
+# The guard fails closed for a call that acts (D10 = C, docs/guard.md › Fail-open design): a crash while judging a
+# shell command, a file write or patch, or an MCP tool would otherwise skip every rule for that call, and the command
+# text is the agent's to shape (26.11.4 failed open on an xargs with no command in a program's code). WebFetch fails
+# closed too: its rule keeps secrets out of the URLs it sends (webfetch_verdict). A call that only reads or launches
+# (Read, Grep, Glob, WebSearch, and Agent, Task or Codex's spawn_agent: each subagent call passes the guard again)
+# still fails open, so a guard bug never blinds the session that has to diagnose it. Kept here, not in guard.py, so it
+# holds when guard.py itself cannot load.
+_ACTING_TOOLS = frozenset({"Write", "Edit", "MultiEdit", "NotebookEdit", "apply_patch", "WebFetch"})
+GUARD_ERROR_REASON = ("devkit's guard could not judge this call (an internal error, {err}, recorded in the audit trail "
+                      "as rule guard-error), so it is refused rather than run unchecked. Rewrite it more simply (one "
+                      "command per call, or a script file) and try once more; if it is refused again, stop and tell "
+                      "the developer: they can run it in their own terminal, where the guard does not apply, and "
+                      "`dev doctor` and the hooks log show the error.")
+
+
+def _acts(data: dict) -> bool:
+    """True for a call the guard must judge before it runs: a shell command (any tool input with a command, which
+    guard.check reads as one, Monitor's included), a file write or patch, a WebFetch, an MCP tool."""
+    tool, inp = str(data.get("tool_name") or ""), data.get("tool_input")
+    return tool in SHELL_TOOLS or tool in _ACTING_TOOLS or tool.startswith("mcp__") or \
+        (isinstance(inp, dict) and isinstance(inp.get("command"), (str, list)))
+
+
+def _guard_failed(agent: str, data: dict, held: dict, exc: BaseException) -> bool:
+    """The guard hook raised while it handled a call. A deny or ask it had already reached still stands, recorded
+    once, under its own rule (`held`: `rule`, and `recorded` once the hook wrote it); a call that acts and was not
+    yet judged in full is refused (GUARD_ERROR_REASON) and recorded as guard.deny, rule guard-error.
+    -> False when the call may run (judged and allowed, or one that only reads): run() records guard.failopen."""
+    verdict = held.get("verdict")
+    if verdict and verdict[0] in ("deny", "ask"):
+        decision, reason = ("deny" if agent == "codex" else verdict[0]), str(verdict[1])
+        rule, detail = held.get("rule"), f"{str(verdict[1])[:300]} (hook error after it: {type(exc).__name__}: {exc})"
+    elif held.get("done") or not _acts(data):
+        return False
+    else:
+        decision, reason = "deny", GUARD_ERROR_REASON.format(err=type(exc).__name__)
+        rule, detail = "guard-error", f"{reason[:300]} ({type(exc).__name__}: {exc})"[:400]
+    _log(f"guard {agent} {decision} (guard-error):\n{traceback.format_exc()}")
+    try:
+        _close_call(data)  # a refused call never runs: it leaves no open entry
+    except Exception:
+        pass
+    try:
+        from . import audit
+        tin = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
+        if not held.get("recorded"):
+            audit.record(f"guard.{decision}", str(tin.get("command") or tin.get("file_path") or
+                                                  data.get("tool_name") or "")[:400],
+                         detail[:400], decision, tool=data.get("tool_name") or "", agent_id=data.get("agent_id") or "",
+                         **({"rule": rule} if rule else {}))
+    except Exception:
+        pass  # the refusal stands without its record
+    print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": decision,
+                                             "permissionDecisionReason": reason}}))
+    return True
 
 
 def _with_pitfalls(agent: str, data: dict, reason: str) -> str:
@@ -1812,9 +1895,11 @@ def prompt(agent: str):
         extra = _with_catalog(context_for(cwd, agent), agent)
         _log(f"prompt {agent}: session {sid[:12]} had no SessionStart; devkit context injected")
     raw = (data.get("prompt") or "").lstrip()
+    background = _background_told(agent, data)  # a member's completion notice is often this very prompt
     if raw.startswith(("<task-notification", "[SYSTEM NOTIFICATION", "<system-reminder", "<agent-message")) or \
             "<task-notification>" in raw[:400]:
-        _context_out("UserPromptSubmit", extra)  # background events are not the developer's request
+        # background events are not the developer's request
+        _context_out("UserPromptSubmit", "\n\n".join(x for x in (extra, background) if x))
         return
     # the prompt waits as pending in the checkpoint until Stop classes the turn; then what waits for the main session
     # (a late compaction's brief, "Not in the summary"), first in the context
@@ -1846,7 +1931,8 @@ def prompt(agent: str):
         hatches = bypass_context(agent, sid)
     except Exception:
         _log(f"prompt hatches {agent}: {traceback.format_exc()[-300:]}")
-    _context_out("UserPromptSubmit", "\n\n".join(x for x in (carried, extra, granted, hatches, route, text) if x))
+    _context_out("UserPromptSubmit", "\n\n".join(x for x in (carried, extra, granted, background, hatches, route, text)
+                                                 if x))
 
 
 DELIVERY = re.compile(r"\bgit\s+(?:-C\s+\S+\s+)?(commit|push|merge|tag|rebase|cherry-pick|revert)\b|"
@@ -1977,10 +2063,87 @@ def closing_reminder(data: dict, sess: dict, now: float, agent: str = "claude") 
     return "\n\n".join(x for x in (block, todo) if x)
 
 
+NOTICE_COMMAND_MAX = 80  # characters of a member's command the tech lead's context shows
+
+
+def _inline(text, limit: int = NOTICE_COMMAND_MAX) -> str:
+    """Text a member wrote, as one inert code span of the tech lead's context: backticks dropped (it cannot close
+    its span), every run of whitespace, newlines and carriage returns included, one space, at most `limit`
+    characters with "…" at the cut. Then no part of it can start a line that reads as devkit's own."""
+    s = " ".join(str(text or "").replace("`", "").split())
+    return s if len(s) <= limit else s[:limit - 1] + "…"
+
+
+def crew_background_notice(sess: dict) -> str:
+    """Main session: the members whose lane closed at SubagentStop while their background work still ran (kept by
+    the crew gates, `gates._keep_for_lead`, under the name devkit's launch records give them), each told once:
+    Claude Code lists such a member until that work ends. Each command renders as one inert span (`_inline`),
+    whatever wrote the record. Removes what it tells from `sess`, one member at a time, so a member kept meanwhile is
+    not lost."""
+    kept = sess.get("crew_background") or {}
+    parts = []
+    for aid in list(kept):
+        rec = kept.pop(aid) or {}
+        tasks = [t for t in rec.get("tasks") or [] if isinstance(t, dict) and t.get("id")]
+        if not tasks:
+            continue
+        ids = ", ".join("`" + str(t["id"]) + "`" for t in tasks)
+        cmds = "; ".join("`" + _inline(t.get("command")) + "`" for t in tasks[:2]) + (" …" if len(tasks) > 2 else "")
+        parts.append(f"{rec.get('who') or 'a crew member'} task{'s' if len(tasks) > 1 else ''} {ids} ({cmds}); stop "
+                     f"it with TaskStop `{aid}` only if you no longer need it")
+    if not parts:
+        return ""
+    return ("devkit · Stopped with background work still running (it may still be working, and may resume when that "
+            "work ends): " + ". ".join(parts) + ". Claude Code lists a "
+            "member until its background work ends.")
+
+
+def crew_finished_notice(sess: dict) -> str:
+    """Main session: the members it launched that finished (kept by subagent_stop in `sess["crew_finished"]`, only
+    for a launch devkit recorded from the main session), one line each, told once. Claude Code has listed a finished
+    member as running long after its report arrived, and only TaskStop on its agent id removed it (L-fzh8oq4aby8). A
+    member that stopped with background work still running is named by crew_background_notice instead. Removes what
+    it tells, one member at a time, like that notice."""
+    done = sess.get("crew_finished") or {}
+    lines = []
+    for aid in list(done):
+        who = done.pop(aid) or "A crew member"
+        lines.append(f"devkit · {who} finished (agent `{aid}`). If Claude Code still lists it as running, TaskStop "
+                     f"`{aid}` ends it.")
+    return "\n".join(lines)
+
+
+def crew_notices(sess: dict) -> str:
+    """What the main session hears about its members' lifecycle at its next tool call or prompt: the members that
+    finished, and those that stopped with background work still running."""
+    return "\n\n".join(x for x in (crew_finished_notice(sess), crew_background_notice(sess)) if x)
+
+
+def _background_told(agent: str, data: dict) -> str:
+    """crew_notices for a hook that has not read the session record (UserPromptSubmit)."""
+    if data.get("agent_id"):
+        return ""
+    try:
+        sf = _session_file(agent, data.get("session_id") or "-")
+        if not sf.exists():
+            return ""
+        sess = state.read(sf) or {}
+        if not (sess.get("crew_background") or sess.get("crew_finished")):
+            return ""
+        before = copy.deepcopy(sess)
+        text = crew_notices(sess)
+        _patch_quietly(sf, before, sess)
+        return text
+    except Exception:
+        _log(f"background notice {agent}: {traceback.format_exc()[-300:]}")
+        return ""
+
+
 def post_tool(agent: str):
     """PostToolUse: time slow calls; remind the agent to update the developer after a long silence; sync the
     handoff repository right after a delivery event (commit, push, merge, tag, PR, release); at a call that usually
-    ends the turn, show the status block the final message opens with."""
+    ends the turn, show the status block the final message opens with; in the main session, name the members that
+    finished, and those that finished with background work still running (crew_notices)."""
     from . import progress
     data = _stdin_json()
     _check_writes(agent, data)
@@ -2008,7 +2171,7 @@ def post_tool(agent: str):
         if isinstance(cmd, list):
             cmd = " ".join(cmd)
         words = command_words(cmd)
-        if data.get("tool_name") in ("Bash", "exec_command", "shell") and DELIVERY.search(words):
+        if data.get("tool_name") in SHELL_TOOLS and DELIVERY.search(words):
             from . import work
             work.request_sync("delivery: " + DELIVERY.search(words).group(0))
         if data.get("tool_name") in SHELL_TOOLS and CI_TRIGGER.search(words) and not data.get("agent_id"):
@@ -2019,18 +2182,19 @@ def post_tool(agent: str):
                 ciwatch.start_background(top, session=f"{agent}:{data.get('session_id') or ''}")
     except Exception:
         pass
-    closing = ""
+    closing = background = ""
     try:
         sf = _session_file(agent, data.get("session_id") or "-")
         if sf.exists():  # only sessions that started with devkit active
             sess = state.read(sf) or {}
             before = copy.deepcopy(sess)
             closing = closing_reminder(data, sess, time.time(), agent=agent)
+            background = "" if data.get("agent_id") else crew_notices(sess)
             if note_milestone(data, sess, time.time()) or sess != before:  # only what changed, on the fresh record:
                 _patch_quietly(sf, before, sess)  # a background launch's SubagentStart claims its entry meanwhile
     except Exception:
         _log(f"post-tool closing {agent}: {traceback.format_exc()[-300:]}")
-    _context_out("PostToolUse", "\n\n".join(x for x in (carried, answered, _output_pitfalls(agent, data),
+    _context_out("PostToolUse", "\n\n".join(x for x in (carried, answered, background, _output_pitfalls(agent, data),
                                                         _bulk_rewrite_note(data), closing,
                                                         progress.on_tool_done(agent, data)) if x))
 
@@ -2063,6 +2227,48 @@ def _launch_meta(data: dict) -> dict:
         return {}
     meta = core.read_json(Path(p[:-len(".jsonl")] + ".meta.json"), {}) or {}
     return meta if isinstance(meta, dict) and (meta.get("toolUseId") or meta.get("description")) else {}
+
+
+def _launch_record(sess: dict, meta: dict, aid: str):
+    """The launch record devkit wrote for this subagent: the one its meta file names, else the one already bound to
+    it; None when there is none or another agent holds it."""
+    ls = (sess or {}).get("launches") or {}
+    tid = str((meta or {}).get("toolUseId") or "")
+    rec = ls.get(tid) if tid else None
+    if not isinstance(rec, dict):
+        rec = next((v for v in ls.values() if isinstance(v, dict) and v.get("agent_id") == aid), None)
+    return rec if isinstance(rec, dict) and rec.get("agent_id") in (None, "", aid) else None
+
+
+def _launched_by_main(sess: dict, lane, meta: dict, aid: str) -> bool:
+    """Do devkit's own records show that the main session launched this subagent? Its lane's parent, which binding
+    copies from the launch record; else the launch record the agent's meta file names, or the one already bound to
+    it, unless another agent holds that record. A launch description proves nothing: a member writes its helpers'
+    descriptions. With no record, False (fail closed)."""
+    if lane and lane.get("parent"):
+        return lane["parent"] == "main"
+    return (_launch_record(sess, meta, aid) or {}).get("parent") == "main"
+
+
+def _lead_name(sess: dict, run, lane, meta: dict, aid: str, name: str, by_main: bool) -> str:
+    """How the tech lead's context names this subagent, from devkit's records only: `name` as a member, when the
+    main session launched it (`by_main`, from _launched_by_main); "a helper of <member>" when a member the main
+    session launched launched it, that member named from the main session's own launch; "" when the records show
+    neither. Never the helper's own type or description: its member chose both."""
+    if by_main:
+        return _who(name)
+    parent = str((lane or {}).get("parent") or (_launch_record(sess, meta, aid) or {}).get("parent") or "")
+    if not parent or parent == "main":
+        return ""
+    plane = ((run or {}).get("agents") or {}).get(parent)
+    if not _launched_by_main(sess, plane, {}, parent):
+        return ""
+    from . import progress
+    rec = _launch_record(sess, {}, parent) or {}
+    label = (plane or {}).get("label") or rec.get("label") or ""
+    boss = (plane or {}).get("persona") or progress.persona(rec.get("type") or "", label) or \
+        label.split(":")[0].strip()
+    return f"a helper of {_who(boss)}" if boss else ""
 
 
 def _who(name: str) -> str:
@@ -2113,9 +2319,10 @@ def subagent_stop(agent: str):
         if sess is not None and sess.get("turn_class") != "other":
             from . import canary
             run, lane = progress.lane_of(agent, sid, aid)
+            meta = _launch_meta(data)
+            by_main = _launched_by_main(sess, lane, meta, aid)  # read before a pending lane is dropped
             if lane and lane.get("binding") == "pending":
                 lane = None  # never bound to a launch: a helper owes no report
-            meta = _launch_meta(data)
             label = (lane or {}).get("label") or meta.get("description") or ""
             name = (lane or {}).get("persona") or progress.persona(data.get("agent_type") or "", label) \
                 or label.split(":")[0].strip() or "Agent"
@@ -2167,8 +2374,15 @@ def subagent_stop(agent: str):
             if out is None and (lane or meta):  # the crew gates: proofs, skills, stubs, tests, lessons; once
                 from . import gates
                 ref = copy.deepcopy(sess)
-                out = gates.check(name, data, sess, pid)
-                if sess != ref:  # only the gates' own mark, on the fresh record
+                out = gates.check(name, data, sess, pid,
+                                  lead_name=_lead_name(sess, run, lane, meta, aid, name, by_main))
+                if out is None and agent == "claude" and aid and by_main and \
+                        aid not in (sess.get("crew_background") or {}):
+                    # it finished: the tech lead hears it once, with the id Claude Code's TaskStop takes
+                    # (crew_finished_notice); only for an agent devkit saw the main session launch, since a member
+                    # writes its helpers' labels; Codex has no TaskStop and no such agent list
+                    sess.setdefault("crew_finished", {})[aid] = _who(name)
+                if sess != ref:  # only the gates' own mark and this one, on the fresh record
                     _patch_quietly(sf, ref, sess)
     except Exception:
         _log(f"subagent-stop {agent}: {traceback.format_exc()[-300:]}")
@@ -2333,8 +2547,8 @@ def run(event: str, agent: str) -> int:
         fn(agent)
     except SystemExit:
         raise
-    except Exception as e:  # fail open: never break the agent session
-        _log(f"{event} {agent} error:\n{traceback.format_exc()}")
+    except Exception as e:  # fail open: never break the agent session (guard() already refused, in _guard_failed,
+        _log(f"{event} {agent} error:\n{traceback.format_exc()}")  # a call that acts and was not judged in full)
         if event == "guard":  # the guard failed open: recorded, so a rule that never runs is seen (spec G12)
             from . import guard as g
             g.failopen("guard-hook", e)

@@ -141,7 +141,8 @@ Or, in Terminal, run `dev crew graph --latest` (the newest run on this Mac). The
 ### The dashboard
 
 Run `dev dashboard` in Terminal, or ask Claude to open the dashboard. Your browser opens devkit's dashboard, a page on
-your Mac that updates by itself while it is open. Open **Background** (or press `g` then `b`): your run is there with
+your Mac that updates by itself while it is open. It opens on **Now**, which says in one sentence whether anything
+needs you and when your run lands. Open **Background** (or press `g` then `b`): your run is there with
 every step, who owns it, and anything waiting for you.
 
 <picture>

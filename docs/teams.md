@@ -92,6 +92,19 @@ Both services must agree on the event before either ships.
 The actor is your GitHub login, the machine's short host name, and the agent: `claude` or `codex` when an agent runs
 the command (detected from its environment), `human` otherwise.
 
+The item's changelog is the last `## Changelog` heading outside code blocks, at the end of the file, with only its
+entries (one list item per version) after it. Plans use the same rule. A description or a plan can contain that
+heading too, in a code example or as a section of its own, and devkit keeps those lines in the body. Frontmatter lines
+that devkit doesn't know, such as another tool's keys, stay after devkit's own fields. Only `links` is read as a list,
+so a title such as `[API] Export invoices [v2]` stays as you wrote it.
+
+Every write compares the new text with the file on disk and refuses to drop a line that the command does not change,
+so a file devkit misreads stops the command instead of shrinking (see
+[Troubleshooting](troubleshooting.md#devkit-refused-to-write-a-task-or-plan-file)). In the frontmatter of a devkit
+file (one with an `id:` line), a command may change a key's value but not remove the key, and every other line must
+stay. A file without one is compared whole. devkit writes the new text to a temporary file in the same folder and
+then swaps it in, so a reader never sees half a file.
+
 ### Lifecycle
 
 <picture>
@@ -190,7 +203,9 @@ dev plan ls                                             # flags plans edited wit
 devkit compares the body with the hash it recorded. When the body changed without `dev plan revise`, `dev plan ls`
 shows `✎ needs dev plan revise`, and the Stop hook does not let the agent finish its turn until it records the reason
 for each plan it changed in that session. A plan written by another tool (Superpowers writes to the same folder) is
-adopted into the format on its first revision. The kinds and their sections are in
+adopted into the format on its first revision: devkit adds its frontmatter and keeps every line of the file. When the
+file starts with `---`, for another tool's frontmatter or a horizontal rule, those lines stay at the top of the body.
+The kinds and their sections are in
 [Templates](templates.md#plans-and-specs).
 
 ## Session logs

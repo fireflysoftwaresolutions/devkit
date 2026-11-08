@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# devkit installer. devkit is for macOS (Apple Silicon and Intel).
+# devkit installer. devkit is for Macs with Apple silicon: Homebrew, which it needs, no longer installs on Intel
+# Macs. An Intel Mac that already has Homebrew can still run it.
 # Copyright (c) 2026 Firefly Software Solutions Inc.
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -17,10 +18,12 @@
 
 usage() {
   cat <<EOF
-devkit installer. devkit is for macOS (Apple Silicon and Intel).
+devkit installer. devkit is for Macs with Apple silicon.
 
 It makes sure Homebrew, git, Python, and the GitHub CLI are present, gets devkit (the newest
 release), signs you in to GitHub, and starts the setup wizard. Safe to run again.
+
+An Intel Mac can run it only if it already has Homebrew: Homebrew no longer installs on Intel.
 
 Usage:
   curl -fsSL $INSTALL_URL | bash
@@ -115,23 +118,57 @@ describe() {
 
 check_mac() {
   step "This Mac" "devkit runs on macOS; this checks the system before anything changes."
-  local os arch ver
+  local os machine sysctl arch ver
   os="$(uname -s)"
   if [ "$os" != Darwin ]; then
-    fail "This computer runs $os. devkit is for macOS only (Apple Silicon and Intel); nothing was changed."
+    fail "This computer runs $os. devkit is for Macs with Apple silicon; nothing was changed."
     exit 1
   fi
-  arch="$(uname -m)"
-  case "$arch" in arm64) arch="Apple Silicon" ;; x86_64) arch="Intel" ;; esac
+  machine="$(uname -m)"
+  # Under Rosetta, uname -m says x86_64 on Apple silicon too; hw.optional.arm64 is 1 on Apple silicon only, Rosetta
+  # included. Such a terminal would run the Intel Homebrew in /usr/local, or none: it needs a native one. sysctl is in
+  # /usr/sbin, which a PATH may leave out. A Terminal that still runs keeps Rosetta in each new window: quit it first.
+  sysctl="$(command -v sysctl || true)"
+  sysctl="${sysctl:-/usr/sbin/sysctl}"
+  if [ "$machine" = x86_64 ] && [ "$("$sysctl" -n hw.optional.arm64 2>/dev/null || true)" = 1 ]; then
+    fail "This terminal runs under Rosetta, so this Mac with Apple silicon reports an x86_64 processor." \
+      "Nothing was changed."
+    {
+      printf '    devkit and Homebrew need a native terminal:\n'
+      printf '    1. Quit Terminal (Command-Q).\n'
+      printf '    2. In Finder, select Terminal in Applications > Utilities, choose File > Get Info,\n'
+      printf '       and clear "Open using Rosetta".\n'
+      printf '    3. Open Terminal again and run the installer:\n      %s\n' "$RETRY"
+      printf '    In a shell started with arch -x86_64, type exit instead, then run the installer again.\n'
+      printf '    Another terminal app, such as iTerm2: see\n      %s\n' \
+        "$DOCS_URL/troubleshooting.md#the-installer-stops-on-an-intel-mac-or-in-a-rosetta-terminal"
+    } >&2
+    exit 1
+  fi
+  # Homebrew's own installer stops on Intel Macs (Homebrew/install PR #1140): only a Homebrew already there can serve.
+  if [ "$machine" != arm64 ] && ! find_brew >/dev/null; then
+    fail "devkit needs a Mac with Apple silicon for a new install, because Homebrew no longer installs on Intel Macs." \
+      "Nothing was changed."
+    printf '    This Mac reports an Intel processor (%s) and has no Homebrew.\n' "$machine" >&2
+    printf '    An Intel Mac that already has Homebrew can still run this installer.\n' >&2
+    exit 1
+  fi
+  case "$machine" in arm64) arch="Apple silicon" ;; x86_64) arch="Intel" ;; *) arch="$machine" ;; esac
   ver="$(sw_vers -productVersion 2>/dev/null || true)"
   ok "macOS${ver:+ $ver} on $arch"
+  if [ "$machine" != arm64 ]; then
+    note "Homebrew no longer supports Intel Macs: devkit uses the Homebrew you have, but some tools may build slowly" \
+      "from source."
+  fi
 }
 
-# Homebrew lives in /opt/homebrew on Apple Silicon and in /usr/local on Intel.
+# Prints the brew to use: the one on PATH, else Homebrew's brew for Apple silicon, else the one for Intel, by absolute
+# path only. Fails when there is none.
 find_brew() {
   local b
   if command -v brew >/dev/null 2>&1; then command -v brew; return 0; fi
-  for b in /opt/homebrew/bin/brew /usr/local/bin/brew; do
+  for b in "$BREW_ARM" "$BREW_INTEL"; do
+    case "$b" in /*) ;; *) continue ;; esac
     if [ -x "$b" ]; then printf '%s\n' "$b"; return 0; fi
   done
   return 1
@@ -157,10 +194,10 @@ ensure_homebrew() {
 }
 
 # The step Homebrew's installer asks you to do by hand, so that new terminals find brew and what it installs.
-# /usr/local/bin (Intel) is on the default PATH of macOS already.
+# Intel's brew is in /usr/local/bin, which is on the default PATH of macOS already.
 add_brew_to_zprofile() {
   local profile="$HOME/.zprofile"
-  case "$1" in /usr/local/*) return 0 ;; esac
+  if [ "$1" = "$BREW_INTEL" ]; then return 0; fi
   if [ -f "$profile" ] && grep -qF "brew shellenv" "$profile"; then return 0; fi
   # shellcheck disable=SC2016  # the line is written as is, for zsh to run in each new terminal
   printf '\neval "$(%s shellenv)"\n' "$1" >>"$profile"
@@ -350,6 +387,12 @@ main() {
   set -eEuo pipefail
   INSTALL_URL="https://raw.githubusercontent.com/fireflysoftwaresolutions/devkit/main/install.sh"
   DEFAULT_REPO="https://github.com/fireflysoftwaresolutions/devkit.git"
+  DOCS_URL="https://github.com/fireflysoftwaresolutions/devkit/blob/main/docs"
+  # Where Homebrew installs brew, for when it is not on PATH: Apple silicon, then Intel.
+  BREW_ARM=/opt/homebrew/bin/brew BREW_INTEL=/usr/local/bin/brew
+  # Test hook only; not a supported setting. "<Apple silicon brew>:<Intel brew>" in a temporary folder, so that the
+  # tests never reach this Mac's Homebrew. find_brew skips an entry that is not an absolute path.
+  if [ -n "${DEVKIT_TEST_BREW_PATHS:-}" ]; then IFS=: read -r BREW_ARM BREW_INTEL <<<"$DEVKIT_TEST_BREW_PATHS"; fi
   SETUP_ARGS=() NO_SETUP=0 YES=0 STEP="start" BREW_PREFIX="" PY="" SETUP_RC=0 GITHUB=0
   local arg src here=""
   for arg in "$@"; do
@@ -361,7 +404,7 @@ main() {
     esac
   done
   colors
-  printf '%sdevkit installer%s · devkit is for macOS (Apple Silicon and Intel)\n' "$C_B" "$C_OFF"
+  printf '%sdevkit installer%s · devkit is for Macs with Apple silicon\n' "$C_B" "$C_OFF"
 
   # From a clone (./install.sh): set up that checkout. Through a pipe, or as a file on its own: get devkit first.
   src="${BASH_SOURCE[0]:-}"

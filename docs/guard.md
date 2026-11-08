@@ -10,15 +10,22 @@ It inspects:
 - **Claude Code:** `Bash` (`command`), `Write`, `Edit`, `MultiEdit` (`file_path`) and `NotebookEdit` (`notebook_path`).
   The hook also sees the `Agent` and `Task` tools, to time them and to add required skills to subagent briefs (see
   [Skills and plugins › Required skills](skills-and-plugins.md#required-skills)); no guard rule applies to them.
-- **Codex:** `Bash` (`command`) and `apply_patch` (the patch's `Add File`, `Update File`, and `Move to` paths).
+- **Codex:** `Bash` and `exec_command` (`command`, and `cmd`, which `exec_command` may send instead: a list is read
+  word by word, and when both keys are present and differ, each is judged and the call is refused if either is) and
+  `apply_patch` (the patch's `Add File`, `Update File`, and `Move to` paths).
 
 Shell commands are tokenized: chains (`&&`, `||`, `;`, `|`, new lines) are checked one by one, `cd` and `pushd` change
 the directory used to resolve later paths, leading `VAR=value`, `sudo`, `env`, `command`, `nohup`, `time`, `exec`,
 `builtin`, `nice`, and `caffeinate` prefixes are skipped, heredoc bodies are treated as data, and output redirections
 (`>`, `>>`) are checked as writes. The guard also reads what the shell runs inside a command: `$(…)` and backtick
 substitutions, `sh -c` and `eval` strings (with the words after a `sh -c` line in place of its `$0`, `$1`, and
-`"$@"`), `xargs` and `find -exec` commands, and a pager that git or gh starts. Every rule applies at each of these
-levels, so `find . -exec sh -c 'git push --force origin main' \;` is denied as the plain command is. Quoted
+`"$@"`), `xargs` and `find -exec` commands, and a pager that git or gh starts. The shells it reads this way are
+`sh`, `bash`, `zsh`, `dash`, `ksh`, `fish`, `csh`, and `tcsh`, run by name, by path, or by a script's shebang. It
+reads every one of them with POSIX shell quoting, which `csh` and `tcsh` do not follow in every case (a backslash
+before a closing double quote). Every rule applies at each of these
+levels, so `find . -exec sh -c 'git push --force origin main' \;` is denied as the plain command is. The guard
+reads four levels of nesting; a command nested deeper (`sh -c` inside `sh -c` five times) is refused whatever it
+runs, and the irreversible-action gate counts it as `unknown`, because the guard cannot judge what it cannot read. Quoted
 text a command only carries, such as a `dev crew ask` message, is data and never read as a command. A heredoc body
 ends at its tag line, and also at a line that starts with the tag and `)`: macOS `/bin/bash` 3.2 ends a heredoc there
 inside `$(…)` and runs what follows, while zsh reads on, so the guard reads it the way that shows what bash runs.
@@ -64,6 +71,22 @@ the net under your own review, not as a replacement for it.
 | Inside the handoff repository | see [The handoff repository](#the-handoff-repository) |
 | Anywhere else (Desktop, Documents, `~/notes.md`, …) | Claude: ask · Codex: deny |
 | A path with a NUL character, in a file tool's `file_path` or `notebook_path` or an MCP tool's path | deny: the system reads a path up to its first NUL, so another file would be written, and a later rule would fail on it and let the call through |
+
+A file tool (Write, Edit, MultiEdit, NotebookEdit, `apply_patch`, and an MCP tool's path) hands its path to the system
+as it is, so the guard reads it the same way: `$` and a backtick are ordinary characters, and `..` and links resolve as
+the system resolves them. `/private/tmp/$X/../../../Users/me/.config/devkit/config.json` is devkit's configuration
+once a folder named `$X` exists, and it is refused like the plain path. In a shell command, `$X` stays a variable the
+guard cannot know. A leading `~` is your home folder for Claude's file tools, which expand it. Codex's `apply_patch`
+and an MCP server may write `<folder>/~/…` instead, so the guard judges their paths both ways and refuses the write
+when either reading is refused. A path with a link followed by `..` (`link/../x`) is judged both as the system reads
+it (the link's target, then `..`) and as a program that cleans the path first reads it (`x` beside the link): a write
+that either reading puts in devkit's state, configuration, or install is refused. `apply_patch` is judged by its patch
+under any key Codex sends it in (`input`, `patch`, or `command`), with its lines split as Codex splits them (on a
+line feed only, with a carriage return before it dropped). A patch whose `Add File`, `Update File`, `Delete File`, or
+`Move to` path holds a control character or a line separator (`\r`, `\x0b`, `\x1c`, `\x85`, U+2028) is refused, so
+the guard and Codex always read the same path. A `Bash` or `Monitor` command is always judged
+as a shell command, even one that starts like a patch. The rules on the handoff repository compare paths without case, as macOS folders do:
+`~/development/.HANDOFF/projects/other/repo.MD` is another project's note.
 
 "Owners you belong to" are your GitHub login and organizations (from `gh`, cached for a day) plus folders that already
 exist in the dev root.
@@ -200,7 +223,7 @@ unsaved work (see [Commands › Files](commands.md#files)).
 | --- | --- |
 | `rm <path>` or `unlink <path>` | deny → `dev rm <path>` |
 | `find … -delete`, or `find … -exec rm` | deny → list the matches with `dev find`, then `dev rm` them |
-| `xargs rm` | deny → `dev rm` |
+| `xargs rm` or `xargs unlink`, in any folder (a temp folder too: what it deletes comes from its input) | deny → `dev rm` |
 | `git clean -f` (without `-n`) when it would delete untracked paths | deny → review with `git clean -n`, then `dev rm --discard <paths>` |
 | `cp` or `mv` onto an existing file, without `-n` or `-i` | deny → `dev cp` or `dev mv` (with `--force`, the old version goes to the Trash) |
 
@@ -270,8 +293,21 @@ needs another configuration, start that session yourself in a terminal.
 ### What the guard cannot see
 
 The guard's rules read a command as it is typed, and the commands it hands to a shell, a package runner, `xargs`,
-`find -exec`, or a program's code. A command that decides what runs only when it runs gets through. For the
-extension rule, these are not refused:
+`find -exec`, or a program's code. A runner whose command comes from its input is refused, for every session, in the
+shell and in a program's code: `xargs` with only a wrapper after it (`xargs env`, `xargs nohup`, `xargs sudo`,
+`xargs timeout 5`: xargs adds what it reads, and its first word becomes the command), a placeholder in the command's
+place (`xargs -I{} {} …`, `parallel env`, `find … -exec {} \;`, `dev {}`), a shell line the input fills in
+(`xargs sh -c`, `xargs sh -c '"$@"' sh`), and a shell or interpreter whose script, code, or module the input names,
+or that gets no program at all (`xargs sh`, `xargs python3 -c`, `xargs node -r`, `xargs -I{} node`,
+`find … -exec sh {} \;`, `parallel python3 ::: a.py`). `xargs` with no command runs `echo` and stays open, and so does
+a program that is named with its script (`xargs python3 tool.py`, `xargs -n1 python3 -m py_compile`). The guard reads
+xargs's options as xargs does, so a value is never taken for the command (`xargs -tn 1 dev`,
+`xargs --max-args 1 dev`). For GNU `parallel` it reads each string an option names for the input as the placeholder
+(`-I`, `--replace`, `--er`, `--bnr`, `--dnr`, `--bner`, `--seqreplace`, `--slotreplace`, the tag of `--rpl`), and any
+`{…}` in the command too (`{.}`, `{..}`, `{+/}`, `{=…=}`), so `parallel -I % % install` is refused. A command given
+as one word with spaces is the shell line parallel runs (`parallel 'gzip -9 {}' ::: a.log` is `sh -c 'gzip -9 {}'`).
+A command that decides what runs only when it runs in other ways gets through. For the extension rule, these are not
+refused:
 
 - a program name built at run time: `$(printf claude) plugin install x`, or an alias (`alias c=claude; c plugin …`);
 - a script a shell reads from a source the guard cannot read: `curl … | sh`, `echo '…' | sh`, or a file the same
@@ -281,14 +317,24 @@ extension rule, these are not refused:
   (`osascript x.scpt`), or an `expect` script file;
 - options that load a plugin or MCP server for one session only: `claude --mcp-config`, `--plugin-dir`.
 
-Quoting or brace expansion around a command word is not read by the guard's rules until 26.11.5: `$'dev' ext ack`,
+The [irreversible-action gate](#commands-the-guard-cannot-name) reads a program an interpreter runs, but not yet
+these, and a fix is planned:
+
+- local code the program loads: `import big_mod` of a large module beside it, `python3 -m big_mod`, `runpy`,
+  `importlib`, or `exec(open(…).read())`;
+- a zip app or a package folder an interpreter runs (`python3 app.pyz`, `python3 pkg/`, `node pkg/`);
+- a command the program decodes when it runs (base64, rot13, hex);
+- GNU `parallel` options other than its replacement strings: `--arg-sep`, `--limit`, `--filter`, `--ssh`, a profile
+  (`-J`), and a Perl expression `{=…=}` in an argument of a named program (`parallel echo '{=system(…)=}'`).
+
+The guard's rules do not read quoting or brace expansion around a command word yet; a fix is planned. `$'dev' ext ack`,
 `$"dev" install`, `dev {ext,} ack`, and `$'screen' -X …` reach the shell as `dev` and `screen`, but the guard does not
 take them for those commands. devkit's own terminal check (`set_by_developer()`) still refuses those `dev` commands
-when an agent runs them directly. One line form is not read as bash runs it until 26.11.5 either: lines between
-two comments that each hold an apostrophe (`ls # it's` and `dev install # don't` on the next line), because the pair
-reads as one quoted word. A command split by a backslash-newline is read as typed, with every backslash-newline
-removed (`dev \` with `install` on the next line is `dev install`), and with the backslash at the end of a comment
-dropped (bash ends a comment at its newline); a refusal in any of the three readings stands.
+when an agent runs them directly. One line form is not read as bash runs it yet either, and a fix is planned too:
+lines between two comments that each hold an apostrophe (`ls # it's` and `dev install # don't` on the next line),
+because the pair reads as one quoted word. A command split by a backslash-newline is read as typed, with every
+backslash-newline removed (`dev \` with `install` on the next line is `dev install`), and with the backslash at the end
+of a comment dropped (bash ends a comment at its newline); a refusal in any of the three readings stands.
 
 Typing into a terminal session is refused outright: agents cannot type into a `screen` or `tmux` session at all. The
 guard refuses each command that types or carries a command, by its name, an alias, or a prefix tmux accepts; a `#(…)`
@@ -321,7 +367,24 @@ action `unknown`, tier 2, with the target `cmd-<hash>` of that exact command tex
   names git's;
 - a program that builds the name of what it calls, such as `getattr(__import__('os'), 'sys' + 'tem')`, or starts a
   command that begins with what it fills in at run time, such as ``execSync(`${tool} pr merge 12`)`` or
-  `subprocess.run(f"{tool} …")`.
+  `subprocess.run(f"{tool} …")`;
+- a program or script the gate must read and cannot: larger than it reads (512 KB for a program an interpreter runs
+  or a script a shell runs, 256 KB for a shell script run by its path) or unreadable, such as `python3 big.py` padded
+  past 512 KB with a force push at its end. A program run by its path is read as the system runs it: with a python,
+  node, or other interpreter's shebang as that interpreter's script (`./big.py` is `python3 ./big.py`, with the same
+  cap), and an executable text file with no shebang, or with a byte-order mark before `#!`, as the `sh` script the
+  shell runs it as (also one that is not executable yet when the command runs `chmod`). A shell or interpreter reads its program from a redirect or a pipe the same way: `sh < f`, `< f sh`, `sh 0< f`,
+  `sh <(cat f)`, `python3 < f`, `python3 /dev/stdin < f`, and `cat f | python3` are read like `sh f` and
+  `python3 f`. A path the system cannot encode (a lone surrogate) counts as unreadable. A binary is classified by its
+  name, as before. A shell script the gate reads but cannot parse (a comment with an apostrophe, such as
+  `# it's a test`) is unknown in the same way, however it runs: `./y.sh`, `sh y.sh`, `bash y.sh`, `. y.sh`,
+  `source y.sh`, `sh < y.sh`, or `cat y.sh | bash`. A script inside the workspace is the repository's own and is not
+  counted as unknown when it is large (autotools' `./configure`) or cannot be parsed, as for `python3 tools/x.py`;
+- a subcommand that `xargs`, `parallel`, or `find -exec` fills in for a program whose subcommand the gate reads (npm,
+  pnpm, yarn, cargo, docker, twine, terraform, gem, make, and the other publish and deploy tools): `echo publish |
+  xargs npm`, `xargs -I{} npm {}`, `parallel npm ::: publish`. The guard counts a filled word up to the second word
+  that is no option, so `xargs npm install` and `find … -exec docker load -i {} \;` count too. `git push` with any
+  word the input fills in (`echo --force origin main | xargs git push`) is `unknown` as well.
 
 These are not `unknown`:
 
@@ -459,11 +522,23 @@ DEVKIT_LOCAL_CI_PASSED=1.
   (`os.system("dev install # don't")`); any other literal, such as `print("don't")`, is data. Heredoc bodies are set
   aside first, so text with apostrophes can go in one. A script file or a sourced file the guard cannot read is
   allowed, as before.
-- Most exceptions in the guard are logged to `~/.local/state/devkit/logs/hooks.log` and the call is allowed. These
-  checks fail closed instead, because letting the call through would defeat them: a crew member's shell command that
-  the lane check cannot read or judge; an irreversible action, in enforce, when the gate itself fails and the text
-  looks irreversible; the MCP gate; and the developer-only actions (lifting an embargo, `dev backup --public`,
-  `dev backup policy`).
+- When the guard itself fails while it judges a call that acts (a shell command, `Monitor`'s included, a `Write`,
+  `Edit`, `MultiEdit`, `NotebookEdit`, or `apply_patch`, a `WebFetch`, whose rule keeps secrets out of the URLs it
+  sends, or an MCP tool), the call is refused with the reason "devkit's guard could not judge this call." A crash would
+  otherwise skip every rule for that call, and an agent shapes the command text, so it could choose one that crashes
+  the guard. The refusal is logged to `~/.local/state/devkit/logs/hooks.log` with its traceback and
+  recorded as `guard.deny` with rule `guard-error` (`dev audit --action guard.deny`). A refusal the guard had already
+  reached also stands when a later part of the hook fails, recorded once, under its own rule. The agent rewrites the command more simply or stops and
+  tells the developer, who can run it in their own terminal (hooks run only in agent sessions) or start the session
+  with `DEVKIT_GUARD=off`, which the hook reads before any rule runs.
+- Other exceptions in the guard are logged there and the call is allowed, with a `guard.failopen` record: a call that
+  only reads or launches (`Read`, `Grep`, `Glob`, `WebSearch`, and `Agent`, `Task`, and Codex's `spawn_agent`, whose
+  subagent's calls each pass the guard again), and a call every rule has already allowed when only the context the hook
+  adds to it fails, a crew member's `dev progress` or `dev crew` call that devkit routes to its lane included. A
+  guard bug never blinds the session that has to diagnose it, and the other hooks (session start, prompt, stop) still
+  fail open. These checks fail closed too: a crew member's shell command that the lane check cannot read or judge;
+  an irreversible action, in enforce, when the gate itself fails and the text looks irreversible; the MCP gate; and
+  the developer-only actions (lifting an embargo, `dev backup --public`, `dev backup policy`).
 - Every deny and ask is logged there too, and written to the audit trail (`dev audit --action guard`), so you can
   review what was blocked.
 

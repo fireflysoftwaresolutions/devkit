@@ -71,7 +71,7 @@ in the virtual machine, which macOS has not got back." `dev docker trim` returns
 reports how much macOS got back. It deletes nothing, and Docker keeps running.
 
 ```bash
-dev docker trim           # return Colima's free space to macOS (Colima must be running)
+dev docker trim           # return the Colima free space to macOS (Colima must be running)
 ```
 
 Unused images are one plan item that runs `docker image prune -a -f` and then the trim. devkit never prunes volumes.

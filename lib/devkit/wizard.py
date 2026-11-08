@@ -40,6 +40,21 @@ CLAUDE_MODES = {"bypassPermissions": "no prompts; the devkit guard protects the 
 CODEX_MODES = {"full": ("never", "danger-full-access", "no prompts, full access; the devkit guard protects (recommended)"),
                "workspace": ("on-request", "workspace-write", "sandboxed to the project; asks when it needs more")}
 CLAUDE_INSTALLER = "curl -fsSL https://claude.ai/install.sh | bash"  # Claude Code's official native installer
+# The commands `dev doctor` requires, by package group (the `# @group` of the Brewfile and npm-globals.txt), with what
+# installs each: ("brew" | "cask", name) from the Brewfile, ("npm", name) from npm-globals.txt, ("script", command).
+# The base groups are required on every Mac; a stack's group only when the developer chose it (config `stacks`).
+DOCTOR_TOOLS = {
+    "core": {"git": ("brew", "git"), "gh": ("brew", "gh"), "python3": ("brew", "python"), "node": ("brew", "node"),
+             "npm": ("brew", "node"), "jq": ("brew", "jq"), "rg": ("brew", "ripgrep"), "fzf": ("brew", "fzf")},
+    "docker": {"docker": ("brew", "docker"), "colima": ("brew", "colima")},
+    "agents": {"claude": ("script", CLAUDE_INSTALLER), "codex": ("cask", "codex")},
+    "java": {"java": ("brew", "openjdk"), "mvn": ("brew", "maven"), "gradle": ("brew", "gradle"),
+             "jdtls": ("brew", "jdtls")},
+    "python": {"uv": ("brew", "uv"), "pyright": ("npm", "pyright")},
+    "php": {"php": ("brew", "php"), "composer": ("brew", "composer"), "intelephense": ("npm", "intelephense")},
+    "node": {"pnpm": ("brew", "pnpm"), "typescript-language-server": ("npm", "typescript-language-server"),
+             "ng": ("npm", "@angular/cli")},
+}
 # HTTPS with the browser: no questions about protocols or tokens, and git signs in through gh.
 GH_LOGIN = ["gh", "auth", "login", "-h", "github.com", "-p", "https", "-w", "-s", "repo,read:org,workflow,gist"]
 

@@ -124,7 +124,7 @@ Before you change an area, search what is known about it. `--search` and `--all`
 so they go before `ls`, or you leave `ls` out:
 
 ```bash
-dev lesson                        # this project's lessons, its initiatives', and the global ones
+dev lesson                        # the lessons of this project, of its initiatives, and the global ones
 dev lesson --search "release"     # with these words in the title or any section
 dev lesson --all                  # every scope, retired lessons included
 dev lesson show L-fwqyx0ywj1x     # all sections and the history (a unique part of the id or title works too)

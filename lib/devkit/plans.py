@@ -21,28 +21,28 @@ FIELDS = ("id", "title", "kind", "scope", "status", "version", "body_sha", "crea
           "supersedes")
 
 
+def _read(text: str):
+    """-> (frontmatter fields, the frontmatter's other lines as they are, body, changelog entries). Only the record's
+    own changelog at the end is taken out of the body (work.split_changelog), so a `## Changelog` in a code example or
+    a section stays in the body."""
+    front, body = work.split_frontmatter(text)
+    meta, extra = work.read_frontmatter(front, FIELDS, ())
+    body, changelog = work.split_changelog(body)
+    return meta, extra, body.strip("\n"), changelog
+
+
 def _split(text: str):
-    meta, body = {}, text
-    if text.startswith("---\n"):
-        end = text.find("\n---\n", 4)
-        if end != -1:
-            for ln in text[4:end].splitlines():
-                k, _, v = ln.partition(":")
-                meta[k.strip()] = v.strip()
-            body = text[end + 5:]
-    changelog = []
-    if "\n## Changelog" in body:
-        body, _, log = body.partition("\n## Changelog")
-        changelog = [ln[2:].strip() for ln in log.splitlines() if ln.startswith("- ")]
-    return meta, body.strip("\n"), changelog
+    """-> (frontmatter fields, body, changelog entries)."""
+    meta, _, body, changelog = _read(text)
+    return meta, body, changelog
 
 
 def _sha(body: str) -> str:
     return hashlib.sha256(re.sub(r"\s+", " ", body).strip().encode()).hexdigest()[:16]
 
 
-def _render(meta: dict, body: str, changelog: list) -> str:
-    head = "---\n" + "\n".join(f"{k}: {meta.get(k, '')}".rstrip() for k in FIELDS) + "\n---\n"
+def _render(meta: dict, body: str, changelog: list, extra=()) -> str:
+    head = "---\n" + "\n".join([f"{k}: {meta.get(k, '')}".rstrip() for k in FIELDS] + list(extra)) + "\n---\n"
     return head + body.rstrip() + "\n\n## Changelog\n" + "".join(f"- {c}\n" for c in changelog)
 
 
@@ -81,7 +81,7 @@ def new(scope: str, title: str, a=None, kind: str = "plan") -> Path:
             "body_sha": _sha(body), "created": work.now_iso(), "created_by": f"{a['user']}@{a['host']}",
             "updated": work.now_iso(), "updated_by": f"{a['user']}@{a['host']}"}
     log = [f"v1 · {work.now_iso()} · {work.actor_str(a)} · created from the {kind} template"]
-    path.write_text(_render(meta, body, log))
+    work.write_record(path, _render(meta, body, log))
     work._commit([path], f"{meta['id']}: plan “{title[:60]}” created ({work.actor_str(a)})")
     return path
 
@@ -92,9 +92,12 @@ def revise(path: Path, why: str, a=None, status: str = None) -> dict:
         raise ValueError("a plan revision needs the reason: --why \"…\"")
     a = a or work.actor()
     path = Path(path)
-    meta, body, log = _split(path.read_text())
+    text = path.read_text()
+    meta, extra, body, log = _read(text)
     adopted = not meta.get("id")
-    if adopted:
+    if adopted:  # not devkit's frontmatter: another tool's, or a first `---` rule, stays at the top of the body
+        body, log = work.split_changelog(text)
+        body, extra = body.strip("\n"), []
         title = next((ln[2:].strip() for ln in body.splitlines() if ln.startswith("# ")), path.stem)
         meta = {"id": "P-" + work.new_id("task")[2:], "title": title, "scope": scope_of(path), "status": "draft",
                 "version": 0, "created": work.now_iso(), "created_by": f"{a['user']}@{a['host']}"}
@@ -110,7 +113,7 @@ def revise(path: Path, why: str, a=None, status: str = None) -> dict:
     change = "adopted into devkit format" if adopted else (status or "revised")
     detail = f" ({stat.strip()})" if stat.strip() else ""
     log.insert(0, f"v{meta['version']} · {work.now_iso()} · {work.actor_str(a)} · {change}{detail} — why: {why}")
-    path.write_text(_render(meta, body, log))
+    work.write_record(path, _render(meta, body, log, extra))
     work._commit([path], f"{meta['id']}: {change} v{meta['version']} ({work.actor_str(a)}) — {why}")
     return meta
 

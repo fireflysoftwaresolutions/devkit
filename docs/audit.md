@@ -36,7 +36,7 @@ anyone else gets access to the handoff repository, or before the first published
 `team_months` (at 13 months, 2027-12), whichever comes first.
 
 Each machine prunes only its own folder. The folder of a retired machine stays until that cleanup also covers other
-machines' folders (planned for 26.11.5).
+machines' folders, which is planned and not built yet.
 
 ## Personal data and the GDPR
 
@@ -67,6 +67,71 @@ devkit keeps these out of every record it writes:
 - **Prompt text and message text.** A crew message is recorded by its id, sender, recipient, and length, and
   `dev crew ask` and `dev crew answer` by their naming arguments (`--to`, the message id) and the length of the text.
   Crew messages often quote the developer's requests, so their text stays in the session's own records.
+- **Free text in a command line.** Since 26.11.5, a record that keeps a command line keeps only the words devkit
+  knows to be safe, and replaces every other word with its length, such as `[text not recorded: 22 characters]`, or
+  `N+` when the command was cut inside it. Words next to each other in one argument share one marker.
+  `dev crew ask` and `dev crew answer` keep their marker `[message text not recorded: N characters]`, and
+  `dev crew decide` keeps `[free text: N characters]`. These words stay:
+  - The program, when it is `dev`, `git`, or `gh`, and its subcommands. The program is the word at command
+    position: devkit skips reserved words such as `if`, `do`, `{`, and `!`, variable assignments, and wrappers such
+    as `env`, `sudo`, `timeout`, `nice`, `xargs`, and `uv run` with their options and values. It also finds the
+    program as a path (`~/bin/dev`) or `python3 -m devkit`, and inside the text of `bash -c`, `sh -c`, `zsh -c`,
+    and `eval`. Anywhere else, such as in `kubectl --context dev` or `echo dev crew show`, `dev` is a word like
+    any other.
+  - The name of another program at command position when devkit's list of known programs has it, such as `kubectl`
+    or `sleep`. The list is fixed and the same on every machine, with no lookup in your `PATH`: devkit's own
+    programs, the programs the guard's read-only allowlist runs with its checks, package runners, and wrappers, and
+    common developer tools, such as `python3`, `npm`, `make`, `docker`, and `curl` (`PROGRAMS` in
+    `lib/devkit/audit.py`). Any other program becomes its length, since a word there can be a client's name, a file,
+    or a password. A name written with quotes or an escape, such as `"cat"`, also becomes its length.
+  - The last part of a path, when the path runs a program on that list. A program or a wrapper run by its path,
+    `dev`, `git`, and `gh` included, keeps only that last part: `/opt/homebrew/bin/python3` is recorded as
+    `[text not recorded: 17 characters]/python3`.
+  - Option names, such as `--why` and `-m`.
+  - The value of an option that names something, such as `--to`, `--type`, `--scope`, `--project`, or `--step`
+    in `dev`, and `-C`, `-R`, `--repo`, `--base`, and `--head` in `git` and `gh`.
+  - The arguments of `dev` that name something, such as a branch, a path, a project, or a crew member. An argument
+    that selects a task, a lesson, or a step stays only as an id or a number, since it can be part of a title.
+    `dev crew raci` also classifies a task given in words, so its argument stays only as a kind of work or a crew
+    member of devkit's roster, such as `backend` or `tank`, and its `--set` value only as `R`, `A`, `C`, and `I`
+    with crew members.
+  - The value of `status` and `priority` in `dev note set`, which is one of a fixed set, such as `status=blocked`.
+    The value of any other key becomes its length.
+  - Ids (`T-…`, `L-…`, `P-…`, `D<n>`, `M<n>`, `R<n>`) and numbers of up to six digits. A longer number, such as a
+    phone number, becomes its length.
+  - Shell operators, reserved words, and redirections. A redirection's file stays only when it names no file of
+    yours: `/dev/null`, `/dev/stdout`, `/dev/stderr`, `/dev/tty`, a number, or `-`.
+  - The name of a variable that the command sets (`MSG=`), and the value of a `DEVKIT_*` variable when it is one
+    short word, such as `DEVKIT_GUARD=off`.
+
+  Everything else becomes its length: free text, such as a `dev crew ask` message, the text of `--why`, `--check`,
+  or `-m`, a heredoc's body, a here-string, and a comment; and a word that only might be free text, such as a
+  filename, a branch passed to `git push`, or a value devkit does not know. A line whose program is none of these
+  keeps its operators, the program's name when the list has it, and each other word's length: `rm -rf src` is
+  recorded as `rm [text not recorded: 3 characters] [text not recorded: 3 characters]`, and `globex-sync --all` as
+  `[text not recorded: 11 characters] [text not recorded: 5 characters]`.
+
+  These fields hold a command line:
+
+  | Record | Field | What it holds |
+  | --- | --- | --- |
+  | `dev.<command>` | `target` | The `dev` command's arguments |
+  | `guard.*`, such as `guard.deny`, `guard.ask`, and `guard.bypass` | `target` | The call the guard refused or asked about, or that an escape hatch let through. A refused file edit keeps the file's path, and a refused tool call keeps the tool's name |
+  | `guard.*` | `detail` | The refusal the agent reads. What it quotes in backticks is masked as a command line, so its operators stay, and devkit's `…` stays. A quote whose first word is not a program on devkit's list is free text and becomes its length, so a quote of one word stays only as such a program, such as `cat`. The guard quotes each value as one Markdown code span, with a longer fence when the value holds a backtick, so the value cannot end the quote early. The rest of the refusal stays |
+  | `guard.irreversible` | `detail` | The words of the irreversible command, or the shell text the guard could not parse |
+  | `calls.unclosed` | `detail` | The call that got no result, and how long devkit waited for it |
+  | `job.*` | `target` | The job's `dev` arguments |
+  | Any record | `evidence.command` | A command line |
+
+  For example, `dev task add "Fix the Acme export" --why "Ana asked" --type bug` is recorded as
+  `add [text not recorded: 19 characters] --why [text not recorded: 9 characters] --type bug`. Only the stored
+  record changes: the guard decides as before, and the agent still reads the whole refusal. A value that names
+  something stays, so a name passed as one, such as a crew member, a step's name, or a path, can still reach a
+  record.
+- **Delegated work and handoff commits.** `crew.delegate` keeps who delegated to whom and the step, and what the
+  member should do only as its length. A commit to the handoff repository (`handoff.*`) keeps the item's id and the
+  operation, such as `T-…: done`, and the rest of its message, which holds the title and the reason, only as its
+  length.
 - **The developer's approval lines.** Evidence for a decision or a grant (`crew.evidence`) keeps what it covers (the
   decision id, or a grant's action and target), the channel, and the id of the developer's message in the
   transcript. Of the line itself (`approve D<n>: …`, or the question and answer from the question tool) it keeps only
@@ -105,12 +170,16 @@ Records written before 26.11.3 can hold what the preceding rules now keep out. T
 format, and v2 records sealed before the fix, some of which hold crew message text or a home path. devkit cleans every
 record with the current rules whenever it reads one, so `dev audit`, `dev audit show`, and `dev audit export` do not
 show that text. A v2 record that the cleaning changed is marked `"cleaned": true`. Its `hash` still covers the stored
-line, which is what `dev audit verify` checks.
+line, which is what `dev audit verify` checks. Records written before 26.11.5 can also hold the free text of a
+command line, and reading masks it the same way. Their `dev` arguments were joined by spaces, so a word cannot tell
+where an argument ends: once a word in them is free text, reading keeps the command and its subcommands, and after
+them only the option names that `dev`'s parser knows, the ids, and numbers of up to six digits. A command that a
+guard refusal quotes holds its words joined the same way and is masked by the same rule.
 
 The stored lines still hold the text, in three places:
 
-- On this machine, in `~/.local/state/devkit/audit/`, until the re-seal planned for 26.11.5 (`dev audit reseal`)
-  rewrites them with the current rules and records the migration.
+- On this machine, in `~/.local/state/devkit/audit/`, until a planned re-seal, not built yet, rewrites them with
+  the current rules and records the migration.
 - In the handoff repository's working copy, until the first publish after that re-seal.
 - In the handoff repository's git history, until the purge described in [What git keeps](#what-git-keeps).
 
@@ -135,8 +204,8 @@ access:
 4. Purge the history first ([What git keeps](#what-git-keeps)): until then, git still holds the message text of
    records written before 26.11.3.
 
-The planned design for shared repositories (26.11.5) publishes, per month file, a seal (the chain's last hash and the
-record count) plus the refusal, security, and configuration records, instead of every record. The seal still lets
+The planned design for shared repositories, not built yet, publishes, per month file, a seal (the chain's last hash
+and the record count) plus the refusal, security, and configuration records, instead of every record. The seal still lets
 `dev audit verify` prove that nothing was changed.
 
 ## The record: schema v2
@@ -153,7 +222,7 @@ dev audit show 01M6SFPEZ2
   "id": "01M6SFPEZ26QJ416WAYP5S80YH",
   "ts": 1794004171.746,
   "time": "2026-11-06T22:29:31.746Z",
-  "actor": {"user": "ancongui", "host": "mac", "agent": "claude", "session": "962d6aba-c6a"},
+  "actor": {"user": "ana", "host": "mac", "agent": "claude", "session": "3f2a91c0-7b1"},
   "action": "audit.verify",
   "category": "security",
   "severity": "info",
@@ -240,7 +309,7 @@ dev audit verify
 
 ```text
   ✓ ~/.local/state/devkit/audit/2026-11.jsonl  1786 record(s), 3324 v1 line(s) outside the chain
-  ✓ ~/Development/.handoff/audit/ancongui@mac/2026-11.jsonl  0 record(s), 1159 v1 line(s) outside the chain
+  ✓ ~/Development/.handoff/audit/ana@mac/2026-11.jsonl  0 record(s), 1159 v1 line(s) outside the chain
 ✓ the chain holds: 1786 record(s) · 1786 not yet published, so not yet anchored
 ```
 
@@ -265,7 +334,7 @@ recorded as `audit.verify`, with `critical` severity when it fails. The daily jo
 published copy it no longer extends; it records `audit.publish` as blocked and critical instead. It never publishes a
 month file over 45 MB either, because GitHub refuses files over 100 MB and then every handoff push: that month's copy
 stays as it was, the job records `audit.publish` as blocked with `warning` severity, and `dev audit stats` and
-`dev doctor` say so until devkit 26.11.5 publishes daily segments instead of whole months.
+`dev doctor` say so until devkit publishes daily segments instead of whole months, which is planned.
 
 ## Query and export
 

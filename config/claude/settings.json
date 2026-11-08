@@ -42,7 +42,7 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "Bash|Write|Edit|MultiEdit|NotebookEdit|Agent|Task|WebFetch|mcp__.*",
+        "matcher": "Bash|Monitor|Write|Edit|MultiEdit|NotebookEdit|Agent|Task|WebFetch|mcp__.*",
         "hooks": [
           {
             "type": "command",
