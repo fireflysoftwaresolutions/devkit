@@ -1006,7 +1006,7 @@ the path to the full log.
 | `dev test` | Last failures first; if they pass, the affected tests |
 | `dev test run [<paths>…] [--failed \| --affected \| --all]` | These test files, directories, or runner ids; or only the last failures, only the affected tests, or the full suite |
 | `dev test plan [--all]` | What would run and why (changed file → tests), with the time estimate; runs nothing. `--all`: the whole suite, its full-run time, and the slowest files |
-| `dev test prove [<tests>…] [--runs N]` | For each new or changed test, in a temporary copy: it passes `N` times with your change (default 5) and fails with the production files restored from the base. Verdicts: proves the change, does not test the change, flaky, fails with the change, did not run without the change |
+| `dev test prove [<tests>…] [--runs N]` | For each new or changed test, in a temporary copy: it passes `N` times with your change (default 5) and fails with the production files, and the changed test helpers and fixtures, restored from the base. Verdicts: proves the change, does not test the change, flaky, fails with the change, did not run without the change |
 | `dev test audit [<paths>…] [--changed] [--min-severity low\|medium\|high] [--rule RULE]` | Tests that cannot fail: no or trivial assertions, empty bodies, swallowed failures, skips without a reason, sleeps, and more. `--changed`: only test files changed on this branch, staged, unstaged, or untracked. Default severity shown: medium and up. `--rule` repeats |
 
 | Option | Effect |

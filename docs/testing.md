@@ -115,13 +115,15 @@ For each new or changed test, `prove` checks two things in a temporary copy of t
 never touched):
 
 1. **It fails without your change.** devkit restores the base version of every production file you changed (the
-   merge-base with `origin/<default>`, or `--since REF`) and runs the test. A test that still passes is reported as
-   "does not test the change."
+   merge-base with `origin/<default>`, or `--since REF`) and runs the test. A changed test helper or fixture counts
+   as part of the change and is restored too, so a fix that lives only in a helper is proven. A test that still
+   passes is reported as "does not test the change."
 2. **It is stable.** It runs the test five times with your change (`--runs N` changes the count). A test that is not
    five times green is reported as flaky. This is the rule Meta's TestGen-LLM applies to generated tests.
 
-The dependency folders (`node_modules`, `.venv`, `vendor`) are linked into the copy, not copied. The command exits with
-`1` unless every test proves the change.
+The copy carries a clone of the checkout's git repository that shares its objects, so a test that runs git on its
+checkout works there. The dependency folders (`node_modules`, `.venv`, `vendor`) are linked into the copy, not
+copied. The command exits with `1` unless every test proves the change.
 
 ## TDD with devkit
 
