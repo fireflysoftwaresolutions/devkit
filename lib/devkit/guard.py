@@ -394,13 +394,55 @@ def _newlines_to_semicolons(cmd: str, op: str = ";") -> str:
 HEREDOC_RE = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
 _HEREDOC_AT = re.compile(r"<<-?[ \t]*(?:'([^'\n]+)'|\"([^\"\n]+)\"|\\?([A-Za-z_][A-Za-z0-9_]*))")
 
+# `#` starts a comment only at the start of a word, as bash and zsh read it: after a blank, a newline, an operator or
+# a redirection. A `)` that ends a substitution ends no word, so `x$(true)#c` and `<(true)#<(…)` are one word each,
+# where `(echo a)#c` ends at the `#`.
+_COMMENT_AFTER = frozenset(" \t\n;&|()<>")
+_FUNCTION_PARENS = re.compile(r"\([ \t]*\)")
+
+
+def _paren_kind(s: str, k: int) -> str:
+    """What the `(` at s[k] opens: 'w' a substitution, part of the word around it (`$(`, `$((`, `<(`, `>(`, zsh's
+    `=(` at the start of a word); 'o' an operator (a subshell, `((`, a function's `()`); '?' a parenthesis the shells
+    read differently (bash reads `a=(1 2)#c` as one word, zsh ends it at the `#`; extglob `@(…)`; glob qualifiers)."""
+    prev = s[k - 1] if k else ""
+    if prev in ("$", "<", ">") or (prev == "=" and (k < 2 or s[k - 2] in _COMMENT_AFTER)):
+        return "w"
+    if not prev or prev in _COMMENT_AFTER or _FUNCTION_PARENS.match(s, k):
+        return "o"
+    return "?"
+
+
+class _Parens:
+    """The parentheses a scanner of `s` has opened and closed, to tell where a `#` starts a comment."""
+
+    def __init__(self, s: str):
+        self.s, self.opened, self.closed = s, [], {}
+
+    def open(self, k: int):
+        self.opened.append(_paren_kind(self.s, k))
+
+    def close(self, k: int, kind: str = ""):
+        """The `)` at s[k] closes the last parenthesis opened (`kind`: one the scanner skipped whole)."""
+        self.closed[k] = kind or (self.opened.pop() if self.opened else "o")
+
+    def comment(self, i: int, lean: bool) -> bool:
+        """True when the `#` at s[i] starts a comment. `lean`: the reading of a parenthesis the shells read
+        differently ('?'): a comment (True) where reading it as words could hide a line (a heredoc's `<<WORD` after
+        it), words (False) where reading it as a comment could (a substitution after it)."""
+        s = self.s
+        if s[i] != "#" or (i and s[i - 1] not in _COMMENT_AFTER):
+            return False
+        kind = self.closed.get(i - 1, "o") if i and s[i - 1] == ")" else "o"
+        return kind == "o" or (kind == "?" and lean)
+
 
 def _split_heredocs(cmd: str):
     """-> (the command without its heredoc bodies and terminator lines, [(body, expands)]). A `<<WORD` counts only
     where the shell reads it: outside quotes and comments, and not `<<<` (a here-string), so a quoted "<<EOF" in a
     commit message hides no line. `expands`: the delimiter is unquoted, so the shell runs `$(…)` in the body."""
     out, bodies, pending = [], [], []
-    i, n, q = 0, len(cmd), None
+    i, n, q, parens = 0, len(cmd), None, _Parens(cmd)
     while i < n:
         c = cmd[i]
         if q == "'":
@@ -417,7 +459,7 @@ def _split_heredocs(cmd: str):
             continue
         elif c in "'\"":
             q = c
-        elif c == "#" and (i == 0 or cmd[i - 1] in " \t\n;&|()"):
+        elif c == "#" and parens.comment(i, True):
             j = cmd.find("\n", i)
             j = n if j < 0 else j
             out.append(cmd[i:j])
@@ -430,9 +472,15 @@ def _split_heredocs(cmd: str):
                 j += 1
                 if depth == 0:
                     break
+            if depth == 0:
+                parens.close(j - 1, "w" if c == "$" else "o")
             out.append(cmd[i:j])
             i = j
             continue
+        elif c == "(":
+            parens.open(i)
+        elif c == ")":
+            parens.close(i)
         elif cmd.startswith("<<", i) and not cmd.startswith("<<<", i) and cmd[i - 1:i] != "<":
             m = _HEREDOC_AT.match(cmd, i)
             if m:
@@ -4861,7 +4909,7 @@ def _subst(s: str, quotes: bool, procs: list | None = None) -> list:
     """The bodies of the substitutions the shell runs in `s`: `$(…)`, backticks, and with `quotes` (a command line,
     not a heredoc body) `<(…)` and `>(…)` outside quotes. `procs`: a list that gets, for each body, whether it is a
     process substitution."""
-    out, i, n, q = [], 0, len(s), None
+    out, i, n, q, parens = [], 0, len(s), None, _Parens(s)
     while i < n:
         c = s[i]
         if q == "'":
@@ -4875,7 +4923,7 @@ def _subst(s: str, quotes: bool, procs: list | None = None) -> list:
             q = "'"
         elif quotes and c == '"':
             q = None if q == '"' else '"'
-        elif quotes and q is None and c == "#" and (i == 0 or s[i - 1] in " \t\n;&|()"):
+        elif quotes and q is None and c == "#" and parens.comment(i, False):
             j = s.find("\n", i)
             i = n if j < 0 else j
             continue
@@ -4902,6 +4950,8 @@ def _subst(s: str, quotes: bool, procs: list | None = None) -> list:
             out.append(s[i + 2:j - 1] if depth == 0 else s[i + 2:])
             if procs is not None:
                 procs.append(c != "$")
+            if depth == 0:
+                parens.close(j - 1, "w")
             i = j
             continue
         elif c == "`":
@@ -4913,6 +4963,10 @@ def _subst(s: str, quotes: bool, procs: list | None = None) -> list:
                 procs.append(False)
             i = j + 1
             continue
+        elif quotes and q is None and c == "(":
+            parens.open(i)
+        elif quotes and q is None and c == ")":
+            parens.close(i)
         i += 1
     return out
 
@@ -6156,7 +6210,7 @@ def _mask_substitutions(s: str):
     """(the command with each `$(…)`, backtick and `<(…)`/`>(…)` the shell runs replaced by a placeholder word, the
     commands inside them), or None for an arithmetic `$((…))` (zsh evaluates the variables in it as code) or a
     substitution that does not end. Single quotes and comments are text."""
-    out, inner, i, n, q = [], [], 0, len(s), None
+    out, inner, i, n, q, parens = [], [], 0, len(s), None, _Parens(s)
     while i < n:
         c = s[i]
         if q == "'":
@@ -6176,6 +6230,7 @@ def _mask_substitutions(s: str):
                 return None
             inner.append(s[i + 2:j - 1])
             out.append(_SUBST_WORD)
+            parens.close(j - 1, "w")
             i = j
             continue
         if c == "`":
@@ -6192,12 +6247,16 @@ def _mask_substitutions(s: str):
             q = "'"
         elif c == '"':
             q = None if q == '"' else '"'
-        elif q is None and c == "#" and (i == 0 or s[i - 1] in " \t\n;&|()"):
+        elif q is None and c == "#" and parens.comment(i, False):
             j = s.find("\n", i)
             j = n if j < 0 else j
             out.append(s[i:j])
             i = j
             continue
+        elif q is None and c == "(":
+            parens.open(i)
+        elif q is None and c == ")":
+            parens.close(i)
         out.append(c)
         i += 1
     return "".join(out), inner
@@ -8149,7 +8208,7 @@ _CMD_KEEP = _KEEP_START | {"builtin", "command", "exec", "noglob", "nocorrect", 
 def _code_kinds(s: str):
     """For each character of a command: 'C' (code the shell reads, also inside a `$(…)` in double quotes), 'D'
     (double-quoted text), 'S' (single-quoted, escaped or a comment), with its parenthesis depth; None for backticks."""
-    kinds, deps, stack, depth, i, n = [], [], [("C", 0)], 0, 0, len(s)
+    kinds, deps, stack, depth, i, n, parens = [], [], [("C", 0)], 0, 0, len(s), _Parens(s)
 
     def put(k, count=1):
         kinds.extend([k] * count)
@@ -8174,6 +8233,7 @@ def _code_kinds(s: str):
                 put("D", 2)
                 depth += 1
                 stack.append(("C", depth))
+                parens.opened.append("w")
                 i += 2
                 continue
             put("D")
@@ -8187,7 +8247,7 @@ def _code_kinds(s: str):
         elif c == '"':
             stack.append(("D", depth))
             put("D")
-        elif c == "#" and (i == 0 or s[i - 1] in " \t\n;&|()"):
+        elif c == "#" and parens.comment(i, False):
             j = s.find("\n", i)
             j = n if j < 0 else j
             put("S", j - i)
@@ -8195,8 +8255,10 @@ def _code_kinds(s: str):
             continue
         elif c == "(":
             depth += 1
+            parens.open(i)
             put("C")
         elif c == ")":
+            parens.close(i)
             put("C")
             if len(stack) > 1 and stack[-1] == ("C", depth):
                 stack.pop()  # the end of a `$(…)` opened inside double quotes
@@ -8231,7 +8293,7 @@ def _shell_words(s: str):
     `$(…)`, as (text, the offset in `s` of each character, plain, at the place of a command), where plain means no
     quote, backslash or `$` in it; None for backticks and ANSI-C or locale quotes (`$'…'`, `$"…"`), whose text the
     guard does not decode. Operators separate words, so `a;b` is two; a redirection's target is no command."""
-    words, cur, offs, plain, i, n = [], [], [], True, 0, len(s)
+    words, cur, offs, plain, i, n, parens = [], [], [], True, 0, len(s), _Parens(s)
     stack, depth = [], []  # quote contexts: "'", '"', "(" for a `$(…)` inside double quotes, with its paren depth
     state = {"open": True, "target": False, "keep": False}  # a command word may still come; the next word is a redirection's
 
@@ -8285,6 +8347,7 @@ def _shell_words(s: str):
                 end()
                 stack.append("(")
                 depth.append(0)
+                parens.opened.append("w")
                 state.update(open=True, target=False, keep=False)
                 i += 2
                 continue
@@ -8293,7 +8356,8 @@ def _shell_words(s: str):
             offs.append(i)
             i += 1
             continue
-        if c == "#" and not cur and plain:  # a comment, to the end of its line: its words count, its quotes do not
+        if c == "#" and not cur and plain and parens.comment(i, False):
+            # a comment, to the end of its line: its words count, its quotes do not
             j = s.find("\n", i)
             j = n if j < 0 else j
             for m in re.finditer(r"\S+", s[i:j]):
@@ -8316,6 +8380,10 @@ def _shell_words(s: str):
             continue
         if c in "\n;&|()":
             end()
+            if c == "(":
+                parens.open(i)
+            elif c == ")":
+                parens.close(i)
             if c == ")" and ctx == "(":
                 if depth[-1]:
                     depth[-1] -= 1
