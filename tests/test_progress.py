@@ -1801,9 +1801,10 @@ class EstimateRoundingTests(unittest.TestCase):
 
 
 class ScopeWriteTests(unittest.TestCase):
-    # The Code reviewer works review-only while the Senior engineer's step scope holds docs/audit.md. A review lane can
-    # write through a script in its own scratch folder, so a file that changed during its shell call inside a working
-    # member's scope is that member's only while the member had a call open in the call ledger
+    # The Code reviewer works review-only while the Senior engineer's step scope holds docs/audit.md. A file that
+    # changed during the reviewer's shell call inside a working member's scope is that member's write, call open or
+    # not: an Edit opens no shell call (B-fy1ae3k2ao6: the Security engineer's and the QA engineer's edits were held
+    # against the Business analyst). Only a file no working member's scope holds is the reviewer's to answer for
     def setUp(self):
         self.state = TempState().__enter__()
         self.addCleanup(self.state.__exit__, None, None, None)
@@ -1822,15 +1823,23 @@ class ScopeWriteTests(unittest.TestCase):
         pg.call_opened("claude", {"session_id": "s1", "tool_use_id": "toolu_neo_sh", "agent_id": "a_neo",
                                   "tool_input": {"command": "python3 -m unittest tests.test_audit"}})
 
-    def test_a_file_in_a_build_scope_is_the_reviewers_own_write_when_that_lane_had_no_call_open(self):
+    def test_files_in_working_build_scopes_are_those_lanes_writes_and_only_the_rest_is_held(self):
+        # two members edit with their Edit tool (no shell call open) while the reviewer's shell call runs
         from devkit import audit
-        flagged = pg.scope_written("claude", "s1", "a_seraph", ["docs/audit.md"]) or {}
-        self.assertEqual((flagged.get("paths"), flagged.get("certainty")), (["docs/audit.md"], "certain"))
-        (text,) = self.told()
-        self.assertIn("Code reviewer (Seraph)", text)
-        self.assertIn("Senior engineer (Neo)", text)
-        recs = audit.query(action="scope.write")
-        self.assertEqual([(r["target"], r["detail"]) for r in recs], [("Seraph", "certain: docs/audit.md")])
+        pg.add_step("audit tests=10m")
+        pg.assign("audit tests", "Mouse", scope="tests/test_audit.py", why="test")
+        launch("a_mouse", "devkit:mouse", "Mouse: audit tests")
+        flagged = pg.scope_written("claude", "s1", "a_seraph", ["docs/audit.md", "tests/test_audit.py", "lib/x.py"])
+        self.assertEqual((flagged["paths"], flagged["certainty"]), (["lib/x.py"], "possible"))
+        self.assertEqual(sorted((r["target"], r["detail"]) for r in audit.query(action="scope.write")),
+                         [("Mouse", "attributed: tests/test_audit.py"), ("Neo", "attributed: docs/audit.md"),
+                          ("Seraph", "possible: lib/x.py")])
+        self.assertNotIn("changed by another lane", pg.render_update(pg.load_run("claude", "s1"), branch="b"))
+
+    def test_a_shell_call_that_only_overlaps_other_members_edits_tells_nobody(self):
+        self.assertIsNone(pg.scope_written("claude", "s1", "a_seraph", ["docs/audit.md"]))
+        self.assertEqual(self.told(), [])
+        self.assertNotIn("scope_writes", pg.load_run("claude", "s1")["agents"]["a_seraph"])
 
     def test_a_file_in_a_build_scope_is_credited_to_that_lane_while_it_has_a_call_open(self):
         from devkit import audit
@@ -1844,6 +1853,9 @@ class ScopeWriteTests(unittest.TestCase):
                       [(r["target"], r["detail"]) for r in audit.query(action="scope.write")])
 
     def test_the_review_step_lists_the_files_another_lane_changed_in_the_scope_of_the_work_it_follows(self):
+        run = pg.load_run("claude", "s1")  # the Senior engineer's lane stopped: nobody works on docs/audit.md now
+        run["agents"]["a_neo"]["state"] = "stopped"
+        pg._save(run, touch_session=False)
         pg.scope_written("claude", "s1", "a_seraph", ["docs/audit.md"])
         lines = pg.render_update(pg.load_run("claude", "s1"), branch="b").splitlines()
         review = next(ln for ln in lines if " 2. review" in ln)

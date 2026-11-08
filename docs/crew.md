@@ -387,10 +387,10 @@ main session launched: a member's own helpers, and agents with no launch record,
 When the member stops for good, its step ends on evidence: done with a Check ✓ in its report or its own
 `dev progress step --check`, otherwise unverified, for the tech lead to close with evidence or reopen. A review-only or
 read-only member whose shell call wrote files ends unverified too. A file that changed during that call inside a
-working member's scope counts as that member's write only while that member, or a helper of it, has a call open;
-otherwise it is the read-only member's own write, since a read-only member can write through a script in its
-scratch folder. Either way the working member's step keeps the file, and the review that follows that step lists it
-(`scope.write` in the audit trail). Keeping the step open while gate findings remain is planned.
+working member's scope counts as that member's write, whether or not that member has a call open (an edit opens
+none), and nothing is flagged for it. Only a file no working member's scope holds counts as the read-only member's
+own write; an open step whose scope holds it keeps it, and the review that follows that step lists it (`scope.write`
+in the audit trail). Keeping the step open while gate findings remain is planned.
 
 **Review steps start on unverified work.** A step whose dependencies ended unverified waits, except a review step
 (its kind of work is review, or its member works review-only): it starts, and its Check ✓ ends done the steps it
@@ -602,7 +602,7 @@ dashboard and the handoff read, and devkit's audit trail (`dev audit`), publishe
 | `crew.decision`, `crew.decided`, `crew.mode` | a decision point, its answer (and by whom), a change of mode |
 | `crew.withdrawn`, `crew.decision-closed` | the tech lead withdrew a decision, or its run ended or was replaced, each with the reason |
 | `crew.message-closed` | a question that still waited for an answer closed because its run ended or was replaced, with the reason (never its text) |
-| `scope.write` | a file a read-only member's shell call changed, counted for the working member whose scope holds it while that member has a call open, otherwise flagged for the read-only member |
+| `scope.write` | a file a read-only member's shell call changed, counted for the working member whose scope holds it, call open or not, otherwise flagged for the read-only member |
 | `crew.delegate`, `crew.decline` | work handed to another member, or handed back |
 | `raci.override` | a step assigned to a member the RACI does not make Responsible, with the reason |
 | `caller.refused`, `caller.unverified` | a tech lead's command refused because it did not come from the main session, or allowed on Codex without verification |

@@ -5791,21 +5791,21 @@ def _shown(paths: list) -> str:
 
 
 def scope_written(agent: str, sid: str, aid: str, paths: list, now: float | None = None) -> dict | None:
-    """A review or read-only lane's shell call wrote these files (write detection). A review or read-only lane can
-    write through a script in its own scratch folder, so the scope a file lies in is no alibi: a file in the scope
-    of a build lane that works now is credited to that lane only while it (or a helper of it) has a call open in the
-    call ledger (open_calls), whose run may have written it (scope.write, outcome attributed); otherwise it is the
-    review lane's own write, certain. Each file held against the lane it keeps in `scope_writes`, so its report is
-    unverified and its step cannot end done on its word; a file outside every working build scope is "possible"
-    when a lane that may write works in the run at the time, else "certain". The build lane's open step keeps each
-    file of its scope the call changed (`other_writes`, either way), which the review step after it lists; Morpheus
-    gets one crew notice naming the lanes; and the audit trail a scope.write record. -> the lane's scope_writes, or
-    None without a lane or when it has none."""
+    """A review or read-only lane's shell call wrote these files (write detection). A file in the scope of a build
+    lane that works now (as `dev crew owner` reads it: lane_states) is that lane's write, whether or not it has a call
+    open: an Edit opens no shell call, so the call ledger cannot tell who wrote it (B-fy1ae3k2ao6). devkit credits it
+    to that lane (scope.write, outcome attributed) and flags nothing. Only a file no working lane's scope holds is
+    held against the review lane in `scope_writes`, so its report is unverified and its step cannot end done on its
+    word: "possible" when a lane that may write works in the run at the time, else "certain". An open step whose
+    scope holds such a file keeps it (`other_writes`), which the review step after it lists; Morpheus gets one crew
+    notice naming the files; and the audit trail a scope.write record. -> the lane's scope_writes, or None without a
+    lane or when it has none."""
     from . import crew
     now = now or time.time()
     paths = sorted({str(p) for p in paths or [] if p})
     if not paths:
         return None
+    states = lane_states(load_run(agent, sid) or {}, now, own=True)  # read before the lock: it reads other runs
     with _tx(agent, sid):
         run = load_run(agent, sid)
         lane = ((run or {}).get("agents") or {}).get(aid)
@@ -5813,60 +5813,45 @@ def scope_written(agent: str, sid: str, aid: str, paths: list, now: float | None
             return None
         chain = set(lane_chain(run, aid))
         builders = [k for k, v in run["agents"].items() if k not in chain and v.get("state") == "running"
+                    and (states.get(k) or {}).get("state", "working") == "working"
                     and lane_tools(run, k) in ("build", "all")]
         layers = {k: lane_scope(run, k) for k in builders}
         calling = {str(e.get("caller") or "") for e in open_calls(sid, now)} - {"main", ""}
         busy = {k for k in builders if any(k in lane_chain(run, c) for c in calling)}
-        owned, crossed, loose = {}, {}, []  # credited to a lane with a call open; in a quiet lane's scope; elsewhere
+        owned, loose = {}, []  # credited to the working lane whose scope holds it; held against the review lane
         for p in paths:
             holders = [k for k in builders if layers[k] and in_scope(p, layers[k])]
-            if not holders:
+            if holders:  # the one with a call open first, when two scopes hold it
+                owned.setdefault(next((h for h in holders if h in busy), holders[0]), []).append(p)
+            else:
                 loose.append(p)
-                continue
-            k = next((h for h in holders if h in busy), None)
-            (owned if k else crossed).setdefault(k or holders[0], []).append(p)
         who = lane.get("persona") or lane.get("label") or aid
         name = crew.who(who)
-        level = lane_tools(run, aid)
         certainty = "possible" if builders else "certain"
-        held = [p for files in crossed.values() for p in files] + loose
-        if held:
-            had = lane.get("scope_writes") or {}
-            sure = bool(crossed) or certainty == "certain" or had.get("certainty") == "certain"
-            lane["scope_writes"] = {"ts": round(now), "paths": sorted(set(had.get("paths") or []) | set(held))[:20],
-                                    "certainty": "certain" if sure else "possible"}
-        parts = []
-        for k, files in owned.items():
-            _mark_other_writes(run, k, files, aid, name, "possible", now)
-            parts.append(f"{_shown(files)} changed during its shell call, inside the scope of "
-                         f"{crew.who(_name_of(run, k))}, who had a call open then, so devkit credits "
-                         f"{'them' if len(files) > 1 else 'it'} to {crew.who(_name_of(run, k))}")
-        for k, files in crossed.items():
-            _mark_other_writes(run, k, files, aid, name, "certain", now)
-            parts.append(f"its shell call wrote {_shown(files)}, inside the scope of {crew.who(_name_of(run, k))}, "
-                         f"who had no call open then, so devkit counts {'them' if len(files) > 1 else 'it'} as its "
-                         f"own write")
         if loose:
+            had = lane.get("scope_writes") or {}
+            sure = certainty == "certain" or had.get("certainty") == "certain"
+            lane["scope_writes"] = {"ts": round(now), "paths": sorted(set(had.get("paths") or []) | set(loose))[:20],
+                                    "certainty": "certain" if sure else "possible"}
+            marked = _mark_other_writes(run, loose, chain, aid, name, certainty, now)
             maybe = (f" (possibly another member's: {', '.join(crew.who(_name_of(run, k)) for k in builders[:3])} "
                      f"works too)" if builders else "")
-            parts.append(f"its shell call wrote {_shown(loose)}{maybe}")
-        reviews = sorted({crew.who(_name_of(run, k)) for k in [*owned, *crossed]})
-        listed = f" The review of {' and '.join(reviews)}'s work lists these files." if reviews else ""
-        tail = (" Its report counts as unverified: check the change (git diff), keep or revert it, then close its step "
-                "with evidence." if held else " Check the change (git diff) before that review approves it.")
-        _post(run, aid, "main", f"devkit: {name} works {'review-only' if level == 'review' else 'read-only'}, and "
-              + "; and ".join(parts) + "." + listed + tail, now, from_name="devkit", kind="notice")
-        _save(run)
+            parts = [f"its shell call wrote {_shown(loose)}{maybe}"]
+            for k, files in owned.items():
+                parts.append(f"{_shown(files)} changed during it inside the scope of {crew.who(_name_of(run, k))}, "
+                             f"who works now, so devkit credits {'them' if len(files) > 1 else 'it'} to them")
+            listed = f" The review after {', '.join(marked)} lists these files." if marked else ""
+            level = lane_tools(run, aid)
+            _post(run, aid, "main", f"devkit: {name} works {'review-only' if level == 'review' else 'read-only'}, "
+                  "and " + "; and ".join(parts) + "." + listed + " Its report counts as unverified: check the change "
+                  "(git diff), keep or revert it, then close its step with evidence.", now, from_name="devkit",
+                  kind="notice")
+            _save(run)
         writes = dict(lane.get("scope_writes") or {}) or None
     for k, mine in owned.items():
         _audit("scope.write", _name_of(run, k), f"attributed: {', '.join(mine[:20])}"[:600], "attributed",
                lane=k[:16], paths=mine[:20], count=len(mine), project=run.get("project") or "",
-               why=f"changed during {who}'s shell call, inside the scope of {_name_of(run, k)}, who had a call open")
-    for k, mine in crossed.items():
-        _audit("scope.write", who, f"certain: {', '.join(mine[:20])}"[:600], "detected", lane=aid[:16],
-               paths=mine[:20], certainty="certain", count=len(mine), project=run.get("project") or "",
-               severity="warning",
-               why=f"inside the scope of {_name_of(run, k)} ({k[:16]}), who had no call open during {who}'s shell call")
+               why=f"changed during {who}'s shell call, inside the scope of {_name_of(run, k)}, who works now")
     if loose:
         _audit("scope.write", who, f"{certainty}: {', '.join(loose[:20])}"[:600], "detected", lane=aid[:16],
                paths=loose[:20], certainty=certainty, count=len(loose), project=run.get("project") or "",
@@ -5874,19 +5859,21 @@ def scope_written(agent: str, sid: str, aid: str, paths: list, now: float | None
     return writes
 
 
-def _mark_other_writes(run: dict, holder: str, files: list, by: str, by_name: str, certainty: str, now: float):
-    """The open steps of a build lane (or of the member a helper works for) whose scope holds these files keep them
-    as changed by another lane (`other_writes`), so the review of that work lists them (other_writes_for)."""
-    lanes = lane_chain(run, holder)
+def _mark_other_writes(run: dict, files: list, chain: set, by: str, by_name: str, certainty: str, now: float) -> list:
+    """The open steps outside the writing lane whose scope holds one of these files keep them as changed by another
+    lane (`other_writes`), so the review of that work lists them (other_writes_for). -> the names of those steps."""
+    out = []
     for st in run.get("plan") or []:
-        if st.get("owner") not in lanes or st.get("state") in DONE:
+        if st.get("owner") in chain or st.get("state") in DONE or not st.get("scope"):
             continue
-        mine = [p for p in files if not st.get("scope") or in_scope(p, [st["scope"]])]
+        mine = [p for p in files if in_scope(p, [st["scope"]])]
         if mine:
             marks = st.setdefault("other_writes", [])
             marks.append({"ts": round(now), "by": by[:16], "by_name": by_name, "paths": mine[:20],
                           "certainty": certainty})
             st["other_writes"] = marks[-20:]
+            out.append(st["name"])
+    return out
 
 
 def other_writes_for(run: dict, st: dict) -> list:
