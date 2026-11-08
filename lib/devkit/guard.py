@@ -1324,8 +1324,9 @@ IDENTITY_REASON = ("This command hides from what it runs that an agent runs it: 
 def identity_hiding(argv0) -> str | None:
     """IDENTITY_REASON for a segment (its words, prefixes included) that unsets or blanks an agent identity variable
     (core.AGENT_MARKERS): `unset NAME`, `env -u NAME …`, `env -i …`, an empty `NAME=` before a command, alone or
-    after export."""
-    names = set(core.AGENT_MARKERS)
+    after export. DEVKIT_FROM_AGENT, the lane marker a crew member's commands carry, is left to the caller-identity
+    rule, which refuses a member that changes it and lets the main session, which carries none, unset it."""
+    names = set(core.AGENT_MARKERS) - {"DEVKIT_FROM_AGENT"}
     words = [str(w) for w in argv0]
     for k, w in enumerate(words):
         m = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)=", w)
