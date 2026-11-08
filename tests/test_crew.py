@@ -444,6 +444,24 @@ class BriefTests(unittest.TestCase):
         a = cli.build_parser().parse_args(argv)  # the printed command is one the progress CLI accepts
         self.assertEqual((a.progress_cmd, a.which, a.to, a.scope), ("assign", "2", ["Neo"], "lib/parser/**,tests/test_parser.py"))
 
+    def test_a_brief_marks_the_skills_the_crew_gates_check_apart_from_its_roles_list(self):
+        # this run's briefs listed every skill alike, and some called a gated one optional; the gates check the
+        # skills of each procedure phase the member works in (gates.gated_skills) and those of the files it changes
+        with tempfile.TemporaryDirectory() as d:
+            text = ui.ANSI_RE.sub("", crew.brief_text(crew.member("kid"), "Speed up the build.", "tools/**", cwd=d))
+        part = text.split("## Skills to load first", 1)[1].split("\n## ", 1)[0]
+        gated, also = part.split("Also listed for your role", 1)
+        self.assertIn("The crew gates check these before you stop", gated)
+        for skill, phases in (("superpowers:test-driven-development", "Build"), ("testing", "Build and Verify"),
+                              ("docs", "Document"), ("superpowers:verification-before-completion", "Verify")):
+            self.assertIn(f"- `{skill}` ({phases} phase", gated)
+            self.assertNotIn(f"`{skill}`", also)
+        self.assertIn("plus the skills devkit's skill rules require for the files you change", gated)
+        for skill in ("workspace", "using-devkit", "communicating"):
+            self.assertIn(f"- `{skill}`", also)
+            self.assertNotIn(f"`{skill}`", gated)
+        self.assertNotIn("optional", part.lower())
+
     def test_every_brief_names_the_member_s_own_scratch_folder(self):
         # the guard lets a member write only in scratchpad/<its id>/ of the session scratchpad; a brief that does not
         # say so sends members to the shared top level, where the guard refuses them (lesson L-fxs9q5evz83)
@@ -525,6 +543,16 @@ class CrewSessionTests(unittest.TestCase):
             rc, _, err = run_cli("crew", "answer", "M9", "x")
             self.assertEqual(rc, 2)
             self.assertIn("no message M9", err)
+
+    def test_ask_tells_the_asker_the_wait_that_brings_the_answer(self):
+        # it said the answer arrives "with their next tool call or prompt": nothing told a member how to wait for it
+        with TempState() as t:
+            pg.start("Parser", plan=["parse", "review"])
+            t.launch()
+            out = run_cli("crew", "ask", "Should the parser accept empty lines?", from_agent="a1")[1]
+            self.assertIn("run dev watch --wait --for me as a command of its own", out)
+            out = run_cli("crew", "ask", "--to", "Neo", "Is the parser done?")[1]
+            self.assertIn("run dev watch --wait as a command of its own", out)
 
     def test_ask_without_a_run_explains_and_exits_2(self):
         with TempState():
@@ -799,6 +827,60 @@ class CrewSessionTests(unittest.TestCase):
             self.assertIn("Drop the legacy column? → B", run_cli("crew", "inbox", from_agent="a1")[1])
             self.assertEqual(run_cli("crew", "decide", "D2", "A")[0], 2)  # the developer's answer stands
             self.assertEqual(run_cli("crew", "ask", "--decision", "x", "--to", "Seraph")[0], 2)
+
+
+KID_REPORT = ("**[Firefly> DevKit · DevEx engineer (Kid)]** acme/api · `main` · fix\n- **Done:** the fix\n"
+              "- **Check:** ✓ 10 tests pass\n- **Next:** the tech lead")
+
+
+class ResumedMemberStepTests(unittest.TestCase):
+    # B-fxriigsni7c, B-fyj09eek926, live in this run: the DevEx engineer, resumed with SendMessage for its next step,
+    # was never bound to it, so its scope stayed the old step's and its own step close went to its lane, not the plan.
+    # A step assigned to a member whose lane works and holds no other open step is that lane's, whatever its launch
+    # was called; a lane resumed with no open step takes the one step waiting for its member
+    def setUp(self):
+        # the DevEx engineer works on "fix", reports with its evidence, and stops: its lane closes the step
+        self.state = TempState().__enter__()
+        self.addCleanup(self.state.__exit__, None, None, None)
+        pg.start("Hotfix", plan="fix=30m; graph view=30m after fix; dashboard=30m after fix")
+        pg.assign("fix", "Kid", why="test")
+        self.state.launch("a1", "devkit:kid", "Kid: fix crew message ids")
+        pg.step("fixed", which="fix", from_agent="a1", check="✓ 10 tests pass")
+        self.stop()
+
+    def stop(self):
+        pg.on_subagent("claude", {"session_id": "s1", "agent_id": "a1", "agent_type": "devkit:kid",
+                                  "last_assistant_message": KID_REPORT}, False)
+
+    def resume(self):  # SendMessage: the same agent works again
+        pg.on_subagent("claude", {"session_id": "s1", "agent_id": "a1", "agent_type": "devkit:kid"}, True)
+
+    def step(self, name):
+        return next(s for s in pg.load_run("claude", "s1")["plan"] if s["name"] == name)
+
+    def test_a_step_assigned_to_a_resumed_member_binds_to_its_lane_and_its_report_closes_it(self):
+        self.resume()
+        pg.assign("graph view", "Kid", scope="lib/devkit/progress.py", why="test")
+        s = self.step("graph view")
+        self.assertEqual((s["owner"], s["state"]), ("a1", "running"))
+        self.assertEqual(pg.load_run("claude", "s1")["agents"]["a1"]["scope"], ["lib/devkit/progress.py"])
+        pg.step("graph view done", which="graph view", from_agent="a1", check="✓ 12 tests pass")
+        self.stop()
+        self.assertEqual(self.step("graph view")["state"], "done")
+
+    def test_a_member_resumed_with_no_open_step_takes_the_step_waiting_for_it(self):
+        pg.assign("graph view", "Kid", scope="lib/devkit/progress.py", why="test")
+        self.assertEqual(self.step("graph view")["owner"], "main")  # nobody works for it yet
+        self.resume()
+        s, run = self.step("graph view"), pg.load_run("claude", "s1")
+        self.assertEqual((s["owner"], s["state"], run["agents"]["a1"]["scope"]),
+                         ("a1", "running", ["lib/devkit/progress.py"]))
+
+    def test_a_working_lane_with_another_open_step_never_takes_a_new_one(self):
+        self.resume()
+        pg.assign("graph view", "Kid", why="test")  # the resumed lane takes it
+        pg.assign("dashboard", "Kid", why="test")
+        self.assertEqual((self.step("dashboard")["owner"], self.step("dashboard")["state"]), ("main", "pending"))
 
 
 class DispatchCliTests(unittest.TestCase):

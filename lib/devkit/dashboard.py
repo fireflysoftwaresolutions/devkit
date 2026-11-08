@@ -884,10 +884,13 @@ def _runs(now: float, host: str = "", raw: list = None) -> list:
         b.update({"id": run_id(r), "agent": r.get("agent"), "session": r.get("session"), "project": r.get("project"),
                   "mode": r.get("mode") or "", "host": host, "estimate_cal": r.get("estimate_cal"), "finished": r.get("finished"),
                   "seen": run_seen(r), "total_min": plan_total(r, now),
-                  # only what still waits: open decisions (not moot) and questions nobody answered (never a notice)
-                  "decisions": [{k: d.get(k) for k in ("id", "ts", "question", "options", "recommend", "irreversible", "from_name")}
+                  # only what still waits: open decisions (not moot) and questions nobody answered (never a notice),
+                  # by ids that name their run (progress.shown_id): the page belongs to no session
+                  "decisions": [dict({k: d.get(k) for k in ("ts", "question", "options", "recommend", "irreversible",
+                                                            "from_name")}, id=progress.shown_id(r, d.get("id")))
                                 for d in progress.pending_decisions(r)],
-                  "questions": [{k: m.get(k) for k in ("id", "ts", "from_name", "text")}
+                  "questions": [dict({k: m.get(k) for k in ("ts", "from_name", "text")},
+                                     id=progress.shown_id(r, m.get("id")))
                                 for m in progress.waiting_messages(r)][-20:],
                   "updates": [{k: u.get(k) for k in ("ts", "kind", "text", "next")} for u in (r.get("updates") or [])[-8:]]})
         out.append(b)
@@ -1279,13 +1282,16 @@ def run_detail(rid: str, now: float = None):
                                    if u.get("step") == name and (u.get("check") or u.get("kind") in ("step", "done", "blocked"))],
                       "history": [x for x in hist if x.get("step") == name]})
     # each decision with the state the page shows (a pending one nobody waits for is moot, with why), and each message
-    # with whether it still waits for an answer (a notice, an answer or a replied question never does)
-    decisions = [dict(d, state=progress.decision_state(run, d),
+    # with whether it still waits for an answer (a notice, an answer or a replied question never does); ids name
+    # their run (progress.shown_id), as on the runs list
+    decisions = [dict(d, id=progress.shown_id(run, d.get("id")), state=progress.decision_state(run, d),
                       **({"moot": progress.moot_text(run, d)} if progress.is_moot(run, d) else {}))
                  for d in run.get("decisions") or [] if isinstance(d, dict)]
     msgs = [m for m in run.get("messages") or [] if isinstance(m, dict)]
     waiting = {m.get("id") for to in {m.get("to") for m in msgs} for m in progress.waiting_messages(run, to)}
-    questions = [dict(m, waiting=m.get("id") in waiting) for m in msgs]
+    questions = [dict(m, id=progress.shown_id(run, m.get("id")), waiting=m.get("id") in waiting,
+                      **({"reply_to": progress.shown_id(run, m["reply_to"])} if m.get("reply_to") else {}))
+                 for m in msgs]
     running = run.get("state") == "running"
     lo, hi = safe(lambda: progress.eta_range(run, now), (None, None)) if running else (None, None)
     live = safe(lambda: progress.lane_states(run, now), {})

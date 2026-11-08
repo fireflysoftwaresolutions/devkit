@@ -95,7 +95,8 @@ dev progress assign api --to Tank --scope "services/invoices/**,tests/invoices/*
 dev progress assign ui  --to Trinity --scope "web/src/invoices/**" --activity frontend
 dev crew brief Tank "Add the CSV export endpoint" --scope "services/invoices/**,tests/invoices/**" --step api \
   --activity backend
-dev crew graph                       # the session as one graph: steps, lanes, decisions, approvals owed, messages
+dev crew graph                       # the project's sessions as graphs: steps, lanes, decisions, approvals, messages
+dev crew graph --global              # every live session on this Mac (the default outside a project)
 ```
 
 - **Declare each step's kind of work:** `[id]` after a step in the plan (or in `dev progress add`), `--activity <id>`
@@ -108,7 +109,9 @@ dev crew graph                       # the session as one graph: steps, lanes, d
   own, and you are told why. Put the step's name in the launch description (`dev crew brief --step` does). A step
   delegated into a working lane closes only on that lane's own evidence: the member names it with
   `dev progress step "…" --step "<name>" --check "…"`.
-- The step's time is its member's own time, and its `--scope` is the set of files the guard lets that member edit. A
+- The step's time is its member's own time, and its `--scope` is the set of files the guard lets that member edit.
+  It is also what the member commits: in a crew lane, `dev commit` commits only the staged files inside the scope and
+  leaves the rest staged for their owner, so members who share one checkout never commit the files of another. A
   member that needs more asks you. Write scopes repository-relative (`lib/**`): they match in every checkout of the
   repository. `assign` and `dev crew delegate --scope` rewrite an absolute or `~` path inside one checkout to that
   form and tell you, and refuse one that spans checkouts or names a worktree that is not there (deleted included).
@@ -119,7 +122,10 @@ dev crew graph                       # the session as one graph: steps, lanes, d
 - Work you discover goes into the plan when it **starts** (`dev progress add`, then `dev progress begin`), so its
   time is its own; close a step only with its evidence and only the step it is about.
 - `dev crew brief` prints the brief and the exact spawn line. Launch every parallel member **in one message**. Then
-  do non-overlapping work, and never poll: each member notifies you when it finishes.
+  do non-overlapping work, and never poll. Before you end a turn while members work, arm `dev watch --wait` (in
+  Claude Code with Bash `run_in_background`, in Codex in the foreground with `--timeout 10`) and name its task id:
+  it wakes you for their questions, the decisions for the developer, steps that become ready, members that stop or
+  are lost, and CI results. Arm it again after each wake while members still work (`wait-and-wake` skill).
 
 A good brief (the `working-efficiently` skill has more): the goal and how to check it; the scope (files owned, files
 not to change); the decisions already made and why; the skills to load; and what to return. Paths, not pasted
@@ -166,7 +172,15 @@ files.
   default, or `--to Seraph`; `--to "Tech lead"` and `--to Morpheus` reach the main session). The message reaches the
   recipient with its next action. Answer with `dev crew answer M1 "Yes, skip them"`. Answer quickly: a member waiting
   on you blocks a lane. Only a question waits: a notice (a CI result, a step or launch notice, a decision's result)
-  and an answer close once delivered, and `dev status` lists only the questions nobody answered.
+  and an answer close once delivered, and `dev status` lists only the questions nobody answered. Another session's
+  run shows its ids with its session (`M1@9448c4d0`): answer by that qualified id, never the bare one, and record a
+  decision only in the session that owns it.
+- **Waiting for an answer:** a member keeps working on what does not need the answer. When it is blocked, it waits
+  with `dev watch --wait --for me --timeout 9` in the foreground, as a command of its own, and continues with what
+  it prints; with no answer, it ends with the question under "Needs from the tech lead." In Claude Code, your
+  `SendMessage` to the member who asked also answers its open questions (devkit records them as answered via
+  SendMessage, with your text); Codex's `send_input` does not, so answer with `dev crew answer` first. A question
+  whose member ended and holds no open step is **moot**: nobody waits for it, and it needs no answer.
 - **Decisions that are the developer's** (scope, behavior, cost, risk): you ask the developer with the decision
   template (`communicating` skill). Members never ask the developer directly.
 - **Updates to the developer** are yours: `dev progress step` prints the status block with every lane under it.

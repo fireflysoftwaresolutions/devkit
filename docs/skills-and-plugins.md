@@ -40,6 +40,7 @@ agent's copy when it differs from the checkout.
 | `cicd` | Fast, reliable, DevSecOps pipelines on GitHub Actions, GitLab, Bitbucket and Azure: `dev ci audit` and `dev ci init` (see [CI/CD pipelines](ci-cd.md)) |
 | `crew` | Leading devkit's crew: who to send, parallel or in sequence, briefs, lanes, scopes, messages, delegation, guided or automatic decisions (see [The crew](crew.md)) |
 | `work-state` | Keeping devkit's records of work in flight true: what each state of an item, run, step, lane, decision, CI watch, and branch means, what to do before ending a turn, after a merge, and before a release, and how to repair drift (see [Work states](work-states.md)) |
+| `wait-and-wake` | Waiting without polling: when to arm `dev watch --wait`, the one wait for every devkit event, and how each agent arms it (the Claude Code main session in the background, a crew member or Codex in the foreground), the exit codes, re-arming, and `dev watches` (see [Progress and communication › Waiting and waking](progress-and-communication.md#waiting-and-waking)) |
 
 Slash commands: `/devkit:status`, `/devkit:overview`, `/devkit:task`, `/devkit:handoff`, `/devkit:standup`,
 `/devkit:ship`, `/devkit:ci`, `/devkit:dashboard`, `/devkit:doctor`, `/devkit:progress`, `/devkit:crew-status`,
@@ -57,42 +58,54 @@ same roles in `~/.codex/agents/`. See [The crew](crew.md).
 ## Required skills
 
 Installing a skill is not enough: the agent has to load it for the work it fits. devkit maps kinds of work to the
-skills they require, in `config/skill-rules.json`, and enforces the mapping in both agents.
+skills they require, in `config/skill-rules.json`, and enforces the mapping in Claude Code and Codex alike, except for
+one step: only Claude Code's subagent briefs get the required skills added by a hook (see
+[Where devkit enforces them](#where-devkit-enforces-them)).
 
 ### The rules
 
 | Rule | Claude Code | Codex | Matches (files; commands; kinds of work) |
 | --- | --- | --- | --- |
-| `ui` | `frontend-design`, `impeccable` | the same | HTML, CSS, Sass, Less, TSX, JSX, Vue, and Svelte files, code in other languages that renders HTML or styles; `ux`, `frontend`, `design-system`, `accessibility`, and `i18n` work |
+| `ui` | `frontend-design`, `impeccable` | the same | HTML, CSS, Sass, Less, TSX, JSX, Vue, and Svelte files; code in other languages, outside tests, that renders HTML or styles or declares an Angular component; `ux`, `frontend`, `design-system`, `accessibility`, and `i18n` work |
 | `testing` | `testing` | `testing` | Test files of every stack, `conftest.py`, test runner configs; `pytest`, `jest`, `vitest`, `dev test`, `python3 -m unittest`; `testing` work |
 | `angular` | `angular-developer` | `angular-developer` | Components, `angular.json`, routes; `ng build`, `ng generate`, `ng serve`, `ng test`, `ng update` |
 | `react` | `react-best-practices` | `react-best-practices` | TSX and JSX files; `next build`, `next dev` |
 | `spring` | `java-springboot`, `backend` | the same | Java and Kotlin files that use `org.springframework` |
 | `java-tests` | `java-junit`, `spring-boot-testing` | the same | `*Test.java`, `*Tests.java`, `*IT.java` |
-| `api` | `backend` | `backend` | OpenAPI, GraphQL, and protobuf files, controllers; `backend` and `sso` work |
-| `database` | `supabase-postgres-best-practices`, `backend` | the same | SQL files and migration folders; `alembic`, `flyway`, `liquibase`, `psql`, `prisma migrate`; `database` work |
-| `workflows` | `cicd`, `github-actions-hardening`, `delivery` | the same | GitHub, GitLab, Bitbucket and Azure pipeline files; `gh workflow`, `gh run`; `cicd` work |
+| `api` | `backend` | `backend` | OpenAPI, GraphQL, and protobuf files; Java, PHP, and TypeScript controllers; Python, PHP, and Node code, outside tests, that declares HTTP routes (FastAPI, Flask, Django, Laravel, Symfony, Express, NestJS, Fastify, Hono); `backend` and `sso` work |
+| `database` | `backend` | `backend` | SQL files and migration folders; `alembic`, `flyway`, `liquibase`, `prisma migrate`; `database` work |
+| `postgres` | `supabase-postgres-best-practices` | the same | SQL files and migration folders in a repository whose project files name Postgres; `psql`, `pg_dump`, `pg_restore` |
+| `workflows` | `cicd`, `github-actions-hardening`, `delivery` | the same | GitHub, GitLab, Bitbucket and Azure pipeline files; `gh workflow`; `cicd` work |
 | `security` | `devsecops` | `devsecops` | Dockerfiles, security folders, Terraform; `dev sec scan`; `security`, `sso`, `redteam`, and `dependencies` work |
-| `docs` | `docs` | `docs` | `README.md`, `docs/**/*.md`, MDX, `CHANGELOG.md`, `CONTRIBUTING.md`; `dev docs check`; `docs` work |
+| `terraform` | `terraform-style-guide` | the same | `*.tf` and `*.tfvars` files, only when the `iac` skill group is installed |
+| `docs` | `docs` | `docs` | `README.md`, Markdown in `docs/`, MDX, `CHANGELOG.md`, `CONTRIBUTING.md`, skills (`plugin/skills/**`, any `SKILL.md`), agent files, slash commands, and `agents/AGENTS.md`; `dev docs check`; `docs` work |
 | `diagrams` | `diagrams` | `diagrams` | Diagram specs, SVG, C4, and Mermaid files; `dev diagram`; `architecture` work |
-| `delivery` | `delivery`, `release-policy` | the same | `CHANGELOG.md`, `VERSION`, `cliff.toml`, release-please files; `git push`, `git tag`, `dev push`, `dev release`, `dev pr`, `gh pr create`, `gh release`; `release` work |
+| `delivery` | `delivery` | `delivery` | `git push`, `dev push`, `dev pr`, `gh pr create`; `release` work |
+| `release` | `delivery`, `release-policy` | the same | `VERSION`, `cliff.toml`, release-please files; `git tag`, `dev release`, `gh release`; `release` work |
 | `crew` | `crew`, `working-efficiently` | the same | `plan` work |
 | `communicating` | `communicating` | `communicating` | `dev task delegate`, `dev report`; `plan` and `scope` work |
-| `learning` | `learning-loop` | `learning-loop` | `dev lesson`, `git revert`; `incident` work |
+| `learning` | `learning-loop` | `learning-loop` | `dev lesson add`, `dev lesson recur`, `dev lesson prevent`, `git revert`; `incident` work |
 | `work-state` | `work-state` | `work-state` | `dev task reconcile`, `dev branch prune`, `dev crew withdraw`, `dev progress confirm`; `release` and `plan` work |
 
 A rule matches on what the work does, never on the words of your request, which can be in any language: globs on the
 files a turn changed (`files`); a regular expression on the content of changed files (`content`, applied to the
-`files` matches, or to the `content_files` globs, so a Python file that renders HTML counts as UI); the command words
-an agent runs (`commands`); and the kinds of work a step or brief declares (`activities`, ids from `dev crew raci`).
+`files` matches, or to the `content_files` globs except those in `content_exclude`, so a Python file that renders
+HTML counts as UI and a test that holds HTML does not); the command words an agent runs (`commands`, read without
+their quoted text and heredocs, with `bin/dev` counted as `dev`); and the kinds of work a step or brief declares
+(`activities`, ids from `dev crew raci`). A `project` condition limits a rule to repositories whose project files
+match, such as the `postgres` rule, and a `group` condition applies a rule only when its optional skill group is in
+`skills.groups`, such as the `terraform` rule. A file on disk outside every repository is scratch work and matches no
+rule.
 
 ### Where devkit enforces them
 
-| When | Hook | What happens |
-| --- | --- | --- |
-| Claude starts a subagent | PreToolUse on the Agent and Task tools | A "devkit · required skills" section is appended to the subagent's brief, with the skills of its declared kind of work (else its member's Responsible one) and of the files it owns, so the subagent loads them too |
-| A crew member stops | SubagentStop | The crew gates send the member back once if it did not load the skills of its procedure or of the files it changed |
-| The agent finishes a turn | Stop | If the turn changed matching files without loading a required skill, the turn goes back once per skill per session, with the reason and the files, to load the skill, and review the change |
+| When | Hook | Claude Code | Codex |
+| --- | --- | --- | --- |
+| A session starts | SessionStart | The context carries the catalog: the skills of each kind of work, for the agent to pick | The same |
+| A crew member is briefed | `dev crew brief` | The brief lists first the skills the crew gates check before the member stops (each procedure phase's, and those the files of its scope require), then the other skills of its role or kind of work; it never calls a gated skill optional | The same |
+| A subagent starts | PreToolUse | On the Agent and Task tools, a "devkit · required skills" section is appended to the subagent's brief, with the skills of its declared kind of work (else its member's Responsible one) and of the files it owns | Not enforced: a hook cannot rewrite a `spawn_agent` call, so a member gets its skills only from the brief `dev crew brief` writes |
+| A crew member stops | SubagentStop | The crew gates send the member back once if it did not load the skills of its procedure or of the files it changed | The same, judged against the skills installed for Codex |
+| The agent finishes a turn | Stop | If the turn changed matching files or ran matching commands without loading a required skill, it goes back once per skill per session to load the skill and review the work; the request names the reason and the files or commands | The same |
 
 devkit reads which skills a session loaded from its transcript, that is, Claude's Skill tool calls and reads of a `SKILL.md`,
 and Codex's shell commands that read a `SKILL.md`. Only skills that are installed for that agent are required.
@@ -305,10 +318,10 @@ To move to a newer impeccable, change its `ref` in `config/skills.json` after re
 
 | Skill | Source · license | Use |
 | --- | --- | --- |
-| `grill-with-docs` | mattpocock/skills · MIT | Interview the developer to align before work starts |
+| `grill-with-docs` | mattpocock/skills · MIT | Interview the developer to align before work starts. Your own slash command, `/grill-with-docs`: a model cannot load it |
 | `domain-modeling` | mattpocock/skills · MIT | Glossary and domain model, ADRs |
 | `codebase-design` | mattpocock/skills · MIT | Deep-module design |
-| `improve-codebase-architecture` | mattpocock/skills · MIT | Architecture review and refactoring direction |
+| `improve-codebase-architecture` | mattpocock/skills · MIT | Architecture review and refactoring direction. Your own slash command, `/improve-codebase-architecture`: a model cannot load it |
 | `architecture` | anthropics/knowledge-work-plugins · Apache-2.0 | Architecture decisions and trade-offs |
 | `system-design` | anthropics/knowledge-work-plugins · Apache-2.0 | System design reviews |
 | `incident-response` | anthropics/knowledge-work-plugins · Apache-2.0 | Triage, communication, and blameless postmortems |
@@ -368,6 +381,7 @@ attribution, with the other sources.
 | --- | --- | --- |
 | Superpowers specs and plans go to `~/Development/.handoff/plans/<id>/` and are not committed | global instructions | Superpowers otherwise writes and commits `docs/superpowers/…` in the repository |
 | Superpowers asks before creating a worktree, and uses `dev wt new` | global instructions | Its worktree step otherwise runs after every design approval |
+| Where a Superpowers skill and devkit differ, devkit wins: test scale and selection, finishing a branch (`dev push`, `dev pr create`, `dev pr ready`, `dev pr merge`, `dev wt rm`), the plans folder, and worktrees | global instructions | Superpowers' TDD asks for a test first on every change, and its branch-finishing step merges locally with `git merge`, pushes with a raw `git push`, and removes worktrees with `git worktree remove`, outside devkit's PR flow and its one CI run |
 | `SUPERPOWERS_DISABLE_TELEMETRY=1` | agent environments, shell | Turns off its version ping |
 | `ENABLE_STOP_REVIEW=0`, `ENABLE_COMMIT_REVIEW=0` | Claude `env` | security-guidance would otherwise run an Opus review after every turn and an agent review on every commit |
 | `CLAUDE_SECURITY_SCAN_TIP=off` | Claude `env` | No scan tip in every session; run Claude Security when you want it |
@@ -571,7 +585,9 @@ it on every Mac.
    `dev ext update <name> --why "…"` on a branch of the devkit checkout: it prints the compare link, the commits, and
    the files changed before it changes only that pin.
 
-3. If a kind of work should require it, add or change a rule in `config/skill-rules.json`.
+3. If a kind of work should require it, add or change a rule in `config/skill-rules.json`. A skill that sets
+   `disable-model-invocation` goes in its source's `user_only` list instead: the developer runs it as a slash
+   command, and no crew procedure or rule may ask a model to load it.
 4. Run `dev install --only skills`, then `dev doctor`.
 5. Record the change in `CHANGELOG.md` and in `NOTICE`.
 

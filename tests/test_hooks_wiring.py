@@ -451,11 +451,15 @@ class CommandTextRecordTests(WiringCase):
         # a member's call devkit cannot route to its lane (the hooks' own refusal, cut at 200 characters)
         pg.start("Work", plan=["parser"])
         launch("a_tank", "devkit:tank", "Tank: parser")
-        why = self.deny(self.hook("guard", self.bash(f'cd /tmp && dev crew ask "{self.MESSAGE}"', aid="a_tank")))
+        # after cd it reaches the lane (guard.lane_route); fed by a pipe it does not
+        out = self.hook("guard", self.bash(f'cd /tmp && dev crew ask "{self.MESSAGE}"', aid="a_tank"))
+        self.assertIsNone(self.deny(out))
+        self.assertIn("cd /tmp && DEVKIT_FROM_AGENT=a_tank dev crew ask", out)
+        why = self.deny(self.hook("guard", self.bash(f'echo y | dev crew ask "{self.MESSAGE}"', aid="a_tank")))
         self.assertTrue(why, "the lane's compound call is refused")
         recs = self.records("guard.deny")
-        # cd is no program the masker knows: its name stays and its argument keeps only its length (26.11.5)
-        self.assertEqual([r["target"] for r in recs], [f"cd [text not recorded: 4 characters] && {self.MASKED}"])
+        # echo is no program the masker knows: its name stays and its argument keeps only its length (26.11.5)
+        self.assertEqual([r["target"] for r in recs], [f"echo [text not recorded: 1 characters] | {self.MASKED}"])
         self.assertNotIn("secret plan", self.stored())
 
     def test_a_refused_irreversible_command_reads_whole_but_is_recorded_masked(self):

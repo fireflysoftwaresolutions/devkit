@@ -197,12 +197,15 @@ class CacheAndSegment(Sandbox):
         prompt.refresh(reg={"projects": [self.project("acme/devkit", main)]}, runs=[])
         f, d = prompt.cache_zsh(), prompt.folder()
         self.assertEqual(self.probe((main, 120)), [("✦ devkit", UNSET)])
-        os.chmod(f, 0o666)
+        # the test sets the file mode it checks, on its own temporary files
+        os.chmod(f, 0o666)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions
         self.assertEqual(self.probe((main, 120)), [(UNSET, UNSET)])
         os.chmod(f, 0o600)
-        os.chmod(d, 0o777)
+        # the test sets the file mode it checks, on its own temporary files
+        os.chmod(d, 0o777)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions
         self.assertEqual(self.probe((main, 120)), [(UNSET, UNSET)])
-        os.chmod(d, 0o700)
+        # the test sets the file mode it checks, on its own temporary files
+        os.chmod(d, 0o700)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions
         real = self.root / "elsewhere.zsh"
         os.replace(f, real)
         os.symlink(real, f)
@@ -267,6 +270,31 @@ class CacheAndSegment(Sandbox):
             self.assertEqual(self.probe((main, 120)), [(f"✦ devkit · checks {glyph}", UNSET)])
         (main / ".git" / "HEAD").write_text("ref: refs/heads/feat/other\n")  # git switch, and no devkit event yet
         self.assertEqual(self.probe((main, 120)), [("✦ devkit", UNSET)])
+
+    # The session-start welcome reads the same records with their details: when the run ended and the first job
+    # that failed, from a watch result or from the runs devkit read last, whichever is newer.
+    def test_checks_detail_gives_the_newest_result_with_its_time_and_failed_job(self):
+        remote = "https://github.com/acme/devkit.git"
+        self.assertEqual(prompt.checks_detail(remote, "main"), {})
+        ciwatch.WATCH.mkdir(parents=True)
+        (ciwatch.WATCH / f"{ciwatch._key('acme/devkit', 'main')}.json").write_text(json.dumps(
+            {"ts": 1_700_000_000, "state": "failed", "repo": "acme/devkit", "branch": "main",
+             "diagnoses": [{"failed_jobs": [{"name": "unit tests"}, {"name": "lint"}]}]}))
+        self.assertEqual(prompt.checks_detail(remote, "main"),
+                         {"state": "failed", "ts": 1_700_000_000, "at": 1_700_000_000, "failed": "unit tests"})
+        cistatus.CACHE.mkdir(parents=True)
+        runs = cistatus.CACHE / "runs-github-acme__devkit-main-1-1.json"
+        runs.write_text(json.dumps({"runs": [{"branch": "main", "status": "failed", "started": 1_700_000_100,
+                                              "finished": 1_700_000_400,
+                                              "jobs": [{"name": "build", "status": "success"},
+                                                       {"name": "integration", "status": "failed"}]}]}))
+        os.utime(runs, (1_700_000_500, 1_700_000_500))
+        self.assertEqual(prompt.checks_detail(remote, "main"),
+                         {"state": "failed", "ts": 1_700_000_500, "at": 1_700_000_400, "failed": "integration"})
+        self.assertEqual(prompt.checks_for(remote, "main"), "failed")
+        os.utime(runs, (1_699_999_000, 1_699_999_000))  # older than the watch result: the watch result wins
+        self.assertEqual(prompt.checks_detail(remote, "main")["failed"], "unit tests")
+        self.assertEqual(prompt.checks_detail(remote, "feat/other"), {})
 
     # `dev ci watch` records a result: once the developer turned the helper on, the prompt shows it at once; before
     # that, nothing is written. Through the real audit trail (lesson L-fxzc02legsi: no stubbed recorder).

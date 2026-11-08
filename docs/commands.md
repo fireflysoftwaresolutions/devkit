@@ -96,7 +96,8 @@ The project you are in, or `<name>`, in the order of its questions:
 1. **Needs you:** what is open for you now, or `✓ Nothing needs you right now.` A crew decision waiting for you, a
    crew question to the tech lead nobody answered yet (with its `dev crew answer` command), a project outside devkit's
    folder layout (with its `dev adopt` command), and work at risk. The last status block's You bullet is not repeated
-   here: it may be done already.
+   here: it may be done already. A question or decision of another session's run shows with that run's session,
+   `M3@9448c4d0`; one of your own session's run keeps its bare id, `M3`. A run that ended lists none.
 2. **Right now:** the checks of the branch or its open PR, the crew members working now (role, name, and what their
    step does, never its code), and the plan's steps done and time left while a run works. A run works while it or one
    of its crew reported in the last 30 minutes.
@@ -325,8 +326,8 @@ Live progress of long agent work, with active time, a critical-path ETA and a pl
 | `dev progress step "<what finished>" --check "<evidence>" [--step <n or name>] [--next "…"] [--force]` | Closes the running step (or the one named) with its evidence, and prints the update, which is the status block with the plan under it, then the exact change made. Refused when the description does not match the step, a crew member still owns it, or its dependencies are open; `--no-check` when there is nothing to verify |
 | `dev progress step "<what finished>" --check "<evidence>" --approves "api, screens"` | The step's Check is also its verdict on the finished steps it names: `✓` approves them, `✗` or `⚠` sends them back. Refused, whole, when a named step is not done, has no kind of work, was done by the same member, or is approved by someone else in the RACI |
 | `dev progress note "<what is happening>" [--next "…"]` | An update while a step is still running: recorded and printed as the status block (Check `–` the step is still running), and no step changes state. From a crew member, it stays in its lane |
-| `dev progress add "<name>=<estimate> [after …] [<id>]" [--why "…"]` | Adds a step found during the work; add it when it starts. `[<id>]` declares its kind of work, as in a plan. From a crew member, the step goes to its own lane |
-| `dev progress assign <step> --to <member> [--scope "<globs>"] [--activity ID] [--allow push,pr] [--why "…"]` | Hands a step to a crew member; its time is that member's, and the guard keeps its edits inside the scope. `--activity` declares the step's kind of work (an id from `dev crew raci`, such as `backend` or `ux`), so the RACI check and the approver do not depend on the language of the step's name. `--allow` gives the member push and PR create in that step, each only with the developer's grant (`grant push <branch>`) or a verified decision. Refused when the crew's RACI does not make that member Responsible for the step's kind of work, unless `--why` gives the reason, which is recorded |
+| `dev progress add "<name>=<estimate> [after …] [<id>]" [--why "…"]` | Adds a step found during the work; add it when it starts. `[<id>]` declares its kind of work, as in a plan. Each quoted spec is a step (`dev progress add "a=5h [security]" "b=2h [testing]"` adds two), and so is each part between `;`; a step name that still holds an estimate (`a=5h b`) is refused. From a crew member, the step goes to its own lane |
+| `dev progress assign <step> --to <member> [--scope "<globs>"] [--activity ID] [--allow push,pr] [--why "…"]` | Hands a step to a crew member; its time is that member's, and the guard keeps its edits inside the scope. A working lane of that member that holds no other open step takes it at once, a member resumed with `SendMessage` included, so the lane gets the step's scope and its report closes it. `--activity` declares the step's kind of work (an id from `dev crew raci`, such as `backend` or `ux`), so the RACI check and the approver do not depend on the language of the step's name. `--allow` gives the member push and PR create in that step, each only with the developer's grant (`grant push <branch>`) or a verified decision. Refused when the crew's RACI does not make that member Responsible for the step's kind of work, unless `--why` gives the reason, which is recorded |
 | `dev progress begin <step>` | Starts a step in parallel with the running one |
 | `dev progress reopen <step> --why "…"` · `dev progress skip <step> --why "…"` · `dev progress confirm <step> --why "…"` | Undoes a wrong close, skips a step on purpose, or confirms a step whose dependencies were reopened and closed again |
 | `dev progress block "<why>" [--next "<what is needed>"]` | The run is blocked; prints the update and sends a desktop notification |
@@ -373,7 +374,7 @@ devkit's specialist agents. See [The crew](crew.md).
 | Command | Effect |
 | --- | --- |
 | `dev crew [--json] [--latest]` | The roster, and in a session with a run: who is working now, the steps assigned to each member, open messages and decisions, and the mode. `--latest` reads the most recent running run on this Mac instead of this session's; `--json` prints the roster and the live state |
-| `dev crew graph [--latest] [--mermaid \| --json]` | The live session as one graph, with the tech lead (Morpheus), the run's steps with their state, owner, kind of work, and the steps each waits for; the crew lanes and nested subagents under their steps; the work items the run tracks; decisions waiting for the developer; approvals owed; and open messages. `--latest` draws the most recent running run on this Mac; `--mermaid` prints a Mermaid flowchart that renders on GitHub; `--json` prints the nodes and edges |
+| `dev crew graph [--global \| --latest] [--all] [--mermaid \| --json]` | The live sessions as graphs, each with its tech lead (Morpheus), the run's steps with their state, owner, kind of work, and the steps each waits for; the crew lanes and nested subagents; the work items the run tracks; decisions waiting for the developer; approvals owed; and open messages. Inside a project it draws that project's live sessions, yours first; outside one, or with `--global`, every live session on this Mac, under a header that says it is the global view. Ids of another session's decisions and messages carry that session (`D1@5e1f0a2b`). A lane shows once, under the step it works now, in the state `dev crew owner` reads (working, stale, or ended), with its time on that step; a step it finished before names it done. Skipped steps fold into one line; `--all` lists them. `--latest` draws only the most recent running run; `--mermaid` prints one Mermaid flowchart, a subgraph per session, that renders on GitHub; `--json` prints `{view, project, caller, sessions}`, each session as its nodes and edges (with `--latest`, that one graph) |
 | `dev crew raci [<work> \| <member> \| "<task>"] [--markdown]` | Who does (R), approves (A), is consulted on (C), and is informed about (I) each kind of work, as one table. With a kind of work, its row; with a member, what they do, approve, and are consulted or informed on; with a task, the kind of work it reads as, and its row. `--markdown` prints the whole matrix as a Markdown table |
 | `dev crew raci <work> --set "R=tank A=seraph C=… I=…" --why "…"` | Changes one row of the RACI for the whole team, recorded in the handoff repository with who and why |
 | `dev crew rules` | Every crew rule, the devkit check that enforces it, and its state (enforced, planned, or guidance). Exits with `1` when a rule's check is missing |
@@ -388,9 +389,9 @@ devkit's specialist agents. See [The crew](crew.md).
 | `dev crew next` | Ready to launch (with the commands), queued until a slot frees, waiting and why, and who is busy |
 | `dev crew next --first <step> --why "…"` | The tech lead (Morpheus) launches that step ahead of the order; the reason is recorded and audited. Both options are required |
 | `dev crew owner <path>… [--json]` | Who holds each file before you edit or assign it: the crew member, their run and session, their step, their lane state (working; stale when its session's process is gone or it has been silent for `progress.stale_agent_minutes`; ended when devkit or Claude Code saw it end) and last activity, and what to do (wait, `dev crew ask --to <id> "…"`, or nothing when the holder ended or is stale). It decides exactly as the edit check does. Exits with `1` while a working member holds a path, `0` when every path is free. Reads only |
-| `dev crew ask "<text>" [--to <name>]` · `dev crew answer <id> "<text>"` · `dev crew inbox` | Messages between members; delivered with the recipient's next action |
+| `dev crew ask "<text>" [--to <name>]` · `dev crew answer <id> "<text>"` · `dev crew inbox` | Messages between members; delivered with the recipient's next action. A bare id (`M3`) is a message of your session's run; a qualified id (`M3@9448c4d0`, as `dev status` lists another run's) answers that run's message, and the answer reaches the member who asked there. A bare id is refused, with the qualified ids to use, when your run's message by that id is missing or waits for nothing while another run's waits. A question of a run that ended is closed and takes no answer |
 | `dev crew ask --decision "<question>" --options "A: <choice> \| B: <choice>" --recommend A [--irreversible push] [--target v26.11.4] [--performs A] [--approves "api, screens"]` | A decision point: a question under 300 characters, 2 to 4 options each with its letter, and the recommended one (refused otherwise, with the corrected command; an irreversible action without options is asked as `A: yes \| B: no`). Decided at once in auto mode, waits for the developer in guided mode or for irreversible actions. `--target` is what the irreversible action acts on, and the question names it as a word of its own; the developer's answer opens that action on that target once, and only when it chooses the option that performs it: `--performs`, else the one option that reads yes or approve, else the recommended one ([The crew › Guided or automatic](crew.md#guided-or-automatic)). `--approves` names the finished steps the developer's answer approves, checked against the plan |
-| `dev crew mode [guided\|auto] [--approve "push feat/*, release v26.11.4"]` · `dev crew decide <id> "<answer>"` · `dev crew decisions [--pending] [--ask [<id>…] [--json]]` | The mode (`--approve` names each action with its target; publish and deploy never), the developer's answers (recorded by the tech lead (Morpheus) only), and every decision with who took it. `--ask` prints the pending decisions (or the ones named) as question tool calls, at most 4 per call and an irreversible one alone in its call, the recommended option first, `--json` for the tool's input; the tech lead may reword a reversible one. Only an answer to a question with `D<n> ·` up front (or the header `D<n>`) that picks one of its options by letter or words, or a typed `approve <id>[: <option>]`, makes the decision the developer's. An irreversible one counts only in devkit's exact call: one question, its own header (`D<n>` or empty), labels only (no description, preview, or other field), its question and labels word for word (the performing option's label says what it runs, `A: yes (release v26.11.4)`) |
+| `dev crew mode [guided\|auto] [--approve "push feat/*, release v26.11.4"]` · `dev crew decide <id> "<answer>"` · `dev crew decisions [--pending] [--ask [<id>…] [--json]]` | The mode (`--approve` names each action with its target; publish and deploy never), the developer's answers (recorded by the tech lead (Morpheus) only, in the session whose run holds the decision: `dev crew decide` and `dev crew withdraw` take `D3` or your own run's `D3@<session>`, and refuse another session's), and every decision with who took it. `--ask` prints the pending decisions (or the ones named) as question tool calls, at most 4 per call and an irreversible one alone in its call, the recommended option first, `--json` for the tool's input; the tech lead may reword a reversible one. Only an answer to a question with `D<n> ·` up front (or the header `D<n>`) that picks one of its options by letter or words, or a typed `approve <id>[: <option>]`, makes the decision the developer's; `approve D3@<session>`, as `dev status` and the dashboard list another session's decision, counts only in the session it names. An irreversible one counts only in devkit's exact call: one question, its own header (`D<n>` or empty), labels only (no description, preview, or other field), its question and labels word for word (the performing option's label says what it runs, `A: yes (release v26.11.4)`) |
 | `dev crew sync [--check]` | Regenerates the Claude Code agents from `config/crew.json` |
 
 ## Lessons
@@ -631,6 +632,45 @@ Lists the live watches, and those that stopped before their runs ended with the 
 background watches and the agents' `dev ci watch --wait`, with the repository, target, start, last event, expiry,
 agent, and session. See [CI/CD pipelines › List the watches](ci-cd.md#list-the-watches).
 
+### `dev watch [--wait] [--for me] [--only KINDS] [--timeout MIN] [--json]`
+
+Without `--wait`, shows what waits for you in this session (marking nothing), what can still arrive, and the live
+waits. With `--wait`, it is the one wait for every devkit event: it blocks until something you must act on arrives
+for your own session, prints each event once, one line each, and exits. The hooks and the wait take from the same
+records, so a hook never repeats what a wait printed, and the other way round.
+
+| Kind | What wakes the main session | What wakes a crew member |
+| --- | --- | --- |
+| `question` | A crew question or an answer to the tech lead | A message to its lane: an answer, a question |
+| `decision` | A decision that waits for the developer | — |
+| `ready` | A step ready to launch, including a review step and a step that a freed crew slot lets start | — |
+| `member` | A member that stopped, was lost, or ended unverified; on Codex, one that finished | — |
+| `ci` | A CI result of a run this session sent | — |
+| `notice` | Never alone: a crew limit change or a failed handoff push rides along | — |
+
+Each line starts with devkit's own words; a member's or CI's text is one quoted span with control and escape
+sequences removed. The last line is `watch: <n> events · arm again: dev watch --wait`.
+
+- `--for me`: the caller's own events: its crew lane's, or the main session's. It is the default and the only
+  value: a wait never reads another lane's or another session's events.
+- `--only`: a comma list of kinds to take (`question,decision,ready,member,ci,notice`).
+- `--timeout`: minutes before it ends with the command to arm it again. Defaults: 240 for the main session on Claude
+  Code (Bash `run_in_background`), 10 on Codex (in the foreground), 9 for a crew member (in the foreground).
+- `--json`: the peek as JSON.
+
+Exit codes: 0 events printed, 1 no agent session here, 2 nothing can arrive (no member works, no launch is pending,
+no step waits for a slot, and no CI run this session sent is unfinished; it says so at once), 3 when it timed out or
+was stopped (arm it again), 5 a newer wait of the same session and consumer took over. The wait watches devkit's
+state folders (kqueue on macOS, a stat every 2 seconds anyway), lets a burst settle for 2 seconds, and reconciles the
+session's run every 60 seconds, so a member that went silent or a slot that a quota window freed wakes an idle
+session too. It never calls a model. Each wake is in the audit trail (`watch.wake`).
+
+### `dev watches [--json]`
+
+Lists every wait: the `dev watch --wait` records (live, expired before anything arrived, or superseded by a newer
+one, each with the command to arm it again) and the CI watches (`dev ci watches`), then what can still arrive for
+this session.
+
 ### `dev ci audit [--fix] [--strict] [--provider HOST] [--json] [-p PROJECT]`
 
 Diagnoses every pipeline in the repository (GitHub Actions, GitLab CI, Bitbucket Pipelines, Azure Pipelines) for
@@ -856,7 +896,10 @@ lane, and the guard asks the main session for the developer's grant. Without a v
 
 ### `dev commit -m "type(scope): summary" [options] [<paths>…]`
 
-Commits the staged changes, or `-a` every tracked change, or the listed paths. The header must be a Conventional
+Commits the staged changes, or `-a` every tracked change, or the listed paths. In a crew lane it commits only the
+staged files inside the step scope of the lane, leaves the other staged files exactly as they are for their owner,
+and names them. A lane with none of its own files staged, or with no scope, is refused and told to name its paths.
+The header must be a Conventional
 Commit with a known type, in the imperative mood, without a final period, and at most 72 characters. Commits on the
 default branch and on non-conforming branches are refused; AI attribution lines are removed; the guard's secret scan
 runs.
@@ -869,7 +912,7 @@ runs.
 | `--verified "…"` | The last paragraph of the body, `Verified: …`: how you verified the change |
 | `--refs "…"` | The `Refs:` trailer: `#12`, `owner/repo#12`, a URL, or a ticket key; repeat it for more. Default: the ticket of the task started on this branch. A devkit task id is refused in it, as anywhere in the message |
 | `--breaking "…"` | The `BREAKING CHANGE:` trailer: what breaks, and how to move to the new behavior |
-| `-a`, `--all` | Stage every tracked change first |
+| `-a`, `--all` | Stage every tracked change first; in a crew lane, only those inside its scope |
 | `--amend` | Amend HEAD (keeps its message without `-m`); warns when HEAD was already pushed |
 | `--wip [-m "what"]` | Save everything, untracked files too, as a `wip:` commit instead of a stash |
 | `--unwip` | Undo the WIP commit at HEAD; its changes come back uncommitted |
@@ -966,7 +1009,7 @@ the path to the full log.
 | `dev test` | Last failures first; if they pass, the affected tests |
 | `dev test run [<paths>…] [--failed \| --affected \| --all]` | These test files, directories, or runner ids; or only the last failures, only the affected tests, or the full suite |
 | `dev test plan [--all]` | What would run and why (changed file → tests), with the time estimate; runs nothing. `--all`: the whole suite, its full-run time, and the slowest files |
-| `dev test prove [<tests>…] [--runs N]` | For each new or changed test, in a temporary copy: it passes `N` times with your change (default 5) and fails with the production files restored from the base. Verdicts: proves the change, does not test the change, flaky, fails with the change, did not run without the change |
+| `dev test prove [<tests>…] [--runs N]` | For each new or changed test, in a temporary copy: it passes `N` times with your change (default 5) and fails with the production files, and the changed test helpers and fixtures, restored from the base. Verdicts: proves the change, does not test the change, flaky, fails with the change, did not run without the change |
 | `dev test audit [<paths>…] [--changed] [--min-severity low\|medium\|high] [--rule RULE]` | Tests that cannot fail: no or trivial assertions, empty bodies, swallowed failures, skips without a reason, sleeps, and more. `--changed`: only test files changed on this branch, staged, unstaged, or untracked. Default severity shown: medium and up. `--rule` repeats |
 
 | Option | Effect |

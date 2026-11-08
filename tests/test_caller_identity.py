@@ -338,7 +338,16 @@ class IdentityChangeTests(CallerCase):
             with self.subTest(cmd):
                 out = self.guard(cmd)
                 self.assertIn('"deny"', out)
-                self.assertIn("who calls devkit", out)
+                # a command that also hides the session's markers (DEVKIT_SESSION, env -i) may be refused first by the
+                # rule on hiding an agent; either refusal keeps the member from changing who it is
+                self.assertTrue("who calls devkit" in out or "an agent runs it" in out, out)
+
+    def test_hiding_the_agent_markers_is_refused_for_the_main_session_too(self):
+        for cmd in ("unset CLAUDECODE; npm run release", "env -u CLAUDECODE node tool.js", "CLAUDECODE= dev status"):
+            with self.subTest(cmd):
+                out = self.guard(cmd, aid=None)
+                self.assertIn('"deny"', out)
+                self.assertIn("CLAUDECODE", out)
 
     def test_a_command_that_only_mentions_an_identity_variable_passes(self):
         for cmd in ("git commit -m 'explain DEVKIT_FROM_AGENT= in the docs'", "grep -n DEVKIT_FROM_AGENT lib/x.py",

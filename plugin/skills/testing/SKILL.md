@@ -48,11 +48,11 @@ The Stop hook runs the audit on the test files a turn changed and sends the turn
 test or delete it; never weaken the detector's finding by adding a meaningless assertion. A crew member's changed
 tests get the same audit when it stops (the crew gates).
 
-One known gap of `dev test prove`, until it is fixed:
-
-- **It runs the tests in a plain copy of the repository, without `.git`.** A test that clones its own repository or
-  runs git on the repository root fails there. Build test repositories from files: copy what the test needs into a
-  temporary folder, `git init`, and commit.
+`dev test prove` runs the tests in a copy of the working tree that carries the checkout's git repository, and it
+counts a changed test helper or fixture as part of the change, so a fix that lives only in a helper is proven too.
+An exported copy (`git archive`) has no `.git`: a test that runs git on the repository root
+fails there. Build test repositories from files: copy what the test needs into a temporary folder, `git init`, and
+commit.
 
 ## 3. TDD done right
 

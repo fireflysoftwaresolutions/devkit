@@ -110,7 +110,9 @@ count as failed); `2` nothing to watch; `3` the watch ended before the run (re-a
 skipped, neutral, or stale ones). Claude Code: the Monitor tool (one event per line, at most 30 minutes, re-armed on
 expiry) or Bash with `run_in_background` (one notification at exit). Codex has no background wake-up: run it in the
 foreground with a timeout, or say that you check it again at the next turn. The Stop hook sends back a turn that
-sent work to origin and leaves its unfinished run with nothing watching it that wakes the agent.
+sent work to origin and leaves its unfinished run with nothing watching it that wakes the agent. A live
+`dev watch --wait`, the one wait for every devkit event, counts too: it takes the CI result devkit's background
+watch delivers, so arm `dev ci watch --wait` only to follow one run job by job (`wait-and-wake` skill).
 
 A failure comes with the failed jobs and steps, **the first error of the log** (not the tail: later errors
 follow from it), a class and one next action:

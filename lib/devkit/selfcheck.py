@@ -22,6 +22,10 @@ as devkit grows (D1-D11 of the crew gap review 2).
       discovers tests/ runs it as a package (`-t .`), the only way unittest imports tests/__init__.py
   D13 the shell completion checked in (shell/completions/_dev and dev.bash) is what the parser generates now, and
       every completion rule (lib/devkit/completion.py RULES) names an argument the parser has
+  D14 every skill devkit names (the crew, the skill rules, the using-devkit table, AGENTS.md section 9) comes from
+      a source devkit installs, and none that the crew, a rule or the table asks a model to load is one only the
+      developer can run (`disable-model-invocation`) or one devkit's own skill supersedes; the rules table of
+      docs/skills-and-plugins.md shows each skill rule with the skills it requires
 
 Each check returns findings: (check, item, evidence, fix). `item` is stable across runs (no line numbers), so a known
 finding can be listed by it. The checks read files and import devkit's modules only: no network and no subprocess.
@@ -734,6 +738,133 @@ def d8_uninstalled_skills(agent: str = "claude", roster=None, home=None, agent_h
     return out
 
 
+SKILL_TOKEN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*(?::[a-z0-9]+(?:-[a-z0-9]+)*)?$")
+NOT_SKILLS = {"dev"}  # backticked words in the skill lists that name a program, not a skill
+
+
+def _plugin_names(home: Path) -> set:
+    """The plugins devkit installs for either agent: `superpowers` from `superpowers@claude-plugins-official`."""
+    out = set()
+    for agent in ("claude", "codex"):
+        conf = core.read_json(home / "config" / agent / "plugins.json", {}) or {}
+        out |= {str(p).split("@")[0] for p in list(conf.get("plugins") or []) + list(conf.get("disabled") or [])}
+    return out
+
+
+def _frontmatter_user_only(path: Path) -> bool:
+    head = _read(path)[:2000]
+    return bool(re.search(r"^disable-model-invocation:\s*true\s*$", head.split("\n---", 1)[0], re.M | re.I))
+
+
+def user_only_skills(home=None) -> set:
+    """Skills only the developer can run (their SKILL.md sets `disable-model-invocation: true`, so a model cannot load
+    them): those config/skills.json lists as `user_only`, and devkit's own skills whose frontmatter says so."""
+    home = _home(home)
+    out = set()
+    for src in (core.read_json(home / "config" / "skills.json", {}) or {}).get("sources") or []:
+        out |= set(src.get("user_only") or [])
+    for f in sorted((home / "plugin" / "skills").glob("*/SKILL.md")):
+        if _frontmatter_user_only(f):
+            out.add(f.parent.name)
+    return out
+
+
+def skill_resolves(name: str, home=None) -> bool:
+    """A source devkit installs provides the skill: devkit's own plugin, config/skills.json, a plugin of
+    config/<agent>/plugins.json (`superpowers:brainstorming`, or `frontend-design` from its own plugin), or the
+    packages step (playwright-cli)."""
+    home = _home(home)
+    if ":" in name:
+        plugin, skill = name.split(":", 1)
+        if plugin == "devkit":
+            return (home / "plugin" / "skills" / skill / "SKILL.md").exists()
+        return plugin in _plugin_names(home)
+    if skill_group(name, home) != "unknown" or name in _plugin_names(home):
+        return True
+    from . import ext
+    return name in ext._devkits_skill_names()
+
+
+def _table_skills(text: str, heading: str) -> list:
+    """The backticked skill names in the last column of the first table after `heading`."""
+    out = []
+    for row in _table(text, heading):
+        out += [t for t in re.findall(r"`([^`]+)`", row[-1]) if SKILL_TOKEN.match(t) and t not in NOT_SKILLS]
+    return out
+
+
+def skill_names(home=None, roster=None) -> dict:
+    """{skill: [where devkit names it]}: the crew (members, phases, kinds of work), the skill rules (every rule, its
+    group on or not), the Skills column of the using-devkit table, and section 9 of AGENTS.md ("AGENTS.md §9")."""
+    home = _home(home)
+    out = {k: list(v) for k, v in crew_skills(_roster(roster)).items()}
+    rules = (core.read_json(home / "config" / "skill-rules.json", {}) or {}).get("rules") or []
+    commands = {c for r in rules for c in r.get("commands") or [] if " " not in c}  # `pytest` is a command
+    for r in rules:
+        for agent, names in (r.get("skills") or {}).items():
+            for s in names:
+                out.setdefault(s, []).append(f"skill rule {r.get('id')} ({agent})")
+    using = _read(home / "plugin" / "skills" / "using-devkit" / "SKILL.md")
+    for s in _table_skills(using, "## Which tool for which job"):
+        out.setdefault(s, []).append("the using-devkit table")
+    agents = _read(home / "agents" / "AGENTS.md")
+    m = re.search(r"^## 9\..*?(?=^## 10\.)", agents, re.M | re.S)
+    for t in re.findall(r"`([^`]+)`", m.group(0) if m else ""):
+        if SKILL_TOKEN.match(t) and t not in NOT_SKILLS and t not in commands:
+            out.setdefault(t, []).append("AGENTS.md §9")
+    return {k: sorted(set(v)) for k, v in out.items()}
+
+
+def d14_skill_names(home=None, roster=None) -> list:
+    """D14: a skill devkit names that no source it installs provides, or one that the crew, a skill rule or the
+    using-devkit table asks a model to load although only the developer can run it (`user_only_skills`) or devkit's
+    own skill replaces it (config/skills.json `superseded`: devkit wins where a plugin skill differs). AGENTS.md may
+    name such a skill as the developer's own slash command."""
+    home = _home(home)
+    out = []
+    user_only = user_only_skills(home)
+    superseded = (core.read_json(home / "config" / "skills.json", {}) or {}).get("superseded") or {}
+    for name, where in sorted(skill_names(home, roster).items()):
+        if not skill_resolves(name, home):
+            out.append(Finding("D14", f"unknown: {name}", f"no source devkit installs provides {name}; named by "
+                               f"{', '.join(where[:4])}", "fix the name, or add its source to config/skills.json"))
+        asked = [w for w in where if w != "AGENTS.md §9"]
+        if name.split(":")[-1] in user_only and asked:
+            out.append(Finding("D14", f"user-only: {name}", f"{name} is the developer's slash command (a model cannot "
+                               f"load it), but {', '.join(asked[:4])} ask a model to load it",
+                               "name a skill a model can load there, and suggest the slash command to the developer"))
+        if name in superseded and asked:
+            by = superseded[name]
+            out.append(Finding("D14", f"superseded: {name}", f"{by.get('by')} replaces {name} ({by.get('why')}), but "
+                               f"{', '.join(asked[:4])} name it", f"name {by.get('by')} instead"))
+    return out
+
+
+def d14_rules_table(home=None) -> list:
+    """D14, the docs: the rules table of docs/skills-and-plugins.md against config/skill-rules.json. A rule without a
+    row, a row whose Claude Code or Codex skills differ from the rule's, or a row for a rule the config lacks."""
+    home = _home(home)
+    shown = {}
+    for row in _table(_read(home / "docs" / "skills-and-plugins.md"), "### The rules"):
+        ids = re.findall(r"`([^`]+)`", row[0]) if row else []
+        if ids and len(row) >= 3:
+            claude = re.findall(r"`([^`]+)`", row[1])
+            shown[ids[0]] = (claude, claude if row[2].strip().lower() == "the same" else re.findall(r"`([^`]+)`", row[2]))
+    out, fix = [], "make the row of docs/skills-and-plugins.md › The rules match config/skill-rules.json"
+    rules = (core.read_json(home / "config" / "skill-rules.json", {}) or {}).get("rules") or []
+    for r in rules:
+        want = tuple(list((r.get("skills") or {}).get(a) or []) for a in ("claude", "codex"))
+        if r.get("id") not in shown:
+            out.append(Finding("D14", f"rules table: {r.get('id')}", "the rule has no row in the rules table", fix))
+        elif shown[r["id"]] != want:
+            out.append(Finding("D14", f"rules table: {r['id']}", f"the row shows {shown[r['id']]}, the rule requires "
+                               f"{want} (Claude Code, Codex)", fix))
+    for rid in sorted(set(shown) - {r.get("id") for r in rules}):
+        out.append(Finding("D14", f"rules table: {rid}", "the row names a rule config/skill-rules.json does not have",
+                           fix))
+    return out
+
+
 def d9_phase_proofs(roster=None) -> list:
     """D9: a procedure phase whose proof is not in its own `devkit` list, or whose gate names a `dev …` command (in
     backticks) that is not in that list."""
@@ -970,8 +1101,35 @@ def work_state(scope: str, top, *, runs=None, now=None, lock_hours=None, merged=
     return {"project": scope, "rows": rows, "count": count}
 
 
+HANDOFF_SKILL = Path("plugin") / "skills" / "handoff" / "SKILL.md"
+HANDOFF_MAX_LINES = 150  # when the handoff skill states no size
+
+
+def handoff_max_lines(home=None) -> int:
+    """The size the handoff skill sets for a project's note ("Keep the whole note under ~150 lines")."""
+    m = re.search(r"under ~?(\d+) lines", _read(_home(home) / HANDOFF_SKILL))
+    return int(m.group(1)) if m else HANDOFF_MAX_LINES
+
+
+def handoff_size_rows(scope: str) -> list:
+    """`dev doctor`'s warning when the project's handoff note is longer than the handoff skill allows; [] when it is
+    within it or there is no note."""
+    note = core.note_path(scope)
+    try:
+        n = len(note.read_text(encoding="utf-8", errors="ignore").splitlines())
+    except OSError:
+        return []
+    limit = handoff_max_lines()
+    if n <= limit:
+        return []
+    return [("Workspace", "handoff note", False, f"{scope}: {core.tilde(note)} has {n} lines, over the ~{limit} the "
+             "handoff skill sets", "rewrite Current state as it stands and move history and long material into "
+             "plans/ (the handoff skill, /devkit:handoff)")]
+
+
 def work_state_checks(top=None, scope=None, *, runs=None, now=None) -> list:
-    """`dev doctor`'s "work state" row for the project you are in, [] outside one: (group, name, ok, detail, fix)."""
+    """`dev doctor`'s "work state" row for the project you are in, [] outside one: (group, name, ok, detail, fix);
+    and a "handoff note" warning when the project's note is longer than the handoff skill allows."""
     top = top or core.gitout(os.getcwd(), "rev-parse", "--show-toplevel")
     if not top or core.real(top) == core.real(core.HANDOFF):
         return []
@@ -979,15 +1137,16 @@ def work_state_checks(top=None, scope=None, *, runs=None, now=None) -> list:
         from . import registry
         main = registry.main_of(Path(top)) or Path(top)
         scope = core.project_identity(main, core.gitout(str(main), "config", "--get", "remote.origin.url"))[0]
+    size = handoff_size_rows(scope)
     try:
         r = work_state(scope, top, runs=runs, now=now)
     except (OSError, ValueError, KeyError) as e:  # an item or run file it cannot read: say so, never stop the doctor
         return [("Workspace", "work state", False, f"{scope}: the work state could not be read ({e})",
-                 f"dev task -p {scope} reconcile")]
+                 f"dev task -p {scope} reconcile")] + size
     if not r["rows"]:
-        return [("Workspace", "work state", True, f"{scope}: no stale work items or runs", "")]
+        return [("Workspace", "work state", True, f"{scope}: no stale work items or runs", "")] + size
     return [("Workspace", "work state", False, f"{scope}: " + "; ".join(x["text"] for x in r["rows"]),
-             " · ".join(dict.fromkeys(x["fix"] for x in r["rows"] if x["fix"])))]
+             " · ".join(dict.fromkeys(x["fix"] for x in r["rows"] if x["fix"])))] + size
 
 
 # --------------------------------------------------------------------------- devkit copies older than the pin
@@ -1068,7 +1227,8 @@ def old_copy_checks(claude_home=None, codex_home=None, managed=None) -> list:
 
 REPO_CHECKS = (("D1", d1_enforced_rows), ("D3", d3_unwired), ("D4", d4_commands), ("D5", d5_hook_events),
                ("D6", d6_config_keys), ("D7", d7_raci_hygiene), ("D9", d9_phase_proofs), ("D10", d10_file_anchors),
-               ("D11", d11_guardrails), ("D12", d12_hermetic_tests), ("D13", d13_completion))
+               ("D11", d11_guardrails), ("D12", d12_hermetic_tests), ("D13", d13_completion),
+               ("D14", d14_skill_names), ("D14", d14_rules_table))
 MACHINE_CHECKS = (("D2", d2_planned_rows), ("D7", d7_team_raci),
                   ("D8", lambda: d8_uninstalled_skills("claude") + d8_uninstalled_skills("codex")),
                   ("D10", d10_lesson_anchors))

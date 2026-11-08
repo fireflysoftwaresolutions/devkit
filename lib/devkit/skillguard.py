@@ -2,12 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 """Skill enforcement: the right skills are loaded for the work being done (config/skill-rules.json).
 
-1. Catalog  the session's catalog (`crew.catalog`) lists the skills by kind of work; the model picks them, whatever
-            language the developer writes in. Rules never match the developer's words (crew gap review, C13).
+1. Catalog  the session's catalog (`hooks.catalog_context`) is an index of the kinds of work the model declares by
+            id, whatever language the developer writes in, and points to config/skill-rules.json for the skills each
+            one requires. Rules never match the developer's words, which can be in any language.
 2. Brief    PreToolUse on Claude's Agent/Task tool appends the required skills to a subagent's brief (updatedInput):
             those of the brief's declared kind of work, else of its member's Responsible one.
-3. Finish   Stop refuses to end a turn that changed files matching a rule while the rule's skills were never
-            loaded in the session (once per skill per session), with the reason and the files.
+3. Finish   Stop refuses to end a turn that changed files matching a rule, or ran a shell command of a rule's
+            `commands`, while the rule's skills were never loaded in the session (once per skill per session), with
+            the reason and the files or commands. Files on disk outside every repository are scratch work.
 Rules also answer for a kind of work (`rules_for_activity`) and for a command the agent runs (`rules_for_command`).
 
 Loaded skills are read from the session transcript: Claude's Skill tool calls and reads of SKILL.md files; Codex
@@ -17,6 +19,7 @@ from __future__ import annotations
 
 import fnmatch
 import json
+import os
 import re
 from pathlib import Path
 
@@ -32,13 +35,16 @@ def enabled() -> bool:
 
 
 def rules() -> list:
+    """devkit's rules with the developer's (`skills.rules`) on top; a rule of an optional skill group (`group`)
+    only when that group is installed (`skills.groups`)."""
     base = (core.read_json(RULES_FILE, {}) or {}).get("rules", [])
     extra = (CFG.get("skills") or {}).get("rules") or []
     by_id = {r["id"]: r for r in base}
     for r in extra:  # user rules extend or replace devkit's by id
         if r.get("id"):
             by_id[r["id"]] = {**by_id.get(r["id"], {}), **r}
-    return list(by_id.values())
+    groups = set((CFG.get("skills") or {}).get("groups") or [])
+    return [r for r in by_id.values() if not r.get("group") or r["group"] in groups]
 
 
 def short(name: str) -> str:
@@ -85,14 +91,35 @@ def _match_path(path: str, pattern: str) -> bool:
     return fnmatch.fnmatch(Path(p).name, pattern)
 
 
+def repo_top(path: str):
+    """The repository a path belongs to (the nearest folder above it that holds `.git`), or None."""
+    d = Path(os.path.abspath(os.path.expanduser(str(path or "")))).parent
+    for folder in [d, *d.parents]:
+        if (folder / ".git").exists():
+            return folder
+    return None
+
+
+def delivered(paths) -> list:
+    """The paths a skill rule may judge: a file on disk outside every repository is scratch work (a probe in a
+    scratch folder), not delivered work. A path that is not on disk (deleted, or named relative to another folder)
+    is judged by its path."""
+    return [p for p in paths if not (os.path.exists(str(p)) and repo_top(p) is None)]
+
+
 def rules_for_files(paths) -> list:
-    hits = []
+    """[(rule, [the paths it matches])]: a path matches a rule's `files` globs by name; a path that matches its
+    `content_files` and none of its `content_exclude` globs matches when its text matches `content`. A rule with a
+    `project` condition keeps only the paths of repositories whose project files match it (`project_uses`)."""
+    hits, seen = [], {}
     for r in rules():
         files = [p for p in paths if any(_match_path(p, g) for g in r.get("files") or [])]
         if r.get("content") and r.get("content_files"):
             rx = re.compile(r["content"], re.I)
+            skip = r.get("content_exclude") or []
             for p in paths:
-                if p in files or not any(_match_path(p, g) for g in r["content_files"]):
+                if p in files or not any(_match_path(p, g) for g in r["content_files"]) or \
+                        any(_match_path(p, g) for g in skip):
                     continue
                 try:
                     if rx.search(Path(p).read_text(errors="ignore")[:400_000]):
@@ -102,9 +129,38 @@ def rules_for_files(paths) -> list:
         elif r.get("content") and files:  # files match only when their content matches too (e.g. Spring code)
             rx = re.compile(r["content"], re.I)
             files = [p for p in files if _read_matches(p, rx)]
+        if files and r.get("project"):
+            files = [p for p in files if project_uses(p, r["project"], seen)]
         if files:
             hits.append((r, files))
     return hits
+
+
+def project_uses(path: str, spec: dict, seen=None) -> bool:
+    """A rule's `project` condition: a project file of the path's repository (`files`, globs at the repository's
+    top) has text that matches `content`, such as a project that uses Postgres. False outside a repository.
+    `seen` caches the answer per repository and condition."""
+    top = repo_top(path)
+    if top is None:
+        return False
+    key = (str(top), spec.get("content") or "", tuple(spec.get("files") or ()))
+    if seen is not None and key in seen:
+        return seen[key]
+    rx = re.compile(spec.get("content") or r"(?!)", re.I)
+    found = False
+    for g in spec.get("files") or []:
+        for f in sorted(top.glob(g)):
+            try:
+                if f.is_file() and rx.search(f.read_text(errors="ignore")[:200_000]):
+                    found = True
+                    break
+            except OSError:
+                continue
+        if found:
+            break
+    if seen is not None:
+        seen[key] = found
+    return found
 
 
 def _read_matches(p, rx) -> bool:
@@ -122,8 +178,25 @@ def rules_for_activity(activity_id: str) -> list:
 def rules_for_command(command: str) -> list:
     """The rules whose command words a shell command runs ("gh workflow run ci.yml" → workflows); text inside quotes
     is not a command."""
-    from .lessons import runs
-    return [r for r in rules() if any(runs(command, c) for c in r.get("commands") or [])]
+    return [r for r, _ in rules_for_commands([command])]
+
+
+def rules_for_commands(commands) -> list:
+    """[(rule, [its command words the shell ran])] for shell commands. What a command runs is read the way the crew
+    gates read it: quoted text and heredoc bodies are dropped, each simple command stands alone, and a program is
+    its base name (`bin/dev test` runs `dev test`). The words may follow a wrapper (`uv run pytest`)."""
+    from .gates import _invocations
+    runs = [[os.path.basename(w) for w in words] for words in _invocations([str(c) for c in commands or []])]
+    out = []
+    for r in rules():
+        ran = [c for c in r.get("commands") or [] if any(_has(words, c.split()) for words in runs)]
+        if ran:
+            out.append((r, ran))
+    return out
+
+
+def _has(words, want) -> bool:
+    return bool(want) and any(words[i:i + len(want)] == want for i in range(len(words) - len(want) + 1))
 
 
 DECLARED = re.compile(r"^Kind of work: .*\(`([a-z0-9-]+)`\)\s*$", re.M)  # the line `dev crew brief` writes
@@ -161,7 +234,20 @@ def how_to_load(agent: str) -> str:
 
 def scan(agent: str, transcript: str, offset: int = 0):
     """-> (loaded skill names, changed file paths, new offset) from the transcript since `offset`."""
-    loaded, files = set(), []
+    loaded, files, _, offset = read(agent, transcript, offset)
+    return loaded, files, offset
+
+
+def _shell_command(inp) -> str:
+    cmd = (inp or {}).get("command") or (inp or {}).get("cmd") or ""
+    return " ".join(map(str, cmd)) if isinstance(cmd, list) else str(cmd)
+
+
+def read(agent: str, transcript: str, offset: int = 0):
+    """-> (loaded skill names, changed file paths, shell commands, new offset) from the transcript since
+    `offset`."""
+    from .hooks import SHELL_TOOLS
+    loaded, files, commands = set(), [], []
     try:
         p = Path(transcript)
         size = p.stat().st_size
@@ -171,7 +257,7 @@ def scan(agent: str, transcript: str, offset: int = 0):
             fh.seek(offset)
             data = fh.read().decode("utf-8", "ignore")
     except (OSError, TypeError):
-        return loaded, files, offset
+        return loaded, files, commands, offset
     for ln in data.splitlines():
         if agent == "claude":
             if '"tool_use"' not in ln:
@@ -191,6 +277,8 @@ def scan(agent: str, transcript: str, offset: int = 0):
                     loaded.add(Path(fp).parent.name.lower())
                 if name in ("Write", "Edit", "MultiEdit", "NotebookEdit") and fp:
                     files.append(fp)
+                if name in SHELL_TOOLS:
+                    commands.append(_shell_command(inp))
                 if name == "Bash":  # cat/sed of a SKILL.md counts as loading it
                     for m in SKILL_PATH_RE.finditer(inp.get("command") or ""):
                         loaded.add(m.group(1).lower())
@@ -201,7 +289,19 @@ def scan(agent: str, transcript: str, offset: int = 0):
                 loaded.add(m.group(1).lower())
             for m in re.finditer(r"\*\*\* (?:Add|Update) File: ([^\\\n\"]+)", ln):
                 files.append(m.group(1).strip())
-    return loaded, files, offset + len(data.encode("utf-8"))
+            try:
+                rec = json.loads(ln)
+            except ValueError:
+                continue
+            pl = rec.get("payload") if isinstance(rec, dict) else None
+            if isinstance(pl, dict) and pl.get("type") == "function_call" and pl.get("name") in SHELL_TOOLS:
+                args = pl.get("arguments")
+                try:
+                    args = json.loads(args) if isinstance(args, str) else args
+                except ValueError:
+                    args = {}
+                commands.append(_shell_command(args if isinstance(args, dict) else {}))
+    return loaded, files, commands, offset + len(data.encode("utf-8"))
 
 
 # --------------------------------------------------------------------------- hook entry points
@@ -263,35 +363,37 @@ def on_agent_brief(agent: str, tool_input: dict, project: str = ""):
 
 
 def on_stop(agent: str, data: dict, sess: dict):
-    """-> reason to continue the turn (missing skills for the files it changed), or None. Updates `sess`."""
+    """-> reason to continue the turn (missing skills for the files it changed and the commands it ran), or None.
+    Updates `sess`."""
     if not enabled():
         return None
     transcript = data.get("transcript_path")
     if not transcript:
         return None
-    loaded, files, offset = scan(agent, transcript, int(sess.get("skills_offset") or 0))
+    loaded, files, commands, offset = read(agent, transcript, int(sess.get("skills_offset") or 0))
     sess["skills_offset"] = offset
     sess["skills_loaded"] = sorted(set(sess.get("skills_loaded") or []) | loaded)
     changed = sorted(set(sess.get("files_changed") or []) | set(files))
     sess["files_changed"] = changed[-300:]
-    if data.get("stop_hook_active") or not files:
+    if data.get("stop_hook_active") or not (files or commands):
         return None
     have = installed(agent)
     nudged = set(sess.get("skills_nudged") or [])
-    missing = []
-    for r, matched in rules_for_files(files):
+    missing = {}  # skill -> (why, what needs it)
+    hits = [(r, ", ".join(Path(f).name for f in m[:3]) + (" …" if len(m) > 3 else ""))
+            for r, m in rules_for_files(delivered(files))]
+    hits += [(r, ", ".join(f"`{c}`" for c in ran)) for r, ran in rules_for_commands(commands)]
+    for r, what in hits:
         for s in required(r, agent):
-            if s in have and s not in sess["skills_loaded"] and s not in nudged:
-                missing.append((s, r["why"], matched))
+            if s in have and s not in sess["skills_loaded"] and s not in nudged and s not in missing:
+                missing[s] = (r["why"], what)
     if not missing:
         return None
-    sess["skills_nudged"] = sorted(nudged | {m[0] for m in missing})
-    parts = []
-    for s, why, matched in missing:
-        names = ", ".join(Path(f).name for f in matched[:3]) + (" …" if len(matched) > 3 else "")
-        parts.append(f"`{s}` ({why}) for {names}")
-    return ("devkit: you changed files that need skills you have not loaded in this session: " + "; ".join(parts) +
-            f". Load each {how_to_load(agent)}, review your change against it, fix what it finds, then finish.")
+    sess["skills_nudged"] = sorted(nudged | set(missing))
+    parts = [f"`{s}` ({why}) for {what}" for s, (why, what) in missing.items()]
+    return ("devkit: your turn changed files or ran commands that need skills you have not loaded in this session: " +
+            "; ".join(parts) + f". Load each {how_to_load(agent)}, review your work against it, fix what it finds, "
+            "then finish.")
 
 
 def coverage(agent: str) -> list:

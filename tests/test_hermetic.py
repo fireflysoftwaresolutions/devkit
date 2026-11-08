@@ -68,6 +68,22 @@ class IsolatedRun(unittest.TestCase):
                                                         for r in _hermetic.state()["real"].values())]
         self.assertEqual([], real)
 
+    # whatever the shell put in the environment, an entry that names a real root goes, by its value and not by the
+    # variable's name: zsh's FPATH can list a devkit release's completions folder, and its _ the last command's path;
+    # the other entries of a path list stay, and a folder that only starts with a root's name is not below it
+    def test_the_scrub_removes_every_value_that_names_a_real_root(self):
+        real = _hermetic.state()["real"]
+        completions = os.path.join(real["install"], "releases", "26.11.5-c343681", "shell", "completions")
+        env = {"FPATH": os.pathsep.join(["/usr/share/zsh/functions", completions, "/opt/zsh/site"]),
+               "_": os.path.join(real["install"], "current", "bin", "dev"),
+               "LAST_LOG": os.path.join(real["state"], "logs", "x.log"),
+               "NEAR": real["state"] + "-other",
+               "PLAIN": "/usr/bin", "CLAUDECODE": "1", "DEVKIT_GUARD": "off", "DEVKIT_HOME": "/x"}
+        changed = _hermetic.scrub(env)
+        self.assertEqual({"FPATH": "/usr/share/zsh/functions" + os.pathsep + "/opt/zsh/site",
+                          "NEAR": real["state"] + "-other", "PLAIN": "/usr/bin", "DEVKIT_HOME": "/x"}, env)
+        self.assertEqual(["CLAUDECODE", "DEVKIT_GUARD", "FPATH", "LAST_LOG", "_"], sorted(changed))
+
     # a process a test starts resolves the same temporary roots, through the environment it inherits
     def test_a_child_process_resolves_the_temporary_home(self):
         lib = str(Path(__file__).resolve().parents[1] / "lib")
@@ -176,6 +192,34 @@ class RefusedAccess(unittest.TestCase):
         self.assertEqual(0, subprocess.run(["/usr/bin/true"]).returncode)
         self.assertEqual(0, subprocess.run("echo osascript >/dev/null", shell=True).returncode)
         self.assertEqual(0, os.system("grep -c osascript /dev/null >/dev/null; true"))
+
+    # from a working folder inside a real root (a run started in the handoff repository), shutil.rmtree of a
+    # temporary folder works: its walk opens and removes names relative to the folder it holds open (dir_fd), not
+    # to the working folder. A name relative to the working folder is still refused there
+    def test_a_cleanup_by_folder_descriptor_is_judged_by_that_folder_not_the_working_folder(self):
+        fake = os.path.realpath(self.real_tmp())
+        saved = {k: _hermetic.state()[k] for k in ("real", "prefixes", "named", "homes")}
+        _hermetic._record_real(fake, saved["homes"])
+        self.addCleanup(_hermetic.state().update, saved)
+        inside = os.path.join(fake, ".local", "state", "devkit", "logs")
+        _hermetic.state()["allow"] += 1
+        try:
+            os.makedirs(inside)
+        finally:
+            _hermetic.state()["allow"] -= 1
+        here = os.getcwd()
+        self.addCleanup(os.chdir, here)
+        os.chdir(inside)
+        tree = os.path.join(self.real_tmp(), "t")
+        os.makedirs(os.path.join(tree, "a", "logs"))
+        Path(tree, "a", "logs", "f.json").write_text("{}")
+        shutil.rmtree(tree)
+        self.assertFalse(os.path.exists(tree))
+        fd = os.open(self.real_tmp(), os.O_RDONLY)
+        self.addCleanup(os.close, fd)
+        os.mkdir("d", dir_fd=fd)
+        os.rmdir("d", dir_fd=fd)
+        self.assert_refused(lambda: open(self.probe, "w"), os.path.join(inside, self.probe))
 
     def real_tmp(self):
         d = tempfile.mkdtemp()

@@ -1,0 +1,22 @@
+{
+  "kind": "sequence",
+  "name": "watch-wake",
+  "title": "One wait wakes the idle session",
+  "desc": "The tech lead arms one devkit wait before it ends its turn. A crew member's question lands in the run file; the wait sees the file change, prints the question once and exits, and the harness wakes the session, which answers and arms the wait again.",
+  "participants": [
+    {"id": "lead", "label": "Tech lead", "sub": "main session"},
+    {"id": "wait", "label": "dev watch --wait", "sub": "background task", "family": "firefly"},
+    {"id": "run", "label": "Run and session files", "sub": "devkit state", "family": "slate"},
+    {"id": "member", "label": "Crew member", "sub": "subagent"}
+  ],
+  "messages": [
+    {"from": "lead", "to": "wait", "label": "arm, then end the turn"},
+    {"from": "member", "to": "run", "label": "dev crew ask"},
+    {"from": "run", "to": "wait", "label": "file changed", "style": "async"},
+    {"from": "wait", "to": "run", "label": "take what is new, mark it told"},
+    {"from": "wait", "to": "lead", "label": "prints the question, exits 0", "style": "primary"},
+    {"from": "lead", "to": "run", "label": "dev crew answer"},
+    {"from": "lead", "to": "wait", "label": "arm again"},
+    {"from": "run", "to": "member", "label": "answer at its next call or wait", "style": "return"}
+  ]
+}

@@ -224,15 +224,17 @@ def _pending(run: dict) -> list:
 def _moot(run: dict, roster) -> list:
     """A run's moot decisions (asked by a lane that ended, and no step waits on them), each with its own line: shown
     on the run, never in the queue."""
-    return [{"id": _line(d.get("id"), 20), "question": _line(d.get("question"), TITLE),
+    return [{"id": _line(progress.shown_id(run, d.get("id")), 20), "question": _line(d.get("question"), TITLE),
              "asker": _who(d.get("from_name") or d.get("from"), roster), "since": _int(d.get("ts")),
              "text": _line(progress.moot_text(run, d))}
             for d in sorted(progress.moot_decisions(run), key=lambda d: (d.get("ts") or 0, str(d.get("id"))))]
 
 
 def _questions(run: dict) -> list:
-    """The crew's questions to the tech lead that wait for an answer (progress.waiting_messages); notices never."""
-    return [{k: m.get(k) for k in ("id", "ts", "from_name", "text")} for m in progress.waiting_messages(run)][-20:]
+    """The crew's questions to the tech lead that wait for an answer (progress.waiting_messages); notices never. Each
+    id names its run (progress.shown_id): the page belongs to no session."""
+    return [dict({k: m.get(k) for k in ("ts", "from_name", "text")}, id=progress.shown_id(run, m.get("id")))
+            for m in progress.waiting_messages(run)][-20:]
 
 
 def _steps(run: dict) -> list:
@@ -253,7 +255,8 @@ def waiting_on(run: dict, now: float):
     pend = _pending(run)
     if pend:
         d = pend[0]
-        return {"kind": "grant" if d.get("irreversible") else "decision", "ref": _line(d.get("id"), 20),
+        return {"kind": "grant" if d.get("irreversible") else "decision",
+                "ref": _line(progress.shown_id(run, d.get("id")), 20),
                 "since": _int(d.get("ts"))}
     if _blocked(run):
         u = next((u for u in reversed(run.get("updates") or []) if isinstance(u, dict) and u.get("kind") == "blocked"),
@@ -456,8 +459,9 @@ def _runs(raw_runs, briefs, now, host, team, memo, roster=None) -> list:
             continue
         wo = waiting_on(raw, now)
         eta = memo.get(b["id"], landing_key(raw, wo), lambda raw=raw: landing(raw, now))
-        decisions = [{k: d.get(k) for k in ("id", "ts", "question", "options", "recommend", "irreversible",
-                                             "from_name")} for d in _pending(raw)]
+        decisions = [dict({k: d.get(k) for k in ("ts", "question", "options", "recommend", "irreversible",
+                                                  "from_name")}, id=progress.shown_id(raw, d.get("id")))
+                     for d in _pending(raw)]
         out.append(dict(b, machine=None, who=None, branch=None, waiting_on=wo, eta=eta, decisions=decisions,
                         questions=_questions(raw), moot=_moot(raw, roster)))
     out += _remote_runs(team, host, now)
@@ -590,24 +594,26 @@ def _decision_items(run: dict, rid: str, roster) -> list:
     goal = _line(run.get("goal") or "the run", 80)
     out = []
     for d in _pending(run):
-        did = _line(d.get("id"), 20)
+        # `did` keys the item and anchors the run; `shown` names the run too (progress.shown_id), since the page
+        # belongs to no session, and so does the approve line it gives, which only that run's session takes
+        did, shown = _line(d.get("id"), 20), _line(progress.shown_id(run, d.get("id")), 20)
         asker = _who(d.get("from_name") or d.get("from") or "main", roster)
         lanes = _lanes_waiting(run, d.get("id"))
         common = dict(id=f"decision:{rid}:{did}", rank=1, tone="you", since=d.get("ts"), project=run.get("project"),
                       run_id=rid, asker=asker, blocks={"run": goal, "lanes": lanes}, options=_options(d),
-                      clause=f"{goal} is paused until you answer {did}.", open=_open("run", rid, did))
+                      clause=f"{goal} is paused until you answer {shown}.", open=_open("run", rid, did))
         act, target = _line(d.get("irreversible"), 40), _line(d.get("target"), 120)
         if act:
             what = f"{act.replace('-', ' ').capitalize()} {('PR ' + target) if target.isdigit() else target}".strip()
             out.append(_item(**common, kind="grant", irreversible=act, title=f"{what} waits for your grant",
                              lines=[f"{asker} asked at {_clock(d.get('ts') or 0)} for {goal}.", d.get("question")],
                              type_to_answer=[f"grant {act} {target}"] if target and " " not in target
-                             else _type_to_answer(did, common["options"])))
+                             else _type_to_answer(shown, common["options"])))
             continue
         waits = f", {_plural(lanes, 'crew member waits', 'crew members wait')}" if lanes else ""
-        out.append(_item(**common, kind="decision", title=f"{did} · {d.get('question') or ''}",
+        out.append(_item(**common, kind="decision", title=f"{shown} · {d.get('question') or ''}",
                          lines=[f"{asker} asks · pauses {goal}{waits}"],
-                         type_to_answer=_type_to_answer(did, common["options"])))
+                         type_to_answer=_type_to_answer(shown, common["options"])))
     return out
 
 

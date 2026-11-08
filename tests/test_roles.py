@@ -310,13 +310,6 @@ class DispatchTests(unittest.TestCase):
 
 
 class SessionContextTests(unittest.TestCase):
-    # the session-start context: the catalog names who does and approves each kind of work role first
-    def test_the_catalog_names_the_responsible_and_accountable_members_role_first(self):
-        text = crew.catalog(ROSTER)
-        self.assertIn("R Backend engineer (Tank) · A Code reviewer (Seraph)", text)
-        self.assertEqual(bare(text), [])
-        self.assertLessEqual(len(text), hooks.CATALOG_MAX)
-
     def test_the_route_hint_calls_the_session_the_tech_lead(self):
         text = hooks.morpheus_hint("build the JSON API server for the dashboard and implement the frontend live "
                                    "updates", ROSTER)

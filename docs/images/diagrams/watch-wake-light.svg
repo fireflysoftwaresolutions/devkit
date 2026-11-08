@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="952" height="696" viewBox="0 0 952 696" role="img" aria-labelledby="dk-title dk-desc">
+<title id="dk-title">One wait wakes the idle session</title>
+<desc id="dk-desc">The tech lead arms one devkit wait before it ends its turn. A crew member's question lands in the run file; the wait sees the file change, prints the question once and exits, and the harness wakes the session, which answers and arms the wait again.</desc>
+<rect width="952" height="696" fill="#F3F1EB"/>
+<g font-family="Manrope, 'Manrope Variable', system-ui, -apple-system, 'Segoe UI', Arial, sans-serif">
+<circle cx="68" cy="74" r="4" fill="#FFB34A"/>
+<text x="80" y="78.5" font-size="12" font-weight="600" fill="#62645B" letter-spacing="0.48">ONE WAIT WAKES THE IDLE SESSION</text>
+<g transform="translate(132.0,104.0)">
+<line x1="0.0" y1="80.0" x2="0.0" y2="576.0" stroke="#D8D4CA" stroke-width="1.5" stroke-dasharray="4 4"/>
+<line x1="216.0" y1="80.0" x2="216.0" y2="576.0" stroke="#D8D4CA" stroke-width="1.5" stroke-dasharray="4 4"/>
+<line x1="448.0" y1="80.0" x2="448.0" y2="576.0" stroke="#D8D4CA" stroke-width="1.5" stroke-dasharray="4 4"/>
+<line x1="680.0" y1="80.0" x2="680.0" y2="576.0" stroke="#D8D4CA" stroke-width="1.5" stroke-dasharray="4 4"/>
+<path d="M0.0,136.0 L208.5,136.0" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="216.0,136.0 208.0,140.0 208.0,132.0" fill="#62645B"/>
+<rect x="33.0" y="106.0" width="149.9" height="22.0" rx="9" fill="#F3F1EB"/>
+<text x="108.0" y="121.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">arm, then end the turn</text>
+<path d="M680.0,192.0 L455.5,192.0" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="448.0,192.0 456.0,188.0 456.0,196.0" fill="#62645B"/>
+<rect x="516.4" y="162.0" width="95.2" height="22.0" rx="9" fill="#F3F1EB"/>
+<text x="564.0" y="177.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">dev crew ask</text>
+<path d="M448.0,248.0 L223.5,248.0" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-dasharray="6 5" stroke-linecap="butt"/><polygon points="216.0,248.0 224.0,244.0 224.0,252.0" fill="#62645B"/>
+<rect x="287.3" y="218.0" width="89.4" height="22.0" rx="9" fill="#F3F1EB"/>
+<text x="332.0" y="233.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">file changed</text>
+<path d="M216.0,304.0 L440.5,304.0" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="448.0,304.0 440.0,308.0 440.0,300.0" fill="#62645B"/>
+<rect x="236.7" y="274.0" width="190.6" height="22.0" rx="9" fill="#F3F1EB"/>
+<text x="332.0" y="289.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">take what is new, mark it told</text>
+<path d="M216.0,360.0 L9.5,360.0" fill="none" stroke="#9D671F" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="0.0,360.0 10.0,355.0 10.0,365.0" fill="#9D671F"/>
+<rect x="21.0" y="330.0" width="174.0" height="22.0" rx="9" fill="#F3F1EB"/>
+<text x="108.0" y="345.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">prints the question, exits 0</text>
+<path d="M0.0,416.0 L440.5,416.0" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="448.0,416.0 440.0,420.0 440.0,412.0" fill="#62645B"/>
+<rect x="165.0" y="386.0" width="117.9" height="22.0" rx="9" fill="#F3F1EB"/>
+<text x="224.0" y="401.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">dev crew answer</text>
+<path d="M0.0,472.0 L208.5,472.0" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="216.0,472.0 208.0,476.0 208.0,468.0" fill="#62645B"/>
+<rect x="69.7" y="442.0" width="76.5" height="22.0" rx="9" fill="#F3F1EB"/>
+<text x="108.0" y="457.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">arm again</text>
+<path d="M448.0,528.0 L680.0,528.0" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-dasharray="6 5" stroke-linecap="butt"/><polyline points="672.0,532.0 680.0,528.0 672.0,524.0" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+<rect x="469.1" y="498.0" width="189.9" height="22.0" rx="9" fill="#F3F1EB"/>
+<text x="564.0" y="513.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">answer at its next call or wait</text>
+<rect x="-68.0" y="0.0" width="136.0" height="80.0" rx="6.0" fill="#FFFFFF" stroke="#BFB8AB" stroke-width="1.5"/>
+<text x="0.0" y="34.0" font-size="16" font-weight="600" fill="#272820" text-anchor="middle">Tech lead</text>
+<text x="0.0" y="56.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">main session</text>
+<rect x="132.0" y="0.0" width="168.0" height="80.0" rx="6.0" fill="#FFF0D8" stroke="#F0A33C" stroke-width="1.5"/>
+<text x="216.0" y="34.0" font-size="16" font-weight="600" fill="#272820" text-anchor="middle">dev watch --wait</text>
+<text x="216.0" y="56.0" font-size="13" font-weight="400" fill="#855414" text-anchor="middle">background task</text>
+<rect x="340.0" y="0.0" width="216.0" height="80.0" rx="6.0" fill="#D8DCDA" stroke="#6B8795" stroke-width="1.5"/>
+<text x="448.0" y="34.0" font-size="16" font-weight="600" fill="#272820" text-anchor="middle">Run and session files</text>
+<text x="448.0" y="56.0" font-size="13" font-weight="400" fill="#39464B" text-anchor="middle">devkit state</text>
+<rect x="604.0" y="0.0" width="152.0" height="80.0" rx="6.0" fill="#FFFFFF" stroke="#BFB8AB" stroke-width="1.5"/>
+<text x="680.0" y="34.0" font-size="16" font-weight="600" fill="#272820" text-anchor="middle">Crew member</text>
+<text x="680.0" y="56.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">subagent</text>
+</g>
+</g>
+</svg>

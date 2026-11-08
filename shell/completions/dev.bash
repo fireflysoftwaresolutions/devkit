@@ -210,7 +210,7 @@ _dev_here='tasks steps plans branches worktrees'
 _dev_spec() {
   c= o= v= p=
   case "$1" in
-    '') c='help ls go alias status clone new adopt open claude codex handoff-import handoff session task note plan progress time delivery lesson sleep jobs audit report rm mv cp files find grep diff stubs team initiative overview standup dashboard config agents calver plugin guard wt backup sync du free gc canary ci branch commit rebase push pr run release issue git gh test mcp desktop crew ext impeccable doctor install docs sec diagram setup prompt update docker version completion' o='-h --help' ;;
+    '') c='help ls go alias status clone new adopt open claude codex handoff-import handoff session task note plan progress time delivery lesson sleep jobs audit report rm mv cp files find grep diff stubs team initiative overview standup dashboard config agents calver plugin guard wt backup sync du free gc canary ci watch watches branch commit rebase push pr run release issue git gh test mcp desktop crew ext impeccable doctor install docs sec diagram setup prompt update docker version completion' o='-h --help' ;;
     'help') o='-h --help' ;;
     'ls') o='-h --help --offline --names --all --json' ;;
     'go') o='-h --help' p='l:projects:-:: l:worktrees:@1::' ;;
@@ -325,6 +325,8 @@ _dev_spec() {
     'gc') o='-h --help --safe -y --yes --apply --auto-only -v --verbose' p='*n' ;;
     'canary') o='-h --help --days --limit' v='--days=n --limit=n' ;;
     'ci') o='-h --help -p --project --sha --wait --tag --pr --timeout --quiet --commands --runs --status --branch --all-branches --watch --limit --all-jobs --json --run --mark-passed --note --evidence --dry-run --keep-going --step-timeout --resume --provider --fix --strict --stack --force' v='-p=l:projects:-:: --project=l:projects:-:: --sha=n --tag=n --pr=n --timeout=n --branch=l:branches:-:: --limit=n --note=n --step-timeout=n --provider=c:github,gitlab,bitbucket,azure --stack=c:auto,python,node,java-maven,java-gradle,go,php,docker' p='l:projects:-:status,audit,init,watch,watches:' ;;
+    'watch') o='-h --help --wait --for --only --timeout --json' v='--for=c:me --only=m:question,decision,ready,member,ci,notice --timeout=n' ;;
+    'watches') o='-h --help --json' ;;
     'branch') c='new rename ls clean prune embargo' o='-h --help' ;;
     'branch new') o='-h --help --ticket --base' v='--ticket=n --base=l:branches:-::' p='n' ;;
     'branch rename') o='-h --help --ticket' v='--ticket=n' p='n' ;;
@@ -368,7 +370,7 @@ _dev_spec() {
     'crew set') o='-h --help --why' v='--why=n' p='l:crew:-:: n *n' ;;
     'crew history') o='-h --help' ;;
     'crew rules') o='-h --help' ;;
-    'crew graph') o='-h --help --latest --mermaid --json' ;;
+    'crew graph') o='-h --help --global --latest --all --mermaid --json' ;;
     'crew show') o='-h --help' p='*l:crew:-::' ;;
     'crew brief') o='-h --help --scope --step --activity' v='--scope=n --step=l:steps:-:: --activity=l:activities:-::' p='l:crew:-:: *n' ;;
     'crew sync') o='-h --help --check' ;;

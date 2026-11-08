@@ -111,10 +111,15 @@ short version:
    work and files, what to return and how to report, and it prints the exact launch line for Claude Code and for
    Codex. The launch names the step, which is how the step binds to the member's lane.
 
-4. **Follow and answer.** `dev crew graph` draws the session as one graph: the steps with their state, owner, and
-   kind of work, the lanes under them, decisions waiting for the developer, approvals owed, and open messages. Answer
+4. **Follow and answer.** `dev crew graph` draws the project's live sessions, each as one graph: the steps with
+   their state, owner, and kind of work, each lane once under the step it works now (working, stale, or ended, as
+   `dev crew owner` reads it), decisions waiting for the developer, approvals owed, and open messages. Outside a
+   project, or with `--global`, it draws every live session on this Mac. Answer
    questions as they come (`dev crew answer M2 "…"`), and keep the developer informed with `dev progress step`, whose
-   update shows every lane.
+   update shows every lane. Before ending a turn while members work, arm `dev watch --wait`: it wakes the idle tech
+   lead for their questions, decisions for the developer, steps that become ready, members that stop or are lost,
+   and CI results (see
+   [Progress and communication › Waiting and waking](progress-and-communication.md#waiting-and-waking)).
 
 5. **Check and integrate** each member's work, then run the full suite once (`dev ci --run`).
 
@@ -194,9 +199,11 @@ that launch alone, so two members launched together never swap lanes:
   on that lane's own evidence.
 - **A launch that failed** (an unknown agent type, an interrupt) starts no agent, so its record goes at once: it
   never labels another agent or holds a slot.
-- **A resumed agent** keeps its own lane and takes nothing else. It takes a crew slot like a launch: while none is
-  free, it may read but not write, and the tech lead is told once (`crew.queued`); it takes its slot at its first
-  tool call after one frees.
+- **A resumed agent** keeps its own lane and takes no other member's step or label. When it holds no open step, it
+  takes the one step assigned to its member that waits for a launch, unless a new launch of its member is on its
+  way for it; with two or more waiting, `dev progress assign` picks. It takes a crew slot like a launch: while none
+  is free, it may read but not write, and the tech lead is told once (`crew.queued`); it takes its slot at its
+  first tool call after one frees.
 - **A lane whose files went to another lane.** When a step and its scope go to another lane, a lane that holds no
   open step and kept an overlapping scope may read but not write until the tech lead assigns it a step
   (`crew.scope-handed`), so two lanes never write the same files.
@@ -223,7 +230,10 @@ The crew shares a number of slots, and a launch that does not fit is refused wit
   Lookup scout (Sparks) nothing (`progress.slot_weights`). Members' helpers count, and so does a member that works
   again after its lane ended: over the limit, it reads only until a slot frees.
 - **The reserve.** `progress.reserve` (1) keeps a slot for what you ask while the crew works: plan steps queued in an
-  earlier turn do not take it, and a launch for your request in the current turn does (`crew.reserve`).
+  earlier turn do not take it, and a launch for your request in the current turn does (`crew.reserve`). A message
+  you type while the tech lead works counts as your latest request too. Claude Code runs no prompt hook for it, so
+  devkit reads it from the transcript at the next tool call. It moves the request clock only, never counts as an
+  approval or a grant.
 - **The order.** `dev crew next` lists the ready steps in the order to launch them: the longest critical path first,
   then your latest request, then the oldest. It records that order, and a launch out of it needs
   `dev crew next --first "<step>" --why "…"`.
@@ -307,7 +317,14 @@ dev crew ask "Should the export include voided invoices?"           # to the tec
 dev crew ask --to Seraph "Please look at the rounding in total()"   # to another member
 dev crew answer M3 "No: only issued and paid ones"
 dev crew inbox
+dev watch --wait --for me --timeout 9                               # a member blocked on the answer, in the foreground
 ```
+
+A member keeps working on what does not need the answer. When it is blocked, it waits for the answer with
+`dev watch --wait --for me --timeout 9`, in the foreground and as a command of its own, so the wait takes its own
+messages and never the tech lead's; with no answer, it ends with the question under "Needs from the tech lead." The
+tech lead's idle session wakes for the question through its own `dev watch --wait` (see
+[Progress and communication › Waiting and waking](progress-and-communication.md#waiting-and-waking)).
 
 A message reaches its recipient with the recipient's next action (the PostToolUse hook adds it to the context), or
 with the main session's next prompt. A message to a member who has not started yet, or whose lane ended or went
@@ -327,6 +344,30 @@ Each message has a kind, and only a question waits:
 
 `dev status` and the dashboard list the questions to the tech lead that nobody answered, each with its
 `dev crew answer` command; a notice or an answer is never listed as open.
+
+On Claude Code, a `SendMessage` from the tech lead to the member who asked answers that member's open questions to
+the tech lead: devkit marks each answered via SendMessage, keeps the text as the answer, and records
+`crew.message-answered`. Codex's `send_input` does not, so answer there with `dev crew answer` before you resume the
+member. A question whose member ended and holds no running or blocked step is **moot**: nobody waits for it, it is
+never listed as open and wakes nobody, and `dev watch` shows it as moot with the reason.
+
+Message ids are numbered per run, so two runs of one project can both hold an `M3`. Where a run's message or
+decision is shown to anyone but that run's own session and members, its id carries the run's session: `M3@9448c4d0`,
+with at least 8 characters of the session id. `dev status` in your session shows your run's ids bare and every other
+run's qualified; the dashboard, which belongs to no session, qualifies them all, and so does a continuity brief read
+from another session.
+
+```bash
+dev crew answer M3@9448c4d0 "Yes, ship it"   # answers M3 of that run; the answer reaches the member who asked there
+dev crew answer M3 "Yes, ship it"            # M3 of your own session's run
+```
+
+A bare id never answers another message than the one shown: when your run has no `M3`, or its `M3` waits for no
+answer, while another run's `M3` waits, `dev crew answer M3` is refused and prints the qualified ids to use. A crew
+member answers the messages of its own run only. When a run ends (`dev progress done`) or is replaced
+(`dev progress start --replace`), its questions that still wait close with the reason (`crew.message-closed`): they
+leave **Needs you**, the dashboard, and the continuity brief, and take no answer. To recover a closed question that
+still matters, ask it again with `dev crew ask`.
 
 ### Every report is checked
 
@@ -368,11 +409,14 @@ main session launched: a member's own helpers, and agents with no launch record,
 
 When the member stops for good, its step ends on evidence: done with a Check ✓ in its report or its own
 `dev progress step --check`, otherwise unverified, for the tech lead to close with evidence or reopen. A review-only or
-read-only member whose shell call wrote files ends unverified too. A file that changed during that call inside a
-working member's scope counts as that member's write only while that member, or a helper of it, has a call open;
-otherwise it is the read-only member's own write, since a read-only member can write through a script in its
-scratch folder. Either way the working member's step keeps the file, and the review that follows that step lists it
-(`scope.write` in the audit trail). Keeping the step open while gate findings remain is planned.
+read-only member whose shell call wrote files ends unverified too. devkit records every Write, Edit, and MultiEdit
+call with its file and its caller. A file that changed during the read-only member's shell call counts as the write
+of whoever's own edit call touched it during that call (a working member, its helper, or the tech lead), and
+nothing is flagged for it. Any other file counts as the read-only member's own write, even inside a working
+member's scope, since a script of the read-only member can write there: `possible` when a member whose scope holds
+it had a shell call open at the time, else `certain`. An open step whose scope holds it keeps it, and the review
+that follows that step lists it (`scope.write` in the audit trail). Keeping the step open while gate findings remain
+is planned.
 
 **Review steps start on unverified work.** A step whose dependencies ended unverified waits, except a review step
 (its kind of work is review, or its member works review-only): it starts, and its Check ✓ ends done the steps it
@@ -402,7 +446,8 @@ dev crew delegate "add the export column" --to Dozer          # from anyone: a n
 dev crew delegate "review the parser before merge" --to auto  # routed to the best fit
 dev crew decline "add the export column" --why "needs a data migration plan first"
 dev crew next                                                 # ready to launch, queued, waiting, busy, the slots
-dev crew graph                                                # the whole session as one graph
+dev crew graph                                                # this project's live sessions as graphs
+dev crew graph --global                                       # every live session on this Mac
 ```
 
 - **Routing** suggests a member: `dev crew route` ranks the members by their keywords (`config/crew.json`), their
@@ -466,6 +511,11 @@ A decision belongs to its run, and only an open one needs you:
   never your answer, so it opens no irreversible action.
 - **Closed with its run.** When the run ends (`dev progress done`) or is replaced (`dev progress start --replace`),
   each decision still pending in it, moot ones included, closes with the reason (`crew.decision-closed`).
+- **Answered in its own session.** A decision of another session's run shows as `D3@9448c4d0`, and `dev status`
+  and the dashboard give its approve line in that form: `approve D3@9448c4d0: <option>`. Type it in that
+  session's chat, where devkit reads your evidence; typed in any other session it counts for nothing, so it never
+  answers that session's own `D3`. Its tech lead records it there: `dev crew decide` and `dev crew withdraw`
+  refuse another session's qualified id, and take your own run's.
 
 [Work states › Decisions](work-states.md#decisions) draws the whole lifecycle.
 
@@ -580,7 +630,10 @@ dashboard and the handoff read, and devkit's audit trail (`dev audit`), publishe
 | `crew.message` | a question or answer between members |
 | `crew.decision`, `crew.decided`, `crew.mode` | a decision point, its answer (and by whom), a change of mode |
 | `crew.withdrawn`, `crew.decision-closed` | the tech lead withdrew a decision, or its run ended or was replaced, each with the reason |
-| `scope.write` | a file a read-only member's shell call changed, counted for the working member whose scope holds it while that member has a call open, otherwise flagged for the read-only member |
+| `crew.message-closed` | a question that still waited for an answer closed because its run ended or was replaced, with the reason (never its text) |
+| `crew.message-answered`, `crew.message-moot` | a question answered via SendMessage (with the channel), or one nobody waits on any more because its member ended and holds no open step (with the reason) |
+| `watch.wake` | a `dev watch --wait` woke its agent: the kinds of events, how many, and the time from the oldest event to the wake |
+| `scope.write` | a file a read-only member's shell call changed, counted for whoever's own edit call touched it during that call, otherwise flagged for the read-only member |
 | `crew.delegate`, `crew.decline` | work handed to another member, or handed back |
 | `raci.override` | a step assigned to a member the RACI does not make Responsible, with the reason |
 | `caller.refused`, `caller.unverified` | a tech lead's command refused because it did not come from the main session, or allowed on Codex without verification |

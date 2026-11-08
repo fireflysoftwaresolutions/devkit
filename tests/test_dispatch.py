@@ -42,6 +42,42 @@ class RouteTests(unittest.TestCase):
         self.assertEqual(self.best("write the runbook and release notes"), "ghost")
         self.assertEqual(self.best("something vague nobody owns"), "neo")  # the generalist
 
+    # Kotlin, Markdown and PHP or Python service code route to the member whose skills their rules require: a Spring
+    # Kotlin service to the backend engineer (Spring and backend skills), an Android activity to the mobile
+    # engineer, a plain note to nobody by its files, and PHP and Python services to the backend engineer with the
+    # backend skill
+    def test_files_route_to_the_member_their_skill_rules_fit(self):
+        from devkit import skillguard
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / ".git").mkdir()
+            files = {"src/main/kotlin/acme/OrderService.kt": "import org.springframework.stereotype.Service\n",
+                     "app/src/main/java/com/acme/MainActivity.kt": "import android.app.Activity\n",
+                     "routes/api.php": "<?php\nRoute::get('/users', fn () => []);\n",
+                     "service/main.py": "from fastapi import FastAPI\napp = FastAPI()\n",
+                     "notes/ideas.md": "# Ideas\n", "docs/guide.md": "# Guide\n"}
+            for rel, text in files.items():
+                (root / rel).parent.mkdir(parents=True, exist_ok=True)
+                (root / rel).write_text(text)
+            routed = {rel: self.best("update it", files=[rel]) for rel in files}
+            needs = {rel: sorted({s for r, _ in skillguard.rules_for_files([str(root / rel)])
+                                  for s in skillguard.required(r, "claude")}) for rel in files}
+        self.assertEqual(routed, {"src/main/kotlin/acme/OrderService.kt": "tank",
+                                  "app/src/main/java/com/acme/MainActivity.kt": "switch", "routes/api.php": "tank",
+                                  "service/main.py": "tank", "notes/ideas.md": "neo", "docs/guide.md": "ghost"})
+        self.assertEqual({rel: needs[rel] for rel in ("src/main/kotlin/acme/OrderService.kt", "routes/api.php",
+                                                      "service/main.py", "docs/guide.md")},
+                         {"src/main/kotlin/acme/OrderService.kt": ["backend", "java-springboot"],
+                          "routes/api.php": ["backend"], "service/main.py": ["backend"], "docs/guide.md": ["docs"]})
+
+    # the Markdown the technical writer is routed is the Markdown the docs skill rule covers, and the other way round
+    def test_the_writers_markdown_is_the_docs_rules(self):
+        from devkit import skillguard
+        docs = next(r for r in skillguard.rules() if r["id"] == "docs")["files"]
+        writer = next(globs for globs, who in dispatch.FILE_HINTS if who == "ghost")
+        self.assertEqual(sorted(g for g in writer if g.endswith((".md", ".mdx")) or "/" in g and g != "docs/**"),
+                         sorted(g for g in docs if g.endswith((".md", ".mdx")) or "/" in g))
+
     def test_reasons_are_given(self):
         member, score, why = dispatch.route("add a database migration")[0]
         self.assertGreater(score, 0)

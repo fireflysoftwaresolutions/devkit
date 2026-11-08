@@ -3,6 +3,155 @@
 All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH restarts at 0 each month); tags are
 `vYY.MM.PATCH`. Sections follow [Keep a Changelog](https://keepachangelog.com/).
 
+## [26.11.7] - 2026-11-08
+
+This release makes sure nothing that needs an agent or you waits unseen. An idle tech lead heard nothing while crew
+members asked questions, a member had no way to wait for its answer, questions answered by message stayed open, a
+request you typed while the agent worked lost the crew slot kept for you, and the status block could leave out how
+far the run had come. Now one wait, `dev watch --wait`, wakes an idle session for every devkit event; a short welcome
+tells you what needs you when a session starts; the status block always shows the step of the total while a run is
+active; and the guard, the crew checks, and the skill rules refuse fewer honest commands while reading more of the
+ones that hide an action.
+[Progress and communication › Waiting and waking](docs/progress-and-communication.md#waiting-and-waking) explains the
+wait, and [Concepts › The session-start welcome](docs/concepts.md#the-session-start-welcome) the welcome.
+
+Restart your Claude Code sessions after the update: devkit's PostToolUse hook now also runs for `SendMessage`, a
+managed setting a running session does not reload. `dev update` lists the sessions to restart.
+
+### Added
+
+- **`dev watch --wait`, one wait that wakes an idle session for every devkit event.** It blocks until something its
+  caller must act on arrives for its own session (a crew question or answer, a decision for you, a step ready to
+  launch, a member that stopped, was lost, or ended unverified, or a CI result), prints each event once, one line
+  each, and exits: `0` events, `2` nothing can arrive, `3` timeout, `5` a newer wait took over. The hooks and the wait
+  take from the same records, so nothing reaches the agent twice. The Claude Code main session runs it in the
+  background; a crew member waits for its answer in the foreground with `--for me --timeout 9`; Codex, which has no
+  background wake-up, waits in the foreground with `--timeout 10`. It calls no model while it waits. `dev watch`
+  shows what waits and whether a wait is armed, and `dev watches` lists every wait with the command to arm it again.
+  See [Commands › dev watch](docs/commands.md#dev-watch---wait---for-me---only-kinds---timeout-min---json).
+- **The Stop hook sends back a turn that leaves nothing to wake it.** A main-session turn that ends while a crew member
+  works, a launch is pending, a step waits for a crew slot, or CI it sent still runs, with no live wait, goes back
+  once with the command for that agent. A live `dev watch --wait` also counts as the watch on a pushed commit's CI
+  run, so the turn gets one message, not two.
+- **A short welcome when a session starts.** Claude Code and Codex show `dev status` in at most five lines: a verdict
+  on the first line, then what needs you, what is running, what is next, and where you are. A resume says what
+  happened since you left; `/clear` and a compaction say one line or nothing. It reads devkit's records only, and
+  says `see dev status`, never `nothing needs you`, when it cannot read what needs you. Codex now shows devkit's
+  session-start message too.
+- **The `wait-and-wake` skill** teaches agents when to arm the wait and how each agent arms it. The crew,
+  communicating, delivery, cicd, using-devkit, working-efficiently, and work-state skills link to it.
+- **A decision that waits while the session is idle notifies your desktop,** so the crew does not stall on you
+  without your knowing.
+- **`dev doctor` warns when a handoff note outgrows the handoff skill** (about 150 lines), with the fix: rewrite
+  Current state and move history into `plans/`.
+- **[Developing devkit](docs/development.md)** explains how to change a skill, an agent, a slash command, or the
+  global instructions.
+
+### Changed
+
+- **The Progress bullet is required while a run is active.** Every final message shows the steps done of the steps
+  that count (a skipped step counts in neither number), the running steps by number and name, the active time
+  against the estimate, and the ETA, as `dev progress step` and `dev progress note` print it. A message without it,
+  or with other step counts than the run's, goes back once with the line to use; `canary.enforce: false` turns the
+  check off. See
+  [Progress and communication › The Progress line](docs/progress-and-communication.md#the-progress-line).
+- **A message you type while the agent works counts as your latest request.** Claude Code runs no prompt hook for
+  it, so devkit reads it from the transcript, and a launch for it may take the crew slot kept for you. It never
+  counts as an approval or a grant.
+- **A `SendMessage` to the member who asked answers its open questions.** On Claude Code, devkit marks them answered
+  via SendMessage, with the text, in the inbox and the audit trail; they used to stay open until the run ended. A
+  message that names question ids (`M12`) answers only those, and a name that fits several members who asked answers
+  none, since SendMessage reached only one of them.
+- **A question nobody waits on is moot.** A question to the tech lead whose member ended and holds no open step no
+  longer waits or wakes anyone, and `dev watch` shows it as moot with the reason.
+- **`dev crew graph` draws every live session.** Inside a project it draws that project's sessions, yours first;
+  outside one, or with `--global`, every live session on this Mac. A lane shows once, under the step it works now, in
+  the state `dev crew owner` reads; skipped steps fold into one line (`--all` lists them). `--json` now prints
+  `{view, project, caller, sessions}`, and `--mermaid` one flowchart with a subgraph per session.
+- **The prompt hook reminds the tech lead to declare kinds of work, in any language.** It used to guess a route from
+  the request's English words, so requests in other languages got none. Every request of four or more words now gets
+  the same reminder: declare the kinds of work by their catalog ids, and route each by the RACI.
+- **Required skills follow the commands a turn runs, not only its files.** A turn that pushed without `delivery`, or
+  tagged a release without `release-policy`, goes back once, like one that changed files. The rules changed too:
+  `api` requires `backend` for PHP, Python, and Node service code with routes; `database` requires `backend`; a new
+  `postgres` rule applies only in a repository whose project files name Postgres, and a new `terraform` rule only
+  with the `iac` skill group; `docs` covers every page, skill, agent file, slash command, and `agents/AGENTS.md`; a new
+  `release` rule holds tags, releases, and `VERSION`; the `ui` rule no longer fires on tests or on a Spring
+  `@Component("x")`; and a file outside every repository matches no rule. See
+  [Skills and plugins › The rules](docs/skills-and-plugins.md#the-rules).
+- **Crew briefs list first the skills the crew gates check,** then the other skills of the role, and never call a
+  gated skill optional.
+- **The crew's procedures ask only for skills a model can load.** The Security engineer's scan phase requires
+  `devsecops` and runs a Semgrep audit only when you ask; the hand-off phases no longer require `communicating`, whose
+  format the brief already carries; the tech lead closes a branch with `delivery`, which wins where Superpowers'
+  branch-finishing skill differs.
+- **The crew gates judge each member by its own agent.** A Codex member's commands and skill reads count, and only
+  the skills installed for Codex are required of it. A reviewer owes no skill for a file it only read.
+- **Kotlin and Markdown route as the skill rules see them.** Kotlin under `src/main/kotlin` goes to the Backend
+  engineer and Android Kotlin to the Mobile engineer, and only documentation goes to the Technical writer.
+- **The global instructions** keep plan labels ("Phase 1," a finding number) out of code, docs, commits, and PRs, put
+  the design-first loop for UI work in, say that devkit wins where a Superpowers skill differs, and say that the tech
+  lead's own procedure is guidance while devkit checks what it produces.
+
+### Fixed
+
+- **`dev crew answer` answers the message in the run that holds it.** Ids are numbered per run, so two runs could
+  both hold an `M11`, and answering the one `dev status` listed answered your own instead. An id shown outside its
+  session now carries it (`M3@9448c4d0`), `dev crew answer` takes that form, and a bare id that could reach another
+  message is refused with the ids to use. A run that ends closes its waiting questions, so they leave **Needs you**.
+- **`approve D3@<session>` counts only in the session it names.** A bare `approve D3` typed in another session's chat
+  used to answer that session's own `D3`, a different decision.
+- **`dev progress add` adds one step per quoted spec.** Two quoted specs became one step with the wrong estimate and
+  kind of work; a name that still holds an estimate is now refused, with a command that works (`dev progress add
+  "a=5h; b=2h"`).
+- **A resumed crew member takes its next step.** A member resumed with `SendMessage` kept its old step's scope, and
+  its report closed nothing in the plan. Now, holding no open step, it takes the one step assigned to it that waits
+  for a launch, and `dev progress assign` binds a step to a working lane of that member that holds no other.
+- **`dev test prove` proves a fix that lives in a test helper,** and runs tests that need git: a changed helper or
+  fixture is restored with the production files, and the copy carries a clone of the checkout's repository.
+- **The crew checks credit a file to the member that wrote it.** A build member is credited only with files it
+  wrote, not every file its commands named; a read-only member's write is credited only to an exact edit call, so
+  another member's edits, dotfiles such as `.github/…` included, no longer count against it.
+- **A crew member's `dev commit` keeps a pre-commit hook's fix.** A lane commits from its own index; the shared index
+  kept the old version of a file the hook fixed and re-staged, a staged revert the next commit would carry. It now
+  takes the committed version of every path the commit changed.
+- **The tech lead's wait stays the tech lead's while a member waits.** A member blocked on `dev watch --wait --for me`
+  made the tech lead's own `dev watch --wait` count as that member's, so nothing woke the tech lead.
+- **A message typed after a long transcript line is still seen.** A line longer than one read (a screenshot)
+  held the reading position, so the requests typed after it, mid-turn, were never read.
+- **A turn that pushed while the crew worked gets one wake instruction.** It used to be told to arm both a
+  `dev ci watch --wait` of the commit and `dev watch --wait`; now the one wait covers a run devkit follows, and a run
+  nothing follows gets its own CI watch.
+- **A new wait removes wait records older than three days,** which only `dev watches` removed before.
+- **Crew members' lane calls joined to `cd` or a read now reach their lane** instead of being refused as compound
+  commands (`cd <worktree> && dev progress step …`, `dev crew inbox | tail -5`).
+- **Read-only crew members can run the reads they were refused,** such as `python3 --version`, `ps`, `sysctl`,
+  `command -v`, a read-only substitution, or `mkdir` of their own scratch folder.
+- **The guard reads a Python program's strings as text when no shell runs them,** so a regular expression with
+  backticks or a variable named `HOME` no longer blocks a crew member's script.
+- **The test suite is hermetic:** it ignores environment entries that name a real devkit root and builds the
+  checkouts its tests need.
+
+### Security
+
+- **The guard reads more of what a shell runs,** so a command that hid an irreversible action or a lane escape is
+  judged for what it does: a variable a later command can rebind, a shell's `-c` line after all its options and
+  bash's one-dash long options and `+c`, a line another program runs, the agent flags an `expect` or Tcl program
+  writes, process substitutions (zsh's `=(…)` included), heredocs inside `${…}`, and the file `source` and `.` read,
+  resolved as the system opens it. A command it cannot read safely counts as unknown. See
+  [Guard rules › What the guard cannot see](docs/guard.md#what-the-guard-cannot-see).
+- **An agent cannot hide the variables that mark it as an agent.** A command that unsets or blanks `CLAUDECODE`,
+  `CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_PID`, `CODEX_SANDBOX`, `CODEX_THREAD_ID`, `DEVKIT_SESSION` or `DEVKIT_AGENT`
+  (`unset`, `env -u`, `env -i`, an empty `NAME=`) is refused for the main session and the crew alike: what it runs
+  would pass for the developer's own terminal, where devkit lets `dev install` and grants through.
+- **A `$(…)` or backtick inside a word is judged as the bare one.** The guard of Claude and Codex and the writing lane
+  read a substitution in double quotes, a here-string, an expanding heredoc, or the `-c` word of a shell that only
+  parses (`bash -n -c "$(…)"`), so `echo "$(dev install)"` is refused like `echo $(dev install)`.
+- **The wait prints no line that reads as an approval.** A member's or CI's text is one quoted span with control and
+  escape sequences removed, and a message you type while the agent works never counts as a grant.
+- **devkit's own scans cover `tests/`.** Semgrep no longer skips the test fixtures, scripts, and hook payloads that run
+  on the developer's machine, and each intended finding in a fixture carries its reason.
+
 ## [26.11.6] - 2026-11-08
 
 This release makes what devkit shows match what happened. One project listed 261 open work items next to 65 closed

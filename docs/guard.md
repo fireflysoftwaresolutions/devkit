@@ -18,9 +18,24 @@ Shell commands are tokenized: chains (`&&`, `||`, `;`, `|`, new lines) are check
 the directory used to resolve later paths, leading `VAR=value`, `sudo`, `env`, `command`, `nohup`, `time`, `exec`,
 `builtin`, `nice`, and `caffeinate` prefixes are skipped, heredoc bodies are treated as data, and output redirections
 (`>`, `>>`) are checked as writes. The guard also reads what the shell runs inside a command: `$(…)` and backtick
-substitutions, `sh -c` and `eval` strings (with the words after a `sh -c` line in place of its `$0`, `$1`, and
-`"$@"`), `xargs` and `find -exec` commands, and a pager that git or gh starts. The shells it reads this way are
-`sh`, `bash`, `zsh`, `dash`, `ksh`, `fish`, `csh`, and `tcsh`, run by name, by path, or by a script's shebang. It
+substitutions, process substitutions (`<(…)` and `>(…)` outside quotes, and zsh's `=(…)` at the start of a word,
+which runs its command the same way and stands for a file that holds its output, so `cat <(gh pr merge 12)` is a
+merge and `. =(echo …)` runs what echo writes; a redirect into one, `cmd > >(…)`, writes no file),
+`sh -c` and `eval` strings (with the words after a `sh -c` line in place of its `$0`, `$1`, and
+`"$@"`, unless the line, read as the shell reads its words once quotes are removed (`s""hift` is `shift`), holds
+anything that can bind them again: `shift`, `getopts`, `eval`, `source` or `.`, `set` with operands, zsh's `argv` or
+`1=…`, a function or zsh's anonymous function `() { … }`, or a `for` or `select` loop without an `in` list (`for a do`
+loops over them). Then they stay variables, and one that names the program is `unknown`, so
+`bash -c 'shift; $1 pr merge 12' sh echo gh` is refused; the line is the first word after all the shell's options, as bash, zsh, sh, dash, and ksh read them, so
+`bash -c -e 'line'` and `zsh -c -o errexit 'line'` run `line`, while `csh` and `tcsh` take the word right after
+`-c`; `bash` and `sh` read a long option with one dash before any short one, so `bash -norc -c 'line'` is
+`bash --norc -c 'line'` and `-rcfile f` takes `f`, and they read `+c` as `-c`), `xargs` and `find -exec` commands, and a pager that git or gh starts. The shells it reads this way are
+`sh`, `bash`, `zsh`, `dash`, `ksh`, `fish`, `csh`, and `tcsh`, run by name, by path, or by a script's shebang,
+and the guard knows a shell or an interpreter by the file it runs as well as by its name: a symbolic link to one
+(`./bash-link -c …`), a hard link, or a renamed copy is read as that program too, and a refusal of either reading
+stands. A binary run by its path that the guard cannot identify this way is `unknown` when the command hands it
+`-c` (alone or in a cluster such as `-lc`), `--command`, a here-string, a heredoc, a redirect, or a pipe, as it may
+run that text as a program. It
 reads every one of them with POSIX shell quoting, which `csh` and `tcsh` do not follow in every case (a backslash
 before a closing double quote). Every rule applies at each of these
 levels, so `find . -exec sh -c 'git push --force origin main' \;` is denied as the plain command is. The guard
@@ -29,6 +44,12 @@ runs, and the irreversible-action gate counts it as `unknown`, because the guard
 text a command only carries, such as a `dev crew ask` message, is data and never read as a command. A heredoc body
 ends at its tag line, and also at a line that starts with the tag and `)`: macOS `/bin/bash` 3.2 ends a heredoc there
 inside `$(…)` and runs what follows, while zsh reads on, so the guard reads it the way that shows what bash runs.
+A `<<WORD` inside `${…}`, `$[…]`, or `$((…))` is part of the expansion and opens no heredoc, so in
+`echo ${x/<<E/}` the next line is a command. A `#` starts a comment only at the start of a word, as bash and zsh read it: after a blank, a new line, an operator,
+or a redirection. A `#` right after the `)` that ends a substitution is part of the word, so in
+`echo x$(true)# <(gh pr merge 12)` the merge runs, while in `(echo a)# <(gh pr merge 12)` it is a comment. Where the
+shells read a parenthesis differently (bash reads `a=(1 2)#x` as one word, zsh as a comment), the guard takes the
+reading that shows more of what runs.
 
 ## What the guard is and is not
 
@@ -153,6 +174,8 @@ If devkit really should be off somewhere, change devkit's own configuration (see
 | `git reset --hard` with uncommitted changes to tracked files | deny |
 | `git stash`, `git stash push`, `save`, `pop`, or `apply` (the stash is shared by every worktree) | deny → `dev commit --wip`, then `dev commit --unwip` |
 | A commit, push, or tag chained after a pipe without `pipefail` (`npm test \| tail -5 && git commit …`), and the same for `dev commit`, `dev push`, `dev release`, `gh pr create`, `gh pr merge`, and `gh release create` | deny → run the check without the pipe, start with `set -o pipefail;`, or test the output |
+| A wait (`dev watch --wait`, `dev ci watch --wait`) with more work after it in the same command line: after `;`, `&&`, `\|\|`, `&`, or a new line, or a pipe into anything but a read-only filter (`tail`, `head`, `grep`, `wc`, `jq`, …) | deny → run the wait alone and act after it wakes you: the wait wakes the session only when everything after it has ended |
+| An action that must depend on a check's result sequenced after it without depending on it: after `;`, `\|\|`, or `&`, or after the check piped into a filter and joined with `&&` without `set -o pipefail` (`npm test; npm run release`, `npm test \| tail -3 && npm run release`). Checks are a CI watch or run, `dev test`, test runners, linters, type checkers, and `test`, `lint`, `check`, `build` scripts; actions are commit, push, tag, merge, release, publish, and deploy, a project's `release`, `publish`, or `deploy` script included (`npm run release`, `make release`, `just release`) | deny → gate it on the real result: `check && action` without a pipe, `set -o pipefail;` first, or a separate call |
 | `git commit` when gitleaks finds a secret in what the commit is about to record: the staged changes, plus any `git add` earlier in the same command, or every tracked change with `commit -a` | deny, with the rule, file, and line of each finding |
 | `git tag <name>` that breaks the project's recorded delivery policy (a non-CalVer tag in a CalVer project, a non-SemVer tag in a SemVer project) | deny, with the version to use, unless prefixed `DEVKIT_TAG_ANY=1` |
 | `git commit`, `tag`, `merge`, or `notes` whose message (inline or `-F` file) contains AI attribution | deny |
@@ -247,6 +270,7 @@ three folders readable and writable by your account only (`0700`) every time it 
 | A shell write there: a redirect, `tee`, `cp`, `mv`, `ln`, `rm`, `dev rm`, `sed -i`, an interpreter that writes files, also inside `sh -c`, `eval`, `xargs`, or `find -exec` | deny |
 | `dev config set safeguards.*` or `dev config edit`, or a `DEVKIT_*` or `DEV_ROOT` value added to the `env` block of an agent settings file or to a shell startup file such as `~/.zshrc` | deny |
 | Replacing, writing, or deleting a `dev` that a shell finds: `~/.local/bin/dev` (the link itself) or another `dev` earlier on `PATH` | deny → the developer runs `dev install --only cli` |
+| Unsetting or blanking a variable that tells a program an agent runs it (`CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_PID`, `CODEX_SANDBOX`, `CODEX_THREAD_ID`, `DEVKIT_SESSION`, `DEVKIT_AGENT`, `DEVKIT_FROM_AGENT`): `unset`, `env -u`, `env -i`, or an empty assignment before a command or after `export`, also inside `sh -c` | deny: a project's own tools read them to act differently for agents, and an agent must not hide from them |
 | `HOME`, `DEVKIT_CONFIG`, `DEV_ROOT`, or another `DEVKIT_*` variable set for `dev`, `python -m devkit`, a program that imports devkit, or a nested `claude` or `codex` session; `launchctl setenv` of one of them | deny; the one-command [escape hatches](#escape-hatches) still work |
 | `PYTHONPATH`, `PYTHONSTARTUP`, `PYTHONHOME`, `PYTHONUSERBASE`, `PYTHONPLATLIBDIR`, `PYTHONEXECUTABLE`, or `PYTHONBREAKPOINT` set for the same commands | deny: they load other code into devkit's own process. `bin/dev` runs `python3 -I -S`, which ignores them, the current folder, and the user and site-packages folders (and their `.pth` files); the rule also covers `python3 bin/dev`. A repository's own tests may still set `PYTHONPATH` |
 | A shell command that names a devkit copy in `~/.local/share/devkit/releases` other than the pinned release, or the releases folder itself (a `cd`, a glob, or a `find` there chooses a copy), however the path is written | deny → run `dev` from the PATH, and read a copy's files with a file tool; `dev doctor` lists the copies. An older copy may lack newer safeguards, and its repair writes its own hooks, guard, and instructions back for every session |
@@ -288,6 +312,13 @@ These rules also apply when a package runner starts the agent (`npx @anthropic-a
 `bunx`, `pnpm dlx`, `yarn dlx`, `@openai/codex`), and when interpreter code hands the command to a process
 (`subprocess.run(['claude', '--bare', …])`, `os.system('claude --bare …')`, `child_process.spawn('dev', ['hook',
 …])`). The same goes for `dev hook <event>`, which no agent tool call runs.
+
+They also apply when a program that drives a terminal starts the agent: an `expect` script (by its path, `-f`, `-b`,
+`--`, `-c`, or fed through its input, `expect < x.exp` or `cat x.exp | expect`), a `tclsh` program with `spawn`,
+`exec`, or `system`, Python's `pexpect.spawn('codex …')`, `script -q /dev/null codex …`, and `unbuffer codex …`.
+The guard reads the program where it writes the agent's flags, as it reads any interpreter's program, also one an
+interpreter reads from its input (`python3 < x.py`, `cat x.py | python3`). A repository's own script is its code
+and is not read this way, as for the other interpreter rules.
 
 A nested session with your own settings still runs, and so does a prompt that only names these flags. If the work
 needs another configuration, start that session yourself in a terminal.
@@ -364,7 +395,7 @@ The [irreversible-action gate](crew.md#guardrails) classifies each command by th
 gives it. When the shell names the program only when it runs, the guard cannot know what it does, so the command is the
 action `unknown`, tier 2, with the target `cmd-<hash>` of that exact command text. For example:
 
-- `$(printf gh) pr merge 12`, `${X:-gh} pr merge 12`, `g=gh; $g pr merge 12`, or `env -S 'gh pr merge 12'`;
+- `$(printf gh) pr merge 12`, `${X:-gh} pr merge 12`, `read g; $g pr merge 12`, or `env -S 'gh pr merge 12'`;
 - `gh $SUB merge 12` or `gh pr $ACT 12`, where a variable names gh's command, and `git $SUB push`, where a variable
   names git's;
 - a program that builds the name of what it calls, such as `getattr(__import__('os'), 'sys' + 'tem')`, or starts a
@@ -377,7 +408,15 @@ action `unknown`, tier 2, with the target `cmd-<hash>` of that exact command tex
   cap), and an executable text file with no shebang, or with a byte-order mark before `#!`, as the `sh` script the
   shell runs it as (also one that is not executable yet when the command runs `chmod`). A shell or interpreter reads its program from a redirect or a pipe the same way: `sh < f`, `< f sh`, `sh 0< f`,
   `sh <(cat f)`, `python3 < f`, `python3 /dev/stdin < f`, and `cat f | python3` are read like `sh f` and
-  `python3 f`. A path the system cannot encode (a lone surrogate) counts as unreadable. A binary is classified by its
+  `python3 f`, and `source` and `.` read their input or a descriptor the same way: `. /dev/stdin <<< '…'`,
+  `echo '…' | source /dev/stdin`, `source /dev/fd/3 3<<< '…'`, and `source <(echo …)` run the text they are fed
+  (`source /dev/fd/3` with nothing the command shows on that descriptor is `unknown`). The file is resolved as the
+  system opens it before the guard compares it: after `--`, in the folder the command runs in, with `//`, `.`, `..`,
+  and symbolic links read, so `source -- /dev/stdin`, `/dev/fd//0`, `cd /dev && source stdin`, and a link to
+  `/dev/stdin` are the input too; the same holds for a shell's or an interpreter's script (`bash //dev/stdin`). When
+  the guard cannot tell which file `source` or `.` reads (a variable, a substitution, an option it does not read)
+  and the command feeds it a here-string, a heredoc, a redirect, or a pipe, the command is `unknown`:
+  `f=/dev/stdin; source $f <<< '…'`. A path the system cannot encode (a lone surrogate) counts as unreadable. A binary is classified by its
   name, as before. A shell script the gate reads but cannot parse (a comment with an apostrophe, such as
   `# it's a test`) is unknown in the same way, however it runs: `./y.sh`, `sh y.sh`, `bash y.sh`, `. y.sh`,
   `source y.sh`, `sh < y.sh`, or `cat y.sh | bash`. A script inside the workspace is the repository's own and is not
@@ -392,9 +431,46 @@ These are not `unknown`:
 
 - a known program in a folder a variable names, such as `$VENV/bin/python` or `"$VIRTUAL_ENV/bin/pytest"`, unless
   the same command sets that variable or `IFS`;
+- a variable the command itself sets from a literal word: `py=python3; $py -m unittest …`, or a `for` loop over
+  literal words, `for P in python3 /usr/bin/python3; do $P -m unittest …; done`. The guard judges the command once
+  for each value, as if it were written out, and one refusal refuses it: `G=gh; $G pr merge 12` is a merge. The value
+  counts only from a plain assignment that always runs first (at the top of the command, after `;` or a newline,
+  not in a block, subshell, pipeline, or background job, and not as a prefix such as `py=x $py`), or inside the body
+  of the loop, and only when nothing else in the command can give the variable another value. These keep it
+  unknown: its name anywhere else in the command, in any word as the shell reads it once quotes are removed
+  (`read "G"`, `declare 'G'=…`, `read p""y`, `printf -vG`), or a use other than a plain `$G` or `${G}`; anything
+  that can set, unset, or evaluate a variable by a name it computes when it runs (`read "$n"`, `printf -v`,
+  `declare`, `typeset`, `local`, `readonly`, `mapfile`, `getopts`, `vared`, `trap`, `eval`, `source`, `.`, `${!n}`,
+  zsh's `${(P)n}`, arithmetic, `setopt`, a function or an alias), also when a resolved variable holds such a word
+  (`R=read; $R "$n"`), while `read`, `unset`, `wait`, and `export` count only with a computed word or an option
+  other than the plain ones (`read -r line` is fine); a name the shell sets by itself (`REPLY`, `_`, `MATCH`,
+  `BASH_REMATCH`, `OPTARG`, `PWD`, …); a value with a `$`, quote, glob, or `~`, or one that starts with `=`; `IFS`,
+  `case`, heredocs, backticks, ANSI-C quotes (`$'…'`), and more than 16 combinations;
+- a shell that only parses its program: `bash -n x.sh`, `sh -n`, `zsh -n` or `--noexec`, `bash -o noexec`, with a
+  script, a `-c` line, or its input. It runs nothing, neither its startup files nor `BASH_ENV`, so it is a read of the
+  file. `+n` or `+o noexec` after it, `-i`, `-l`, or `--login` (where `-n` does not hold), or `-n` after the script
+  (a word of the script) make it run, and it is judged as running, as `csh` and `tcsh` are. For `bash` and `sh`,
+  every option word must be one the guard knows runs nothing (`-norc`, `-noprofile`, `-posix`, set's letters and
+  `-o` names, and `-O extglob` or another globbing option); `-login`, `-rcfile`, `-debugger`, `-O extdebug`, `-D`, an
+  unknown option, or `-posix` after a short option (which bash reads as `-p -o … -s -i -x`) make it run;
 - text inside an interpreter's string literals: `${…}`, `{…}`, `[…]` and `*` there belong to the language (a
   template literal, an f-string, a list), and the guard looks for spawn calls in the program's code, not in the
-  text it carries. A program named in such a string (`os.system('gh pr merge 12')`) is still classified.
+  text it carries. A program named in such a string (`os.system('gh pr merge 12')`) is still classified;
+- backticks and `$(…)` in the strings of a Python program that starts processes only with argument lists, such as a
+  regular expression `` r"`([^`]+)`" `` or a Markdown template. Such a program uses no `shell=` (other than `shell=False`),
+  `os.system`, `popen`, `getoutput`, or `pty`, names no shell or `-c` option in a string, and builds no code with
+  `exec`, `eval`, `compile`, `__import__`, or `getattr`. With any of those, its strings are read as shell lines,
+  as before.
+
+A Python variable named `HOME`, `DEV_ROOT`, or `DEVKIT_*` (`HOME = Path.home()`) is a variable of the program, so it
+does not count as setting devkit's environment. `os.environ["HOME"] = …`, `putenv`, an `env={"HOME": …}` dictionary,
+and `dict(os.environ, HOME=…)` still do.
+
+A command line a program hands to a shell or a process (`subprocess.run('…', shell=True)`, `os.system`, `os.popen`,
+Node's `child_process.exec` and `execSync`, Ruby's `system` and backticks, Perl's `system`) is judged by the rules of
+the same line typed in the shell, with the variables the program sets in its own environment counted as set:
+`os.system('HOME=/tmp/x dev status')` is refused as `HOME=/tmp/x dev status` is, and so is `os.environ["HOME"] = …`
+followed by `os.system('cd /tmp && dev status')`.
 
 A pager is a command too: `git -c core.pager=…`, `-c pager.<command>=…`, `GIT_PAGER`, and `PAGER` for git, and
 `GH_PAGER` and `PAGER` for gh, are classified as the command they name, and so are `core.editor`,
@@ -481,10 +557,65 @@ These rules apply while a progress run has crew members working ([The crew](crew
 | The main session edits a file inside a working member's scope | deny, and how to ask that member |
 | A crew member records or withdraws a decision (`dev crew decide`, `dev crew withdraw`) | refused by `dev crew`: only Morpheus records the developer's answers and withdraws a decision |
 | A crew member writes or deletes in the session scratchpad outside its own folder, `scratchpad/<member id>/` (a file tool, a redirect, `rm`, `mv`, `find -delete`, a nested shell) | deny, with the folder to use. The member's brief names that folder, and devkit creates it when the lane opens (see [The crew › Scratch folders](crew.md#scratch-folders)) |
-| A crew member runs `dev progress …` or `dev crew ask\|answer\|…` | routed to its own lane when the shell runs only that one command; otherwise refused, since it would act as Morpheus |
+| A crew member runs `dev progress …` or `dev crew ask\|answer\|…` | routed to its own lane when it is the whole command, or the one lane call in a list of `cd` and reads (see below); otherwise refused, since it would act as Morpheus |
 
 A message is data, so quoted operators in it (`dev crew ask "x; y && z"`) keep the call a single command. A `$(…)` or
 backtick that the shell expands in a message runs a command of its own, so it makes the call more than one command.
+
+#### Lane calls in a list
+
+A member may join its lane call to `cd` and reads with `&&`, `||`, `;` or a newline, and pipe it into a read-only
+filter. These reach the member's lane:
+
+```bash
+cd ~/Development/.worktrees/acme/app/fix-login && dev progress step "login fixed" --check "12 tests pass"
+dev crew inbox 2>&1 | tail -5
+git status --short && dev crew inbox
+dev progress note "tests green" --next "commit" 2>&1 | tail -3
+```
+
+devkit puts `DEVKIT_FROM_AGENT` in front of the lane call and nowhere else. The command is routed only when all of
+these hold:
+
+- It holds exactly one lane call. Two lane calls are two commands: run them one after the other.
+- The lane call starts its pipeline, and only filters that read follow it: `head`, `tail`, `grep`, `rg`, `wc`, `cat`,
+  `sort`, `uniq`, `cut`, `tr`, `nl`, `column`, `jq`, and `sed` that only prints.
+- Every other command reads: `cd`, or a command the read-only lanes may run (below). An interpreter, a shell, a
+  project check, or anything that writes makes the list unroutable.
+- The shell reads the list as written: no `$(…)` or backticks (except a quoted heredoc message), no subshell, `{ }`
+  group, `if` or loop, comment, background job, or heredoc, and redirects only to `/dev/null` or between stderr and
+  stdout.
+
+Anything else stays refused: `dev progress step x && rm -rf build`, `echo y | dev crew decide D1 A`,
+`dev progress step x | tee out`, `env dev crew …`, `bash -c 'dev crew …'`, and a lane call inside `$(…)`, `<(…)`,
+or `>(…)` (`wc -l <(dev crew decide D1 A)`).
+
+#### What read-only lanes may run
+
+A review or read-only member runs only what its allowlist names: readers, reads of git, gh and dev, and the project's
+checks. These run as well:
+
+- An interpreter or shell asked only for its version: `python3 --version`, `bash --version`, `python3 -V`.
+- `command -v` and `command -V`, which only look names up and run none of them: `command -v gh dev`.
+- A shell that only parses its program: `bash -n x.sh`, `zsh -n -c '…'` (see
+  [Commands the guard cannot name](#commands-the-guard-cannot-name)).
+- Machine diagnostics: `ps`, `pgrep`, `sw_vers`, `id`, `whoami`, `printenv`, `uptime`, `groups`, `locale`,
+  `getconf`, `seq`, and `sysctl` without a value, `-w`, `-f`, or `-p`.
+- A command substitution or process substitution whose own command is on the allowlist:
+  `git diff $(git merge-base HEAD main) HEAD`, `diff <(git show a:f) <(git show b:f)`. Arithmetic `$((…))` and a
+  substitution used as the program stay refused.
+- `sed` whose script only prints, with or without `-n`: `sed 's/a/b/g' f`, `sed '/^#/d' f`. `-i`, `-f`, and the `w`,
+  `r`, and `e` commands stay refused.
+- `awk` whose program prints to standard output only. A program with `>`, `|`, `system()`, `getline`, `@load`, or a
+  program file stays refused; compare with `<` instead of `>`.
+- `mkdir -p` inside the member's own scratch folder, `scratchpad/<member id>/`.
+- A shell variable set on its own, when its name is lowercase or one capital letter (`S=/path; ls $S`). `PATH`,
+  `PAGER`, `IFS`, and zsh's tied names (`path`, `fpath`, …) stay refused.
+- `dev guard check`, and `dev lesson show` and `dev lesson ls`.
+- A command continued with a backslash-newline, read as the shell joins it.
+
+A script from the member's own scratch folder (`python3 scratchpad/<member id>/probe.py`) already ran before this
+change, and still does; a script in another member's folder does not.
 
 ## Example messages
 

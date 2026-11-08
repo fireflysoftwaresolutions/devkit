@@ -106,17 +106,18 @@ class NowScreenTests(unittest.TestCase):
     # the asker role first, what it pauses, the wait, the options with the recommendation and the words to type.
     def test_a_decision_leads_with_its_question_options_and_the_words_to_type_and_no_copy_button(self):
         out = self.probe("""out.h1 = text($("main h1")); out.line = text($(".now-line")); const r = $(".now-item");
-            out.key = r.getAttribute("data-key"); out.you = r.classList.contains("you"); out.row = text(r);
+            out.key = r.getAttribute("data-key"); out.you = r.classList.contains("you"); out.row = text(r); out.id = $$(".now-id", r).map(text);
             out.kbd = $$("kbd", r).map(text); out.copies = $$("button", r).map(b => b.getAttribute("aria-label"));
             out.open = $$("a", r).map(text); out.amber = getComputedStyle(r, "::before").backgroundColor;
             out.others = $$(".now-item").slice(1).filter(x => getComputedStyle(x, "::before").backgroundColor === out.amber).length;""")
         self.assertEqual(out["h1"], "2 things need you")
-        self.assertEqual(out["line"], "Invoice export is paused until you answer D1. CI failed on feat/rules-engine. · a copy from 15:15; it does not update.")
+        self.assertEqual(out["line"], "Invoice export is paused until you answer D1@7f3a. CI failed on feat/rules-engine. · a copy from 15:15; it does not update.")
         self.assertEqual((out["key"], out["you"]), ("decision:claude-7f3a:D1", True))
-        for part in ("D1 · Include cancelled invoices in the export?", "9 min", "Backend engineer (Tank) asks · pauses Invoice export, 2 crew members wait",
-                     "Options: A Leave them out (recommended) · B Include them", "In the session, type: approve D1 or approve D1: B"):
+        self.assertEqual(out["id"], ["D1@7f3a"])                                               # the id names its run, in the id's ink
+        for part in ("D1@7f3a · Include cancelled invoices in the export?", "9 min", "Backend engineer (Tank) asks · pauses Invoice export, 2 crew members wait",
+                     "Options: A Leave them out (recommended) · B Include them", "In the session, type: approve D1@7f3a or approve D1@7f3a: B"):
             self.assertIn(part, out["row"])
-        self.assertEqual(out["kbd"], ["approve D1", "approve D1: B"])
+        self.assertEqual(out["kbd"], ["approve D1@7f3a", "approve D1@7f3a: B"])  # only its own session takes it
         self.assertEqual(out["copies"], [])                                                     # consent is typed, never pasted
         self.assertEqual(out["open"], ["Open the run"])
         self.assertEqual(out["others"], 0)                                                      # the only amber bar is the first row's
@@ -213,11 +214,11 @@ class NowScreenTests(unittest.TestCase):
         steps = """out.lands = $$(".now-run").map(b => text($(".now-lands", b))); out.brackets = $$(".now-run").map(b => text($(".now-bracket", b)) || "");
             out.more = text($(".now-more")); out.done = $$(".now-done").map(text); out.labels = $$(".now-run .now-strip").map(s => s.getAttribute("aria-label"));"""
         out = self.probe(steps, change=five)
-        self.assertEqual(out["lands"], ["Lands 25–60 min after you answer D1", "Blocked: the export endpoint fails its contract test. No landing time until it moves.",
+        self.assertEqual(out["lands"], ["Lands 25–60 min after you answer D1@7f3a", "Blocked: the export endpoint fails its contract test. No landing time until it moves.",
                                         "No update for 18 min. The landing time is unknown.", "Lands 15:55–16:10"])
         self.assertEqual(out["brackets"], ["+25–60 min", "", "", "15:55–16:10"])
         self.assertEqual(out["more"], "1 more run")                                            # at most four blocks
-        self.assertEqual(out["labels"][0], "3 of 6 steps done; waiting for your answer to D1. Lands 25–60 min after you answer D1")
+        self.assertEqual(out["labels"][0], "3 of 6 steps done; waiting for your answer to D1@7f3a. Lands 25–60 min after you answer D1@7f3a")
         out = self.probe(steps, change=two)
         self.assertEqual(out["lands"], ["Lands 16:20–16:45, later than planned (estimate 2 h, now about 3 h)."])
         self.assertEqual(out["done"], ["Docs refresh · finished 14:20 in 35 min"])              # done in the last hour: one line
@@ -458,7 +459,7 @@ class NowSnapshotTests(unittest.TestCase):
                             "#/now", 390, height=600)
         keys, y, lands = out["before"]
         self.assertEqual(keys[0], self.D1)
-        self.assertTrue(lands.endswith("after you answer D1"), lands)
+        self.assertTrue(lands.endswith("after you answer D1@s1"), lands)
         self.assertEqual(y, 200)
         self.assertNotIn(self.D1, out["keys"])
         self.assertEqual(out["keys"][:len(keys) - 1], keys[1:])  # the other rows move up, in the server's order

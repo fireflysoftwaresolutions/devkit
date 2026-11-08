@@ -14,7 +14,8 @@ this skill is the how.
 ### Start
 
 1. Read the injected _devkit · workspace context_: project, branch, git state, commands, initiatives, Now tasks, last
-   status and the handoff digest. It replaces exploration—do not rediscover it.
+   status and the handoff digest. It replaces exploration—do not rediscover it. The developer already saw devkit's
+   short welcome (the context names its lines): do not repeat it, and ask the decisions that wait first.
 2. Pick up where the last session stopped: the first Now task, or what the user asked. `dev task` shows the board.
 3. Unsure about the portfolio? `dev overview` (add `--json` to compute with it).
 
@@ -48,9 +49,13 @@ this skill is the how.
 1. Close or release the items you worked on, then update the project's note with the `handoff` skill (Current state,
    tasks, decisions); `dev handoff --log "…"` adds your one-line summary. devkit adds branch, commits, and your status
    block automatically.
-2. Start your final message with
+2. While events can still arrive (a crew member works, a launch is pending, a step waits for a slot, CI you sent
+   runs), arm `dev watch --wait` before your final message and name its task id there (`wait-and-wake` skill); the
+   Stop hook sends back a turn that leaves nothing to wake you.
+3. Start your final message with
    the status block: `` **[Firefly> DevKit]** <project> · `<branch>` · <task> ``, then the bullets **Done:**,
-   **Check:** (✓/⚠/✗ with the evidence) and **Next:** (global instructions §0 has the rules).
+   **Check:** (✓/⚠/✗ with the evidence), **Progress:** while a `dev progress` run is active, and **Next:** (global
+   instructions §0 has the rules).
 
 ## Required skills
 
@@ -58,8 +63,9 @@ devkit knows which skills each kind of work needs (`config/skill-rules.json` in 
 `skills.rules` in the developer's config). Its rules follow what the work does, never the words of a prompt: the files
 you change, the commands you run, and the kind of work a step or brief declares. devkit names the skills for the files
 you change, and a crew brief carries those of its kind of work. Load them before you start, put them in every brief
-you write, and expect the Stop hook to send you back once if you changed UI, Spring, migration, workflow, docs, or
-diagram files without them.
+you write, and expect the Stop hook to send you back once if you changed matching files (UI, Spring, migration,
+workflow, docs, skill, or diagram files) or ran matching commands (`git push`, `dev release`, `dev lesson add`,
+`pytest`, …) without them. In Codex, a subagent's brief gets its skills only from `dev crew brief`.
 
 ## Which tool for which job
 
@@ -67,14 +73,15 @@ diagram files without them.
 | --- | --- | --- |
 | Find, clone, start a project | `dev ls` (this Mac; `--all` adds the portfolio), `dev go`, `dev alias` (short names the team shares), `dev clone`, `dev new`, `dev adopt` (move a repository into the layout, with the developer), `dev open`; `dev claude` and `dev codex` start an agent in it | `workspace` |
 | Parallel work | `dev wt new <type>/<topic>` | `workspace` |
-| Plan, build, debug | `dev task`, plans folder | Superpowers (brainstorming, writing-plans, TDD, systematic-debugging) |
+| Plan, build, debug | `dev task`, plans folder | Superpowers (brainstorming, writing-plans, TDD, systematic-debugging); where one differs from devkit, devkit wins (global instructions, section 9) |
 | Test | `dev test` (failed first, then the blast radius), `dev test plan`, `dev test audit`, `dev test prove`; `dev stubs` for unfinished work | `testing`, Superpowers TDD |
-| CI/CD pipelines | `dev ci audit [--fix]`, `dev ci init`, `dev ci status`, `dev ci watch --wait` (the wait that wakes you: a Monitor or background command in Claude Code, the foreground in Codex), `dev ci watches` | `cicd`, `github-actions-hardening`, `devsecops` |
+| CI/CD pipelines | `dev ci audit [--fix]`, `dev ci init`, `dev ci status`, `dev ci watch --wait` (one run, job by job: a Monitor or background command in Claude Code, the foreground in Codex), `dev ci watches` | `cicd`, `github-actions-hardening`, `devsecops` |
+| Wait for what comes back | `dev watch --wait` (one wait for every devkit event, CI included: a background command in Claude Code's main session, the foreground with `--for me --timeout 9` for a crew member and with `--timeout 10` in Codex), `dev watch` (a peek), `dev watches` (live, expired, and superseded waits) | `wait-and-wake` |
 | Architecture and design | `dev initiative` for cross-project work | `architecture`, `system-design`, `domain-modeling`, `codebase-design`, `likec4-dsl`, `diagrams` |
 | Backend | — | `backend`, `java-springboot`, `spring-boot-testing`, `java-junit` |
 | Frontend | Chrome DevTools MCP, `playwright-cli`, `dev impeccable <verb>` (impeccable's engine: `context` once at the start, `detect`, …; never its launcher by path) | `angular-developer`, `react-best-practices`, `composition-patterns`, `frontend-design` / `impeccable` |
 | Security | `dev sec scan` | `devsecops`, `/security-review` |
-| Branch, commit, PR | `dev branch new`, `dev branch ls` (where each branch lives, backed up or not), `dev commit --why "…" --verified "…"` (the commit template), `dev rebase`, `dev push`, `dev backup` (a copy on the remote when it starts no CI run; `dev backup policy` shows the project's policy, `dev branch embargo` keeps a branch off), `dev pr create [--draft]\|ready\|checks --watch\|merge` (merge closes the branch's items and deletes the branch), `dev branch prune [--apply]` (merged branches here and on origin, by ancestry, PR, or content, with their worktrees; `--apply` deletes on origin, an irreversible action a crew member never runs), `dev run view --failed`, `dev issue`; `dev git` and `dev gh` for anything else | `delivery`, `communicating` (commit and PR templates) |
+| Branch, commit, PR | `dev branch new`, `dev branch ls` (where each branch lives, backed up or not), `dev commit --why "…" --verified "…"` (the commit template), `dev rebase`, `dev push`, `dev backup` (a copy on the remote when it starts no CI run; `dev backup policy` shows the project's policy, `dev branch embargo` keeps a branch off), `dev pr create [--draft]\|ready\|checks\|merge` (merge closes the branch's items and deletes the branch), `dev branch prune [--apply]` (merged branches here and on origin, by ancestry, PR, or content, with their worktrees; `--apply` deletes on origin, an irreversible action a crew member never runs), `dev run view --failed`, `dev issue`; `dev git` and `dev gh` for anything else | `delivery`, `communicating` (commit and PR templates) |
 | Ship | `dev ci --run`, `dev ci status`, `dev calver`, `dev delivery`, `dev release`, `/devkit:ship` | `delivery`, `release-policy` |
 | Document | `dev docs check`, `dev diagram render` | `docs`, `documentation-writer`, `doc-coauthoring`, `diagrams` |
 | Hand off | `dev handoff`, `dev note set status=… priority=…`, `dev task`, `/devkit:handoff`; `dev handoff-import` adopts an older handoff repository; `dev session brief` (what a session kept through compaction or `/clear`), `dev session carry` (the run into this session after `/clear`) | `handoff` |
@@ -114,3 +121,10 @@ It is how the user sees, reply by reply, that you follow these instructions—an
 status, the session log, the dashboard, and the next session. Make it specific and true: name the branch, the outcome,
 the evidence (`tests green`, `CI not run`, `not verified`) and the next step. If a rule could not be followed, say so
 there.
+
+While a `dev progress` run is active (running or blocked), every final message carries the **Progress:** bullet as
+`dev progress step` and `dev progress note` print it, for example `14 of 21 steps · 11 skipped · now 28. guard
+findings, 33. welcome research · 2h10m active of ~3h00m · ETA ~40m–1h00m`: the steps done of the steps that count
+(skipped steps count in neither number), the running steps by their number in the plan, the active time against the
+estimate, and the ETA. On Claude Code and on Codex, the Stop hook sends back once a final message that lacks it or
+has other step counts than the run, with the line to use. Without an active run there is no Progress bullet.

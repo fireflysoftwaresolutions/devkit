@@ -32,7 +32,9 @@ from .progress import StepError, _find_step, _lane, _log_change, _new_step, load
 FILE_HINTS = [
     (("*.tsx", "*.jsx", "*.vue", "*.svelte", "*.css", "*.scss", "*.html", "web/**", "frontend/**", "ui/**",
       "src/app/**", "*.component.ts"), "trinity"),
-    (("*.swift", "*.kt", "ios/**", "android/**", "*.dart"), "switch"),
+    # Kotlin by where it lives: Android keeps it under src/main/java, Spring and Ktor under src/main/kotlin (tank)
+    (("*.swift", "ios/**", "android/**", "*.dart", "src/main/java/**/*.kt", "*/src/main/java/**/*.kt",
+      "*AndroidManifest.xml"), "switch"),
     (("*migration*", "migrations/**", "db/**", "*.sql", "schema*", "prisma/**", "flyway/**", "liquibase/**",
       "alembic/**"), "dozer"),
     ((".github/workflows/**", ".gitlab-ci.yml", "bitbucket-pipelines.yml", "azure-pipelines*.yml", ".gitlab/ci/**"),
@@ -40,8 +42,11 @@ FILE_HINTS = [
     (("Dockerfile*", "docker-compose*", "*.tf", "terraform/**", "k8s/**", "helm/**", "charts/**", "infra/**",
       "deploy/**"), "niobe"),
     (("test_*.py", "*_test.py", "tests/**", "*.spec.*", "*.test.*", "*Test.java", "*IT.java", "*_test.go"), "mouse"),
-    (("docs/**", "*.md", "*.mdx"), "ghost"),
-    (("*.java", "*.py", "*.go", "*.php", "*.rb", "*.cs", "api/**", "services/**", "server/**"), "tank"),
+    # the Markdown of the docs skill rule (config/skill-rules.json, rule docs): what the writer edits needs that skill
+    (("docs/**", "README.md", "docs/*.md", "docs/**/*.md", "*.mdx", "CHANGELOG.md", "CONTRIBUTING.md",
+      "plugin/skills/**", "**/SKILL.md", "plugin/agents/*.md", "plugin/commands/*.md", "agents/AGENTS.md"), "ghost"),
+    (("*.java", "*.py", "*.go", "*.php", "*.rb", "*.cs", "src/main/kotlin/**", "*/src/main/kotlin/**", "api/**",
+      "services/**", "server/**"), "tank"),
     (("Makefile", "scripts/**", "bin/**", "tools/**", ".devcontainer/**"), "kid"),
 ]
 STOP = set("the a an and or of to in on for with by from at as is are be it this that into add make do fix update "
@@ -393,21 +398,38 @@ def launch_line(s: dict) -> str:
     return " ".join(shlex.quote(p) for p in parts)
 
 
-def ready_context(agent: str, sid: str) -> str:
-    """For Morpheus's next action: steps that just became ready to launch (once per step)."""
+def take_ready(agent: str, sid: str, mark: bool = True) -> tuple:
+    """The steps that became ready to launch and were not told yet -> (ready(run), [step], mode); with mark, each is
+    marked `ready_told` in the same locked write (a step that leaves pending is told again once it is ready again)."""
     run = load_run(agent, sid)
-    if not run or run.get("state") == "done" or all(s.get("ready_told") for s in ready(run)["launch"]):
-        return ""  # the usual case, without the lock
+    if not run or run.get("state") == "done":
+        return {}, [], ""
+    r = ready(run)
+    if all(s.get("ready_told") for s in r["launch"]):
+        return r, [], ""  # the usual case, without the lock
+    if not mark:
+        return r, [dict(s) for s in r["launch"] if not s.get("ready_told")], progress.mode_of(run)
     with progress._tx(agent, sid):
         run = normalize(load_run(agent, sid) or {})
         r = ready(run)
         new = [s for s in r["launch"] if not s.get("ready_told")]
         if not new:
-            return ""
+            return r, [], ""
         for s in new:
             s["ready_told"] = True
         progress._save(run, touch_session=False)
-    mode = progress.mode_of(run)
+    return r, [dict(s) for s in new], progress.mode_of(run)
+
+
+def ready_context(agent: str, sid: str) -> str:
+    """For Morpheus's next action: steps that just became ready to launch (once per step)."""
+    r, new, mode = take_ready(agent, sid)
+    return ready_text(r, new, mode) if new else ""
+
+
+def ready_text(r: dict, new: list, mode: str) -> str:
+    """The main session's context for steps ready to launch: the order, each step's `dev crew brief` line, and the
+    steps queued for a slot."""
     lines = [f"devkit · ready to launch, in this order ({progress.slots_text(r['slots'])}, {mode} "
              f"mode{': launch them now, in one message' if mode == 'auto' else ''}):"]
     from . import crew

@@ -37,7 +37,7 @@ Follow these phases in order. A phase is finished when its gate holds; `proof` m
 2. **Sources.** Read primary sources for the exact version: vendor docs, changelogs, issues and advisories. skills: `working-efficiently` · gate: every claim has a source
 3. **Spike.** Try the top candidates in a scratch folder outside the repository when the docs are not enough. devkit: `dev sec scan` · gate: spike code stays outside the repository
 4. **Recommend.** Report a comparison table, a recommendation and the risks; the Software architect (The Architect) approves. skills: `architecture` · devkit: `dev crew ask` · gate: the recommendation names its risks
-5. **Hand off.** Record the step with its evidence, name who approves it (the RACI), and report with your status block. skills: `communicating` · devkit: `dev progress step`, `dev crew ask` · gate: the step is recorded with its evidence · proof: `dev progress step`
+5. **Hand off.** Record the step with its evidence, name who approves it (the RACI), and report with your status block. devkit: `dev progress step`, `dev crew ask` · gate: the step is recorded with its evidence · proof: `dev progress step`
 
 ## Your place in the crew's RACI
 

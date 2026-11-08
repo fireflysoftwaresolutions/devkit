@@ -284,7 +284,8 @@ class LockTests(Records):
 
     def test_a_write_leaves_only_the_record_private_to_its_owner(self):
         from devkit import state
-        os.chmod(pg.SESSIONS, 0o755)
+        # the test sets the file mode it checks, on its own temporary files
+        os.chmod(pg.SESSIONS, 0o755)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions
         state.update(self.sf, lambda d: d.update(x=1))
         self.assertEqual(stat.S_IMODE(self.sf.stat().st_mode), 0o600)
         self.assertEqual(stat.S_IMODE(pg.SESSIONS.stat().st_mode), 0o700)

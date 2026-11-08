@@ -15,8 +15,10 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import filecmp
 import fnmatch
 import functools
+import itertools
 import json
 import os
 import re
@@ -385,6 +387,8 @@ def _newlines_to_semicolons(cmd: str, op: str = ";") -> str:
             q = ch
         elif ch == "\n":
             ch = op
+        elif ch == "=" and _proc_subst_at(cmd, i):  # zsh's `=(…)` is read as the `<(…)` it runs as
+            ch = "<"
         out.append(ch)
         i += 1
     return "".join(out)
@@ -393,13 +397,88 @@ def _newlines_to_semicolons(cmd: str, op: str = ";") -> str:
 HEREDOC_RE = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
 _HEREDOC_AT = re.compile(r"<<-?[ \t]*(?:'([^'\n]+)'|\"([^\"\n]+)\"|\\?([A-Za-z_][A-Za-z0-9_]*))")
 
+# `#` starts a comment only at the start of a word, as bash and zsh read it: after a blank, a newline, an operator or
+# a redirection. A `)` that ends a substitution ends no word, so `x$(true)#c` and `<(true)#<(…)` are one word each,
+# where `(echo a)#c` ends at the `#`.
+_COMMENT_AFTER = frozenset(" \t\n;&|()<>")
+_FUNCTION_PARENS = re.compile(r"\([ \t]*\)")
+
+
+def _paren_kind(s: str, k: int) -> str:
+    """What the `(` at s[k] opens: 'w' a substitution, part of the word around it (`$(`, `$((`, `<(`, `>(`, zsh's
+    `=(` at the start of a word); 'o' an operator (a subshell, `((`, a function's `()`); '?' a parenthesis the shells
+    read differently (bash reads `a=(1 2)#c` as one word, zsh ends it at the `#`; extglob `@(…)`; glob qualifiers)."""
+    prev = s[k - 1] if k else ""
+    if prev in ("$", "<", ">") or (prev == "=" and (k < 2 or s[k - 2] in _COMMENT_AFTER)):
+        return "w"
+    if not prev or prev in _COMMENT_AFTER or _FUNCTION_PARENS.match(s, k):
+        return "o"
+    return "?"
+
+
+def _proc_subst_at(s: str, i: int) -> bool:
+    """True when s[i] opens a process substitution: `<(…)`, `>(…)`, or zsh's `=(…)` at the start of a word, which runs
+    its command as `<(…)` does and stands for a temporary file that holds what it wrote (`. =(echo …)` runs it)."""
+    return s[i + 1:i + 2] == "(" and (s[i] in "<>" or (s[i] == "=" and (i == 0 or s[i - 1] in _COMMENT_AFTER)))
+
+
+class _Parens:
+    """The parentheses a scanner of `s` has opened and closed, to tell where a `#` starts a comment."""
+
+    def __init__(self, s: str):
+        self.s, self.opened, self.closed = s, [], {}
+
+    def open(self, k: int):
+        self.opened.append(_paren_kind(self.s, k))
+
+    def close(self, k: int, kind: str = ""):
+        """The `)` at s[k] closes the last parenthesis opened (`kind`: one the scanner skipped whole)."""
+        self.closed[k] = kind or (self.opened.pop() if self.opened else "o")
+
+    def comment(self, i: int, lean: bool) -> bool:
+        """True when the `#` at s[i] starts a comment. `lean`: the reading of a parenthesis the shells read
+        differently ('?'): a comment (True) where reading it as words could hide a line (a heredoc's `<<WORD` after
+        it), words (False) where reading it as a comment could (a substitution after it)."""
+        s = self.s
+        if s[i] != "#" or (i and s[i - 1] not in _COMMENT_AFTER):
+            return False
+        kind = self.closed.get(i - 1, "o") if i and s[i - 1] == ")" else "o"
+        return kind == "o" or (kind == "?" and lean)
+
+
+def _braced_end(s: str, i: int) -> int:
+    """The index after the `}` or `]` that ends the `${…}` or `$[…]` at s[i], or len(s) when none does. Its quotes,
+    nested braces and substitutions are read as the shell reads them."""
+    closers, j, n = [{"{": "}", "[": "]"}[s[i + 1]]], i + 2, len(s)
+    while j < n and closers:
+        d = s[j]
+        if d == "\\":
+            j += 2
+            continue
+        if d == "'":
+            k = s.find("'", j + 1)
+            j = n if k < 0 else k + 1
+            continue
+        if d == '"':
+            k = j + 1
+            while k < n and s[k] != '"':
+                k += 2 if s[k] == "\\" else 1
+            j = k + 1
+            continue
+        if d in "{[(":
+            closers.append({"{": "}", "[": "]", "(": ")"}[d])
+        elif d == closers[-1]:
+            closers.pop()
+        j += 1
+    return min(j, n)
+
 
 def _split_heredocs(cmd: str):
     """-> (the command without its heredoc bodies and terminator lines, [(body, expands)]). A `<<WORD` counts only
     where the shell reads it: outside quotes and comments, and not `<<<` (a here-string), so a quoted "<<EOF" in a
     commit message hides no line. `expands`: the delimiter is unquoted, so the shell runs `$(…)` in the body."""
     out, bodies, pending = [], [], []
-    i, n, q = 0, len(cmd), None
+    i, n, q, parens = 0, len(cmd), None, _Parens(cmd)
     while i < n:
         c = cmd[i]
         if q == "'":
@@ -416,9 +495,14 @@ def _split_heredocs(cmd: str):
             continue
         elif c in "'\"":
             q = c
-        elif c == "#" and (i == 0 or cmd[i - 1] in " \t\n;&|()"):
+        elif c == "#" and parens.comment(i, True):
             j = cmd.find("\n", i)
             j = n if j < 0 else j
+            out.append(cmd[i:j])
+            i = j
+            continue
+        elif cmd.startswith("${", i) or cmd.startswith("$[", i):  # `${x/<<E/}`, `$[1<<E]`: no heredoc in either
+            j = _braced_end(cmd, i)
             out.append(cmd[i:j])
             i = j
             continue
@@ -429,9 +513,15 @@ def _split_heredocs(cmd: str):
                 j += 1
                 if depth == 0:
                     break
+            if depth == 0:
+                parens.close(j - 1, "w" if c == "$" else "o")
             out.append(cmd[i:j])
             i = j
             continue
+        elif c == "(":
+            parens.open(i)
+        elif c == ")":
+            parens.close(i)
         elif cmd.startswith("<<", i) and not cmd.startswith("<<<", i) and cmd[i - 1:i] != "<":
             m = _HEREDOC_AT.match(cmd, i)
             if m:
@@ -467,13 +557,16 @@ def strip_heredocs(cmd: str) -> str:
     return _split_heredocs(cmd)[0]
 
 
-def split_commands(cmd: str, ops: bool = False, newline: str = ";", inputs: list | None = None):
+def split_commands(cmd: str, ops: bool = False, newline: str = ";", inputs: list | None = None,
+                   stripped: bool = False, heredocs: list | None = None):
     """-> list of (argv, redirect_targets). None when the command cannot be tokenised. With `ops`, each entry is
     (argv, redirect_targets, the operator after the segment ('|', '&&', ';', … or ''), its here-strings (<<< …)).
     `newline`: the operator a newline outside quotes becomes (`&` for tmux_list_refusal only). `inputs`: a list that
-    gets, for each segment, the files its input is redirected from (`< f`, `0< f`, `<> f`)."""
+    gets, for each segment, the files its input is redirected from (`< f`, `0< f`, `<> f`). `stripped`: `cmd` is
+    already without its heredoc bodies (strip_heredocs); stripping it again would read the line after a `<<EOF` as
+    a body and hide it. `heredocs`: a list that gets, for each segment, whether a heredoc is its input."""
     try:
-        lex = shlex.shlex(_newlines_to_semicolons(strip_heredocs(cmd), newline), posix=True,
+        lex = shlex.shlex(_newlines_to_semicolons(cmd if stripped else strip_heredocs(cmd), newline), posix=True,
                           punctuation_chars=";&|()<>")
         lex.whitespace_split = True
         lex.commenters = ""
@@ -481,7 +574,7 @@ def split_commands(cmd: str, ops: bool = False, newline: str = ";", inputs: list
     except ValueError:
         return None
     segs, argv, redirs, expect_redir, here, herestr = [], [], [], False, [], False
-    fd, stdin, ins = None, False, []
+    fd, stdin, ins, hd = None, False, [], False
     for k, t in enumerate(tokens):
         nxt = tokens[k + 1] if k + 1 < len(tokens) else ""
         if t.isdigit() and nxt[:1] in ("<", ">"):
@@ -499,10 +592,13 @@ def split_commands(cmd: str, ops: bool = False, newline: str = ";", inputs: list
                 segs.append((argv, redirs, t, here) if ops else (argv, redirs))
                 if inputs is not None:
                     inputs.append(ins)
-            argv, redirs, here, ins = [], [], [], []
+                if heredocs is not None:
+                    heredocs.append(hd)
+            argv, redirs, here, ins, hd = [], [], [], [], False
             continue
         if t and set(t) <= set("<>"):
             herestr = t == "<<<"
+            hd = hd or (t == "<<" and fd in (None, "0"))
             stdin = t in ("<", "<>") and fd in (None, "0")
             fd = None
             expect_redir = ">" in t
@@ -512,7 +608,7 @@ def split_commands(cmd: str, ops: bool = False, newline: str = ";", inputs: list
         if expect_redir is not False:
             if stdin:
                 ins.append(t)
-            if expect_redir:
+            if expect_redir and t not in ("<(", ">("):  # `> >(…)` writes into a substitution, whose command is read
                 redirs.append(t)
             elif herestr:
                 here.append(t)
@@ -523,6 +619,8 @@ def split_commands(cmd: str, ops: bool = False, newline: str = ";", inputs: list
         segs.append((argv, redirs, "", here) if ops else (argv, redirs))
         if inputs is not None:
             inputs.append(ins)
+        if heredocs is not None:
+            heredocs.append(hd)
     return segs
 
 
@@ -1068,6 +1166,191 @@ def _pipe_gate_open(cmd) -> str:
     return "hatch" if "DEVKIT_PIPE_OK" in names else ""
 
 
+# A wait for devkit's events or a CI run wakes the session when its command ends; work joined after it in the same
+# command line delays that wake until the work ends too, and runs whatever the wait reported.
+WAIT_REASON = ("This command waits for an event (`dev watch --wait` or `dev ci watch --wait`) and then does more work "
+               "in the same command line: the wait wakes you only when everything after it has ended, and what follows "
+               "runs whatever the wait reports. Run the wait on its own (a read-only filter such as `| tail -3` may "
+               "follow it), and act after it wakes you.")
+_FILTERS = frozenset({"tail", "head", "grep", "egrep", "fgrep", "rg", "cat", "wc", "jq", "cut", "sort", "uniq", "tr",
+                      "less", "more"})
+
+
+def _waits(argv) -> bool:
+    """A wait that ends when an event or a CI run does: `dev watch --wait`, `dev ci watch --wait`."""
+    dev = _dev_args(argv)
+    if not dev or not any(a == "--wait" or a.startswith("--wait=") for a in dev):
+        return False
+    return dev[:1] == ["watch"] or dev[:2] == ["ci", "watch"]
+
+
+def wait_then_work_refusal(cmd: str) -> str | None:
+    """WAIT_REASON when a wait (_waits) is followed in the same command line by anything but read-only filters it
+    pipes into: a command after `;`, `&&`, `||`, `&` or a new line."""
+    segs = split_commands(cmd, ops=True)
+    if not segs:
+        return None
+    for k, (argv0, _, op, _) in enumerate(segs):
+        if not _waits(_unwrap(argv0)):
+            continue
+        j = k
+        while segs[j][2] in ("|", "|&") and j + 1 < len(segs):
+            j += 1
+            if os.path.basename((_unwrap(segs[j][0]) or [""])[0]) not in _FILTERS:
+                return WAIT_REASON
+        if j + 1 < len(segs):
+            return WAIT_REASON
+    return None
+
+
+# An action that must depend on a result (a CI run, a test, a check) runs whatever that result is when it follows the
+# check after `;`, `||` or `&`, or after a pipeline with `&&`, whose status is the last filter's.
+GATE_REASON = ("This runs {what} after {check} without depending on its result: after `;`, `||` or `&` it runs "
+               "whatever the check reported, and after a pipeline (`… | tail -3 && …`) `&&` sees the filter's exit "
+               "status, not the check's. Gate it on the real result: `set -o pipefail;` first, `check && action` "
+               "without a pipe, or a separate call once you have read the result. Lesson: gate on the real result.")
+_CHECK_TOOLS = frozenset({"pytest", "tox", "nox", "jest", "vitest", "mocha", "tsc", "ruff", "mypy", "eslint",
+                          "shellcheck", "phpunit", "pest", "rspec", "phpstan", "psalm"})
+_CHECK_SCRIPTS = re.compile(r"(?:test|tests|lint|check|checks|typecheck|verify|ci|build)(?::[\w:-]+)?\Z")
+_RELEASE_SCRIPTS = re.compile(r"(?:release|publish|deploy|ship)(?::[\w:-]+)?\Z")
+
+
+def _check_step(argv) -> str:
+    """The check a segment runs, named for a refusal, or '': a CI watch or run, a test, a lint or a type check."""
+    if not argv:
+        return ""
+    name, args = os.path.basename(argv[0]), [str(a) for a in argv[1:]]
+    dev = _dev_args(argv)
+    if dev is not None:
+        if _waits(argv) or dev[:2] in (["ci", "watch"], ["ci", "--run"], ["sec", "scan"], ["ci", "audit"]) or \
+                dev[:1] == ["test"]:
+            return "dev " + " ".join(dev[:2])
+        return ""
+    words = [a for a in args if not a.startswith("-")]
+    if name in _CHECK_TOOLS:
+        return name
+    if _INTERP.match(name) and any(args[i:i + 2] in (["-m", "pytest"], ["-m", "unittest"]) for i in range(len(args))):
+        return f"{name} -m {'pytest' if 'pytest' in args else 'unittest'}"
+    if name in ("npm", "pnpm", "yarn", "bun"):
+        script = words[1] if words[:1] == ["run"] and len(words) > 1 else words[0] if words else ""
+        return f"{name} {script}" if _CHECK_SCRIPTS.match(script) else ""
+    if name in ("make", "gmake", "just", "task") and words and _CHECK_SCRIPTS.match(words[0]):
+        return f"{name} {words[0]}"
+    if name in ("go", "cargo") and words[:1] in (["test"], ["vet"], ["check"], ["clippy"]):
+        return f"{name} {words[0]}"
+    if name in ("mvn", "mvnw", "gradle", "gradlew") and any(w in ("test", "verify", "check", "build") for w in words):
+        return name
+    if name == "gh" and args[:2] in (["run", "watch"], ["pr", "checks"]):
+        return f"gh {' '.join(args[:2])}"
+    return ""
+
+
+def _dependent_action(argv) -> str:
+    """The action a segment takes that must depend on a check's result, named for a refusal, or '': commit, push,
+    tag, merge, release, publish or deploy, a project's release script (`npm run release`, `make release`) included."""
+    if not argv:
+        return ""
+    name, args = os.path.basename(argv[0]), [str(a) for a in argv[1:]]
+    words = [a for a in args if not a.startswith("-")]
+    if _gated(argv):
+        return " ".join([name, *words[:2]])
+    dev = _dev_args(argv)
+    if dev is not None:
+        return "dev " + " ".join(dev[:2]) if dev[:1] in (["release"], ["deploy"]) or \
+            dev[:2] in (["pr", "merge"], ["pr", "ready"]) else ""
+    if name in ("npm", "pnpm", "yarn", "bun"):
+        if words[:1] == ["publish"]:
+            return f"{name} publish"
+        script = words[1] if words[:1] == ["run"] and len(words) > 1 else words[0] if words else ""
+        return f"{name} run {script}" if _RELEASE_SCRIPTS.match(script) else ""
+    if name in ("make", "gmake", "just", "task") and words and _RELEASE_SCRIPTS.match(words[0]):
+        return f"{name} {words[0]}"
+    if (name, words[:1]) in (("cargo", ["publish"]), ("twine", ["upload"]), ("docker", ["push"]), ("gem", ["push"])):
+        return f"{name} {words[0]}"
+    return ""
+
+
+_BRANCHES = frozenset({"if", "then", "elif", "else", "case", "while", "until"})  # shell words that branch
+
+
+def ungated_action_refusal(cmd: str) -> str | None:
+    """GATE_REASON when an action that must depend on a check (_dependent_action) follows one (_check_step) in the
+    same command line without depending on its result: the check is not in the action's chain of `&&`, or it is but
+    pipes into a filter and no `set -o pipefail` comes first. A branch between them (`if`, `then`, a `[ … ]` test)
+    may test the result in a way the guard does not read, and leaves the action open."""
+    segs = split_commands(cmd, ops=True)
+    if not segs:
+        return None
+    pipefail = False
+    for k, (argv0, _, _, _) in enumerate(segs):
+        argv = _unwrap(argv0)
+        if argv[:1] == ["set"] and any(re.fullmatch(r"-[A-Za-z]*o", a) and argv[i + 2:i + 3] == ["pipefail"]
+                                       for i, a in enumerate(argv[1:])):
+            pipefail = True
+        what = _dependent_action(argv)
+        if not what:
+            continue
+        chained = True  # walking back: the segments joined to the action by `&&` and pipes only
+        for j in range(k, -1, -1):
+            if j < k and segs[j][2] not in ("&&", "|", "|&"):
+                chained = False
+            if set(segs[j][0][:1]) & _BRANCHES or (j < k and _unwrap(segs[j][0])[:1] in (["["], ["[["], ["test"])):
+                break  # `if …; then …`, `[ "$r" = OK ] && …`: it branches on something the guard does not read
+            if j == k:
+                continue
+            check = _check_step(_unwrap(segs[j][0]))
+            if not check:
+                continue
+            if not chained:
+                return GATE_REASON.format(what=_code(what), check=_code(check))
+            if segs[j][2] in ("|", "|&") and not pipefail and not _gated(argv):  # its status lost to a filter;
+                # PIPE_GATE judges git, dev and gh, with its DEVKIT_PIPE_OK hatch, which opens this one too
+                why = GATE_REASON.format(what=_code(what), check=_code(check))
+                hatch = _pipe_gate_open(cmd) == "hatch"
+                if not hatch or not _hatch({"DEVKIT_PIPE_OK"}, "DEVKIT_PIPE_OK", "pipe-gate", why):
+                    return why
+            break
+    return None
+
+
+# The variables that tell a program an agent runs it (core.AGENT_MARKERS): a project's own tools read them to act
+# differently for agents, so an agent must not hide them.
+IDENTITY_REASON = ("This command hides from what it runs that an agent runs it: it unsets or blanks {name} (`unset`, "
+                   "`env -u`, `env -i`, or an empty assignment before the command), which tells a project's own tools "
+                   "that an agent is at work. Run the command with the environment it has; if a tool misbehaves under "
+                   "an agent, tell the developer.")
+
+
+def identity_hiding(argv0) -> str | None:
+    """IDENTITY_REASON for a segment (its words, prefixes included) that unsets or blanks an agent identity variable
+    (core.AGENT_MARKERS): `unset NAME`, `env -u NAME …`, `env -i …`, an empty `NAME=` before a command, alone or
+    after export. DEVKIT_FROM_AGENT, the lane marker a crew member's commands carry, is left to the caller-identity
+    rule, which refuses a member that changes it and lets the main session, which carries none, unset it."""
+    names = set(core.AGENT_MARKERS) - {"DEVKIT_FROM_AGENT"}
+    words = [str(w) for w in argv0]
+    for k, w in enumerate(words):
+        m = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)=", w)
+        if m and m.group(1) in names:
+            return IDENTITY_REASON.format(name=_code(m.group(1)))
+        base = os.path.basename(w)
+        if base == "unset" and (k == 0 or words[k - 1] in ("builtin", "command")) and "-f" not in words[k + 1:]:
+            hit = next((a for a in words[k + 1:] if a in names), None)
+            if hit:
+                return IDENTITY_REASON.format(name=_code(hit))
+        if base == "env":
+            j = k + 1
+            while j < len(words) and (words[j].startswith("-") or _ASSIGN.match(words[j])):
+                a = words[j]
+                if a in ("-", "--ignore-environment") or re.fullmatch(r"-[A-Za-z]*i[A-Za-z]*", a):
+                    return IDENTITY_REASON.format(name="every variable")
+                val = words[j + 1] if a in ("-u", "--unset") and j + 1 < len(words) else \
+                    a.split("=", 1)[1] if a.startswith("--unset=") else a[2:] if re.fullmatch(r"-u\w+", a) else ""
+                if val in names:
+                    return IDENTITY_REASON.format(name=_code(val))
+                j += 2 if a in ("-u", "--unset", "-C", "--chdir", "-S", "--split-string", "-P") else 1
+    return None
+
+
 # a line with a word that starts with `#` and a backslash-newline at its end: bash ends the comment at the newline
 _COMMENT_CONTINUES = re.compile(r"(?m)^([^\n]*(?<![^ \t\n;&|()])#[^\n]*)\\\n")
 
@@ -1115,6 +1398,9 @@ def _check_bash_reading(cmd: str, cwd: str, agent: str):
         evidence_forgery(cmd, cwd or os.getcwd())
     if v:
         return v
+    why = wait_then_work_refusal(cmd) or ungated_action_refusal(cmd)
+    if why:
+        return deny(why)
     if PIPE_GATE.search(cmd):
         how = _pipe_gate_open(cmd)
         if not how:
@@ -1133,29 +1419,108 @@ def _check_bash_reading(cmd: str, cwd: str, agent: str):
 _PATH_TAKERS = frozenset({"rm", "unlink", "mkdir", "touch", "cp", "mv", "rsync", "ditto"})
 
 
-def _shell_line(args):
-    """The -c line of a shell's arguments, or None (a script file or its input is not a line given here)."""
-    k = 0
-    while k < len(args):
-        a = args[k]
-        if a == "--" or not a.startswith(("-", "+")):
-            return None
-        if a.startswith("-") and not a.startswith("--") and "c" in a[1:]:
-            return _with_positionals(args[k + 1], args[k + 2:]) if k + 1 < len(args) else None
-        k += 2 if a in ("-o", "+o", "-O", "+O", "--rcfile", "--init-file") else 1
-    return None
+_POSIX_SHELLS = frozenset({"bash", "sh", "zsh", "dash", "ksh"})
+_BASH_LIKE = frozenset({"bash", "sh"})  # sh is bash on macOS
+# bash's long options, which it reads with one dash as with two (`bash -norc` is `bash --norc`, not -n -o rc -c):
+# those that take the next word as their value, and those that only change how it reports or which startup files it
+# skips. The others (login, debugger, wordexp, dump-strings, …) may run startup files or code: a shell given one runs.
+_BASH_LONG_VALUE = frozenset({"rcfile", "init-file"})
+_BASH_LONG_QUIET = frozenset({"norc", "noprofile", "noediting", "posix", "verbose", "restricted"})
+_BASH_LONG = _BASH_LONG_VALUE | _BASH_LONG_QUIET | frozenset({
+    "debug", "debugger", "dump-po-strings", "dump-strings", "help", "login", "pretty-print", "protected",
+    "rpm-requires", "version", "wordexp"})
+# the option letters and `-o` names a bash that only parses knows to run nothing: set's flags, -r, -s, -c, -n
+_BASH_QUIET_LETTERS = frozenset("abefhkmnptuvxBCEHPTrsc")
+_BASH_QUIET_SET = frozenset({
+    "allexport", "braceexpand", "emacs", "errexit", "errtrace", "functrace", "hashall", "histexpand", "history",
+    "ignoreeof", "interactivecomments", "keyword", "monitor", "noclobber", "noexec", "noglob", "nolog", "notify",
+    "nounset", "onecmd", "physical", "pipefail", "posix", "privileged", "verbose", "vi", "xtrace"})
+_BASH_QUIET_SHOPT = frozenset({"extglob", "globstar", "nullglob", "failglob", "dotglob", "nocaseglob", "nocasematch",
+                               "expandaliases"})
 
 
-def _nested_lines(argv) -> list:
+def _shell_args(args, name="bash") -> tuple:
+    """How a shell reads its words -> (kind, k, parse_only). kind: "line" (the -c command line is args[k], its $0,
+    $1… follow it), "script" (a script file at args[k]), "stdin" (-s: its program comes from its input, and its $1…
+    start at args[k]), "input" (no word left: it reads its input) or "none" (-c and no line). bash, zsh, sh, dash and
+    ksh read options up to the first word that is not one, -c among them, so the line is the first word after all of
+    them (`bash -c -e 'line'`, `bash -c +x 'line'`, `zsh -c -o errexit 'line'`); csh, tcsh and fish take the word right
+    after -c. bash and sh read their long options with one dash too (`-norc`, `-rcfile f`, _BASH_LONG), and take +c,
+    +s and +l as -c, -s and -l. parse_only: one of those five only reads and parses its program, and runs none of it
+    nor its startup files: -n, -o noexec or zsh's --noexec is on (the last of -n, +n, -o noexec, +o noexec wins), it
+    is no interactive or login shell (-i, -l, --login, --rcfile), where -n does not hold, and, for bash and sh, every
+    option word is one the guard knows runs nothing; any other word is judged as running."""
+    posix, bashlike = name in _POSIX_SHELLS, name in _BASH_LIKE
+    line = stdin = noexec = runs = False
+    i, leading = 0, bashlike  # bash reads its long options before any short one: `bash -n -posix` is -n -p -o …
+    while i < len(args):
+        a = args[i]
+        if a in ("--", "-"):
+            i += 1
+            break
+        long = a[2:] if a.startswith("--") else a[1:] if leading and a[:1] == "-" and a[1:] in _BASH_LONG else None
+        leading = leading and long is not None
+        if long is not None:
+            key = long.split("=", 1)[0].casefold()
+            opt = re.sub(r"[_-]", "", key)
+            noexec = True if opt == "noexec" else False if opt == "exec" else noexec
+            runs = runs or opt in ("login", "interactive", "rcfile", "initfile") or \
+                (bashlike and key not in _BASH_LONG_QUIET)
+            i += 2 if key in _BASH_LONG_VALUE and "=" not in long else 1
+            continue
+        if len(a) < 2 or a[0] not in "-+":
+            break
+        on, names = a[0] == "-", []
+        for ch in a[1:]:
+            if ch in "oO":  # its option name is the next word: -o noexec, -eo pipefail, -O extglob
+                names.append((ch, args[i + 1 + len(names)] if i + 1 + len(names) < len(args) else ""))
+            elif ch == "n":
+                noexec = on
+            elif ch == "c" and (on or bashlike):  # bash reads +c as -c, +s as -s and +l as -l
+                line = True
+            elif ch == "s" and (on or bashlike):
+                stdin = True
+            elif ch in "il" and (on or (bashlike and ch == "l")):
+                runs = True
+            elif bashlike and ch not in _BASH_QUIET_LETTERS:  # -D, -i… or a letter it does not know
+                runs = True
+        for ch, opt in names:
+            opt = re.sub(r"[_-]", "", opt.casefold())
+            if ch == "o" and opt in ("noexec", "exec"):
+                noexec = (opt == "noexec") == on
+            if bashlike and opt not in (_BASH_QUIET_SET if ch == "o" else _BASH_QUIET_SHOPT):
+                runs = True
+        i += 1 + len(names)
+        if line and not posix:  # csh, tcsh, fish: the word after -c is the line
+            break
+    parse_only = posix and noexec and not runs
+    if line:
+        return ("line" if i < len(args) else "none"), i, parse_only
+    if stdin:
+        return "stdin", i, parse_only
+    return ("script" if i < len(args) else "input"), i, parse_only
+
+
+def _shell_line(args, name="bash"):
+    """The -c line of a shell's arguments (_shell_args), or None: a script file or its input is not a line given
+    here, and a shell that only parses (`bash -n -c …`) runs none."""
+    kind, k, parse_only = _shell_args(args, name)
+    if kind != "line" or parse_only:
+        return None
+    return _with_positionals(args[k], args[k + 1:])
+
+
+def _nested_lines(argv, cwd=None) -> list:
     run = _unwrap(argv)
     if not run:
         return []
     if run != list(argv):  # a runner (uv run, npx, npm exec, timeout, a wrapper): its command is read as a line (F3)
         return [shlex.join(run)]
     argv = run
-    name, args = os.path.basename(argv[0]), argv[1:]
+    real = _as_run(argv, cwd)[1:]  # `./bash-link -c …`: the shell its file is
+    name, args = os.path.basename((real[0] if real else argv)[0]), argv[1:]
     if name in _SHELLS:
-        line = _shell_line(args)
+        line = _shell_line(args, name)
         return [line] if line else []
     if name == "eval":
         return [" ".join(args)] if args else []
@@ -1181,6 +1546,9 @@ def _check_segments(cmd: str, segs, ecwd: str, agent: str, depth: int = 0, outer
         if _env_runs_string(argv0):
             return deny("`env -S` (--split-string) runs a command line from a string, which the guard cannot check. "
                         "Type the command itself.")
+        why = identity_hiding(argv0)
+        if why:
+            return deny(why)
         argv = _strip_prefix(argv0)
         while argv and argv[0] in _RESERVED:  # `if …; then rm -rf ~; fi` runs rm
             argv = _strip_prefix(argv[1:])
@@ -1291,7 +1659,7 @@ def _check_segments(cmd: str, segs, ecwd: str, agent: str, depth: int = 0, outer
                     res = deny(f"Do not create backup copies ({dest.name}); git already keeps history.")
         if res:
             return res
-        lines = _nested_lines(argv)
+        lines = _nested_lines(argv, ecwd)
         if lines and depth >= 4:  # too deep to read is no "nothing found": refused
             return deny(NESTED_REASON)
         for line in lines:
@@ -1299,6 +1667,16 @@ def _check_segments(cmd: str, segs, ecwd: str, agent: str, depth: int = 0, outer
             res = _check_segments(line, inner, ecwd, agent, depth + 1, envs) if inner else None
             if res:
                 return res
+    # what `<(…)`, `>(…)` and the `$(…)` and backticks inside a word run: the tokenizer leaves their words in the
+    # command around them (it splits only a bare `$(…)`)
+    subs = _process_substitutions(cmd) + _command_substitutions(cmd)
+    if subs and depth >= 4:
+        return deny(NESTED_REASON)
+    for line in subs:
+        inner = split_commands(line)
+        res = _check_segments(line, inner, ecwd, agent, depth + 1, outer_envs) if inner else None
+        if res:
+            return res
     return None
 
 
@@ -1653,6 +2031,116 @@ def _shell_script_head(p) -> bool:
 
 _BINARY_MAGIC = (b"\xcf\xfa\xed\xfe", b"\xce\xfa\xed\xfe", b"\xfe\xed\xfa\xcf", b"\xfe\xed\xfa\xce",
                  b"\xca\xfe\xba\xbe", b"\x7fELF")  # Mach-O (thin and universal) and ELF
+
+
+# the shells and interpreters the guard reads, by the names they are installed under, to know them by their file
+_KNOWN_PROGRAMS = ("bash", "sh", "zsh", "dash", "ksh", "fish", "csh", "tcsh", "python3", "python", "pypy3", "node",
+                   "nodejs", "deno", "bun", "perl", "ruby", "php", "osascript", "lua", "tclsh", "Rscript", "swift",
+                   "awk", "gawk", "mawk", "nawk", "expect", "wish")
+_PROGRAM_DIRS = ("/bin", "/usr/bin", "/usr/local/bin", "/opt/homebrew/bin")
+
+
+def _program_family(name) -> str:
+    """A program's name without its version and folder: python3.13 and python3 are python, ksh93 is ksh."""
+    fam = re.sub(r"[0-9.]+$", "", os.path.basename(str(name or ""))).casefold()
+    return {"pypy": "python", "nodejs": "node"}.get(fam, fam)
+
+
+def _reads_programs(name) -> bool:
+    """True for a shell or an interpreter the guard reads by its name."""
+    base = os.path.basename(str(name or ""))
+    return base in _SHELLS or bool(_INTERP.match(base)) or _program_family(base) in _SHELLS
+
+
+@functools.lru_cache(maxsize=1)
+def _program_files() -> tuple:
+    """({(device, inode): path}, {size: [path]}) of the shells and interpreters installed here, each by its real
+    path. A file with more than two names is left out: one binary that many programs share and that picks what to
+    be by the name it is called by (macOS's /usr/bin shims) says nothing about which program a copy of it is."""
+    nodes, sizes = {}, {}
+    for name in _KNOWN_PROGRAMS:
+        for p in [os.path.join(d, name) for d in _PROGRAM_DIRS] + [shutil.which(name) or ""]:
+            try:
+                real = os.path.realpath(p) if p else ""
+                st = os.stat(real) if real else None
+            except (OSError, ValueError):
+                continue
+            if st is None or st.st_nlink > 2 or not _reads_programs(real) or (st.st_dev, st.st_ino) in nodes:
+                continue
+            nodes[(st.st_dev, st.st_ino)] = real
+            sizes.setdefault(st.st_size, []).append(real)
+    return nodes, sizes
+
+
+def _identify(word, cwd) -> str:
+    """The real path of the shell or interpreter the program word `word` runs when its name does not say so, else
+    '': a path or a name on the PATH whose links lead to one (`./bash-link`), or a file that is one installed here
+    under another name (a hard link, a renamed copy). A word that names one already, or that names nothing the guard
+    can find, is ''."""
+    word = str(word or "")
+    if not word or _reads_programs(word) or re.search(r"[$`*?\[{]", word):
+        return ""
+    if "/" in word:
+        p = resolve(word, cwd)
+        if p == UNKNOWN:
+            return ""
+        real = str(p)
+    else:
+        found = shutil.which(word)
+        if not found:
+            return ""
+        real = os.path.realpath(found)
+    if _reads_programs(real):
+        return real
+    try:
+        st = os.stat(real)
+    except (OSError, ValueError):
+        return ""
+    nodes, sizes = _program_files()
+    if (st.st_dev, st.st_ino) in nodes:
+        return nodes[(st.st_dev, st.st_ino)]
+    for known in sizes.get(st.st_size, []):
+        try:
+            if filecmp.cmp(real, known, shallow=False):
+                return known
+        except OSError:
+            continue
+    return ""
+
+
+def _as_run(argv, cwd) -> list:
+    """The readings of a segment's program: as it is written, and, when the file it runs is a shell or an
+    interpreter under another name (_identify: `./bash-link -c …`, a renamed copy of zsh), as that program too. A
+    refusal of either stands: a binary that picks what to be by the name it is called by runs as written, any other
+    as what it is."""
+    real = _identify(argv[0], cwd) if argv else ""
+    return [argv, [real, *argv[1:]]] if real and _program_family(real) != _program_family(argv[0]) else [argv]
+
+
+def _unknown_binary(argv, cwd) -> bool:
+    """True when the segment runs, by its path, a binary the guard cannot identify: no shell or interpreter it reads
+    (_identify), no script whose shebang says what runs it, not the program installed under its name on the PATH
+    (`/usr/bin/grep -c x` is grep, the same file or the same bytes), and not a file the system owns, which no agent
+    replaced (owned by root and not writable by this user)."""
+    if not argv or "/" not in str(argv[0]) or _reads_programs(argv[0]) or _identify(argv[0], cwd):
+        return False
+    p = resolve(argv[0], cwd)
+    if p == UNKNOWN or _run_by_path(p)[0] != "binary":
+        return False
+    try:
+        st = os.stat(p)
+        if st.st_uid == 0 and not os.access(p, os.W_OK):
+            return False
+        named = shutil.which(os.path.basename(str(argv[0])))
+        return not (named and (os.path.samefile(named, p) or filecmp.cmp(named, p, shallow=False)))
+    except (OSError, ValueError):
+        return True
+
+
+def _command_option(args) -> bool:
+    """True when the words hold an option that may hand a program a command line: `-c` alone or in a cluster (`-lc`),
+    or `--command`."""
+    return any(re.fullmatch(r"-[A-Za-z]*c[A-Za-z]*|--command(?:=.*)?", str(a), re.S) for a in args)
 
 
 def _run_by_path(p) -> tuple:
@@ -2145,7 +2633,7 @@ _SHELLS = {"bash", "sh", "zsh", "dash", "ksh", "fish", "csh", "tcsh"}
 _GIT_TREE_WRITES = frozenset("checkout switch reset restore revert merge pull rebase cherry-pick stash apply am mv rm "
                              "clean read-tree checkout-index update-index filter-branch filter-repo".split())
 _INTERP = re.compile(r"^(?:python[0-9.]*|pypy[0-9.]*|node|nodejs|deno|bun|perl[0-9.]*|ruby|php|osascript|lua|tclsh|"
-                     r"Rscript|swift|awk|gawk|mawk|nawk)$")
+                     r"Rscript|swift|awk|gawk|mawk|nawk|expect|wish)$")
 _READERS = {"cat", "head", "tail", "less", "more", "bat", "ls", "stat", "file", "wc", "grep", "egrep", "fgrep", "rg",
             "ag", "ack", "jq", "diff", "cmp", "comm", "md5", "md5sum", "shasum", "sha1sum", "sha256sum", "cksum", "du",
             "df", "realpath", "readlink", "basename", "dirname", "test", "[", "[[", "echo", "printf", "hexdump", "xxd",
@@ -2200,6 +2688,30 @@ _ENV_SET_CODE = re.compile(
     r"DEV_ROOT|DEVKIT_\w+)|['\"](?:HOME|DEV_ROOT|DEVKIT_\w+)['\"]\s*:|\b(?:HOME|DEV_ROOT|DEVKIT_\w+)\s*=(?!=)"
     r"|process\.env\.(?:HOME|DEV_ROOT|DEVKIT_\w+)\s*=(?!=)|\bENV\s*\[\s*['\"](?:HOME|DEV_ROOT|DEVKIT_\w+)['\"]\s*\]\s*=(?!=)")
 _DEV_RUN_CODE = re.compile(r"['\"](?:[^'\"\s]*/)?dev(?:['\"]\s*[,\])]|\s+\w)|\bbin/dev\b|\bdevkit\b")
+
+
+def _code_env_sets(code: str, name: str = "") -> set:
+    """The names of devkit's variables (HOME, DEV_ROOT, DEVKIT_*) a program's code sets in an environment
+    (_ENV_SET_CODE). In Python, an assignment to a variable of that name (`HOME = Path.home()`) is a variable of the
+    program and sets no environment, so it does not count; `os.environ["HOME"] = …`, `env={"HOME": …}`,
+    `dict(os.environ, HOME=…)` and a `HOME=…` in a shell line still do. A program that does not parse counts all."""
+    hits = [(m.start(), _ENV_NAME.findall(m.group(0))) for m in _ENV_SET_CODE.finditer(code or "")]
+    fam = re.sub(r"[0-9.]+$", "", os.path.basename(str(name or "")).casefold())
+    if not hits or fam not in ("python", "pypy"):
+        return {n for _, names in hits for n in names}
+    import ast
+    try:
+        tree = ast.parse(code)
+    except (SyntaxError, ValueError):
+        return {n for _, names in hits for n in names}
+    stores = {(n.lineno, n.col_offset) for n in ast.walk(tree) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
+    out = set()
+    for at, names in hits:
+        line_start = code.rfind("\n", 0, at) + 1
+        where = (code.count("\n", 0, at) + 1, len(code[line_start:at].encode("utf-8")))  # ast counts UTF-8 bytes
+        if where not in stores:
+            out.update(names)
+    return out
 INSTALL_REASON = ("`dev install` and `dev update` change what every hook, the guard and `dev` itself run: they pin a "
                   "new devkit copy and rewrite the agents' settings (spec C10, K1). The developer runs them, in a "
                   "terminal. Ask them, and say which commit should be pinned and why; `dev doctor` shows what is "
@@ -2754,7 +3266,10 @@ class _Shell:
         if tmux_list_refusal(self.cmd):
             return deny(TERMINAL_TYPING_REASON)
         cwd = self.cwd
-        for argv0, redirs in segs:
+        ins = []  # what an interpreter reads as its program from `< f` or a pipe (`cat x.exp | expect`)
+        osegs = split_commands(self.cmd, ops=True, inputs=ins)
+        osegs = osegs if osegs is not None and len(osegs) == len(segs) else None
+        for seg, (argv0, redirs) in enumerate(segs):
             argv0, clobber, k = list(argv0), [], 0
             while k < len(argv0):  # `>|` reaches argv as a token; the next token is its target
                 if argv0[k] in (">|", ">>|"):
@@ -2778,9 +3293,27 @@ class _Shell:
                 cwd = str(core.HOME) if len(argv) == 1 else cwd if argv[1] == "-" else str(resolve(argv[1], cwd))
                 continue
             self.exported |= _exports(name, argv[1:])
-            v = self.segment(name, argv, assigns, cwd, names)
+            heredocs, run = self.bodies, _unwrap(list(argv))
+            if osegs and run and _INTERP.match(os.path.basename(run[0])):
+                with _skipped_reads():  # read as the gate reads it (_fed_program): its program joins the heredocs
+                    fed = _fed_program(run, osegs, seg, ins[seg] if seg < len(ins) else [], cwd)[1]
+                self.bodies = heredocs + [text for text, _ in fed]
+            try:
+                v = None
+                for run_as in _as_run(argv, cwd):  # also as the shell or interpreter its file is (`./bash-link`)
+                    v = v or self.segment(os.path.basename(run_as[0]), run_as, assigns, cwd, names)
+            finally:
+                self.bodies = heredocs
             if v:
                 return v
+        # what `<(…)`, `>(…)` and the `$(…)` and backticks inside a word run, from the folder the command starts in
+        # and the one it ends in (the tokenizer leaves their words in the command around them; it splits only a bare
+        # `$(…)` into commands of their own)
+        for text in _process_substitutions(self.cmd) + _command_substitutions(self.cmd):
+            for where in dict.fromkeys((self.cwd, cwd)):
+                v = self.nested(text, where)
+                if v:
+                    return v
         if self.unresolved and self.mentions:
             return deny(f"This command writes to {_code(self.unresolved[0])}, which depends on a variable or a "
                         f"subshell the guard cannot see, and it names devkit's state, configuration or install (spec "
@@ -2845,9 +3378,27 @@ class _Shell:
         if _INTERP.match(name) and not _repo_script(argv, cwd):
             code = _program(argv, cwd, self.bodies)[0]
             if code and _DEV_RUN_CODE.search(code):
-                bad = _forged({n for m in _ENV_SET_CODE.finditer(code) for n in _ENV_NAME.findall(m.group(0))})
+                bad = _forged(_code_env_sets(code, name))
                 if bad:
                     return deny(forged_env_reason(bad, f"the devkit command this {name} program runs"))
+            return self.program_lines(name, code, cwd)
+        return None
+
+    def program_lines(self, name, code, cwd):
+        """The command lines an interpreter's program may hand to a shell or a process (_code_texts: os.system,
+        subprocess with a string or shell=True, child_process.exec, Ruby's system and backticks, Perl's system, …),
+        judged by the rules of a typed line, with the variables the program sets in its environment as exported:
+        `os.system('HOME=/x dev status')` is refused as `HOME=/x dev status` is. A Python program that starts
+        processes only with argument lists (_py_argv_only) hands no string to a shell, so only its lists count there:
+        a string it holds is at most one argument word. A string the tokenizer cannot read is left to
+        code_session_refusal, which refuses one that names a command it judges."""
+        if not code:
+            return None
+        env = _code_env_sets(code, name)
+        for text in _code_texts(code, name, lists_only=_py_argv_only(code, name)):
+            v = self.nested(text, cwd, names=env, typed=False)
+            if v:
+                return v
         return None
 
     def segment(self, name, argv, assigns, cwd, names=()):
@@ -2876,18 +3427,23 @@ class _Shell:
         dev = _dev_args(argv)
         if dev is not None:
             return self.dev(dev, cwd, set(names) | self.exported)
-        installer = argv[0] if name == "install.sh" else next(
-            (a for a in args if not a.startswith(("-", "+"))), "") if name in _SHELLS else ""
+        shell = _shell_args(args, name) if name in _SHELLS else ("", 0, False)
+        installer = argv[0] if name == "install.sh" else args[shell[1]] if shell[0] == "script" and not shell[2] \
+            else ""
         if installer and _devkit_installer(resolve(installer, cwd)):
             return deny(INSTALL_REASON)
         if name in _SHELLS:
-            for text, typed, _ in _shell_sources(args, cwd, self.bodies):
+            for text, typed, _ in _shell_sources(args, cwd, self.bodies, name):
                 v = self.nested(text, cwd, names=names, typed=typed)
                 if v:
                     return v
             return None
         if name in ("source", ".") and args:
-            return self.nested(_read_small(resolve(args[0], cwd)), cwd, same_shell=True, typed=False)
+            for text, typed, _ in _sourced(args, cwd, self.bodies):
+                v = self.nested(text, cwd, same_shell=True, typed=typed)
+                if v:
+                    return v
+            return None
         if name == "eval":
             return self.nested(" ".join(args), cwd, same_shell=True)
         if name == "xargs":
@@ -3135,7 +3691,11 @@ def _unwrap(argv, more: bool = False, stop=()):
         if not argv:
             return argv
         n = os.path.basename(argv[0])
-        if argv[0] in _RESERVED:
+        if argv[0] in ("for", "select") and argv[2:3] == ["do"]:  # `for a do $a …`: a loop over $@ needs no `;`
+            argv = argv[3:]
+        elif argv[0] == "function" and len(argv) > 2:  # `function f { gh …; }`: the body's first command
+            argv = argv[2:]
+        elif argv[0] in _RESERVED:
             argv = argv[1:]
         elif n in ("timeout", "gtimeout"):
             rest = argv[1:]
@@ -3158,7 +3718,10 @@ def _unwrap(argv, more: bool = False, stop=()):
                 return argv
             argv = run
         elif n == "expect":
-            argv = _expect_command(argv[1:])
+            run = _expect_command(argv[1:])
+            if run is None:  # a script file or its input: the interpreter, read as one (_program)
+                return argv
+            argv = run
         elif n == "yarn" and argv[1:3] == ["workspaces", "foreach"]:  # runs `yarn <command>` in each workspace
             rest, i = argv[3:], 0
             while i < len(rest) and rest[i].startswith("-"):
@@ -3605,22 +4168,41 @@ def terminal_typing_refusal(argv, more: bool = False) -> bool:
 
 
 _EXPECT_RUN = re.compile(r"(?:^|[;\n\[{]|\bthen\b)\s*(?:spawn|exec|system)\s+([^;\n\]}]*)")
+_TCL = frozenset({"tclsh", "expect", "wish"})
 _EXPECT_SPAWN_OPTS = frozenset({"-noecho", "-console", "-nottycopy", "-nottyinit", "-pty", "-ignore", "-open",
                                 "-leaveopen"})
 
 
-def _expect_command(args) -> list:
-    """What `expect -c '<script>'` runs, as `sh -c <lines>`: each `spawn`, `exec` and `system` command of the script
-    (Tcl words read as shell words, past spawn's own options). [] when it runs none the guard can see."""
-    scripts = [args[k + 1] for k, a in enumerate(args[:-1]) if a == "-c"]
+def _tcl_lines(script) -> list:
+    """The command lines a Tcl program (tclsh, expect, wish) starts: each `spawn`, `exec` and `system` command, its
+    Tcl words read as shell words, past spawn's own options."""
     lines = []
-    for script in scripts:
-        for m in _EXPECT_RUN.finditer(script):
-            words = m.group(1).replace("{", " ").replace("}", " ").split()
-            while words and words[0] in _EXPECT_SPAWN_OPTS:
-                words = words[2:] if words[0] in ("-ignore", "-open", "-leaveopen") else words[1:]
-            if words:
-                lines.append(" ".join(words))
+    for m in _EXPECT_RUN.finditer(script or ""):
+        words = m.group(1).replace("{", " ").replace("}", " ").split()
+        while words and words[0] in _EXPECT_SPAWN_OPTS:
+            words = words[2:] if words[0] in ("-ignore", "-open", "-leaveopen") else words[1:]
+        if words:
+            lines.append(" ".join(words))
+    return lines
+
+
+def _expect_command(args):
+    """What `expect -c '<script>'` runs, as `sh -c <lines>` (_tcl_lines); [] when it runs none the guard can see.
+    None when expect also runs a script file or its input (`expect x.exp`, `expect -f x.exp`, `expect < x.exp`): it is
+    then an interpreter whose program the walkers read from the folder the command runs in (_program)."""
+    scripts, i = [], 0
+    while i < len(args):
+        a = args[i]
+        if a == "-c":
+            scripts.append(args[i + 1] if i + 1 < len(args) else "")
+            i += 2
+            continue
+        if a in ("-f", "-b", "--", "-") or not a.startswith("-"):
+            return None
+        i += 2 if a == "-D" else 1
+    if not scripts:
+        return None  # no -c: it reads its commands from its input
+    lines = [line for s in scripts for line in _tcl_lines(s)]
     return ["sh", "-c", "; ".join(lines)] if lines else []
 
 
@@ -3687,7 +4269,7 @@ _SHELL_VALUE_OPTS = ("-o", "+o", "-O", "+O", "--rcfile", "--init-file")
 # per interpreter family: the options whose value is its program (code, a script or a module), the ones whose value
 # is code it loads before it (node -r, perl -M, ruby -r), and the ones whose value is no code (python -W ignore)
 _PROGRAM_OPTS = {"python": ("-c", "-m"), "node": ("-e", "--eval", "-p", "--print"), "perl": ("-e", "-E"),
-                 "ruby": ("-e",), "php": ("-r", "-f"), "awk": ("-f",), "": ("-e",)}
+                 "ruby": ("-e",), "php": ("-r", "-f"), "awk": ("-f",), "expect": ("-c", "-f", "-b"), "": ("-e",)}
 _LOAD_OPTS = {"node": ("-r", "--require", "--import", "--loader", "--experimental-loader", "--preload"),
               "perl": ("-M", "-m", "-I"), "ruby": ("-r", "-I")}
 _PLAIN_VALUE_OPTS = {"python": ("-W", "-X"), "node": ("--env-file", "--input-type", "-C", "--conditions", "--title"),
@@ -3739,8 +4321,10 @@ def _program_source(run, whole: bool = False) -> str | None:
         if a == "-" or (shell and a.startswith("-") and not a.startswith("--") and "s" in a[1:]):
             return "none"  # it reads its program from its input
         if shell and a.startswith("-") and not a.startswith("--") and "c" in a[1:]:
-            # a line the input is only part of is read word by word where it runs (_input_runs, the walker)
-            line = args[i + 1].strip() if i + 1 < len(args) else None
+            # a line the input is only part of is read word by word where it runs (_input_runs, the walker); the
+            # line is the first word after the options (_shell_args)
+            kind, k, _ = _shell_args(args, name)
+            line = args[k].strip() if kind == "line" else None
             return "none" if line is None else "filled" if _RUNNER_FILLS.fullmatch(line) else "given"
         if shell and a in _SHELL_VALUE_OPTS:
             i += 2
@@ -3796,7 +4380,7 @@ def _input_runs(words, depth: int = 0) -> bool:
     if depth >= 4:  # too deep to read: it may run what its input names (fails closed)
         return True
     name = os.path.basename(run[0])
-    line = _shell_line(run[1:]) if name in _SHELLS else " ".join(run[1:]) if name == "eval" else None
+    line = _shell_line(run[1:], name) if name in _SHELLS else " ".join(run[1:]) if name == "eval" else None
     if not line:
         return False
     segs = split_commands(line)
@@ -3912,10 +4496,65 @@ def _dev_words(args) -> list:
 _POSITIONAL = re.compile(r'"\$[@*]"|\$[@*]|\$\{(\d+)\}|\$(\d)')
 
 
+# the words that can give a line's $1… other values than the words after it, wherever they stand once quotes are
+# removed (`s""hift` is shift): shift, getopts' shift, eval and source, which run text the guard reads as a string,
+# zsh's argv, and a function, whose $1… are its own arguments
+_REBINDERS = frozenset({"shift", "getopts", "eval", "source", "function", "argv"})
+_FUNCTION_DEF = re.compile(r"\([ \t]*\)")  # `f() …`, `f ()`, zsh's anonymous `() { … }`
+
+
+_LOOPS = frozenset({"while", "until", "for", "select", "repeat", "foreach"})
+
+
+def _rebind_cut(line: str) -> int:
+    """How much of a -c line sees the words after it as $0, $1…: the index where the first thing that may give them
+    other values takes effect, read as the shell reads its words once quotes are removed (`s""hift` is shift). That
+    is the end of the command holding shift, getopts, source, `.`, set with operands, zsh's argv or `1=…` (their own
+    words still see the old values); the start of eval, whose text may define a function, of a function (`function
+    f`, the `(` of `f()` or of zsh's anonymous `() { … }`), and of a for or select loop without an `in` list, which
+    loops over them. 0 when a loop before that point may run its text
+    again after it, or when the guard cannot read the line's words (backticks, `$'…'`); len(line) when nothing can."""
+    words, ck = _shell_words(line), _code_kinds(line)
+    if words is None or ck is None:
+        return 0
+    code = "".join(c if k == "C" else " " for c, k in zip(line, ck[0]))
+    m = _FUNCTION_DEF.search(code)
+    cut = m.start() if m else len(line)
+    for k, (text, offs, _, at_cmd) in enumerate(words):
+        if not offs or offs[0] >= cut:
+            continue
+        rest = [w[0] for w in words[k + 1:]]
+        if (at_cmd and text in ("for", "select") and (len(rest) < 2 or rest[1] != "in")) or \
+                text in ("eval", "function"):  # text that runs later, maybe as a function with its own $1
+            cut = min(cut, offs[0])
+            break
+        rebinds = text in _REBINDERS or bool(re.match(r"(?:\d+|argv(?:\[[^]]*\])?)\+?=", text)) or \
+            (at_cmd and text == ".")
+        if at_cmd and text == "set":
+            j = 0
+            while j < len(rest) and not words[k + 1 + j][3]:
+                opt = rest[j]
+                if not re.fullmatch(r"[-+][A-Za-z]+", opt) or "A" in opt:  # an operand, `--`, `-` or zsh's -A
+                    rebinds = True
+                    break
+                j += 2 if opt.endswith("o") else 1  # `-o pipefail`: the option's name
+        if rebinds:
+            end = re.search(r"[;&|\n]", code[offs[-1]:])
+            cut = min(cut, offs[-1] + end.start() if end else len(line))
+            break
+    if cut < len(line) and any(at_cmd and text in _LOOPS and offs and offs[0] < cut
+                               for text, offs, _, at_cmd in words):
+        return 0
+    return cut
+
+
 def _with_positionals(line: str, words) -> str:
     """A shell's -c line with the words after it in place of $0, $1…, ${1} and "$@" or $* (the words after $0),
-    quoted as the shell passes them, so the guard reads what runs (`sh -c 'claude "$@"' _ plugin install x`)."""
-    if not words:
+    quoted as the shell passes them, so the guard reads what runs (`sh -c 'claude "$@"' _ plugin install x`). A line
+    that can bind them to other values (_rebind_cut: `shift; $1 …`, `s""et -- gh; "$@"`) keeps them as variables from
+    there on, which the gate judges as unknown where they name a program."""
+    cut = _rebind_cut(line) if words else 0
+    if not cut:
         return line
 
     def sub(m):
@@ -3923,39 +4562,119 @@ def _with_positionals(line: str, words) -> str:
         if n is None:
             return " ".join(shlex.quote(w) for w in words[1:])
         return shlex.quote(words[int(n)]) if int(n) < len(words) else ""
-    return _POSITIONAL.sub(sub, line)
+    return _POSITIONAL.sub(sub, line[:cut]) + line[cut:]
 
 
-def _shell_inputs(args, cwd, bodies) -> list:
+# the files that are a command's input or another of its descriptors: what `source`, `.`, a shell or an interpreter
+# reads from them is what the command feeds it
+_FED_FILES = re.compile(r"/dev/(?:stdin|fd/\d+)|/proc/(?:self|thread-self|\d+)/fd/\d+")
+
+
+def _descriptor(word, cwd):
+    """The descriptor file `word` opens (`/dev/stdin`, `/dev/fd/3`, `/proc/self/fd/0`) as the system opens it: made
+    absolute in the folder the command runs in, with `//`, `.` and `..` read as the kernel reads them and each
+    symbolic link followed, so `/dev/fd//0`, `//dev/stdin`, `cd /dev && . stdin` and a link to /dev/stdin are all
+    its input. False for any other file; None when the guard cannot tell which file it is (a variable, a
+    substitution, a glob, a folder only the run knows, a loop of links)."""
+    word = str(word)
+    if not word or re.search(r"[$`*?\[]", word):
+        return None
+    p = _path_text(word)
+    if p is None:
+        return None
+    if not os.path.isabs(p):
+        if cwd is None or str(cwd) == str(UNKNOWN):
+            return None
+        p = os.path.join(_c_path(cwd), p)
+    parts, at, hops = [x for x in p.split("/") if x], "/", 0
+    while True:
+        whole = os.path.normpath(os.path.join(at, *parts))
+        if _FED_FILES.fullmatch(whole):
+            return whole
+        if not parts:
+            return False
+        part = parts.pop(0)
+        if part == ".":
+            continue
+        if part == "..":
+            at = os.path.dirname(at)
+            continue
+        step = os.path.join(at, part)
+        try:
+            link = os.readlink(step)
+        except (OSError, ValueError):  # no link (or nothing there): the path goes on from it
+            at = step
+            continue
+        hops += 1
+        if hops > 40:
+            return None
+        parts, at = [x for x in link.split("/") if x] + parts, "/" if link.startswith("/") else at
+
+
+def _source_args(args) -> list:
+    """The words of `source` or `.` after `--`, which ends their options in bash and zsh."""
+    return list(args[1:]) if list(args[:1]) == ["--"] else list(args)
+
+
+def _source_target(args, cwd):
+    """Which file `source` or `.` reads, as _descriptor tells: its path ("<(" for a process substitution), False for
+    a file the guard reads, None when the guard cannot tell (also after an option it does not read)."""
+    args = _source_args(args)
+    if not args:
+        return False
+    if args[0] == "<(":
+        return "<("
+    if args[0].startswith("-") and args[0] != "-":
+        return None
+    return _descriptor(args[0], cwd)
+
+
+def _reads_input(word, cwd) -> bool:
+    """True when the file `word` names is the command's input (_descriptor: `/dev/stdin`, `/dev/fd/0`, `//dev/stdin`,
+    a link to it)."""
+    d = word if isinstance(word, str) and _FED_FILES.fullmatch(word) else _descriptor(word, cwd)
+    return bool(d) and bool(re.search(r"/(?:stdin|0)\Z", d))
+
+
+def _sourced(args, cwd, bodies) -> list:
+    """What `source` or `.` runs -> [(text, typed, path)], as for a shell's script (_shell_sources): the file it
+    names; for its input or another descriptor (`. /dev/stdin <<< '…'`, `source /dev/fd/3`), the command's heredocs
+    and here-strings and what a pipe feeds it (`bodies`), also when the guard cannot tell which file it reads
+    (`source $f <<< '…'`); for a process substitution (`source <(echo …)`), what its command writes (_produced)."""
+    target, args = _source_target(args, cwd), _source_args(args)
+    if not args:
+        return []
+    if target == "<(":
+        sub = _unwrap(args[1:])
+        return [(_produced(sub, cwd), False, _cat_path(sub, cwd))] if sub else []
+    if target is not False:
+        return [(b, True, None) for b in bodies]
+    path = resolve(args[0], cwd)
+    return [(_read_small(path), False, path)]
+
+
+def _shell_inputs(args, cwd, bodies, name="bash") -> list:
     """The scripts a shell runs: its -c string, a script file, or its input (the command's heredocs). With -s it reads
     its input even when words follow, and they are its $1, $2 … (`bash -s plugin install x <<< 'claude "$@"'`)."""
-    return [text for text, _, _ in _shell_sources(args, cwd, bodies)]
+    return [text for text, _, _ in _shell_sources(args, cwd, bodies, name)]
 
 
-def _shell_sources(args, cwd, bodies) -> list:
+def _shell_sources(args, cwd, bodies, name="bash") -> list:
     """_shell_inputs as (text, typed, path): typed when the command holds the text (a -c line, a heredoc), False for a
-    script file read from disk, whose resolved path is the third item (None for the others)."""
-    i, stdin = 0, False
-    while i < len(args):
-        a = args[i]
-        if a == "--":
-            i += 1
-            break
-        if a.startswith("-") and not a.startswith("--") and "c" in a[1:]:
-            return [(_with_positionals(args[i + 1], args[i + 2:]), True, None)] if i + 1 < len(args) else []
-        if a in ("-o", "+o", "-O", "+O", "--rcfile", "--init-file"):
-            i += 2
-            continue
-        if a.startswith(("-", "+")):
-            stdin = stdin or (a.startswith("-") and not a.startswith("--") and "s" in a[1:])
-            i += 1
-            continue
-        break
-    if stdin:
-        return [(_with_positionals(b, ["sh", *args[i:]]), True, None) for b in bodies]
-    if i < len(args):
-        path = resolve(args[i], cwd)
+    script file read from disk, whose resolved path is the third item (None for the others). A shell that only
+    parses its program (`bash -n x.sh`, _shell_args) runs none: []."""
+    kind, k, parse_only = _shell_args(args, name)
+    if parse_only or kind == "none":
+        return []
+    if kind == "line":
+        return [(_with_positionals(args[k], args[k + 1:]), True, None)]
+    if kind == "stdin":
+        return [(_with_positionals(b, ["sh", *args[k:]]), True, None) for b in bodies]
+    if kind == "script" and _descriptor(args[k], cwd) is False:
+        path = resolve(args[k], cwd)
         return [(_read_small(path), False, path)]
+    if kind == "script":  # `bash /dev/stdin <<< '…'`, `bash $f <<< '…'`: what the command feeds it, as for source
+        return [(b, True, None) for b in bodies]
     return [(b, True, None) for b in bodies]
 
 
@@ -3980,6 +4699,19 @@ def _program(argv, cwd, bodies):
                 code.append(a)
             i += 1
             break
+        if fam == "expect":  # expect [-dinN] [-D n] [-c cmds]… [[-f|-b|--] cmdfile] [args]: -c runs before the file
+            if a == "-c":
+                code.append(nxt)
+                i += 2
+                continue
+            if a in ("-f", "-b", "--"):
+                script, i = nxt or None, i + 2
+                break
+            if a == "-" or not a.startswith("-"):
+                script, i = a, i + 1
+                break
+            i += 2 if a == "-D" else 1
+            continue
         if fam in ("python", "pypy"):
             if short and a.endswith("c"):
                 code.append(nxt)
@@ -4008,7 +4740,7 @@ def _program(argv, cwd, bodies):
             script, i = a, i + 1
         break
     rest = args[i:]
-    if script in ("/dev/stdin", "/dev/fd/0"):  # its input, as `-` is
+    if script and script != "-" and _reads_input(script, cwd):  # its input, as `-` is
         script = "-"
     if script and script != "-":
         code.append(_read_small(resolve(script, cwd)))
@@ -4288,9 +5020,10 @@ def _forged_calls(text, cwd, depth=0) -> str:
             cwd = str(core.HOME) if len(argv) == 1 else cwd if argv[1] == "-" else str(resolve(argv[1], cwd))
             continue
         prev = _unwrap(segs[k - 1][0]) if k and segs[k - 1][2] in ("|", "|&") else []
-        fn = _forged_argv(argv, cwd, bodies, list(here), prev, depth)
-        if fn:
-            return fn
+        for run_as in _as_run(argv, cwd):
+            fn = _forged_argv(run_as, cwd, bodies, list(here), prev, depth)
+            if fn:
+                return fn
     for sub in _expansions(text):
         fn = _forged_calls(sub, cwd, depth + 1)
         if fn:
@@ -4319,11 +5052,13 @@ def _forged_argv(argv, cwd, bodies, here, prev, depth) -> str:
         return fn
     texts, inners = [], []
     if name in _SHELLS:
-        texts = _shell_inputs(args, cwd, bodies)
-        if _reads_stdin(args):
+        texts = _shell_inputs(args, cwd, bodies, name)
+        if _reads_stdin(args, name):
             texts += here + ([_produced(prev, cwd)] if prev else [])
     elif name in ("source", ".") and args:
-        texts = [_read_small(resolve(args[0], cwd))]
+        texts = [t for t, _, _ in _sourced(args, cwd, bodies)]
+        if _source_target(args, cwd) not in (False, "<("):
+            texts += here + ([_produced(prev, cwd)] if prev else [])
     elif name == "eval":
         texts = [" ".join(args)]
     elif name == "xargs":
@@ -4363,8 +5098,9 @@ def evidence_forgery(cmd: str, cwd):
 # --------------------------------------------------------------------------- crew members (spec F3/F4, guard side)
 #
 # A crew member is a subagent. devkit routes its `dev progress …` and `dev crew ask|answer|…` calls to its own lane
-# only when the call is the whole command (hooks._route_subagent_progress rewrites that one command). A lane call
-# anywhere else runs as Morpheus: it advances the main plan or records the developer's decision, so it is refused.
+# when the call is the whole command, or a call in a flat list with `cd` and reads (lane_route; hooks.
+# _route_subagent_progress rewrites the command). A lane call anywhere else runs as Morpheus: it advances the main plan
+# or records the developer's decision, so it is refused.
 # What counts is what the shell runs (lessons L-fxom7edle07, L-fxpeihqfwzb; B-fxn17sez8cj): the command words, nested
 # shells (bash -c, eval, source, xargs, find -exec, a heredoc a shell reads), the command substitutions the shell
 # expands (inside double quotes too) and the program an interpreter runs when it can start a process. Text a command
@@ -4384,10 +5120,12 @@ _SPAWNS = re.compile(
     # a terminal (F1-R4 part 2)
     r"\bdo (?:shell )?script\b|\bwrite text\b|\bkeystroke\b")
 _SPAWNS_QUOTED = re.compile(r"`[^`]*`|\bqx\b|%x[\[{(]")  # backticks run a command in perl, ruby and php only
-LANE_REASON = ("Run `dev progress …` and `dev crew …` as a command of its own (no `&&`, `;`, pipes, `$(…)`, `bash -c`, "
-               "`env` or `timeout` around it), so devkit can route it to your lane; anywhere else it would act as "
-               "the tech lead. Text that only mentions these commands (a quoted message, a heredoc written to a file) is "
-               "fine, and read-only crew commands (graph, show, raci, …) work anywhere.")
+LANE_REASON = ("Run `dev progress …` and `dev crew …` as a command of its own, or joined with `&&` or `;` to `cd` and "
+               "reads (`cd <worktree> && dev progress step \"…\"`) with only read-only filters piped after it (`| tail "
+               "-5`), so devkit can route it to your lane; inside `$(…)`, `bash -c`, `env`, `timeout`, a loop or next "
+               "to a command that writes or runs code it would act as the tech lead. Text that only mentions these "
+               "commands (a quoted message, a heredoc written to a file) is fine, and read-only crew commands (graph, "
+               "show, raci, …) work anywhere.")
 
 
 _DATA_HEREDOC = re.compile(r"\$\(cat <<(['\"])([A-Za-z_][A-Za-z0-9_]*)\1\n")
@@ -4449,8 +5187,196 @@ def runs_one_command(cmd: str) -> bool:
     return q is None
 
 
-def _subst(s: str, quotes: bool) -> list:
-    out, i, n, q = [], 0, len(s), None
+# A crew member's compound command with lane calls in it (`cd <worktree> && dev progress step "…"`, `dev crew inbox |
+# tail -5`, `git status && dev crew inbox`) is routed too when the shell reads it as a flat list of simple commands
+# the router can place exactly: words, `&&`, `||`, `;`, `|` and newlines, no substitution but a quoted heredoc message,
+# no subshell, group, control word, comment, background job or heredoc, no redirect but to /dev/null or between stderr
+# and stdout. It holds one lane call, which starts its pipeline (nothing feeds it), is typed as `dev …` or a literal
+# path to it, and may be followed only by read-only filters (`| tail -5`, `| grep x`); it gets DEVKIT_FROM_AGENT in
+# front of it. Every other command of the list is a read (_route_read), and is judged again as any command of the lane
+# (crew_shell_verdict with `routed`).
+_ROUTE_REDIRECT = re.compile(r"(?:[12]?>&[12]|(?:[12]|&)?>>?[ \t]*/dev/null)(?=[ \t\n;&|]|$)")
+_ROUTE_FILTERS = frozenset({"head", "tail", "grep", "egrep", "fgrep", "rg", "wc", "cat", "sort", "uniq", "cut", "tr",
+                            "nl", "column", "sed", "jq"})
+_LITERAL_DEV = re.compile(r"(?:~?[A-Za-z0-9_.+-]*/)*dev\Z")
+
+
+def _route_tokens(cmd: str):
+    """The words, operators and redirects of a command in the router's flat grammar, as [(kind, text, start)];
+    None for anything outside it."""
+    out, i, n = [], 0, len(cmd)
+    while i < n:
+        c = cmd[i]
+        if c in " \t":
+            i += 1
+            continue
+        if cmd.startswith(("&&", "||"), i):
+            out.append(("op", cmd[i:i + 2], i))
+            i += 2
+            continue
+        if c in ";|\n":
+            out.append(("op", ";" if c == "\n" else c, i))
+            i += 1
+            continue
+        m = _ROUTE_REDIRECT.match(cmd, i)
+        if m:
+            out.append(("redir", m.group(0), i))
+            i = m.end()
+            continue
+        if c in "&<>(){}#`":
+            return None
+        start, q = i, None
+        while i < n:
+            c = cmd[i]
+            if q == "'":
+                q = None if c == "'" else q
+                i += 1
+                continue
+            if cmd.startswith("$(", i):
+                end = _data_heredoc_end(cmd, i)
+                if end < 0:
+                    return None
+                i = end
+                continue
+            if c == "`":
+                return None
+            if q == '"':
+                if c == "\\":
+                    i += 2
+                    continue
+                q = None if c == '"' else q
+                i += 1
+                continue
+            if c == "\\":
+                if cmd[i + 1:i + 2] in ("\n", ""):
+                    return None
+                i += 2
+                continue
+            if c in "'\"":
+                q = c
+            elif c in " \t\n;&|<>()":
+                break
+            i += 1
+        if q:
+            return None
+        out.append(("word", cmd[start:i], start))
+    return out
+
+
+def _route_read(argv, text) -> bool:
+    """True when one command of a routed list only reads: `cd`, or a reader, a read of git, gh or dev the read-only
+    allowlist names, with no substitution; never an interpreter, a shell or a project check, which run code."""
+    inner = _unwrap(argv)
+    if not inner or not runs_one_command(text):
+        return False
+    name = os.path.basename(inner[0])
+    if _INTERP.match(name) or name in _SHELLS or name in ("eval", "source", ".", "xargs", "find") or \
+            _check_refusal(inner) is None or _crew_kind(_dev_args(inner) or []) in ("team", "sync"):
+        return False
+    return _ro_program(argv, os.getcwd()) is None
+
+
+def _route_plan(cmd: str):
+    """For a compound command in the router's grammar: the offsets of its lane calls' first words, [] when it has
+    none; None when it is outside the grammar or a lane call is where the router cannot place it."""
+    toks = _route_tokens(cmd or "")
+    if not toks:
+        return None
+    pipes, pipe, words, last = [], [], [], ";"
+    for kind, text, at in toks:
+        if kind == "op":
+            if not words:
+                return None  # an empty command: a leading operator, `&& &&`, `| |`
+            pipe.append(words)
+            words = []
+            if text != "|":
+                pipes.append(pipe)
+                pipe = []
+            last = text
+        elif kind == "word":
+            words.append((text, at))
+        elif not words:
+            return None  # a redirect before the command word
+    if words:
+        pipe.append(words)
+    elif last != ";":
+        return None  # a pipe, `&&` or `||` with nothing after it
+    if pipe:
+        pipes.append(pipe)
+    lanes = []
+    for pipe in pipes:
+        for k, words in enumerate(pipe):
+            if words[0][0] in _RESERVED or words[0][0] in ("for", "function", "[[", "]]"):
+                return None  # a control word: the list is not flat
+            text = cmd[words[0][1]:words[-1][1] + len(words[-1][0])]
+            try:
+                argv = shlex.split(text)
+            except ValueError:
+                return None
+            if _crew_kind(_dev_args(_unwrap(argv)) or []) != "lane":
+                if not _route_read(argv, text):
+                    return None  # the rewrite approves nothing but the lane calls and reads
+                continue
+            if k or not _LITERAL_DEV.match(words[0][0]) or not runs_one_command(text):
+                return None  # fed by a pipe, behind a wrapper or a variable, or holding a substitution
+            for fw in pipe[1:]:
+                ftext = cmd[fw[0][1]:fw[-1][1] + len(fw[-1][0])]
+                try:
+                    fargv = shlex.split(ftext)
+                except ValueError:
+                    return None
+                if not fargv or fargv[0] not in _ROUTE_FILTERS or not runs_one_command(ftext) or \
+                        _ro_program(fargv, os.getcwd()):
+                    return None
+            lanes.append(words[0][1])
+    return lanes
+
+
+def lane_route(cmd: str, aid: str):
+    """The command a crew member's shell call becomes so that each of its `dev progress …` and `dev crew ask|answer|
+    inbox|…` calls acts as the member's lane (DEVKIT_FROM_AGENT=<aid> in front of each), or None when it has no lane
+    call or one the router cannot place. A single call is the whole command (a quoted heredoc message is data); a
+    compound command follows _route_plan. The result is read back with the guard's own tokenizer: each lane call it
+    finds must carry the variable, or the command is not routed."""
+    if not isinstance(cmd, str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,80}", str(aid or "")):
+        return None
+    head = f"DEVKIT_FROM_AGENT={aid}"
+    try:
+        argv = shlex.split(cmd) if runs_one_command(cmd) else None
+    except ValueError:
+        argv = None
+    if argv and _LITERAL_DEV.match(cmd.split(None, 1)[0]) and _crew_kind(_dev_args(argv) or []) == "lane":
+        return f"{head} {cmd.strip()}"
+    plan = _route_plan(cmd)
+    if not plan or len(plan) != 1:
+        return None  # one lane call per command: two are two commands
+    out = cmd
+    for at in sorted(plan, reverse=True):
+        out = out[:at] + head + " " + out[at:]
+    segs, before = split_commands(out), split_commands(cmd)
+    if segs is None or before is None or len(segs) != len(before):
+        return None
+    marked = 0
+    for argv0, _ in segs:
+        if _crew_kind(_dev_args(_unwrap(argv0)) or []) == "lane":
+            if argv0[:1] != [head]:
+                return None
+            marked += 1
+    return out if marked == len(plan) else None
+
+
+def _routed_lanes(cmd: str) -> int:
+    """How many lane calls lane_route gives the member's lane in this command (0: it routes none)."""
+    if lane_route(cmd, "a") is None:
+        return 0
+    return 1 if runs_one_command(cmd) else len(_route_plan(cmd) or [])
+
+
+def _subst(s: str, quotes: bool, procs: list | None = None) -> list:
+    """The bodies of the substitutions the shell runs in `s`: `$(…)`, backticks, and with `quotes` (a command line,
+    not a heredoc body) `<(…)`, `>(…)` and zsh's `=(…)` outside quotes. `procs`: a list that gets, for each body,
+    whether it is a process substitution."""
+    out, i, n, q, parens = [], 0, len(s), None, _Parens(s)
     while i < n:
         c = s[i]
         if q == "'":
@@ -4464,12 +5390,14 @@ def _subst(s: str, quotes: bool) -> list:
             q = "'"
         elif quotes and c == '"':
             q = None if q == '"' else '"'
-        elif quotes and q is None and c == "#" and (i == 0 or s[i - 1] in " \t\n;&|()"):
+        elif quotes and q is None and c == "#" and parens.comment(i, False):
             j = s.find("\n", i)
             i = n if j < 0 else j
             continue
-        elif s.startswith("$(", i):
-            j, depth, qq = i + 2, 1, None
+        elif s.startswith("$(", i) or (quotes and q is None and _proc_subst_at(s, i)):
+            # `<(…)`, `>(…)` and zsh's `=(…)`: process substitutions, which the shell runs as `$(…)` (never in double
+            # quotes or in a heredoc body, where they are text)
+            j, depth, qq, pending = i + 2, 1, None, []
             while j < n and depth:
                 d = s[j]
                 if qq:
@@ -4485,8 +5413,21 @@ def _subst(s: str, quotes: bool) -> list:
                     depth += 1
                 elif d == ")":
                     depth -= 1
+                elif d == "<" and s.startswith("<<", j) and not s.startswith("<<<", j) and s[j - 1:j] != "<" and \
+                        (m := _HEREDOC_AT.match(s, j)):  # the shell reads a heredoc inside `$(…)`, even in "…"
+                    pending.append(m.group(1) or m.group(2) or m.group(3))
+                    j = m.end()
+                    continue
+                elif d == "\n" and pending:  # its body is text: an apostrophe there opens no quote
+                    j = _past_heredoc_bodies(s, j + 1, pending)
+                    pending = []
+                    continue
                 j += 1
             out.append(s[i + 2:j - 1] if depth == 0 else s[i + 2:])
+            if procs is not None:
+                procs.append(c != "$")
+            if depth == 0:
+                parens.close(j - 1, "w")
             i = j
             continue
         elif c == "`":
@@ -4494,9 +5435,48 @@ def _subst(s: str, quotes: bool) -> list:
             while j < n and s[j] != "`":
                 j += 2 if s[j] == "\\" else 1
             out.append(s[i + 1:j])
+            if procs is not None:
+                procs.append(False)
             i = j + 1
             continue
+        elif quotes and q is None and c == "(":
+            parens.open(i)
+        elif quotes and q is None and c == ")":
+            parens.close(i)
         i += 1
+    return out
+
+
+def _past_heredoc_bodies(s: str, i: int, delims) -> int:
+    """The index after the bodies of heredocs whose bodies start at `i`, one per delimiter in order, each ending at
+    its terminator line, or, as bash 3.2 reads it in a `$(…)`, right after a delimiter a `)` follows (_split_heredocs
+    reads them the same way)."""
+    n = len(s)
+    for delim in delims:
+        while i < n:
+            j = s.find("\n", i)
+            j = n if j < 0 else j
+            ln, start, i = s[i:j], i, j + 1
+            if ln.strip() == delim:
+                break
+            if ln.startswith(delim + ")"):
+                i = start + len(delim)
+                break
+    return min(i, n)
+
+
+def _process_substitutions(cmd: str) -> list:
+    """The command lines of the `<(…)` and `>(…)` the shell runs in `cmd`, also inside a `$(…)` or backticks: the
+    tokenizer leaves their words in the command around them, where `$(…)` it splits into commands of their own."""
+    out, todo = [], [(strip_heredocs(cmd), 0)]
+    while todo:
+        text, level = todo.pop()
+        procs = []
+        for body, proc in zip(_subst(text, True, procs), procs):
+            if proc:
+                out.append(body)
+            elif level < 4:
+                todo.append((body, level + 1))
     return out
 
 
@@ -4505,6 +5485,20 @@ def _expansions(cmd: str) -> list:
     double quotes too), and in heredoc bodies whose delimiter is unquoted."""
     text, bodies = _split_heredocs(cmd)
     out = _subst(text, True)
+    for body, expands in bodies:
+        if expands:
+            out += _subst(body, False)
+    return out
+
+
+def _command_substitutions(cmd: str) -> list:
+    """The command lines of the `$(…)` and backticks the shell runs in `cmd` (outside single quotes and comments, in
+    double quotes, here-strings and expanding heredoc bodies too), not its `<(…)`: the tokenizer splits only a bare
+    `$(…)` into segments of their own, and keeps the rest inside one word, where no rule would see them (`echo
+    "$(dev install)"`, a parse-only `bash -n -c "$(…)"`). Each rule walks these as lines one level down."""
+    text, bodies = _split_heredocs(cmd)
+    procs = []
+    out = [body for body, proc in zip(_subst(text, True, procs), procs) if not proc]
     for body, expands in bodies:
         if expands:
             out += _subst(body, False)
@@ -4524,8 +5518,10 @@ def shell_calls(cmd: str, cwd, depth: int = 0, where: bool = False):
     segs = split_commands(cmd)
     if segs is None:
         return None
-    bodies, out = heredoc_bodies(cmd), []
-    for argv0, _ in segs:
+    bodies, out, ins = heredoc_bodies(cmd), [], []
+    osegs = split_commands(cmd, ops=True, inputs=ins)
+    osegs = osegs if osegs is not None and len(osegs) == len(segs) else None
+    for k, (argv0, _) in enumerate(segs):
         argv = _unwrap(argv0)
         if not argv:
             continue
@@ -4533,10 +5529,15 @@ def shell_calls(cmd: str, cwd, depth: int = 0, where: bool = False):
             cwd = str(core.HOME) if len(argv) == 1 else cwd if argv[1] == "-" else str(resolve(argv[1], cwd))
             continue
         here = _prefix_chdir(argv0[:len(argv0) - len(_strip_prefix(argv0))], cwd) if where else cwd
-        more = _program_calls(argv, here, bodies, depth, where)
-        if more is None:
-            return None
-        out += more
+        for run_as in _as_run(argv, cwd):  # also as the shell or interpreter its file is (`./bash-link`)
+            fed = []
+            if osegs is not None:  # what a pipe or `< f` feeds a shell, an interpreter or `. /dev/stdin` (_fed_program)
+                with _skipped_reads():
+                    run_as, fed, _ = _fed_program(run_as, osegs, k, ins[k] if k < len(ins) else [], cwd)
+            more = _program_calls(run_as, here, bodies + [t for t, _ in fed], depth, where)
+            if more is None:
+                return None
+            out += more
     for text in _expansions(cmd):
         more = shell_calls(text, cwd, depth + 1, where)
         if more is None:
@@ -4555,9 +5556,9 @@ def _program_calls(argv, cwd, bodies, depth, where=False):
         return [call(argv, None if _repo_script(argv, cwd) else _program(argv, cwd, bodies)[0])]
     out, texts, inners = [call(argv, None)], [], []
     if name in _SHELLS:
-        texts = _shell_inputs(args, cwd, bodies)
+        texts = _shell_inputs(args, cwd, bodies, name)
     elif name in ("source", ".") and args:
-        texts = [_read_small(resolve(args[0], cwd))]
+        texts = [t for t, _, _ in _sourced(args, cwd, bodies)]
     elif name == "eval":
         texts = [" ".join(args)]
     elif name == "xargs":
@@ -4742,7 +5743,9 @@ class _ScratchShell(_Shell):
         self.member = member
 
     def child(self, text, cwd, names=()):
-        return _ScratchShell(text, cwd, self.member, self.depth + 1)
+        inner = _ScratchShell(text, cwd, self.member, self.depth + 1)
+        inner.exported = self.exported | set(names)  # what the parent or the program exports reaches the nested line
+        return inner
 
     def target(self, t, cwd, verb="write", holds=False, track=True):
         p = resolve(t, cwd)
@@ -4769,6 +5772,8 @@ _RO_READERS = frozenset({
     "readlink", "which", "type", "echo", "printf", "date", "diff", "cmp", "comm", "cut", "tr", "sort", "uniq",
     "column", "nl", "od", "xxd", "strings", "jq", "grep", "egrep", "fgrep", "rg", "find", "sed", "yq", "shasum",
     "md5", "sha256sum", "cksum", "uname",
+    # what the machine runs and is: no option of these writes or runs a program (sysctl is judged in _ro_reader)
+    "ps", "pgrep", "sw_vers", "id", "whoami", "printenv", "uptime", "groups", "locale", "getconf", "sysctl", "seq",
     # shell builtins that change nothing outside the shell
     "cd", "pushd", "popd", "true", "false", "test", "[", "[[", "read", "set", "wait", "sleep", "export", "unset",
     "local", "declare", "typeset", "readonly", "for", "select", "case", "in", "esac"})
@@ -4799,7 +5804,8 @@ _RO_GIT_GLOBAL = frozenset({"--no-pager", "-P", "--no-optional-locks", "--litera
 _RO_GH_READ = frozenset({"view", "list", "diff", "checks", "status"})
 _RO_DEV = {"status": None, "grep": None, "find": None, "files": None, "diff": None, "stubs": None, "help": None,
            "version": None, "sec": ("scan",), "test": ("", "run", "plan", "audit", "prove"), "plan": ("show",),
-           "lesson": ("add", "recur"), "task": ("", "ls", "list", "show"), "ci": ("", "status", "ls", "list"),
+           "lesson": ("", "ls", "list", "show", "add", "recur"), "task": ("", "ls", "list", "show"),
+           "ci": ("", "status", "ls", "list"), "guard": ("check",),
            "delivery": ("", "show"), "audit": ("", "verify", "show", "stats", "config"), "completion": None,
            "__complete": None}
 _SED_ADDR = r"(?:\d+|\$|/(?:[^/\\\n]|\\.)*/I?)"
@@ -4896,13 +5902,99 @@ def _ro_sed(args) -> str | None:
         i += 1
     if not scripts and files:
         scripts = files[:1]
-    if not quiet:
-        return "`sed` without -n is for editing; print lines with `sed -n '1,20p' file` or `sed -n '/re/p' file`"
     for s in scripts:
-        for part in re.split(r"[;\n]", s):
-            if part.strip() and not _SED_PRINT.match(part.strip()):
-                return f"the sed command {_code(part.strip())} can write or run (only line ranges and /re/ with p)"
+        if quiet and all(not p.strip() or _SED_PRINT.match(p.strip()) for p in re.split(r"[;\n]", s)):
+            continue
+        if not _sed_prints_only(s):
+            return (f"the sed script {_code(s.strip())} can write or run a file (its w, r or e command, or a form the "
+                    f"guard does not read); print with sed -n and a line range, or a substitution to standard output")
     return None
+
+
+_SED_FLAGS = frozenset("gpiIMm0123456789")
+
+
+def _sed_part(s: str, i: int, delim: str) -> int:
+    """The index after the next unescaped `delim` from i (a sed regex or replacement), or -1."""
+    while i < len(s):
+        if s[i] == "\\":
+            i += 2
+            continue
+        if s[i] == "\n":
+            return -1
+        if s[i] == delim:
+            return i + 1
+        i += 1
+    return -1
+
+
+def _sed_address(s: str, i: int) -> int:
+    """The index after one sed address at i (a line number, `$`, `/re/`, `\\cREc`, or `first~step`), i when none,
+    -1 when it does not end."""
+    if i < len(s) and s[i] == "$":
+        return i + 1
+    m = re.match(r"\d+(?:~\d+)?", s[i:])
+    if m:
+        return i + m.end()
+    if i < len(s) and s[i] == "/":
+        j = _sed_part(s, i + 1, "/")
+        return j if j < 0 else j + (1 if s[j:j + 1] in ("I", "M") else 0)
+    if s[i:i + 1] == "\\" and i + 1 < len(s) and s[i + 1] not in "\n\\":
+        return _sed_part(s, i + 2, s[i + 1])
+    return i
+
+
+def _sed_prints_only(script: str) -> bool:
+    """True when a sed script only prints what it reads to standard output: addresses, blocks, labels and branches,
+    and the commands s (without the w and e flags), y, d, D, p, P, n, N, g, G, h, H, x, l, =, q, Q and z. False for w,
+    W, r, R, e, F, v and anything the guard does not read here, so it fails closed."""
+    s, i, n = script, 0, len(script)
+    while i < n:
+        if s[i] in " \t\n;{}!":
+            i += 1
+            continue
+        if s[i] == "#":
+            j = s.find("\n", i)
+            i = n if j < 0 else j
+            continue
+        j = _sed_address(s, i)
+        if j < 0:
+            return False
+        if j > i and j < n and s[j] == ",":
+            j = _sed_address(s, j + 1)
+            if j < 0:
+                return False
+        while j < n and s[j] in " \t!":
+            j += 1
+        if j >= n:
+            return j > i
+        c, i = s[j], j + 1
+        if c in "dDpPnNgGhHxlz={}":
+            continue
+        if c in "qQ":
+            while i < n and s[i].isdigit():
+                i += 1
+            continue
+        if c in ":bt":
+            while i < n and s[i] not in ";\n}":
+                i += 1
+            continue
+        if c in "sy":
+            if i >= n or s[i] in "\\\n ":
+                return False
+            d = s[i]
+            i = _sed_part(s, i + 1, d)
+            i = _sed_part(s, i, d) if i > 0 else -1
+            if i < 0:
+                return False
+            if c == "s":
+                while i < n and s[i] in _SED_FLAGS:
+                    i += 1
+            if i < n and s[i] not in " \t;\n}":
+                return False  # a w or e flag, or a file name after it
+            continue
+        return False
+    return True
 
 
 def _ro_git(args) -> str | None:
@@ -5443,6 +6535,8 @@ def _ro_program(argv0, cwd, member=None) -> str | None:
     for k, a in enumerate(pre):
         n = os.path.basename(a)
         if _ASSIGN.match(a):
+            if not argv and _SHELL_VAR.match(a.split("=", 1)[0]):
+                continue  # `S=/path` alone sets a shell variable no program reads (not exported, no known name)
             why = _ro_env(*a.split("=", 1))
             if why:
                 return why
@@ -5450,6 +6544,9 @@ def _ro_program(argv0, cwd, member=None) -> str | None:
             return "`sudo` runs the command as another user"
         elif n == "env" and any(x.startswith("-") for x in pre[k + 1:k + 2]):
             return "`env` with options changes the command's environment"
+        elif n == "command" and any(re.fullmatch(r"-[pvV]*[vV][pvV]*", x) for x in
+                                    itertools.takewhile(lambda x: x.startswith("-") and x != "--", pre[k + 1:])):
+            return None  # `command -v gh dev`, `command -V x`: it only looks the names up and runs none of them
         elif n in _RO_RUNNERS:
             runner = True
     if not argv:
@@ -5458,6 +6555,8 @@ def _ro_program(argv0, cwd, member=None) -> str | None:
     if why:
         return why
     name, args = os.path.basename(argv[0]), argv[1:]
+    if argv[0] == _SUBST_WORD:
+        return "a program named by a command substitution"
     if argv[0][:1] in ("$", "`") or name.startswith("#"):
         return None if name.startswith("#") else "a program named by a variable"
     dev = _dev_args(argv)
@@ -5467,14 +6566,88 @@ def _ro_program(argv0, cwd, member=None) -> str | None:
     if why is not None:
         if not why and _INTERP.match(name) and not runner and _own_scratch_script(argv, cwd, member):
             return None
+        if not why and not runner and (_INTERP.match(name) or name in _SHELLS) and _version_only(name, args):
+            return None
+        if not why and not runner and name in _SHELLS and _shell_args(args, name)[2]:
+            return None  # `bash -n x.sh`, `zsh -n -c '…'`: it reads and parses, and runs nothing
+        if not why and not runner and _family(name) in ("awk", "gawk", "mawk", "nawk"):
+            return _ro_awk(args)
         return why or (f"{_code(name)} is not on the read-only allowlist" if runner or _INTERP.match(name) or
                        name in _SHELLS or name in ("eval", "source", ".") else _ro_reader(name, args, cwd, member))
     return None
 
 
+# a shell variable a read-only lane may set alone (`S=/path; ls $S`): a lowercase name, or one capital letter with
+# digits, which no program reads from its environment; PATH, PAGER, IFS and the other known names stay refused
+_SHELL_VAR = re.compile(r"^(?!(?:path|fpath|cdpath|manpath|module_path|mailpath|histchars|fignore|psvar)$)"
+                        r"(?:[a-z_][a-z0-9_]*|[A-Z][0-9]*)$")  # zsh ties path to PATH, fpath to FPATH, …
+
+
+def _version_only(name: str, args) -> bool:
+    """`python3 --version`, `bash --version`, `node --version`, `python3 -V`: an interpreter or shell asked only for
+    its version, which runs no program."""
+    return list(args) == ["--version"] or (_family(name) in ("python", "pypy") and list(args) in (["-V"], ["-VV"]))
+
+
+_AWK_RUNS = re.compile(r"\bsystem\b|\bgetline\b|[|>]|@(?:load|include|namespace)\b|\bclose\b|\bfflush\b")
+
+
+def _ro_awk(args) -> str | None:
+    """Why an awk call of a read-only lane is refused, or None: its program (inline, `-e` or `--source`) may only read
+    its input and print to standard output: no `>` or `|` (a file or a command it writes to, and comparisons with `>`,
+    which read the same), no system(), getline, @load or @include; no program file and no option that loads one."""
+    progs, i, inline = [], 0, True
+    while i < len(args):
+        a = args[i]
+        if a in ("-F", "-v", "--field-separator", "--assign"):
+            i += 2
+            continue
+        if a.startswith(("-F", "-v", "--field-separator=", "--assign=")):
+            i += 1
+            continue
+        if a in ("-e", "--source"):
+            progs.append(args[i + 1] if i + 1 < len(args) else "")
+            inline = False
+            i += 2
+            continue
+        if a == "--":
+            i += 1
+            break
+        if a.startswith("-"):
+            return f"{_code(f'awk {a}')} reads a program file, loads an extension or changes how awk runs"
+        break
+    if inline:
+        if i >= len(args):
+            return "`awk` without a program"
+        progs.append(args[i])
+    for p in progs:
+        if _AWK_RUNS.search(p):
+            return ("the awk program writes to a file or a command, or runs one (`>`, `|`, system(), getline); "
+                    "print to standard output only, and compare with `<`")
+    return None
+
+
+def _ro_mkdir(args, cwd, member) -> str | None:
+    """`mkdir [-p] <folder>…` of a read-only lane: every folder in crew member `member`'s own scratch folder."""
+    paths = [a for a in args if not a.startswith("-")]
+    if not member or not paths or any(a not in ("-p", "-v", "-pv", "-vp") for a in args if a.startswith("-")):
+        return "`mkdir` is not on the read-only allowlist (only `mkdir -p` inside your scratch folder)"
+    for a in paths:
+        p = resolve(a, cwd)
+        m = _SCRATCHPAD.match(str(real(str(p)))) if p != UNKNOWN else None
+        if not m or not m.group(2) or scratch_refusal(p, member):
+            return f"{_code(f'mkdir {a}')} is outside your scratch folder, scratchpad/{member}/"
+    return None
+
+
 def _ro_reader(name, args, cwd, member=None) -> str | None:
+    if name == "mkdir":
+        return _ro_mkdir(args, cwd, member)
     if name not in _RO_READERS and name not in ("git", "gh", "xargs"):
         return f"{_code(name)} is not on the read-only allowlist"
+    if name == "sysctl" and any("=" in a or a in ("-w", "-f", "-p", "--write", "--load", "--system") or
+                                (a[:1] == "-" and a[1:2] != "-" and set(a[1:]) & set("wfp")) for a in args):
+        return "`sysctl` with a value, -w, -f or -p changes the kernel's settings"
     f = _flag_hits(args, _RO_FLAGS.get(name, ()))
     if f:
         return f"{_code(f'{name} {f}')} writes a file or runs a program"
@@ -5508,26 +6681,6 @@ def _ro_reader(name, args, cwd, member=None) -> str | None:
     return None
 
 
-def _proc_subst(text: str) -> bool:
-    """True when the shell runs a process substitution, `<(…)` or `>(…)`, outside quotes."""
-    q, i = None, 0
-    while i < len(text):
-        c = text[i]
-        if q:
-            q = None if c == q else q
-            i += 2 if c == "\\" and q == '"' else 1
-            continue
-        if c == "\\":
-            i += 2
-            continue
-        if c in "'\"":
-            q = c
-        elif c in "<>" and text[i + 1:i + 2] == "(":
-            return True
-        i += 1
-    return False
-
-
 def _redirect_ok(target, cwd) -> bool:
     if target in ("/dev/null", "/dev/stdout", "/dev/stderr", "-"):
         return True
@@ -5535,16 +6688,111 @@ def _redirect_ok(target, cwd) -> bool:
     return p != UNKNOWN and is_temp(p)
 
 
-def readonly_refusal(cmd: str, cwd, member=None) -> str | None:
+_SUBST_WORD = "/dev/fd/63"  # what a substitution stands for while the command around it is read
+
+
+def _close_paren(s: str, j: int) -> int:
+    """The index after the `)` that closes a `(` just before j, or -1."""
+    depth, q = 1, None
+    while j < len(s):
+        d = s[j]
+        if q:
+            if d == "\\" and q == '"':
+                j += 1
+            elif d == q:
+                q = None
+        elif d == "\\":
+            j += 1
+        elif d in "'\"":
+            q = d
+        elif d == "(":
+            depth += 1
+        elif d == ")":
+            depth -= 1
+            if not depth:
+                return j + 1
+        j += 1
+    return -1
+
+
+def _mask_substitutions(s: str):
+    """(the command with each `$(…)`, backtick and `<(…)`/`>(…)`/`=(…)` the shell runs replaced by a placeholder
+    word, the commands inside them), or None for an arithmetic `$((…))` (zsh evaluates the variables in it as code) or a
+    substitution that does not end. Single quotes and comments are text."""
+    out, inner, i, n, q, parens = [], [], 0, len(s), None, _Parens(s)
+    while i < n:
+        c = s[i]
+        if q == "'":
+            q = None if c == "'" else q
+            out.append(c)
+            i += 1
+            continue
+        if c == "\\":
+            out.append(s[i:i + 2])
+            i += 2
+            continue
+        if s.startswith("$((", i):
+            return None
+        if s.startswith("$(", i) or (q is None and _proc_subst_at(s, i)):
+            j = _close_paren(s, i + 2)
+            if j < 0:
+                return None
+            inner.append(s[i + 2:j - 1])
+            out.append(_SUBST_WORD)
+            parens.close(j - 1, "w")
+            i = j
+            continue
+        if c == "`":
+            j = i + 1
+            while j < n and s[j] != "`":
+                j += 2 if s[j] == "\\" else 1
+            if j >= n:
+                return None
+            inner.append(s[i + 1:j])
+            out.append(_SUBST_WORD)
+            i = j + 1
+            continue
+        if q is None and c == "'":
+            q = "'"
+        elif c == '"':
+            q = None if q == '"' else '"'
+        elif q is None and c == "#" and parens.comment(i, False):
+            j = s.find("\n", i)
+            j = n if j < 0 else j
+            out.append(s[i:j])
+            i = j
+            continue
+        elif q is None and c == "(":
+            parens.open(i)
+        elif q is None and c == ")":
+            parens.close(i)
+        out.append(c)
+        i += 1
+    return "".join(out), inner
+
+
+def readonly_refusal(cmd: str, cwd, member=None, depth: int = 0) -> str | None:
     """Why a review or read-only lane may not run `cmd` (spec F7, consultation §4), or None when every segment is on
-    the read-only allowlist: no command substitution or process substitution, a command that parses, redirects only to
-    /dev/null or a temp folder, and each program a reader, a read of git, gh or dev, one of the project's checks, or a
-    script from crew member `member`'s own scratch folder."""
+    the read-only allowlist: a command that parses, redirects only to /dev/null or a temp folder, and each program a
+    reader, a read of git, gh or dev, one of the project's checks, or a script from crew member `member`'s own scratch
+    folder. A command substitution (`$(…)`, backticks) or process substitution (`<(…)`, `>(…)`) passes when the
+    command inside it does, by the same rules; never as the program a command runs, and never arithmetic."""
     if not cmd or not str(cmd).strip():
         return None
-    if _expansions(cmd) or _proc_subst(strip_heredocs(cmd)):
-        return READONLY_REASON.format(what="`$(…)`, backticks, `<(…)` and `>(…)` run commands the guard cannot judge")
-    segs = split_commands(cmd)
+    readings = _continued_readings(cmd)
+    if readings:  # a backslash-newline: the readings shells use (joined; a comment ended at its newline), each judged
+        return next((why for why in (readonly_refusal(r, cwd, member, depth) for r in readings) if why), None)
+    masked = _mask_substitutions(strip_heredocs(cmd)) if depth < 3 else None
+    if masked is None:
+        return READONLY_REASON.format(what="`$((…))` and substitutions nested deeper than three levels run code the "
+                                           "guard cannot judge")
+    text, inner = masked
+    inner += [t for body, expands in _split_heredocs(cmd)[1] if expands for t in _subst(body, False)]
+    for sub in inner:
+        why = readonly_refusal(sub, cwd, member, depth + 1)
+        if why:
+            return why
+    segs = split_commands(text, stripped=True)
     if segs is None:
         return READONLY_REASON.format(what="the guard cannot parse this command, so it cannot tell what it writes")
     here = str(cwd or os.getcwd())
@@ -5607,9 +6855,18 @@ def crew_shell_verdict(cmd: str, cwd, scope=None, member=None, level=None, base=
     (progress.lane_tools), of which the stricter of it and the member's roster level counts; `base`: the folder the
     scope globs count from (scope_base); `lane`: the lane's agent_id, whose step grants count for tier 1 (none without
     it); `session`, `agent`: the session the lane runs in; `grant`: replaces progress.use_grant in tests.
-    `routed`: devkit routes this command to the lane (hooks._route_subagent_progress), so the one lane call it is
-    passes, and everything else is judged as for any command: defense in depth if runs_one_command misreads it."""
+    `routed`: devkit routes this command to the lane (hooks._route_subagent_progress, lane_route), so the lane calls
+    the router marked pass, and everything else is judged as for any command: defense in depth if the router misreads
+    it."""
     if not cmd or not str(cmd).strip():
+        return None
+    variants = literal_variants(cmd)
+    if variants:  # a variable set from a literal: judged once per value it holds, the first refusal stands
+        for text in variants:
+            v = crew_shell_verdict(text, cwd, scope, member, level, base, lane=lane, session=session, agent=agent,
+                                   grant=grant, now=now, routed=routed)
+            if v:
+                return v
         return None
     cwd = cwd or os.getcwd()
     if member:
@@ -5635,9 +6892,9 @@ def crew_shell_verdict(cmd: str, cwd, scope=None, member=None, level=None, base=
         why = _member_gate(cmd, cwd, member, lane, agent, session, grant, now)
         return deny(why) if why else None
     lanes = [1 for argv, code in calls for kind, _ in _dev_calls(argv, code) if kind == "lane"]
-    # the routed call, and the `cat` of a quoted heredoc message it carries (runs_one_command's data form)
-    one_routed = routed and lanes == [1] and [k for k, _ in _dev_calls(*calls[0])] == ["lane"] and \
-        all(argv == ["cat"] for argv, code in calls[1:])
+    # the lane calls the router gave DEVKIT_FROM_AGENT (lane_route): every lane call the shell runs is one of them, so
+    # a lane call nested in a substitution, a shell or a program, which the router never marks, is refused
+    one_routed = bool(routed) and bool(lanes) and len(lanes) == _routed_lanes(cmd)
     for argv, code, at in placed:
         dev = _dev_args(argv) if code is None else None
         imp = impeccable_refusal(impeccable_engine_words(dev[1:])) if dev and dev[:1] == ["impeccable"] else ""
@@ -5802,12 +7059,17 @@ def _walk_argv(argv0, cwd, bodies, depth):
     out, argv = [(argv0, cwd, bodies)], _unwrap(argv0)
     if not argv:
         return out
+    for run_as in _as_run(argv, cwd)[1:]:  # also as the shell or interpreter its file is (`./bash-link -c …`)
+        more = _walk_argv(run_as, cwd, bodies, depth)
+        if more is None:
+            return None
+        out += more
     name, args = os.path.basename(argv[0]), argv[1:]
     texts, inners = [], []
     if name in _SHELLS:
-        texts = _shell_inputs(args, cwd, bodies)
+        texts = _shell_inputs(args, cwd, bodies, name)
     elif name in ("source", ".") and args:
-        texts = [_read_small(resolve(args[0], cwd))]
+        texts = [t for t, _, _ in _sourced(args, cwd, bodies)]
     elif name == "eval":
         texts = [" ".join(args)]
     elif name == "xargs":
@@ -6105,6 +7367,12 @@ def _unknown(text) -> tuple:
     return ("unknown", "cmd-" + hashlib.sha256(str(text).encode()).hexdigest()[:10])
 
 
+def _unsure_action(argv, what) -> tuple:
+    """_unknown for a command the guard cannot be sure of, with what it cannot tell, which the refusal names."""
+    action, target = _unknown(" ".join(argv))
+    return action, target, "", ("unsure", what)
+
+
 def _unread_action(argv, path) -> tuple:
     """_unknown for a command whose program or script the gate must read and cannot, with the file it left
     unread, which the refusal names."""
@@ -6148,6 +7416,8 @@ def _code_spawns(code, name="") -> bool:
     if not code:
         return False
     fam = re.sub(r"[0-9.]+$", "", os.path.basename(str(name or "")).casefold())
+    if fam in _TCL and (_EXPECT_RUN.search(code) or re.search(r"\bopen\s+[\"{]?\|", code)):
+        return True  # Tcl starts a process with spawn, exec, system or `open "|cmd"`
     bare = _outside_strings(code)
     return bool(_SPAWNS.search(bare) or _SPAWN_MODULE.search(code) or _BARE_LIST.search(bare) or
                 (fam in ("perl", "ruby", "php") and _SPAWNS_QUOTED.search(code)) or _dynamic_code(name, code))
@@ -6950,7 +8220,11 @@ def _opaque_actions(name, argv, cwd) -> list:
             names = pos[1:2]
         elif pos and ((name == "pnpm" and pos[0] not in _PNPM_BUILTIN) or (name == "yarn" and pos[0] not in _YARN_BUILTIN)):
             names = pos[:1]
-    elif name in _SHELLS or _INTERP.match(name):  # before the path test: /usr/bin/python3 scripts/deploy.py
+    elif name in _SHELLS:  # before the path test: bash scripts/deploy.sh; `bash -n x.sh` only parses it
+        kind, k, parse_only = _shell_args(args, name)
+        if kind == "script" and not parse_only:
+            names = [os.path.splitext(os.path.basename(args[k]))[0]]
+    elif _INTERP.match(name):  # before the path test: /usr/bin/python3 scripts/deploy.py
         script = next((a for a in args if not a.startswith("-")), "")
         if script and "-c" not in args and not any(a.startswith("-") and not a.startswith("--") and "c" in a[1:]
                                                    for a in args[:args.index(script)]):
@@ -6966,12 +8240,15 @@ def _opaque_actions(name, argv, cwd) -> list:
     return out
 
 
-def _code_texts(code, name="") -> list:
+def _code_texts(code, name="", lists_only=False) -> list:
     """The command lines an interpreter's program may hand to a shell or a process: its string literals and its lists
-    of string literals, when the program can start a process at all (or call a function it names at run time)."""
+    of string literals, when the program can start a process at all (or call a function it names at run time).
+    `lists_only`: only the lists, each written as the command line it runs."""
     if not _code_spawns(code, name):
         return []
-    texts = [next((g for g in m.groups() if g is not None), "") for m in _STR_LIT.finditer(code)]
+    texts = [] if lists_only else [next((g for g in m.groups() if g is not None), "") for m in _STR_LIT.finditer(code)]
+    if re.sub(r"[0-9.]+$", "", os.path.basename(str(name or "")).casefold()) in _TCL:
+        texts += _tcl_lines(code)  # Tcl runs bare command words: `spawn codex …`, `exec git push`
     for m in [*_LIST_LIT.finditer(code), *_BARE_LIST.finditer(code), *_CALL_LIST.finditer(code)]:
         items = re.findall(r"'([^'\n]*)'|\"([^\"\n]*)\"", m.group(1))
         texts.append(" ".join(shlex.quote(a or b) for a, b in items))
@@ -7066,25 +8343,11 @@ def code_session_refusal(argv, cwd, bodies, depth: int = 0) -> str | None:
     return None
 
 
-def _reads_stdin(args) -> bool:
-    """True when a shell with these arguments reads its program from its input: no -c and no script file (or -s)."""
-    i = 0
-    while i < len(args):
-        a = args[i]
-        if a == "--":
-            return i + 1 >= len(args)
-        if a.startswith("-") and not a.startswith("--") and "c" in a[1:]:
-            return False
-        if a in ("-o", "+o", "-O", "+O", "--rcfile", "--init-file"):
-            i += 2
-            continue
-        if a.startswith(("-", "+")):
-            if not a.startswith("--") and "s" in a[1:]:
-                return True
-            i += 1
-            continue
-        return False
-    return True
+def _reads_stdin(args, name="bash") -> bool:
+    """True when a shell with these arguments runs a program it reads from its input: no -c and no script file (or
+    -s), and it does not only parse it (_shell_args)."""
+    kind, _, parse_only = _shell_args(args, name)
+    return kind in ("stdin", "input") and not parse_only
 
 
 def _fed_program(argv, segs, k, files, cwd) -> tuple:
@@ -7092,20 +8355,26 @@ def _fed_program(argv, segs, k, files, cwd) -> tuple:
     `python3 < f`, `node - < f`, `python3 /dev/stdin < f`), and the process substitution it runs as its script
     (`sh <(cat f)`, read as `sh -` fed what cat writes) -> (argv, [(text, path)], [paths left unread]), where path is
     the file a text was read from (a redirect, `cat f`), or None for words the command holds (echo, printf). A
-    program given in the words (`sh -c …`, `python3 x.py`) is fed nothing here."""
+    program given in the words (`sh -c …`, `python3 x.py`) is fed nothing here. `source` and `.` are fed the same
+    way when their file is their input (`echo '…' | . /dev/stdin`, `source /dev/stdin < f`)."""
     name = os.path.basename(argv[0]) if argv else ""
-    if not argv or (name not in _SHELLS and not _INTERP.match(name)):
+    sourced = name in ("source", ".") and len(argv) > 1 and _source_target(argv[1:], cwd) not in (False, "<(")
+    if not argv or (name not in _SHELLS and not _INTERP.match(name) and not sourced) or \
+            (name in _SHELLS and _shell_args(argv[1:], name)[2]):  # `bash -n < f` only parses what it reads
         return argv, [], []
     texts = []
     with _skipped_reads() as unread:
-        if "<(" in argv[1:]:  # `sh <(cat f)`: the tokenizer leaves the substitution's words in the segment
+        if sourced:
+            pass
+        elif "<(" in argv[1:]:  # `sh <(cat f)`: the tokenizer leaves the substitution's words in the segment
             j = argv.index("<(")
             if all(str(a).startswith("-") for a in argv[1:j]):
                 sub = _unwrap(argv[j + 1:])
                 texts.append((_produced(sub, cwd), _cat_path(sub, cwd)) if sub else ("", None))
                 argv = [*argv[:j], "-"]
-        stdin = (_reads_stdin(argv[1:]) if name in _SHELLS else _program_source(argv, whole=True) == "none") or \
-            any(a in ("/dev/stdin", "/dev/fd/0") for a in argv[1:])
+        stdin = sourced or (_reads_stdin(argv[1:], name) if name in _SHELLS else
+                            _program_source(argv, whole=True) == "none") or \
+            any(_reads_input(a, cwd) for a in argv[1:])
         if stdin:
             prev = _unwrap(segs[k - 1][0]) if k else []
             if prev and segs[k - 1][2] in ("|", "|&"):
@@ -7219,8 +8488,9 @@ def _segment_actions(argv, cwd, bodies, depth) -> list:
         if not found and _INTERP.match(name) and not _repo_script(argv, cwd):
             with _skipped_reads() as unread:
                 code = _program(argv, cwd, bodies)[0]
+            expand = not _py_argv_only(code, name)  # backticks in a string no shell reads are Markdown, not commands
             for text in _code_texts(code, name):
-                more += _text_actions(text, cwd, depth + 1, from_code=True) or []
+                more += _text_actions(text, cwd, depth + 1, from_code=True, expand=expand) or []
             if unread:  # its program is too large or unreadable: it may do anything
                 found = [_unread_action(argv, unread[0])]
             elif _dynamic_code(name, code) or _SPAWN_BUILT.search(code or ""):  # it may build what it runs
@@ -7337,9 +8607,13 @@ def _argv_actions(argv, cwd, bodies, depth):
     texts, inners = [], []  # texts: (script, the path of a script file or None for a line the command holds)
     with _skipped_reads() as unread:
         if name in _SHELLS:
-            texts = [(text, path) for text, _, path in _shell_sources(args, cwd, bodies)]
+            texts = [(text, path) for text, _, path in _shell_sources(args, cwd, bodies, name)]
         elif name in ("source", ".") and args:
-            texts = [(_read_small(resolve(args[0], cwd)), resolve(args[0], cwd))]
+            texts = [(text, path) for text, _, path in _sourced(args, cwd, bodies)]
+            target = _source_target(args, cwd)
+            if target and target != "<(" and not _reads_input(target, cwd) and not texts:
+                # `exec 3< f; . /dev/fd/3`: a descriptor the command does not show may hold anything
+                out += _found([_unknown(" ".join(argv))], argv, cwd)
     if unread:  # `sh big.sh`, `source big.sh`: a script too large or unreadable may do anything
         out += _found([_unread_action(argv, unread[0])], argv, cwd)
     if name == "eval":
@@ -7398,19 +8672,456 @@ def _var_program(word, text) -> str:
     return os.path.basename(m.group(3))
 
 
-def _text_actions(text, cwd, depth=0, from_code=False):
+# A variable the command itself sets from a literal names a program or a path the guard can read before the shell
+# runs, so crew members can loop over interpreters and name a path once: `py=python3; $py -m unittest …`, `for P in
+# python3 /usr/bin/python3; do $P -m unittest …; done`, `S=/tmp/x; mkdir -p $S`. literal_variants writes the command
+# once for each value the variable can hold where it is used, and the guard judges every variant: one refusal refuses
+# the command. A variable is resolved only when every use of it is: after a plain assignment of a literal word that
+# always runs before it (at the top of the command, after `;` or a newline, never inside a block, a subshell or a
+# pipeline, never as the prefix of a command), or inside the body of a `for` loop over literal words. And only when
+# nothing else in the command can give it another value:
+# - the command names it nowhere else, in any word as the shell reads it after quotes are removed (`read "G"`,
+#   `declare 'G'=…`, `read p""y`, `printf -vG`), and uses it only as a plain `$G` or `${G}`;
+# - the command holds nothing that sets, unsets or evaluates a variable whose name it may compute when it runs
+#   (`read "$n"`, `printf -v`, `declare`, `eval`, `.`, `trap`, `${!n}`, zsh's `${(P)n}`, an arithmetic, `setopt`; see
+#   _VAR_BINDERS), checked again on each variant, so a variable that holds `read` counts too;
+# - the shell does not set it itself (`REPLY` after read, `_` after every command, `MATCH` after `=~`; _SHELL_SET).
+# Anything else is a value from outside the command and stays unknown, as are IFS, case, functions, heredocs,
+# backticks, ANSI-C quotes (`$'…'`) and `${x:-…}` and the other expansions.
+_LIT_WORD = re.compile(r"(?!=)[A-Za-z0-9_./:@%+,=-]+\Z")  # `==cmd` would be zsh's path of cmd
+# the variables the shell sets or changes by itself between two commands, in bash and zsh
+_SHELL_SET = frozenset({
+    "_", "REPLY", "reply", "MATCH", "MBEGIN", "MEND", "match", "mbegin", "mend", "OPTARG", "OPTIND", "OPTERR", "PWD",
+    "OLDPWD", "DIRSTACK", "dirstack", "RANDOM", "SRANDOM", "SECONDS", "EPOCHSECONDS", "EPOCHREALTIME", "epochtime",
+    "LINENO", "HISTCMD", "PIPESTATUS", "pipestatus", "status", "ERRNO", "COPROC", "MAPFILE", "argv", "ARGC", "PPID",
+    "FUNCNAME", "funcstack", "functrace", "funcfiletrace", "funcsourcetrace", "TRY_BLOCK_ERROR", "TRY_BLOCK_INTERRUPT",
+    "COLUMNS", "LINES", "SHLVL", "TTYIDLE", "UID", "EUID", "GID", "EGID", "USERNAME", "commands", "functions",
+    "aliases", "builtins", "parameters", "options", "modules", "history", "historywords", "jobstates", "jobtexts",
+    "jobdirs", "nameddirs", "userdirs", "termcap", "terminfo", "sysparams", "errnos", "widgets", "keymaps"})
+_SHELL_SET_PREFIX = re.compile(r"(?:BASH|ZSH|COMP|READLINE)(?:_|\Z)|zsh_")
+# the words that set, unset or evaluate a variable by a name they may compute when they run, run code later, or
+# change how the shell expands a variable; `printf`/`print` count with -v, `set` with an option other than the usual
+# ones, read, unset, wait and export by their words (_NAME_ARGS), `.` where it can be a command
+_VAR_BINDERS = frozenset({
+    "mapfile", "readarray", "getopts", "select", "vared", "getln", "zparseopts", "zstyle", "zformat",
+    "zstat", "strftime", "zregexparse", "sysread", "syswrite", "zselect", "pcre_match", "zle", "compadd", "compset",
+    "zpty", "ztcp", "zsocket", "zsystem", "zgetattr", "zlistattr", "zcurses", "ztie", "integer", "float", "private",
+    "typeset", "declare", "local", "readonly", "let", "coproc", "eval", "source", "alias", "function",
+    "trap", "sched", "enable", "fc", "emulate", "setopt", "unsetopt", "shopt", "compgen", "zmodload", "autoload",
+    "case"})
+# the builtins that bind only the names written as their words, with the options that bind nothing else: any other
+# option (`read -a`, `wait -p`) or a word computed when it runs (`read "$n"`) counts as a binder
+_NAME_ARGS = {"read": re.compile(r"-[rsE]+"), "unset": re.compile(r"-[fvn]+"), "wait": re.compile(r"-[nf]+|%?\d+"),
+              "export": re.compile(r"-[np]+")}
+_SET_OK = re.compile(r"[-+][euxv]*o?\Z|--?\Z")
+_SET_NAMES = frozenset({"errexit", "nounset", "pipefail", "xtrace", "verbose"})
+_VAR_REF = re.compile(r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)([^}]*)\}|([A-Za-z_][A-Za-z0-9_]*))")
+_FOR_LIST = re.compile(r"for[ \t]+([A-Za-z_][A-Za-z0-9_]*)[ \t]+in[ \t]+([^;\n]*?)([ \t]*)(?:;|\n)[ \t\n]*do(?![A-Za-z0-9_])")
+_CMD_WORD = re.compile(r"[^\s;&|()<>]+")
+_BLOCK_OPEN = frozenset({"if", "case", "{", "do"})  # while, until and select open theirs at `do`
+_BLOCK_CLOSE = frozenset({"fi", "esac", "done", "}"})
+_KEEP_START = frozenset({"if", "then", "elif", "else", "while", "until", "do", "{", "!", "time"})
+MAX_VARIANTS = 16
+# the words that keep the next word at the place of a command (`then . f`, `builtin . f`)
+_CMD_KEEP = _KEEP_START | {"builtin", "command", "exec", "noglob", "nocorrect", "-", "repeat"}
+
+
+def _code_kinds(s: str):
+    """For each character of a command: 'C' (code the shell reads, also inside a `$(…)` in double quotes), 'D'
+    (double-quoted text), 'S' (single-quoted, escaped or a comment), with its parenthesis depth; None for backticks."""
+    kinds, deps, stack, depth, i, n, parens = [], [], [("C", 0)], 0, 0, len(s), _Parens(s)
+
+    def put(k, count=1):
+        kinds.extend([k] * count)
+        deps.extend([depth] * count)
+
+    while i < n:
+        ctx, c = stack[-1][0], s[i]
+        if ctx == "S":
+            put("S")
+            if c == "'":
+                stack.pop()
+            i += 1
+            continue
+        if c == "\\":
+            put("S", min(2, n - i))
+            i += 2
+            continue
+        if c == "`":
+            return None
+        if ctx == "D":
+            if s.startswith("$(", i):
+                put("D", 2)
+                depth += 1
+                stack.append(("C", depth))
+                parens.opened.append("w")
+                i += 2
+                continue
+            put("D")
+            if c == '"':
+                stack.pop()
+            i += 1
+            continue
+        if c == "'":
+            stack.append(("S", depth))
+            put("S")
+        elif c == '"':
+            stack.append(("D", depth))
+            put("D")
+        elif c == "#" and parens.comment(i, False):
+            j = s.find("\n", i)
+            j = n if j < 0 else j
+            put("S", j - i)
+            i = j
+            continue
+        elif c == "(":
+            depth += 1
+            parens.open(i)
+            put("C")
+        elif c == ")":
+            parens.close(i)
+            put("C")
+            if len(stack) > 1 and stack[-1] == ("C", depth):
+                stack.pop()  # the end of a `$(…)` opened inside double quotes
+            depth -= 1
+        else:
+            put("C")
+        i += 1
+    return kinds, deps
+
+
+def _command_starts(code: str, deps):
+    """The words of a code mask as (word, start, end, at command start, block depth, operator before)."""
+    out, start, block, prev_op, i = [], True, 0, ";", 0
+    for m in re.finditer(r"&&|\|\||[;|&\n()]|" + _CMD_WORD.pattern, code):
+        t = m.group(0)
+        if t in ("&&", "||", ";", "|", "&", "\n", "(", ")"):
+            start, prev_op = True, {"\n": ";"}.get(t, t)
+            continue
+        word_start = start
+        if word_start and t in _BLOCK_CLOSE:
+            block -= 1
+        out.append((t, m.start(), m.end(), word_start, block, prev_op, deps[m.start()]))
+        if word_start and t in _BLOCK_OPEN:
+            block += 1
+        start = word_start and t in _KEEP_START
+        prev_op = ""
+    return out
+
+
+def _shell_words(s: str):
+    """The words of a command line as the shell reads them once quotes and backslashes are removed, also inside a
+    `$(…)`, as (text, the offset in `s` of each character, plain, at the place of a command), where plain means no
+    quote, backslash or `$` in it; None for backticks and ANSI-C or locale quotes (`$'…'`, `$"…"`), whose text the
+    guard does not decode. Operators separate words, so `a;b` is two; a redirection's target is no command."""
+    words, cur, offs, plain, i, n, parens = [], [], [], True, 0, len(s), _Parens(s)
+    stack, depth = [], []  # quote contexts: "'", '"', "(" for a `$(…)` inside double quotes, with its paren depth
+    state = {"open": True, "target": False, "keep": False}  # a command word may still come; the next word is a redirection's
+
+    def end(before_redirect=False):
+        nonlocal cur, offs, plain
+        if cur or not plain:
+            text = "".join(cur)
+            fd = before_redirect and (text.isdigit() or (plain and re.fullmatch(r"\{\w+\}", text)))
+            at_cmd = state["open"] and not state["target"] and not fd
+            words.append((text, offs, plain, at_cmd))
+            keep = text in _CMD_KEEP or (plain and _ASSIGN.match(text)) or \
+                (state["keep"] and (text.startswith("-") or text.isdigit()))  # `command -p . f`, `repeat 3 . f`
+            if at_cmd and not keep:
+                state["open"] = False
+            state["keep"] = bool(at_cmd and keep)
+            state["target"] = False
+        cur, offs, plain = [], [], True
+
+    while i < n:
+        c, ctx = s[i], stack[-1] if stack else ""
+        if ctx == "'":
+            if c == "'":
+                stack.pop()
+            else:
+                cur.append(c)
+                offs.append(i)
+            i += 1
+            continue
+        if c == "`" or (c == "$" and ctx != '"' and s[i + 1:i + 2] in ("'", '"')):
+            return None
+        if c == "\\":
+            nxt = s[i + 1:i + 2]
+            if ctx == '"' and nxt not in ("$", "`", '"', "\\", "\n"):
+                cur.append(c)
+                offs.append(i)
+                i += 1
+                continue
+            if nxt != "\n":  # a backslash-newline joins two lines
+                plain = False
+                if nxt:
+                    cur.append(nxt)
+                    offs.append(i + 1)
+            i += 2
+            continue
+        if ctx == '"':
+            if c == '"':
+                stack.pop()
+                i += 1
+                continue
+            if s.startswith("$(", i):
+                end()
+                stack.append("(")
+                depth.append(0)
+                parens.opened.append("w")
+                state.update(open=True, target=False, keep=False)
+                i += 2
+                continue
+            plain = plain and c != "$"
+            cur.append(c)
+            offs.append(i)
+            i += 1
+            continue
+        if c == "#" and not cur and plain and parens.comment(i, False):
+            # a comment, to the end of its line: its words count, its quotes do not
+            j = s.find("\n", i)
+            j = n if j < 0 else j
+            for m in re.finditer(r"\S+", s[i:j]):
+                words.append((m.group(0), list(range(i + m.start(), i + m.end())), True, False))
+            i = j
+            continue
+        if c in "'\"":
+            stack.append(c)
+            plain = False
+            i += 1
+            continue
+        if c in " \t":
+            end()
+            i += 1
+            continue
+        if c in "<>":
+            end(before_redirect=True)
+            state["target"] = True
+            i += 1
+            continue
+        if c in "\n;&|()":
+            end()
+            if c == "(":
+                parens.open(i)
+            elif c == ")":
+                parens.close(i)
+            if c == ")" and ctx == "(":
+                if depth[-1]:
+                    depth[-1] -= 1
+                else:
+                    stack.pop()
+                    depth.pop()
+            elif c == "(" and ctx == "(":
+                depth[-1] += 1
+            state.update(open=True, target=False, keep=False)
+            i += 1
+            continue
+        plain = plain and c != "$"
+        cur.append(c)
+        offs.append(i)
+        i += 1
+    end()
+    return words
+
+
+def _binds_names(s: str, kinds, words) -> bool:
+    """True when command `s` holds something that may set, unset or evaluate a variable by a name the guard cannot
+    read, run code later, or change how the shell expands a variable (_VAR_BINDERS, `${!…}`, `${(P)…}`, an
+    arithmetic, a function, IFS); `kinds` and `words` are _code_kinds and _shell_words of `s`. A word counts
+    wherever it stands (`echo eval` too), except `.`, which counts where it can be a command."""
+    texts = [w[0] for w in words]
+    if any(t in _VAR_BINDERS for t in texts) or any(re.search(r"\bIFS\b", t) for t in texts):
+        return True
+    if any(t == "." and at_cmd for t, _, _, at_cmd in words):
+        return True
+    for k, t in enumerate(texts):
+        if t not in _NAME_ARGS and t not in ("printf", "print", "set"):
+            continue
+        rest = []
+        for w in words[k + 1:]:
+            if w[3]:
+                break
+            rest.append(w[0])
+        if t in _NAME_ARGS:  # every name it binds is a word the guard reads (_named_elsewhere); export's value may vary
+            if any(not (t == "export" and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", a, re.S)) and
+                   ("$" in a or not (_NAME_ARGS[t].fullmatch(a) or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", a)))
+                   for a in rest):
+                return True
+            continue
+        j = 0
+        while j < len(rest):  # the options first: printf -v, set -A (zsh), and an option computed when it runs
+            a = rest[j]
+            if "$" in a:
+                return True
+            if a in ("--", "-") or not a.startswith(("-", "+")):
+                break
+            if t != "set" and "v" in a:
+                return True
+            if t == "set":
+                if not _SET_OK.match(a):
+                    return True
+                if a.endswith("o") and len(a) > 1:
+                    if j + 1 >= len(rest) or rest[j + 1] not in _SET_NAMES:
+                        return True
+                    j += 1
+            j += 1
+    expanded = "".join(c if k in ("C", "D") else " " for c, k in zip(s, kinds))
+    code = "".join(c if k == "C" else " " for c, k in zip(s, kinds))
+    # an expansion that reaches a variable by a name it holds (`${!n}`, zsh's flags `${(P)n}`, which can also assign
+    # it); arithmetic (`$((…))` also in double quotes), where a variable's value is read as an expression, so
+    # `$((x))` with x=G=5 sets G; and a function (`f() …`, zsh's anonymous `() { … }`; an empty array `a=()` is none)
+    return bool(re.search(r"\$\{[!(]|\$\(\(|\$\[", expanded) or
+                re.search(r"\(\(|(?:\w[ \t]*|(?:^|[;&|\n{])[ \t]*)\(\s*\)", code))
+
+
+def literal_variants(cmd: str) -> list:
+    """The command written out once for each value its literal variables can hold where it uses them (see above),
+    [] when it uses no variable the guard can resolve, or more than MAX_VARIANTS combinations."""
+    s = str(cmd or "")
+    if "$" not in s or "<<" in s.replace("<<<", "") or len(s) > 20000:
+        return []
+    ck = _code_kinds(s)
+    if ck is None:
+        return []
+    kinds, deps = ck
+    code = "".join(c if k == "C" else " " for c, k in zip(s, kinds))
+    words = _command_starts(code, deps)
+    read = _shell_words(s)
+    if read is None or _binds_names(s, kinds, read):
+        return []
+    events, touched = {}, {}  # name -> [(pos, values or None, kind, body span)], name -> [(start, end)]
+    for k, (t, a, b, at_start, block, op, dep) in enumerate(words):
+        if at_start and t == "for":
+            fm = _FOR_LIST.match(code, a)
+            if not fm:
+                continue  # `for x; do`, `for ((…))`: its name is a bare mention below, so it stays unknown
+            name, (la, lb) = fm.group(1), fm.span(2)
+            touched.setdefault(name, []).append(fm.span(1))
+            items = s[la:lb].split()
+            # every character up to the `;` is code: a quoted or escaped item, masked in `code`, is no literal word
+            if dep or not items or any(kd != "C" for kd in kinds[la:fm.end(3)]) or \
+                    not all(_LIT_WORD.match(v) for v in items):
+                events.setdefault(name, []).append((a, None, "loop", None))
+                continue
+            level, stop = 1, None
+            for w in words:
+                if w[1] < fm.end() or not w[3]:
+                    continue
+                level += {"do": 1, "done": -1}.get(w[0], 0)
+                if not level:
+                    stop = w[1]
+                    break
+            events.setdefault(name, []).append((a, items if stop else None, "loop", (fm.end(), stop or 0)))
+            continue
+        exported = k and words[k - 1][0] == "export" and words[k - 1][3]
+        m = re.match(r"([A-Za-z_][A-Za-z0-9_]*)\+?=", t) if at_start or exported else None
+        if not m:
+            continue
+        name, val = m.group(1), s[a + len(m.group(0)):b]
+        touched.setdefault(name, []).append((a, a + len(m.group(1))))
+        nxt = words[k + 1] if k + 1 < len(words) else None
+        definite = "+=" not in m.group(0) and not dep and not block and \
+            (words[k - 1][5] if exported else op) == ";" and bool(val) and bool(_LIT_WORD.match(val)) and \
+            (b == len(s) or s[b] in " \t\n;&|)") and (nxt is None or nxt[3]) and \
+            not re.match(r"[ \t]*(?:\|(?!\|)|&(?!&))", code[b:])
+        events.setdefault(name, []).append((a, [val] if definite else None, "set", None))
+    refs = {}
+    for m in _VAR_REF.finditer(s):
+        if kinds[m.start()] not in ("C", "D"):
+            continue
+        name = m.group(1) or m.group(3)
+        after = s[m.end():m.end() + 1]
+        bad = bool(m.group(2)) or (not m.group(1) and after in ("[", ":"))
+        refs.setdefault(name, []).append((m.start(), m.end(), bad))
+    choices, plans = [], {}
+    for name, uses in refs.items():
+        evs = sorted(events.get(name) or [], key=lambda e: e[0])
+        spans = [(a, b) for a, b, _ in uses] + touched.get(name, [])
+        if name in _SHELL_SET or _SHELL_SET_PREFIX.match(name) or _named_elsewhere(name, read, spans) or not evs or \
+                any(bad for _, _, bad in uses) or any(e[1] is None for e in evs):
+            continue
+        plan = []
+        for a, b, _ in uses:
+            inside = [e for e in evs if e[2] == "loop" and e[3][0] <= a < e[3][1]]
+            before = [e for e in evs if e[0] < a]
+            if inside:
+                ev = inside[-1]
+            elif before and before[-1][2] == "set" and not any(e[2] == "loop" and e[3][0] <= a for e in before):
+                ev = before[-1]
+            else:
+                plan = None
+                break
+            plan.append((a, b, ev))
+        if plan:
+            plans[name] = plan
+            for _, _, ev in plan:
+                if ev not in choices:
+                    choices.append(ev)
+    if not plans:
+        return []
+    combos = 1
+    for ev in choices:
+        combos *= len(ev[1])
+    if combos > MAX_VARIANTS:
+        return []
+    out = []
+    for pick in itertools.product(*[ev[1] for ev in choices]):
+        chosen = dict(zip(map(id, choices), pick))
+        text, last = [], 0
+        for a, b, ev in sorted((u for p in plans.values() for u in p), key=lambda u: u[0]):
+            text += [s[last:a], chosen[id(ev)]]
+            last = b
+        out.append("".join(text) + s[last:])
+    for text in out:  # a value that makes a word able to bind a name (`R=read; $R "$n"`) leaves them all unknown
+        ck, again = _code_kinds(text), _shell_words(text)
+        if ck is None or again is None or _binds_names(text, ck[0], again):
+            return []
+    return out
+
+
+def _named_elsewhere(name, words, spans) -> bool:
+    """True when a word of the command, as the shell reads it (_shell_words), names variable `name` outside `spans`
+    (its plain uses and its literal assignments): `read "G"`, `declare 'G'=…`, `read p""y`, `n=G`. A name inside a
+    longer word (guard.py, ./py/x, -py, $py, \\n: no name holds a backslash) is no mention."""
+    pat = re.compile(rf"(?<![A-Za-z0-9_$./\\-]){re.escape(name)}(?![A-Za-z0-9_./\\-])")
+    for text, offs, _, _ in words:
+        for m in pat.finditer(text):
+            raw = offs[m.start():m.end()]
+            if not any(a <= raw[0] and raw[-1] < b for a, b in spans):
+                return True
+    return False
+
+
+_PY_SHELL_LINE = re.compile(
+    r"\bshell\b(?!\s*=\s*False\b)|\bos\s*\.\s*(?:system|popen|exec\w*|spawn\w*|posix_spawn\w*)\b|\bpopen\b|"
+    r"\bgetoutput\b|\bgetstatusoutput\b|\bpty\b|\bcommands\b|['\"](?:[^'\"\s]*/)?(?:ba|z|da|k|tc|c|fi|pwsh|)sh['\"]|"
+    r"['\"]-\w*c['\"]|(?<![\w.])(?:eval|exec|compile)\s*\(|\b(?:__import__|import_module|getattr|globals|locals|vars)\s*\(")
+
+
+def _py_argv_only(code, name="") -> bool:
+    """True when a Python program can start processes only with argument lists no shell reads: subprocess without
+    `shell` (other than shell=False), no os.system, popen, getoutput or pty, no string that names a shell or a `-c`
+    option, and no code built at run time. Then a string literal in it is at most one argument word, and the
+    backticks and `$(…)` in it are text (Markdown code spans in a template, a regex), not commands."""
+    fam = re.sub(r"[0-9.]+$", "", os.path.basename(str(name or "")).casefold())
+    return bool(code) and fam in ("python", "pypy") and not _PY_SHELL_LINE.search(code)
+
+
+def _text_actions(text, cwd, depth=0, from_code=False, expand=True):
     """The actions of every segment of a command line, level by level: what each segment runs, what a shell reads
     from a pipe (`printf '…' | sh`, `cat f | bash`) or a here-string (`bash <<< '…'`), and the substitutions the
     shell expands. Quoted text a command only carries is one word here, so it is never read as a command. None when
     a level cannot be parsed. `from_code`: the text is a string literal of an interpreter's program, where `${…}`,
     `{…}`, `[…]` and `*` are the language's own (a template, an f-string, a list), so they never make a program the
-    shell names at run time; the shells and substitutions it runs are judged as usual (M394)."""
+    shell names at run time; the shells and substitutions it runs are judged as usual. `expand` False: the
+    text is a string of a program that never hands one to a shell (_py_argv_only), so the substitutions in it are
+    text; a shell it names with its own command line (`bash -c …`) is still read in full."""
     if not text or not str(text).strip():
         return []
     if depth > 4:  # a level deeper than the gate reads may run anything: unknown, never "nothing found"
         return _nested_action(text, cwd)
-    ins = []
-    segs = split_commands(text, ops=True, inputs=ins)
+    ins, hds = [], []
+    segs = split_commands(text, ops=True, inputs=ins, heredocs=hds)
     if segs is None:
         return None
     bodies, out, gh_repo, shell_env = heredoc_bodies(text), [], "", {}
@@ -7448,39 +9159,54 @@ def _text_actions(text, cwd, depth=0, from_code=False):
             argv = [argv[0], *gopts, *argv[1:]]
         elif gopts:  # dev, gh and anything else that runs git inherit them: it acts on that repository
             here = _git_where(["git", *gopts], here)
-        argv, fed, unread = _fed_program(argv, segs, k, ins[k] if k < len(ins) else [], cwd)
-        if unread:  # `sh < big.sh`, `cat big.py | python3`: a program too large or unreadable may do anything
-            out += _found([_unread_action(argv, unread[0])], argv0, cwd)
-        more = _argv_actions(argv, here, bodies + [t for t, _ in fed] if _INTERP.match(name) else bodies, depth)
-        if more is None:
-            return None
-        out += more
-        if name in ("source", "."):  # the file may cd or export GIT_DIR, now or once it changes: both are unknown
-            cwd, shell_env["GIT_DIR"] = str(UNKNOWN), "$(source)"
-            continue
-        pagers, unknown = [], False
-        if name == "git":  # the pager it runs through the shell is a command like any other (RT3)
-            pagers, unknown = _git_pagers(argv, {**shell_env, **assigns})
-        elif name == "gh":  # gh starts GH_PAGER, else PAGER, for its output
-            env = {**shell_env, **assigns}
-            pagers = [p for p in (env.get("GH_PAGER") or env.get("PAGER") or "",) if p.strip()]
-        if name in ("git", "gh"):
-            if unknown:
-                out += _found([_unknown(text)], argv0, cwd)
-            for pager in pagers:
-                more = _text_actions(pager, cwd, depth + 1)
-                if more is None:
-                    return None
-                out += more
-        if name in _SHELLS and (fed or _reads_stdin(argv[1:])):
-            for script, path in [*((h, None) for h in (herestrs if _reads_stdin(argv[1:]) else [])), *fed]:
-                more = _text_actions(script, cwd, depth + 1)
-                if more is None and path is not None:  # `sh < y.sh`, `cat y.sh | sh`: as `./y.sh`
-                    more = _unparsed_script(path, text, argv0, cwd)
-                if more is None:
-                    return None
-                out += more
-    for sub in _expansions(text):
+        fed_in = (hds[k] if k < len(hds) else bodies) or herestrs or (ins[k] if k < len(ins) else []) or \
+            (k and segs[k - 1][2] in ("|", "|&"))
+        if _unknown_binary(argv, here) and (_command_option(argv[1:]) or fed_in):
+            # `./copy -c '…'`, `… | ./copy`: a program the guard cannot identify, handed a command line or a program
+            out += _found([_unsure_action(argv, f"{_code(argv[0])}, a program the guard cannot identify, with a "
+                                                f"command line or an input it may run as a program")], argv0, cwd)
+        for argv in _as_run(argv, here):  # also as the shell or interpreter its file is (`./bash-link -c …`)
+            name = os.path.basename(argv[0])
+            argv, fed, unread = _fed_program(argv, segs, k, ins[k] if k < len(ins) else [], cwd)
+            if unread:  # `sh < big.sh`, `cat big.py | python3`: a program too large or unreadable may do anything
+                out += _found([_unread_action(argv, unread[0])], argv0, cwd)
+            if name in ("source", ".") and _source_target(argv[1:], cwd) is None and \
+                    (bodies or fed or (ins[k] if k < len(ins) else []) or (k and segs[k - 1][2] in ("|", "|&"))):
+                # `source $f <<< '…'`: it may read what the command feeds it, which the guard cannot tell
+                word = (_source_args(argv[1:]) or [""])[0]
+                out += _found([_unsure_action(argv, f"what it reads from {_code(word)}, a file the guard cannot place, "
+                                                    f"which may be the input the command feeds it")], argv0, cwd)
+            more = _argv_actions(argv, here, bodies + [t for t, _ in fed]
+                                 if _INTERP.match(name) or name in ("source", ".") else bodies, depth)
+            if more is None:
+                return None
+            out += more
+            if name in ("source", "."):  # the file may cd or export GIT_DIR, now or once it changes: both are unknown
+                cwd, shell_env["GIT_DIR"] = str(UNKNOWN), "$(source)"
+                continue
+            pagers, unknown = [], False
+            if name == "git":  # the pager it runs through the shell is a command like any other
+                pagers, unknown = _git_pagers(argv, {**shell_env, **assigns})
+            elif name == "gh":  # gh starts GH_PAGER, else PAGER, for its output
+                env = {**shell_env, **assigns}
+                pagers = [p for p in (env.get("GH_PAGER") or env.get("PAGER") or "",) if p.strip()]
+            if name in ("git", "gh"):
+                if unknown:
+                    out += _found([_unknown(text)], argv0, cwd)
+                for pager in pagers:
+                    more = _text_actions(pager, cwd, depth + 1)
+                    if more is None:
+                        return None
+                    out += more
+            if name in _SHELLS and not _shell_args(argv[1:], name)[2] and (fed or _reads_stdin(argv[1:], name)):
+                for script, path in [*((h, None) for h in (herestrs if _reads_stdin(argv[1:], name) else [])), *fed]:
+                    more = _text_actions(script, cwd, depth + 1)
+                    if more is None and path is not None:  # `sh < y.sh`, `cat y.sh | sh`: as `./y.sh`
+                        more = _unparsed_script(path, text, argv0, cwd)
+                    if more is None:
+                        return None
+                    out += more
+    for sub in _expansions(text) if expand else []:
         more = _text_actions(sub, cwd, depth + 1)
         if more is None:
             return None
@@ -7633,6 +9359,8 @@ def _what(a) -> str:
     if (a.get("why") or ("",))[0] == "unread":  # a program or script too large or unreadable to judge
         return (f"runs {tilde(a['why'][1])}, which the guard cannot read (too large or unreadable), so it may be any "
                 f"action, tier 2 included (command {a['target']})")
+    if (a.get("why") or ("",))[0] == "unsure":  # the guard cannot tell what runs
+        return f"runs {a['why'][1]}, so it may be any action, tier 2 included (command {a['target']})"
     if a.get("why"):  # B2b: a push of an embargoed branch, or of a branch while the note cannot be read
         return (f"sends an embargoed branch or its commits to the remote, a decision only the developer makes "
                 f"({a['target']})")
@@ -7768,7 +9496,15 @@ def irreversible_verdict(cmd: str, cwd, *, agent: str = "claude", session: str =
     action no live grant covers while safeguards.irreversible_main enforces; None otherwise. Every action is recorded
     (guard.irreversible), and the grant that allows one is used. `grant(action, target, repo, consume)` replaces
     progress.use_grant in tests. A failure inside the gate denies in enforce when the command names an irreversible
-    action, as an unparsed one does; otherwise it runs with a guard.failopen record (P4)."""
+    action, as an unparsed one does; otherwise it runs with a guard.failopen record (P4). A command whose variables
+    it sets from literals is judged once per value they hold (literal_variants)."""
+    variants = literal_variants(cmd)
+    if variants:
+        for text in variants:
+            v = irreversible_verdict(text, cwd, agent=agent, session=session, grant=grant, now=now)
+            if v:
+                return v
+        return None
     try:
         acts = irreversible_actions(cmd, cwd or os.getcwd())
         if acts is None:
@@ -8007,8 +9743,9 @@ def _tool_command(tool_input) -> str:
 
 def _check_shell(tool_input, cwd, agent):
     """check_bash for each command a tool input carries (tool_commands): the first refusal, else the first other
-    verdict, else None. A call with no command is judged as the empty command, as before."""
-    verdicts = [check_bash(c, cwd, agent) for c in tool_commands(tool_input) or [""]]
+    verdict, else None. A call with no command is judged as the empty command, as before. A command whose variables
+    the command itself sets from literals is judged once per value they hold (literal_variants)."""
+    verdicts = [check_bash(v, cwd, agent) for c in tool_commands(tool_input) or [""] for v in literal_variants(c) or [c]]
     return next((v for v in verdicts if v and v[0] == "deny"), None) or next((v for v in verdicts if v), None)
 
 

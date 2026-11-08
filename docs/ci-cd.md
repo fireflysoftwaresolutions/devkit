@@ -407,7 +407,10 @@ Azure give the job, the step, and the link). It sorts the error into one class a
 devkit's background watch speaks at the session's next hook, and a hook runs only when the session does something.
 An idle session waiting for CI never gets there. An agent that waits on a run, or promises to report when CI ends or
 a release is published, arms a watch that wakes it, in the same turn, names its task id in its reply, and reports
-the result when the watch fires. `dev ci watch --wait` is that watch:
+the result when the watch fires. Two waits do that. `dev watch --wait`, the one wait for every devkit event, takes the
+background watch's result together with the crew's questions and decisions (see
+[Progress and communication › Waiting and waking](progress-and-communication.md#waiting-and-waking)).
+`dev ci watch --wait` follows one run job by job:
 
 ```bash
 dev ci watch --wait --branch feat/export --sha a1b2c3d --timeout 28   # one commit on a branch
@@ -458,8 +461,10 @@ has not finished, unless a watch that wakes this agent follows it:
 - **Claude Code:** a live Monitor or background command, started in this session, running `dev ci watch --wait` on
   that commit. A finished foreground run of it does not count.
 - **Codex:** `dev ci watch --wait` on that commit, run in the foreground in this turn.
+- **Either agent:** a live `dev watch --wait` of this session's main session, while devkit's background watch of that
+  commit runs: the wait takes the result the background watch delivers.
 
-devkit's own background watch never counts, because it wakes no idle session. An agent's own watch of this session
+devkit's own background watch never counts alone, because it wakes no idle session. An agent's own watch of this session
 that stopped before its run ended must be armed again too. The message names each run and the exact command for the
 agent, and the reminder after the push says the same before the turn can end. The run counts as unfinished while
 the host shows it queued or running, while none has appeared within five minutes of the push (except for a draft

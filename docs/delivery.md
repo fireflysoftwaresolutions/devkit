@@ -83,9 +83,10 @@ dev delivery apply --set job_timeout_minutes=45 --why "integration tests take 35
 - **The guard refuses tags that break it.** In a CalVer project, `git tag v2.0.0` is refused with the next version
   to use (`dev calver --next`); in a SemVer project, a tag that is not `vMAJOR.MINOR.PATCH` is refused. Prefix the
   command with `DEVKIT_TAG_ANY=1` to tag anyway, or change the policy.
-- **Release work requires the `release-policy` skill.** Requests about releases, tags, version bumps, changelogs and
-  publishing, and changes to `CHANGELOG.md`, `VERSION`, or release-tool configuration, require the `delivery` and
-  `release-policy` skills (see [Skills and plugins › Required skills](skills-and-plugins.md#required-skills)).
+- **Release work requires the `release-policy` skill.** Tags and releases (`git tag`, `dev release`, `gh release`),
+  `release` work, and changes to `VERSION` or release-tool configuration require the `delivery` and `release-policy`
+  skills. A push or a PR requires `delivery`, and a `CHANGELOG.md` entry requires `docs` (see
+  [Skills and plugins › Required skills](skills-and-plugins.md#required-skills)).
 
 devkit records its own policy this way, with CalVer `vYY.MM.PATCH` from `VERSION`, a Keep a Changelog `CHANGELOG.md`,
 and a test gate that compiles the code and runs the suite with Homebrew's Python and with the macOS system Python 3.9.
@@ -108,14 +109,17 @@ the pipeline itself, see [CI/CD pipelines](ci-cd.md).
 ```bash
 dev branch new feat/x                   # from an up-to-date origin/main
 # … small steps, targeted tests while iterating …
-dev commit -a -m "feat(scope): summary" --body "why"
+dev commit -a -m "feat(scope): summary" --why "the problem and who it affects" --verified "the command and its result"
 dev ci --run            # the full local equivalent of CI: lint, types, unit, integration (Testcontainers), build
 dev sec scan            # secrets, dependencies, code patterns, IaC, workflows
 dev push                # one push, only with local CI evidence for exactly these files
 dev pr create --dry-run | sed '1,/^---$/d' > body.md   # the pre-filled body; fill "What and why", then:
 dev pr create --body-file body.md
-dev pr checks --watch
+dev ci watch --wait --pr <n>   # an agent arms it as a Monitor or background command and names its task id
 ```
+
+The commit message follows devkit's commit template: `--why` writes the reason, `--verified` the `Verified:` line
+with the command you ran and its result (see [Git and GitHub › Commits](git-and-github.md#commits)).
 
 The pull request description follows the template in [Templates › Pull request
 description](templates.md#pull-request-description): what and why, changes, how to verify (with the local results),
@@ -199,7 +203,7 @@ git merge --no-ff feat/b                 # local branches of other worktrees wor
 dev ci --run                             # the full local suite on the result
 dev push
 dev pr create --title "chore(release): 26.11.4" --body-file body.md   # "Integrates #12, #17, #22"
-dev pr checks --watch
+dev ci watch --wait --pr <n>
 ```
 
 Ask the sessions working on those branches to commit locally and stop pushing. Never merge the individual PRs one
@@ -208,17 +212,30 @@ release branch name when the project uses CalVer.
 
 ## 4. Follow CI
 
-Watch the single run instead of polling it:
+After every push, PR, merge or release, devkit follows the run in the background (`dev ci watch`) and tells the
+session how it ended at the session's next hook. A hook runs only when the session does something, so that watch
+wakes no idle agent. **An agent that waits on the run arms a wait that wakes it, in the same turn, and names its
+task id in its reply.** CI is one source of the one wait for every devkit event, `dev watch --wait`: the background
+watch's result reaches the agent through it, together with its crew's questions and decisions (see
+[Progress and communication › Waiting and waking](progress-and-communication.md#waiting-and-waking)). To follow one
+run job by job, the agent arms `dev ci watch --wait` instead: in Claude Code as a Monitor or a background command; in
+Codex, which has no background wake-up, in the foreground with a timeout. A wait that ends before its run (exit 3) is
+armed again with the command `dev watches` or `dev ci watches` prints. The Stop hook sends back a turn that sent work
+to origin and left its unfinished run with nothing that wakes the agent.
 
 ```bash
-dev ci status            # the runs of the branch: state, jobs, current step, elapsed, ETA
-dev ci status --watch    # refresh every 15 seconds until nothing runs
-dev pr checks --watch    # the checks of the PR; prints only the result, with the logs of failed jobs
+dev watch --wait                      # every devkit event, the CI result included (Claude Code: in the background)
+dev ci watch --wait --pr <n>          # a PR's head, or its merge commit once merged
+dev ci watch --wait --tag v26.11.4    # a release tag
+dev ci watches                        # live watches, and expired ones with the command to re-arm each
+dev ci status                         # a look at the runs of the branch: state, jobs, current step, elapsed, ETA
 ```
 
-`dev ci status` works with GitHub Actions, GitLab CI, Bitbucket Pipelines and Azure Pipelines; the ETA comes from
-the last successful runs of the same pipeline. The details and the sign-in each host needs are in
-[Commands › dev ci status](commands.md#dev-ci-status---watch---branch-name----all-branches---all-jobs---limit-n---json).
+`dev ci status` is for a look; it wakes nobody. It works with GitHub Actions, GitLab CI, Bitbucket Pipelines and
+Azure Pipelines; the ETA comes from the last successful runs of the same pipeline. The details and the sign-in each
+host needs are in
+[Commands › dev ci status](commands.md#dev-ci-status---watch---branch-name----all-branches---all-jobs---limit-n---json),
+and the watch's exit codes in [CI/CD pipelines › Watch every run](ci-cd.md#watch-every-run).
 
 ## 5. When CI fails
 

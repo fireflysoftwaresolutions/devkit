@@ -119,10 +119,57 @@ class RepositoryDrift(unittest.TestCase):
     def test_d12_the_suite_runs_hermetic(self):
         self.assert_known("D12", selfcheck.d12_hermetic_tests())
 
-    # run() covers D1 to D13, so a check added to the module is also one `dev doctor` and CI run
+    # D14: every skill devkit asks a model to load (the crew, the skill rules, the using-devkit table) and every
+    # skill AGENTS.md names comes from a source devkit installs; those a model must load are model-loadable
+    def test_d14_skill_names_resolve_and_load(self):
+        self.assert_known("D14", selfcheck.d14_skill_names() + selfcheck.d14_rules_table())
+
+    # D14 on a small roster: a name no source provides and a skill only the developer can run are drift
+    def test_d14_finds_an_unknown_and_a_user_only_skill(self):
+        roster = {"members": [{"id": "oracle", "skills": ["grill-with-docs", "no-such-skill", "testing",
+                                                           "superpowers:brainstorming"]}], "activities": []}
+        found = {f.item: f for f in selfcheck.d14_skill_names(roster=roster)
+                 if "grill-with-docs" in f.item or "no-such-skill" in f.item or "testing" in f.item
+                 or "brainstorming" in f.item}
+        self.assertEqual(sorted(found), ["unknown: no-such-skill", "user-only: grill-with-docs"])
+        self.assertIn("oracle", found["user-only: grill-with-docs"].evidence)
+
+    # D14 on a small roster: a skill devkit's own skill replaces (it would merge and push around devkit's delivery)
+    # is drift, with the skill that replaces it in the fix
+    def test_d14_finds_a_superseded_skill(self):
+        roster = {"members": [{"id": "morpheus", "skills": ["delivery"], "procedure": [
+            {"phase": "Integrate and close", "skills": ["superpowers:finishing-a-development-branch", "delivery"]}]}],
+            "activities": []}
+        found = {f.item: f for f in selfcheck.d14_skill_names(roster=roster) if "finishing" in f.item}
+        self.assertEqual(sorted(found), ["superseded: superpowers:finishing-a-development-branch"])
+        self.assertIn("delivery", found["superseded: superpowers:finishing-a-development-branch"].fix)
+
+    # D14: the rules table of docs/skills-and-plugins.md shows each rule of config/skill-rules.json with the skills
+    # it requires of each agent; a missing row, a wrong skill and a row for no rule are drift
+    def test_d14_the_rules_table_matches_the_config(self):
+        import json
+        with tempfile.TemporaryDirectory() as d:
+            home = Path(d)
+            (home / "config").mkdir()
+            (home / "docs").mkdir()
+            rules = [{"id": "docs", "skills": {"claude": ["docs"], "codex": ["docs"]}},
+                     {"id": "release", "skills": {"claude": ["delivery", "release-policy"],
+                                                  "codex": ["delivery", "release-policy"]}},
+                     {"id": "postgres", "skills": {"claude": ["supabase-postgres-best-practices"],
+                                                   "codex": ["supabase-postgres-best-practices"]}}]
+            (home / "config" / "skill-rules.json").write_text(json.dumps({"rules": rules}))
+            (home / "docs" / "skills-and-plugins.md").write_text(
+                "### The rules\n\n| Rule | Claude Code | Codex | Matches |\n| --- | --- | --- | --- |\n"
+                "| `docs` | `docs` | `docs` | Markdown |\n| `release` | `delivery` | the same | `VERSION` |\n"
+                "| `delivery` | `delivery` | the same | `git push` |\n")
+            found = {f.item: f for f in selfcheck.d14_rules_table(home=home)}
+        self.assertEqual(sorted(found), ["rules table: delivery", "rules table: postgres", "rules table: release"])
+        self.assertIn("release-policy", found["rules table: release"].evidence)
+
+    # run() covers D1 to D14, so a check added to the module is also one `dev doctor` and CI run
     def test_run_covers_every_check(self):
         ids = {cid for cid, _ in selfcheck.REPO_CHECKS + selfcheck.MACHINE_CHECKS}
-        self.assertEqual(ids, {f"D{i}" for i in range(1, 14)})
+        self.assertEqual(ids, {f"D{i}" for i in range(1, 15)})
 
 
 class CommandResolution(unittest.TestCase):

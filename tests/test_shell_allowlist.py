@@ -23,18 +23,18 @@ sys.path.insert(0, str(ROOT / "lib"))
 
 from devkit import core, guard  # noqa: E402
 
-CWD = str(ROOT)
+# the main session works in a project of the dev root (the run's, below its temporary home), where the guard allows
+# its writes, whatever folder this checkout lives in (~/Development on the developer's Mac, a runner folder in CI)
+MAIN_CWD = str(core.DEV / "fireflysoftwaresolutions" / "devkit")
+# a member's lane works there too: in this checkout's own folder the verdicts would follow where the tree sits (in a
+# session scratchpad, an exported copy there, the guard's scratch-folder rule judges every write first)
+CWD = MAIN_CWD
 REVIEWER = "seraph"  # a review-only member in config/crew.json: its lane gets the allowlist without a level
 
 
 def lane(cmd, member=REVIEWER, cwd=CWD, **kw):
     v = guard.crew_shell_verdict(cmd, cwd, None, member, **kw)
     return v[1] if v else None
-
-
-# the main session works in a project of the dev root (the run's, below its temporary home), where the guard allows
-# its writes, whatever folder this checkout lives in (~/Development on the developer's Mac, a runner folder in CI)
-MAIN_CWD = str(core.DEV / "fireflysoftwaresolutions" / "devkit")
 
 
 def main_session(cmd, cwd=MAIN_CWD):
@@ -69,12 +69,13 @@ WRITERS = [
     "tee out.txt < a", "cp a b", "mv a b", "tsc", "semgrep --autofix .", "markdownlint --fix .", "uniq a b",
     "xxd a b", "tree -o out.txt", "git reflog expire --all", "gh pr comment 12 -b x",
     "gh api -X POST repos/o/r/issues", "gh api repos/o/r/issues -f title=x", "gh run download 5",
-    "dev task add 'x'", "dev ci --run", "cat $(echo a)", "cat `echo a`", "diff <(ls a) <(ls b)",
+    "dev task add 'x'", "dev ci --run", "cat $(touch a)", "cat `touch a`", "diff <(touch a) <(ls b)",
     "GIT_EXTERNAL_DIFF=./x.sh git diff", "sudo cat a",
 ]
-# writers the main session's guard refuses for its own reasons (deletes, branch and tag names, the shared stash)
+# writers the main session's guard refuses for its own reasons (deletes, also inside a process substitution, branch
+# and tag names, the shared stash)
 MAIN_REFUSES = ["find . -name '*.pyc' -delete", "git clean -fd", "git tag v9.9.9", "git stash", "git branch x",
-                "gh pr merge 12"]
+                "gh pr merge 12", "diff <(rm a) <(ls b)"]
 
 
 class AllowlistTests(unittest.TestCase):
@@ -94,14 +95,20 @@ class AllowlistTests(unittest.TestCase):
             with self.subTest(cmd=cmd):
                 self.assertIsNotNone(lane(cmd))
 
+    def test_a_substitution_whose_command_only_reads_runs_in_a_review_lane(self):
+        # its twins in WRITERS (cat $(touch a), diff <(touch a) <(ls b)) stay refused
+        for cmd in ("cat $(echo a)", "cat `echo a`", "diff <(ls a) <(ls b)"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(lane(cmd))
+
     def test_sed_prints_a_line_range_or_a_match_but_never_writes_or_runs(self):
         for cmd in ("sed -n '1,20p' f", "sed -n '/def check/p' lib/devkit/guard.py", "sed -n '$p' f",
                     "sed -n -e '1p' -e '3,4p' f", "sed -ne '10,20p' f", "sed -n '120,$p' f", "sed -En '/^[a-z]+$/p' f",
-                    "sed -n '1p;5p' f"):
+                    "sed -n '1p;5p' f", "sed '1,5p' f"):  # without -n it prints those lines twice: still a read
             with self.subTest(cmd=cmd):
                 self.assertIsNone(lane(cmd))
         for cmd in ("sed -n '1w out' f", "sed -n '1,5p;w x' f", "sed -n 's/a/b/w out' f", "sed -n '1e date' f",
-                    "sed '1,5p' f", "sed -n -f script.sed f", "sed -n -i '1p' f", "sed -n --in-place '1p' f"):
+                    "sed '1,5w out' f", "sed -n -f script.sed f", "sed -n -i '1p' f", "sed -n --in-place '1p' f"):
             with self.subTest(cmd=cmd):
                 self.assertIsNotNone(lane(cmd))
 
@@ -265,18 +272,41 @@ class WriteDetectionTests(unittest.TestCase):
 
 class ScopeBaseTests(unittest.TestCase):
 
+    def workspace(self):
+        # a workspace laid out like the developer's, built for the test so it holds wherever the tree under test sits
+        # (a main checkout, a managed worktree, an exported copy without .git): the run's repository under its
+        # two-part id <dev>/<owner>/<repo>, whose origin names that id, and a managed worktree of it below
+        # <dev>/.worktrees/<owner>/<repo>/. It sits in the run's home: devkit gives a checkout in a temp folder no
+        # project
+        d = tempfile.mkdtemp(dir=str(core.HOME))
+        self.addCleanup(shutil.rmtree, d, True)
+        dev = Path(d) / "Development"
+        main = dev / "fireflysoftwaresolutions" / "devkit"
+        (main / "lib" / "devkit").mkdir(parents=True)
+        (main / "lib" / "devkit" / "guard.py").write_text("DENY = True\n")
+        (main / "README.md").write_text("devkit\n")
+        _git(main, "init", "-q")
+        _git(main, "remote", "add", "origin", "https://github.com/fireflysoftwaresolutions/devkit.git")
+        _git(main, "-c", "user.email=t@example.com", "-c", "user.name=t", "add", ".")
+        _git(main, "-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-qm", "init")
+        wt = dev / ".worktrees" / "fireflysoftwaresolutions" / "devkit" / "test-x"
+        _git(main, "worktree", "add", "-q", "-b", "test/x", str(wt))
+        return dev, "fireflysoftwaresolutions/devkit", main, wt
+
     def test_scope_globs_are_relative_to_the_runs_repository_whatever_the_session_folder(self):
-        path = str(ROOT / "lib" / "devkit" / "guard.py")
+        dev, project, main, wt = self.workspace()
+        path = str(main / "lib" / "devkit" / "guard.py")
         home = str(core.HOME)
         self.assertFalse(guard.scope_holds(path, home, ["lib/devkit/guard.py"]))  # what the session's cwd gives
-        # the workspace and the run's project id that name this checkout, wherever it sits (a main checkout at
-        # <dev>/<owner>/<repo> or a managed worktree below .worktrees/)
-        with mock.patch.object(guard, "DEV", ROOT.parent):
-            base = guard.scope_base(ROOT.name, home)
-            self.assertEqual(os.path.realpath(base), os.path.realpath(ROOT))
+        # the run's two-part project id names the main checkout from a session outside it, and a session in the
+        # checkout or in its managed worktree counts from the folder it works in
+        with mock.patch.object(guard, "DEV", dev):
+            base = guard.scope_base(project, home)
+            self.assertEqual(os.path.realpath(base), os.path.realpath(main))
             self.assertTrue(guard.scope_holds(path, home, ["lib/devkit/guard.py"], base=base))
             self.assertFalse(guard.scope_holds(path, home, ["tests/**"], base=base))
-            self.assertEqual(os.path.realpath(guard.scope_base(ROOT.name, CWD + "/lib")), os.path.realpath(ROOT))
+            self.assertEqual(os.path.realpath(guard.scope_base(project, str(main / "lib"))), os.path.realpath(main))
+            self.assertEqual(os.path.realpath(guard.scope_base(project, str(wt / "lib"))), os.path.realpath(wt))
 
     def test_a_session_in_a_worktree_of_the_runs_repository_counts_from_that_worktree(self):
         with tempfile.TemporaryDirectory() as d:
@@ -291,10 +321,11 @@ class ScopeBaseTests(unittest.TestCase):
     def test_a_plan_named_by_the_scope_is_exempt_from_a_session_in_home(self):
         plan = core.HANDOFF / "plans" / "fireflysoftwaresolutions" / "devkit" / "f7-probe.md"
         scope = [str(core.HANDOFF / "plans" / "fireflysoftwaresolutions" / "devkit") + "/**"]
-        with mock.patch.object(guard, "DEV", ROOT.parent):
-            base = guard.scope_base(ROOT.name, str(core.HOME))
+        dev, project, main, _ = self.workspace()
+        with mock.patch.object(guard, "DEV", dev):
+            base = guard.scope_base(project, str(core.HOME))
             self.assertTrue(guard.member_write_exempt(str(plan), str(core.HOME), scope, "oracle", base=base))
-            self.assertFalse(guard.member_write_exempt(str(ROOT / "README.md"), str(core.HOME), scope, "oracle",
+            self.assertFalse(guard.member_write_exempt(str(main / "README.md"), str(core.HOME), scope, "oracle",
                                                        base=base))
 
 

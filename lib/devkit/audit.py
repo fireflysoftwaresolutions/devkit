@@ -389,6 +389,7 @@ COMMAND_ARGS = {
     "time": "",
     "update": "",
     "version": "",
+    "watch": "", "watches": "",
     "wt": "", "wt ls": "", "wt new": "branch:name", "wt rm": "target:name",
 }
 # a command's marker when it is not TEXT_MARK: the one its records held before 26.11.5, so they read back as stored
@@ -405,7 +406,7 @@ NAME_OPTIONS = frozenset({
     "--action", "--activity", "--actor", "--after", "--agent", "--allow", "--approve", "--approves", "--ask",
     "--assignee", "--at", "--base", "--body-file", "--branch", "--by", "--category", "--command", "--commit-template",
     "--config", "--context", "--cwd", "--days", "--delay", "--depth", "--due", "--estimate", "--every", "--export",
-    "--ext", "--fd", "--file", "--files", "--first", "--fold", "--format", "--from", "--glob", "--hours",
+    "--ext", "--fd", "--file", "--files", "--first", "--fold", "--for", "--format", "--from", "--glob", "--hours",
     "--initiative", "--interval", "--irreversible", "--kind", "--label", "--lang", "--license", "--limit", "--lines",
     "--max", "--max-per-file", "--member", "--min-severity", "--mode", "--model", "--notes-file", "--only", "--out",
     "--outcome", "--owner", "--path", "--performs", "--pr", "--priority", "--project", "--projects", "--provider",
@@ -530,7 +531,7 @@ PROGRAMS = frozenset((
     "cat head tail less more bat ls stat file wc grep egrep fgrep rg ag ack jq yq diff diff3 cmp comm patch md5 md5sum "
     "shasum sha1sum sha256sum cksum du df realpath readlink basename dirname hexdump xxd od strings column cut tr nl "
     "fold paste tree lsof whoami id uname printenv date sort uniq find sed awk gawk mawk nawk seq expr bc tee base64 "
-    "mdfind mdls plutil "
+    "mdfind mdls plutil uptime groups locale getconf sysctl "
     # files
     "touch mkdir mkfifo truncate rm rmdir unlink shred srm ln chmod chown chgrp chflags xattr setfacl cp gcp mv gmv "
     "install ditto rsync scp sftp tar zip unzip gzip gunzip bzip2 xz zstd open "
@@ -1552,6 +1553,7 @@ ACTIONS = {
     "plan": ("decision", "info"), "raci.override": ("decision", "notice"),
     "handoff": ("data", "info"),
     "job": ("job", "info"), "jobs": ("config", "notice"), "ci.watch": ("job", "info"), "ops": ("job", "info"),
+    "watch": ("job", "info"),  # watch.wake: a `dev watch --wait` printed what arrived
     "state": ("lifecycle", "warning"), "install": ("lifecycle", "notice"),
     # dev ext: a change to the plugins, skills and MCP servers that run (supply chain), and drift found
     "ext": ("security", "notice"), "ext.drift": ("security", "warning"),
@@ -2035,7 +2037,8 @@ def _forward(rec: dict, cfg: dict):
 READ_ONLY = {"help", "ls", "go", "status", "open", "overview", "standup", "dashboard", "team", "report", "time",
              "files", "find", "grep", "diff", "canary", "du", "doctor", "version", "agents", "calver", "audit",
              "__complete", "completion", "hook", "guard", "plugin", "docs", "diagram", "stubs", "mcp",
-             "test"}  # dev test run|plan|prove|audit: runs and reads tests (prove in a temp copy), changes nothing
+             "test",  # dev test run|plan|prove|audit: runs and reads tests (prove in a temp copy), changes nothing
+             "watch", "watches"}  # a wait only tells what is new, once, and audits each wake itself (watch.wake)
 READ_SUB = {("task", "ls"), ("task", "show"), ("task", "history"), ("task", None), ("plan", "ls"), ("plan", None),
             ("lesson", "ls"), ("lesson", "show"), ("lesson", "scan"), ("lesson", "review"), ("lesson", None),
             ("progress", None), ("progress", "time"), ("delivery", None), ("initiative", "ls"), ("initiative", "show"),

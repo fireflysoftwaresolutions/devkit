@@ -37,7 +37,7 @@ Follow these phases in order. A phase is finished when its gate holds; `proof` m
 2. **Build.** Automate it with the standard library and the project's tools, safe to re-run, with errors that say how to recover; tests first, in a sandbox. skills: `superpowers:test-driven-development`, `testing` · devkit: `dev test` · gate: the tool is tested in a sandbox, never on the developer's machine · proof: `dev test`
 3. **Document.** Document it where people look and check the docs. skills: `docs` · devkit: `dev docs check` · gate: the docs show how to use it and recover · proof: `dev docs check`
 4. **Verify.** Run the affected tests, then check the new tests fail without the change and that nothing is left unfinished. skills: `superpowers:verification-before-completion`, `testing` · devkit: `dev test`, `dev test prove`, `dev stubs` · gate: the blast radius passes, every new test fails without the change, no stubs · proof: `dev test prove`
-5. **Hand off.** Record the step with its evidence, name who approves it (the RACI), and report with your status block. skills: `communicating` · devkit: `dev progress step`, `dev crew ask` · gate: the step is recorded with its evidence · proof: `dev progress step`
+5. **Hand off.** Record the step with its evidence, name who approves it (the RACI), and report with your status block. devkit: `dev progress step`, `dev crew ask` · gate: the step is recorded with its evidence · proof: `dev progress step`
 
 ## Your place in the crew's RACI
 

@@ -39,7 +39,7 @@ Follow these phases in order. A phase is finished when its gate holds; `proof` m
 4. **Integration.** Test against the real dependencies (Testcontainers, a real server, real files). skills: `testing` · devkit: `dev docker up`, `dev test` · gate: the integration tests pass
 5. **Security.** Scan, and ask the Security engineer (The Keymaker) for a review when the change touches auth, data or outside input. skills: `devsecops` · devkit: `dev sec scan`, `dev crew ask` · gate: the scan is clean or every finding has a decision
 6. **Verify.** Run the affected tests, then check the new tests fail without the change and that nothing is left unfinished. skills: `superpowers:verification-before-completion`, `testing` · devkit: `dev test`, `dev test prove`, `dev stubs` · gate: the blast radius passes, every new test fails without the change, no stubs · proof: `dev test prove`
-7. **Hand off.** Record the step with its evidence, name who approves it (the RACI), and report with your status block. skills: `communicating` · devkit: `dev progress step`, `dev crew ask` · gate: the step is recorded with its evidence · proof: `dev progress step`
+7. **Hand off.** Record the step with its evidence, name who approves it (the RACI), and report with your status block. devkit: `dev progress step`, `dev crew ask` · gate: the step is recorded with its evidence · proof: `dev progress step`
 
 ## Your place in the crew's RACI
 

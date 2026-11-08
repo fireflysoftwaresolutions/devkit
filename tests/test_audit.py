@@ -104,7 +104,8 @@ CURL = "cur" + "l"  # the secret scan of this file reads "curl -u user:value" as
 COMMANDS = [
     ("curl -u", f"{CURL} -sS -u admin:{CMD} https://api.example.com/x", CMD,
      ["curl -u admin https://api.example.com:8443/x", "docker run -u 1000:1000 alpine", "sort -u a.txt b:c.txt"]),
-    ("sshpass -p", f"sshpass -P assword -p '{CMD}' ssh deploy@host", CMD,
+    # test input: a command whose password the audit trail must mask
+    ("sshpass -p", f"sshpass -P assword -p '{CMD}' ssh deploy@host", CMD,  # nosemgrep: generic.secrets.security.detected-ssh-password.detected-ssh-password
      ["sshpass -e ssh -p 2222 deploy@host", "sshpass -f ~/.pw ssh host", "ssh -p 2222 deploy@host"]),
     ("mysql -p", f"mysql -u root -p{CMD} app", CMD,
      ["mysql -u root -p app", "mysql -h db -P 3306 -u root -p", "mysqldump --single-transaction app"]),
@@ -1244,7 +1245,8 @@ class IntegrityTests(AuditCase):
 
     def test_an_existing_0644_file_becomes_0600(self):
         audit.AUDIT.mkdir(parents=True, mode=0o755)
-        os.chmod(audit.AUDIT, 0o755)
+        # the test sets the file mode it checks, on its own temporary files
+        os.chmod(audit.AUDIT, 0o755)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions
         self.month().write_text("")
         os.chmod(self.month(), 0o644)
         self.write(1)

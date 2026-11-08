@@ -11,6 +11,7 @@ import contextlib
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -29,7 +30,13 @@ ALLOW = "gitleaks" + ":allow"  # built here, so this file holds no allow comment
 STATE = core.HOME / ".local" / "state" / "devkit"
 
 
-def member(cmd, who=BUILDER, cwd=CWD):
+# a member's lane works in a project of the run's dev root, below its temporary home: in this checkout's own folder
+# the verdicts would follow where the tree sits (in a session scratchpad, an exported copy there, the guard's
+# scratch-folder rule judges every write first)
+LANE_CWD = str(core.DEV / "fireflysoftwaresolutions" / "devkit")
+
+
+def member(cmd, who=BUILDER, cwd=LANE_CWD):
     v = guard.crew_shell_verdict(cmd, cwd, None, who)
     return v[1] if v else None
 
@@ -182,18 +189,35 @@ class BypassRecordTests(unittest.TestCase):
         self.assertEqual(main_session(cmd, cwd), "allow")
         return [(b["flag"], b["rule"]) for b in guard.last_bypasses()]
 
+    def checkout(self) -> str:
+        # devkit's own checkout as the main session finds it: a git checkout whose origin names the project, built in
+        # the run's home, so the verdicts do not follow where the tree under test sits (an exported copy has no .git,
+        # and in a session scratchpad or a temp folder a delete is a scratch write; devkit gives a checkout in a temp
+        # folder no project)
+        d = tempfile.mkdtemp(dir=str(core.HOME))
+        self.addCleanup(shutil.rmtree, d, True)
+        top = Path(d) / "fireflysoftwaresolutions" / "devkit"
+        top.mkdir(parents=True)
+        (top / "notes.md").write_text("x\n")
+        origin = "https://github.com/fireflysoftwaresolutions/devkit.git"
+        for args in (["init", "-q"], ["remote", "add", "origin", origin]):
+            subprocess.run(["git", "-C", str(top), *args], check=True, capture_output=True)
+        self.assertEqual(guard.current_project(str(top)), "fireflysoftwaresolutions/devkit")
+        return str(top)
+
     def test_a_main_session_hatch_that_skips_a_denial_is_collected_with_that_denial(self):
-        self.assertEqual(self.uses("DEVKIT_RAW_GH=1 gh pr merge 12"), [("DEVKIT_RAW_GH", "gh-merge")])
+        top = self.checkout()
+        self.assertEqual(self.uses("DEVKIT_RAW_GH=1 gh pr merge 12", top), [("DEVKIT_RAW_GH", "gh-merge")])
         self.assertTrue(guard.last_bypasses()[0]["denial"].startswith("Use `dev pr merge`"))
-        self.assertEqual(self.uses("DEVKIT_FLAKY=1 gh run rerun 5"), [("DEVKIT_FLAKY", "gh-rerun")])
-        self.assertEqual(self.uses("DEVKIT_RAW_FS=1 rm notes.md"), [("DEVKIT_RAW_FS", "rm")])
+        self.assertEqual(self.uses("DEVKIT_FLAKY=1 gh run rerun 5", top), [("DEVKIT_FLAKY", "gh-rerun")])
+        self.assertEqual(self.uses("DEVKIT_RAW_FS=1 rm notes.md", top), [("DEVKIT_RAW_FS", "rm")])
         # the tag rule follows the project's recorded delivery policy (CalVer, as devkit's own), in the run's handoff
-        policy = delivery.policy_path(guard.current_project(CWD))
+        policy = delivery.policy_path(guard.current_project(top))
         policy.parent.mkdir(parents=True, exist_ok=True)
         policy.write_text(json.dumps({"versioning": "calver", "tag_format": "vYY.MM.PATCH"}))
         self.addCleanup(policy.unlink)
-        self.assertEqual(self.uses("DEVKIT_TAG_ANY=1 git tag v9.9.9"), [("DEVKIT_TAG_ANY", "tag-format")])
-        self.assertEqual(self.uses("DEVKIT_CROSS_PROJECT=1 dev task add x -p acme/other"),
+        self.assertEqual(self.uses("DEVKIT_TAG_ANY=1 git tag v9.9.9", top), [("DEVKIT_TAG_ANY", "tag-format")])
+        self.assertEqual(self.uses("DEVKIT_CROSS_PROJECT=1 dev task add x -p acme/other", top),
                          [("DEVKIT_CROSS_PROJECT", "cross-project")])
         with tempfile.TemporaryDirectory() as d:
             self.assertEqual(self.uses("make test | tail -1 && DEVKIT_PIPE_OK=1 git commit -m x", d),

@@ -57,7 +57,7 @@ dev pr ready             # once, when the local suite is green: starts the one C
 3. Before the first push that starts CI, run the full local equivalent of CI (lint, types, unit, integration, build,
    package).
 4. `dev ci --run` (local CI evidence), then `dev push` once, `dev pr create` (or `dev pr ready` on your draft), and
-   `dev pr checks --watch`.
+   arm a watch that wakes you (see [After a push, merge or release](#after-a-push-merge-or-release)).
 
 ## 3. Branches or PRs that must land together
 
@@ -71,7 +71,7 @@ git merge --no-ff feat/b                              # local branches from othe
 dev ci --run                                          # the evidence dev push and dev pr create check
 dev push
 dev pr create --title "chore(release): <version>"     # the template, pre-filled; name the PRs it integrates
-dev pr checks --watch
+dev ci watch --wait --pr <n>                          # as a Monitor or background command; name its task id
 ```
 
 - Ask other sessions working on those branches to commit locally and stop pushing; worktrees share the
@@ -81,16 +81,22 @@ dev pr checks --watch
 - `dev pr merge` closes the items of the integration branch only. The branches it carried are merged too (by ancestry
   or by content): `dev task reconcile --apply` closes their items, and `dev branch prune` lists them for deletion.
 
-## CI is watched for you
+## After a push, merge or release
 
 After `dev push`, `dev pr create`, `dev pr ready`, `dev pr merge` or `dev release`, devkit follows the pipeline to
 the end in the background (`dev ci watch`) and tells this session how it ended at its next hook: green, or red with
 the first error, its class and the one next action (`cicd` skill, section 6). A hook runs only when the session
 does something, so that watch never wakes an idle session. Never poll.
 
-**When you wait on the run, arm a watch that wakes you, in the same turn,** and name its task id in your reply:
+**Arm a wait that wakes you, in the same turn, and name its task id in your reply.** `dev watch --wait` is the one
+wait for every devkit event: devkit's background watch feeds the CI result into it, so one wait covers CI and the
+crew together (the `wait-and-wake` skill has the command for each agent). To follow one run job by job instead, arm
+`dev ci watch --wait`: in Claude Code as a Monitor or a background command; in Codex, which has no background
+wake-up, in the foreground with a timeout. Re-arm a wait that ends first (exit 3; `dev watches` and `dev ci watches`
+print the command), and report the result when it fires. `dev ci status` is for a look at the runs; it wakes nobody.
 
 ```bash
+dev watch --wait                                                 # Claude Code: Bash with run_in_background; every event, CI included
 dev ci watch --wait --branch <branch> --sha <sha> --timeout 28   # Claude Code: the Monitor tool, timeout_ms 1800000
 dev ci watch --wait --branch <branch> --sha <sha>                # Claude Code: Bash with run_in_background
 dev ci watch --wait --pr <n>                                     # a PR's head, or its merge commit once merged
@@ -100,10 +106,9 @@ dev ci watches                                                   # live and expi
 
 It prints a line per finished job and a last line `CI <word> · …`, and exits 0 passed, 1 failed, 3 the watch ended
 first (re-arm it), 4 none. A Monitor expires after 30 minutes: when its last line says `CI still running`, re-arm it.
-Codex has no background wake-up: run the same command in the foreground with a timeout, and if the run is still
-going, say plainly that you check it again at the next turn. When the watch fires, report the result. The Stop hook
-sends back a turn that sent work to origin and leaves its unfinished run with nothing that wakes you, naming the
-exact command.
+In Codex, if the run is still going when the foreground timeout ends, say plainly that you check it again at the
+next turn. The Stop hook sends back a turn that sent work to origin and leaves its unfinished run with nothing that
+wakes you, naming the exact command.
 
 When the fix is not trivial and you lead the crew, hand it to the Release engineer (Link):
 `dev crew brief link "Fix the failed CI run: <job>, <class>" --activity cicd`. In auto mode this happens at once.

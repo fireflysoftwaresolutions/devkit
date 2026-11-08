@@ -27,7 +27,6 @@
         "superpowers:dispatching-parallel-agents",
         "superpowers:executing-plans",
         "superpowers:verification-before-completion",
-        "superpowers:finishing-a-development-branch",
         "handoff"
       ],
       "tools": "all",
@@ -133,7 +132,6 @@
           "do": "Integrate the results, run the full suite once, get each approver's review, reopen a work item that comes back with dev task reopen and its reason, finish the branch, update the handoff note, and report.",
           "skills": [
             "superpowers:verification-before-completion",
-            "superpowers:finishing-a-development-branch",
             "delivery",
             "handoff"
           ],
@@ -244,9 +242,6 @@
         {
           "phase": "Approve",
           "do": "Review the requirements and the data answers you are accountable for against the outcome; approve them, or send them back with what is missing.",
-          "skills": [
-            "communicating"
-          ],
           "devkit": [
             "dev crew answer",
             "dev progress step"
@@ -256,9 +251,6 @@
         {
           "phase": "Hand off",
           "do": "Record the step with its evidence, name who approves it (the RACI), and report with your status block.",
-          "skills": [
-            "communicating"
-          ],
           "devkit": [
             "dev progress step",
             "dev crew ask"
@@ -287,7 +279,6 @@
       "skills": [
         "domain-modeling",
         "communicating",
-        "grill-with-docs",
         "doc-coauthoring",
         "superpowers:brainstorming"
       ],
@@ -327,7 +318,7 @@
           "phase": "Read first",
           "do": "Read the code, the docs and the handoff note before asking anything.",
           "skills": [
-            "grill-with-docs"
+            "domain-modeling"
           ],
           "devkit": [
             "dev grep",
@@ -380,9 +371,6 @@
         {
           "phase": "Hand off",
           "do": "Record the step with its evidence, name who approves it (the RACI), and report with your status block.",
-          "skills": [
-            "communicating"
-          ],
           "devkit": [
             "dev progress step",
             "dev crew ask"
@@ -416,7 +404,6 @@
         "domain-modeling",
         "diagrams",
         "superpowers:writing-plans",
-        "improve-codebase-architecture",
         "communicating",
         "threat-model-analyst"
       ],
@@ -516,7 +503,7 @@
           "phase": "Review the build",
           "do": "Check that the implementation keeps the contracts; approve research and migrations you are accountable for.",
           "skills": [
-            "improve-codebase-architecture"
+            "codebase-design"
           ],
           "devkit": [
             "dev crew answer"
@@ -526,9 +513,6 @@
         {
           "phase": "Hand off",
           "do": "Record the step with its evidence, name who approves it (the RACI), and report with your status block.",
-          "skills": [
-            "communicating"
-          ],
           "devkit": [
             "dev progress step",
             "dev crew ask"
@@ -628,9 +612,6 @@
         {
           "phase": "Hand off",
           "do": "Record the step with its evidence, name who approves it (the RACI), and report with your status block.",
-          "skills": [
-            "communicating"
-          ],
           "devkit": [
             "dev progress step",
             "dev crew ask"
@@ -747,9 +728,6 @@
         {
           "phase": "Hand off",
           "do": "Record the step with its evidence, name who approves it (the RACI), and report with your status block.",
-          "skills": [
-            "communicating"
-          ],
           "devkit": [
             "dev progress step",
             "dev crew ask"
@@ -877,9 +855,6 @@
         {
           "phase": "Hand off",
           "do": "Record the step with its evidence, name who approves it (the RACI), and report with your status block.",
-          "skills": [
-            "communicating"
-          ],
           "devkit": [
             "dev progress step",
             "dev crew ask"
@@ -1025,9 +1000,6 @@
         {
           "phase": "Hand off",
           "do": "Record the step with its evidence, name who approves it (the RACI), and report with your status block.",
-          "skills": [
-            "communicating"
-          ],
           "devkit": [
             "dev progress step",
             "dev crew ask"
@@ -1144,9 +1116,6 @@
         {
           "phase": "Hand off",
           "do": "Record the step with its evidence, name who approves it (the RACI), and report with your status block.",
-          "skills": [
-            "communicating"
-          ],
           "devkit": [
             "dev progress step",
             "dev crew ask"
@@ -1261,9 +1230,6 @@
         {
           "phase": "Hand off",
           "do": "Record the step with its evidence, name who approves it (the RACI), and report with your status block.",
-          "skills": [
-            "communicating"
-          ],
           "devkit": [
             "dev progress step",
             "dev crew ask"
@@ -1393,9 +1359,6 @@
         {
           "phase": "Hand off",
           "do": "Record the step with its evidence, name who approves it (the RACI), and report with your status block.",
-          "skills": [
-            "communicating"
-          ],
           "devkit": [
             "dev progress step",
             "dev crew ask"
@@ -1512,9 +1475,6 @@
         {
           "phase": "Hand off",
           "do": "Record the step with its evidence, name who approves it (the RACI), and report with your status block.",
-          "skills": [
-            "communicating"
-          ],
           "devkit": [
             "dev progress step",
             "dev crew ask"
@@ -1606,9 +1566,6 @@
         {
           "phase": "Hand to the frontend engineer",
           "do": "Hand the design to the Frontend engineer (Trinity) with the states and copy written out.",
-          "skills": [
-            "communicating"
-          ],
           "devkit": [
             "dev plan revise",
             "dev progress step"
@@ -1733,9 +1690,6 @@
         {
           "phase": "Hand off",
           "do": "Record the step with its evidence, name who approves it (the RACI), and report with your status block.",
-          "skills": [
-            "communicating"
-          ],
           "devkit": [
             "dev progress step",
             "dev crew ask"
@@ -1838,9 +1792,6 @@
         {
           "phase": "Verdict",
           "do": "Report findings ranked by severity with file, line, risk and fix; approve or request changes.",
-          "skills": [
-            "communicating"
-          ],
           "devkit": [
             "dev progress step"
           ],
@@ -1866,7 +1817,6 @@
         "devsecops",
         "sharp-edges",
         "supply-chain-risk-auditor",
-        "semgrep",
         "github-actions-hardening",
         "testing",
         "communicating"
@@ -1931,10 +1881,9 @@
         },
         {
           "phase": "Scan",
-          "do": "Scan secrets, dependencies, code, containers and infrastructure.",
+          "do": "Scan secrets, dependencies, code, containers and infrastructure with `dev sec scan`; harden the workflow files you change with github-actions-hardening; run a full Semgrep audit (the semgrep skill) only when the developer asks for one, since its scan plan needs the developer's approval.",
           "skills": [
-            "semgrep",
-            "github-actions-hardening"
+            "devsecops"
           ],
           "devkit": [
             "dev sec scan",
@@ -1957,9 +1906,6 @@
         {
           "phase": "Hand off",
           "do": "Record the step with its evidence, name who approves it (the RACI), and report with your status block.",
-          "skills": [
-            "communicating"
-          ],
           "devkit": [
             "dev progress step",
             "dev crew ask"
@@ -2054,9 +2000,6 @@
         {
           "phase": "Hand off",
           "do": "Record the step with its evidence, name who approves it (the RACI), and report with your status block.",
-          "skills": [
-            "communicating"
-          ],
           "devkit": [
             "dev progress step",
             "dev crew ask"
@@ -2159,9 +2102,6 @@
         {
           "phase": "Hand off",
           "do": "Record the step with its evidence, name who approves it (the RACI), and report with your status block.",
-          "skills": [
-            "communicating"
-          ],
           "devkit": [
             "dev progress step",
             "dev crew ask"
@@ -2297,9 +2237,6 @@
         {
           "phase": "Hand off",
           "do": "Record the step with its evidence, name who approves it (the RACI), and report with your status block.",
-          "skills": [
-            "communicating"
-          ],
           "devkit": [
             "dev progress step",
             "dev crew ask"
@@ -2324,7 +2261,6 @@
       ],
       "skills": [
         "devsecops",
-        "terraform-style-guide",
         "otel-instrumentation",
         "otel-collector",
         "communicating"
@@ -2369,8 +2305,7 @@
           "phase": "As code",
           "do": "Change infrastructure only as code through a PR; plan before apply.",
           "skills": [
-            "devsecops",
-            "terraform-style-guide"
+            "devsecops"
           ],
           "gate": "the plan is reviewed before it is applied"
         },
@@ -2399,9 +2334,6 @@
         {
           "phase": "Hand off",
           "do": "Record the step with its evidence, name who approves it (the RACI), and report with your status block.",
-          "skills": [
-            "communicating"
-          ],
           "devkit": [
             "dev progress step",
             "dev crew ask"
@@ -2508,9 +2440,6 @@
         {
           "phase": "Hand off",
           "do": "Record the step with its evidence, name who approves it (the RACI), and report with your status block.",
-          "skills": [
-            "communicating"
-          ],
           "devkit": [
             "dev progress step",
             "dev crew ask"
@@ -2613,9 +2542,6 @@
         {
           "phase": "Hand off",
           "do": "Record the step with its evidence, name who approves it (the RACI), and report with your status block.",
-          "skills": [
-            "communicating"
-          ],
           "devkit": [
             "dev progress step",
             "dev crew ask"
@@ -2639,7 +2565,7 @@
         "large data migrations"
       ],
       "skills": [
-        "improve-codebase-architecture",
+        "codebase-design",
         "superpowers:writing-plans",
         "superpowers:executing-plans",
         "backend",
@@ -2686,7 +2612,7 @@
           "phase": "Inventory",
           "do": "Inventory the dependencies and the breaking changes between the versions.",
           "skills": [
-            "improve-codebase-architecture"
+            "codebase-design"
           ],
           "devkit": [
             "dev grep"
@@ -2747,9 +2673,6 @@
         {
           "phase": "Hand off",
           "do": "Record the step with its evidence, name who approves it (the RACI), and report with your status block.",
-          "skills": [
-            "communicating"
-          ],
           "devkit": [
             "dev progress step",
             "dev crew ask"
@@ -2830,9 +2753,6 @@
         {
           "phase": "Hand off",
           "do": "Record the step with its evidence, name who approves it (the RACI), and report with your status block.",
-          "skills": [
-            "communicating"
-          ],
           "devkit": [
             "dev progress step",
             "dev crew ask"
@@ -2940,9 +2860,6 @@
         {
           "phase": "Hand off",
           "do": "Record the step with its evidence, name who approves it (the RACI), and report with your status block.",
-          "skills": [
-            "communicating"
-          ],
           "devkit": [
             "dev progress step",
             "dev crew ask"
@@ -4067,7 +3984,7 @@
         "skills": [
           "backend",
           "testing",
-          "improve-codebase-architecture"
+          "codebase-design"
         ],
         "docs": [
           "docs/testing.md"

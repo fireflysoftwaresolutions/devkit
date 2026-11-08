@@ -119,13 +119,13 @@ class SessionGraphTests(unittest.TestCase):
             "  │  ├─ ✓ 1. API contract · done · Tech lead (Morpheus) · [architecture]",
             "  │  ├─ ! 2. orders REST endpoint · done · recheck (reopened: API contract) · Backend engineer (Tank)"
             " · [backend] · after 1",
-            "  │  │  └─ ○ Backend engineer (Tank) · orders endpoint · done · 33m",
+            "  │  │  └─ ○ Backend engineer (Tank) · orders REST endpoint · done · 33m",  # labeled by its step
             "  │  ├─ ✗ 3. checkout page component · blocked: waiting for decision D1 · Frontend engineer (Trinity)"
             " · [frontend] · after 1",
-            "  │  │  └─ ● Frontend engineer (Trinity) · checkout page · waiting for decision D1 · 53m",
-            "  │  │     └─ ● QA engineer (Mouse) · probe payloads · running · 40m",
+            "  │  │  └─ ● Frontend engineer (Trinity) · checkout page component · waiting for decision D1 · 53m",
+            "  │  │     └─ ● QA engineer (Mouse) · probe payloads · working · 40m",  # as dev crew owner reads it
             "  │  ├─ ○ 4. write the docs · waiting for 3 · Tech lead (Morpheus) · [docs] · after 2, 3",
-            "  │  ├─ – 5. load test · skipped · Tech lead (Morpheus) · after 1",
+            "  │  ├─ – 1 skipped step: 5. load test · dev crew graph --all shows them",  # folded
             "  │  └─ Lanes with no step",
             "  │     └─ ○ general-purpose · Codex settings research · done · 7m",
             "  ├─ Work items linked to the run",
@@ -143,7 +143,7 @@ class SessionGraphTests(unittest.TestCase):
         self.assertEqual(missing, [], "\n".join(lines))
         self.assertEqual([lines.index(ln) for ln in expected], sorted(lines.index(ln) for ln in expected))
         status = lines[lines.index("  ├─ Run · Checkout flow (F-fxcheckout1)") + 1]
-        self.assertTrue(status.startswith("  │  running · mode guided · 3/5 · "), status)
+        self.assertTrue(status.startswith("  │  running · mode guided · 2 of 4 steps · 1 skipped · "), status)
         self.assertIn("ETA ~", status)
         self.assertNotIn("Unrelated now task", "\n".join(lines))  # the run links its tasks: no Now list
 
@@ -152,7 +152,7 @@ class SessionGraphTests(unittest.TestCase):
         run = pg.load_run("claude", "s1")
         run["plan"][3]["name"] = 'write the "docs" <now>'  # a label that would break Mermaid unescaped
         pg.run_path("claude", "s1").write_text(json.dumps(run))
-        rc, out, _ = run_cli("crew", "graph", "--mermaid")
+        rc, out, _ = run_cli("crew", "graph", "--latest", "--mermaid")  # one session's flowchart
         self.assertEqual(rc, 0)
         lines = [ln.strip() for ln in out.strip().splitlines()]
         self.assertEqual(lines[0], "flowchart TD")
@@ -193,7 +193,7 @@ class SessionGraphTests(unittest.TestCase):
         run = pg.load_run("claude", "s1")
         run["plan"][3]["after"] += ["checkout page component"]  # a run edited by hand repeats a dependency
         pg.run_path("claude", "s1").write_text(json.dumps(run))
-        rc, out, _ = run_cli("crew", "graph", "--json")
+        rc, out, _ = run_cli("crew", "graph", "--latest", "--json")  # one session's nodes and edges
         self.assertEqual(rc, 0)
         g = json.loads(out)
         nodes = {n["id"]: n for n in g["nodes"]}
@@ -209,7 +209,7 @@ class SessionGraphTests(unittest.TestCase):
         self.assertEqual({(f, t) for f, t, k in edges if k == "after"},
                          {("s1", "s2"), ("s1", "s3"), ("s2", "s4"), ("s3", "s4"), ("s1", "s5")})
         lanes = {n["ref"]: n for n in g["nodes"] if n["kind"] == "lane"}
-        self.assertEqual({r: (n["who"], n["state"], n["parent"]) for r, n in lanes.items()},
+        self.assertEqual({r: (n["who"], n["recorded"], n["parent"]) for r, n in lanes.items()},
                          {"a1": ("Backend engineer (Tank)", "done", None),
                           "a2": ("Frontend engineer (Trinity)", "running", None),
                           "a4": ("general-purpose", "done", None),
@@ -262,11 +262,13 @@ class SessionGraphTests(unittest.TestCase):
         self.assertIn("F-fxcheckout1 · doing · Checkout flow", text)
 
     def test_an_empty_session_says_there_is_no_run_and_how_to_start_one(self):
-        rc, out, _ = run_cli("crew", "graph")
+        with mock.patch.object(pg, "_project", lambda cwd=None: "acme/api"):
+            rc, out, _ = run_cli("crew", "graph")
+            self.assertEqual(json.loads(run_cli("crew", "graph", "--json")[1])["sessions"], [])
         self.assertEqual(rc, 0)
-        self.assertIn("No progress run in this session", out)
+        self.assertIn("Crew graph · acme/api · 0 sessions", out)
+        self.assertIn("No live progress run in this project", out)
         self.assertIn('dev progress start "<goal>" --plan', out)
-        self.assertEqual(json.loads(run_cli("crew", "graph", "--json")[1])["nodes"], [])
         self.assertIn("No running progress run on this Mac", run_cli("crew", "graph", "--latest")[1])
         self.assertEqual(run_cli("crew", "graph", "--mermaid")[1].splitlines()[0], "flowchart TD")
 

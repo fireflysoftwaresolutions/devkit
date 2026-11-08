@@ -35,7 +35,7 @@ stored or injected. A record is deleted 7 days after its last change, so it outl
 | --- | --- | --- |
 | Before the compaction (PreCompact, manual or automatic) | devkit writes the checkpoint and records the compaction. In the main session, it adds its own instructions to the summarizer's: keep every open request word for word, the run and its current step, the crew still running, the ids of the decisions and messages waiting, the branch and the release state, and the status block rule | devkit writes the checkpoint and records the compaction |
 | After the compaction (PostCompact) | In the main session, devkit compares the summary with its record and keeps what the summary left out: running members, requests, decisions, messages, and the current step. It prints nothing | devkit closes the compaction's record. Codex sends no summary, so there is nothing to compare |
-| The session goes on (SessionStart, source `compact`) | The continuity brief comes first, before the workspace context | The same |
+| The session goes on (SessionStart, source `compact`) | One line about the welcome you saw comes first, then the continuity brief, then the workspace context | The same |
 | The next prompt or tool call | The main session gets "Not in the summary" once, first in the context, and the brief of a compaction that only the transcript showed | — |
 | A crew member's own context is compacted | The member gets a reminder of its role, step, scope, procedure and where it was, the start of its launch brief, and its report format | Not verified yet |
 

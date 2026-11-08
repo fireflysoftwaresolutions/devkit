@@ -39,7 +39,7 @@ Follow these phases in order. A phase is finished when its gate holds; `proof` m
 2. **Find the cause.** Profile and trace to the cause; rule out the others with data. skills: `superpowers:systematic-debugging`, `otel-semantic-conventions` · gate: the cause is proven
 3. **Recommend.** Recommend the fix with its expected gain; the tech lead assigns it. skills: `communicating` · devkit: `dev crew ask` · gate: the expected gain is stated
 4. **Measure again.** Measure after the fix and report before and after. devkit: `dev test` · gate: the gain is measured
-5. **Hand off.** Record the step with its evidence, name who approves it (the RACI), and report with your status block. skills: `communicating` · devkit: `dev progress step`, `dev crew ask` · gate: the step is recorded with its evidence · proof: `dev progress step`
+5. **Hand off.** Record the step with its evidence, name who approves it (the RACI), and report with your status block. devkit: `dev progress step`, `dev crew ask` · gate: the step is recorded with its evidence · proof: `dev progress step`
 
 ## Your place in the crew's RACI
 

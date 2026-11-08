@@ -24,6 +24,7 @@ sys.path.insert(0, str(ROOT / "lib"))
 from devkit import core, guard  # noqa: E402
 
 CWD = str(ROOT)
+DEV_CWD = str(core.DEV / "fireflysoftwaresolutions" / "devkit")  # a project of the run's dev root
 STATE = core.HOME / ".local" / "state" / "devkit"
 CONFIG_DIR = core.HOME / ".config" / "devkit"
 PROBE = STATE / "runs" / "k1-probe-run.json"  # a name no real run uses; nothing is written to it
@@ -306,8 +307,10 @@ class HookWiringTests(unittest.TestCase):
         self.addCleanup(p.stop)
 
     def lane(self, cmd, tool="Bash"):
+        # the lane works in a project of the run's dev root: in this checkout's folder its verdicts would follow where
+        # the tree lives (in a copy inside a session scratchpad the scratch-folder rule judges every path first)
         return self.hooks._unroutable_lane_command({"agent_id": "o1", "tool_name": tool, "session_id": "s",
-                                                    "cwd": CWD, "tool_input": {"command": cmd}})
+                                                    "cwd": DEV_CWD, "tool_input": {"command": cmd}})
 
     def write(self, path):
         return self.hooks._scope_violation("claude", {"agent_id": "o1", "tool_name": "Write", "session_id": "s",
@@ -318,7 +321,8 @@ class HookWiringTests(unittest.TestCase):
         for cmd in ("dev crew graph", "dev crew raci backend", 'git log --grep "explain dev progress step"'):
             with self.subTest(cmd=cmd):
                 self.assertIsNone(self.lane(cmd))
-        self.assertIn("command of its own", self.lane("cd lib && dev progress step x") or "")
+        self.assertIsNone(self.lane("cd lib && dev progress step x"))  # routed to the lane (guard.lane_route)
+        self.assertIn("command of its own", self.lane("cd lib && dev progress step x && rm -rf build") or "")
         self.assertIn("command of its own", self.lane(["bash", "-lc", "dev crew decide D1 A"], "exec_command") or "")
         self.assertIn("scratchpad/oracle/", self.lane(f"rm {self.pad}/tank/f3.py") or "")
 

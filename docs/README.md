@@ -11,7 +11,7 @@ machine.
 | --- | --- |
 | [Getting started](getting-started.md) | Your first install step by step, even without a terminal habit; the setup wizard, the pinned copy, Tab completion and the zsh helpers (`dev setup shell`), onboarding another developer, the first-day checklist, updating and `dev update --check`, what devkit touches |
 | [Where to use devkit](surfaces.md) | The six surfaces compared: hooks, guard, crew, routing, skills in briefs, and status block checks on each, and which tutorial to follow |
-| [Concepts](concepts.md) | Workspace layout, project ids, how work is organized, from plan to operate, the handoff repository and notes, worktrees, the guard, the status block, and background sync and scheduled jobs |
+| [Concepts](concepts.md) | Workspace layout, project ids, how work is organized, from plan to operate, the handoff repository and notes, worktrees, the guard, the status block, the session-start welcome, and background sync and scheduled jobs |
 
 ## Tutorials: your first task
 
@@ -31,10 +31,10 @@ block, progress updates, approvals, the crew graph, and the dashboard.
 | Guide | What it covers |
 | --- | --- |
 | [Teams and machines](teams.md) | Sharing a handoff repository: work items, locks, reasons, and history, shipped and stale items and `dev task reconcile`, delegation, versioned plans, session logs, presence, merge rules, a handoff repository that stopped syncing |
-| [Work states](work-states.md) | The states of work items and locks, runs, steps, and crew lanes, decisions and crew messages, CI watches, the pinned install, and branches after a merge: what moves each, where you see it, and how to repair drift |
+| [Work states](work-states.md) | The states of work items and locks, runs, steps, and crew lanes, decisions and crew messages, waits and CI watches, the pinned install, and branches after a merge: what moves each, where you see it, and how to repair drift |
 | [Initiatives](initiatives.md) | Cross-project initiatives: creating them, who may write what, progress, adopting an older handoff repository |
 | [The crew](crew.md) | devkit's 25 specialist agents and the tech lead (Morpheus): who does what, parallel or in sequence, slots, lanes, scopes, messages, delegation, guided or automatic decisions, moot and withdrawn decisions, how your answers to irreversible decisions count, the crew canary, and rooms (planned, not available yet) |
-| [Progress and communication](progress-and-communication.md) | `dev progress`, when a run may end and `dev progress confirm`, ETA and calibrated estimates, notifications, what the hooks add, waits that wake the agent, `dev time`, the message templates, status reports |
+| [Progress and communication](progress-and-communication.md) | `dev progress`, when a run may end and `dev progress confirm`, ETA and calibrated estimates, notifications, what the hooks add, waiting and waking (`dev watch --wait`, the one wait for every devkit event), `dev time`, the message templates, status reports |
 | [Continuity](continuity.md) | What devkit keeps of a session through compaction, resume, and `/clear`, the continuity brief, `dev session`, and `devkit_resume` in chat |
 | [Dashboard](dashboard.md) | The live command center: `dev dashboard` and its server, Now (the view it opens on: does anything need you), the views, Background work, the crew, drawers, live and honest states, search, shortcuts, routes |
 | [Git and GitHub](git-and-github.md) | `dev branch`, `commit`, `rebase`, `push`, `pr`, `run`, `release`, and `issue`: local CI evidence, the PR template, safe merges, releases by the policy |

@@ -1,0 +1,26 @@
+# What Semgrep skips in this repository. Without this file Semgrep applies its built-in list, which also skips test/
+# and tests/: devkit's tests hold fixtures, scripts and hook payloads that run on the developer's machine, so the
+# scans cover them on purpose. Only build output, caches and vendored files are left out.
+
+# Build output
+dist/
+build/
+
+# Caches
+__pycache__/
+*.pyc
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+.playwright/
+
+# Vendored and installed dependencies
+node_modules/
+vendor/
+.venv/
+venv/
+*.min.js
+
+# Semgrep's own rules folder and logs
+.semgrep/
+.semgrep_logs/

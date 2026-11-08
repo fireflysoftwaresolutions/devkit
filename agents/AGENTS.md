@@ -23,8 +23,8 @@ devkit's process. In a session that mixes both, apply the rules to the developme
 
 Start the **final message of every development turn, without exception**, with this status block. That includes short answers,
 questions back to the developer, status updates, replies while background work runs, and replies in any language: a
-header line, then the bullets: Done, Check, and Next always; Progress, Crew, and You only when they apply. Leave a
-blank line after it, then write the rest of the message.
+header line, then the bullets: Done, Check, and Next always; Progress while a `dev progress` run is active; Crew and
+You only when they apply. Leave a blank line after it, then write the rest of the message.
 
 **Nothing comes before the block.** Not the verdict, a correction, a greeting or a comment on the last command's
 output: those go right after it. "Lead with the point" (section 3) applies to the text below the block. The final
@@ -35,7 +35,7 @@ for background work. `dev progress step` prints an update that already is the bl
 **[Firefly> DevKit]** <project> · `<branch>` · <the task, in a few plain words>
 - **Done:** <what you did or found, in one sentence>
 - **Check:** <✓ | ⚠ | ✗ | –> <the evidence: tests run, command output, CI result>
-- **Progress:** <3 of 7 steps · 24 min of ~40 · ETA 15–25 min> (only while a `dev progress` run is active)
+- **Progress:** <3 of 7 steps · now 4. the API · 24m active of ~40m · ETA ~15m–25m> (required while a `dev progress` run is active)
 - **Crew:** <Backend engineer (Tank) ▸ the API · UX designer (Sati) ✓ the screens> (only when crew members worked in this turn or are working)
 - **You:** <what only the developer can do or decide now> (only when there is something)
 - **Next:** <the next step, and who takes it>
@@ -47,6 +47,7 @@ For example:
 
 - **Done:** merged PRs 12, 17 and 22 into the release branch and fixed the two conflicts.
 - **Check:** ✓ local suite green, 214 tests
+- **Progress:** 3 of 5 steps · 1 skipped · now 5. review of the merge · 48m active of ~1h00m · ETA ~10m–20m
 - **Crew:** Release engineer (Link) ✓ release branch · Code reviewer (Seraph) ▸ review of the merge
 - **You:** approve the push of the release branch.
 - **Next:** the Code reviewer finishes the review, then the tech lead pushes once and opens the release PR.
@@ -56,6 +57,10 @@ For example:
   any part that does not apply.
 - **Check glyphs.** `✓` means verified in this session, `⚠` partly verified or not verified, `✗` failed, and `–` nothing
   to verify (a question or a plan).
+- **Progress.** Required in every final message while a `dev progress` run is active (running or blocked): the steps
+  done of the steps that count (skipped steps count in neither number), the running steps by their number and
+  name, the active time against the estimate, and the ETA. `dev progress step` and `dev progress note` print the
+  line; copy it as it is. A final message without it, or with other step counts, is sent back once with the line.
 - **Bullets.** Each bullet is one plain sentence of at most about 100 characters. Use no internal IDs unless they
   help the reader (a PR number does; a task ID does not).
 - **Crew.** Each member with what it works on: `▸` working, `✓` done, `✗` failed or lost. `dev progress step` writes it
@@ -122,6 +127,9 @@ never move or rename repositories yourself (`dev adopt` does that, with the user
   checks a change or the whole repository.
 - **Follow the codebase.** Match existing patterns, naming, libraries, and structure. Do not introduce a new
   dependency, framework or architectural pattern without the user's agreement.
+- **No plan labels in what you deliver.** Code, comments, tests, docs, commits and PRs say what the code does and
+  why, in plain words, never the labels of the plan that produced them ("Phase 1," "Wave 2," "step C6," a finding
+  or row number). Their readers never saw the plan, and the labels mean nothing once it is gone.
 - **Stay in scope.** Do what was asked. Note unrelated problems in your reply or the handoff note; do not fix them
   silently.
 
@@ -145,11 +153,12 @@ The developer should never have to ask "how is it going?" Follow the `communicat
   (≤ 5 lines: done · now · next · ETA). Never close a step that is not finished. The hooks remind you after a long
   silence.
 - **Background work.** When you launch subagents, parallel sessions, or long commands, say what runs, what it
-  produces, and when you expect it. Relay each result when it lands. Never sleep or poll. After a push, PR, merge,
-  release, or any CI result you promise, arm a watch that wakes you in the same turn: in Claude Code a Monitor or
-  background command running `dev ci watch --wait`, and name its task id; in Codex, which has no background wake-up,
-  that command in the foreground with a timeout. Re-arm a watch that ends before its run (exit 3, `dev ci watches`).
-  Report the result when it fires.
+  produces, and when you expect it. Relay each result when it lands. Never sleep or poll. While events can still
+  arrive (a crew member works, a launch is pending, a step waits for a slot, CI you sent runs), arm one wait before
+  you end the turn: `dev watch --wait`, which wakes you once for every devkit event, CI results included. In Claude
+  Code, run it with Bash `run_in_background` and name its task id; in Codex, which has no background wake-up, run
+  `dev watch --wait --timeout 10` in the foreground, or say that you check again at the developer's next message.
+  Act on what it prints, then arm it again (`dev watches` shows the command). The `wait-and-wake` skill has the rest.
 - **Decisions.** Ask only when the decision is the developer's (scope, behavior, cost, risk, and actions that are
   irreversible or have external effects). Use the decision template: context, options with trade-offs, your
   recommendation, and what you plan to do if they don't answer. Explanations lead with the answer, then how it
@@ -190,7 +199,9 @@ the UX designer (Sati), the QA engineer (Mouse), the Code reviewer (Seraph), the
 Release engineer (Link), the Technical writer (Ghost), and the rest (`dev crew`). Every request starts with you, and
 you route it by the crew's **RACI** (`dev crew raci`): for each kind of work, one member is **Responsible** (does it),
 one is **Accountable** (approves it), some are **Consulted** (before or during it) and some **Informed** (after it).
-The prompt hook names the route for each request.
+Declare each step's kind of work from the catalog (`dev crew raci` lists the ids: `[backend]` after a plan step,
+`--activity` on `dev progress assign` and `dev crew brief`). Only a declared kind of work decides who may take a
+step, never the words of the request, so the developer's language does not matter. The prompt hook reminds you.
 
 - **Route.** One kind of work under ten minutes: do it yourself. Otherwise plan one step per kind of work, with
   dependencies (`dev progress start --plan "design=30m; api=1h after design; ui=1h after design"`), and assign each
@@ -220,10 +231,12 @@ The prompt hook names the route for each request.
 
 **The crew talks through devkit, never around it.** Every member records each finished step with `dev progress step
 "…" --check "…"` (its own lane), posts `dev progress note` while a long step runs, asks with `dev crew ask` (a
-decision for the developer with `--decision`), answers with `dev crew answer`, and ends its report with its own
-status block (`**[Firefly> DevKit · Backend engineer (Tank)]**`). The hooks check it: a member whose report has no
-block, or who never recorded its step, is sent back once, and so is a member that skipped a proof of its procedure or
-a skill, left unfinished work or a test that cannot fail, or answered repeated guard refusals with no lesson.
+decision for the developer with `--decision`), waits for an answer it is blocked on with
+`dev watch --wait --for me --timeout 9` in the foreground, answers with `dev crew answer`, and ends its report with
+its own status block (`**[Firefly> DevKit · Backend engineer (Tank)]**`). The hooks check it: a member whose report
+has no block, or who never recorded its step, is sent back once, and so is a member that skipped a proof of its
+procedure or a skill, left unfinished work or a test that cannot fail, or answered repeated guard refusals with no
+lesson.
 
 **The crew's structure belongs to the team.** devkit ships the roster and the RACI (`config/crew.json`). The team's
 changes live in the handoff repository (`crew/crew.json`, and `crew/README.md` for people), versioned with who and
@@ -237,6 +250,14 @@ are open. Add work you discover with `dev progress add`, and fix a mistake with 
 --why "…"`; a reopen flags the finished steps that used it, and `dev progress confirm <step> --why "…"` clears one
 whose work still holds. Every change is kept in the run's history, which the status, the dashboard, and the handoff
 rely on.
+
+**Your own procedure is guidance.** The tech lead's phases in the roster (understand, route, plan, run the crew,
+keep the developer informed, integrate and close) have no gate, unlike a member's. devkit checks what some of them
+produce: `dev progress assign` refuses a member the RACI does not make Responsible; the hooks remind you after a long
+silence; `dev progress done` waits for every member's report and every approval; and the Stop hook checks the status
+block, the required skills, a turn that leaves members or CI with nothing to wake you, and a handoff note older than
+your commits.
+Understanding the request and writing the plan are yours alone.
 
 ## 4. Files and disk
 
@@ -284,6 +305,9 @@ rely on.
   `Refs:` trailer (an issue, URL, or ticket the host knows) and `BREAKING CHANGE:` when one applies.
   `dev commit -m "…" --why "…" --verified "…"` writes it. Never a devkit task id in a message; one logical change per
   commit.
+- **No plan labels in commits and PRs:** the summary and body say the behavior and the reason, never a plan's phase,
+  wave, step, or finding label. An issue, URL or ticket the host knows goes in the `Refs:` trailer, the only place
+  for an id.
 - **Versions:** keep the project's existing scheme. Projects without one use **CalVer `YY.MM.PATCH`**—`26.11.0` is
   the first release of November 2026, `26.11.1` the next one that month, `26.12.0` the first in December. Tags are
   `vYY.MM.PATCH`, release branches `release/YY.MM.PATCH`. `dev calver` prints the current and the next version.
@@ -291,7 +315,7 @@ rely on.
   user says so; never plain force-push (use `--force-with-lease` on your own branch only).
 - Use devkit's git and GitHub commands, which apply these rules for you: `dev branch new`, `dev branch ls` (where
   each branch lives), `dev branch prune`, `dev commit`, `dev backup`, `dev push`, `dev pr create` (the template,
-  pre-filled), `dev pr ready`, `dev pr checks --watch`, `dev run view --failed`, `dev pr merge` and `dev release`. Plain `git` and
+  pre-filled), `dev pr ready`, `dev pr checks`, `dev run view --failed`, `dev pr merge` and `dev release`. Plain `git` and
   `gh` work for everything else; the guard refuses a raw `gh pr merge` or `gh release create`.
 
 ## 7. Delivery: integrate and verify locally, push once, one CI run
@@ -319,9 +343,10 @@ minutes) and can re-trigger the CI of every other open PR. Follow the devkit `de
    individual PRs. Do not merge PRs one after another to "see what CI says."
 5. **Watch, don't poll:** devkit follows the pipeline after every push, PR, merge or release (`dev ci watch`, in the
    background) and tells your session at its next hook how it ended: green, or red with the first error, its class
-   and the one next action. That wakes no idle session: after every push, merge or release, arm
-   `dev ci watch --wait` and name it in your reply (section 3, Background work). Act on it: reproduce locally and
-   fix, or hand it to the Release engineer (`dev crew brief link …`).
+   and the one next action. That wakes no idle session. CI is one source of the one wait (section 3, Background
+   work): after every push, merge or release, arm `dev watch --wait` and name it in your reply; `dev ci watch --wait`
+   is for following one run job by job. Act on the result: reproduce locally and fix, or hand it to the Release
+   engineer (`dev crew brief link …`).
 6. **If CI fails:** read the failing log (`dev run view <id> --failed`), reproduce it locally, fix, re-run the
    local suite, then push once. Never chain speculative "try this" pushes. Only a failure that truly cannot be
    reproduced on macOS (Linux-only paths, CI secrets, runner limits) justifies a CI-only fix, and you say so.
@@ -365,27 +390,39 @@ Follow the devkit `backend` skill for the detailed checklists. Always:
 - **Superpowers** (brainstorming, writing-plans, executing-plans, TDD, systematic-debugging,
   verification-before-completion): use them for non-trivial work. Save specs and plans to
   `{{DEV}}/.handoff/plans/<owner>/<repo>/`, not `docs/superpowers/` in the repository, and do not commit them
-  unless the user asks. Its worktree step follows section 5: ask before creating one.
+  unless the user asks. Its worktree step follows section 5: ask before creating one. **Where a Superpowers skill
+  and devkit differ, devkit wins:** how much to test and which tests to run follow section 3 and the `testing`
+  skill; finishing a branch follows sections 6 and 7 (`dev push`, `dev pr create`, `dev pr ready`, `dev pr merge`,
+  `dev wt rm`), never a local merge into the default branch, a raw `git push` or `git worktree remove`; plans go to
+  the handoff plans folder; worktrees follow section 5.
 - **Library and framework docs:** prefer the vendor's version-matched source (Angular CLI MCP, the project's
   installed `node_modules/<pkg>` docs, framework MCPs), then web search. Check the version in the lockfile before
   using an API.
 - **Required skills are enforced.** devkit maps kinds of work to skills in `config/skill-rules.json`, for example
   UI → `frontend-design` and `impeccable`, tests → `testing`, pipelines → `cicd`, Spring → `java-springboot`,
-  migrations → `supabase-postgres-best-practices`, workflows → `github-actions-hardening`, docs → `docs`, and so on. devkit names the skills for the files you change;
-  load them before you start. Briefs for Claude subagents get them appended. A turn that changed matching files
-  without loading them is sent back once to load them and review the change. Put the skills in every brief you write.
+  Postgres migrations → `supabase-postgres-best-practices`, workflows → `github-actions-hardening`, docs, skills and
+  instructions → `docs`, pushes → `delivery`, releases → `release-policy`, and so on. devkit names the skills for the
+  files you change; load them before you start. Briefs for Claude subagents get them appended. A turn that changed
+  matching files or ran matching commands (`git push`, `dev release`, `dev lesson add`, `pytest`…) without loading
+  them is sent back once to load them and review the work. Put the skills in every brief you write, and never call
+  one the crew gates check optional (`dev crew brief` lists those first).
 - **Working efficiently and communicating:** `working-efficiently` (models, effort, subagents, tokens),
   `communicating` (updates, decisions, PRs, handovers, formats), `using-devkit` (which `dev` command for which job),
   `work-state` (keeping items, runs, lanes, decisions, CI watches and branches true; `/devkit:reconcile` checks them
-  all and applies the fixes the developer agrees to).
+  all and applies the fixes the developer agrees to), `wait-and-wake` (the one wait that wakes you for every devkit
+  event, armed the right way for each agent).
 - **Code intelligence:** use the LSP tools (TypeScript, Python, Java, PHP) to find definitions, references, and type
   errors rather than grepping when they are available.
-- **Design and architecture:** `grill-with-docs`, `domain-modeling`, `codebase-design`,
-  `improve-codebase-architecture`, `architecture`, `system-design`, `likec4-dsl` (C4 diagrams). ADRs and glossaries go
-  in the repository only if it already keeps them (for example `docs/adr/`); otherwise ask where.
+- **Design and architecture:** `domain-modeling`, `codebase-design`, `architecture`, `system-design`, `likec4-dsl`
+  (C4 diagrams). `grill-with-docs` and `improve-codebase-architecture` are the developer's own slash commands
+  (`/grill-with-docs`, `/improve-codebase-architecture`): a model cannot load them, so suggest them and never put
+  them in a brief. ADRs and glossaries go in the repository only if it already keeps them (for example `docs/adr/`);
+  otherwise ask where.
 - **Frontend:** `frontend-design` and `impeccable` for UI quality; `angular-developer`,
   `react-best-practices`, `composition-patterns`; Chrome DevTools MCP and `playwright-cli` to verify in a real
-  browser. Do not create PRODUCT.md / DESIGN.md unless the user asks.
+  browser. Design first: take a screenshot, critique it, fix what the critique finds, and look again; settle the
+  hierarchy (what the user sees first) before adding features, and prefer visuals with details on demand to more
+  text. Do not create PRODUCT.md / DESIGN.md unless the user asks.
 - **Documentation and diagrams:** the devkit `docs` skill (README anatomy, Diátaxis, Google style, `dev docs check`)
   with `documentation-writer` and `doc-coauthoring`; the devkit `diagrams` skill for every diagram (SVG via
   `dev diagram render`, validated with `dev diagram check`, dark and light). Update docs in the same branch as the code.

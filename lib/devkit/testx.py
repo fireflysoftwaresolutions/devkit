@@ -2154,10 +2154,41 @@ def _restore_base(top, base, dest, files) -> None:
         elif os.path.lexists(dst):
             os.remove(dst)
     for d, subs, _ in os.walk(dest):
-        subs[:] = [s for s in subs if s not in DEP_DIRS]
+        subs[:] = [s for s in subs if s not in DEP_DIRS and s != ".git"]
         if "__pycache__" in subs:
             shutil.rmtree(os.path.join(d, "__pycache__"), ignore_errors=True)
             subs.remove("__pycache__")
+
+
+def _carry_git(top, dest) -> str:
+    """Give the copy at `dest` the checkout's git repository, so a test that runs git on its own checkout (its files,
+    branch, history or origin) sees in the copy what it sees in the checkout: a clone that shares the checkout's
+    objects (no history is copied), with its branches, remote branches and tags, HEAD on the same branch and commit,
+    the index at that commit and the checkout's origin URL. The work files stay the copy's. Returns '' when the copy
+    has the repository, else why not (the copy then has none)."""
+    parent = tempfile.mkdtemp(prefix="devkit-prove-git-", dir=os.path.dirname(str(dest)))
+    try:
+        clone = os.path.join(parent, "c")
+        rc, _, err = core.sh(["git", "clone", "-q", "--shared", "--no-checkout", str(top), clone], timeout=120)
+        if rc != 0:
+            return f"git clone: {err or rc}"
+        os.rename(os.path.join(clone, ".git"), os.path.join(str(dest), ".git"))
+    finally:
+        shutil.rmtree(parent, ignore_errors=True)
+    head = _git(top, "rev-parse", "--verify", "-q", "HEAD")
+    branch = _git(top, "symbolic-ref", "-q", "HEAD")
+    url = _git(top, "config", "--get", "remote.origin.url")
+    steps = [["fetch", "-q", "--prune", "--update-head-ok", str(top), "+refs/heads/*:refs/heads/*",
+              "+refs/remotes/*:refs/remotes/*", "+refs/tags/*:refs/tags/*"],
+             ["symbolic-ref", "HEAD", branch] if branch else ["update-ref", "--no-deref", "HEAD", head],
+             ["reset", "-q"],
+             ["remote", "set-url", "origin", url] if url else ["remote", "remove", "origin"]]
+    for args in steps:
+        rc, _, err = core.git(dest, *args, timeout=120)
+        if rc != 0:
+            shutil.rmtree(os.path.join(str(dest), ".git"), ignore_errors=True)
+            return f"git {args[0]}: {err or rc}"
+    return ""
 
 
 def _prove(a, top, runners) -> int:
@@ -2167,6 +2198,7 @@ def _prove(a, top, runners) -> int:
     changed = changed_files(top, a.since)
     repo = _Repo(top)
     prod = [f for f in changed if not is_test_file(f)]
+    helpers = [f for f in changed if is_test_file(f) and not _runnable(f)]  # test helpers, conftest.py, fixtures
     if a.tests:
         tests = []
         for t in a.tests:
@@ -2176,9 +2208,10 @@ def _prove(a, top, runners) -> int:
             tests.append(rel)
     else:
         tests = [f for f in changed if _runnable(f) and f in repo.ex]
-    if not prod:
-        return _refuse(f"no production change to prove against: only tests changed since {label}",
-                       "prove checks that each new test fails without your code change; compare with --since <ref>")
+    if not prod and not helpers:
+        return _refuse(f"no production change to prove against: only test modules changed since {label}",
+                       "prove checks that each new test fails without your change (code outside the tests, a test "
+                       "helper or a fixture); compare with --since <ref>")
     if not tests:
         return _refuse(f"no new or changed tests since {label}",
                        "write the test first, or name it: dev test prove <test file>")
@@ -2199,7 +2232,7 @@ def _prove(a, top, runners) -> int:
     parent.mkdir(parents=True, exist_ok=True)
     dest = tempfile.mkdtemp(prefix="devkit-prove-", dir=str(parent))
     env = {"PYTHONDONTWRITEBYTECODE": "1"}
-    found, problem = {}, None
+    found, problem, gitless = {}, None, ""
 
     def place(res, members):
         hits = []
@@ -2219,6 +2252,7 @@ def _prove(a, top, runners) -> int:
 
     try:
         _copy_worktree(top, dest)
+        gitless = _carry_git(top, dest)
         for n in range(runs):
             for r, sel, members in groups.values():
                 res = run_tests(dest, r, files=sel["files"], ids=sel["ids"], env=env)
@@ -2238,7 +2272,7 @@ def _prove(a, top, runners) -> int:
                 break
         without = {}
         if not problem:
-            _restore_base(top, base, dest, prod)
+            _restore_base(top, base, dest, prod + helpers)
             for r, sel, members in groups.values():
                 res = run_tests(dest, r, files=sel["files"], ids=sel["ids"], env=env)
                 for key, c in place(res, members):
@@ -2262,10 +2296,16 @@ def _prove(a, top, runners) -> int:
                      "verdict": verdict, "message": msg if st == "failed" else rec["message"]})
     rc = 0 if rows and all(x["verdict"] == "proves the change" for x in rows) else 1
     if a.json:
-        print(json.dumps({"base": label, "production": prod, "runs": runs, "tests": rows, "exit": rc}, indent=1))
+        print(json.dumps({"base": label, "production": prod, "helpers": helpers,
+                          "git": f"none: {gitless}" if gitless else "carried", "runs": runs, "tests": rows,
+                          "exit": rc}, indent=1))
         return rc
-    print(ui.section(f"Prove · {len(rows)} new or changed test(s) · production change: "
-                     f"{', '.join(prod[:3])}{' …' if len(prod) > 3 else ''} (restored from {label} for the last run)"))
+    change = prod + helpers
+    print(ui.section(f"Prove · {len(rows)} new or changed test(s) · change: "
+                     f"{', '.join(change[:3])}{' …' if len(change) > 3 else ''}"
+                     f"{f' ({len(helpers)} in the tests)' if helpers else ''} (restored from {label} for the last run)"))
+    if gitless:
+        print(f"  {ui.WARN} the copy has no git repository ({gitless}): a test that runs git on its checkout fails there")
     green = sum(1 for x in rows if x["with_change"] == f"{runs}/{runs}")
     print(f"  {ui.OK if green == len(rows) else ui.FAIL} with the change: {green} of {len(rows)} test(s) passed "
           f"{runs} of {runs} runs")

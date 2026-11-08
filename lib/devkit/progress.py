@@ -299,6 +299,55 @@ def call_closed(data: dict):
             pass
 
 
+EDIT_TOOLS = ("Write", "Edit", "MultiEdit")  # the tools that name the one file they change (tool_input.file_path)
+EDIT_SLACK = 2.0  # seconds an edit may precede a shell call's start and still fall in its window (hook ordering)
+EDIT_KEEP = 12 * 3600  # seconds the edit record keeps a call: a lane's whole life, which the crew gates read
+EDIT_MAX = 1000  # edit calls the record keeps at most, newest last
+
+
+def _edits_path(sid: str) -> Path:
+    """The session's recent edit calls, beside its open calls (a dot-file: the ledger's readers skip it)."""
+    return CALLS / _safe_name(sid) / ".edits.json"
+
+
+def note_edit(agent: str, data: dict, now: float | None = None):
+    """PostToolUse of a Write, Edit or MultiEdit: the file it changed, who changed it (the agent_id, or main) and when,
+    kept for EDIT_KEEP, so write detection credits a file to whoever really edited it (scope_written) and the crew
+    gates credit a member only with what it wrote (gates.crew_gates). Under the record's lock; a busy lock drops this
+    one record (state audits it)."""
+    if data.get("tool_name") not in EDIT_TOOLS:
+        return
+    path, sid = (data.get("tool_input") or {}).get("file_path"), _safe_name(data.get("session_id"))
+    if not sid or not isinstance(path, str) or not path.strip():
+        return
+    now = now or time.time()
+    who = str(data.get("agent_id") or "main")[:80]
+
+    def add(doc):
+        kept = [e for e in doc.get("edits") or [] if isinstance(e, dict) and now - (e.get("ts") or 0) <= EDIT_KEEP]
+        doc["edits"] = (kept + [{"ts": round(now, 3), "caller": who, "path": path[:1024]}])[-EDIT_MAX:]
+    try:
+        state.update(_edits_path(sid), add)
+    except state.StateBusy:
+        pass
+
+
+def edits_since(sid: str, since: float, now: float | None = None) -> list:
+    """The edit calls of the session recorded from `since` (less EDIT_SLACK) to now: [{ts, caller, path}]."""
+    now = now or time.time()
+    doc = core.read_json(_edits_path(sid), {}) or {}
+    return [e for e in doc.get("edits") or [] if isinstance(e, dict)
+            and since - EDIT_SLACK <= (e.get("ts") or 0) <= now + EDIT_SLACK]
+
+
+def _edited(edit_path: str, rel: str) -> bool:
+    """Does an edit call's file (absolute, as the tool names it) name `rel`, a path relative to the repository?"""
+    e, r = str(edit_path or "").replace("\\", "/"), str(rel or "").replace("\\", "/")
+    while r.startswith("./"):  # only a leading "./": a dotfile (.github/…, .env) keeps its dot
+        r = r[2:]
+    return bool(r) and (e == r or e.endswith("/" + r))
+
+
 def open_calls(sid: str, now: float | None = None) -> list:
     """The session's open calls, oldest first. An entry past its ttl got no result (the tool was cut off, or another
     hook refused it): it is removed and audited as calls.unclosed."""
@@ -499,7 +548,8 @@ PACE_MIN, PACE_MAX = 0.5, 2.5
 
 def parse_plan(plan) -> list:
     """"design=30m; build=2h after design [backend]; docs" -> [(name, minutes or None, [steps it waits for],
-    activity id or "")]. The [id] tag declares the step's kind of work (an id from dev crew raci)."""
+    activity id or "")]. The [id] tag declares the step's kind of work (an id from dev crew raci). A name that still
+    holds an estimate ("a=5h b", two specs run together) is refused: StepError."""
     from . import raci
     items = plan if isinstance(plan, (list, tuple)) else str(plan or "").split(";")
     out = []
@@ -512,11 +562,40 @@ def parse_plan(plan) -> list:
         if m:
             raw, after = m.group(1).strip(), [x.strip() for x in re.split(r"[,&]|\band\b", m.group(2)) if x.strip()]
         m = re.match(r"^(.*?)\s*[=@]\s*(\d[\dhm.\s]*)$", raw)
-        if m and parse_minutes(m.group(2)):
-            out.append((m.group(1).strip(), parse_minutes(m.group(2)), after, act))
-        else:
-            out.append((raw, None, after, act))
+        name, est = (m.group(1).strip(), parse_minutes(m.group(2))) if m and parse_minutes(m.group(2)) else (raw, None)
+        if "=" in name or re.search(r"@\s*\d", name):
+            raise StepError(f"step “{name}” holds another estimate: separate the steps with ; "
+                            f"(dev progress add \"a=5h; b=2h\")")
+        out.append((name, est, after, act))
     return out
+
+
+def spec_args(args) -> list:
+    """The step specs of `dev progress add <spec>…`: each argument with a space in it is a spec of its own (the shell
+    kept it whole, so it was quoted), and arguments without one are the words of one spec typed without quotes
+    (review=20m after api); a group of words that opens with `after` or a [tag] finishes the spec before it. Each
+    spec may hold several steps separated by ;."""
+    out, words = [], []
+
+    def flush():
+        if words:
+            grp = " ".join(words)
+            if out and (grp.lower().startswith("after ") or grp.startswith("[")):
+                out[-1] += " " + grp
+            else:
+                out.append(grp)
+            words.clear()
+    for a in args if isinstance(args, (list, tuple)) else [args]:
+        a = str(a or "").strip()
+        if not a:
+            continue
+        if re.search(r"\s", a):
+            flush()
+            out.append(a)
+        else:
+            words.append(a)
+    flush()
+    return [p.strip() for s in out for p in s.split(";") if p.strip()]
 
 
 def _new_step(name, est=None):
@@ -897,17 +976,56 @@ def _project(cwd=None) -> str:
         return ""
 
 
+STEP_NAME_MAX = 40  # characters of a step's name on the Progress line, so the line stays one line
+STEPS_NAMED = 3  # running steps the Progress line names; the rest are counted ("+2")
+
+
+def step_counts(run: dict) -> tuple:
+    """(done, the steps that count, skipped): a skipped step counts in neither of the first two numbers, so
+    "2 of 5 steps" means two finished steps of the five that will be worked on."""
+    plan = (normalize(run) or {}).get("plan") or []
+    skipped = sum(1 for s in plan if s.get("state") == "skipped")
+    return sum(1 for s in plan if s.get("state") == "done"), len(plan) - skipped, skipped
+
+
+def _short(name: str, limit: int = STEP_NAME_MAX) -> str:
+    """A step's name within `limit` characters, cut at a word with "…"."""
+    name = " ".join(str(name or "").split())
+    if len(name) <= limit:
+        return name
+    cut = name[:limit - 1]
+    cut = cut[:cut.rfind(" ")] if " " in cut else cut
+    return cut.rstrip(" ,;:·") + "…"
+
+
+def _steps_in(plan: list, state: str) -> str:
+    """The plan's steps in `state` as "2. guard findings, 4. welcome research" (their number in the plan, as the
+    checklist under the status block shows them), at most STEPS_NAMED and "+N" for the rest; '' when none."""
+    hits = [f"{i}. {_short(s.get('name'))}" for i, s in enumerate(plan, 1) if s.get("state") == state]
+    if len(hits) > STEPS_NAMED:
+        return ", ".join(hits[:STEPS_NAMED]) + f" +{len(hits) - STEPS_NAMED}"
+    return ", ".join(hits)
+
+
 def headline(run: dict, now: float | None = None, states=None) -> str:
-    """'2/6 · 42m active (1h05m wall) of ~3h00m · ETA ~24m–37m · 2 agents working · 1 agent stale': the members
-    that still work and those that went stale (lane_states, read when `states` is None); one that ended is not
-    counted."""
+    """The status block's Progress line, also what dev status, dev crew and the dashboard show for a run:
+    '14 of 21 steps · 11 skipped · now 28. guard findings, 33. welcome research · 42m active (1h05m wall) of ~3h00m
+    · ETA ~24m–37m · 2 agents working · 1 agent stale'. Skipped steps count in neither number (step_counts); the
+    running steps (or the blocked ones) carry their number in the plan; then the members that still work and those
+    that went stale (lane_states, read when `states` is None); one that ended is not counted."""
     now = now or time.time()
     run = normalize(run)
     plan = run.get("plan") or []
-    done = sum(1 for s in plan if s.get("state") in ("done", "skipped"))
+    done, counted, skipped = step_counts(run)
     act, wall = active_minutes(run, now=run.get("finished") or now), wall_minutes(run, now)
-    parts = [f"{done}/{len(plan)}" if plan else "no plan",
-             f"{fmt_min(act)} active" + (f" ({fmt_min(wall)} wall)" if wall - act >= 5 else "")]
+    parts = [f"{done} of {counted} steps" if plan else "no plan"]
+    if skipped:
+        parts.append(f"{skipped} skipped")
+    for state, word in (("running", "now"), ("blocked", "blocked")):
+        named = _steps_in(plan, state)
+        if named:
+            parts.append(f"{word} {named}")
+    parts.append(f"{fmt_min(act)} active" + (f" ({fmt_min(wall)} wall)" if wall - act >= 5 else ""))
     if run.get("estimate"):
         parts[-1] += f" of ~{fmt_about(run.get('estimate_cal') or run['estimate'])}"
     if run.get("state") == "running":
@@ -972,14 +1090,19 @@ def start(goal: str, steps: int = 0, estimate: str = "", cwd: str | None = None,
                 raise StepError(f"a run is live in this session: “{live['goal']}” ({done_} of "
                                 f"{len(live.get('plan') or [])} steps). Add to it (dev progress add), end it (dev "
                                 f"progress done), or replace it: dev progress start … --replace --why \"<reason>\"")
-            # its pending decisions belong to it: closed, and kept with the reason in the run that replaces it
+            # its pending decisions and waiting questions belong to it: closed, and kept with the reason in the run
+            # that replaces it
             closed = _close_decisions(live, f"run replaced: {why.strip()[:240]}", now, history_run=run)
+            closed_msgs = _close_messages(live, f"run replaced: {why.strip()[:240]}", now)
             run["replaced"] = {"goal": live["goal"], "started": live.get("started"), "ts": round(now),
                                "why": why.strip()[:300]}
             if closed:
                 run["replaced"]["decisions"] = closed
+            if closed_msgs:
+                run["replaced"]["messages"] = closed_msgs
             _audit("progress.replace", live["goal"][:120], why.strip()[:300], project=run.get("project") or "")
             _audit_closed(run, closed)
+            _audit_closed_messages(run, closed_msgs)
         _save(run)
     _publish()
     return run
@@ -1143,6 +1266,7 @@ def assign(which, label: str, cwd: str | None = None, now: float | None = None, 
             _log_change(run, s, s.get("state"), "pending", "main", f"reassigned from {old} to {label}", now)
             s.update(owner="main", state="pending")  # the other member's lane no longer owns it
         s["label"] = label
+        s["assigned_at"] = round(now, 3)  # a step assigned after the developer's mid-turn message is their request
         if wanted:
             held = dict(s.get("allow_evidence") or {})
             for act in wanted:
@@ -1166,30 +1290,72 @@ def assign(which, label: str, cwd: str | None = None, now: float | None = None, 
                                         f"wait until they finish.")
             s["scope"] = globs
         working = [k for k, v in live if _label_matches(label, v)]
-        lane_id = None if deps_open(run, s) else next((k for k in working if s.get("owner") == k
-                                                       or _launch_takes(run, k, s)), None)
+        # its launch's lane first; else a working lane of the member with no other open step (a member resumed
+        # with SendMessage keeps its first launch's words)
+        lane_id = None if deps_open(run, s) else next(
+            (k for k in working if s.get("owner") == k or _launch_takes(run, k, s)),
+            next((k for k in working if not _open_step_of(run, k, s)), None))
         if working and not lane_id and not deps_open(run, s) and s.get("state") not in DONE:
             from . import crew
             busy = run["agents"][working[0]]
-            _post(run, "devkit", "main", f"{crew.who(busy.get('persona') or label)} works as “{busy.get('label')}”, "
-                  f"which does not name “{s['name']}” (one step per launch): the step waits for a launch of its own "
-                  f"(dev crew next), and that lane's report cannot close it", now, from_name="devkit")
+            other = _open_step_of(run, working[0], s)
+            _post(run, "devkit", "main", f"{crew.who(busy.get('persona') or label)} works on “{other['name']}” "
+                  f"(one open step per lane): “{s['name']}” waits for a launch of its own (dev crew next), or for "
+                  f"that step to end, and that lane's report cannot close it", now, from_name="devkit")
         if lane_id:
-            s.update(owner=lane_id, state="running", started=s.get("started") or now)
-            lane = run["agents"][lane_id]
-            lane.pop("handed_over", None)  # Morpheus gives it a step of its own
-            if s.get("scope"):
-                lane["scope"] = s["scope"]
-                _hand_scope(run, s, lane_id, now)
-            if lane.get("binding") == "unbound":  # Morpheus confirms a lane devkit had no launch record of
-                lane["binding"] = "confirmed"
-                _audit("crew.confirm", lane.get("persona") or label, f"Morpheus assigned “{s['name']}” to a lane "
-                       f"without a launch record", project=run.get("project") or "", agent_id=lane_id[:16])
+            _take_step(run, lane_id, s, now)
+            if run["agents"][lane_id].get("binding") == "unbound":  # Morpheus confirms a lane with no launch record
+                run["agents"][lane_id]["binding"] = "confirmed"
+                _audit("crew.confirm", run["agents"][lane_id].get("persona") or label, f"Morpheus assigned "
+                       f"“{s['name']}” to a lane without a launch record", project=run.get("project") or "",
+                       agent_id=lane_id[:16])
         elif s.get("state") == "running" and (s.get("owner") or "main") == "main":
             s["state"] = "pending"  # waits for its subagent
         _advance_main(run, now)
         _save(run)
     return run
+
+
+def _open_step_of(run: dict, aid: str, s: dict | None = None):
+    """The step lane `aid` still works on other than `s` (not done, skipped or unverified: a step that ended
+    unverified waits for the tech lead's evidence, not for the member), or None: a lane works one step at a time."""
+    return next((x for x in run.get("plan") or [] if x is not s and x.get("owner") == aid
+                 and x.get("state") not in DONE + ("unverified",)), None)
+
+
+def _take_step(run: dict, aid: str, s: dict, now: float):
+    """Lane `aid` takes step `s`: it owns it and runs it, its scope becomes the step's, and its member's step closes
+    reach the plan."""
+    s.update(owner=aid, state="running", started=s.get("started") or now)
+    lane = run["agents"][aid]
+    lane.pop("handed_over", None)  # Morpheus gives it a step of its own
+    if s.get("scope"):
+        lane["scope"] = s["scope"]
+        _hand_scope(run, s, aid, now)
+
+
+def _take_waiting_step(run: dict, aid: str, now: float, sess=None):
+    """A member resumed (SendMessage) that holds no open step takes the one step assigned to it that waits for a
+    launch (pending on the tech lead, its dependencies done), as a new launch would; with two or more waiting it
+    takes none, and the tech lead's `dev progress assign` picks. Never another member's step, and none while a new
+    launch of its own member is on its way (that launch takes the step). `sess`: the session record, for its
+    launches. -> the step taken, or None."""
+    lane = (run.get("agents") or {}).get(aid) or {}
+    if not lane.get("persona") and not lane.get("label") or _open_step_of(run, aid):
+        return None
+    me = (lane.get("persona") or "").lower()
+    if me and any(r.get("state") == "pending" and not r.get("agent_id") and now - (r.get("ts") or now) < LAUNCH_TTL
+                  and (persona(r.get("type") or "", r.get("label") or "") or "").lower() == me
+                  for r in ((sess or {}).get("launches") or {}).values() if isinstance(r, dict)):
+        return None
+    waiting = [x for x in run.get("plan") or [] if (x.get("owner") or "main") == "main" and x.get("state") == "pending"
+               and x.get("label") and _label_matches(x["label"], lane) and not deps_open(run, x)]
+    if len(waiting) != 1:
+        return None
+    s = waiting[0]
+    _take_step(run, aid, s, now)
+    _log_change(run, s, "pending", "running", "main", "its member was resumed and holds no other step", now)
+    return s
 
 
 def _launch_takes(run: dict, aid: str, s: dict) -> bool:
@@ -1699,15 +1865,16 @@ def _waits_notice(run, m: dict, frm: str, now: float | None = None) -> str:
             f"{again}, or ask someone else (dev crew ask --to <member> \"…\").")
 
 
-def _reply_to(run, aid: str, now: float | None = None) -> str:
+def _reply_to(run, aid: str, now: float | None = None, own: bool = True) -> str:
     """Where a reply to lane `aid` goes (the answer to its question, the result of its decision): that lane while its
-    member works, as `dev crew owner` reads it (lane_gone over lane_states of the caller's own run; a lane the run
-    does not know counts as working); else the member's name, which crew_ask addresses (_addr) to their working lane
-    or to their next launch, telling the sender (_waits_notice). A lane with no name to address keeps its id."""
+    member works, as `dev crew owner` reads it (lane_gone over lane_states of `run`, the caller's own unless `own` is
+    False; a lane the run does not know counts as working); else the member's name, which crew_ask addresses (_addr)
+    to their working lane or to their next launch, telling the sender (_waits_notice). A lane with no name to address
+    keeps its id."""
     lane = (run.get("agents") or {}).get(aid)
     if not isinstance(lane, dict) or not (lane.get("persona") or lane.get("label")):
         return aid
-    states = lane_states(run, now, own=True) if lane.get("state") == "running" else {}
+    states = lane_states(run, now, own=own) if lane.get("state") == "running" else {}
     return _lane_name(lane) if lane_gone(aid, lane, states) else aid
 
 
@@ -1727,16 +1894,25 @@ def crew_ask(text: str, to: str | None = None, from_agent: str | None = None, cw
     """A question or request between crew members (default: to Morpheus, the main session). It reaches the recipient
     with its next tool call (PostToolUse) or prompt. `kind`: "message" (a question, or a notice when CI watch or devkit
     sends it), "notice" (it tells, and waits for no answer) or "answer". The audit trail keeps its kind and length,
-    never its text (crew messages quote the developer's requests)."""
+    never its text (crew messages quote the developer's requests). A message longer than MESSAGE_MAX is refused whole,
+    never cut: the reader would get half a text without knowing it."""
     now = now or time.time()
+    size = len((text or "").strip())
+    if size > MESSAGE_MAX:
+        raise ValueError(f"the message is {size} characters and a crew message holds at most {MESSAGE_MAX}: send it "
+                         "in parts, or write the long text to a file in your scratch folder and send its path")
     from_agent = _as_lane(from_agent, cwd)
     agent, sid = current_session(cwd)
+    return _ask_into(agent, sid, text, to, from_agent or "main", now, kind)
+
+
+def _ask_into(agent: str, sid: str, text: str, to, frm: str, now: float, kind: str = "message") -> dict:
+    """crew_ask into the run of session `agent`:`sid`, from `frm` (a lane of that run, or "main")."""
     with _tx(agent, sid):
         run = load_run(agent, sid)
         if not run:
             raise ValueError("no progress run in this session: the tech lead starts one with dev progress start")
         run = normalize(run)
-        frm = from_agent or "main"
         m = _post(run, frm, _addr(run, to or "", now), text, now, kind=kind if kind in ("notice", "answer") else "")
         told = _waits_notice(run, m, frm, now) if m["to"].startswith("name:") and frm not in NOTICE_SENDERS else ""
         if told:  # never silently: the sender learns with its next tool call that nobody reads it now
@@ -1754,13 +1930,14 @@ def _next_id(items: list, prefix: str) -> str:
 
 
 NOTICE_SENDERS = ("ci", "devkit")  # CI watch and devkit itself tell; they never ask
+MESSAGE_MAX = 1500  # characters in one crew message; crew_ask refuses a longer one, devkit's own notices stay under it
 
 
 def _post(run, frm: str, to: str, text: str, now: float, from_name: str = "", kind: str = "") -> dict:
     """Add a message to the run (the caller saves it). `kind`: question, notice or answer; without it, a notice from
     CI watch or devkit, else a question. -> the message."""
     msgs = run.setdefault("messages", [])
-    m = {"id": _next_id(msgs, "M"), "ts": round(now), "from": frm, "to": to, "text": text.strip()[:1500],
+    m = {"id": _next_id(msgs, "M"), "ts": round(now), "from": frm, "to": to, "text": text.strip()[:MESSAGE_MAX],
          "delivered": False, "kind": kind or ("notice" if frm in NOTICE_SENDERS else "question")}
     m["from_name"], m["to_name"] = from_name or _name_of(run, frm), _name_of(run, to)
     msgs.append(m)
@@ -1776,28 +1953,216 @@ def _asks(m: dict) -> bool:
     return not (m.get("from") in NOTICE_SENDERS or m.get("from_name") == "devkit" or m.get("reply_to"))
 
 
-def waiting_messages(run, to: str = "main") -> list:
-    """The messages to `to` (the tech lead by default) that ask a question nobody has answered yet: delivered or
-    not, they wait. A notice (CI watch, a step or launch notice, a decision's result) never waits."""
+def _unanswered(run) -> list:
+    """The messages of `run` that ask a question nobody has answered, and that did not close with their run."""
     msgs = [m for m in (run or {}).get("messages") or [] if isinstance(m, dict)]
     replied = {m.get("reply_to") for m in msgs if m.get("reply_to")}
-    return [m for m in msgs if m.get("to") == to and _asks(m) and not m.get("answered") and m.get("id") not in replied]
+    return [m for m in msgs if _asks(m) and not m.get("answered") and not m.get("closed") and m.get("id") not in replied]
+
+
+def _open_questions(run) -> list:
+    """The unanswered questions of `run` that someone still waits on: never a moot one (is_moot_message)."""
+    return [m for m in _unanswered(run) if not is_moot_message(run, m)]
+
+
+def is_moot_message(run, m: dict) -> bool:
+    """A question to the tech lead that nobody waits on any more: the lane that asked it has ended (done, stopped,
+    lost, or closed unverified) and owns no running or blocked step. Not answered and not closed, it is moot: never
+    waiting, never waking, shown as moot. A question of the tech lead's, or of a lane the run does not know, never
+    is."""
+    if not isinstance(m, dict) or m.get("to") != "main" or not _asks(m) or m.get("answered") or m.get("closed"):
+        return False
+    lane = ((run or {}).get("agents") or {}).get(m.get("from") or "")
+    if m.get("from") in (None, "", "main") or not isinstance(lane, dict) or \
+            lane.get("state") not in ENDED_LANE + ("unverified",):
+        return False
+    return not any(isinstance(s, dict) and s.get("owner") == m.get("from") and s.get("state") in ("running", "blocked")
+                   for s in (run or {}).get("plan") or [])
+
+
+def moot_messages(run) -> list:
+    """The unanswered questions to the tech lead nobody waits on any more (is_moot_message)."""
+    return [m for m in _unanswered(run) if is_moot_message(run, m)]
+
+
+def moot_message_reason(run, m: dict) -> str:
+    """Why a moot question needs nobody, in one clause: "Backend engineer (Tank) ended (done) and holds no open
+    step"."""
+    from . import crew
+    lane = ((run or {}).get("agents") or {}).get(m.get("from") or "") or {}
+    return f"{crew.who(m.get('from_name') or _name_of(run, m.get('from') or ''))} ended ({lane.get('state') or '?'}) " \
+           f"and holds no open step"
+
+
+def waiting_messages(run, to: str = "main") -> list:
+    """The messages to `to` (the tech lead by default) that ask a question nobody has answered yet: delivered or
+    not, they wait. A notice (CI watch, a step or launch notice, a decision's result) never waits, nor does any
+    question of a run that is done: its questions closed with it (_close_messages), runs saved before that included."""
+    if (run or {}).get("state") == "done":
+        return []
+    return [m for m in _open_questions(run) if m.get("to") == to]
+
+
+def _close_messages(run, reason: str, now: float) -> list:
+    """A run ends or is replaced: each question in it that still waits for an answer, to the tech lead or to a
+    member, closes with the reason, and takes no answer any more. -> copies of the closed messages, for the audit
+    after the save."""
+    closed = []
+    for m in _open_questions(run):
+        m.update(closed=round(now), reason=reason[:300])
+        closed.append(dict(m))
+    return closed
+
+
+def _audit_closed_messages(run, closed: list):
+    for m in closed:  # never the text: crew messages quote the developer's requests
+        _audit("crew.message-closed", m["id"], m.get("reason") or "", "closed", project=(run or {}).get("project") or "",
+               why=m.get("reason") or "")
+
+
+# --------------------------------------------------------------------------- ids across runs
+# Message and decision ids (M3, D2) are numbered per run, so two runs of one project both hold an M3. Where a run's
+# message or decision is shown to anyone but that run's own session and members, it carries the run's session:
+# M3@9448c4d0 (shown_id), which dev crew answer resolves in that run (run_of_prefix).
+
+SESSION_PREFIX = 8  # characters of a session id a qualified id names at least
+_QUALIFIED = re.compile(r"^([A-Za-z]\d+)@([0-9A-Za-z][0-9A-Za-z._-]*)$")
+
+
+def _run_sessions() -> list:
+    """(agent, session id) of every run file on this Mac (<agent>-<session id>.json)."""
+    out = []
+    for f in RUNS.glob("*.json") if RUNS.exists() else []:
+        agent, _, sid = f.stem.partition("-")
+        if agent and sid:
+            out.append((agent, sid))
+    return out
+
+
+_PREFIXES: dict = {}  # (runs folder, its mtime, session id) -> prefix: a page lists many ids of one run
+
+
+def session_prefix(sid: str) -> str:
+    """The shortest prefix of session id `sid`, 8 characters at least (the whole id when shorter), that no other run
+    of this Mac shares: what a qualified id names its run by."""
+    sid = str(sid or "")
+    try:  # the folder's mtime changes when a run file is added or removed, the only change a prefix depends on
+        key = (str(RUNS), RUNS.stat().st_mtime_ns, sid)
+    except OSError:
+        key = None
+    if key in _PREFIXES:
+        return _PREFIXES[key]
+    others = {s.lower() for _, s in _run_sessions() if s != sid}
+    n = min(SESSION_PREFIX, len(sid))
+    while n < len(sid) and any(o.startswith(sid[:n].lower()) for o in others):
+        n += 1
+    if key:
+        if len(_PREFIXES) > 512:
+            _PREFIXES.clear()
+        _PREFIXES[key] = sid[:n]
+    return sid[:n]
+
+
+def shown_id(run, item_id: str, caller=None) -> str:
+    """A message or decision id of `run` as shown to `caller`, the (agent, session id) that reads it: bare in the
+    caller's own run, whose main session and members answer by it; qualified with the run's session everywhere else
+    (M3@9448c4d0), the dashboard and a terminal with no session included (`caller` None). A run that names no
+    session keeps the bare id."""
+    sid = (run or {}).get("session")
+    if not item_id or not sid:
+        return item_id
+    if caller and tuple(caller[:2]) == (run.get("agent") or "claude", sid):
+        return item_id
+    return f"{item_id}@{session_prefix(sid)}"
+
+
+def split_id(ref) -> tuple:
+    """'M3@9448c4d0' -> ('M3', '9448c4d0'); 'M3' -> ('M3', '')."""
+    ref = str(ref or "").strip()
+    mt = _QUALIFIED.match(ref)
+    return (mt.group(1), mt.group(2)) if mt else (ref, "")
+
+
+def run_of_prefix(prefix: str) -> tuple:
+    """The (agent, session id) of the one run on this Mac whose session id starts with `prefix`. Raises ValueError
+    for a prefix shorter than 8 characters (unless it is a whole session id), one no run has, and one that more than
+    one run shares."""
+    p = str(prefix or "").lower()
+    hits = [(a, s) for a, s in _run_sessions() if s.lower().startswith(p)]
+    exact = [(a, s) for a, s in hits if s.lower() == p]
+    if len(exact) == 1:
+        return exact[0]
+    if len(p) < SESSION_PREFIX:
+        raise ValueError(f"@{prefix} is too short: name the run by at least {SESSION_PREFIX} characters of its "
+                         f"session id, as dev status prints it")
+    if not hits:
+        raise ValueError(f"no run of a session {prefix}… on this Mac: dev status lists the questions that wait")
+    if len(hits) > 1:
+        raise ValueError(f"@{prefix} names {len(hits)} runs ({', '.join(f'{a}:{s[:12]}' for a, s in hits)}): give "
+                         f"more characters of the session id")
+    return hits[0]
+
+
+def _waiting_elsewhere(msg_id: str, own: tuple, cwd: str | None = None) -> list:
+    """The qualified ids of the questions to the tech lead with id `msg_id` that wait in this Mac's other active runs
+    of the caller's project (of every project when it is unknown). Read before any lock: _project runs git."""
+    mine = load_run(*own) or {}
+    project = mine.get("project") or (core.read_json(session_path(*own), {}) or {}).get("project") or _project(cwd)
+    out = []
+    for r in active_runs():
+        if (r.get("agent") or "claude", r.get("session")) == own or (project and r.get("project") != project):
+            continue
+        if any(str(m.get("id") or "").lower() == msg_id.lower() for m in waiting_messages(r)):
+            out.append(shown_id(r, msg_id, own))
+    return out
+
+
+def _closed_why(run, m: dict) -> str:
+    """Why a question takes no answer any more ('' while it may): it closed with its run, or its run is done."""
+    if m.get("closed"):
+        return m.get("reason") or "its run ended"
+    return "its run ended" if (run or {}).get("state") == "done" and _asks(m) else ""
 
 
 def crew_answer(msg_id: str, text: str, from_agent: str | None = None, cwd: str | None = None, now: float | None = None) -> dict:
+    """Answer crew message `msg_id` (`dev crew answer`): mark it answered and post the answer, in the run that holds
+    it, to the lane that asked while its member works (_reply_to of that run). A qualified id (M3@9448c4d0) names
+    that run by its session; a bare one is the caller's own run's. The tech lead's or the developer's bare id whose
+    message in the caller's run is missing, or is no question waiting for an answer, while another active run of the
+    project holds one that waits by that id, is refused with the qualified ids to use: it never answers a message
+    other than the one shown. A crew member answers the messages of its own run only."""
     from_agent = _as_lane(from_agent, cwd)
     agent, sid = current_session(cwd)
-    with _tx(agent, sid):
-        run = normalize(load_run(agent, sid) or {})
-        q = next((m for m in run.get("messages") or [] if m["id"].lower() == str(msg_id).lower()), None)
+    own = (agent, sid)
+    bare, prefix = split_id(msg_id)
+    elsewhere = []
+    if prefix:
+        target = run_of_prefix(prefix)
+        if target != own and from_agent:
+            raise ValueError(f"{msg_id} is a message of another session's run: a crew member answers the messages of "
+                             f"its own run only. Ask the tech lead: dev crew ask \"…\"")
+    else:  # a member's bare id is its own run's: its inbox shows only those
+        target, elsewhere = own, ([] if from_agent else _waiting_elsewhere(bare, own, cwd))
+    with _tx(*target):
+        run = normalize(load_run(*target) or {})
+        q = next((m for m in run.get("messages") or [] if str(m.get("id") or "").lower() == bare.lower()), None)
+        if elsewhere and (not q or q not in waiting_messages(run, q.get("to") or "main")):
+            what = f"{bare} in this session's run is no question waiting for an answer" if q else \
+                f"this session's run has no message {bare}"
+            raise ValueError(f"{what}, and another run waits on its own {bare}. Answer the one dev status lists by its "
+                             "qualified id: " + " · ".join(f'dev crew answer {x} "…"' for x in elsewhere))
         if not q:
             raise ValueError(f"no message {msg_id}")
+        if _closed_why(run, q):
+            raise ValueError(f"{msg_id} was closed ({_closed_why(run, q)}): it takes no answer. Ask again with dev "
+                             f"crew ask if it still matters")
         q["answered"] = True
         _save(run, touch_session=False)
-    to = _reply_to(run, q["from"], now)  # the asking lane while its member works, else the member by name
-    a = crew_ask(text, to=to, from_agent=from_agent, cwd=cwd, now=now, kind="answer")
-    with _tx(agent, sid):
-        run = normalize(load_run(agent, sid) or {})
+    # the asking lane while its member works, else the member by name; another session's run is not the caller's own
+    to = _reply_to(run, q["from"], now, own=target == own)
+    a = _ask_into(target[0], target[1], text, to, from_agent or "main", now or time.time(), kind="answer")
+    with _tx(*target):
+        run = normalize(load_run(*target) or {})
         for m in run.get("messages") or []:
             if m["id"] == a["id"]:
                 m["reply_to"] = q["id"]
@@ -1815,15 +2180,59 @@ def crew_inbox(from_agent: str | None = None, cwd: str | None = None, mark: bool
     return _take_messages(agent, sid, from_agent or "main", mark) if run else []
 
 
-def _take_messages(agent, sid, me: str, mark=True) -> list:
+def answered_by_sendmessage(agent: str, data: dict, now: float | None = None) -> list:
+    """PostToolUse of a SendMessage from the main session: its text answers the open questions that the member it went
+    to (a lane id, or a name its lanes answer to) asked the tech lead: the ones it names (M12), else all of them.
+    A name that fits several lanes with open questions answers none: SendMessage reached only one of them. Each is
+    marked answered via SendMessage, the text is kept as the answer (delivered already: SendMessage carried it), and
+    the audit trail records crew.message-answered with the channel. -> the ids answered"""
+    inp = data.get("tool_input") or {}
+    to, text = str(inp.get("to") or "").strip(), str(inp.get("message") or "").strip()
+    resp = data.get("tool_response")
+    sid = data.get("session_id") or ""
+    if data.get("agent_id") or not sid or not to or not text or to == "main" or \
+            (isinstance(resp, dict) and resp.get("success") is False):
+        return []
+    now = now or time.time()
+    with _tx(agent, sid):
+        run = load_run(agent, sid)
+        if not isinstance(run, dict) or run.get("state") not in ("running", "blocked"):
+            return []
+        run = normalize(run)
+        agents = run.get("agents") or {}
+        lanes = [to] if to in agents else [k for k, v in agents.items() if isinstance(v, dict) and
+                                           _label_matches(to, v)]
+        asked = [m for m in _unanswered(run) if m.get("to") == "main" and m.get("from") in lanes]
+        if len({m.get("from") for m in asked}) > 1:  # the name fits several lanes that asked: SendMessage reached one
+            return []
+        named = set(re.findall(r"\b(M\d+)(?:@[\w.:-]+)?\b", text))
+        if named:  # the questions it names, not every open one of that member
+            asked = [m for m in asked if m.get("id") in named]
+        if not asked:
+            return []
+        for q in asked:
+            q.update(answered=True, via="SendMessage")
+        a = _post(run, "main", asked[-1]["from"], text, now, kind="answer")
+        a.update(reply_to=asked[-1]["id"], delivered=True, via="SendMessage", to_name=asked[-1].get("from_name") or
+                 a.get("to_name"))
+        _save(run, touch_session=False)
+    for q in asked:  # never the text: crew messages quote the developer's requests
+        _audit("crew.message-answered", q["id"], f"answered via SendMessage to {q.get('from_name') or q['from']}",
+               "answered", project=run.get("project") or "", id=a["id"], channel="SendMessage", count=len(text))
+    return [q["id"] for q in asked]
+
+
+def _take_messages(agent, sid, me: str, mark=True, select=None, limit=None) -> list:
     """The messages for `me` not delivered yet; with mark, they are marked delivered (once each, under the lock).
-    Every hook call asks: the lock is taken only when there is something to take."""
+    `select(run, message)`: only the messages it keeps; `limit`: at most that many, oldest first (watch.mail). Every
+    hook call asks: the lock is taken only when there is something to take."""
     def mine(run):
         run = normalize(run)
         lane = (run.get("agents") or {}).get(me) or {}
-        return run, [m for m in run.get("messages") or [] if not m.get("delivered") and (
+        new = [m for m in run.get("messages") or [] if not m.get("delivered") and (
             m.get("to") == me or ((m.get("to") or "").startswith("name:") and me != "main"
-                                  and _label_matches(m["to"][5:], lane)))]
+                                  and _label_matches(m["to"][5:], lane))) and (select is None or select(run, m))]
+        return run, new[:limit] if limit is not None else new
     run = load_run(agent, sid)
     if not run or not mine(run)[1]:
         return []
@@ -2180,7 +2589,21 @@ def crew_decision(question: str, options=None, recommend: str = "", irreversible
            by=d.get("by") or "", answer=d.get("answer") or "", irreversible=d.get("irreversible") or "",
            mode=mode_of(run), asked_by=d["from_name"], options=d.get("options") or [],
            labels=" | ".join(ask_labels(d)), session=f"{agent}:{sid}")  # verify reruns the matcher against them
+    if d["state"] == "pending":
+        _notify_idle(agent, sid, d)
     return d
+
+
+def _notify_idle(agent: str, sid: str, d: dict):
+    """A decision for the developer while the main session is idle (its turn ended): a desktop notification too, so
+    the developer hears of it when nobody looks at the terminal. In a turn, the tech lead asks it."""
+    try:
+        sess = state.read(session_path(agent, sid)) or {}
+    except Exception:
+        return
+    if sess and not sess.get("turn_started"):
+        from . import crew
+        notify(f"Decision {d['id']} waits for you", f"{crew.who(d.get('from_name') or '')}: {d.get('question') or ''}")
 
 
 def crew_decide(decision_id: str, answer: str, cwd: str | None = None, now: float | None = None) -> dict:
@@ -2192,6 +2615,7 @@ def crew_decide(decision_id: str, answer: str, cwd: str | None = None, now: floa
     now = now or time.time()
     _main_only(None, "records the developer's answers", cwd)
     agent, sid = current_session(cwd)
+    decision_id = _own_decision_id(decision_id, agent, sid, "answered")
     answer = answer.strip()[:800]
 
     def find(run):
@@ -2239,6 +2663,25 @@ def crew_decide(decision_id: str, answer: str, cwd: str | None = None, now: floa
         crew_ask(f"Decision {d['id']} — {d['question'][:120]} → {d['answer']}", to=_reply_to(run, d["from"], now),
                  cwd=cwd, now=now, kind="notice")
     return d
+
+
+def _own_decision_id(decision_id: str, agent: str, sid: str, verb: str) -> str:
+    """The bare id of a decision of the caller's own run (agent, sid): a qualified id (D2@9448c4d0) of that session
+    loses its session; one of another session's run is refused, since a decision is `verb` (answered, withdrawn) in
+    the session that owns it, where the developer's evidence lives (its transcript)."""
+    bare, prefix = split_id(decision_id)
+    if not prefix:
+        return bare
+    try:
+        target = run_of_prefix(prefix)
+    except ValueError as e:
+        raise StepError(str(e))
+    if target != (agent, sid):
+        raise StepError(f"{decision_id} is a decision of another session's run ({target[0]}:{target[1][:12]}): it is "
+                        f"{verb} in the session that owns it, where the developer's evidence lives (its transcript). "
+                        f"There the developer types approve {bare}, and its tech lead runs dev crew decide {bare} "
+                        f"\"…\" or dev crew withdraw {bare} --why \"…\"")
+    return bare
 
 
 def _release(run, d: dict, why: str, now: float) -> list:
@@ -2299,6 +2742,7 @@ def crew_withdraw(decision_id: str, why: str, from_agent: str | None = None, cwd
     if not why:
         raise StepError("say why: dev crew withdraw <id> --why \"…\" (it goes into the run's history and the audit)")
     agent, sid = current_session(cwd)
+    decision_id = _own_decision_id(decision_id, agent, sid, "withdrawn")
     with _tx(agent, sid):
         run = normalize(load_run(agent, sid) or {})
         d = _decision(run, decision_id)
@@ -2419,40 +2863,57 @@ def _not_open(d: dict) -> str:
     return ""
 
 
-def _ci(agent, sid) -> str:
+def _ci(agent, sid, mark: bool = True) -> list:
+    """The CI results waiting in the session record of a session without a run (ciwatch.take_events), each taken
+    once: the CI source of watch.mail. [] when the record cannot be read."""
     try:
         from . import ciwatch
-        return ciwatch.pending_events(agent, sid)
+        return ciwatch.take_events(agent, sid, mark=mark)
     except Exception:
-        return ""
+        return []
 
 
-def _ready(agent, sid) -> str:
-    try:
-        from . import dispatch
-        return dispatch.ready_context(agent, sid)
-    except Exception:
-        return ""
+def _mail(agent, sid, me: str) -> str:
+    """watch.mail: crew messages, decisions, ready steps, CI results and notices new for `me`, each told once."""
+    from . import watch
+    return watch.mail(agent, sid, me)
 
 
 def _told(d: dict) -> bool:
     return bool(d.get("told") or d.get("surfaced"))  # `surfaced`: runs written before spec C5
 
 
-def decisions_context(agent: str, sid: str) -> str:
-    """For the main session: decisions waiting for the developer, newest first, once per decision."""
+def take_decisions(agent: str, sid: str, mark: bool = True) -> tuple:
+    """The decisions waiting for the developer that the main session was not told yet -> (run, [decision]); with
+    mark, each is marked told in the same locked write, so no later hook or wait tells it again."""
     run = load_run(agent, sid)
     if not run or not any(not _told(d) for d in pending_decisions(run)):
-        return ""  # the usual case, without the lock
+        return run, []  # the usual case, without the lock
+    if not mark:
+        return run, [dict(d) for d in pending_decisions(normalize(run)) if not _told(d)]
     with _tx(agent, sid):
         run = normalize(load_run(agent, sid) or {})
         new = [d for d in pending_decisions(run) if not _told(d)]
         if not new:
-            return ""
+            return run, []
         for d in new:
             d["told"] = round(time.time())  # delivered to Morpheus; `shown` is when the developer saw it
             d.pop("surfaced", None)
         _save(run, touch_session=False)
+    return run, [dict(d) for d in new]
+
+
+def decisions_context(agent: str, sid: str, taken: list | None = None) -> str:
+    """For the main session: decisions waiting for the developer, newest first, once per decision. `taken`: a list
+    that receives the decisions told (watch.mail renders them one per line for a wait)."""
+    run, new = take_decisions(agent, sid)
+    if taken is not None:
+        taken.extend(new)
+    return decisions_text(run, new) if new else ""
+
+
+def decisions_text(run: dict, new: list) -> str:
+    """The main session's context for decisions that wait for the developer: how to ask them, then one line each."""
     from . import crew
     lines = ["devkit · decisions waiting for the developer (" + mode_of(run) + " mode). Ask them with your "
              "question tool (AskUserQuestion) in the calls `dev crew decisions --ask` prints: a plain question with "
@@ -2500,16 +2961,27 @@ def waiting_context(agent: str, sid: str, since, now: float) -> str:
                f"{k} question calls, one after the other; `dev crew decisions --ask` prints them."))
 
 
-def messages_context(agent: str, sid: str, me: str) -> str:
-    """The hook text that delivers a crew member's pending messages."""
-    msgs = _take_messages(agent, sid, me)
+def messages_context(agent: str, sid: str, me: str, select=None, limit=None, taken: list | None = None) -> str:
+    """The hook text that delivers the pending messages of `me` (the main session or a crew lane), each once.
+    `select` and `limit` as _take_messages; `taken`: a list that receives the messages delivered (watch.mail)."""
+    msgs = _take_messages(agent, sid, me, select=select, limit=limit)
+    if taken is not None:
+        taken.extend(msgs)
+    return messages_text(msgs, normalize(load_run(agent, sid) or {}) if msgs and me == "main" else None)
+
+
+def messages_text(msgs: list, run=None) -> str:
+    """The hook text for crew messages taken for their recipient: how to answer, then one line each; with the run, a
+    question nobody waits on any more says it is moot, and why."""
     if not msgs:
         return ""
     from . import crew
     lines = ["devkit · crew messages for you (answer with `dev crew answer <id> \"…\"`):"]
     for m in msgs:
+        moot = run is not None and is_moot_message(run, m)
         lines.append(f"- {m['id']} from {crew.who(m.get('from_name'))}: {m['text']}"
-                     + (f" (answer to {m['reply_to']})" if m.get("reply_to") else ""))
+                     + (f" (answer to {m['reply_to']})" if m.get("reply_to") else "")
+                     + (f" (moot: {moot_message_reason(run, m)})" if moot else ""))
     return "\n".join(lines)
 
 
@@ -2533,7 +3005,15 @@ GRANT_CLASSES = ("push", "pr", "push-destructive", "pr-write", "merge", "release
                  "developer-only", "backup", "embargo")  # B2: the developer's own decisions (guard.DEVELOPER_GRANTS)
 HEADLESS_SURFACES = ("SDK", "claude -p", "codex exec")  # nobody at the keyboard: DEVKIT_PREAPPROVE only
 TRANSCRIPT_DAYS = 30  # Claude Code's default cleanupPeriodDays: older evidence may have lost its transcript
-_APPROVE_LINE = re.compile(r"(?i)^approve\s+(D\d+)\s*(?::\s*(\S.*?))?\s*$")
+# `approve D3`, or `approve D3@9448c4d0` as a decision listed outside its own session shows it (shown_id): groups are
+# the decision, the session prefix it names, and the answer
+_APPROVE_LINE = re.compile(r"(?i)^approve\s+(D\d+)(?:@([0-9a-z][0-9a-z._-]*))?\s*(?::\s*(\S.*?))?\s*$")
+
+
+def _names_session(prefix: str, sid: str) -> bool:
+    """Does the session prefix of a qualified approve line name session `sid`? At least 8 characters of it, or all."""
+    p, s = str(prefix or "").lower(), str(sid or "").lower()
+    return len(p) >= min(SESSION_PREFIX, len(s)) and bool(s) and s.startswith(p)
 _GRANT_LINE = re.compile(r"(?i)^grant\s+([a-z][a-z-]*)\s+(\S+)\s*$")
 _PLAIN_YES = re.compile(r"(?i)^\s*yes\s*[.!]?\s*$")
 _RELAYED = re.compile(r"^\s*(?:\[[^\]\n]{0,120}\bsent to (?:Claude|Codex)\b[^\]\n]*\]|\[SYSTEM NOTIFICATION|"
@@ -2971,7 +3451,9 @@ def _refuse_forged(agent: str, sid: str, named, what: str):
 def on_human_prompt(agent: str, data: dict, now: float | None = None) -> list:
     """UserPromptSubmit: the E2 lines of the developer's prompt -> the entries recorded. A line of its own, outside
     code blocks and quotes: `approve D<n>[: <option>]` or `grant <action> <target>`; a plain "yes" covers the one
-    decision the last final message showed. Relayed comments, notifications and headless sessions record nothing."""
+    decision the last final message showed. `approve D<n>@<session>[: <option>]`, as a decision listed outside its
+    own session shows it, counts only in the session it names, and records nothing typed in another. Relayed
+    comments, notifications and headless sessions record nothing."""
     now = now or time.time()
     sid = data.get("session_id") or ""
     sess = state.read(session_path(agent, sid)) if sid else None
@@ -2990,9 +3472,11 @@ def on_human_prompt(agent: str, data: dict, now: float | None = None) -> list:
     repo = sess.get("project") or (live or {}).get("project") or ""  # a grant holds in this repository only
     for ln in _own_lines(text):
         mt = _APPROVE_LINE.match(ln)
+        if mt and mt.group(2) and not _names_session(mt.group(2), sid):
+            continue  # a decision of another session's run, typed here: it is evidence only in that session
         if mt and live:
             new.append(_entry(agent, "E2", mt.group(1).upper(), ln, uuid, tp, live, now,
-                              answer=(mt.group(2) or "").strip()[:300], repo=repo, session=sid))
+                              answer=(mt.group(3) or "").strip()[:300], repo=repo, session=sid))
             continue
         mt = _GRANT_LINE.match(ln)
         if mt and mt.group(1).lower() in GRANT_CLASSES:
@@ -3224,7 +3708,8 @@ def _speaks_of(d: dict, q: dict, answers: dict, notes: dict) -> bool:
 def _word_on(d: dict, r: dict) -> bool:
     """Is transcript record `r` a word of the developer on irreversible decision `d`: a question tool result, the main
     session's or a crew member's, with a question that speaks of it (_speaks_of), or a prompt they typed with an
-    `approve D<n>` line for it?"""
+    `approve D<n>` line for it? A line qualified with any session counts too: a word that may be on it ends an
+    earlier yes rather than letting it stand."""
     res = r.get("toolUseResult")
     if isinstance(res, dict) and isinstance(res.get("questions"), list):
         answers = res.get("answers") if isinstance(res.get("answers"), dict) else {}
@@ -3780,10 +4265,10 @@ def _lane_name(lane: dict) -> str:
     return lane.get("persona") or lane.get("label") or "a subagent"
 
 
-def add_step(spec: str, cwd: str | None = None, now: float | None = None, why: str = "",
+def add_step(spec, cwd: str | None = None, now: float | None = None, why: str = "",
              from_agent: str | None = None) -> dict:
-    """Add a step discovered during the work: "name=30m after other". From a crew member, the step goes to its own
-    lane's plan; the main plan is Morpheus's."""
+    """Add a step discovered during the work: "name=30m after other", or a list of such specs (spec_args), each a
+    step. From a crew member, the step goes to its own lane's plan; the main plan is Morpheus's."""
     now = now or time.time()
     from_agent = _as_lane(from_agent, cwd)
     agent, sid = current_session(cwd)
@@ -3983,9 +4468,10 @@ def step(text: str, nxt: str = "", cwd: str | None = None, kind: str = "step", c
     finished steps the Check approves or sends back (approvals.record). kind "done" ends the run, refused while a
     crew member still works on a step (_refuse_members_working), while an approval is owed or a step is flagged
     recheck once the plan is closed, unless `why` (approvals.end_check), or while a decision still needs the
-    developer, unless `force`; the decisions still pending (moot ones too) close with the run."""
+    developer, unless `force`; the decisions still pending (moot ones too) and the questions still waiting for an
+    answer close with the run."""
     now = now or time.time()
-    closed = []
+    closed, closed_msgs = [], []
     agent, sid = current_session(cwd)
     from_agent = _as_lane(from_agent, cwd)
     if kind == "done" and not from_agent:
@@ -4100,6 +4586,7 @@ def step(text: str, nxt: str = "", cwd: str | None = None, kind: str = "step", c
                                 f"{gone[s['name']]}; closed with the run's end: {text}" if s["name"] in gone else text,
                                 now)
             closed = _close_decisions(run, "run ended", now)
+            closed_msgs = _close_messages(run, "run ended", now)
             run.update(state="done", finished=now)
             _close(run, "turn", None, now)
             record("run", agent, sid, run.get("goal", ""), active_minutes(run, now=now) * 60, run.get("project", ""),
@@ -4112,6 +4599,7 @@ def step(text: str, nxt: str = "", cwd: str | None = None, kind: str = "step", c
         run["updates"] = run["updates"][-40:]
         _save(run)
     _audit_closed(run, closed)
+    _audit_closed_messages(run, closed_msgs)
     _publish()
     if kind in ("blocked", "done"):
         notify(f"{run.get('project') or 'devkit'} · {kind}", text)
@@ -4332,14 +4820,13 @@ def on_prompt(agent: str, data: dict, now: float | None = None):
     if f.exists():
         try:
             state.update(f, lambda d: d.update({"turn_started": now, "last_update": now, "nudges": 0,
-                                                "last_prompt": now}), create=False)
+                                                "last_prompt": now, "request_ts": None}), create=False)
         except state.StateBusy:
             pass  # audited by state: this prompt's clock is dropped, the hook still answers
     _run_event(agent, sid, lambda run: (_close(run, "turn", None, now), _open(run, "turn", "main", now)))
     prompt = (data.get("prompt") or "")[:400]
-    mail = "\n\n".join(x for x in (messages_context(agent, sid, "main"), decisions_context(agent, sid),
-                                    waiting_context(agent, sid, s.get("last_prompt"), now),
-                                    _ready(agent, sid), _ci(agent, sid)) if x) if f.exists() else ""
+    mail = "\n\n".join(x for x in (_mail(agent, sid, "main"), waiting_context(agent, sid, s.get("last_prompt"), now))
+                       if x) if f.exists() else ""
     if not STATUS_Q.search(prompt):
         return mail or None
     runs = [r for r in active_runs() if r.get("session") == sid] or active_runs()[:3]
@@ -4655,7 +5142,12 @@ def _last_assistant_text_ts(transcript: str):
 
 
 def on_tool_done(agent: str, data: dict):
-    """PostToolUse: time the call; nudge for a progress update after a long silence."""
+    """PostToolUse: time the call; record an edit call's file (note_edit); nudge for a progress update after a long
+    silence."""
+    try:
+        note_edit(agent, data)
+    except Exception:
+        pass  # a hook fails open: the edit record only spares a reading lane a false flag
     sid = data.get("session_id") or "-"
     tid = re.sub(r"[^A-Za-z0-9_-]", "", data.get("tool_use_id") or "")[:80]
     pf = PENDING / f"{tid}.json"
@@ -4673,10 +5165,9 @@ def on_tool_done(agent: str, data: dict):
     if not f.exists():
         return None
     me = data.get("agent_id") or "main"
-    mail = messages_context(agent, sid, me)
+    mail = _mail(agent, sid, me)  # what is new for the caller, taken once whichever of a hook and a wait reads it
     if me != "main":  # inside a subagent: deliver its messages; updates to the developer are the main session's job
         return mail or None
-    mail = "\n\n".join(x for x in (mail, decisions_context(agent, sid), _ready(agent, sid), _ci(agent, sid)) if x)
     now = time.time()
     said = _last_assistant_text_ts(data.get("transcript_path")) if agent == "claude" else None
     last = max(x for x in (s.get("turn_started") or s.get("started") or now, s.get("last_update") or 0,
@@ -4923,6 +5414,8 @@ def _lane_event(run, aid, kind, tid, rec, binding, now, start, waiting, own=True
             _open(run, "agent", aid, now)
             _audit("crew.resume", lane.get("persona") or lane.get("label") or aid[:8], lane.get("label") or "",
                    project=run.get("project") or "", agent_id=aid[:16])
+            if lane.get("parent", "main") == "main":  # a member, not a helper: it takes the step waiting for it
+                _take_waiting_step(run, aid, now, sess if isinstance(sess, dict) else None)
     if binding == "exact" and lane.get("binding") == "pending":
         label = rec.get("label") or lane.get("label") or kind
         parent = rec.get("parent") or "main"
@@ -5164,10 +5657,137 @@ def named_step(run: dict, kind: str = "", label: str = ""):
 
 
 def is_latest_request(run: dict, sess: dict, s: dict) -> bool:
-    """A step the developer asked for in the current turn: added since its prompt, by Morpheus (not delegated by a
-    member). True for every step when the turn is unknown (no prompt recorded)."""
+    """A step the developer asked for in the current turn, by Morpheus (not delegated by a member): added since its
+    prompt, or added or assigned since a message they typed mid-turn (`request_ts`, note_midturn). True for every step
+    when the turn is unknown (no prompt recorded). A plan step merely assigned in the turn, with no newer request,
+    stays plan work."""
     turn = (sess or {}).get("turn_started")
-    return not turn or (_step_added(run, s) >= float(turn) and (s.get("requested_by") or "main") == "main")
+    if not turn:
+        return True
+    if (s.get("requested_by") or "main") != "main":
+        return False
+    if _step_added(run, s) >= float(turn):
+        return True
+    req = (sess or {}).get("request_ts")
+    return bool(req) and float(s.get("assigned_at") or 0) >= float(req)
+
+
+MIDTURN_READ = 400_000  # bytes of new transcript lines one hook reads at most; the rest waits for the next hook
+_WAKE_PROMPTS = ("<task-notification", "[SYSTEM NOTIFICATION", "<system-reminder", "<agent-message")
+
+
+def _past_line(transcript, pos: int, start: int) -> int:
+    """The offset just after the line that runs on past `pos`, so the next read starts at a whole line; `start` while
+    that line is still being written (no end yet)."""
+    try:
+        with open(transcript, "rb") as fh:
+            fh.seek(pos)
+            while True:
+                chunk = fh.read(MIDTURN_READ)
+                if not chunk:
+                    return start
+                i = chunk.find(b"\n")
+                if i >= 0:
+                    return pos + i + 1
+                pos += len(chunk)
+    except OSError:
+        return start
+
+
+def midturn_requests(transcript, offset=None, since=None) -> tuple:
+    """The messages the developer typed while the session worked, in the transcript lines after `offset` -> ([{"text",
+    "ts"}], the offset to keep). Claude Code runs no UserPromptSubmit for them: it records each as an attachment of
+    type queued_command with commandMode "prompt" and origin.kind "human". Never a task notification, nor any other
+    queued command. A line cut mid-write is read at the next call, whole; a transcript shorter than `offset` (rotated)
+    is read from its start; with no offset, only its last MIDTURN_READ bytes. `since`: only messages at or after it
+    (the turn's prompt). They move the request clock and continuity only, never approval evidence: the attachment is
+    the harness's format, not a contract."""
+    try:
+        size = os.path.getsize(transcript)
+    except (OSError, TypeError, ValueError):
+        return [], offset
+    start = offset if isinstance(offset, int) and 0 <= offset <= size else (0 if isinstance(offset, int) else
+                                                                           max(0, size - MIDTURN_READ))
+    try:
+        with open(transcript, "rb") as fh:
+            fh.seek(start)
+            data = fh.read(MIDTURN_READ)
+    except OSError:
+        return [], offset
+    if start and not isinstance(offset, int):  # a tail read starts mid-line: from the next whole one
+        cut = data.find(b"\n")
+        data, start = (data[cut + 1:], start + cut + 1) if cut >= 0 else (b"", start)
+    end = data.rfind(b"\n")
+    if end < 0:
+        if len(data) < MIDTURN_READ:
+            return [], start  # a line still being written: read it whole at the next call
+        return [], _past_line(transcript, start + len(data), start)  # one line longer than a read: skip to its end
+    out = []
+    import datetime as dt
+    for raw in data[:end + 1].splitlines():
+        if b"queued_command" not in raw:
+            continue
+        try:
+            rec = json.loads(raw)
+        except ValueError:
+            continue
+        a = rec.get("attachment") if isinstance(rec, dict) else None
+        if not isinstance(a, dict) or a.get("type") != "queued_command" or a.get("commandMode") != "prompt" or \
+                not isinstance(a.get("origin"), dict) or a["origin"].get("kind") != "human":
+            continue
+        text = str(a.get("prompt") or "")
+        if not text.strip() or text.lstrip().startswith(_WAKE_PROMPTS):
+            continue
+        try:
+            ts = dt.datetime.fromisoformat(str(a.get("timestamp") or rec.get("timestamp")).replace("Z", "+00:00")
+                                           ).timestamp()
+        except ValueError:
+            continue
+        if since and ts < float(since):
+            continue
+        out.append({"text": text, "ts": ts})
+    return out, start + end + 1
+
+
+def note_midturn(agent: str, data: dict) -> list:
+    """The main session's hooks (PreToolUse of a launch, PostToolUse): the messages the developer typed mid-turn
+    since the last hook (midturn_requests, from the offset the session record keeps, read and moved under its lock so
+    each is counted once) become the developer's latest request: `request_ts`, which is_latest_request reads, and a
+    prompt of the turn in continuity. -> the messages found"""
+    if data.get("agent_id") or agent != "claude":
+        return []
+    sid = data.get("session_id") or ""
+    f = session_path(agent, sid)
+    if not sid or not f.exists():
+        return []
+    sess = state.read(f) or {}
+    try:  # the usual case: nothing written since the last hook read it, without the lock
+        if os.path.getsize(data.get("transcript_path") or sess.get("transcript")) == sess.get("midturn_offset"):
+            return []
+    except (OSError, TypeError, ValueError):
+        return []
+    found = []
+
+    def read(s):
+        transcript = data.get("transcript_path") or s.get("transcript")
+        if not transcript:
+            return state.SKIP
+        new, off = midturn_requests(transcript, s.get("midturn_offset"), since=s.get("turn_started"))
+        if off == s.get("midturn_offset") and not new:
+            return state.SKIP
+        s["midturn_offset"] = off
+        if new:
+            s["request_ts"] = max([float(s.get("request_ts") or 0)] + [r["ts"] for r in new])
+            found.extend(new)
+    try:
+        state.update(f, read, create=False)
+    except state.StateBusy:
+        return []  # audited by state; the next hook reads them
+    if found:
+        from . import continuity
+        for r in found:
+            continuity.on_midturn(agent, sid, r["text"], r["ts"])
+    return found
 
 
 # Nested agents (spec F3, contract C3). A subagent can launch agents of its own; such a helper gets its parent's
@@ -5326,6 +5946,12 @@ def _note_limit(agent: str, limit: int, why: str, configured: int, now: float | 
     if old != limit:
         _audit("crew.limit", f"{limit} crew slots", f"{old} → {limit}: {why or 'progress.max_parallel'}",
                project="")
+        try:  # it rides along with the next wake of each live run's main session: slots frees or holds queued steps
+            from . import watch
+            watch.notice_all("notice", f"limit:{agent}:{limit}:{round(now or time.time())}",
+                             f"crew slots {old} → {limit}: {why or 'progress.max_parallel'}", agent=agent)
+        except Exception:
+            pass
 
 
 def launch_verdict(agent: str, data: dict, run: dict, now: float | None = None):
@@ -5573,21 +6199,23 @@ def _shown(paths: list) -> str:
 
 
 def scope_written(agent: str, sid: str, aid: str, paths: list, now: float | None = None) -> dict | None:
-    """A review or read-only lane's shell call wrote these files (write detection). A review or read-only lane can
-    write through a script in its own scratch folder, so the scope a file lies in is no alibi: a file in the scope
-    of a build lane that works now is credited to that lane only while it (or a helper of it) has a call open in the
-    call ledger (open_calls), whose run may have written it (scope.write, outcome attributed); otherwise it is the
-    review lane's own write, certain. Each file held against the lane it keeps in `scope_writes`, so its report is
-    unverified and its step cannot end done on its word; a file outside every working build scope is "possible"
-    when a lane that may write works in the run at the time, else "certain". The build lane's open step keeps each
-    file of its scope the call changed (`other_writes`, either way), which the review step after it lists; Morpheus
-    gets one crew notice naming the lanes; and the audit trail a scope.write record. -> the lane's scope_writes, or
-    None without a lane or when it has none."""
+    """A review or read-only lane's shell call wrote these files (write detection). A file is credited to whoever's
+    own Write, Edit or MultiEdit call touched that path during the call (note_edit: a build lane, its helper or the
+    tech lead, never the reading lane itself): devkit audits it as attributed and flags nothing, since an edit opens
+    no shell call and the edit record is exact. Every other file is held against the reading lane in
+    `scope_writes`, so its report is unverified and its step cannot end done on its word: a script of the reading
+    lane can write into a working member's scope, so a scope is no alibi. A held file is "possible" when a build lane
+    that works now and whose scope holds it, or any working build lane for a file outside every scope, had a shell
+    call open (its shell may have written it), else "certain". An open step whose scope holds a held file keeps it
+    (`other_writes`), which the review step after it lists; Morpheus gets one crew notice naming the files; and the
+    audit trail a scope.write record per certainty. -> the lane's scope_writes, or None without a lane or when it
+    has none."""
     from . import crew
     now = now or time.time()
     paths = sorted({str(p) for p in paths or [] if p})
     if not paths:
         return None
+    states = lane_states(load_run(agent, sid) or {}, now, own=True)  # read before the lock: it reads other runs
     with _tx(agent, sid):
         run = load_run(agent, sid)
         lane = ((run or {}).get("agents") or {}).get(aid)
@@ -5595,80 +6223,78 @@ def scope_written(agent: str, sid: str, aid: str, paths: list, now: float | None
             return None
         chain = set(lane_chain(run, aid))
         builders = [k for k, v in run["agents"].items() if k not in chain and v.get("state") == "running"
+                    and (states.get(k) or {}).get("state", "working") == "working"
                     and lane_tools(run, k) in ("build", "all")]
         layers = {k: lane_scope(run, k) for k in builders}
-        calling = {str(e.get("caller") or "") for e in open_calls(sid, now)} - {"main", ""}
+        calls = open_calls(sid, now)
+        calling = {str(e.get("caller") or "") for e in calls} - {"main", ""}
         busy = {k for k in builders if any(k in lane_chain(run, c) for c in calling)}
-        owned, crossed, loose = {}, {}, []  # credited to a lane with a call open; in a quiet lane's scope; elsewhere
+        start = min((e.get("ts") or now for e in calls if e.get("caller") == aid), default=now - CALL_TTL)
+        edits = [e for e in edits_since(sid, start, now) if str(e.get("caller") or "") not in chain]
+        owned, held = {}, {}  # credited to the caller whose edit touched it; held against the reading lane, by certainty
         for p in paths:
-            holders = [k for k in builders if layers[k] and in_scope(p, layers[k])]
-            if not holders:
-                loose.append(p)
+            by = next((str(e.get("caller")) for e in edits if _edited(e.get("path"), p)), None)
+            if by:
+                owned.setdefault(by, []).append(p)
                 continue
-            k = next((h for h in holders if h in busy), None)
-            (owned if k else crossed).setdefault(k or holders[0], []).append(p)
+            holders = [k for k in builders if layers[k] and in_scope(p, layers[k])]
+            maybe = (set(holders) & busy) if holders else busy
+            held.setdefault("possible" if maybe else "certain", []).append(p)
         who = lane.get("persona") or lane.get("label") or aid
         name = crew.who(who)
-        level = lane_tools(run, aid)
-        certainty = "possible" if builders else "certain"
-        held = [p for files in crossed.values() for p in files] + loose
-        if held:
-            had = lane.get("scope_writes") or {}
-            sure = bool(crossed) or certainty == "certain" or had.get("certainty") == "certain"
-            lane["scope_writes"] = {"ts": round(now), "paths": sorted(set(had.get("paths") or []) | set(held))[:20],
-                                    "certainty": "certain" if sure else "possible"}
-        parts = []
-        for k, files in owned.items():
-            _mark_other_writes(run, k, files, aid, name, "possible", now)
-            parts.append(f"{_shown(files)} changed during its shell call, inside the scope of "
-                         f"{crew.who(_name_of(run, k))}, who had a call open then, so devkit credits "
-                         f"{'them' if len(files) > 1 else 'it'} to {crew.who(_name_of(run, k))}")
-        for k, files in crossed.items():
-            _mark_other_writes(run, k, files, aid, name, "certain", now)
-            parts.append(f"its shell call wrote {_shown(files)}, inside the scope of {crew.who(_name_of(run, k))}, "
-                         f"who had no call open then, so devkit counts {'them' if len(files) > 1 else 'it'} as its "
-                         f"own write")
+        loose = sorted(p for files in held.values() for p in files)
         if loose:
-            maybe = (f" (possibly another member's: {', '.join(crew.who(_name_of(run, k)) for k in builders[:3])} "
-                     f"works too)" if builders else "")
-            parts.append(f"its shell call wrote {_shown(loose)}{maybe}")
-        reviews = sorted({crew.who(_name_of(run, k)) for k in [*owned, *crossed]})
-        listed = f" The review of {' and '.join(reviews)}'s work lists these files." if reviews else ""
-        tail = (" Its report counts as unverified: check the change (git diff), keep or revert it, then close its step "
-                "with evidence." if held else " Check the change (git diff) before that review approves it.")
-        _post(run, aid, "main", f"devkit: {name} works {'review-only' if level == 'review' else 'read-only'}, and "
-              + "; and ".join(parts) + "." + listed + tail, now, from_name="devkit", kind="notice")
-        _save(run)
+            had = lane.get("scope_writes") or {}
+            sure = "certain" in held or had.get("certainty") == "certain"
+            lane["scope_writes"] = {"ts": round(now), "paths": sorted(set(had.get("paths") or []) | set(loose))[:20],
+                                    "certainty": "certain" if sure else "possible"}
+            marked = []
+            for c, files in held.items():
+                marked += [n for n in _mark_other_writes(run, files, chain, aid, name, c, now) if n not in marked]
+            parts = []
+            if held.get("certain"):
+                parts.append(f"its shell call wrote {_shown(held['certain'])}, which nobody else edited meanwhile")
+            if held.get("possible"):
+                shells = ", ".join(crew.who(_name_of(run, k)) for k in sorted(busy)[:3])
+                parts.append(f"its shell call wrote {_shown(held['possible'])} (possibly the shell call of {shells}, "
+                             f"open at the time)")
+            for k, files in owned.items():
+                parts.append(f"{_shown(files)} changed during it, edited by {crew.who(_name_of(run, k))} with its own "
+                             f"edit tool, so devkit credits {'them' if len(files) > 1 else 'it'} to them")
+            listed = f" The review after {', '.join(marked)} lists these files." if marked else ""
+            level = lane_tools(run, aid)
+            _post(run, aid, "main", f"devkit: {name} works {'review-only' if level == 'review' else 'read-only'}, "
+                  "and " + "; and ".join(parts) + "." + listed + " Its report counts as unverified: check the change "
+                  "(git diff), keep or revert it, then close its step with evidence.", now, from_name="devkit",
+                  kind="notice")
+            _save(run)
         writes = dict(lane.get("scope_writes") or {}) or None
     for k, mine in owned.items():
         _audit("scope.write", _name_of(run, k), f"attributed: {', '.join(mine[:20])}"[:600], "attributed",
                lane=k[:16], paths=mine[:20], count=len(mine), project=run.get("project") or "",
-               why=f"changed during {who}'s shell call, inside the scope of {_name_of(run, k)}, who had a call open")
-    for k, mine in crossed.items():
-        _audit("scope.write", who, f"certain: {', '.join(mine[:20])}"[:600], "detected", lane=aid[:16],
-               paths=mine[:20], certainty="certain", count=len(mine), project=run.get("project") or "",
-               severity="warning",
-               why=f"inside the scope of {_name_of(run, k)} ({k[:16]}), who had no call open during {who}'s shell call")
-    if loose:
-        _audit("scope.write", who, f"{certainty}: {', '.join(loose[:20])}"[:600], "detected", lane=aid[:16],
-               paths=loose[:20], certainty=certainty, count=len(loose), project=run.get("project") or "",
-               **({"severity": "warning"} if certainty == "certain" else {}))
+               why=f"edited by {_name_of(run, k)} with its own edit tool during {who}'s shell call")
+    for c, files in held.items():
+        _audit("scope.write", who, f"{c}: {', '.join(files[:20])}"[:600], "detected", lane=aid[:16],
+               paths=files[:20], certainty=c, count=len(files), project=run.get("project") or "",
+               **({"severity": "warning"} if c == "certain" else {}))
     return writes
 
 
-def _mark_other_writes(run: dict, holder: str, files: list, by: str, by_name: str, certainty: str, now: float):
-    """The open steps of a build lane (or of the member a helper works for) whose scope holds these files keep them
-    as changed by another lane (`other_writes`), so the review of that work lists them (other_writes_for)."""
-    lanes = lane_chain(run, holder)
+def _mark_other_writes(run: dict, files: list, chain: set, by: str, by_name: str, certainty: str, now: float) -> list:
+    """The open steps outside the writing lane whose scope holds one of these files keep them as changed by another
+    lane (`other_writes`), so the review of that work lists them (other_writes_for). -> the names of those steps."""
+    out = []
     for st in run.get("plan") or []:
-        if st.get("owner") not in lanes or st.get("state") in DONE:
+        if st.get("owner") in chain or st.get("state") in DONE or not st.get("scope"):
             continue
-        mine = [p for p in files if not st.get("scope") or in_scope(p, [st["scope"]])]
+        mine = [p for p in files if in_scope(p, [st["scope"]])]
         if mine:
             marks = st.setdefault("other_writes", [])
             marks.append({"ts": round(now), "by": by[:16], "by_name": by_name, "paths": mine[:20],
                           "certainty": certainty})
             st["other_writes"] = marks[-20:]
+            out.append(st["name"])
+    return out
 
 
 def other_writes_for(run: dict, st: dict) -> list:

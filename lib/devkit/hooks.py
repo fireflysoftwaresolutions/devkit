@@ -179,9 +179,15 @@ def _clone_node_modules(wt: Path, main: Path):
     return None
 
 
+_SEEN = {}  # cwd -> what context_for inspected there last ("top", "repo"): the welcome reuses that one inspection
+
+
 def context_for(cwd: str, agent: str) -> str:
+    """The workspace context the model reads at session start. What it inspects stays in _SEEN for the welcome:
+    "top" (the checkout's root, "" outside a repository) and "repo" (the project, as registry.inspect_repo gave it)."""
     from . import registry
     top = core.gitout(cwd, "rev-parse", "--show-toplevel")
+    seen = _SEEN[cwd] = {"top": top or ""}
     lines = ["## devkit · workspace context", "",
              "For development work only (code, debugging, tests, builds, deploys, releases, developer tools). If a "
              "request is something else (a recipe, a general question, consulting work with the Firefly consulting "
@@ -201,6 +207,7 @@ def context_for(cwd: str, agent: str) -> str:
         return "\n".join(lines)
     main = registry.main_of(Path(top)) or Path(top)
     p = registry.inspect_repo(main, with_prs=True, refresh_prs=False, pr_max_age=86400)
+    seen["repo"] = p
     p["main"]["active"] = True
     if registry.update_note(p):
         pass
@@ -238,8 +245,8 @@ def context_for(cwd: str, agent: str) -> str:
         lines.append(f"Last agent status ({st.get('agent')}, {core.ago(st.get('ts'))}): {st.get('line')}")
     from . import notes as notesmod
     note = core.note_path(p["id"])
-    if note.exists():
-        ns = notesmod.summarize(note.read_text())
+    ns = notesmod.summarize(note.read_text()) if note.exists() else None
+    if ns:
         meta = f"status {ns['status']} · priority {ns['priority']}" + (f" · milestone {ns['milestone']}" if ns["milestone"] else "")
         lines.append(f"Project: {meta} · tasks: {len(ns['tasks']['now'])} now, {ns['tasks']['open']} open "
                      f"(`dev task` lists them; `dev task add|start|done` edits them)")
@@ -288,7 +295,7 @@ def context_for(cwd: str, agent: str) -> str:
         inits = [d.name for d in (HANDOFF / "initiatives").glob("*") if (d / "README.md").exists() and
                  p["id"] in notesmod.summarize((d / "README.md").read_text())["projects"]] \
             if (HANDOFF / "initiatives").exists() else []
-        known = lessons.context_lines(p["id"], inits)
+        known = lessons.context_lines(p["id"], inits, limit=PITFALLS_MAX)
         if known:
             lines.append("Known pitfalls (lessons from earlier mistakes; follow their prevention, and `dev lesson recur "
                          "<id> --evidence …` if one happens again):")
@@ -311,12 +318,32 @@ def context_for(cwd: str, agent: str) -> str:
                  "decisions, PRs, handovers; plain American English).")
     lines.append("devkit manual: the `using-devkit` skill (session protocol, which tool for which job, project and "
                  "initiative rules, the status line).")
-    lines.append(f"Handoff note: {tilde(note)} — read it before starting; update it with the devkit `handoff` skill "
-                 f"before you finish or when the user says handoff/pause/wrap up.")
-    body = registry.human_sections(p["id"])
-    if body:
-        lines += ["", "--- handoff note ---", body]
+    lines.append(f"Handoff note: {tilde(note)} — its Now tasks and current state are below; read the rest (decisions "
+                 f"and gotchas, Next tasks, recent sessions) before starting, and update it with the devkit `handoff` "
+                 f"skill before you finish or when the user says handoff/pause/wrap up.")
+    lines += ["", "--- handoff note ---", _note_excerpt(ns)]
     return "\n".join(lines)
+
+
+def _note_excerpt(ns) -> str:
+    """The part of the handoff note (its notes.summarize) the session starts with: the Now tasks, then the current
+    state, which comes last because a cut to CONTEXT_MAX takes it from its end. The rest stays in the note."""
+    if not ns or not (ns["tasks"]["now"] or ns["state"]):
+        return "(The note has no Now tasks or current state yet: fill Current state as you learn the project.)"
+    now = ns["tasks"]["now"]
+    parts = []
+    if now:
+        parts.append("Tasks, Now:\n" + "\n".join("- " + _cut_task(x) for x in now[:NOW_MAX])
+                     + (f"\n- … {len(now) - NOW_MAX} more (`dev task`)" if len(now) > NOW_MAX else ""))
+    if ns["state"]:  # never more than the whole context holds
+        parts.append("Current state:\n" + ns["state"][:CONTEXT_MAX])
+    return "\n\n".join(parts)
+
+
+def _cut_task(title: str) -> str:
+    """A task's title on one line of at most TASK_MAX characters."""
+    title = " ".join(title.split())
+    return title if len(title) <= TASK_MAX else title[:TASK_MAX - 1].rstrip() + "…"
 
 
 def _register_session(agent: str, sid: str, cwd: str, data: dict = None) -> Path:
@@ -422,39 +449,79 @@ def session_start(agent: str):
         work.request_sync("session start", delay=1)  # pull other machines' claims and publish this session
     except Exception:
         pass
-    text = "\n\n".join(x for x in (_continuity("on_session_start", agent, data),
-                                   _with_catalog(context_for(cwd, agent), agent)) if x)
-    shown = [older] if older else []  # the notices the developer must see too, not only the agent (Claude: a system message)
-    text += f"\n\n{older}" if older else ""
-    try:  # devkit notices from files only, no network (spec P-fym583l7sg1)
-        from . import ext, updatecheck
-        notices = ((lambda: updatecheck.session_line(installed=updatecheck.installed_version()), False),  # daily
-                   (lambda: ext.session_line(cwd), False),  # extensions changed outside devkit, each audited once
-                   (lambda: ext.accepted_line(), True),  # extensions accepted since the developer's last ack
-                   (lambda: ext.last_ack_line(), True))  # that last ack, once, with its terminal
+    _SEEN.pop(cwd, None)
+    brief = _continuity("on_session_start", agent, data)
+    context = _with_catalog(context_for(cwd, agent), agent)
+    seen = _SEEN.pop(cwd, {})  # what context_for inspected, for the welcome
+    shown = [older] if older else []  # the notices the developer must see when no welcome carries them
+    told = [older] if older else []  # the notices the model reads, before the workspace context: a cut keeps them
+    said = set()  # the notices this start has: the welcome turns them into need lines
+    try:  # devkit notices from files only, no network; the daily update line is the welcome's
+        from . import ext
+        notices = (("ext_changed", lambda: ext.session_line(cwd), False),  # changed outside devkit, audited once
+                   ("ext_accepted", lambda: ext.accepted_line(), True),  # accepted since the developer's last ack
+                   ("ext_ack", lambda: ext.last_ack_line(), True))  # that last ack, once, with its terminal
     except Exception:
         notices = ()
         _log(f"session-start notices {agent}: {traceback.format_exc()[-300:]}")
-    for notice, to_developer in notices:
+    for key, notice, to_developer in notices:
         try:
             line = notice()
-            text += f"\n\n{line}" if line else ""
+            if line:
+                told.append(line)
+                said.add(key)
             if line and to_developer:
                 shown.append(line)
         except Exception:
             _log(f"session-start notice {agent}: {traceback.format_exc()[-300:]}")
-    if os.environ.get("DEVKIT_GUARD", "").lower() == "off":  # spec F8, rule 5: never silent
-        text = ("devkit · the guard is off in this session (DEVKIT_GUARD=off): it judges no tool call, so the "
-                "workspace rules, the crew's limits and the irreversible-action gate do not hold. That is recorded "
-                "once as guard.off in the audit trail. Start the session without it to turn the guard back on.\n\n"
-                + text)
-    if agent == "codex":
-        print(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": text}}))
-    elif shown:  # Claude Code shows a system message to the developer, as the canary does at the Stop hook
-        print(json.dumps({"systemMessage": "\n\n".join(shown),
-                          "hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": text}}))
+    guard_off = ""
+    if os.environ.get("DEVKIT_GUARD", "").lower() == "off":  # never silent
+        guard_off = ("devkit · the guard is off in this session (DEVKIT_GUARD=off): it judges no tool call, so the "
+                     "workspace rules, the crew's limits and the irreversible-action gate do not hold. That is "
+                     "recorded once as guard.off in the audit trail. Start the session without it to turn the guard "
+                     "back on.")
+    wanted, hello = _welcome(agent, data, cwd, seen, bool(older), said)
+    seen_note = ""
+    if hello:  # first of all, in the part of the context a preview keeps when the whole is too long
+        from . import welcome
+        seen_note = welcome.for_model(hello)
+    else:  # no welcome to show it (and mark the day only then): the model hears the daily update line, as before
+        try:
+            from . import updatecheck
+            line = updatecheck.session_line(installed=updatecheck.installed_version())
+            told += [line] if line else []
+        except Exception:
+            _log(f"session-start update notice {agent}: {traceback.format_exc()[-300:]}")
+    # what matters most first: a cut to CONTEXT_MAX takes the handoff note's excerpt, then the catalog, from the end
+    text = _fit("\n\n".join(x for x in (seen_note, guard_off, brief, *told, context) if x))
+    # the developer reads the welcome (Claude Code at the session's top, Codex above its first reply); without one,
+    # the notices themselves. A headless run, a crew member's session and a scratch repository get neither.
+    message = hello or ("\n\n".join(shown) if wanted else "")
+    if agent == "codex" or message:
+        out = {"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": text}}
+        print(json.dumps(dict({"systemMessage": message}, **out) if message else out))
     else:
         print(text)
+
+
+def _welcome(agent: str, data: dict, cwd: str, seen: dict, older: bool, said: set) -> tuple:
+    """-> (whether this start gets a welcome, the welcome or ""). Not wanted for a headless run, a crew member's
+    session or a scratch repository (welcome.wanted). "" when context_for did not say where the session is (then
+    the notices show as before), and on any error: the hook never fails for it."""
+    try:
+        from . import welcome
+        from .canary import surface
+        if not welcome.wanted(agent, data, seen.get("top", "")):
+            return False, ""
+        if "top" not in seen:
+            return True, ""
+        return True, welcome.text(agent, str(data.get("source") or "startup"), cwd, data=data,
+                                  repo=seen.get("repo"), top=seen["top"], older=older,
+                                  ext_changed="ext_changed" in said, ext_ack="ext_ack" in said,
+                                  mode=welcome.mode_for(surface(agent, data)))
+    except Exception:
+        _log(f"session-start welcome {agent}: {traceback.format_exc()[-300:]}")
+        return True, ""
 
 
 def _continuity(fn: str, agent: str, data: dict, **kw):
@@ -494,27 +561,66 @@ def post_compact(agent: str):
     _continuity("on_post_compact", agent, _stdin_json())
 
 
-CATALOG_MAX = 8000  # characters of the catalog in the session's context (about 7,200 with the members' roles)
+CONTEXT_MAX = 9000  # UTF-8 bytes of the context a session starts with: Claude Code cuts a hook's output past 10,000
+# characters to a 2,000-character preview, and Codex past about 2,500 tokens, which it counts as 4 bytes each
+PITFALLS_MAX = 3  # known pitfalls in that context, the most relevant first
+NOW_MAX = 5  # Now tasks of the handoff note in that context, each on one line of at most TASK_MAX characters: the
+TASK_MAX = 160  # note's current state comes after them and keeps its room
+CUT_LINE = "… cut here to keep devkit's context under the hooks' size limit: the handoff note has the rest."
+CATALOG_MAX = 8000  # characters of the catalog's index at most (about 2,300 with devkit's 34 kinds of work)
+
+
+def _fit(text: str, limit: int = CONTEXT_MAX) -> str:
+    """`text` cut at whole lines to `limit` UTF-8 bytes, from its end, with CUT_LINE last; as it is when it fits.
+    The session's context puts what matters most first, so the cut takes the handoff note's excerpt first."""
+    if len(text.encode("utf-8")) <= limit:
+        return text
+    room = limit - len(CUT_LINE.encode("utf-8")) - 1
+    out, size = [], 0
+    for ln in text.split("\n"):
+        n = len(ln.encode("utf-8")) + 1
+        if size + n > room:
+            if not out:  # one line longer than the limit: its start
+                out.append(ln.encode("utf-8")[:room].decode("utf-8", "ignore"))
+            break
+        out.append(ln)
+        size += n
+    while out and not out[-1].strip():
+        out.pop()
+    return "\n".join(out + [CUT_LINE])
 
 
 def catalog_context(agent: str) -> str:
-    """The catalog of ids the model declares (C13.1), cut at whole lines to CATALOG_MAX, with where the rest is."""
+    """The catalog of ids the model declares, as an index: every kind of work by its id and name, then where the rest
+    is (who does and approves each one, the crew's rules, the skills each one requires), the same for every agent.
+    Cut at whole kinds of work to CATALOG_MAX, keeping its last lines."""
     try:
-        from . import crew
-        text = crew.catalog(agent=agent)
+        from . import crew, raci, skillguard
+        kinds = [f"- `{a['id']}` {a['name']}" for a in raci.activities(crew.load())]
+        rules = tilde(skillguard.RULES_FILE)
     except Exception:
         _log(f"catalog {agent}: {traceback.format_exc()[-300:]}")
         return ""
-    if len(text) <= CATALOG_MAX:
-        return text
-    tail = "… the rest: `dev crew raci` (kinds of work), `dev crew rules` (skills), `dev lesson ls` (anchors)."
-    out, size = [], len(tail) + 1
-    for ln in text.splitlines():
-        if size + len(ln) + 1 > CATALOG_MAX:
+    head = ["devkit catalog · declare these ids, whatever language the developer writes in; devkit enforces on them "
+            "and never on words.",
+            "Kinds of work: one per plan step (`[id]` in a plan spec, as in `api=1h after design [backend]`, or "
+            "`--activity <id>` when you assign it) and per brief (`--activity <id>`). Without one, a step takes its "
+            "member's Responsible kind of work, then its files'."]
+    tail = ['Lesson anchors, where a lesson applies: dev lesson add "…" --cause "…" --prevent "…" --file <glob> '
+            '--command "<command words>" --activity <id> --error "<text the output shows>" --stack <name>.',
+            f"The rest: who does and who approves each kind of work, `dev crew raci [<id>]`; every crew rule and the "
+            f"check that enforces it, `dev crew rules`; the skills each kind of work, file and command requires, "
+            f"{rules} (a brief carries them, and the Stop hook checks them)."]
+    room = CATALOG_MAX - len("\n".join(head + tail)) - 1
+    shown = []
+    for i, ln in enumerate(kinds):
+        more = f"- … {len(kinds) - i} more: `dev crew raci`"
+        if len(ln) + 1 + (len(more) + 1 if i < len(kinds) - 1 else 0) > room:
+            shown.append(more)
             break
-        out.append(ln)
-        size += len(ln) + 1
-    return "\n".join(out + [tail])
+        shown.append(ln)
+        room -= len(ln) + 1
+    return "\n".join(head + shown + tail)
 
 
 def _with_catalog(text: str, agent: str) -> str:
@@ -825,15 +931,39 @@ def _test_gate(data: dict, sess: dict):
     return msg
 
 
-def _ci_watch_gate(agent: str, data: dict):
+def _ci_watch_gate(agent: str, data: dict, defer: bool = False):
     """A turn that sent work to origin and leaves its unfinished CI run with nothing watching it that wakes this agent
-    goes back with the command to start (ciwatch.stop_gate); the turn's stop.block names the rule. Fails open."""
+    goes back with the command to start (ciwatch.stop_gate); with `defer`, a run devkit's background watch follows is
+    left to the one wait. The turn's stop.block names the rule. Fails open."""
     try:
         from . import ciwatch
-        return ciwatch.stop_gate(agent, data)
+        return ciwatch.stop_gate(agent, data, defer=defer)
     except Exception:
         _log(f"stop ci watch: {traceback.format_exc()[-300:]}")
         return None
+
+
+def _wait_gate(agent: str, data: dict, ci_apart: bool = False):
+    """A main-session turn that ends while events can still arrive (a member works, a launch is pending, a step waits
+    for a slot, CI it sent has not finished) and leaves nothing armed that wakes it goes back once with the wait to
+    arm (watch.stop_gate); the turn's stop.block names the rule. Fails open."""
+    try:
+        from . import watch
+        return watch.stop_gate(agent, data, ci_apart=ci_apart)
+    except Exception:
+        _log(f"stop wait: {traceback.format_exc()[-300:]}")
+        return None
+
+
+def _watch_reasons(agent: str, data: dict) -> list:
+    """The two wake rules as one instruction -> [(rule, text)]. When the one wait is asked, a run devkit's background
+    watch follows is left to it, so the CI rule names only a run nothing follows; and when the CI rule asks for its
+    own watch, the wait does not claim to cover that run."""
+    wait = _wait_gate(agent, data)
+    ci = _ci_watch_gate(agent, data, defer=bool(wait))
+    if ci and wait:
+        wait = _wait_gate(agent, data, ci_apart=True)
+    return [(rule, why) for rule, why in (("watch", ci), ("wait", wait)) if why]
 
 
 def turn_checklist(agent: str, data: dict, sess: dict) -> list:
@@ -862,9 +992,8 @@ def turn_checklist(agent: str, data: dict, sess: dict) -> list:
         msg = find(data, sess)[1]
         if msg:
             items.append((rule, msg))
-    why = _ci_watch_gate(agent, data)  # right after a push, before the turn can end on a promise
-    if why:
-        items.append(("watch", why.replace("devkit: ", "", 1)))
+    for rule, why in _watch_reasons(agent, dict(data, stop_hook_active=False)):  # after a push, members at work
+        items.append((rule, why.replace("devkit: ", "", 1)))
     return items
 
 
@@ -935,6 +1064,9 @@ def stop(agent: str):
                 sess["roles_told"] = sess.get("turn_started")
                 reasons.append(("roles", f"devkit: your final message {canary.roles_reason(names)} Reply again with "
                                          f"the message fixed."))
+        why = canary.progress_gate(agent, data, sess) if dev_turn else ""  # the Progress rule, once per turn
+        if why:
+            reasons.append(("progress", why))
         try:
             from . import skillguard
             why = skillguard.on_stop(agent, data, sess) if dev_turn else None
@@ -947,9 +1079,7 @@ def stop(agent: str):
                 why = gate(data, sess)
                 if why:
                     reasons.append((rule, why))
-            why = _ci_watch_gate(agent, data)  # Claude and Codex: each is told the watch that wakes it
-            if why:
-                reasons.append(("watch", why))
+            reasons += _watch_reasons(agent, data)  # members or CI can still answer: what wakes the idle session
         try:  # lessons the reply names were applied: that use keeps them alive
             from . import lessons as _les
             said = data.get("last_assistant_message") or ""
@@ -1134,10 +1264,6 @@ def session_end(agent: str):
 
 # Claude Code's Monitor runs its `command` in the same shell as Bash: it is judged, gated and counted as one
 SHELL_TOOLS = ("Bash", "Monitor", "exec_command", "shell", "local_shell", "unified_exec")
-# what a subagent runs as itself: dev progress …, and dev crew ask, answer, inbox, decide, decisions, mode, delegate,
-# decline and route
-DEV_LANE_CMD = re.compile(r"^\s*(?:\S*/)?dev\s+(?:progress(?:\s|$)|"
-                          r"crew\s+(?:ask|answer|inbox|decide|decisions|mode|delegate|decline|route)(?:\s|$))")
 
 
 def _unroutable_lane_command(data: dict, agent: str = "claude"):
@@ -1147,10 +1273,19 @@ def _unroutable_lane_command(data: dict, agent: str = "claude"):
     lane commands pass; a team change, or `dev crew sync` outside the step's scope, is refused. -> the refusal, or None."""
     if not data.get("agent_id") or data.get("tool_name") not in SHELL_TOOLS:
         return None
-    if _route_subagent_progress(data):
+    if _route_subagent_progress(data, agent):
         return None
     cmd = (data.get("tool_input") or {}).get("command") or ""
     cmd = " ".join(shlex.quote(str(c)) for c in cmd) if isinstance(cmd, list) else str(cmd)
+    from . import guard
+    routed = isinstance((data.get("tool_input") or {}).get("command"), str) and \
+        guard.lane_route(cmd, data["agent_id"]) is not None
+    return _lane_verdict(data, agent, cmd, routed)
+
+
+def _lane_verdict(data: dict, agent: str, cmd: str, routed: bool = False):
+    """guard.crew_shell_verdict for a subagent's shell command, with its lane's scope, member, tool level and
+    repository: the refusal, or None. `routed`: the lane router gives the command's lane calls to the lane."""
     from . import guard
     aid, sid, cwd = data["agent_id"], data.get("session_id") or "-", data.get("cwd") or os.getcwd()
     scope = member = level = base = None  # no lane names no member, so no member folder applies (M124)
@@ -1163,7 +1298,7 @@ def _unroutable_lane_command(data: dict, agent: str = "claude"):
             base = guard.scope_base((run or {}).get("project"), cwd)
         # the lane's id finds its step grant for a tier-1 push or PR (spec C6, M180)
         v = guard.crew_shell_verdict(cmd, cwd, scope, member, level=level, base=base, lane=aid, session=sid,
-                                     agent=agent)
+                                     agent=agent, routed=routed)
     except Exception as e:  # unchecked is not allowed: the member's command fails closed (the Keymaker's review)
         _log(f"crew-lane {agent} {aid}: {traceback.format_exc()[-300:]}")
         return (f"devkit could not check this command against your lane ({type(e).__name__}), so it is refused "
@@ -1317,8 +1452,9 @@ def identity_change(cmd: str, cwd=None) -> list:
         if name == "unset":
             found += [a for a in argv[1:] if a.startswith("DEVKIT_") or "$" in a]
         found += [x for x in g._exports(name, argv[1:]) if x.startswith("DEVKIT_") or x == "?"]
-        if name in g._SHELLS:
-            texts += [argv[k + 1] for k in range(1, len(argv) - 1) if re.fullmatch(r"-[A-Za-z]*c[A-Za-z]*", argv[k])]
+        if name in g._SHELLS:  # the script of -c, and of +c, which bash 3.2 (macOS's /bin/bash) runs the same way
+            texts += [argv[k + 1] for k in range(1, len(argv) - 1)
+                      if re.fullmatch(r"[-+][A-Za-z]*c[A-Za-z]*", argv[k])]
         elif name == "eval":
             texts.append(" ".join(argv[1:]))
     seen = set()
@@ -1365,23 +1501,42 @@ def _member_folder(run: dict, aid: str) -> str:
         return str(aid)
 
 
-def _route_subagent_progress(data: dict):
-    """Inside a subagent (the hook input carries `agent_id`, in Claude Code and Codex), a single `dev progress …`
-    or `dev crew ask|answer|inbox|decide|decisions|mode|delegate|decline|route` command gets DEVKIT_FROM_AGENT, so it
-    updates that subagent's lane (its messages, decisions and delegations come from it, and `decide` refuses it) and
-    never advances the main plan.
-    Compound commands are left alone: the rewrite must not approve anything but that one command."""
+def _route_subagent_progress(data: dict, agent: str = "claude"):
+    """Inside a subagent (the hook input carries `agent_id`, in Claude Code and Codex), each `dev progress …` or
+    `dev crew ask|answer|inbox|decide|decisions|mode|delegate|decline|route` call of its shell command gets
+    DEVKIT_FROM_AGENT, so it updates that subagent's lane (its messages, decisions and delegations come from it, and
+    `decide` refuses it) and never advances the main plan (guard.lane_route). A single call is the whole command (a
+    quoted heredoc message is data). A compound command (`cd <worktree> && dev progress step "…" | tail -3`) is
+    routed only when the lane verdict allows everything else it runs: the rewrite approves nothing but the lane
+    calls."""
     aid = data.get("agent_id")
     inp = data.get("tool_input") or {}
     cmd = inp.get("command")
-    if not aid or data.get("tool_name") not in SHELL_TOOLS or not isinstance(cmd, str) or not DEV_LANE_CMD.match(cmd):
+    if not aid or data.get("tool_name") not in SHELL_TOOLS or not isinstance(cmd, str):
         return None
     from . import guard
-    if not guard.runs_one_command(cmd):  # a quoted heredoc message is data (K8)
+    new = guard.lane_route(cmd, str(aid)) or _watch_route(cmd, str(aid))
+    if new is None:
         return None
-    if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,80}", str(aid)):
+    if not guard.runs_one_command(cmd) and _lane_verdict(data, agent, cmd, routed=True):
+        return None  # _unroutable_lane_command gives the refusal
+    return {**inp, "command": new}
+
+
+def _watch_route(cmd: str, aid: str):
+    """A member's `dev watch …` call that is the whole command: with DEVKIT_FROM_AGENT=<aid> in front, so its wait
+    takes the member's own events, never the main session's. The call ledger names the member only while the call
+    is open, and a background command's call closes as soon as it starts. None for any other command."""
+    from . import guard
+    if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,80}", aid) or not guard.runs_one_command(cmd):
         return None
-    return {**inp, "command": f"DEVKIT_FROM_AGENT={aid} {cmd.strip()}"}
+    try:
+        argv = shlex.split(cmd)
+    except ValueError:
+        return None
+    if not argv or os.path.basename(argv[0]) != "dev" or argv[1:2] != ["watch"]:
+        return None
+    return f"DEVKIT_FROM_AGENT={aid} {cmd.strip()}"
 
 
 _HOOK_TEXT = re.compile(r"\bdevkit\.hooks\b|\bfrom\s+devkit\s+import\b[^\n]*\bhooks\b|(?:^|[\s;&|(`'\"])(?:\S*/)?dev\s+"
@@ -1584,6 +1739,7 @@ def _crew_limits(agent: str, data: dict):
                 return ("deny", progress.holder_refusal(h, path, cwd))
         if tool not in ("Agent", "Task", "spawn_agent"):
             return None
+        progress.note_midturn(agent, data)  # a request typed mid-turn may take the slot kept for the developer
         run = progress.load_run(agent, sid)
         if not run or run.get("state") == "done":
             return None
@@ -1866,7 +2022,7 @@ def _guard(agent: str, data: dict, held: dict):
             print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
                                                      "permissionDecisionReason": _with_pitfalls(agent, data, why)}}))
             return
-        routed = _route_subagent_progress(data)
+        routed = _route_subagent_progress(data, agent)
         if routed:
             out = _rewrite(agent, routed)
             held["done"] = True  # judged and routed to its lane: a failure adding its context must not refuse it
@@ -2001,41 +2157,18 @@ def _context_out(event: str, text: str):
 
 
 def morpheus_hint(text: str, roster=None) -> str:
-    """The route Morpheus takes for a development request: each kind of work it contains (the crew's RACI), who does
-    it, who approves it, and whom to consult. '' when the request is not clearly any kind of work."""
-    try:
-        from . import raci
-        if len(str(text or "").split()) < 4:
-            return ""
-        every = raci.classify(text, roster, limit=30)
-        ranked = [x for x in every if x[1] >= raci.MIN_SCORE][:4]
-    except Exception:
+    """The tech lead's reminder for a development request: declare its kinds of work by their ids from the catalog
+    and route each by the crew's RACI. It is the same in every language: the ids decide, never the request's words.
+    '' for a request too short to be work ("continue")."""
+    t = str(text or "").strip()
+    if len(t.split()) < 4 and len(t) < 30:
         return ""
-    mentioned = [x for x in every if x[1] >= 2]
-    you = f"devkit · you are the {_lead(roster)}"
-    if len(mentioned) >= 4:  # it names many kinds of work (often as examples): the tech lead decides, no single route
-        names_ = ", ".join(raci._lower(a["name"]) for a, _, _ in mentioned[:6])
-        return (f"{you}: this request mentions {len(mentioned)} kinds of work ({names_}). Decide "
-                "whether it is one change to how devkit or the crew works, or several pieces of work; plan one step "
-                "per kind of work and route each by the RACI (`dev crew raci`).")
-    if not ranked:
-        return ""
-    parts = []
-    for act, _, hits in ranked:
-        line = f"{raci._lower(act['name'])} → {raci.names(act.get('R'), roster)} does it"
-        if act.get("A") not in (act.get("R") or []):
-            line += f", {raci.names([act['A']], roster)} approves"
-        if act.get("C"):
-            line += f", consult {raci.names(act['C'], roster)}"
-        parts.append(line)
-    if len(parts) == 1:
-        head = f"{you}: this request is {parts[0]} (the crew's RACI)."
-    else:
-        head = (f"{you}: this request spans " + str(len(parts)) + " kinds of work (the crew's "
-                "RACI): " + "; ".join(parts) + ". Plan one step per kind of work and assign each to its member.")
-    return (head + " One kind of work under ten minutes: do it yourself. Otherwise plan it (`dev progress start "
-            "--plan`), assign the steps (`dev progress assign <step> --to <member>`) and brief the members "
-            "(`dev crew brief <member> \"<task>\"`); the run ends when each approver has reviewed.")
+    return (f"devkit · you are the {_lead(roster)}: declare the kinds of work in this request by their ids from the "
+            "catalog (`dev crew raci` lists them), whatever language it is in, and route each to its Responsible "
+            "member. One kind of work under ten minutes: do it yourself. Otherwise plan one step per kind of work "
+            "(`dev progress start --plan`), assign each with its id (`dev progress assign <step> --to <member> "
+            "--activity <id>`) and brief the member (`dev crew brief <member> \"<task>\" --activity <id>`); the run "
+            "ends when each approver has reviewed.")
 
 
 def prompt(agent: str):
@@ -2051,7 +2184,7 @@ def prompt(agent: str):
     if sid and not _session_file(agent, sid).exists():
         cwd = data.get("cwd") or os.getcwd()
         _register_session(agent, sid, cwd, data)
-        extra = _with_catalog(context_for(cwd, agent), agent)
+        extra = _fit(_with_catalog(context_for(cwd, agent), agent))
         _log(f"prompt {agent}: session {sid[:12]} had no SessionStart; devkit context injected")
     elif sid and agent == "claude" and not (state.read(_session_file(agent, sid)) or {}).get("pid"):
         try:  # a record an earlier prompt made without its process
@@ -2062,8 +2195,15 @@ def prompt(agent: str):
     background = _background_told(agent, data)  # a member's completion notice is often this very prompt
     if raw.startswith(("<task-notification", "[SYSTEM NOTIFICATION", "<system-reminder", "<agent-message")) or \
             "<task-notification>" in raw[:400]:
-        # background events are not the developer's request
-        _context_out("UserPromptSubmit", "\n\n".join(x for x in (extra, background) if x))
+        # background events are not the developer's request; what waits for the woken session comes with them
+        mail = ""
+        if sid and _session_file(agent, sid).exists():  # a prompt is the main session's
+            try:
+                from . import watch
+                mail = watch.mail(agent, sid, "main")
+            except Exception:
+                _log(f"prompt wake mail {agent}: {traceback.format_exc()[-300:]}")
+        _context_out("UserPromptSubmit", "\n\n".join(x for x in (extra, background, mail) if x))
         return
     # the prompt waits as pending in the checkpoint until Stop classes the turn; then what waits for the main session
     # (a late compaction's brief, "Not in the summary"), first in the context
@@ -2087,9 +2227,6 @@ def prompt(agent: str):
     route = ""
     if (core.CFG.get("crew") or {}).get("route_hint", True):
         route = morpheus_hint(data.get("prompt") or "")
-        if route:  # words never decide (C13): the catalog's ids do; this ranks a suggestion, in English only
-            route = route.replace("devkit · ", "devkit · a guess from the request's words (English only; declare "
-                                  "the kinds of work from the catalog) · ", 1)
     hatches = ""
     try:
         hatches = bypass_context(agent, sid)
@@ -2220,10 +2357,15 @@ def closing_reminder(data: dict, sess: dict, now: float, agent: str = "claude") 
     else:
         project = (sess.get("project") or "").rstrip("/").rsplit("/", 1)[-1] or "<project>"
     branch = (core.gitout(top, "branch", "--show-current") if top else "") or "-"
+    from . import canary
+    line = canary.progress_line(agent, data.get("session_id") or "", now)  # '' without an active run
     block = (f"devkit · after {what}: if you end the turn here (to wait, or because the work is done), your final "
              f"message opens with the status block: **[Firefly> DevKit]** {project} · `{branch}` · <task>, then "
-             f"Done / Check / Next. Nothing above it: a waiting note or a comment on this output goes below the block. "
-             f"Name crew members as <role> (<Name>), such as Backend engineer (Tank), never by the name alone.")
+             f"Done / Check / {'Progress / ' if line else ''}Next. Nothing above it: a waiting note or a comment on "
+             f"this output goes below the block. Name crew members as <role> (<Name>), such as Backend engineer "
+             f"(Tank), never by the name alone."
+             + (f" The run is active, so the block carries its Progress bullet as it is: - **Progress:** {line}"
+                if line else ""))
     return "\n\n".join(x for x in (block, todo) if x)
 
 
@@ -2332,6 +2474,12 @@ def post_tool(agent: str):
     # main: a compaction only the transcript shows (its brief) or "Not in the summary"; a member: its reminder after
     # its own compaction. Each once
     carried = _continuity("on_tool", agent, data)
+    try:  # the main session: what the developer typed mid-turn is their latest request (no prompt hook ran for it)
+        progress.note_midturn(agent, data)
+        if data.get("tool_name") == "SendMessage":  # the tech lead answered a member's question outside devkit
+            progress.answered_by_sendmessage(agent, data)
+    except Exception:
+        _log(f"post-tool requests {agent}: {traceback.format_exc()[-300:]}")
     answered = ""
     if data.get("tool_name") in progress.QUESTION_TOOLS:  # the developer's answer to a decision (spec C5, E1)
         try:

@@ -38,7 +38,7 @@ Follow these phases in order. A phase is finished when its gate holds; `proof` m
 2. **Attack.** Attack the running system in a safe environment: injection, bypasses, escalation, abuse of limits. skills: `variant-analysis` · gate: each attack ran
 3. **Confirm.** Confirm each finding with a working reproduction; rule out false positives. skills: `fp-check` · gate: every finding reproduces
 4. **Report.** Report the reproduction, the impact and the variants; never fix it yourself. skills: `communicating` · devkit: `dev crew ask` · gate: the variants are listed
-5. **Hand off.** Record the step with its evidence, name who approves it (the RACI), and report with your status block. skills: `communicating` · devkit: `dev progress step`, `dev crew ask` · gate: the step is recorded with its evidence · proof: `dev progress step`
+5. **Hand off.** Record the step with its evidence, name who approves it (the RACI), and report with your status block. devkit: `dev progress step`, `dev crew ask` · gate: the step is recorded with its evidence · proof: `dev progress step`
 
 ## Your place in the crew's RACI
 

@@ -28,7 +28,7 @@ Not yours: attacking the system (Agent Smith). Say so in your report and leave i
 
 Load each one with the Skill tool (it may list a plugin skill with its prefix, such as `devkit:testing`). Without the Skill tool, or when it does not list one, read the skill's SKILL.md.
 
-`threat-model-analyst`, `devsecops`, `sharp-edges`, `supply-chain-risk-auditor`, `semgrep`, `github-actions-hardening`, `testing`, `communicating`
+`threat-model-analyst`, `devsecops`, `sharp-edges`, `supply-chain-risk-auditor`, `github-actions-hardening`, `testing`, `communicating`
 
 ## Your procedure
 
@@ -36,9 +36,9 @@ Follow these phases in order. A phase is finished when its gate holds; `proof` m
 
 1. **Threat model.** Map the assets, entry points, trust boundaries and abuse cases. skills: `threat-model-analyst`, `devsecops` · gate: every entry point is in the model
 2. **Review.** Check authentication, authorization per operation, input validation, secrets and least privilege, and that devkit's own guard covers the new commands (`dev guard check` simulates it); approve, or send back with the fixes, the infrastructure changes and red-team findings you are accountable for. skills: `sharp-edges`, `supply-chain-risk-auditor` · gate: each control is checked
-3. **Scan.** Scan secrets, dependencies, code, containers and infrastructure. skills: `semgrep`, `github-actions-hardening` · devkit: `dev sec scan`, `dev ci audit` · gate: the scan is clean or every finding has a decision · proof: `dev sec scan`
+3. **Scan.** Scan secrets, dependencies, code, containers and infrastructure with `dev sec scan`; harden the workflow files you change with github-actions-hardening; run a full Semgrep audit (the semgrep skill) only when the developer asks for one, since its scan plan needs the developer's approval. skills: `devsecops` · devkit: `dev sec scan`, `dev ci audit` · gate: the scan is clean or every finding has a decision · proof: `dev sec scan`
 4. **Prove.** Report each finding with severity, proof and fix; write the test that keeps it fixed. skills: `testing` · devkit: `dev test` · gate: every fixed issue has a test
-5. **Hand off.** Record the step with its evidence, name who approves it (the RACI), and report with your status block. skills: `communicating` · devkit: `dev progress step`, `dev crew ask` · gate: the step is recorded with its evidence · proof: `dev progress step`
+5. **Hand off.** Record the step with its evidence, name who approves it (the RACI), and report with your status block. devkit: `dev progress step`, `dev crew ask` · gate: the step is recorded with its evidence · proof: `dev progress step`
 
 ## Your place in the crew's RACI
 

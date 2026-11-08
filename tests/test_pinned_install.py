@@ -135,7 +135,8 @@ class Sandbox(unittest.TestCase):
 
     def tearDown(self):
         for d, _, _ in os.walk(self.root):  # pinned copies are read-only
-            os.chmod(d, 0o755)
+            # the test sets the file mode it checks, on its own temporary files
+            os.chmod(d, 0o755)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions
         self.tmp.cleanup()
 
     def head(self, repo=None) -> str:
@@ -322,7 +323,8 @@ class DoctorTests(Sandbox):
         man_f = pin / core.PIN_MANIFEST  # a manifest rewritten to match the change is noticed too
         man = json.loads(man_f.read_text())
         man["files"]["lib/devkit/guard.py"] = sha256(guard)
-        os.chmod(pin, 0o755)
+        # the test sets the file mode it checks, on its own temporary files
+        os.chmod(pin, 0o755)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions
         os.chmod(man_f, 0o644)
         man_f.write_text(json.dumps(man))
         os.chmod(man_f, 0o444)
@@ -341,11 +343,13 @@ class DoctorTests(Sandbox):
         self.install()
         setup.write_claude_settings(include_hooks=True)
         s = self.settings()
-        s["hooks"]["PreToolUse"][0]["hooks"][0]["command"] = f"'{core.DEVKIT_HOME}/bin/dev' hook guard --agent claude"
+        # the hook runs the checkout the copy was pinned from (the sandbox's, so the check does not depend on where
+        # the tree under test sits: an exported copy's folder need not be named devkit)
+        s["hooks"]["PreToolUse"][0]["hooks"][0]["command"] = f"'{self.src}/bin/dev' hook guard --agent claude"
         (self.home / ".claude" / "settings.json").write_text(json.dumps(s))
         ok, detail, _ = self.checks()["hooks run the pinned copy"]
         self.assertFalse(ok)
-        self.assertIn(f"Claude PreToolUse runs {core.tilde(core.DEVKIT_HOME)}", detail)
+        self.assertIn(f"Claude PreToolUse runs {core.tilde(self.src)} (the checkout)", detail)
 
 
 class RealTreeTests(Sandbox):
@@ -550,7 +554,8 @@ class RealOlderReleaseTests(Sandbox):
     def pin_tree(self, name: str, version: str, files: bytes) -> Path:
         src = self.root / name
         src.mkdir()
-        with tarfile.open(fileobj=io.BytesIO(files)) as tf:
+        # the test extracts an archive it built itself, with the data filter when available
+        with tarfile.open(fileobj=io.BytesIO(files)) as tf:  # nosemgrep: trailofbits.python.tarfile-extractall-traversal.tarfile-extractall-traversal
             tf.extractall(str(src), **({"filter": "data"} if hasattr(tarfile, "data_filter") else {}))
         (src / "VERSION").write_text(version + "\n")
         git(src, "init", "-q", "-b", "main")

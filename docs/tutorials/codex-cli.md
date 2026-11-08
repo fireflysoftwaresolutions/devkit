@@ -58,6 +58,18 @@ That block is the **status block**. Every development reply starts with it, so i
 devkit's rules from `~/.codex/AGENTS.md`. If the reply has no such line, go to
 [When something goes wrong](#when-something-goes-wrong).
 
+With its first reply, Codex also shows devkit's welcome, the message of devkit's session-start hook. For this new
+project it reads:
+
+```text
+devkit · reading-list · new project
+› No history yet: say what you want to build
+· main · no commits yet
+```
+
+It is `dev status` in a few lines: what needs you, what runs, what is next, and where you are. [Concepts › The
+session-start welcome](../concepts.md#the-session-start-welcome) explains each line.
+
 ## Step 3: give the crew a task
 
 Type this request and press Return:
@@ -89,10 +101,9 @@ What happens, and what you see:
 **[Firefly> DevKit]** reading-list · `main` · Reading list
 - **Done:** the page adds books and marks them as read; the list stays after a reload.
 - **Check:** ✓ 6 tests pass in a headless browser
-- **Progress:** 3 of 4 steps · 31 min of ~45 · ETA 10–15 min
-- **Crew:** Trinity ✓ the page · Mouse ✓ the tests · Seraph ▸ the review
-- **You:** nothing yet; I ask before anything leaves this Mac.
-- **Next:** Seraph finishes the review, then I write the final report.
+- **Progress:** 3 of 4 steps · now 4. review · 31m active of ~45m · ETA ~10m–15m
+- **Crew:** Frontend engineer (Trinity) ✓ the page · QA engineer (Mouse) ✓ the tests · Code reviewer (Seraph) ▸ the review
+- **Next:** the Code reviewer finishes the review, then I write the final report.
 ```
 
 | Line | What it tells you |
@@ -100,8 +111,8 @@ What happens, and what you see:
 | Header | The project, the branch, and the task in a few words |
 | **Done** | What was done or found, in one sentence |
 | **Check** | The proof. `✓` checked in this session, `⚠` partly or not checked, `✗` failed, `–` nothing to check |
-| **Progress** | Only while a run is going: steps done, time spent, and when it is likely to finish |
-| **Crew** | Only when crew members work: each one with `▸` working, `✓` done, or `✗` failed |
+| **Progress** | Required while a run is going: steps done of the total, the step running now, active time against the estimate, and when it is likely to finish. devkit sends a reply back once when it is missing |
+| **Crew** | Only when crew members work: each one by its role and name, with `▸` working, `✓` done, or `✗` failed |
 | **You** | Only when something waits for you: a decision, an approval, or an action on your Mac or account |
 | **Next** | The next step, and who takes it |
 
@@ -142,9 +153,10 @@ describes every view.
 
 ## Step 5: finish
 
-The run ends when every approver has reviewed the work they own: here, Seraph reviews Trinity's page. Ask Codex how to
-open what it built: a one-page app is a file that opens in your browser. To end the session, type `/quit`. devkit
-records the session in the project's handoff note, so the next session starts from where this one stopped.
+The run ends when every approver has reviewed the work they own: here, the Code reviewer (Seraph) reviews the Frontend
+engineer's page. Ask Codex how to open what it built: a one-page app is a file that opens in your browser. To end the
+session, type `/quit`. devkit records the session in the project's handoff note, so the next session starts from where
+this one stopped.
 
 ## When something goes wrong
 

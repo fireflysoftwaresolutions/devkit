@@ -20,10 +20,24 @@ TEXT = {".py", ".md", ".sh", ".json", ".jsonc", ".toml", ".yml", ".yaml", ".js",
         ".bash", ".ini", ".cfg"}
 
 
-def tracked_text_files() -> list:
-    out = subprocess.run(["git", "-C", str(ROOT), "ls-files", "-z"], capture_output=True, check=True).stdout
-    names = [n for n in out.decode().split("\0") if n]
-    return [ROOT / n for n in names if Path(n).suffix in TEXT or Path(n).name in {"VERSION", "install.sh"}]
+# folders no checkout tracks: git's own, devkit's ignored ones (.gitignore) and the caches a copy of a working folder
+# can hold
+UNTRACKED_DIRS = {".git", "__pycache__", "dist", "node_modules", ".venv", "venv", ".tox", ".mypy_cache",
+                  ".pytest_cache", ".ruff_cache"}
+
+
+def tracked_text_files(root: Path = ROOT) -> list:
+    """The text files the checkout at `root` tracks; in an exported copy (git archive, no .git), which holds only
+    tracked files, every file outside the folders no checkout tracks."""
+    if (root / ".git").exists():
+        out = subprocess.run(["git", "-C", str(root), "ls-files", "-z"], capture_output=True, check=True).stdout
+        names = [n for n in out.decode().split("\0") if n]
+    else:
+        names = []
+        for d, dirs, files in os.walk(root):
+            dirs[:] = [x for x in dirs if x not in UNTRACKED_DIRS]
+            names += [Path(d, f).relative_to(root).as_posix() for f in files]
+    return [root / n for n in names if Path(n).suffix in TEXT or Path(n).name in {"VERSION", "install.sh"}]
 
 
 def naming(files, login: str) -> list:
@@ -47,6 +61,30 @@ class NoPersonalNames(unittest.TestCase):
         files = tracked_text_files()
         self.assertGreater(len(files), 100)
         self.assertEqual(naming(files, login), [])
+
+    # an exported copy (git archive, no .git) holds only tracked files: the check reads the same text files there as
+    # git ls-files lists in the checkout, and not the caches and build output a copy can pick up
+    def test_an_exported_copy_is_checked_on_the_files_the_checkout_tracks(self):
+        with tempfile.TemporaryDirectory() as d:
+            repo, export = Path(d) / "repo", Path(d) / "export"
+            files = {"README.md": "r\n", "VERSION": "26.11.7\n", "install.sh": "x\n", "lib/a.py": "a = 1\n",
+                     "docs/guide.md": "g\n", "assets/logo.png": "png", ".gitignore": "dist/\n__pycache__/\n",
+                     "dist/out.js": "ignored\n", "lib/__pycache__/a.py": "ignored\n"}
+            for rel, text in files.items():
+                (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+                (repo / rel).write_text(text)
+            git = ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@example.com"]
+            for args in (["init", "-q"], ["add", "."], ["commit", "-qm", "init"]):
+                subprocess.run(git + args, check=True, capture_output=True)
+            export.mkdir()
+            tar = subprocess.run(git + ["archive", "HEAD"], check=True, capture_output=True).stdout
+            subprocess.run(["tar", "-x", "-C", str(export)], input=tar, check=True)
+            for rel in ("lib/__pycache__/a.py", "node_modules/m/index.js", ".venv/lib/site.py", "dist/out.js"):
+                (export / rel).parent.mkdir(parents=True, exist_ok=True)  # what a copy of a working folder can hold
+                (export / rel).write_text("not tracked\n")
+            tracked = sorted(str(f.relative_to(repo)) for f in tracked_text_files(repo))
+            self.assertEqual(["README.md", "VERSION", "docs/guide.md", "install.sh", "lib/a.py"], tracked)
+            self.assertEqual(tracked, sorted(str(f.relative_to(export)) for f in tracked_text_files(export)))
 
     def test_the_check_finds_a_login_in_a_path_and_as_a_word_but_not_inside_another_name(self):
         with tempfile.TemporaryDirectory(dir=ROOT / "tests") as d:

@@ -227,7 +227,8 @@ The Stop hook asks for one more pass, never in a loop, when:
 | A plan changed without a recorded reason | `dev plan revise <file> --why "…"` for each plan it names |
 | Files changed without a required skill | The agent loads the skill and reviews the change. `skills.enforce: false` turns this off |
 | Commits without a handoff update | The agent updates the note with the `handoff` skill. `handoff.enforce: false` turns this off |
-| Work sent to `origin` with nothing that wakes the agent when its CI run ends | The agent arms `dev ci watch --wait` on that commit: in a Monitor or a background command on Claude Code, in the foreground on Codex. The message names each run and the exact command; see [CI/CD pipelines › The end-of-turn check](ci-cd.md#the-end-of-turn-check) |
+| Work sent to `origin` with nothing that wakes the agent when its CI run ends | The agent arms `dev watch --wait`, or `dev ci watch --wait` on that commit: in a Monitor or a background command on Claude Code, in the foreground on Codex. The message names each run and the exact command; see [CI/CD pipelines › The end-of-turn check](ci-cd.md#the-end-of-turn-check) |
+| Crew members still work, a launch is pending, or a step waits for a slot, and nothing wakes the agent | The agent arms `dev watch --wait`: with Bash `run_in_background` on Claude Code, or `--timeout 10` in the foreground on Codex, where it may instead end the turn saying when it checks again; see [Progress and communication › Waiting and waking](progress-and-communication.md#waiting-and-waking) |
 | Unfinished work without a task | Build it for real, or record the task and name it on the line; see [A commit is refused for unfinished work](#a-commit-is-refused-for-unfinished-work) |
 | New or changed tests that cannot fail | Fix each test that `dev test audit` names, or delete it; a meaningless assertion is not a fix |
 
@@ -315,6 +316,11 @@ explains why each record drifts):
 
 Neither `dev doctor` nor the dashboard changes anything: run the fix yourself. `dev task reconcile` without `--apply`
 shows the items first.
+
+A **handoff note** row of its own warns when the project's handoff note is longer than the handoff skill allows
+(about 150 lines), with its length. Rewrite Current state as it stands now and move history and long material into
+the project's `plans/` folder (the `handoff` skill, `/devkit:handoff`); the next session reads less and finds the
+current state first.
 
 ### `dev task start` says the task was claimed on another machine first
 
@@ -460,10 +466,18 @@ devkit's background watch reports at the session's next hook, and an idle sessio
 wait there unseen. Ask the agent for the status, or run `dev ci watches`: it lists the live watches and the ones that
 stopped before their runs ended, each with the command to arm it again. `dev ci status` shows the runs themselves.
 
-An agent that promises a report arms a wait that wakes it, `dev ci watch --wait`, and the Stop hook sends back a
-turn that pushed without one (see
+An agent that promises a report arms a wait that wakes it, `dev watch --wait` or `dev ci watch --wait`, and the Stop
+hook sends back a turn that pushed without one (see
 [CI/CD pipelines › Wait on a run](ci-cd.md#wait-on-a-run-a-watch-that-wakes-the-agent)). Each result is reported
 once: when you saw it already, in this session or another one, it does not come again.
+
+### A crew member waited, and the tech lead never answered
+
+The tech lead's session was idle with nothing armed, so no hook ran to deliver the question. Run `dev watches`: it
+lists the waits of each session, live, expired, or superseded, and what can still arrive. Ask the agent to arm
+`dev watch --wait` again, or write to it, and it gets the waiting question at once. A question whose member has
+ended and holds no open step is moot and needs no answer; `dev watch` shows it as moot with the reason. See
+[Progress and communication › Waiting and waking](progress-and-communication.md#waiting-and-waking).
 
 ### `dev push` says there is no local CI evidence
 

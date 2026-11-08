@@ -83,6 +83,8 @@ COMMANDS = [
          "The specialist agents: who does what, briefs, routing, delegation, who holds a file, decisions, the live "
          "graph, the rules, the RACI"),
         ("ci status [--watch]", "Live CI/CD runs (GitHub, GitLab, Bitbucket, Azure): jobs, steps, elapsed, ETA"),
+        ("watch [--wait] · watches", "One wait for every devkit event (questions, decisions, ready steps, members, "
+                                     "CI): it wakes an idle session once per event; watches lists the waits"),
         ("calver [--next]", "Current and next CalVer version YY.MM.PATCH from the repository's tags"),
         ("sec scan [--history]", "Security: secrets (gitleaks), dependencies (osv-scanner), SAST (Semgrep), Trivy"),
         ("docs check [--online]", "Check docs: Markdown structure, links and anchors, prose (Vale), diagrams"),
@@ -216,6 +218,14 @@ def commit_push(push=True, quiet=False):
             else:
                 audit.record("handoff.push", core.handoff_repo(), err[:300], "failed")
                 failed.write_text(json.dumps({"ts": int(time.time()), "error": err[:300]}))
+                try:  # each live session hears of it once, with its next wake or hook
+                    from . import watch
+                    watch.notice_all("notice", f"push:{int(time.time())}",
+                                     f"the handoff push failed at {time.strftime('%H:%M')}: "
+                                     f"{' '.join(err.split())[:200] or 'no reason given'}. dev status shows it; "
+                                     "the next dev sync tries again")
+                except Exception:
+                    pass
         if not ok and not quiet:
             ui.warn(f"handoff push failed: {err}")
 
@@ -646,12 +656,12 @@ def _crew_now(runs: list, roster, now: float) -> dict:
             what = [x for x in what if x]
             out["members"].append({"who": who, "on": what, "member": (m or {}).get("id", ""), "state": lv["state"]})
         if plan and out["plan"] is None:
-            done = sum(1 for s in plan if isinstance(s, dict) and s.get("state") in ("done", "skipped"))
+            done, total, _skipped = pg.step_counts(run)  # skipped steps count in neither, as in the Progress line
             try:
                 left = pg.eta(run, now)
             except Exception:
                 left = None
-            out["plan"] = {"done": done, "total": len(plan), "left_min": left}
+            out["plan"] = {"done": done, "total": total, "left_min": left}
             out["goal"] = run.get("goal") or ""
     return out
 
@@ -705,21 +715,36 @@ def _asker(name, roster):
         (m or {}).get("name") or name or "Morpheus")
 
 
-def _message_need(msg: dict, roster) -> dict:
-    """A crew question to the tech lead that nobody answered yet (progress.waiting_messages)."""
+def _session_of(ref: str) -> str:
+    """'the session' for a bare id, 'session 9448c4d0' for a qualified one (progress.shown_id)."""
+    from . import progress as pg
+    prefix = pg.split_id(ref)[1]
+    return f"session {prefix}" if prefix else "the session"
+
+
+def _message_need(msg: dict, roster, ref: str = "") -> dict:
+    """A crew question to the tech lead that nobody answered yet (progress.waiting_messages); `ref`: its id as shown
+    to the caller (progress.shown_id), which `dev crew answer` takes."""
     _, who = _asker(msg.get("from_name"), roster)
-    return {"kind": "message", "id": msg.get("id"), "text": f"{who} asks: {(msg.get('text') or '').rstrip()} Answer it "
-                                                            "in the chat with the session, or:",
-            "command": f"dev crew answer {msg.get('id')} \"…\"", "ts": msg.get("ts")}
+    ref = ref or msg.get("id")
+    return {"kind": "message", "id": ref, "text": f"{who} asks: {(msg.get('text') or '').rstrip()} Answer it in the "
+                                                  f"chat with {_session_of(ref)}, or:",
+            "command": f"dev crew answer {ref} \"…\"", "ts": msg.get("ts")}
 
 
-def _decision_need(d: dict, roster) -> dict:
+def _decision_need(d: dict, roster, ref: str = "") -> dict:
+    """A decision that needs the developer; `ref`: its id as shown to the caller (progress.shown_id). Its answer is
+    typed in the chat of the session that owns it: `approve D3`, or `approve D3@9448c4d0` for another session's run,
+    which that session alone takes as the developer's evidence."""
     m, who = _asker(d.get("from_name"), roster)
     q = (d.get("question") or "").rstrip()
     rec = f" {m['name'] if m else who} recommends {d['recommend']}." if d.get("recommend") else ""
-    answer = f"approve {d['id']}" + (f": {d['recommend']}" if d.get("recommend") else "")
-    return {"kind": "decision", "id": d.get("id"), "text": f"{who} asks: {q}{rec} Answer in the chat with the "
-                                                           "session:", "command": answer, "ts": d.get("ts")}
+    ref = ref or d.get("id")
+    answer = f"approve {ref}" + (f": {d['recommend']}" if d.get("recommend") else "")
+    where = "Answer in the chat with the session:" if ref == d.get("id") else \
+        f"Answer it in the chat with {_session_of(ref)}:"
+    return {"kind": "decision", "id": ref, "text": f"{who} asks: {q}{rec} {where}", "command": answer,
+            "ts": d.get("ts")}
 
 
 def _issue_needs(reg: dict, p: dict) -> list:
@@ -733,9 +758,11 @@ def _issue_needs(reg: dict, p: dict) -> list:
     return out
 
 
-def status_view(reg: dict, p: dict, w: dict = None, runs=None, ci=None, roster=None, now=None) -> dict:
+def status_view(reg: dict, p: dict, w: dict = None, runs=None, ci=None, roster=None, now=None, caller=None) -> dict:
     """Everything `dev status` shows for one project, in Sati's order: what needs you, what happens now (checks, the
-    crew, the plan), the last update, then the details. `--json` prints this."""
+    crew, the plan), the last update, then the details. `--json` prints this. `caller`: the (agent, session id) that
+    runs it, whose own run's messages and decisions keep their bare ids; every other run's carry their session
+    (progress.shown_id)."""
     from . import canary, crew as crew_mod, progress as pg
     now = now or time.time()
     roster = roster or crew_mod.load()
@@ -747,8 +774,10 @@ def status_view(reg: dict, p: dict, w: dict = None, runs=None, ci=None, roster=N
     runs = pg.active_runs() if runs is None else runs
     mine = [r for r in runs if r.get("project") == p["id"]]
     # what needs you is what is open now; the saved block's You line is history once the developer acted on it
-    needs = [_decision_need(d, roster) for r in mine for d in pg.pending_decisions(r)]
-    needs += [_message_need(m, roster) for r in mine for m in pg.waiting_messages(r)]
+    needs = [_decision_need(d, roster, pg.shown_id(r, d.get("id"), caller)) for r in mine
+             for d in pg.pending_decisions(r)]
+    needs += [_message_need(m, roster, pg.shown_id(r, m.get("id"), caller)) for r in mine
+              for m in pg.waiting_messages(r)]
     sl = p.get("status_line") or registry.status_line(p["id"]) or {}
     parsed = canary.parse_line(sl.get("line") or "") if sl.get("line") else {}
     if local and not p.get("canonical_ok", True):
@@ -872,8 +901,9 @@ def render_status(v: dict, cols: int = None) -> list:
     return out
 
 
-def home_view(reg: dict, runs=None, name: str = None, roster=None, offline: bool = True) -> dict:
-    """`dev status` outside a project: what needs you across this Mac's projects, then the projects."""
+def home_view(reg: dict, runs=None, name: str = None, roster=None, offline: bool = True, caller=None) -> dict:
+    """`dev status` outside a project: what needs you across this Mac's projects, then the projects. `caller`: as
+    status_view takes it."""
     from . import crew as crew_mod, progress as pg
     roster = roster or crew_mod.load()
     runs = pg.active_runs() if runs is None else runs
@@ -885,7 +915,7 @@ def home_view(reg: dict, runs=None, name: str = None, roster=None, offline: bool
         for r in runs:
             if r.get("project") == p["id"]:
                 for d in pg.pending_decisions(r):
-                    n = _decision_need(d, roster)
+                    n = _decision_need(d, roster, pg.shown_id(r, d.get("id"), caller))
                     n.update(text=f"{alias}: {n['text'][:1].lower()}{n['text'][1:]}", command=f"dev status {alias}")
                     needs.append(n)
         if not p.get("canonical_ok", True):
@@ -929,15 +959,16 @@ def cmd_status(a):
         p, w = _resolve(reg, a.query), None
     else:
         p, w = registry.project_for_cwd(reg, os.getcwd())
+    caller = _status_caller()
     if not p:
-        v = home_view(reg, offline=False)
+        v = home_view(reg, offline=False, caller=caller)
         _prompt_refresh(reg)
         if getattr(a, "json", False):
             print(json.dumps(v, indent=2, ensure_ascii=False, default=str))
             return 0
         print("\n".join(render_home(v)))
         return 0
-    v = status_view(reg, p, w)
+    v = status_view(reg, p, w, caller=caller)
     where = ((w or {}).get("path") or p.get("path")) if a.query else os.getcwd()
     v["needs_you"] += devkit_needs(where)  # the plugins of the project asked about, not of the folder it runs in
     _prompt_refresh(reg, where)
@@ -948,6 +979,16 @@ def cmd_status(a):
     print("\n".join(render_status(v)))
     print()
     return 0
+
+
+def _status_caller():
+    """The (agent, session id) `dev status` runs in, as `dev crew answer` resolves it, so an id shown bare answers
+    the same run; None when it cannot be told (then every run's ids carry their session)."""
+    from . import progress as pg
+    try:
+        return pg.current_session()
+    except Exception:
+        return None
 
 
 def devkit_needs(cwd: str = None) -> list:
@@ -2209,7 +2250,7 @@ def cmd_progress(a):
             elif act == "begin":
                 run = pg.begin(a.which, from_agent=from_agent)
             elif act == "add":
-                run = pg.add_step(" ".join(a.spec), why=getattr(a, "why", "") or "", from_agent=from_agent)
+                run = pg.add_step(pg.spec_args(a.spec), why=getattr(a, "why", "") or "", from_agent=from_agent)
                 if from_agent:
                     print(f"{ui.OK} added to your lane's plan · {' '.join(a.spec)}")
                     return 0
@@ -3686,6 +3727,23 @@ def build_parser():
     p.add_argument("--limit", type=int, default=5)
     p.add_argument("--all-jobs", action="store_true", help="list every running job")
     p.add_argument("--json", action="store_true")
+    from . import watch
+    w = add("watch", watch.cmd_watch, "What waits for you in this session, what can still arrive, and the live "
+                                      "waits; `--wait`: block until something you must act on arrives, print it once "
+                                      "and exit (exit 0 events, 2 nothing can arrive, 3 timeout, 5 superseded)")
+    w.add_argument("--wait", action="store_true",
+                   help="block until an event arrives for you: Claude Code main session with Bash run_in_background; "
+                        "a crew member or Codex in the foreground")
+    w.add_argument("--for", dest="for_", choices=("me",), help="me: the caller's own events (its crew lane, or the "
+                                                               "main session): the default, and the only value")
+    w.add_argument("--only", help="comma list: question,decision,ready,member,ci,notice; take only these kinds")
+    w.add_argument("--timeout", type=float, help="minutes before it ends with the command to arm it again (default "
+                                                 "240 for the main session on Claude Code, 10 on Codex, 9 for a crew "
+                                                 "member)")
+    w.add_argument("--json", action="store_true", help="the peek as JSON (for tools)")
+    w = add("watches", watch.cmd_watches, "Every wait (dev watch --wait) and CI watch: live, expired or superseded, "
+                                          "with the command to arm it again, and what can still arrive")
+    w.add_argument("--json", action="store_true", help="the waits as JSON (for tools)")
     from . import gitx
     gitx.add_ci_arguments(p)
     from . import pipelines

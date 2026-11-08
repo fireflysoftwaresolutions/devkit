@@ -80,11 +80,23 @@ class CatalogTests(HookCase):
         self.assertLess(out.index("devkit catalog"), out.index("--- handoff note ---"))  # the note may be cut, not it
 
     def test_the_catalog_is_bounded(self):
-        long = "\n".join(f"- `kind{i}` a kind of work with a long description to fill the line" for i in range(500))
-        with mock.patch.object(crew, "catalog", lambda *a, **k: long):
+        many = [{"id": f"kind{i}", "name": "a kind of work with a long description to fill the line"}
+                for i in range(500)]
+        with mock.patch.object(raci, "activities", lambda *a, **k: many):
             text = hooks.catalog_context("claude")
         self.assertLessEqual(len(text), hooks.CATALOG_MAX)
+        self.assertIn("`kind0`", text)
+        self.assertRegex(text, r"\n- … \d+ more: `dev crew raci`\n")  # the cut says how many kinds it left out
         self.assertIn("dev crew raci", text.splitlines()[-1])
+
+    def test_the_catalog_is_an_index_that_points_to_the_rest(self):
+        text = hooks.catalog_context("claude")
+        self.assertIn("`dev crew raci", text)
+        self.assertIn("`dev crew rules`", text)
+        for flag in ("--activity", "--file", "--command", "--error", "--stack"):  # where a lesson applies
+            self.assertIn(flag, text)
+        for detail in (" · R ", " · A ", "Skills the files you change"):  # those stay behind the commands
+            self.assertNotIn(detail, text)
 
 
 class LessonRecallTests(HookCase):
@@ -173,19 +185,25 @@ class RefusalRecordTests(HookCase):
     def test_guard_refusals_name_the_crew_member(self):
         pg.start("Work", plan=["parser"])
         self.hook("guard", self.bash("echo '{}' | dev hook prompt --agent claude", aid="a_tank"), real_guard=True)
-        self.hook("guard", self.bash("cd lib && dev progress step x --check y", aid="a_neo", tid="toolu_2"))
+        # a lane call inside a substitution, which the lane router never routes, stays refused for a crew member
+        self.hook("guard", self.bash('echo "$(dev progress step x --check y)"', aid="a_neo", tid="toolu_2"))
         lanes = {(r.get("crew") or {}).get("lane") for r in audit.records(1, action="guard.deny")}
         self.assertTrue({"a_tank", "a_neo"} <= lanes, lanes)
 
 
 class RouteHintTests(HookCase):
-    def test_the_prompt_route_is_labeled_a_guess(self):
-        out = self.hook("prompt", {"session_id": "s1", "hook_event_name": "UserPromptSubmit", "cwd": str(self.root),
-                                   "prompt": "build the JSON API server for the dashboard and implement the frontend "
-                                             "live updates"})
-        ctx = self.context(out)
-        self.assertIn("you are the Tech lead (Morpheus)", ctx)
-        self.assertIn("a guess from the request's words", ctx)
+    # the prompt hook reminds the tech lead to declare the kinds of work by catalog id, the same for a Spanish
+    # request as for an English one, and guesses no route from the words
+    def test_the_prompt_reminds_the_tech_lead_the_same_in_every_language(self):
+        def reminder(sid, prompt):
+            ctx = self.context(self.hook("prompt", {"session_id": sid, "hook_event_name": "UserPromptSubmit",
+                                                    "cwd": str(self.root), "prompt": prompt}))
+            return next((p for p in ctx.split("\n\n") if "you are the Tech lead (Morpheus)" in p), "")
+        en = reminder("s1", "build the JSON API server for the dashboard and implement the frontend live updates")
+        es = reminder("s2", "construye el servidor de la API JSON del panel y la parte de interfaz en vivo")
+        self.assertIn("declare the kinds of work in this request by their ids from the catalog", en)
+        self.assertEqual(en, es)
+        self.assertNotIn("Backend engineer (Tank)", en)
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 ---
 name: work-state
-description: Keeping devkit's records of work in flight true—work items and their locks, progress runs, steps and crew lanes, decisions and crew messages, CI watches, the pinned install, and merged branches—for the tech lead and crew members on Claude Code and Codex. Use before you end a turn that started, changed or finished work, right after a merge, before a release, when `dev doctor`'s work state check or the dashboard's Health view reports stale work, when an item stays doing, `dev progress done` refuses to end a run, a decision blocks nothing, a CI watch expired, or merged branches pile up.
+description: Keeping devkit's records of work in flight true—work items and their locks, progress runs, steps and crew lanes, decisions and crew messages, waits and CI watches, the pinned install, and merged branches—for the tech lead and crew members on Claude Code and Codex. Use before you end a turn that started, changed or finished work, right after a merge, before a release, when `dev doctor`'s work state check or the dashboard's Health view reports stale work, when an item stays doing, `dev progress done` refuses to end a run, a decision blocks nothing, a CI watch expired, or merged branches pile up.
 ---
 
 # Keeping work state true
@@ -20,7 +20,8 @@ event happens, and repair what drifted when the checks show it.
 | Step | pending, running, blocked, done, skipped, unverified | `dev progress step\|reopen\|skip\|confirm`; a member's report |
 | Crew lane | running, done, unverified, stopped, lost | the launch, the member's report, TaskStop, an interruption, silence |
 | Decision | pending (or moot), decided, withdrawn, closed | `dev crew decide`, `dev crew withdraw`, the end of its run |
-| Crew message | question (waits), notice and answer (never wait) | `dev crew ask`, `dev crew answer` |
+| Crew message | question (waits, or moot), notice and answer (never wait) | `dev crew ask`, `dev crew answer`, a `SendMessage` to the member who asked, the end of its run |
+| Wait | live, expired, superseded, ended | `dev watch --wait`; its timeout, a newer wait, what it printed; `dev watches` lists them |
 | CI watch | live, expired, ended | `dev ci watch --wait`; `dev ci watches` lists them |
 | Install | the pinned release, or an older session | `dev install`, `dev update`, a restart |
 | Branch | open, merged, pruned | the merge test; `dev pr merge`, `dev release`, `dev branch prune` |
@@ -37,7 +38,14 @@ item.
 
 **A decision is open only while someone waits for it.** It is moot when the member that asked has ended and no step
 is blocked on it: it needs no answer, never goes in the status block's **You** line, and does not stop
-`dev progress done`. Ending or replacing the run closes every decision still pending in it, with the reason.
+`dev progress done`. Ending or replacing the run closes every decision still pending in it, with the reason. A
+question to the tech lead is moot the same way: its member ended and holds no open step, so it wakes nobody and
+needs no answer.
+
+**A wait is live only while its process runs.** `dev watch --wait` is `live` until it prints what arrived (`ended`),
+times out or is stopped first (`expired`), or a newer wait of the same session and consumer takes over
+(`superseded`). One live wait per consumer: the main session, or one crew lane. The `wait-and-wake` skill says when
+to arm one.
 
 **A lane holds a slot only while it works.** A member stopped with TaskStop, or whose transcript shows an interruption,
 ends `stopped`: its slot frees and its open steps go back to pending. A resumed member takes a slot like a launch;
@@ -48,7 +56,7 @@ while none is free it may read but not write.
 | Who | Commands |
 | --- | --- |
 | The tech lead | `dev progress done\|confirm\|reopen\|skip` and `dev crew decide\|withdraw`, typed in the main session: run through a script or `bash -c`, they are refused (Codex runs them and records them as unverified). The repairs: `dev task reconcile --apply`, `dev branch prune --apply` (under the irreversible-action gate when it deletes on origin) |
-| A crew member | `dev progress step\|note` and `dev crew ask\|answer`, in its own lane; it asks the tech lead for a repair. It never runs `dev branch prune --apply` (unless `--local` or `--offline`) or `dev sync --scheduled`: the guard counts both as deletions on origin |
+| A crew member | `dev progress step\|note` and `dev crew ask\|answer`, in its own lane, and `dev watch --wait --for me --timeout 9` while blocked on an answer; it asks the tech lead for a repair. It never runs `dev branch prune --apply` (unless `--local` or `--offline`) or `dev sync --scheduled`: the guard counts both as deletions on origin |
 | The developer | answers to decisions; `dev install`, `dev update`, and the restart of their sessions; the yes before `dev branch prune --apply` deletes branches on origin |
 
 ## Before you end a turn
@@ -57,8 +65,9 @@ while none is free it may read but not write.
    `dev progress note`, never a close.
 2. The item you worked on: `dev task done <n> --why "<evidence>"` once it is verified, or `dev task release <n>` if
    you stop. Never leave it doing on a branch no session is on.
-3. Every unfinished CI run you sent to origin has a watch that wakes you (the `cicd` skill has the commands for each
-   agent).
+3. While events can still arrive (a member works, a launch is pending, a step waits for a slot, CI you sent runs),
+   a wait that wakes you is armed: `dev watch --wait`, which covers CI too (the `wait-and-wake` skill has the
+   command for each agent).
 4. The **You** line names only open decisions that wait for the developer. Moot and closed decisions and notices
    never go there, and a crew question to the tech lead is yours to answer (`dev crew answer`).
 5. Ending the run: `dev progress done "<outcome>"` is refused while a member owns a running step. Wait for its report,
@@ -108,6 +117,7 @@ while none is free it may read but not write.
 | A decision that no longer applies | `dev crew decisions` | the tech lead runs `dev crew withdraw <id> --why "…"` |
 | A question nobody answered | `dev status` | `dev crew answer <id> "…"` |
 | A watch expired while its run goes on | `dev ci watches` | run the re-arm command it prints |
+| A wait expired while members still work | `dev watches` | run the arm-again command it prints |
 | Merged branches and their worktrees | `dev branch prune` | `dev branch prune --apply`, after the developer agrees |
 | A session older than the pinned install | the one-time notice, `dev doctor` | the developer restarts the session |
 

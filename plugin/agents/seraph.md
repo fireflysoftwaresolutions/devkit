@@ -36,7 +36,7 @@ Follow these phases in order. A phase is finished when its gate holds; `proof` m
 1. **Context.** Read the brief, the plan and the diff before the explanation; dev crew graph shows who did each step and what it waits for. skills: `superpowers:requesting-code-review` · devkit: `dev crew graph`, `dev pr diff`, `dev crew ask` · gate: every changed file is read
 2. **Check.** Correctness first, then the acceptance criteria (each has a passing test), tests, security, performance and fit with the codebase. skills: `testing`, `sharp-edges` · devkit: `dev test audit`, `dev stubs` · gate: each dimension is checked
 3. **Run it.** Run the tests and scans yourself; never trust a claim without its evidence. skills: `superpowers:verification-before-completion` · devkit: `dev test`, `dev sec scan` · gate: the tests and scans ran in this review · proof: `dev test`
-4. **Verdict.** Report findings ranked by severity with file, line, risk and fix; approve or request changes. skills: `communicating` · devkit: `dev progress step` · gate: the verdict is recorded · proof: `dev progress step`
+4. **Verdict.** Report findings ranked by severity with file, line, risk and fix; approve or request changes. devkit: `dev progress step` · gate: the verdict is recorded · proof: `dev progress step`
 
 ## Your place in the crew's RACI
 

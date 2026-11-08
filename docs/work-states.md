@@ -1,7 +1,7 @@
 # Work states
 
 devkit keeps a record of each piece of work in flight: work items and their locks, progress runs with their steps
-and crew lanes, decisions and crew messages, CI watches, the pinned install, and branches. This page explains the
+and crew lanes, decisions and crew messages, waits and CI watches, the pinned install, and branches. This page explains the
 states each record moves through, what moves it, where you see it, and how to set it right when it no longer
 matches what happened.
 
@@ -28,7 +28,8 @@ devkit closes that gap in three ways:
 | [Step](#steps) | pending, running, blocked, done, skipped, unverified | `dev progress`, crew reports | `dev progress reopen`, `skip`, `confirm` |
 | [Crew lane](#crew-lanes) | running, done, unverified, stopped, lost | SubagentStart, SubagentStop, TaskStop | a new launch from `dev crew next` |
 | [Decision](#decisions) | pending (or moot), decided, withdrawn, closed | `dev crew ask --decision`, `decide`, `withdraw`, the run's end | `dev crew withdraw` |
-| [Crew message](#crew-messages) | question, notice, answer | `dev crew ask`, `dev crew answer`, devkit | `dev crew answer` |
+| [Crew message](#crew-messages) | question (or moot), notice, answer | `dev crew ask`, `dev crew answer`, a `SendMessage` to the member who asked, devkit | `dev crew answer` |
+| [Wait](#waits) | live, ended, expired, superseded | `dev watch --wait`, its timeout, a newer wait | the arm-again command `dev watches` prints |
 | [CI watch](#ci-watches) | live, expired, ended | a push, a pull request, a merge, a release, `dev ci watch --wait` | the re-arm command `dev ci watches` prints |
 | [Install](#the-install-pin) | pinned release, older session | `dev install`, `dev update` | restart the session |
 | [Branch](#branches-after-a-merge) | open, merged, pruned | the merge test, `dev branch prune`, `gc` | `dev branch prune --apply` |
@@ -170,6 +171,16 @@ Every crew message has a kind:
 
 A message to the tech lead by role, such as `--to "Tech lead"` or `--to Morpheus`, reaches the main session.
 
+A question closes when someone answers it with `dev crew answer`. On Claude Code, a `SendMessage` from the main
+session to the member who asked also answers that member's open questions to the tech lead: devkit marks each as
+answered via SendMessage, keeps the text as the answer, and records `crew.message-answered` in the audit trail.
+Codex's `send_input` does not, so the tech lead answers there with `dev crew answer`.
+
+A question to the tech lead is **moot** when the member that asked it has ended (done, stopped, lost, or unverified)
+and holds no running or blocked step: nobody waits for the answer. It is never listed as waiting, it wakes nobody,
+and `dev watch` shows it as moot with the reason. When the run ends or is replaced, the questions that still wait close
+with the reason (`crew.message-closed`).
+
 **Where you see it.** `dev status` lists under **Needs you** the decisions that wait for you and the questions to
 the tech lead that nobody answered, each with its command. The dashboard's Now view shows the same, with each moot
 decision under its run. `dev crew decisions` marks moot decisions, and `dev crew decisions --pending` leaves them
@@ -177,6 +188,29 @@ out. After a compaction, the continuity brief lists only the messages that still
 
 **Repair.** Answer a waiting question with `dev crew answer <id> "…"`. Withdraw a decision that no longer matters
 with `dev crew withdraw <id> --why "…"`, or end the run, which closes the decisions it still holds.
+
+## Waits
+
+`dev watch --wait` is the wait that wakes an idle agent for every devkit event: crew questions and answers, decisions
+for you, steps ready to launch, members that stopped or were lost, and CI results (see
+[Progress and communication › Waiting and waking](progress-and-communication.md#waiting-and-waking)). Each wait has
+a record, for one session and one consumer: the main session, or one crew lane.
+
+| State | What it means |
+| --- | --- |
+| `live` | Its process runs, before its timeout |
+| `ended` | It printed what arrived, or said that nothing can arrive, or its session ended |
+| `expired` | It timed out or was stopped before anything arrived |
+| `superseded` | A newer wait of the same session and consumer took over; the older one ended with one line |
+
+One wait is live per session and consumer. A record older than three days is removed.
+
+**Where you see it.** `dev watches` lists the live, expired, and superseded waits, each with the command to arm it
+again, then the CI watches and what can still arrive for this session. `dev watch` says whether a wait is armed for
+you. Each wake is in the audit trail (`watch.wake`).
+
+**Repair.** While events can still arrive, an expired wait wakes nobody: arm it again with the command
+`dev watches` prints. The Stop hook sends back a main-session turn that ends that way, once per turn.
 
 ## CI watches
 
@@ -200,7 +234,8 @@ from its own watch only.
 
 The background watch speaks only at a hook, and an idle session runs none. That is why the Stop hook sends back a
 turn that sent work to `origin` and leaves its unfinished CI run with nothing that wakes the agent (see
-[CI/CD pipelines › The end-of-turn check](ci-cd.md#the-end-of-turn-check)).
+[CI/CD pipelines › The end-of-turn check](ci-cd.md#the-end-of-turn-check)). A live [wait](#waits) counts: it takes
+the background watch's result when it lands.
 
 **Where you see it.** `dev ci watches` lists the live and expired watches, and `dev ci status` the runs themselves.
 The dashboard's Now view shows a branch's CI failure only while it is the newest settled result of that branch, so

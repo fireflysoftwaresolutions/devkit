@@ -158,7 +158,7 @@ class ProgressTests(unittest.TestCase):
             text = pg.render_update(run, branch="feat/export")
             self.assertTrue(canary.has_marker(text), text)  # the update is the status block: it passes the canary
             self.assertEqual(canary.format_issues(text), [], text)
-            self.assertIn("1/3", text)
+            self.assertIn("- **Progress:** 1 of 3 steps · now 2. step 2 · ", text)
             self.assertIn("**Next:** wire the endpoint", text)
             self.assertIn("**Check:** ✓ 12 tests pass", text)
             self.assertIn("⚠ not verified", pg.render_update(pg.step("endpoint wired"), branch="x"))
@@ -188,7 +188,7 @@ class ProgressTests(unittest.TestCase):
                 with self.subTest(q=q):
                     ctx = pg.on_prompt("claude", {"session_id": "s1", "prompt": q})
                     self.assertIn("Release", ctx)
-                    self.assertIn("1/4", ctx)
+                    self.assertIn("1 of 4 steps", ctx)
             self.assertIsNone(pg.on_prompt("claude", {"session_id": "s1", "prompt": "add a CSV export"}))
 
     def test_silence_nudge_and_tool_timing(self):
@@ -217,6 +217,59 @@ class ProgressTests(unittest.TestCase):
             pg.on_turn_end("claude", "s1", {"turn_started": time.time() - 90, "status": "DevKit · x"})
             self.assertEqual(len(pg.records(1, "turn")), 1)
             self.assertIn("Time", pg.report(1))
+
+
+class ProgressLineTests(unittest.TestCase):
+    # The status block's Progress bullet (the developer, 2026-11-08): the steps done of the steps that count, skipped
+    # steps in neither number, the running steps by their number in the plan, the active time against the estimate
+    # and the ETA, on one line. Every view that shows the block (dev progress, the reminders, dev status, the
+    # dashboard) prints this line, and the Stop hook compares a final message's numbers with it.
+    T0 = 1_800_000_000.0
+
+    def run_(self, states, names=None, state="running"):
+        names = names or [f"step {i}" for i in range(1, len(states) + 1)]
+        plan = [dict(pg._new_step(n, 10), state=st) for n, st in zip(names, states)]
+        return {"v": 2, "goal": "Hotfix", "state": state, "started": self.T0, "estimate": 120, "plan": plan,
+                "intervals": [[self.T0, None, "turn", "main"]], "agents": {}, "updates": []}
+
+    def line(self, run):
+        with TempState():
+            return pg.headline(run, self.T0 + 30 * 60)
+
+    def test_skipped_steps_count_in_neither_number(self):
+        run = self.run_(["done", "skipped", "done", "skipped", "skipped", "running", "pending", "pending"])
+        self.assertTrue(self.line(run).startswith("2 of 5 steps · 3 skipped · "), self.line(run))
+        self.assertEqual(pg.step_counts(run), (2, 5, 3))
+
+    def test_a_plan_without_skipped_steps_does_not_mention_them(self):
+        line = self.line(self.run_(["done", "running", "pending"]))
+        self.assertTrue(line.startswith("1 of 3 steps · now 2. step 2 · "), line)
+        self.assertNotIn("skipped", line)
+
+    def test_the_running_steps_are_named_by_their_number_in_the_plan(self):
+        names = ["roadmap", "guard findings", "lessons", "welcome research"]
+        line = self.line(self.run_(["skipped", "running", "done", "running"], names))
+        self.assertIn(" · now 2. guard findings, 4. welcome research · ", line)
+
+    def test_more_than_three_running_steps_name_three_and_count_the_rest(self):
+        line = self.line(self.run_(["running"] * 5, list("abcde")))
+        self.assertIn(" · now 1. a, 2. b, 3. c +2 · ", line)
+
+    def test_a_blocked_step_is_named_like_a_running_one(self):
+        line = self.line(self.run_(["done", "blocked", "pending"], ["design", "api", "ui"], state="blocked"))
+        self.assertIn(" · blocked 2. api · ", line)
+        self.assertTrue(line.endswith(" · blocked"), line)  # a blocked run has no ETA
+
+    def test_a_long_step_name_is_cut_so_the_line_stays_one_line(self):
+        name = "write the migration that moves every invoice to the new ledger table"
+        line = self.line(self.run_(["running"], [name]))
+        self.assertIn(" · now 1. write the migration that moves every… · ", line)  # at a word, within 40 characters
+
+    def test_time_against_the_estimate_and_the_eta_follow_the_steps(self):
+        parts = self.line(self.run_(["done", "running", "pending"])).split(" · ")
+        self.assertEqual(parts[2], "30m active of ~2h00m")
+        self.assertTrue(parts[3].startswith("ETA ~"), parts)
+        self.assertEqual(len(parts), 4, parts)
 
 
 class TimeModelTests(unittest.TestCase):
@@ -1300,6 +1353,223 @@ class CrewMessageIdTests(unittest.TestCase):
             self.assertEqual(pg.crew_decision("And another?", options="yes | no", recommend="yes")["id"], "D202")
 
 
+RUN_A = "5e1f0a2b-7c3d-4e5f-8a9b-0c1d2e3f4a5b"  # made-up session ids: never a real session of this Mac
+RUN_B = "c0ffee00-1234-4abc-8def-001122334455"
+NO_RUN = "d00d0000-0000-4000-8000-000000000000"  # a session of the same project with no run
+
+
+class CrossRunIdTests(unittest.TestCase):
+    # Message and decision ids are numbered per run, so two runs of one project both hold an M1. dev status listed
+    # another run's M11 and `dev crew answer M11` answered the caller's own M11 instead, leaving the listed one open.
+    # Here run A's Code reviewer asks M1, still waiting; run B's Release engineer asked an M1 its tech lead answered.
+    T0 = 1_800_000_000.0
+
+    def m(self, minutes):
+        return self.T0 + minutes * 60
+
+    def setUp(self):
+        self.state = TempState().__enter__()
+        self.addCleanup(self.state.__exit__, None, None, None)
+        for sid in (RUN_A, RUN_B, NO_RUN):
+            (pg.SESSIONS / f"claude-{sid}.json").write_text(json.dumps(
+                {"agent": "claude", "session": sid, "started": self.T0, "project": "acme/api"}))
+        with self.in_(RUN_A):
+            pg.start("Parser", plan=["parser", "review"], now=self.m(0))
+            launch("a1", "devkit:seraph", "Seraph: review", self.m(1), sid=RUN_A)
+            pg.crew_ask("Ship the parser with the old error format?", from_agent="a1", now=self.m(2))
+        with self.in_(RUN_B):
+            pg.start("Release", plan=["build"], now=self.m(0))
+            launch("b1", "devkit:link", "Link: build", self.m(1), sid=RUN_B)
+            q = pg.crew_ask("may I push the release branch?", from_agent="b1", now=self.m(2))
+            pg.crew_answer(q["id"], "yes", now=self.m(3))
+
+    def in_(self, sid):
+        return mock.patch.dict(os.environ, {"DEVKIT_SESSION": f"claude:{sid}"})
+
+    def run_of(self, sid):
+        return pg.load_run("claude", sid)
+
+    def waiting(self, sid):
+        return [m["id"] for m in pg.waiting_messages(self.run_of(sid))]
+
+    def test_a_bare_id_never_answers_the_callers_settled_message_while_another_run_waits_on_it(self):
+        before = self.run_of(RUN_B)["messages"]
+        with self.in_(RUN_B), self.assertRaises(ValueError) as e:
+            pg.crew_answer("M1", "yes, ship it", now=self.m(4))
+        self.assertIn('dev crew answer M1@5e1f0a2b "…"', str(e.exception))
+        self.assertEqual(self.run_of(RUN_B)["messages"], before)
+        self.assertEqual(self.waiting(RUN_A), ["M1"])
+
+    def test_a_qualified_id_answers_that_runs_message_and_the_answer_reaches_its_member(self):
+        before = self.run_of(RUN_B)["messages"]
+        with self.in_(RUN_B):
+            a = pg.crew_answer("M1@5e1f0a2b", "yes, keep the old format", now=self.m(4))
+        answers = [(m["id"], m["to"], m.get("reply_to"), m["text"]) for m in self.run_of(RUN_A)["messages"]
+                   if m.get("kind") == "answer"]
+        self.assertEqual(answers, [(a["id"], "a1", "M1", "yes, keep the old format")])
+        self.assertEqual(self.waiting(RUN_A), [])
+        self.assertEqual(self.run_of(RUN_B)["messages"], before)
+        self.assertIn("yes, keep the old format", pg.on_tool_done("claude", {"session_id": RUN_A, "agent_id": "a1"}))
+
+    def test_a_bare_id_the_callers_run_lacks_is_refused_with_the_qualified_ids_that_wait(self):
+        pg.start("Docs", plan=["docs"], now=self.m(0))  # TempState's session s1: its Technical writer waits on M1
+        pg.crew_ask("which guide gets the new page?", from_agent="c1", now=self.m(2))
+        with self.in_(NO_RUN), self.assertRaises(ValueError) as e:
+            pg.crew_answer("M1", "the configuration guide", now=self.m(4))
+        self.assertIn("M1@5e1f0a2b", str(e.exception))
+        self.assertIn("M1@s1", str(e.exception))
+        self.assertNotIn("M1@c0ffee00", str(e.exception))  # run B's M1 waits no more
+        self.assertEqual((self.waiting(RUN_A), self.waiting("s1")), (["M1"], ["M1"]))
+
+    def test_a_run_that_ends_closes_its_waiting_questions(self):
+        from devkit import audit
+        with self.in_(RUN_A):
+            pg.step("stopped early", kind="done", force=True, now=self.m(5))
+        run = self.run_of(RUN_A)
+        self.assertEqual(pg.waiting_messages(run), [])
+        self.assertEqual([(m["id"], m.get("closed"), m.get("reason")) for m in run["messages"]],
+                         [("M1", round(self.m(5)), "run ended")])
+        self.assertEqual([r["target"] for r in audit.query(action="crew.message-closed")], ["M1"])
+
+    def test_a_closed_question_takes_no_answer(self):
+        with self.in_(RUN_A):
+            pg.step("stopped early", kind="done", force=True, now=self.m(5))
+        with self.in_(RUN_B), self.assertRaises(ValueError) as e:
+            pg.crew_answer("M1@5e1f0a2b", "yes", now=self.m(6))
+        self.assertIn("M1@5e1f0a2b was closed (run ended)", str(e.exception))
+        self.assertEqual([m["id"] for m in self.run_of(RUN_A)["messages"]], ["M1"])
+
+    def test_dev_status_qualifies_another_runs_questions_and_drops_a_finished_runs(self):
+        from devkit import cli, crew, registry
+        with self.in_(RUN_B):
+            pg.crew_ask("may I tag v1.2.0?", from_agent="b1", now=self.m(4))  # run B's own M3, waiting
+        p = {"id": "acme/api", "owner": "acme", "name": "api", "path": None, "local": False, "main": {},
+             "worktrees": [], "canonical_ok": True, "prs_open": [], "status_line": {"line": ""}}
+        reg = {"projects": [p], "issues": [], "sessions": []}
+
+        def answers(runs):
+            with mock.patch.object(registry, "alias_map", lambda projects: {}):
+                v = cli.status_view(reg, p, None, runs=runs, ci={"runs": []}, roster=crew.load(team=False),
+                                    now=self.m(5), caller=("claude", RUN_B))
+            return sorted(n["command"] for n in v["needs_you"] if n["kind"] == "message")
+        self.assertEqual(answers([self.run_of(RUN_A), self.run_of(RUN_B)]),
+                         ['dev crew answer M1@5e1f0a2b "…"', 'dev crew answer M3 "…"'])
+        ended = dict(self.run_of(RUN_A), state="done", finished=self.m(5))  # saved before runs closed their questions
+        self.assertEqual(answers([ended, self.run_of(RUN_B)]), ['dev crew answer M3 "…"'])
+
+    def test_the_dashboard_lists_each_runs_questions_by_their_qualified_id(self):
+        from devkit import dashboard, dashnow
+        runs = dashboard._runs(self.m(5), raw=[self.run_of(RUN_A)])
+        self.assertEqual([q["id"] for q in runs[0]["questions"]], ["M1@5e1f0a2b"])
+        self.assertEqual([q["id"] for q in dashnow._questions(self.run_of(RUN_A))], ["M1@5e1f0a2b"])
+
+    def test_a_brief_read_from_another_session_qualifies_the_ids_and_its_own_session_keeps_them_bare(self):
+        self.assertIn("Crew messages waiting: M1@5e1f0a2b from",
+                      continuity.brief("claude", RUN_A, caller=("claude", RUN_B), now=self.m(5)))
+        self.assertIn("Crew messages waiting: M1 from", continuity.brief("claude", RUN_A, now=self.m(5)))
+
+    def test_decide_refuses_another_sessions_qualified_id(self):
+        with self.in_(RUN_A):
+            pg.crew_decision("Keep the old error format?", options="A: keep | B: drop", recommend="A",
+                             from_agent="a1", now=self.m(3))
+        with self.in_(RUN_B):
+            pg.crew_decision("Tag on Friday?", options="A: yes | B: no", recommend="A", now=self.m(3))
+            with self.assertRaises(pg.StepError) as e:
+                pg.crew_decide("D1@5e1f0a2b", "A: keep", now=self.m(4))
+        self.assertIn("answered in the session that owns it", str(e.exception))
+        self.assertEqual([d["state"] for d in self.run_of(RUN_A)["decisions"] + self.run_of(RUN_B)["decisions"]],
+                         ["pending", "pending"])
+
+    def test_dev_status_gives_another_runs_decision_the_approve_line_of_its_own_session(self):
+        from devkit import cli, crew, registry
+        with self.in_(RUN_A):
+            pg.crew_decision("Keep the old error format?", options="A: keep | B: drop", recommend="A",
+                             from_agent="a1", now=self.m(3))
+        p = {"id": "acme/api", "owner": "acme", "name": "api", "path": None, "local": False, "main": {},
+             "worktrees": [], "canonical_ok": True, "prs_open": [], "status_line": {"line": ""}}
+        with mock.patch.object(registry, "alias_map", lambda projects: {}):
+            v = cli.status_view({"projects": [p], "issues": [], "sessions": []}, p, None,
+                                runs=[self.run_of(RUN_A)], ci={"runs": []}, roster=crew.load(team=False),
+                                now=self.m(5), caller=("claude", RUN_B))
+        (need,) = [n for n in v["needs_you"] if n["kind"] == "decision"]
+        self.assertEqual(need["command"], "approve D1@5e1f0a2b: A")
+        self.assertTrue(need["text"].endswith("Answer it in the chat with session 5e1f0a2b:"), need["text"])
+
+    def test_decide_takes_the_callers_own_qualified_id(self):
+        with self.in_(RUN_B):
+            pg.crew_decision("Tag on Friday?", options="A: yes | B: no", recommend="A", now=self.m(3))
+            d = pg.crew_decide("D1@c0ffee00", "B: no", now=self.m(4))
+        self.assertEqual((d["id"], d["state"], d["answer"]), ("D1", "decided", "B: no"))
+
+
+def progress_cli(*argv):
+    """`dev progress …` through the real parser and handler -> (exit code, stderr)."""
+    import contextlib
+    import io
+    from devkit import cli
+    a = cli.build_parser().parse_args(["progress", *argv])
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        rc = a.fn(a) or 0
+    return rc, err.getvalue()
+
+
+class AddStepSpecTests(unittest.TestCase):
+    # `dev progress add "a=5h [security]" "b=2h [testing]"` joined its arguments into one step named
+    # "a=5h b=2h [testing]" (lesson L-g17fxiz48n1): each quoted argument is a step of its own
+    def setUp(self):
+        self.state = TempState().__enter__()
+        self.addCleanup(self.state.__exit__, None, None, None)
+        pg.start("Release", plan=["build"])
+
+    def plan(self):
+        return [(s["name"], s.get("est"), s.get("activity")) for s in pg.load_run("claude", "s1")["plan"]]
+
+    def test_each_quoted_spec_is_a_step_and_unquoted_words_stay_one(self):
+        self.assertEqual(progress_cli("add", "guard lessons=5h [security]", "test env lessons=2h [testing]")[0], 0)
+        self.assertEqual(progress_cli("add", "review=20m", "after", "build")[0], 0)  # typed without quotes
+        self.assertEqual(self.plan()[1:], [("guard lessons", 300.0, "security"), ("test env lessons", 120.0, "testing"),
+                                           ("review", 20.0, None)])
+        self.assertEqual(pg.load_run("claude", "s1")["plan"][3]["after"], ["build"])
+
+    def test_a_step_name_holding_a_second_estimate_is_refused(self):
+        rc, err = progress_cli("add", "a=5h", "b=2h")  # two specs in one: "a=5h b" with 2h
+        self.assertEqual(rc, 2)
+        self.assertIn("“a=5h b” holds another estimate", err)
+        self.assertEqual([n for n, *_ in self.plan()], ["build"])
+
+    def test_the_command_the_refusal_suggests_adds_both_steps(self):
+        import re
+        import shlex
+        _, err = progress_cli("add", "a=5h", "b=2h")
+        suggested = re.findall(r"dev progress add ([^)]+)\)", err)
+        self.assertTrue(suggested, err)
+        for args in suggested:
+            pg.start("Release", plan=["build"], replace=True, why="test")
+            self.assertEqual(progress_cli("add", *shlex.split(args))[0], 0, args)
+            self.assertEqual(self.plan()[1:], [("a", 300.0, None), ("b", 120.0, None)])
+
+
+class CrewMessageLengthTests(unittest.TestCase):
+    # a message over the limit was cut at 1,500 characters with no word to anyone, so the reader got half a text
+    def test_a_message_over_the_limit_is_refused_whole_and_nothing_is_posted(self):
+        with TempState():
+            pg.start("Release", plan=["build"])
+            with self.assertRaises(ValueError) as caught:
+                pg.crew_ask("Docs text for the writer: " + "x" * 1600, from_agent="a1")
+            self.assertIn("1626 characters", str(caught.exception))
+            self.assertIn("1500", str(caught.exception))
+            self.assertEqual(pg.load_run("claude", "s1").get("messages") or [], [])
+
+    def test_a_message_at_the_limit_arrives_whole(self):
+        with TempState():
+            pg.start("Release", plan=["build"])
+            text = "may I change lib/x.py? " + "y" * (1500 - 23)
+            q = pg.crew_ask(text, from_agent="a1")
+            self.assertEqual(len(text), 1500)
+            self.assertEqual(q["text"], text)
+
+
 class CrewMessageAuditTests(unittest.TestCase):
     def test_a_message_is_audited_by_its_kind_and_length_never_its_text(self):
         from devkit import audit
@@ -1315,10 +1585,19 @@ class CrewMessageAuditTests(unittest.TestCase):
 
 class CrewSafetyTests(unittest.TestCase):
     def test_a_subagent_cannot_act_as_morpheus_through_a_compound_command(self):
+        # the lane router (guard.lane_route) routes a lane call joined only to cd or to reads, as its own lane; any
+        # other compound stays refused, so it never runs as the tech lead
         from devkit import hooks
         sub = {"agent_id": "a1", "tool_name": "Bash"}
-        for cmd in ('cd lib && dev progress step "x" --check y', 'dev crew decide D1 "A"; echo ok',
-                    'echo $(dev crew mode auto)'):
+        for cmd, routed in (('cd lib && dev progress step "x" --check y',
+                             'cd lib && DEVKIT_FROM_AGENT=a1 dev progress step "x" --check y'),
+                            ('dev crew decide D1 "A"; echo ok', 'DEVKIT_FROM_AGENT=a1 dev crew decide D1 "A"; echo ok')):
+            with self.subTest(cmd=cmd):
+                self.assertEqual((hooks._route_subagent_progress(dict(sub, tool_input={"command": cmd})) or {})
+                                 .get("command"), routed)
+                self.assertIsNone(hooks._unroutable_lane_command(dict(sub, tool_input={"command": cmd})))
+        for cmd in ('echo $(dev crew mode auto)', 'dev progress step x && rm -rf build', 'echo y | dev crew decide D1 A',
+                    'cd lib && dev progress step x | tee /tmp/out', 'cd lib && env dev crew decide D1 A'):
             with self.subTest(cmd=cmd):
                 self.assertIsNone(hooks._route_subagent_progress(dict(sub, tool_input={"command": cmd})))
                 self.assertIn("command of its own", hooks._unroutable_lane_command(dict(sub, tool_input={"command": cmd})))
@@ -1483,6 +1762,23 @@ class EvidenceReplayTests(TranscriptCase):
         self.assertFalse(pg.confirmed({"agent": "codex", "channel": "E2", "transcript_uuid": "p-1", "covers": "D1"}))
 
 
+class QualifiedApproveTests(TranscriptCase):
+    # A bare `approve D1` typed in another session's chat counts for that session's own D1. A decision listed outside
+    # its own session shows `approve D1@<session>`, which is evidence only in the session it names
+    def typed(self, text, pid):
+        self.write({"type": "user", "promptId": pid, "uuid": f"u-{pid}", "isSidechain": False,
+                    "origin": {"kind": "human"}, "message": {"role": "user", "content": text}})
+        return self.prompt(text, pid)
+
+    def test_a_qualified_approve_line_counts_only_in_the_session_it_names(self):
+        pg.crew_decision("Skip empty lines or reject the file?", options="A: skip | B: reject", recommend="A")
+        pg.on_final_message("claude", "s1", "**[Firefly> DevKit]** … D1 waits for you: skip empty lines?")
+        self.assertEqual(self.typed("approve D1@5e1f0a2b: B", "p-1"), [])  # another session's D1, typed here
+        self.assertEqual([(e["covers"], e["answer"]) for e in self.typed("approve D1@s1: A", "p-2")], [("D1", "A")])
+        d = pg.crew_decide("D1", "A: skip")
+        self.assertEqual((d["by"], d["verified"], d["answer"]), ("developer", True, "A: skip"))
+
+
 class UnknownCommandGrantTests(TranscriptCase):
     # M332 (The Keymaker's RT1/RT2): a command whose program is only known when it runs is the action class unknown
     # (tier 2), its target cmd-<hash>; the developer opens that one command with "grant unknown cmd-<hash>"
@@ -1630,9 +1926,11 @@ class EstimateRoundingTests(unittest.TestCase):
 
 
 class ScopeWriteTests(unittest.TestCase):
-    # The Code reviewer works review-only while the Senior engineer's step scope holds docs/audit.md. A review lane can
-    # write through a script in its own scratch folder, so a file that changed during its shell call inside a working
-    # member's scope is that member's only while the member had a call open in the call ledger
+    # The Code reviewer works review-only while the Senior engineer's step scope holds docs/audit.md. A file that
+    # changed during the reviewer's shell call is the write of whoever's own Write, Edit or MultiEdit touched it
+    # during that call (B-fy1ae3k2ao6: the Security engineer's and the QA engineer's edits were held against the
+    # Business analyst). Every other file is the reviewer's, even inside a working member's scope: a script of the
+    # reviewer can write there, so a scope is no alibi
     def setUp(self):
         self.state = TempState().__enter__()
         self.addCleanup(self.state.__exit__, None, None, None)
@@ -1641,39 +1939,72 @@ class ScopeWriteTests(unittest.TestCase):
         pg.assign("review", "Seraph")
         launch("a_neo", "devkit:neo", "Neo: audit docs")
         launch("a_seraph", "devkit:seraph", "Seraph: review")
+        self.t0 = time.time()
+        # the reviewer's shell call has started (PreToolUse): the window its written files are judged in
+        pg.call_opened("claude", {"session_id": "s1", "tool_use_id": "toolu_seraph_sh", "agent_id": "a_seraph",
+                                  "tool_input": {"command": "python3 scratch/check.py"}}, now=self.t0)
 
     def told(self):
         return [m["text"] for m in pg.load_run("claude", "s1").get("messages") or [] if m.get("to") == "main"
                 and "shell call" in m["text"]]
 
-    def neo_call_open(self):
-        # the Senior engineer's shell call has started (PreToolUse) and has no result yet (PostToolUse)
-        pg.call_opened("claude", {"session_id": "s1", "tool_use_id": "toolu_neo_sh", "agent_id": "a_neo",
-                                  "tool_input": {"command": "python3 -m unittest tests.test_audit"}})
+    def edited(self, aid, path, at):
+        # a member's Edit call ends (PostToolUse) at `at`, as the hook hands it to progress
+        with mock.patch.object(pg.time, "time", lambda: at):
+            pg.on_tool_done("claude", {"session_id": "s1", "tool_name": "Edit", "tool_use_id": f"toolu_{aid}",
+                                       "agent_id": aid, "tool_input": {"file_path": f"/repo/{path}"}})
 
-    def test_a_file_in_a_build_scope_is_the_reviewers_own_write_when_that_lane_had_no_call_open(self):
+    def written(self, paths):
+        return pg.scope_written("claude", "s1", "a_seraph", paths, now=self.t0 + 30)
+
+    def test_files_members_edited_during_the_readers_call_are_theirs_and_only_the_rest_is_held(self):
+        # this run's case: two members edit with their Edit tool (no shell call open) while the reader's call runs
         from devkit import audit
-        flagged = pg.scope_written("claude", "s1", "a_seraph", ["docs/audit.md"]) or {}
-        self.assertEqual((flagged.get("paths"), flagged.get("certainty")), (["docs/audit.md"], "certain"))
+        pg.add_step("audit tests=10m")
+        pg.assign("audit tests", "Mouse", scope="tests/test_audit.py", why="test")
+        launch("a_mouse", "devkit:mouse", "Mouse: audit tests")
+        self.edited("a_neo", "docs/audit.md", self.t0 + 5)
+        self.edited("a_mouse", "tests/test_audit.py", self.t0 + 6)
+        flagged = self.written(["docs/audit.md", "tests/test_audit.py", "lib/x.py"])
+        self.assertEqual((flagged["paths"], flagged["certainty"]), (["lib/x.py"], "certain"))
+        self.assertEqual(sorted((r["target"], r["detail"]) for r in audit.query(action="scope.write")),
+                         [("Mouse", "attributed: tests/test_audit.py"), ("Neo", "attributed: docs/audit.md"),
+                          ("Seraph", "certain: lib/x.py")])
+        self.assertNotIn("changed by another lane", pg.render_update(pg.load_run("claude", "s1"), branch="b"))
+
+    def test_a_dotfile_a_member_edited_during_the_readers_call_is_theirs(self):
+        self.edited("a_neo", ".github/workflows/ci.yml", self.t0 + 5)
+        self.edited("a_neo", ".env.example", self.t0 + 6)
+        self.assertIsNone(self.written([".github/workflows/ci.yml", "./.env.example"]))
+        self.assertEqual(self.told(), [])
+
+    def test_a_shell_call_that_only_overlaps_other_members_edits_tells_nobody(self):
+        self.edited("a_neo", "docs/audit.md", self.t0 + 5)
+        self.assertIsNone(self.written(["docs/audit.md"]))
+        self.assertEqual(self.told(), [])
+        self.assertNotIn("scope_writes", pg.load_run("claude", "s1")["agents"]["a_seraph"])
+
+    def test_a_readers_write_into_a_working_members_scope_with_no_edit_of_theirs_is_held(self):
+        # the hiding case: the reader's script writes docs/audit.md; the Senior engineer edited it before the call
+        from devkit import audit
+        self.edited("a_neo", "docs/audit.md", self.t0 - 60)
+        flagged = self.written(["docs/audit.md"])
+        self.assertEqual((flagged["paths"], flagged["certainty"]), (["docs/audit.md"], "certain"))
         (text,) = self.told()
         self.assertIn("Code reviewer (Seraph)", text)
-        self.assertIn("Senior engineer (Neo)", text)
-        recs = audit.query(action="scope.write")
-        self.assertEqual([(r["target"], r["detail"]) for r in recs], [("Seraph", "certain: docs/audit.md")])
+        self.assertEqual([(r["target"], r["detail"]) for r in audit.query(action="scope.write")],
+                         [("Seraph", "certain: docs/audit.md")])
 
-    def test_a_file_in_a_build_scope_is_credited_to_that_lane_while_it_has_a_call_open(self):
-        from devkit import audit
-        self.neo_call_open()
-        flagged = pg.scope_written("claude", "s1", "a_seraph", ["docs/audit.md", "lib/x.py"]) or {}
-        self.assertEqual(flagged.get("paths"), ["lib/x.py"])
+    def test_a_file_in_the_scope_of_a_member_whose_shell_call_was_open_is_held_as_possible(self):
+        pg.call_opened("claude", {"session_id": "s1", "tool_use_id": "toolu_neo_sh", "agent_id": "a_neo",
+                                  "tool_input": {"command": "python3 -m unittest tests.test_audit"}}, now=self.t0 + 1)
+        flagged = self.written(["docs/audit.md"])
+        self.assertEqual((flagged["paths"], flagged["certainty"]), (["docs/audit.md"], "possible"))
         (text,) = self.told()
-        self.assertIn("docs/audit.md", text)  # the tech lead hears of the credited file too, with both lanes named
-        self.assertIn("Senior engineer (Neo)", text)
-        self.assertIn(("Neo", "attributed: docs/audit.md"),
-                      [(r["target"], r["detail"]) for r in audit.query(action="scope.write")])
+        self.assertIn("possibly the shell call of Senior engineer (Neo)", text)
 
     def test_the_review_step_lists_the_files_another_lane_changed_in_the_scope_of_the_work_it_follows(self):
-        pg.scope_written("claude", "s1", "a_seraph", ["docs/audit.md"])
+        self.written(["docs/audit.md"])
         lines = pg.render_update(pg.load_run("claude", "s1"), branch="b").splitlines()
         review = next(ln for ln in lines if " 2. review" in ln)
         self.assertIn("changed by another lane: docs/audit.md (Code reviewer (Seraph), certain)", review)
@@ -1856,7 +2187,8 @@ class HookCallsTests(unittest.TestCase):
             mods = {**{k: v for k, v in top.items() if k not in local}, **imports(fn.body)}
             missing |= {f"{n.value.id}.{n.attr} (line {n.lineno})" for n in ast.walk(fn)
                         if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and n.value.id in mods
-                        and not hasattr(importlib.import_module(f"devkit.{mods[n.value.id]}"), n.attr)}
+                        # the names imported are devkit's own modules, read from devkit's source by this test
+                        and not hasattr(importlib.import_module(f"devkit.{mods[n.value.id]}"), n.attr)}  # nosemgrep: python.lang.security.audit.non-literal-import.non-literal-import
         self.assertEqual(sorted(missing), [])
 
 
