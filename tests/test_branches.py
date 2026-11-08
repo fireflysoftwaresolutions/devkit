@@ -1036,6 +1036,14 @@ class MergeTestTests(MergeCase):
         self.assertEqual((row["merged_into"], row["backup"]["state"]), ("main", "merged"))
         self.assertIn("by content", row["backup"]["reason"])
 
+    def test_the_branch_map_tests_a_backed_up_branch_in_a_worktree_by_content_too(self):
+        # its backup left nothing unpushed, and dev free offers its worktree only when the map knows it is merged
+        self.land(*self.feature("fix/kept", "fix: keep the pushed thing", push=True))
+        git(self.repo, "worktree", "add", "-q", str(self.root / "wt-kept"), "fix/kept")
+        row = self.rows()["fix/kept"]
+        self.assertEqual((row["unpushed"], row["merged_into"], row["merged_how"]), (0, "main", "content"))
+        self.assertEqual(row["backup"]["state"], "on_remote")
+
     def test_a_remote_branch_is_tested_by_its_remote_ref(self):
         tips = self.feature("fix/remote", "fix: keep the remote thing", push=True)
         git(self.repo, "branch", "-q", "-D", "fix/remote")

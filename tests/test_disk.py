@@ -387,6 +387,18 @@ class PlanTests(Sandbox):
         self.assertEqual(wt["safety"], "check first")
         self.assertIn("macos-app-6b4769 has 2 commits that are not pushed. Push them first.", wt["risk"])
 
+    # A copy whose branch main took by content (cherry-picked, or rebased by its pull request) is offered like a
+    # merged one: the registry's merge test says so, and its commits on no remote are in main, not work to push.
+    def test_a_copy_merged_by_content_is_offered_like_a_merged_one(self):
+        r = self.repo()
+        copy = r.parent / "kit-consulting-picked"
+        write(copy / "f", 30)
+        rep = self.measure(self.project("acme/kit-consulting", r, [
+            self.wt(copy, "stray", "fix/picked", ahead_default=2, unpushed=2, landed=2, merged="content")]))
+        offered = [i for i in rep["plan"] if i["kind"] == "copy"]
+        self.assertEqual([(i["safety"], i["risk"]) for i in offered],
+                         [("safe", "Its commits have an equivalent in main (merged by content).")])
+
     # A main checkout in use keeps its build output out of the plan, and Codex worktrees are never removed (the
     # Codex app manages them).
     def test_main_in_use_and_codex_worktrees_stay_out_of_the_plan(self):
@@ -570,6 +582,28 @@ class FreeTests(Sandbox):
         self.assertEqual(rc, 0, out)
         self.assertFalse(copy.exists())
         self.assertNotIn(str(copy), git(r, "worktree", "list"))
+
+    # A copy merged by content goes although its commit is on no remote: the merge test runs again right before the
+    # removal, and the local branch goes with it, since main has its commit.
+    def test_free_removes_a_copy_merged_by_content_and_its_branch(self):
+        r = self.repo()
+        copy = self.worktree(r, r.parent / "kit-consulting-picked", "fix/picked")
+        (copy / "fix.txt").write_text("fix\n")
+        git(copy, "add", "-A")
+        git(copy, "commit", "-q", "-m", "fix: keep the picked thing")
+        (r / "NEWS.md").write_text("news\n")  # main moves on, so the cherry-pick is a new commit
+        git(r, "add", "-A")
+        git(r, "commit", "-q", "-m", "docs: add news")
+        git(r, "cherry-pick", git(copy, "rev-parse", "HEAD"))
+        git(r, "push", "-q", "origin", "main")
+        rep = self.measure(self.project("acme/kit-consulting", r, [
+            self.wt(copy, "stray", "fix/picked", ahead_default=1, unpushed=1, landed=1, merged="content")]))
+        disk.save(rep)
+        disk.mark_seen(rep)
+        rc, out = self.free(item(rep, "copy")["n"])
+        self.assertEqual(rc, 0, out)
+        self.assertFalse(copy.exists())
+        self.assertEqual(git(r, "branch", "--list", "fix/picked"), "")
 
     # Freeing unused images runs Docker's own prune and then the trim, and nothing ever prunes volumes.
     def test_free_images_prunes_images_then_trims_and_never_volumes(self):

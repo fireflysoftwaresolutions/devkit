@@ -550,12 +550,13 @@ def _pr_by_branch(prs) -> dict:
     return out
 
 
-def branch_rows(c, offline=False) -> list:
+def branch_rows(c, offline=False, prs=None) -> list:
+    """prs: the repository's pull requests, already read (None: read them here, unless offline)."""
     fmt = "%(refname:short)%00%(upstream:short)%00%(upstream:track,nobracket)%00%(committerdate:unix)%00%(objectname)"
     base = _base_ref(c)
     merged = set(core.gitout(c.top, "branch", "--format=%(refname:short)", "--merged", base).splitlines())
     wts = _worktree_branches(c.top)
-    prs = _pr_by_branch(None if offline else _prs(c))
+    prs = _pr_by_branch(prs if prs is not None else None if offline else _prs(c))
     rows = []
     for ln in core.gitout(c.top, "for-each-ref", "--format=" + fmt, "refs/heads").splitlines():
         parts = (ln.split("\x00") + [""] * 5)[:5]
@@ -603,41 +604,42 @@ def _branch_ls(c, a) -> int:
     return 0
 
 
-def _clean_reason(c, r, default):
-    """Why branch `r` may be deleted, or (None, why it is kept)."""
+def _clean_reason(c, r, default, prs=None):
+    """(why branch `r` may be deleted, None, True) or (None, why it is kept, merged). Merged is the merge test of
+    `dev branch prune` (branches.merge_test): its tip is in the base, its merged pull request from this repository had
+    its tip, or every commit has an equivalent in the base. prs: the repository's pull requests (None: no PR test)."""
+    from . import branches
+    m = branches.merge_test(c.top, r["name"], r["base"], prs=prs) if r["name"] != default else {"merged": False}
     if r["current"]:
-        return None, "current branch"
+        return None, "current branch", m["merged"]
     if r["name"] in (default,) or r["name"] in guard.PERMANENT_BRANCHES:
-        return None, "permanent branch"
+        return None, "permanent branch", m["merged"]
     if r["worktree"]:
-        return None, f"checked out in {core.tilde(r['worktree'])}"
-    if r["merged"] and r["name"] in set(core.gitout(c.top, "branch", "--format=%(refname:short)", "--merged",
-                                                    r["base"]).splitlines()):
-        return f"merged into {r['base']}", None
+        return None, f"checked out in {core.tilde(r['worktree'])}", m["merged"]
+    if m["merged"]:
+        return branches.merge_words(m, r["base"]), None, True
     pr = r.get("pr")
-    if pr and pr["state"] == "merged":
-        full = _ref_sha(c.top, f"refs/heads/{r['name']}")
-        if pr.get("head") and full == pr["head"]:
-            return f"PR #{pr['number']} merged", None
-        return None, f"PR #{pr['number']} merged, but the branch has newer commits"
+    if pr and pr["state"] == "merged":  # from a fork, merged elsewhere, or the branch moved on since
+        return None, f"PR #{pr['number']} merged, but " + branches.merge_words(m, r["base"]).split(": ", 1)[-1], False
     if r["gone"]:
         unique = int(core.gitout(c.top, "rev-list", "--count", f"refs/heads/{r['name']}", "--not", "--remotes") or 0)
         if unique == 0:
-            return "gone upstream, all commits are on the remote", None
-        return None, f"gone upstream but {unique} commit(s) exist only here"
-    return None, ""
+            return "gone upstream, all commits are on the remote", None, False
+        return None, f"gone upstream but {unique} commit(s) exist only here", False
+    return None, "", False
 
 
 def _branch_clean(c, a) -> int:
     if not a.offline:
         _fetch(c)
-    rows = branch_rows(c, offline=a.offline)
+    prs = None if a.offline else _prs(c)  # read once: the rows and the merge test share them
+    rows = branch_rows(c, prs=prs or [])
     drop, keep = [], []
     for r in rows:
-        why, kept = _clean_reason(c, r, c.default)
+        why, kept, merged = _clean_reason(c, r, c.default, prs)
         if why:
             drop.append((r["name"], why))
-        elif kept and (r["gone"] or r["merged"] or (r.get("pr") or {}).get("state") == "merged"):
+        elif kept and (r["gone"] or merged or (r.get("pr") or {}).get("state") == "merged"):
             keep.append((r["name"], kept))
     if a.json:
         return emit({"delete": [{"branch": b, "why": w} for b, w in drop],

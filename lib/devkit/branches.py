@@ -16,9 +16,13 @@ A row (`dev branch ls --json` prints the list; `registry.json` keeps it as `proj
     base, base_ahead, base_behind                           against origin/<default> (or the local default)
     where                                                   "local + origin" | "local only"
     last_commit, unpushed, oldest_unpushed                  unix times; unpushed: commits on no remote ref
+    landed                                                  of the unpushed commits, those with an equivalent in the
+                                                            base (by content), as far as the content test looks
     merged_into                                             a branch that has every commit of this one, or null
     merged_how                                              ancestor, or content (git cherry: every commit has an
-                                                            equivalent in the default branch), or null
+                                                            equivalent in the default branch), or null; the content
+                                                            test covers branches with unpushed commits and those
+                                                            checked out (merged_default reads both, through carriers)
     last_backup                                             unix time of the newest git.backup record, or null
     embargo                                                 {why, until, who, when} or null
     embargo_via                                             the embargoed branch that carries its commits, or null
@@ -417,12 +421,13 @@ def _counts(walked, names):
 CONTENT_DAYS = 7  # how far before a branch's oldest own commit the default branch is searched for its equivalents
 
 
-def _content_merged(top, base_ref: str, off_base, names, cands) -> list:
+def _content_merged(top, base_ref: str, off_base, names, cands):
     """The branches of `cands` whose every own commit (off `base_ref`, merges left out, as git cherry does) has an
     equivalent in `base_ref`: the same patch id among its commits since CONTENT_DAYS before the oldest of them. Two git
-    calls for the whole repository, where git cherry takes one per branch (the session start has 30 s)."""
+    calls for the whole repository, where git cherry takes one per branch (the session start has 30 s).
+    -> (those branches, the own commits of `cands` that have an equivalent in `base_ref`)."""
     if off_base is None:
-        return []
+        return [], set()
     want = {n: 1 << k for k, n in enumerate(names) if n in cands}
     mask = 0
     for b in want.values():
@@ -430,28 +435,52 @@ def _content_merged(top, base_ref: str, off_base, names, cands) -> list:
     own = {sha: bits for sha, (_, bits) in off_base.items() if bits & mask}
     stamps = [ts for sha, (ts, _) in off_base.items() if sha in own and ts]
     if not own or not stamps:
-        return []
+        return [], set()
     since = min(stamps) - CONTENT_DAYS * 86400
     rc, patches, _ = core.sh(["git", "-C", str(top), "log", "-p", "--no-merges", "--format=commit %H",
                               f"--since={since}", base_ref, "--stdin"], input="".join(f"{s}\n" for s in own),
                              timeout=120)
     if rc != 0:
-        return []
+        return [], set()
     listed = {ln[7:47] for ln in patches.splitlines() if ln.startswith("commit ") and len(ln) >= 47}
     rc, ids, _ = core.sh(["git", "-C", str(top), "patch-id", "--stable"], input=patches + "\n", timeout=120)
     if rc != 0:
-        return []
+        return [], set()
     pid_of = {}
     for ln in ids.splitlines():
         parts = ln.split()
         if len(parts) == 2:
             pid_of[parts[1]] = parts[0]
-    landed = {p for sha, p in pid_of.items() if sha not in own}
+    in_base = {p for sha, p in pid_of.items() if sha not in own}
+    found = {sha for sha in own if sha in listed and pid_of.get(sha) in in_base}  # non-merge commits that landed
     out = []
     for name, bit in want.items():
         mine = [sha for sha, bits in own.items() if bits & bit and sha in listed]  # its non-merge commits
-        if mine and all(pid_of.get(sha) in landed for sha in mine):
+        if mine and all(sha in found for sha in mine):
             out.append(name)
+    return out, found
+
+
+def merged_default(rows) -> dict:
+    """name -> how the map's base (origin/<default>) holds every commit of the branch: "ancestor" (its tip is in the
+    base) or "content" (merged by content, itself or through the branches that carry it, as `merged_into` links
+    them). A branch the local default branch carries but the base does not is left out, as is every unmerged one.
+    No git calls: it reads the rows of `map`."""
+    by = {r["name"]: r for r in rows}
+    out = {}
+    for r in rows:
+        if r["default"] or not r.get("base"):
+            continue
+        if r["base_ahead"] == 0:
+            out[r["name"]] = "ancestor"
+            continue
+        x, seen = r, set()
+        while x is not None and not x["default"] and x["name"] not in seen:
+            seen.add(x["name"])
+            if x.get("merged_how") == "content":
+                out[r["name"]] = "content"
+                break
+            x = by.get(x.get("merged_into"))
     return out
 
 
@@ -575,10 +604,20 @@ def map(repo, prs=None, offline=False, now=None, pid=None, default=None, current
     for r in rows:
         r["merged_how"] = "ancestor" if r["merged_into"] else None
     # merged by content (the merge test): cherry-picked or carried by a release branch. Without this the hourly backup
-    # pushed such a branch back to origin after its remote branch had been deleted.
-    cands = [r["name"] for r in rows if not r["default"] and not r["merged_into"] and r["unpushed"]]
-    for name in _content_merged(top, base_ref, off_base, names, cands) if base_ref and cands else ():
+    # pushed such a branch back to origin after its remote branch had been deleted. A checked-out branch is tested
+    # even when its backup left nothing unpushed: `dev wt ls` and `dev free` read its checkout as merged from here.
+    # Other branches with nothing unpushed are not: an old one would widen the search through the default branch.
+    cands = [r["name"] for r in rows if not r["default"] and not r["merged_into"]
+             and (r["unpushed"] or r["worktree"] or r["name"] == head)]
+    merged_c, found = _content_merged(top, base_ref, off_base, names, cands) if base_ref and cands else ([], set())
+    for name in merged_c:
         by_name[name]["merged_into"], by_name[name]["merged_how"] = default, "content"
+    landed = {}  # of each branch's commits only here, those with an equivalent in the base
+    for sha in found:
+        for n in _bits(((walked_here or {}).get(sha) or (None, 0))[1], names):
+            landed[n] = landed.get(n, 0) + 1
+    for r in rows:
+        r["landed"] = min(landed.get(r["name"], 0), r["unpushed"])
     done = backups(pid)
     held_full = read_embargoes(pid)[0] or {}
     held = {b: {k: e[k] for k in notes.EMBARGO_FIELDS} for b, e in held_full.items()}

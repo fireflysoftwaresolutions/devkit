@@ -129,12 +129,16 @@ def ignored_folders(path: str, skip=()) -> list:
 
 
 def _checkout(kind: str, info: dict, kb, folders: list, has_remote: bool) -> dict:
+    # merged: its pull request, or the registry's merge test (registry.merge_states: an ancestor of origin/<default>,
+    # or merged by content); unpushed: only the commits with no equivalent there (registry.unpushed_work)
     pr = info.get("pr") or None
+    how = info.get("merged")
     merged = kind != "main" and has_remote and (bool(pr and pr.get("state") in ("MERGED", "CLOSED"))
-                                                or info.get("ahead_default") == 0)
+                                                or info.get("ahead_default") == 0 or how in ("ancestor", "content"))
     return {"kind": kind, "path": info["path"], "name": os.path.basename(info["path"]), "kb": kb or 0,
             "branch": info.get("branch"), "pr": {"number": pr["number"], "state": pr["state"]} if pr else None,
-            "merged": merged, "ahead_default": info.get("ahead_default") or 0, "unpushed": info.get("unpushed") or 0,
+            "merged": merged, "how": how if merged else None, "ahead_default": info.get("ahead_default") or 0,
+            "unpushed": registry.unpushed_work(info),
             "modified": info.get("modified") or 0, "untracked": info.get("untracked") or 0,
             "active": bool(info.get("active")), "locked": bool(info.get("locked")),
             "last_activity": info.get("last_activity") or 0, "folders": folders}
@@ -373,7 +377,7 @@ def _build_item(p: dict, c: dict) -> dict:
 
 def _removal(p: dict, c: dict) -> dict:
     return {"path": c["path"], "name": c["name"], "kb": c["kb"], "main": p["path"], "branch": c.get("branch"),
-            "github": p.get("github"), "pr": c.get("pr")}
+            "github": p.get("github"), "pr": c.get("pr"), "default": p.get("default_branch")}
 
 
 def _project_items(p: dict) -> list:
@@ -393,7 +397,8 @@ def _project_items(p: dict) -> list:
             pr = c.get("pr")
             risk = (f"PR {pr['number']} is {pr['state'].lower()}; its branch stays on GitHub." if pr and p.get("github")
                     else f"PR {pr['number']} is {pr['state'].lower()}; its branch stays on the remote." if pr
-                    else f"Its branch has no commits beyond {p['default_branch']}.")
+                    else f"Its commits have an equivalent in {p['default_branch']} (merged by content)."
+                    if c.get("how") == "content" else f"Its branch has no commits beyond {p['default_branch']}.")
             items.append({"key": f"copy:{c['path']}", "kind": "copy", "kb": c["kb"], "what": f"The {c['name']} copy",
                           "safety": "check first" if why else "safe", "risk": why or risk, "runs": None,
                           "project": p["alias"], "targets": [_removal(p, c)]})
@@ -600,7 +605,7 @@ def state_text(c: dict, p: dict, now=None) -> str:
     if c["kind"] != "main" and pr and pr["state"] in ("MERGED", "CLOSED"):
         parts.append(f"PR {pr['number']} {pr['state'].lower()}")
     elif c["kind"] != "main" and c.get("merged"):
-        parts.append(f"merged into {default}")
+        parts.append(f"merged into {default}" + (" by content" if c.get("how") == "content" else ""))
     else:
         parts.append(ui.fit_cell(c["branch"], 32) if c.get("branch") else "not on a branch")
         if pr:
@@ -918,8 +923,22 @@ def _busy(path: str) -> bool:
     return core.is_active(path)
 
 
-def blocker_now(path: str, name: str):
-    """Why a checkout may hold work right now, or None (checked again just before removing it)."""
+def merge_now(t: dict):
+    """The merge test (branches.merge_test, without GitHub) on a worktree's HEAD right before removing it: {base, sha,
+    prs} when its branch is merged into origin/<default>, as an ancestor or by content, for gc.remove_worktree to test
+    again; else None."""
+    from . import branches
+    branch = t.get("branch")
+    if not branch or not os.path.isdir(t["path"]):
+        return None
+    base = f"origin/{t.get('default') or registry.default_branch(Path(t['main']))}"
+    m = branches.merge_test(t["path"], branch, base, ref="HEAD")
+    return {"base": base, "sha": m["sha"], "prs": None} if m["merged"] else None
+
+
+def blocker_now(path: str, name: str, merged: dict = None):
+    """Why a checkout may hold work right now, or None (checked again just before removing it). `merged`: merge_now
+    found its branch merged just now, so its commits on no remote have an equivalent in the default branch."""
     if not os.path.isdir(path):
         return f"{name} is no longer there. Measure again: dev du --refresh"
     if _busy(path):
@@ -931,7 +950,7 @@ def blocker_now(path: str, name: str):
     if n:
         return f"{name} has {_plural(n, 'changed file')}. Commit or discard {'it' if n == 1 else 'them'} first."
     k = int(core.gitout(path, "rev-list", "--count", "HEAD", "--not", "--remotes") or 0)
-    if k:
+    if k and not merged:
         return (f"{name} has {_plural(k, 'commit')} that {'is' if k == 1 else 'are'} not pushed. "
                 f"Push {'it' if k == 1 else 'them'} first.")
     return None
@@ -970,14 +989,15 @@ def _free_build(it: dict):
 def _free_worktrees(it: dict):
     freed, done, refused = 0, [], []
     for t in it["targets"]:
-        why = blocker_now(t["path"], t["name"])
+        merged = merge_now(t)
+        why = blocker_now(t["path"], t["name"], merged)
         if why:
             refused.append(why)
             continue
         pr = t.get("pr")
         ok, msg = gc.remove_worktree(t["main"], t["path"], t.get("branch") or "detached", t.get("github"),
                                      require_pr=pr if pr and pr.get("state") in ("MERGED", "CLOSED") else None,
-                                     log=False)
+                                     log=False, merged=merged)
         if ok:
             freed += t.get("kb") or 0
             done.append(ui.tilde_path(t["path"]))

@@ -299,13 +299,18 @@ class BranchTests(unittest.TestCase):
             git(s.repo, "push", "-q", "origin", "--delete", "feat/gone")
             git(s.repo, "switch", "-q", "main")
             s.branch("feat/squashed")
-            tip = s.commit("feat: add squashed thing")
+            s.commit("feat: add squashed thing")
+            tip = s.commit("feat: finish squashed thing")
             git(s.repo, "switch", "-q", "main")
+            git(s.repo, "merge", "-q", "--squash", "feat/squashed")  # two commits in one: only its PR tells
+            git(s.repo, "commit", "-q", "-m", "feat: add squashed thing (#9)")
+            git(s.repo, "push", "-q", "origin", "main")
             git(s.repo, "branch", "feat/in-wt", "feat/merged")
             wt = s.root / "wt"
             git(s.repo, "worktree", "add", "-q", str(wt), "feat/in-wt")
             s.gh.on(["pr", "list"], [{"number": 9, "state": "MERGED", "headRefName": "feat/squashed",
-                                      "headRefOid": tip, "updatedAt": "2026-11-01T10:00:00Z"}])
+                                      "headRefOid": tip, "isCrossRepository": False,
+                                      "mergeCommit": {"oid": s.head("main")}, "updatedAt": "2026-11-01T10:00:00Z"}])
             s.branch("feat/current")
             git(s.repo, "fetch", "-q", "--prune", "origin")
             rc, out, _ = dev("branch", "ls", "--json")
@@ -327,6 +332,50 @@ class BranchTests(unittest.TestCase):
             for kept in ("feat/open", "feat/gone", "feat/in-wt", "feat/current", "main"):
                 self.assertIn(kept, left)
             self.assertIn("exist only here", out)
+
+    def test_clean_deletes_a_branch_merged_by_content(self):
+        # main took its commit by cherry-pick (a release branch carried it): no ancestor, no pull request
+        with Sandbox() as s:
+            s.branch("fix/picked")
+            tip = s.commit("fix: keep the picked thing")
+            git(s.repo, "switch", "-q", "main")
+            s.commit("docs: move main on")  # so the cherry-pick is a new commit
+            git(s.repo, "cherry-pick", tip)
+            git(s.repo, "push", "-q", "origin", "main")
+            rc, out, err = dev("branch", "clean", "--apply")
+            self.assertEqual(rc, 0, err)
+            self.assertNotIn("fix/picked", git(s.repo, "branch", "--format=%(refname:short)").split())
+            self.assertIn("fix/picked  merged by content: 1 commit has an equivalent in origin/main", out)
+
+    def test_clean_offline_finds_a_branch_merged_by_content_without_github(self):
+        with Sandbox() as s:
+            s.branch("fix/picked")
+            tip = s.commit("fix: keep the picked thing")
+            git(s.repo, "switch", "-q", "main")
+            s.commit("docs: move main on")
+            git(s.repo, "cherry-pick", tip)
+            git(s.repo, "push", "-q", "origin", "main")
+            rc, out, err = dev("branch", "clean", "--offline", "--json")
+            self.assertEqual(rc, 0, err)
+            self.assertEqual(json.loads(out), {
+                "delete": [{"branch": "fix/picked", "why": "merged by content: 1 commit has an equivalent in origin/main"}],
+                "keep": [], "applied": False})
+            self.assertEqual(s.gh.called("pr"), [])
+            self.assertIn("fix/picked", git(s.repo, "branch", "--format=%(refname:short)").split())
+
+    def test_clean_keeps_a_branch_whose_merged_pull_request_came_from_a_fork(self):
+        # a fork's pull request can carry any branch name and head; only the repository's own count
+        with Sandbox() as s:
+            s.branch("fix/victim")
+            tip = s.commit("fix: work only this branch has")
+            git(s.repo, "switch", "-q", "main")
+            s.gh.on(["pr", "list"], [{"number": 9, "state": "MERGED", "headRefName": "fix/victim", "headRefOid": tip,
+                                      "isCrossRepository": True, "mergeCommit": {"oid": s.head("main")},
+                                      "updatedAt": "2026-11-01T10:00:00Z"}])
+            rc, out, err = dev("branch", "clean", "--apply")
+            self.assertEqual(rc, 0, err)
+            self.assertIn("fix/victim", git(s.repo, "branch", "--format=%(refname:short)").split())
+            self.assertIn("fix/victim  PR #9 merged, but 1 commit not in origin/main", out)
 
     def test_ls_table_is_plain_text(self):
         with Sandbox() as s:
