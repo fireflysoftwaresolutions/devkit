@@ -1434,6 +1434,43 @@ class CrossRunIdTests(unittest.TestCase):
         self.assertEqual((d["id"], d["state"], d["answer"]), ("D1", "decided", "B: no"))
 
 
+def progress_cli(*argv):
+    """`dev progress …` through the real parser and handler -> (exit code, stderr)."""
+    import contextlib
+    import io
+    from devkit import cli
+    a = cli.build_parser().parse_args(["progress", *argv])
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        rc = a.fn(a) or 0
+    return rc, err.getvalue()
+
+
+class AddStepSpecTests(unittest.TestCase):
+    # `dev progress add "a=5h [security]" "b=2h [testing]"` joined its arguments into one step named
+    # "a=5h b=2h [testing]" (lesson L-g17fxiz48n1): each quoted argument is a step of its own
+    def setUp(self):
+        self.state = TempState().__enter__()
+        self.addCleanup(self.state.__exit__, None, None, None)
+        pg.start("Release", plan=["build"])
+
+    def plan(self):
+        return [(s["name"], s.get("est"), s.get("activity")) for s in pg.load_run("claude", "s1")["plan"]]
+
+    def test_each_quoted_spec_is_a_step_and_unquoted_words_stay_one(self):
+        self.assertEqual(progress_cli("add", "guard lessons=5h [security]", "test env lessons=2h [testing]")[0], 0)
+        self.assertEqual(progress_cli("add", "review=20m", "after", "build")[0], 0)  # typed without quotes
+        self.assertEqual(self.plan()[1:], [("guard lessons", 300.0, "security"), ("test env lessons", 120.0, "testing"),
+                                           ("review", 20.0, None)])
+        self.assertEqual(pg.load_run("claude", "s1")["plan"][3]["after"], ["build"])
+
+    def test_a_step_name_holding_a_second_estimate_is_refused(self):
+        rc, err = progress_cli("add", "a=5h", "b=2h")  # two specs in one: "a=5h b" with 2h
+        self.assertEqual(rc, 2)
+        self.assertIn("“a=5h b” holds another estimate", err)
+        self.assertEqual([n for n, *_ in self.plan()], ["build"])
+
+
 class CrewMessageAuditTests(unittest.TestCase):
     def test_a_message_is_audited_by_its_kind_and_length_never_its_text(self):
         from devkit import audit

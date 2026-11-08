@@ -499,7 +499,8 @@ PACE_MIN, PACE_MAX = 0.5, 2.5
 
 def parse_plan(plan) -> list:
     """"design=30m; build=2h after design [backend]; docs" -> [(name, minutes or None, [steps it waits for],
-    activity id or "")]. The [id] tag declares the step's kind of work (an id from dev crew raci)."""
+    activity id or "")]. The [id] tag declares the step's kind of work (an id from dev crew raci). A name that still
+    holds an estimate ("a=5h b", two specs run together) is refused: StepError."""
     from . import raci
     items = plan if isinstance(plan, (list, tuple)) else str(plan or "").split(";")
     out = []
@@ -512,11 +513,40 @@ def parse_plan(plan) -> list:
         if m:
             raw, after = m.group(1).strip(), [x.strip() for x in re.split(r"[,&]|\band\b", m.group(2)) if x.strip()]
         m = re.match(r"^(.*?)\s*[=@]\s*(\d[\dhm.\s]*)$", raw)
-        if m and parse_minutes(m.group(2)):
-            out.append((m.group(1).strip(), parse_minutes(m.group(2)), after, act))
-        else:
-            out.append((raw, None, after, act))
+        name, est = (m.group(1).strip(), parse_minutes(m.group(2))) if m and parse_minutes(m.group(2)) else (raw, None)
+        if "=" in name or re.search(r"@\s*\d", name):
+            raise StepError(f"step “{name}” holds another estimate: give each step as its own quoted spec "
+                            f"(dev progress add \"a=5h\" \"b=2h\") or separate the steps with ; (\"a=5h; b=2h\")")
+        out.append((name, est, after, act))
     return out
+
+
+def spec_args(args) -> list:
+    """The step specs of `dev progress add <spec>…`: each argument with a space in it is a spec of its own (the shell
+    kept it whole, so it was quoted), and arguments without one are the words of one spec typed without quotes
+    (review=20m after api); a group of words that opens with `after` or a [tag] finishes the spec before it. Each
+    spec may hold several steps separated by ;."""
+    out, words = [], []
+
+    def flush():
+        if words:
+            grp = " ".join(words)
+            if out and (grp.lower().startswith("after ") or grp.startswith("[")):
+                out[-1] += " " + grp
+            else:
+                out.append(grp)
+            words.clear()
+    for a in args if isinstance(args, (list, tuple)) else [args]:
+        a = str(a or "").strip()
+        if not a:
+            continue
+        if re.search(r"\s", a):
+            flush()
+            out.append(a)
+        else:
+            words.append(a)
+    flush()
+    return [p.strip() for s in out for p in s.split(";") if p.strip()]
 
 
 def _new_step(name, est=None):
@@ -3965,10 +3995,10 @@ def _lane_name(lane: dict) -> str:
     return lane.get("persona") or lane.get("label") or "a subagent"
 
 
-def add_step(spec: str, cwd: str | None = None, now: float | None = None, why: str = "",
+def add_step(spec, cwd: str | None = None, now: float | None = None, why: str = "",
              from_agent: str | None = None) -> dict:
-    """Add a step discovered during the work: "name=30m after other". From a crew member, the step goes to its own
-    lane's plan; the main plan is Morpheus's."""
+    """Add a step discovered during the work: "name=30m after other", or a list of such specs (spec_args), each a
+    step. From a crew member, the step goes to its own lane's plan; the main plan is Morpheus's."""
     now = now or time.time()
     from_agent = _as_lane(from_agent, cwd)
     agent, sid = current_session(cwd)

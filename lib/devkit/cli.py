@@ -2239,7 +2239,7 @@ def cmd_progress(a):
             elif act == "begin":
                 run = pg.begin(a.which, from_agent=from_agent)
             elif act == "add":
-                run = pg.add_step(" ".join(a.spec), why=getattr(a, "why", "") or "", from_agent=from_agent)
+                run = pg.add_step(pg.spec_args(a.spec), why=getattr(a, "why", "") or "", from_agent=from_agent)
                 if from_agent:
                     print(f"{ui.OK} added to your lane's plan · {' '.join(a.spec)}")
                     return 0
