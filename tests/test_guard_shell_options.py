@@ -143,5 +143,28 @@ class BashLongOptionsWithOneDash(unittest.TestCase):
                 self.assertIsNone(member(cmd))
 
 
+class PositionalsTheLineRebinds(unittest.TestCase):
+    """A -c line's $1… are the words after it only until the line binds them again: `shift; $1` and
+    `set -- gh; $1` name another program (`bash -c 'shift; $1 +X' sh echo /bin/date` printed the date)."""
+
+    def test_a_line_that_rebinds_its_positionals_keeps_them_unknown(self):
+        for cmd in ("bash -c 'shift; $1 pr merge 12' sh echo gh", "bash -c 'set -- gh; $1 pr merge 12' sh echo",
+                    "sh -c 'set x gh; $2 pr merge 12' sh echo echo", "zsh -c 'argv=(gh); $1 pr merge 12' sh echo",
+                    "zsh -c '1=gh; $1 pr merge 12' sh echo", "bash -c 'f() { $1 pr merge 12; }; f gh' sh echo",
+                    "bash -c 'shift; \"$@\"' sh echo gh pr merge 12"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNotNone(main(cmd))
+                self.assertIsNotNone(member(cmd))
+
+    def test_a_line_that_only_sets_options_still_gets_its_words(self):
+        # twins: the words fill $1… as before, so a harmless program stays allowed and a merge stays a merge
+        for cmd in ("bash -c 'set -e; $1 status' sh git", "bash -c 'set -eo pipefail; $1 status' sh git",
+                    "sh -c 'git config --get x.set \"$1\"' sh y", "bash -c 'echo reset; $1 status' sh git"):
+            with self.subTest(twin=cmd):
+                self.assertIsNone(main(cmd))
+                self.assertIsNone(member(cmd))
+        self.assertIn("merges PR 12", main("bash -c 'set -e; $1 pr merge 12' sh gh") or "")
+
+
 if __name__ == "__main__":
     unittest.main()

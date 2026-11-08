@@ -20,7 +20,9 @@ the directory used to resolve later paths, leading `VAR=value`, `sudo`, `env`, `
 (`>`, `>>`) are checked as writes. The guard also reads what the shell runs inside a command: `$(…)` and backtick
 substitutions, process substitutions (`<(…)` and `>(…)` outside quotes, so `cat <(gh pr merge 12)` is a merge),
 `sh -c` and `eval` strings (with the words after a `sh -c` line in place of its `$0`, `$1`, and
-`"$@"`; the line is the first word after all the shell's options, as bash, zsh, sh, dash, and ksh read them, so
+`"$@"`, unless the line can bind them again with `shift`, `set` with operands, zsh's `argv` or `1=…`, or a function:
+then they stay variables, and one that names the program is `unknown`, so `bash -c 'shift; $1 pr merge 12' sh echo
+gh` is refused; the line is the first word after all the shell's options, as bash, zsh, sh, dash, and ksh read them, so
 `bash -c -e 'line'` and `zsh -c -o errexit 'line'` run `line`, while `csh` and `tcsh` take the word right after
 `-c`; `bash` and `sh` read a long option with one dash before any short one, so `bash -norc -c 'line'` is
 `bash --norc -c 'line'` and `-rcfile f` takes `f`, and they read `+c` as `-c`), `xargs` and `find -exec` commands, and a pager that git or gh starts. The shells it reads this way are

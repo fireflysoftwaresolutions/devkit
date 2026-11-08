@@ -4092,10 +4092,25 @@ def _dev_words(args) -> list:
 _POSITIONAL = re.compile(r'"\$[@*]"|\$[@*]|\$\{(\d+)\}|\$(\d)')
 
 
+# what can give a line's $1… other values than the words after it: shift, set with operands (`set -- gh`, `set x`; a
+# `set` with options only, such as `set -e` or `set -o pipefail`, changes none), zsh's argv and `1=…`, getopts' shift,
+# and a function, whose $1… are its own arguments
+_REBINDS = re.compile(r"\b(?:shift|argv|function)\b|(?<![\w$])\d+\+?=|\w\s*\(\s*\)")
+_SET_WORD = re.compile(r"(?<![\w.$/-])set(?![\w.-])")
+_SET_OPTIONS_ONLY = re.compile(r"(?<![\w.$/-])set((?:[ \t]+[-+][A-Za-z]*o[ \t]+[\w-]+|[ \t]+[-+][A-Za-z]+)*)[ \t]*(?:$|[;&|\n)}])")
+
+
+def _rebinds_positionals(line: str) -> bool:
+    return bool(_REBINDS.search(line)) or \
+        len(_SET_WORD.findall(line)) != len(_SET_OPTIONS_ONLY.findall(line))
+
+
 def _with_positionals(line: str, words) -> str:
     """A shell's -c line with the words after it in place of $0, $1…, ${1} and "$@" or $* (the words after $0),
-    quoted as the shell passes them, so the guard reads what runs (`sh -c 'claude "$@"' _ plugin install x`)."""
-    if not words:
+    quoted as the shell passes them, so the guard reads what runs (`sh -c 'claude "$@"' _ plugin install x`). A line
+    that can bind them to other values first (_REBINDS: `shift; $1 …`, `set -- gh; $1 …`) keeps them as variables,
+    which the gate judges as unknown where they name a program."""
+    if not words or _rebinds_positionals(line):
         return line
 
     def sub(m):
