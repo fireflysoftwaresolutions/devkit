@@ -241,6 +241,13 @@ are open. Add work you discover with `dev progress add`, and fix a mistake with 
 whose work still holds. Every change is kept in the run's history, which the status, the dashboard, and the handoff
 rely on.
 
+**Your own procedure is guidance.** The tech lead's phases in the roster (understand, route, plan, run the crew,
+keep the developer informed, integrate and close) have no gate, unlike a member's. devkit checks what some of them
+produce: `dev progress assign` refuses a member the RACI does not make Responsible; the hooks remind you after a long
+silence; `dev progress done` waits for every member's report and every approval; and the Stop hook checks the status
+block, the required skills, a CI run left without a watch, and a handoff note older than your commits.
+Understanding the request and writing the plan are yours alone.
+
 ## 4. Files and disk
 
 - Prefer editing existing files. Create a new file only when the change needs it.
