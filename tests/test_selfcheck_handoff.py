@@ -40,8 +40,9 @@ class HandoffNoteSize(unittest.TestCase):
         return {name: (ok, detail, fix) for _, name, ok, detail, fix in
                 selfcheck.work_state_checks(self.top, "acme/api", runs=[], now=self.t)}
 
-    # a note past the handoff skill's size is a warning naming its length, the limit and the fix
-    def test_a_long_handoff_note_is_a_doctor_warning(self):
+    # a note past the handoff skill's size is a warning naming its length, the limit and the fix; a note within it
+    # adds no row, and the work state row stays the only one
+    def test_a_long_handoff_note_is_a_doctor_warning_and_a_short_one_is_not(self):
         limit = selfcheck.handoff_max_lines()
         self.note(limit + 50)
         ok, detail, fix = self.rows()["handoff note"]
@@ -49,9 +50,6 @@ class HandoffNoteSize(unittest.TestCase):
         self.assertIn(f"{limit + 50} lines", detail)
         self.assertIn(f"~{limit}", detail)
         self.assertIn("handoff skill", fix)
-
-    # a note within the size adds no row, and the work state row stays the only one
-    def test_a_short_handoff_note_adds_no_row(self):
         self.note(20)
         self.assertEqual(list(self.rows()), ["work state"])
 

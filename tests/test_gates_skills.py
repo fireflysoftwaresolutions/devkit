@@ -21,8 +21,9 @@ class ScratchFiles(GateCase):
         super().setUp()
         skillguard.installed = lambda agent: UI_HAVE
 
-    # a probe the member writes in its scratch folder, outside every repository, owes no skill
-    def test_a_scratch_file_outside_the_repository_owes_no_skill(self):
+    # a probe the member writes in its scratch folder, outside every repository, owes no skill; the same code in
+    # the repository is UI work and owes the UI skills
+    def test_a_scratch_file_owes_no_skill_and_the_same_file_in_the_repository_does(self):
         scratch = Path(self.tmp.name) / "scratchpad" / "kid" / "probe.py"
         scratch.parent.mkdir(parents=True)
         text = 'HTML = "<!doctype html><style>p{}</style>"\n'
@@ -30,11 +31,7 @@ class ScratchFiles(GateCase):
         self.tx.call("Write", f"File created successfully at: {scratch}", file_path=str(scratch), content=text)
         self.complete()
         self.assertEqual(self.rules(self.gates(KID)), [])
-
-    # the same code inside the repository is UI work: the member owes the UI skills
-    def test_the_same_file_in_the_repository_owes_the_ui_skills(self):
-        self.write("lib/page.py", 'HTML = "<!doctype html><style>p{}</style>"\n')
-        self.complete()
+        self.write("lib/page.py", text)
         self.assertEqual(sorted(i for r, i in self.rules(self.gates(KID)) if r == "skills"),
                          ["frontend-design", "impeccable"])
 
@@ -44,9 +41,8 @@ class ReviewMembers(GateCase):
     # no skill
     def test_a_reviewer_owes_no_skill_for_a_file_it_only_read(self):
         reviewer = {"id": "seraph", "name": "Seraph", "title": "Code reviewer", "tools": "review", "procedure": []}
-        self.tx.bash("git diff -- docs/crew.md")
-        (self.repo / "docs").mkdir()
-        (self.repo / "docs" / "crew.md").write_text("# The crew\n")  # the writer's lane, while the review runs
+        self.tx.bash("git diff -- README.md")
+        (self.repo / "README.md").write_text("# repo\n\nThe writer's lane adds a line while the review runs.\n")
         self.assertEqual([i for r, i in self.rules(self.gates(reviewer)) if r == "skills"], [])
 
 
