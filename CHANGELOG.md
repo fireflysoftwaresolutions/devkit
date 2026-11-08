@@ -3,7 +3,7 @@
 All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH restarts at 0 each month); tags are
 `vYY.MM.PATCH`. Sections follow [Keep a Changelog](https://keepachangelog.com/).
 
-## [26.11.7] - 2026-11-09
+## [26.11.7] - 2026-11-08
 
 This release makes sure nothing that needs an agent or you waits unseen. An idle tech lead heard nothing while crew
 members asked questions, a member had no way to wait for its answer, questions answered by message stayed open, a
