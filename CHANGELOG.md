@@ -3,15 +3,17 @@
 All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH restarts at 0 each month); tags are
 `vYY.MM.PATCH`. Sections follow [Keep a Changelog](https://keepachangelog.com/).
 
-## [26.11.6] - Unreleased
+## [26.11.6] - 2026-11-08
 
 This release makes what devkit shows match what happened. One project listed 261 open work items next to 65 closed
 ones, though much of the open work had shipped; locks stayed held for days; decisions you had answered, or that no
 longer mattered, still showed as needing you; one CI run sent the same result five times; a session still on an older
-devkit undid an update; merged branches piled up; and agents promised to report CI with nothing watching it. Now
-work items close when their branch merges and go back to todo when nobody works on them, only open decisions and
-unanswered questions wait for you, each CI result is reported once, an older session changes no setting, merged
-branches are pruned, and an agent that waits on CI arms a watch that wakes it. [Work states](docs/work-states.md)
+devkit undid an update; merged branches piled up; crew members that had ended still showed as working and kept
+their files; and agents promised to report CI with nothing watching it. Now work items close when their branch
+merges and go back to todo when nobody works on them, only open decisions and unanswered questions wait for you,
+each CI result is reported once, an older session changes no setting, merged branches are pruned, a member that
+ended holds nothing (`dev crew owner` says who holds a file), and an agent that waits on CI arms a watch that
+wakes it. [Work states](docs/work-states.md)
 explains what moves each record and how to repair one that drifted.
 
 ### Added
