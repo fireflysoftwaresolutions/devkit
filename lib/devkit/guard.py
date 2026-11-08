@@ -1270,10 +1270,14 @@ def _dependent_action(argv) -> str:
     return ""
 
 
+_BRANCHES = frozenset({"if", "then", "elif", "else", "case", "while", "until"})  # shell words that branch
+
+
 def ungated_action_refusal(cmd: str) -> str | None:
     """GATE_REASON when an action that must depend on a check (_dependent_action) follows one (_check_step) in the
     same command line without depending on its result: the check is not in the action's chain of `&&`, or it is but
-    pipes into a filter and no `set -o pipefail` comes first."""
+    pipes into a filter and no `set -o pipefail` comes first. A branch between them (`if`, `then`, a `[ … ]` test)
+    may test the result in a way the guard does not read, and leaves the action open."""
     segs = split_commands(cmd, ops=True)
     if not segs:
         return None
@@ -1287,9 +1291,13 @@ def ungated_action_refusal(cmd: str) -> str | None:
         if not what:
             continue
         chained = True  # walking back: the segments joined to the action by `&&` and pipes only
-        for j in range(k - 1, -1, -1):
-            if segs[j][2] not in ("&&", "|", "|&"):
+        for j in range(k, -1, -1):
+            if j < k and segs[j][2] not in ("&&", "|", "|&"):
                 chained = False
+            if set(segs[j][0][:1]) & _BRANCHES or (j < k and _unwrap(segs[j][0])[:1] in (["["], ["[["], ["test"])):
+                break  # `if …; then …`, `[ "$r" = OK ] && …`: it branches on something the guard does not read
+            if j == k:
+                continue
             check = _check_step(_unwrap(segs[j][0]))
             if not check:
                 continue

@@ -61,7 +61,9 @@ class ActionsGatedOnTheResult(unittest.TestCase):
         for cmd in ("npm test && npm run release", "set -o pipefail; npm test | tail -3 && npm run release",
                     "npm run release", "make test && make release", "git add . && git commit -m x",
                     "python3 -m unittest tests.test_x && git add -A && git commit -m x", "npm test; npm run lint",
-                    "npm run release:notes > notes.md; echo done"):
+                    "npm run release:notes > notes.md; echo done",
+                    'r=$(python3 -m unittest x 2>&1 | tail -1); echo "$r"; if [ "$r" = OK ]; then git commit -m x; fi',
+                    'out=$(npm test | tail -1); [ "$out" = OK ] && npm run release'):
             with self.subTest(cmd=cmd):
                 self.assertIsNone(check(cmd))
 
