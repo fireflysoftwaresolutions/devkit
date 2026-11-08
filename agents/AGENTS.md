@@ -388,9 +388,11 @@ Follow the devkit `backend` skill for the detailed checklists. Always:
   using an API.
 - **Required skills are enforced.** devkit maps kinds of work to skills in `config/skill-rules.json`, for example
   UI → `frontend-design` and `impeccable`, tests → `testing`, pipelines → `cicd`, Spring → `java-springboot`,
-  migrations → `supabase-postgres-best-practices`, workflows → `github-actions-hardening`, docs → `docs`, and so on. devkit names the skills for the files you change;
-  load them before you start. Briefs for Claude subagents get them appended. A turn that changed matching files
-  without loading them is sent back once to load them and review the change. Put the skills in every brief you write.
+  Postgres migrations → `supabase-postgres-best-practices`, workflows → `github-actions-hardening`, docs, skills and
+  instructions → `docs`, pushes → `delivery`, releases → `release-policy`, and so on. devkit names the skills for the
+  files you change; load them before you start. Briefs for Claude subagents get them appended. A turn that changed
+  matching files or ran matching commands (`git push`, `dev release`, `dev lesson add`, `pytest`…) without loading
+  them is sent back once to load them and review the work. Put the skills in every brief you write.
 - **Working efficiently and communicating:** `working-efficiently` (models, effort, subagents, tokens),
   `communicating` (updates, decisions, PRs, handovers, formats), `using-devkit` (which `dev` command for which job),
   `work-state` (keeping items, runs, lanes, decisions, CI watches and branches true; `/devkit:reconcile` checks them

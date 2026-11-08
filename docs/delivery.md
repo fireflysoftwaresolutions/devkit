@@ -83,9 +83,10 @@ dev delivery apply --set job_timeout_minutes=45 --why "integration tests take 35
 - **The guard refuses tags that break it.** In a CalVer project, `git tag v2.0.0` is refused with the next version
   to use (`dev calver --next`); in a SemVer project, a tag that is not `vMAJOR.MINOR.PATCH` is refused. Prefix the
   command with `DEVKIT_TAG_ANY=1` to tag anyway, or change the policy.
-- **Release work requires the `release-policy` skill.** Requests about releases, tags, version bumps, changelogs and
-  publishing, and changes to `CHANGELOG.md`, `VERSION`, or release-tool configuration, require the `delivery` and
-  `release-policy` skills (see [Skills and plugins › Required skills](skills-and-plugins.md#required-skills)).
+- **Release work requires the `release-policy` skill.** Tags and releases (`git tag`, `dev release`, `gh release`),
+  `release` work, and changes to `VERSION` or release-tool configuration require the `delivery` and `release-policy`
+  skills. A push or a PR requires `delivery`, and a `CHANGELOG.md` entry requires `docs` (see
+  [Skills and plugins › Required skills](skills-and-plugins.md#required-skills)).
 
 devkit records its own policy this way, with CalVer `vYY.MM.PATCH` from `VERSION`, a Keep a Changelog `CHANGELOG.md`,
 and a test gate that compiles the code and runs the suite with Homebrew's Python and with the macOS system Python 3.9.

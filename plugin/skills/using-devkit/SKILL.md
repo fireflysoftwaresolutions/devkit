@@ -58,8 +58,9 @@ devkit knows which skills each kind of work needs (`config/skill-rules.json` in 
 `skills.rules` in the developer's config). Its rules follow what the work does, never the words of a prompt: the files
 you change, the commands you run, and the kind of work a step or brief declares. devkit names the skills for the files
 you change, and a crew brief carries those of its kind of work. Load them before you start, put them in every brief
-you write, and expect the Stop hook to send you back once if you changed UI, Spring, migration, workflow, docs, or
-diagram files without them.
+you write, and expect the Stop hook to send you back once if you changed matching files (UI, Spring, migration,
+workflow, docs, skill, or diagram files) or ran matching commands (`git push`, `dev release`, `dev lesson add`,
+`pytest`, …) without them. In Codex, a subagent's brief gets its skills only from `dev crew brief`.
 
 ## Which tool for which job
 
