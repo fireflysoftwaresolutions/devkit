@@ -78,6 +78,19 @@ def _who(name) -> str:
     return crew.who(name or "") or str(name or "a crew member")
 
 
+def _consumer_name(agent: str, sid: str, me: str) -> str:
+    """Who a wait is for, in words: "the main session", or the member as Role (Name), from its lane in the session's
+    run (a wait knows the member by its agent id only)."""
+    if me == "main":
+        return "the main session"
+    from . import progress
+    try:
+        lane = ((progress.load_run(agent, sid) or {}).get("agents") or {}).get(me) or {}
+    except Exception:
+        lane = {}
+    return _who(lane.get("persona") or lane.get("label") or me)
+
+
 def _ci_line(text: str) -> str:
     """A CI result as one line: its head and, for a failure, each run's class, next action and log."""
     lines = [ln.strip() for ln in str(text or "").splitlines() if ln.strip()]
@@ -577,9 +590,11 @@ def wait(agent: str, sid: str, me: str, timeout_min: float, only=None, out=None,
             return delivered
         why = can_arrive(agent, sid, clock(), me)
         if not why:
-            return finish("ended", "watch: nothing can arrive for " + ("you" if me != "main" else "this session") +
-                          ": no crew member works, no launch is pending, no step waits for a slot and no CI run is "
-                          "unfinished. End the turn without a wait.", EXIT["nothing"])
+            return finish("ended", ("watch: nothing can arrive for you: none of your questions waits for an answer."
+                                    if me != "main" else
+                                    "watch: nothing can arrive for this session: no crew member works, no launch is "
+                                    "pending, no step waits for a slot and no CI run is unfinished.")
+                          + " End the turn without a wait.", EXIT["nothing"])
         progress_files = [progress.run_path(agent, sid), progress.session_path(agent, sid), LIVE / f"{rid}.json"]
         watcher = changes or Changes(progress_files)
         deadline, beat = start + timeout_min * 60, clock()
@@ -776,7 +791,7 @@ def cmd_watch(a) -> int:
                           "armed": live, "moot": [{"id": m.get("id"), "why": progress.moot_message_reason(run, m)}
                                                   for m in moot]}, ensure_ascii=False))
         return 0
-    print(f"watch · {agent}:{sid[:12]} · for {'the main session' if me == 'main' else _who(me)}")
+    print(f"watch · {agent}:{sid[:12]} · for {_consumer_name(agent, sid, me)}")
     print("\n".join(f"  {ev['line']}" + ("" if ev["wakes"] else "  (rides along)") for ev in evs) or "  nothing new")
     seen = {ev["id"] for ev in evs}
     for m in moot:  # told already, and still unanswered: nobody waits on it any more
@@ -807,7 +822,7 @@ def cmd_watches(a, out=None) -> int:
         return time.strftime("%H:%M", time.localtime(ts)) if ts else "-"
     lines = ["Waits: dev watch --wait (live, expired before anything arrived, superseded by a newer one)"]
     for w in ws:
-        who = "the main session" if w.get("consumer") == "main" else _who(w.get("consumer"))
+        who = _consumer_name(w.get("agent") or "", w.get("session") or "", w.get("consumer") or "main")
         lines.append(f"  {w['status']:<10} {w.get('agent')} session {(w.get('session') or '-')[:8]} · for {who} · "
                      f"started {at(w.get('started'))}" + (f" · expires {at(w.get('expires'))}"
                                                           if w["status"] == "live" else ""))
