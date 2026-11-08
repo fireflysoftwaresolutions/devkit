@@ -364,7 +364,7 @@ The [irreversible-action gate](crew.md#guardrails) classifies each command by th
 gives it. When the shell names the program only when it runs, the guard cannot know what it does, so the command is the
 action `unknown`, tier 2, with the target `cmd-<hash>` of that exact command text. For example:
 
-- `$(printf gh) pr merge 12`, `${X:-gh} pr merge 12`, `g=gh; $g pr merge 12`, or `env -S 'gh pr merge 12'`;
+- `$(printf gh) pr merge 12`, `${X:-gh} pr merge 12`, `read g; $g pr merge 12`, or `env -S 'gh pr merge 12'`;
 - `gh $SUB merge 12` or `gh pr $ACT 12`, where a variable names gh's command, and `git $SUB push`, where a variable
   names git's;
 - a program that builds the name of what it calls, such as `getattr(__import__('os'), 'sys' + 'tem')`, or starts a
@@ -392,9 +392,26 @@ These are not `unknown`:
 
 - a known program in a folder a variable names, such as `$VENV/bin/python` or `"$VIRTUAL_ENV/bin/pytest"`, unless
   the same command sets that variable or `IFS`;
+- a variable the command itself sets from a literal word: `py=python3; $py -m unittest …`, or a `for` loop over
+  literal words, `for P in python3 /usr/bin/python3; do $P -m unittest …; done`. The guard judges the command once
+  for each value, as if it were written out, and one refusal refuses it: `G=gh; $G pr merge 12` is a merge. The value
+  counts only from a plain assignment that always runs first (at the top of the command, after `;` or a newline,
+  not in a block, subshell, pipeline, or background job, and not as a prefix such as `py=x $py`), or inside the body
+  of the loop. A variable the command also reads, exports, unsets, or names in any other way, a value with a `$`,
+  quote, glob, or `~`, `eval`, `source`, `IFS`, `case`, functions, heredocs, and more than 16 combinations keep it
+  unknown;
 - text inside an interpreter's string literals: `${…}`, `{…}`, `[…]` and `*` there belong to the language (a
   template literal, an f-string, a list), and the guard looks for spawn calls in the program's code, not in the
-  text it carries. A program named in such a string (`os.system('gh pr merge 12')`) is still classified.
+  text it carries. A program named in such a string (`os.system('gh pr merge 12')`) is still classified;
+- backticks and `$(…)` in the strings of a Python program that starts processes only with argument lists, such as a
+  regular expression `` r"`([^`]+)`" `` or a Markdown template. Such a program uses no `shell=` (other than `shell=False`),
+  `os.system`, `popen`, `getoutput`, or `pty`, names no shell or `-c` option in a string, and builds no code with
+  `exec`, `eval`, `compile`, `__import__`, or `getattr`. With any of those, its strings are read as shell lines,
+  as before.
+
+A Python variable named `HOME`, `DEV_ROOT`, or `DEVKIT_*` (`HOME = Path.home()`) is a variable of the program, so it
+does not count as setting devkit's environment. `os.environ["HOME"] = …`, `putenv`, an `env={"HOME": …}` dictionary,
+and `dict(os.environ, HOME=…)` still do.
 
 A pager is a command too: `git -c core.pager=…`, `-c pager.<command>=…`, `GIT_PAGER`, and `PAGER` for git, and
 `GH_PAGER` and `PAGER` for gh, are classified as the command they name, and so are `core.editor`,
@@ -481,10 +498,61 @@ These rules apply while a progress run has crew members working ([The crew](crew
 | The main session edits a file inside a working member's scope | deny, and how to ask that member |
 | A crew member records or withdraws a decision (`dev crew decide`, `dev crew withdraw`) | refused by `dev crew`: only Morpheus records the developer's answers and withdraws a decision |
 | A crew member writes or deletes in the session scratchpad outside its own folder, `scratchpad/<member id>/` (a file tool, a redirect, `rm`, `mv`, `find -delete`, a nested shell) | deny, with the folder to use. The member's brief names that folder, and devkit creates it when the lane opens (see [The crew › Scratch folders](crew.md#scratch-folders)) |
-| A crew member runs `dev progress …` or `dev crew ask\|answer\|…` | routed to its own lane when the shell runs only that one command; otherwise refused, since it would act as Morpheus |
+| A crew member runs `dev progress …` or `dev crew ask\|answer\|…` | routed to its own lane when it is the whole command, or the one lane call in a list of `cd` and reads (see below); otherwise refused, since it would act as Morpheus |
 
 A message is data, so quoted operators in it (`dev crew ask "x; y && z"`) keep the call a single command. A `$(…)` or
 backtick that the shell expands in a message runs a command of its own, so it makes the call more than one command.
+
+#### Lane calls in a list
+
+A member may join its lane call to `cd` and reads with `&&`, `||`, `;` or a newline, and pipe it into a read-only
+filter. These reach the member's lane:
+
+```bash
+cd ~/Development/.worktrees/acme/app/fix-login && dev progress step "login fixed" --check "12 tests pass"
+dev crew inbox 2>&1 | tail -5
+git status --short && dev crew inbox
+dev progress note "tests green" --next "commit" 2>&1 | tail -3
+```
+
+devkit puts `DEVKIT_FROM_AGENT` in front of the lane call and nowhere else. The command is routed only when all of
+these hold:
+
+- It holds exactly one lane call. Two lane calls are two commands: run them one after the other.
+- The lane call starts its pipeline, and only filters that read follow it: `head`, `tail`, `grep`, `rg`, `wc`, `cat`,
+  `sort`, `uniq`, `cut`, `tr`, `nl`, `column`, `jq`, and `sed` that only prints.
+- Every other command reads: `cd`, or a command the read-only lanes may run (below). An interpreter, a shell, a
+  project check, or anything that writes makes the list unroutable.
+- The shell reads the list as written: no `$(…)` or backticks (except a quoted heredoc message), no subshell, `{ }`
+  group, `if` or loop, comment, background job, or heredoc, and redirects only to `/dev/null` or between stderr and
+  stdout.
+
+Anything else stays refused: `dev progress step x && rm -rf build`, `echo y | dev crew decide D1 A`,
+`dev progress step x | tee out`, `env dev crew …`, `bash -c 'dev crew …'`, and a lane call inside `$(…)`.
+
+#### What read-only lanes may run
+
+A review or read-only member runs only what its allowlist names: readers, reads of git, gh and dev, and the project's
+checks. These run as well:
+
+- An interpreter or shell asked only for its version: `python3 --version`, `bash --version`, `python3 -V`.
+- Machine diagnostics: `ps`, `pgrep`, `sw_vers`, `id`, `whoami`, `printenv`, `uptime`, `groups`, `locale`,
+  `getconf`, `seq`, and `sysctl` without a value, `-w`, `-f`, or `-p`.
+- A command substitution or process substitution whose own command is on the allowlist:
+  `git diff $(git merge-base HEAD main) HEAD`, `diff <(git show a:f) <(git show b:f)`. Arithmetic `$((…))` and a
+  substitution used as the program stay refused.
+- `sed` whose script only prints, with or without `-n`: `sed 's/a/b/g' f`, `sed '/^#/d' f`. `-i`, `-f`, and the `w`,
+  `r`, and `e` commands stay refused.
+- `awk` whose program prints to standard output only. A program with `>`, `|`, `system()`, `getline`, `@load`, or a
+  program file stays refused; compare with `<` instead of `>`.
+- `mkdir -p` inside the member's own scratch folder, `scratchpad/<member id>/`.
+- A shell variable set on its own, when its name is lowercase or one capital letter (`S=/path; ls $S`). `PATH`,
+  `PAGER`, `IFS`, and zsh's tied names (`path`, `fpath`, …) stay refused.
+- `dev guard check`, and `dev lesson show` and `dev lesson ls`.
+- A command continued with a backslash-newline, read as the shell joins it.
+
+A script from the member's own scratch folder (`python3 scratchpad/<member id>/probe.py`) already ran before this
+change, and still does; a script in another member's folder does not.
 
 ## Example messages
 
