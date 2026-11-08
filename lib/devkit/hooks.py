@@ -245,8 +245,8 @@ def context_for(cwd: str, agent: str) -> str:
         lines.append(f"Last agent status ({st.get('agent')}, {core.ago(st.get('ts'))}): {st.get('line')}")
     from . import notes as notesmod
     note = core.note_path(p["id"])
-    if note.exists():
-        ns = notesmod.summarize(note.read_text())
+    ns = notesmod.summarize(note.read_text()) if note.exists() else None
+    if ns:
         meta = f"status {ns['status']} · priority {ns['priority']}" + (f" · milestone {ns['milestone']}" if ns["milestone"] else "")
         lines.append(f"Project: {meta} · tasks: {len(ns['tasks']['now'])} now, {ns['tasks']['open']} open "
                      f"(`dev task` lists them; `dev task add|start|done` edits them)")
@@ -295,7 +295,7 @@ def context_for(cwd: str, agent: str) -> str:
         inits = [d.name for d in (HANDOFF / "initiatives").glob("*") if (d / "README.md").exists() and
                  p["id"] in notesmod.summarize((d / "README.md").read_text())["projects"]] \
             if (HANDOFF / "initiatives").exists() else []
-        known = lessons.context_lines(p["id"], inits)
+        known = lessons.context_lines(p["id"], inits, limit=PITFALLS_MAX)
         if known:
             lines.append("Known pitfalls (lessons from earlier mistakes; follow their prevention, and `dev lesson recur "
                          "<id> --evidence …` if one happens again):")
@@ -318,12 +318,32 @@ def context_for(cwd: str, agent: str) -> str:
                  "decisions, PRs, handovers; plain American English).")
     lines.append("devkit manual: the `using-devkit` skill (session protocol, which tool for which job, project and "
                  "initiative rules, the status line).")
-    lines.append(f"Handoff note: {tilde(note)} — read it before starting; update it with the devkit `handoff` skill "
-                 f"before you finish or when the user says handoff/pause/wrap up.")
-    body = registry.human_sections(p["id"])
-    if body:
-        lines += ["", "--- handoff note ---", body]
+    lines.append(f"Handoff note: {tilde(note)} — its Now tasks and current state are below; read the rest (decisions "
+                 f"and gotchas, Next tasks, recent sessions) before starting, and update it with the devkit `handoff` "
+                 f"skill before you finish or when the user says handoff/pause/wrap up.")
+    lines += ["", "--- handoff note ---", _note_excerpt(ns)]
     return "\n".join(lines)
+
+
+def _note_excerpt(ns) -> str:
+    """The part of the handoff note (its notes.summarize) the session starts with: the Now tasks, then the current
+    state, which comes last because a cut to CONTEXT_MAX takes it from its end. The rest stays in the note."""
+    if not ns or not (ns["tasks"]["now"] or ns["state"]):
+        return "(The note has no Now tasks or current state yet: fill Current state as you learn the project.)"
+    now = ns["tasks"]["now"]
+    parts = []
+    if now:
+        parts.append("Tasks, Now:\n" + "\n".join("- " + _cut_task(x) for x in now[:NOW_MAX])
+                     + (f"\n- … {len(now) - NOW_MAX} more (`dev task`)" if len(now) > NOW_MAX else ""))
+    if ns["state"]:  # never more than the whole context holds
+        parts.append("Current state:\n" + ns["state"][:CONTEXT_MAX])
+    return "\n\n".join(parts)
+
+
+def _cut_task(title: str) -> str:
+    """A task's title on one line of at most TASK_MAX characters."""
+    title = " ".join(title.split())
+    return title if len(title) <= TASK_MAX else title[:TASK_MAX - 1].rstrip() + "…"
 
 
 def _register_session(agent: str, sid: str, cwd: str, data: dict = None) -> Path:
@@ -430,11 +450,11 @@ def session_start(agent: str):
     except Exception:
         pass
     _SEEN.pop(cwd, None)
-    text = "\n\n".join(x for x in (_continuity("on_session_start", agent, data),
-                                   _with_catalog(context_for(cwd, agent), agent)) if x)
+    brief = _continuity("on_session_start", agent, data)
+    context = _with_catalog(context_for(cwd, agent), agent)
     seen = _SEEN.pop(cwd, {})  # what context_for inspected, for the welcome
     shown = [older] if older else []  # the notices the developer must see when no welcome carries them
-    text += f"\n\n{older}" if older else ""
+    told = [older] if older else []  # the notices the model reads, before the workspace context: a cut keeps them
     said = set()  # the notices this start has: the welcome turns them into need lines
     try:  # devkit notices from files only, no network; the daily update line is the welcome's
         from . import ext
@@ -447,29 +467,33 @@ def session_start(agent: str):
     for key, notice, to_developer in notices:
         try:
             line = notice()
-            text += f"\n\n{line}" if line else ""
             if line:
+                told.append(line)
                 said.add(key)
             if line and to_developer:
                 shown.append(line)
         except Exception:
             _log(f"session-start notice {agent}: {traceback.format_exc()[-300:]}")
-    if os.environ.get("DEVKIT_GUARD", "").lower() == "off":  # spec F8, rule 5: never silent
-        text = ("devkit · the guard is off in this session (DEVKIT_GUARD=off): it judges no tool call, so the "
-                "workspace rules, the crew's limits and the irreversible-action gate do not hold. That is recorded "
-                "once as guard.off in the audit trail. Start the session without it to turn the guard back on.\n\n"
-                + text)
+    guard_off = ""
+    if os.environ.get("DEVKIT_GUARD", "").lower() == "off":  # never silent
+        guard_off = ("devkit · the guard is off in this session (DEVKIT_GUARD=off): it judges no tool call, so the "
+                     "workspace rules, the crew's limits and the irreversible-action gate do not hold. That is "
+                     "recorded once as guard.off in the audit trail. Start the session without it to turn the guard "
+                     "back on.")
     wanted, hello = _welcome(agent, data, cwd, seen, bool(older), said)
+    seen_note = ""
     if hello:  # first of all, in the part of the context a preview keeps when the whole is too long
         from . import welcome
-        text = welcome.for_model(hello) + "\n\n" + text
+        seen_note = welcome.for_model(hello)
     else:  # no welcome to show it (and mark the day only then): the model hears the daily update line, as before
         try:
             from . import updatecheck
             line = updatecheck.session_line(installed=updatecheck.installed_version())
-            text += f"\n\n{line}" if line else ""
+            told += [line] if line else []
         except Exception:
             _log(f"session-start update notice {agent}: {traceback.format_exc()[-300:]}")
+    # what matters most first: a cut to CONTEXT_MAX takes the handoff note's excerpt, then the catalog, from the end
+    text = _fit("\n\n".join(x for x in (seen_note, guard_off, brief, *told, context) if x))
     # the developer reads the welcome (Claude Code at the session's top, Codex above its first reply); without one,
     # the notices themselves. A headless run, a crew member's session and a scratch repository get neither.
     message = hello or ("\n\n".join(shown) if wanted else "")
@@ -537,27 +561,66 @@ def post_compact(agent: str):
     _continuity("on_post_compact", agent, _stdin_json())
 
 
-CATALOG_MAX = 8000  # characters of the catalog in the session's context (about 7,200 with the members' roles)
+CONTEXT_MAX = 9000  # UTF-8 bytes of the context a session starts with: Claude Code cuts a hook's output past 10,000
+# characters to a 2,000-character preview, and Codex past about 2,500 tokens, which it counts as 4 bytes each
+PITFALLS_MAX = 3  # known pitfalls in that context, the most relevant first
+NOW_MAX = 5  # Now tasks of the handoff note in that context, each on one line of at most TASK_MAX characters: the
+TASK_MAX = 160  # note's current state comes after them and keeps its room
+CUT_LINE = "… cut here to keep devkit's context under the hooks' size limit: the handoff note has the rest."
+CATALOG_MAX = 8000  # characters of the catalog's index at most (about 2,300 with devkit's 34 kinds of work)
+
+
+def _fit(text: str, limit: int = CONTEXT_MAX) -> str:
+    """`text` cut at whole lines to `limit` UTF-8 bytes, from its end, with CUT_LINE last; as it is when it fits.
+    The session's context puts what matters most first, so the cut takes the handoff note's excerpt first."""
+    if len(text.encode("utf-8")) <= limit:
+        return text
+    room = limit - len(CUT_LINE.encode("utf-8")) - 1
+    out, size = [], 0
+    for ln in text.split("\n"):
+        n = len(ln.encode("utf-8")) + 1
+        if size + n > room:
+            if not out:  # one line longer than the limit: its start
+                out.append(ln.encode("utf-8")[:room].decode("utf-8", "ignore"))
+            break
+        out.append(ln)
+        size += n
+    while out and not out[-1].strip():
+        out.pop()
+    return "\n".join(out + [CUT_LINE])
 
 
 def catalog_context(agent: str) -> str:
-    """The catalog of ids the model declares (C13.1), cut at whole lines to CATALOG_MAX, with where the rest is."""
+    """The catalog of ids the model declares, as an index: every kind of work by its id and name, then where the rest
+    is (who does and approves each one, the crew's rules, the skills each one requires), the same for every agent.
+    Cut at whole kinds of work to CATALOG_MAX, keeping its last lines."""
     try:
-        from . import crew
-        text = crew.catalog(agent=agent)
+        from . import crew, raci, skillguard
+        kinds = [f"- `{a['id']}` {a['name']}" for a in raci.activities(crew.load())]
+        rules = tilde(skillguard.RULES_FILE)
     except Exception:
         _log(f"catalog {agent}: {traceback.format_exc()[-300:]}")
         return ""
-    if len(text) <= CATALOG_MAX:
-        return text
-    tail = "… the rest: `dev crew raci` (kinds of work), `dev crew rules` (skills), `dev lesson ls` (anchors)."
-    out, size = [], len(tail) + 1
-    for ln in text.splitlines():
-        if size + len(ln) + 1 > CATALOG_MAX:
+    head = ["devkit catalog · declare these ids, whatever language the developer writes in; devkit enforces on them "
+            "and never on words.",
+            "Kinds of work: one per plan step (`[id]` in a plan spec, as in `api=1h after design [backend]`, or "
+            "`--activity <id>` when you assign it) and per brief (`--activity <id>`). Without one, a step takes its "
+            "member's Responsible kind of work, then its files'."]
+    tail = ['Lesson anchors, where a lesson applies: dev lesson add "…" --cause "…" --prevent "…" --file <glob> '
+            '--command "<command words>" --activity <id> --error "<text the output shows>" --stack <name>.',
+            f"The rest: who does and who approves each kind of work, `dev crew raci [<id>]`; every crew rule and the "
+            f"check that enforces it, `dev crew rules`; the skills each kind of work, file and command requires, "
+            f"{rules} (a brief carries them, and the Stop hook checks them)."]
+    room = CATALOG_MAX - len("\n".join(head + tail)) - 1
+    shown = []
+    for i, ln in enumerate(kinds):
+        more = f"- … {len(kinds) - i} more: `dev crew raci`"
+        if len(ln) + 1 + (len(more) + 1 if i < len(kinds) - 1 else 0) > room:
+            shown.append(more)
             break
-        out.append(ln)
-        size += len(ln) + 1
-    return "\n".join(out + [tail])
+        shown.append(ln)
+        room -= len(ln) + 1
+    return "\n".join(head + shown + tail)
 
 
 def _with_catalog(text: str, agent: str) -> str:
@@ -2118,7 +2181,7 @@ def prompt(agent: str):
     if sid and not _session_file(agent, sid).exists():
         cwd = data.get("cwd") or os.getcwd()
         _register_session(agent, sid, cwd, data)
-        extra = _with_catalog(context_for(cwd, agent), agent)
+        extra = _fit(_with_catalog(context_for(cwd, agent), agent))
         _log(f"prompt {agent}: session {sid[:12]} had no SessionStart; devkit context injected")
     elif sid and agent == "claude" and not (state.read(_session_file(agent, sid)) or {}).get("pid"):
         try:  # a record an earlier prompt made without its process

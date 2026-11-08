@@ -557,38 +557,6 @@ ENFORCEMENT = (
 )
 
 
-def catalog(roster=None, agent: str = "claude") -> str:
-    """The ids the model declares, for the session's context (SessionStart and the brief after a compaction): every
-    kind of work with its Responsible and Accountable members and skills, the skill rules, and the lesson anchors.
-    devkit never guesses them from the developer's words, which can be in any language (crew gap review, C13)."""
-    from . import raci, skillguard
-    roster = roster or load()
-
-    def short_names(ids):
-        return ", ".join(who(member(i, roster) or i, roster) for i in ids or [])
-    lines = ["devkit catalog · declare these ids, whatever language the developer writes in; devkit enforces on them "
-             "and never on words.",
-             "Kinds of work: one per step (`[id]` in a plan spec, as in `api=1h after design [backend]`, or "
-             "`--activity <id>` when you assign it) and per brief (`--activity <id>`). Without one, a step takes its "
-             "member's Responsible kind of work, then its files'."]
-    for a in raci.activities(roster):
-        sk = ", ".join((a.get("knowledge") or {}).get("skills") or [])
-        lines.append(f"- `{a['id']}` {a['name']} · R {short_names(a.get('R'))} · A {short_names([a.get('A')])}"
-                     + (f" · skills {sk}" if sk else ""))
-    lines.append("Skills the files you change and the commands you run require (briefs get them; Stop checks them):")
-    for r in skillguard.rules():
-        need = skillguard.required(r, agent)
-        if need:
-            when = [f"for {', '.join(r['activities'])}"] if r.get("activities") else []
-            when += [f"running {', '.join(r['commands'][:3])}"] if r.get("commands") else []
-            when += ["by its files"] if r.get("files") else []
-            lines.append(f"- {r['id']}: {', '.join(need)} ({'; '.join(when)})")
-    lines.append('Lesson anchors: record where a lesson applies, never its words: dev lesson add "…" --cause "…" '
-                 '--prevent "…" --file <glob> --command "<command words>" --activity <id> --error "<text the output '
-                 'shows>" --stack <name>. An older lesson gets them with dev lesson anchor <id> … --why "…".')
-    return "\n".join(lines)
-
-
 def enforcement(plan_steps=None) -> list:
     """The matrix as rows, with a check that every enforced rule's function exists and every planned rule names
     a step of `plan_steps` (when given). -> [(rule, where, ref, state, ok)], in the order of ENFORCEMENT (whose

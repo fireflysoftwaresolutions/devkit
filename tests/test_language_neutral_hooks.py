@@ -80,11 +80,23 @@ class CatalogTests(HookCase):
         self.assertLess(out.index("devkit catalog"), out.index("--- handoff note ---"))  # the note may be cut, not it
 
     def test_the_catalog_is_bounded(self):
-        long = "\n".join(f"- `kind{i}` a kind of work with a long description to fill the line" for i in range(500))
-        with mock.patch.object(crew, "catalog", lambda *a, **k: long):
+        many = [{"id": f"kind{i}", "name": "a kind of work with a long description to fill the line"}
+                for i in range(500)]
+        with mock.patch.object(raci, "activities", lambda *a, **k: many):
             text = hooks.catalog_context("claude")
         self.assertLessEqual(len(text), hooks.CATALOG_MAX)
+        self.assertIn("`kind0`", text)
+        self.assertRegex(text, r"\n- … \d+ more: `dev crew raci`\n")  # the cut says how many kinds it left out
         self.assertIn("dev crew raci", text.splitlines()[-1])
+
+    def test_the_catalog_is_an_index_that_points_to_the_rest(self):
+        text = hooks.catalog_context("claude")
+        self.assertIn("`dev crew raci", text)
+        self.assertIn("`dev crew rules`", text)
+        for flag in ("--activity", "--file", "--command", "--error", "--stack"):  # where a lesson applies
+            self.assertIn(flag, text)
+        for detail in (" · R ", " · A ", "Skills the files you change"):  # those stay behind the commands
+            self.assertNotIn(detail, text)
 
 
 class LessonRecallTests(HookCase):
