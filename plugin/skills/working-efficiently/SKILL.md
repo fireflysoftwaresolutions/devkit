@@ -127,12 +127,15 @@ pass. A cheap agent's "nothing found" in a risky area proves nothing: redo it at
 - **No sleep or poll loops.** Commands that run for more than a minute or so while you have other work go to the
   background (Claude `run_in_background`, Codex background terminals, `/ps`); you are notified when they finish. Run
   in the foreground only when the next step needs the result right away.
-- **Waits that must wake you.** An idle session wakes only for its own tasks. Claude Code: a Monitor (one event per
-  output line, at most 30 minutes, re-arm it) or a background command (one notification when it exits, no limit).
-  Codex: nothing in the background wakes it, so wait in the foreground with a timeout, or check at the next turn.
-- **After a push, PR, merge or release, arm a watch that wakes you,** in the same turn, and name its task id in your
-  reply: `dev ci watch --wait` on both agents, as above; re-arm it when it ends before its run (exit 3,
-  `dev ci watches`). `dev ci status` is for a look; it wakes nobody (`cicd` skill, section 6).
+- **Waits that must wake you.** An idle session wakes only for its own tasks, so arm `dev watch --wait`, the one
+  wait for every devkit event (crew questions, decisions, ready steps, lost members, CI results). Claude Code: a
+  background command (one notification when it exits, no time limit). Codex: nothing in the background wakes it, so
+  wait in the foreground with `--timeout 10`, or check at the next turn. Waiting costs no tokens and each wake costs
+  one turn, so never poll with the model: no sleep loops, repeated peeks, or `dev status` calls to see whether
+  something came (`wait-and-wake` skill).
+- **After a push, PR, merge or release,** that same wait takes the CI result: arm it in the same turn and name its
+  task id in your reply. Arm `dev ci watch --wait` only to follow one run job by job (`cicd` skill, section 6).
+  `dev ci status` is for a look; it wakes nobody.
 - **Lean always-on context.** Prefer CLIs (`gh`) to MCP tools that do the same job, and keep workflow detail in skills,
   not in AGENTS.md/CLAUDE.md. `/usage` (both tools) and `/context` (Claude) show where tokens go and what is loaded.
 
@@ -187,4 +190,4 @@ Prefer devkit's token-light commands to raw shell output. They are capped, respe
 | `rm`, `mv`, `cp` | `dev rm`, `dev mv`, `dev cp` | to the Trash with undo; refuses unsaved work or open files and names the flag |
 
 For a look at CI, `dev ci status` gives the jobs, the current step and an ETA, in place of reading `gh run view`
-output; to wait for a run, arm `dev ci watch --wait`.
+output; to wait for a run, arm `dev watch --wait` (`wait-and-wake` skill).

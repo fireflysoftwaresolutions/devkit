@@ -48,7 +48,10 @@ this skill is the how.
 1. Close or release the items you worked on, then update the project's note with the `handoff` skill (Current state,
    tasks, decisions); `dev handoff --log "…"` adds your one-line summary. devkit adds branch, commits, and your status
    block automatically.
-2. Start your final message with
+2. While events can still arrive (a crew member works, a launch is pending, a step waits for a slot, CI you sent
+   runs), arm `dev watch --wait` before your final message and name its task id there (`wait-and-wake` skill); the
+   Stop hook sends back a turn that leaves nothing to wake you.
+3. Start your final message with
    the status block: `` **[Firefly> DevKit]** <project> · `<branch>` · <task> ``, then the bullets **Done:**,
    **Check:** (✓/⚠/✗ with the evidence), **Progress:** while a `dev progress` run is active, and **Next:** (global
    instructions §0 has the rules).
@@ -71,7 +74,8 @@ workflow, docs, skill, or diagram files) or ran matching commands (`git push`, `
 | Parallel work | `dev wt new <type>/<topic>` | `workspace` |
 | Plan, build, debug | `dev task`, plans folder | Superpowers (brainstorming, writing-plans, TDD, systematic-debugging); where one differs from devkit, devkit wins (global instructions, section 9) |
 | Test | `dev test` (failed first, then the blast radius), `dev test plan`, `dev test audit`, `dev test prove`; `dev stubs` for unfinished work | `testing`, Superpowers TDD |
-| CI/CD pipelines | `dev ci audit [--fix]`, `dev ci init`, `dev ci status`, `dev ci watch --wait` (the wait that wakes you: a Monitor or background command in Claude Code, the foreground in Codex), `dev ci watches`, `dev watch --wait` (one wait for every devkit event, CI included), `dev watches` | `cicd`, `github-actions-hardening`, `devsecops` |
+| CI/CD pipelines | `dev ci audit [--fix]`, `dev ci init`, `dev ci status`, `dev ci watch --wait` (one run, job by job: a Monitor or background command in Claude Code, the foreground in Codex), `dev ci watches` | `cicd`, `github-actions-hardening`, `devsecops` |
+| Wait for what comes back | `dev watch --wait` (one wait for every devkit event, CI included: a background command in Claude Code's main session, the foreground with `--for me --timeout 9` for a crew member and with `--timeout 10` in Codex), `dev watch` (a peek), `dev watches` (live, expired, and superseded waits) | `wait-and-wake` |
 | Architecture and design | `dev initiative` for cross-project work | `architecture`, `system-design`, `domain-modeling`, `codebase-design`, `likec4-dsl`, `diagrams` |
 | Backend | — | `backend`, `java-springboot`, `spring-boot-testing`, `java-junit` |
 | Frontend | Chrome DevTools MCP, `playwright-cli`, `dev impeccable <verb>` (impeccable's engine: `context` once at the start, `detect`, …; never its launcher by path) | `angular-developer`, `react-best-practices`, `composition-patterns`, `frontend-design` / `impeccable` |

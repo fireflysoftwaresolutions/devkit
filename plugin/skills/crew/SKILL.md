@@ -120,7 +120,10 @@ dev crew graph --global              # every live session on this Mac (the defau
 - Work you discover goes into the plan when it **starts** (`dev progress add`, then `dev progress begin`), so its
   time is its own; close a step only with its evidence and only the step it is about.
 - `dev crew brief` prints the brief and the exact spawn line. Launch every parallel member **in one message**. Then
-  do non-overlapping work, and never poll: each member notifies you when it finishes.
+  do non-overlapping work, and never poll. Before you end a turn while members work, arm `dev watch --wait` (in
+  Claude Code with Bash `run_in_background`, in Codex in the foreground with `--timeout 10`) and name its task id:
+  it wakes you for their questions, the decisions for the developer, steps that become ready, members that stop or
+  are lost, and CI results. Arm it again after each wake while members still work (`wait-and-wake` skill).
 
 A good brief (the `working-efficiently` skill has more): the goal and how to check it; the scope (files owned, files
 not to change); the decisions already made and why; the skills to load; and what to return. Paths, not pasted
@@ -170,6 +173,12 @@ files.
   and an answer close once delivered, and `dev status` lists only the questions nobody answered. Another session's
   run shows its ids with its session (`M1@9448c4d0`): answer by that qualified id, never the bare one, and record a
   decision only in the session that owns it.
+- **Waiting for an answer:** a member keeps working on what does not need the answer. When it is blocked, it waits
+  with `dev watch --wait --for me --timeout 9` in the foreground, as a command of its own, and continues with what
+  it prints; with no answer, it ends with the question under "Needs from the tech lead." In Claude Code, your
+  `SendMessage` to the member who asked also answers its open questions (devkit records them as answered via
+  SendMessage, with your text); Codex's `send_input` does not, so answer with `dev crew answer` first. A question
+  whose member ended and holds no open step is **moot**: nobody waits for it, and it needs no answer.
 - **Decisions that are the developer's** (scope, behavior, cost, risk): you ask the developer with the decision
   template (`communicating` skill). Members never ask the developer directly.
 - **Updates to the developer** are yours: `dev progress step` prints the status block with every lane under it.

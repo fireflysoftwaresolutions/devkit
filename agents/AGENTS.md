@@ -153,11 +153,12 @@ The developer should never have to ask "how is it going?" Follow the `communicat
   (≤ 5 lines: done · now · next · ETA). Never close a step that is not finished. The hooks remind you after a long
   silence.
 - **Background work.** When you launch subagents, parallel sessions, or long commands, say what runs, what it
-  produces, and when you expect it. Relay each result when it lands. Never sleep or poll. After a push, PR, merge,
-  release, or any CI result you promise, arm a watch that wakes you in the same turn: in Claude Code a Monitor or
-  background command running `dev ci watch --wait`, and name its task id; in Codex, which has no background wake-up,
-  that command in the foreground with a timeout. Re-arm a watch that ends before its run (exit 3, `dev ci watches`).
-  Report the result when it fires.
+  produces, and when you expect it. Relay each result when it lands. Never sleep or poll. While events can still
+  arrive (a crew member works, a launch is pending, a step waits for a slot, CI you sent runs), arm one wait before
+  you end the turn: `dev watch --wait`, which wakes you once for every devkit event, CI results included. In Claude
+  Code, run it with Bash `run_in_background` and name its task id; in Codex, which has no background wake-up, run
+  `dev watch --wait --timeout 10` in the foreground, or say that you check again at the developer's next message.
+  Act on what it prints, then arm it again (`dev watches` shows the command). The `wait-and-wake` skill has the rest.
 - **Decisions.** Ask only when the decision is the developer's (scope, behavior, cost, risk, and actions that are
   irreversible or have external effects). Use the decision template: context, options with trade-offs, your
   recommendation, and what you plan to do if they don't answer. Explanations lead with the answer, then how it
@@ -230,10 +231,12 @@ step, never the words of the request, so the developer's language does not matte
 
 **The crew talks through devkit, never around it.** Every member records each finished step with `dev progress step
 "…" --check "…"` (its own lane), posts `dev progress note` while a long step runs, asks with `dev crew ask` (a
-decision for the developer with `--decision`), answers with `dev crew answer`, and ends its report with its own
-status block (`**[Firefly> DevKit · Backend engineer (Tank)]**`). The hooks check it: a member whose report has no
-block, or who never recorded its step, is sent back once, and so is a member that skipped a proof of its procedure or
-a skill, left unfinished work or a test that cannot fail, or answered repeated guard refusals with no lesson.
+decision for the developer with `--decision`), waits for an answer it is blocked on with
+`dev watch --wait --for me --timeout 9` in the foreground, answers with `dev crew answer`, and ends its report with
+its own status block (`**[Firefly> DevKit · Backend engineer (Tank)]**`). The hooks check it: a member whose report
+has no block, or who never recorded its step, is sent back once, and so is a member that skipped a proof of its
+procedure or a skill, left unfinished work or a test that cannot fail, or answered repeated guard refusals with no
+lesson.
 
 **The crew's structure belongs to the team.** devkit ships the roster and the RACI (`config/crew.json`). The team's
 changes live in the handoff repository (`crew/crew.json`, and `crew/README.md` for people), versioned with who and
@@ -252,7 +255,8 @@ rely on.
 keep the developer informed, integrate and close) have no gate, unlike a member's. devkit checks what some of them
 produce: `dev progress assign` refuses a member the RACI does not make Responsible; the hooks remind you after a long
 silence; `dev progress done` waits for every member's report and every approval; and the Stop hook checks the status
-block, the required skills, a CI run left without a watch, and a handoff note older than your commits.
+block, the required skills, a turn that leaves members or CI with nothing to wake you, and a handoff note older than
+your commits.
 Understanding the request and writing the plan are yours alone.
 
 ## 4. Files and disk
@@ -339,9 +343,10 @@ minutes) and can re-trigger the CI of every other open PR. Follow the devkit `de
    individual PRs. Do not merge PRs one after another to "see what CI says."
 5. **Watch, don't poll:** devkit follows the pipeline after every push, PR, merge or release (`dev ci watch`, in the
    background) and tells your session at its next hook how it ended: green, or red with the first error, its class
-   and the one next action. That wakes no idle session: after every push, merge or release, arm
-   `dev ci watch --wait` and name it in your reply (section 3, Background work). Act on it: reproduce locally and
-   fix, or hand it to the Release engineer (`dev crew brief link …`).
+   and the one next action. That wakes no idle session. CI is one source of the one wait (section 3, Background
+   work): after every push, merge or release, arm `dev watch --wait` and name it in your reply; `dev ci watch --wait`
+   is for following one run job by job. Act on the result: reproduce locally and fix, or hand it to the Release
+   engineer (`dev crew brief link …`).
 6. **If CI fails:** read the failing log (`dev run view <id> --failed`), reproduce it locally, fix, re-run the
    local suite, then push once. Never chain speculative "try this" pushes. Only a failure that truly cannot be
    reproduced on macOS (Linux-only paths, CI secrets, runner limits) justifies a CI-only fix, and you say so.
@@ -404,7 +409,8 @@ Follow the devkit `backend` skill for the detailed checklists. Always:
 - **Working efficiently and communicating:** `working-efficiently` (models, effort, subagents, tokens),
   `communicating` (updates, decisions, PRs, handovers, formats), `using-devkit` (which `dev` command for which job),
   `work-state` (keeping items, runs, lanes, decisions, CI watches and branches true; `/devkit:reconcile` checks them
-  all and applies the fixes the developer agrees to).
+  all and applies the fixes the developer agrees to), `wait-and-wake` (the one wait that wakes you for every devkit
+  event, armed the right way for each agent).
 - **Code intelligence:** use the LSP tools (TypeScript, Python, Java, PHP) to find definitions, references, and type
   errors rather than grepping when they are available.
 - **Design and architecture:** `domain-modeling`, `codebase-design`, `architecture`, `system-design`, `likec4-dsl`

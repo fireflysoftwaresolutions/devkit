@@ -121,14 +121,14 @@ successful runs. It is for a look: to wait for a run to end, arm a watch (sectio
   and what you plan to do with it. The developer cannot see subagent output.
 - **Never poll or sleep while waiting.** Use notifications (`run_in_background`, a Monitor). If a job runs past its
   expected time, say so.
-- **After a push, PR, merge or release, arm a watch that wakes you,** in the same turn, and name its task id in
-  your reply; do the same before you promise to report when CI ends or a release is published. In Claude Code, run
-  `dev ci watch --wait` as a Monitor (`--timeout 28`, `timeout_ms` 1800000) or a background command; in Codex, which
-  has no background wake-up, run it in the foreground with a timeout, and if the run is still going, say plainly
-  that you check it again at the next turn. Re-arm a watch that ends before its run (exit 3; `dev ci watches` prints
-  the command), and report the result when it fires. `dev ci status` is for a look; it wakes nobody. devkit's own
-  background watch speaks only at your next hook, so it wakes nobody either; the Stop hook sends back a turn that
-  sent work to origin and leaves its run unwatched.
+- **A wait you promise is a wait you arm.** Before you end a turn while crew members work, a launch is pending, a
+  step waits for a crew slot, or CI you sent still runs, arm `dev watch --wait` in the same turn and name its task id
+  in your reply: in Claude Code with Bash `run_in_background`; in Codex, which has no background wake-up, in the
+  foreground with `--timeout 10`, or say plainly that you check again at the developer's next message. It wakes you
+  for every devkit event, CI results included. When it fires, report what it brought and arm it again while events
+  can still arrive. The `wait-and-wake` skill has the command for each agent and the exit codes. `dev ci status` is
+  for a look; it wakes nobody, and neither does devkit's own background CI watch, which speaks only at your next
+  hook. The Stop hook sends back a turn that ends while events can arrive and nothing is armed.
 
 ## 5. Decision request, for questions of consequence
 

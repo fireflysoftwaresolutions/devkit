@@ -88,12 +88,15 @@ the end in the background (`dev ci watch`) and tells this session how it ended a
 the first error, its class and the one next action (`cicd` skill, section 6). A hook runs only when the session
 does something, so that watch never wakes an idle session. Never poll.
 
-**Arm a watch that wakes you, in the same turn, and name its task id in your reply.** In Claude Code, run
-`dev ci watch --wait` as a Monitor or a background command; in Codex, which has no background wake-up, run it in the
-foreground with a timeout. Re-arm a watch that ends before its run (exit 3; `dev ci watches` prints the command), and
-report the result when it fires. `dev ci status` is for a look at the runs; it wakes nobody.
+**Arm a wait that wakes you, in the same turn, and name its task id in your reply.** `dev watch --wait` is the one
+wait for every devkit event: devkit's background watch feeds the CI result into it, so one wait covers CI and the
+crew together (the `wait-and-wake` skill has the command for each agent). To follow one run job by job instead, arm
+`dev ci watch --wait`: in Claude Code as a Monitor or a background command; in Codex, which has no background
+wake-up, in the foreground with a timeout. Re-arm a wait that ends first (exit 3; `dev watches` and `dev ci watches`
+print the command), and report the result when it fires. `dev ci status` is for a look at the runs; it wakes nobody.
 
 ```bash
+dev watch --wait                                                 # Claude Code: Bash with run_in_background; every event, CI included
 dev ci watch --wait --branch <branch> --sha <sha> --timeout 28   # Claude Code: the Monitor tool, timeout_ms 1800000
 dev ci watch --wait --branch <branch> --sha <sha>                # Claude Code: Bash with run_in_background
 dev ci watch --wait --pr <n>                                     # a PR's head, or its merge commit once merged
