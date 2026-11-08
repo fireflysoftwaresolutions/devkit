@@ -388,7 +388,9 @@ action `unknown`, tier 2, with the target `cmd-<hash>` of that exact command tex
   cap), and an executable text file with no shebang, or with a byte-order mark before `#!`, as the `sh` script the
   shell runs it as (also one that is not executable yet when the command runs `chmod`). A shell or interpreter reads its program from a redirect or a pipe the same way: `sh < f`, `< f sh`, `sh 0< f`,
   `sh <(cat f)`, `python3 < f`, `python3 /dev/stdin < f`, and `cat f | python3` are read like `sh f` and
-  `python3 f`. A path the system cannot encode (a lone surrogate) counts as unreadable. A binary is classified by its
+  `python3 f`, and `source` and `.` read their input or a descriptor the same way: `. /dev/stdin <<< '…'`,
+  `echo '…' | source /dev/stdin`, `source /dev/fd/3 3<<< '…'`, and `source <(echo …)` run the text they are fed
+  (`source /dev/fd/3` with nothing the command shows on that descriptor is `unknown`). A path the system cannot encode (a lone surrogate) counts as unreadable. A binary is classified by its
   name, as before. A shell script the gate reads but cannot parse (a comment with an apostrophe, such as
   `# it's a test`) is unknown in the same way, however it runs: `./y.sh`, `sh y.sh`, `bash y.sh`, `. y.sh`,
   `source y.sh`, `sh < y.sh`, or `cat y.sh | bash`. A script inside the workspace is the repository's own and is not

@@ -3039,7 +3039,11 @@ class _Shell:
                     return v
             return None
         if name in ("source", ".") and args:
-            return self.nested(_read_small(resolve(args[0], cwd)), cwd, same_shell=True, typed=False)
+            for text, typed, _ in _sourced(args, cwd, self.bodies):
+                v = self.nested(text, cwd, same_shell=True, typed=typed)
+                if v:
+                    return v
+            return None
         if name == "eval":
             return self.nested(" ".join(args), cwd, same_shell=True)
         if name == "xargs":
@@ -4102,6 +4106,26 @@ def _with_positionals(line: str, words) -> str:
     return _POSITIONAL.sub(sub, line)
 
 
+# the files that are a command's input or another of its descriptors: what `source` or `.` reads from them is fed in
+_FED_FILES = re.compile(r"/dev/(?:stdin|fd/\d+)|/proc/self/fd/\d+")
+
+
+def _sourced(args, cwd, bodies) -> list:
+    """What `source` or `.` runs -> [(text, typed, path)], as for a shell's script (_shell_sources): the file it
+    names; for its input or another descriptor (`. /dev/stdin <<< '…'`, `source /dev/fd/3`), the command's heredocs
+    and here-strings and what a pipe feeds it (`bodies`); for a process substitution (`source <(echo …)`), what its
+    command writes (_produced)."""
+    if not args:
+        return []
+    if args[0] == "<(":
+        sub = _unwrap(args[1:])
+        return [(_produced(sub, cwd), False, _cat_path(sub, cwd))] if sub else []
+    if _FED_FILES.fullmatch(args[0]):
+        return [(b, True, None) for b in bodies]
+    path = resolve(args[0], cwd)
+    return [(_read_small(path), False, path)]
+
+
 def _shell_inputs(args, cwd, bodies, name="bash") -> list:
     """The scripts a shell runs: its -c string, a script file, or its input (the command's heredocs). With -s it reads
     its input even when words follow, and they are its $1, $2 … (`bash -s plugin install x <<< 'claude "$@"'`)."""
@@ -4502,7 +4526,9 @@ def _forged_argv(argv, cwd, bodies, here, prev, depth) -> str:
         if _reads_stdin(args, name):
             texts += here + ([_produced(prev, cwd)] if prev else [])
     elif name in ("source", ".") and args:
-        texts = [_read_small(resolve(args[0], cwd))]
+        texts = [t for t, _, _ in _sourced(args, cwd, bodies)]
+        if _FED_FILES.fullmatch(args[0]):
+            texts += here + ([_produced(prev, cwd)] if prev else [])
     elif name == "eval":
         texts = [" ".join(args)]
     elif name == "xargs":
@@ -4915,8 +4941,10 @@ def shell_calls(cmd: str, cwd, depth: int = 0, where: bool = False):
     segs = split_commands(cmd)
     if segs is None:
         return None
-    bodies, out = heredoc_bodies(cmd), []
-    for argv0, _ in segs:
+    bodies, out, ins = heredoc_bodies(cmd), [], []
+    osegs = split_commands(cmd, ops=True, inputs=ins)
+    osegs = osegs if osegs is not None and len(osegs) == len(segs) else None
+    for k, (argv0, _) in enumerate(segs):
         argv = _unwrap(argv0)
         if not argv:
             continue
@@ -4924,7 +4952,11 @@ def shell_calls(cmd: str, cwd, depth: int = 0, where: bool = False):
             cwd = str(core.HOME) if len(argv) == 1 else cwd if argv[1] == "-" else str(resolve(argv[1], cwd))
             continue
         here = _prefix_chdir(argv0[:len(argv0) - len(_strip_prefix(argv0))], cwd) if where else cwd
-        more = _program_calls(argv, here, bodies, depth, where)
+        fed = []
+        if osegs is not None:  # what a pipe or `< f` feeds a shell, an interpreter or `. /dev/stdin` (_fed_program)
+            with _skipped_reads():
+                argv, fed, _ = _fed_program(argv, osegs, k, ins[k] if k < len(ins) else [], cwd)
+        more = _program_calls(argv, here, bodies + [t for t, _ in fed], depth, where)
         if more is None:
             return None
         out += more
@@ -4948,7 +4980,7 @@ def _program_calls(argv, cwd, bodies, depth, where=False):
     if name in _SHELLS:
         texts = _shell_inputs(args, cwd, bodies, name)
     elif name in ("source", ".") and args:
-        texts = [_read_small(resolve(args[0], cwd))]
+        texts = [t for t, _, _ in _sourced(args, cwd, bodies)]
     elif name == "eval":
         texts = [" ".join(args)]
     elif name == "xargs":
@@ -6446,7 +6478,7 @@ def _walk_argv(argv0, cwd, bodies, depth):
     if name in _SHELLS:
         texts = _shell_inputs(args, cwd, bodies, name)
     elif name in ("source", ".") and args:
-        texts = [_read_small(resolve(args[0], cwd))]
+        texts = [t for t, _, _ in _sourced(args, cwd, bodies)]
     elif name == "eval":
         texts = [" ".join(args)]
     elif name == "xargs":
@@ -7726,20 +7758,25 @@ def _fed_program(argv, segs, k, files, cwd) -> tuple:
     `python3 < f`, `node - < f`, `python3 /dev/stdin < f`), and the process substitution it runs as its script
     (`sh <(cat f)`, read as `sh -` fed what cat writes) -> (argv, [(text, path)], [paths left unread]), where path is
     the file a text was read from (a redirect, `cat f`), or None for words the command holds (echo, printf). A
-    program given in the words (`sh -c …`, `python3 x.py`) is fed nothing here."""
+    program given in the words (`sh -c …`, `python3 x.py`) is fed nothing here. `source` and `.` are fed the same
+    way when their file is their input (`echo '…' | . /dev/stdin`, `source /dev/stdin < f`)."""
     name = os.path.basename(argv[0]) if argv else ""
-    if not argv or (name not in _SHELLS and not _INTERP.match(name)) or \
+    sourced = name in ("source", ".") and len(argv) > 1 and bool(_FED_FILES.fullmatch(argv[1]))
+    if not argv or (name not in _SHELLS and not _INTERP.match(name) and not sourced) or \
             (name in _SHELLS and _shell_args(argv[1:], name)[2]):  # `bash -n < f` only parses what it reads
         return argv, [], []
     texts = []
     with _skipped_reads() as unread:
-        if "<(" in argv[1:]:  # `sh <(cat f)`: the tokenizer leaves the substitution's words in the segment
+        if sourced:
+            pass
+        elif "<(" in argv[1:]:  # `sh <(cat f)`: the tokenizer leaves the substitution's words in the segment
             j = argv.index("<(")
             if all(str(a).startswith("-") for a in argv[1:j]):
                 sub = _unwrap(argv[j + 1:])
                 texts.append((_produced(sub, cwd), _cat_path(sub, cwd)) if sub else ("", None))
                 argv = [*argv[:j], "-"]
-        stdin = (_reads_stdin(argv[1:], name) if name in _SHELLS else _program_source(argv, whole=True) == "none") or \
+        stdin = sourced or (_reads_stdin(argv[1:], name) if name in _SHELLS else
+                            _program_source(argv, whole=True) == "none") or \
             any(a in ("/dev/stdin", "/dev/fd/0") for a in argv[1:])
         if stdin:
             prev = _unwrap(segs[k - 1][0]) if k else []
@@ -7975,7 +8012,10 @@ def _argv_actions(argv, cwd, bodies, depth):
         if name in _SHELLS:
             texts = [(text, path) for text, _, path in _shell_sources(args, cwd, bodies, name)]
         elif name in ("source", ".") and args:
-            texts = [(_read_small(resolve(args[0], cwd)), resolve(args[0], cwd))]
+            texts = [(text, path) for text, _, path in _sourced(args, cwd, bodies)]
+            if _FED_FILES.fullmatch(args[0]) and args[0] not in ("/dev/stdin", "/dev/fd/0", "/proc/self/fd/0") \
+                    and not texts:  # `exec 3< f; . /dev/fd/3`: a descriptor the command does not show may hold anything
+                out += _found([_unknown(" ".join(argv))], argv, cwd)
     if unread:  # `sh big.sh`, `source big.sh`: a script too large or unreadable may do anything
         out += _found([_unread_action(argv, unread[0])], argv, cwd)
     if name == "eval":
@@ -8515,7 +8555,8 @@ def _text_actions(text, cwd, depth=0, from_code=False, expand=True):
         argv, fed, unread = _fed_program(argv, segs, k, ins[k] if k < len(ins) else [], cwd)
         if unread:  # `sh < big.sh`, `cat big.py | python3`: a program too large or unreadable may do anything
             out += _found([_unread_action(argv, unread[0])], argv0, cwd)
-        more = _argv_actions(argv, here, bodies + [t for t, _ in fed] if _INTERP.match(name) else bodies, depth)
+        more = _argv_actions(argv, here, bodies + [t for t, _ in fed]
+                             if _INTERP.match(name) or name in ("source", ".") else bodies, depth)
         if more is None:
             return None
         out += more

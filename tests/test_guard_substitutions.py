@@ -78,5 +78,36 @@ class ProcessSubstitution(unittest.TestCase):
                 self.assertIsNone(member(cmd, level="review", who="seraph"))
 
 
+class SourceReadsItsInput(unittest.TestCase):
+    """`source` and `.` run what they read from their input, a descriptor or a process substitution, as a shell does
+    (`. /dev/stdin <<< '/bin/date +X'` printed the date in /bin/bash and /bin/zsh)."""
+
+    def test_what_source_is_fed_is_judged_as_the_program_it_runs(self):
+        for cmd in ("source /dev/stdin <<< 'gh pr merge 12'", ". /dev/stdin <<< 'gh pr merge 12'",
+                    "source <(echo gh pr merge 12)", ". <(echo gh pr merge 12)",
+                    "echo gh pr merge 12 | source /dev/stdin", "printf 'gh pr merge 12' | . /dev/fd/0",
+                    "source /dev/fd/3 3<<< 'gh pr merge 12'"):
+            with self.subTest(cmd=cmd):
+                self.assertIn("merges PR 12", main(cmd) or "")
+                self.assertIn("merges PR 12", member(cmd) or "")
+                self.assertIsNotNone(member(cmd, level="review", who="seraph"))
+        # a descriptor the command does not show may hold anything
+        self.assertIsNotNone(main("exec 3< f; . /dev/fd/3"))
+
+    def test_a_lane_call_source_or_a_shell_is_fed_is_refused(self):
+        for cmd in ("source /dev/stdin <<< 'dev progress done x'", "echo dev progress done x | source /dev/stdin",
+                    "source <(echo dev crew decide D1 A)", "echo dev progress done x | bash",
+                    "printf 'dev crew decide D1 A' | sh"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNotNone(member(cmd))
+
+    def test_a_harmless_program_fed_to_source_runs(self):
+        for cmd in ("source /dev/stdin <<< 'ls'", "echo 'export X=1' | . /dev/stdin", "source <(echo ls)",
+                    "source /dev/stdin < /dev/null", "echo hi | bash"):
+            with self.subTest(twin=cmd):
+                self.assertIsNone(main(cmd))
+                self.assertIsNone(member(cmd))
+
+
 if __name__ == "__main__":
     unittest.main()
