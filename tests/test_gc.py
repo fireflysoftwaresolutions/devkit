@@ -104,6 +104,14 @@ class GcBranchTests(GcCase):
         gc.apply(pl)
         self.assertEqual(self.on_origin("fix/backed"), "")
 
+    def test_a_run_that_may_not_reach_origin_keeps_every_remote_branch(self):
+        # dev sync --offline or --no-push runs gc when gc's own job is not installed: it deletes nothing on origin
+        self.land(*self.feature("fix/backed", "fix: keep the backed-up thing", push=True, age=48 * HOUR))
+        self.backed_up("fix/backed")
+        results = gc.apply(self.plan(), remote=False)
+        self.assertTrue(self.on_origin("fix/backed"))
+        self.assertIn((False, "kept remote branch origin/fix/backed: this run does not reach origin"), results)
+
     def test_a_merged_remote_branch_devkit_did_not_push_and_no_pull_request_merged_stays(self):
         # someone else's branch: the nightly job leaves it to dev branch prune --apply
         self.land(*self.feature("fix/theirs", "fix: keep their thing", push=True, age=48 * HOUR))

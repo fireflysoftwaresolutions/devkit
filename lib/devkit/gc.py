@@ -256,7 +256,9 @@ def remove_worktree(main: str, path: str, branch: str = None, github: str = None
     return True, msg
 
 
-def apply(pl: dict, only_auto=True) -> list:
+def apply(pl: dict, only_auto=True, remote=True) -> list:
+    """Carry out the plan's actions (only the automatic ones by default) -> [(ok, message)]. With remote False it keeps
+    every branch on origin, for a run that may not reach it (dev sync --offline or --no-push)."""
     results = []
     for a in pl["actions"]:
         if only_auto and not a.get("auto"):
@@ -266,6 +268,9 @@ def apply(pl: dict, only_auto=True) -> list:
             ok, msg = remove_worktree(a["main"], a["path"], a.get("branch"), a.get("github"),
                                       require_pr=a.get("pr"), merged=a.get("merged"))
         elif k == "prune-branch":
+            if a["where"] == "remote" and not remote:
+                results.append((False, f"kept remote branch {a['path']}: this run does not reach origin"))
+                continue
             from . import branches
             done = branches.prune(a["plan"], only=lambda x, row=a["row"]: x is row)
             r = done[0] if done else dict(a["row"], result="failed", error="not deleted")

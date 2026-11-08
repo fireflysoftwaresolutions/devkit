@@ -1321,7 +1321,8 @@ def cmd_sync(a):
         results = []
         if a.scheduled and CFG["gc"].get("auto") and not (core.HOME / "Library" / "LaunchAgents" /
                                                           "com.devkit.job.gc.plist").exists():
-            results = gc.apply(gc.plan(reg, with_sizes=True), only_auto=True)  # only when the gc job is not installed
+            # only when the gc job is not installed; an offline or no-push sync deletes nothing on origin
+            results = gc.apply(gc.plan(reg, with_sizes=True), only_auto=True, remote=not (a.offline or a.no_push))
             if any(ok_ and m.startswith("removed") for ok_, m in results):
                 core._CWDS = None
                 reg = registry.build(with_prs=True, refresh_prs=False, with_sizes=False)
