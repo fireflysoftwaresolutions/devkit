@@ -291,7 +291,7 @@ rely on.
   user says so; never plain force-push (use `--force-with-lease` on your own branch only).
 - Use devkit's git and GitHub commands, which apply these rules for you: `dev branch new`, `dev branch ls` (where
   each branch lives), `dev branch prune`, `dev commit`, `dev backup`, `dev push`, `dev pr create` (the template,
-  pre-filled), `dev pr ready`, `dev pr checks --watch`, `dev run view --failed`, `dev pr merge` and `dev release`. Plain `git` and
+  pre-filled), `dev pr ready`, `dev pr checks`, `dev run view --failed`, `dev pr merge` and `dev release`. Plain `git` and
   `gh` work for everything else; the guard refuses a raw `gh pr merge` or `gh release create`.
 
 ## 7. Delivery: integrate and verify locally, push once, one CI run

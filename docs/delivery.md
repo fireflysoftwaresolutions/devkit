@@ -114,8 +114,11 @@ dev sec scan            # secrets, dependencies, code patterns, IaC, workflows
 dev push                # one push, only with local CI evidence for exactly these files
 dev pr create --dry-run | sed '1,/^---$/d' > body.md   # the pre-filled body; fill "What and why", then:
 dev pr create --body-file body.md
-dev pr checks --watch
+dev ci watch --wait --pr <n>   # an agent arms it as a Monitor or background command and names its task id
 ```
+
+The commit message follows devkit's commit template: `--why` writes the reason, `--verified` the `Verified:` line
+with the command you ran and its result (see [Git and GitHub › Commits](git-and-github.md#commits)).
 
 The pull request description follows the template in [Templates › Pull request
 description](templates.md#pull-request-description): what and why, changes, how to verify (with the local results),
@@ -199,7 +202,7 @@ git merge --no-ff feat/b                 # local branches of other worktrees wor
 dev ci --run                             # the full local suite on the result
 dev push
 dev pr create --title "chore(release): 26.11.4" --body-file body.md   # "Integrates #12, #17, #22"
-dev pr checks --watch
+dev ci watch --wait --pr <n>
 ```
 
 Ask the sessions working on those branches to commit locally and stop pushing. Never merge the individual PRs one
@@ -208,17 +211,26 @@ release branch name when the project uses CalVer.
 
 ## 4. Follow CI
 
-Watch the single run instead of polling it:
+After every push, PR, merge or release, devkit follows the run in the background (`dev ci watch`) and tells the
+session how it ended at the session's next hook. A hook runs only when the session does something, so that watch
+wakes no idle agent. **An agent that waits on the run arms a watch that wakes it, in the same turn, and names its
+task id in its reply.** In Claude Code it runs `dev ci watch --wait` as a Monitor or a background command; in Codex,
+which has no background wake-up, it runs it in the foreground with a timeout. A watch that ends before its run (exit
+3) is re-armed with the command `dev ci watches` prints. The Stop hook sends back a turn that sent work to origin and
+left its unfinished run with nothing that wakes the agent.
 
 ```bash
-dev ci status            # the runs of the branch: state, jobs, current step, elapsed, ETA
-dev ci status --watch    # refresh every 15 seconds until nothing runs
-dev pr checks --watch    # the checks of the PR; prints only the result, with the logs of failed jobs
+dev ci watch --wait --pr <n>          # a PR's head, or its merge commit once merged
+dev ci watch --wait --tag v26.11.4    # a release tag
+dev ci watches                        # live watches, and expired ones with the command to re-arm each
+dev ci status                         # a look at the runs of the branch: state, jobs, current step, elapsed, ETA
 ```
 
-`dev ci status` works with GitHub Actions, GitLab CI, Bitbucket Pipelines and Azure Pipelines; the ETA comes from
-the last successful runs of the same pipeline. The details and the sign-in each host needs are in
-[Commands › dev ci status](commands.md#dev-ci-status---watch---branch-name----all-branches---all-jobs---limit-n---json).
+`dev ci status` is for a look; it wakes nobody. It works with GitHub Actions, GitLab CI, Bitbucket Pipelines and
+Azure Pipelines; the ETA comes from the last successful runs of the same pipeline. The details and the sign-in each
+host needs are in
+[Commands › dev ci status](commands.md#dev-ci-status---watch---branch-name----all-branches---all-jobs---limit-n---json),
+and the watch's exit codes in [CI/CD pipelines › Watch every run](ci-cd.md#watch-every-run).
 
 ## 5. When CI fails
 

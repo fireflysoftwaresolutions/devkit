@@ -190,9 +190,9 @@ devkit follows its own delivery method: integrate locally, run the full suite, p
    check. In your terminal, run `bin/dev install`, which pins this tested commit for your hooks, then `dev doctor`
    and `dev agents test`; every check must pass.
 4. Push the release branch once (`dev push`), open one PR (`dev pr create`), and watch its CI
-   (`dev pr checks --watch`).
-5. Merge with `dev pr merge`, wait for the CI run on `main` (`dev ci status --watch`), and publish with
-   `dev release`. It tags `vYY.MM.PATCH` on `main` and creates the GitHub release with the CHANGELOG section as its
+   (`dev ci watch --wait --pr <n>`; an agent arms it as a Monitor or background command and names its task id).
+5. Merge with `dev pr merge`, wait for the CI run on `main` (`dev ci watch --wait --pr <n>` follows the merge
+   commit), and publish with `dev release`. It tags `vYY.MM.PATCH` on `main` and creates the GitHub release with the CHANGELOG section as its
    notes. The guard refuses a raw `gh pr merge` or `gh release create`.
 6. Verify what was published: download the source archive into an empty folder
    (`gh release download vYY.MM.PATCH --archive tar.gz -D <folder>`), compare it with the tag, and run its tests.
