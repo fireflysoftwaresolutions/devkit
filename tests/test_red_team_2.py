@@ -325,7 +325,7 @@ class RedTeam2(unittest.TestCase):
 
     def test_m394_names_the_program_or_shell_builds_at_run_time_stay_unknown(self):
         for cmd in ("$X pr merge 12", "$VENV/bin/gh pr merge 12", "VENV='gh pr merge 12 #'; $VENV/bin/python x",
-                    "IFS=/; $VENV/bin/python x", "for VENV in a b; do $VENV/bin/python x; done",
+                    "IFS=/; $VENV/bin/python x", "for VENV in $LIST; do $VENV/bin/python x; done",
                     "${VENV:=/tmp}/bin/python x",
                     "python3 -c \"getattr(__import__('os'),'sys'+'tem')('gh pr merge 12')\"",
                     "python3 -c \"import os; os.system('bash -c \\\"$X pr merge 12\\\"')\"",
@@ -335,6 +335,12 @@ class RedTeam2(unittest.TestCase):
                 self.assertIn("unknown", self.acts(cmd))
                 self.assertIsNotNone(self.main(cmd))
                 self.assertIsNotNone(self.member(cmd))
+        # a loop over literal words names no program at run time (guard.literal_variants): each value is judged
+        # as the program written out
+        looped, written = "for VENV in a b; do $VENV/bin/python x; done", "a/bin/python x; b/bin/python x"
+        self.assertEqual(self.main(looped), self.main(written))
+        self.assertEqual(self.member(looped), self.member(written))
+        self.assertIn("merges PR 12", self.member("for G in echo gh; do $G pr merge 12; done") or "")
         # a program named in a string is still classified
         self.assertEqual(self.acts("python3 -c \"import os; os.system('gh pr merge 12')\""), ["merge"])
         self.assertEqual(self.acts("node -e \"require('child_process').execSync('gh pr merge 12')\""), ["merge"])
@@ -1261,7 +1267,7 @@ class EmbargoedBranchesStayOffTheRemote(EmbargoCase):
                 self.assertEqual(self.targets(cmd), [("push", "feat/x")])
         subst = ('git -C "$(git rev-parse --show-toplevel)" push origin fix/hole',
                  'cd "$(git rev-parse --show-toplevel)" && gh pr create --head fix/hole --title t --body b')
-        var = ('cd "$X" && git push origin fix/hole', 'X=/elsewhere; cd "$X" && dev push', 'cd "$X" && dev pr create',
+        var = ('cd "$X" && git push origin fix/hole', 'X=$(pwd); cd "$X" && dev push', 'cd "$X" && dev pr create',
                'cd "$X" && gh pr create --fill', 'dev git -C "$X" push origin fix/hole',
                'cd "$X" && bash -c "git push origin fix/hole"')
         for cmd in subst + var:
@@ -1271,6 +1277,11 @@ class EmbargoedBranchesStayOffTheRemote(EmbargoCase):
                 self.assertIn("folder", reason)
                 self.assertNotIn("grant embargo", reason)  # `?`: no grant covers it; the folder written out does
                 self.assertIn("Crew members never run", self.member(cmd) or "")
+        # a folder the command sets from a literal word is no folder named at run time (guard.literal_variants):
+        # judged as the folder written out
+        literal, written = 'X=/elsewhere; cd "$X" && dev push', "cd /elsewhere && dev push"
+        self.assertEqual(self.main(literal), self.main(written))
+        self.assertEqual(self.member(literal), self.member(written))
         self.assertIsNotNone(self.main(subst[0], setting="audit"))  # developer-only: the audit week holds it too
         self.note.write_text("---\nstatus: active\n---\n# acme/widget\n")  # no embargo in the session's project
         for cmd in (subst[0], var[0]):

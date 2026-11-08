@@ -17,6 +17,7 @@ import contextlib
 import contextvars
 import fnmatch
 import functools
+import itertools
 import json
 import os
 import re
@@ -6038,6 +6039,14 @@ def crew_shell_verdict(cmd: str, cwd, scope=None, member=None, level=None, base=
     it."""
     if not cmd or not str(cmd).strip():
         return None
+    variants = literal_variants(cmd)
+    if variants:  # a variable set from a literal: judged once per value it holds, the first refusal stands
+        for text in variants:
+            v = crew_shell_verdict(text, cwd, scope, member, level, base, lane=lane, session=session, agent=agent,
+                                   grant=grant, now=now, routed=routed)
+            if v:
+                return v
+        return None
     cwd = cwd or os.getcwd()
     if member:
         v = _ScratchShell(cmd, cwd, member).run()
@@ -7825,6 +7834,207 @@ def _var_program(word, text) -> str:
     return os.path.basename(m.group(3))
 
 
+# A variable the command itself sets from a literal names a program or a path the guard can read before the shell
+# runs (B-fyouzwjdxv6, B-fyxlzwa4phq): `py=python3; $py -m unittest …`, `for P in python3 /usr/bin/python3; do $P -m
+# unittest …; done`, `S=/tmp/x; mkdir -p $S`. literal_variants writes the command once for each value the variable
+# can hold where it is used, and the guard judges every variant: one refusal refuses the command. A variable is
+# resolved only when every use of it is: after a plain assignment of a literal word that always runs before it (at
+# the top of the command, after `;` or a newline, never inside a block, a subshell or a pipeline, never as the prefix
+# of a command), or inside the body of a `for` loop over literal words; and when the command names it nowhere else
+# (read, export, unset, printf -v, an arithmetic, …). Anything else is a value from outside the command, and stays
+# unknown: eval, source, IFS, case, functions, heredocs, backticks, `${x:-…}` and the other expansions.
+_LIT_WORD = re.compile(r"[A-Za-z0-9_./:@%+,=-]+\Z")
+_VAR_REF = re.compile(r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)([^}]*)\}|([A-Za-z_][A-Za-z0-9_]*))")
+_FOR_LIST = re.compile(r"for[ \t]+([A-Za-z_][A-Za-z0-9_]*)[ \t]+in[ \t]+([^;\n]*?)([ \t]*)(?:;|\n)[ \t\n]*do(?![A-Za-z0-9_])")
+_CMD_WORD = re.compile(r"[^\s;&|()<>]+")
+_BLOCK_OPEN = frozenset({"if", "case", "{", "do"})  # while, until and select open theirs at `do`
+_BLOCK_CLOSE = frozenset({"fi", "esac", "done", "}"})
+_KEEP_START = frozenset({"if", "then", "elif", "else", "while", "until", "do", "{", "!", "time"})
+MAX_VARIANTS = 16
+
+
+def _code_kinds(s: str):
+    """For each character of a command: 'C' (code the shell reads, also inside a `$(…)` in double quotes), 'D'
+    (double-quoted text), 'S' (single-quoted, escaped or a comment), with its parenthesis depth; None for backticks."""
+    kinds, deps, stack, depth, i, n = [], [], [("C", 0)], 0, 0, len(s)
+
+    def put(k, count=1):
+        kinds.extend([k] * count)
+        deps.extend([depth] * count)
+
+    while i < n:
+        ctx, c = stack[-1][0], s[i]
+        if ctx == "S":
+            put("S")
+            if c == "'":
+                stack.pop()
+            i += 1
+            continue
+        if c == "\\":
+            put("S", min(2, n - i))
+            i += 2
+            continue
+        if c == "`":
+            return None
+        if ctx == "D":
+            if s.startswith("$(", i):
+                put("D", 2)
+                depth += 1
+                stack.append(("C", depth))
+                i += 2
+                continue
+            put("D")
+            if c == '"':
+                stack.pop()
+            i += 1
+            continue
+        if c == "'":
+            stack.append(("S", depth))
+            put("S")
+        elif c == '"':
+            stack.append(("D", depth))
+            put("D")
+        elif c == "#" and (i == 0 or s[i - 1] in " \t\n;&|()"):
+            j = s.find("\n", i)
+            j = n if j < 0 else j
+            put("S", j - i)
+            i = j
+            continue
+        elif c == "(":
+            depth += 1
+            put("C")
+        elif c == ")":
+            put("C")
+            if len(stack) > 1 and stack[-1] == ("C", depth):
+                stack.pop()  # the end of a `$(…)` opened inside double quotes
+            depth -= 1
+        else:
+            put("C")
+        i += 1
+    return kinds, deps
+
+
+def _command_starts(code: str, deps):
+    """The words of a code mask as (word, start, end, at command start, block depth, operator before)."""
+    out, start, block, prev_op, i = [], True, 0, ";", 0
+    for m in re.finditer(r"&&|\|\||[;|&\n()]|" + _CMD_WORD.pattern, code):
+        t = m.group(0)
+        if t in ("&&", "||", ";", "|", "&", "\n", "(", ")"):
+            start, prev_op = True, {"\n": ";"}.get(t, t)
+            continue
+        word_start = start
+        if word_start and t in _BLOCK_CLOSE:
+            block -= 1
+        out.append((t, m.start(), m.end(), word_start, block, prev_op, deps[m.start()]))
+        if word_start and t in _BLOCK_OPEN:
+            block += 1
+        start = word_start and t in _KEEP_START
+        prev_op = ""
+    return out
+
+
+def literal_variants(cmd: str) -> list:
+    """The command written out once for each value its literal variables can hold where it uses them (see above),
+    [] when it uses no variable the guard can resolve, or more than MAX_VARIANTS combinations."""
+    s = str(cmd or "")
+    if "$" not in s or "<<" in s.replace("<<<", "") or len(s) > 20000:
+        return []
+    ck = _code_kinds(s)
+    if ck is None:
+        return []
+    kinds, deps = ck
+    code = "".join(c if k == "C" else " " for c, k in zip(s, kinds))
+    words = _command_starts(code, deps)
+    if any(w[3] and w[0] in ("case", "function", "eval", "source", ".", "select", "coproc", "alias") for w in words) \
+            or re.search(r"\bIFS\b", code) or re.search(r"\w\s*\(\s*\)", code):
+        return []
+    events, touched = {}, {}  # name -> [(pos, values or None, kind, body span)], name -> [(start, end)]
+    for k, (t, a, b, at_start, block, op, dep) in enumerate(words):
+        if at_start and t == "for":
+            fm = _FOR_LIST.match(code, a)
+            if not fm:
+                continue  # `for x; do`, `for ((…))`: its name is a bare mention below, so it stays unknown
+            name, (la, lb) = fm.group(1), fm.span(2)
+            touched.setdefault(name, []).append(fm.span(1))
+            items = s[la:lb].split()
+            # every character up to the `;` is code: a quoted or escaped item, masked in `code`, is no literal word
+            if dep or not items or any(kd != "C" for kd in kinds[la:fm.end(3)]) or \
+                    not all(_LIT_WORD.match(v) for v in items):
+                events.setdefault(name, []).append((a, None, "loop", None))
+                continue
+            level, stop = 1, None
+            for w in words:
+                if w[1] < fm.end() or not w[3]:
+                    continue
+                level += {"do": 1, "done": -1}.get(w[0], 0)
+                if not level:
+                    stop = w[1]
+                    break
+            events.setdefault(name, []).append((a, items if stop else None, "loop", (fm.end(), stop or 0)))
+            continue
+        exported = k and words[k - 1][0] == "export" and words[k - 1][3]
+        m = re.match(r"([A-Za-z_][A-Za-z0-9_]*)\+?=", t) if at_start or exported else None
+        if not m:
+            continue
+        name, val = m.group(1), s[a + len(m.group(0)):b]
+        touched.setdefault(name, []).append((a, a + len(m.group(1))))
+        nxt = words[k + 1] if k + 1 < len(words) else None
+        definite = "+=" not in m.group(0) and not dep and not block and \
+            (words[k - 1][5] if exported else op) == ";" and bool(val) and bool(_LIT_WORD.match(val)) and \
+            (b == len(s) or s[b] in " \t\n;&|)") and (nxt is None or nxt[3]) and \
+            not re.match(r"[ \t]*(?:\|(?!\|)|&(?!&))", code[b:])
+        events.setdefault(name, []).append((a, [val] if definite else None, "set", None))
+    refs = {}
+    for m in _VAR_REF.finditer(s):
+        if kinds[m.start()] not in ("C", "D"):
+            continue
+        name = m.group(1) or m.group(3)
+        after = s[m.end():m.end() + 1]
+        bad = bool(m.group(2)) or (not m.group(1) and after in ("[", ":"))
+        refs.setdefault(name, []).append((m.start(), m.end(), bad))
+    choices, plans = [], {}
+    for name, uses in refs.items():
+        evs = sorted(events.get(name) or [], key=lambda e: e[0])
+        spans = [(a, b) for a, b, _ in uses] + touched.get(name, [])
+        bare = [m.start() for m in re.finditer(rf"(?<![A-Za-z0-9_$]){re.escape(name)}(?![A-Za-z0-9_])", code)
+                if not any(a <= m.start() < b for a, b in spans)]
+        if not evs or bare or any(bad for _, _, bad in uses) or any(e[1] is None for e in evs):
+            continue
+        plan = []
+        for a, b, _ in uses:
+            inside = [e for e in evs if e[2] == "loop" and e[3][0] <= a < e[3][1]]
+            before = [e for e in evs if e[0] < a]
+            if inside:
+                ev = inside[-1]
+            elif before and before[-1][2] == "set" and not any(e[2] == "loop" and e[3][0] <= a for e in before):
+                ev = before[-1]
+            else:
+                plan = None
+                break
+            plan.append((a, b, ev))
+        if plan:
+            plans[name] = plan
+            for _, _, ev in plan:
+                if ev not in choices:
+                    choices.append(ev)
+    if not plans:
+        return []
+    combos = 1
+    for ev in choices:
+        combos *= len(ev[1])
+    if combos > MAX_VARIANTS:
+        return []
+    out = []
+    for pick in itertools.product(*[ev[1] for ev in choices]):
+        chosen = dict(zip(map(id, choices), pick))
+        text, last = [], 0
+        for a, b, ev in sorted((u for p in plans.values() for u in p), key=lambda u: u[0]):
+            text += [s[last:a], chosen[id(ev)]]
+            last = b
+        out.append("".join(text) + s[last:])
+    return out
+
+
 def _text_actions(text, cwd, depth=0, from_code=False):
     """The actions of every segment of a command line, level by level: what each segment runs, what a shell reads
     from a pipe (`printf '…' | sh`, `cat f | bash`) or a here-string (`bash <<< '…'`), and the substitutions the
@@ -8195,7 +8405,15 @@ def irreversible_verdict(cmd: str, cwd, *, agent: str = "claude", session: str =
     action no live grant covers while safeguards.irreversible_main enforces; None otherwise. Every action is recorded
     (guard.irreversible), and the grant that allows one is used. `grant(action, target, repo, consume)` replaces
     progress.use_grant in tests. A failure inside the gate denies in enforce when the command names an irreversible
-    action, as an unparsed one does; otherwise it runs with a guard.failopen record (P4)."""
+    action, as an unparsed one does; otherwise it runs with a guard.failopen record (P4). A command whose variables
+    it sets from literals is judged once per value they hold (literal_variants)."""
+    variants = literal_variants(cmd)
+    if variants:
+        for text in variants:
+            v = irreversible_verdict(text, cwd, agent=agent, session=session, grant=grant, now=now)
+            if v:
+                return v
+        return None
     try:
         acts = irreversible_actions(cmd, cwd or os.getcwd())
         if acts is None:
@@ -8434,8 +8652,9 @@ def _tool_command(tool_input) -> str:
 
 def _check_shell(tool_input, cwd, agent):
     """check_bash for each command a tool input carries (tool_commands): the first refusal, else the first other
-    verdict, else None. A call with no command is judged as the empty command, as before."""
-    verdicts = [check_bash(c, cwd, agent) for c in tool_commands(tool_input) or [""]]
+    verdict, else None. A call with no command is judged as the empty command, as before. A command whose variables
+    the command itself sets from literals is judged once per value they hold (literal_variants)."""
+    verdicts = [check_bash(v, cwd, agent) for c in tool_commands(tool_input) or [""] for v in literal_variants(c) or [c]]
     return next((v for v in verdicts if v and v[0] == "deny"), None) or next((v for v in verdicts if v), None)
 
 
