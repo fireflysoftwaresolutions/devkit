@@ -325,21 +325,21 @@ class AssignmentTests(unittest.TestCase):
 class MorpheusTests(unittest.TestCase):
     """Morpheus routes every development request, and the crew talks through devkit."""
 
-    def test_a_request_with_several_kinds_of_work_names_each_member_and_approver(self):
+    def test_the_route_hint_is_the_same_reminder_in_every_language(self):
+        # the prompt hook reminds the tech lead to declare the kinds of work by their catalog ids; it never guesses
+        # them from the request's words, so a Spanish request gets the same reminder as an English one
         from devkit import hooks
         r = crew.load(team=False)
-        text = hooks.morpheus_hint("build the JSON API server for the dashboard and implement the frontend live "
-                                   "updates", r)
-        self.assertIn("you are the Tech lead (Morpheus)", text)
-        self.assertIn("back-end services and APIs → Backend engineer (Tank) does it, Code reviewer (Seraph) approves", text)
-        self.assertIn("front-end implementation → Frontend engineer (Trinity) does it", text)
-        self.assertIn("Plan one step per kind of work", text)
+        en = hooks.morpheus_hint("build the JSON API server for the dashboard and implement the frontend live "
+                                 "updates", r)
+        es = hooks.morpheus_hint("construye el servidor de la API JSON del panel y la parte de interfaz en vivo", r)
+        self.assertEqual(en, es)
+        self.assertTrue(en.startswith("devkit · you are the Tech lead (Morpheus): declare the kinds of work"), en)
+        self.assertIn("`dev crew raci`", en)
+        self.assertIn("--activity <id>", en)
+        self.assertNotIn("Backend engineer (Tank)", en)  # no member guessed from the words
         self.assertEqual(hooks.morpheus_hint("please continue", r), "")
-        meta = hooks.morpheus_hint("every member needs its own procedure: developing a backend, a frontend, testing "
-                                   "and ci/cd differ, and so do designing an architecture and documenting", r)
-        self.assertIn("mentions", meta)  # examples of many kinds of work: no single route
-        self.assertNotIn("this request is CI/CD", meta)
-        self.assertEqual(hooks.morpheus_hint("look at this one thing", r), "")
+        self.assertEqual(hooks.morpheus_hint("continúa", r), "")
 
     def test_the_status_block_shows_the_crew_and_what_the_developer_must_decide(self):
         from devkit import canary

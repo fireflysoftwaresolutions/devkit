@@ -136,7 +136,7 @@ lock use the same effective set, so they never undo your choice.
 | `progress.stale_agent_minutes` | `90` | The reconciler's limit: a working crew member silent this long (no hook, no update) is lost and frees its slot, and its step waits for a new owner. It works again, with its step, at its next hook. A member stopped with TaskStop frees its slot at once, and its step waits unverified |
 | `work.mode` | `guided` | `guided`: decisions that are the developer's wait for the developer; `auto`: the crew goes on with the recommended option and records it. A run can set its own (`--mode`) |
 | `crew.gates.enforce` | `true` | At SubagentStop, the crew gates send a member back once for each proof, skill, unfinished line, test that cannot fail, or lesson it still owes; `false` only records them in the audit trail (see [The crew › Every report is checked](crew.md#every-report-is-checked)) |
-| `crew.route_hint` | `true` | The prompt hook adds the tech lead's route for each request, a guess from the request's words (English only); `false` leaves it out |
+| `crew.route_hint` | `true` | The prompt hook reminds the tech lead to declare each request's kinds of work by their ids from the catalog and route each by the RACI, in any language; `false` leaves it out |
 | `ui.powerline` | `false` | Draw Nerd Font arrows between the status pills in `dev status` and `dev overview` (needs a Nerd Font in your terminal) |
 | `dashboard.idle_minutes` | `30` | The live dashboard server stops after this many minutes with no page open and no request |
 | `handoff.enforce` | `true` | When a session made commits without updating the handoff note, the Stop hook asks the agent once to update it |

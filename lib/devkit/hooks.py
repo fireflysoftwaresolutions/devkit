@@ -2009,41 +2009,18 @@ def _context_out(event: str, text: str):
 
 
 def morpheus_hint(text: str, roster=None) -> str:
-    """The route Morpheus takes for a development request: each kind of work it contains (the crew's RACI), who does
-    it, who approves it, and whom to consult. '' when the request is not clearly any kind of work."""
-    try:
-        from . import raci
-        if len(str(text or "").split()) < 4:
-            return ""
-        every = raci.classify(text, roster, limit=30)
-        ranked = [x for x in every if x[1] >= raci.MIN_SCORE][:4]
-    except Exception:
+    """The tech lead's reminder for a development request: declare its kinds of work by their ids from the catalog
+    and route each by the crew's RACI. It is the same in every language: the ids decide, never the request's words.
+    '' for a request too short to be work ("continue")."""
+    t = str(text or "").strip()
+    if len(t.split()) < 4 and len(t) < 30:
         return ""
-    mentioned = [x for x in every if x[1] >= 2]
-    you = f"devkit · you are the {_lead(roster)}"
-    if len(mentioned) >= 4:  # it names many kinds of work (often as examples): the tech lead decides, no single route
-        names_ = ", ".join(raci._lower(a["name"]) for a, _, _ in mentioned[:6])
-        return (f"{you}: this request mentions {len(mentioned)} kinds of work ({names_}). Decide "
-                "whether it is one change to how devkit or the crew works, or several pieces of work; plan one step "
-                "per kind of work and route each by the RACI (`dev crew raci`).")
-    if not ranked:
-        return ""
-    parts = []
-    for act, _, hits in ranked:
-        line = f"{raci._lower(act['name'])} → {raci.names(act.get('R'), roster)} does it"
-        if act.get("A") not in (act.get("R") or []):
-            line += f", {raci.names([act['A']], roster)} approves"
-        if act.get("C"):
-            line += f", consult {raci.names(act['C'], roster)}"
-        parts.append(line)
-    if len(parts) == 1:
-        head = f"{you}: this request is {parts[0]} (the crew's RACI)."
-    else:
-        head = (f"{you}: this request spans " + str(len(parts)) + " kinds of work (the crew's "
-                "RACI): " + "; ".join(parts) + ". Plan one step per kind of work and assign each to its member.")
-    return (head + " One kind of work under ten minutes: do it yourself. Otherwise plan it (`dev progress start "
-            "--plan`), assign the steps (`dev progress assign <step> --to <member>`) and brief the members "
-            "(`dev crew brief <member> \"<task>\"`); the run ends when each approver has reviewed.")
+    return (f"devkit · you are the {_lead(roster)}: declare the kinds of work in this request by their ids from the "
+            "catalog (`dev crew raci` lists them), whatever language it is in, and route each to its Responsible "
+            "member. One kind of work under ten minutes: do it yourself. Otherwise plan one step per kind of work "
+            "(`dev progress start --plan`), assign each with its id (`dev progress assign <step> --to <member> "
+            "--activity <id>`) and brief the member (`dev crew brief <member> \"<task>\" --activity <id>`); the run "
+            "ends when each approver has reviewed.")
 
 
 def prompt(agent: str):
@@ -2095,9 +2072,6 @@ def prompt(agent: str):
     route = ""
     if (core.CFG.get("crew") or {}).get("route_hint", True):
         route = morpheus_hint(data.get("prompt") or "")
-        if route:  # words never decide (C13): the catalog's ids do; this ranks a suggestion, in English only
-            route = route.replace("devkit · ", "devkit · a guess from the request's words (English only; declare "
-                                  "the kinds of work from the catalog) · ", 1)
     hatches = ""
     try:
         hatches = bypass_context(agent, sid)

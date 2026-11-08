@@ -179,13 +179,18 @@ class RefusalRecordTests(HookCase):
 
 
 class RouteHintTests(HookCase):
-    def test_the_prompt_route_is_labeled_a_guess(self):
-        out = self.hook("prompt", {"session_id": "s1", "hook_event_name": "UserPromptSubmit", "cwd": str(self.root),
-                                   "prompt": "build the JSON API server for the dashboard and implement the frontend "
-                                             "live updates"})
-        ctx = self.context(out)
-        self.assertIn("you are the Tech lead (Morpheus)", ctx)
-        self.assertIn("a guess from the request's words", ctx)
+    # the prompt hook reminds the tech lead to declare the kinds of work by catalog id, the same for a Spanish
+    # request as for an English one, and guesses no route from the words
+    def test_the_prompt_reminds_the_tech_lead_the_same_in_every_language(self):
+        def reminder(sid, prompt):
+            ctx = self.context(self.hook("prompt", {"session_id": sid, "hook_event_name": "UserPromptSubmit",
+                                                    "cwd": str(self.root), "prompt": prompt}))
+            return next((p for p in ctx.split("\n\n") if "you are the Tech lead (Morpheus)" in p), "")
+        en = reminder("s1", "build the JSON API server for the dashboard and implement the frontend live updates")
+        es = reminder("s2", "construye el servidor de la API JSON del panel y la parte de interfaz en vivo")
+        self.assertIn("declare the kinds of work in this request by their ids from the catalog", en)
+        self.assertEqual(en, es)
+        self.assertNotIn("Backend engineer (Tank)", en)
 
 
 if __name__ == "__main__":
