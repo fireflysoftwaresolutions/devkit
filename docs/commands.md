@@ -896,7 +896,10 @@ lane, and the guard asks the main session for the developer's grant. Without a v
 
 ### `dev commit -m "type(scope): summary" [options] [<paths>…]`
 
-Commits the staged changes, or `-a` every tracked change, or the listed paths. The header must be a Conventional
+Commits the staged changes, or `-a` every tracked change, or the listed paths. In a crew lane it commits only the
+staged files inside the step scope of the lane, leaves the other staged files exactly as they are for their owner,
+and names them. A lane with none of its own files staged, or with no scope, is refused and told to name its paths.
+The header must be a Conventional
 Commit with a known type, in the imperative mood, without a final period, and at most 72 characters. Commits on the
 default branch and on non-conforming branches are refused; AI attribution lines are removed; the guard's secret scan
 runs.
@@ -909,7 +912,7 @@ runs.
 | `--verified "…"` | The last paragraph of the body, `Verified: …`: how you verified the change |
 | `--refs "…"` | The `Refs:` trailer: `#12`, `owner/repo#12`, a URL, or a ticket key; repeat it for more. Default: the ticket of the task started on this branch. A devkit task id is refused in it, as anywhere in the message |
 | `--breaking "…"` | The `BREAKING CHANGE:` trailer: what breaks, and how to move to the new behavior |
-| `-a`, `--all` | Stage every tracked change first |
+| `-a`, `--all` | Stage every tracked change first; in a crew lane, only those inside its scope |
 | `--amend` | Amend HEAD (keeps its message without `-m`); warns when HEAD was already pushed |
 | `--wip [-m "what"]` | Save everything, untracked files too, as a `wip:` commit instead of a stash |
 | `--unwip` | Undo the WIP commit at HEAD; its changes come back uncommitted |

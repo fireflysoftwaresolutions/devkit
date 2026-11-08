@@ -109,7 +109,9 @@ dev crew graph --global              # every live session on this Mac (the defau
   own, and you are told why. Put the step's name in the launch description (`dev crew brief --step` does). A step
   delegated into a working lane closes only on that lane's own evidence: the member names it with
   `dev progress step "…" --step "<name>" --check "…"`.
-- The step's time is its member's own time, and its `--scope` is the set of files the guard lets that member edit. A
+- The step's time is its member's own time, and its `--scope` is the set of files the guard lets that member edit.
+  It is also what the member commits: in a crew lane, `dev commit` commits only the staged files inside the scope and
+  leaves the rest staged for their owner, so members who share one checkout never commit the files of another. A
   member that needs more asks you. Write scopes repository-relative (`lib/**`): they match in every checkout of the
   repository. `assign` and `dev crew delegate --scope` rewrite an absolute or `~` path inside one checkout to that
   form and tell you, and refuse one that spans checkouts or names a worktree that is not there (deleted included).
