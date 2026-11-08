@@ -3,6 +3,7 @@
 # The skills gate of the crew gates (SubagentStop): which skills a member owes, from the files it changed. Built on
 # the crew gate fixtures of tests/test_crew_gates.py. Tests carry comments, not docstrings: `dev test prove` leaves
 # out tests with a docstring. Run: python3 -m unittest tests.test_gates_skills
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -10,7 +11,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
 from devkit import gates, skillguard  # noqa: E402
-from tests.test_crew_gates import KID, KID_DOCS, GateCase  # noqa: E402
+from tests.test_crew_gates import GOOD_TEST, KID, KID_DOCS, GateCase  # noqa: E402
 
 UI_HAVE = {"test-driven-development", "testing", "docs", "communicating", "frontend-design", "impeccable"}
 
@@ -74,6 +75,31 @@ class GatedSkills(unittest.TestCase):
     def test_the_security_engineer_owes_devsecops_at_every_stop(self):
         always = {g["skill"] for g in gates.gated_skills("keymaker") if g["always"]}
         self.assertEqual(always, {"devsecops"})
+
+
+class CodexMembers(GateCase):
+    # a Codex member's transcript (Codex rollout records): what it ran, read and patched
+    def codex(self, *calls):
+        recs = [{"timestamp": "2026-11-08T09:00:00.000Z", "type": "session_meta", "payload": {"id": "c1"}}]
+        for kind, value in calls:
+            if kind == "shell":
+                pl = {"type": "function_call", "name": "exec_command", "arguments": json.dumps({"cmd": value})}
+            else:
+                pl = {"type": "custom_tool_call", "name": "apply_patch",
+                      "input": f"*** Begin Patch\n*** Add File: {value}\n+x\n*** End Patch"}
+            recs.append({"timestamp": "2026-11-08T09:00:01.000Z", "type": "response_item", "payload": pl})
+        self.tx.path.write_text("\n".join(json.dumps(r) for r in recs) + "\n")
+        return str(self.tx.path)
+
+    # judged by Codex's own skills: one it read through its shell counts, one only Claude has is not owed
+    def test_a_codex_member_is_judged_by_codex_skills(self):
+        skillguard.installed = lambda agent: {"testing"} if agent == "codex" else \
+            {"test-driven-development", "testing", "communicating"}
+        (self.repo / "tests").mkdir()
+        (self.repo / "tests" / "test_calc.py").write_text(GOOD_TEST)
+        path = self.codex(("shell", "cat ~/.agents/skills/testing/SKILL.md"), ("patch", "tests/test_calc.py"),
+                          ("shell", "dev test"), ("shell", 'dev progress step "built it" --check "12 tests pass"'))
+        self.assertEqual(self.rules(gates.crew_gates(KID, path, str(self.repo))), [])
 
 
 if __name__ == "__main__":
