@@ -75,8 +75,9 @@ class OwnerCase(unittest.TestCase):
     def other_run(self, lanes, steps=()):
         pg.RUNS.mkdir(parents=True, exist_ok=True)
         pg.run_path("claude", "s2").write_text(json.dumps({
-            "goal": "Branch cleanup", "state": "running", "agent": "claude", "session": "s2", "project": "acme/api",
-            "started": self.now - 3 * 3600, "plan": list(steps), "agents": lanes, "history": []}))
+            "v": 2, "goal": "Branch cleanup", "state": "running", "agent": "claude", "session": "s2",
+            "project": "acme/api", "started": self.now - 3 * 3600, "plan": list(steps), "agents": lanes,
+            "history": []}))
 
     def claude_meta(self, sid, aid, finished, at, log_at):
         # Claude Code's own record of a subagent, beside the transcript of the session it now runs in
@@ -252,6 +253,128 @@ class CarryTests(OwnerCase):
         self.assertIn("Kid still running", str(e.exception))
         self.assertNotIn("Keymaker", str(e.exception))
         self.assertEqual(pg.load_run("claude", "s2")["agents"]["a_kid"]["state"], "running")
+
+
+class SweepTests(OwnerCase):
+    def test_the_sweep_closes_a_lane_claude_code_recorded_finished_beside_the_conversations_newer_transcript(self):
+        # tonight's old run: the sweep read Claude Code's records only beside its own session's transcript, where the
+        # copy still says running; beside s1's transcript (the conversation's newer session id) it says finished
+        self.other_run({"a_kid": self.lane("Kid", "Kid: branches", ["lib/branches/**"], active=25 * MIN)},
+                       steps=[{"name": "branches", "state": "running", "owner": "a_kid"}])
+        self.claude_meta("s2", "a_kid", finished=False, at=self.now - 2 * 3600, log_at=self.now - 25 * MIN - 1)
+        self.claude_meta("s1", "a_kid", finished=True, at=self.now - 25 * MIN, log_at=self.now - 60 * MIN)
+        approvals.sweep(now=self.now)
+        run = pg.load_run("claude", "s2")
+        self.assertEqual((run["agents"]["a_kid"]["state"], run["plan"][0]["state"]), ("unverified", "unverified"))
+        why = " ".join(h.get("why", "") for h in run.get("history") or [] if h.get("step") == "(lane Kid)")
+        self.assertIn("Claude Code recorded it finished", why)
+
+    def test_the_sweep_keeps_a_member_that_works_beside_the_conversations_newer_transcript(self):
+        # its run has not heard from it for longer than the stale minutes, but its own transcript, beside s1's, was
+        # written a minute ago: it still works, so its lane stays running and keeps its step
+        stale = approvals.limits()["stale_minutes"]
+        self.other_run({"a_kid": self.lane("Kid", "Kid: branches", ["lib/branches/**"], active=(stale + 5) * MIN)},
+                       steps=[{"name": "branches", "state": "running", "owner": "a_kid"}])
+        self.claude_meta("s1", "a_kid", finished=False, at=self.now - 2 * 3600, log_at=self.now - MIN)
+        approvals.sweep(now=self.now)
+        run = pg.load_run("claude", "s2")
+        self.assertEqual((run["agents"]["a_kid"]["state"], run["plan"][0]["state"]), ("running", "running"))
+
+
+class WhoStillWorksCase(OwnerCase):
+    def fixture(self):
+        # s2's run lists three members as running: Kid works, Ghost went quiet past the stale minutes, and Claude
+        # Code recorded the Keymaker finished beside s1's transcript
+        stale = approvals.limits()["stale_minutes"]
+        self.other_run({"a_kid": self.lane("Kid", "Kid: branches", ["lib/branches/**"], active=4 * MIN),
+                        "a_ghost": self.lane("Ghost", "Ghost: docs", ["lib/docs/**"], active=(stale + 5) * MIN),
+                        "a_key": self.lane("The Keymaker", "Keymaker: guard", ["lib/guard/**"], active=30 * MIN)},
+                       steps=[{"name": "branches", "state": "running", "owner": "a_kid"},
+                              {"name": "docs", "state": "running", "owner": "a_ghost"},
+                              {"name": "guard", "state": "running", "owner": "a_key"}])
+        self.claude_meta("s1", "a_key", finished=True, at=self.now - 30 * MIN, log_at=self.now - 30 * MIN - 1)
+        return pg.load_run("claude", "s2")
+
+
+class ProgressViewTests(WhoStillWorksCase):
+    def test_dev_progress_counts_only_the_members_that_still_work(self):
+        head = pg.headline(self.fixture(), self.now)
+        self.assertTrue(head.endswith(" · 1 agent working · 1 agent stale"), head)
+
+    def test_the_crew_slots_hold_only_the_members_that_still_work(self):
+        self.assertEqual(pg.slots(self.fixture(), {}, self.now), [("a_kid", "Kid")])
+
+    def test_the_crew_line_marks_stale_and_ended_members(self):
+        line = pg.crew_summary(self.fixture(), now=self.now)
+        parts = line.split(" · ")
+        self.assertEqual(parts[:3], ["DevEx engineer (Kid) ▸ branches", "Technical writer (Ghost) ✗ docs (stale)",
+                                     "Security engineer (The Keymaker) ✓ guard (ended)"])
+        self.assertRegex(parts[3], r"^1 of \d+ slots in use")
+
+    def test_a_lane_with_no_recorded_activity_in_a_run_with_no_start_still_works(self):
+        # nothing says when it last worked, and its run names no session: unknown, never stale (L-g0ilzimdm63)
+        run = {"v": 2, "plan": [], "agents": {"a1": {"persona": "Neo", "label": "Neo: parser", "state": "running"}}}
+        self.assertEqual([k for k, _ in pg.working_agents(run, self.now)], ["a1"])
+        self.assertTrue(pg.headline(run, self.now).endswith(" · 1 agent working"), pg.headline(run, self.now))
+
+    def test_dev_crew_next_names_only_the_members_that_still_work_as_busy(self):
+        busy = crew.ready_view(self.fixture(), TEAMLESS(team=False))["busy"]
+        self.assertEqual([b["who"] for b in busy], ["DevEx engineer (Kid)"])
+
+
+class ContinuityTests(WhoStillWorksCase):
+    def test_the_brief_after_a_compaction_lists_members_that_work_marks_stale_ones_and_names_ended_ones_apart(self):
+        self.fixture()
+        text = continuity.brief("claude", "s2", reason="resume", now=self.now)
+        crew_part = text.split("Crew working now:\n", 1)[1].split("\nTheir results", 1)[0].splitlines()
+        self.assertEqual(len(crew_part), 2, crew_part)
+        self.assertTrue(crew_part[0].startswith("- DevEx engineer (Kid) · step branches"), crew_part)
+        self.assertNotIn("stale", crew_part[0])
+        self.assertTrue(crew_part[1].startswith("- Technical writer (Ghost) · step docs"), crew_part)
+        self.assertIn("stale: silent for", crew_part[1])
+        ended = next(ln for ln in text.splitlines() if ln.startswith("Ended since"))
+        self.assertIn("Security engineer (The Keymaker) on step guard", ended)
+
+    def test_the_pre_compact_record_keeps_only_the_members_that_still_work(self):
+        run = self.fixture()
+        text = continuity.on_pre_compact("claude", {"session_id": "s2", "cwd": str(self.repo), "trigger": "manual"},
+                                         now=self.now)
+        crew_line = next(ln for ln in text.splitlines() if ln.startswith("- the crew working now: "))
+        self.assertIn("DevEx engineer (Kid) on step branches", crew_line)
+        self.assertIn("Technical writer (Ghost) on step docs (stale)", crew_line)
+        self.assertNotIn("Keymaker", crew_line)
+        lanes = continuity.read("claude", "s2")["checkpoint"]["lanes"]
+        self.assertEqual([(x["persona"], x["state"]) for x in lanes], [("Kid", "working"), ("Ghost", "stale")])
+        self.assertEqual(run["agents"]["a_key"]["state"], "running")  # the record of the run itself is the sweep's
+
+
+class DashboardTests(WhoStillWorksCase):
+    def test_the_dashboard_shows_working_stale_and_ended_members_as_dev_status_does(self):
+        # the brief (presence, dev crew) names each member's live state; the page draws a stale member as it draws
+        # a lost one ("Stopped reporting"), and an ended one apart from "Working now"
+        from devkit import dashboard
+        run = self.fixture()
+        self.assertEqual({a["label"]: (a["state"], a.get("live")) for a in pg.brief(run, self.now)["agents"]},
+                         {"Kid: branches": ("running", "working"), "Ghost: docs": ("stale", "stale"),
+                          "Keymaker: guard": ("ended", "ended")})
+        (b,) = dashboard._runs(self.now, raw=[run])
+        self.assertEqual([(a["label"], a["state"], sorted(a)) for a in b["agents"]],
+                         [("Kid: branches", "running", ["label", "min", "state"]),
+                          ("Ghost: docs", "lost", ["label", "min", "state"]),
+                          ("Keymaker: guard", "ended", ["label", "min", "state"])])
+        self.assertTrue(b["headline"].endswith(" · 1 agent working · 1 agent stale"), b["headline"])
+        lanes = dashboard.run_detail(dashboard.run_id(run), now=self.now)["lanes"]
+        self.assertEqual({x["persona"]: x["state"] for x in lanes},
+                         {"Kid": "running", "Ghost": "lost", "The Keymaker": "ended"})
+
+    def test_another_macs_stale_member_shows_as_stopped_reporting(self):
+        # a brief published by another Mac names the lane state "stale"; the Now page draws it as "lost"
+        from devkit import dashnow
+        b = dashnow._remote_brief({"goal": "Branch cleanup", "state": "running",
+                                   "agents": [{"label": "Ghost: docs", "state": "stale", "min": 5},
+                                              {"label": "Kid: branches", "state": "running", "min": 3}]}, self.now)
+        self.assertEqual([(a["label"], a["state"]) for a in b["agents"]],
+                         [("Ghost: docs", "lost"), ("Kid: branches", "running")])
 
 
 if __name__ == "__main__":

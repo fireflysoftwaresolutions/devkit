@@ -231,9 +231,10 @@ def decline(which: str, why: str, from_agent: str | None = None, cwd: str | None
     return s
 
 
-def _sorted(run):
-    """The plan's steps for the crew, sorted: (launchable [steps], waiting [(step, why)])."""
-    busy = progress.running_agents(run)
+def _sorted(run, now: float | None = None):
+    """The plan's steps for the crew, sorted: (launchable [steps], waiting [(step, why)]). A member is busy while it
+    works (progress.working_agents): one that ended or went stale is not."""
+    busy = progress.working_agents(run, now)
     launch, waiting = [], []
     for s in run.get("plan") or []:
         if s.get("state") not in ("pending", "blocked") or not s.get("label") or (s.get("owner") or "main") != "main":
@@ -277,7 +278,7 @@ def order(run, now: float | None = None, sess: dict | None = None) -> list:
     critical path first (the step and what waits for it), then the developer's latest request (a step added in the
     current turn), then the oldest (no step starves), then the plan's order."""
     run = normalize(run)
-    cands, _ = _sorted(run)
+    cands, _ = _sorted(run, now)
     if not cands:
         return []
     if sess is None:
@@ -303,16 +304,16 @@ def order(run, now: float | None = None, sess: dict | None = None) -> list:
 
 def ready(run, now: float | None = None) -> dict:
     """{"launch": [steps ready to launch, in order], "queued": [steps that wait for a slot], "waiting": [(step,
-    why)], "busy": [lanes working], "free": slots, "limit": n, "slots": progress.slot_budget, "why": {step: its
-    place in the order}}: the ready steps in dispatch order, launched while their cost fits the limit less the
-    developer's reserve; a step the developer asked for in this turn may take the reserve, and goes ahead of queued
-    plan work (spec R3-R5)."""
+    why)], "busy": [lanes whose member still works], "free": slots, "limit": n, "slots": progress.slot_budget,
+    "why": {step: its place in the order}}: the ready steps in dispatch order, launched while their cost fits the
+    limit less the developer's reserve; a step the developer asked for in this turn may take the reserve, and goes
+    ahead of queued plan work (spec R3-R5)."""
     run = normalize(run)
-    busy = progress.running_agents(run)
+    busy = progress.working_agents(run, now)
     sess = core.read_json(progress.session_path(run.get("agent") or "", run.get("session") or ""), {}) or {}
     b = progress.slot_budget(run.get("agent") or "claude", run, sess, now)  # launches count before they start
     free = max(0.0, b["limit"] - b["reserve"] - b["used"])
-    _, waiting = _sorted(run)
+    _, waiting = _sorted(run, now)
     launch, queued, room, reasons = [], [], free, {}
     for s, why in order(run, now, sess):
         reasons[s["name"]] = why

@@ -897,8 +897,10 @@ def _project(cwd=None) -> str:
         return ""
 
 
-def headline(run: dict, now: float | None = None) -> str:
-    """'2/6 · 42m active (1h05m wall) of ~3h00m · ETA ~24m–37m · 2 agents working'"""
+def headline(run: dict, now: float | None = None, states=None) -> str:
+    """'2/6 · 42m active (1h05m wall) of ~3h00m · ETA ~24m–37m · 2 agents working · 1 agent stale': the members
+    that still work and those that went stale (lane_states, read when `states` is None); one that ended is not
+    counted."""
     now = now or time.time()
     run = normalize(run)
     plan = run.get("plan") or []
@@ -913,9 +915,11 @@ def headline(run: dict, now: float | None = None) -> str:
         parts.append(f"ETA {fmt_range(lo, hi)}")
     else:
         parts.append(run.get("state", ""))
-    working = sum(1 for a in (run.get("agents") or {}).values() if a.get("state") == "running")
-    if working:
-        parts.append(f"{working} agent{'s' if working > 1 else ''} working")
+    live = [v["state"] for v in (lane_states(run, now) if states is None else states).values()]
+    for word in ("working", "stale"):
+        n = live.count(word)
+        if n:
+            parts.append(f"{n} agent{'s' if n > 1 else ''} {word}")
     return " · ".join(parts)
 
 
@@ -1334,11 +1338,13 @@ def _lane_activity(lane: dict) -> float:
     return max([float(t) for t in seen if isinstance(t, (int, float))] or [0.0])
 
 
-def _known_transcripts() -> list:
-    """The main transcripts of the sessions devkit has a record of on this Mac: Claude Code keeps each agent's record
-    in a folder beside the transcript of the session the conversation runs in now, which a compaction can change."""
+def _known_transcripts(folder=None) -> list:
+    """The main transcripts of the sessions devkit has a record of on this Mac (`folder`: the session records,
+    SESSIONS by default): Claude Code keeps each agent's record in a folder beside the transcript of the session the
+    conversation runs in now, which a compaction can change."""
     out = []
-    for f in sorted(SESSIONS.glob("*.json")) if SESSIONS.exists() else []:
+    folder = Path(folder) if folder else SESSIONS
+    for f in sorted(folder.glob("*.json")) if folder.exists() else []:
         t = (core.read_json(f, {}) or {}).get("transcript")
         if isinstance(t, str) and t.endswith(".jsonl") and t not in out:
             out.append(t)
@@ -1405,25 +1411,61 @@ def _clock(ts: float, now: float) -> str:
     return time.strftime("%H:%M", time.localtime(ts)) + (" (just now)" if ago < 1 else f" ({fmt_min(ago)} ago)")
 
 
-def lane_state(run: dict, aid: str, lane: dict, facts, now: float | None = None, alive=None, own: bool = False) -> dict:
+def lane_ended(run: dict, lane: dict, f: dict):
+    """When and how the member of a lane its run lists as running ended -> {"at", "how"}, or None while it may still
+    work: devkit or Claude Code saw it end (`f`, agent_facts of its agent) at or after its last activity anywhere.
+    A lane with no activity recorded counts from its run's start."""
+    last = max(_lane_activity(lane), f["active"]) or float(run.get("started") or 0)
+    if f["ended"] is not None and f["ended"] + END_GRACE >= last:
+        return {"at": f["ended"], "how": f["how"]}
+    return None
+
+
+def lane_state(run: dict, aid: str, lane: dict, facts, now: float | None = None, alive=None, own: bool = False,
+               gone: str | None = None) -> dict:
     """How a lane its run lists as running really is -> {"state": "working" | "stale" | "ended", "last": its last
-    activity, "why"}. ended: devkit or Claude Code saw it end after its last activity (agent_facts); stale: its
-    session ended or its process is gone (not asked for the caller's own session), or it has been silent for
-    progress.stale_agent_minutes; working: anything else."""
+    activity, "why"}. ended: devkit or Claude Code saw it end after its last activity (lane_ended); stale: its
+    session ended or its process is gone (not asked for the caller's own session; `gone`, when given, is
+    _session_gone already read), or it has been silent for progress.stale_agent_minutes (a lane with no activity
+    recorded, in a run with no start, is unknown, never silent); working: anything else."""
     from . import approvals
     now = now or time.time()
     f = facts(aid)
     last = max(_lane_activity(lane), f["active"]) or float(run.get("started") or 0)  # none recorded: since its run began
-    if f["ended"] is not None and f["ended"] + END_GRACE >= last:
-        return {"state": "ended", "last": last, "why": f"{f['how']} at {_clock(f['ended'], now)}"}
-    gone = "" if own else _session_gone(run, alive)
+    end = lane_ended(run, lane, f)
+    if end:
+        return {"state": "ended", "last": last, "why": f"{end['how']} at {_clock(end['at'], now)}"}
+    gone = "" if own else (_session_gone(run, alive) if gone is None else gone)
     if gone:
         return {"state": "stale", "last": last, "why": gone}
     quiet = approvals.limits()["stale_minutes"]
-    if now - last > quiet * 60:
+    if last and now - last > quiet * 60:  # no activity known at all, not even its run's start: unknown, not silent
         return {"state": "stale", "last": last, "why": f"silent for {fmt_min((now - last) / 60)} "
                                                        f"(progress.stale_agent_minutes is {quiet:g})"}
     return {"state": "working", "last": last, "why": ""}
+
+
+def lane_states(run: dict, now: float | None = None, facts=None, alive=None) -> dict:
+    """{lane id: lane_state} for every lane `run` lists as running: whether its member still works, went stale or
+    ended, as scope_holders decides for the files it holds. Everything that counts or lists the crew at work
+    (headline, crew_summary, slot_use, brief, working_agents, the continuity brief, the dashboard) reads it, so they
+    agree with `dev crew owner`. `facts`: agent_facts over this Mac's live runs and `run`, read when None. Unknown
+    counts as working."""
+    lanes = {k: v for k, v in ((run or {}).get("agents") or {}).items()
+             if isinstance(v, dict) and v.get("state") == "running"}
+    if not lanes:
+        return {}
+    now = now or time.time()
+    facts = agent_facts(active_runs() + [run]) if facts is None else facts
+    gone = _session_gone(run, alive)
+    return {aid: lane_state(run, aid, lane, facts, now, alive, gone=gone) for aid, lane in lanes.items()}
+
+
+def working_agents(run, now: float | None = None, states=None) -> list:
+    """The lanes `run` lists as running whose member still works (lane_states) -> [(id, lane)], as running_agents
+    lists them; a member that ended or went stale is not busy and holds no slot."""
+    states = lane_states(run, now) if states is None else states
+    return [(k, v) for k, v in running_agents(run) if (states.get(k) or {}).get("state", "working") == "working"]
 
 
 def _holder(run: dict, aid: str, lane: dict, globs, facts, now: float, alive, own: bool) -> dict:
@@ -3991,7 +4033,8 @@ def crew_summary(run: dict, limit: int = 4, now: float | None = None) -> str:
     (spec R7): "Tank ▸ the API · Kid ✓ installer · 1 of 4 slots in use". '' without crew members (the agent's own
     helpers are not the crew)."""
     from . import crew
-    lanes = []
+    now = now or time.time()
+    states, lanes = lane_states(run, now), []
     for aid, lane in (run.get("agents") or {}).items():
         m = crew._for_label(lane.get("persona") or "") if lane.get("persona") else None
         if not m:
@@ -3999,7 +4042,14 @@ def crew_summary(run: dict, limit: int = 4, now: float | None = None) -> str:
         step_ = next((s["name"] for s in run.get("plan") or [] if s.get("owner") == aid), "")
         what = step_ or (lane.get("label") or "").split(":", 1)[-1].strip()
         mark = {"running": "▸", "done": "✓", "lost": "✗", "stopped": "✗"}.get(lane.get("state"), "·")
-        lanes.append((lane.get("state") != "running", f"{crew.who(m)} {mark} {what}".strip()))
+        live = (states.get(aid) or {}).get("state", "working")
+        if lane.get("state") == "running" and live == "stale":  # a member that went quiet works no longer
+            mark, what = "✗", f"{what} (stale)"
+        elif lane.get("state") == "running" and live == "ended":
+            stopped = "interruption" in states[aid]["why"]
+            mark, what = ("✗", f"{what} (stopped)") if stopped else ("✓", f"{what} (ended)")
+        works = lane.get("state") == "running" and live == "working"
+        lanes.append((not works, f"{crew.who(m)} {mark} {what}".strip()))
     if not lanes:
         return ""
     lanes.sort(key=lambda x: x[0])
@@ -4038,7 +4088,7 @@ def render_update(run: dict, branch: str | None = None, now: float | None = None
              f"- **Done:** {done or 'started'}",
              f"- **Check:** {check}",
              f"- **Progress:** {headline(run, now)}"]
-    crew_line = crew_summary(run)
+    crew_line = crew_summary(run, now=now)
     if crew_line:
         lines.append(f"- **Crew:** {crew_line}")
     waiting = pending_decisions(run)
@@ -4129,10 +4179,20 @@ def active_runs(max_age_h: float = 12) -> list:
     return sorted(out, key=lambda r: -r.get("started", 0))
 
 
+def _shown_lane(lane: dict, live) -> str:
+    """A lane's state as brief shows it: "running" only while its member works (`live`, its lane_state), "stale" or
+    "ended" for one its run still lists as running, else its recorded state."""
+    if lane.get("state") != "running" or not live:
+        return lane.get("state")
+    return {"working": "running"}.get(live["state"], live["state"])
+
+
 def brief(run: dict, now: float | None = None) -> dict:
-    """Compact form for presence and the dashboard."""
+    """Compact form for presence and the dashboard. A lane its run lists as running shows as its member really is
+    (lane_states): "running" while it works, else "stale" or "ended", with `live` and `why`."""
     now = now or time.time()
     run = normalize(run)
+    states = lane_states(run, now)
     last = next((u for u in reversed(run.get("updates") or []) if u.get("kind") != "agent"), {})
     lo, hi = eta_range(run, now) if run.get("state") == "running" else (None, None)
     return {"goal": run.get("goal"), "state": run.get("state"), "step": run.get("step"), "steps": run.get("steps"),
@@ -4145,10 +4205,11 @@ def brief(run: dict, now: float | None = None) -> dict:
                       "owner": "main" if (s.get("owner") or "main") == "main"
                       else ((run.get("agents") or {}).get(s["owner"], {}).get("label") or "subagent")}
                      for s in run.get("plan") or []],
-            "agents": [{"label": a.get("label") or a.get("type") or k[:8], "state": a.get("state"),
-                        "min": round(active_minutes(run, a.get("started"), a.get("finished") or now, now, k), 1)}
+            "agents": [{"label": a.get("label") or a.get("type") or k[:8], "state": _shown_lane(a, states.get(k)),
+                        "min": round(active_minutes(run, a.get("started"), a.get("finished") or now, now, k), 1),
+                        **({"live": states[k]["state"], "why": states[k]["why"]} if k in states else {})}
                        for k, a in (run.get("agents") or {}).items()],
-            "headline": headline(run, now), "last": last.get("text", ""), "next": last.get("next", ""),
+            "headline": headline(run, now, states), "last": last.get("text", ""), "next": last.get("next", ""),
             "updated": last.get("ts")}
 
 
@@ -4927,7 +4988,8 @@ def step_cost(run, s: dict) -> float:
 def slot_use(run: dict, sess: dict | None = None, now: float | None = None) -> list:
     """The crew slots in use, [(id, name, cost)] (spec D2, R3): launches whose agent has not started yet, and working
     lanes bound to a launch (a resumed one too), each at its cost. A provisional lane counts through its launch.
-    Lanes bound before launch records existed count while they run."""
+    Lanes bound before launch records existed count while they run. A lane whose member ended or went stale
+    (lane_states) holds no slot, whatever its run still lists."""
     now = now or time.time()
     if sess is None:
         sess = core.read_json(session_path(run.get("agent") or "", run.get("session") or ""), {}) if run else {}
@@ -4948,8 +5010,11 @@ def slot_use(run: dict, sess: dict | None = None, now: float | None = None) -> l
         from . import crew
     except Exception:
         crew = None
-    for k, v in agents.items():
-        if v.get("state") == "running" and v.get("binding", "exact") in ("exact", "confirmed"):
+    bound = {k: v for k, v in agents.items()
+             if v.get("state") == "running" and v.get("binding", "exact") in ("exact", "confirmed")}
+    states = lane_states(run, now) if bound else {}
+    for k, v in bound.items():
+        if (states.get(k) or {}).get("state", "working") == "working":  # one that ended or went stale holds none
             m = crew._for_lane(v) if crew else None
             out.append((k, v.get("persona") or v.get("label") or k[:8], _cost(m, lane_tools(run, k))))
     return out

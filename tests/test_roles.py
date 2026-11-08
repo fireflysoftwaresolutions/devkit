@@ -386,7 +386,7 @@ class ContinuityTests(ContinuityCase):
     def test_the_clear_notice_and_the_summary_instructions_name_the_crew_role_first(self):
         run = self.make_run()
         notice = ct._notice("claude", SID, T0)
-        keep = ct._instructions(pg.normalize(run), {})
+        keep = ct._instructions(pg.normalize(run), {}, T0)
         self.assertIn("Running: Backend engineer (Tank) on step api, Senior engineer (Neo) on step ui", notice)
         self.assertIn("the crew working now: Backend engineer (Tank) on step api, Senior engineer (Neo) on step ui",
                       keep)

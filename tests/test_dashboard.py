@@ -609,6 +609,18 @@ class DecisionTests(unittest.TestCase):
         self.assertIn("codex login", cmds)
         self.assertNotIn("dev adopt", " ".join(cmds))                     # canonical, and the remote-only project is skipped
 
+    def test_commits_merged_by_content_are_not_counted_as_not_pushed(self):
+        # registry.unpushed_work: a branch squash-merged into the default branch has commits only here by count and
+        # none by content, so neither the project's health nor its actions warn about them
+        reg = registry()
+        p = reg["projects"][0]
+        p["main"].update(modified=0, unpushed=3, merged=True)
+        warned = lambda: ([r for r in dashboard.project_health(p, NOW)["reasons"] if "not pushed" in r],  # noqa: E731
+                          [a["title"] for a in dashboard.build_actions(reg, NOW) if "not pushed" in a["title"]])
+        self.assertEqual(warned(), ([], []))
+        p["main"].update(merged=False, landed=2)  # two of the three have an equivalent on origin's default branch
+        self.assertEqual(warned(), (["1 commit(s) not pushed"], ["1 commit(s) not pushed"]))
+
     def test_health(self):
         h = dashboard.project_health(self.reg["projects"][0], NOW)
         self.assertEqual(h["level"], "risk")

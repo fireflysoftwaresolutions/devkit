@@ -386,7 +386,8 @@ def _iso(ts) -> str:
 
 
 def _last_activity(lane: dict, f: dict) -> float:
-    seen = [lane.get("started") or 0, lane.get("resumed_at") or 0, f.get("last_seen") or f.get("transcript_mtime") or 0]
+    seen = [lane.get("started") or 0, lane.get("resumed_at") or 0, f.get("last_seen") or f.get("transcript_mtime") or 0,
+            f.get("active") or 0]  # active: its last activity anywhere (progress.agent_facts), when the sweep read it
     return max(seen + [u.get("ts") or 0 for u in lane.get("updates") or []])
 
 
@@ -419,7 +420,9 @@ def stop_moves(run: dict, aid: str, why: str, at=None) -> list:
 def reconcile(run: dict, facts: dict, now: float, lim: dict | None = None) -> list:
     """The transitions the facts call for (C7), without changing the run. Facts: per lane `meta_finished` (when its
     meta file said finished), `meta_running`, `stopped_at` (when its own transcript ended with its interruption),
-    `last_seen` (its last hook) and `transcript_mtime`; the session's `ended` and `alive`; the session's `launches`.
+    `ended_how` (what saw the end, when it was not the meta file beside the session's own transcript), `last_seen`
+    (its last hook), `transcript_mtime` and `active` (its last activity anywhere); the session's `ended` and `alive`;
+    the session's `launches`.
     Rules: a working lane whose meta finished `finish_grace` ago with no SubagentStop is unverified, its steps too,
     and frees its slot; one whose transcript ends with its interruption stopped (stop_moves); one silent past
     `stale_minutes`, or whose session ended while its meta does not say it runs, is lost, and its steps wait for an
@@ -441,12 +444,14 @@ def reconcile(run: dict, facts: dict, now: float, lim: dict | None = None) -> li
             mf = f.get("meta_finished")
             silent = now - _last_activity(lane, f)
             if mf is not None and now - mf >= lim["finish_grace"]:
-                why = f"finished at {_iso(mf)} with no SubagentStop: no report, so no evidence"
+                how = f" ({f['ended_how']})" if f.get("ended_how") else ""
+                why = f"finished at {_iso(mf)} with no SubagentStop{how}: no report, so no evidence"
                 moves.append(_lane_move(aid, st, "unverified", why, at=mf))
                 moves += [_step_move(s, "unverified", aid, why) for s in mine]
             elif f.get("stopped_at") is not None:
-                moves += stop_moves(run, aid, f"interrupted at {_iso(f['stopped_at'])} (its transcript ends with its "
-                                    f"interruption), before its report", at=f["stopped_at"])
+                how = f.get("ended_how") or "its transcript ends with its interruption"
+                moves += stop_moves(run, aid, f"interrupted at {_iso(f['stopped_at'])} ({how}), before its report",
+                                    at=f["stopped_at"])
             elif silent > lim["stale_minutes"] * 60 or (ended and not f.get("meta_running")):
                 why = (f"silent for {silent / 60:.0f} minutes" if silent > lim["stale_minutes"] * 60 else
                        "its session ended") + "; the step waits for a new owner"
@@ -615,10 +620,15 @@ def meta_reader(transcript_path):
     return read
 
 
-def facts(run: dict, sess, now: float | None = None, meta=None, alive=None) -> dict:
+def facts(run: dict, sess, now: float | None = None, meta=None, alive=None, seen=None) -> dict:
     """What the reconciler needs, read outside any lock. `sess`: the session record, None when it is gone (SessionEnd
     deletes it). `meta(aid)`: a lane's meta file (`meta_reader`). `alive(pid, pid_start)`: whether the session's
-    process still runs (`pid_alive`); None leaves it unknown, as in the session's own hooks."""
+    process still runs (`pid_alive`); None leaves it unknown, as in the session's own hooks. `seen(aid)`:
+    progress.agent_facts, what devkit and Claude Code saw of the agent anywhere on this Mac (its lane in every run,
+    its records beside every session transcript devkit knows): a running lane whose member ended there, after its
+    last activity, ends as if its own meta file said so (`ended_how` says what saw it), and its last activity
+    anywhere (`active`) counts for its silence. After a compaction gives the conversation a new session id, Claude
+    Code writes the agent's records beside the new transcript, where the meta file beside the run's own never is."""
     now = now or time.time()
     subs = (sess or {}).get("subagents") or {}
     lanes = {}
@@ -631,6 +641,16 @@ def facts(run: dict, sess, now: float | None = None, meta=None, alive=None) -> d
                       "stopped_at": m.get("stopped"),
                       "last_seen": lane.get("last_seen") or (subs.get(aid) or {}).get("last_seen"),
                       "transcript_mtime": m.get("transcript_mtime")}
+        if seen is None:
+            continue
+        from .progress import lane_ended
+        g = seen(aid)
+        lanes[aid]["active"] = g.get("active") or None
+        end = lane_ended(run, lane, g) if lane.get("state") == "running" else None
+        if end and lanes[aid]["meta_finished"] is None and lanes[aid]["stopped_at"] is None:
+            interrupted = "interruption" in end["how"]
+            lanes[aid].update(meta_running=False, ended_how=end["how"],
+                              **({"stopped_at": end["at"]} if interrupted else {"meta_finished": end["at"]}))
     if sess is None:
         session = {"ended": now, "alive": None, "why": "its session record is gone (the session ended)"}
     elif sess.get("ended"):
@@ -683,14 +703,21 @@ def pid_alive(pid, started=None):
 
 def sweep(runs_dir=None, sessions_dir=None, now: float | None = None, alive=pid_alive) -> dict:
     """`dev sync --scheduled`: reconcile every live run on this Mac (C7), each on its freshly read record ->
-    {run file name: [transitions made]}. The facts are read before the run's lock is taken."""
+    {run file name: [transitions made]}. The facts are read before the run's lock is taken, with what devkit and
+    Claude Code saw of each agent anywhere on this Mac (facts, `seen`), so a lane whose member ended under the
+    conversation's newer session id closes too, with the reason in the run's history."""
     from . import progress, state
     now = now or time.time()
     runs_dir = Path(runs_dir or progress.RUNS)
     sessions_dir = Path(sessions_dir or progress.SESSIONS)
     lim, out = limits(), {}
     stops = sessions_dir == Path(progress.SESSIONS)  # pending stops live beside devkit's own session records
-    for f in sorted(runs_dir.glob("*.json")) if runs_dir.is_dir() else []:
+    files = sorted(runs_dir.glob("*.json")) if runs_dir.is_dir() else []
+    # what devkit and Claude Code saw of each agent anywhere on this Mac: every run here, and Claude Code's records
+    # beside every session transcript devkit knows (the run's own session may no longer be the conversation's)
+    seen = progress.agent_facts([r for r in (state.read(f) for f in files) if isinstance(r, dict)],
+                                progress._known_transcripts(sessions_dir))
+    for f in files:
         run = state.read(f)
         if not isinstance(run, dict) or run.get("state") not in LIVE:
             continue
@@ -699,7 +726,7 @@ def sweep(runs_dir=None, sessions_dir=None, now: float | None = None, alive=pid_
             if not isinstance(run, dict) or run.get("state") not in LIVE:
                 continue
         sess = state.read(sessions_dir / f.name)
-        fx = facts(run, sess, now, meta=meta_reader((sess or {}).get("transcript")), alive=alive)
+        fx = facts(run, sess, now, meta=meta_reader((sess or {}).get("transcript")), alive=alive, seen=seen)
         if not reconcile(run, fx, now, lim):
             continue
         made = []

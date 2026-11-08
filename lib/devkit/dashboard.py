@@ -226,7 +226,9 @@ def guard_rules(events: list) -> list:
 # --------------------------------------------------------------------------- health & actions
 
 def project_health(p: dict, now: float = None) -> dict:
-    """{level: ok|warn|risk, reasons: [...]} from PRs, note status, tasks and git state."""
+    """{level: ok|warn|risk, reasons: [...]} from PRs, note status, tasks and git state. Commits not pushed are those
+    with no equivalent on origin's default branch (registry.unpushed_work): a branch merged by content has none."""
+    from . import registry
     now = now or time.time()
     risk, warn = [], []
     for pr in p.get("prs_open") or []:
@@ -246,8 +248,8 @@ def project_health(p: dict, now: float = None) -> dict:
     dirty = (m.get("modified") or 0) + (m.get("untracked") or 0)
     if dirty and not m.get("active") and _idle(m.get("last_activity"), now) > IDLE_WORK_S:
         warn.append(f"{dirty} uncommitted change(s), idle {int(_idle(m.get('last_activity'), now) // 86400)}d")
-    if m.get("unpushed") and not m.get("active") and _idle(m.get("last_activity"), now) > 86400:
-        warn.append(f"{m['unpushed']} commit(s) not pushed")
+    if registry.unpushed_work(m) and not m.get("active") and _idle(m.get("last_activity"), now) > 86400:
+        warn.append(f"{registry.unpushed_work(m)} commit(s) not pushed")
     for w in p.get("worktrees") or []:
         wd = (w.get("modified") or 0) + (w.get("untracked") or 0)
         if (wd or w.get("unpushed")) and not w.get("active") and _idle(w.get("last_activity"), now) > IDLE_WORK_S:
@@ -280,6 +282,7 @@ def _task_flag(scope: str) -> str:
 
 def build_actions(reg: dict, now: float = None, items: list = None, colls: list = None) -> list:
     """The prioritised 'what needs me now' list. Each item carries the one command that moves it forward."""
+    from . import registry
     now = now or time.time()
     me = reg.get("github_user") or ""
     acts = []
@@ -346,8 +349,8 @@ def build_actions(reg: dict, now: float = None, items: list = None, colls: list 
                 add(60, "warn", "idle-work", pid, f"{dirty} uncommitted change(s) idle {int(idle // 86400)}d",
                     f"{p.get('name') or pid} · {branch}", f"cd {_sh(path)} && git status -sb", None,
                     co.get("last_activity"))
-            elif co.get("unpushed") and idle > 86400:
-                add(62, "warn", "idle-work", pid, f"{co['unpushed']} commit(s) not pushed",
+            elif registry.unpushed_work(co) and idle > 86400:
+                add(62, "warn", "idle-work", pid, f"{registry.unpushed_work(co)} commit(s) not pushed",
                     f"{p.get('name') or pid} · {branch}", f"cd {_sh(path)} && git status -sb", None,
                     co.get("last_activity"))
         for w in p.get("worktrees") or []:
@@ -804,6 +807,18 @@ def _timing(now: float) -> dict:
         return timing_summary([], now)
 
 
+# A lane as the page draws it (progress.brief, progress.lane_states), the way dev status lists the crew: a member
+# that still works as "running" ("Working"), one that went stale as "lost" ("Stopped reporting"), and one that
+# ended as "ended", which is not under "Working now". The page's data keeps its keys: label, state, min.
+PAGE_LANE = {"stale": "lost"}
+
+
+def page_lane(a: dict) -> dict:
+    """A brief's lane ({label, state, min}) as the page draws it."""
+    st = a.get("state")
+    return {**{k: v for k, v in a.items() if k not in ("live", "why")}, "state": PAGE_LANE.get(st, st)}
+
+
 def run_seen(run: dict) -> int:
     """The run's latest sign of life: a report by the run or by any of its lanes (updates of every kind, lane updates,
     crew messages, step changes, decisions), a turn or a lane starting or ending, or a lane's last hook (`last_seen`,
@@ -858,6 +873,7 @@ def _runs(now: float, host: str = "", raw: list = None) -> list:
             b = progress.brief(r, now)
         except (KeyError, TypeError, ValueError):
             continue
+        b["agents"] = [page_lane(a) for a in b.get("agents") or []]
         lanes = r.get("agents") or {}
         for s, raw in zip(b.get("plan") or [], r.get("plan") or []):
             if isinstance(raw, dict):
@@ -1272,6 +1288,7 @@ def run_detail(rid: str, now: float = None):
     questions = [dict(m, waiting=m.get("id") in waiting) for m in msgs]
     running = run.get("state") == "running"
     lo, hi = safe(lambda: progress.eta_range(run, now), (None, None)) if running else (None, None)
+    live = safe(lambda: progress.lane_states(run, now), {})
     return {"id": rid, "agent": run.get("agent"), "session": run.get("session"), "project": run.get("project"),
             "goal": run.get("goal"), "mode": progress.mode_of(run), "state": run.get("state"),
             "started": run.get("started"), "finished": run.get("finished"), "estimate": run.get("estimate"),
@@ -1282,7 +1299,8 @@ def run_detail(rid: str, now: float = None):
             "seen": run_seen(run), "total_min": plan_total(run, now),
             "headline": safe(lambda: progress.headline(run, now), ""), "steps": steps,
             "lanes": [{"id": k, "label": a.get("label") or "", "type": a.get("type") or "", "persona": a.get("persona") or "",
-                       "state": a.get("state"), "started": a.get("started"), "finished": a.get("finished"),
+                       **page_lane({"state": progress._shown_lane(a, live.get(k))}),
+                       "started": a.get("started"), "finished": a.get("finished"),
                        "scope": a.get("scope"), "done": a.get("done") or 0,
                        "min": safe(lambda: round(progress.active_minutes(run, a.get("started"), a.get("finished") or now, now, k), 1)),
                        "updates": (a.get("updates") or [])[-20:]} for k, a in lanes.items() if isinstance(a, dict)],

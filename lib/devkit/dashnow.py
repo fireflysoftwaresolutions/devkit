@@ -371,7 +371,9 @@ def _remote_brief(b: dict, now: float) -> dict:
     out["plan"] = [{"name": _line(s.get("name"), 120), "state": _line(s.get("state"), 20), "est": _num(s.get("est")),
                     "min": _num(s.get("min")), "owner": _line(s.get("owner"), 120)}
                    for s in (b.get("plan") if isinstance(b.get("plan"), list) else [])[:200] if isinstance(s, dict)]
-    out["agents"] = [{"label": _line(a.get("label"), 120), "state": _line(a.get("state"), 20), "min": _num(a.get("min"))}
+    # a lane as dev status shows it (dashboard.page_lane): working, stale ("Stopped reporting") or ended (not working)
+    out["agents"] = [dashboard.page_lane({"label": _line(a.get("label"), 120), "state": _line(a.get("state"), 20),
+                                          "min": _num(a.get("min"))})
                      for a in (b.get("agents") if isinstance(b.get("agents"), list) else [])[:50] if isinstance(a, dict)]
     out.update(decisions=[], questions=[], updates=[], moot=[])
     return out

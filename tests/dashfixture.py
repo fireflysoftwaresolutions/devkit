@@ -340,9 +340,24 @@ def welcome() -> dict:
 STATES = {"example": example, "empty": empty, "welcome": welcome}
 
 
+@contextmanager
+def live_sessions(*sessions):
+    """A record for each (agent, session) of this Mac's runs, as a live session keeps one: progress.lane_states reads
+    a run whose session has no record as one whose session ended, and its members as stale. No pid: its process is
+    unknown, so it counts as live. The records sit in a folder of their own, removed after."""
+    import tempfile
+    from unittest import mock
+    with tempfile.TemporaryDirectory() as d:
+        for agent, sid in sessions:
+            (Path(d) / f"{agent}-{sid}.json").write_text(json.dumps({"agent": agent, "session": sid}))
+        with mock.patch.object(progress, "SESSIONS", Path(d)):
+            yield
+
+
 def document(state: str, memo=None) -> dict:
-    """The five areas for one state, at the fixed clock, in UTC, with a memo of its own."""
-    with utc():
+    """The five areas for one state, at the fixed clock, in UTC, with a memo of its own; this Mac's runs belong to
+    live sessions."""
+    with utc(), live_sessions(("claude", "7f3a")):
         kw = STATES[state]()
         return dashnow.areas(**kw, memo=memo or dashnow.LandingMemo(clock=lambda: NOW))
 

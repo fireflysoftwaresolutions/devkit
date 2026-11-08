@@ -458,15 +458,45 @@ def _lane_scope(run: dict, aid: str) -> list:
         return []
 
 
-def _lanes(run: dict) -> list:
+def _live(run: dict, now=None) -> dict:
+    """progress.lane_states of the run: who of the members it lists as running still works, went stale or ended. {}
+    when that cannot be read: every such member then counts as working, as before."""
+    try:
+        return progress.lane_states(run, now)
+    except Exception:
+        return {}
+
+
+def _lanes(run: dict, now=None, states=None) -> list:
+    """The members the run lists as running that still work or went stale (progress.lane_states), each with its
+    `state` (working or stale) and `why`. One that ended is left out: _ended_lanes names it."""
+    states = _live(run, now) if states is None else states
     out = []
-    for aid, lane in progress.running_agents(run)[:LANES]:
+    for aid, lane in progress.running_agents(run):
+        lv = states.get(aid) or {"state": "working", "why": ""}
+        if lv["state"] == "ended":
+            continue
         persona = lane.get("persona") or progress.persona(lane.get("type"), lane.get("label")) or ""
         m = _member(persona) or {}
         out.append({"agent_id": aid, "persona": persona, "role": m.get("title") or "", "step": _lane_step(run, aid),
                     "scope": _lane_scope(run, aid), "label": (lane.get("label") or "")[:80],
-                    "started": lane.get("started"), "binding": lane.get("binding") or ""})
-    return out
+                    "started": lane.get("started"), "binding": lane.get("binding") or "", "state": lv["state"],
+                    "why": (lv.get("why") or "")[:160]})
+    return out[:LANES]
+
+
+def _ended_lanes(run: dict, now=None, states=None) -> list:
+    """The members the run lists as running that ended without their run hearing it (progress.lane_states), for
+    the "Ended since" line: [{persona, role, step}]."""
+    states = _live(run, now) if states is None else states
+    out = []
+    for aid, lane in progress.running_agents(run):
+        if (states.get(aid) or {}).get("state") != "ended":
+            continue
+        persona = lane.get("persona") or progress.persona(lane.get("type"), lane.get("label")) or ""
+        out.append({"persona": persona, "role": (_member(persona) or {}).get("title") or "",
+                    "label": (lane.get("label") or "")[:80], "step": _lane_step(run, aid)})
+    return out[:LANES]
 
 
 def _decisions(run: dict) -> list:
@@ -530,7 +560,7 @@ def _tasks(agent: str, sid: str, project: str) -> list:
 def _build(reason: str, now: float, cwd: str, sess: dict, run, git: dict, tasks: list, prompts: list) -> dict:
     return {"v": 1, "reason": reason, "ts": round(now, 3), "cwd": cwd, "top": sess.get("top") or "",
             "project": sess.get("project") or "", "run": _run_part(run) if run else None,
-            "lanes": _lanes(run) if run else [], "decisions": _decisions(run) if run else [],
+            "lanes": _lanes(run, now) if run else [], "decisions": _decisions(run) if run else [],
             "messages": _messages(run) if run else [], "tasks": tasks or [],
             "status": (sess.get("status") or "")[:STATUS_MAX], "git": git, "prompts": prompts or []}
 
@@ -757,12 +787,12 @@ def _missing_now(rec: dict, refs: list, now: float) -> str:
     return _missing_text(labels)
 
 
-def _items(rec: dict, run) -> list:
-    """What a summary must keep, live first: the running members, the developer's requests, the decisions, the
-    messages and tasks waiting, and the current step."""
+def _items(rec: dict, run, now=None) -> list:
+    """What a summary must keep, live first: the members that still work or went stale, the developer's requests,
+    the decisions, the messages and tasks waiting, and the current step."""
     cp = rec.get("checkpoint") or {}
     items = []
-    lanes = _lanes(run) if run else cp.get("lanes") or []
+    lanes = _lanes(run, now) if run else cp.get("lanes") or []
     for x in lanes:
         m = _member(x.get("persona")) or {}
         ids = [x.get("persona"), m.get("name"), m.get("id"), re.sub(r"^The ", "", m.get("name") or "")]
@@ -865,7 +895,9 @@ def brief(agent: str, sid: str, reason: str = "manual", chat: bool = False, now=
         goal, rstate, mode = run.get("goal") or "", run.get("state"), run.get("mode") or "guided"
         cur, nxt = _current(plan), _next_steps(plan)
         done = len([s for s in plan if s.get("state") in _DONE])
-        lanes = [dict(x, minutes=int(max(0, now - (x.get("started") or now)) / 60)) for x in _lanes(run)]
+        states = _live(run, now)
+        lanes = [dict(x, minutes=int(max(0, now - (x.get("started") or now)) / 60)) for x in _lanes(run, now, states)]
+        ended = _ended_lanes(run, now, states)
         decs = [{"id": d["id"], "from_name": d.get("from_name") or "", "question": d.get("question") or "",
                  "options": d.get("options") or [], "recommend": d.get("recommend") or ""}
                 for d in progress.pending_decisions(run)]
@@ -878,6 +910,7 @@ def brief(agent: str, sid: str, reason: str = "manual", chat: bool = False, now=
         nxt = _next_steps(steps)
         done = r.get("done", 0) + len([s for s in steps if s.get("state") in _DONE])
         lanes = [dict(x, minutes=int(max(0, now - (x.get("started") or now)) / 60)) for x in cp.get("lanes") or []]
+        ended = []
         decs, msgs = cp.get("decisions") or [], cp.get("messages") or []
     git = _git(sess.get("top") or rec.get("cwd") or "", sess)
     if not git.get("branch") and cp.get("git"):
@@ -916,9 +949,14 @@ def brief(agent: str, sid: str, reason: str = "manual", chat: bool = False, now=
         if lanes:
             out.append("Crew working now:")
             for x in lanes:
+                stale = f" · stale: {x.get('why') or 'no recent activity'}" if x.get("state") == "stale" else ""
                 out.append(f"- {_who(x.get('persona') or x.get('label') or 'a member', x.get('role'))} · step "
-                           f"{x.get('step') or '-'} · {x['minutes']} min")
-            out.append(f"Their results arrive as notifications: do not relaunch them; {relaunch} continues one.")
+                           f"{x.get('step') or '-'} · {x['minutes']} min{stale}")
+            if any(x.get("state", "working") == "working" for x in lanes):
+                out.append(f"Their results arrive as notifications: do not relaunch them; {relaunch} continues one.")
+        if ended:
+            out.append("Ended since, with no report in the run: " + ", ".join(_on_step(x) for x in ended)
+                       + ". Check their work, then close or reopen their steps.")
         if decs:
             parts = []
             for d in decs[-IDS:]:
@@ -965,7 +1003,7 @@ def _notice(agent: str, old_sid: str, now: float) -> str:
     if not run or run.get("state") not in ("running", "blocked"):
         return ""
     plan = run.get("plan") or []
-    lanes = ", ".join(_on_step(x) for x in _lanes(run))
+    lanes = ", ".join(_on_step(x) for x in _lanes(run, now) if x["state"] == "working")
     out = [f"devkit · you cleared the conversation. The previous session ({agent}:{old_sid[:12]}) has an open run "
            f"«{_excerpt(run.get('goal'), 100)}», current step {_current(plan) or '-'}."]
     if lanes:
@@ -1033,7 +1071,7 @@ def _reminder(agent: str, sid: str, aid: str, path: str) -> str:
     return _cut_bytes("\n".join(lines + [tail]), REMINDER_MAX)
 
 
-def _instructions(run, git: dict) -> str:
+def _instructions(run, git: dict, now=None) -> str:
     """PreCompact's text for Claude's summarizer (main session): what to keep, by id. No request text."""
     lines = ["devkit · keep these in the summary, verbatim; devkit checks the summary against its record after "
              "the compaction:",
@@ -1044,10 +1082,12 @@ def _instructions(run, git: dict) -> str:
         cur, nxt = _current(plan), [n for n in _next_steps(plan) if n != _current(plan)][:3]
         lines.append(f"- the run «{_excerpt(run.get('goal'), 120)}»: current step {cur or '-'}"
                      + (f"; next: {', '.join(nxt)}" if nxt else "") + ";")
-        lanes = _lanes(run)
+        lanes = _lanes(run, now)
         if lanes:
-            lines.append("- the crew working now: " + ", ".join(_on_step(x) for x in lanes)
-                         + ". They are still running: their results arrive as notifications;")
+            works = any(x["state"] == "working" for x in lanes)
+            lines.append("- the crew working now: " + ", ".join(
+                _on_step(x) + (" (stale)" if x["state"] == "stale" else "") for x in lanes)
+                + (". They are still running: their results arrive as notifications;" if works else ";"))
         decs = [d["id"] for d in progress.pending_decisions(run)][-IDS:]
         msgs = [m.get("id") for m in _open_messages(run)][-IDS:]
         if decs or msgs:
@@ -1165,7 +1205,7 @@ def on_pre_compact(agent: str, data: dict, now=None) -> str:
         return ""
     sess = _session(agent, sid)
     cp = (r or read(agent, sid) or {}).get("checkpoint") or {}
-    return _instructions(_live_run(agent, sid), cp.get("git") or _git("", sess))
+    return _instructions(_live_run(agent, sid), cp.get("git") or _git("", sess), now)
 
 
 @_fail_open("")
@@ -1256,7 +1296,7 @@ def on_post_compact(agent: str, data: dict, now=None) -> None:
     summary = data.get("compact_summary") if agent == "claude" and who == "main" else None
     refs = None
     if isinstance(summary, str) and summary.strip():
-        refs = _refs(summary, _items(read(agent, sid) or {}, _live_run(agent, sid)))[:20]
+        refs = _refs(summary, _items(read(agent, sid) or {}, _live_run(agent, sid), now))[:20]
     fresh = []
 
     def change(r):

@@ -103,7 +103,7 @@ class HookTests(HookCase):
         self.assertIn("«rename the flag in `lib/flags.py`» (missing `lib/flags.py`)", got)
 
     def test_session_start_after_a_compaction_gives_the_brief_before_the_workspace_context(self):
-        self.make_run()
+        self.make_run(started=time.time() - 600)  # the hook reads the real clock: members that work now
         out = self.hook("session-start", self.payload("SessionStart.compact"))
         brief, _, rest = out.partition("\n\n")
         self.assertTrue(brief.startswith("devkit · this conversation was compacted"), out[:80])
