@@ -30,7 +30,12 @@ loops over them). Then they stay variables, and one that names the program is `u
 `bash -c -e 'line'` and `zsh -c -o errexit 'line'` run `line`, while `csh` and `tcsh` take the word right after
 `-c`; `bash` and `sh` read a long option with one dash before any short one, so `bash -norc -c 'line'` is
 `bash --norc -c 'line'` and `-rcfile f` takes `f`, and they read `+c` as `-c`), `xargs` and `find -exec` commands, and a pager that git or gh starts. The shells it reads this way are
-`sh`, `bash`, `zsh`, `dash`, `ksh`, `fish`, `csh`, and `tcsh`, run by name, by path, or by a script's shebang. It
+`sh`, `bash`, `zsh`, `dash`, `ksh`, `fish`, `csh`, and `tcsh`, run by name, by path, or by a script's shebang,
+and the guard knows a shell or an interpreter by the file it runs as well as by its name: a symbolic link to one
+(`./bash-link -c …`), a hard link, or a renamed copy is read as that program too, and a refusal of either reading
+stands. A binary run by its path that the guard cannot identify this way is `unknown` when the command hands it
+`-c` (alone or in a cluster such as `-lc`), `--command`, a here-string, a heredoc, a redirect, or a pipe, as it may
+run that text as a program. It
 reads every one of them with POSIX shell quoting, which `csh` and `tcsh` do not follow in every case (a backslash
 before a closing double quote). Every rule applies at each of these
 levels, so `find . -exec sh -c 'git push --force origin main' \;` is denied as the plain command is. The guard

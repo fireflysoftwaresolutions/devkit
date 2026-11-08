@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import filecmp
 import fnmatch
 import functools
 import itertools
@@ -1316,14 +1317,15 @@ def _shell_line(args, name="bash"):
     return _with_positionals(args[k], args[k + 1:])
 
 
-def _nested_lines(argv) -> list:
+def _nested_lines(argv, cwd=None) -> list:
     run = _unwrap(argv)
     if not run:
         return []
     if run != list(argv):  # a runner (uv run, npx, npm exec, timeout, a wrapper): its command is read as a line (F3)
         return [shlex.join(run)]
     argv = run
-    name, args = os.path.basename(argv[0]), argv[1:]
+    real = _as_run(argv, cwd)[1:]  # `./bash-link -c …`: the shell its file is
+    name, args = os.path.basename((real[0] if real else argv)[0]), argv[1:]
     if name in _SHELLS:
         line = _shell_line(args, name)
         return [line] if line else []
@@ -1461,7 +1463,7 @@ def _check_segments(cmd: str, segs, ecwd: str, agent: str, depth: int = 0, outer
                     res = deny(f"Do not create backup copies ({dest.name}); git already keeps history.")
         if res:
             return res
-        lines = _nested_lines(argv)
+        lines = _nested_lines(argv, ecwd)
         if lines and depth >= 4:  # too deep to read is no "nothing found": refused
             return deny(NESTED_REASON)
         for line in lines:
@@ -1832,6 +1834,105 @@ def _shell_script_head(p) -> bool:
 
 _BINARY_MAGIC = (b"\xcf\xfa\xed\xfe", b"\xce\xfa\xed\xfe", b"\xfe\xed\xfa\xcf", b"\xfe\xed\xfa\xce",
                  b"\xca\xfe\xba\xbe", b"\x7fELF")  # Mach-O (thin and universal) and ELF
+
+
+# the shells and interpreters the guard reads, by the names they are installed under, to know them by their file
+_KNOWN_PROGRAMS = ("bash", "sh", "zsh", "dash", "ksh", "fish", "csh", "tcsh", "python3", "python", "pypy3", "node",
+                   "nodejs", "deno", "bun", "perl", "ruby", "php", "osascript", "lua", "tclsh", "Rscript", "swift",
+                   "awk", "gawk", "mawk", "nawk", "expect", "wish")
+_PROGRAM_DIRS = ("/bin", "/usr/bin", "/usr/local/bin", "/opt/homebrew/bin")
+
+
+def _family(name) -> str:
+    """A program's name without its version and folder: python3.13 and python3 are python, ksh93 is ksh."""
+    fam = re.sub(r"[0-9.]+$", "", os.path.basename(str(name or ""))).casefold()
+    return {"pypy": "python", "nodejs": "node"}.get(fam, fam)
+
+
+def _reads_programs(name) -> bool:
+    """True for a shell or an interpreter the guard reads by its name."""
+    base = os.path.basename(str(name or ""))
+    return base in _SHELLS or bool(_INTERP.match(base)) or _family(base) in _SHELLS
+
+
+@functools.lru_cache(maxsize=1)
+def _program_files() -> tuple:
+    """({(device, inode): path}, {size: [path]}) of the shells and interpreters installed here, each by its real
+    path. A file with more than two names is left out: one binary that many programs share and that picks what to
+    be by the name it is called by (macOS's /usr/bin shims) says nothing about which program a copy of it is."""
+    nodes, sizes = {}, {}
+    for name in _KNOWN_PROGRAMS:
+        for p in [os.path.join(d, name) for d in _PROGRAM_DIRS] + [shutil.which(name) or ""]:
+            try:
+                real = os.path.realpath(p) if p else ""
+                st = os.stat(real) if real else None
+            except (OSError, ValueError):
+                continue
+            if st is None or st.st_nlink > 2 or not _reads_programs(real) or (st.st_dev, st.st_ino) in nodes:
+                continue
+            nodes[(st.st_dev, st.st_ino)] = real
+            sizes.setdefault(st.st_size, []).append(real)
+    return nodes, sizes
+
+
+def _identify(word, cwd) -> str:
+    """The real path of the shell or interpreter the program word `word` runs when its name does not say so, else
+    '': a path or a name on the PATH whose links lead to one (`./bash-link`), or a file that is one installed here
+    under another name (a hard link, a renamed copy). A word that names one already, or that names nothing the guard
+    can find, is ''."""
+    word = str(word or "")
+    if not word or _reads_programs(word) or re.search(r"[$`*?\[{]", word):
+        return ""
+    if "/" in word:
+        p = resolve(word, cwd)
+        if p == UNKNOWN:
+            return ""
+        real = str(p)
+    else:
+        found = shutil.which(word)
+        if not found:
+            return ""
+        real = os.path.realpath(found)
+    if _reads_programs(real):
+        return real
+    try:
+        st = os.stat(real)
+    except (OSError, ValueError):
+        return ""
+    nodes, sizes = _program_files()
+    if (st.st_dev, st.st_ino) in nodes:
+        return nodes[(st.st_dev, st.st_ino)]
+    for known in sizes.get(st.st_size, []):
+        try:
+            if filecmp.cmp(real, known, shallow=False):
+                return known
+        except OSError:
+            continue
+    return ""
+
+
+def _as_run(argv, cwd) -> list:
+    """The readings of a segment's program: as it is written, and, when the file it runs is a shell or an
+    interpreter under another name (_identify: `./bash-link -c …`, a renamed copy of zsh), as that program too. A
+    refusal of either stands: a binary that picks what to be by the name it is called by runs as written, any other
+    as what it is."""
+    real = _identify(argv[0], cwd) if argv else ""
+    return [argv, [real, *argv[1:]]] if real and _family(real) != _family(argv[0]) else [argv]
+
+
+def _unknown_binary(argv, cwd) -> bool:
+    """True when the segment runs, by its path, a binary the guard cannot identify (_identify): no shell or
+    interpreter it reads, by its name, its links or its content, and no script whose shebang says what runs it."""
+    if not argv or "/" not in str(argv[0]) or _reads_programs(argv[0]) or _identify(argv[0], cwd):
+        return False
+    p = resolve(argv[0], cwd)
+    return p != UNKNOWN and _run_by_path(p)[0] == "binary"
+
+
+def _command_option(args) -> bool:
+    """True when the words hold an option that may hand a program a command line: `-c` alone or in a cluster (`-lc`),
+    or `--command`."""
+    return any(re.fullmatch(r"-[A-Za-z]*c[A-Za-z]*|--command(?:=.*)?", str(a), re.S) for a in args)
 
 
 def _run_by_path(p) -> tuple:
@@ -2990,7 +3091,9 @@ class _Shell:
                     fed = _fed_program(run, osegs, seg, ins[seg] if seg < len(ins) else [], cwd)[1]
                 self.bodies = heredocs + [text for text, _ in fed]
             try:
-                v = self.segment(name, argv, assigns, cwd, names)
+                v = None
+                for run_as in _as_run(argv, cwd):  # also as the shell or interpreter its file is (`./bash-link`)
+                    v = v or self.segment(os.path.basename(run_as[0]), run_as, assigns, cwd, names)
             finally:
                 self.bodies = heredocs
             if v:
@@ -4708,9 +4811,10 @@ def _forged_calls(text, cwd, depth=0) -> str:
             cwd = str(core.HOME) if len(argv) == 1 else cwd if argv[1] == "-" else str(resolve(argv[1], cwd))
             continue
         prev = _unwrap(segs[k - 1][0]) if k and segs[k - 1][2] in ("|", "|&") else []
-        fn = _forged_argv(argv, cwd, bodies, list(here), prev, depth)
-        if fn:
-            return fn
+        for run_as in _as_run(argv, cwd):
+            fn = _forged_argv(run_as, cwd, bodies, list(here), prev, depth)
+            if fn:
+                return fn
     for sub in _expansions(text):
         fn = _forged_calls(sub, cwd, depth + 1)
         if fn:
@@ -5175,14 +5279,15 @@ def shell_calls(cmd: str, cwd, depth: int = 0, where: bool = False):
             cwd = str(core.HOME) if len(argv) == 1 else cwd if argv[1] == "-" else str(resolve(argv[1], cwd))
             continue
         here = _prefix_chdir(argv0[:len(argv0) - len(_strip_prefix(argv0))], cwd) if where else cwd
-        fed = []
-        if osegs is not None:  # what a pipe or `< f` feeds a shell, an interpreter or `. /dev/stdin` (_fed_program)
-            with _skipped_reads():
-                argv, fed, _ = _fed_program(argv, osegs, k, ins[k] if k < len(ins) else [], cwd)
-        more = _program_calls(argv, here, bodies + [t for t, _ in fed], depth, where)
-        if more is None:
-            return None
-        out += more
+        for run_as in _as_run(argv, cwd):  # also as the shell or interpreter its file is (`./bash-link`)
+            fed = []
+            if osegs is not None:  # what a pipe or `< f` feeds a shell, an interpreter or `. /dev/stdin` (_fed_program)
+                with _skipped_reads():
+                    run_as, fed, _ = _fed_program(run_as, osegs, k, ins[k] if k < len(ins) else [], cwd)
+            more = _program_calls(run_as, here, bodies + [t for t, _ in fed], depth, where)
+            if more is None:
+                return None
+            out += more
     for text in _expansions(cmd):
         more = shell_calls(text, cwd, depth + 1, where)
         if more is None:
@@ -6704,6 +6809,11 @@ def _walk_argv(argv0, cwd, bodies, depth):
     out, argv = [(argv0, cwd, bodies)], _unwrap(argv0)
     if not argv:
         return out
+    for run_as in _as_run(argv, cwd)[1:]:  # also as the shell or interpreter its file is (`./bash-link -c …`)
+        more = _walk_argv(run_as, cwd, bodies, depth)
+        if more is None:
+            return None
+        out += more
     name, args = os.path.basename(argv[0]), argv[1:]
     texts, inners = [], []
     if name in _SHELLS:
@@ -8799,45 +8909,52 @@ def _text_actions(text, cwd, depth=0, from_code=False, expand=True):
             argv = [argv[0], *gopts, *argv[1:]]
         elif gopts:  # dev, gh and anything else that runs git inherit them: it acts on that repository
             here = _git_where(["git", *gopts], here)
-        argv, fed, unread = _fed_program(argv, segs, k, ins[k] if k < len(ins) else [], cwd)
-        if unread:  # `sh < big.sh`, `cat big.py | python3`: a program too large or unreadable may do anything
-            out += _found([_unread_action(argv, unread[0])], argv0, cwd)
-        if name in ("source", ".") and _source_target(argv[1:], cwd) is None and \
-                (bodies or fed or (ins[k] if k < len(ins) else []) or (k and segs[k - 1][2] in ("|", "|&"))):
-            # `source $f <<< '…'`: it may read what the command feeds it, which the guard cannot tell
-            word = (_source_args(argv[1:]) or [""])[0]
-            out += _found([_unsure_action(argv, f"what it reads from {_code(word)}, a file the guard cannot place, "
-                                                f"which may be the input the command feeds it")], argv0, cwd)
-        more = _argv_actions(argv, here, bodies + [t for t, _ in fed]
-                             if _INTERP.match(name) or name in ("source", ".") else bodies, depth)
-        if more is None:
-            return None
-        out += more
-        if name in ("source", "."):  # the file may cd or export GIT_DIR, now or once it changes: both are unknown
-            cwd, shell_env["GIT_DIR"] = str(UNKNOWN), "$(source)"
-            continue
-        pagers, unknown = [], False
-        if name == "git":  # the pager it runs through the shell is a command like any other (RT3)
-            pagers, unknown = _git_pagers(argv, {**shell_env, **assigns})
-        elif name == "gh":  # gh starts GH_PAGER, else PAGER, for its output
-            env = {**shell_env, **assigns}
-            pagers = [p for p in (env.get("GH_PAGER") or env.get("PAGER") or "",) if p.strip()]
-        if name in ("git", "gh"):
-            if unknown:
-                out += _found([_unknown(text)], argv0, cwd)
-            for pager in pagers:
-                more = _text_actions(pager, cwd, depth + 1)
-                if more is None:
-                    return None
-                out += more
-        if name in _SHELLS and not _shell_args(argv[1:], name)[2] and (fed or _reads_stdin(argv[1:], name)):
-            for script, path in [*((h, None) for h in (herestrs if _reads_stdin(argv[1:], name) else [])), *fed]:
-                more = _text_actions(script, cwd, depth + 1)
-                if more is None and path is not None:  # `sh < y.sh`, `cat y.sh | sh`: as `./y.sh`
-                    more = _unparsed_script(path, text, argv0, cwd)
-                if more is None:
-                    return None
-                out += more
+        if _unknown_binary(argv, here) and (_command_option(argv[1:]) or bodies or herestrs or
+                                            (ins[k] if k < len(ins) else []) or (k and segs[k - 1][2] in ("|", "|&"))):
+            # `./copy -c '…'`, `… | ./copy`: a program the guard cannot identify, handed a command line or a program
+            out += _found([_unsure_action(argv, f"{_code(argv[0])}, a program the guard cannot identify, with a "
+                                                f"command line or an input it may run as a program")], argv0, cwd)
+        for argv in _as_run(argv, here):  # also as the shell or interpreter its file is (`./bash-link -c …`)
+            name = os.path.basename(argv[0])
+            argv, fed, unread = _fed_program(argv, segs, k, ins[k] if k < len(ins) else [], cwd)
+            if unread:  # `sh < big.sh`, `cat big.py | python3`: a program too large or unreadable may do anything
+                out += _found([_unread_action(argv, unread[0])], argv0, cwd)
+            if name in ("source", ".") and _source_target(argv[1:], cwd) is None and \
+                    (bodies or fed or (ins[k] if k < len(ins) else []) or (k and segs[k - 1][2] in ("|", "|&"))):
+                # `source $f <<< '…'`: it may read what the command feeds it, which the guard cannot tell
+                word = (_source_args(argv[1:]) or [""])[0]
+                out += _found([_unsure_action(argv, f"what it reads from {_code(word)}, a file the guard cannot place, "
+                                                    f"which may be the input the command feeds it")], argv0, cwd)
+            more = _argv_actions(argv, here, bodies + [t for t, _ in fed]
+                                 if _INTERP.match(name) or name in ("source", ".") else bodies, depth)
+            if more is None:
+                return None
+            out += more
+            if name in ("source", "."):  # the file may cd or export GIT_DIR, now or once it changes: both are unknown
+                cwd, shell_env["GIT_DIR"] = str(UNKNOWN), "$(source)"
+                continue
+            pagers, unknown = [], False
+            if name == "git":  # the pager it runs through the shell is a command like any other (RT3)
+                pagers, unknown = _git_pagers(argv, {**shell_env, **assigns})
+            elif name == "gh":  # gh starts GH_PAGER, else PAGER, for its output
+                env = {**shell_env, **assigns}
+                pagers = [p for p in (env.get("GH_PAGER") or env.get("PAGER") or "",) if p.strip()]
+            if name in ("git", "gh"):
+                if unknown:
+                    out += _found([_unknown(text)], argv0, cwd)
+                for pager in pagers:
+                    more = _text_actions(pager, cwd, depth + 1)
+                    if more is None:
+                        return None
+                    out += more
+            if name in _SHELLS and not _shell_args(argv[1:], name)[2] and (fed or _reads_stdin(argv[1:], name)):
+                for script, path in [*((h, None) for h in (herestrs if _reads_stdin(argv[1:], name) else [])), *fed]:
+                    more = _text_actions(script, cwd, depth + 1)
+                    if more is None and path is not None:  # `sh < y.sh`, `cat y.sh | sh`: as `./y.sh`
+                        more = _unparsed_script(path, text, argv0, cwd)
+                    if more is None:
+                        return None
+                    out += more
     for sub in _expansions(text) if expand else []:
         more = _text_actions(sub, cwd, depth + 1)
         if more is None:

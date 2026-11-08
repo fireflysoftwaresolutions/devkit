@@ -210,5 +210,48 @@ class PositionalsReadAsWords(Case):
                 self.assertIsNone(member(cmd))
 
 
+class ProgramsKnownByWhatTheyRun(Case):
+    """A program is known by the file it runs as well as by its name: a link, a hard link or a renamed copy of a
+    shell is read as that shell, and a binary the guard cannot identify that is handed `-c` or an input is unknown."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="rt3-")
+        self.addCleanup(shutil.rmtree, self.tmp)
+        sh = os.path.realpath("/bin/sh")
+        os.symlink(sh, os.path.join(self.tmp, "shell-link"))
+        os.symlink(sh, os.path.join(self.tmp, "git"))  # a name the guard knows, on a file that is a shell
+        shutil.copy(sh, os.path.join(self.tmp, "renamed"))
+        self.other = os.path.join(self.tmp, "tool")
+        shutil.copy(os.path.realpath(shutil.which("ls")), self.other)
+
+    def test_a_shell_under_another_name_runs_its_line(self):
+        t = self.tmp
+        for cmd in (f"{t}/shell-link -c 'gh pr merge 12'", f"{t}/git -c 'gh pr merge 12'",
+                    f"{t}/renamed -c 'gh pr merge 12'", f"cd {t} && ./renamed -c 'gh pr merge 12'"):
+            with self.subTest(cmd=cmd):
+                self.assertIn("merges PR 12", main(cmd) or "")
+                self.assertIn("merges PR 12", member(cmd) or "")
+                self.assertIsNotNone(check(cmd))
+        for cmd in (f"echo 'gh pr merge 12' | {t}/renamed", f"{t}/shell-link <<< 'gh pr merge 12'"):
+            with self.subTest(fed=cmd):
+                self.assertIn("merges PR 12", main(cmd) or "")
+                self.assertIn("merges PR 12", member(cmd) or "")
+
+    def test_a_binary_it_cannot_identify_given_a_command_line_or_an_input_is_unknown(self):
+        for cmd in (f"{self.other} -c 'gh pr merge 12'", f"echo 'gh pr merge 12' | {self.other}",
+                    f"{self.other} <<< 'gh pr merge 12'"):
+            with self.subTest(cmd=cmd):
+                self.assertIn("cannot identify", main(cmd) or "")
+                self.assertIsNotNone(member(cmd))
+
+    def test_ordinary_programs_and_reads_by_path_stay_open(self):
+        t = self.tmp
+        for cmd in (f"{self.other} -la", f"{t}/shell-link -c 'echo hi'", f"{t}/shell-link -n -c 'gh pr merge 12'",
+                    "/bin/ls -la", "/bin/sh -c 'echo hi'", "/usr/bin/env python3 -c 'print(1)'", "./bin/dev status"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(main(cmd))
+                self.assertIsNone(member(cmd))
+
+
 if __name__ == "__main__":
     unittest.main()
