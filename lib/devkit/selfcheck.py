@@ -815,12 +815,14 @@ def skill_names(home=None, roster=None) -> dict:
 
 
 def d14_skill_names(home=None, roster=None) -> list:
-    """D14: a skill devkit names that no source it installs provides, or one only the developer can run
-    (`user_only_skills`) that the crew, a skill rule or the using-devkit table asks a model to load. AGENTS.md may
+    """D14: a skill devkit names that no source it installs provides, or one that the crew, a skill rule or the
+    using-devkit table asks a model to load although only the developer can run it (`user_only_skills`) or devkit's
+    own skill replaces it (config/skills.json `superseded`: devkit wins where a plugin skill differs). AGENTS.md may
     name such a skill as the developer's own slash command."""
     home = _home(home)
     out = []
     user_only = user_only_skills(home)
+    superseded = (core.read_json(home / "config" / "skills.json", {}) or {}).get("superseded") or {}
     for name, where in sorted(skill_names(home, roster).items()):
         if not skill_resolves(name, home):
             out.append(Finding("D14", f"unknown: {name}", f"no source devkit installs provides {name}; named by "
@@ -830,6 +832,10 @@ def d14_skill_names(home=None, roster=None) -> list:
             out.append(Finding("D14", f"user-only: {name}", f"{name} is the developer's slash command (a model cannot "
                                f"load it), but {', '.join(asked[:4])} ask a model to load it",
                                "name a skill a model can load there, and suggest the slash command to the developer"))
+        if name in superseded and asked:
+            by = superseded[name]
+            out.append(Finding("D14", f"superseded: {name}", f"{by.get('by')} replaces {name} ({by.get('why')}), but "
+                               f"{', '.join(asked[:4])} name it", f"name {by.get('by')} instead"))
     return out
 
 

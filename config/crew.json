@@ -27,7 +27,6 @@
         "superpowers:dispatching-parallel-agents",
         "superpowers:executing-plans",
         "superpowers:verification-before-completion",
-        "superpowers:finishing-a-development-branch",
         "handoff"
       ],
       "tools": "all",
@@ -133,7 +132,6 @@
           "do": "Integrate the results, run the full suite once, get each approver's review, reopen a work item that comes back with dev task reopen and its reason, finish the branch, update the handoff note, and report.",
           "skills": [
             "superpowers:verification-before-completion",
-            "superpowers:finishing-a-development-branch",
             "delivery",
             "handoff"
           ],

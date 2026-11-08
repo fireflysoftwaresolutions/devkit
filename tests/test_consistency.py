@@ -134,6 +134,16 @@ class RepositoryDrift(unittest.TestCase):
         self.assertEqual(sorted(found), ["unknown: no-such-skill", "user-only: grill-with-docs"])
         self.assertIn("oracle", found["user-only: grill-with-docs"].evidence)
 
+    # D14 on a small roster: a skill devkit's own skill replaces (it would merge and push around devkit's delivery)
+    # is drift, with the skill that replaces it in the fix
+    def test_d14_finds_a_superseded_skill(self):
+        roster = {"members": [{"id": "morpheus", "skills": ["delivery"], "procedure": [
+            {"phase": "Integrate and close", "skills": ["superpowers:finishing-a-development-branch", "delivery"]}]}],
+            "activities": []}
+        found = {f.item: f for f in selfcheck.d14_skill_names(roster=roster) if "finishing" in f.item}
+        self.assertEqual(sorted(found), ["superseded: superpowers:finishing-a-development-branch"])
+        self.assertIn("delivery", found["superseded: superpowers:finishing-a-development-branch"].fix)
+
     # run() covers D1 to D14, so a check added to the module is also one `dev doctor` and CI run
     def test_run_covers_every_check(self):
         ids = {cid for cid, _ in selfcheck.REPO_CHECKS + selfcheck.MACHINE_CHECKS}

@@ -1,5 +1,11 @@
 {
-  "_comment": "Third-party skills fetched at install time from upstream at a pinned commit, then linked into ~/.claude/skills and ~/.agents/skills (Codex). Sources without `group` are always installed; a `group` source is installed when the group is listed in devkit config `skills.groups` (default: security-deep, postgres, observability). Bump a ref with `dev install --only skills` after review. `user_only` lists a source's skills that set disable-model-invocation: the developer runs them as slash commands, and no crew procedure or skill rule may ask a model to load them. `why` says why each source is here (`dev ext ls -v`); more in docs/skills-and-plugins.md.",
+  "_comment": "Third-party skills fetched at install time from upstream at a pinned commit, then linked into ~/.claude/skills and ~/.agents/skills (Codex). Sources without `group` are always installed; a `group` source is installed when the group is listed in devkit config `skills.groups` (default: security-deep, postgres, observability). Bump a ref with `dev install --only skills` after review. `user_only` lists a source's skills that set disable-model-invocation: the developer runs them as slash commands, and no crew procedure or skill rule may ask a model to load them. `superseded` lists plugin skills devkit's own skill replaces where they differ (devkit wins): no crew procedure or skill rule may name them. `why` says why each source is here (`dev ext ls -v`); more in docs/skills-and-plugins.md.",
+  "superseded": {
+    "superpowers:finishing-a-development-branch": {
+      "by": "delivery",
+      "why": "it merges locally and pushes and removes worktrees with raw git; devkit integrates locally, pushes once with dev push and delivers through dev pr"
+    }
+  },
   "sources": [
     {
       "repo": "anthropics/claude-plugins-official",
