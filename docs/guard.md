@@ -397,9 +397,16 @@ These are not `unknown`:
   for each value, as if it were written out, and one refusal refuses it: `G=gh; $G pr merge 12` is a merge. The value
   counts only from a plain assignment that always runs first (at the top of the command, after `;` or a newline,
   not in a block, subshell, pipeline, or background job, and not as a prefix such as `py=x $py`), or inside the body
-  of the loop. A variable the command also reads, exports, unsets, or names in any other way, a value with a `$`,
-  quote, glob, or `~`, `eval`, `source`, `IFS`, `case`, functions, heredocs, and more than 16 combinations keep it
-  unknown;
+  of the loop, and only when nothing else in the command can give the variable another value. These keep it
+  unknown: its name anywhere else in the command, in any word as the shell reads it once quotes are removed
+  (`read "G"`, `declare 'G'=…`, `read p""y`, `printf -vG`), or a use other than a plain `$G` or `${G}`; anything
+  that can set, unset, or evaluate a variable by a name it computes when it runs (`read "$n"`, `printf -v`,
+  `declare`, `typeset`, `local`, `readonly`, `mapfile`, `getopts`, `vared`, `trap`, `eval`, `source`, `.`, `${!n}`,
+  zsh's `${(P)n}`, arithmetic, `setopt`, a function or an alias), also when a resolved variable holds such a word
+  (`R=read; $R "$n"`), while `read`, `unset`, `wait`, and `export` count only with a computed word or an option
+  other than the plain ones (`read -r line` is fine); a name the shell sets by itself (`REPLY`, `_`, `MATCH`,
+  `BASH_REMATCH`, `OPTARG`, `PWD`, …); a value with a `$`, quote, glob, or `~`, or one that starts with `=`; `IFS`,
+  `case`, heredocs, backticks, ANSI-C quotes (`$'…'`), and more than 16 combinations;
 - text inside an interpreter's string literals: `${…}`, `{…}`, `[…]` and `*` there belong to the language (a
   template literal, an f-string, a list), and the guard looks for spawn calls in the program's code, not in the
   text it carries. A program named in such a string (`os.system('gh pr merge 12')`) is still classified;

@@ -7861,15 +7861,47 @@ def _var_program(word, text) -> str:
 
 # A variable the command itself sets from a literal names a program or a path the guard can read before the shell
 # runs, so crew members can loop over interpreters and name a path once: `py=python3; $py -m unittest …`, `for P in
-# python3 /usr/bin/python3; do $P -m
-# unittest …; done`, `S=/tmp/x; mkdir -p $S`. literal_variants writes the command once for each value the variable
-# can hold where it is used, and the guard judges every variant: one refusal refuses the command. A variable is
-# resolved only when every use of it is: after a plain assignment of a literal word that always runs before it (at
-# the top of the command, after `;` or a newline, never inside a block, a subshell or a pipeline, never as the prefix
-# of a command), or inside the body of a `for` loop over literal words; and when the command names it nowhere else
-# (read, export, unset, printf -v, an arithmetic, …). Anything else is a value from outside the command, and stays
-# unknown: eval, source, IFS, case, functions, heredocs, backticks, `${x:-…}` and the other expansions.
-_LIT_WORD = re.compile(r"[A-Za-z0-9_./:@%+,=-]+\Z")
+# python3 /usr/bin/python3; do $P -m unittest …; done`, `S=/tmp/x; mkdir -p $S`. literal_variants writes the command
+# once for each value the variable can hold where it is used, and the guard judges every variant: one refusal refuses
+# the command. A variable is resolved only when every use of it is: after a plain assignment of a literal word that
+# always runs before it (at the top of the command, after `;` or a newline, never inside a block, a subshell or a
+# pipeline, never as the prefix of a command), or inside the body of a `for` loop over literal words. And only when
+# nothing else in the command can give it another value:
+# - the command names it nowhere else, in any word as the shell reads it after quotes are removed (`read "G"`,
+#   `declare 'G'=…`, `read p""y`, `printf -vG`), and uses it only as a plain `$G` or `${G}`;
+# - the command holds nothing that sets, unsets or evaluates a variable whose name it may compute when it runs
+#   (`read "$n"`, `printf -v`, `declare`, `eval`, `.`, `trap`, `${!n}`, zsh's `${(P)n}`, an arithmetic, `setopt`; see
+#   _VAR_BINDERS), checked again on each variant, so a variable that holds `read` counts too;
+# - the shell does not set it itself (`REPLY` after read, `_` after every command, `MATCH` after `=~`; _SHELL_SET).
+# Anything else is a value from outside the command and stays unknown, as are IFS, case, functions, heredocs,
+# backticks, ANSI-C quotes (`$'…'`) and `${x:-…}` and the other expansions.
+_LIT_WORD = re.compile(r"(?!=)[A-Za-z0-9_./:@%+,=-]+\Z")  # `==cmd` would be zsh's path of cmd
+# the variables the shell sets or changes by itself between two commands, in bash and zsh
+_SHELL_SET = frozenset({
+    "_", "REPLY", "reply", "MATCH", "MBEGIN", "MEND", "match", "mbegin", "mend", "OPTARG", "OPTIND", "OPTERR", "PWD",
+    "OLDPWD", "DIRSTACK", "dirstack", "RANDOM", "SRANDOM", "SECONDS", "EPOCHSECONDS", "EPOCHREALTIME", "epochtime",
+    "LINENO", "HISTCMD", "PIPESTATUS", "pipestatus", "status", "ERRNO", "COPROC", "MAPFILE", "argv", "ARGC", "PPID",
+    "FUNCNAME", "funcstack", "functrace", "funcfiletrace", "funcsourcetrace", "TRY_BLOCK_ERROR", "TRY_BLOCK_INTERRUPT",
+    "COLUMNS", "LINES", "SHLVL", "TTYIDLE", "UID", "EUID", "GID", "EGID", "USERNAME", "commands", "functions",
+    "aliases", "builtins", "parameters", "options", "modules", "history", "historywords", "jobstates", "jobtexts",
+    "jobdirs", "nameddirs", "userdirs", "termcap", "terminfo", "sysparams", "errnos", "widgets", "keymaps"})
+_SHELL_SET_PREFIX = re.compile(r"(?:BASH|ZSH|COMP|READLINE)(?:_|\Z)|zsh_")
+# the words that set, unset or evaluate a variable by a name they may compute when they run, run code later, or
+# change how the shell expands a variable; `printf`/`print` count with -v, `set` with an option other than the usual
+# ones, read, unset, wait and export by their words (_NAME_ARGS), `.` where it can be a command
+_VAR_BINDERS = frozenset({
+    "mapfile", "readarray", "getopts", "select", "vared", "getln", "zparseopts", "zstyle", "zformat",
+    "zstat", "strftime", "zregexparse", "sysread", "syswrite", "zselect", "pcre_match", "zle", "compadd", "compset",
+    "zpty", "ztcp", "zsocket", "zsystem", "zgetattr", "zlistattr", "zcurses", "ztie", "integer", "float", "private",
+    "typeset", "declare", "local", "readonly", "let", "coproc", "eval", "source", "alias", "function",
+    "trap", "sched", "enable", "fc", "emulate", "setopt", "unsetopt", "shopt", "compgen", "zmodload", "autoload",
+    "case"})
+# the builtins that bind only the names written as their words, with the options that bind nothing else: any other
+# option (`read -a`, `wait -p`) or a word computed when it runs (`read "$n"`) counts as a binder
+_NAME_ARGS = {"read": re.compile(r"-[rsE]+"), "unset": re.compile(r"-[fvn]+"), "wait": re.compile(r"-[nf]+|%?\d+"),
+              "export": re.compile(r"-[np]+")}
+_SET_OK = re.compile(r"[-+][euxv]*o?\Z|--?\Z")
+_SET_NAMES = frozenset({"errexit", "nounset", "pipefail", "xtrace", "verbose"})
 _VAR_REF = re.compile(r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)([^}]*)\}|([A-Za-z_][A-Za-z0-9_]*))")
 _FOR_LIST = re.compile(r"for[ \t]+([A-Za-z_][A-Za-z0-9_]*)[ \t]+in[ \t]+([^;\n]*?)([ \t]*)(?:;|\n)[ \t\n]*do(?![A-Za-z0-9_])")
 _CMD_WORD = re.compile(r"[^\s;&|()<>]+")
@@ -7877,6 +7909,8 @@ _BLOCK_OPEN = frozenset({"if", "case", "{", "do"})  # while, until and select op
 _BLOCK_CLOSE = frozenset({"fi", "esac", "done", "}"})
 _KEEP_START = frozenset({"if", "then", "elif", "else", "while", "until", "do", "{", "!", "time"})
 MAX_VARIANTS = 16
+# the words that keep the next word at the place of a command (`then . f`, `builtin . f`)
+_CMD_KEEP = _KEEP_START | {"builtin", "command", "exec", "noglob", "nocorrect", "-", "repeat"}
 
 
 def _code_kinds(s: str):
@@ -7959,6 +7993,165 @@ def _command_starts(code: str, deps):
     return out
 
 
+def _shell_words(s: str):
+    """The words of a command line as the shell reads them once quotes and backslashes are removed, also inside a
+    `$(…)`, as (text, the offset in `s` of each character, plain, at the place of a command), where plain means no
+    quote, backslash or `$` in it; None for backticks and ANSI-C or locale quotes (`$'…'`, `$"…"`), whose text the
+    guard does not decode. Operators separate words, so `a;b` is two; a redirection's target is no command."""
+    words, cur, offs, plain, i, n = [], [], [], True, 0, len(s)
+    stack, depth = [], []  # quote contexts: "'", '"', "(" for a `$(…)` inside double quotes, with its paren depth
+    state = {"open": True, "target": False, "keep": False}  # a command word may still come; the next word is a redirection's
+
+    def end(before_redirect=False):
+        nonlocal cur, offs, plain
+        if cur or not plain:
+            text = "".join(cur)
+            fd = before_redirect and (text.isdigit() or (plain and re.fullmatch(r"\{\w+\}", text)))
+            at_cmd = state["open"] and not state["target"] and not fd
+            words.append((text, offs, plain, at_cmd))
+            keep = text in _CMD_KEEP or (plain and _ASSIGN.match(text)) or \
+                (state["keep"] and (text.startswith("-") or text.isdigit()))  # `command -p . f`, `repeat 3 . f`
+            if at_cmd and not keep:
+                state["open"] = False
+            state["keep"] = bool(at_cmd and keep)
+            state["target"] = False
+        cur, offs, plain = [], [], True
+
+    while i < n:
+        c, ctx = s[i], stack[-1] if stack else ""
+        if ctx == "'":
+            if c == "'":
+                stack.pop()
+            else:
+                cur.append(c)
+                offs.append(i)
+            i += 1
+            continue
+        if c == "`" or (c == "$" and ctx != '"' and s[i + 1:i + 2] in ("'", '"')):
+            return None
+        if c == "\\":
+            nxt = s[i + 1:i + 2]
+            if ctx == '"' and nxt not in ("$", "`", '"', "\\", "\n"):
+                cur.append(c)
+                offs.append(i)
+                i += 1
+                continue
+            if nxt != "\n":  # a backslash-newline joins two lines
+                plain = False
+                if nxt:
+                    cur.append(nxt)
+                    offs.append(i + 1)
+            i += 2
+            continue
+        if ctx == '"':
+            if c == '"':
+                stack.pop()
+                i += 1
+                continue
+            if s.startswith("$(", i):
+                end()
+                stack.append("(")
+                depth.append(0)
+                state.update(open=True, target=False, keep=False)
+                i += 2
+                continue
+            plain = plain and c != "$"
+            cur.append(c)
+            offs.append(i)
+            i += 1
+            continue
+        if c == "#" and not cur and plain:  # a comment, to the end of its line: its words count, its quotes do not
+            j = s.find("\n", i)
+            j = n if j < 0 else j
+            for m in re.finditer(r"\S+", s[i:j]):
+                words.append((m.group(0), list(range(i + m.start(), i + m.end())), True, False))
+            i = j
+            continue
+        if c in "'\"":
+            stack.append(c)
+            plain = False
+            i += 1
+            continue
+        if c in " \t":
+            end()
+            i += 1
+            continue
+        if c in "<>":
+            end(before_redirect=True)
+            state["target"] = True
+            i += 1
+            continue
+        if c in "\n;&|()":
+            end()
+            if c == ")" and ctx == "(":
+                if depth[-1]:
+                    depth[-1] -= 1
+                else:
+                    stack.pop()
+                    depth.pop()
+            elif c == "(" and ctx == "(":
+                depth[-1] += 1
+            state.update(open=True, target=False, keep=False)
+            i += 1
+            continue
+        plain = plain and c != "$"
+        cur.append(c)
+        offs.append(i)
+        i += 1
+    end()
+    return words
+
+
+def _binds_names(s: str, kinds, words) -> bool:
+    """True when command `s` holds something that may set, unset or evaluate a variable by a name the guard cannot
+    read, run code later, or change how the shell expands a variable (_VAR_BINDERS, `${!…}`, `${(P)…}`, an
+    arithmetic, a function, IFS); `kinds` and `words` are _code_kinds and _shell_words of `s`. A word counts
+    wherever it stands (`echo eval` too), except `.`, which counts where it can be a command."""
+    texts = [w[0] for w in words]
+    if any(t in _VAR_BINDERS for t in texts) or any(re.search(r"\bIFS\b", t) for t in texts):
+        return True
+    if any(t == "." and at_cmd for t, _, _, at_cmd in words):
+        return True
+    for k, t in enumerate(texts):
+        if t not in _NAME_ARGS and t not in ("printf", "print", "set"):
+            continue
+        rest = []
+        for w in words[k + 1:]:
+            if w[3]:
+                break
+            rest.append(w[0])
+        if t in _NAME_ARGS:  # every name it binds is a word the guard reads (_named_elsewhere); export's value may vary
+            if any(not (t == "export" and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", a, re.S)) and
+                   ("$" in a or not (_NAME_ARGS[t].fullmatch(a) or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", a)))
+                   for a in rest):
+                return True
+            continue
+        j = 0
+        while j < len(rest):  # the options first: printf -v, set -A (zsh), and an option computed when it runs
+            a = rest[j]
+            if "$" in a:
+                return True
+            if a in ("--", "-") or not a.startswith(("-", "+")):
+                break
+            if t != "set" and "v" in a:
+                return True
+            if t == "set":
+                if not _SET_OK.match(a):
+                    return True
+                if a.endswith("o") and len(a) > 1:
+                    if j + 1 >= len(rest) or rest[j + 1] not in _SET_NAMES:
+                        return True
+                    j += 1
+            j += 1
+    expanded = "".join(c if k in ("C", "D") else " " for c, k in zip(s, kinds))
+    code = "".join(c if k == "C" else " " for c, k in zip(s, kinds))
+    # an expansion that reaches a variable by a name it holds (`${!n}`, zsh's flags `${(P)n}`, which can also assign
+    # it); arithmetic (`$((…))` also in double quotes), where a variable's value is read as an expression, so
+    # `$((x))` with x=G=5 sets G; and a function (`f() …`, zsh's anonymous `() { … }`; an empty array `a=()` is none)
+    return bool(re.search(r"\$\{[!(]|\$\(\(|\$\[", expanded) or
+                re.search(r"\(\(|(?:\w[ \t]*|(?:^|[;&|\n{])[ \t]*)\(\s*\)", code))
+
+
 def literal_variants(cmd: str) -> list:
     """The command written out once for each value its literal variables can hold where it uses them (see above),
     [] when it uses no variable the guard can resolve, or more than MAX_VARIANTS combinations."""
@@ -7971,8 +8164,8 @@ def literal_variants(cmd: str) -> list:
     kinds, deps = ck
     code = "".join(c if k == "C" else " " for c, k in zip(s, kinds))
     words = _command_starts(code, deps)
-    if any(w[3] and w[0] in ("case", "function", "eval", "source", ".", "select", "coproc", "alias") for w in words) \
-            or re.search(r"\bIFS\b", code) or re.search(r"\w\s*\(\s*\)", code):
+    read = _shell_words(s)
+    if read is None or _binds_names(s, kinds, read):
         return []
     events, touched = {}, {}  # name -> [(pos, values or None, kind, body span)], name -> [(start, end)]
     for k, (t, a, b, at_start, block, op, dep) in enumerate(words):
@@ -8022,11 +8215,8 @@ def literal_variants(cmd: str) -> list:
     for name, uses in refs.items():
         evs = sorted(events.get(name) or [], key=lambda e: e[0])
         spans = [(a, b) for a, b, _ in uses] + touched.get(name, [])
-        # any other mention of the name as a shell word (read py, unset py, printf -v py, (( py )), r=py); a name
-        # inside a longer word (guard.py, ./py/x, -py) is no mention
-        bare = [m.start() for m in re.finditer(rf"(?<![A-Za-z0-9_$./-]){re.escape(name)}(?![A-Za-z0-9_./-])", code)
-                if not any(a <= m.start() < b for a, b in spans)]
-        if not evs or bare or any(bad for _, _, bad in uses) or any(e[1] is None for e in evs):
+        if name in _SHELL_SET or _SHELL_SET_PREFIX.match(name) or _named_elsewhere(name, read, spans) or not evs or \
+                any(bad for _, _, bad in uses) or any(e[1] is None for e in evs):
             continue
         plan = []
         for a, b, _ in uses:
@@ -8060,7 +8250,24 @@ def literal_variants(cmd: str) -> list:
             text += [s[last:a], chosen[id(ev)]]
             last = b
         out.append("".join(text) + s[last:])
+    for text in out:  # a value that makes a word able to bind a name (`R=read; $R "$n"`) leaves them all unknown
+        ck, again = _code_kinds(text), _shell_words(text)
+        if ck is None or again is None or _binds_names(text, ck[0], again):
+            return []
     return out
+
+
+def _named_elsewhere(name, words, spans) -> bool:
+    """True when a word of the command, as the shell reads it (_shell_words), names variable `name` outside `spans`
+    (its plain uses and its literal assignments): `read "G"`, `declare 'G'=…`, `read p""y`, `n=G`. A name inside a
+    longer word (guard.py, ./py/x, -py, $py, \\n: no name holds a backslash) is no mention."""
+    pat = re.compile(rf"(?<![A-Za-z0-9_$./\\-]){re.escape(name)}(?![A-Za-z0-9_./\\-])")
+    for text, offs, _, _ in words:
+        for m in pat.finditer(text):
+            raw = offs[m.start():m.end()]
+            if not any(a <= raw[0] and raw[-1] < b for a, b in spans):
+                return True
+    return False
 
 
 _PY_SHELL_LINE = re.compile(

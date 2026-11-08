@@ -121,6 +121,75 @@ class LiteralVariables(unittest.TestCase):
             self.assertEqual(literal and literal[0], "deny")
             self.assertEqual(via_var and via_var[0], "deny")
 
+    def test_a_rebind_the_shell_runs_leaves_the_variable_unknown_and_its_twin_resolved(self):
+        # each pair: the shell gives G another value than its literal (proven in zsh or bash with harmless twins), and
+        # an honest command of the same shape the guard still reads as written out
+        pairs = (
+            ('G=echo; read "G" <<< gh; $G pr merge 12', 'G=echo; read -r line <<< gh; $G pr merge 12'),
+            ('G=echo; typeset "G=gh"; $G pr merge 12', 'G=echo; export H=gh; $G pr merge 12'),
+            ("G=echo; declare 'G'=gh; $G pr merge 12", "G=echo; echo 'H'=gh; $G pr merge 12"),
+            ('G=echo; printf -v "G" gh; $G pr merge 12', "G=echo; printf '%s\\n' gh; $G pr merge 12"),
+            ('G=echo; printf -vG gh; $G pr merge 12', 'G=echo; printf -- -x; $G pr merge 12'),
+            ('G=echo; export "G=gh"; $G pr merge 12', 'G=echo; export H="gh x"; $G pr merge 12'),
+            ('G=echo; readonly "G=gh"; $G pr merge 12', 'G=echo; unset H; $G pr merge 12'),
+            ('G=echo; local "G=gh"; $G pr merge 12', 'G=echo; wait; $G pr merge 12'),
+            ("G=echo; n=$'\\x47'; read \"$n\" <<< gh; $G pr merge 12", "G=echo; read -r n <<< gh; $G pr merge 12"),
+            ('G=echo; n=G; read "$n" <<< gh; $G pr merge 12', 'G=echo; n=H; echo "$n"; $G pr merge 12'),
+            ('py=echo; read p""y <<< gh; $py pr merge 12', 'py=echo; read p""z <<< gh; $py pr merge 12'),
+            ('G=echo; "re"ad "$n" <<< gh; $G pr merge 12', 'G=echo; "ca"t "$n"; $G pr merge 12'),
+            ('G=echo; \\read "$n" <<< gh; $G pr merge 12', 'G=echo; \\cat "$n"; $G pr merge 12'),
+            ('G=echo; builtin read "$n" <<< gh; $G pr merge 12', 'G=echo; builtin cd /tmp; $G pr merge 12'),
+            ('R=read; G=echo; $R "$n" <<< gh; $G pr merge 12', 'R=cat; G=echo; $R "$n"; $G pr merge 12'),
+            ('REPLY=echo; read <<< gh; $REPLY pr merge 12', 'RE=echo; read -r x <<< gh; $RE pr merge 12'),
+            ('_=echo; true gh; $_ pr merge 12', 'u=echo; true gh; $u pr merge 12'),
+            ('MATCH=echo; [[ gh =~ gh ]]; $MATCH pr merge 12', 'M=echo; [[ gh =~ gh ]]; $M pr merge 12'),
+            ('BASH_REMATCH=echo; [[ gh =~ gh ]]; $BASH_REMATCH pr merge 12', 'B=echo; [[ gh =~ gh ]]; $B pr merge 12'),
+            ('G=echo; : ${!n}; $G pr merge 12', 'G=echo; : ${n}; $G pr merge 12'),
+            ('G=echo; : ${(P)n::=gh}; $G pr merge 12', 'G=echo; : $n; $G pr merge 12'),
+            ('G=echo; declare -n r=$n; r=gh; $G pr merge 12', 'G=echo; r=gh; $G pr merge 12'),
+            ('G=echo; trap "$n" DEBUG; $G pr merge 12', 'G=echo; true "$n"; $G pr merge 12'),
+            ('G=echo; wait -p "$n"; $G pr merge 12', 'G=echo; wait %1; $G pr merge 12'),
+            ('G=echo; x=$n; : $(( x )); $G pr merge 12', 'G=echo; x=$n; : $x; $G pr merge 12'),
+            ('G=echo; mapfile -t G <<< gh; $G pr merge 12', 'G=echo; cat <<< gh; $G pr merge 12'),
+            ('G=echo; typeset -g G=gh; $G pr merge 12', 'G=echo; set -euo pipefail; $G pr merge 12'),
+            ('G=echo; set -A G gh; $G pr merge 12', 'G=echo; set -e; $G pr merge 12'),
+            ('G=echo; vared G; $G pr merge 12', 'G=echo; true; $G pr merge 12'),
+            ('G==gh; setopt globsubst; $G pr merge 12', 'G=echo; true; $G pr merge 12'),
+            ('G=echo; 2>/dev/null . /tmp/g.sh; $G pr merge 12', 'G=echo; ls 2>/dev/null .; $G pr merge 12'),
+            ('G=echo; repeat 1 . /tmp/g.sh; $G pr merge 12', 'G=echo; find . -name x; $G pr merge 12'),
+            ('G=echo; command -p . /tmp/g.sh; $G pr merge 12', 'G=echo; command -v ls; $G pr merge 12'),
+            ('G=echo; for G in $(echo gh); do $G pr merge 12; done', 'for G in echo true; do $G pr merge 12; done'),
+            ('G=echo; while read G; do $G pr merge 12; done <<< gh', 'G=echo; while read -r x; do :; done; $G pr x'),
+            ('G=echo; bash -c "read G" && $G pr merge 12', 'G=echo; bash -c "read H" && $G pr x'),
+        )
+        for bad, twin in pairs:
+            with self.subTest(cmd=bad):
+                self.assertEqual(guard.literal_variants(bad), [])
+                self.assertIn("only known when it runs", main(bad) or "")
+                self.assertIn("only known when it runs", member(bad) or "")
+            with self.subTest(twin=twin):
+                self.assertTrue(guard.literal_variants(twin))
+        # a quote in a comment hides no word from the variable rule; the guard refuses the unclosed quote itself
+        hidden = "G=echo; # it's\nread \"$n\" <<< gh; $G pr merge 12"
+        self.assertEqual(guard.literal_variants(hidden), [])
+        self.assertEqual(guard.check("Bash", {"command": hidden}, CWD, "claude")[0], "deny")
+        # a read-only lane: its quoted rebind to an interpreter stays unknown, the twin reads a file
+        self.assertIn("variable", member('s=cat; read "s" <<< python3; $s /tmp/x.py', "review", "seraph") or "")
+        self.assertIsNone(member('s=cat; read -r t <<< python3; $s /tmp/x.py', "review", "seraph"))
+
+    def test_the_honest_forms_the_crew_needs_are_read_as_written_out(self):
+        # the loop over two Pythons, a scratch path named once, a folder written out for cd; and the name inside a
+        # longer word or after a backslash (\n in a jq filter) is no mention
+        self.assertEqual(guard.literal_variants("S=/tmp/k; python3 $S/x.py"), ["S=/tmp/k; python3 /tmp/k/x.py"])
+        self.assertEqual(guard.literal_variants('X=/elsewhere; cd "$X" && dev push'),
+                         ['X=/elsewhere; cd "/elsewhere" && dev push'])
+        self.assertEqual(len(guard.literal_variants("for n in 16 17; do gh pr view $n --jq '\"\\(.t)\\n\"'; done")), 2)
+        self.assertEqual(len(guard.literal_variants(
+            "unset CLAUDECODE; for py in python3 /usr/bin/python3; do $py -m unittest tests.test_guard; done")), 2)
+        # `((` in quoted text is text, and zsh's ${=x} only splits x: neither reaches another variable
+        self.assertTrue(guard.literal_variants('S=/tmp/k; node -e "f(() => 1)" > $S/out'))
+        self.assertTrue(guard.literal_variants("D=/tmp/k/devfs; for a in x y; do $D ${=a}; done"))
+
     def test_too_many_combinations_stay_unknown(self):
         cmd = "; ".join(f"for V{k} in a b c; do $V{k} x; done" for k in range(3))
         self.assertEqual(guard.literal_variants(cmd), [])  # 27 > MAX_VARIANTS
