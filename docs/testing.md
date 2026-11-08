@@ -48,6 +48,21 @@ Mapping is fast: under half a second on repositories of a few thousand files.
 A selection that runs no test (a mistyped name, a filter that matches nothing) exits with code 2 and says which
 selector and which changed files were involved. A runner's own "no tests found" is not accepted as success.
 
+### The record of failures
+
+devkit keeps one record of test results per project, shared by every worktree and agent lane, and writes it under a
+lock, so two runs at the same time both keep their results. Each run writes its own log, in a folder per worktree;
+the newest 10 logs per runner stay.
+
+A failure is recorded with its module or file, so the next `dev test` reruns that exact test. When a recorded test
+no longer exists (renamed, or its file deleted), the rerun says so, names it, and removes it from the record:
+
+```text
+! 1 recorded failure(s) no longer select a test (renamed or deleted): forgotten: tests.test_canary.AliasTests.test_old_name
+```
+
+A test module that exists but fails to import is a real failure and stays recorded.
+
 ### After a CI step fails
 
 ```bash
