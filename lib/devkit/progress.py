@@ -2241,12 +2241,14 @@ def crew_decide(decision_id: str, answer: str, cwd: str | None = None, now: floa
     return d
 
 
-def _unblock(run, d: dict, now: float):
-    """A decided decision unblocks what waits on it: a step blocked on it runs again while its member's lane works,
-    and waits for a new launch (pending, back with Morpheus, announced ready) when that lane has ended; a lane never
-    runs again because of an answer (its wait never changed its state). A step that moved on meanwhile stays as it
-    is."""
-    agents = run.get("agents") or {}
+def _release(run, d: dict, why: str, now: float) -> list:
+    """The steps blocked on decision `d`, once it is decided or withdrawn (`why` says which): each runs again while
+    its member works, and waits for a new launch (pending, back with Morpheus, its scope kept, announced ready) when
+    its member ended or went stale, as `dev crew owner` reads it (lane_gone over lane_states of the caller's own run;
+    a lane the run does not know counts as working). A lane never runs again because of an answer (its wait never
+    changed its state); a step that moved on meanwhile stays as it is. -> the steps sent back for a new launch"""
+    from . import crew
+    agents, states, back = run.get("agents") or {}, None, []
     for s in run.get("plan") or []:
         if s.get("waiting") != d["id"]:
             continue
@@ -2254,26 +2256,42 @@ def _unblock(run, d: dict, now: float):
         if s.get("state") != "blocked":
             continue
         owner = s.get("owner") or "main"
-        lane = agents.get(owner) or {}
-        if owner != "main" and lane.get("state") != "running":
-            _log_change(run, s, "blocked", "pending", "main", f"{d['id']} decided: {d['answer'][:80]}; "
-                        f"{_lane_name(lane)} ended ({lane.get('state') or 'gone'}), so the step waits for a new launch",
+        lane = agents.get(owner)
+        if states is None and isinstance(lane, dict) and lane.get("state") == "running":
+            states = lane_states(run, now, own=True)
+        g = lane_gone(owner, lane, states or {}) if owner != "main" else None
+        if g:
+            _log_change(run, s, "blocked", "pending", "main", f"{why}; its owner {crew.who(_lane_name(lane))} had "
+                        f"{'gone stale' if g[0] == 'stale' else 'ended'}: {g[1]}, so the step waits for a new launch",
                         now)
-            s.update(state="pending", owner="main", lost_from=owner)
+            s.update(state="pending", owner="main")
+            if lane["state"] != "running":
+                s["lost_from"] = owner  # a lost lane seen again takes it back (approvals.reconcile)
+            else:  # never from a lane its run lists as running: approvals.reconcile counts that lane working through
+                s.pop("lost_from", None)  # finish_grace, and would hand the step back to it at the next hook
+            back.append(s)
         else:
-            _log_change(run, s, "blocked", "running", "main", f"{d['id']} decided: {d['answer'][:80]}", now)
+            _log_change(run, s, "blocked", "running", "main", why, now)
             s["state"] = "running"
     for lane in agents.values():
         if lane.get("waiting") == d["id"]:
             lane.pop("waiting", None)
             lane.pop("state_before_wait", None)  # kept by runs saved before an answer stopped reviving lanes
+    return back
+
+
+def _unblock(run, d: dict, now: float):
+    """A decided decision unblocks what waits on it (_release)."""
+    _release(run, d, f"{d['id']} decided: {d['answer'][:80]}", now)
 
 
 def crew_withdraw(decision_id: str, why: str, from_agent: str | None = None, cwd: str | None = None,
                   now: float | None = None) -> dict:
     """The tech lead withdraws a pending decision (`dev crew withdraw <id> --why`): state withdrawn, with the reason
-    in the run's history and the audit trail. A step blocked on it runs again, and the asking lane, when it still
-    runs, is told to go on without an answer. Never the developer's answer: no evidence, no `chosen`, so it opens no
+    in the run's history and the audit trail. A step blocked on it runs again, or waits for a new launch when its
+    member ended or went stale (_release); the asking member is told to go on without an answer when its run still
+    lists its lane as running, or when the step it blocked waits for a new launch: its lane while it works, else its
+    working lane or next launch (_reply_to). Never the developer's answer: no evidence, no `chosen`, so it opens no
     irreversible action (approves_action and use_grant read decided ones only), and it takes no answer later."""
     _main_only(from_agent, "withdraws decisions", cwd)
     now = now or time.time()
@@ -2291,24 +2309,16 @@ def crew_withdraw(decision_id: str, why: str, from_agent: str | None = None, cwd
                                             f"decision is withdrawn")
         d.update(state="withdrawn", withdrawn=round(now), why=why[:300])
         _decision_history(run, d, "withdrawn", why, now)
-        for s in run.get("plan") or []:
-            if s.get("waiting") == d["id"]:
-                s.pop("waiting", None)
-                if s.get("state") == "blocked":
-                    _log_change(run, s, "blocked", "running", "main", f"{d['id']} withdrawn: {why[:80]}", now)
-                    s["state"] = "running"
+        back = _release(run, d, f"{d['id']} withdrawn: {why[:80]}", now)
         lane = (run.get("agents") or {}).get(d.get("from") or "main")
-        for ln in (run.get("agents") or {}).values():
-            if ln.get("waiting") == d["id"]:
-                ln.pop("waiting", None)
-                ln.pop("state_before_wait", None)  # an ended lane stays ended
-        tell = d.get("from") not in (None, "", "main") and isinstance(lane, dict) and lane.get("state") == "running"
+        tell = d.get("from") not in (None, "", "main") and isinstance(lane, dict) \
+            and (lane.get("state") == "running" or bool(back))  # it may wait, or the launch that takes its step will
         _save(run, touch_session=False)
     _audit("crew.withdrawn", d["id"], why[:300], "withdrawn", project=run.get("project") or "", by="morpheus",
            why=why[:300], was="pending", session=f"{agent}:{sid}")
-    if tell:
+    if tell:  # the asking lane while its member works, else the member's working lane or next launch
         crew_ask(f"Decision {d['id']} was withdrawn by the tech lead: {why}. Go on without it; it is not the "
-                 f"developer's answer.", to=d["from"], cwd=cwd, now=now, kind="notice")
+                 f"developer's answer.", to=_reply_to(run, d["from"], now), cwd=cwd, now=now, kind="notice")
     return d
 
 

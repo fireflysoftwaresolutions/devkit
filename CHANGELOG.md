@@ -121,9 +121,11 @@ explains what moves each record and how to repair one that drifted.
   lanes, with the reason in the run's history. `dev crew delegate` and `dev progress assign` give no step to such a
   member and refuse no scope it held: the step waits for a new launch, and the sweep sends a step that started after
   its member ended back to pending, never to unverified. A message for such a member (`dev crew ask --to tank`) waits
-  for their next launch instead of their old lane, and devkit tells the sender; answers (`dev crew answer`) and
-  decision results (`dev crew decide`) follow the same rule. A step such a member owned closes on the tech lead's
-  evidence (`dev progress step --step`), and the run's history says its owner had ended.
+  for their next launch instead of their old lane, and devkit tells the sender; answers (`dev crew answer`),
+  decision results (`dev crew decide`), and the notice of a withdrawn decision (`dev crew withdraw`) follow the same
+  rule. A step such a member blocked on a decision waits for a new launch, with its scope, once the decision is
+  decided or withdrawn, instead of running again in the old lane. A step such a member owned closes on the tech
+  lead's evidence (`dev progress step --step`), and the run's history says its owner had ended.
   `dev progress done` no longer waits for such a member either: their running step closes with the run, and its
   history says its owner had ended; a member that still works still holds the run's end.
 - **The dashboard no longer warns about commits merged by content.** A project's health, its actions, and the

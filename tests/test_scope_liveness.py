@@ -259,8 +259,8 @@ class EndedTankCase(OwnerCase):
     # this session's run still lists the Backend engineer (Tank) as running, but Claude Code recorded him finished
     # beside this session's transcript ten minutes ago, after his last activity: `dev crew owner` and the Crew line
     # show him ended (Code reviewer, second pass)
-    def ended_tank(self, plan, label, assign=None):
-        pg.start("Export", plan=plan, now=self.now - 3600)
+    def ended_tank(self, plan, label, assign=None, mode=""):
+        pg.start("Export", plan=plan, now=self.now - 3600, mode=mode)
         if assign:
             pg.assign(assign, "Tank", scope="lib/api/**", now=self.now - 3600)
         launch("a_tank", "devkit:tank", label, self.now - 3600)
@@ -269,10 +269,10 @@ class EndedTankCase(OwnerCase):
         self.assertEqual(run["agents"]["a_tank"]["state"], "running")
         self.assertEqual(pg.lane_states(run, self.now)["a_tank"]["state"], "ended")
 
-    def stale_tank(self, plan, label, assign=None):
+    def stale_tank(self, plan, label, assign=None, mode=""):
         # the same lane, silent past progress.stale_agent_minutes, with nothing that says it ended
         quiet = (approvals.limits()["stale_minutes"] + 20) * MIN
-        pg.start("Export", plan=plan, now=self.now - quiet)
+        pg.start("Export", plan=plan, now=self.now - quiet, mode=mode)
         if assign:
             pg.assign(assign, "Tank", scope="lib/api/**", now=self.now - quiet)
         launch("a_tank", "devkit:tank", label, self.now - quiet)
@@ -410,6 +410,85 @@ class ReplyToAMemberWhoEndedTests(EndedTankCase):
         self.assertIn("Decision D1 — Skip empty lines or reject the file? → B: reject", mail)
         self.assertEqual(self.mail_of("a_new"), "")
         self.assertNotIn("waits for their next launch", self.lead_mail())
+
+
+class DecisionOfAMemberWhoEndedTests(EndedTankCase):
+    # a decided (dev crew decide) or withdrawn (dev crew withdraw) decision put the step it blocked back to running
+    # under the lane that asked it, even when Claude Code had recorded that member finished, or he had gone stale,
+    # while the run still listed his lane as running: nobody launched the step, dev crew next skipped it, and the sweep
+    # later closed it as unverified (Senior engineer, probe after the reply fix). The step waits for a new launch now,
+    # with the tech lead and its scope; a member who still works gets it back running (test_progress,
+    # test_guided_waits_for_the_developer_and_resumes, test_withdrawing_a_decision_lets_the_asking_lane_work_again_…)
+    def asks_d1(self, at):
+        # the Backend engineer (Tank) asks D1 in guided mode, and his step "api" waits on it
+        pg.crew_decision("Skip empty lines or reject the file?", options="A: skip | B: reject", recommend="A",
+                         from_agent="a_tank", now=at)
+        self.assertEqual(pg.load_run("claude", "s1")["plan"][0]["state"], "blocked")
+
+    def waits_for_a_new_launch(self, why):
+        run = pg.load_run("claude", "s1")
+        step = run["plan"][0]
+        self.assertEqual((step["state"], step["owner"], step.get("scope"), "waiting" in step),
+                         ("pending", "main", ["lib/api/**"], False))
+        self.assertIn("api", [s["name"] for s in dispatch._sorted(run, self.now)[0]])  # dev crew next offers it
+        h = [h for h in run["history"] if h["step"] == "api"][-1]
+        self.assertEqual((h["from"], h["to"]), ("blocked", "pending"))
+        self.assertIn(why, h["why"])
+
+    def test_deciding_for_a_member_who_ended_sends_his_step_back_for_a_new_launch(self):
+        self.ended_tank(["api"], "Tank: api", assign="api", mode="guided")
+        self.asks_d1(self.now - 15 * MIN)
+        pg.crew_decide("D1", "B: reject", now=self.now)
+        self.waits_for_a_new_launch("its owner Backend engineer (Tank) had ended: Claude Code recorded it finished")
+
+    def test_deciding_for_a_member_who_went_stale_sends_his_step_back_for_a_new_launch(self):
+        quiet = (approvals.limits()["stale_minutes"] + 20) * MIN
+        self.stale_tank(["api"], "Tank: api", assign="api", mode="guided")
+        self.asks_d1(self.now - quiet + MIN)  # his last word, long before the answer
+        self.assertEqual(pg.lane_states(pg.load_run("claude", "s1"), self.now, own=True)["a_tank"]["state"], "stale")
+        pg.crew_decide("D1", "B: reject", now=self.now)
+        self.waits_for_a_new_launch("its owner Backend engineer (Tank) had gone stale: silent for")
+
+    def test_withdrawing_the_decision_of_a_member_who_ended_tells_his_next_launch_and_the_tech_lead(self):
+        self.ended_tank(["api"], "Tank: api", assign="api", mode="guided")
+        self.asks_d1(self.now - 15 * MIN)
+        pg.crew_withdraw("D1", "the export keeps empty lines", now=self.now)
+        self.waits_for_a_new_launch("its owner Backend engineer (Tank) had ended: Claude Code recorded it finished")
+        told = self.lead_mail()
+        self.assertIn("Backend engineer (Tank) ended: Claude Code recorded it finished", told)
+        self.assertIn("waits for their next launch: launch them again (dev crew brief tank", told)
+        launch("a_tank2", "devkit:tank", "Tank: api", self.now + MIN)
+        self.assertIn("D1 was withdrawn by the tech lead: the export keeps empty lines", self.mail_of("a_tank2"))
+
+    def test_withdrawing_the_decision_of_a_member_whose_lane_was_lost_tells_the_launch_that_takes_his_step(self):
+        # his lane went quiet while his step waited on D1 (the run closed it as lost): withdrawing D1 ran the step
+        # again under that lost lane, and told nobody
+        pg.start("Export", plan=["api"], now=self.now - MIN, mode="guided")
+        pg.assign("api", "Tank", scope="lib/api/**", now=self.now - MIN)
+        launch("a_tank", "devkit:tank", "Tank: api", self.now - MIN)
+        self.asks_d1(self.now)
+        later = self.now + (pg.cfg()["stale_agent_hours"] + 1) * 3600
+        run = pg.load_run("claude", "s1")
+        self.assertTrue(pg.expire_stale(run, now=later))
+        pg._save(run, touch_session=False)
+        pg.crew_withdraw("D1", "the export keeps empty lines", now=later)
+        self.waits_for_a_new_launch("its owner Backend engineer (Tank) had ended: its lane is lost")
+        self.assertIn("Backend engineer (Tank) ended: its lane is lost", self.lead_mail())
+        launch("a_tank2", "devkit:tank", "Tank: api", later + MIN)
+        self.assertIn("D1 was withdrawn by the tech lead: the export keeps empty lines", self.mail_of("a_tank2"))
+
+    def test_a_step_decided_moments_after_its_member_ended_stays_with_the_tech_lead_at_the_next_hook(self):
+        # within approvals' finish_grace the reconciler still waits for his SubagentStop and counts his lane as
+        # working: a step marked as lost from that lane would go back to running under it at the tech lead's next
+        # tool call, and end unverified with the lane once the grace is over
+        pg.start("Export", plan=["api"], now=self.now - 20 * MIN, mode="guided")
+        pg.assign("api", "Tank", scope="lib/api/**", now=self.now - 20 * MIN)
+        launch("a_tank", "devkit:tank", "Tank: api", self.now - 20 * MIN)
+        self.asks_d1(self.now - 2 * MIN)
+        self.claude_meta("s1", "a_tank", finished=True, at=self.now - 30, log_at=self.now - 31)
+        pg.crew_decide("D1", "B: reject", now=self.now)
+        pg.reconcile_hook("claude", {"session_id": "s1"}, now=self.now + 10)
+        self.waits_for_a_new_launch("its owner Backend engineer (Tank) had ended: Claude Code recorded it finished")
 
 
 class StepOfAMemberWhoEndedTests(EndedTankCase):

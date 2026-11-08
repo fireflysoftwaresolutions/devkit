@@ -312,9 +312,10 @@ dev crew inbox
 A message reaches its recipient with the recipient's next action (the PostToolUse hook adds it to the context), or
 with the main session's next prompt. A message to a member who has not started yet, or whose lane ended or went
 stale, waits for their next launch; devkit tells the sender when the member ended or went stale. An answer
-(`dev crew answer`) or a decision's result goes to the lane that asked while its member works; once that lane ended
-or went stale, it goes to the member's working lane or waits for their next launch, like any other message. A message
-to the tech lead by role, such as `--to "Tech lead"` or `--to Morpheus`, reaches the main session.
+(`dev crew answer`), a decision's result, or the notice that a decision was withdrawn goes to the lane that asked
+while its member works; once that lane ended or went stale, it goes to the member's working lane or waits for their
+next launch, like any other message. A message to the tech lead by role, such as `--to "Tech lead"` or
+`--to Morpheus`, reaches the main session.
 
 Each message has a kind, and only a question waits:
 
@@ -449,7 +450,8 @@ How a decision travels:
    spent while it waits. The tech lead sees the decision with his next action and asks you with Claude Code's
    question dialog (see [How the tech lead asks you](#how-the-tech-lead-asks-you)). Your answer is recorded with
    `dev crew decide`, and the tech lead resumes the member with it; the member keeps everything it knew. Recording
-   the answer never brings back a lane that ended: the step it blocked goes back to pending, ready to launch.
+   the answer never brings back a member that ended or went stale: the step it blocked goes back to pending with
+   its scope, ready to launch, and the answer waits for the member's next launch.
 4. The run cannot be closed while a decision waits for you, and the final report lists the automatic decisions.
 
 A decision belongs to its run, and only an open one needs you:
@@ -458,9 +460,10 @@ A decision belongs to its run, and only an open one needs you:
   answer. The decision stays pending but is moot: it shows on a quiet line under its run, never under **Needs you**,
   and it does not stop `dev progress done`. Your answer to it still counts if you give one.
 - **Withdrawn.** `dev crew withdraw <id> --why "…"` closes a pending decision that no longer applies. Only the tech
-  lead runs it. It frees the step blocked on the decision, tells the asking member when it still works, and records
-  the reason in the run's history and the audit trail (`crew.withdrawn`). It is never your answer, so it opens no
-  irreversible action.
+  lead runs it. It frees the step blocked on the decision, which goes back to pending, ready to launch, when the
+  member that asked ended or went stale. It tells the asking member when it still works, or their next launch when
+  the step waits for one, and records the reason in the run's history and the audit trail (`crew.withdrawn`). It is
+  never your answer, so it opens no irreversible action.
 - **Closed with its run.** When the run ends (`dev progress done`) or is replaced (`dev progress start --replace`),
   each decision still pending in it, moot ones included, closes with the reason (`crew.decision-closed`).
 

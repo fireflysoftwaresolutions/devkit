@@ -124,8 +124,8 @@ assigns it a step.
 When Claude Code gives the main conversation a new session id after a compaction, the session's open run moves to
 the new id with its working lanes, and the run's history and the audit trail (`session.adopt`) record the move.
 
-Your answer to a decision never brings back a lane that ended. The step the decision blocked goes back to pending
-instead, and the tech lead launches the member again with your answer.
+Your answer to a decision never brings back a lane that ended, even one its run still lists as running. The step
+the decision blocked goes back to pending instead, and the tech lead launches the member again with your answer.
 
 **Where you see it.** The Progress and Crew lines of the status block, `dev progress`, `dev crew`, `dev crew next`,
 and the dashboard's Now and Runs views. `dev time` lists only the runs that are still live. `dev doctor` and the
@@ -155,7 +155,7 @@ and it does not stop `dev progress done`. If you answer it anyway, your answer s
 | End | What causes it |
 | --- | --- |
 | `decided` | Your answer, which the tech lead records with `dev crew decide`, or the recommended option in auto mode |
-| `withdrawn` | The tech lead's `dev crew withdraw <id> --why "…"`. It frees a step blocked on the decision, tells the asking member when it still works, and records the reason in the run's history and the audit trail (`crew.withdrawn`). It is never your answer, and it opens no irreversible action |
+| `withdrawn` | The tech lead's `dev crew withdraw <id> --why "…"`. It frees a step blocked on the decision (back to pending when its member ended or went stale), tells the asking member in their working lane or at their next launch, and records the reason in the run's history and the audit trail (`crew.withdrawn`). It is never your answer, and it opens no irreversible action |
 | `closed` | The run ended (`dev progress done`) or was replaced (`dev progress start --replace`). The reason goes in the run's history and the audit trail |
 
 ### Crew messages
