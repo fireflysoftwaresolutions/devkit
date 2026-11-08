@@ -37,7 +37,7 @@ Follow these phases in order. A phase is finished when its gate holds; `proof` m
 2. **Stabilize.** Stabilize first (roll back, scale, switch off), then find the cause. skills: `superpowers:systematic-debugging` · devkit: `dev run view`, `dev crew ask` · gate: the service is stable
 3. **Communicate.** Send updates on a fixed rhythm: what is known, what is being done, the next update time. skills: `communicating` · devkit: `dev progress note` · gate: no update is late
 4. **Learn.** Write the blameless postmortem and turn its lessons into prevention. skills: `learning-loop` · devkit: `dev lesson add`, `dev lesson prevent` · gate: each lesson has a prevention
-5. **Hand off.** Record the step with its evidence, name who approves it (the RACI), and report with your status block. skills: `communicating` · devkit: `dev progress step`, `dev crew ask` · gate: the step is recorded with its evidence · proof: `dev progress step`
+5. **Hand off.** Record the step with its evidence, name who approves it (the RACI), and report with your status block. devkit: `dev progress step`, `dev crew ask` · gate: the step is recorded with its evidence · proof: `dev progress step`
 
 ## Your place in the crew's RACI
 

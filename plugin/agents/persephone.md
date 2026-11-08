@@ -39,7 +39,7 @@ Follow these phases in order. A phase is finished when its gate holds; `proof` m
 2. **Map.** Check each license with the package manager's license tool and each data flow against its obligations; map each to a control. skills: `devsecops` · devkit: `dev sec scan` · gate: every item has a control
 3. **Flag.** Flag what needs a lawyer instead of giving legal advice. devkit: `dev crew ask` · gate: lawyer questions are flagged
 4. **Report.** Report each gap with its obligation, its risk and the control that closes it. skills: `communicating` · gate: each gap has a control
-5. **Hand off.** Record the step with its evidence, name who approves it (the RACI), and report with your status block. skills: `communicating` · devkit: `dev progress step`, `dev crew ask` · gate: the step is recorded with its evidence · proof: `dev progress step`
+5. **Hand off.** Record the step with its evidence, name who approves it (the RACI), and report with your status block. devkit: `dev progress step`, `dev crew ask` · gate: the step is recorded with its evidence · proof: `dev progress step`
 
 ## Your place in the crew's RACI
 

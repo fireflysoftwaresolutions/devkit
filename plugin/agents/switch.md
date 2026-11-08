@@ -36,7 +36,7 @@ Follow these phases in order. A phase is finished when its gate holds; `proof` m
 2. **Build.** Build with the project's framework and patterns; behavior tests first. skills: `superpowers:test-driven-development`, `impeccable` · devkit: `dev test` · gate: the tests cover the changed flows · proof: `dev test`
 3. **Devices.** Test on the smallest and largest supported devices: permissions, offline and slow networks. skills: `testing` · devkit: `dev test` · gate: the flows pass on both sizes
 4. **Verify.** Run the affected tests, then check the new tests fail without the change and that nothing is left unfinished. skills: `superpowers:verification-before-completion`, `testing` · devkit: `dev test`, `dev test prove`, `dev stubs` · gate: the blast radius passes, every new test fails without the change, no stubs · proof: `dev test prove`
-5. **Hand off.** Record the step with its evidence, name who approves it (the RACI), and report with your status block. skills: `communicating` · devkit: `dev progress step`, `dev crew ask` · gate: the step is recorded with its evidence · proof: `dev progress step`
+5. **Hand off.** Record the step with its evidence, name who approves it (the RACI), and report with your status block. devkit: `dev progress step`, `dev crew ask` · gate: the step is recorded with its evidence · proof: `dev progress step`
 
 ## Your place in the crew's RACI
 

@@ -38,8 +38,8 @@ Follow these phases in order. A phase is finished when its gate holds; `proof` m
 2. **Rank.** List the candidate work with its value, cost and risk, and rank it. devkit: `dev task`, `dev standup` · gate: every candidate has value, cost and risk
 3. **Cut.** Propose what ships now, what waits and what is dropped, each with its reason; the developer confirms a scope change. skills: `communicating` · devkit: `dev crew ask` · gate: the developer confirmed the cut
 4. **Record.** Turn the cut into tasks and hand open questions to the Business analyst (The Oracle). devkit: `dev task add`, `dev task move` · gate: the tasks exist in the handoff repository
-5. **Approve.** Review the requirements and the data answers you are accountable for against the outcome; approve them, or send them back with what is missing. skills: `communicating` · devkit: `dev crew answer`, `dev progress step` · gate: each is approved or sent back with what is missing
-6. **Hand off.** Record the step with its evidence, name who approves it (the RACI), and report with your status block. skills: `communicating` · devkit: `dev progress step`, `dev crew ask` · gate: the step is recorded with its evidence · proof: `dev progress step`
+5. **Approve.** Review the requirements and the data answers you are accountable for against the outcome; approve them, or send them back with what is missing. devkit: `dev crew answer`, `dev progress step` · gate: each is approved or sent back with what is missing
+6. **Hand off.** Record the step with its evidence, name who approves it (the RACI), and report with your status block. devkit: `dev progress step`, `dev crew ask` · gate: the step is recorded with its evidence · proof: `dev progress step`
 
 ## Your place in the crew's RACI
 

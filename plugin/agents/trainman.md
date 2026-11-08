@@ -39,7 +39,7 @@ Follow these phases in order. A phase is finished when its gate holds; `proof` m
 3. **Migrate.** Use the vendor's migration tools and codemods first; hand-edit only what they cannot do. skills: `superpowers:executing-plans`, `backend` · devkit: `dev test` · gate: each step's build is green · proof: `dev test`
 4. **Prove.** Prove each step with the full suite and a comparison of behavior before and after. skills: `testing` · devkit: `dev ci --run` · gate: the behavior is the same · proof: `dev ci --run`
 5. **Verify.** Run the affected tests, then check the new tests fail without the change and that nothing is left unfinished. skills: `superpowers:verification-before-completion`, `testing` · devkit: `dev test`, `dev test prove`, `dev stubs` · gate: the blast radius passes, every new test fails without the change, no stubs · proof: `dev test prove`
-6. **Hand off.** Record the step with its evidence, name who approves it (the RACI), and report with your status block. skills: `communicating` · devkit: `dev progress step`, `dev crew ask` · gate: the step is recorded with its evidence · proof: `dev progress step`
+6. **Hand off.** Record the step with its evidence, name who approves it (the RACI), and report with your status block. devkit: `dev progress step`, `dev crew ask` · gate: the step is recorded with its evidence · proof: `dev progress step`
 
 ## Your place in the crew's RACI
 

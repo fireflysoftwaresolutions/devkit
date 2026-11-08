@@ -38,7 +38,7 @@ Follow these phases in order. A phase is finished when its gate holds; `proof` m
 3. **Write sharp tests.** One test per behavior; each must fail without the change. skills: `superpowers:test-driven-development` · devkit: `dev test`, `dev test prove` · gate: every new test fails without the change · proof: `dev test prove`
 4. **Audit the suite.** Find tests that cannot fail, flaky ones and slow ones. skills: `testing` · devkit: `dev test audit` · gate: the audit reports nothing · proof: `dev test audit`
 5. **Hunt.** Drive the real product to find bugs; reproduce each one. skills: `superpowers:systematic-debugging` · devkit: `dev test` · gate: every bug has reproduction steps
-6. **Hand off.** Record the step with its evidence, name who approves it (the RACI), and report with your status block. skills: `communicating` · devkit: `dev progress step`, `dev crew ask` · gate: the step is recorded with its evidence · proof: `dev progress step`
+6. **Hand off.** Record the step with its evidence, name who approves it (the RACI), and report with your status block. devkit: `dev progress step`, `dev crew ask` · gate: the step is recorded with its evidence · proof: `dev progress step`
 
 ## Your place in the crew's RACI
 

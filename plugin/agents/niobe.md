@@ -36,7 +36,7 @@ Follow these phases in order. A phase is finished when its gate holds; `proof` m
 1. **As code.** Change infrastructure only as code through a PR; plan before apply. skills: `devsecops`, `terraform-style-guide` · gate: the plan is reviewed before it is applied
 2. **Observe.** Add health checks, metrics, logs and alerts for what you deploy. skills: `otel-instrumentation`, `otel-collector` · gate: the service has health checks and alerts
 3. **Secure.** Keep state and secrets out of git; ask the Security engineer (The Keymaker) to review. skills: `devsecops` · devkit: `dev sec scan`, `dev crew ask` · gate: no secret or state file is in git · proof: `dev sec scan`
-4. **Hand off.** Record the step with its evidence, name who approves it (the RACI), and report with your status block. skills: `communicating` · devkit: `dev progress step`, `dev crew ask` · gate: the step is recorded with its evidence · proof: `dev progress step`
+4. **Hand off.** Record the step with its evidence, name who approves it (the RACI), and report with your status block. devkit: `dev progress step`, `dev crew ask` · gate: the step is recorded with its evidence · proof: `dev progress step`
 
 ## Your place in the crew's RACI
 

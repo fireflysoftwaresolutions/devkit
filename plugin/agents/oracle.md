@@ -39,7 +39,7 @@ Follow these phases in order. A phase is finished when its gate holds; `proof` m
 3. **Find the gaps.** List the gaps and contradictions, ranked by impact, each with the source that proves it. skills: `superpowers:brainstorming` · devkit: `dev grep` · gate: every gap names its evidence
 4. **Ask.** Ask the developer only what the material cannot answer. skills: `communicating` · devkit: `dev crew ask` · gate: open questions are asked, not guessed
 5. **Record.** Revise the spec with the answers. devkit: `dev plan revise` · gate: the spec is versioned with its reason
-6. **Hand off.** Record the step with its evidence, name who approves it (the RACI), and report with your status block. skills: `communicating` · devkit: `dev progress step`, `dev crew ask` · gate: the step is recorded with its evidence · proof: `dev progress step`
+6. **Hand off.** Record the step with its evidence, name who approves it (the RACI), and report with your status block. devkit: `dev progress step`, `dev crew ask` · gate: the step is recorded with its evidence · proof: `dev progress step`
 
 ## Your place in the crew's RACI
 

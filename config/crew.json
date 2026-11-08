@@ -244,9 +244,6 @@
         {
           "phase": "Approve",
           "do": "Review the requirements and the data answers you are accountable for against the outcome; approve them, or send them back with what is missing.",
-          "skills": [
-            "communicating"
-          ],
           "devkit": [
             "dev crew answer",
             "dev progress step"
@@ -256,9 +253,6 @@
         {
           "phase": "Hand off",
           "do": "Record the step with its evidence, name who approves it (the RACI), and report with your status block.",
-          "skills": [
-            "communicating"
-          ],
           "devkit": [
             "dev progress step",
             "dev crew ask"
@@ -380,9 +374,6 @@
         {
           "phase": "Hand off",
           "do": "Record the step with its evidence, name who approves it (the RACI), and report with your status block.",
-          "skills": [
-            "communicating"
-          ],
           "devkit": [
             "dev progress step",
             "dev crew ask"
@@ -526,9 +517,6 @@
         {
           "phase": "Hand off",
           "do": "Record the step with its evidence, name who approves it (the RACI), and report with your status block.",
-          "skills": [
-            "communicating"
-          ],
           "devkit": [
             "dev progress step",
             "dev crew ask"
@@ -628,9 +616,6 @@
         {
           "phase": "Hand off",
           "do": "Record the step with its evidence, name who approves it (the RACI), and report with your status block.",
-          "skills": [
-            "communicating"
-          ],
           "devkit": [
             "dev progress step",
             "dev crew ask"
@@ -747,9 +732,6 @@
         {
           "phase": "Hand off",
           "do": "Record the step with its evidence, name who approves it (the RACI), and report with your status block.",
-          "skills": [
-            "communicating"
-          ],
           "devkit": [
             "dev progress step",
             "dev crew ask"
@@ -877,9 +859,6 @@
         {
           "phase": "Hand off",
           "do": "Record the step with its evidence, name who approves it (the RACI), and report with your status block.",
-          "skills": [
-            "communicating"
-          ],
           "devkit": [
             "dev progress step",
             "dev crew ask"
@@ -1025,9 +1004,6 @@
         {
           "phase": "Hand off",
           "do": "Record the step with its evidence, name who approves it (the RACI), and report with your status block.",
-          "skills": [
-            "communicating"
-          ],
           "devkit": [
             "dev progress step",
             "dev crew ask"
@@ -1144,9 +1120,6 @@
         {
           "phase": "Hand off",
           "do": "Record the step with its evidence, name who approves it (the RACI), and report with your status block.",
-          "skills": [
-            "communicating"
-          ],
           "devkit": [
             "dev progress step",
             "dev crew ask"
@@ -1261,9 +1234,6 @@
         {
           "phase": "Hand off",
           "do": "Record the step with its evidence, name who approves it (the RACI), and report with your status block.",
-          "skills": [
-            "communicating"
-          ],
           "devkit": [
             "dev progress step",
             "dev crew ask"
@@ -1393,9 +1363,6 @@
         {
           "phase": "Hand off",
           "do": "Record the step with its evidence, name who approves it (the RACI), and report with your status block.",
-          "skills": [
-            "communicating"
-          ],
           "devkit": [
             "dev progress step",
             "dev crew ask"
@@ -1512,9 +1479,6 @@
         {
           "phase": "Hand off",
           "do": "Record the step with its evidence, name who approves it (the RACI), and report with your status block.",
-          "skills": [
-            "communicating"
-          ],
           "devkit": [
             "dev progress step",
             "dev crew ask"
@@ -1606,9 +1570,6 @@
         {
           "phase": "Hand to the frontend engineer",
           "do": "Hand the design to the Frontend engineer (Trinity) with the states and copy written out.",
-          "skills": [
-            "communicating"
-          ],
           "devkit": [
             "dev plan revise",
             "dev progress step"
@@ -1733,9 +1694,6 @@
         {
           "phase": "Hand off",
           "do": "Record the step with its evidence, name who approves it (the RACI), and report with your status block.",
-          "skills": [
-            "communicating"
-          ],
           "devkit": [
             "dev progress step",
             "dev crew ask"
@@ -1838,9 +1796,6 @@
         {
           "phase": "Verdict",
           "do": "Report findings ranked by severity with file, line, risk and fix; approve or request changes.",
-          "skills": [
-            "communicating"
-          ],
           "devkit": [
             "dev progress step"
           ],
@@ -1955,9 +1910,6 @@
         {
           "phase": "Hand off",
           "do": "Record the step with its evidence, name who approves it (the RACI), and report with your status block.",
-          "skills": [
-            "communicating"
-          ],
           "devkit": [
             "dev progress step",
             "dev crew ask"
@@ -2052,9 +2004,6 @@
         {
           "phase": "Hand off",
           "do": "Record the step with its evidence, name who approves it (the RACI), and report with your status block.",
-          "skills": [
-            "communicating"
-          ],
           "devkit": [
             "dev progress step",
             "dev crew ask"
@@ -2157,9 +2106,6 @@
         {
           "phase": "Hand off",
           "do": "Record the step with its evidence, name who approves it (the RACI), and report with your status block.",
-          "skills": [
-            "communicating"
-          ],
           "devkit": [
             "dev progress step",
             "dev crew ask"
@@ -2295,9 +2241,6 @@
         {
           "phase": "Hand off",
           "do": "Record the step with its evidence, name who approves it (the RACI), and report with your status block.",
-          "skills": [
-            "communicating"
-          ],
           "devkit": [
             "dev progress step",
             "dev crew ask"
@@ -2397,9 +2340,6 @@
         {
           "phase": "Hand off",
           "do": "Record the step with its evidence, name who approves it (the RACI), and report with your status block.",
-          "skills": [
-            "communicating"
-          ],
           "devkit": [
             "dev progress step",
             "dev crew ask"
@@ -2506,9 +2446,6 @@
         {
           "phase": "Hand off",
           "do": "Record the step with its evidence, name who approves it (the RACI), and report with your status block.",
-          "skills": [
-            "communicating"
-          ],
           "devkit": [
             "dev progress step",
             "dev crew ask"
@@ -2611,9 +2548,6 @@
         {
           "phase": "Hand off",
           "do": "Record the step with its evidence, name who approves it (the RACI), and report with your status block.",
-          "skills": [
-            "communicating"
-          ],
           "devkit": [
             "dev progress step",
             "dev crew ask"
@@ -2745,9 +2679,6 @@
         {
           "phase": "Hand off",
           "do": "Record the step with its evidence, name who approves it (the RACI), and report with your status block.",
-          "skills": [
-            "communicating"
-          ],
           "devkit": [
             "dev progress step",
             "dev crew ask"
@@ -2828,9 +2759,6 @@
         {
           "phase": "Hand off",
           "do": "Record the step with its evidence, name who approves it (the RACI), and report with your status block.",
-          "skills": [
-            "communicating"
-          ],
           "devkit": [
             "dev progress step",
             "dev crew ask"
@@ -2938,9 +2866,6 @@
         {
           "phase": "Hand off",
           "do": "Record the step with its evidence, name who approves it (the RACI), and report with your status block.",
-          "skills": [
-            "communicating"
-          ],
           "devkit": [
             "dev progress step",
             "dev crew ask"

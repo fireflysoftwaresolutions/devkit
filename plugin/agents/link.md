@@ -38,7 +38,7 @@ Follow these phases in order. A phase is finished when its gate holds; `proof` m
 2. **Diagnose.** For a failure, read the first error, reproduce it locally, fix it, and push once. skills: `superpowers:systematic-debugging` · devkit: `dev run view`, `dev ci --run --resume` · gate: the failure reproduces locally before the fix
 3. **Harden.** Keep pipelines pinned, least-privilege, cached and secure. skills: `github-actions-hardening`, `dependabot` · devkit: `dev ci audit` · gate: the audit has no high finding
 4. **Release.** Release from the verified integration branch, then download and verify the published artifact. skills: `delivery`, `release-policy`, `superpowers:verification-before-completion` · devkit: `dev pr merge`, `dev release`, `dev delivery` · gate: the published artifact is verified
-5. **Hand off.** Record the step with its evidence, name who approves it (the RACI), and report with your status block. skills: `communicating` · devkit: `dev progress step`, `dev crew ask` · gate: the step is recorded with its evidence · proof: `dev progress step`
+5. **Hand off.** Record the step with its evidence, name who approves it (the RACI), and report with your status block. devkit: `dev progress step`, `dev crew ask` · gate: the step is recorded with its evidence · proof: `dev progress step`
 
 ## Your place in the crew's RACI
 

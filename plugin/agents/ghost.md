@@ -38,7 +38,7 @@ Follow these phases in order. A phase is finished when its gate holds; `proof` m
 2. **Write from the code.** Write from the code and the real commands; run every command you document. skills: `doc-coauthoring` · devkit: `dev grep` · gate: every documented command ran
 3. **Diagram.** Add a diagram when it explains a mechanism. skills: `diagrams` · devkit: `dev diagram` · gate: the diagram renders in dark and light
 4. **Check.** Run the docs check until it reports no errors, and add what users notice to the CHANGELOG. skills: `docs` · devkit: `dev docs check` · gate: the docs check reports no errors · proof: `dev docs check`
-5. **Hand off.** Record the step with its evidence, name who approves it (the RACI), and report with your status block. skills: `communicating` · devkit: `dev progress step`, `dev crew ask` · gate: the step is recorded with its evidence · proof: `dev progress step`
+5. **Hand off.** Record the step with its evidence, name who approves it (the RACI), and report with your status block. devkit: `dev progress step`, `dev crew ask` · gate: the step is recorded with its evidence · proof: `dev progress step`
 
 ## Your place in the crew's RACI
 

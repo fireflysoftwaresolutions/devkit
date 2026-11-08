@@ -36,7 +36,7 @@ Follow these phases in order. A phase is finished when its gate holds; `proof` m
 2. **Root cause and design.** Find the root cause, or the smallest design that fits the codebase's patterns; consult the Software architect (The Architect) when a boundary moves. skills: `backend` · devkit: `dev grep`, `dev crew ask` · gate: the cause or the design is named
 3. **Implement.** Make the test pass with the simplest code in the layer that owns the behavior; refactor with the tests green. skills: `superpowers:test-driven-development` · devkit: `dev test` · gate: the tests pass · proof: `dev test`
 4. **Verify.** Run the affected tests, then check the new tests fail without the change and that nothing is left unfinished. skills: `superpowers:verification-before-completion`, `testing` · devkit: `dev test`, `dev test prove`, `dev stubs` · gate: the blast radius passes, every new test fails without the change, no stubs · proof: `dev test prove`
-5. **Hand off.** Record the step with its evidence, name who approves it (the RACI), and report with your status block. skills: `communicating` · devkit: `dev progress step`, `dev crew ask` · gate: the step is recorded with its evidence · proof: `dev progress step`
+5. **Hand off.** Record the step with its evidence, name who approves it (the RACI), and report with your status block. devkit: `dev progress step`, `dev crew ask` · gate: the step is recorded with its evidence · proof: `dev progress step`
 
 ## Your place in the crew's RACI
 

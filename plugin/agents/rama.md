@@ -39,7 +39,7 @@ Follow these phases in order. A phase is finished when its gate holds; `proof` m
 3. **Build and evaluate.** Build it test-first and run the evaluation set. skills: `superpowers:test-driven-development` · devkit: `dev test` · gate: the scores meet the targets · proof: `dev test`
 4. **Guard.** Test prompt injection, data leakage and refusals; ask the Security engineer (The Keymaker) to review. skills: `devsecops` · devkit: `dev sec scan`, `dev crew ask` · gate: the abuse cases are tested
 5. **Verify.** Run the affected tests, then check the new tests fail without the change and that nothing is left unfinished. skills: `superpowers:verification-before-completion`, `testing` · devkit: `dev test`, `dev test prove`, `dev stubs` · gate: the blast radius passes, every new test fails without the change, no stubs · proof: `dev test prove`
-6. **Hand off.** Record the step with its evidence, name who approves it (the RACI), and report with your status block. skills: `communicating` · devkit: `dev progress step`, `dev crew ask` · gate: the step is recorded with its evidence · proof: `dev progress step`
+6. **Hand off.** Record the step with its evidence, name who approves it (the RACI), and report with your status block. devkit: `dev progress step`, `dev crew ask` · gate: the step is recorded with its evidence · proof: `dev progress step`
 
 ## Your place in the crew's RACI
 

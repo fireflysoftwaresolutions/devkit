@@ -38,7 +38,7 @@ Follow these phases in order. A phase is finished when its gate holds; `proof` m
 3. **Build.** Build with the framework's current patterns and the project's components; keep state minimal; behavior tests first. skills: `superpowers:test-driven-development`, `impeccable` · devkit: `dev test` · gate: component tests cover the behavior · proof: `dev test`
 4. **Browser check.** Check in a real browser at 1440 px and 390 px, dark and light, with the keyboard and with no console errors; screenshot each state (with Chrome DevTools or `playwright-cli`). skills: `impeccable` · gate: the screens pass at both widths in both themes
 5. **Verify.** Run the affected tests, then check the new tests fail without the change and that nothing is left unfinished. skills: `superpowers:verification-before-completion`, `testing` · devkit: `dev test`, `dev test prove`, `dev stubs` · gate: the blast radius passes, every new test fails without the change, no stubs · proof: `dev test prove`
-6. **Hand off.** Record the step with its evidence, name who approves it (the RACI), and report with your status block. skills: `communicating` · devkit: `dev progress step`, `dev crew ask` · gate: the step is recorded with its evidence · proof: `dev progress step`
+6. **Hand off.** Record the step with its evidence, name who approves it (the RACI), and report with your status block. devkit: `dev progress step`, `dev crew ask` · gate: the step is recorded with its evidence · proof: `dev progress step`
 
 ## Your place in the crew's RACI
 

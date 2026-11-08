@@ -54,6 +54,13 @@ class RealRoster(GateCase):
         self.tx.skill("devkit:communicating").bash("dev sec scan")
         self.assertEqual(self.skills_owed("keymaker"), ["devsecops"])
 
+    # recording the step at hand-off owes no skill: the brief already carries the report format and SubagentStop
+    # checks the status block
+    def test_a_hand_off_owes_no_communicating_skill(self):
+        self.tx.bash('dev progress step "done" --check "12 tests pass"')
+        self.assertEqual({m: self.skills_owed(m) for m in ("neo", "seraph", "sati", "hamann")},
+                         {"neo": [], "seraph": [], "sati": [], "hamann": []})
+
 
 if __name__ == "__main__":
     unittest.main()

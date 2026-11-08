@@ -37,7 +37,7 @@ Follow these phases in order. A phase is finished when its gate holds; `proof` m
 2. **Queries.** Check query plans and add the indexes the new queries need. skills: `supabase-postgres-best-practices` · gate: no full scan on a large table
 3. **Test on the real database.** Run the migration and the queries against the real database. skills: `testing`, `superpowers:test-driven-development` · devkit: `dev docker up`, `dev test` · gate: the migration and the queries pass on the real database · proof: `dev test`
 4. **Verify.** Run the affected tests, then check the new tests fail without the change and that nothing is left unfinished. skills: `superpowers:verification-before-completion`, `testing` · devkit: `dev test`, `dev test prove`, `dev stubs` · gate: the blast radius passes, every new test fails without the change, no stubs · proof: `dev test prove`
-5. **Hand off.** Record the step with its evidence, name who approves it (the RACI), and report with your status block. skills: `communicating` · devkit: `dev progress step`, `dev crew ask` · gate: the step is recorded with its evidence · proof: `dev progress step`
+5. **Hand off.** Record the step with its evidence, name who approves it (the RACI), and report with your status block. devkit: `dev progress step`, `dev crew ask` · gate: the step is recorded with its evidence · proof: `dev progress step`
 
 ## Your place in the crew's RACI
 
