@@ -525,7 +525,8 @@ ENFORCEMENT = (
      "devkit.guard.irreversible_verdict", "enforced"),
     ("E-proofs", "A member runs the proofs its procedure names", "SubagentStop: the crew gates",
      "devkit.gates.crew_gates", "enforced"),
-    ("E-skills", "A member loads the skills its brief names", "SubagentStop: the crew gates",
+    ("E-skills", "A member loads the skills of each procedure phase it works in and those the skill rules require "
+                 "for the files it changes", "SubagentStop: the crew gates",
      "devkit.gates.crew_gates", "enforced"),
     ("E-stubs", "No stubs or untracked TODOs in a member's changes", "SubagentStop: the crew gates",
      "devkit.gates.crew_gates", "enforced"),
@@ -1014,6 +1015,43 @@ def brief_skills(m: dict, task: str = "", globs=None, agent: str = "claude", act
     return out, why
 
 
+def _skill_lines(m: dict, skills: list, why: list, globs, roster) -> list:
+    """The brief's skills, the ones the crew gates check first: the skills of the member's procedure phases
+    (gates.gated_skills, each with its phases) and those the skill rules require for the files of its scope; then the
+    rest its role or kind of work lists. A brief never calls a gated skill optional."""
+    from . import gates, skillguard
+    path = lambda s: f": `{core.tilde(p)}`" if (p := skillguard.skill_path(s)) else ""  # noqa: E731
+    phases = {}
+    try:
+        for g in gates.gated_skills(m, roster):
+            phases.setdefault(g["skill"], [])
+            if g.get("phase") and g["phase"] not in phases[g["skill"]]:
+                phases[g["skill"]].append(g["phase"])
+        for r, _ in skillguard.rules_for_files(list(globs or [])):
+            for s in skillguard.required(r, "claude"):
+                phases.setdefault(s, [])
+    except Exception:
+        phases = {}  # a gate that cannot be read lists every skill alike, never one less
+    if not skills and not phases:
+        return ["None."]
+    out = []
+    if phases:
+        out += ["The crew gates check these before you stop: load each with the Skill tool, or read its SKILL.md at "
+                "the path shown when the Skill tool does not list it, before you work in its phase:"]
+        out += [f"- `{s}`" + (f" ({' and '.join(ph)} phase{'s' if len(ph) > 1 else ''})" if ph else
+                              " (the files of your scope)") + path(s) for s, ph in phases.items()]
+        out.append("They check them in each phase you work in, plus the skills devkit's skill rules require for the "
+                   "files you change (devkit names those when you edit).")
+    rest = [s for s in skills if s not in phases]
+    if rest:
+        out += (["", "Also listed for your role or kind of work; load them first too (the gates do not check them)"]
+                if phases else ["Load each with the Skill tool, or read its SKILL.md at the path shown when the "
+                                "Skill tool does not list it"])
+        out[-1] += (f" ({'; '.join(why)})" if why else "") + ":"
+        out += [f"- `{s}`" + path(s) for s in rest]
+    return out
+
+
 def brief_text(m: dict, task: str, scope: str = "", step=None, roster=None, cwd=None, activity=None) -> str:
     """What `dev crew brief` prints: the spawn lines, the lane link and the brief to paste as the prompt."""
     roster = roster or load()
@@ -1058,11 +1096,7 @@ def brief_text(m: dict, task: str, scope: str = "", step=None, roster=None, cwd=
         if s not in skills:
             skills.append(s)
             why.append(f"{s}: {raci._lower(act['name'])}")
-    b.append(("Load each with the Skill tool, or read its SKILL.md at the path shown when the Skill tool does not "
-              "list it" + (f" ({'; '.join(why)})" if why else "") + ":" if skills else "None."))
-    if skills:
-        from . import skillguard
-        b += [f"- `{s}`" + (f": `{core.tilde(p)}`" if (p := skillguard.skill_path(s)) else "") for s in skills]
+    b += _skill_lines(m, skills, why, globs, roster)
     if know.get("docs"):
         b += ["", "## Read first", "", f"devkit's guides for {raci._lower(act['name'])}; follow them:"]
         b += [f"- `{core.tilde(core.DEVKIT_HOME / d)}`" for d in know["docs"] if (core.DEVKIT_HOME / d).exists()]

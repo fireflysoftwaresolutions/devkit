@@ -444,6 +444,24 @@ class BriefTests(unittest.TestCase):
         a = cli.build_parser().parse_args(argv)  # the printed command is one the progress CLI accepts
         self.assertEqual((a.progress_cmd, a.which, a.to, a.scope), ("assign", "2", ["Neo"], "lib/parser/**,tests/test_parser.py"))
 
+    def test_a_brief_marks_the_skills_the_crew_gates_check_apart_from_its_roles_list(self):
+        # this run's briefs listed every skill alike, and some called a gated one optional; the gates check the
+        # skills of each procedure phase the member works in (gates.gated_skills) and those of the files it changes
+        with tempfile.TemporaryDirectory() as d:
+            text = ui.ANSI_RE.sub("", crew.brief_text(crew.member("kid"), "Speed up the build.", "tools/**", cwd=d))
+        part = text.split("## Skills to load first", 1)[1].split("\n## ", 1)[0]
+        gated, also = part.split("Also listed for your role", 1)
+        self.assertIn("The crew gates check these before you stop", gated)
+        for skill, phases in (("superpowers:test-driven-development", "Build"), ("testing", "Build and Verify"),
+                              ("docs", "Document"), ("superpowers:verification-before-completion", "Verify")):
+            self.assertIn(f"- `{skill}` ({phases} phase", gated)
+            self.assertNotIn(f"`{skill}`", also)
+        self.assertIn("plus the skills devkit's skill rules require for the files you change", gated)
+        for skill in ("workspace", "using-devkit", "communicating"):
+            self.assertIn(f"- `{skill}`", also)
+            self.assertNotIn(f"`{skill}`", gated)
+        self.assertNotIn("optional", part.lower())
+
     def test_every_brief_names_the_member_s_own_scratch_folder(self):
         # the guard lets a member write only in scratchpad/<its id>/ of the session scratchpad; a brief that does not
         # say so sends members to the shared top level, where the guard refuses them (lesson L-fxs9q5evz83)
