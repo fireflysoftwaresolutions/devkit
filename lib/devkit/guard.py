@@ -1198,6 +1198,108 @@ def wait_then_work_refusal(cmd: str) -> str | None:
     return None
 
 
+# An action that must depend on a result (a CI run, a test, a check) runs whatever that result is when it follows the
+# check after `;`, `||` or `&`, or after a pipeline with `&&`, whose status is the last filter's.
+GATE_REASON = ("This runs {what} after {check} without depending on its result: after `;`, `||` or `&` it runs "
+               "whatever the check reported, and after a pipeline (`… | tail -3 && …`) `&&` sees the filter's exit "
+               "status, not the check's. Gate it on the real result: `set -o pipefail;` first, `check && action` "
+               "without a pipe, or a separate call once you have read the result. Lesson: gate on the real result.")
+_CHECK_TOOLS = frozenset({"pytest", "tox", "nox", "jest", "vitest", "mocha", "tsc", "ruff", "mypy", "eslint",
+                          "shellcheck", "phpunit", "pest", "rspec", "phpstan", "psalm"})
+_CHECK_SCRIPTS = re.compile(r"(?:test|tests|lint|check|checks|typecheck|verify|ci|build)(?::[\w:-]+)?\Z")
+_RELEASE_SCRIPTS = re.compile(r"(?:release|publish|deploy|ship)(?::[\w:-]+)?\Z")
+
+
+def _check_step(argv) -> str:
+    """The check a segment runs, named for a refusal, or '': a CI watch or run, a test, a lint or a type check."""
+    if not argv:
+        return ""
+    name, args = os.path.basename(argv[0]), [str(a) for a in argv[1:]]
+    dev = _dev_args(argv)
+    if dev is not None:
+        if _waits(argv) or dev[:2] in (["ci", "watch"], ["ci", "--run"], ["sec", "scan"], ["ci", "audit"]) or \
+                dev[:1] == ["test"]:
+            return "dev " + " ".join(dev[:2])
+        return ""
+    words = [a for a in args if not a.startswith("-")]
+    if name in _CHECK_TOOLS:
+        return name
+    if _INTERP.match(name) and any(args[i:i + 2] in (["-m", "pytest"], ["-m", "unittest"]) for i in range(len(args))):
+        return f"{name} -m {'pytest' if 'pytest' in args else 'unittest'}"
+    if name in ("npm", "pnpm", "yarn", "bun"):
+        script = words[1] if words[:1] == ["run"] and len(words) > 1 else words[0] if words else ""
+        return f"{name} {script}" if _CHECK_SCRIPTS.match(script) else ""
+    if name in ("make", "gmake", "just", "task") and words and _CHECK_SCRIPTS.match(words[0]):
+        return f"{name} {words[0]}"
+    if name in ("go", "cargo") and words[:1] in (["test"], ["vet"], ["check"], ["clippy"]):
+        return f"{name} {words[0]}"
+    if name in ("mvn", "mvnw", "gradle", "gradlew") and any(w in ("test", "verify", "check", "build") for w in words):
+        return name
+    if name == "gh" and args[:2] in (["run", "watch"], ["pr", "checks"]):
+        return f"gh {' '.join(args[:2])}"
+    return ""
+
+
+def _dependent_action(argv) -> str:
+    """The action a segment takes that must depend on a check's result, named for a refusal, or '': commit, push,
+    tag, merge, release, publish or deploy, a project's release script (`npm run release`, `make release`) included."""
+    if not argv:
+        return ""
+    name, args = os.path.basename(argv[0]), [str(a) for a in argv[1:]]
+    words = [a for a in args if not a.startswith("-")]
+    if _gated(argv):
+        return " ".join([name, *words[:2]])
+    dev = _dev_args(argv)
+    if dev is not None:
+        return "dev " + " ".join(dev[:2]) if dev[:1] in (["release"], ["deploy"]) or \
+            dev[:2] in (["pr", "merge"], ["pr", "ready"]) else ""
+    if name in ("npm", "pnpm", "yarn", "bun"):
+        if words[:1] == ["publish"]:
+            return f"{name} publish"
+        script = words[1] if words[:1] == ["run"] and len(words) > 1 else words[0] if words else ""
+        return f"{name} run {script}" if _RELEASE_SCRIPTS.match(script) else ""
+    if name in ("make", "gmake", "just", "task") and words and _RELEASE_SCRIPTS.match(words[0]):
+        return f"{name} {words[0]}"
+    if (name, words[:1]) in (("cargo", ["publish"]), ("twine", ["upload"]), ("docker", ["push"]), ("gem", ["push"])):
+        return f"{name} {words[0]}"
+    return ""
+
+
+def ungated_action_refusal(cmd: str) -> str | None:
+    """GATE_REASON when an action that must depend on a check (_dependent_action) follows one (_check_step) in the
+    same command line without depending on its result: the check is not in the action's chain of `&&`, or it is but
+    pipes into a filter and no `set -o pipefail` comes first."""
+    segs = split_commands(cmd, ops=True)
+    if not segs:
+        return None
+    pipefail = False
+    for k, (argv0, _, _, _) in enumerate(segs):
+        argv = _unwrap(argv0)
+        if argv[:1] == ["set"] and any(re.fullmatch(r"-[A-Za-z]*o", a) and argv[i + 2:i + 3] == ["pipefail"]
+                                       for i, a in enumerate(argv[1:])):
+            pipefail = True
+        what = _dependent_action(argv)
+        if not what:
+            continue
+        chained = True  # walking back: the segments joined to the action by `&&` and pipes only
+        for j in range(k - 1, -1, -1):
+            if segs[j][2] not in ("&&", "|", "|&"):
+                chained = False
+            check = _check_step(_unwrap(segs[j][0]))
+            if not check:
+                continue
+            if not chained:
+                return GATE_REASON.format(what=_code(what), check=_code(check))
+            if segs[j][2] in ("|", "|&") and not pipefail and not _gated(argv):  # its status lost to a filter;
+                # PIPE_GATE judges git, dev and gh, with its DEVKIT_PIPE_OK hatch, which opens this one too
+                why = GATE_REASON.format(what=_code(what), check=_code(check))
+                hatch = _pipe_gate_open(cmd) == "hatch"
+                if not hatch or not _hatch({"DEVKIT_PIPE_OK"}, "DEVKIT_PIPE_OK", "pipe-gate", why):
+                    return why
+            break
+    return None
+
+
 # The variables that tell a program an agent runs it (core.AGENT_MARKERS): a project's own tools read them to act
 # differently for agents, so an agent must not hide them.
 IDENTITY_REASON = ("This command hides from what it runs that an agent runs it: it unsets or blanks {name} (`unset`, "
@@ -1282,7 +1384,7 @@ def _check_bash_reading(cmd: str, cwd: str, agent: str):
         evidence_forgery(cmd, cwd or os.getcwd())
     if v:
         return v
-    why = wait_then_work_refusal(cmd)
+    why = wait_then_work_refusal(cmd) or ungated_action_refusal(cmd)
     if why:
         return deny(why)
     if PIPE_GATE.search(cmd):

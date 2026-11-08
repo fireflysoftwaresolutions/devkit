@@ -45,6 +45,27 @@ class WaitAlone(unittest.TestCase):
                 self.assertIsNone(check(cmd))
 
 
+class ActionsGatedOnTheResult(unittest.TestCase):
+
+    def test_an_action_that_ignores_the_check_before_it_is_refused(self):
+        for cmd in ("npm test; npm run release", "npm test | tail -3 && npm run release",
+                    "dev ci watch --pr 12 | tail -3; npm run release -- --no-check > log 2>&1",
+                    "python3 -m unittest tests.test_x; git commit -m x", "pytest; git add . && git commit -m x",
+                    "make test || make release", "npm run build; npm publish", "pnpm lint; pnpm run release",
+                    "cargo test; cargo publish", "just check; just release", "dev test; dev release"):
+            for agent in ("claude", "codex"):
+                with self.subTest(cmd=cmd, agent=agent):
+                    self.assertIn("gate it on the real result", (check(cmd, agent) or "").lower())
+
+    def test_an_action_that_depends_on_the_result_or_follows_no_check_runs(self):
+        for cmd in ("npm test && npm run release", "set -o pipefail; npm test | tail -3 && npm run release",
+                    "npm run release", "make test && make release", "git add . && git commit -m x",
+                    "python3 -m unittest tests.test_x && git add -A && git commit -m x", "npm test; npm run lint",
+                    "npm run release:notes > notes.md; echo done"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(check(cmd))
+
+
 class AgentIdentityStays(unittest.TestCase):
 
     def test_unsetting_or_blanking_an_identity_variable_is_refused(self):
