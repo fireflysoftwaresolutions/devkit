@@ -1251,7 +1251,7 @@ def _gate_message(agent: str, missing: list, cwd, chained: bool = False) -> str:
             "id in your reply, and when it fires, report the result.")
 
 
-def stop_gate(agent: str, data: dict, runs_fn=None, now: float | None = None) -> str | None:
+def stop_gate(agent: str, data: dict, runs_fn=None, now: float | None = None, defer: bool = False) -> str | None:
     """The Stop hook. A turn that sent work to origin (a push, a PR created or made ready but not as a draft, a
     merge, a release, as targets() reads them) whose CI run has not finished must leave a watch on that run that
     wakes this agent, started in this session: on Claude Code a live Monitor or background command running
@@ -1259,7 +1259,8 @@ def stop_gate(agent: str, data: dict, runs_fn=None, now: float | None = None) ->
     turn. So must an agent's own watch of this session that stopped before its run ended. devkit's background watch
     does not count alone: it reports at the next hook, which an idle session never reaches; with a live `dev watch
     --wait` of this session's main session (watch.armed), which takes that report when it lands, it does. -> the
-    message that sends the turn back once, naming each run and the command to start, or None."""
+    message that sends the turn back once, naming each run and the command to start, or None. With `defer` (the one
+    wait is asked in the same turn) a run devkit's background watch follows is left to that wait."""
     now = now or time.time()
     calls, turn = _shell_calls(data.get("transcript_path"), now)
     sent = []
@@ -1286,7 +1287,7 @@ def stop_gate(agent: str, data: dict, runs_fn=None, now: float | None = None) ->
                and c["wake"] != "foreground" and not c["alone"] and (c["live"] or i >= turn)]
     missing, armed = [], None
     for s in sent:
-        if any(_covers(w, s) for w in watching):
+        if any(_covers(w, s) for w in watching) or (defer and _devkit_watches(agent, sid, s, now)):
             continue
         still, runs = _unfinished(s, runs_fn, now)
         if not still:

@@ -173,10 +173,26 @@ class CiRuleTests(StopRuleCase):
 
     def test_a_live_global_wait_covers_the_ci_rule_of_a_push(self):
         # 26.11.6 asked for a `dev ci watch --wait` of the commit even when a wait for every event was armed
-        self.assertIn("dev ci watch --wait", self.stop().get("reason") or "")  # nothing armed: the CI rule asks
+        self.assertIn("dev watch --wait", self.stop().get("reason") or "")  # nothing armed: the one wait is asked
         self.shell("dev watch --wait", "toolu_w", "Command running in background with ID: bw1. Output is being "
                                                   "written to: /tmp/bw1.output", background=True)
         self.assertEqual(self.stop(), {})
+
+    def test_a_push_devkit_follows_asks_for_the_one_wait_only(self):
+        # the turn went back with two instructions: a `dev ci watch --wait` of the commit, and `dev watch --wait`,
+        # "one wait covers the CI results too"
+        reason = self.stop().get("reason") or ""
+        self.assertIn("run `dev watch --wait` with Bash run_in_background", reason)
+        self.assertNotIn("dev ci watch --wait", reason)
+
+    def test_a_push_devkit_does_not_follow_asks_for_its_own_watch_and_no_wait_claims_to_cover_it(self):
+        for f in (self.root / "ci-live").glob("*.json"):
+            f.unlink()  # devkit's background watch of the commit is gone
+        self.member_works()
+        reason = self.stop().get("reason") or ""
+        self.assertIn("dev ci watch --wait", reason)
+        self.assertIn("Backend engineer (Tank)", reason)
+        self.assertNotIn("One wait covers the CI results too", reason)
 
 
 if __name__ == "__main__":

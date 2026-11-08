@@ -749,12 +749,12 @@ def lane_notices(run: dict, moves: list):
 
 # --------------------------------------------------------------------------- the end of a turn
 
-def stop_gate(agent: str, data: dict, now=None) -> str | None:
+def stop_gate(agent: str, data: dict, now=None, ci_apart: bool = False) -> str | None:
     """The Stop hook, for the main session, once per turn. A turn that ends while events can still arrive (a member
     works, a launch is pending, a step waits for a slot, CI this session sent has not finished) must leave a wait
     that wakes the session: on Claude Code a live `dev watch --wait` (its record, or a background command or Monitor
     of the transcript); on Codex one run in the foreground in this turn. -> the message that sends the turn back
-    once, or None."""
+    once, or None. With `ci_apart` the CI rule names its own watch, so this one does not claim to cover CI."""
     if data.get("stop_hook_active") or data.get("agent_id"):
         return None
     now = now or time.time()
@@ -772,7 +772,7 @@ def stop_gate(agent: str, data: dict, now=None) -> str | None:
                 "foreground now and act on what it prints, or end the turn saying what still runs and that you check "
                 "it at the developer's next message.")
     return (head + " Before you end the turn, run `dev watch --wait` with Bash run_in_background, name its task id, and "
-            "arm it again after each wake. One wait covers the CI results too.")
+            "arm it again after each wake." + ("" if ci_apart else " One wait covers the CI results too."))
 
 
 # --------------------------------------------------------------------------- dev watch, dev watches
