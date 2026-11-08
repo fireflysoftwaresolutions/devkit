@@ -426,7 +426,8 @@ class ProcedureTests(unittest.TestCase):
 
     def test_a_brief_carries_the_knowledge_of_its_kind_of_work_with_the_skill_files(self):
         brief = crew.brief_text(crew.member("tank"), "write the missing tests for the orders API")
-        self.assertIn("- `testing`: `", brief)  # the testing skill, with where its SKILL.md is
+        # the testing skill, with the phases the gates check it in and where its SKILL.md is
+        self.assertIn("- `testing` (Tests first and Integration and Verify phases): `", brief)
         self.assertIn("superpowers:test-driven-development", brief)
         self.assertIn("## Read first", brief)
         self.assertIn("docs/testing.md", brief)  # devkit's own testing guide
