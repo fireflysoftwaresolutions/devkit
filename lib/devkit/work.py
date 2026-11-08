@@ -44,8 +44,8 @@ LIST_FIELDS = ("links",)  # written as `[a, b]`; every other value is text, even
 
 # --------------------------------------------------------------------------- identity
 
-def actor(agent: str = None, session: str = None) -> dict:
-    user = core.github_user() or os.environ.get("USER", "unknown")
+def actor(agent: str = None, session: str = None, user: str = None) -> dict:
+    user = user or core.github_user() or os.environ.get("USER", "unknown")
     host = socket.gethostname().split(".")[0].lower()
     agent = agent or os.environ.get("DEVKIT_AGENT") or ("claude" if os.environ.get("CLAUDECODE") else
                                                         "codex" if os.environ.get("CODEX_SANDBOX") or
@@ -572,15 +572,33 @@ def _report_skipped(job: str, op: str, skipped: list) -> None:
         audit.record("handoff.record-skipped", target, f"{err.path.stem}: {op}", outcome="blocked")
 
 
-def renew_locks(a=None, hours: float = None) -> int:
-    """Extend the locks this actor holds (called while a session is active)."""
+def _links(it: dict) -> list:
+    links = it["meta"].get("links") or []
+    return [x.strip() for x in links.strip("[]").split(",")] if isinstance(links, str) else list(links)
+
+
+def _live_branches(sessions) -> set:
+    """(project, branch) of each live session: the branches someone is working on now."""
+    return {(s.get("project"), s.get("branch")) for s in sessions or []
+            if s.get("active") and s.get("project") and s.get("branch")}
+
+
+def renew_locks(a=None, hours: float = None, sessions=None) -> int:
+    """Extend the locks this actor holds on items linked to a branch (`branch:<name>`, set by `claim`) that one of the
+    live sessions on this machine is on now. `sessions`: `registry.live_sessions()` (read when None). Any other lock
+    is left to run out after `work.lock_hours`, and `expire_locks` then sends its item back to todo."""
     a = a or actor()
     hours = hours or float(core.CFG.get("work", {}).get("lock_hours", 8))
+    if sessions is None:
+        from .registry import live_sessions
+        sessions = live_sessions()
+    live = _live_branches(sessions)
     me = f"{a['user']}@{a['host']}"
     changed, skipped = [], []
     for it in all_items():
         holder, expired = lock_holder(it)
-        if holder and holder.startswith(me) and not expired:
+        working = any((it["scope"], ln[len("branch:"):]) in live for ln in _links(it) if ln.startswith("branch:"))
+        if holder and holder.startswith(me) and not expired and working:
             if parse_iso(it["meta"]["lock_expires"]) - time.time() < hours * 1800:
                 it["meta"]["lock_expires"] = now_iso(time.time() + hours * 3600)
                 try:
@@ -596,25 +614,125 @@ def renew_locks(a=None, hours: float = None) -> int:
 
 
 def expire_locks() -> list:
-    """Release expired locks (run by the hourly sync on any machine)."""
-    out, skipped = [], []
+    """Release expired locks (run by the hourly sync on any machine). A doing item goes back to todo, so nobody's
+    board shows work in progress that nobody holds; a blocked item stays blocked. One commit for all."""
+    out, skipped, back = [], [], 0
     for it in all_items():
         holder, expired = lock_holder(it)
         if holder and expired:
             m = it["meta"]
-            it["changelog"].insert(0, f"v{m['version'] + 1} · {now_iso()} · devkit · lock of {holder} expired")
+            doing = m.get("status") == "doing"
+            it["changelog"].insert(0, f"v{m['version'] + 1} · {now_iso()} · devkit · lock of {holder} expired at "
+                                      f"{m.get('lock_expires')}" + (": back to todo" if doing else ""))
             m["version"] += 1
             m["claimed_by"] = m["claimed_at"] = m["lock_expires"] = ""
+            if doing:
+                m["status"] = "todo"
             try:
                 write_record(it["path"], render(it))
             except RecordLossError as e:
                 skipped.append(e)
                 continue
             out.append(it["path"])
+            back += 1 if doing else 0
     if out:
-        _commit(out, f"release {len(out)} expired lock(s)", push=False)
+        _commit(out, f"release {len(out)} expired lock(s)" + (f", {back} item(s) back to todo" if back else ""),
+                push=False)
     _report_skipped("expired-lock release", "lock-release-skipped", skipped)
     return out
+
+
+# --------------------------------------------------------------------------- items of merged branches
+
+OPEN = ("todo", "doing", "blocked")
+
+
+def linked_open(scope: str, branches) -> list:
+    """The open items of `scope` linked to one of `branches` (`branch:<name>`, set by `claim`): [(item, branch)]."""
+    want, out = set(branches or ()), []
+    for it in all_items(scope):
+        if it["meta"].get("status") not in OPEN:
+            continue
+        branch = next((ln[len("branch:"):] for ln in _links(it)
+                       if ln.startswith("branch:") and ln[len("branch:"):] in want), None)
+        if branch:
+            out.append((it, branch))
+    return out
+
+
+def _apply(changes, a: dict, job: str, op: str, message) -> list:
+    """Write each (item, op, detail, meta changes) through `write_record`, then one commit whose message is
+    `message(<items written>)`. An item the write would shrink is left as it is and reported (`_report_skipped`).
+    -> the written items."""
+    done, skipped = [], []
+    for it, verb, detail, meta in changes:
+        it["meta"].update(meta)
+        _touch(it, a, verb, detail=detail)
+        try:
+            write_record(it["path"], render(it))
+        except RecordLossError as e:
+            skipped.append(e)
+            continue
+        done.append(it)
+    if done:
+        _commit([it["path"] for it in done], message(len(done)) + f" ({actor_str(a)})")
+    _report_skipped(job, op, skipped)
+    return done
+
+
+UNLOCK = {"claimed_by": "", "claimed_at": "", "lock_expires": ""}
+
+
+def close_merged(scope: str, branch: str, detail: str, a=None) -> list:
+    """After `branch` is merged, every open item of `scope` linked to it is done and its lock cleared, whoever holds
+    it: the work landed. `detail` says where (`merged in PR #7 (abc1234)`) and goes in each changelog line. One
+    commit. -> the closed items."""
+    a = a or actor()
+    changes = [(it, "done", detail, dict(UNLOCK, status="done")) for it, _ in linked_open(scope, [branch])]
+    return _apply(changes, a, "merge", "merge-close-skipped", lambda n: f"close {n} item(s) of {branch}: {detail}")
+
+
+def normal_title(title: str) -> str:
+    """A title for comparison: lower case, words only (`Add the CSV export.` and `add the  csv export` match)."""
+    return " ".join(re.sub(r"[^\w]+", " ", (title or "").lower()).split())
+
+
+def _brief(it: dict, **extra) -> dict:
+    m = it["meta"]
+    return dict({"id": m.get("id"), "title": m.get("title") or it.get("title"), "status": m.get("status")}, **extra)
+
+
+def reconcile(scope: str, merged: dict, apply: bool = False, a=None) -> dict:
+    """What is stale in `scope`'s items: doing items without a live lock, open items linked to a branch in `merged`
+    (branch -> {"sha", "pr"}: the merges into the default branch, `gitx.merged_into_default`), and items that share a
+    normalized title (open ones, with any done one of the same title). `apply` closes the merged ones (done, with
+    the merge commit as evidence) and sends the lockless doing ones back to todo, each with a changelog line, in one
+    commit; the same titles are only reported. Without `apply` nothing is written.
+    -> {"scope", "lockless_doing", "merged", "duplicates", "changed": the ids written}"""
+    items = all_items(scope)
+    shipped = linked_open(scope, merged)
+    closing = {it["meta"]["id"] for it, _ in shipped}
+    lockless = [it for it in items if it["meta"].get("status") == "doing" and it["meta"]["id"] not in closing
+                and (not lock_holder(it)[0] or lock_holder(it)[1])]
+    groups = {}
+    for it in items:
+        if it["meta"].get("status") != "cancelled" and normal_title(it["meta"].get("title")):
+            groups.setdefault(normal_title(it["meta"].get("title")), []).append(it)
+    dups = [g for g in groups.values() if len(g) > 1 and any(i["meta"].get("status") in OPEN for i in g)]
+    report = {"scope": scope, "lockless_doing": [_brief(it) for it in lockless],
+              "merged": [_brief(it, branch=b, commit=merged[b]["sha"], pr=merged[b].get("pr")) for it, b in shipped],
+              "duplicates": [[_brief(it) for it in g] for g in dups], "changed": []}
+    if not apply:
+        return report
+    a = a or actor()
+    changes = [(it, "done", f"{b} merged in {merged[b]['sha'][:7]}" +
+                (f" (PR #{merged[b]['pr']})" if merged[b].get("pr") else ""), dict(UNLOCK, status="done"))
+               for it, b in shipped]
+    changes += [(it, "todo", "doing without a lock: back to todo", dict(UNLOCK, status="todo")) for it in lockless]
+    written = _apply(changes, a, "reconcile", "reconcile-skipped",
+                     lambda n: f"reconcile {n} item(s): {len(shipped)} merged, {len(lockless)} back to todo")
+    report["changed"] = [it["meta"]["id"] for it in written]
+    return report
 
 
 # --------------------------------------------------------------------------- sessions log and presence

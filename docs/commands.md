@@ -238,7 +238,7 @@ of the title. See [Teams and machines](teams.md) for locks, versions, and the ch
 | Verb | Effect |
 | --- | --- |
 | `add <title> [options]` | Creates a work item (see the next table) |
-| `start <selector> [--why]` | Claims the lock (8 hours by default), pushes it at once, and moves a todo item to Now as doing. Run in the project's checkout on a work branch, it links the branch (`branch:<name>` in the item's links, in the private handoff), so the branch map shows the task without its id in the branch name |
+| `start <selector> [--why]` | Claims the lock (8 hours by default), pushes it at once, and moves a todo item to Now as doing. Run in the project's checkout on a work branch, it links the branch (`branch:<name>` in the item's links, in the private handoff), so the branch map shows the task without its id in the branch name. The lock is renewed only while one of your live sessions is on that branch; otherwise it runs out and the item goes back to todo |
 | `claim <selector> [--why]` | Same as `start` |
 | `release <selector> [--why]` | Gives the lock back; the item returns to todo |
 | `done <selector> [--why]` | Marks the item done and releases the lock |
@@ -252,6 +252,7 @@ of the title. See [Teams and machines](teams.md) for locks, versions, and the ch
 | `link <selector> --to SLUG --why "…"` | Counts a project task toward an initiative (adds the link `initiative:<slug>`) |
 | `show <selector>` | The item's fields, its description, and its history |
 | `history <selector>` | The item's changelog only |
+| `reconcile [--apply] [--json]` | Reports the stale items of a project: doing without a lock, open although their branch is merged into the default branch on `origin`, and the same title more than once. It changes nothing; `--apply` closes the items of merged branches (done, the merge commit as evidence) and sends doing items without a lock back to todo, in one commit. See [Teams and machines › Shipped and stale items](teams.md#shipped-and-stale-items) |
 | `ls` | The open items (the default) |
 
 Options of `dev task add`:
@@ -869,7 +870,7 @@ a fresh fetch, that `origin` has nothing you lack, no WIP or fixup commits, a fi
 | `dev pr view [n] [--body] [--json]` | One-line state: branches, checks, review, conflicts, size, author, age, address |
 | `dev pr ls [--all] [--all-projects [--offline]] [--json]` | Your open PRs and those waiting for your review; `--all` adds the others; `--all-projects` covers every project |
 | `dev pr checks [n] [--watch [--fail-fast] [--interval S] [--timeout MIN]] [--lines N] [--json]` | Pass, fail, and pending counts; each failing job with its trimmed log (25 lines). Exits with `0` (passed), `1` (failed), or `8` (pending). When every check was skipped (a draft's run skips the jobs with the draft gate), it reports no checks yet and exits with `8`, never passed. `--watch` waits and prints only the result; it also waits up to two minutes for the real run after `dev pr ready` |
-| `dev pr merge [n] [--squash \| --merge \| --rebase] [--auto] [--keep-branch] [--dry-run]` | Merges when the checks passed and the reviews allow it, with the repository's method (checks that were all skipped have not passed: it waits for the real run); a squash commit gets the PR title and its "What and why"; then deletes the branch and updates the default branch locally. `--auto` lets GitHub merge when the checks pass |
+| `dev pr merge [n] [--squash \| --merge \| --rebase] [--auto] [--keep-branch] [--dry-run]` | Merges when the checks passed and the reviews allow it, with the repository's method (checks that were all skipped have not passed: it waits for the real run); a squash commit gets the PR title and its "What and why"; then deletes the branch and updates the default branch locally, and marks the open work items linked to the merged branch as done (`merged in PR #<n> (<short sha>)` in their changelog; the output names them). `--auto` lets GitHub merge when the checks pass and closes no item |
 | `dev pr ready [n] [--ci-passed] [--lang L]` | Marks a draft ready after checking its title and required sections. Marking ready starts the one CI run, so for the current branch it also needs the PR's head to be your HEAD and local CI evidence for it (`--ci-passed` attests it) |
 | `dev pr comment [n] -m "…" \| --body-file F` | Comments on a PR |
 | `dev pr review [n] --approve \| --request-changes \| --comment [-m "…"]` | Reviews a PR; `--request-changes` and `--comment` need a message |
@@ -883,13 +884,18 @@ a fresh fetch, that `origin` has nothing you lack, no WIP or fixup commits, a fi
 | `dev run view [id] [--failed] [--lines N] [--json]` | A run's failing jobs and their failing step (default: the branch's latest run); `--failed` adds the trimmed logs (30 lines). Exits with `1` when a job failed |
 | `dev run rerun <id> --flaky "test and evidence" [--all-jobs]` | Re-runs the failed jobs of a run, only with a reason for a proven flaky test, which is recorded in `~/.local/state/devkit/flaky.jsonl` and the project's session log |
 
-### `dev release [--version V] [--notes-file F] [--ci-passed] [--sign] [--draft] [--prerelease] [--dry-run]`
+### `dev release [--version V] [--notes-file F] [--ci-passed] [--sign] [--draft] [--prerelease] [--dry-run] [--why REASON]`
 
 Tags and publishes a release from a clean default branch that is in step with `origin`, by the delivery policy:
 the next CalVer version unless `--version` (required for other schemes), version files that agree, local CI evidence,
 CI on GitHub not failing or running, and notes from the CHANGELOG section. It creates the annotated (or signed) tag,
 pushes it, and creates the GitHub release. A project that releases with release-please or semantic-release is
 refused. See [Git and GitHub › Releases](git-and-github.md#releases).
+
+It and `--dry-run` also list the open work items linked to the branches merged since the previous tag (the merge
+commits of `<previous tag>..HEAD`) and refuse while any is open. Close the shipped ones (`dev task done`, or
+`dev task reconcile --apply`), or release anyway with `--why "<reason>"`, which the output and the audit
+(`dev.release.open-items`) record. See [Teams and machines › Shipped and stale items](teams.md#shipped-and-stale-items).
 
 ### `dev issue ls | view | create`
 

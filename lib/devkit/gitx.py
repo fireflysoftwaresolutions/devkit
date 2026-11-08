@@ -2326,7 +2326,70 @@ def _pr_merge(c, a) -> int:
         tail.append("remote branch deleted")
         tail.append(_after_merge(c, p.get("headRefName")))
     ok(" · ".join(x for x in tail if x))
+    _close_merged_items(c, p.get("headRefName"), n)
     return 0
+
+
+def _close_merged_items(c, head: str, n) -> list:
+    """The work landed: the open items linked to the merged branch (`branch:<head>`) are done, with the PR and its
+    merge commit in their changelog. A problem with the handoff repository only warns: the merge itself is done."""
+    if not head or not c.pid:
+        return []
+    from . import work
+    try:
+        work.pull()
+        if not work.linked_open(c.pid, [head]):
+            return []
+        pm, _ = gh_json(["pr", "view", str(n), "-R", c.slug, "--json", "mergeCommit"], c)
+        sha = ((pm or {}).get("mergeCommit") or {}).get("oid") or ""
+        closed = work.close_merged(c.pid, head, f"merged in PR #{n}" + (f" ({sha[:7]})" if sha else ""),
+                                   a=work.actor(user=_me() or None))
+    except Exception as e:  # the merge is done; the items wait for `dev task reconcile`
+        ui.warn(f"work items of {head} not closed: {e} (dev task reconcile --apply closes them later)")
+        return []
+    if closed:
+        ok(f"closed {len(closed)} work item(s) linked to {head}: " +
+           ", ".join(f"{i['meta']['id']} “{i['meta']['title']}”" for i in closed))
+    return closed
+
+
+_MERGE_PR = re.compile(r"^Merge pull request #(\d+) from [^/\s]+/(\S+)")
+_MERGE_BRANCH = re.compile(r"^Merge (?:branch '([^']+)'|remote-tracking branch '[^/']+/([^']+)')")
+
+
+def merged_branch(subject: str):
+    """The branch a merge commit's subject names and its PR number: GitHub's `Merge pull request #7 from
+    owner/feat/x`, git's `Merge branch 'feat/x' [into …]` and `Merge remote-tracking branch 'origin/feat/x'`.
+    -> (branch, PR number or None), or (None, None) for any other subject (a squash commit names no branch)."""
+    s = (subject or "").strip()
+    m = _MERGE_PR.match(s)
+    if m:
+        return m.group(2), int(m.group(1))
+    m = _MERGE_BRANCH.match(s)
+    return (m.group(1) or m.group(2), None) if m else (None, None)
+
+
+def merged_branches(top, rev: str) -> dict:
+    """branch -> {"sha", "pr"} for the merge commits of `rev` (a range such as `v26.11.5..HEAD`, or a ref), the
+    newest merge of each branch."""
+    out = {}
+    for ln in core.gitout(top, "log", "--merges", "--format=%H%x09%s", rev).splitlines():
+        sha, _, subject = ln.partition("\t")
+        branch, pr = merged_branch(subject)
+        if branch and branch not in out:
+            out[branch] = {"sha": sha, "pr": pr}
+    return out
+
+
+def merged_into_default(top, default: str) -> dict:
+    """The branches merged into the default branch as origin has it (the local branch when there is no origin):
+    a merge that only exists on this Mac has not shipped. branch -> {"sha", "pr"}."""
+    ref = f"origin/{default}" if _ref_sha(top, f"refs/remotes/origin/{default}") else default
+    return merged_branches(top, ref)
+
+
+def _merge_ref(m: dict) -> str:
+    return f"PR #{m['pr']}" if m.get("pr") else m["sha"][:7]
 
 
 def _after_merge(c, head: str) -> str:
@@ -2700,6 +2763,14 @@ def cmd_release(a) -> int:
         f, v = next(iter(wrong.items()))
         return refuse(f"{f} says {v}, not {version}",
                       "bump the version (and the CHANGELOG) on the release branch, merge it, then release")
+    why = (getattr(a, "why", None) or "").strip()
+    pending = release_open_items(c, current)
+    listing = "".join(f"\n    {it['meta']['id']} “{it['meta']['title']}” · {b} ({_merge_ref(m)})" for it, b, m in pending)
+    if pending and not why:
+        return refuse(f"{len(pending)} open work item(s) linked to branches merged since "
+                      f"{current or 'the first commit'}:{listing}",
+                      "close the shipped ones (dev task done <id>, or dev task reconcile --apply), or release anyway: "
+                      "dev release --why \"<reason>\"")
     ev = evidence(c) if a.dry_run else _evidence_or_attest(c, a.ci_passed, "release")
     if not ev and not a.dry_run:
         return no_evidence(c, "release")
@@ -2723,6 +2794,9 @@ def cmd_release(a) -> int:
     steps = [f"tag {tag} at {head[:7]}" + (" (signed)" if sign else ""), f"push {tag} to origin"]
     if c.provider == "github":
         steps.append("gh release create " + tag + (" with the CHANGELOG section" if notes else " with generated notes"))
+    override = f"released with {len(pending)} open work item(s) · why: {why}" if pending else ""
+    if pending:
+        print(f"  open work items of merged branches, released anyway ({why}):{listing}")
     if a.dry_run:
         ok(f"dry run: release {tag} ({scheme}) · local CI: {describe_evidence(ev)} · remote CI: {remote_ci}")
         for s in steps:
@@ -2739,8 +2813,14 @@ def cmd_release(a) -> int:
     rc, _, err = core.git(c.top, "push", "origin", f"refs/tags/{tag}", timeout=300)
     if rc != 0:
         return fail(f"pushing {tag} failed (the tag exists locally: git tag -d {tag} to retry)", err)
+    if pending:
+        from . import audit
+        audit.record("dev.release.open-items", tag, ", ".join(f"{it['meta']['id']} ({b})" for it, b, _ in pending),
+                     why=why)
     if c.provider != "github":
         ok(f"tagged and pushed {tag} · release pages for {c.host} are not supported yet")
+        if override:
+            ok(override)
         return 0
     args = ["release", "create", tag, "-R", c.slug, "--verify-tag", "--title", tag]
     args += ["--notes", notes] if notes else ["--generate-notes"]
@@ -2755,7 +2835,21 @@ def cmd_release(a) -> int:
     url = (out.strip().splitlines() or [""])[-1]
     ok(f"released {tag} · {url} · verify the artefact: gh release download {tag} -R {c.slug} -D <scratch dir>, "
        f"install and smoke-test it")
+    if override:
+        ok(override)
     return 0
+
+
+def release_open_items(c, since) -> list:
+    """The open work items linked to the branches merged since the tag `since` (every merge of HEAD without one):
+    [(item, branch, {"sha", "pr"})]. The merges are the merge commits of `since..HEAD`."""
+    if not c.pid:
+        return []
+    merged = merged_branches(c.top, f"{since}..HEAD" if since else "HEAD")
+    if not merged:
+        return []
+    from . import work
+    return [(it, b, merged[b]) for it, b in work.linked_open(c.pid, merged)]
 
 
 # --------------------------------------------------------------------------- dev issue
@@ -3197,6 +3291,8 @@ def register(add):
     p.add_argument("--draft", action="store_true")
     p.add_argument("--prerelease", action="store_true")
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--why", metavar="REASON", help="release although work items of the merged branches are still "
+                                                   "open (recorded in the audit and the output)")
 
     p = add("issue", cmd_issue, "Issues (GitHub): ls · view · create")
     sp = p.add_subparsers(dest="issue_cmd", metavar="ls|view|create")

@@ -2,7 +2,7 @@
   "name": "work-item-lifecycle",
   "kind": "state",
   "title": "Life of a work item",
-  "desc": "A work item starts as todo when dev task add creates it. dev task start (or claim) takes an 8-hour lock and makes it doing; release or delegate gives the lock back and returns it to todo, and done releases the lock and closes the item. A lock that is not renewed for 8 hours expires: the item stays doing, unlocked, and anyone may claim it. block, with a reason, marks an item blocked, and unblock returns it to todo (or to doing while it is still claimed). cancel, with a reason, closes any open item.",
+  "desc": "A work item starts as todo when dev task add creates it. dev task start (or claim) takes an 8-hour lock and makes it doing; the lock is renewed only while a session works on the item's branch. release or delegate gives the lock back and returns the item to todo, and so does a lock that runs out. done releases the lock and closes the item, and so does dev pr merge of the item's branch. block, with a reason, marks an item blocked, and unblock returns it to todo (or to doing while it is still claimed). cancel, with a reason, closes any open item.",
   "equal_widths": "all",
   "nodes": [
     {
@@ -42,17 +42,10 @@
       "row": 2
     },
     {
-      "id": "expired",
-      "label": "Doing, unlocked",
-      "sub": "not renewed for 8 h",
-      "col": 2,
-      "row": 2
-    },
-    {
       "id": "cancelled",
       "label": "Cancelled",
       "sub": "with a reason",
-      "col": 1.5,
+      "col": 2,
       "row": 3,
       "family": "olive"
     }
@@ -64,8 +57,7 @@
       "nodes": [
         "todo",
         "doing",
-        "blocked",
-        "expired"
+        "blocked"
       ],
       "dashed": true
     }
@@ -84,7 +76,7 @@
     {
       "from": "doing",
       "to": "todo",
-      "label": "release · delegate",
+      "label": "release · delegate · lock runs out",
       "style": "dashed",
       "from_side": "top",
       "to_side": "top"
@@ -92,7 +84,7 @@
     {
       "from": "doing",
       "to": "done",
-      "label": "done"
+      "label": "done · branch merged"
     },
     {
       "from": "todo",
@@ -106,19 +98,6 @@
       "style": "dashed",
       "from_side": "left",
       "to_side": "left"
-    },
-    {
-      "from": "doing",
-      "to": "expired",
-      "label": "lock expires"
-    },
-    {
-      "from": "expired",
-      "to": "doing",
-      "label": "claim",
-      "style": "dashed",
-      "from_side": "right",
-      "to_side": "right"
     },
     {
       "from": "open",

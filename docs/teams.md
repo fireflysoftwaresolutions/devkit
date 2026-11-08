@@ -15,7 +15,8 @@ It applies equally to one developer with a laptop and a desktop, and to a team t
 - **Write through `dev`.** Work items, session logs, and presence are written only by `dev`; the guard blocks direct
   edits, so versions, locks, and history stay correct.
 - **Finish or give back.** `dev task done <n>` when the work is verified, `dev task release <n>` when you stop
-  without finishing. A lock that nobody renews expires after 8 hours.
+  without finishing. A lock is renewed only while a session works on the item's branch; otherwise it runs out after
+  8 hours and the item goes back to todo. `dev pr merge` closes the items of the branch it merges.
 - **Look before you start.** `dev team` shows who is working on what, on every machine.
 - **Changes travel in seconds.** Every commit, push, PR, release, and handoff change queues a sync that reaches
   GitHub within about 15 seconds; other machines get it at their next pull (see
@@ -109,7 +110,7 @@ then swaps it in, so a reader never sees half a file.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="images/diagrams/work-item-lifecycle-dark.svg">
-  <img src="images/diagrams/work-item-lifecycle-light.svg" alt="Life of a work item: dev task add creates it as todo; start or claim takes an 8-hour lock and makes it doing; release or delegate gives the lock back and returns it to todo; done releases the lock and closes it; a lock that is not renewed for 8 hours expires and the item stays doing but anyone may claim it; block marks an item blocked and release returns it to todo; cancel with a reason closes any open item." width="100%">
+  <img src="images/diagrams/work-item-lifecycle-light.svg" alt="Life of a work item: dev task add creates it as todo; start or claim takes an 8-hour lock and makes it doing; release, delegate, or a lock that runs out returns it to todo; done, or a merge of its branch, releases the lock and closes it; block marks an item blocked and unblock returns it to todo; cancel with a reason closes any open item." width="100%">
 </picture>
 
 | Command | From | To | Lock |
@@ -123,7 +124,9 @@ then swaps it in, so a reader never sees half a file.
 | `dev task cancel <n> --why "…"` | any open state | cancelled | cleared |
 | `dev task delegate <n> --to <login>` | any open state | todo when you held the lock | yours is given back; the teammate claims it |
 | `dev task link <n> --to <slug> --why "…"` | any state | unchanged; it now counts toward the initiative | unchanged |
-| Lock not renewed for 8 hours | doing | doing, unlocked | cleared by the hourly sync on any machine |
+| Lock not renewed for 8 hours | doing (blocked stays blocked) | todo | cleared by the hourly sync on any machine |
+| `dev pr merge` merges the item's branch | any open state | done; the changelog names the PR and its merge commit | cleared |
+| `dev task reconcile --apply` | doing without a lock · open on a merged branch | todo · done | cleared |
 
 Claiming a blocked item keeps it blocked; run `dev task unblock <n>` when the blocker is gone.
 
@@ -140,13 +143,41 @@ Claiming a blocked item keeps it blocked; run `dev task unblock <n>` when the bl
 2. **Respect.** Each session's context lists your claimed tasks and the tasks claimed by others with the line
    `Claimed by others — do NOT work on these`. It also names the people working on the same project right now.
    Changing an item that someone else holds is refused until the lock expires.
-3. **Renew.** While a session works, the Stop hook's background sync (at most every 2 minutes) extends the locks your
-   machine holds once less than half of the lock time is left.
-4. **Expire.** The hourly `sync` job on any machine releases locks whose time has run out. The item keeps its status, and
-   the changelog says whose lock expired.
-5. **Finish.** `done` and `release` give the lock back and push at once.
+3. **Renew.** While a session works, the Stop hook's background sync (at most every 2 minutes) extends a lock your
+   machine holds once less than half of the lock time is left, but only when one of your live sessions is on the
+   item's branch: `dev task start` on a work branch links it (`branch:<name>`). An item claimed on the default
+   branch, or whose branch nobody works on, is not renewed.
+4. **Expire.** The hourly `sync` job on any machine releases locks whose time has run out, in one commit. A doing item
+   goes back to todo, a blocked one stays blocked, and the changelog says whose lock expired and when.
+5. **Finish.** `done` and `release` give the lock back and push at once. `dev pr merge` does it for every open item
+   linked to the branch it merges.
 
 The lock length is `work.lock_hours` in [Configuration](configuration.md).
+
+### Shipped and stale items
+
+The board shows only work that is really open, because three commands close or reset what has shipped or stalled:
+
+| Command | What it does with work items |
+| --- | --- |
+| `dev pr merge <n>` | After the merge, marks every open item linked to the merged branch as done, clears its lock, and writes `merged in PR #<n> (<short sha>)` in its changelog. The output names the items it closed. `--auto` closes nothing until GitHub merges |
+| `dev release` · `dev release --dry-run` | Lists the open items linked to the branches merged since the previous tag (the merge commits of `<previous tag>..HEAD`) and refuses to tag while any is open. `--why "<reason>"` releases anyway; the reason goes in the audit (`dev.release.open-items`) and the output |
+| `dev task reconcile` | Reports the project's doing items without a lock, its open items linked to a branch already merged into the default branch on `origin`, and items that share a title. It changes nothing |
+| `dev task reconcile --apply` | Closes the items of merged branches (done, the merge commit as evidence) and sends the doing items without a lock back to todo, each with a changelog line, in one commit. Items that share a title are only reported |
+
+A branch counts as merged when a merge commit names it, such as GitHub's `Merge pull request #7 from owner/feat/x` or
+git's `Merge branch 'feat/x'`. A squash or rebase merge leaves no such commit, so `dev pr merge` closes those items when it
+merges; for a squash merge made elsewhere, close the item with `dev task done <n>`.
+
+To recover:
+
+- **An item went back to todo while you were still on it.** Your session was on another branch, or on the default
+  branch. Run `dev task start <n>` on the work branch: it takes the lock again and links the branch, so the lock is
+  renewed from then on.
+- **An item was closed by a merge but has work left.** Run `dev task reopen <n> --why "<what is left>"`.
+- **`dev release` refuses because of open items.** Close the shipped ones (`dev task done <n>`, or
+  `dev task reconcile --apply`), or release anyway with `dev release --why "<reason>"`.
+- **Two items share a title.** Keep one and cancel the other: `dev task cancel <n> --why "duplicate of <id>"`.
 
 ### Reasons and history
 

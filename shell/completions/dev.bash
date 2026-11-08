@@ -225,7 +225,7 @@ _dev_spec() {
     'handoff-import') o='-h --help --slug --dry-run' v='--slug=n' p='d' ;;
     'handoff') o='-h --help --edit --path --log --agent' v='--log=n --agent=n' p='l:projects:-::' ;;
     'session') o='-h --help --session --latest -p --project --for-chat --provider --from --members --all' v='--session=n -p=l:projects:ids:: --project=l:projects:ids:: --provider=n --from=n' p='c:brief,carry,compactions,forget f' ;;
-    'task') c='add start claim release done block unblock cancel reopen show history link delegate move edit ls' o='-h --help -p --project -i --initiative --all' v='-p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' ;;
+    'task') c='add start claim release done block unblock cancel reopen show history link delegate move edit reconcile ls' o='-h --help -p --project -i --initiative --all' v='-p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' ;;
     'task add') o='-h --help --now --next --later --type --priority --due --body --why --claim --done --no-template -p --project -i --initiative' v='--type=c:task,feature,bug,spike --priority=c:high,normal,low --due=n --body=n --why=n --done=n -p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' p='*n' ;;
     'task start') o='-h --help --why -p --project -i --initiative' v='--why=n -p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' p='*l:tasks:-::' ;;
     'task claim') o='-h --help --why -p --project -i --initiative' v='--why=n -p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' p='*l:tasks:-::' ;;
@@ -241,6 +241,7 @@ _dev_spec() {
     'task delegate') o='-h --help --to --why --due --no-copy -p --project -i --initiative' v='--to=n --why=n --due=n -p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' p='*l:tasks:-::' ;;
     'task move') o='-h --help --to --why -p --project -i --initiative' v='--to=c:now,next,later --why=n -p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' p='*l:tasks:-::' ;;
     'task edit') o='-h --help --title --body-file --priority --due --why -p --project -i --initiative' v='--title=n --body-file=f --priority=c:high,normal,low --due=n --why=n -p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' p='*l:tasks:-::' ;;
+    'task reconcile') o='-h --help --apply --json -p --project -i --initiative' v='-p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' ;;
     'task ls') o='-h --help -p --project -i --initiative' v='-p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' ;;
     'note') o='-h --help -p --project -i --initiative' v='-p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' p='c:set *n' ;;
     'plan') c='new revise approve supersede ls' o='-h --help -p --project -i --initiative' v='-p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' ;;
@@ -346,7 +347,7 @@ _dev_spec() {
     'run ls') o='-h --help --branch --all-branches --limit --json' v='--branch=l:branches:-:: --limit=n' ;;
     'run view') o='-h --help --failed --lines --json' v='--lines=n' p='n' ;;
     'run rerun') o='-h --help --flaky --all-jobs' v='--flaky=n' p='n' ;;
-    'release') o='-h --help --version --notes-file --ci-passed --sign --draft --prerelease --dry-run' v='--version=n --notes-file=f' ;;
+    'release') o='-h --help --version --notes-file --ci-passed --sign --draft --prerelease --dry-run --why' v='--version=n --notes-file=f --why=n' ;;
     'issue') c='ls view create' o='-h --help' ;;
     'issue ls') o='-h --help --mine --label --state --limit --json' v='--label=n --state=c:open,closed,all --limit=n' ;;
     'issue view') o='-h --help --comments --json' p='n' ;;

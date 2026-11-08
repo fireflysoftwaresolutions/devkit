@@ -1316,7 +1316,7 @@ def cmd_sync(a):
         try:
             from . import work
             if a.renew:
-                work.renew_locks(work.actor(a.renew))
+                work.renew_locks(work.actor(a.renew), sessions=reg.get("sessions"))
             if a.scheduled:
                 work.pull()
                 work.expire_locks()
@@ -1857,6 +1857,71 @@ def _task_branch(scope: str) -> str:
     return branch if pid == scope and branch != registry.default_branch(main) else ""
 
 
+def _checkout_of(scope: str) -> str:
+    """A checkout of the project on this Mac: the repository you are in when it is that project, else its folder in
+    the workspace. '' when there is none."""
+    top = core.gitout(os.getcwd(), "rev-parse", "--show-toplevel")
+    if top:
+        main = registry.main_of(Path(top)) or Path(top)
+        if core.project_identity(main, core.gitout(top, "config", "--get", "remote.origin.url"))[0] == scope:
+            return top
+    d = core.DEV / scope
+    return str(d) if (d / ".git").exists() else ""
+
+
+def reconcile_text(r: dict, label: str, applied: bool) -> str:
+    """`dev task reconcile`'s report: each kind of stale item, what --apply does with it, then what changed."""
+    def row(i, more=""):
+        return f"    {i['id']}  {i['title']}{more}"
+    out = [ui.section(f"{label} · reconcile")]
+    if r["lockless_doing"]:
+        out.append(f"  Doing without a lock ({len(r['lockless_doing'])}): back to todo with --apply")
+        out += [row(i) for i in r["lockless_doing"]]
+    if r["merged"]:
+        out.append(f"  Open, but their branch is merged ({len(r['merged'])}): done with --apply")
+        out += [row(i, f" · {i['branch']} merged in {i['commit'][:7]}" + (f" (PR #{i['pr']})" if i.get("pr") else ""))
+                for i in r["merged"]]
+    if r["duplicates"]:
+        out.append(f"  Same title ({len(r['duplicates'])} group(s)): review them, then "
+                   f"dev task cancel <id> --why \"duplicate of <id>\"")
+        out += [f"    {', '.join(i['id'] + ' (' + i['status'] + ')' for i in g)}  {g[0]['title']}"
+                for g in r["duplicates"]]
+    fixable = len(r["lockless_doing"]) + len(r["merged"])
+    if not fixable and not r["duplicates"]:
+        out.append(f"{ui.OK} nothing stale in {label}")
+    elif applied:
+        out.append(f"{ui.OK} changed {len(r['changed'])} of {fixable} item(s) in one commit")
+    elif fixable:
+        out.append(ui.dim(f"  nothing changed · dev task reconcile --apply fixes the {fixable} item(s) marked "
+                          f"\"with --apply\""))
+    return "\n".join(out)
+
+
+def _task_reconcile(a, scope: str, label: str) -> int:
+    """`dev task reconcile`: the stale items of a project, from its items and the merges on its default branch."""
+    from . import gitx, work
+    if scope.startswith("initiatives/"):
+        ui.err("dev task reconcile works on a project, whose git history says what was merged: use -p <project>")
+        return 2
+    top = _checkout_of(scope)
+    if not top:
+        ui.err(f"no checkout of {scope} on this Mac: run dev task reconcile inside it (dev go {scope})")
+        return 2
+    default = registry.default_branch(Path(top))
+    if core.gitout(top, "remote"):
+        rc, _, err = core.git(top, "fetch", "-q", "origin", default, timeout=60)
+        if rc != 0:
+            ui.warn(f"git fetch failed ({(err or '').strip()[:120]}); using the last known origin/{default}")
+    if a.apply:
+        work.pull()
+    r = work.reconcile(scope, gitx.merged_into_default(top, default), apply=a.apply)
+    if a.json:
+        print(json.dumps(r, indent=1, ensure_ascii=False))
+    else:
+        print(reconcile_text(r, label, a.apply))
+    return 0
+
+
 def cmd_task(a):
     from . import work
     scope, label = _scope(a)
@@ -1941,6 +2006,8 @@ def cmd_task(a):
                 core.sh(["pbcopy"], input=msg)
                 print(ui.dim("\n(copied to the clipboard — paste it to your teammate)"))
             return 0
+        elif act == "reconcile":
+            return _task_reconcile(a, scope, label)
         elif act in ("show", "history"):
             it = work.find(" ".join(a.selector), scope)
             m = it["meta"]
@@ -3252,6 +3319,11 @@ def build_parser():
     t.add_argument("--priority", dest="priority_set", choices=["high", "normal", "low"])
     t.add_argument("--due")
     t.add_argument("--why")
+    t = tsp.add_parser("reconcile", help="find stale items: doing without a lock, open although their branch is merged, "
+                                         "the same title twice; --apply fixes the first two")
+    t.add_argument("--apply", action="store_true", help="close the items of merged branches (done, the merge commit as "
+                                                        "evidence) and send doing items without a lock back to todo")
+    t.add_argument("--json", action="store_true")
     tsp.add_parser("ls", help="list open items")
     for sub in tsp.choices.values():
         sub.add_argument("-p", "--project", default=argparse.SUPPRESS, help="project (default: the one you are in)")

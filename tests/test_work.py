@@ -247,14 +247,15 @@ class LockJobReportTests(unittest.TestCase):
         def misreading(item):  # a parser bug: a line of the body goes missing
             return real(item).replace("\nKeep this line.\n", "\n", 1)
 
-        jobs = {"lock renewal": (1, lambda: work.renew_locks(A, hours=8), "lock-renewal-skipped"),
+        live = [{"project": "acme/api", "branch": "feat/lock-job", "active": True}]
+        jobs = {"lock renewal": (1, lambda: work.renew_locks(A, hours=8, sessions=live), "lock-renewal-skipped"),
                 "expired-lock release": (-1, work.expire_locks, "lock-release-skipped")}
         with TempHandoff() as h, mock.patch.object(audit, "AUDIT", h.root / "audit"), \
                 mock.patch.object(audit, "policy_file", lambda: h.root / "no-policy.json"):
             for job, (hours, run, op) in jobs.items():
                 with self.subTest(job):
                     it = work.create("acme/api", f"Item for the {job}", body="Context.\n\nKeep this line.", a=A)
-                    it = work.claim(it, a=A, hours=hours)
+                    it = work.claim(it, a=A, hours=hours, branch="feat/lock-job")
                     before = it["path"].read_text()
                     err = io.StringIO()
                     with mock.patch.object(work, "render", misreading), contextlib.redirect_stderr(err):
@@ -271,6 +272,141 @@ class LockJobReportTests(unittest.TestCase):
                             if r["target"] == f"items/acme/api/{it['path'].name}"]
                     self.assertEqual([(r["outcome"], r["detail"]) for r in recs],
                                      [("blocked", f"{it['meta']['id']}: {op}")])
+
+
+def _git_handoff(root: Path) -> None:
+    """The temporary handoff as a git repository without a remote, so `work._commit` really commits."""
+    for args in (["init", "-q"], ["config", "user.name", "Ana Dev"], ["config", "user.email", "ana@example.com"],
+                 ["commit", "-q", "--allow-empty", "-m", "start"]):
+        rc, out, err = core.sh(["git", "-C", str(root), *args])
+        if rc != 0:
+            raise AssertionError(f"git {' '.join(args)} failed: {err or out}")
+
+
+def _subjects(root: Path) -> list:
+    return core.gitout(root, "log", "--format=%s").splitlines()
+
+
+class StaleLockTests(unittest.TestCase):
+    LIVE = {"project": "acme/api", "branch": "feat/export", "active": True}
+
+    def claimed(self, hours=1.0, branch="feat/export", title="Export invoices"):
+        return work.claim(work.create("acme/api", title, a=A), a=A, hours=hours, branch=branch)
+
+    def test_a_lock_renews_while_a_live_session_is_on_its_branch(self):
+        with TempHandoff():
+            it = self.claimed(hours=1)  # an hour left of 8: renewal is due
+            self.assertEqual(work.renew_locks(A, hours=8, sessions=[self.LIVE]), 1)
+            left = work.parse_iso(work.load(it["path"])["meta"]["lock_expires"]) - time.time()
+            self.assertGreater(left, 7.9 * 3600)
+
+    def test_a_lock_runs_out_when_no_live_session_is_on_its_branch(self):
+        cases = {"no session": ("feat/export", []),
+                 "a session on another branch": ("feat/export", [dict(self.LIVE, branch="feat/other")]),
+                 "an ended session on the branch": ("feat/export", [dict(self.LIVE, active=False)]),
+                 "the same branch in another project": ("feat/export", [dict(self.LIVE, project="acme/web")]),
+                 "an item claimed on no branch": ("", [self.LIVE])}
+        for case, (branch, sessions) in cases.items():
+            with self.subTest(case), TempHandoff():
+                it = self.claimed(hours=1, branch=branch)
+                before = work.load(it["path"])["meta"]["lock_expires"]
+                self.assertEqual(work.renew_locks(A, hours=8, sessions=sessions), 0)
+                self.assertEqual(work.load(it["path"])["meta"]["lock_expires"], before)
+
+    def test_an_expired_lock_sends_a_doing_item_back_to_todo_and_says_whose_lock_ran_out_when(self):
+        with TempHandoff():
+            doing = self.claimed(hours=-1)
+            blocked = self.claimed(hours=-1, title="Import invoices")
+            work.update(work.load(blocked["path"]), "block", why="waits for the bank's API", a=A, status="blocked")
+            holder, expires = doing["meta"]["claimed_by"], doing["meta"]["lock_expires"]
+            self.assertEqual(len(work.expire_locks()), 2)
+            after = work.load(doing["path"])
+            self.assertEqual((after["meta"]["status"], after["meta"]["claimed_by"], after["meta"]["lock_expires"]),
+                             ("todo", "", ""))
+            self.assertIn(f"lock of {holder} expired at {expires}", after["changelog"][0])
+            self.assertIn("back to todo", after["changelog"][0])
+            kept = work.load(blocked["path"])
+            self.assertEqual((kept["meta"]["status"], kept["meta"]["claimed_by"]), ("blocked", ""))
+            self.assertNotIn("back to todo", kept["changelog"][0])
+
+    def test_expired_locks_are_released_in_one_commit_that_counts_the_items_back_to_todo(self):
+        with TempHandoff() as h, mock.patch.object(audit, "AUDIT", h.root / "audit"):
+            _git_handoff(h.root)
+            doing = self.claimed(hours=-1)
+            blocked = self.claimed(hours=-1, title="Import invoices")
+            work.update(work.load(blocked["path"]), "block", why="waits for the bank's API", a=A, status="blocked")
+            before = _subjects(h.root)
+            work.expire_locks()
+            self.assertEqual(_subjects(h.root)[1:], before)  # exactly one new commit
+            self.assertEqual(_subjects(h.root)[0], "release 2 expired lock(s), 1 item(s) back to todo")
+            files = core.gitout(h.root, "show", "--name-only", "--format=", "HEAD").splitlines()
+            self.assertEqual(sorted(files), sorted(str(p["path"].relative_to(h.root)) for p in (doing, blocked)))
+
+
+class ReconcileTests(unittest.TestCase):
+    SHA = "abc1234" + "0" * 33
+    MERGED = {"feat/export": {"sha": SHA, "pr": 7}}
+
+    def backlog(self):
+        """A doing item an old expiry left without a lock, an item of a merged branch, two items with one title,
+        and a claimed item on a branch that is not merged."""
+        lockless = work.create("acme/api", "Fix login", a=A)
+        lockless["meta"]["status"] = "doing"
+        work.write_record(lockless["path"], work.render(lockless))
+        merged = work.claim(work.create("acme/api", "Export invoices", a=A), a=A, branch="feat/export")
+        dups = [work.create("acme/api", "Add the CSV export", a=A), work.create("acme/api", "add the  CSV export.", a=A)]
+        held = work.claim(work.create("acme/api", "Refunds", a=A), a=A, branch="feat/refunds")
+        return lockless, merged, dups, held
+
+    def test_reconcile_reports_the_stale_items_and_changes_nothing(self):
+        with TempHandoff():
+            lockless, merged, dups, held = self.backlog()
+            files = {p: p.read_text() for p in (work.ITEMS / "acme" / "api").glob("*.md")}
+            r = work.reconcile("acme/api", self.MERGED)
+            self.assertEqual([i["id"] for i in r["lockless_doing"]], [lockless["meta"]["id"]])
+            self.assertEqual([(i["id"], i["branch"], i["commit"], i["pr"]) for i in r["merged"]],
+                             [(merged["meta"]["id"], "feat/export", self.SHA, 7)])
+            self.assertEqual([sorted(i["id"] for i in g) for g in r["duplicates"]],
+                             [sorted(d["meta"]["id"] for d in dups)])
+            self.assertEqual(r["changed"], [])
+            self.assertEqual({p: p.read_text() for p in files}, files)
+
+    def test_reconcile_apply_closes_the_items_of_merged_branches_with_the_merge_commit(self):
+        with TempHandoff():
+            _, merged, _, held = self.backlog()
+            r = work.reconcile("acme/api", self.MERGED, apply=True, a=A)
+            self.assertIn(merged["meta"]["id"], r["changed"])
+            after = work.load(merged["path"])
+            self.assertEqual((after["meta"]["status"], after["meta"]["claimed_by"]), ("done", ""))
+            self.assertIn("feat/export merged in abc1234 (PR #7)", after["changelog"][0])
+            self.assertEqual(work.load(held["path"])["meta"]["status"], "doing")
+
+    def test_reconcile_apply_sends_doing_items_without_a_lock_back_to_todo(self):
+        with TempHandoff():
+            lockless, _, dups, held = self.backlog()
+            work.reconcile("acme/api", self.MERGED, apply=True, a=A)
+            after = work.load(lockless["path"])
+            self.assertEqual(after["meta"]["status"], "todo")
+            self.assertIn("doing without a lock: back to todo", after["changelog"][0])
+            self.assertEqual([work.load(d["path"])["meta"]["version"] for d in dups], [1, 1])  # reported, not changed
+            self.assertTrue(work.load(held["path"])["meta"]["claimed_by"].startswith("ana@mbp1"))
+
+
+class ReconcileReportTests(unittest.TestCase):
+    REPORT = {"scope": "acme/api", "lockless_doing": [{"id": "T-1", "title": "Fix login", "status": "doing"}],
+              "merged": [{"id": "T-2", "title": "Export invoices", "status": "doing", "branch": "feat/export",
+                          "commit": "abc1234" + "0" * 33, "pr": 7}],
+              "duplicates": [[{"id": "T-3", "title": "Add the CSV export", "status": "todo"},
+                              {"id": "T-4", "title": "add the CSV export.", "status": "done"}]], "changed": []}
+
+    def test_the_report_names_each_stale_item_and_what_apply_does_with_it(self):
+        from devkit import cli
+        text = cli.reconcile_text(self.REPORT, "acme/api", applied=False)
+        self.assertIn("Doing without a lock (1): back to todo with --apply\n    T-1  Fix login", text)
+        self.assertIn("Open, but their branch is merged (1): done with --apply\n"
+                      "    T-2  Export invoices · feat/export merged in abc1234 (PR #7)", text)
+        self.assertIn("    T-3 (todo), T-4 (done)  Add the CSV export", text)
+        self.assertIn("nothing changed · dev task reconcile --apply fixes the 2 item(s)", text)
 
 
 class PlanTests(unittest.TestCase):

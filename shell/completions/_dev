@@ -442,6 +442,7 @@ _dev__task() {
         'delegate:hand a task to a teammate'
         'move:move between Now / Next / Later'
         'edit:change title, description, priority or due date'
+        'reconcile:find stale items'
         'ls:list open items'
       )
       _describe -t commands 'dev task command' cmds && ret=0 ;;
@@ -463,6 +464,7 @@ _dev__task() {
         (delegate) _dev__task__delegate && ret=0 ;;
         (move) _dev__task__move && ret=0 ;;
         (edit) _dev__task__edit && ret=0 ;;
+        (reconcile) _dev__task__reconcile && ret=0 ;;
         (ls) _dev__task__ls && ret=0 ;;
       esac ;;
   esac
@@ -621,6 +623,15 @@ _dev__task__edit() {
     '(--project -p)'{-p+,--project=}'[project (default: the one you are in)]:project: _dev_live projects -' \
     '(--initiative -i)'{-i+,--initiative=}'[an initiative instead of a project]:initiative: _dev_live initiatives -' \
     '*:task: _dev_live tasks -'
+}
+
+_dev__task__reconcile() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--apply[close the items of merged branches]' \
+    '--json[json]' \
+    '(--project -p)'{-p+,--project=}'[project (default: the one you are in)]:project: _dev_live projects -' \
+    '(--initiative -i)'{-i+,--initiative=}'[an initiative instead of a project]:initiative: _dev_live initiatives -'
 }
 
 _dev__task__ls() {
@@ -1902,7 +1913,8 @@ _dev__release() {
     '--sign[signed tag (default: git config tag.gpgSign)]' \
     '--draft[draft]' \
     '--prerelease[prerelease]' \
-    '--dry-run[dry run]'
+    '--dry-run[dry run]' \
+    '--why=[release although work items of the merged branches are still open]:reason: '
 }
 
 _dev__issue() {

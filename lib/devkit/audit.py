@@ -378,7 +378,7 @@ COMMAND_ARGS = {
     "task": "", "task add": "text:text+", "task block": "selector:select+", "task cancel": "selector:select+",
     "task claim": "selector:select+", "task delegate": "selector:select+", "task done": "selector:select+",
     "task edit": "selector:select+", "task history": "selector:select+", "task link": "selector:select+",
-    "task ls": "", "task move": "selector:select+", "task release": "selector:select+",
+    "task ls": "", "task reconcile": "", "task move": "selector:select+", "task release": "selector:select+",
     "task reopen": "selector:select+", "task show": "selector:select+", "task start": "selector:select+",
     "task unblock": "selector:select+",
     "team": "",
