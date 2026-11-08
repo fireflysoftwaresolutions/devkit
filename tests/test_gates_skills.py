@@ -39,6 +39,17 @@ class ScratchFiles(GateCase):
                          ["frontend-design", "impeccable"])
 
 
+class ReviewMembers(GateCase):
+    # a reviewer reads a doc another lane changes during its lane: the reviewer never edits, so the change owes it
+    # no skill
+    def test_a_reviewer_owes_no_skill_for_a_file_it_only_read(self):
+        reviewer = {"id": "seraph", "name": "Seraph", "title": "Code reviewer", "tools": "review", "procedure": []}
+        self.tx.bash("git diff -- docs/crew.md")
+        (self.repo / "docs").mkdir()
+        (self.repo / "docs" / "crew.md").write_text("# The crew\n")  # the writer's lane, while the review runs
+        self.assertEqual([i for r, i in self.rules(self.gates(reviewer)) if r == "skills"], [])
+
+
 class RealRoster(GateCase):
     # the gates on config/crew.json as it ships, with every skill it names installed
     def setUp(self):

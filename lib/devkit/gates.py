@@ -479,7 +479,10 @@ def crew_gates(member, transcript_path, cwd, roster=None, agent: str = "") -> li
                 found.append(_finding("proofs", proof, f"`{proof}` is not among your {len(commands)} shell commands "
                                       "(text inside quotes or a heredoc does not count)",
                                       f"run `{proof}{PROOF_ARGS.get(proof, '')}`"))
-    found += _skill_findings(m, inv, loaded, paths + touched, top, kinds, agent)
+    # a member that never edits (tools review or read) wrote nothing through its shell: a file its commands name that
+    # changed during its lane is another lane's, and owes it no skill
+    edits = (m or {}).get("tools") not in ("review", "read")
+    found += _skill_findings(m, inv, loaded, paths + (touched if edits else []), top, kinds, agent)
     if in_repo or shell:
         written = {**_written(transcript_path), **shell}
         changed = in_repo + sorted(shell)
