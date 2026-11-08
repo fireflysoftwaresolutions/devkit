@@ -116,7 +116,9 @@ explains what moves each record and how to repair one that drifted.
   only members that still work count and hold a slot, a stale one is marked stale (Stopped reporting on the
   dashboard), and one that ended is left out; the brief after a compaction names it on an "Ended since" line. The
   scheduled sweep reads Claude Code's records beside every session transcript devkit knows, so it closes such
-  lanes, with the reason in the run's history.
+  lanes, with the reason in the run's history. `dev crew delegate` and `dev progress assign` give no step to such a
+  member and refuse no scope it held: the step waits for a new launch, and the sweep sends a step that started after
+  its member ended back to pending, never to unverified.
 - **The dashboard no longer warns about commits merged by content.** A project's health, its actions, and the
   worktrees to reclaim count only commits with no equivalent on `origin`'s default branch.
 - **A stopped rebase no longer stops every handoff sync without a word.** devkit ends it before reads, pulls, commits,
