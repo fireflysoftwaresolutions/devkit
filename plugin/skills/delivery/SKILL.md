@@ -48,7 +48,8 @@ dev pr ready             # once, when the local suite is green: starts the one C
 
 ## 2. Single change
 
-1. Branch from an up-to-date default: `dev branch new feat/x`.
+1. Start the work item, then branch from an up-to-date default: `dev task start <n>`, `dev branch new feat/x` (it
+   links the item to the branch, and the item's lock renews while you work there).
 2. Work in small verified steps (targeted tests while iterating), committing with `dev commit --why … --verified …`;
    back up as you go (`dev backup`).
 3. Before the first push that starts CI, run the full local equivalent of CI (lint, types, unit, integration, build,
@@ -75,6 +76,8 @@ dev pr checks --watch
   repository, so you can merge their local branches directly.
 - Never merge the individual PRs one by one to "see what CI says." The integration PR supersedes them: when it is
   merged, GitHub marks them merged (their commits are included) or close them with a link.
+- `dev pr merge` closes the items of the integration branch only. The branches it carried are merged too (by ancestry
+  or by content): `dev task reconcile --apply` closes their items, and `dev branch prune` lists them for deletion.
 
 ## CI is watched for you
 
@@ -118,12 +121,19 @@ signal to stop and reproduce locally.
 
 ## 5. Release
 
-1. From the verified, green integration branch: merge with the repository's strategy (squash vs merge commit).
-2. Version: the project's own scheme, otherwise CalVer `YY.MM.PATCH` (`dev calver` prints the next one). Tag
+1. From the verified, green integration branch: merge with the repository's strategy (squash vs merge commit):
+   `dev pr merge`. It marks the merged branch's open items done (the PR and the merge commit in their changelog) and
+   deletes the branch on origin and here, naming a worktree that still holds it (`dev wt rm <branch>`). Arm a watch
+   on the merge commit (`dev ci watch --wait --pr <n>`).
+2. Reconcile: `dev task reconcile`, then `--apply`, or reopen an item with what is left. `dev release` refuses while
+   items of branches merged since the previous tag are open; `--why "…"` overrides it on the record, only for an
+   item that truly stays open.
+3. Version: the project's own scheme, otherwise CalVer `YY.MM.PATCH` (`dev calver` prints the next one). Tag
    `vYY.MM.PATCH` (`git tag -s` if the project signs tags), push the tag, create the GitHub release with notes from the
-   CHANGELOG: `dev release` does all three (the guard refuses a raw `gh release create`).
-3. Verify the published artefact: download/install it from the release and smoke-test it.
-4. Update the handoff note: version, what shipped, follow-ups.
+   CHANGELOG: `dev release` does all three (the guard refuses a raw `gh release create`), and prunes the branches it
+   finds merged. Arm a watch on the tag (`dev ci watch --wait --tag v<version>`).
+4. Verify the published artefact: download/install it from the release and smoke-test it.
+5. Update the handoff note: version, what shipped, follow-ups. `dev branch prune` shows no merged branch left.
 
 ## 6. GitOps rules
 

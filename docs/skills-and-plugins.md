@@ -39,10 +39,12 @@ agent's copy when it differs from the checkout.
 | `testing` | Tests that can fail for a real bug, a strategy per kind of code, TDD done right, running only what a change can break (`dev test`), flaky tests, mutation testing, diagnosing an existing suite (see [Testing](testing.md)) |
 | `cicd` | Fast, reliable, DevSecOps pipelines on GitHub Actions, GitLab, Bitbucket and Azure: `dev ci audit` and `dev ci init` (see [CI/CD pipelines](ci-cd.md)) |
 | `crew` | Leading devkit's crew: who to send, parallel or in sequence, briefs, lanes, scopes, messages, delegation, guided or automatic decisions (see [The crew](crew.md)) |
+| `work-state` | Keeping devkit's records of work in flight true: what each state of an item, run, step, lane, decision, CI watch, and branch means, what to do before ending a turn, after a merge, and before a release, and how to repair drift (see [Work states](work-states.md)) |
 
 Slash commands: `/devkit:status`, `/devkit:overview`, `/devkit:task`, `/devkit:handoff`, `/devkit:standup`,
 `/devkit:ship`, `/devkit:ci`, `/devkit:dashboard`, `/devkit:doctor`, `/devkit:progress`, `/devkit:crew-status`,
-`/devkit:test`, and `/devkit:stubs`. Codex plugins have no slash commands (their manifest takes skills, hooks, apps,
+`/devkit:test`, `/devkit:stubs`, and `/devkit:reconcile` (runs `dev task reconcile`, the work state check of
+`dev doctor`, `dev ci watches`, and `dev branch prune`, reports the drift, and applies the fixes you agree to). Codex plugins have no slash commands (their manifest takes skills, hooks, apps,
 MCP servers, and scheduled tasks), so `dev install` builds Codex's own copy of the plugin in
 `~/.local/share/devkit/codex-marketplace/`, where each command is a skill of the same name and content; Codex and the
 ChatGPT app list them with the other skills.
@@ -77,6 +79,7 @@ skills they require, in `config/skill-rules.json`, and enforces the mapping in b
 | `crew` | `crew`, `working-efficiently` | the same | `plan` work |
 | `communicating` | `communicating` | `communicating` | `dev task delegate`, `dev report`; `plan` and `scope` work |
 | `learning` | `learning-loop` | `learning-loop` | `dev lesson`, `git revert`; `incident` work |
+| `work-state` | `work-state` | `work-state` | `dev task reconcile`, `dev branch prune`, `dev crew withdraw`, `dev progress confirm`; `release` and `plan` work |
 
 A rule matches on what the work does, never on the words of your request, which can be in any language: globs on the
 files a turn changed (`files`); a regular expression on the content of changed files (`content`, applied to the

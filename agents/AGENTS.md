@@ -63,8 +63,8 @@ For example:
 - **Names.** Write a crew member as `<Role> (<Name>)`, such as Backend engineer (Tank), or by the role alone, in any
   language; never by the Matrix name alone. This holds in the block and the prose of every message and report;
   commands and code keep the ids (`--to tank`). A final message or a report that breaks it is sent back once.
-- **You.** Only what the developer alone can do: a decision, an approval, or an action on their machine or account. Work
-  the crew can do never goes there.
+- **You.** Only what the developer alone can do: an open decision (never a moot or closed one), an approval, or an
+  action on their machine or account. Work the crew can do never goes there.
 - **Truth.** If a rule could not be followed or something failed, the block says so.
 
 The block proves to the user that these global instructions are loaded and followed: devkit checks every reply,
@@ -146,9 +146,10 @@ The developer should never have to ask "how is it going?" Follow the `communicat
   silence.
 - **Background work.** When you launch subagents, parallel sessions, or long commands, say what runs, what it
   produces, and when you expect it. Relay each result when it lands. Never sleep or poll. After a push, PR, merge,
-  release, or any wait you promise, arm a watch that wakes you in the same turn and name its task id: in Claude Code
-  a Monitor or background command running `dev ci watch --wait`; in Codex, that command in the foreground with a
-  timeout. Report the result when it fires.
+  release, or any CI result you promise, arm a watch that wakes you in the same turn: in Claude Code a Monitor or
+  background command running `dev ci watch --wait`, and name its task id; in Codex, which has no background wake-up,
+  that command in the foreground with a timeout. Re-arm a watch that ends before its run (exit 3, `dev ci watches`).
+  Report the result when it fires.
 - **Decisions.** Ask only when the decision is the developer's (scope, behavior, cost, risk, and actions that are
   irreversible or have external effects). Use the decision template: context, options with trade-offs, your
   recommendation, and what you plan to do if they don't answer. Explanations lead with the answer, then how it
@@ -195,19 +196,25 @@ The prompt hook names the route for each request.
   dependencies (`dev progress start --plan "design=30m; api=1h after design; ui=1h after design"`), and assign each
   to its Responsible member with the files it owns (`dev progress assign api --to Tank --scope "services/**"`).
   devkit refuses a member the RACI does not make Responsible for the step; override only with `--why "…"`, which is
-  recorded. Launch members with `dev crew brief`, and name the step in the launch: a step binds only to the launch
-  that names it.
+  recorded. Launch one step per member with `dev crew brief --step`, whose launch description names it: a step binds
+  only to the launch that names it. devkit creates the member's `scratchpad/<member id>/` at launch, the only place
+  it may write scratch files.
 - **Parallel or not.** Run members in parallel only for independent steps with fixed contracts and separate files;
   otherwise in sequence. They share the crew's slots (`progress.max_parallel`, four by default), which shrink as the
   account's 5-hour and weekly usage grows and keep one for the developer's own request; `dev crew next` shows the
-  slots and the order to launch in.
+  slots and the order to launch in. A member stopped with TaskStop or interrupted frees its slot, and its step waits
+  for a new launch; a resumed member needs a free slot to write.
 - **Approval.** The run ends only when each Accountable member has approved the work they own: add a review step for
   them (`dev progress add "review=20m after api"`, then assign it), or end with `dev progress done "…" --why "…"`. A
   review step starts even when the work it follows ended unverified, and its Check ✓ approves that work.
+  `dev progress done` is refused while a member owns a running step: wait for its report, or skip the step with a
+  reason.
 - **Decisions.** Work is **guided** (decisions that are the developer's wait for the developer; the member stops
   until you resume it with the answer) or **auto** (the crew goes on with the recommended option and records it), set
   with `--mode` or `dev crew mode`. Irreversible actions wait for the developer in both, unless the developer
-  pre-approved them.
+  pre-approved them. Only an open decision needs the developer: one whose asking member ended and that blocks no step
+  is moot, and ending the run closes the rest. `dev crew withdraw <id> --why "…"` closes a decision that no longer
+  applies; it is never the developer's answer, so never use it to skip one that still matters.
 
 **The crew talks through devkit, never around it.** Every member records each finished step with `dev progress step
 "…" --check "…"` (its own lane), posts `dev progress note` while a long step runs, asks with `dev crew ask` (a
@@ -225,7 +232,9 @@ history` lists the changes. The `crew` skill has the roster, the patterns, and t
 Close a step only with its evidence (`dev progress step "…" --check "…"`) and only the step that evidence is about:
 devkit refuses a description that does not match the step, a step a member still owns, and a step whose dependencies
 are open. Add work you discover with `dev progress add`, and fix a mistake with `dev progress reopen|skip <step>
---why "…"`; every change is kept in the run's history, which the status, the dashboard, and the handoff rely on.
+--why "…"`; a reopen flags the finished steps that used it, and `dev progress confirm <step> --why "…"` clears one
+whose work still holds. Every change is kept in the run's history, which the status, the dashboard, and the handoff
+rely on.
 
 ## 4. Files and disk
 
@@ -244,8 +253,8 @@ are open. Add work you discover with `dev progress add`, and fix a mistake with 
 - Create a worktree only when the user asks or when work must run in parallel with another session on the same
   repository. Use `dev wt new <type>/<topic>` (or your harness's own worktree feature)—never raw
   `git worktree add`; the devkit guard blocks unmanaged paths.
-- One worktree per task, named after the branch. When its PR is merged, it is cleaned up automatically
-  (`dev gc`); remove it yourself with `dev wt rm <branch>` when you abandon the task.
+- One worktree per task, named after the branch. A merged branch goes with its worktree: `dev branch prune --apply`
+  deletes what `dev pr merge` and the nightly `gc` leave. Remove an abandoned task's worktree with `dev wt rm <branch>`.
 - Never edit another worktree's files from your session, and never use bare `git stash` / `git stash pop` (the stash
   is shared by all worktrees); use a WIP commit instead.
 
@@ -255,8 +264,10 @@ are open. Add work you discover with `dev progress add`, and fix a mistake with 
 - **No AI attribution, ever:** no `Co-Authored-By: Claude/Codex` trailers, no "Generated with …" lines in commits,
   PRs, issues, or code comments.
 - **Branching model (trunk-based GitOps):** `main` is protected and always releasable; every change goes through a
-  short-lived branch from an up-to-date `origin/main` and a PR; rebase on `main` before review; delete the branch
-  after merge. `develop` exists only if the repository already uses it.
+  short-lived branch from an up-to-date `origin/main` and a PR; rebase on `main` before review; never leave a merged
+  branch behind: `dev pr merge` and `dev release` delete it, GitHub does too with `delete_branch_on_merge`
+  (`dev doctor` reports it, `dev delivery apply` sets it), and `dev branch prune` lists the rest. `develop` exists
+  only if the repository already uses it.
 - **Branch names:** `<type>/<ticket>-<topic>`—lowercase kebab-case topic, optional ticket key, ≤ 60 characters.
   Types: `feat` `fix` `refactor` `perf` `docs` `test` `build` `ci` `chore` `deps` `style` `revert` for changes;
   `hotfix/<version-or-topic>` for urgent production fixes; `release/<version>` and `integration/<topic>` for local
@@ -275,8 +286,8 @@ are open. Add work you discover with `dev progress add`, and fix a mistake with 
 - Commit only when the user asks or committing is part of the task. Never push to `main`/`master` directly unless the
   user says so; never plain force-push (use `--force-with-lease` on your own branch only).
 - Use devkit's git and GitHub commands, which apply these rules for you: `dev branch new`, `dev branch ls` (where
-  each branch lives), `dev commit`, `dev backup`, `dev push`, `dev pr create` (the template, pre-filled),
-  `dev pr ready`, `dev pr checks --watch`, `dev run view --failed`, `dev pr merge` and `dev release`. Plain `git` and
+  each branch lives), `dev branch prune`, `dev commit`, `dev backup`, `dev push`, `dev pr create` (the template,
+  pre-filled), `dev pr ready`, `dev pr checks --watch`, `dev run view --failed`, `dev pr merge` and `dev release`. Plain `git` and
   `gh` work for everything else; the guard refuses a raw `gh pr merge` or `gh release create`.
 
 ## 7. Delivery: integrate and verify locally, push once, one CI run
@@ -304,9 +315,9 @@ minutes) and can re-trigger the CI of every other open PR. Follow the devkit `de
    individual PRs. Do not merge PRs one after another to "see what CI says."
 5. **Watch, don't poll:** devkit follows the pipeline after every push, PR, merge or release (`dev ci watch`, in the
    background) and tells your session at its next hook how it ended: green, or red with the first error, its class
-   and the one next action. That wakes no idle session: to wait on it, arm `dev ci watch --wait` (section 3,
-   Background work). Act on it: reproduce locally and fix, or hand it to the Release engineer
-   (`dev crew brief link …`).
+   and the one next action. That wakes no idle session: after every push, merge or release, arm
+   `dev ci watch --wait` and name it in your reply (section 3, Background work). Act on it: reproduce locally and
+   fix, or hand it to the Release engineer (`dev crew brief link …`).
 6. **If CI fails:** read the failing log (`dev run view <id> --failed`), reproduce it locally, fix, re-run the
    local suite, then push once. Never chain speculative "try this" pushes. Only a failure that truly cannot be
    reproduced on macOS (Linux-only paths, CI secrets, runner limits) justifies a CI-only fix, and you say so.
@@ -316,9 +327,11 @@ minutes) and can re-trigger the CI of every other open PR. Follow the devkit `de
    publishing). `dev delivery` shows it, or detects and recommends one with its gaps; `dev delivery apply --why "…"`
    records it in the handoff repository (`release-policy` skill). The session context shows it, and the guard refuses
    tags that break it.
-9. **Release from the verified integration branch:** `dev pr merge` (the repository's strategy), then `dev release`
-   (tag and publish by the policy), then verify the published artifact (download or install it) before calling
-   the release done.
+9. **Release from the verified integration branch:** `dev pr merge` (the repository's strategy; it marks the merged
+   branch's open items done), then `dev task reconcile` (close or reopen what it lists: `dev release` refuses while
+   items of branches merged since the previous tag are open, and `--why` is only for one that truly stays open), then
+   `dev release` (tag and publish by the policy), then verify the published artifact (download or install it) before
+   calling the release done.
 10. **GitOps:** git is the source of truth for code, configuration, and infrastructure. Changes to environments go
     through PRs and tags; no manual changes to deployed systems, no drift.
 
@@ -358,7 +371,9 @@ Follow the devkit `backend` skill for the detailed checklists. Always:
   load them before you start. Briefs for Claude subagents get them appended. A turn that changed matching files
   without loading them is sent back once to load them and review the change. Put the skills in every brief you write.
 - **Working efficiently and communicating:** `working-efficiently` (models, effort, subagents, tokens),
-  `communicating` (updates, decisions, PRs, handovers, formats), `using-devkit` (which `dev` command for which job).
+  `communicating` (updates, decisions, PRs, handovers, formats), `using-devkit` (which `dev` command for which job),
+  `work-state` (keeping items, runs, lanes, decisions, CI watches and branches true; `/devkit:reconcile` checks them
+  all and applies the fixes the developer agrees to).
 - **Code intelligence:** use the LSP tools (TypeScript, Python, Java, PHP) to find definitions, references, and type
   errors rather than grepping when they are available.
 - **Design and architecture:** `grill-with-docs`, `domain-modeling`, `codebase-design`,
@@ -408,12 +423,14 @@ each) → tasks (Now / Next / Later / Done), plans, and sessions.** The devkit `
 - **Initiatives** hold the goal, scope, one workstream per member project, cross-project tasks, decisions and
   contracts (APIs, events, versions) every member must respect. `dev initiative ls|show`, `dev task -i <slug>`.
 
-- **Team protocol (when developers, laptops, and agents share the handoff repo):** claim a task before you work on
-  it (`dev task start <n>`—the lock is pushed at once), never work on a task claimed by someone else (the session
-  context lists them), and finish with `dev task done <n>` or `dev task release <n>`. Changes of scope (edit, move,
-  cancel, block) need `--why "…"`: the reason is versioned in the item's changelog and its commit. After editing a
-  plan or spec run `dev plan revise <file> --why "…"`. Work items, session logs and presence are written only through
-  `dev`, never by hand. `dev team` shows who is working on what.
+- **Team protocol (when developers, laptops, and agents share the handoff repo):** start the item you work on, on its
+  branch, before you work (`dev task start <n>`: the lock is pushed at once and linked to the branch, and renews only
+  while you are on it; elsewhere it expires and the item goes back to todo). Never work on a task claimed by someone
+  else (the session context lists them). Finish with `dev task done <n> --why "<evidence>"` once verified, or
+  `dev task release <n>`; nothing stays doing without a lock. Run `dev task reconcile` before a release and at
+  handoff. Changes of scope (edit, move, cancel, block) need `--why "…"`: the reason is versioned in the item's
+  changelog and its commit. After editing a plan or spec run `dev plan revise <file> --why "…"`. Work items, session
+  logs and presence are written only through `dev`, never by hand. `dev team` shows who is working on what.
 
 Use it, keep it current:
 
@@ -423,10 +440,11 @@ Use it, keep it current:
   `dev note set status=blocked priority=high milestone="…" due=YYYY-MM-DD`; `dev plan new|revise|approve`.
 - `dev standup`—what happened recently; `dev dashboard`—the visual command center (for the user).
 - Slash commands in Claude Code: `/devkit:status`, `/devkit:overview`, `/devkit:task`, `/devkit:handoff`,
-  `/devkit:standup`, `/devkit:ship`, `/devkit:ci`, `/devkit:doctor` (Codex has the same as skills).
+  `/devkit:standup`, `/devkit:ship`, `/devkit:ci`, `/devkit:doctor`, `/devkit:reconcile` (Codex has the same as
+  skills).
 
-Record work as it happens: add a task when you discover follow-up work, `start` it when you begin, `done` it when it is
-verified. Plans and specs go to `{{DEV}}/.handoff/plans/<project id>/`.
+Record work as it happens: add a task when you discover follow-up work. Plans and specs go to
+`{{DEV}}/.handoff/plans/<project id>/`.
 
 ### Handoff
 
@@ -450,3 +468,7 @@ waiting, and the release state.
 A pre-tool hook enforces the workspace rules of these instructions (layout, worktrees, clones, backups, destructive commands, force
 pushes, attribution). When it blocks an action, read the reason and do it the way it describes. Do not try to work
 around it with other commands; if the user really wants the blocked action, tell them what was blocked and why.
+
+devkit runs a pinned release. A session on an older copy writes no managed config (settings, hooks, these
+instructions) and only says to restart: tell the developer. `dev install` and `dev update` list the sessions still
+running; each needs a restart after an update. Use `dev` on the PATH; never run devkit from an old release folder.
