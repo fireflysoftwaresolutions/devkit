@@ -4366,8 +4366,9 @@ def evidence_forgery(cmd: str, cwd):
 # --------------------------------------------------------------------------- crew members (spec F3/F4, guard side)
 #
 # A crew member is a subagent. devkit routes its `dev progress …` and `dev crew ask|answer|…` calls to its own lane
-# only when the call is the whole command (hooks._route_subagent_progress rewrites that one command). A lane call
-# anywhere else runs as Morpheus: it advances the main plan or records the developer's decision, so it is refused.
+# when the call is the whole command, or a call in a flat list with `cd` and reads (lane_route; hooks.
+# _route_subagent_progress rewrites the command). A lane call anywhere else runs as Morpheus: it advances the main plan
+# or records the developer's decision, so it is refused.
 # What counts is what the shell runs (lessons L-fxom7edle07, L-fxpeihqfwzb; B-fxn17sez8cj): the command words, nested
 # shells (bash -c, eval, source, xargs, find -exec, a heredoc a shell reads), the command substitutions the shell
 # expands (inside double quotes too) and the program an interpreter runs when it can start a process. Text a command
@@ -4387,10 +4388,12 @@ _SPAWNS = re.compile(
     # a terminal (F1-R4 part 2)
     r"\bdo (?:shell )?script\b|\bwrite text\b|\bkeystroke\b")
 _SPAWNS_QUOTED = re.compile(r"`[^`]*`|\bqx\b|%x[\[{(]")  # backticks run a command in perl, ruby and php only
-LANE_REASON = ("Run `dev progress …` and `dev crew …` as a command of its own (no `&&`, `;`, pipes, `$(…)`, `bash -c`, "
-               "`env` or `timeout` around it), so devkit can route it to your lane; anywhere else it would act as "
-               "the tech lead. Text that only mentions these commands (a quoted message, a heredoc written to a file) is "
-               "fine, and read-only crew commands (graph, show, raci, …) work anywhere.")
+LANE_REASON = ("Run `dev progress …` and `dev crew …` as a command of its own, or joined with `&&` or `;` to `cd` and "
+               "reads (`cd <worktree> && dev progress step \"…\"`) with only read-only filters piped after it (`| tail "
+               "-5`), so devkit can route it to your lane; inside `$(…)`, `bash -c`, `env`, `timeout`, a loop or next "
+               "to a command that writes or runs code it would act as the tech lead. Text that only mentions these "
+               "commands (a quoted message, a heredoc written to a file) is fine, and read-only crew commands (graph, "
+               "show, raci, …) work anywhere.")
 
 
 _DATA_HEREDOC = re.compile(r"\$\(cat <<(['\"])([A-Za-z_][A-Za-z0-9_]*)\1\n")
@@ -4450,6 +4453,191 @@ def runs_one_command(cmd: str) -> bool:
             return False
         i += 1
     return q is None
+
+
+# A crew member's compound command with lane calls in it (`cd <worktree> && dev progress step "…"`, `dev crew inbox |
+# tail -5`, `git status && dev crew inbox`) is routed too when the shell reads it as a flat list of simple commands
+# the router can place exactly: words, `&&`, `||`, `;`, `|` and newlines, no substitution but a quoted heredoc message,
+# no subshell, group, control word, comment, background job or heredoc, no redirect but to /dev/null or between stderr
+# and stdout. It holds one lane call, which starts its pipeline (nothing feeds it), is typed as `dev …` or a literal
+# path to it, and may be followed only by read-only filters (`| tail -5`, `| grep x`); it gets DEVKIT_FROM_AGENT in
+# front of it. Every other command of the list is a read (_route_read), and is judged again as any command of the lane
+# (crew_shell_verdict with `routed`).
+_ROUTE_REDIRECT = re.compile(r"(?:[12]?>&[12]|(?:[12]|&)?>>?[ \t]*/dev/null)(?=[ \t\n;&|]|$)")
+_ROUTE_FILTERS = frozenset({"head", "tail", "grep", "egrep", "fgrep", "rg", "wc", "cat", "sort", "uniq", "cut", "tr",
+                            "nl", "column", "sed", "jq"})
+_LITERAL_DEV = re.compile(r"(?:~?[A-Za-z0-9_.+-]*/)*dev\Z")
+
+
+def _route_tokens(cmd: str):
+    """The words, operators and redirects of a command in the router's flat grammar, as [(kind, text, start)];
+    None for anything outside it."""
+    out, i, n = [], 0, len(cmd)
+    while i < n:
+        c = cmd[i]
+        if c in " \t":
+            i += 1
+            continue
+        if cmd.startswith(("&&", "||"), i):
+            out.append(("op", cmd[i:i + 2], i))
+            i += 2
+            continue
+        if c in ";|\n":
+            out.append(("op", ";" if c == "\n" else c, i))
+            i += 1
+            continue
+        m = _ROUTE_REDIRECT.match(cmd, i)
+        if m:
+            out.append(("redir", m.group(0), i))
+            i = m.end()
+            continue
+        if c in "&<>(){}#`":
+            return None
+        start, q = i, None
+        while i < n:
+            c = cmd[i]
+            if q == "'":
+                q = None if c == "'" else q
+                i += 1
+                continue
+            if cmd.startswith("$(", i):
+                end = _data_heredoc_end(cmd, i)
+                if end < 0:
+                    return None
+                i = end
+                continue
+            if c == "`":
+                return None
+            if q == '"':
+                if c == "\\":
+                    i += 2
+                    continue
+                q = None if c == '"' else q
+                i += 1
+                continue
+            if c == "\\":
+                if cmd[i + 1:i + 2] in ("\n", ""):
+                    return None
+                i += 2
+                continue
+            if c in "'\"":
+                q = c
+            elif c in " \t\n;&|<>()":
+                break
+            i += 1
+        if q:
+            return None
+        out.append(("word", cmd[start:i], start))
+    return out
+
+
+def _route_read(argv, text) -> bool:
+    """True when one command of a routed list only reads: `cd`, or a reader, a read of git, gh or dev the read-only
+    allowlist names, with no substitution; never an interpreter, a shell or a project check, which run code."""
+    inner = _unwrap(argv)
+    if not inner or not runs_one_command(text):
+        return False
+    name = os.path.basename(inner[0])
+    if _INTERP.match(name) or name in _SHELLS or name in ("eval", "source", ".", "xargs", "find") or \
+            _check_refusal(inner) is None or _crew_kind(_dev_args(inner) or []) in ("team", "sync"):
+        return False
+    return _ro_program(argv, os.getcwd()) is None
+
+
+def _route_plan(cmd: str):
+    """For a compound command in the router's grammar: the offsets of its lane calls' first words, [] when it has
+    none; None when it is outside the grammar or a lane call is where the router cannot place it."""
+    toks = _route_tokens(cmd or "")
+    if not toks:
+        return None
+    pipes, pipe, words, last = [], [], [], ";"
+    for kind, text, at in toks:
+        if kind == "op":
+            if not words:
+                return None  # an empty command: a leading operator, `&& &&`, `| |`
+            pipe.append(words)
+            words = []
+            if text != "|":
+                pipes.append(pipe)
+                pipe = []
+            last = text
+        elif kind == "word":
+            words.append((text, at))
+        elif not words:
+            return None  # a redirect before the command word
+    if words:
+        pipe.append(words)
+    elif last != ";":
+        return None  # a pipe, `&&` or `||` with nothing after it
+    if pipe:
+        pipes.append(pipe)
+    lanes = []
+    for pipe in pipes:
+        for k, words in enumerate(pipe):
+            if words[0][0] in _RESERVED or words[0][0] in ("for", "function", "[[", "]]"):
+                return None  # a control word: the list is not flat
+            text = cmd[words[0][1]:words[-1][1] + len(words[-1][0])]
+            try:
+                argv = shlex.split(text)
+            except ValueError:
+                return None
+            if _crew_kind(_dev_args(_unwrap(argv)) or []) != "lane":
+                if not _route_read(argv, text):
+                    return None  # the rewrite approves nothing but the lane calls and reads
+                continue
+            if k or not _LITERAL_DEV.match(words[0][0]) or not runs_one_command(text):
+                return None  # fed by a pipe, behind a wrapper or a variable, or holding a substitution
+            for fw in pipe[1:]:
+                ftext = cmd[fw[0][1]:fw[-1][1] + len(fw[-1][0])]
+                try:
+                    fargv = shlex.split(ftext)
+                except ValueError:
+                    return None
+                if not fargv or fargv[0] not in _ROUTE_FILTERS or not runs_one_command(ftext) or \
+                        _ro_program(fargv, os.getcwd()):
+                    return None
+            lanes.append(words[0][1])
+    return lanes
+
+
+def lane_route(cmd: str, aid: str):
+    """The command a crew member's shell call becomes so that each of its `dev progress …` and `dev crew ask|answer|
+    inbox|…` calls acts as the member's lane (DEVKIT_FROM_AGENT=<aid> in front of each), or None when it has no lane
+    call or one the router cannot place. A single call is the whole command (a quoted heredoc message is data); a
+    compound command follows _route_plan. The result is read back with the guard's own tokenizer: each lane call it
+    finds must carry the variable, or the command is not routed."""
+    if not isinstance(cmd, str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,80}", str(aid or "")):
+        return None
+    head = f"DEVKIT_FROM_AGENT={aid}"
+    try:
+        argv = shlex.split(cmd) if runs_one_command(cmd) else None
+    except ValueError:
+        argv = None
+    if argv and _LITERAL_DEV.match(cmd.split(None, 1)[0]) and _crew_kind(_dev_args(argv) or []) == "lane":
+        return f"{head} {cmd.strip()}"
+    plan = _route_plan(cmd)
+    if not plan or len(plan) != 1:
+        return None  # one lane call per command: two are two commands
+    out = cmd
+    for at in sorted(plan, reverse=True):
+        out = out[:at] + head + " " + out[at:]
+    segs, before = split_commands(out), split_commands(cmd)
+    if segs is None or before is None or len(segs) != len(before):
+        return None
+    marked = 0
+    for argv0, _ in segs:
+        if _crew_kind(_dev_args(_unwrap(argv0)) or []) == "lane":
+            if argv0[:1] != [head]:
+                return None
+            marked += 1
+    return out if marked == len(plan) else None
+
+
+def _routed_lanes(cmd: str) -> int:
+    """How many lane calls lane_route gives the member's lane in this command (0: it routes none)."""
+    if lane_route(cmd, "a") is None:
+        return 0
+    return 1 if runs_one_command(cmd) else len(_route_plan(cmd) or [])
 
 
 def _subst(s: str, quotes: bool) -> list:
@@ -5845,8 +6033,9 @@ def crew_shell_verdict(cmd: str, cwd, scope=None, member=None, level=None, base=
     (progress.lane_tools), of which the stricter of it and the member's roster level counts; `base`: the folder the
     scope globs count from (scope_base); `lane`: the lane's agent_id, whose step grants count for tier 1 (none without
     it); `session`, `agent`: the session the lane runs in; `grant`: replaces progress.use_grant in tests.
-    `routed`: devkit routes this command to the lane (hooks._route_subagent_progress), so the one lane call it is
-    passes, and everything else is judged as for any command: defense in depth if runs_one_command misreads it."""
+    `routed`: devkit routes this command to the lane (hooks._route_subagent_progress, lane_route), so the lane calls
+    the router marked pass, and everything else is judged as for any command: defense in depth if the router misreads
+    it."""
     if not cmd or not str(cmd).strip():
         return None
     cwd = cwd or os.getcwd()
@@ -5873,9 +6062,9 @@ def crew_shell_verdict(cmd: str, cwd, scope=None, member=None, level=None, base=
         why = _member_gate(cmd, cwd, member, lane, agent, session, grant, now)
         return deny(why) if why else None
     lanes = [1 for argv, code in calls for kind, _ in _dev_calls(argv, code) if kind == "lane"]
-    # the routed call, and the `cat` of a quoted heredoc message it carries (runs_one_command's data form)
-    one_routed = routed and lanes == [1] and [k for k, _ in _dev_calls(*calls[0])] == ["lane"] and \
-        all(argv == ["cat"] for argv, code in calls[1:])
+    # the lane calls the router gave DEVKIT_FROM_AGENT (lane_route): every lane call the shell runs is one of them, so
+    # a lane call nested in a substitution, a shell or a program, which the router never marks, is refused
+    one_routed = bool(routed) and bool(lanes) and len(lanes) == _routed_lanes(cmd)
     for argv, code, at in placed:
         dev = _dev_args(argv) if code is None else None
         imp = impeccable_refusal(impeccable_engine_words(dev[1:])) if dev and dev[:1] == ["impeccable"] else ""

@@ -1134,10 +1134,6 @@ def session_end(agent: str):
 
 # Claude Code's Monitor runs its `command` in the same shell as Bash: it is judged, gated and counted as one
 SHELL_TOOLS = ("Bash", "Monitor", "exec_command", "shell", "local_shell", "unified_exec")
-# what a subagent runs as itself: dev progress …, and dev crew ask, answer, inbox, decide, decisions, mode, delegate,
-# decline and route
-DEV_LANE_CMD = re.compile(r"^\s*(?:\S*/)?dev\s+(?:progress(?:\s|$)|"
-                          r"crew\s+(?:ask|answer|inbox|decide|decisions|mode|delegate|decline|route)(?:\s|$))")
 
 
 def _unroutable_lane_command(data: dict, agent: str = "claude"):
@@ -1147,10 +1143,19 @@ def _unroutable_lane_command(data: dict, agent: str = "claude"):
     lane commands pass; a team change, or `dev crew sync` outside the step's scope, is refused. -> the refusal, or None."""
     if not data.get("agent_id") or data.get("tool_name") not in SHELL_TOOLS:
         return None
-    if _route_subagent_progress(data):
+    if _route_subagent_progress(data, agent):
         return None
     cmd = (data.get("tool_input") or {}).get("command") or ""
     cmd = " ".join(shlex.quote(str(c)) for c in cmd) if isinstance(cmd, list) else str(cmd)
+    from . import guard
+    routed = isinstance((data.get("tool_input") or {}).get("command"), str) and \
+        guard.lane_route(cmd, data["agent_id"]) is not None
+    return _lane_verdict(data, agent, cmd, routed)
+
+
+def _lane_verdict(data: dict, agent: str, cmd: str, routed: bool = False):
+    """guard.crew_shell_verdict for a subagent's shell command, with its lane's scope, member, tool level and
+    repository: the refusal, or None. `routed`: the lane router gives the command's lane calls to the lane."""
     from . import guard
     aid, sid, cwd = data["agent_id"], data.get("session_id") or "-", data.get("cwd") or os.getcwd()
     scope = member = level = base = None  # no lane names no member, so no member folder applies (M124)
@@ -1163,7 +1168,7 @@ def _unroutable_lane_command(data: dict, agent: str = "claude"):
             base = guard.scope_base((run or {}).get("project"), cwd)
         # the lane's id finds its step grant for a tier-1 push or PR (spec C6, M180)
         v = guard.crew_shell_verdict(cmd, cwd, scope, member, level=level, base=base, lane=aid, session=sid,
-                                     agent=agent)
+                                     agent=agent, routed=routed)
     except Exception as e:  # unchecked is not allowed: the member's command fails closed (the Keymaker's review)
         _log(f"crew-lane {agent} {aid}: {traceback.format_exc()[-300:]}")
         return (f"devkit could not check this command against your lane ({type(e).__name__}), so it is refused "
@@ -1365,23 +1370,26 @@ def _member_folder(run: dict, aid: str) -> str:
         return str(aid)
 
 
-def _route_subagent_progress(data: dict):
-    """Inside a subagent (the hook input carries `agent_id`, in Claude Code and Codex), a single `dev progress …`
-    or `dev crew ask|answer|inbox|decide|decisions|mode|delegate|decline|route` command gets DEVKIT_FROM_AGENT, so it
-    updates that subagent's lane (its messages, decisions and delegations come from it, and `decide` refuses it) and
-    never advances the main plan.
-    Compound commands are left alone: the rewrite must not approve anything but that one command."""
+def _route_subagent_progress(data: dict, agent: str = "claude"):
+    """Inside a subagent (the hook input carries `agent_id`, in Claude Code and Codex), each `dev progress …` or
+    `dev crew ask|answer|inbox|decide|decisions|mode|delegate|decline|route` call of its shell command gets
+    DEVKIT_FROM_AGENT, so it updates that subagent's lane (its messages, decisions and delegations come from it, and
+    `decide` refuses it) and never advances the main plan (guard.lane_route). A single call is the whole command (a
+    quoted heredoc message is data, K8). A compound command (`cd <worktree> && dev progress step "…" | tail -3`) is
+    routed only when the lane verdict allows everything else it runs: the rewrite approves nothing but the lane
+    calls."""
     aid = data.get("agent_id")
     inp = data.get("tool_input") or {}
     cmd = inp.get("command")
-    if not aid or data.get("tool_name") not in SHELL_TOOLS or not isinstance(cmd, str) or not DEV_LANE_CMD.match(cmd):
+    if not aid or data.get("tool_name") not in SHELL_TOOLS or not isinstance(cmd, str):
         return None
     from . import guard
-    if not guard.runs_one_command(cmd):  # a quoted heredoc message is data (K8)
+    new = guard.lane_route(cmd, str(aid))
+    if new is None:
         return None
-    if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,80}", str(aid)):
-        return None
-    return {**inp, "command": f"DEVKIT_FROM_AGENT={aid} {cmd.strip()}"}
+    if not guard.runs_one_command(cmd) and _lane_verdict(data, agent, cmd, routed=True):
+        return None  # _unroutable_lane_command gives the refusal
+    return {**inp, "command": new}
 
 
 _HOOK_TEXT = re.compile(r"\bdevkit\.hooks\b|\bfrom\s+devkit\s+import\b[^\n]*\bhooks\b|(?:^|[\s;&|(`'\"])(?:\S*/)?dev\s+"
@@ -1866,7 +1874,7 @@ def _guard(agent: str, data: dict, held: dict):
             print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
                                                      "permissionDecisionReason": _with_pitfalls(agent, data, why)}}))
             return
-        routed = _route_subagent_progress(data)
+        routed = _route_subagent_progress(data, agent)
         if routed:
             out = _rewrite(agent, routed)
             held["done"] = True  # judged and routed to its lane: a failure adding its context must not refuse it
