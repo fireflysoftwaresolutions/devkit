@@ -397,7 +397,9 @@ Follow the devkit `backend` skill for the detailed checklists. Always:
   otherwise ask where.
 - **Frontend:** `frontend-design` and `impeccable` for UI quality; `angular-developer`,
   `react-best-practices`, `composition-patterns`; Chrome DevTools MCP and `playwright-cli` to verify in a real
-  browser. Do not create PRODUCT.md / DESIGN.md unless the user asks.
+  browser. Design first: take a screenshot, critique it, fix what the critique finds, and look again; settle the
+  hierarchy (what the user sees first) before adding features, and prefer visuals with details on demand to more
+  text. Do not create PRODUCT.md / DESIGN.md unless the user asks.
 - **Documentation and diagrams:** the devkit `docs` skill (README anatomy, Diátaxis, Google style, `dev docs check`)
   with `documentation-writer` and `doc-coauthoring`; the devkit `diagrams` skill for every diagram (SVG via
   `dev diagram render`, validated with `dev diagram check`, dark and light). Update docs in the same branch as the code.
