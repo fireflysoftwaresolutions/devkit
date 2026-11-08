@@ -332,7 +332,54 @@ def _register_session(agent: str, sid: str, cwd: str, data: dict = None) -> Path
             state.update(f, lambda d: state.SKIP if d else rec)
         except state.StateBusy:
             pass
+    try:
+        _claim_process(agent, sid, f)
+    except Exception:
+        _log(f"register pid {agent}: {traceback.format_exc()[-300:]}")
     return f
+
+
+def _claim_process(agent: str, sid: str, f: Path):
+    """Record the agent process this session runs in (pid, pid_start), on every way a session registers: SessionStart,
+    or the first prompt of a session that had none (Claude Code gives a running conversation a new session id after a
+    compaction). A `dev` command below that process then finds this session by its parents (progress.resolve_session).
+    An older Claude Code record that holds the same process is kept, marked superseded_by this session, and gives the
+    pid up (pid_superseded): one Claude Code process runs one conversation, and its shells still name the older id
+    in DEVKIT_SESSION. Codex runs several threads in one process, so its records keep their pids."""
+    from . import approvals, progress
+    pid = progress.agent_pid()
+    if not pid:
+        return
+    rec = state.read(f) or {}
+    start = approvals.pid_start(pid)  # ps, before any lock
+    if rec.get("pid") != pid or rec.get("pid_start") != start:
+        state.update(f, lambda d: d.update(pid=pid, pid_start=start), create=False)
+    if agent != "claude":
+        return
+    took = False
+    for g in sorted(f.parent.glob(f"{agent}-*.json")):
+        if g == f:
+            continue
+        other = state.read(g) or {}
+        if other.get("agent") != agent or other.get("pid") != pid or \
+                (other.get("pid_start") and start and other["pid_start"] != start) or \
+                float(other.get("started") or 0) > float(rec.get("started") or time.time()):
+            continue
+
+        def supersede(d):
+            if d.get("pid") != pid:
+                return state.SKIP
+            d["pid_superseded"] = d.pop("pid")
+            d.update(superseded_by=sid, superseded_at=time.time())
+        try:
+            took = bool((state.update(g, supersede, create=False) or {}).get("superseded_by") == sid) or took
+        except state.StateBusy:
+            _log(f"register pid {agent}: {g.name} busy, still holds pid {pid}")
+    if took:
+        try:  # the older session's open run and its lanes go on in this one
+            progress.adopt_process_run(agent, sid, pid)
+        except Exception:
+            _log(f"register run {agent}: {traceback.format_exc()[-300:]}")
 
 
 def session_start(agent: str):
@@ -340,14 +387,10 @@ def session_start(agent: str):
     cwd = data.get("cwd") or os.getcwd()
     sid = data.get("session_id") or f"pid{os.getppid()}"
     f = _register_session(agent, sid, cwd, data)
-    try:  # the agent's own process: a `dev` command below it finds this session by its parents (spec C4)
+    try:  # the agent's own process (spec C4) is recorded by _register_session (_claim_process)
         from . import progress
-        from . import approvals
-        pid = progress.agent_pid()
         rec_ = state.read(f) or {}
         more = {"transcript": data["transcript_path"]} if data.get("transcript_path") else {}
-        if pid and rec_.get("pid") != pid:
-            more.update(pid=pid, pid_start=approvals.pid_start(pid))  # ps, before the lock
         if more and any(rec_.get(k) != v for k, v in more.items()):
             state.update(f, lambda d: d.update(more), create=False)
         progress.resume_orphaned(agent, sid)
@@ -2022,6 +2065,11 @@ def prompt(agent: str):
         _register_session(agent, sid, cwd, data)
         extra = _with_catalog(context_for(cwd, agent), agent)
         _log(f"prompt {agent}: session {sid[:12]} had no SessionStart; devkit context injected")
+    elif sid and agent == "claude" and not (state.read(_session_file(agent, sid)) or {}).get("pid"):
+        try:  # a record an earlier prompt made without its process
+            _claim_process(agent, sid, _session_file(agent, sid))
+        except Exception:
+            _log(f"prompt pid {agent}: {traceback.format_exc()[-300:]}")
     raw = (data.get("prompt") or "").lstrip()
     background = _background_told(agent, data)  # a member's completion notice is often this very prompt
     if raw.startswith(("<task-notification", "[SYSTEM NOTIFICATION", "<system-reminder", "<agent-message")) or \

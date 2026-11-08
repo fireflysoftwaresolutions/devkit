@@ -945,6 +945,89 @@ def release_home() -> Path:
     return pin["path"] if pin else DEVKIT_HOME
 
 
+# The other copies in the releases folder are kept for `dev install --version` (a rollback), but a copy older than
+# the version check above has no check at all: a session that started before `dev install` still runs it, and its
+# repair writes its own, older hooks, guard and instructions back. Its code cannot be changed, but its bin/dev reads
+# the code next to its real path (os.path.realpath), so `dev install` and a repair by the pinned release turn each
+# other copy's bin/dev into a link to the pinned release's bin/dev. Every hook, job and repair of an older session
+# then runs the installed release. The copy's own bin/dev stays beside it (bin/.dev.retired), so a rollback can put
+# it back (restore_pin). The releases folder is the guard's to protect, so no agent sets or undoes a link.
+
+RETIRED_DEV = ".dev.retired"
+
+
+def is_current_pin() -> bool:
+    """True when the copy that runs now is the release install.json pins (and the record holds up)."""
+    pin = pinned_release()
+    return bool(pin) and real(pin["path"]) == real(DEVKIT_HOME)
+
+
+def retired_to(path):
+    """The copy whose code another pinned copy's bin/dev runs once retired (a link) -> its folder, else None."""
+    dev = Path(path) / "bin" / "dev"
+    return Path(os.path.realpath(dev)).parent.parent if dev.is_symlink() else None
+
+
+def _with_writable(folder: Path, fn):
+    """Run fn() with `folder` (0555 in a pinned copy) writable by its owner for the moment; its mode comes back."""
+    mode = stat.S_IMODE(folder.stat().st_mode)
+    os.chmod(folder, mode | stat.S_IWUSR)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions (the owner's write, for one rename, then the read-only mode again)
+    try:
+        return fn()
+    finally:
+        os.chmod(folder, mode)
+
+
+def retire_other_pins() -> list:
+    """Point bin/dev of every other pinned copy at the pinned release's bin/dev (see above) -> the names changed now.
+    Nothing when install.json does not hold up: a link to a copy nobody verified would be worse than none."""
+    pin = pinned_release()
+    target = Path(pin["path"]) / "bin" / "dev" if pin else None
+    if not target or target.is_symlink() or not target.is_file():
+        return []
+    out = []
+    for d in sorted(pin_root().iterdir()):
+        if d.name.startswith(".") or d.is_symlink() or not d.is_dir() or real(d) == real(pin["path"]) \
+                or not is_pinned(d):
+            continue
+        dev, keep = d / "bin" / "dev", d / "bin" / RETIRED_DEV
+        if dev.is_symlink() and os.readlink(dev) == str(target):
+            continue
+
+        def link(dev=dev, keep=keep):
+            if not dev.is_symlink() and not os.path.lexists(keep):
+                os.link(dev, keep)  # the copy's own bin/dev, for a rollback
+            tmp = dev.with_name(f".dev.{os.getpid()}.tmp")
+            if os.path.lexists(tmp):
+                tmp.unlink()
+            os.symlink(str(target), tmp)
+            if hasattr(os, "lchmod"):  # macOS: the link reads 0555 like the rest of the copy
+                os.lchmod(tmp, 0o555)
+            os.replace(tmp, dev)  # one rename: a hook that starts now runs one bin/dev or the other, never none
+        _with_writable(d / "bin", link)
+        out.append(d.name)
+    if out:
+        from . import audit
+        audit.record("install.retire", ", ".join(out), f"their bin/dev runs the pinned release {pin['name']} now, so "
+                     f"a session that started before the install no longer writes their older settings back")
+    return out
+
+
+def restore_pin(path) -> bool:
+    """Undo retire_other_pins for one copy, before `dev install` uses it again: its own bin/dev back, when the one
+    kept beside it is what its manifest names. -> whether it was put back."""
+    d = Path(path)
+    dev, keep = d / "bin" / "dev", d / "bin" / RETIRED_DEV
+    if not dev.is_symlink() or not keep.is_file() or keep.is_symlink():
+        return False
+    want = ((read_json(d / PIN_MANIFEST, {}) or {}).get("files") or {}).get("bin/dev")
+    import hashlib
+    if not want or hashlib.sha256(keep.read_bytes()).hexdigest() != want:
+        return False
+    _with_writable(d / "bin", lambda: os.replace(keep, dev))
+    return True
+
+
 def source_home() -> Path:
     """The devkit checkout that `dev install` pins and `dev update` updates: this copy when it is a checkout; for a
     pinned copy, the checkout it was made from."""

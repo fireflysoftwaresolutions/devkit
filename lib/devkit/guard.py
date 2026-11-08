@@ -1111,7 +1111,8 @@ def _check_bash_reading(cmd: str, cwd: str, agent: str):
         return None
     if _NUL in cmd:
         return deny(NUL_REASON)
-    v = protected_bash(cmd, cwd or os.getcwd()) or evidence_forgery(cmd, cwd or os.getcwd())
+    v = other_release(cmd, cwd or os.getcwd()) or protected_bash(cmd, cwd or os.getcwd()) or \
+        evidence_forgery(cmd, cwd or os.getcwd())
     if v:
         return v
     if PIPE_GATE.search(cmd):
@@ -1184,6 +1185,10 @@ def _check_segments(cmd: str, segs, ecwd: str, agent: str, depth: int = 0, outer
         while argv and argv[0] in _RESERVED:  # `if …; then rm -rf ~; fi` runs rm
             argv = _strip_prefix(argv[1:])
         envs = frozenset(a.split("=", 1)[0] for a in argv0[:len(argv0) - len(argv)] if "=" in a) | outer_envs
+        for w in list(redirs) + _candidates(argv0):  # a word read from the folder an earlier cd chose
+            v = other_release_word(w, ecwd)
+            if v:
+                return v
         for r in redirs:
             v = check_write_path(r, ecwd, agent)
             if v:
@@ -2055,6 +2060,79 @@ def dev_command_reason(p, verb="replace") -> str:
             f"`dev` earlier on PATH would run instead of it, for the developer, the hooks' shells and the jobs. Agents "
             f"may not {verb} it (spec C11, K1). `dev doctor` shows where it points; the developer fixes it in a "
             f"terminal with `dev install --only cli`. Reading it is fine (`readlink`, `ls -l`). {_TAIL}")
+
+
+# ---- the other devkit copies in the releases folder
+#
+# `dev install` keeps older pinned copies for a rollback. An older one may lack newer safeguards (26.11.5 and before
+# have no version check), and its repair writes its own hooks, guard and instructions back over the installed
+# release: an agent that runs one downgrades devkit for every session. A shell command may name the releases folder
+# only as the pinned release (core.runtime_home, core.release_home) or a file in it; any other copy, the folder
+# itself (a find, a glob or a cd chooses a copy from it) or a pattern is refused, however the path is written.
+
+_RELEASES_TEXT = re.compile(r"(?P<pre>[^\s;|&<>()`=]*?)\.local/+share/+devkit/+releases(?![\w.-])"
+                            r"(?:/+(?P<name>[^/\s;|&<>()`'\"]*))?")
+_WORD_ENDS = frozenset(" \t\n;|&<>()`'\"=")
+
+
+def _pinned_names() -> set:
+    """The folder names (case-folded) of the release the hooks and the installed `dev` run."""
+    out = set()
+    for h in (core.runtime_home(), core.release_home()):
+        if core.is_pinned(h):
+            out.add(Path(real(h)).name.casefold())
+    return out
+
+
+def other_release_reason(what) -> str:
+    pin = core.pinned_release()
+    named = f"devkit {pin['version']} ({pin['name']})" if pin else "one release"
+    return (f"{_code(what)} names a devkit copy in {tilde(core.pin_root())} other than the one `dev install` pinned, "
+            f"{named}. An older copy may lack the newer safeguards, and its repair writes its own hooks, guard and "
+            f"instructions back over the installed ones, for every session. Run the installed `dev` (on PATH) "
+            f"instead; read a copy's files with a file tool, not the shell; `dev doctor` lists the copies. {_TAIL}")
+
+
+def _releases_path(p, allowed) -> bool:
+    """True when the real path `p` is the releases folder itself or anything in a copy other than the pinned one."""
+    root = Path(real(core.pin_root()))
+    if p == UNKNOWN or not is_under(p, root):
+        return False
+    rel = Path(real(p)).relative_to(root).parts if real(p) != str(root) else ()
+    return not rel or rel[0].casefold() not in allowed
+
+
+def other_release(cmd: str, cwd):
+    """The guard's refusal when a shell command names another devkit copy than the pinned release (see above)."""
+    allowed = _pinned_names()
+    flat = re.sub(r"[\\'\"]", "", cmd)  # quotes and escapes do not change the path the shell builds
+    for text in dict.fromkeys((cmd, flat)):
+        for m in _RELEASES_TEXT.finditer(text):
+            base = resolve(m.group("pre") + ".local/share/devkit/releases", cwd)
+            if base != UNKNOWN and real(base) != real(core.pin_root()):
+                continue  # another HOME's releases folder (a test's sandbox), not this install
+            name = (m.group("name") or "").casefold()
+            if not name or name not in allowed:
+                return deny(other_release_reason(m.group(0)))
+    root = core.pin_root()
+    others = [d.name for d in root.iterdir() if not d.name.startswith(".") and d.name.casefold() not in allowed] \
+        if root.is_dir() else []
+    for name in others:  # a copy's name with the path built some other way ($R/<name>/bin/dev)
+        for m in re.finditer(re.escape(name), flat, re.I):
+            start = m.start()
+            while start and flat[start - 1] not in _WORD_ENDS:
+                start -= 1
+            if not _RELEASES_TEXT.search(flat[start:m.end()]):  # with the folder written out, the loop above judged it
+                return deny(other_release_reason(name))
+    return None
+
+
+def other_release_word(word: str, cwd):
+    """The refusal for one word of a command (a program, an argument, a redirect) whose path, read from the
+    command's working folder, is in another devkit copy or is the releases folder; else None."""
+    if not word or not _pathlike(word):
+        return None
+    return deny(other_release_reason(word)) if _releases_path(_lexical(word, cwd), _pinned_names()) else None
 
 
 # ---- the shell
@@ -6121,7 +6199,7 @@ _DEV_VALUES = frozenset({
     "-i", "--initiative", "--label", "--state", "--assignee", "--interval", "--timeout", "--lines", "--limit",
     "--branch", "--flaky", "--why", "--action", "--actor", "--agent", "--breaking", "--category", "--commit-template",
     "--days", "--delay", "--format", "--grep", "--lang", "--log", "--member", "--note", "--only", "--out", "--outcome",
-    "--provider", "--refs", "--renew", "--runner", "--search", "--session", "--severity", "--sha", "--since", "--stack",
+    "--pr", "--provider", "--refs", "--tag", "--renew", "--runner", "--search", "--session", "--severity", "--sha", "--since", "--stack",
     "--step-timeout", "--until", "--verified", "-n", "-o"})
 _CURL_VALUES = frozenset(
     "-X --request -H --header -d --data --data-raw --data-binary --data-ascii --data-urlencode --json -F --form "

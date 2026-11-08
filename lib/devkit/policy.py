@@ -239,10 +239,17 @@ def _older_refuses(what: str, quiet: bool = False) -> bool:
 
 def repair(quiet=False, include_codex=True) -> list:
     """Restore every drifted managed key. Returns the list of Drift that was repaired. A copy older than the pinned
-    release repairs nothing: what it would restore are its own, older values."""
+    release repairs nothing: what it would restore are its own, older values. The pinned release first retires the
+    other pinned copies (core.retire_other_pins), so a session that still runs one runs the pinned release instead."""
     from . import setup
     if _older_refuses("dev config repair", quiet):
         return []
+    if core.is_current_pin():
+        try:
+            core.retire_other_pins()
+        except OSError as e:  # the repair goes on; dev doctor names the copies still running their own code
+            from . import audit
+            audit.record("install.retire", tilde(core.pin_root()), f"could not retire the other copies: {e}", "failed")
     drifts = diff(include_codex=include_codex)
     if not drifts:
         return []

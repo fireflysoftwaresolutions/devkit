@@ -349,6 +349,7 @@ def pin(source=None, unverified_why: str = None) -> dict:
     name = f"{version}-{commit[:7]}"
     dest = core.pin_root() / name
     if dest.exists():  # rebuilt from git all the same: a manifest rewritten to match a change would look intact
+        core.restore_pin(dest)  # a copy a newer install retired gets its own bin/dev back first: that is no change
         problems = verify_pin(dest)
         rec = core.install_record()
         if rec.get("manifest_sha256") and core.real(rec.get("path") or "") == core.real(dest) \
@@ -468,6 +469,7 @@ def select_pin(version: str) -> dict:
     if not hits:
         raise PinError(f"no pinned copy of {version}; there are: {', '.join(d.name for _, d in copies) or 'none'}.")
     man, d = hits[0]
+    core.restore_pin(d)  # a rollback: the copy a newer install retired runs its own code again
     problems = verify_pin(d)
     if problems:
         raise PinError(f"{d.name} differs from its manifest ({'; '.join(problems[:4])}), so it is not used. Pin it "
@@ -2172,6 +2174,13 @@ def run_install(only=None, unverified_why=None, version=None, as_pinned=False, c
         sys.stdout.flush()
         sys.stderr.flush()
         os.execv(sys.executable, argv)
+    if core.is_current_pin():  # before any step: an older session's hooks run this release from now on
+        try:
+            retired = core.retire_other_pins()
+            if retired:
+                done(f"the other pinned copies run devkit {core.VERSION} now: {', '.join(retired)}")
+        except OSError as e:
+            fail(f"the other pinned copies still run their own code ({e}); `dev config repair` retries")
     steps = [("config", ensure_config), ("tools", setup_tools), ("cli", install_cli), ("git", lambda: setup_git(commit_template=commit_template)), ("handoff", setup_handoff),
              ("instructions", write_agent_instructions), ("skills", install_skills), ("claude", setup_claude),
              ("codex", setup_codex), ("desktop", setup_desktop), ("docker", setup_docker), ("docs", setup_docs_tools),
@@ -2365,6 +2374,8 @@ def doctor() -> int:
 
     for name, ok, detail, fix in pin_checks():
         check("Pinned install", name, ok, detail, fix)
+    for row in selfcheck.old_copy_checks(CLAUDE_HOME, CODEX_HOME):  # what an older session wrote back, and its copy
+        check(*row)
 
     s = read_json(CLAUDE_HOME / "settings.json", {}) or {}
     check("Claude", "bypassPermissions default", (s.get("permissions") or {}).get("defaultMode") == "bypassPermissions",
