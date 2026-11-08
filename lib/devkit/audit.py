@@ -358,6 +358,7 @@ COMMAND_ARGS = {
     "pr view": "number:name?",
     "progress": "", "progress add": "spec:text+", "progress assign": "which:select",
     "progress begin": "which:select", "progress block": "text:text+", "progress done": "text:text+",
+    "progress confirm": "which:select",
     "progress history": "", "progress note": "text:text+", "progress reopen": "which:select",
     "progress skip": "which:select", "progress start": "goal:text+", "progress step": "text:text+",
     "progress time": "",

@@ -81,6 +81,7 @@ RULES = (
     (("progress", "begin"), "which", "steps"),
     (("progress", "reopen"), "which", "steps"),
     (("progress", "skip"), "which", "steps"),
+    (("progress", "confirm"), "which", "steps"),
     (("progress", "assign"), "--to", "crew"),
     (("progress", "assign"), "--activity", "activities"),
     (("crew", "raci"), "work", "activities+crew"),

@@ -243,7 +243,7 @@ class OrderTests(unittest.TestCase):
 
 class StoppedAgentTests(unittest.TestCase):
     # R6 (B-fxsvxz9n78p): TaskStop fires no SubagentStop, so the stopped agent's slot is free at the stop call's result;
-    # its step waits unverified for Morpheus, and the agent takes its slot back when it works again (SendMessage)
+    # its step waits for a new launch, and the agent takes its slot back when it works again (SendMessage)
     def test_a_stopped_agent_frees_its_slot_at_the_stop_calls_result(self):
         with TempState():
             pg.start("Work", plan=["api"])
@@ -255,11 +255,45 @@ class StoppedAgentTests(unittest.TestCase):
                 "tool_response": {"message": "Successfully stopped task: a_tank (Tank: api)", "task_id": "a_tank",
                                   "task_type": "local_agent", "command": "Tank: api"}})
             run = pg.load_run("claude", "s1")
-            self.assertEqual((run["agents"]["a_tank"]["state"], run["plan"][0]["state"]), ("stopped", "unverified"))
+            self.assertEqual((run["agents"]["a_tank"]["state"], run["plan"][0]["state"]), ("stopped", "pending"))
             self.assertEqual(pg.slots(run), [])
             self.assertEqual([r["target"] for r in audit.records(1, "crew.stopped")], ["a_tank"])
             pg.bind("claude", {"session_id": "s1", "agent_id": "a_tank", "agent_type": "devkit:tank"})
             self.assertEqual([k for k, _ in pg.slots(pg.load_run("claude", "s1"))], ["a_tank"])
+
+
+class LaneStoppedTests(unittest.TestCase):
+    # A Release engineer lane stopped by TaskStop stayed running for hours and held a crew slot: a stopped lane ends
+    # as stopped, frees its slot, and its step waits for a new launch, unless a live lane of the same member holds it
+    def setUp(self):
+        self.state = TempState().__enter__()
+        self.addCleanup(self.state.__exit__, None, None, None)
+        self.t0 = time.time() - 3600
+        pg.start("Work", plan=["ciwatch reports once"], now=self.t0)
+        pg.assign("ciwatch reports once", "Link", now=self.t0)
+        launch("a_link", "devkit:link", "Link: ciwatch reports once", at=self.t0 + 60)
+
+    def test_a_stopped_lane_frees_its_slot_and_its_step_waits_for_a_new_launch(self):
+        made = pg.lane_stopped("a_link", "stopped by the tech lead: wrong brief", agent="claude", sid="s1",
+                               now=self.t0 + 120)
+        run = pg.load_run("claude", "s1")
+        step = run["plan"][0]
+        self.assertEqual(run["agents"]["a_link"]["state"], "stopped")
+        self.assertEqual((step["state"], step["owner"], step["label"]), ("pending", "main", "Link"))
+        self.assertEqual(pg.slots(run), [])
+        self.assertIn("wrong brief", next(h["why"] for h in run["history"] if h["step"] == "ciwatch reports once"
+                                          and h["to"] == "pending"))
+        self.assertEqual([r["target"] for r in audit.records(1, "crew.stopped")], ["a_link"])
+        self.assertTrue(made)
+        self.assertIn("ciwatch reports once", dispatch.ready_context("claude", "s1"))  # announced ready to launch
+
+    def test_a_stopped_lanes_step_stays_with_a_live_lane_of_its_member_that_names_it(self):
+        launch("a_link2", "devkit:link", "Link: ciwatch reports once", at=self.t0 + 90)  # relaunched before the stop
+        pg.lane_stopped("a_link", "stopped by the tech lead: a second launch took over", agent="claude", sid="s1",
+                        now=self.t0 + 120)
+        run = pg.load_run("claude", "s1")
+        self.assertEqual((run["plan"][0]["state"], run["plan"][0]["owner"]), ("running", "a_link2"))
+        self.assertEqual([k for k, _ in pg.slots(run)], ["a_link2"])
 
 
 class VisibleTests(unittest.TestCase):

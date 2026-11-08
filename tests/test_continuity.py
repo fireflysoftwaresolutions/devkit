@@ -303,6 +303,20 @@ class CheckpointTests(Base):
                          ("manual", "main", ["pre"], fixture("PreCompact.manual")["prompt_id"], False, False))
         self.assertEqual([x["outcome"] for x in self.audited("session.compact")], ["ok"])
 
+    def test_the_checkpoint_keeps_only_the_messages_that_still_wait_for_an_answer(self):
+        # a resumed session's brief listed notices and questions already answered as open messages
+        self.make_run(messages=[
+            {"id": "M1", "ts": T0 - 600, "from": "a-neo", "from_name": "Neo", "to": "main", "text": "Which icon set?",
+             "delivered": True},
+            {"id": "M2", "ts": T0 - 500, "from": "devkit", "from_name": "devkit", "to": "main", "kind": "notice",
+             "text": "Neo started as “Neo: the ui”", "delivered": True},
+            {"id": "M3", "ts": T0 - 400, "from": "a-tank", "from_name": "Tank", "to": "main", "text": "Paginate?",
+             "delivered": True},
+            {"id": "M4", "ts": T0 - 300, "from": "main", "from_name": "Morpheus", "to": "a-tank", "reply_to": "M3",
+             "text": "Yes, by cursor"}])
+        ct.on_pre_compact("claude", self.payload("PreCompact.manual"), now=T0 - 10)
+        self.assertEqual([m["id"] for m in self.rec()["checkpoint"]["messages"]], ["M1"])
+
     def test_a_secret_in_a_prompt_never_reaches_the_checkpoint_which_is_0600_and_at_most_16_kb(self):
         # fake secrets, put together at run time so that no secret scanner finds one in this file
         key = "PRIVATE " + "KEY-----"
@@ -598,6 +612,21 @@ class ClearTests(Base):
         self.assertEqual(len(self.audited("session.carry")), 1)
         with self.assertRaisesRegex(ValueError, "no run"):
             ct.carry("claude", SID, NEW, now=T0)
+
+    def test_carry_takes_back_a_run_its_ended_session_left_orphaned(self):
+        # the reconciler orphans the run of the session /clear ended; the session it is carried to works on it
+        self.make_run()
+        run = state.read(pg.run_path("claude", SID))
+        for lane in run["agents"].values():
+            lane["state"] = "done"
+        run.update(state="orphaned", orphaned={"ts": round(T0 - 60), "why": "its session ended (clear)"})
+        state.replace(pg.run_path("claude", SID), run)
+        ct.carry("claude", SID, NEW, now=T0)
+        moved = state.read(pg.run_path("claude", NEW))
+        self.assertEqual((moved["state"], "orphaned" in moved), ("running", False))
+        back = [h for h in moved["history"] if h["step"] == "(run)"][-1]
+        self.assertEqual((back["from"], back["to"], back["by"]), ("orphaned", "running", "devkit"))
+        self.assertIn(NEW[:12], back["why"])
 
     def test_the_summarizer_subagent_stop_is_recognized_and_writes_nothing(self):
         sess = state.read(pg.session_path("claude", SID))

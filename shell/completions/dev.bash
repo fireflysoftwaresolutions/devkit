@@ -250,7 +250,7 @@ _dev_spec() {
     'plan approve') o='-h --help --why -p --project -i --initiative' v='--why=n -p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' p='l:plans:-::' ;;
     'plan supersede') o='-h --help --why -p --project -i --initiative' v='--why=n -p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' p='l:plans:-::' ;;
     'plan ls') o='-h --help -p --project -i --initiative' v='-p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' ;;
-    'progress') c='start note step block done assign begin add reopen skip history time' o='-h --help' ;;
+    'progress') c='start note step block done assign begin add reopen skip confirm history time' o='-h --help' ;;
     'progress start') o='-h --help --steps --estimate --mode --plan --replace --why' v='--steps=n --estimate=n --mode=c:guided,auto --plan=n --why=n' p='*n' ;;
     'progress note') o='-h --help --next' v='--next=n' p='*n' ;;
     'progress step') o='-h --help --next --check --step --force --no-check --approves' v='--next=n --check=n --step=l:steps:-:: --approves=l:steps:-::' p='*n' ;;
@@ -261,6 +261,7 @@ _dev_spec() {
     'progress add') o='-h --help --why' v='--why=n' p='*n' ;;
     'progress reopen') o='-h --help --why' v='--why=n' p='l:steps:-::' ;;
     'progress skip') o='-h --help --why' v='--why=n' p='l:steps:-::' ;;
+    'progress confirm') o='-h --help --why' v='--why=n' p='l:steps:-::' ;;
     'progress history') o='-h --help' ;;
     'progress time') o='-h --help --days -p --project' v='--days=n -p=l:projects:-:: --project=l:projects:-::' ;;
     'time') o='-h --help --days -p --project' v='--days=n -p=l:projects:-:: --project=l:projects:-::' ;;

@@ -747,6 +747,7 @@ _dev__progress() {
         'add:add a step found during the work'
         'reopen:undo a wrong close'
         'skip:skip a step on purpose'
+        'confirm:a step flagged recheck still holds after the step it used was redone'
         'history:every step change'
         'time:how long things take'
       )
@@ -764,6 +765,7 @@ _dev__progress() {
         (add) _dev__progress__add && ret=0 ;;
         (reopen) _dev__progress__reopen && ret=0 ;;
         (skip) _dev__progress__skip && ret=0 ;;
+        (confirm) _dev__progress__confirm && ret=0 ;;
         (history) _dev__progress__history && ret=0 ;;
         (time) _dev__progress__time && ret=0 ;;
       esac ;;
@@ -855,6 +857,13 @@ _dev__progress__reopen() {
 }
 
 _dev__progress__skip() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--why=[the reason (kept in the run'\''s history)]:why: ' \
+    ':plan step: _dev_live steps -'
+}
+
+_dev__progress__confirm() {
   _arguments -s -S : \
     '(- *)'{-h,--help}'[show this help message and exit]' \
     '--why=[the reason (kept in the run'\''s history)]:why: ' \

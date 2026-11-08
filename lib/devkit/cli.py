@@ -2128,7 +2128,7 @@ def cmd_progress(a):
             print(ui.dim("  changed: " + " · ".join(f"{i}. {s['name']} {before.get(s['name']) or 'new'} → "
                                                     f"{s.get('state')}" for i, s in changed)))
         return 0
-    if act in ("assign", "begin", "add", "reopen", "skip"):
+    if act in ("assign", "begin", "add", "reopen", "skip", "confirm"):
         try:
             if act == "assign":
                 extra = {}
@@ -2144,6 +2144,8 @@ def cmd_progress(a):
                 if from_agent:
                     print(f"{ui.OK} added to your lane's plan · {' '.join(a.spec)}")
                     return 0
+            elif act == "confirm":
+                run = pg.confirm(a.which, a.why or "", from_agent=from_agent)
             else:
                 run = pg.reopen(a.which, a.why or "", skip=act == "skip", from_agent=from_agent)
         except ValueError as e:
@@ -3394,7 +3396,8 @@ def build_parser():
     x.add_argument("spec", nargs="+")
     x.add_argument("--why", help="why it was not in the plan")
     for verb, h_ in (("reopen", "undo a wrong close: the step goes back to running"),
-                     ("skip", "skip a step on purpose")):
+                     ("skip", "skip a step on purpose"),
+                     ("confirm", "a step flagged recheck still holds after the step it used was redone")):
         x = gsp.add_parser(verb, help=h_)
         x.add_argument("which", help="step number or part of its name")
         x.add_argument("--why", required=True, help="the reason (kept in the run's history)")

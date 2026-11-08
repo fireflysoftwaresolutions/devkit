@@ -476,7 +476,9 @@ def _decisions(run: dict) -> list:
 
 
 def _open_messages(run: dict) -> list:
-    return [m for m in run.get("messages") or [] if m.get("to") == "main" and not m.get("answered")]
+    """The questions to the tech lead nobody has answered yet (progress.waiting_messages): never a notice, nor a
+    question a reply answers."""
+    return progress.waiting_messages(run, "main")
 
 
 def _messages(run: dict) -> list:
@@ -1468,7 +1470,8 @@ def latest(cwd=None, project=None, now=None):
 def carry(agent: str, from_sid: str, to_sid: str, now=None) -> dict:
     """Move the open run of `from_sid` (the session /clear ended) to `to_sid`, under both sessions' locks. Refused
     while a member of that run is still running (its results go to the old session) and when this session already
-    has an open run. Audited as session.carry."""
+    has an open run. A run the reconciler orphaned when that session ended runs again here, with the reason in its
+    history (progress.take_back). Audited as session.carry."""
     now = now or time.time()
     if not from_sid or from_sid == to_sid:
         raise ValueError("nothing to carry: name the cleared session with --from <session id>")
@@ -1487,8 +1490,12 @@ def carry(agent: str, from_sid: str, to_sid: str, now=None) -> dict:
             raise ValueError(f"this session already has an open run «{there.get('goal')}»: close it first "
                              "(dev progress done)")
         run.update(session=to_sid, carried_from=from_sid, carried_at=round(now))
+        why = f"carried to {agent}:{to_sid[:12]}"
+        taken = progress.take_back(run, why, now)
         state.replace(dst, run, indent=1)
         state.remove(src)
+    if taken:
+        progress.audit_taken_back(run, why)
     audit.record("session.carry", run.get("project") or f"{agent}:{to_sid[:12]}",
                  f"run «{_excerpt(run.get('goal'), 80)}» from {agent}:{from_sid[:12]} to {agent}:{to_sid[:12]}",
                  "ok", project=run.get("project") or "", session=f"{agent}:{to_sid[:12]}")
