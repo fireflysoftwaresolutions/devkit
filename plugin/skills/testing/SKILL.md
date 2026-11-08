@@ -50,7 +50,7 @@ tests get the same audit when it stops (the crew gates).
 
 `dev test prove` runs the tests in a copy of the working tree that carries the checkout's git repository, and it
 counts a changed test helper or fixture as part of the change, so a fix that lives only in a helper is proven too.
-An exported copy (`git archive`, the Signature build) has no `.git`: a test that runs git on the repository root
+An exported copy (`git archive`) has no `.git`: a test that runs git on the repository root
 fails there. Build test repositories from files: copy what the test needs into a temporary folder, `git init`, and
 commit.
 
