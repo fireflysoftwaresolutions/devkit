@@ -59,7 +59,9 @@ managed setting a running session does not reload. `dev update` lists the sessio
   it, so devkit reads it from the transcript, and a launch for it may take the crew slot kept for you. It never
   counts as an approval or a grant.
 - **A `SendMessage` to the member who asked answers its open questions.** On Claude Code, devkit marks them answered
-  via SendMessage, with the text, in the inbox and the audit trail; they used to stay open until the run ended.
+  via SendMessage, with the text, in the inbox and the audit trail; they used to stay open until the run ended. A
+  message that names question ids (`M12`) answers only those, and a name that fits several members who asked answers
+  none, since SendMessage reached only one of them.
 - **A question nobody waits on is moot.** A question to the tech lead whose member ended and holds no open step no
   longer waits or wakes anyone, and `dev watch` shows it as moot with the reason.
 - **`dev crew graph` draws every live session.** Inside a project it draws that project's sessions, yours first;
@@ -100,7 +102,8 @@ managed setting a running session does not reload. `dev update` lists the sessio
 - **`approve D3@<session>` counts only in the session it names.** A bare `approve D3` typed in another session's chat
   used to answer that session's own `D3`, a different decision.
 - **`dev progress add` adds one step per quoted spec.** Two quoted specs became one step with the wrong estimate and
-  kind of work; a name that still holds an estimate is now refused.
+  kind of work; a name that still holds an estimate is now refused, with a command that works (`dev progress add
+  "a=5h; b=2h"`).
 - **A resumed crew member takes its next step.** A member resumed with `SendMessage` kept its old step's scope, and
   its report closed nothing in the plan. Now, holding no open step, it takes the one step assigned to it that waits
   for a launch, and `dev progress assign` binds a step to a working lane of that member that holds no other.
@@ -108,7 +111,18 @@ managed setting a running session does not reload. `dev update` lists the sessio
   fixture is restored with the production files, and the copy carries a clone of the checkout's repository.
 - **The crew checks credit a file to the member that wrote it.** A build member is credited only with files it
   wrote, not every file its commands named; a read-only member's write is credited only to an exact edit call, so
-  another member's edits no longer count against it.
+  another member's edits, dotfiles such as `.github/…` included, no longer count against it.
+- **A crew member's `dev commit` keeps a pre-commit hook's fix.** A lane commits from its own index; the shared index
+  kept the old version of a file the hook fixed and re-staged, a staged revert the next commit would carry. It now
+  takes the committed version of every path the commit changed.
+- **The tech lead's wait stays the tech lead's while a member waits.** A member blocked on `dev watch --wait --for me`
+  made the tech lead's own `dev watch --wait` count as that member's, so nothing woke the tech lead.
+- **A message typed after a long transcript line is still seen.** A line longer than one read (a screenshot)
+  held the reading position, so the requests typed after it, mid-turn, were never read.
+- **A turn that pushed while the crew worked gets one wake instruction.** It used to be told to arm both a
+  `dev ci watch --wait` of the commit and `dev watch --wait`; now the one wait covers a run devkit follows, and a run
+  nothing follows gets its own CI watch.
+- **A new wait removes wait records older than three days,** which only `dev watches` removed before.
 - **Crew members' lane calls joined to `cd` or a read now reach their lane** instead of being refused as compound
   commands (`cd <worktree> && dev progress step …`, `dev crew inbox | tail -5`).
 - **Read-only crew members can run the reads they were refused,** such as `python3 --version`, `ps`, `sysctl`,
@@ -126,6 +140,13 @@ managed setting a running session does not reload. `dev update` lists the sessio
   writes, process substitutions (zsh's `=(…)` included), heredocs inside `${…}`, and the file `source` and `.` read,
   resolved as the system opens it. A command it cannot read safely counts as unknown. See
   [Guard rules › What the guard cannot see](docs/guard.md#what-the-guard-cannot-see).
+- **An agent cannot hide the variables that mark it as an agent.** A command that unsets or blanks `CLAUDECODE`,
+  `CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_PID`, `CODEX_SANDBOX`, `CODEX_THREAD_ID`, `DEVKIT_SESSION` or `DEVKIT_AGENT`
+  (`unset`, `env -u`, `env -i`, an empty `NAME=`) is refused for the main session and the crew alike: what it runs
+  would pass for the developer's own terminal, where devkit lets `dev install` and grants through.
+- **A `$(…)` or backtick inside a word is judged as the bare one.** The guard of Claude and Codex and the writing lane
+  read a substitution in double quotes, a here-string, an expanding heredoc, or the `-c` word of a shell that only
+  parses (`bash -n -c "$(…)"`), so `echo "$(dev install)"` is refused like `echo $(dev install)`.
 - **The wait prints no line that reads as an approval.** A member's or CI's text is one quoted span with control and
   escape sequences removed, and a message you type while the agent works never counts as a grant.
 - **devkit's own scans cover `tests/`.** Semgrep no longer skips the test fixtures, scripts, and hook payloads that run
