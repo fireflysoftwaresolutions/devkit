@@ -90,12 +90,16 @@ class MidTurnRequestTests(RequestCase):
         pg.assign("docs", "Ghost", why="the developer asked for it now", now=self.now - 60)
         self.assertIsNone(self.launch_verdict("Ghost: docs", "devkit:ghost"))
 
-    def test_a_queued_task_notification_is_no_request_of_the_developer(self):
+    def test_only_the_developers_own_queued_message_is_a_request_never_a_task_notification(self):
         self.append(queued("<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n"
                            "</task-notification>", self.now - 120, human=False))
         pg.assign("docs", "Ghost", why="test", now=self.now - 60)
-        self.post_tool()
-        self.assertIsNotNone(self.launch_verdict("Ghost: docs", "devkit:ghost"))
+        self.post_tool("t1")
+        self.assertIsNotNone(self.launch_verdict("Ghost: docs", "devkit:ghost"))  # a notification asks for nothing
+        self.append(queued("Start the docs", self.now - 40))
+        pg.assign("docs", "Ghost", why="the developer asked", now=self.now - 30)
+        self.post_tool("t2")
+        self.assertIsNone(self.launch_verdict("Ghost: docs", "devkit:ghost"))
 
     def test_a_cut_line_is_read_once_it_is_whole_and_a_rotated_transcript_is_read_from_its_start(self):
         # the reader keeps an offset in the session record: a line half written when a hook ran is read at the next
