@@ -122,6 +122,9 @@ never move or rename repositories yourself (`dev adopt` does that, with the user
   checks a change or the whole repository.
 - **Follow the codebase.** Match existing patterns, naming, libraries, and structure. Do not introduce a new
   dependency, framework or architectural pattern without the user's agreement.
+- **No plan labels in what you deliver.** Code, comments, tests, docs, commits and PRs say what the code does and
+  why, in plain words, never the labels of the plan that produced them ("Phase 1," "Wave 2," "step C6," a finding
+  or row number). Their readers never saw the plan, and the labels mean nothing once it is gone.
 - **Stay in scope.** Do what was asked. Note unrelated problems in your reply or the handoff note; do not fix them
   silently.
 
@@ -284,6 +287,9 @@ rely on.
   `Refs:` trailer (an issue, URL, or ticket the host knows) and `BREAKING CHANGE:` when one applies.
   `dev commit -m "…" --why "…" --verified "…"` writes it. Never a devkit task id in a message; one logical change per
   commit.
+- **No plan labels in commits and PRs:** the summary and body say the behavior and the reason, never a plan's phase,
+  wave, step, or finding label. An issue, URL or ticket the host knows goes in the `Refs:` trailer, the only place
+  for an id.
 - **Versions:** keep the project's existing scheme. Projects without one use **CalVer `YY.MM.PATCH`**—`26.11.0` is
   the first release of November 2026, `26.11.1` the next one that month, `26.12.0` the first in December. Tags are
   `vYY.MM.PATCH`, release branches `release/YY.MM.PATCH`. `dev calver` prints the current and the next version.

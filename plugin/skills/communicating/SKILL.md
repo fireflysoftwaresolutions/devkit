@@ -251,13 +251,17 @@ BREAKING CHANGE: …                             ← only for a breaking change 
   commit to its task; a message that names one is refused.
 - The why says the problem and who it affects, not the files. The Verified line quotes the command you ran and its
   result, never "tested."
+- **No plan labels.** The summary and body say the behavior and the reason in plain words, never the labels of the
+  plan or review that produced the change ("Phase 1," "Wave 2," "step C6," a finding or row number): the reader of
+  `git log` never saw that plan. An id the host knows goes in `Refs:` only.
 - No co-author or AI attribution lines: `dev commit` removes them and says how many.
 
 ## 10. Pull request description
 
 `dev pr create` fills the template (the repository's own `.github/pull_request_template.md`, otherwise devkit's) from
 your commits, tasks, and local CI result. You write only the two parts that need you: the **What and why** and the **Risk and
-rollback**.
+rollback**. Write them, and the title, without plan labels: say what changes for the reader and why, as in a
+commit message (section 9).
 
 ```markdown
 Title: feat(invoices): export invoices as CSV           ← Conventional Commit, ≤ 72 chars, imperative
