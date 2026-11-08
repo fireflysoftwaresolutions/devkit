@@ -656,12 +656,12 @@ def _crew_now(runs: list, roster, now: float) -> dict:
             what = [x for x in what if x]
             out["members"].append({"who": who, "on": what, "member": (m or {}).get("id", ""), "state": lv["state"]})
         if plan and out["plan"] is None:
-            done = sum(1 for s in plan if isinstance(s, dict) and s.get("state") in ("done", "skipped"))
+            done, total, _skipped = pg.step_counts(run)  # skipped steps count in neither, as in the Progress line
             try:
                 left = pg.eta(run, now)
             except Exception:
                 left = None
-            out["plan"] = {"done": done, "total": len(plan), "left_min": left}
+            out["plan"] = {"done": done, "total": total, "left_min": left}
             out["goal"] = run.get("goal") or ""
     return out
 

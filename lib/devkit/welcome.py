@@ -172,7 +172,8 @@ def cut(s: str, room: int) -> str:
         return s
     head = _prefix(s, max(0, room - 1))
     nxt = s[len(head):len(head) + 1]
-    if " " in head.strip() and nxt not in ("", " ") and width(nxt) == 1:
+    # a head that ends at a space already ends at a word; else drop the word the cut went through
+    if not head.endswith(" ") and " " in head.strip() and nxt not in ("", " ") and width(nxt) == 1:
         head = head[:head.rstrip().rfind(" ")]
     return head.rstrip(_TRAILING) + "…"
 

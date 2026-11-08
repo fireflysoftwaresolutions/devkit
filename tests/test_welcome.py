@@ -263,6 +263,18 @@ class Variants(Sandbox):
     def test_clear_names_the_open_run_in_one_line(self):
         self.assertEqual(self.lines("clear", runs=[self.make_run()]), ["devkit · billing · run open, step 3 of 7"])
 
+    def test_skipped_steps_count_in_neither_number_as_in_the_status_block(self):
+        # a re-planned run: the welcome said "step 57 of 62" while the status block said "24 of 31 steps"
+        run = self.make_run(done=2, total=7)
+        run["plan"][-2:] = [dict(s, state="skipped") for s in run["plan"][-2:]]
+        line = next(x for x in self.lines(runs=[run]) if x.startswith("▸ "))
+        self.assertIn(" · step 3 of 5 · ", line)
+
+    def test_a_goal_cut_at_a_word_keeps_every_word_that_fits(self):
+        # "Hotfix 26.11.7: crew…" was cut to "Hotfix…" when the room ended right after a space
+        self.assertEqual(welcome.cut("Hotfix 26.11.7: crew message ids", 17), "Hotfix 26.11.7…")
+        self.assertEqual(welcome.cut("Invoice export for cancelled", 15), "Invoice export…")
+
     def test_clear_with_a_need_says_the_need(self):
         self.assertEqual(self.lines("clear", runs=[self.make_run(decisions=[self.decision()])]),
                          ["devkit · billing · 1 thing needs you"])
