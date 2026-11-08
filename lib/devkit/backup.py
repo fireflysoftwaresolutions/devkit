@@ -322,7 +322,8 @@ def _policy_gate(c, name, remote, ctx):
             'dev backup policy on --why "…"   (the developer: back up this project\'s branches)',
             f"dev backup --public {name}   (the developer: this once)"])
     if outgrown:
-        then = rec.get("visibility") or "of a visibility devkit did not record"
+        then = {"": "of a visibility devkit did not record", "unknown": "of a visibility devkit could not read"}.get(
+            rec.get("visibility") or "", rec.get("visibility"))
         now = vis if vis in ("public", "private", "internal") else "of a visibility devkit cannot read"
         return _result(name, remote, SKIPPED, f"the backup policy of {c.pid} is on, but it was set while the "
                        f"repository was {then}, and it is {now} now: the developer has not answered again", [

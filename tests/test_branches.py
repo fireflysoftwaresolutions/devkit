@@ -759,6 +759,40 @@ class PolicyTests(BackupCase):
         with mock.patch.object(backup, "_visibility", return_value="private"):
             self.assertEqual(self.sync(), [("feat/x", "pushed")])  # private: the record still holds
 
+    def test_an_on_recorded_without_its_visibility_waits_while_the_visibility_is_unknown(self):
+        # gh fails or the machine is offline: the on may have been decided while the repository was private
+        self.branch("feat/x", 2 * HOUR)
+        branches._edit_records(PID, branches.POLICY_KEY, lambda recs: [
+            {"policy": "on", "why": "recorded by an older devkit", "who": "ana", "when": "2026-11-01T10:00:00Z"}])
+        with mock.patch.object(backup, "_visibility", return_value=None), self.never_asked():
+            done = backup.sync({"projects": [self.project()]})
+        self.assertEqual([(r["branch"], r["state"]) for r in done], [("feat/x", "skipped")])
+        self.assertIn("of a visibility devkit did not record", done[0]["reason"])
+        self.assertEqual(self.on_origin("feat/x"), "")
+
+    def test_an_answer_given_while_the_visibility_is_unknown_holds_until_it_is_known_public(self):
+        tip = self.branch("feat/x", 2 * HOUR)[-1]
+        with mock.patch.object(backup, "_visibility", return_value=None):
+            with self.terminal("y") as asked:
+                rc, out = self.backup()
+            self.assertEqual((rc, asked.call_count, self.on_origin("feat/x")), (0, 1, tip), out)
+            self.assertEqual(branches.backup_policy(PID)["visibility"], "unknown")
+            self.branch("feat/y", 2 * HOUR)
+            self.assertEqual(self.sync(), [("feat/y", "pushed")])  # still unknown: no second question
+        self.branch("feat/z", 2 * HOUR)
+        self.assertEqual(self.sync(), [("feat/z", "skipped")])  # public now (this class's setUp): asked again
+
+    def test_an_on_holds_only_for_the_visibility_it_was_decided_for(self):
+        legacy, unknown = {"policy": "on", "visibility": ""}, {"policy": "on", "visibility": "unknown"}
+        for rec, now, outgrown in ((legacy, None, True), (legacy, "", True), (legacy, "public", True),
+                                   (legacy, "private", False), (unknown, None, False), (unknown, "public", True),
+                                   (unknown, "internal", False), ({"policy": "on", "visibility": "public"}, "public",
+                                                                  False),
+                                   ({"policy": "on", "visibility": "private"}, "public", True),
+                                   ({"policy": "off", "visibility": ""}, None, False), (None, None, False)):
+            with self.subTest(rec=rec, now=now):
+                self.assertEqual(branches.outgrown_on(rec, now), outgrown)
+
     def test_public_pushes_once_whatever_the_policy_and_a_crew_member_cannot_use_it(self):
         tip = self.branch("feat/x", HOUR)[-1]
         self.assertEqual(self.backup("policy", "off", "--why", "a client's fork")[0], 0)

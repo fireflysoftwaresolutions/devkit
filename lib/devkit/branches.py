@@ -882,22 +882,25 @@ def backup_policy(pid: str):
 
 def set_backup_policy(pid: str, policy: str, why: str, who: str, visibility=None) -> dict:
     """Record the project's choice (it replaces the one before) with the visibility of the repository it was decided
-    for ("public", "private", "internal"; None when devkit could not read it) -> the record."""
+    for ("public", "private", "internal"; None when devkit could not read it, recorded as "unknown") -> the record."""
     if policy not in POLICIES:
         raise ValueError(f"the backup policy is one of {', '.join(POLICIES)}, not {policy!r}")
-    rec = {"policy": policy, "why": why, "who": who, "when": _now_iso()}
-    if visibility:
-        rec["visibility"] = visibility
+    rec = {"policy": policy, "why": why, "who": who, "when": _now_iso(), "visibility": visibility or "unknown"}
     _edit_records(pid, POLICY_KEY, lambda recs: [rec])
-    return dict(rec, visibility=visibility or "")
+    return dict(rec)
 
 
 def outgrown_on(rec, visibility) -> bool:
-    """True when a recorded on no longer holds: the repository is not private now (public, or devkit cannot read it)
-    and on was decided for another visibility, or before devkit kept it. Backups then wait for the developer's answer
-    again, so a repository made public stops publishing its branches with the hourly dev sync."""
-    return bool(rec) and rec.get("policy") == "on" and visibility not in ("private", "internal") and \
-        (rec.get("visibility") or "") != (visibility or "")
+    """True when a recorded on no longer holds: the repository is not known to be private now (public, or devkit
+    cannot read it) and on was decided for another visibility, or before devkit kept it (no visibility recorded: it
+    may have been decided while the repository was private). An on decided while devkit could not read the
+    visibility ("unknown") holds while it still cannot. Backups then wait for the developer's answer again, so a
+    repository made public, or one devkit cannot read (gh failing, offline), stops publishing with the hourly dev
+    sync."""
+    if not rec or rec.get("policy") != "on" or visibility in ("private", "internal"):
+        return False
+    then = rec.get("visibility") or ""
+    return not then or then != (visibility or "unknown")
 
 
 def default_policy(visibility) -> str:
