@@ -246,7 +246,9 @@ class ProgramsKnownByWhatTheyRun(Case):
 
     def test_ordinary_programs_and_reads_by_path_stay_open(self):
         t = self.tmp
+        grep = os.path.realpath(shutil.which("grep"))  # the installed grep, by its path: `-c` counts, input is data
         for cmd in (f"{self.other} -la", f"{t}/shell-link -c 'echo hi'", f"{t}/shell-link -n -c 'gh pr merge 12'",
+                    f"ls | {grep} -c x", f"{grep} -ciE 'a|b' x", f"cat > {t}/x.txt <<'EOF'\nhi\nEOF\n{self.other} -la",
                     "/bin/ls -la", "/bin/sh -c 'echo hi'", "/usr/bin/env python3 -c 'print(1)'", "./bin/dev status"):
             with self.subTest(cmd=cmd):
                 self.assertIsNone(main(cmd))

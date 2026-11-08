@@ -558,13 +558,13 @@ def strip_heredocs(cmd: str) -> str:
 
 
 def split_commands(cmd: str, ops: bool = False, newline: str = ";", inputs: list | None = None,
-                   stripped: bool = False):
+                   stripped: bool = False, heredocs: list | None = None):
     """-> list of (argv, redirect_targets). None when the command cannot be tokenised. With `ops`, each entry is
     (argv, redirect_targets, the operator after the segment ('|', '&&', ';', … or ''), its here-strings (<<< …)).
     `newline`: the operator a newline outside quotes becomes (`&` for tmux_list_refusal only). `inputs`: a list that
     gets, for each segment, the files its input is redirected from (`< f`, `0< f`, `<> f`). `stripped`: `cmd` is
     already without its heredoc bodies (strip_heredocs); stripping it again would read the line after a `<<EOF` as
-    a body and hide it."""
+    a body and hide it. `heredocs`: a list that gets, for each segment, whether a heredoc is its input."""
     try:
         lex = shlex.shlex(_newlines_to_semicolons(cmd if stripped else strip_heredocs(cmd), newline), posix=True,
                           punctuation_chars=";&|()<>")
@@ -574,7 +574,7 @@ def split_commands(cmd: str, ops: bool = False, newline: str = ";", inputs: list
     except ValueError:
         return None
     segs, argv, redirs, expect_redir, here, herestr = [], [], [], False, [], False
-    fd, stdin, ins = None, False, []
+    fd, stdin, ins, hd = None, False, [], False
     for k, t in enumerate(tokens):
         nxt = tokens[k + 1] if k + 1 < len(tokens) else ""
         if t.isdigit() and nxt[:1] in ("<", ">"):
@@ -592,10 +592,13 @@ def split_commands(cmd: str, ops: bool = False, newline: str = ";", inputs: list
                 segs.append((argv, redirs, t, here) if ops else (argv, redirs))
                 if inputs is not None:
                     inputs.append(ins)
-            argv, redirs, here, ins = [], [], [], []
+                if heredocs is not None:
+                    heredocs.append(hd)
+            argv, redirs, here, ins, hd = [], [], [], [], False
             continue
         if t and set(t) <= set("<>"):
             herestr = t == "<<<"
+            hd = hd or (t == "<<" and fd in (None, "0"))
             stdin = t in ("<", "<>") and fd in (None, "0")
             fd = None
             expect_redir = ">" in t
@@ -616,6 +619,8 @@ def split_commands(cmd: str, ops: bool = False, newline: str = ";", inputs: list
         segs.append((argv, redirs, "", here) if ops else (argv, redirs))
         if inputs is not None:
             inputs.append(ins)
+        if heredocs is not None:
+            heredocs.append(hd)
     return segs
 
 
@@ -2103,12 +2108,23 @@ def _as_run(argv, cwd) -> list:
 
 
 def _unknown_binary(argv, cwd) -> bool:
-    """True when the segment runs, by its path, a binary the guard cannot identify (_identify): no shell or
-    interpreter it reads, by its name, its links or its content, and no script whose shebang says what runs it."""
+    """True when the segment runs, by its path, a binary the guard cannot identify: no shell or interpreter it reads
+    (_identify), no script whose shebang says what runs it, not the program installed under its name on the PATH
+    (`/usr/bin/grep -c x` is grep, the same file or the same bytes), and not a file the system owns, which no agent
+    replaced (owned by root and not writable by this user)."""
     if not argv or "/" not in str(argv[0]) or _reads_programs(argv[0]) or _identify(argv[0], cwd):
         return False
     p = resolve(argv[0], cwd)
-    return p != UNKNOWN and _run_by_path(p)[0] == "binary"
+    if p == UNKNOWN or _run_by_path(p)[0] != "binary":
+        return False
+    try:
+        st = os.stat(p)
+        if st.st_uid == 0 and not os.access(p, os.W_OK):
+            return False
+        named = shutil.which(os.path.basename(str(argv[0])))
+        return not (named and (os.path.samefile(named, p) or filecmp.cmp(named, p, shallow=False)))
+    except (OSError, ValueError):
+        return True
 
 
 def _command_option(args) -> bool:
@@ -9052,8 +9068,8 @@ def _text_actions(text, cwd, depth=0, from_code=False, expand=True):
         return []
     if depth > 4:  # a level deeper than the gate reads may run anything: unknown, never "nothing found"
         return _nested_action(text, cwd)
-    ins = []
-    segs = split_commands(text, ops=True, inputs=ins)
+    ins, hds = [], []
+    segs = split_commands(text, ops=True, inputs=ins, heredocs=hds)
     if segs is None:
         return None
     bodies, out, gh_repo, shell_env = heredoc_bodies(text), [], "", {}
@@ -9091,8 +9107,9 @@ def _text_actions(text, cwd, depth=0, from_code=False, expand=True):
             argv = [argv[0], *gopts, *argv[1:]]
         elif gopts:  # dev, gh and anything else that runs git inherit them: it acts on that repository
             here = _git_where(["git", *gopts], here)
-        if _unknown_binary(argv, here) and (_command_option(argv[1:]) or bodies or herestrs or
-                                            (ins[k] if k < len(ins) else []) or (k and segs[k - 1][2] in ("|", "|&"))):
+        fed_in = (hds[k] if k < len(hds) else bodies) or herestrs or (ins[k] if k < len(ins) else []) or \
+            (k and segs[k - 1][2] in ("|", "|&"))
+        if _unknown_binary(argv, here) and (_command_option(argv[1:]) or fed_in):
             # `./copy -c '…'`, `… | ./copy`: a program the guard cannot identify, handed a command line or a program
             out += _found([_unsure_action(argv, f"{_code(argv[0])}, a program the guard cannot identify, with a "
                                                 f"command line or an input it may run as a program")], argv0, cwd)
