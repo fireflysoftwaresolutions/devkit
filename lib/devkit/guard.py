@@ -1138,6 +1138,23 @@ _PATH_TAKERS = frozenset({"rm", "unlink", "mkdir", "touch", "cp", "mv", "rsync",
 
 
 _POSIX_SHELLS = frozenset({"bash", "sh", "zsh", "dash", "ksh"})
+_BASH_LIKE = frozenset({"bash", "sh"})  # sh is bash on macOS
+# bash's long options, which it reads with one dash as with two (`bash -norc` is `bash --norc`, not -n -o rc -c):
+# those that take the next word as their value, and those that only change how it reports or which startup files it
+# skips. The others (login, debugger, wordexp, dump-strings, …) may run startup files or code: a shell given one runs.
+_BASH_LONG_VALUE = frozenset({"rcfile", "init-file"})
+_BASH_LONG_QUIET = frozenset({"norc", "noprofile", "noediting", "posix", "verbose", "restricted"})
+_BASH_LONG = _BASH_LONG_VALUE | _BASH_LONG_QUIET | frozenset({
+    "debug", "debugger", "dump-po-strings", "dump-strings", "help", "login", "pretty-print", "protected",
+    "rpm-requires", "version", "wordexp"})
+# the option letters and `-o` names a bash that only parses knows to run nothing: set's flags, -r, -s, -c, -n
+_BASH_QUIET_LETTERS = frozenset("abefhkmnptuvxBCEHPTrsc")
+_BASH_QUIET_SET = frozenset({
+    "allexport", "braceexpand", "emacs", "errexit", "errtrace", "functrace", "hashall", "histexpand", "history",
+    "ignoreeof", "interactivecomments", "keyword", "monitor", "noclobber", "noexec", "noglob", "nolog", "notify",
+    "nounset", "onecmd", "physical", "pipefail", "posix", "privileged", "verbose", "vi", "xtrace"})
+_BASH_QUIET_SHOPT = frozenset({"extglob", "globstar", "nullglob", "failglob", "dotglob", "nocaseglob", "nocasematch",
+                               "expandaliases"})
 
 
 def _shell_args(args, name="bash") -> tuple:
@@ -1146,22 +1163,28 @@ def _shell_args(args, name="bash") -> tuple:
     start at args[k]), "input" (no word left: it reads its input) or "none" (-c and no line). bash, zsh, sh, dash and
     ksh read options up to the first word that is not one, -c among them, so the line is the first word after all of
     them (`bash -c -e 'line'`, `bash -c +x 'line'`, `zsh -c -o errexit 'line'`); csh, tcsh and fish take the word right
-    after -c. parse_only: one of those five only reads and parses its program, and runs none of it nor its startup
-    files: -n, -o noexec or zsh's --noexec is on (the last of -n, +n, -o noexec, +o noexec wins), and it is no
-    interactive or login shell (-i, -l, --login, --rcfile), where -n does not hold."""
-    posix = name in _POSIX_SHELLS
+    after -c. bash and sh read their long options with one dash too (`-norc`, `-rcfile f`, _BASH_LONG), and take +c,
+    +s and +l as -c, -s and -l. parse_only: one of those five only reads and parses its program, and runs none of it
+    nor its startup files: -n, -o noexec or zsh's --noexec is on (the last of -n, +n, -o noexec, +o noexec wins), it
+    is no interactive or login shell (-i, -l, --login, --rcfile), where -n does not hold, and, for bash and sh, every
+    option word is one the guard knows runs nothing; any other word is judged as running."""
+    posix, bashlike = name in _POSIX_SHELLS, name in _BASH_LIKE
     line = stdin = noexec = runs = False
-    i = 0
+    i, leading = 0, bashlike  # bash reads its long options before any short one: `bash -n -posix` is -n -p -o …
     while i < len(args):
         a = args[i]
         if a in ("--", "-"):
             i += 1
             break
-        if a.startswith("--"):
-            opt = re.sub(r"[_-]", "", a[2:].split("=", 1)[0].casefold())
+        long = a[2:] if a.startswith("--") else a[1:] if leading and a[:1] == "-" and a[1:] in _BASH_LONG else None
+        leading = leading and long is not None
+        if long is not None:
+            key = long.split("=", 1)[0].casefold()
+            opt = re.sub(r"[_-]", "", key)
             noexec = True if opt == "noexec" else False if opt == "exec" else noexec
-            runs = runs or opt in ("login", "interactive", "rcfile", "initfile")
-            i += 2 if a in ("--rcfile", "--init-file") else 1
+            runs = runs or opt in ("login", "interactive", "rcfile", "initfile") or \
+                (bashlike and key not in _BASH_LONG_QUIET)
+            i += 2 if key in _BASH_LONG_VALUE and "=" not in long else 1
             continue
         if len(a) < 2 or a[0] not in "-+":
             break
@@ -1171,16 +1194,20 @@ def _shell_args(args, name="bash") -> tuple:
                 names.append((ch, args[i + 1 + len(names)] if i + 1 + len(names) < len(args) else ""))
             elif ch == "n":
                 noexec = on
-            elif on and ch == "c":
+            elif ch == "c" and (on or bashlike):  # bash reads +c as -c, +s as -s and +l as -l
                 line = True
-            elif on and ch == "s":
+            elif ch == "s" and (on or bashlike):
                 stdin = True
-            elif on and ch in "il":
+            elif ch in "il" and (on or (bashlike and ch == "l")):
+                runs = True
+            elif bashlike and ch not in _BASH_QUIET_LETTERS:  # -D, -i… or a letter it does not know
                 runs = True
         for ch, opt in names:
             opt = re.sub(r"[_-]", "", opt.casefold())
             if ch == "o" and opt in ("noexec", "exec"):
                 noexec = (opt == "noexec") == on
+            if bashlike and opt not in (_BASH_QUIET_SET if ch == "o" else _BASH_QUIET_SHOPT):
+                runs = True
         i += 1 + len(names)
         if line and not posix:  # csh, tcsh, fish: the word after -c is the line
             break

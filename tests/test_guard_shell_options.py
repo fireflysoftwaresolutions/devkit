@@ -94,5 +94,54 @@ class AShellThatOnlyParses(unittest.TestCase):
                 self.assertIsNotNone(member(cmd, level="review", who="seraph"))
 
 
+class BashLongOptionsWithOneDash(unittest.TestCase):
+    """bash, and sh (bash on macOS), read a long option with one dash before any short one: `-norc` is `--norc`, not
+    -n -o rc -c, and `-rcfile f` takes f. bash 3.2 also reads +c as -c. Each running case printed its twin's output in
+    /bin/bash and /bin/sh (`bash -norc -c '/bin/date +X'` prints the date)."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.release = Path(tmp.name) / "script.sh"
+        self.release.write_text("gh pr merge 12\n")
+
+    def test_a_long_option_with_one_dash_does_not_make_the_line_a_parse(self):
+        s = self.release
+        for cmd in ("bash -norc -c 'gh pr merge 12'", "sh -norc -c 'gh pr merge 12'", f"bash -norc {s}",
+                    "bash -norc <<< 'gh pr merge 12'", "bash -rcfile /dev/null -c 'gh pr merge 12'",
+                    "bash -init-file /dev/null -c 'gh pr merge 12'", "bash -login -c 'gh pr merge 12'",
+                    "bash -posix -c 'gh pr merge 12'", "bash -verbose -c 'gh pr merge 12'",
+                    "bash -noprofile -c 'gh pr merge 12'", "bash -noediting -c 'gh pr merge 12'",
+                    "bash +c 'gh pr merge 12'", "sh +c 'gh pr merge 12'"):
+            with self.subTest(cmd=cmd):
+                self.assertIn("merges PR 12", main(cmd) or "")
+                self.assertIn("merges PR 12", member(cmd) or "")
+                self.assertIsNotNone(member(cmd, level="review", who="seraph"))
+        for cmd in ("bash -norc -c 'gh pr merge 12'", "bash +c 'gh pr merge 12'", "bash -posix -c 'gh pr merge 12'"):
+            with self.subTest(check=cmd):
+                self.assertIsNotNone(check(cmd))
+
+    def test_parse_only_needs_every_option_word_known(self):
+        s = self.release
+        # -n with an option that runs startup files or code, or one the guard does not know, is judged as running;
+        # after a short option, `-posix` is -p -o <word> -s -i -x: an interactive shell, where -n does not hold
+        for cmd in (f"bash -n -login {s}", f"bash -n -O extdebug {s}", f"bash -n -D {s}", f"bash -n -o foo {s}",
+                    f"bash -debugger -n {s}", f"bash -n -posix noexec {s}"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNotNone(member(cmd, level="review", who="seraph"))
+        # twins: long options that only change startup files, and known set and shopt names, still only parse
+        for cmd in (f"bash -norc -n {s}", f"bash -posix -n {s}", f"bash --noprofile -n {s}", f"sh -norc -n {s}",
+                    f"bash -n -O extglob {s}", f"bash -n -o pipefail {s}", f"bash -n -x {s}"):
+            with self.subTest(twin=cmd):
+                self.assertIsNone(main(cmd))
+                self.assertIsNone(member(cmd))
+                self.assertIsNone(member(cmd, level="review", who="seraph"))
+        # running twins with a harmless line
+        for cmd in ("bash -norc -c 'git status'", "bash +c 'git status'", "bash -rcfile /dev/null -c 'git status'"):
+            with self.subTest(twin=cmd):
+                self.assertIsNone(main(cmd))
+                self.assertIsNone(member(cmd))
+
+
 if __name__ == "__main__":
     unittest.main()

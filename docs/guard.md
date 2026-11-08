@@ -21,7 +21,8 @@ the directory used to resolve later paths, leading `VAR=value`, `sudo`, `env`, `
 substitutions, `sh -c` and `eval` strings (with the words after a `sh -c` line in place of its `$0`, `$1`, and
 `"$@"`; the line is the first word after all the shell's options, as bash, zsh, sh, dash, and ksh read them, so
 `bash -c -e 'line'` and `zsh -c -o errexit 'line'` run `line`, while `csh` and `tcsh` take the word right after
-`-c`), `xargs` and `find -exec` commands, and a pager that git or gh starts. The shells it reads this way are
+`-c`; `bash` and `sh` read a long option with one dash before any short one, so `bash -norc -c 'line'` is
+`bash --norc -c 'line'` and `-rcfile f` takes `f`, and they read `+c` as `-c`), `xargs` and `find -exec` commands, and a pager that git or gh starts. The shells it reads this way are
 `sh`, `bash`, `zsh`, `dash`, `ksh`, `fish`, `csh`, and `tcsh`, run by name, by path, or by a script's shebang. It
 reads every one of them with POSIX shell quoting, which `csh` and `tcsh` do not follow in every case (a backslash
 before a closing double quote). Every rule applies at each of these
@@ -419,7 +420,10 @@ These are not `unknown`:
 - a shell that only parses its program: `bash -n x.sh`, `sh -n`, `zsh -n` or `--noexec`, `bash -o noexec`, with a
   script, a `-c` line, or its input. It runs nothing, neither its startup files nor `BASH_ENV`, so it is a read of the
   file. `+n` or `+o noexec` after it, `-i`, `-l`, or `--login` (where `-n` does not hold), or `-n` after the script
-  (a word of the script) make it run, and it is judged as running, as `csh` and `tcsh` are;
+  (a word of the script) make it run, and it is judged as running, as `csh` and `tcsh` are. For `bash` and `sh`,
+  every option word must be one the guard knows runs nothing (`-norc`, `-noprofile`, `-posix`, set's letters and
+  `-o` names, and `-O extglob` or another globbing option); `-login`, `-rcfile`, `-debugger`, `-O extdebug`, `-D`, an
+  unknown option, or `-posix` after a short option (which bash reads as `-p -o … -s -i -x`) make it run;
 - text inside an interpreter's string literals: `${…}`, `{…}`, `[…]` and `*` there belong to the language (a
   template literal, an f-string, a list), and the guard looks for spawn calls in the program's code, not in the
   text it carries. A program named in such a string (`os.system('gh pr merge 12')`) is still classified;
