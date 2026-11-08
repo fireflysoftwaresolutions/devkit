@@ -197,12 +197,15 @@ class CacheAndSegment(Sandbox):
         prompt.refresh(reg={"projects": [self.project("acme/devkit", main)]}, runs=[])
         f, d = prompt.cache_zsh(), prompt.folder()
         self.assertEqual(self.probe((main, 120)), [("✦ devkit", UNSET)])
-        os.chmod(f, 0o666)
+        # the test sets the file mode it checks, on its own temporary files
+        os.chmod(f, 0o666)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions
         self.assertEqual(self.probe((main, 120)), [(UNSET, UNSET)])
         os.chmod(f, 0o600)
-        os.chmod(d, 0o777)
+        # the test sets the file mode it checks, on its own temporary files
+        os.chmod(d, 0o777)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions
         self.assertEqual(self.probe((main, 120)), [(UNSET, UNSET)])
-        os.chmod(d, 0o700)
+        # the test sets the file mode it checks, on its own temporary files
+        os.chmod(d, 0o700)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions
         real = self.root / "elsewhere.zsh"
         os.replace(f, real)
         os.symlink(real, f)

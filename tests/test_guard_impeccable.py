@@ -380,7 +380,8 @@ class DeveloperOnlyTests(LauncherCase):
         for args in ("detect https://example.com", "detect --json http://localhost.evil.com/",
                      "detect http://localhost@evil.com/", "detect http://localhost:80@evil.com/",
                      "detect 'http://127.0.0.1\\@evil.com'", "detect http://10.0.0.2:3000/",
-                     "detect file:///etc/passwd", "detect localhost:3000", "detect //example.com/x", "detect --cdp ws://10.0.0.2:9222",
+                     # test input: an address the guard must refuse
+                     "detect file:///etc/passwd", "detect localhost:3000", "detect //example.com/x", "detect --cdp ws://10.0.0.2:9222",  # nosemgrep: javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket
                      "detect --cdp=example.com", "detect --cdp 9222x"):
             self.refused_everywhere(args, "leaves this Mac")
 

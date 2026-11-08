@@ -318,7 +318,8 @@ class RootModeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp).resolve()
             (home / ".config" / "devkit").mkdir(parents=True)
-            os.chmod(home / ".config" / "devkit", 0o755)
+            # the test sets the file mode it checks, on its own temporary files
+            os.chmod(home / ".config" / "devkit", 0o755)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions
             p = _run_core({"HOME": str(home)}, "from devkit import core")
             self.assertEqual(p.returncode, 0, p.stderr)
             for root in (".local/state/devkit", ".config/devkit", ".local/share/devkit"):
