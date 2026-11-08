@@ -1149,6 +1149,54 @@ class ProveTests(unittest.TestCase):
             self.assertIn("flaky", out)
             self.assertIn("2 of 3", out)
 
+    # a fix in a test helper (a file of the test folders that is no test module: tests/_*.py, conftest.py, fixtures)
+    # is part of the change: the new test runs against the old helper too, and fails there
+    def test_a_fix_in_a_test_helper_is_proven_against_the_old_helper(self):
+        helper_test = """
+    def test_clean_drops_x(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import _support
+        self.assertEqual(_support.clean({"X": 1, "Y": 2}), {"Y": 2})
+"""
+        with Env() as e:
+            r = e.repo({**PROVE_BASE, "tests/_support.py": "def clean(env):\n    return dict(env)\n"})
+            (r / "tests" / "_support.py").write_text(
+                "def clean(env):\n    return {k: v for k, v in env.items() if k != 'X'}\n")
+            (r / "tests" / "test_calc.py").write_text(with_tests(helper_test))
+            rc, out, err = dev(r, "prove", "--json", "--runs", "2")
+            self.assertEqual(rc, 0, out + err)
+            data = json.loads(out)
+            self.assertEqual(data["helpers"], ["tests/_support.py"])
+            self.assertEqual([(t["id"], t["without_change"], t["verdict"]) for t in data["tests"]],
+                             [("test_calc.CalcTests.test_clean_drops_x", "failed", "proves the change")])
+
+    # the copy prove runs in carries the checkout's git repository: a test that runs git on its own checkout (its
+    # files, its origin) sees what it sees in the checkout, with the change and without it
+    def test_a_test_that_runs_git_on_its_checkout_runs_in_the_copy_as_in_the_checkout(self):
+        git_test = """
+    def test_mul_in_a_tracked_file_of_acme(self):
+        import subprocess
+        root = str(Path(__file__).resolve().parents[1])
+        run = lambda *a: subprocess.run(["git", "-C", root, *a], capture_output=True, text=True, check=True)
+        self.assertIn("calc.py", run("ls-files").stdout.split())
+        self.assertEqual(run("config", "--get", "remote.origin.url").stdout.strip(),
+                         "https://github.com/acme/proj.git")
+        self.assertEqual(calc.mul(2, 3), 6)
+"""
+        with Env() as e:
+            r = e.repo(PROVE_BASE)
+            (r / "tests" / "test_calc.py").write_text(with_tests(git_test))
+            (r / "calc.py").write_text(MUL)
+            before = self.snapshot(r)
+            head = git(r, "rev-parse", "HEAD")
+            rc, out, err = dev(r, "prove", "--json", "--runs", "2")
+            self.assertEqual(rc, 0, out + err)
+            self.assertEqual([(t["with_change"], t["without_change"]) for t in json.loads(out)["tests"]],
+                             [("2/2", "failed")])
+            self.assertEqual(self.snapshot(r), before)
+            self.assertEqual(git(r, "rev-parse", "HEAD"), head)
+            self.assertEqual(list((e.root / "devtmp").iterdir()), [])
+
     def test_needs_a_production_change_and_a_changed_test(self):
         with Env() as e:
             r = e.repo(PROVE_BASE)
