@@ -632,6 +632,45 @@ Lists the live watches, and those that stopped before their runs ended with the 
 background watches and the agents' `dev ci watch --wait`, with the repository, target, start, last event, expiry,
 agent, and session. See [CI/CD pipelines › List the watches](ci-cd.md#list-the-watches).
 
+### `dev watch [--wait] [--for me] [--only KINDS] [--timeout MIN] [--json]`
+
+Without `--wait`, shows what waits for you in this session (marking nothing), what can still arrive, and the live
+waits. With `--wait`, it is the one wait for every devkit event: it blocks until something you must act on arrives
+for your own session, prints each event once, one line each, and exits. The hooks and the wait take from the same
+records, so a hook never repeats what a wait printed, and the other way round.
+
+| Kind | What wakes the main session | What wakes a crew member |
+| --- | --- | --- |
+| `question` | A crew question or an answer to the tech lead | A message to its lane: an answer, a question |
+| `decision` | A decision that waits for the developer | — |
+| `ready` | A step ready to launch, including a review step and a step that a freed crew slot lets start | — |
+| `member` | A member that stopped, was lost, or ended unverified; on Codex, one that finished | — |
+| `ci` | A CI result of a run this session sent | — |
+| `notice` | Never alone: a crew limit change or a failed handoff push rides along | — |
+
+Each line starts with devkit's own words; a member's or CI's text is one quoted span with control and escape
+sequences removed. The last line is `watch: <n> events · arm again: dev watch --wait`.
+
+- `--for me`: the caller's own events: its crew lane's, or the main session's. It is the default and the only
+  value: a wait never reads another lane's or another session's events.
+- `--only`: a comma list of kinds to take (`question,decision,ready,member,ci,notice`).
+- `--timeout`: minutes before it ends with the command to arm it again. Defaults: 240 for the main session on Claude
+  Code (Bash `run_in_background`), 10 on Codex (in the foreground), 9 for a crew member (in the foreground).
+- `--json`: the peek as JSON.
+
+Exit codes: 0 events printed, 1 no agent session here, 2 nothing can arrive (no member works, no launch is pending,
+no step waits for a slot, and no CI run this session sent is unfinished; it says so at once), 3 when it timed out or
+was stopped (arm it again), 5 a newer wait of the same session and consumer took over. The wait watches devkit's
+state folders (kqueue on macOS, a stat every 2 seconds anyway), lets a burst settle for 2 seconds, and reconciles the
+session's run every 60 seconds, so a member that went silent or a slot that a quota window freed wakes an idle
+session too. It never calls a model. Each wake is in the audit trail (`watch.wake`).
+
+### `dev watches [--json]`
+
+Lists every wait: the `dev watch --wait` records (live, expired before anything arrived, or superseded by a newer
+one, each with the command to arm it again) and the CI watches (`dev ci watches`), then what can still arrive for
+this session.
+
 ### `dev ci audit [--fix] [--strict] [--provider HOST] [--json] [-p PROJECT]`
 
 Diagnoses every pipeline in the repository (GitHub Actions, GitLab CI, Bitbucket Pipelines, Azure Pipelines) for

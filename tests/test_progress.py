@@ -2150,7 +2150,8 @@ class HookCallsTests(unittest.TestCase):
             mods = {**{k: v for k, v in top.items() if k not in local}, **imports(fn.body)}
             missing |= {f"{n.value.id}.{n.attr} (line {n.lineno})" for n in ast.walk(fn)
                         if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and n.value.id in mods
-                        and not hasattr(importlib.import_module(f"devkit.{mods[n.value.id]}"), n.attr)}
+                        # the names imported are devkit's own modules, read from devkit's source by this test
+                        and not hasattr(importlib.import_module(f"devkit.{mods[n.value.id]}"), n.attr)}  # nosemgrep: python.lang.security.audit.non-literal-import.non-literal-import
         self.assertEqual(sorted(missing), [])
 
 

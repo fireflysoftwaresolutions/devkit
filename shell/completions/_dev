@@ -184,6 +184,8 @@ _dev() {
         'gc:Reclaim disk'
         'canary:Instruction-compliance canary report'
         'ci:What CI runs'
+        'watch:What waits for you in this session, what can still arrive, and the live…'
+        'watches:Every wait (dev watch --wait) and CI watch'
         'branch:Branches: new'
         'commit:Conventional Commit of the staged changes, -a'
         'rebase:Fetch and rebase the current branch on origin/<default>'
@@ -267,6 +269,8 @@ _dev() {
         (gc) _dev__gc && ret=0 ;;
         (canary) _dev__canary && ret=0 ;;
         (ci) _dev__ci && ret=0 ;;
+        (watch) _dev__watch && ret=0 ;;
+        (watches) _dev__watches && ret=0 ;;
         (branch) _dev__branch && ret=0 ;;
         (commit) _dev__commit && ret=0 ;;
         (rebase) _dev__rebase && ret=0 ;;
@@ -1624,6 +1628,22 @@ _dev__ci() {
     '--stack=[init: the stack]:stack:(auto python node java-maven java-gradle go php docker)' \
     '--force[init: overwrite an existing pipeline file]' \
     '::project: _dev_live projects - status audit init watch watches'
+}
+
+_dev__watch() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--wait[block until an event arrives for you]' \
+    '--for=[me: the caller'\''s own events]:for :(me)' \
+    '--only=[comma list: question,decision,ready,member,ci,notice]:only:_values -s , only question decision ready member ci notice' \
+    '--timeout=[minutes before it ends with the command to arm it again]:timeout: ' \
+    '--json[the peek as JSON]'
+}
+
+_dev__watches() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--json[the waits as JSON]'
 }
 
 _dev__branch() {

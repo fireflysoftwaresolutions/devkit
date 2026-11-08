@@ -414,14 +414,22 @@ def _superseded(ev: dict, events: list) -> bool:
 
 
 def pending_events(agent: str, sid: str) -> str:
-    """The CI results waiting for a session without a progress run. Each is given once and marked delivered in the
-    same locked write, so no later call (the next hook, a parallel tool call) gives it again. A failure a later pass
-    on its branch supersedes is marked delivered without being told."""
+    """The CI results waiting for a session without a progress run, as the text that tells them (take_events)."""
+    return "\n\n".join(e.get("text") or "" for e in take_events(agent, sid))
+
+
+def take_events(agent: str, sid: str, mark: bool = True) -> list:
+    """The CI results waiting for a session without a progress run -> [event] to tell. With mark, each is given once
+    and marked delivered in the same locked write, so no later call (the next hook, a parallel tool call, a wait)
+    gives it again. A failure a later pass on its branch supersedes is marked delivered without being told."""
     try:
         from . import progress
         f = progress.SESSIONS / f"{agent}-{sid}.json"
-        if not any(_pending(e) for e in (state.read(f) or {}).get("ci_events") or []):
-            return ""  # the usual case, without the lock
+        events = (state.read(f) or {}).get("ci_events") or []
+        if not any(_pending(e) for e in events):
+            return []  # the usual case, without the lock
+        if not mark:
+            return [dict(e) for e in events if _pending(e) and not _superseded(e, events)]
         new = []
 
         def take(s):
@@ -435,9 +443,9 @@ def pending_events(agent: str, sid: str) -> str:
                 if _superseded(e, events):
                     e["superseded"] = True
         state.update(f, take, create=False)
-        return "\n\n".join(e.get("text") or "" for e in new if not e.get("superseded"))
+        return [dict(e) for e in new if not e.get("superseded")]
     except Exception:
-        return ""
+        return []
 
 
 _WRAPPERS = ("env", "command", "time", "nohup", "exec")

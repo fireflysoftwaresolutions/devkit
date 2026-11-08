@@ -83,6 +83,8 @@ COMMANDS = [
          "The specialist agents: who does what, briefs, routing, delegation, who holds a file, decisions, the live "
          "graph, the rules, the RACI"),
         ("ci status [--watch]", "Live CI/CD runs (GitHub, GitLab, Bitbucket, Azure): jobs, steps, elapsed, ETA"),
+        ("watch [--wait] · watches", "One wait for every devkit event (questions, decisions, ready steps, members, "
+                                     "CI): it wakes an idle session once per event; watches lists the waits"),
         ("calver [--next]", "Current and next CalVer version YY.MM.PATCH from the repository's tags"),
         ("sec scan [--history]", "Security: secrets (gitleaks), dependencies (osv-scanner), SAST (Semgrep), Trivy"),
         ("docs check [--online]", "Check docs: Markdown structure, links and anchors, prose (Vale), diagrams"),
@@ -3717,6 +3719,23 @@ def build_parser():
     p.add_argument("--limit", type=int, default=5)
     p.add_argument("--all-jobs", action="store_true", help="list every running job")
     p.add_argument("--json", action="store_true")
+    from . import watch
+    w = add("watch", watch.cmd_watch, "What waits for you in this session, what can still arrive, and the live "
+                                      "waits; `--wait`: block until something you must act on arrives, print it once "
+                                      "and exit (exit 0 events, 2 nothing can arrive, 3 timeout, 5 superseded)")
+    w.add_argument("--wait", action="store_true",
+                   help="block until an event arrives for you: Claude Code main session with Bash run_in_background; "
+                        "a crew member or Codex in the foreground")
+    w.add_argument("--for", dest="for_", choices=("me",), help="me: the caller's own events (its crew lane, or the "
+                                                               "main session): the default, and the only value")
+    w.add_argument("--only", help="comma list: question,decision,ready,member,ci,notice; take only these kinds")
+    w.add_argument("--timeout", type=float, help="minutes before it ends with the command to arm it again (default "
+                                                 "240 for the main session on Claude Code, 10 on Codex, 9 for a crew "
+                                                 "member)")
+    w.add_argument("--json", action="store_true", help="the peek as JSON (for tools)")
+    w = add("watches", watch.cmd_watches, "Every wait (dev watch --wait) and CI watch: live, expired or superseded, "
+                                          "with the command to arm it again, and what can still arrive")
+    w.add_argument("--json", action="store_true", help="the waits as JSON (for tools)")
     from . import gitx
     gitx.add_ci_arguments(p)
     from . import pipelines

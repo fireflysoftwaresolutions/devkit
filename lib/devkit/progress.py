@@ -2137,15 +2137,17 @@ def crew_inbox(from_agent: str | None = None, cwd: str | None = None, mark: bool
     return _take_messages(agent, sid, from_agent or "main", mark) if run else []
 
 
-def _take_messages(agent, sid, me: str, mark=True) -> list:
+def _take_messages(agent, sid, me: str, mark=True, select=None, limit=None) -> list:
     """The messages for `me` not delivered yet; with mark, they are marked delivered (once each, under the lock).
-    Every hook call asks: the lock is taken only when there is something to take."""
+    `select(run, message)`: only the messages it keeps; `limit`: at most that many, oldest first (watch.mail). Every
+    hook call asks: the lock is taken only when there is something to take."""
     def mine(run):
         run = normalize(run)
         lane = (run.get("agents") or {}).get(me) or {}
-        return run, [m for m in run.get("messages") or [] if not m.get("delivered") and (
+        new = [m for m in run.get("messages") or [] if not m.get("delivered") and (
             m.get("to") == me or ((m.get("to") or "").startswith("name:") and me != "main"
-                                  and _label_matches(m["to"][5:], lane)))]
+                                  and _label_matches(m["to"][5:], lane))) and (select is None or select(run, m))]
+        return run, new[:limit] if limit is not None else new
     run = load_run(agent, sid)
     if not run or not mine(run)[1]:
         return []
@@ -2762,40 +2764,57 @@ def _not_open(d: dict) -> str:
     return ""
 
 
-def _ci(agent, sid) -> str:
+def _ci(agent, sid, mark: bool = True) -> list:
+    """The CI results waiting in the session record of a session without a run (ciwatch.take_events), each taken
+    once: the CI source of watch.mail. [] when the record cannot be read."""
     try:
         from . import ciwatch
-        return ciwatch.pending_events(agent, sid)
+        return ciwatch.take_events(agent, sid, mark=mark)
     except Exception:
-        return ""
+        return []
 
 
-def _ready(agent, sid) -> str:
-    try:
-        from . import dispatch
-        return dispatch.ready_context(agent, sid)
-    except Exception:
-        return ""
+def _mail(agent, sid, me: str) -> str:
+    """watch.mail: crew messages, decisions, ready steps, CI results and notices new for `me`, each told once."""
+    from . import watch
+    return watch.mail(agent, sid, me)
 
 
 def _told(d: dict) -> bool:
     return bool(d.get("told") or d.get("surfaced"))  # `surfaced`: runs written before spec C5
 
 
-def decisions_context(agent: str, sid: str) -> str:
-    """For the main session: decisions waiting for the developer, newest first, once per decision."""
+def take_decisions(agent: str, sid: str, mark: bool = True) -> tuple:
+    """The decisions waiting for the developer that the main session was not told yet -> (run, [decision]); with
+    mark, each is marked told in the same locked write, so no later hook or wait tells it again."""
     run = load_run(agent, sid)
     if not run or not any(not _told(d) for d in pending_decisions(run)):
-        return ""  # the usual case, without the lock
+        return run, []  # the usual case, without the lock
+    if not mark:
+        return run, [dict(d) for d in pending_decisions(normalize(run)) if not _told(d)]
     with _tx(agent, sid):
         run = normalize(load_run(agent, sid) or {})
         new = [d for d in pending_decisions(run) if not _told(d)]
         if not new:
-            return ""
+            return run, []
         for d in new:
             d["told"] = round(time.time())  # delivered to Morpheus; `shown` is when the developer saw it
             d.pop("surfaced", None)
         _save(run, touch_session=False)
+    return run, [dict(d) for d in new]
+
+
+def decisions_context(agent: str, sid: str, taken: list | None = None) -> str:
+    """For the main session: decisions waiting for the developer, newest first, once per decision. `taken`: a list
+    that receives the decisions told (watch.mail renders them one per line for a wait)."""
+    run, new = take_decisions(agent, sid)
+    if taken is not None:
+        taken.extend(new)
+    return decisions_text(run, new) if new else ""
+
+
+def decisions_text(run: dict, new: list) -> str:
+    """The main session's context for decisions that wait for the developer: how to ask them, then one line each."""
     from . import crew
     lines = ["devkit · decisions waiting for the developer (" + mode_of(run) + " mode). Ask them with your "
              "question tool (AskUserQuestion) in the calls `dev crew decisions --ask` prints: a plain question with "
@@ -2843,9 +2862,17 @@ def waiting_context(agent: str, sid: str, since, now: float) -> str:
                f"{k} question calls, one after the other; `dev crew decisions --ask` prints them."))
 
 
-def messages_context(agent: str, sid: str, me: str) -> str:
-    """The hook text that delivers a crew member's pending messages."""
-    msgs = _take_messages(agent, sid, me)
+def messages_context(agent: str, sid: str, me: str, select=None, limit=None, taken: list | None = None) -> str:
+    """The hook text that delivers the pending messages of `me` (the main session or a crew lane), each once.
+    `select` and `limit` as _take_messages; `taken`: a list that receives the messages delivered (watch.mail)."""
+    msgs = _take_messages(agent, sid, me, select=select, limit=limit)
+    if taken is not None:
+        taken.extend(msgs)
+    return messages_text(msgs)
+
+
+def messages_text(msgs: list) -> str:
+    """The hook text for crew messages taken for their recipient: how to answer, then one line each."""
     if not msgs:
         return ""
     from . import crew
@@ -4696,9 +4723,8 @@ def on_prompt(agent: str, data: dict, now: float | None = None):
             pass  # audited by state: this prompt's clock is dropped, the hook still answers
     _run_event(agent, sid, lambda run: (_close(run, "turn", None, now), _open(run, "turn", "main", now)))
     prompt = (data.get("prompt") or "")[:400]
-    mail = "\n\n".join(x for x in (messages_context(agent, sid, "main"), decisions_context(agent, sid),
-                                    waiting_context(agent, sid, s.get("last_prompt"), now),
-                                    _ready(agent, sid), _ci(agent, sid)) if x) if f.exists() else ""
+    mail = "\n\n".join(x for x in (_mail(agent, sid, "main"), waiting_context(agent, sid, s.get("last_prompt"), now))
+                       if x) if f.exists() else ""
     if not STATUS_Q.search(prompt):
         return mail or None
     runs = [r for r in active_runs() if r.get("session") == sid] or active_runs()[:3]
@@ -5037,10 +5063,9 @@ def on_tool_done(agent: str, data: dict):
     if not f.exists():
         return None
     me = data.get("agent_id") or "main"
-    mail = messages_context(agent, sid, me)
+    mail = _mail(agent, sid, me)  # what is new for the caller, taken once whichever of a hook and a wait reads it
     if me != "main":  # inside a subagent: deliver its messages; updates to the developer are the main session's job
         return mail or None
-    mail = "\n\n".join(x for x in (mail, decisions_context(agent, sid), _ready(agent, sid), _ci(agent, sid)) if x)
     now = time.time()
     said = _last_assistant_text_ts(data.get("transcript_path")) if agent == "claude" else None
     last = max(x for x in (s.get("turn_started") or s.get("started") or now, s.get("last_update") or 0,
