@@ -376,6 +376,29 @@ def _record_real(home: str, homes: set):
     _S["homes"] = homes
 
 
+def scrub(environ) -> list:
+    """Remove from `environ` (changed in place) what names the developer's live session or reaches it; returns the
+    names of the variables it changed. Beyond the names it knows, any entry of a value (a path list is split on
+    os.pathsep) that lies below a real root goes, whatever the variable: a shell exports its own path lists (zsh's
+    FPATH can list a devkit release's completions) and a list of names never keeps up with them."""
+    changed = []
+    for k in list(environ):
+        if k in SCRUB or (k.startswith("DEVKIT_") and k not in KEEP):
+            changed.append(k)
+            del environ[k]
+            continue
+        parts = environ[k].split(os.pathsep)
+        kept = [p for p in parts if not (p.startswith("/") and (_protected(os.path.normpath(p)) or
+                                                                 _protected(os.path.realpath(p))))]
+        if len(kept) != len(parts):
+            changed.append(k)
+            if any(kept):
+                environ[k] = os.pathsep.join(kept)
+            else:
+                del environ[k]
+    return changed
+
+
 def activate() -> dict:
     """Isolate the run (see the module docstring). Returns the state: active, late, root, home, real, violations."""
     if _S["active"] or _S["late"]:
@@ -393,9 +416,7 @@ def activate() -> dict:
     root = tempfile.mkdtemp(prefix="devkit-hermetic-", dir=home_base())
     home = os.path.join(root, "home")
     os.makedirs(os.path.join(home, "Development"))
-    for k in [k for k in os.environ if k in SCRUB or (k.startswith("DEVKIT_") and k not in KEEP)]:
-        _S["scrubbed"].append(k)
-        del os.environ[k]
+    _S["scrubbed"].extend(scrub(os.environ))
     os.environ.update({"HOME": home, MARK: home, **KEEP})
     snap = snapshot(watched())
     _S.update(root=root, home=home, owner=os.getpid(), snapshot=snap, own=outputs(watched(), snap))

@@ -68,6 +68,22 @@ class IsolatedRun(unittest.TestCase):
                                                         for r in _hermetic.state()["real"].values())]
         self.assertEqual([], real)
 
+    # whatever the shell put in the environment, an entry that names a real root goes, by its value and not by the
+    # variable's name: zsh's FPATH can list a devkit release's completions folder, and its _ the last command's path;
+    # the other entries of a path list stay, and a folder that only starts with a root's name is not below it
+    def test_the_scrub_removes_every_value_that_names_a_real_root(self):
+        real = _hermetic.state()["real"]
+        completions = os.path.join(real["install"], "releases", "26.11.5-c343681", "shell", "completions")
+        env = {"FPATH": os.pathsep.join(["/usr/share/zsh/functions", completions, "/opt/zsh/site"]),
+               "_": os.path.join(real["install"], "current", "bin", "dev"),
+               "LAST_LOG": os.path.join(real["state"], "logs", "x.log"),
+               "NEAR": real["state"] + "-other",
+               "PLAIN": "/usr/bin", "CLAUDECODE": "1", "DEVKIT_GUARD": "off", "DEVKIT_HOME": "/x"}
+        changed = _hermetic.scrub(env)
+        self.assertEqual({"FPATH": "/usr/share/zsh/functions" + os.pathsep + "/opt/zsh/site",
+                          "NEAR": real["state"] + "-other", "PLAIN": "/usr/bin", "DEVKIT_HOME": "/x"}, env)
+        self.assertEqual(["CLAUDECODE", "DEVKIT_GUARD", "FPATH", "LAST_LOG", "_"], sorted(changed))
+
     # a process a test starts resolves the same temporary roots, through the environment it inherits
     def test_a_child_process_resolves_the_temporary_home(self):
         lib = str(Path(__file__).resolve().parents[1] / "lib")
