@@ -2204,6 +2204,30 @@ _ENV_SET_CODE = re.compile(
     r"DEV_ROOT|DEVKIT_\w+)|['\"](?:HOME|DEV_ROOT|DEVKIT_\w+)['\"]\s*:|\b(?:HOME|DEV_ROOT|DEVKIT_\w+)\s*=(?!=)"
     r"|process\.env\.(?:HOME|DEV_ROOT|DEVKIT_\w+)\s*=(?!=)|\bENV\s*\[\s*['\"](?:HOME|DEV_ROOT|DEVKIT_\w+)['\"]\s*\]\s*=(?!=)")
 _DEV_RUN_CODE = re.compile(r"['\"](?:[^'\"\s]*/)?dev(?:['\"]\s*[,\])]|\s+\w)|\bbin/dev\b|\bdevkit\b")
+
+
+def _code_env_sets(code: str, name: str = "") -> set:
+    """The names of devkit's variables (HOME, DEV_ROOT, DEVKIT_*) a program's code sets in an environment
+    (_ENV_SET_CODE). In Python, an assignment to a variable of that name (`HOME = Path.home()`) is a variable of the
+    program and sets no environment, so it does not count; `os.environ["HOME"] = …`, `env={"HOME": …}`,
+    `dict(os.environ, HOME=…)` and a `HOME=…` in a shell line still do. A program that does not parse counts all."""
+    hits = [(m.start(), _ENV_NAME.findall(m.group(0))) for m in _ENV_SET_CODE.finditer(code or "")]
+    fam = re.sub(r"[0-9.]+$", "", os.path.basename(str(name or "")).casefold())
+    if not hits or fam not in ("python", "pypy"):
+        return {n for _, names in hits for n in names}
+    import ast
+    try:
+        tree = ast.parse(code)
+    except (SyntaxError, ValueError):
+        return {n for _, names in hits for n in names}
+    stores = {(n.lineno, n.col_offset) for n in ast.walk(tree) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
+    out = set()
+    for at, names in hits:
+        line_start = code.rfind("\n", 0, at) + 1
+        where = (code.count("\n", 0, at) + 1, len(code[line_start:at].encode("utf-8")))  # ast counts UTF-8 bytes
+        if where not in stores:
+            out.update(names)
+    return out
 INSTALL_REASON = ("`dev install` and `dev update` change what every hook, the guard and `dev` itself run: they pin a "
                   "new devkit copy and rewrite the agents' settings (spec C10, K1). The developer runs them, in a "
                   "terminal. Ask them, and say which commit should be pinned and why; `dev doctor` shows what is "
@@ -2849,7 +2873,7 @@ class _Shell:
         if _INTERP.match(name) and not _repo_script(argv, cwd):
             code = _program(argv, cwd, self.bodies)[0]
             if code and _DEV_RUN_CODE.search(code):
-                bad = _forged({n for m in _ENV_SET_CODE.finditer(code) for n in _ENV_NAME.findall(m.group(0))})
+                bad = _forged(_code_env_sets(code, name))
                 if bad:
                     return deny(forged_env_reason(bad, f"the devkit command this {name} program runs"))
         return None
@@ -7655,8 +7679,9 @@ def _segment_actions(argv, cwd, bodies, depth) -> list:
         if not found and _INTERP.match(name) and not _repo_script(argv, cwd):
             with _skipped_reads() as unread:
                 code = _program(argv, cwd, bodies)[0]
+            expand = not _py_argv_only(code, name)  # backticks in a string no shell reads are Markdown, not commands
             for text in _code_texts(code, name):
-                more += _text_actions(text, cwd, depth + 1, from_code=True) or []
+                more += _text_actions(text, cwd, depth + 1, from_code=True, expand=expand) or []
             if unread:  # its program is too large or unreadable: it may do anything
                 found = [_unread_action(argv, unread[0])]
             elif _dynamic_code(name, code) or _SPAWN_BUILT.search(code or ""):  # it may build what it runs
@@ -8035,13 +8060,30 @@ def literal_variants(cmd: str) -> list:
     return out
 
 
-def _text_actions(text, cwd, depth=0, from_code=False):
+_PY_SHELL_LINE = re.compile(
+    r"\bshell\b(?!\s*=\s*False\b)|\bos\s*\.\s*(?:system|popen|exec\w*|spawn\w*|posix_spawn\w*)\b|\bpopen\b|"
+    r"\bgetoutput\b|\bgetstatusoutput\b|\bpty\b|\bcommands\b|['\"](?:[^'\"\s]*/)?(?:ba|z|da|k|tc|c|fi|pwsh|)sh['\"]|"
+    r"['\"]-\w*c['\"]|(?<![\w.])(?:eval|exec|compile)\s*\(|\b(?:__import__|import_module|getattr|globals|locals|vars)\s*\(")
+
+
+def _py_argv_only(code, name="") -> bool:
+    """True when a Python program can start processes only with argument lists no shell reads: subprocess without
+    `shell` (other than shell=False), no os.system, popen, getoutput or pty, no string that names a shell or a `-c`
+    option, and no code built at run time. Then a string literal in it is at most one argument word, and the
+    backticks and `$(…)` in it are text (Markdown code spans in a template, a regex), not commands."""
+    fam = re.sub(r"[0-9.]+$", "", os.path.basename(str(name or "")).casefold())
+    return bool(code) and fam in ("python", "pypy") and not _PY_SHELL_LINE.search(code)
+
+
+def _text_actions(text, cwd, depth=0, from_code=False, expand=True):
     """The actions of every segment of a command line, level by level: what each segment runs, what a shell reads
     from a pipe (`printf '…' | sh`, `cat f | bash`) or a here-string (`bash <<< '…'`), and the substitutions the
     shell expands. Quoted text a command only carries is one word here, so it is never read as a command. None when
     a level cannot be parsed. `from_code`: the text is a string literal of an interpreter's program, where `${…}`,
     `{…}`, `[…]` and `*` are the language's own (a template, an f-string, a list), so they never make a program the
-    shell names at run time; the shells and substitutions it runs are judged as usual (M394)."""
+    shell names at run time; the shells and substitutions it runs are judged as usual (M394). `expand` False: the
+    text is a string of a program that never hands one to a shell (_py_argv_only), so the substitutions in it are
+    text; a shell it names with its own command line (`bash -c …`) is still read in full."""
     if not text or not str(text).strip():
         return []
     if depth > 4:  # a level deeper than the gate reads may run anything: unknown, never "nothing found"
@@ -8117,7 +8159,7 @@ def _text_actions(text, cwd, depth=0, from_code=False):
                 if more is None:
                     return None
                 out += more
-    for sub in _expansions(text):
+    for sub in _expansions(text) if expand else []:
         more = _text_actions(sub, cwd, depth + 1)
         if more is None:
             return None
