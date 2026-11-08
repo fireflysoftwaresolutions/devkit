@@ -59,6 +59,7 @@ SCRUB = ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ID", "CLAU
          "CLAUDE_CODE_EXECPATH", "CLAUDE_CODE_TMPDIR", "CLAUDE_PID", "CLAUDE_ENV_FILE", "CLAUDE_PROJECT_DIR",
          "CLAUDE_JOB_DIR", "CLAUDE_PLUGIN_ROOT", "CLAUDE_EFFORT", "CLAUDE_MODEL", "CODEX_THREAD_ID", "CODEX_SANDBOX",
          "CODEX_SANDBOX_NETWORK_DISABLED", "CODEX_MANAGED_BY_NPM", "GH_CONFIG_DIR",
+         "_",  # the shell's path of the command it last ran, which can name a real devkit copy
          # the locations devkit and the tools it runs take from the environment before HOME: without them every one
          # follows HOME, the run's or the one a test makes for itself
          "DEVKIT_CONFIG", "DEV_ROOT", "CODEX_HOME", "CLAUDE_CONFIG_DIR", "XDG_CONFIG_HOME", "XDG_STATE_HOME",
