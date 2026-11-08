@@ -1,7 +1,7 @@
 # Copyright (c) 2026 Firefly Software Solutions Inc.
 # SPDX-License-Identifier: Apache-2.0
 # How the guard quotes a value in a refusal: one code span that nothing inside the value can end, so the agent reads
-# the value whole and the audit trail masks it as one quote (1 of the Code reviewer's fourth review of the masking).
+# the value whole and the audit trail masks it as one quote.
 # Run: python3 -m unittest tests.test_guard -v
 import ast
 import re

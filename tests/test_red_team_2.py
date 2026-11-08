@@ -809,7 +809,7 @@ class RedTeam2(unittest.TestCase):
         outside.chmod(0o755)
         self.assertEqual(self.acts(str(outside)), ["unknown"])
 
-    # ---- the Code reviewer's last probes of 80b1467 (M700, M701)
+    # ---- unparseable scripts, csh and tcsh, and a tool's cmd key
     def unparsed_scripts(self):
         """x.sh in a workspace folder and y.sh in a temp folder, each with a comment the gate's parser cannot read
         (`# it's a test`); y.sh then force-pushes main. -> (workspace folder, temp folder)."""
@@ -893,7 +893,7 @@ class RedTeam2(unittest.TestCase):
         self.assertEqual(guard.tool_commands({"command": "ls", "cmd": "ls"}), ["ls"])
         self.assertEqual(guard.tool_commands({"cmd": 3}), [])
 
-    # ---- Red team round 3 on 80b1467: nesting depth, patch header paths
+    # ---- nesting depth and patch header paths
     def test_a_command_nested_deeper_than_the_guard_reads_is_refused(self):
         # five levels of `sh -c` (or bash -lc, eval, env and nohup) around a force push passed every rule: the caps
         # read "too deep to read" as "nothing found"; now the shell rules refuse it and the gate counts it unknown

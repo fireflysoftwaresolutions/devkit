@@ -508,7 +508,7 @@ _WRAPPERS = {
 _SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh"})
 _PYTHON = re.compile(r"python(?:3(?:\.\d+)?)?")
 _PYTHON_VALUED = frozenset({"-W", "-X", "--check-hash-based-pycs"})
-# the programs whose name a record keeps (2b of the Code reviewer's fourth review, the tech lead's decision): a word at
+# the programs whose name a record keeps: a word at
 # command position, or a refusal's one-word quote, stays only when it is on this list; any other is recorded as its
 # length, since a lowercase word there can be a client's name, a file or a password. A program run by its path keeps
 # its base name, and only when the list has it. The list is fixed, so a record masks the same way on every machine (no
@@ -986,7 +986,7 @@ def _bare(w, line: str) -> bool:
 
 
 def _folder(w, extra: list) -> None:
-    """A program or a wrapper run by its path (/opt/x/bin/dev, L4 of the fourth review): its folder becomes its length
+    """A program or a wrapper run by its path (/opt/x/bin/dev): its folder becomes its length
     in `extra`, and its base name stays."""
     folder = w[3][:w[3].rfind("/")]
     if w[1] >= 0 and folder and not _kept(folder):
@@ -1123,7 +1123,7 @@ def _simple_acts(words: list, form: str, depth: int, line: str, extra: list) -> 
             _folder(words[k], extra)
     if j >= n:
         return acts
-    if kind is None:  # 2b: its name stays only from devkit's list, its base name when it runs by its path (L4)
+    if kind is None:  # its name stays only from devkit's list, its base name when it runs by its path
         v = words[j][3]
         base = v.rsplit("/", 1)[-1]
         if words[j][0] == "mark":

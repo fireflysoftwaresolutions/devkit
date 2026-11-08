@@ -1327,7 +1327,7 @@ def _dev_cross_violation(args, cwd):
 def _patch_lines(patch: str) -> list:
     """An apply_patch envelope's lines as Codex's parser reads them: split on `\n` only, with one `\r` before it
     dropped. str.splitlines() also splits on `\r`, `\x0b`, `\x0c`, `\x1c`-`\x1e`, `\x85`, U+2028 and U+2029, which
-    cut a header path that Codex reads whole (Red team round 3). A final `\n` ends the last line, as for splitlines."""
+    cut a header path that Codex reads whole. A final `\n` ends the last line, as for splitlines."""
     lines = [ln[:-1] if ln.endswith("\r") else ln for ln in str(patch).split("\n")]
     return lines[:-1] if lines and lines[-1] == "" else lines
 
@@ -2236,7 +2236,7 @@ def _ext_refusal(args) -> bool:
 # H1 and its re-reviews (the Security engineer): the agents' own CLIs change the same plugins, marketplaces and MCP
 # servers `dev ext` does, outside its audit trail and lock. Two rounds of a verb block list over a loose parse each
 # lost to a new spelling (an option's value read as the group, `--`, help where a parser takes it as a value), so the
-# rule is an allowlist that fails closed (round three): a claude or codex call whose words include a group word
+# rule is an allowlist that fails closed: a claude or codex call whose words include a group word
 # anywhere is the developer's, unless its whole argv is one of these exact read-only forms. NAME is one argument that
 # is no option; `claude plugins` is `claude plugin`. A group alone prints its help.
 _VENDOR_WORDS = frozenset({"plugin", "plugins", "mcp", "marketplace"})
@@ -7032,7 +7032,7 @@ def _cat_path(argv, cwd):
 def _unparsed_script(path, words, argv, cwd) -> list:
     """The actions of a script file whose lines the gate cannot parse, however it runs (`./y.sh`, `sh y.sh`,
     `. y.sh`, `sh < y.sh`): none for the repository's own script inside the workspace, else an unknown action named
-    by `words`, as it may do anything (M701)."""
+    by `words`, as it may do anything."""
     return [] if _workspace_file(path) else _found([_unknown(words)], argv, cwd)
 
 
@@ -7277,7 +7277,7 @@ def _argv_actions(argv, cwd, bodies, depth):
 
 def _nested_action(text, cwd) -> list:
     """The gate's record for a command nested deeper than it reads (`sh -c` five levels deep): an unknown, tier-2
-    action named by the text left unread, as it may do anything (Red team round 3)."""
+    action named by the text left unread, as it may do anything."""
     return _found([_unknown(text)], [str(text)], cwd)
 
 

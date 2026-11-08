@@ -421,7 +421,7 @@ class BackgroundWorkTests(GateCase):
         self.assertNotIn("crew_background", sess)  # sent back: its lane stays open, the tech lead is not told yet
 
     def test_a_command_moved_to_the_background_after_some_output_is_found_by_its_result_id(self):
-        # the Code reviewer's review, finding 2: the commonest real shape has output before Claude Code's
+        # the commonest real shape has output before Claude Code's
         # "Command was moved to the background" line, and the id only in the result record's backgroundTaskId
         self.complete()
         self.tx.call("Bash", "Ran 1595 tests in 212s\nCommand was moved to the background (ID: m0v3d4w4y). "

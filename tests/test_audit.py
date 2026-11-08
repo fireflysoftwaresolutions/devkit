@@ -739,7 +739,7 @@ class CommandTextTests(AuditCase):
                  ("task", "done SECRET Acme export --why x"): f"done {self.t(18)} --why {self.t(1)}",
                  ("crew", "ask --to Persephone [message text not recorded: 44 characters]"):
                      "ask --to Persephone [message text not recorded: 44 characters]",  # a marker: read as stored
-                 # L2 of the third review: there only the option names dev's parser knows stay, and numbers of up to
+                 # there only the option names dev's parser knows stay, and numbers of up to
                  # six digits (a phone number is no task number)
                  ("task", "done 3 --why called Ana at 6505551234 about --acme-merger --json"):
                      f"done 3 --why {self.t(44)} --json",
@@ -772,7 +772,7 @@ class CommandTextTests(AuditCase):
         self.assertNotIn("6505551234", self.stored())
 
     def test_crew_raci_keeps_a_kind_of_work_or_a_crew_id_and_masks_anything_else(self):
-        # L1 of the third review: dev crew raci also classifies a task given in words. Its argument stays only as a
+        # dev crew raci also classifies a task given in words. Its argument stays only as a
         # kind of work or a crew id of devkit's roster, and its --set value only as R/A/C/I pairs of crew ids
         t = self.t
         cases = [(["raci", "backend"], "raci backend"), (["raci", "tank"], "raci tank"), (["raci", "Scout"], "raci Scout"),
@@ -793,7 +793,7 @@ class CommandTextTests(AuditCase):
         self.unmarked()
 
     def test_dev_note_set_keeps_a_value_only_from_a_keys_fixed_set(self):
-        # L3 of the third review: status and priority take a value from a fixed set; a milestone, a due date or tags
+        # status and priority take a value from a fixed set; a milestone, a due date or tags
         # are the developer's words
         t = self.t
         audit.record("dev.note", ["set", "status=blocked", "priority=high", "milestone=3", "due=2026-12-01",
@@ -830,8 +830,8 @@ class CommandTextTests(AuditCase):
 
     def test_a_shell_line_finds_its_program_behind_reserved_words_wrappers_and_nested_shells(self):
         # H2: the Code reviewer's forms; the program is found and its free text masked, and the words around it that
-        # are not known to be safe become their length. The program is the word at command position (H1 of the third
-        # review): a wrapper's options and their values come before it
+        # are not known to be safe become their length. The program is the word at command position: a
+        # wrapper's options and their values come before it
         t, m = self.t, self.m
         cases = {
             '{ dev crew ask "SECRET plan"; }': f"{{ dev crew ask {m(11)}; }}",
@@ -851,7 +851,7 @@ class CommandTextTests(AuditCase):
             'nice -n 5 dev crew ask "SECRET"': f"nice -n 5 dev crew ask {m(6)}",
             'uv run dev crew ask "SECRET"': f"uv run dev crew ask {m(6)}",
             'python3 -I -m devkit crew ask "SECRET"': f"python3 -I -m devkit crew ask {m(6)}",
-            '~/Development/x/bin/dev crew ask "SECRET"': f"{t(19)}/dev crew ask {m(6)}",  # L4 of the fourth review
+            '~/Development/x/bin/dev crew ask "SECRET"': f"{t(19)}/dev crew ask {m(6)}",
             'dev crew ask <<< "SECRET"': f"dev crew ask <<< {t(6)}",
             'time -p dev --json crew ask "SECRET"': f"time -p dev --json crew ask {m(6)}",
         }
@@ -863,7 +863,7 @@ class CommandTextTests(AuditCase):
         self.unmarked()
 
     def test_a_line_without_a_known_program_keeps_its_operators_its_programs_name_and_each_words_length(self):
-        # M2 of the third review: the program's name stays, its arguments become their length; a program run by its
+        # the program's name stays, its arguments become their length; a program run by its
         # path keeps only its base name, and a word that names no program (a variable, a quoted text) is masked
         t = self.t
         cases = {
@@ -887,7 +887,7 @@ class CommandTextTests(AuditCase):
         self.unmarked()
 
     def test_dev_is_a_program_only_at_command_position(self):
-        # H1 of the third review: `dev` as another program's argument (a context, a container, a script, a host, an
+        # `dev` as another program's argument (a context, a container, a script, a host, an
         # echoed word, a file) is no program, so the words after it are masked like that program's other arguments
         t = self.t
         cases = {
@@ -950,9 +950,9 @@ class CommandTextTests(AuditCase):
         self.unmarked()
 
     def test_a_guard_detail_keeps_devkits_own_wording(self):
-        # M1 of the third review: a refusal also quotes devkit's own words. A quoted span is read as a shell line, so
-        # its operators stay, and `…` stays; a one-word span stays only as a program on devkit's list (2b of the
-        # fourth review: a project id is the developer's name too). A quoted command holds the words joined by
+        # a refusal also quotes devkit's own words. A quoted span is read as a shell line, so
+        # its operators stay, and `…` stays; a one-word span stays only as a program on devkit's list (a project
+        # id is the developer's name too). A quoted command holds the words joined by
         # spaces, so once one is free text only known option names stay after it. The rule reads only the detail,
         # so the stored detail reads back as it was stored
         t, m = self.t, self.m
@@ -977,7 +977,7 @@ class CommandTextTests(AuditCase):
         self.unmarked()
 
     def test_a_program_keeps_its_name_only_when_devkits_list_has_it(self):
-        # 2b of the fourth review, the tech lead's decision: a lowercase word at command position can be a client's
+        # a lowercase word at command position can be a client's
         # name, a file or a password, so a program's name stays only from devkit's fixed list (audit.PROGRAMS), and
         # a program run by its path keeps its base name only when the list has it. 2a: a name written with quotes
         # or an escape stays in neither case
@@ -1005,7 +1005,7 @@ class CommandTextTests(AuditCase):
         self.unmarked()
 
     def test_the_program_list_is_the_same_on_every_machine(self):
-        # 2b: the list is fixed, so a program on this machine's PATH changes nothing; it holds the guard's read-only
+        # the list is fixed, so a program on this machine's PATH changes nothing; it holds the guard's read-only
         # allowlist, its checks, runners and wrappers, and the programs the masker reads
         from devkit import guard
         with tempfile.TemporaryDirectory() as d:
@@ -1021,7 +1021,7 @@ class CommandTextTests(AuditCase):
         self.assertEqual(sorted(known - audit.PROGRAMS), [])
 
     def test_a_program_run_by_its_path_keeps_only_its_base_name(self):
-        # L4 of the fourth review: dev, git, gh, a wrapper, a shell or python run by its path kept the folder, which
+        # dev, git, gh, a wrapper, a shell or python run by its path kept the folder, which
         # can name a client; the folder becomes its length. A program run by a quoted path is no program devkit
         # knows, so the line is masked like another program's
         t, m = self.t, self.m
@@ -1042,7 +1042,7 @@ class CommandTextTests(AuditCase):
         self.unmarked()
 
     def test_an_option_before_the_program_keeps_its_name_and_only_a_value_that_names_nothing(self):
-        # nits of the fourth review: nice's -10 and xargs' {} name nothing and stay; a value attached to an option of
+        # nice's -10 and xargs' {} name nothing and stay; a value attached to an option of
         # python or a shell before the program (a path) is masked
         t = self.t
         cases = {
@@ -1062,7 +1062,7 @@ class CommandTextTests(AuditCase):
         self.unmarked()
 
     def test_a_quote_keeps_a_word_only_when_devkits_list_has_it(self):
-        # 2b: a refusal's one-word quote stays only as a program on the list; a quote whose first word is not on it
+        # a refusal's one-word quote stays only as a program on the list; a quote whose first word is not on it
         # is free text, recorded as its length; a path keeps its base name only when the list has it
         t = self.t
         cases = {"`john` takes only a, b": f"`{t(4)}` takes only a, b",
@@ -1083,7 +1083,7 @@ class CommandTextTests(AuditCase):
         self.unmarked()
 
     def test_a_value_with_a_backtick_of_its_own_cannot_end_the_quote_early(self):
-        # 1 of the fourth review: a refusal quoted a value in single backticks, so a backtick inside it ended the
+        # a refusal quoted a value in single backticks, so a backtick inside it ended the
         # quote and the rest stayed as prose. The guard now fences the value so it reads as one quote, and a record
         # written before (prose that touches a quote on both sides, as in `a`b`c`) masks that prose too
         from devkit import guard
@@ -1191,7 +1191,7 @@ class CommandTextTests(AuditCase):
         # names something; and a NAME option a command reads as a flag is listed for that command. A new command,
         # positional or valued option fails here until it is classified. Whether a class is right is not checked
         # here: the masking tests above check the classes that hold text. FLAG_OPTIONS lists the options that take
-        # no value, the rest of the names dev's parser knows (L2 of the third review)
+        # no value, the rest of the names dev's parser knows
         import argparse
         from devkit import cli
         valued, bare, commands, flags = set(), set(), {}, {}
