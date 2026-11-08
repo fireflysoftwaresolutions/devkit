@@ -1141,14 +1141,16 @@ _POSIX_SHELLS = frozenset({"bash", "sh", "zsh", "dash", "ksh"})
 
 
 def _shell_args(args, name="bash") -> tuple:
-    """How a shell reads its words -> (kind, k). kind: "line" (the -c command line is args[k], its $0, $1… follow
-    it), "script" (a script file at args[k]), "stdin" (-s: its program comes from its input, and its $1… start at
-    args[k]), "input" (no word left: it reads its input) or "none" (-c and no line). bash, zsh, sh, dash and ksh read
-    options up to the first word that is not one, -c among them, so the line is the first word after all of them
-    (`bash -c -e 'line'`, `bash -c +x 'line'`, `zsh -c -o errexit 'line'`); csh, tcsh and fish take the word right
-    after -c."""
+    """How a shell reads its words -> (kind, k, parse_only). kind: "line" (the -c command line is args[k], its $0,
+    $1… follow it), "script" (a script file at args[k]), "stdin" (-s: its program comes from its input, and its $1…
+    start at args[k]), "input" (no word left: it reads its input) or "none" (-c and no line). bash, zsh, sh, dash and
+    ksh read options up to the first word that is not one, -c among them, so the line is the first word after all of
+    them (`bash -c -e 'line'`, `bash -c +x 'line'`, `zsh -c -o errexit 'line'`); csh, tcsh and fish take the word right
+    after -c. parse_only: one of those five only reads and parses its program, and runs none of it nor its startup
+    files: -n, -o noexec or zsh's --noexec is on (the last of -n, +n, -o noexec, +o noexec wins), and it is no
+    interactive or login shell (-i, -l, --login, --rcfile), where -n does not hold."""
     posix = name in _POSIX_SHELLS
-    line = stdin = False
+    line = stdin = noexec = runs = False
     i = 0
     while i < len(args):
         a = args[i]
@@ -1156,33 +1158,45 @@ def _shell_args(args, name="bash") -> tuple:
             i += 1
             break
         if a.startswith("--"):
+            opt = re.sub(r"[_-]", "", a[2:].split("=", 1)[0].casefold())
+            noexec = True if opt == "noexec" else False if opt == "exec" else noexec
+            runs = runs or opt in ("login", "interactive", "rcfile", "initfile")
             i += 2 if a in ("--rcfile", "--init-file") else 1
             continue
         if len(a) < 2 or a[0] not in "-+":
             break
-        on, names = a[0] == "-", 0
+        on, names = a[0] == "-", []
         for ch in a[1:]:
-            if ch in "oO":  # its option name is the next word: -o errexit, -eo pipefail, -O extglob
-                names += 1
+            if ch in "oO":  # its option name is the next word: -o noexec, -eo pipefail, -O extglob
+                names.append((ch, args[i + 1 + len(names)] if i + 1 + len(names) < len(args) else ""))
+            elif ch == "n":
+                noexec = on
             elif on and ch == "c":
                 line = True
             elif on and ch == "s":
                 stdin = True
-        i += 1 + names
+            elif on and ch in "il":
+                runs = True
+        for ch, opt in names:
+            opt = re.sub(r"[_-]", "", opt.casefold())
+            if ch == "o" and opt in ("noexec", "exec"):
+                noexec = (opt == "noexec") == on
+        i += 1 + len(names)
         if line and not posix:  # csh, tcsh, fish: the word after -c is the line
             break
+    parse_only = posix and noexec and not runs
     if line:
-        return ("line" if i < len(args) else "none"), i
+        return ("line" if i < len(args) else "none"), i, parse_only
     if stdin:
-        return "stdin", i
-    return ("script" if i < len(args) else "input"), i
+        return "stdin", i, parse_only
+    return ("script" if i < len(args) else "input"), i, parse_only
 
 
 def _shell_line(args, name="bash"):
     """The -c line of a shell's arguments (_shell_args), or None: a script file or its input is not a line given
-    here."""
-    kind, k = _shell_args(args, name)
-    if kind != "line":
+    here, and a shell that only parses (`bash -n -c …`) runs none."""
+    kind, k, parse_only = _shell_args(args, name)
+    if kind != "line" or parse_only:
         return None
     return _with_positionals(args[k], args[k + 1:])
 
@@ -2959,8 +2973,9 @@ class _Shell:
         dev = _dev_args(argv)
         if dev is not None:
             return self.dev(dev, cwd, set(names) | self.exported)
-        shell = _shell_args(args, name) if name in _SHELLS else ("", 0)
-        installer = argv[0] if name == "install.sh" else args[shell[1]] if shell[0] == "script" else ""
+        shell = _shell_args(args, name) if name in _SHELLS else ("", 0, False)
+        installer = argv[0] if name == "install.sh" else args[shell[1]] if shell[0] == "script" and not shell[2] \
+            else ""
         if installer and _devkit_installer(resolve(installer, cwd)):
             return deny(INSTALL_REASON)
         if name in _SHELLS:
@@ -3824,7 +3839,7 @@ def _program_source(run, whole: bool = False) -> str | None:
         if shell and a.startswith("-") and not a.startswith("--") and "c" in a[1:]:
             # a line the input is only part of is read word by word where it runs (_input_runs, the walker); the
             # line is the first word after the options (_shell_args)
-            kind, k = _shell_args(args, name)
+            kind, k, _ = _shell_args(args, name)
             line = args[k].strip() if kind == "line" else None
             return "none" if line is None else "filled" if _RUNNER_FILLS.fullmatch(line) else "given"
         if shell and a in _SHELL_VALUE_OPTS:
@@ -4019,9 +4034,10 @@ def _shell_inputs(args, cwd, bodies, name="bash") -> list:
 
 def _shell_sources(args, cwd, bodies, name="bash") -> list:
     """_shell_inputs as (text, typed, path): typed when the command holds the text (a -c line, a heredoc), False for a
-    script file read from disk, whose resolved path is the third item (None for the others)."""
-    kind, k = _shell_args(args, name)
-    if kind == "none":
+    script file read from disk, whose resolved path is the third item (None for the others). A shell that only
+    parses its program (`bash -n x.sh`, _shell_args) runs none: []."""
+    kind, k, parse_only = _shell_args(args, name)
+    if parse_only or kind == "none":
         return []
     if kind == "line":
         return [(_with_positionals(args[k], args[k + 1:]), True, None)]
@@ -5826,6 +5842,8 @@ def _ro_program(argv0, cwd, member=None) -> str | None:
             return None
         if not why and not runner and (_INTERP.match(name) or name in _SHELLS) and _version_only(name, args):
             return None
+        if not why and not runner and name in _SHELLS and _shell_args(args, name)[2]:
+            return None  # `bash -n x.sh`, `zsh -n -c '…'`: it reads and parses, and runs nothing
         if not why and not runner and _family(name) in ("awk", "gawk", "mawk", "nawk"):
             return _ro_awk(args)
         return why or (f"{_code(name)} is not on the read-only allowlist" if runner or _INTERP.match(name) or
@@ -7458,9 +7476,9 @@ def _opaque_actions(name, argv, cwd) -> list:
             names = pos[1:2]
         elif pos and ((name == "pnpm" and pos[0] not in _PNPM_BUILTIN) or (name == "yarn" and pos[0] not in _YARN_BUILTIN)):
             names = pos[:1]
-    elif name in _SHELLS:  # before the path test: bash scripts/deploy.sh
-        kind, k = _shell_args(args, name)
-        if kind == "script":
+    elif name in _SHELLS:  # before the path test: bash scripts/deploy.sh; `bash -n x.sh` only parses it
+        kind, k, parse_only = _shell_args(args, name)
+        if kind == "script" and not parse_only:
             names = [os.path.splitext(os.path.basename(args[k]))[0]]
     elif _INTERP.match(name):  # before the path test: /usr/bin/python3 scripts/deploy.py
         script = next((a for a in args if not a.startswith("-")), "")
@@ -7580,9 +7598,10 @@ def code_session_refusal(argv, cwd, bodies, depth: int = 0) -> str | None:
 
 
 def _reads_stdin(args, name="bash") -> bool:
-    """True when a shell with these arguments reads its program from its input: no -c and no script file (or -s)
-    (_shell_args)."""
-    return _shell_args(args, name)[0] in ("stdin", "input")
+    """True when a shell with these arguments runs a program it reads from its input: no -c and no script file (or
+    -s), and it does not only parse it (_shell_args)."""
+    kind, _, parse_only = _shell_args(args, name)
+    return kind in ("stdin", "input") and not parse_only
 
 
 def _fed_program(argv, segs, k, files, cwd) -> tuple:
@@ -7592,7 +7611,8 @@ def _fed_program(argv, segs, k, files, cwd) -> tuple:
     the file a text was read from (a redirect, `cat f`), or None for words the command holds (echo, printf). A
     program given in the words (`sh -c …`, `python3 x.py`) is fed nothing here."""
     name = os.path.basename(argv[0]) if argv else ""
-    if not argv or (name not in _SHELLS and not _INTERP.match(name)):
+    if not argv or (name not in _SHELLS and not _INTERP.match(name)) or \
+            (name in _SHELLS and _shell_args(argv[1:], name)[2]):  # `bash -n < f` only parses what it reads
         return argv, [], []
     texts = []
     with _skipped_reads() as unread:
@@ -8399,8 +8419,8 @@ def _text_actions(text, cwd, depth=0, from_code=False, expand=True):
                 if more is None:
                     return None
                 out += more
-        if name in _SHELLS and (fed or _reads_stdin(argv[1:])):
-            for script, path in [*((h, None) for h in (herestrs if _reads_stdin(argv[1:]) else [])), *fed]:
+        if name in _SHELLS and not _shell_args(argv[1:], name)[2] and (fed or _reads_stdin(argv[1:], name)):
+            for script, path in [*((h, None) for h in (herestrs if _reads_stdin(argv[1:], name) else [])), *fed]:
                 more = _text_actions(script, cwd, depth + 1)
                 if more is None and path is not None:  # `sh < y.sh`, `cat y.sh | sh`: as `./y.sh`
                     more = _unparsed_script(path, text, argv0, cwd)

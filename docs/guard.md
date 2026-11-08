@@ -409,6 +409,10 @@ These are not `unknown`:
   other than the plain ones (`read -r line` is fine); a name the shell sets by itself (`REPLY`, `_`, `MATCH`,
   `BASH_REMATCH`, `OPTARG`, `PWD`, …); a value with a `$`, quote, glob, or `~`, or one that starts with `=`; `IFS`,
   `case`, heredocs, backticks, ANSI-C quotes (`$'…'`), and more than 16 combinations;
+- a shell that only parses its program: `bash -n x.sh`, `sh -n`, `zsh -n` or `--noexec`, `bash -o noexec`, with a
+  script, a `-c` line, or its input. It runs nothing, neither its startup files nor `BASH_ENV`, so it is a read of the
+  file. `+n` or `+o noexec` after it, `-i`, `-l`, or `--login` (where `-n` does not hold), or `-n` after the script
+  (a word of the script) make it run, and it is judged as running, as `csh` and `tcsh` are;
 - text inside an interpreter's string literals: `${…}`, `{…}`, `[…]` and `*` there belong to the language (a
   template literal, an f-string, a list), and the guard looks for spawn calls in the program's code, not in the
   text it carries. A program named in such a string (`os.system('gh pr merge 12')`) is still classified;
@@ -551,6 +555,8 @@ A review or read-only member runs only what its allowlist names: readers, reads 
 checks. These run as well:
 
 - An interpreter or shell asked only for its version: `python3 --version`, `bash --version`, `python3 -V`.
+- A shell that only parses its program: `bash -n x.sh`, `zsh -n -c '…'` (see
+  [Commands the guard cannot name](#commands-the-guard-cannot-name)).
 - Machine diagnostics: `ps`, `pgrep`, `sw_vers`, `id`, `whoami`, `printenv`, `uptime`, `groups`, `locale`,
   `getconf`, `seq`, and `sysctl` without a value, `-w`, `-f`, or `-p`.
 - A command substitution or process substitution whose own command is on the allowlist:
