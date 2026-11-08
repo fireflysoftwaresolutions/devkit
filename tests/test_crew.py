@@ -544,6 +544,16 @@ class CrewSessionTests(unittest.TestCase):
             self.assertEqual(rc, 2)
             self.assertIn("no message M9", err)
 
+    def test_ask_tells_the_asker_the_wait_that_brings_the_answer(self):
+        # it said the answer arrives "with their next tool call or prompt": nothing told a member how to wait for it
+        with TempState() as t:
+            pg.start("Parser", plan=["parse", "review"])
+            t.launch()
+            out = run_cli("crew", "ask", "Should the parser accept empty lines?", from_agent="a1")[1]
+            self.assertIn("run dev watch --wait --for me as a command of its own", out)
+            out = run_cli("crew", "ask", "--to", "Neo", "Is the parser done?")[1]
+            self.assertIn("run dev watch --wait as a command of its own", out)
+
     def test_ask_without_a_run_explains_and_exits_2(self):
         with TempState():
             rc, _, err = run_cli("crew", "ask", "anyone?")

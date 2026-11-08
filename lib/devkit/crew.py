@@ -1901,7 +1901,9 @@ def _messages(a, act) -> int:
         if act == "ask":
             m = progress.crew_ask(" ".join(a.text), to=a.to, from_agent=me)
             print(f"{ui.OK} {m['id']} to {who(m.get('to_name') or 'main')}: {m['text']}")
-            print(ui.dim("  it reaches them with their next tool call or prompt; the answer reaches you the same way"))
+            wait = "dev watch --wait --for me" if me else "dev watch --wait"
+            print(ui.dim(f"  it reaches them at their next tool call, or wakes their wait while they are idle; to wait "
+                         f"for the answer, run {wait} as a command of its own"))
         elif act == "answer":
             m = progress.crew_answer(a.id, " ".join(a.text), from_agent=me)
             print(f"{ui.OK} {m['id']} to {who(m.get('to_name')) or '?'}, the answer to {a.id}: {m['text']}")
