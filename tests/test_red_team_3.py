@@ -77,5 +77,24 @@ class CommentsStartWords(Case):
                 self.assertIsNotNone(member(cmd))
 
 
+class HeredocsOutsideExpansions(Case):
+    """A `<<WORD` inside `${…}` or `$[…]` is part of the expansion, as in `$((…))`: it opens no heredoc, so the
+    lines after it are commands."""
+
+    def test_a_heredoc_word_inside_an_expansion_hides_no_line(self):
+        for cmd in ("echo ${x/<<E/}\ngh pr merge 12\nE", "echo $[1<<E]\ngh pr merge 12\nE",
+                    "x=1; echo ${x:+<<E}\ngh pr merge 12\nE", "echo ${x:-$(echo <<E)}\ngh pr merge 12\nE"):
+            with self.subTest(cmd=cmd):
+                self.assertRefusedEverywhere(cmd)
+
+    def test_a_heredoc_after_an_expansion_is_still_data(self):
+        for cmd in ("echo ${#x} <<E\ngh pr merge 12\nE", "cat <<E ${x}\ngh pr merge 12\nE",
+                    "cat <<E\n${x/a/b} gh pr merge 12\nE"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(main(cmd))
+                self.assertIsNone(check(cmd))
+                self.assertIsNone(member(cmd))
+
+
 if __name__ == "__main__":
     unittest.main()

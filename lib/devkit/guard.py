@@ -437,6 +437,33 @@ class _Parens:
         return kind == "o" or (kind == "?" and lean)
 
 
+def _braced_end(s: str, i: int) -> int:
+    """The index after the `}` or `]` that ends the `${…}` or `$[…]` at s[i], or len(s) when none does. Its quotes,
+    nested braces and substitutions are read as the shell reads them."""
+    closers, j, n = [{"{": "}", "[": "]"}[s[i + 1]]], i + 2, len(s)
+    while j < n and closers:
+        d = s[j]
+        if d == "\\":
+            j += 2
+            continue
+        if d == "'":
+            k = s.find("'", j + 1)
+            j = n if k < 0 else k + 1
+            continue
+        if d == '"':
+            k = j + 1
+            while k < n and s[k] != '"':
+                k += 2 if s[k] == "\\" else 1
+            j = k + 1
+            continue
+        if d in "{[(":
+            closers.append({"{": "}", "[": "]", "(": ")"}[d])
+        elif d == closers[-1]:
+            closers.pop()
+        j += 1
+    return min(j, n)
+
+
 def _split_heredocs(cmd: str):
     """-> (the command without its heredoc bodies and terminator lines, [(body, expands)]). A `<<WORD` counts only
     where the shell reads it: outside quotes and comments, and not `<<<` (a here-string), so a quoted "<<EOF" in a
@@ -462,6 +489,11 @@ def _split_heredocs(cmd: str):
         elif c == "#" and parens.comment(i, True):
             j = cmd.find("\n", i)
             j = n if j < 0 else j
+            out.append(cmd[i:j])
+            i = j
+            continue
+        elif cmd.startswith("${", i) or cmd.startswith("$[", i):  # `${x/<<E/}`, `$[1<<E]`: no heredoc in either
+            j = _braced_end(cmd, i)
             out.append(cmd[i:j])
             i = j
             continue

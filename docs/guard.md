@@ -35,7 +35,8 @@ runs, and the irreversible-action gate counts it as `unknown`, because the guard
 text a command only carries, such as a `dev crew ask` message, is data and never read as a command. A heredoc body
 ends at its tag line, and also at a line that starts with the tag and `)`: macOS `/bin/bash` 3.2 ends a heredoc there
 inside `$(…)` and runs what follows, while zsh reads on, so the guard reads it the way that shows what bash runs.
-A `#` starts a comment only at the start of a word, as bash and zsh read it: after a blank, a new line, an operator,
+A `<<WORD` inside `${…}`, `$[…]`, or `$((…))` is part of the expansion and opens no heredoc, so in
+`echo ${x/<<E/}` the next line is a command. A `#` starts a comment only at the start of a word, as bash and zsh read it: after a blank, a new line, an operator,
 or a redirection. A `#` right after the `)` that ends a substitution is part of the word, so in
 `echo x$(true)# <(gh pr merge 12)` the merge runs, while in `(echo a)# <(gh pr merge 12)` it is a comment. Where the
 shells read a parenthesis differently (bash reads `a=(1 2)#x` as one word, zsh as a comment), the guard takes the
