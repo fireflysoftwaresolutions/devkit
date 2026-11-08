@@ -20,7 +20,10 @@ sys.path.insert(0, str(ROOT / "lib"))
 
 from devkit import core, guard  # noqa: E402
 
-CWD = str(ROOT)
+# the folder the commands run in: a project of the run's dev root (below its temporary home), so a lane's
+# verdicts do not follow where this checkout lives (in a copy inside a session scratchpad the guard's
+# scratch-folder rule would judge every path first)
+CWD = str(core.DEV / "fireflysoftwaresolutions" / "devkit")
 ENFORCE = {"safeguards": {"irreversible_main": "enforce", "irreversible_member": "enforce"}}
 
 # recorded refusals: a for loop over two Pythons, an assignment, a quoted variable, a variable on a continued line

@@ -19,9 +19,12 @@ import _hermetic  # noqa: E402
 _hermetic.activate()
 sys.path.insert(0, str(ROOT / "lib"))
 
-from devkit import guard, hooks, progress  # noqa: E402
+from devkit import core, guard, hooks, progress  # noqa: E402
 
-CWD = str(ROOT)
+# the folder the commands run in: a project of the run's dev root (below its temporary home), so a lane's
+# verdicts do not follow where this checkout lives (in a copy inside a session scratchpad the guard's
+# scratch-folder rule would judge every path first)
+CWD = str(core.DEV / "fireflysoftwaresolutions" / "devkit")
 WT = "/Users/x/Development/.worktrees/acme/devkit/feat-dev-ext"
 HEAD = "DEVKIT_FROM_AGENT=a1 "
 
