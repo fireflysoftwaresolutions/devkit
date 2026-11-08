@@ -1077,6 +1077,50 @@ def global_wait(cmd) -> bool:
     return False
 
 
+CHAINED = ("A wait chained to other work wakes you only when all of it ends: run the wait alone and do the rest "
+           "after it wakes you.")
+_FILTERS = ("cat", "cut", "egrep", "fgrep", "grep", "sed", "sort", "tail", "tee", "tr", "uniq", "wc")  # read only
+
+
+def alone(cmd) -> bool:
+    """Is a wait (`dev ci watch --wait`, `dev watch --wait`) the whole of a command line: one pipeline whose first
+    command is the wait and whose other stages only read what it prints (`| tail -3`)? Work after `;`, `&&`, `||`,
+    `&` or a new line keeps a background command or a Monitor going after the wait ended, and its notification comes
+    only when all of it ends. `head` is no filter here: it can end the wait before its result."""
+    script = re.sub(r"\\\n", " ", _script(cmd)).strip()
+    if "\n" in script:
+        return False
+    try:
+        lex = shlex.shlex(script, posix=True, punctuation_chars=True)
+        lex.whitespace_split = True
+        words = list(lex)
+    except ValueError:
+        return False
+    stages, cur, drop = [], [], False
+    for w in words:
+        if drop:  # the target of a redirection
+            drop = False
+        elif w and set(w) <= set(";&|()"):
+            if w not in ("|", "|&"):
+                return False
+            stages.append(cur)
+            cur = []
+        elif w and set(w) <= set("<>&") and set(w) & set("<>"):
+            if cur and cur[-1].isdigit():
+                cur.pop()  # the descriptor before it, as in 2>&1
+            drop = True
+        else:
+            cur.append(w)
+    stages.append(cur)
+    if not all(stages) or (_wait_spec(shlex.join(stages[0])) is None and not global_wait(shlex.join(stages[0]))):
+        return False
+    for s in stages[1:]:
+        prog = os.path.basename(s[0])
+        if prog not in _FILTERS or (prog == "sed" and any(w.startswith(("-i", "--in-place")) for w in s[1:])):
+            return False
+    return True
+
+
 def _covers(spec: dict, sent: dict) -> bool:
     """A watch with these options follows what was sent: none of them names another commit, tag or branch."""
     want, have = (spec.get("sha") or "").lower(), (sent.get("sha") or "").lower()
@@ -1089,14 +1133,17 @@ def _shell_calls(path, now: float) -> tuple:
     """The shell calls of a session transcript (Claude Code or Codex) in order, and the index of the first one of
     the last turn. Each: {"command", "cwd", "at", "wait": the options of the `dev ci watch --wait` it runs or None,
     "wake": monitor | background | foreground, "live"}. Live: a Monitor or background task that no notification,
-    stop call or Monitor deadline has ended; "global": it runs `dev watch --wait`."""
+    stop call or Monitor deadline has ended; "global": it runs `dev watch --wait`; "alone": its wait is the whole
+    command (alone()), the only way a background command or a Monitor wakes the agent when the wait ends."""
     from .gates import BG_LAUNCH_RE, DENIAL_RE, ENDED, STOP_TOOLS, _notifications, _records, _tag, _task_of, _text
     from .hooks import SHELL_TOOLS
     from .scope import _is_prompt
 
     def call(cmd, cwd, ts):
-        return {"command": cmd, "cwd": cwd, "at": _epoch(ts), "wait": _wait_spec(cmd), "global": global_wait(cmd),
-                "task": "", "id": "", "monitor": False, "limit": 0}
+        spec, everything = _wait_spec(cmd), global_wait(cmd)
+        return {"command": cmd, "cwd": cwd, "at": _epoch(ts), "wait": spec, "global": everything,
+                "alone": (spec is not None or everything) and alone(cmd), "task": "", "id": "", "monitor": False,
+                "limit": 0}
     calls, by_use, stops, gone, turn = [], {}, {}, set(), 0
     for rec in _records(path):
         if _is_prompt(rec):
@@ -1177,14 +1224,14 @@ def _unfinished(sent: dict, runs_fn=None, now: float | None = None) -> tuple:
     return (not sent["draft"] and (now or time.time()) - sent["at"] < 300), []
 
 
-def _gate_message(agent: str, missing: list, cwd) -> str:
+def _gate_message(agent: str, missing: list, cwd, chained: bool = False) -> str:
     items = []
     for s, runs in missing:
         where = ", ".join(f"{_one_line(r.get('name'), 60)} #{r.get('number')} {r.get('status')}" for r in runs)
         items.append(f"{s['ref']} @ {s['sha'][:7]} in {Path(s['top']).name} ({where or 'no run yet'})")
     head = ("devkit: this turn sent work to origin and its CI has not finished, but nothing that wakes you is watching "
             "it: " + "; ".join(items) + ". devkit's own background watch tells this session only at its next hook, "
-            "which an idle session never reaches.")
+            "which an idle session never reaches." + (" " + CHAINED if chained else ""))
     one = len(missing) == 1
     if agent == "codex":
         cmds = " and ".join(f"`{_wait_command(s, 'codex', cwd)}`" for s, _ in missing)
@@ -1230,7 +1277,9 @@ def stop_gate(agent: str, data: dict, runs_fn=None, now: float | None = None) ->
         return None
     fits = WAKES.get(agent, WAKES["claude"])
     watching = [c["wait"] for i, c in enumerate(calls) if c["wait"] is not None and c["wake"] in fits
-                and (c["live"] if c["wake"] != "foreground" else i >= turn)]
+                and (c["live"] and c["alone"] if c["wake"] != "foreground" else i >= turn)]
+    chained = [c for i, c in enumerate(calls) if (c["wait"] is not None or c["global"]) and c["wake"] in fits
+               and c["wake"] != "foreground" and not c["alone"] and (c["live"] or i >= turn)]
     missing, armed = [], None
     for s in sent:
         if any(_covers(w, s) for w in watching):
@@ -1244,7 +1293,8 @@ def stop_gate(agent: str, data: dict, runs_fn=None, now: float | None = None) ->
         if armed and _devkit_watches(agent, sid, s, now):
             continue
         missing.append((s, runs))
-    return _gate_message(agent, missing, data.get("cwd")) if missing else None
+    told = any(c["global"] or any(_covers(c["wait"], s) for s, _ in missing) for c in chained)
+    return _gate_message(agent, missing, data.get("cwd"), chained=told) if missing else None
 
 
 def _devkit_watches(agent: str, sid: str, sent: dict, now: float) -> bool:

@@ -417,8 +417,9 @@ def records(now=None) -> list:
 
 def armed(agent: str, sid: str, me: str = "main", transcript=None, now=None) -> list:
     """The live waits of this consumer -> [{"id", "how"}]: a recorded `dev watch --wait` whose process runs; with the
-    session's transcript, the main session's background command or Monitor running one that no notification or stop
-    has ended (Claude Code), or one run in the foreground in this turn (Codex, which has no background wake-up)."""
+    session's transcript, the main session's background command or Monitor running one, as the whole command
+    (ciwatch.alone), that no notification or stop has ended (Claude Code), or one run in the foreground in this turn
+    (Codex, which has no background wake-up)."""
     now = now or time.time()
     out = [{"id": r["id"], "how": "record"} for r in _records()
            if (r.get("agent"), r.get("session"), r.get("consumer")) == (agent, sid, me) and _is_live(r, now)]
@@ -431,11 +432,24 @@ def armed(agent: str, sid: str, me: str = "main", transcript=None, now=None) -> 
         for i, c in enumerate(calls):
             if not c.get("global"):
                 continue
-            if c["wake"] != "foreground" and c["live"]:
+            if c["wake"] != "foreground" and c["live"] and c.get("alone"):
                 out.append({"id": c.get("task") or c.get("id") or "", "how": c["wake"]})
             elif c["wake"] == "foreground" and agent == "codex" and i >= turn:
                 out.append({"id": c.get("id") or "", "how": "foreground"})
     return out
+
+
+def _chained(transcript, now) -> bool:
+    """Does a live background command or Monitor of the transcript run `dev watch --wait` chained to other work, so
+    it wakes the session only when all of it ends?"""
+    if not transcript:
+        return False
+    try:
+        from .ciwatch import _shell_calls
+        calls, _turn = _shell_calls(transcript, now)
+    except Exception:
+        return False
+    return any(c.get("global") and c["wake"] != "foreground" and c["live"] and not c.get("alone") for c in calls)
 
 
 def default_timeout(agent: str, me: str) -> float:
@@ -738,6 +752,9 @@ def stop_gate(agent: str, data: dict, now=None) -> str | None:
         return None
     head = "devkit: " + "; ".join(why) + ": their questions and results can arrive while you are idle, and nothing " \
                                          "wakes you."
+    if agent != "codex" and _chained(data.get("transcript_path"), now):
+        from .ciwatch import CHAINED
+        head += " " + CHAINED
     if agent == "codex":
         return (head + f" Codex has no background wake-up: run `dev watch --wait --timeout {CODEX_MIN}` in the "
                 "foreground now and act on what it prints, or end the turn saying what still runs and that you check "

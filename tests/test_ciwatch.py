@@ -588,6 +588,36 @@ class StopGateTests(WatchCase):
                 start(self.watch_cmd() + " --timeout 28")
                 self.assertIsNone(self.gate())
 
+    def test_a_watch_chained_to_other_work_wakes_no_one_until_the_watch_runs_alone(self):
+        # a real session: after a merge the agent ran the watch and the release build as one background command; CI
+        # passed in half a minute, but the command ran on, so nothing woke the session until the developer asked
+        chain = (self.watch_cmd() + " 2>&1 | tail -3; unset CLAUDECODE FIREFLY_DOCS_CHAT; npm run release -- "
+                 "--no-check > /tmp/release.log 2>&1; echo \"release exit $?\"; ls dist/release | tail -5")
+        for start in (self.background, self.monitor):
+            with self.subTest(start.__name__):
+                self.records = []
+                self.prompt()
+                self.bash("git push origin feat/x")
+                start(chain, task="t1")
+                why = self.gate()
+                self.assertIn(f"feat/x @ {self.sha[:7]}", why or "")
+                self.assertIn("A wait chained to other work wakes you only when all of it ends: run the wait alone "
+                              "and do the rest after it wakes you", why or "")
+                start(self.watch_cmd() + " 2>&1 | tail -3", task="t2")  # a filter that only reads its output
+                self.assertIsNone(self.gate())
+
+    def test_a_wait_is_alone_only_when_nothing_runs_after_it_but_filters_of_its_output(self):
+        wait = self.watch_cmd()
+        for cmd, whole in ((wait, True), (wait + " 2>&1 | tail -3", True), ("dev watch --wait | grep -v '^$'", True),
+                           ("DEVKIT_FROM_AGENT=a1 dev watch --wait --for me --timeout 9", True),
+                           (wait + "; npm run release", False), (wait + " && echo ok", False),
+                           (wait + " || echo failed", False), (wait + " &", False), (wait + "\nls dist", False),
+                           (wait + " | head -1", False),  # head can end the wait before its result
+                           (wait + " | sed -i s/x/y/ notes.txt", False), ("cd /repo && " + wait, False),
+                           ("npm run release", False)):
+            with self.subTest(cmd):
+                self.assertIs(ciwatch.alone(cmd), whole)
+
     def test_a_watch_started_in_an_earlier_turn_and_still_live_counts(self):
         self.prompt()
         self.monitor("dev ci watch --wait")

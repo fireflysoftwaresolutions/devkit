@@ -47,7 +47,8 @@ class StopRuleCase(WiringCase):
         self.write()
         self.stack = contextlib.ExitStack()
         self.addCleanup(self.stack.close)
-        for p in (mock.patch.object(ciwatch, "LIVE", self.root / "ci-live"),
+        for p in (mock.patch.object(hooks, "_spawn", lambda *a, **k: None),  # the Stop hook's background dev sync
+                  mock.patch.object(ciwatch, "LIVE", self.root / "ci-live"),
                   mock.patch.object(ciwatch, "WATCH", self.root / "ci-watch"),
                   mock.patch.object(canary, "STATE", self.root),
                   mock.patch.object(canary, "check", lambda *a, **k: (True, "acme/api", LINE)),
@@ -122,6 +123,22 @@ class WaitRuleTests(StopRuleCase):
         self.assertIn("dev watch --wait", self.stop().get("reason") or "")  # nothing armed yet
         self.shell("dev watch --wait", "toolu_w", "Command running in background with ID: bw1. Output is being "
                                                   "written to: /tmp/bw1.output", background=True)
+        self.assertNotIn("dev watch --wait", self.stop().get("reason") or "")
+
+    def test_a_wait_chained_to_other_work_is_not_armed_and_the_turn_is_sent_back_until_one_runs_alone(self):
+        self.member_works()
+        self.shell("dev watch --wait 2>&1 | tail -3; unset CLAUDECODE FIREFLY_DOCS_CHAT; npm run release -- "
+                   "--no-check > /tmp/release.log 2>&1; echo done; ls dist/release | tail -5", "toolu_c",
+                   "Command running in background with ID: bc1. Output is being written to: /tmp/bc1.output",
+                   background=True)
+        self.assertEqual(watch.armed("claude", "s1", "main", str(self.transcript)), [])
+        out = self.stop()
+        self.assertEqual(out.get("decision"), "block", out)
+        self.assertIn("A wait chained to other work wakes you only when all of it ends: run the wait alone and do "
+                      "the rest after it wakes you", out["reason"])
+        self.shell("dev watch --wait 2>&1 | tail -3", "toolu_w", "Command running in background with ID: bw1. "
+                   "Output is being written to: /tmp/bw1.output", background=True)
+        self.assertEqual([w["id"] for w in watch.armed("claude", "s1", "main", str(self.transcript))], ["bw1"])
         self.assertNotIn("dev watch --wait", self.stop().get("reason") or "")
 
     def test_a_wait_is_asked_only_once_something_can_arrive(self):
