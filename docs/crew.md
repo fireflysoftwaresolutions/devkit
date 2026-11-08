@@ -196,9 +196,11 @@ that launch alone, so two members launched together never swap lanes:
   on that lane's own evidence.
 - **A launch that failed** (an unknown agent type, an interrupt) starts no agent, so its record goes at once: it
   never labels another agent or holds a slot.
-- **A resumed agent** keeps its own lane and takes nothing else. It takes a crew slot like a launch: while none is
-  free, it may read but not write, and the tech lead is told once (`crew.queued`); it takes its slot at its first
-  tool call after one frees.
+- **A resumed agent** keeps its own lane and takes no other member's step or label. When it holds no open step, it
+  takes the one step assigned to its member that waits for a launch, unless a new launch of its member is on its
+  way for it; with two or more waiting, `dev progress assign` picks. It takes a crew slot like a launch: while none
+  is free, it may read but not write, and the tech lead is told once (`crew.queued`); it takes its slot at its
+  first tool call after one frees.
 - **A lane whose files went to another lane.** When a step and its scope go to another lane, a lane that holds no
   open step and kept an overlapping scope may read but not write until the tech lead assigns it a step
   (`crew.scope-handed`), so two lanes never write the same files.

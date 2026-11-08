@@ -303,11 +303,28 @@ class ResumeTests(LaneCase):
         self.assertEqual((lane["persona"], lane["label"], lane["state"]), ("Tank", "Tank: dashboard server",
                                                                            "running"))
         self.assertEqual(self.step("dashboard ui")["owner"], "main")
-        self.assertEqual(self.step("dashboard server")["owner"], "main")  # a resume takes no step either
+        # its own reopened step waits for it, and it holds no other: the resumed lane takes it (B-fxriigsni7c)
+        self.assertEqual(self.step("dashboard server")["owner"], "a_tank")
         self.assertEqual((self.session().get("launches") or {}).get("toolu_trinity", {}).get("state"), "pending")
         self.start("a_trinity", at=self.m(22))
         self.result("toolu_trinity", "a_trinity", "Trinity: dashboard UI")
         self.assertEqual(self.step("dashboard ui")["owner"], "a_trinity")
+
+    def test_a_resumed_lane_leaves_its_step_to_a_queued_launch_of_its_member(self):
+        # the tech lead launches a new Tank for the reopened step while the old Tank lane is resumed for something
+        # else: the step waits for the launch that names it, never for the resumed lane
+        pg.start("Work", plan=["dashboard server"], now=self.m(0))
+        pg.assign("dashboard server", "Tank", now=self.m(0))
+        self.launch("toolu_tank", "Tank: dashboard server")
+        self.start("a_tank")
+        self.result("toolu_tank", "a_tank", "Tank: dashboard server")
+        self.meta("a_tank", "toolu_tank", "Tank: dashboard server")
+        self.stop("a_tank", at=self.m(20))
+        pg.reopen("dashboard server", "the review found a bug", now=self.m(21))
+        self.launch("toolu_tank2", "Tank: fix the dashboard server", at=self.m(21))
+        self.start("a_tank", at=self.m(22))  # SendMessage resumes the old lane meanwhile
+        self.assertEqual(self.lane("a_tank")["state"], "running")
+        self.assertEqual(self.step("dashboard server")["owner"], "main")
 
     def test_a_lane_resumed_hours_after_it_started_is_not_taken_for_lost(self):
         pg.start("Work", plan=["dashboard server"], now=self.m(0))

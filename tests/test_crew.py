@@ -819,6 +819,60 @@ class CrewSessionTests(unittest.TestCase):
             self.assertEqual(run_cli("crew", "ask", "--decision", "x", "--to", "Seraph")[0], 2)
 
 
+KID_REPORT = ("**[Firefly> DevKit · DevEx engineer (Kid)]** acme/api · `main` · fix\n- **Done:** the fix\n"
+              "- **Check:** ✓ 10 tests pass\n- **Next:** the tech lead")
+
+
+class ResumedMemberStepTests(unittest.TestCase):
+    # B-fxriigsni7c, B-fyj09eek926, live in this run: the DevEx engineer, resumed with SendMessage for its next step,
+    # was never bound to it, so its scope stayed the old step's and its own step close went to its lane, not the plan.
+    # A step assigned to a member whose lane works and holds no other open step is that lane's, whatever its launch
+    # was called; a lane resumed with no open step takes the one step waiting for its member
+    def setUp(self):
+        # the DevEx engineer works on "fix", reports with its evidence, and stops: its lane closes the step
+        self.state = TempState().__enter__()
+        self.addCleanup(self.state.__exit__, None, None, None)
+        pg.start("Hotfix", plan="fix=30m; graph view=30m after fix; dashboard=30m after fix")
+        pg.assign("fix", "Kid", why="test")
+        self.state.launch("a1", "devkit:kid", "Kid: fix crew message ids")
+        pg.step("fixed", which="fix", from_agent="a1", check="✓ 10 tests pass")
+        self.stop()
+
+    def stop(self):
+        pg.on_subagent("claude", {"session_id": "s1", "agent_id": "a1", "agent_type": "devkit:kid",
+                                  "last_assistant_message": KID_REPORT}, False)
+
+    def resume(self):  # SendMessage: the same agent works again
+        pg.on_subagent("claude", {"session_id": "s1", "agent_id": "a1", "agent_type": "devkit:kid"}, True)
+
+    def step(self, name):
+        return next(s for s in pg.load_run("claude", "s1")["plan"] if s["name"] == name)
+
+    def test_a_step_assigned_to_a_resumed_member_binds_to_its_lane_and_its_report_closes_it(self):
+        self.resume()
+        pg.assign("graph view", "Kid", scope="lib/devkit/progress.py", why="test")
+        s = self.step("graph view")
+        self.assertEqual((s["owner"], s["state"]), ("a1", "running"))
+        self.assertEqual(pg.load_run("claude", "s1")["agents"]["a1"]["scope"], ["lib/devkit/progress.py"])
+        pg.step("graph view done", which="graph view", from_agent="a1", check="✓ 12 tests pass")
+        self.stop()
+        self.assertEqual(self.step("graph view")["state"], "done")
+
+    def test_a_member_resumed_with_no_open_step_takes_the_step_waiting_for_it(self):
+        pg.assign("graph view", "Kid", scope="lib/devkit/progress.py", why="test")
+        self.assertEqual(self.step("graph view")["owner"], "main")  # nobody works for it yet
+        self.resume()
+        s, run = self.step("graph view"), pg.load_run("claude", "s1")
+        self.assertEqual((s["owner"], s["state"], run["agents"]["a1"]["scope"]),
+                         ("a1", "running", ["lib/devkit/progress.py"]))
+
+    def test_a_working_lane_with_another_open_step_never_takes_a_new_one(self):
+        self.resume()
+        pg.assign("graph view", "Kid", why="test")  # the resumed lane takes it
+        pg.assign("dashboard", "Kid", why="test")
+        self.assertEqual((self.step("dashboard")["owner"], self.step("dashboard")["state"]), ("main", "pending"))
+
+
 class DispatchCliTests(unittest.TestCase):
     """dev crew route, delegate, decline and next (dispatch.py does the routing; these check the commands)."""
 
