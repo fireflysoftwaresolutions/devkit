@@ -935,6 +935,51 @@ class TaskBranchTests(BackupCase):
         self.assertEqual(rows["feat/report"]["task"]["id"], it["meta"]["id"])
 
 
+class SquashedBackupTests(BackupCase):
+    # GitHub squash-merged a branch of two commits and deleted its remote branch (delete_branch_on_merge), so its
+    # commits read as only on this Mac and the hourly backup pushed it back to origin. Its pull request comes from the
+    # registry's cached list, as `dev sync` and `dev backup` find it: no GitHub call.
+    def squashed(self, name, n, cross=False):
+        tip = self.branch(name, 3 * HOUR, 2 * HOUR)[-1]
+        git(self.repo, "push", "-q", "-u", "origin", name)
+        git(self.repo, "switch", "-q", "main")
+        git(self.repo, "merge", "-q", "--squash", name)
+        git(self.repo, "commit", "-q", "-m", f"feat: land {name} (#{n})")
+        git(self.repo, "push", "-q", "origin", "main", f":{name}")
+        git(self.repo, "fetch", "-q", "--prune", "origin")
+        return {"number": n, "state": "MERGED", "headRefName": name, "headRefOid": tip, "isCrossRepository": cross,
+                "mergeCommit": {"oid": git(self.repo, "rev-parse", "HEAD")}, "title": f"land {name}", "url": "",
+                "updatedAt": "2026-11-07T10:00:00Z", "isDraft": False}
+
+    def cache(self, *prs):
+        f = registry.STATE / "prs" / "acme__widget.json"
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(json.dumps(list(prs)))
+
+    def test_dev_backup_skips_a_branch_its_own_merged_pull_request_squashed_and_names_it(self):
+        self.cache(self.squashed("feat/ours", 7))
+        rc, out = self.dev("backup", "feat/ours")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("feat/ours not backed up: merged: PR #7 was merged, so a backup would put the branch back on "
+                      "origin", out)
+        self.assertEqual(self.on_origin("feat/ours"), "")
+        skipped = self.records("git.backup-skipped")[-1]
+        self.assertEqual((skipped["branch"], skipped["detail"][:28]), ("feat/ours", "merged: PR #7 was merged, so"))
+
+    @unittest.skipUnless(HAS_GITLEAKS, "the secret scan needs gitleaks")
+    def test_the_hourly_backup_keeps_it_here_and_still_backs_up_the_namesake_of_a_forks_pull_request(self):
+        self.ci(CI_PR_AND_MAIN)
+        ours = self.squashed("feat/ours", 7)
+        theirs = self.squashed("fix/theirs", 8, cross=True)  # a fork's PR can carry any branch's name and head
+        self.cache(ours, theirs)
+        p = self.project()
+        backups = {r["name"]: r["backup"] for r in p["branches"]}
+        self.assertEqual(backups["feat/ours"], {"state": "merged", "reason": "PR #7 was merged into main"})
+        done = backup.sync({"projects": [p]})
+        self.assertEqual([(r["branch"], r["state"]) for r in done], [("fix/theirs", "pushed")])
+        self.assertEqual(self.on_origin("feat/ours"), "")
+
+
 # --------------------------------------------------------------------------- closing merged branches
 # One merge test for every branch: merged into the default branch as an ancestor, by its merged pull request (any
 # method), or by content (every commit has an equivalent there, git cherry all "-"). `dev branch prune` lists every
@@ -1043,6 +1088,25 @@ class MergeTestTests(MergeCase):
         row = self.rows()["fix/kept"]
         self.assertEqual((row["unpushed"], row["merged_into"], row["merged_how"]), (0, "main", "content"))
         self.assertEqual(row["backup"]["state"], "on_remote")
+
+    def test_the_branch_map_counts_a_branch_squashed_by_its_own_pull_request_as_merged_and_a_forks_never(self):
+        # a squash of two commits has no ancestor and no equivalent in main, and once GitHub deleted the remote
+        # branch both commits read as only on this Mac: the hourly backup pushed the branch back to origin
+        prs = []
+        for n, (name, cross) in enumerate((("feat/ours", False), ("fix/theirs", True)), start=7):
+            tips = self.feature(name, f"feat: add part one of {name}", f"feat: add part two of {name}", push=True)
+            self.squash(name)
+            prs.append(self.pr(name, tips[-1], cross=cross, n=n))
+            git(self.repo, "push", "-q", "origin", f":{name}")
+        git(self.repo, "fetch", "-q", "--prune", "origin")
+        rows = self.rows(prs=prs)
+        ours, theirs = rows["feat/ours"], rows["fix/theirs"]
+        self.assertEqual((ours["unpushed"], ours["merged_into"], ours["merged_how"], ours["merged_pr"]),
+                         (2, "main", "pr", 7))
+        self.assertEqual(ours["backup"], {"state": "merged", "reason": "PR #7 was merged into main"})
+        self.assertEqual((theirs["unpushed"], theirs["merged_into"], theirs["backup"]["state"]),
+                         (2, None, "not_backed_up"))
+        self.assertEqual(branches.merged_default(list(rows.values())), {"feat/ours": "pr"})
 
     def test_a_remote_branch_is_tested_by_its_remote_ref(self):
         tips = self.feature("fix/remote", "fix: keep the remote thing", push=True)
@@ -1223,6 +1287,60 @@ class PruneTests(PruneCase):
         self.dev("branch", "prune", "--apply")
         self.assertTrue(self.local("feat/reopened"))
         self.assertTrue(self.on_origin("feat/reopened"))
+
+    def test_an_open_pull_request_older_than_the_200_newest_keeps_its_branch_on_origin(self):
+        # gh pr list --state all reads the 200 newest: an older open PR whose commits main had cherry-picked was not
+        # in it, so prune --apply deleted its branch on origin, and GitHub closed the PR
+        tips = self.feature("feat/long-open", "feat: add the long-running thing", push=True)
+        self.land(*tips)
+        everyone = [{"number": 1, "state": "OPEN", "headRefName": "feat/long-open", "headRefOid": tips[-1],
+                     "isCrossRepository": False}] + [
+            {"number": n, "state": "MERGED", "headRefName": f"feat/n{n}", "headRefOid": "0" * 40,
+             "isCrossRepository": False, "mergeCommit": {"oid": "0" * 40}} for n in range(2, 202)]
+
+        def gh(args, cwd=None, timeout=60):  # newest first, by state and limit, as GitHub answers
+            state, limit = args[args.index("--state") + 1], int(args[args.index("--limit") + 1])
+            rows = [p for p in reversed(everyone) if state == "all" or p["state"].lower() == state]
+            return 0, json.dumps(rows[:limit]), ""
+        gitx.GH = gh
+        rc, out = self.dev("branch", "prune", "--apply")
+        self.assertTrue(self.on_origin("feat/long-open"), out)
+        self.assertIn("remote feat/long-open open PR #1", out)
+
+    def test_wt_rm_removes_a_worktree_its_own_pull_request_squashed_and_its_branch(self):
+        # dev wt rm refused it ("it has commits that are on no remote") after GitHub squash-merged its PR and deleted
+        # the remote branch; the registry's cached PR list says it merged, with no GitHub call
+        tips = self.feature("feat/squashed", "feat: add part one", "feat: add part two", push=True)
+        self.squash("feat/squashed")
+        git(self.repo, "push", "-q", "origin", ":feat/squashed")
+        git(self.repo, "fetch", "-q", "--prune", "origin")
+        cache = registry.STATE / "prs" / "acme__widget.json"
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_text(json.dumps([{"number": 7, "state": "MERGED", "headRefName": "feat/squashed",
+                                      "headRefOid": tips[-1], "isCrossRepository": False,
+                                      "mergeCommit": {"oid": git(self.repo, "rev-parse", "origin/main")}}]))
+        wt = self.worktree("feat/squashed")
+        reg = {"projects": [registry.inspect_repo(self.repo, with_prs=False)]}
+        with mock.patch.object(cli, "_reg", lambda prs=True: reg):
+            rc, out = self.dev("wt", "rm", "feat/squashed")
+        self.assertEqual(rc, 0, out)
+        self.assertFalse(wt.exists())
+        self.assertIn("local branch deleted (merged: PR #7 was merged)", out)
+
+    def test_only_its_own_merged_pull_request_marks_a_remote_branch_for_the_nightly_cleanup(self):
+        # gc deletes a merged branch on origin when its pull request merged; a fork's PR of the same name let it
+        # delete a teammate's cherry-picked branch
+        tips = self.feature("fix/teammate", "fix: keep the teammate's thing", push=True)
+        self.land(*tips)
+        self.prs = [{"number": 12, "state": "MERGED", "headRefName": "fix/teammate", "headRefOid": tips[-1],
+                     "isCrossRepository": True, "mergeCommit": {"oid": git(self.repo, "rev-parse", "origin/main")}}]
+
+        def remote_row():
+            return next(r for r in branches.prune_plan(self.repo)["branches"]
+                        if (r["where"], r["name"]) == ("remote", "fix/teammate"))
+        self.assertEqual((remote_row()["state"], remote_row()["pr_merged"]), ("merged", False))
+        self.prs[0]["isCrossRepository"] = False
+        self.assertEqual((remote_row()["how"], remote_row()["pr_merged"]), ("pr", True))
 
     def test_a_remote_branch_that_moved_after_the_listing_is_kept(self):
         self.feature("feat/ff", "feat: add the fast-forward thing", push=True)

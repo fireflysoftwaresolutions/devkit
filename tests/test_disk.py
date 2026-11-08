@@ -605,6 +605,37 @@ class FreeTests(Sandbox):
         self.assertFalse(copy.exists())
         self.assertEqual(git(r, "branch", "--list", "fix/picked"), "")
 
+    # A copy whose branch GitHub squash-merged from two commits (and whose remote branch it deleted) is offered as
+    # safe and goes: the registry's cached pull request says it is merged, and the merge test runs again with that
+    # list right before the removal, so the plan and the removal agree. Its local branch goes with it.
+    def test_free_removes_a_copy_squashed_by_its_own_pull_request_and_its_branch(self):
+        r = self.repo()
+        copy = self.worktree(r, r.parent / "kit-consulting-squashed", "feat/squashed")
+        for k in (1, 2):
+            (copy / f"part{k}.txt").write_text(f"part {k}\n")
+            git(copy, "add", "-A")
+            git(copy, "commit", "-q", "-m", f"feat: add part {k}")
+        tip = git(copy, "rev-parse", "HEAD")
+        git(r, "merge", "-q", "--squash", "feat/squashed")
+        git(r, "commit", "-q", "-m", "feat: land feat/squashed (#7)")
+        git(r, "push", "-q", "origin", "main", ":feat/squashed")
+        pr = {"number": 7, "state": "MERGED", "headRefName": "feat/squashed", "headRefOid": tip,
+              "isCrossRepository": False, "mergeCommit": {"oid": git(r, "rev-parse", "HEAD")}}
+        (self.state / "prs").mkdir()
+        (self.state / "prs" / "acme__kit-consulting.json").write_text(json.dumps([pr]))
+        self.tool("gh", "#!/bin/sh\necho '%s'\n" % json.dumps([dict(pr, updatedAt="2026-11-07T10:00:00Z")]))
+        with mock.patch.object(registry, "STATE", self.state):  # the registry's PR cache, here
+            rep = self.measure(self.project("acme/kit-consulting", r, [
+                self.wt(copy, "stray", "feat/squashed", ahead_default=2, unpushed=2, merged="pr", merged_pr=7,
+                        pr={"number": 7, "state": "MERGED"})], github="acme/kit-consulting"))
+            self.assertEqual(item(rep, "copy")["safety"], "safe")
+            disk.save(rep)
+            disk.mark_seen(rep)
+            rc, out = self.free(item(rep, "copy")["n"])
+        self.assertEqual(rc, 0, out)
+        self.assertFalse(copy.exists())
+        self.assertEqual(git(r, "branch", "--list", "feat/squashed"), "")
+
     # Freeing unused images runs Docker's own prune and then the trim, and nothing ever prunes volumes.
     def test_free_images_prunes_images_then_trims_and_never_volumes(self):
         self.fake_colima(on_mac_kb=8)

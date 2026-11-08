@@ -9,6 +9,7 @@
 # with an equivalent in origin's default branch are merged, not unpushed. Temporary repositories with a local bare
 # origin; devkit's state and handoff repository in a temp folder; no process works anywhere and nothing reaches
 # GitHub. Run: python3 -m unittest tests.test_registry -v
+import json
 import sys
 import tempfile
 import time
@@ -94,6 +95,24 @@ class CheckoutStateTests(unittest.TestCase):
         p = registry.inspect_repo(self.repo, with_prs=False)
         return p, {w["branch"]: w for w in p["worktrees"]}
 
+    def on_github(self):
+        # origin as GitHub names it, the local bare repository underneath: the registry reads its cached PR list
+        url = "https://github.com/acme/widget.git"
+        git(self.repo, "config", f"url.{self.root / 'origin.git'}.insteadOf", url)
+        git(self.repo, "remote", "set-url", "origin", url)
+
+    def squash(self, name, n):
+        # GitHub squash-merges the branch's pull request into main (and deletes its remote branch: it never had one)
+        git(self.repo, "merge", "-q", "--squash", name)
+        git(self.repo, "commit", "-q", "-m", f"feat: land {name} (#{n})")
+        git(self.repo, "push", "-q", "origin", "main")
+        return git(self.repo, "rev-parse", "HEAD")
+
+    def cache(self, prs):
+        f = registry.STATE / "prs" / "acme__widget.json"
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(json.dumps(prs))
+
     def test_a_worktree_merged_by_content_reads_merged_not_unpushed(self):
         # dev wt ls said "2 unpushed" for a branch whose commits main had cherry-picked
         self.land(*self.feature("fix/picked", "fix: keep the first thing", "fix: keep the second thing"))
@@ -124,6 +143,33 @@ class CheckoutStateTests(unittest.TestCase):
         later = time.time() + 3 * 86400  # both idle three days
         issues = [i for b in ("fix/picked", "feat/wip") for i in registry.work_issues(p["id"], wts[b], now=later)]
         self.assertEqual(issues, [("work", f"{p['id']}: 1 unpushed commit(s) on feat/wip")])
+
+    def test_a_worktree_squashed_by_its_own_pull_request_reads_merged_by_it_once_the_cache_has_its_head(self):
+        # dev wt ls said "2 unpushed" for a branch whose pull request GitHub had squash-merged
+        self.on_github()
+        tip = self.feature("feat/squashed", "feat: add part one", "feat: add part two")[-1]
+        landed = self.squash("feat/squashed", 7)
+        pr = {"number": 7, "state": "MERGED", "headRefName": "feat/squashed", "title": "land it", "url": "",
+              "updatedAt": "2026-11-07T10:00:00Z", "isDraft": False}
+        self.cache([pr])  # as devkit 26.11.5 cached it: no head, no merge commit, so nothing new is said
+        self.assertEqual(registry._state(self.inspect()[1]["feat/squashed"]), "2 unpushed")
+        self.cache([dict(pr, headRefOid=tip, isCrossRepository=False, mergeCommit={"oid": landed})])
+        w = self.inspect()[1]["feat/squashed"]
+        self.assertEqual((w["unpushed"], w["merged"], w["merged_pr"]), (2, "pr", 7))
+        self.assertEqual(registry._state(w), "merged by PR #7")
+
+    def test_a_worktree_squashed_by_its_own_pull_request_raises_no_unpushed_commits_issue_and_a_forks_does(self):
+        self.on_github()
+        prs = []
+        for n, (name, cross) in enumerate((("feat/ours", False), ("fix/theirs", True)), start=7):
+            tip = self.feature(name, f"feat: add part one of {name}", f"feat: add part two of {name}")[-1]
+            prs.append({"number": n, "state": "MERGED", "headRefName": name, "headRefOid": tip,
+                        "isCrossRepository": cross, "mergeCommit": {"oid": self.squash(name, n)}})
+        self.cache(prs)
+        p, wts = self.inspect()
+        later = time.time() + 3 * 86400  # both idle three days
+        issues = [i for b in ("feat/ours", "fix/theirs") for i in registry.work_issues(p["id"], wts[b], now=later)]
+        self.assertEqual(issues, [("work", f"{p['id']}: 2 unpushed commit(s) on fix/theirs")])
 
 
 if __name__ == "__main__":

@@ -130,14 +130,17 @@ def ignored_folders(path: str, skip=()) -> list:
 
 def _checkout(kind: str, info: dict, kb, folders: list, has_remote: bool) -> dict:
     # merged: its pull request, or the registry's merge test (registry.merge_states: an ancestor of origin/<default>,
-    # or merged by content); unpushed: only the commits with no equivalent there (registry.unpushed_work)
+    # its own merged pull request, or merged by content); unpushed: only the commits with no equivalent there
+    # (registry.unpushed_work)
     pr = info.get("pr") or None
     how = info.get("merged")
     merged = kind != "main" and has_remote and (bool(pr and pr.get("state") in ("MERGED", "CLOSED"))
-                                                or info.get("ahead_default") == 0 or how in ("ancestor", "content"))
+                                                or info.get("ahead_default") == 0
+                                                or how in ("ancestor", "pr", "content"))
     return {"kind": kind, "path": info["path"], "name": os.path.basename(info["path"]), "kb": kb or 0,
             "branch": info.get("branch"), "pr": {"number": pr["number"], "state": pr["state"]} if pr else None,
             "merged": merged, "how": how if merged else None, "ahead_default": info.get("ahead_default") or 0,
+            "merged_pr": info.get("merged_pr") if merged and how == "pr" else None,
             "unpushed": registry.unpushed_work(info),
             "modified": info.get("modified") or 0, "untracked": info.get("untracked") or 0,
             "active": bool(info.get("active")), "locked": bool(info.get("locked")),
@@ -397,6 +400,7 @@ def _project_items(p: dict) -> list:
             pr = c.get("pr")
             risk = (f"PR {pr['number']} is {pr['state'].lower()}; its branch stays on GitHub." if pr and p.get("github")
                     else f"PR {pr['number']} is {pr['state'].lower()}; its branch stays on the remote." if pr
+                    else f"PR {c['merged_pr']} merged it into {p['default_branch']}." if c.get("how") == "pr"
                     else f"Its commits have an equivalent in {p['default_branch']} (merged by content)."
                     if c.get("how") == "content" else f"Its branch has no commits beyond {p['default_branch']}.")
             items.append({"key": f"copy:{c['path']}", "kind": "copy", "kb": c["kb"], "what": f"The {c['name']} copy",
@@ -605,7 +609,8 @@ def state_text(c: dict, p: dict, now=None) -> str:
     if c["kind"] != "main" and pr and pr["state"] in ("MERGED", "CLOSED"):
         parts.append(f"PR {pr['number']} {pr['state'].lower()}")
     elif c["kind"] != "main" and c.get("merged"):
-        parts.append(f"merged into {default}" + (" by content" if c.get("how") == "content" else ""))
+        parts.append(f"merged into {default}" + (" by content" if c.get("how") == "content" else
+                                                 f" by PR {c['merged_pr']}" if c.get("how") == "pr" else ""))
     else:
         parts.append(ui.fit_cell(c["branch"], 32) if c.get("branch") else "not on a branch")
         if pr:
@@ -924,16 +929,18 @@ def _busy(path: str) -> bool:
 
 
 def merge_now(t: dict):
-    """The merge test (branches.merge_test, without GitHub) on a worktree's HEAD right before removing it: {base, sha,
-    prs} when its branch is merged into origin/<default>, as an ancestor or by content, for gc.remove_worktree to test
-    again; else None."""
+    """The merge test (branches.merge_test, on the registry's cached pull requests: no GitHub call) on a worktree's
+    HEAD right before removing it: {base, sha, prs} when its branch is merged into origin/<default>, as an ancestor,
+    by its own pull request or by content, for gc.remove_worktree to test again; else None. The plan read the same
+    cache (registry.merge_states), so the plan and the removal agree."""
     from . import branches
     branch = t.get("branch")
     if not branch or not os.path.isdir(t["path"]):
         return None
     base = f"origin/{t.get('default') or registry.default_branch(Path(t['main']))}"
-    m = branches.merge_test(t["path"], branch, base, ref="HEAD")
-    return {"base": base, "sha": m["sha"], "prs": None} if m["merged"] else None
+    prs = branches.cached_prs(t["github"]) if t.get("github") else None
+    m = branches.merge_test(t["path"], branch, base, ref="HEAD", prs=prs)
+    return {"base": base, "sha": m["sha"], "prs": prs} if m["merged"] else None
 
 
 def blocker_now(path: str, name: str, merged: dict = None):

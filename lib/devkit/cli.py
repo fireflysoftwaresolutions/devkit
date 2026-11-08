@@ -1236,16 +1236,18 @@ def wt_new(p, branch, base=None, quiet=False, deps=True):
 
 
 def _wt_merged(p: dict, branch: str):
-    """{base, sha, prs} when the worktree's branch is merged into origin/<default> as an ancestor or by content (the
-    merge test of dev branch prune, without GitHub), so `dev wt rm` may remove it with commits on no remote."""
+    """{base, sha, prs} when the worktree's branch is merged into origin/<default> as an ancestor, by its own pull
+    request or by content (the merge test of dev branch prune, on the registry's cached pull requests: no GitHub
+    call), so `dev wt rm` may remove it with commits on no remote."""
     if not branch:
         return None
     from . import branches
     default = p.get("default_branch") or "main"
     base = f"origin/{default}" if core.git(p["path"], "rev-parse", "--verify", "-q",
                                            f"refs/remotes/origin/{default}")[0] == 0 else default
-    m = branches.merge_test(p["path"], branch, base)
-    return {"base": base, "sha": m["sha"], "prs": None} if m["merged"] else None
+    prs = branches.cached_prs(p["github"]) if p.get("github") else None
+    m = branches.merge_test(p["path"], branch, base, prs=prs)
+    return {"base": base, "sha": m["sha"], "prs": prs} if m["merged"] else None
 
 
 def cmd_wt(a):

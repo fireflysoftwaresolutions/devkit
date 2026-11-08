@@ -19,10 +19,13 @@ A row (`dev branch ls --json` prints the list; `registry.json` keeps it as `proj
     landed                                                  of the unpushed commits, those with an equivalent in the
                                                             base (by content), as far as the content test looks
     merged_into                                             a branch that has every commit of this one, or null
-    merged_how                                              ancestor, or content (git cherry: every commit has an
-                                                            equivalent in the default branch), or null; the content
-                                                            test covers branches with unpushed commits and those
-                                                            checked out (merged_default reads both, through carriers)
+    merged_how                                              ancestor, or pr (its own merged pull request, the merge
+                                                            test's pr leg on the PR list: no GitHub call), or content
+                                                            (git cherry: every commit has an equivalent in the
+                                                            default branch), or null; the pr and content tests cover
+                                                            branches with unpushed commits and those checked out
+                                                            (merged_default reads them, content through carriers)
+    merged_pr                                               the number of that pull request, or null
     last_backup                                             unix time of the newest git.backup record, or null
     embargo                                                 {why, until, who, when} or null
     embargo_via                                             the embargoed branch that carries its commits, or null
@@ -34,9 +37,10 @@ A row (`dev branch ls --json` prints the list; `registry.json` keeps it as `proj
     backup                                                  {state, reason}
 
 `backup.state` is one of: backed_up (no commit only here, and a backup is recorded), on_remote (no commit only
-here), merged (another branch carries its commits), waiting (its commits are younger than `backup.after_minutes`),
-not_backed_up, embargoed, no_remote (the repository has no remote). The reason has no times in it; the views add them
-from the row (relative on screens, absolute in the note so it changes only when a branch does).
+here), merged (another branch carries its commits, or its own pull request merged), waiting (its commits are younger
+than `backup.after_minutes`), not_backed_up, embargoed, no_remote (the repository has no remote). The reason has no
+times in it; the views add them from the row (relative on screens, absolute in the note so it changes only when a
+branch does).
 
 Nothing here pushes or fetches. Pull requests come from the caller (the registry's cached list), from the same
 cache, or, for `dev branch ls`, from `registry.prs` (cached, with timeouts); a hook never waits on GitHub.
@@ -463,9 +467,10 @@ def _content_merged(top, base_ref: str, off_base, names, cands):
 
 def merged_default(rows) -> dict:
     """name -> how the map's base (origin/<default>) holds every commit of the branch: "ancestor" (its tip is in the
-    base) or "content" (merged by content, itself or through the branches that carry it, as `merged_into` links
-    them). A branch the local default branch carries but the base does not is left out, as is every unmerged one.
-    No git calls: it reads the rows of `map`."""
+    base), "pr" (its own merged pull request: `merged_pr` names it) or "content" (merged by content, itself or through
+    the branches that carry it, as `merged_into` links them). A branch the local default branch carries but the base
+    does not is left out, as is every unmerged one, and a branch carried by one merged by its pull request (the merge
+    test does not count that pull request for it either). No git calls: it reads the rows of `map`."""
     by = {r["name"]: r for r in rows}
     out = {}
     for r in rows:
@@ -473,6 +478,9 @@ def merged_default(rows) -> dict:
             continue
         if r["base_ahead"] == 0:
             out[r["name"]] = "ancestor"
+            continue
+        if r.get("merged_how") == "pr":
+            out[r["name"]] = "pr"
             continue
         x, seen = r, set()
         while x is not None and not x["default"] and x["name"] not in seen:
@@ -573,7 +581,7 @@ def map(repo, prs=None, offline=False, now=None, pid=None, default=None, current
             "base_ahead": b_ahead, "base_behind": b_behind,
             "where": f"local + {uremote or upstream.split('/', 1)[0]}" if upstream and not gone else "local only",
             "last_commit": int(ts) if ts.isdigit() else 0, "unpushed": unpushed, "oldest_unpushed": oldest,
-            "merged_into": None, "last_backup": None, "embargo": None,
+            "merged_into": None, "merged_pr": None, "last_backup": None, "embargo": None,
             "worktree": wt, "worktree_missing": bool(wt) and not os.path.isdir(wt),
             "changes": {"modified": c.get("modified", 0), "untracked": c.get("untracked", 0)} if c else None,
             "session": bool(c.get("active")),
@@ -609,6 +617,14 @@ def map(repo, prs=None, offline=False, now=None, pid=None, default=None, current
     # Other branches with nothing unpushed are not: an old one would widen the search through the default branch.
     cands = [r["name"] for r in rows if not r["default"] and not r["merged_into"]
              and (r["unpushed"] or r["worktree"] or r["name"] == head)]
+    # merged by its own pull request first, as the merge test orders it, from the PR list above (no GitHub call): a
+    # squash of several commits has no ancestor and no equivalent in the base, and once GitHub deletes the remote
+    # branch every commit reads as only on this Mac
+    for name in list(cands) if base_ref and prs else ():
+        p = pr_merge(top, name, tips[name], base_ref, prs)
+        if p:
+            by_name[name].update(merged_into=default, merged_how="pr", merged_pr=p.get("number"))
+            cands.remove(name)
     merged_c, found = _content_merged(top, base_ref, off_base, names, cands) if base_ref and cands else ([], set())
     for name in merged_c:
         by_name[name]["merged_into"], by_name[name]["merged_how"] = default, "content"
@@ -650,6 +666,8 @@ def _backup_state(r: dict, has_remotes: bool, after: int, now: float, skipped) -
         return {"state": "backed_up", "reason": ""} if r["last_backup"] else {"state": "on_remote", "reason": ""}
     if r["merged_into"] and r.get("merged_how") == "content":
         return {"state": "merged", "reason": f"its commits have an equivalent in {r['merged_into']} (merged by content)"}
+    if r["merged_into"] and r.get("merged_how") == "pr":
+        return {"state": "merged", "reason": f"PR #{r.get('merged_pr')} was merged into {r['merged_into']}"}
     if r["merged_into"]:
         return {"state": "merged", "reason": f"its commits are in {r['merged_into']}"}
     if not has_remotes:
@@ -1119,13 +1137,32 @@ def _ancestor(top, a, b) -> bool:
     return core.git(top, "merge-base", "--is-ancestor", a, b, timeout=60)[0] == 0
 
 
+def pr_merge(top, name: str, sha: str, base: str, prs):
+    """The merge test's pull-request leg, shared by every caller: the merged pull request of the branch `name` at
+    `sha` into `base`, or None. It counts when its head is `sha` or a later commit of the branch (so nothing was added
+    after the merge), it came from the repository itself (a fork's branch can carry any name and head) and its merge
+    commit is in `base` (not merged into another branch). A row without headRefOid, isCrossRepository or mergeCommit
+    (a pull request list cached before 26.11.6) never counts. Git calls only for a merged pull request of that name."""
+    for p in prs or []:
+        head = str(p.get("headRefOid") or "")
+        landed = str((p.get("mergeCommit") or {}).get("oid") or "")
+        if p.get("headRefName") != name or str(p.get("state") or "").upper() != "MERGED" or not head or \
+                p.get("isCrossRepository") is not False or not landed or not _sha(top, landed) or \
+                not _ancestor(top, landed, base):
+            continue
+        if head == sha or (_sha(top, head) and _ancestor(top, sha, head)):
+            return p
+    return None
+
+
 def merge_test(top, name: str, base: str, ref: str = None, prs=None) -> dict:
     """Is the branch `name` (its `ref`, refs/heads/<name> unless given) merged into `base` (origin/<default>)?
 
       ancestor  its tip is in `base`: a merge commit or a fast-forward;
       pr        a merged pull request of the branch (any method: merge, squash or rebase) had its tip, or a later
                 commit, as its head, so nothing was added after the merge; it came from the repository itself (a
-                fork's branch can carry any name and head) and its merge commit is in `base` (not merged elsewhere);
+                fork's branch can carry any name and head) and its merge commit is in `base` (not merged elsewhere):
+                pr_merge, which the branch map and the backup use too;
       content   every commit `base` lacks has an equivalent there (`git cherry`: all "-"): cherry-picked, or carried by
                 a release branch that merged; merge commits are left out, as git cherry leaves them out.
 
@@ -1141,15 +1178,9 @@ def merge_test(top, name: str, base: str, ref: str = None, prs=None) -> dict:
         return dict(out, merged=True, how="ancestor", missing=0)
     n = core.gitout(top, "rev-list", "--count", f"{base}..{sha}", timeout=60)
     out["ahead"] = int(n) if n.isdigit() else 0
-    for p in prs or []:
-        head = str(p.get("headRefOid") or "")
-        landed = str((p.get("mergeCommit") or {}).get("oid") or "")
-        if p.get("headRefName") != name or str(p.get("state") or "").upper() != "MERGED" or not head or \
-                p.get("isCrossRepository") is not False or not landed or not _sha(top, landed) or \
-                not _ancestor(top, landed, base):
-            continue
-        if head == sha or (_sha(top, head) and _ancestor(top, sha, head)):
-            return dict(out, merged=True, how="pr", pr=p.get("number"), missing=0)
+    p = pr_merge(top, name, sha, base, prs)
+    if p:
+        return dict(out, merged=True, how="pr", pr=p.get("number"), missing=0)
     rc, cherry, _ = core.git(top, "cherry", base, sha, timeout=120)
     if rc != 0:
         return out
@@ -1234,11 +1265,26 @@ def _worktree_hold(top, w: dict, live: set):
     return None
 
 
+OPEN_PRS = 1000  # the open pull requests prune_plan reads; with this many or more, every remote branch stays
+
+
+def _open_prs(c):
+    """The repository's open pull requests, in a call of their own -> a list, or None when GitHub cannot be read."""
+    from . import gitx
+    data, _ = gitx.gh_json(["pr", "list", "-R", c.slug, "--state", "open", "--limit", str(OPEN_PRS), "--json",
+                            "number,state,headRefName,headRefOid,updatedAt,title,url,isCrossRepository"], c)
+    if not isinstance(data, list):
+        return None
+    return [p for p in data if isinstance(p, dict) and str(p.get("state") or "").upper() == "OPEN"]
+
+
 def prune_plan(top, prs=None, offline=False, where=("local", "remote"), now=None) -> dict:
     """What `dev branch prune` would do in the repository at `top`: {project, base, default, applied, branches: rows}.
     A row: name, where (local|remote), sha, state (PRUNE_STATES), how (merge_test), pr, ahead, missing, last_commit,
     merge (the merge test in words), worktree, action (delete|keep), why, backup (devkit pushed it: a git.backup record),
-    pr_merged (a merged pull request of the branch exists). Fetches origin first unless `offline`; changes nothing."""
+    pr_merged (its own pull request merged: pr_merge, so a fork's of the same name never counts). Fetches origin first
+    unless `offline`; changes nothing. Online, the open pull requests come with their own call, since the list of every
+    state holds only the newest 200: a remote branch stays when devkit cannot read them all."""
     from . import gitx, registry
     now = now or time.time()
     c = gitx.ctx(top)
@@ -1248,8 +1294,20 @@ def prune_plan(top, prs=None, offline=False, where=("local", "remote"), now=None
         gitx._fetch(c)
     base = gitx._base_ref(c)
     github = c.provider == "github"
+    open_gap = ""  # why an open pull request may be missing from `prs`
     if prs is None and github:
-        prs = cached_prs(c.slug) if offline else gitx._prs(c, limit=200)
+        if offline:
+            prs = cached_prs(c.slug)
+        else:
+            prs = gitx._prs(c, limit=200)
+            opens = _open_prs(c) if prs is not None else None
+            if opens is None:
+                open_gap = "GitHub could not list the open pull requests: one would lose its branch"
+            elif len(opens) >= OPEN_PRS:
+                open_gap = f"devkit reads {OPEN_PRS} open pull requests and there are more: one would lose its branch"
+            if opens:
+                numbers = {p.get("number") for p in opens}
+                prs = opens + [p for p in prs if p.get("number") not in numbers]
     held, unreadable = read_embargoes(c.pid)
     done = backups(c.pid)
     trees = registry.list_worktrees(Path(c.main))
@@ -1277,7 +1335,7 @@ def prune_plan(top, prs=None, offline=False, where=("local", "remote"), now=None
              "missing": m["missing"], "last_commit": int(ts) if ts.isdigit() else 0, "merge": merge_words(m, base),
              "worktree": w["path"] if w else None, "action": "keep", "why": "",
              "backup": bool((done.get(name) or {}).get("backup")),
-             "pr_merged": any(str(p.get("state") or "").upper() == "MERGED" for p in mine)}
+             "pr_merged": m["how"] == "pr" or pr_merge(c.top, name, sha, base, mine) is not None}
         protect = ("the default branch" if name == c.default else
                    "a permanent branch" if name in _permanent() else
                    "the current branch" if name == c.branch else
@@ -1300,6 +1358,8 @@ def prune_plan(top, prs=None, offline=False, where=("local", "remote"), now=None
                 hold = f"the merge requests on {c.host or 'this remote'} are not read here: an open one would lose its branch"
             elif kind == "remote" and prs is None:
                 hold = "GitHub could not be read: an open pull request would lose its branch"
+            elif kind == "remote" and open_gap:
+                hold = open_gap
             elif w:
                 hold = _worktree_hold(c.main, w, live)
             if not hold and kind == "local" and m["how"] == "ancestor":
