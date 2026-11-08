@@ -111,8 +111,10 @@ short version:
    work and files, what to return and how to report, and it prints the exact launch line for Claude Code and for
    Codex. The launch names the step, which is how the step binds to the member's lane.
 
-4. **Follow and answer.** `dev crew graph` draws the session as one graph: the steps with their state, owner, and
-   kind of work, the lanes under them, decisions waiting for the developer, approvals owed, and open messages. Answer
+4. **Follow and answer.** `dev crew graph` draws the project's live sessions, each as one graph: the steps with
+   their state, owner, and kind of work, each lane once under the step it works now (working, stale, or ended, as
+   `dev crew owner` reads it), decisions waiting for the developer, approvals owed, and open messages. Outside a
+   project, or with `--global`, it draws every live session on this Mac. Answer
    questions as they come (`dev crew answer M2 "…"`), and keep the developer informed with `dev progress step`, whose
    update shows every lane.
 
@@ -423,7 +425,8 @@ dev crew delegate "add the export column" --to Dozer          # from anyone: a n
 dev crew delegate "review the parser before merge" --to auto  # routed to the best fit
 dev crew decline "add the export column" --why "needs a data migration plan first"
 dev crew next                                                 # ready to launch, queued, waiting, busy, the slots
-dev crew graph                                                # the whole session as one graph
+dev crew graph                                                # this project's live sessions as graphs
+dev crew graph --global                                       # every live session on this Mac
 ```
 
 - **Routing** suggests a member: `dev crew route` ranks the members by their keywords (`config/crew.json`), their

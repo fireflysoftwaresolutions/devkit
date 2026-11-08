@@ -2119,7 +2119,7 @@ _dev__crew() {
         'set:change a member'\''s definition for the whole team'
         'history:the team'\''s changes to the crew, with who and why'
         'rules:every crew rule, the devkit check that enforces it, and its state'
-        'graph:the live session as one graph'
+        'graph:the live sessions as graphs'
         'show:everything about one member'
         'brief:a ready-to-paste brief for a member, with the spawn line'
         'sync:write plugin/agents/<id>.md from config/crew.json'
@@ -2196,7 +2196,9 @@ _dev__crew__rules() {
 _dev__crew__graph() {
   _arguments -s -S : \
     '(- *)'{-h,--help}'[show this help message and exit]' \
-    '--latest[the most recent running progress run on this Mac instead of this…]' \
+    '--global[every live session on this Mac, from inside a project too]' \
+    '--latest[only the most recent running progress run on this Mac]' \
+    '--all[every step, the skipped ones listed one by one]' \
     '--mermaid[a Mermaid flowchart]' \
     '--json[the graph as nodes and edges, for the dashboard and tools]'
 }

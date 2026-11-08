@@ -95,7 +95,8 @@ dev progress assign api --to Tank --scope "services/invoices/**,tests/invoices/*
 dev progress assign ui  --to Trinity --scope "web/src/invoices/**" --activity frontend
 dev crew brief Tank "Add the CSV export endpoint" --scope "services/invoices/**,tests/invoices/**" --step api \
   --activity backend
-dev crew graph                       # the session as one graph: steps, lanes, decisions, approvals owed, messages
+dev crew graph                       # the project's sessions as graphs: steps, lanes, decisions, approvals, messages
+dev crew graph --global              # every live session on this Mac (the default outside a project)
 ```
 
 - **Declare each step's kind of work:** `[id]` after a step in the plan (or in `dev progress add`), `--activity <id>`

@@ -368,7 +368,7 @@ _dev_spec() {
     'crew set') o='-h --help --why' v='--why=n' p='l:crew:-:: n *n' ;;
     'crew history') o='-h --help' ;;
     'crew rules') o='-h --help' ;;
-    'crew graph') o='-h --help --latest --mermaid --json' ;;
+    'crew graph') o='-h --help --global --latest --all --mermaid --json' ;;
     'crew show') o='-h --help' p='*l:crew:-::' ;;
     'crew brief') o='-h --help --scope --step --activity' v='--scope=n --step=l:steps:-:: --activity=l:activities:-::' p='l:crew:-:: *n' ;;
     'crew sync') o='-h --help --check' ;;
