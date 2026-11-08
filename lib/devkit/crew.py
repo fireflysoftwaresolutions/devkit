@@ -501,7 +501,7 @@ ENFORCEMENT = (
     ("E-deps", "No step starts before its dependencies are done", "every step transition (start, add, assign, begin, "
      "advance, subagent start, close, launch readiness)", "devkit.progress.deps_open", "enforced"),
     ("E-recheck", "A reopened dependency's finished dependents are rechecked before the run ends", "dev progress done",
-     "F6 step endings and approvals", "planned"),
+     "devkit.approvals.recheck_open", "enforced"),
     ("E-fixable", "A step is reopened or skipped only with a reason, kept in the run's history",
      "dev progress reopen and dev progress skip", "devkit.progress.reopen", "enforced"),
     ("E-parallel", "At most progress.max_parallel members work in parallel (4 by default)",
