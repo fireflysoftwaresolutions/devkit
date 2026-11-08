@@ -2200,7 +2200,7 @@ _SHELLS = {"bash", "sh", "zsh", "dash", "ksh", "fish", "csh", "tcsh"}
 _GIT_TREE_WRITES = frozenset("checkout switch reset restore revert merge pull rebase cherry-pick stash apply am mv rm "
                              "clean read-tree checkout-index update-index filter-branch filter-repo".split())
 _INTERP = re.compile(r"^(?:python[0-9.]*|pypy[0-9.]*|node|nodejs|deno|bun|perl[0-9.]*|ruby|php|osascript|lua|tclsh|"
-                     r"Rscript|swift|awk|gawk|mawk|nawk)$")
+                     r"Rscript|swift|awk|gawk|mawk|nawk|expect|wish)$")
 _READERS = {"cat", "head", "tail", "less", "more", "bat", "ls", "stat", "file", "wc", "grep", "egrep", "fgrep", "rg",
             "ag", "ack", "jq", "diff", "cmp", "comm", "md5", "md5sum", "shasum", "sha1sum", "sha256sum", "cksum", "du",
             "df", "realpath", "readlink", "basename", "dirname", "test", "[", "[[", "echo", "printf", "hexdump", "xxd",
@@ -2833,7 +2833,10 @@ class _Shell:
         if tmux_list_refusal(self.cmd):
             return deny(TERMINAL_TYPING_REASON)
         cwd = self.cwd
-        for argv0, redirs in segs:
+        ins = []  # what an interpreter reads as its program from `< f` or a pipe (`cat x.exp | expect`)
+        osegs = split_commands(self.cmd, ops=True, inputs=ins)
+        osegs = osegs if osegs is not None and len(osegs) == len(segs) else None
+        for seg, (argv0, redirs) in enumerate(segs):
             argv0, clobber, k = list(argv0), [], 0
             while k < len(argv0):  # `>|` reaches argv as a token; the next token is its target
                 if argv0[k] in (">|", ">>|"):
@@ -2857,7 +2860,15 @@ class _Shell:
                 cwd = str(core.HOME) if len(argv) == 1 else cwd if argv[1] == "-" else str(resolve(argv[1], cwd))
                 continue
             self.exported |= _exports(name, argv[1:])
-            v = self.segment(name, argv, assigns, cwd, names)
+            heredocs, run = self.bodies, _unwrap(list(argv))
+            if osegs and run and _INTERP.match(os.path.basename(run[0])):
+                with _skipped_reads():  # read as the gate reads it (_fed_program): its program joins the heredocs
+                    fed = _fed_program(run, osegs, seg, ins[seg] if seg < len(ins) else [], cwd)[1]
+                self.bodies = heredocs + [text for text, _ in fed]
+            try:
+                v = self.segment(name, argv, assigns, cwd, names)
+            finally:
+                self.bodies = heredocs
             if v:
                 return v
         if self.unresolved and self.mentions:
@@ -3256,7 +3267,10 @@ def _unwrap(argv, more: bool = False, stop=()):
                 return argv
             argv = run
         elif n == "expect":
-            argv = _expect_command(argv[1:])
+            run = _expect_command(argv[1:])
+            if run is None:  # a script file or its input: the interpreter, read as one (_program)
+                return argv
+            argv = run
         elif n == "yarn" and argv[1:3] == ["workspaces", "foreach"]:  # runs `yarn <command>` in each workspace
             rest, i = argv[3:], 0
             while i < len(rest) and rest[i].startswith("-"):
@@ -3703,22 +3717,41 @@ def terminal_typing_refusal(argv, more: bool = False) -> bool:
 
 
 _EXPECT_RUN = re.compile(r"(?:^|[;\n\[{]|\bthen\b)\s*(?:spawn|exec|system)\s+([^;\n\]}]*)")
+_TCL = frozenset({"tclsh", "expect", "wish"})
 _EXPECT_SPAWN_OPTS = frozenset({"-noecho", "-console", "-nottycopy", "-nottyinit", "-pty", "-ignore", "-open",
                                 "-leaveopen"})
 
 
-def _expect_command(args) -> list:
-    """What `expect -c '<script>'` runs, as `sh -c <lines>`: each `spawn`, `exec` and `system` command of the script
-    (Tcl words read as shell words, past spawn's own options). [] when it runs none the guard can see."""
-    scripts = [args[k + 1] for k, a in enumerate(args[:-1]) if a == "-c"]
+def _tcl_lines(script) -> list:
+    """The command lines a Tcl program (tclsh, expect, wish) starts: each `spawn`, `exec` and `system` command, its
+    Tcl words read as shell words, past spawn's own options."""
     lines = []
-    for script in scripts:
-        for m in _EXPECT_RUN.finditer(script):
-            words = m.group(1).replace("{", " ").replace("}", " ").split()
-            while words and words[0] in _EXPECT_SPAWN_OPTS:
-                words = words[2:] if words[0] in ("-ignore", "-open", "-leaveopen") else words[1:]
-            if words:
-                lines.append(" ".join(words))
+    for m in _EXPECT_RUN.finditer(script or ""):
+        words = m.group(1).replace("{", " ").replace("}", " ").split()
+        while words and words[0] in _EXPECT_SPAWN_OPTS:
+            words = words[2:] if words[0] in ("-ignore", "-open", "-leaveopen") else words[1:]
+        if words:
+            lines.append(" ".join(words))
+    return lines
+
+
+def _expect_command(args):
+    """What `expect -c '<script>'` runs, as `sh -c <lines>` (_tcl_lines); [] when it runs none the guard can see.
+    None when expect also runs a script file or its input (`expect x.exp`, `expect -f x.exp`, `expect < x.exp`): it is
+    then an interpreter whose program the walkers read from the folder the command runs in (_program)."""
+    scripts, i = [], 0
+    while i < len(args):
+        a = args[i]
+        if a == "-c":
+            scripts.append(args[i + 1] if i + 1 < len(args) else "")
+            i += 2
+            continue
+        if a in ("-f", "-b", "--", "-") or not a.startswith("-"):
+            return None
+        i += 2 if a == "-D" else 1
+    if not scripts:
+        return None  # no -c: it reads its commands from its input
+    lines = [line for s in scripts for line in _tcl_lines(s)]
     return ["sh", "-c", "; ".join(lines)] if lines else []
 
 
@@ -3785,7 +3818,7 @@ _SHELL_VALUE_OPTS = ("-o", "+o", "-O", "+O", "--rcfile", "--init-file")
 # per interpreter family: the options whose value is its program (code, a script or a module), the ones whose value
 # is code it loads before it (node -r, perl -M, ruby -r), and the ones whose value is no code (python -W ignore)
 _PROGRAM_OPTS = {"python": ("-c", "-m"), "node": ("-e", "--eval", "-p", "--print"), "perl": ("-e", "-E"),
-                 "ruby": ("-e",), "php": ("-r", "-f"), "awk": ("-f",), "": ("-e",)}
+                 "ruby": ("-e",), "php": ("-r", "-f"), "awk": ("-f",), "expect": ("-c", "-f", "-b"), "": ("-e",)}
 _LOAD_OPTS = {"node": ("-r", "--require", "--import", "--loader", "--experimental-loader", "--preload"),
               "perl": ("-M", "-m", "-I"), "ruby": ("-r", "-I")}
 _PLAIN_VALUE_OPTS = {"python": ("-W", "-X"), "node": ("--env-file", "--input-type", "-C", "--conditions", "--title"),
@@ -4070,6 +4103,19 @@ def _program(argv, cwd, bodies):
                 code.append(a)
             i += 1
             break
+        if fam == "expect":  # expect [-dinN] [-D n] [-c cmds]… [[-f|-b|--] cmdfile] [args]: -c runs before the file
+            if a == "-c":
+                code.append(nxt)
+                i += 2
+                continue
+            if a in ("-f", "-b", "--"):
+                script, i = nxt or None, i + 2
+                break
+            if a == "-" or not a.startswith("-"):
+                script, i = a, i + 1
+                break
+            i += 2 if a == "-D" else 1
+            continue
         if fam in ("python", "pypy"):
             if short and a.endswith("c"):
                 code.append(nxt)
@@ -6674,6 +6720,8 @@ def _code_spawns(code, name="") -> bool:
     if not code:
         return False
     fam = re.sub(r"[0-9.]+$", "", os.path.basename(str(name or "")).casefold())
+    if fam in _TCL and (_EXPECT_RUN.search(code) or re.search(r"\bopen\s+[\"{]?\|", code)):
+        return True  # Tcl starts a process with spawn, exec, system or `open "|cmd"`
     bare = _outside_strings(code)
     return bool(_SPAWNS.search(bare) or _SPAWN_MODULE.search(code) or _BARE_LIST.search(bare) or
                 (fam in ("perl", "ruby", "php") and _SPAWNS_QUOTED.search(code)) or _dynamic_code(name, code))
@@ -7503,6 +7551,8 @@ def _code_texts(code, name="", lists_only=False) -> list:
     if not _code_spawns(code, name):
         return []
     texts = [] if lists_only else [next((g for g in m.groups() if g is not None), "") for m in _STR_LIT.finditer(code)]
+    if re.sub(r"[0-9.]+$", "", os.path.basename(str(name or "")).casefold()) in _TCL:
+        texts += _tcl_lines(code)  # Tcl runs bare command words: `spawn codex …`, `exec git push`
     for m in [*_LIST_LIT.finditer(code), *_BARE_LIST.finditer(code), *_CALL_LIST.finditer(code)]:
         items = re.findall(r"'([^'\n]*)'|\"([^\"\n]*)\"", m.group(1))
         texts.append(" ".join(shlex.quote(a or b) for a, b in items))

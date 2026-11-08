@@ -291,6 +291,13 @@ These rules also apply when a package runner starts the agent (`npx @anthropic-a
 (`subprocess.run(['claude', '--bare', …])`, `os.system('claude --bare …')`, `child_process.spawn('dev', ['hook',
 …])`). The same goes for `dev hook <event>`, which no agent tool call runs.
 
+They also apply when a program that drives a terminal starts the agent: an `expect` script (by its path, `-f`, `-b`,
+`--`, `-c`, or fed through its input, `expect < x.exp` or `cat x.exp | expect`), a `tclsh` program with `spawn`,
+`exec`, or `system`, Python's `pexpect.spawn('codex …')`, `script -q /dev/null codex …`, and `unbuffer codex …`.
+The guard reads the program where it writes the agent's flags, as it reads any interpreter's program, also one an
+interpreter reads from its input (`python3 < x.py`, `cat x.py | python3`). A repository's own script is its code
+and is not read this way, as for the other interpreter rules.
+
 A nested session with your own settings still runs, and so does a prompt that only names these flags. If the work
 needs another configuration, start that session yourself in a terminal.
 
