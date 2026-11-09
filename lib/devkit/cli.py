@@ -2036,15 +2036,16 @@ def cmd_initiative(a):
         if not f.exists():
             ui.err(f"no initiative “{a.slug}”")
             return 2
-        text = f.read_text()
-        meta, _ = notes.split_frontmatter(text)
-        cur = [p.lower() for p in (meta.get("projects") or [])]
-        pid = a.project.lower()
-        cur = sorted(set(cur) | {pid}) if act == "add" else [p for p in cur if p != pid]
-        text = notes.set_meta(text, projects=cur)
-        if act == "add" and f"### {pid}" not in text:
-            text = text.replace("## Tasks\n", f"### {pid}\n_Role in the initiative, state, next step._\n\n## Tasks\n", 1)
-        with core.Lock("notes", wait=30):
+        with registry.notes_lock(wait=30):  # from the read to the write: another writer of the README waits
+            text = f.read_text()
+            meta, _ = notes.split_frontmatter(text)
+            cur = [p.lower() for p in (meta.get("projects") or [])]
+            pid = a.project.lower()
+            cur = sorted(set(cur) | {pid}) if act == "add" else [p for p in cur if p != pid]
+            text = notes.set_meta(text, projects=cur)
+            if act == "add" and f"### {pid}" not in text:
+                text = text.replace("## Tasks\n", f"### {pid}\n_Role in the initiative, state, next step._\n\n## Tasks\n",
+                                    1)
             core.write_if_changed(f, text)
         print(f"{ui.OK} {a.slug}: projects = {', '.join(cur) or '-'}")
         return 0
@@ -3386,12 +3387,12 @@ def cmd_note(a):
             ui.err(f"unknown key “{k}” (keys: {', '.join(notes.META_KEYS)})")
             return 2
         kv[k] = v
-    try:
-        text = notes.set_meta(f.read_text(), **kv)
-    except ValueError as e:
-        ui.err(str(e))
-        return 2
-    with core.Lock("notes", wait=30):
+    with registry.notes_lock(wait=30):  # from the read to the write: another writer of the note waits
+        try:
+            text = notes.set_meta(f.read_text(), **kv)
+        except ValueError as e:
+            ui.err(str(e))
+            return 2
         core.write_if_changed(f, text)
     meta, _ = notes.split_frontmatter(text)
     print(f"{ui.OK} {p['id']}: " + " · ".join(f"{k} {v}" for k, v in meta.items() if v))
