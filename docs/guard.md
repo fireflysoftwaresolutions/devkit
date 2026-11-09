@@ -175,6 +175,9 @@ Write, Edit, `apply_patch`, and shell commands follow this one rule. The guard f
 - **Every JSON form.** A `settings.json` or `settings.local.json` that parses as JSON is denied when it sets
   `disableAllHooks` to `true` or `devkit@firefly-devkit` to `false`, also when a key is spelled with an escape
   (`disabl\u0065AllHooks`). When a key appears twice, the last one counts, as Claude Code reads it.
+- **A byte-order mark.** One byte-order mark at the start of the text, as the character U+FEFF or as its three UTF-8
+  bytes written through `printf` or `echo` escapes, is dropped before the guard judges the text, as Claude Code drops
+  it before it parses the file. A mark before the first key no longer hides it.
 
 It judges the text each kind of call writes:
 
@@ -216,7 +219,10 @@ These stay allowed:
 - a known formatter or linter run with `--check` or `--list-different` and no option that writes: `prettier`,
   `black`, `ruff`, `isort`, `taplo`, `biome`, `dprint`, `shfmt`, `rustfmt`, `eslint`, `stylelint`, and `djlint`. A long
   option that starts with or abbreviates a write option (`--write`, `--fix`, `--wr`), and a short option cluster with
-  `w`, `i`, or `o` in any case (`-w`, `-O`), count as a write;
+  `w`, `i`, or `o` in any case (`-w`, `-O`), count as a write. The formatter counts only by its bare name, which the
+  session's `PATH` finds: one named by a path (`./prettier`, `npx ./prettier`, `scratch/black`), or run by a command
+  that sets or exports `PATH`, is a local program that only shares the name and may write anything, so its check run
+  counts as a write;
 - words that are messages, not files: a `dev` command's arguments (except the file of `-o` or `--out`), `gh`'s words
   (except the file of `-O` or `--output`), and another program's word that holds a space and names a folder that does
   not exist, such as `git commit -m "docs: explain ~/.claude/settings.json"`.
@@ -735,6 +741,51 @@ checks. These run as well:
 
 A script from the member's own scratch folder (`python3 scratchpad/<member id>/probe.py`) already ran before this
 change, and still does; a script in another member's folder does not.
+
+### Who runs a `dev` call: the session marks
+
+`dev watch` and `dev session` act for one consumer: the tech lead's main session or one crew member. Guessing wrong
+would let a member's wait take the tech lead's events, or let a member speak to other sessions as the tech lead. The
+PreToolUse hook therefore marks who runs these calls, on Claude Code and Codex:
+
+| Caller | Calls it marks | Mark |
+| --- | --- | --- |
+| The tech lead's main session | `dev watch`, `dev session`, `dev crew`, `dev progress` | `DEVKIT_SPEAKER=main` |
+| A crew member | `dev watch`, `dev session` | `DEVKIT_FROM_AGENT=<its agent id>` |
+
+A call that is the whole command gets the mark in front of it. A compound command (a pipeline, a list, `eval`,
+`sh -c`, a subshell) gets the mark exported for the whole command only when nothing but `cd`, reads (`cat`, `head`,
+`tail`, `grep`, `rg`, `wc`, `jq`, `sort`, `uniq`, `cut`, `tr`, `echo`, `printf`), and those wrappers run around the
+`dev` call, nothing is redirected into a file, and, for a member, its lane allows the rest. Any other command runs
+unmarked, and devkit reads the call ledger instead: an open call that typed exactly this `dev` command names its
+caller. Codex may not apply the hook's rewrite of a command; its call ledger then names who calls. When devkit still
+cannot tell, a command that needs to know refuses (see [Commands › dev watch](commands.md#dev-watch---wait---for-me---only-kinds---timeout-min---standby---json)).
+
+A member's mark wins over the main mark, so a member can never become the tech lead by a variable. Every hook drops
+both marks before it acts, so a hook never takes a mark it inherited for its own. A process that carries
+`DEVKIT_SPEAKER` counts as an agent's, never as your own terminal, when devkit decides who set `DEVKIT_CONFIG` or
+`DEV_ROOT`.
+
+### Other agent sessions on this Mac
+
+Sessions on one Mac talk and hold shared resources through `dev session` ([Teams and machines › Sessions on one
+Mac](teams.md#sessions-on-one-mac)). The guard keeps that channel the tech lead's and keeps claims real:
+
+| Action of an agent | Decision |
+| --- | --- |
+| `dev release`, a tag push, `dev pr merge`, a push to the default or a permanent branch, or `gh pr merge` or `gh release create`, while another session holds `release:<project>` | deny, with who holds it, until when, and why, and the three ways forward: queue for it, ask that session, or have you type `grant claim-break <resource>` |
+| `git push`, `dev push`, or `dev git push` of a branch while another session holds `push:<project>@<branch>` | deny, the same way |
+| Write, Edit, MultiEdit, `apply_patch`, `dev note set`, or `dev handoff --edit` on a project's handoff note while another session holds `handoff:<project>` | deny, the same way. A shell write to a note is refused for everyone (see [The handoff repository](#the-handoff-repository)) |
+| One of these actions after you typed `grant claim-break <resource>` in the session, by its tech lead | allow once: the claim breaks and its holder hears of it. A crew member's call never uses the grant |
+| A crew member runs `dev session tell`, `ask`, `answer`, `claim`, `release`, or `escalate` (also from a program) | deny: only the tech lead acts for the session, and the member asks with `dev crew ask`. `dev session ls`, `inbox`, `claims`, and `escalations` stay open to read |
+| Setting `DEVKIT_SPEAKER` (the main session's mark) for a command or in the shell | deny, for every agent and the main session too: only the hook sets it. Reading or unsetting it is fine |
+| A crew member sets `CODEX_THREAD_ID` | deny: devkit tells Codex threads of one process apart by it, so another thread's id would make the member speak as that thread's session |
+| A write to devkit's peers state (`~/.local/state/devkit/peers/`) | deny, naming its owner, `dev session` |
+
+The holder's own session and its crew go through a claim, and your own terminal is never refused, because the guard
+runs only in agents' hooks. `branch:` and `custom:` claims are not enforced; they show as overlaps. A command that
+cannot act on a claimed resource costs nothing extra, and the guard reads git only while a claim of the matching kind
+is held. When a claim check itself fails, the action runs and the failure is recorded as `guard.failopen`.
 
 ## Example messages
 

@@ -66,7 +66,9 @@ devkit keeps these out of every record it writes:
 
 - **Prompt text and message text.** A crew message is recorded by its id, sender, recipient, and length, and
   `dev crew ask` and `dev crew answer` by their naming arguments (`--to`, the message id) and the length of the text.
-  Crew messages often quote the developer's requests, so their text stays in the session's own records.
+  Crew messages often quote the developer's requests, so their text stays in the session's own records. A message
+  between agent sessions on this Mac is recorded by its kind, its recipients' sessions, and, for a claim, the
+  resource; its text, a claim's reason, and an escalation's question never are.
 - **Free text in a command line.** Since 26.11.5, a record that keeps a command line keeps only the words devkit
   knows to be safe, and replaces every other word with its length, such as `[text not recorded: 22 characters]`, or
   `N+` when the command was cut inside it. Words next to each other in one argument share one marker.
@@ -97,6 +99,11 @@ devkit keeps these out of every record it writes:
     `dev crew raci` also classifies a task given in words, so its argument stays only as a kind of work or a crew
     member of devkit's roster, such as `backend` or `tank`, and its `--set` value only as `R`, `A`, `C`, and `I`
     with crew members.
+  - The target of a `dev session` command, only in one of its shapes: a session or a group of them (`@4d1cffc7`,
+    `project`, `project:acme/api`, `initiative:payments`, `repo`, `all`), a message or escalation id (`S-…`,
+    `E-…`), a claim's resource (`release:acme/api`, `push:acme/api@main`, `custom:db-migration`), or a transcript
+    (`….jsonl`). A message typed where the target goes becomes its length, and the text of `tell`, `ask`, `answer`,
+    and `escalate` always does.
   - The value of `status` and `priority` in `dev note set`, which is one of a fixed set, such as `status=blocked`.
     The value of any other key becomes its length.
   - Ids (`T-…`, `L-…`, `P-…`, `D<n>`, `M<n>`, `R<n>`) and numbers of up to six digits. A longer number, such as a
@@ -245,7 +252,7 @@ dev audit show 01M6SFPEZ2
 | `v` | yes | The schema version, `2` |
 | `id` | yes | A ULID: 26 characters of Crockford base 32 that sort by time. `dev audit show` takes any unique start of it |
 | `ts` · `time` | yes | When, as Unix seconds with milliseconds, and as ISO 8601 in UTC |
-| `actor` | yes | Who acted: `user` (the GitHub login), `host` (the short host name), `agent` (`claude`, `codex`, `job`, or `human`), and `session` (the first 12 characters of the session id) |
+| `actor` | yes | Who acted: `user` (the GitHub login), `host` (the short host name), `agent` (`claude`, `codex`, `job`, or `human`), and `session` (the first 12 characters of the session id). A `dev` command a Codex thread runs is recorded under `codex` and that thread's session, even though Codex passes no devkit variable to its commands; only your own terminal is `human` |
 | `crew` | when a crew member acts | `member` (its id), `role`, `lane` (the subagent's id), `parent` (the lane that launched it, or `main`), and `tool_use_id` (its launch) |
 | `project` · `branch` · `run` · `step` | when known | The repository, its branch, the goal of the session's `dev progress` run, and the step running in it |
 | `action` | yes | What happened, as a dotted name such as `dev.commit`, `guard.deny`, `crew.decided`, or `audit.verify` |
@@ -254,7 +261,7 @@ dev audit show 01M6SFPEZ2
 | `outcome` | yes | `ok`, `blocked`, `failed`, or `recorded` |
 | `why` | for an override | The reason given with `--why`, redacted. At most 300 characters |
 | `evidence` | when there is some | `command`, `commit`, `check`, `exit`, `duration`, `cwd`, `tool`, `rule`, `count`, `file`, `flag` (an escape hatch's name), `channel`, `transcript_uuid`, and, for a question tool answer, `match` and `asked` |
-| `ref` | when there is some | Links to other records and decisions: `id`, `by`, `was`, `type`, `result`, `answer`, `label`, `labels`, `asked_by`, `irreversible`, `mode`, `overrides`, `routed`, and `session`; for the irreversible-action gate, `tier` (1 or 2), `setting` (`audit` or `enforce`), `grant` (the grant's id), `source` (`E1`, `E2`, `step`, or `preapproval`), and `repo` (the `owner/repo` acted on); for a guard refusal, `refusal_id` (the stable id of the place that refused, or `hooks:<rule>` for a refusal the hook makes itself; see [The bug registry](bug-registry.md)) |
+| `ref` | when there is some | Links to other records and decisions: `id`, `by`, `was`, `type`, `result`, `answer`, `label`, `labels`, `asked_by`, `irreversible`, `mode`, `overrides`, `routed`, and `session`; for messages, claims, and escalations between agent sessions, `kind`, `recipients`, and `resource`; for the irreversible-action gate, `tier` (1 or 2), `setting` (`audit` or `enforce`), `grant` (the grant's id), `source` (`E1`, `E2`, `step`, or `preapproval`), and `repo` (the `owner/repo` acted on); for a guard refusal, `refusal_id` (the stable id of the place that refused, or `hooks:<rule>` for a refusal the hook makes itself; see [The bug registry](bug-registry.md)) |
 | `prev` · `hash` | yes | The hash chain, see [Verify the chain](#verify-the-chain) |
 
 A stored record has no other fields: devkit drops whatever a caller passes outside this list. A record read back
@@ -284,6 +291,19 @@ falls under `dev` (change, info), `dev.release` is release and notice, `guard.de
 
 Severities run `info`, `notice`, `warning`, `critical`. An outcome of `failed` or `blocked` raises a record to at
 least `warning`, and a tampered result raises it to `critical`.
+
+Agent sessions on this Mac that talk to each other (see [Teams and machines › Sessions on one
+Mac](teams.md#sessions-on-one-mac)) write `peer.*` records. Each keeps the kind of message (`ref.kind`), the sessions
+it went to (`ref.recipients`), and the claimed resource (`ref.resource`), never the text:
+
+| Action | Category and severity | Records |
+| --- | --- | --- |
+| `peer.send` · `peer.answer` | `lifecycle`, info | A note, question, or answer sent, with its recipients |
+| `peer.refused` | `refusal`, notice | A message, claim, or settle line devkit refused: a crew member or the developer's own terminal sent, a claim is held, or a prompt tried to settle twice |
+| `peer.claim` · `peer.release` | `decision`, info | A claim taken, renewed, queued, or given up |
+| `peer.break` | `security`, warning | Another session's claim broken with the developer's `grant claim-break` |
+| `peer.escalate` · `peer.settle` | `decision`, notice | An escalation and the developer's settling of it, with the choice's letter or `free text` |
+| `peer.sweep` | `job`, info | The hourly cleanup of old messages, ended sessions' mailboxes, and lapsed claims |
 
 ## Levels: how much is recorded
 

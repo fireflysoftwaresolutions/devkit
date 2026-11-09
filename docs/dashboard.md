@@ -70,8 +70,10 @@ receives, and never sorts it again. From top to bottom:
 | Part | What it shows |
 | --- | --- |
 | **The answer** | One sentence, with one line under it that names the cause, and today's date and time on the right (table below) |
+| **Between sessions** | Shown first, before Needs you, only when agent sessions on this Mac need it: each open escalation in amber, with its question, its options (the recommended one marked), who asks, and the line to type in any agent session (`settle E-…: <choice>`, shown as keys to type and never with a copy button); then the claims, with the resource, the holder, the time it holds until, its quoted reason, and how many sessions wait for it; then the overlaps (two sessions in one checkout, one branch in two checkouts, a work item on another session's branch). The nav dot counts escalations as things that need you |
 | **Needs you** | Up to five rows in the server's order, then **All N** for the rest. A row that waits for your answer has an amber bar and glyph; a broken one has a red ✗. Each row shows its age, its details, the command to copy when there is one, and one link (**Open the run**, **Open the log**, **Open the job**, **Open the pull request**, or **Branches**). Housekeeping is one quiet row with its count. [The action list](#the-action-list) says what enters and in what order |
 | **Running** | One block per run that is running, blocked, waiting for you, or stopped reporting, at most four, then _N more runs_ (Background work). Each block shows the goal and project; the branch, mode, and agent; the landing strip; how far it is (_3 of 6 steps · paused on you 9 min_, or _2 of 4 steps · 48 min of about 1 h 30_); and the landing line. A decision whose asking crew member ended and that no step waits on is moot: one quiet line under its run (_D2 · List the CSV columns in the release notes? Moot: Technical writer (Ghost) ended, and no step waits on D2._), never a row of Needs you. A run on this Mac opens its drawer. A run on another Mac says where it runs and when it last reported (_on studio · last update 2 min ago_). Runs that finished in the last hour take one line each (_Docs refresh · finished 14:20 in 35 min_). Under the runs, the people on other machines and their projects (_bob@studio works on lending-rules_) |
+| **Sessions on this Mac** | Every live and idle agent session on this Mac, grouped by project (the project of what blocks first), each labeled Claude Code or Codex with its short id: its branch, its run (a link to the run's drawer), its crew, the claims it holds, the messages from other sessions that wait for it (quoted, at most 120 characters), and its state (working, waiting until a time, or idle) with its last activity. _No agent session runs on this Mac._ when there is none. See [Teams and machines › Sessions on one Mac](teams.md#sessions-on-one-mac) |
 | **Safety** | One line: the branches that exist only on this Mac, with the age of the oldest commit and a **Branches** link, or _Every branch is on the remote._ |
 | **Since yesterday** | Tasks done, PRs merged, and runs finished, each a link, or _nothing finished_. It is open on the day's first visit and before noon; at other times it folds into a disclosure |
 
@@ -79,7 +81,7 @@ The first rule that matches writes the answer:
 
 | When | Headline | The line under it |
 | --- | --- | --- |
-| A decision or a grant waits for you | _2 things need you_, or _1 decision waits for you_ (or _1 grant waits for you_) when it is the only item | The first two rows, a clause each, such as _Invoice export is paused until you answer D1. CI failed on feat/rules-engine._ |
+| A decision, a grant, or an escalation between agent sessions waits for you | _2 things need you_, or _1 decision waits for you_ (or _1 grant waits for you_, _1 escalation waits for you_) when it is the only item. Escalations count first | The first two, a clause each, such as _2 sessions wait for your choice on E-7k2m9xq4. Invoice export is paused until you answer D1._ |
 | CI failed, a scheduled job failed, or a run is blocked or stopped reporting | _CI failed on feat/rules-engine_, _The doctor job failed_, or _Invoice export stopped reporting_ | The first error, or the reason |
 | Nothing else but a branch kept on this Mac for more than 4 hours, or an agent that is not signed in | _Nothing urgent. 2 things to look at._ | The first item |
 | Nothing needs you, and runs are going | _Nothing needs you_ | _2 runs are going. The first lands about 15:40._ |
@@ -177,6 +179,7 @@ On a phone the figures sit two by two and the runs stack:
   when a lock has expired), and one bar per running session (project, steps, progress; red when blocked). A person
   opens their drawer (sessions, claimed tasks with a countdown ring per lock, recent sessions); a session bar opens
   that session. **Collisions**, such as two sessions on the same branch, are listed first, each with its command.
+  devkit counts sessions, not people: two sessions of one person and one agent on one branch are a collision too.
 - **Crew** (`#/team?tab=crew`, `g c`) starts with **Working now**, the crew members on a run, with their step, run,
   and state (working, waiting for you, done). A member that ended is not listed, and one that went stale shows as
   Stopped reporting, as `dev status` marks it. **The crew** lists every member role first, for example

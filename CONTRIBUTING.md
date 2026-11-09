@@ -29,6 +29,13 @@ The `-t .` runs `tests/` as a package, so `tests/__init__.py` gives the whole ru
 devkit state, configuration and handoff repository stay out of reach (`tests/_hermetic.py`). Without it, unittest
 skips `tests/__init__.py`, and `tests/test_hermetic.py` fails to say so.
 
+The run also keeps this Mac's real coding agents, Homebrew, and GitHub CLI out of reach. It puts stand-ins for
+`codex`, `claude`, `brew`, and `gh` first on `PATH`, devkit keeps them first in every process of the run
+(`DEVKIT_TEST_PATH`, honored only when `HOME` is in a temporary folder), and a test that would start a real one fails
+with `test safety: refused to start …`. A test that builds its own environment for a child process takes it from
+`_sandbox.env()`, and an older devkit release starts through `_sandbox.boot()` (`tests/_sandbox.py`). If you see that
+error, give the process `_sandbox.env(...)` instead of a hand-built `PATH`.
+
 Installing devkit (`./install.sh`) changes your agents' global settings, hooks, and instructions under `~/.claude`
 and `~/.codex`. Do it only when you want devkit to manage your machine; see [Getting started](docs/getting-started.md).
 

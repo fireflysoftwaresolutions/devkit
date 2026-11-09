@@ -1,0 +1,21 @@
+{"kind": "sequence", "name": "session-coordination", "title": "Sessions on one Mac",
+ "desc": "Session A asks session B a question through devkit, which wakes B's wait; B's answer wakes A's wait. When they disagree, A escalates, devkit notifies the developer, and the developer's typed settle line reaches both sessions.",
+ "participants": [
+  {"id": "a", "label": "Session A", "sub": "tech lead, Claude Code"},
+  {"id": "kit", "label": "devkit", "sub": "peers store, this Mac", "family": "firefly"},
+  {"id": "b", "label": "Session B", "sub": "tech lead, Codex"},
+  {"id": "dev", "label": "Developer", "sub": "at the keyboard", "family": "steel"}
+ ],
+ "messages": [
+  {"divider": "Ask and answer"},
+  {"from": "a", "to": "kit", "label": "dev session ask @b"},
+  {"from": "kit", "to": "b", "label": "peer question wakes its wait", "style": "async"},
+  {"from": "b", "to": "kit", "label": "dev session answer S-…"},
+  {"from": "kit", "to": "a", "label": "peer answer wakes its wait", "style": "async"},
+  {"divider": "Escalate"},
+  {"from": "a", "to": "kit", "label": "dev session escalate S-…"},
+  {"from": "kit", "to": "dev", "label": "desktop notification", "style": "async"},
+  {"from": "dev", "to": "kit", "label": "types settle E-…: A", "style": "primary"},
+  {"from": "kit", "to": "a", "label": "settled", "style": "return"},
+  {"from": "kit", "to": "b", "label": "settled", "style": "return"}
+ ]}

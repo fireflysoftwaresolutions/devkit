@@ -205,8 +205,11 @@ the agent.
 ### When an agent arms the wait
 
 Before it ends a turn while events can still arrive: a crew member works, a launch is pending, a step waits for a
-crew slot, or a CI run the session sent has not finished. When none of these holds, nothing can arrive, and
-`dev watch --wait` says so at once (exit 2), so the agent ends its turn without one.
+crew slot, or a CI run the session sent has not finished. Other agent sessions on this Mac add three more: the
+session's question to another session waits for an answer, it queues for a claim another session holds, or an
+escalation it is party to waits for you (see [Teams and machines › Sessions on one Mac](teams.md#sessions-on-one-mac)).
+When none of these holds, nothing can arrive, and `dev watch --wait` says so at once (exit 2), so the agent ends its
+turn without one.
 
 | Agent | How it waits |
 | --- | --- |
@@ -216,8 +219,11 @@ crew slot, or a CI run the session sent has not finished. When none of these hol
 | Codex, crew member | As on Claude Code, in the foreground |
 
 After each wake, the agent acts on what the wait printed (it answers a question, asks you a decision, launches a
-ready step, or relaunches a lost member) and arms the wait again while events can still arrive. The `wait-and-wake`
-skill teaches the agents these rules.
+ready step, or relaunches a lost member) and arms the wait again while events can still arrive. A wait also ends with
+exit 3 when it was stopped, when the program reading its output is gone (a `tail` that was stopped), or when a
+compaction moved the conversation to a new session id: the agent arms a new one. A tech lead that coordinates other
+sessions may keep `dev watch --wait --standby` armed, which wakes only for their messages. The `wait-and-wake` skill
+teaches the agents these rules.
 
 ### What it prints
 
@@ -230,9 +236,9 @@ watch: 3 events · arm again: dev watch --wait
 
 Each line starts with devkit's own words. A member's or CI's text is one quoted span with control and escape
 sequences removed, so no line it prints reads as an approval or a grant. A member's normal finish on Claude Code
-(whose harness wakes the session anyway), a change of the crew's slots, and a failed handoff push are notices: they
+(whose harness wakes the session anyway), a change of the session's crew slots, and a failed handoff push are notices: they
 ride along with the next event and never wake the agent alone. The kinds of events, the flags, and the exit codes
-are in [Commands › dev watch](commands.md#dev-watch---wait---for-me---only-kinds---timeout-min---json).
+are in [Commands › dev watch](commands.md#dev-watch---wait---for-me---only-kinds---timeout-min---standby---json).
 
 ### Each event once
 
