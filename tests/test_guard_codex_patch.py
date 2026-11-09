@@ -449,6 +449,19 @@ class ShellWritesOnAgentSettings(unittest.TestCase):
             ("black --check -W .claude/settings.json", "black --check -l 100 .claude/settings.json"),
         ])
 
+    def test_a_formatter_counts_only_as_a_bare_name_not_a_path(self):
+        # a program named by a path is a local file that only shares the formatter's name, and may write anything
+        self.pairs([
+            ("./prettier --check .claude/settings.json", "npx prettier --check .claude/settings.json"),
+            ("npx ./prettier --check .claude/settings.json", "prettier --check .claude/settings.json"),
+            ("scratch/black --check .claude/settings.json", "black --check .claude/settings.json"),
+            # a PATH the command sets can make the bare name a local file too
+            ("PATH=./scratch:$PATH prettier --check .claude/settings.json",
+             "FORCE_COLOR=0 prettier --check .claude/settings.json"),
+            ("export PATH=scratch:$PATH; prettier --check .claude/settings.json",
+             "export FORCE_COLOR=0; prettier --check .claude/settings.json"),
+        ])
+
     def test_a_truncating_write_replaces_the_files_text_and_only_an_append_keeps_it(self):
         # the file already turns hooks off: an append keeps that text, a `>` (the repair) and touch do not add to it
         (Path(self.cwd) / ".codex" / "config.toml").write_text("[features]\nhooks = false\n")

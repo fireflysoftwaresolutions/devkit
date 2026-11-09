@@ -3225,11 +3225,13 @@ def _write_flag(a: str) -> bool:
     return bool(re.match(r"-[a-z0-9]*[wio]", a))
 
 
-def _check_only(name: str, args) -> bool:
-    """True for a known formatter or linter (_CHECKERS, the program after _unwrap) run only to check (`prettier
-    --check`, `--list-different`): a check flag and no flag that writes (_write_flag)."""
+def _check_only(program: str, args) -> bool:
+    """True for a known formatter or linter (_CHECKERS, the program word after _unwrap) run only to check (`prettier
+    --check`, `--list-different`): a check flag and no flag that writes (_write_flag). The program counts only as a
+    bare name the PATH or the package runner resolves: one named by a path (`./prettier`, `npx ./prettier`,
+    `scratch/black`) is a local file that shares the name and may write anything."""
     opts = _opts_before_dashdash(args)
-    return name in _CHECKERS and any(a in ("--check", "--list-different") for a in opts) and \
+    return "/" not in program and program in _CHECKERS and any(a in ("--check", "--list-different") for a in opts) and \
         not any(_write_flag(a) for a in opts)
 
 
@@ -4159,7 +4161,9 @@ class _Shell:
         # anything else (editors, sqlite3, git, curl, tar, …) may write the paths it is given; a git command that
         # rewrites no work-tree file (diff, log, add, commit) writes no text into an agent settings file it names
         inside = is_protected(Path(cwd)) if cwd and str(cwd) != str(UNKNOWN) else False
-        reads = _git_text_free(argv) if name == "git" else _check_only(name, args)
+        # a formatter's check counts only when the PATH that finds it is the session's (not set or exported here)
+        reads = _git_text_free(argv) if name == "git" else \
+            _check_only(argv[0], args) and not {"PATH", "?"} & (set(names) | self.exported)
         words = [c for c in _candidates(args) if inside or _pathlike(c)]
         if name == "gh":  # its words are titles and bodies, except the file a download writes (-O, --output)
             outs = _dev_values(args, ("-O", "--output"))
