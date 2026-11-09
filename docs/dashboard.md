@@ -211,7 +211,7 @@ sparkline, and the people on it. The tabs follow.
 | Overview | **Doing or blocked** (with who holds each lock); **Off-track projects** as tiles; goal, scope, and current state; who is on it; risks and decisions; links |
 | Projects | The member projects in collapsible groups, searchable (name, status, workstream, task in progress, people). Group by family, status, owner, workstream, or none. Each row has its status, progress, what is in progress or the latest status, who is on it and `dev clone <id>` when not cloned here. A 77-repository platform is a few groups, not a wall of chips |
 | Tasks | The initiative's own items **plus member-project items linked to it** (`links: initiative:<slug>`, the same rule as `dev task -i`). Filter by status (open, doing, blocked, to do, closed) and source (initiative, from projects), grouped Now · Next · Later · Closed |
-| Plans | Versioned plans and specs from `plans/initiatives/<slug>/`: status (draft, approved, superseded), version, last change and who made it, the full history, and _edited · needs a revision_ with the `dev plan revise … --why` command when the body changed without one |
+| Plans | Versioned plans and specs from `plans/initiatives/<slug>/` and its sub-folders: status (draft, approved, superseded), version, last change and who made it, the full history, and _edited · needs a revision_ with the `dev plan revise … --why` command when the body changed without one. Plans in a sub-folder sit in a titled panel per folder, after the initiative's own |
 | Sessions | The session log of the initiative and its member projects, by day, with who, agent, and branch |
 | Docs & source | The source archives and the documents under `initiatives/<slug>/docs/` |
 
@@ -233,6 +233,10 @@ blocked and up next; purpose and current state; the latest status; repository fa
 long work takes here), **Tasks**, **Pull requests** (CI, review, merge state, size, a command each), **Branches**
 (below), **Worktrees** (`dev wt rm`), **Plans**, **Sessions**, and **Handoff note** (the full note, rendered). The
 repository facts on the Overview count the branches and those not backed up, and link to the Branches tab.
+
+**Plans** lists every plan and spec in the project's folder of the handoff repository, `plans/<project id>/`,
+sub-folders included. When some sit in sub-folders, such as `product/` or `history/`, the project's own plans come
+first in a panel titled **Plans**, then one titled panel per sub-folder, in name order, each with its count.
 
 **Branches** is the branch map (the same rows as `dev branch ls`): one row per local branch, work at risk first.
 Each row leads with whether the work is safe off this Mac, as _Backed up 6 min ago_, _On the remote_, _Backup waits_
@@ -502,7 +506,7 @@ view opens Now. Links from earlier versions still resolve: `#/overview` opens No
 | Live page | Served by the dashboard server (`dev dashboard`), which keeps a snapshot of the data, rebuilds it when the files behind it change, and sends open pages the areas that changed. Details (a whole task, run, job, or CI result) come from its read-only API under `/api/v1`; `/api/v1/branches/<project id>` reads one project's branch map from git when its Branches tab opens (a `502` problem quotes git's message when it cannot; the server reads a project's map at most once every 5 seconds and at most two maps at once, and one more gets a `429` problem with `Retry-After`) |
 | Static copy | `~/.local/state/devkit/dashboard/index.html` (or the file you name with `--export`): one self-contained HTML file (inline CSS, JS and SVG), written after every `dev sync` (session ends, debounced turn ends), by the hourly background job, and by `--path` |
 | Refresh | the live page updates in place; a static copy reloads every 2 minutes while visible (not while a drawer is open), keeping its view, filters, and scroll position |
-| Data | The registry (projects, git state, worktrees, PRs, initiatives, live sessions with progress, providers, drift). From the handoff repo: **work items** (`items/<scope>/<id>.md`, with lock and changelog), **presence** (`presence/<user>@<host>.json`), **session logs** (`sessions/<scope>/<YYYY-MM>.md`), **versioned plans** (`plans/<scope>/*.md`), notes, and initiative READMEs. Also the PR cache, the instruction canary, guard decisions, the operations log, **timing records**, and **active runs** |
+| Data | The registry (projects, git state, worktrees, PRs, initiatives, live sessions with progress, providers, drift). From the handoff repo: **work items** (`items/<scope>/<id>.md`, with lock and changelog), **presence** (`presence/<user>@<host>.json`), **session logs** (`sessions/<scope>/<YYYY-MM>.md`), **versioned plans** (`plans/<scope>/**/*.md`, sub-folders included), notes, and initiative READMEs. Also the PR cache, the instruction canary, guard decisions, the operations log, **timing records**, and **active runs** |
 
 The decisions are computed in Python and unit-tested:
 
