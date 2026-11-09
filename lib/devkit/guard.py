@@ -1909,16 +1909,64 @@ def devkit_off_reason(what: str, path) -> str:
             f"`dev config`) — ask the developer.")
 
 
-def devkit_off(path: str, tool_input: dict):
-    """Agent settings files (project or user) must not switch devkit off; that is a decision for devkit's config."""
+EDIT_UNSEEN_REASON = ("This edit's old_string is not in {what}, an agent settings file, so the guard cannot tell what "
+                      "the edit leaves in it or whether that turns devkit's hooks off. Read the file again and edit "
+                      "the text it holds now, or write the whole file with the Write tool.")
+
+
+def _tool_edits(tool_input: dict) -> list:
+    """The (old_string, new_string, replace_all) edits an Edit or MultiEdit call makes, in order."""
+    edits = []
+    if "old_string" in tool_input or "new_string" in tool_input:
+        edits.append(tool_input)
+    edits += [e for e in tool_input.get("edits") or [] if isinstance(e, dict)]
+    return [(str(e.get("old_string") or ""), str(e.get("new_string") or ""), bool(e.get("replace_all")))
+            for e in edits]
+
+
+def apply_edits(text: str, edits) -> str | None:
+    """`text` after `edits` as the Edit and MultiEdit tools apply them (in order; replace_all changes every match, else
+    the first; an empty old_string creates the file), or None when an edit's old_string is not in the text."""
+    for old, new, every in edits:
+        if not old:
+            if text:
+                return None
+            text = new
+        elif old not in text:
+            return None
+        else:
+            text = text.replace(old, new) if every else text.replace(old, new, 1)
+    return text
+
+
+def devkit_off_texts(path, texts, fragments=()):
+    """A deny when a file tool's write leaves devkit off in agent settings file `path`: `texts` are the whole file
+    after the write (settings_off, the TOML parse included), `fragments` the pieces it adds (the patterns only)."""
     if not agent_settings(path):
         return None
-    texts = [tool_input.get("content") or "", tool_input.get("new_string") or ""]
-    texts += [e.get("new_string") or "" for e in tool_input.get("edits") or [] if isinstance(e, dict)]
-    what = next((w for rx, w in DEVKIT_OFF if any(rx.search(x) for x in texts)), None)
-    if not what and Path(path).name.casefold().endswith(".toml"):
-        what = settings_off(tool_input.get("content") or "", True)
+    toml = Path(str(path)).name.casefold().endswith(".toml")
+    what = next((w for w in (settings_off(t, toml) for t in texts) if w), None) or \
+        next((w for rx, w in DEVKIT_OFF if any(rx.search(x) for x in fragments)), None)
     return deny(devkit_off_reason(what, path)) if what else None
+
+
+def devkit_off(path: str, tool_input: dict, cwd=None):
+    """Agent settings files (project or user) must not switch devkit off; that is a decision for devkit's config. Write
+    is judged by its content; Edit and MultiEdit by the file's text after their edits (an edit from true to false
+    matches no pattern alone), and refused when an old_string is not in the file."""
+    if not agent_settings(path):
+        return None
+    fragments = [tool_input.get("new_string") or ""]
+    fragments += [e.get("new_string") or "" for e in tool_input.get("edits") or [] if isinstance(e, dict)]
+    texts = [tool_input.get("content") or ""]
+    edits = _tool_edits(tool_input)
+    if edits:
+        p = resolve(path, cwd)
+        after = apply_edits(_read_small(p, 1 << 20) if p != UNKNOWN else "", edits)
+        if after is None:
+            return deny(EDIT_UNSEEN_REASON.format(what=_code(core.tilde(str(path)))), key="settings-edit-unseen")
+        texts.append(after)
+    return devkit_off_texts(path, texts, fragments)
 
 
 # ---- what a shell command writes, when the command shows it (agent settings files)
@@ -2813,7 +2861,7 @@ def patch_devkit_off(patch: str, cwd):
             _read_small(src, 1 << 20) if src != UNKNOWN and Path(str(src)).is_file() else "", f["lines"])
         dst = resolve(target, cwd)
         for path in dict.fromkeys(str(x) for x in (_lexical(target, cwd), dst) if x != UNKNOWN):
-            v = devkit_off(path, {"content": after or "", "new_string": added})
+            v = devkit_off_texts(path, [after or ""], [added])
             if v:
                 return v
     return None
@@ -10843,7 +10891,7 @@ def _file_tool_verdict(tool: str, tool_input: dict, cwd: str, agent: str) -> _Ju
             v = protected_write(path, cwd, tool_input)
             if v:
                 return _Judged(v)
-        return _Judged(devkit_off(path, tool_input) or check_write_path(path, cwd, agent))
+        return _Judged(devkit_off(path, tool_input, cwd) or check_write_path(path, cwd, agent))
     if _tool_command(tool_input):  # another tool that carries a command: judged as a shell command
         return _SHELL
     return _Judged(None)

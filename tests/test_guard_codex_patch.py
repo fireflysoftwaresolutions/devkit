@@ -92,6 +92,76 @@ class ApplyPatchOnAgentSettings(unittest.TestCase):
                 self.assertEqual(self.verdict(body), want)
 
 
+class EditsOnAgentSettings(unittest.TestCase):
+    """Edit and MultiEdit are judged by the file's text after the edits, as Write is by its content: an edit that turns
+    a true into a false matches no pattern in its new_string alone. An edit whose old_string is not in a settings file
+    is refused, since the guard cannot tell what it changes."""
+
+    PLUGIN = '{"enabledPlugins": {"devkit@firefly-devkit": true, "other@market": true}}\n'
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.cwd = guard.real(tmp.name)
+        root = Path(self.cwd)
+        for d in (".claude", ".codex"):
+            (root / d).mkdir()
+        self.settings, self.config = root / ".claude" / "settings.json", root / ".codex" / "config.toml"
+        self.settings.write_text(self.PLUGIN)
+        self.config.write_text("[features]\ncodex_hooks = true\nverbose = true\n")
+        self.notes = root / ".claude" / "notes.json"
+        self.notes.write_text(self.PLUGIN)
+
+    def verdict(self, tool, path, **tool_input):
+        v = guard.check(tool, {"file_path": str(path), **tool_input}, self.cwd, "claude")
+        return (v or ("allow",))[0]
+
+    def test_an_edit_that_turns_the_plugin_off_is_denied(self):
+        self.assertEqual(self.verdict("Edit", self.settings, old_string='firefly-devkit": true',
+                                      new_string='firefly-devkit": false'), "deny")
+        self.assertEqual(self.verdict("Edit", self.settings, old_string='market": true', new_string='market": false'),
+                         "allow")
+        self.assertEqual(self.verdict("Edit", self.notes, old_string='firefly-devkit": true',
+                                      new_string='firefly-devkit": false'), "allow")  # not a settings file
+        # the user's own settings, named with ~ as Claude's Edit reads it
+        user = Path(guard.real(str(Path.home()))) / ".claude"
+        user.mkdir(exist_ok=True)
+        (user / "settings.json").write_text(self.PLUGIN)
+        self.assertEqual(self.verdict("Edit", "~/.claude/settings.json", old_string='firefly-devkit": true',
+                                      new_string='firefly-devkit": false'), "deny")
+        self.assertEqual(self.verdict("Edit", "~/.claude/settings.json", old_string='market": true',
+                                      new_string='market": false'), "allow")
+
+    def test_an_edit_of_a_toml_value_is_judged_by_the_file_it_leaves(self):
+        self.assertEqual(self.verdict("Edit", self.config, old_string="codex_hooks = true",
+                                      new_string="codex_hooks = false"), "deny")
+        self.assertEqual(self.verdict("Edit", self.config, old_string="verbose = true", new_string="verbose = false"),
+                         "allow")
+        # a key spelled with a \\u escape, which only the TOML parse reads
+        self.assertEqual(self.verdict("Edit", self.config, old_string="codex_hooks = true",
+                                      new_string='"codex_hoo\\u006bs" = false'), "deny")
+
+    def test_replace_all_and_multi_edit_apply_as_the_tools_do(self):
+        self.config.write_text("[features]\ncodex_hooks = true\n")
+        self.assertEqual(self.verdict("Edit", self.settings, old_string="true", new_string="false", replace_all=True),
+                         "deny")
+        # without replace_all only the first match changes, which in this config is the hooks' own value
+        self.assertEqual(self.verdict("Edit", self.config, old_string="true", new_string="false", replace_all=False),
+                         "deny")
+        self.assertEqual(self.verdict("MultiEdit", self.settings, edits=[
+            {"old_string": 'market": true', "new_string": 'market": 1'},
+            {"old_string": "1", "new_string": "false"}]), "allow")
+        self.assertEqual(self.verdict("MultiEdit", self.settings, edits=[
+            {"old_string": 'market": true', "new_string": 'market": 1'},
+            {"old_string": "true", "new_string": "false", "replace_all": True}]), "deny")
+
+    def test_an_edit_whose_old_string_is_not_in_a_settings_file_is_denied(self):
+        self.assertEqual(self.verdict("Edit", self.settings, old_string="no such text", new_string="x"), "deny")
+        self.assertEqual(self.verdict("Edit", self.notes, old_string="no such text", new_string="x"), "allow")
+        self.assertEqual(self.verdict("Edit", self.settings, old_string="other@market", new_string="other@shop"),
+                         "allow")
+
+
 class ShellWritesOnAgentSettings(unittest.TestCase):
     """A shell write to an agent settings file is judged by the text it writes, as Write is; a write whose text the
     command does not show (a copy, sed -i, a variable) is refused. Each refused form has an allowed twin: the same form
