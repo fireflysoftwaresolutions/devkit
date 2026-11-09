@@ -107,14 +107,20 @@ That is why `dev lesson add` and every update screen the text and **hold** a les
 
 - has invisible or direction-changing characters;
 - contains a value that looks like a secret;
-- tries to override the developer or the guard, such as "ignore previous," "always allow," "disable the guard,"
-  `--no-verify`, "skip hooks," or setting one of the guard's escape hatches or devkit's identity variables;
+- tries to override the developer or the guard, such as "ignore previous," "ignore every earlier instruction," "you
+  are now," "new instructions," "always allow," "disable the guard," `--no-verify`, "skip hooks," or setting one of
+  the guard's escape hatches or devkit's identity variables;
 - downloads and runs code (`curl … | sh`), or pipes into a shell;
+- has a URL, or a path under the agents' or devkit's configuration folders;
 - has a command substitution (`$(…)`) or a command in backticks beside a destructive command (`rm -rf`, `sudo`,
-  `chmod -R 777`, a forced `git push`, or fetched code that a shell runs). In What happened, Root cause, Detection,
-  and Evidence, which explain what ran, this one does not hold; a substitution alone holds nowhere, because lessons
-  name them to warn against them;
-- has a URL, or a path under the agents' or devkit's configuration folders.
+  `chmod -R 777`, a forced `git push`, or fetched code that a shell runs);
+- runs a command substitution as code (handed to `eval`, `source`, `.`, `exec`, or a shell, or where a backtick
+  command starts), or decodes text inside one (`base64 -d`, `xxd -r`, `printf` escapes).
+
+The screen reads look-alike Cyrillic and Greek letters as Latin, so a word spelled with them is held like the plain
+one. The last two forms hold only in the title, Prevention, and Fix, the fields agents act on. In What happened, Root
+cause, Detection, and Evidence, which explain what ran, they do not hold. A substitution alone holds nowhere, and a
+placeholder such as `$(…)` passes, because lessons name them to warn against them.
 
 Recall screens each lesson again as it loads it, because a lesson file edited by hand or pulled from a teammate never
 passed `dev lesson add`. A held lesson carries `quarantine: <reason>` in its front matter, or is held as loaded, and
@@ -291,7 +297,7 @@ dev lesson prevent <lesson> --by guard --error "<text>" --why "…"            #
 
 ```text
 ✓ L-fwqyx0ywj1x prevented by lesson rule LR-3c09a1f2b7 (warn), in lessons/rules/acme/billing.json
-  warn: the guard adds the lesson to each matching call, and refuses the call once an agent repeats it after the warning
+  warn: the guard adds the lesson to each matching call and counts a repeat after the warning; only the developer's typed `grant lesson-block <lesson>`, then `dev lesson prevent --by guard <lesson> --block` in a terminal, makes it refuse
 ```
 
 - **Patterns are words, never regular expressions.** A `--match` pattern is a sequence of command words, matched as
@@ -306,14 +312,18 @@ dev lesson prevent <lesson> --by guard --error "<text>" --why "…"            #
   retired lesson makes no rule. When devkit refuses the pattern, it says why: narrow the pattern, never the evidence.
 - **The rule becomes the prevention.** Its id, `LR-` and 10 hex characters, is the lesson's `prevention_ref`, so the
   nightly check reopens the lesson if the rule is removed.
-- **It warns first.** A new rule starts in `warn`: the guard lets the call run and adds the lesson's title and
-  prevention to the call's context, with "If you run this form again after this warning, the rule refuses it from then
-  on." It moves to `block` when an agent shown the lesson earlier in its session runs the call again (a miss). Then the
-  guard refuses the call: "devkit · lesson rule LR-… refuses this call, from lesson L-…: … Do it the way the prevention
-  says."
-- **`--block` is the developer's.** A rule that refuses from the start skips the warnings that show whether it is
-  right, so the guard refuses `--block` to every agent and asks the developer to run it in a terminal. Typing
-  `grant developer-only lesson-block/<lesson>` on its own in the chat opens it once.
+- **It warns.** A new rule starts in `warn`: the guard lets the call run and adds the lesson's title and prevention
+  to the call's context, with the grant line that would make the rule refuse. When an agent shown the lesson earlier
+  in its session runs the call again (a miss), devkit counts the miss. A miss never changes the rule's mode.
+- **Only the developer makes it refuse.** A rule that refuses skips the warnings that show whether it is right, so the
+  guard refuses `--block` to every agent. The developer runs
+  `dev lesson prevent --by guard <lesson> --match "…" --block` in a terminal, or types `grant lesson-block <lesson>`
+  on its own in the chat to open it once. Then the guard refuses the call: "devkit · lesson rule LR-… refuses this
+  call, from lesson L-…: … Do it the way the prevention says."
+- **A block holds on the machine that granted it.** Rule files sync to the team, so a rule whose file says `block`
+  refuses only on a machine where its developer granted that block. Everywhere else it warns.
+- **Protected calls stay open.** When the guard loads the rules, it ignores any rule that would refuse `dev`,
+  `git status`, or the agents' file tools, whatever its file says.
 - **It can only warn or refuse.** A lesson rule never allows anything. The guard checks lesson rules after its own
   rules, on shell commands only, within 0.3 seconds; a rule file it cannot read, or a lookup that takes longer, lets
   the call go on as the guard's own rules decided, and a `guard.failopen` record says so. An output rule adds its

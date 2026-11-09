@@ -230,7 +230,8 @@ apply the same rule. Change the lists with `branches.types` and `branches.forbid
 | `gh pr create --head <branch>` with a branch that breaks the naming rule | deny |
 | `gh pr …`, `gh issue …`, `gh release …`, `gh api …` containing AI attribution | deny |
 | `gh config set pager …` (or a key the guard cannot read) | deny: gh runs its pager as a command for every later read |
-| An agent's `gh issue create`, `gh issue comment`, `gh issue edit`, or `gh api` on the issues of devkit's own repository, and an MCP tool call that writes an issue or a comment there | deny, in the main session and the crew alike, whatever grants exist: "Agents do not post to devkit's bug registry directly. Use `dev bug report` or `dev bug detour`: devkit checks what leaves this machine. A comment on a pull request goes through `gh pr comment` or `dev pr comment`." (see [The bug registry](bug-registry.md)) |
+| An agent's `gh issue create`, `gh issue comment`, `gh issue edit`, or `gh api` on the issues of devkit's own repository, a `gh api repositories/<id>/issues…` route in any repository (a numeric id does not say which one), a `gh api graphql` mutation of an issue, a comment, or a reaction in any repository (a node id does not say which one either), and an MCP tool call that writes an issue or a comment there | deny, in the main session and the crew alike, whatever grants exist: "Agents do not post to devkit's bug registry directly. Use `dev bug report` or `dev bug detour`: devkit checks what leaves this machine. A comment on a pull request goes through `gh pr comment` or `dev pr comment`." (see [The bug registry](bug-registry.md)) |
+| `gh api graphql` with a query the guard cannot read: from standard input (`-F query=@-`, `--input -`), from a file it cannot open, or filled in by the shell (a substitution or a variable) | the action `unknown`, tier 2: it may be a merge or a forced ref update. Write the query out with `-f query='…'` or `-F query=@query.graphql`; if it must run as it is, the developer types `grant unknown cmd-<hash>` |
 
 ### Files and folders from the shell
 
@@ -295,6 +296,7 @@ three folders readable and writable by your account only (`0700`) every time it 
 | `dev hook <event>`, in any shell form (a pipe, `sudo`, `bash -c`, `eval`, `find -exec`, `python3 bin/dev`) | deny, for every session: only the harness runs a hook, when its event fires. A hook event typed through a shell could forge your prompt or answer |
 | A write, move, or delete of a Claude Code transcript (`~/.claude/projects/**/*.jsonl`, a subagent's too) or a Codex session file (`~/.codex/sessions`, `archived_sessions`), with a file tool, a patch, or the shell | deny: devkit reads your approvals from them. Claude Code's memory files stay writable |
 | A program an agent runs (inline, from its input or a pipe, or a script outside the workspace) that loads a devkit module and reaches a function that records or uses your prompts, answers, and grants, or `devkit.state`'s writers | deny, for every session. The guard also reads the agent's own files the program loads (`sys.path` plus `import`, `python -m`, `runpy`, `exec(open(…).read())`, `SourceFileLoader`), three levels deep, and refuses code the program decodes and runs at run time. A repository's own scripts and tests are not judged by this rule |
+| A program an agent runs that loads a devkit module and reaches a function behind one of [the developer's own decisions](#the-developers-own-decisions): `bugs.approve`, `bugs.drop`, `bugs.confirm`, `bugs.set_consent`, `lessons.release`, or the block of `lessonrules` | deny, for every session, the main session included: the refusal names the `dev` command to run instead and the grant line that opens it. A repository's own scripts and tests are not judged by this rule |
 
 devkit checks this a second time when it starts: it takes a `DEVKIT_CONFIG` other than
 `~/.config/devkit/config.json`, or a `DEV_ROOT` other than the configured `dev_root`, only from your terminal, with no
@@ -521,7 +523,10 @@ tier 2:
 | `dev bug confirm <bug> <detour>` | `grant bug-confirm <bug>/<detour>` |
 | `dev bug share on\|reports\|off` | `grant bug-share <setting>` |
 | `dev lesson release <lesson>` | `grant lesson-release <lesson>` |
-| `dev lesson prevent <lesson> --by guard --match "…"\|--error "…" --block` | `grant developer-only lesson-block/<lesson>`; the refusal prints no grant line and asks you to run it in a terminal, because a lesson rule that refuses from the start skips the warnings that show whether it is right (see [Lessons › Lesson rules](lessons.md#lesson-rules)) |
+| `dev lesson prevent <lesson> --by guard --match "…"\|--error "…" --block` | `grant lesson-block <lesson>`, because a lesson rule that refuses skips the warnings that show whether it is right; the block holds on this machine only (see [Lessons › Lesson rules](lessons.md#lesson-rules)) |
+
+A program that imports devkit and calls the functions behind these commands is refused too, with the command and
+its grant line (see [devkit's own state, configuration, and install](#devkits-own-state-configuration-and-install)).
 
 A push from inside a repository's git folder (`<repo>/.git`, `<repo>/.git/worktrees/<name>`), or one that
 `env -C <dir>` or `sudo -D <dir>` runs in another folder, is judged as the project of that folder, so

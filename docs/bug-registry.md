@@ -123,7 +123,14 @@ devkit builds each report from fields it produces itself. A report is never a co
 | **Never sent** | Paths, file names, project, owner, repository, and branch names, arguments, code, tool output, environment variables, host and user names, the handoff repository's content, the crash file, and the ledger |
 
 - **Stack frames** are devkit's own, at most five, innermost first. In a source checkout, a frame whose function the
-  latest release tag did not define is sent as `<local>`, so the functions you add never leave your Mac.
+  latest release tag did not define is sent as `<local>`, so the functions you add never leave your Mac. A frame that
+  names no function of the devkit copy that sends it is sent as `<local>`, and the registry workflow rejects a report
+  that carries such a frame.
+- **The refusal id** is one the guard itself makes: a refusal in `guard.py` or one of the guard hook's own rules.
+  `dev bug report --guard <refusal id>` takes only a refusal the guard noted in this session's ledger, and the
+  registry workflow rejects any other id.
+- **The exception class** is a Python name path, such as `KeyError` or `json.decoder.JSONDecodeError`, of at most 80
+  characters, with nothing in it shaped like a secret.
 - **The command word** is sent only when it is a public program the guard itself knows, such as `sed`, `git`, or
   `python3`. Any other program is sent as `<program>`, and a path as `<path>`.
 - **Exception messages** become templates before anything else: quoted strings, paths, numbers, URLs, email addresses,
@@ -131,7 +138,9 @@ devkit builds each report from fields it produces itself. A report is never a co
   dropped. devkit builds the deny list from this Mac each time it needs one: every project id, owner, and repository
   name in the projects map, local branch and worktree names, git remote URLs, the handoff repository's project ids and
   initiative slugs, git's user name and email, the user and host names, and the home folder. When it sends, it adds
-  the GitHub login that posts.
+  the GitHub login that posts. A deny-list word counts however it is written: in any case; with spaces, `_`, `-`, or
+  camelCase between its parts; in fullwidth or accented letters; with look-alike Cyrillic, Greek, or Armenian
+  letters; or with zero-width characters inside it.
 - **Votes** carry only the fingerprint, the version, the impact, and the time window of their batch.
 
 ### Review held items
@@ -143,7 +152,11 @@ dev bug drop 7         # drop it (developer only)
 ```
 
 Sending approves the exact payload: devkit stores its hash, and an item that changed after you approved it is not
-sent. `dev status` shows one line when items wait for your review or devkit bugs hit this Mac today, such as:
+sent. Before it sends, devkit checks every field again, not only free text. An item where any field names a deny-list
+word or holds something shaped like a secret is held, and `dev bug pending` says which field. Whether an item needs
+your review is read from what it holds, never only from the flag stored in its outbox file.
+
+`dev status` shows one line when items wait for your review or devkit bugs hit this Mac today, such as:
 
 ```text
 devkit's bug registry: 1 item waits for your review · 1 devkit bug hit this Mac today
@@ -305,7 +318,8 @@ seen again on a fixed version is sent as a vote with the newer version, which th
 
 ## How the registry works on GitHub
 
-- **One issue per bug.** devkit searches the registry by fingerprint before it creates an issue. For a known bug it
+- **One issue per bug.** devkit searches the registry's issues labeled `devkit-bug` by fingerprint before it creates
+  an issue, and files a report only to one of them. For a known bug it
   posts one comment per payload: a report, a vote, a detour, a confirmation, or a failure mark. Votes from one Mac
   are batched into at most one comment per issue a day, sent after a random delay of up to an hour.
 - **One record per bug, written by the bot.** The registry's workflow folds the payloads into a single comment written
@@ -338,7 +352,10 @@ scoring code as the client (`lib/devkit/bugs.py`), so the two cannot disagree.
 - **Folding:** each run reads every payload comment on the issue that is not folded yet, in comment order, so a run
   the concurrency group cancels loses nothing. It validates each payload, folds it into the record, recomputes the
   score, and deletes the vote, confirmation, and failure comments it folded. Report and detour comments stay. An
-  invalid payload is left alone and ignored. A record a maintainer edited by hand is rewritten on the next fold.
+  invalid payload is left alone and ignored, and so is a malformed one (a value of the wrong type, or JSON nested
+  too deep): any error while checking a payload marks it invalid, and folding goes on. A report counts only when its
+  fingerprint is the one its kind, exception class, frames, refusal id, and command word give; the workflow
+  recomputes it. A record a maintainer edited by hand is rewritten on the next fold.
 - **Labels and titles:** the workflow applies the labels after it validates the issue's first payload, because GitHub
   drops labels set by people without push access, and it replaces the title with one generated from the report, such
   as `[bug] crash in dev progress step: KeyError`. An issue whose first payload fails validation gets no label, and
@@ -354,6 +371,10 @@ scoring code as the client (`lib/devkit/bugs.py`), so the two cannot disagree.
   prerelease marks nothing.
 - **Output:** the record escapes backticks, angle brackets, and `@`, so no value can close the data block or the
   comment marker, mention someone, or add a second block.
+- **Record size:** a record stays under 60,000 characters, because GitHub refuses a comment over 65,536. When it
+  would grow past that, voters quiet for 90 days go first, then all but the newest 100 voters of each impact become
+  per-impact totals that the score and the count of people still include. If GitHub still refuses a record, the run
+  keeps the old record with this run's progress and fails.
 - **Hardening:** no permissions at the top, and `issues: write` and `contents: read` on its one job; the default
   branch checked out without persisted credentials, by GitHub's own checkout action pinned to a commit; no
   third-party actions and no package installs; event text read from the event file, never placed in a `run:` line; a
