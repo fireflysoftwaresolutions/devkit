@@ -1811,10 +1811,11 @@ def _output_text(data: dict) -> str:
     return (str(r or "") + "\n" + str(data.get("error") or ""))[-50_000:]
 
 
-def _output_pitfalls(agent: str, data: dict) -> str:
+def _output_pitfalls(agent: str, data: dict, take: int = 0, taken: list = None) -> str:
     """PostToolUse and PostToolUseFailure: the lesson rules whose error text the tool's output shows, then the open
     lessons whose error signature it shows. A lesson the output hits is first resolved as missed when it was shown to
-    the agent earlier and still pending (not with this very call: the agent read it only as the call ran)."""
+    the agent earlier and still pending (not with this very call: the agent read it only as the call ran). `take`:
+    the best that many lessons go to `taken` instead, for the root-cause paragraph of this call (_root_cause)."""
     try:
         sess, text = _session_record(agent, data), _output_text(data)
         project = str(sess.get("project") or "")
@@ -1825,6 +1826,9 @@ def _output_pitfalls(agent: str, data: dict) -> str:
         rules, said = _output_rules(data, project, text, same_call)
         found = [x for x in lessons.for_output(project, text, limit=LESSON_HITS_MAX) if x["meta"]["id"] not in said]
         _lesson_hits(data, [x["meta"]["id"] for x in found if x["meta"]["id"] not in same_call])
+        if take and taken is not None:
+            taken.extend(found[:take])
+            found = found[take:]
         return "\n\n".join(x for x in (rules, _pitfalls(agent, data, found[:PITFALL_SHOW], channel="output")) if x)
     except Exception:
         _log(f"pitfalls {agent}: {traceback.format_exc()[-300:]}")
@@ -1859,26 +1863,120 @@ def _output_rules(data: dict, project: str, text: str, same_call=()) -> tuple:
     return "\n".join(lines + [lessons.ADVICE]), said
 
 
-def _output_bugs(agent: str, data: dict, ok: bool) -> str:
+def _command_of(data: dict) -> str:
+    cmd = (data.get("tool_input") or {}).get("command") or ""
+    return " ".join(str(x) for x in cmd) if isinstance(cmd, list) else str(cmd)
+
+
+def _interrupted(data: dict) -> bool:
+    resp = data.get("tool_response")
+    return bool(data.get("is_interrupt")) or (isinstance(resp, dict) and bool(resp.get("interrupted")))
+
+
+def _call_keys(data: dict, ok: bool) -> tuple:
+    """(command key, error key) of a shell call for the patch-loop count (bugs.command_key, bugs.error_signature);
+    the error key only for a failure that was not an interruption. ('', '') for any other tool."""
+    if data.get("tool_name") not in SHELL_TOOLS:
+        return "", ""
+    from . import bugs
+    key = bugs.command_key(command_words(_command_of(data)))
+    if ok or not key or _interrupted(data):
+        return key, ""
+    return key, bugs.error_signature(_output_text(data))
+
+
+def _output_bugs(agent: str, data: dict, ok: bool, keys=None) -> str:
     """PostToolUse (ok) and PostToolUseFailure: the call's line in the session ledger of devkit's bug registry, and,
     for a marker of devkit's own failure in the output, the known detour or the new-bug paragraph. Also outside
-    projects; a marker that names no occurrence of this session does nothing."""
+    projects; a marker that names no occurrence of this session does nothing. `keys`: the call's (command key,
+    error key) when the caller has them (_call_keys)."""
     sid = str(data.get("session_id") or "")
     if not sid:
         return ""
     try:
         from . import bugs
         text = _output_text(data)
-        resp = data.get("tool_response")
-        cmd = (data.get("tool_input") or {}).get("command") or ""
-        cmd = " ".join(str(x) for x in cmd) if isinstance(cmd, list) else str(cmd)
+        cmd = _command_of(data)
         codes = bugs.marker_codes(text)
-        ok = ok and not (isinstance(resp, dict) and resp.get("interrupted"))
-        bugs.ledger_append(sid, data.get("tool_name") or "", ok, bugs.dev_words(command_words(cmd)), codes)
+        ok = ok and not _interrupted(data)
+        cmd_key, sig = keys if keys is not None else _call_keys(data, ok)
+        bugs.ledger_append(sid, data.get("tool_name") or "", ok, bugs.dev_words(command_words(cmd)), codes,
+                           cmd_key=cmd_key, sig=sig, who=_lesson_agent(data))
         return bugs.context_for_output(text, sid) if codes else ""
     except Exception:
         _log(f"bugs {agent}: {traceback.format_exc()[-300:]}")
         return ""
+
+
+# The patch-loop stop. An agent whose command fails twice in a row with the same error is told once to find the root
+# cause before it changes more code; a crew member that fails a third time is reported to the tech lead once.
+ROOT_CAUSE_STOP = ("The same failure twice. Stop changing code and find the root cause first (the root-cause skill): "
+                   "reproduce it, check the known lessons and devkit bugs below, prove the cause, then fix.")
+NOTHING_KNOWN = "No known lesson or devkit bug matches this error yet."
+LOOP_STOP_AT = 2  # identical failures in a row that stop the agent
+LOOP_LEAD_AT = 3  # identical failures in a row in a crew lane that the tech lead hears about
+LOOP_SHOW = 3  # lessons, and devkit bugs, the paragraph lists
+
+
+def _patch_loop(agent: str, data: dict, keys: tuple) -> bool:
+    """PostToolUseFailure of a shell call, after its ledger line: how many times in a row this agent's command
+    failed with this error (bugs.failure_streak). The third time in a crew member's lane, once: a notice to the tech
+    lead (_tell_lead). -> True the second time, once per command and agent in the session: the root-cause paragraph
+    is due (_root_cause)."""
+    cmd_key, sig = keys
+    sid = str(data.get("session_id") or "")
+    if not (sid and cmd_key and sig):
+        return False
+    try:
+        from . import bugs
+        who = _lesson_agent(data)
+        count, told = bugs.failure_streak(sid, who, cmd_key, sig)
+        stop = count >= LOOP_STOP_AT and "agent" not in told
+        if stop:
+            bugs.note_loop(sid, who, cmd_key, "agent")
+        if count >= LOOP_LEAD_AT and data.get("agent_id") and "lead" not in told and _tell_lead(agent, data):
+            bugs.note_loop(sid, who, cmd_key, "lead")
+        return stop
+    except Exception:
+        _log(f"patch loop {agent}: {traceback.format_exc()[-300:]}")
+        return False
+
+
+def _root_cause(data: dict, found: list) -> str:
+    """The root-cause paragraph: ROOT_CAUSE_STOP, then the lessons whose error anchor the output shows (`found`, the
+    best LOOP_SHOW of the output recall) and the registry's devkit bugs the output shows (bugs.registry_lines), or
+    NOTHING_KNOWN."""
+    from . import bugs, lessons
+    try:
+        known = bugs.registry_lines(_output_text(data), str(data.get("session_id") or ""), limit=LOOP_SHOW)
+    except Exception:
+        _log(f"patch loop bugs: {traceback.format_exc()[-300:]}")
+        known = []
+    lines = [ROOT_CAUSE_STOP] + lessons.pitfall_lines(found) + known
+    return "\n".join(lines + ([] if found or known else [NOTHING_KNOWN]))
+
+
+def _tell_lead(agent: str, data: dict) -> bool:
+    """A crew member's third identical failure: one notice from devkit to the tech lead in the run's messages,
+    naming the member, the command, and how to reach it. -> posted (False when the run has no lane for it)."""
+    from . import crew, progress
+    sid, aid = str(data.get("session_id") or ""), str(data.get("agent_id") or "")
+    with progress._tx(agent, sid):
+        run = progress.load_run(agent, sid)
+        if not isinstance(((run or {}).get("agents") or {}).get(aid), dict):
+            return False
+        run = progress.normalize(run)
+        lane = run["agents"][aid]
+        mem = crew._for_lane(lane)
+        who = crew.who(mem) if mem else crew.who(lane.get("persona") or lane.get("label") or "A crew member")
+        ask = f'dev crew ask --to {mem["id"]} "…"' if mem else 'dev crew ask --to <member> "…"'
+        progress._post(run, "devkit", "main",
+                       f"devkit: {who} hit the same failure a third time: `{_inline(_command_of(data))}` failed again "
+                       f"with the same error after devkit told it to stop and find the root cause. Check on it "
+                       f"({ask}), or stop it and route the debugging (`dev crew raci debug` names who takes it).",
+                       time.time(), from_name="devkit", kind="notice")
+        progress._save(run, touch_session=False)
+    return True
 
 
 def _hook_forgery(data: dict):
@@ -2824,15 +2922,31 @@ def post_tool(agent: str):
 def post_tool_failure(agent: str):
     """PostToolUseFailure: a subagent launch that failed (an unknown agent type, an interrupt) starts no agent, so its
     launch record leaves at once: it never labels another agent or holds a crew slot (spec F0, S6). A shell call
-    that failed or was interrupted has ended: it leaves the call ledger."""
+    that failed or was interrupted has ended: it leaves the call ledger. The same failure twice in a row stops the
+    agent with the root-cause paragraph (_patch_loop, _root_cause): it takes the best lessons of the output recall,
+    after the recall resolved their earlier showings, and they count as shown on the output channel."""
     from . import progress
     data = _stdin_json()
     _check_writes(agent, data)  # a call that failed may have written too
     _close_call(data)
     if data.get("tool_name") in ("Agent", "Task", "spawn_agent"):
         progress.launch_failed(agent, data)
-    _context_out("PostToolUseFailure", "\n\n".join(x for x in (_output_pitfalls(agent, data),
-                                                               _output_bugs(agent, data, False)) if x))
+    keys = ("", "")
+    try:
+        keys = _call_keys(data, False)
+    except Exception:
+        _log(f"call keys {agent}: {traceback.format_exc()[-300:]}")
+    bug_text = _output_bugs(agent, data, False, keys)  # the ledger line the loop count reads
+    taken = []
+    stop = _patch_loop(agent, data, keys)
+    pitfalls = _output_pitfalls(agent, data, take=LOOP_SHOW if stop else 0, taken=taken)
+    if stop:
+        try:
+            _shown(data, [x["meta"]["id"] for x in taken], "output")
+        except Exception as e:
+            _swallowed("post-tool-failure", e)
+    _context_out("PostToolUseFailure", "\n\n".join(x for x in (_root_cause(data, taken) if stop else "", pitfalls,
+                                                               bug_text) if x))
 
 
 def subagent_start(agent: str):

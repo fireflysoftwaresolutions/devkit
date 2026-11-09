@@ -181,8 +181,9 @@ def _append_line(path: Path, obj) -> bool:
         return False
 
 
-def _tail_records(path: Path, limit: int = _TAIL_BYTES) -> list:
-    """The JSON lines at the end of `path` (at most `limit` bytes), oldest first; a torn or foreign line is skipped."""
+def _tail_records(path: Path, limit: int = _TAIL_BYTES, has: bytes = b"") -> list:
+    """The JSON lines at the end of `path` (at most `limit` bytes), oldest first; a torn or foreign line is skipped.
+    `has`: only the lines that hold these bytes are parsed (a hook reading a long ledger for one key)."""
     try:
         with open(path, "rb") as fh:
             fh.seek(0, os.SEEK_END)
@@ -196,6 +197,8 @@ def _tail_records(path: Path, limit: int = _TAIL_BYTES) -> list:
         lines = lines[1:]  # the first line may start mid-record
     out = []
     for ln in lines:
+        if has and has not in ln:
+            continue
         try:
             rec = json.loads(ln)
         except ValueError:
@@ -1769,11 +1772,137 @@ def ledger(session: str) -> list:
     return _tail_records(_ledger_path(session)) if session else []
 
 
-def ledger_append(session: str, tool: str, ok: bool, dev_words: str, codes: list) -> None:
+def ledger_append(session: str, tool: str, ok: bool, dev_words: str, codes: list, cmd_key: str = "",
+                  sig: str = "", who: str = "") -> None:
     """One tool call in the session ledger (BUGS/ledger/<session>.jsonl): the tool, whether it succeeded, the `dev`
-    command words it ran and the marker codes its output showed. Local only: it is the evidence a detour needs."""
-    _ledger_write(session, {"tool": str(tool or "")[:40], "ok": bool(ok), "dev": str(dev_words or "")[:60],
-                            "codes": [str(c)[:6] for c in codes or []][:10]})
+    command words it ran and the marker codes its output showed. Local only: it is the evidence a detour needs. A
+    shell call also keeps its command key (command_key), the agent that ran it (`who`: its agent id or "main") and,
+    when it failed, its error key (error_signature): the patch-loop count (failure_streak) reads them."""
+    rec = {"tool": str(tool or "")[:40], "ok": bool(ok), "dev": str(dev_words or "")[:60],
+           "codes": [str(c)[:6] for c in codes or []][:10]}
+    if cmd_key:
+        rec.update(cmd=str(cmd_key)[:12], who=str(who or "main")[:40])
+        if sig and not ok:
+            rec["sig"] = str(sig)[:12]
+    _ledger_write(session, rec)
+
+
+# --------------------------------------------------------------------------- patch loops
+#
+# A command that fails again with the same error while the agent changes code is a patch loop: the agent fixes
+# symptoms without knowing the cause. The ledger keeps hashes of the command words and of the error lines, never
+# their text, and the hooks read them to stop the loop (hooks._patch_loop).
+
+_KEY_SEPARATORS = frozenset(("&&", "||", "|", ";", "&", "(", ")"))
+_ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+COMMAND_KEY_WORDS = 24  # words of a command its key reads
+_SIG_ERROR = re.compile(r"error|exception|traceback|fail|fatal|refused|denied|not found|no such|cannot|can't|"
+                        r"could not|unable|invalid|panic|abort|timed out|timeout", re.IGNORECASE)
+_SIG_PATH = re.compile(r"(?:~|\.{1,2})?(?:/[^\s/:'\"()\[\]{}<>,;]+)+/?")
+_SIG_HEX = re.compile(r"\b(?:0x)?(?=[0-9a-f]*\d)[0-9a-f]{7,}\b", re.IGNORECASE)
+_SIG_NUMBER = re.compile(r"\d+")
+SIGNATURE_LINES = 6  # error lines a signature keeps, from the end of the output
+_SIGNATURE_TAIL = 20000  # characters of output a signature reads, from the end: errors come last
+
+
+def _key(text: str) -> str:
+    import hashlib  # here, as in fingerprint: only shell calls and failures need a key
+    return hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()[:12]
+
+
+def _path_like(word: str) -> bool:
+    return "/" in word or word.startswith(("~", "."))
+
+
+def command_key(words: str) -> str:
+    """The key of a shell command, the same whatever paths its arguments name: each program by its name
+    (`./mvnw` is `mvnw`), its other words without paths, and no variables set in front, so `./mvnw -f /a/pom.xml
+    verify` and `mvnw -f /b/pom.xml verify` are one command. `words`: the command without heredoc bodies and quoted
+    text (hooks.command_words). -> 12 hex characters, or '' when it names no program."""
+    kept, head = [], True
+    for w in str(words or "").split():
+        if w in _KEY_SEPARATORS:
+            kept.append(w)
+            head = True
+        elif head and _ASSIGNMENT.match(w):
+            continue
+        elif head:
+            kept.append(w.rstrip("/").rsplit("/", 1)[-1] or w)
+            head = False
+        elif w.startswith("-") and "=" in w:
+            flag, _, value = w.partition("=")
+            kept.append(flag + "=" if _path_like(value) else w)
+        elif not _path_like(w):
+            kept.append(w)
+    kept = kept[:COMMAND_KEY_WORDS]
+    return _key(" ".join(kept)) if any(w not in _KEY_SEPARATORS for w in kept) else ""
+
+
+def _signature_line(line: str) -> str:
+    m = MARKER_RE.match(line)
+    if m:
+        return "devkit-bug: " + m.group(1)  # each crash prints a fresh code; the bug is the same
+    line = _SIG_NUMBER.sub("#", _SIG_HEX.sub("<hex>", _SIG_PATH.sub("<path>", line)))
+    return " ".join(line.casefold().split())
+
+
+def error_signature(text: str) -> str:
+    """The key of the error a failed call showed, the same when only paths, numbers, hashes, durations or a devkit
+    bug marker's one-time code change: the last SIGNATURE_LINES lines that read as errors, else the last three
+    lines, each normalized. -> 12 hex characters, or '' for no output."""
+    lines = [ln for ln in (x.strip() for x in str(text or "")[-_SIGNATURE_TAIL:].splitlines()) if ln]
+    picked = []
+    for ln in reversed(lines):  # only lines that read as errors are normalized: what normalizing adds reads as none
+        if len(picked) == SIGNATURE_LINES:
+            break
+        if ln.startswith("devkit-bug: ") or _SIG_ERROR.search(ln):
+            norm = _signature_line(ln)
+            if norm.startswith("devkit-bug: ") or _SIG_ERROR.search(norm):
+                picked.append(norm)
+    picked = picked[::-1] or [_signature_line(ln) for ln in lines[-3:]]
+    return _key("\n".join(picked)) if picked else ""
+
+
+def failure_streak(session: str, who: str, cmd_key: str, sig: str) -> tuple:
+    """(count, told) from the session ledger: how many times agent `who` ran the command `cmd_key` and it failed
+    with the error `sig` since that command last succeeded for it (a failure with another error or an interrupted
+    call does not end the run; a success does), and which patch-loop notices it already had for that command in the
+    session (note_loop: "agent", "lead")."""
+    count, told, counting = 0, set(), True
+    rows = _tail_records(_ledger_path(session), has=cmd_key.encode()) if session and cmd_key else []
+    for r in reversed(rows):
+        if r.get("loop") == cmd_key and r.get("who") == who:
+            told.add(r.get("told"))
+        elif counting and r.get("cmd") == cmd_key and r.get("who") == who:
+            if r.get("ok"):
+                counting = False
+            elif sig and r.get("sig") == sig:
+                count += 1
+    return count, told
+
+
+def note_loop(session: str, who: str, cmd_key: str, told: str) -> None:
+    """A patch-loop notice given about agent `who`'s command `cmd_key` ("agent": the root-cause paragraph; "lead":
+    the tech lead's notice), so each comes once per command and agent in the session."""
+    _ledger_write(session, {"loop": str(cmd_key)[:12], "who": str(who or "main")[:40], "told": told})
+
+
+def registry_lines(text: str, session: str, limit: int = 3) -> list:
+    """The devkit bugs that tool output shows by a marker of an occurrence recorded in this session, as devkit's
+    registry knows them (match): `- devkit bug #<n> (`<fingerprint>`): <title>. …`, at most `limit`. A marker of
+    another session, an unknown code or a bug the registry does not know adds nothing: context_for_output answers
+    for those."""
+    out, seen = [], set()
+    for m in MARKER_RE.finditer(text) if session and "devkit-bug:" in (text or "") else ():
+        fp = m.group(1)
+        if fp in seen or occurrence_for(fp, m.group(2), session) is None:
+            continue
+        seen.add(fp)
+        hit = match(fp, core.VERSION)
+        if hit:
+            out.append(f"- devkit bug #{hit['bug'].get('number')} (`{fp}`): {_title(hit['bug'])}. "
+                       f"`dev bug show {fp}` shows its detours and status.")
+    return out[:limit]
 
 
 def dev_words(cmd: str) -> str:

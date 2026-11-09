@@ -104,8 +104,13 @@ class OutcomeTests(LessonHookCase):
         self.hook("guard", self.bash("./mvnw verify", tid="t1"))
         self.hook("post-tool-failure", self.output("t1", "Could not find a valid Docker environment", failed=True))
         self.assertEqual(self.events(lid), [("shown", "call", "main")])  # shown for this very call: not heeded yet
-        self.hook("post-tool-failure", self.output("t2", "Could not find a valid Docker environment", failed=True))
-        self.assertEqual(self.events(lid), [("shown", "call", "main"), ("missed", "call", "main")])
+        again = self.hook("post-tool-failure", self.output("t2", "Could not find a valid Docker environment",
+                                                           failed=True))
+        # the same failure twice: the root-cause paragraph lists the lesson again, and its showing is no miss itself
+        self.assertIn("The same failure twice.", self.context(again))
+        self.assertEqual(self.events(lid), [("shown", "call", "main"), ("missed", "call", "main"),
+                                            ("shown", "output", "main")])
+        self.assertEqual([e for e in self.events(lid) if e[0] == "missed"], [("missed", "call", "main")])
 
     def test_a_members_lessons_are_heeded_when_its_lane_ends_and_the_main_sessions_stay_pending(self):
         lid = self.lesson("Repaired the schema history instead of fixing the migration",
