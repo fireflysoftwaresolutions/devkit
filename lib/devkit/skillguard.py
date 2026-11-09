@@ -346,6 +346,7 @@ def on_agent_brief(agent: str, tool_input: dict, project: str = ""):
                       "prevention. If one happens again, run `dev lesson recur <id> --evidence \"…\"`; a new mistake "
                       "that could repeat gets `dev lesson add \"…\" --cause \"…\" --prevent \"…\"`.\n"
                       + "\n".join(lessons.pitfall_lines(picked)))
+            lessons.track([x["meta"]["id"] for x in picked], "shown", "brief")  # the hook records them for the member
     if "Firefly> DevKit" not in brief:  # every crew member reports the same way (the SubagentStop hook checks it)
         name = (tool_input.get("description") or "").split(":")[0].strip()[:30] or "Agent"
         try:  # the member's role first, as the developer reads every member ("Frontend engineer (Trinity)")

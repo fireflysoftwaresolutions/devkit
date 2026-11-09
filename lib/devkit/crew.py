@@ -1081,6 +1081,7 @@ def brief_text(m: dict, task: str, scope: str = "", step=None, roster=None, cwd=
     if picked:
         b += ["", "## Known pitfalls", "", "Lessons from earlier mistakes in this work; follow their prevention:"] + \
             lessons.pitfall_lines(picked)
+        lessons.track([x["meta"]["id"] for x in picked], "shown", "brief")  # the launch hook gives them to the member
     b += ["", "## Return", "", _sentence(m["returns"]), "",
           "## Report format", "", "Your final message starts with this block; nothing comes before it:", ""]
     b += report_block(m, project=project, branch=branch, task="<the task, in a few words>")
