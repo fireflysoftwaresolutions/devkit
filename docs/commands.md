@@ -1341,14 +1341,26 @@ write and push, settings repair, cleanup, and job run, with secrets redacted. Se
 
 ## Environment
 
-### `dev setup [-y] [--skip-packages] [--resume]` · `dev setup prompt | commit-template | shell [--remove] [-y]`
+### `dev setup [-y] [--skip-packages] [--resume] [--preview [--width N]]` · `dev setup prompt | commit-template | shell [--remove] [-y]`
 
-The installation and configuration wizard. It detects the Mac, GitHub, and both agents. It asks for the development
-root, the handoff repository, which agents to configure and their permission modes, your stacks, your git hosts and
-the commit template, clouds, the Docker VM, automation, and the settings lock. It shows the plan and applies it only after you confirm:
-the packages for your stacks, hosts, and clouds, then `dev install`, the sign-ins, and `dev doctor`. Run it again to
-change your choices. `--resume` continues the last setup where it stopped: it runs every step that is not done, with
-the answers you gave (see [When a step fails or you stop it](getting-started.md#when-a-step-fails-or-you-stop-it)).
+The installation and configuration wizard. It detects the Mac, GitHub, and both agents. It asks which agents to use
+(Claude Code and Codex, Claude Code only, or Codex only), and, in Customize, the development root, the handoff
+repository, the agents' permission modes, your stacks, your git hosts and the commit template, clouds, the Docker VM
+(and whether to start it at the end), automation, and the settings lock. It shows the review and applies it only after
+you choose **Apply**: the packages for your stacks, hosts, and clouds, each chosen agent that is missing, `dev install`,
+Docker; then the sign-in panels, the settings lock, and `dev doctor`, and a summary with the command for each item
+left. Run it again to change your choices; turning an agent off removes what devkit wrote in it.
+
+| Option | Effect |
+| --- | --- |
+| `--resume` | Continue the last setup where it stopped: a quick check of the steps done, then every step that is not done, with the answers you gave. With nothing to continue, it says so and exits with `0`. Plain `dev setup` offers the same when a saved setup did not finish |
+| `--preview` | Draw every screen of the setup with fixed sample data, one after the other, and change nothing; `--width N` draws them `N` columns wide |
+| `-y`, `--yes` | Take every default without asking; in a terminal, the sign-ins still ask |
+| `--skip-packages` | Install no Homebrew or npm packages |
+
+Exit codes: `0` devkit is ready (sign-ins may be left), `1` a required step failed or you quit before applying, `2`
+not signed in to GitHub, `130` paused by you. See
+[When a step fails or you stop it](getting-started.md#when-a-step-fails-or-you-stop-it).
 
 `dev setup prompt` sets up only the [prompt helper](getting-started.md#the-prompt-helper): it says what it changes,
 asks once, and then shows the helper in the prompt you use. With Starship it adds a marked block to

@@ -39,21 +39,60 @@ dev sync                                                  # run a sync in the fo
 
 ### The installer stopped at a step
 
-The installer names the step that failed and the command to run it again; it is safe to repeat, and it skips what is
-done already. The lines before the message are the failing command's own output (Homebrew's, git's, or the GitHub
-CLI's). Fix that cause, then run the same command again.
+A step that did not finish shows `✗ <what> did not install.` (or `did not download`), then:
 
-When the **setup wizard** stopped, its summary lists the steps done and each step left with the command that finishes
-it. Continue where it stopped, with the answers you gave:
+- `Reason:` the failing command's own error line, such as Homebrew's or git's.
+- `Fix:` what to do, then to run the installer again. Before devkit is downloaded, run the same command you started
+  with; after it, run `~/Development/fireflysoftwaresolutions/devkit/install.sh`. Finished steps are not repeated.
+- `Full output: ~/.local/state/devkit/logs/install.log`: everything git and Homebrew printed. If the step fails the
+  same way again, send that file to your devkit contact.
+
+`Ctrl-C` at the installer's welcome stops it with nothing changed (exit code `1`). During a step, it shows
+`! Stopped during "<step>".`: nothing is broken, and running the installer again continues (exit code `130`). Once
+the setup wizard runs, `Ctrl-C` belongs to the wizard.
+
+### The GitHub sign-in did not finish
+
+`✗ You are not signed in to GitHub.` comes with its reason: you stopped the sign-in, the browser page was not finished
+within 10 minutes, or `GitHub said: <the GitHub CLI's error line>`. Press Return to try again, or type `q` and Return
+to quit (exit code `2`): devkit cannot go on without GitHub. To continue later, run
+`~/Development/fireflysoftwaresolutions/devkit/install.sh`.
+
+### A setup step failed
+
+The wizard shows the failed step with three lines:
+
+| Line | What it says |
+| --- | --- |
+| `Reason:` | The error line the command wrote. For a devkit bug, `devkit hit a bug while <what it was doing>: <the error>`, followed by `Bug report saved:` with its file in `~/.local/state/devkit/crashes/` (the full traceback, kept on your Mac). `<command> stopped with exit code <n> and gave no reason.` when it wrote nothing. |
+| `This means:` | What you cannot do yet, such as "Docker is not running; projects that use containers wait until it is." |
+| `Fix:` | The one command that fixes or repeats the step, such as `dev docker up` or `dev setup --resume` |
+
+The other steps still run; a step that needs the failed one shows `waits for <step>`. The summary repeats each item
+with its command, and its **What now?** menu offers to try the failed step again. To continue another time, with the
+answers you gave:
 
 ```bash
-~/Development/fireflysoftwaresolutions/devkit/bin/dev setup --resume
+dev setup --resume
 ```
 
-A step that shows `devkit crashed (exit code 70)` names its crash file in `~/.local/state/devkit/crashes/`: the full
-traceback, kept on your Mac. `stopped by SIGKILL` (or another signal) means something outside devkit ended the
-command; the preceding lines say which part it was in. The whole output of the run is in
+The installer, run again, opens the same **Pick up where you left off?** screen. The whole output of the run is in
 `~/.local/state/devkit/logs/setup.log`.
+
+### A sign-in to Claude Code or Codex did not finish
+
+The agent's panel comes back as `<Agent> is not signed in yet`, with the reason and **Try again**, the other way to
+sign in, and **Skip for now**:
+
+| Reason | What happened, and what to do |
+| --- | --- |
+| `you stopped the sign-in.` | You pressed `Ctrl-C`. Choose **Try again**, or the other way. |
+| `the sign-in page was not finished within 10 minutes.` | The browser page was left open (15 minutes for a code). Try again, or sign in with a code when the browser is not in front of you. |
+| `Codex stopped with an error: <its error>` | The agent's own error, such as a port in use. The other way often works. |
+| `Codex finished, but it still reports that you are not signed in.` | The command ended without an error, but the agent's own status still says signed out. Try again. |
+
+**Skip for now** leaves devkit set up; the agent works once you sign in. Sign in from the summary's **What now?** menu,
+or later in a new terminal with `claude auth login` or `codex login` (`codex login --device-auth` for a code).
 
 ### Claude Code's sign-in fails with `EINVAL: invalid argument, kqueue`
 
@@ -96,7 +135,8 @@ gh auth login -h github.com -p https -w -s repo,read:org,workflow,gist
 In a terminal, `curl … | bash` is interactive: the installer reads the answers from the terminal (by its own device,
 such as `/dev/ttys003`), not from the pipe, and every other command reads `/dev/null`, never the rest of the script.
 Homebrew installs with `HOMEBREW_NO_ASK=1`, so it never stops to ask "Do you want to proceed with the installation?";
-its output stays on the screen and, in the wizard, in the setup log.
+its output goes to `~/.local/state/devkit/logs/install.log` (the installer) or `~/.local/state/devkit/logs/setup.log`
+(the wizard), and the screen shows a line from it only when a step fails.
 
 ### `brew` is not found in a new terminal
 

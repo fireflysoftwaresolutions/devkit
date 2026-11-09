@@ -30,39 +30,41 @@ command and a few presses of Return. Have your Mac's login password and your Git
    curl -fsSL https://raw.githubusercontent.com/fireflysoftwaresolutions/devkit/main/install.sh | bash
    ```
 
-   The first line says `devkit installer · devkit is for Macs with Apple silicon`. Each step after it starts
-   with `✦` and its name, then one sentence that says what the step does and why. On an Intel Mac without Homebrew,
-   the first step stops and says why; nothing is changed.
-3. **Homebrew**, only if your Mac does not have it yet. Homebrew is the standard installer for developer tools on a
-   Mac, and devkit uses it for everything else. It asks for your Mac password: type it and press Return. Nothing
-   appears while you type; that is normal. Then press Return to continue. This step takes the longest of all,
-   because it also installs Apple's command line tools.
-4. **git, Python, and the GitHub CLI.** Nothing to do here: each tool shows a line with `✓` when it is ready.
-5. **devkit.** The installer downloads devkit into `~/Development/fireflysoftwaresolutions/devkit` and shows
-   `✓ downloaded v…`.
-6. **GitHub sign-in.** devkit keeps your project notes in a private GitHub repository and saves your work under your
-   name, so it needs your GitHub account. Press Return at each question. The terminal shows a one-time code, such as
-   `1A2B-3C4D`, and your browser opens GitHub: sign in, type the code, and choose **Authorize**. Back in Terminal, you
-   see `✓ signed in to GitHub as <your name>`.
-7. **The setup wizard.** A full-screen page shows what the wizard found on your Mac, with **Recommended setup**
-   selected: press Return. On a Mac with no projects yet, it then asks **Stacks you work in**, the programming
-   languages you plan to use, with Python and Node / TypeScript (JavaScript) already selected. Press Return to keep
-   them, or add Java or PHP with the arrow keys and Space. The next page is the plan, with **Apply** selected: press
-   Return. Each item then shows a spinner while it runs and `✓` when it is done. When the wizard offers to sign you
-   in to Claude Code or Codex, press Return: your browser opens, and you sign in there with your Claude or ChatGPT
-   account. When it offers to start Docker, press Return.
-8. **The summary.** The installer ends with **What you have now** and **What to do first**. One line of **What you
-   have now** says that the hooks and the guard run a read-only copy of devkit, for example
-   `devkit 26.11.3 (4f2c1ab) in ~/.local/share/devkit/releases/26.11.3-4f2c1ab`. That copy is what keeps your agents
-   safe, and nothing can change it by accident ([The pinned copy](#the-pinned-copy) explains it).
-9. **Open a new Terminal window** (Command-N), so that the `dev` command works, and run:
+   The installer first lists its five steps, says that nothing has changed yet, and waits: press Return to start,
+   or `Ctrl-C` to stop with nothing changed. Each step then shows `N of 5` and its name. On an Intel Mac without
+   Homebrew, the first step stops and says why; nothing is changed.
+3. **Homebrew, git, Python, and the GitHub CLI.** If your Mac has no Homebrew yet, its installer asks for your Mac
+   password: type it and press Return. Nothing appears while you type; that is normal. This step takes the longest
+   of all, because it also installs Apple's command line tools. Each tool then shows a line with `✓`. The output of
+   git and Homebrew goes to `~/.local/state/devkit/logs/install.log`; the screen shows a line from it only when a
+   step fails.
+4. **devkit.** The installer downloads devkit into `~/Development/fireflysoftwaresolutions/devkit` and shows
+   `✓ Downloaded devkit …`.
+5. **GitHub sign-in.** devkit keeps your project notes in a private GitHub repository, so it needs your GitHub
+   account. Your browser opens GitHub: paste the one-time code the terminal shows, then choose **Authorize** (and
+   your company's organization, when it is listed). If the sign-in does not finish, the installer says why and offers
+   to try again; it never goes on without GitHub.
+6. **Your choices.** A full-screen page shows what the wizard found on your Mac, with **Recommended setup**
+   selected: press Return. It then asks **Which coding agents do you want to use?** The answers are Claude Code and
+   Codex, Claude Code only, or Codex only, with the account each one needs. On a Mac with no projects yet, it then asks **Stacks you
+   work in**, with Python and Node / TypeScript already selected. The review shows every answer: press a number from
+   1 to 7 to change a section, or Return to **Apply**.
+7. **Installing on its own.** Each install step shows a spinner while it runs and `✓` when it is done, for 10 to 20
+   minutes. These steps ask nothing, so you can leave the Mac. `Ctrl-C` stops the step in front of you and asks
+   whether to skip it, try it again, or stop the setup.
+8. **Sign in to your agents.** For each agent that is not signed in yet, a panel offers the ways to sign in, such as
+   **Sign in with the browser** or **Sign in with a code**, and **Skip for now**. If a sign-in does not finish, the
+   panel comes back with the reason and lets you try again.
+9. **The summary.** The setup ends with `✓ devkit is ready.` and the first three things to do, or with what is
+   left for later and the one command that finishes each item.
+10. **Open a new Terminal window** (Command-N), so that the `dev` command works, and run:
 
-   ```bash
-   dev doctor
-   ```
+    ```bash
+    dev doctor
+    ```
 
-   Every line should show `✓`. A line with `✗` names the command that fixes it.
-10. **Start your first project:**
+    Every line should show `✓`. A line with `✗` names the command that fixes it.
+11. **Start your first project:**
 
     ```bash
     dev new my-app
@@ -73,13 +75,14 @@ command and a few presses of Return. Have your Mac's login password and your Git
     `dev new` creates the project folder, `dcd` goes into it, and `claude` starts Claude Code there (run `codex` for
     Codex). Ask it for something small, and check that its reply starts with a bold `[Firefly> DevKit]` line, which
     shows that devkit is active.
-11. **Follow the tutorial for where you work.** Each one walks through a first task with devkit's crew and explains
+12. **Follow the tutorial for where you work.** Each one walks through a first task with devkit's crew and explains
     what you see. Pick [Claude Code](tutorials/claude-code.md) in Terminal or an IDE,
     [Claude Desktop's Code tab](tutorials/claude-desktop.md), [Codex CLI](tutorials/codex-cli.md), or
     [Codex in the ChatGPT app](tutorials/chatgpt-codex.md).
 
-If a step fails, the installer names it and prints the command that runs it again. See
-[Troubleshooting › Installing and updating](troubleshooting.md#installing-and-updating).
+If a step fails, it says why, what that means for you, and the command that fixes it. Once devkit is downloaded, run
+the installer again with `~/Development/fireflysoftwaresolutions/devkit/install.sh`: finished steps are not repeated.
+See [Troubleshooting › Installing and updating](troubleshooting.md#installing-and-updating).
 
 ## Install on a new Mac
 
@@ -92,8 +95,12 @@ exec zsh
 dev doctor
 ```
 
-The installer prints each step with one sentence on what it does and why, and ends with a summary: where devkit is,
-its version, what you have now, and what to do first. It is safe to run again. In order, it:
+In a terminal, the installer first lists its five steps and waits for Return: nothing on the Mac changes before that,
+and `Ctrl-C` there stops it with nothing changed (exit code `1`). With `--yes`, or without a terminal, it starts at
+once. Each step then shows `N of 5` and its name. git's and Homebrew's own output goes to
+`~/.local/state/devkit/logs/install.log`, and the screen shows a line from it only when a step fails. When the setup
+wizard has run, the installer adds nothing after the wizard's summary and exits with its code. It is safe to run
+again. In order, it:
 
 1. Checks that the computer is a Mac, and stops on any other system before it changes anything. On an Intel Mac, it
    goes on only when Homebrew is already there (on your `PATH` or in `/usr/local`), with one warning line; otherwise
@@ -107,10 +114,20 @@ its version, what you have now, and what to do first. It is safe to run again. I
    `vYY.MM.PATCH` tag. If devkit is already there at a release, it moves to the newest one; a checkout on a branch, with
    local changes, or at another commit stays as it is. A folder there that is not a git checkout is never changed.
 5. Signs you in to GitHub with the browser (`gh auth login` over HTTPS, so it asks no technical questions), unless
-   the GitHub CLI is signed in already.
+   the GitHub CLI is signed in already. The sign-in waits up to 10 minutes. When it fails, you stop it, or the time
+   runs out, the installer shows `✗ You are not signed in to GitHub.` with the reason, then
+   `Press Enter to try again, or type q and press Enter to quit.` Quitting exits with code `2` and runs no wizard.
 6. Starts the [setup wizard](#the-setup-wizard), `dev setup`, which asks its questions in the terminal even though
-   the installer arrived through a pipe. Its `dev install` makes the [pinned copy](#the-pinned-copy) that the hooks
-   and the guard run.
+   the installer arrived through a pipe. If a saved setup did not finish, the wizard opens on
+   **Pick up where you left off?** instead. Its `dev install` makes the [pinned copy](#the-pinned-copy) that the
+   hooks and the guard run.
+
+| Exit code | Meaning |
+| --- | --- |
+| `0` | devkit is ready; sign-ins may be left for later |
+| `1` | A required step failed, or you quit before anything changed |
+| `2` | Not signed in to GitHub |
+| `130` | Paused by you; run the installer again, or `dev setup --resume`, to continue |
 
 To read the script before you run it, download it first:
 
@@ -131,7 +148,7 @@ curl -fsSL https://raw.githubusercontent.com/fireflysoftwaresolutions/devkit/mai
 
 | Option or variable | Effect |
 | --- | --- |
-| `-y`, `--yes` | Accept every default in the setup wizard |
+| `-y`, `--yes` | Start without waiting at the welcome, and accept every default in the setup wizard (the sign-in panels still ask) |
 | `--skip-packages` | Configure only; do not install the toolchain packages for your stacks (Homebrew, git, Python, and the GitHub CLI are still checked) |
 | `--no-setup` | Get devkit and its prerequisites, but do not sign in or run the wizard; run `install.sh` from the checkout later to finish |
 | `-h`, `--help` | Print the usage, the options, and the variables |
@@ -143,10 +160,12 @@ curl -fsSL https://raw.githubusercontent.com/fireflysoftwaresolutions/devkit/mai
 
 ### Without a terminal
 
-In CI or a provisioning script, nothing can answer questions, so the installer runs without them. Homebrew's
-installer runs with `NONINTERACTIVE=1` (it needs passwordless `sudo` then), and the wizard gets `--yes`. The GitHub
-sign-in needs a person, or a `GH_TOKEN`: without either, the installer downloads devkit, skips the sign-in and the
-wizard, says how to finish, and exits with code `2`.
+In CI or a provisioning script, nothing can answer questions, so the installer runs without them: it starts at once,
+Homebrew's installer runs with `NONINTERACTIVE=1` (it needs passwordless `sudo` then), and the wizard gets `--yes`.
+The GitHub sign-in needs a person, or a `GH_TOKEN`: without either, the installer downloads devkit, skips the sign-in
+and the wizard, says how to finish, and exits with code `2`. The wizard skips the agents' sign-ins too: its summary
+lists `claude auth login` and `codex login` under **To finish**, and it exits with `0` when every required step is
+done.
 
 ### From a clone
 
@@ -160,73 +179,98 @@ this Mac, so run `bin/dev ci --run` in the clone first; the installer says so wh
 In a terminal, `dev setup` is a full-screen wizard that you drive with the arrow keys. Nothing on the Mac changes until
 you choose **Apply** on the review screen.
 
+The setup has three parts: your choices at the start, about 10 to 20 minutes of installing that asks nothing, and the
+sign-ins at the end.
+
 1. **Welcome.** The wizard looks at the Mac and lists what it found: macOS, CPU, memory, and Homebrew; your GitHub
    sign-in; whether Claude Code and Codex are installed and signed in; the stacks used by the repositories in
    `~/Development`; the git hosts and clouds this Mac already shows; and Docker (Colima). Then choose **Recommended
-   setup**, which uses what was found and goes straight to the review, or **Customize**, which walks through the
-   sections. If GitHub is not signed in, the wizard offers to run `gh auth login` first.
-2. **Sections.** Each section is one step, with a progress bar (`Step 3 of 8 · Stacks`). Every answer starts at the
-   recommended or detected value, and the focused option shows a one-line explanation under it.
-3. **Review.** The plan, section by section, and the packages it installs: how many per group, with the groups that
-   are already installed marked `✓`. Choose **Apply**, **Change a section** (edit one section, then come back to the
-   review), or **Quit without changes**.
-4. **Apply.** Each step shows a spinner while it runs and `✓`, `✗`, or `!` when it ends: save
-   `~/.config/devkit/config.json`, install the Homebrew and npm packages, install Claude Code if it is missing, run
-   `dev install` (which pins devkit first), check the agents' sign-in (and offer to sign you in), start Docker, lock
-   the settings if you chose to, and run `dev doctor`. It ends with what this run did (the steps done, then each
-   step skipped or failed with the command that finishes it), the checks that need attention, and three next steps.
+   setup**, which asks which agents (and, when no stacks were found, which stacks) and goes to the review, or
+   **Customize**, which walks through all seven sections. If GitHub is not signed in, the wizard offers to run
+   `gh auth login` first.
+2. **Which agents.** Claude Code and Codex, Claude Code only, or Codex only, with the account each one needs. The
+   answer starts at the agents already signed in on this Mac, else both. Only the agents you choose are installed,
+   set up, and signed in: with Claude Code only, Codex is not installed.
+3. **Sections.** Each question shows a progress bar (`Step 2 of 3 · Stacks`). Every answer starts at the recommended
+   or detected value, and the focused option shows what it means under it.
+4. **Review.** Each section on a numbered row, the packages to install, and how long installing takes (20 seconds a
+   package, rounded up to 5 minutes). Press `1` to `7` to open that section; you come back to the review after it,
+   and a changed row shows in yellow with what it was. Choose **Apply**, **Change a section**, or
+   **Quit without changes**.
+5. **Applying your plan.** These steps ask nothing: save `~/.config/devkit/config.json`, install the Homebrew and
+   npm packages, install Claude Code or Codex when chosen and missing, set up devkit (`dev install`, which pins
+   devkit first), and start Docker when you chose that.
+6. **Now you: sign in.** An agent already signed in shows one line with its plan. Each other chosen agent gets a
+   panel with **Sign in with the browser**, **Sign in with a code** (Codex), **Sign in with your company's single
+   sign-on** or **Sign in with an Anthropic Console account** (Claude Code), and **Skip for now**. If you chose to
+   lock Claude Code's settings, the wizard asks for your Mac password here. Then `dev doctor` checks the setup.
+7. **The summary.** `✓ devkit is ready.` with the first three things to do, or what is left for later with the
+   reason and the command for each item, and a **What now?** menu with **Finish**, **Sign in to Codex now**, or
+   **Try Start Docker again**.
 
 #### When a step fails or you stop it
 
-Only two steps are required: saving your choices and configuring devkit (`dev install`). The others are optional.
+Saving your choices, setting up devkit, and installing each chosen agent are required: devkit cannot be ready
+without them. The other steps are optional. A step that fails or is skipped stops only the steps that need it, which
+show `waits for <step>`; every other step still runs.
 
-- **An optional step** that fails, reaches its time limit, or that you stop with `Ctrl-C` is skipped, and the wizard
-  goes on with the next step. The step shows why and the exact command that finishes it later, such as
-  `codex login` or `dev docker up`. `Ctrl-C` stops only the command that runs in that step.
-- **A required step** that fails or that you stop ends the run. The wizard says where it stopped and why: the exit
-  code, the signal that stopped it, or devkit's crash notice with its crash file, and the last error lines, never the
-  banner the command printed first.
-- **Continue where it stopped** with `dev setup --resume` (or `~/Development/fireflysoftwaresolutions/devkit/bin/dev
-  setup --resume` when the `dev` command is not set up yet). It runs every step that is not done, with the answers
-  you gave, and skips the steps that are done. The steps and their state are kept in
-  `~/.local/state/devkit/setup-run.json`, readable only by you.
-- **Sign-in** runs on your terminal, with a time limit: 10 minutes for the browser, 15 for a device code. When
-  Codex's browser sign-in does not finish, the wizard offers `codex login --device-auth`, which shows a code to enter
-  on another device. Without a terminal, or with `--yes`, nothing signs in: the summary gives the command to run later.
+- **A failed step** shows three lines: `Reason:` (the error line the command wrote, or for a devkit bug, the error
+  and `Bug report saved:` with its file; never a banner or a version line), `This means:` (what you cannot do yet),
+  and `Fix:` (the one command that fixes or repeats it).
+- **`Ctrl-C` during an install step** stops that step and offers **Skip it and go on**, **Try it again**, and
+  **Stop the setup here**. A required step offers only the last two. A second `Ctrl-C` stops the setup, which then
+  says `Setup paused.` and exits with code `130`.
+- **`Ctrl-C` during the questions** asks `Quit the setup?` with **Keep going** selected; a second `Ctrl-C` quits with
+  nothing changed.
+- **A sign-in** runs on your terminal with a time limit: 10 minutes for the browser, 15 for a code. `Ctrl-C`, an
+  error, or the time limit stops that sign-in only, and its panel comes back with the reason, **Try again**, the
+  other way to sign in, and **Skip for now**. `Esc` on the second agent's panel goes back to the first one's. In a
+  remote session (`SSH_CONNECTION` set), Codex's panel recommends the code.
+- **Continue later.** Your answers and each step's state are saved after every step in
+  `~/.local/state/devkit/setup-run.json`, readable only by you. `dev setup --resume`, plain `dev setup`, and the
+  installer all open **Pick up where you left off?** with each step's state. **Continue** quickly checks the steps
+  that are done (for packages, `brew bundle check`; for agents, that they are still installed or signed in), runs
+  again any that no longer hold, then runs the rest. `dev setup --resume` with nothing left says
+  `Nothing to continue` and exits with `0`.
 
 | Section | What you choose |
 | --- | --- |
 | Workspace | The development folder; the private handoff repository (`<you>/handoff`, or a shared one) |
-| Agents | Claude Code, Codex, or both; Claude Code's permissions (no prompts, the recommended `bypassPermissions`; `acceptEdits`; `default`); Codex's autonomy (`full`, recommended, or `workspace`, sandboxed) |
+| Agents | Claude Code and Codex, Claude Code only, or Codex only; Claude Code's permissions (no prompts, the recommended `bypassPermissions`; `acceptEdits`; `default`); Codex's autonomy (`full`, recommended, or `workspace`, sandboxed) |
 | Stacks | Java and Spring, Python, PHP, Node and TypeScript (Angular, React); on a first run, the stacks found in your repositories are preselected |
 | Git hosts and CI/CD | GitHub (always), GitLab, Bitbucket, Azure DevOps; the ones this Mac already shows are preselected |
 | Clouds | AWS, Microsoft Azure, Google Cloud, DigitalOcean, Kubernetes and Helm, OpenTofu or Terraform; preselected from the config folders and CLIs it finds |
-| Docker | VM CPUs, memory, and disk (checked against this Mac); start Colima at login? |
+| Docker | VM CPUs, memory, and disk (checked against this Mac); start Colima at login? Start Docker when the setup ends? |
 | Automation | Reclaim disk space automatically? Background sync interval; lock Claude Code settings with a managed-settings file? |
 
 | Key | Action |
 | --- | --- |
 | `↑` `↓` (or `j` `k`, `Tab`) | Move between options |
-| `1`–`9` | Jump to an option |
+| `1`–`9` | Jump to an option; on the review, `1`–`7` open that section |
 | `Enter` | Choose, confirm, or keep the value shown |
 | `Space` | Select or clear an option in a list with checkboxes |
 | `a` | Select all options, or none, in a list with checkboxes |
 | `y` / `n` | Answer a yes-or-no question at once; `←` `→` switch the highlighted answer |
 | Typing | Replaces the value shown in a text field; `←` `→`, `Backspace`, and `Ctrl-U` edit it |
 | `Esc` | Go back one question; on a section's first question, go to the previous section (or the review) |
-| `Ctrl-C` | Quit; before you apply, nothing has changed |
+| `Ctrl-C` | During the questions, asks before it quits; during a step, stops that step and asks what to do next |
 
 Run `dev setup` again at any time. On a configured Mac it starts from your saved choices (adding the hosts and clouds
 it newly finds) and offers **Keep current setup**; the review marks each section that would change and shows its old
-value. Applying an unchanged plan runs `dev install` again, which repairs anything that drifted.
+value. Applying an unchanged plan runs `dev install` again, which repairs anything that drifted. Turning an agent off
+removes devkit's rules, hooks, skill links, MCP servers, and plugin from that agent, and keeps the agent and your own
+settings; the review says so before you apply, with the command that removes the app if you want that too.
 
-The full output of the apply steps is in `~/.local/state/devkit/logs/setup.log`, readable only by you.
+The full output of the steps is in `~/.local/state/devkit/logs/setup.log`, readable only by you.
+`dev setup --preview` draws every screen of the setup with sample data and changes nothing (`--width 60` draws them
+60 columns wide).
 
 #### Line prompts and `--yes`
 
 When the input or output is not a terminal (a pipe or a script), when `TERM` is `dumb`, or with `--yes`, the wizard
 uses plain line prompts instead: each question shows its default in brackets, and Enter keeps it. `--yes` accepts
-every default without asking and writes the same configuration as earlier versions. When nothing can answer (the input
+every default without asking; in a terminal, the sign-ins still ask, one line each
+(`Sign in to Codex: 1 browser, 2 code, 3 later [1]`), because a sign-in has no default. When nothing can answer (the input
 is not a terminal), the line prompts say so at the start and take every default, as with `--yes`. To get the line prompts in a
 terminal, run `TERM=dumb dev setup`. With `--yes`, the stacks are your saved ones, else the ones found in your
 projects, and otherwise Python and Node.
@@ -235,7 +279,8 @@ projects, and otherwise Python and Node.
 | --- | --- | --- |
 | core | always | git, gh, jq, ripgrep, fd, ast-grep, difftastic, git-cliff, fzf, Python, Node |
 | docker | always | Colima, Lima, the Docker CLI, Compose, Buildx, the keychain credential helper |
-| agents | always | Codex; Claude Code through its official installer when it is missing |
+| codex | when Codex is chosen | Codex, in its own setup step (`brew install --cask codex`) |
+| claude | when Claude Code is chosen | Claude Code through its official installer when it is missing, in its own setup step |
 | docs | always | Vale, lychee, markdownlint-cli2, the Manrope font |
 | security | always | gitleaks, osv-scanner, Trivy, zizmor, Semgrep, Syft, cosign |
 | python | with the Python stack | uv, pyright |
@@ -263,10 +308,10 @@ with `dev install --only <step>`, which re-applies it from the copy that is inst
 | `cli` | Links `~/.local/bin/dev` to the pinned copy and adds a managed block to `~/.zshrc` that sources its `shell/devkit.zsh` |
 | `git` | Sets `user.name` and `user.email` from your GitHub account, makes `gh` git's credential helper, includes the shared git defaults, and the global ignore file |
 | `handoff` | Clones your handoff repository, or creates it as a private GitHub repository and pushes the first commit; writes the multi-machine merge rules |
-| `instructions` | Generates `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md` from `agents/AGENTS.md` (plus your personal rules) |
-| `skills` | Fetches third-party skills at pinned commits (your optional groups included) and links them into both agents |
-| `claude` | Merges settings, hooks, plugins, and MCP servers into Claude Code; reinstalls the devkit plugin when the installed copy is stale |
-| `codex` | Configures Codex through its own app-server API, writes and trusts the hooks, writes the profiles and the `scout` role, installs plugins and MCP servers, reinstalls a stale devkit plugin |
+| `instructions` | Generates `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md` from `agents/AGENTS.md` (plus your personal rules), for each agent that is turned on |
+| `skills` | Fetches third-party skills at pinned commits (your optional groups included) and links them into each agent that is turned on |
+| `claude` | Merges settings, hooks, plugins, and MCP servers into Claude Code; reinstalls the devkit plugin when the installed copy is stale. When Claude Code is turned off in `dev setup`, removes what devkit wrote there instead: its `CLAUDE.md`, hooks, status line, skill links, MCP servers, and plugin |
+| `codex` | Configures Codex through its own app-server API, writes and trusts the hooks, writes the profiles and the `scout` role, installs plugins and MCP servers, reinstalls a stale devkit plugin. When Codex is turned off in `dev setup`, removes what devkit wrote there instead: its `AGENTS.md`, hooks, skill links, MCP servers in `config.toml`, profiles, agent roles, and plugin; your own keys stay |
 | `desktop` | When Claude Desktop is installed: builds the devkit extension for chat and Cowork and opens its installer when it is missing or out of date (choose **Install**); see [Claude Desktop chat and Cowork](tutorials/desktop-chat-and-cowork.md) |
 | `docker` | Adds the Compose and Buildx plugin folder and the keychain credential store to `~/.docker/config.json`; registers Colima at login if you chose that |
 | `docs` | Checks markdownlint, lychee, and Vale, and syncs the Google and write-good Vale styles |
