@@ -892,7 +892,10 @@ class ResumeTests(unittest.TestCase):
 
 DEVKIT_HOOK = {"type": "command", "command": "'/home/x/.local/share/devkit/releases/26.11.9/bin/dev' hook stop"}
 OWN_HOOK = {"type": "command", "command": "/usr/local/bin/my-notifier"}
-DEVKIT_MCP = {"chrome-devtools": {"command": "npx", "args": ["chrome-devtools-mcp"]}}  # devkit's catalog, in tests
+CATALOG_MCP = {"chrome-devtools": {"command": "npx", "args": ["chrome-devtools-mcp"], "env": {"X": "1"}},  # devkit's
+               "angular-cli": {"command": "npx", "args": ["-y", "@angular/cli@22.2.6", "mcp"]}}  # catalog, in tests
+# the person's own server under a name devkit also uses, set up as Angular's docs show
+OWN_ANGULAR = {"command": "npx", "args": ["-y", "@angular/cli", "mcp"]}
 
 
 class AgentOffTests(unittest.TestCase):
@@ -910,7 +913,11 @@ class AgentOffTests(unittest.TestCase):
         (codex / "config.toml").write_text(
             'model = "gpt-6"\napproval_policy = "on-request"\n\n[projects."/Users/ana/work"]\ntrust_level = "trusted"\n'
             '\n[mcp_servers.chrome-devtools]\ncommand = "npx"\nargs = ["chrome-devtools-mcp"]\n\n'
-            '[mcp_servers.chrome-devtools.env]\nX = "1"\n\n[mcp_servers.mine]\ncommand = "my-mcp"\n')
+            '[mcp_servers.chrome-devtools.env]\nX = "1"\n\n[mcp_servers.mine]\ncommand = "my-mcp"\n\n'
+            '[mcp_servers.angular-cli]\ncommand = "npx"\nargs = ["-y", "@angular/cli", "mcp"]\n')
+        (tmp / ".claude.json").write_text(json.dumps({"numStartups": 3, "mcpServers": {
+            "chrome-devtools": {"type": "stdio", **CATALOG_MCP["chrome-devtools"]},
+            "angular-cli": {"type": "stdio", **OWN_ANGULAR, "env": {}}}}))
         (codex / "fast.config.toml").write_text("# Managed by devkit (config/codex/config.json → profiles).\n")
         (codex / "work.config.toml").write_text("model = 'mine'\n")
         (codex / "agents" / "neo.toml").write_text(setup.CODEX_ROLE_MARK + " (config/crew.json).\nname = 'neo'\n")
@@ -933,7 +940,7 @@ class AgentOffTests(unittest.TestCase):
                   mock.patch.object(core, "older_copy", lambda: None), mock.patch.object(core, "have", lambda t: False),
                   mock.patch.object(core, "set_by_developer", lambda *a, **k: person),
                   mock.patch.object(setup, "_audit", lambda *a, **k: (audits if audits is not None else []).append(a)),
-                  mock.patch("devkit.ext.effective_mcp", lambda a: dict(DEVKIT_MCP))):
+                  mock.patch("devkit.ext.effective_mcp", lambda a: dict(CATALOG_MCP))):
             stack.enter_context(p)
         return stack
 
@@ -1016,6 +1023,38 @@ class AgentOffTests(unittest.TestCase):
             self.assertFalse((claude / "CLAUDE.md").exists())
             self.assertFalse((claude / "skills" / "tdd").exists())
             self.assertTrue((codex / "AGENTS.md").exists())
+
+    def test_turning_codex_off_keeps_the_persons_own_mcp_server_under_a_name_devkit_uses(self):
+        """An MCP server is devkit's only when it is the one devkit's catalog writes (same command, arguments, URL and
+        environment): the person's angular-cli, set up as Angular's docs show, stays even on a first Claude-Code-only
+        install where devkit never wrote to Codex, and the message names only the servers that went."""
+        with tempfile.TemporaryDirectory() as tmp:
+            gone, claude, codex, agents = self.remove(Path(tmp), "codex")
+            toml = (codex / "config.toml").read_text()
+        self.assertNotIn("chrome-devtools", toml)
+        self.assertIn('[mcp_servers.angular-cli]\ncommand = "npx"\nargs = ["-y", "@angular/cli", "mcp"]', toml)
+        self.assertEqual([g for g in gone if g.startswith("MCP")], ["MCP servers in config.toml (chrome-devtools)"])
+
+    def test_turning_claude_code_off_removes_only_devkits_mcp_servers_after_a_backup(self):
+        """Claude Code keeps its MCP servers in ~/.claude.json: devkit backs it up, then asks `claude mcp remove`
+        only for the server that is devkit's catalog entry; the person's angular-cli is never named."""
+        calls = []
+
+        def sh(argv, **k):
+            calls.append(list(argv))
+            return 0, "", ""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            claude, codex, agents, share = self.homes(tmp)
+            with self.patched(tmp, claude, codex, agents, share), mock.patch.object(setup, "sh", sh), \
+                    mock.patch.object(core, "have", lambda t: t == "claude"):
+                gone = setup.remove_agent("claude")
+            saved = [p.read_text() for p in (tmp / "state" / "backups").glob(".claude.json.*")]
+            original = (tmp / ".claude.json").read_text()
+        removes = [c for c in calls if c[:3] == ["claude", "mcp", "remove"]]
+        self.assertEqual(removes, [["claude", "mcp", "remove", "-s", "user", "chrome-devtools"]])
+        self.assertEqual(saved, [original])
+        self.assertIn("MCP servers (chrome-devtools)", gone)
 
     def test_removing_twice_changes_nothing_more(self):
         with tempfile.TemporaryDirectory() as tmp:

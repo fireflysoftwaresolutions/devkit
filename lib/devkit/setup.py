@@ -1833,9 +1833,26 @@ def remove_agent(agent: str) -> list:
     return gone
 
 
+def _mcp_shape(spec) -> tuple:
+    """What an MCP server runs, as the agents store it: (command, args, url, env). Claude Code adds `type` and an
+    empty `env`, so neither counts."""
+    spec = spec if isinstance(spec, dict) else {}
+    env = spec.get("env") if isinstance(spec.get("env"), dict) else {}
+    args = spec.get("args") if isinstance(spec.get("args"), list) else []
+    return (str(spec.get("command") or ""), [str(a) for a in args], str(spec.get("url") or ""),
+            {str(k): str(v) for k, v in env.items()})
+
+
+def _devkit_mcp(catalog: dict, installed: dict) -> list:
+    """The names in `installed` ({name: spec}) that are devkit's: the server devkit's catalog writes under that name,
+    the same command, arguments, URL and environment. A name alone proves nothing: angular-cli or chrome-devtools
+    may be the person's own, set up as the vendor's docs show, and that one stays."""
+    return [n for n, spec in catalog.items() if n in installed and _mcp_shape(installed[n]) == _mcp_shape(spec)]
+
+
 def _remove_agent(agent: str, home: Path) -> list:
     from . import ext
-    gone, mcp, own = [], list(ext.effective_mcp(agent)), _own_plugin_ids(agent)
+    gone, catalog, own = [], ext.effective_mcp(agent), _own_plugin_ids(agent)
     rules = home / ("CLAUDE.md" if agent == "claude" else "AGENTS.md")
     if remove_generated_rules(rules):
         gone.append(f"rules ({tilde(rules)})")
@@ -1864,6 +1881,11 @@ def _remove_agent(agent: str, home: Path) -> list:
                 os.replace(tmp, f)
                 gone.append("hooks, status line and plugin entry in settings.json")
         if core.have("claude"):
+            claude_json = HOME / ".claude.json"  # Claude Code's user-scope MCP servers, beside its account state
+            servers = (read_json(claude_json, {}) or {}).get("mcpServers") if claude_json.is_file() else None
+            mcp = _devkit_mcp(catalog, servers if isinstance(servers, dict) else {})
+            if mcp:
+                backup(claude_json)
             removed = [m for m in mcp if sh(["claude", "mcp", "remove", "-s", "user", m], timeout=30)[0] == 0]
             removed_plugins = [p for p in own if sh(["claude", "plugin", "uninstall", p], timeout=120)[0] == 0]
             if removed:
@@ -1883,9 +1905,11 @@ def _remove_agent(agent: str, home: Path) -> list:
                 f.unlink()
             gone.append(f"hooks ({tilde(f)})")
     toml = CODEX_HOME / "config.toml"
-    if toml.is_file() and mcp:
+    if toml.is_file() and catalog:
         text = toml.read_text()
-        new = _without_toml_tables(text, [f"mcp_servers.{m}" for m in mcp])
+        servers, _ = ext.codex_mcp_servers(text)  # a server with lines the reader cannot read is never devkit's
+        mcp = _devkit_mcp(catalog, {n: e["table"] for n, e in servers.items() if not e["unread"]})
+        new = _without_toml_tables(text, [f"mcp_servers.{m}" for m in mcp]) if mcp else text
         if new != text:
             backup(toml)
             toml.write_text(new)
