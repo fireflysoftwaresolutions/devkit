@@ -1922,8 +1922,7 @@ class _Wizard:
             term.write(f"\n  {ui.logo_inline()}  {tui.dim('setup')}\n\n  {tui.bold('Applying your plan')}\n"
                        f"  {tui.dim('This runs on its own. Ctrl+C skips or stops a step.')}\n\n")
         paused = self._run_stages(run)
-        self.log.close()
-        return self._finish(run, paused)
+        return self._finish(run, paused)  # it closes the log: the summary's menu may run more steps into it
 
     def _run_stages(self, run, only=None) -> bool:
         """Run the steps of both stages (only those in `only`, when given) -> whether the person stopped the setup."""

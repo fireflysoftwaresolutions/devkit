@@ -125,6 +125,8 @@ class Mac:
         name = self.name(argv)
         self.ran.append([str(a) for a in argv])
         self.events.append(("exec", name))
+        if log:  # as the real runner does: every command goes to the setup log first
+            log.write(f"\n$ {' '.join(map(str, argv))}\n")
         bf = next((a.split("=", 1)[1] for a in map(str, argv) if a.startswith("--file=")), None)
         if bf and name == "brew":
             self.brewfiles.append(Path(bf).read_text())
@@ -751,6 +753,23 @@ class SummaryTests(unittest.TestCase):
         self.assertRegex(summary, r"✗ Set up devkit +4f2c1ab is not verified: it is not a release")
         self.assertIn("dev setup --resume", summary.split("To finish")[1])
         self.assertEqual((r.rc, r.state("configure")), (1, "failed"))
+
+    def test_try_again_from_the_summary_runs_the_failed_step_and_redraws_it(self):
+        """W-16: "Try Start Docker again" runs the failed step again (its output still goes to the setup log), and
+        the summary drawn after it says devkit is ready."""
+        tries = []
+
+        def docker(on_line):
+            tries.append(1)
+            return wizard._Exit(1, ["Colima did not start: the VM disk is locked"]) if len(tries) == 1 else 0
+        mac = Mac(docker="stopped")
+        mac.outcome["docker"] = docker
+        r = run_wizard(mac, RECOMMENDED + DOWN + ENTER)  # What now? → Try Start Docker again
+        self.assertEqual(mac.prompt("What now?")[1], ["Finish", "Try Start Docker again"])
+        self.assertEqual(len(tries), 2)
+        self.assertNotIn("closed file", r.text)
+        self.assertTrue(r.text[r.text.rindex("devkit is ready"):].startswith("devkit is ready.\n"))
+        self.assertEqual((r.rc, r.state("docker")), (0, "done"))
 
     def test_ac45_exit_codes_match_the_outcome(self):
         """INSTALL-AC-45: ready 0, a skipped sign-in 0, a failed Set up devkit 1, quit at the review 1, paused 130."""
