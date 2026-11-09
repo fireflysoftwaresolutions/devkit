@@ -114,6 +114,40 @@ class ApplyPatchOnAgentSettings(unittest.TestCase):
                 self.assertEqual(self.verdict(body), want)
 
 
+class TomlWithoutTomllib(unittest.TestCase):
+    """Python before 3.11 has no tomllib (macOS's /usr/bin/python3 is 3.9): the guard reads TOML keys itself there,
+    with escapes decoded and comments and strings set aside, so a spelling only a parser reads still counts. A key
+    with an escape the guard cannot decode, set to false, counts as hooks off."""
+
+    OFF = ('[features]\n"hoo\\u006bs" = false', 'features."codex_hoo\\U0000006bs" = false',
+           'features = { a = 1, "hoo\\u006Bs" = false }', "[features]\n'hooks' = false # off",
+           '# """\n[features]\n"hoo\\u006bs" = false\n# """', '[features]\n"hoo\\qks" = false')
+    ON = ('[features]\n"hoo\\u006bs" = true', '[features]\nnote = "a\\nhooks = false"',
+          '[features]\nnote = """\n"hoo\\u006bs" = false\n"""', '# "hoo\\u006bs" = false\n[features]\nmodel = "a"',
+          '[features]\n"my\\u005fhooks" = false')
+
+    def test_every_toml_spelling_counts_without_tomllib(self):
+        for text, want in [(t, True) for t in self.OFF] + [(t, False) for t in self.ON]:
+            with self.subTest(text=text), mock.patch.dict(sys.modules, {"tomllib": None}):
+                self.assertEqual(guard._toml_hooks_off(text), want)
+
+    def test_a_write_and_an_edit_are_judged_without_tomllib(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        cfg = Path(guard.real(tmp.name)) / ".codex" / "config.toml"
+        cfg.parent.mkdir()
+        cfg.write_text("[features]\ncodex_hooks = true\n")
+        with mock.patch.dict(sys.modules, {"tomllib": None}):
+            for new, want in (('"codex_hoo\\u006bs" = false', "deny"), ('"codex_hoo\\u006bs" = true', "allow")):
+                with self.subTest(new=new):
+                    v = guard.check("Edit", {"file_path": str(cfg), "old_string": "codex_hooks = true",
+                                             "new_string": new}, tmp.name, "codex")
+                    self.assertEqual((v or ("allow",))[0], want)
+                    v = guard.check("Write", {"file_path": str(cfg), "content": f"[features]\n{new}\n"}, tmp.name,
+                                    "codex")
+                    self.assertEqual((v or ("allow",))[0], want)
+
+
 class EditsOnAgentSettings(unittest.TestCase):
     """Edit and MultiEdit are judged by the file's text after the edits, as Write is by its content: an edit that turns
     a true into a false matches no pattern in its new_string alone. An edit whose old_string is not in a settings file

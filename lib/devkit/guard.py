@@ -1866,14 +1866,77 @@ DEVKIT_OFF = [
 _HOOK_KEYS = ("hooks", "codex_hooks")
 
 
+_TOML_ESCAPE = re.compile(r"\\(?:u([0-9A-Fa-f]{4})|U([0-9A-Fa-f]{8})|x([0-9A-Fa-f]{2})|([\s\S]))")
+_TOML_SIMPLE_ESCAPES = {"b": "\b", "t": "\t", "n": "\n", "f": "\f", "r": "\r", "e": "\x1b", '"': '"', "\\": "\\"}
+_TOML_STRING = re.compile(r'"""(?:\\[\s\S]|[^\\])*?"""(?!")|"""(?:\\[\s\S]|[^\\])*?""""{1,2}|\'\'\'[\s\S]*?\'\'\'\'{0,2}'
+                          r'|"((?:\\.|[^"\\\n])*)"|\'([^\'\n]*)\'')
+
+
+def _toml_unescape(body: str):
+    """A TOML basic string's text with its escapes decoded (TOML 1.0 and 1.1's \\x and \\e), or None when it holds
+    an escape TOML does not have."""
+    bad = []
+
+    def one(m):
+        u4, u8, x2, c = m.groups()
+        if u4 or u8 or x2:
+            try:
+                return chr(int(u4 or u8 or x2, 16))
+            except (ValueError, OverflowError):
+                bad.append(m.group(0))
+                return ""
+        if c in _TOML_SIMPLE_ESCAPES:
+            return _TOML_SIMPLE_ESCAPES[c]
+        bad.append(m.group(0))
+        return ""
+    text = _TOML_ESCAPE.sub(one, body)
+    return None if bad else text
+
+
+def _toml_keys_off(text: str) -> bool:
+    """The TOML check without a parser (Python before 3.11 has no tomllib): comments are dropped, a quoted string that
+    decodes to a bare key is written as that key and any other string as "_", and the hooks pattern judges what is
+    left, so `"hoo\\u006bs" = false` counts as Codex reads it. A key with an escape TOML does not have, set to false,
+    counts as hooks off (fail closed)."""
+    out, i, n = [], 0, len(text)
+    while i < n:
+        nxt = re.compile(r"[#\"']").search(text, i)
+        if not nxt:
+            out.append(text[i:])
+            break
+        out.append(text[i:nxt.start()])
+        i = nxt.start()
+        c = text[i]
+        if c == "#":  # a comment, to the end of its line
+            j = text.find("\n", i)
+            i = n if j < 0 else j
+            continue
+        m = _TOML_STRING.match(text, i) if c in "\"'" else None
+        if not m:
+            out.append(c)
+            i += 1
+            continue
+        i = m.end()
+        basic, literal = m.group(1), m.group(2)
+        key = _toml_unescape(basic) if basic is not None else literal
+        if key is None and re.match(r"[ \t]*=[ \t]*false\b", text[i:]):
+            return True
+        out.append(f'"{key}"' if key is not None and re.fullmatch(r"[\w-]+", key) else '"_"')
+    return bool(DEVKIT_OFF[-1][0].search("".join(out)))
+
+
 def _toml_hooks_off(text: str) -> bool:
-    """True when `text` parses as TOML and sets hooks or codex_hooks to false in any table: the spellings a pattern
-    misses, such as a key with a \\u escape, count as Codex reads them."""
+    """True when `text` sets hooks or codex_hooks to false in any table as Codex reads it: parsed with tomllib, or read
+    by _toml_keys_off where Python has no tomllib or the text does not parse (a patch's lines without the file), so
+    the spellings a pattern misses, such as a key with a \\u escape, count."""
     try:
         import tomllib
+    except ImportError:
+        return _toml_keys_off(text)
+    try:
         data = tomllib.loads(text)
-    except Exception:  # not TOML (yet): the patterns judge it
-        return False
+    except Exception:  # not TOML (yet): the keys as written judge it
+        return _toml_keys_off(text)
 
     def off(d) -> bool:
         return any((k in _HOOK_KEYS and v is False) or (isinstance(v, dict) and off(v)) for k, v in d.items())
