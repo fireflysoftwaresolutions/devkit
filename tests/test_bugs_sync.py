@@ -439,9 +439,9 @@ class ConcurrencyTests(StateCase):
 
 
 class WiringTests(StateCase):
-    def run_sync(self, *flags, cfg=None):
+    def run_sync(self, *flags, cfg=None, extra=()):
         calls = []
-        stubs = [mock.patch.object(bugs, "sync", lambda: calls.append(True) or {}),
+        stubs = [*extra, mock.patch.object(bugs, "sync", lambda: calls.append(True) or {}),
                  mock.patch("devkit.registry.build", lambda **k: {"projects": [], "sessions": []}),
                  mock.patch("devkit.registry.write_outputs", lambda reg: []),
                  mock.patch("devkit.dashboard.write", lambda reg: None),
@@ -462,6 +462,13 @@ class WiringTests(StateCase):
             a = cli.build_parser().parse_args(["sync", "--scheduled", "--quiet", "--no-push", *flags])
             a.fn(a)
         return calls
+
+    def test_the_hourly_sync_sweeps_other_sessions_store(self):
+        # Without the sweep nothing expires in the peers store: told messages, ended sessions' boxes, void claims and
+        # old escalations pile up, and every Stop gate, welcome and dev status reads them all
+        swept = []
+        self.run_sync(extra=[mock.patch("devkit.peers.sweep", lambda now=None: swept.append(True) or {})])
+        self.assertEqual(swept, [True])
 
     def test_the_hourly_sync_refreshes_the_registry_unless_offline_or_switched_off(self):
         self.assertEqual(self.run_sync(), [True])

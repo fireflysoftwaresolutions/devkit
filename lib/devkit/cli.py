@@ -1584,6 +1584,11 @@ def cmd_sync(a):
                 approvals.sweep()
             except Exception:
                 pass
+            try:  # other sessions' store: told messages, ended sessions' boxes, void claims, old escalations
+                from . import peers
+                peers.sweep()
+            except Exception:
+                pass
         try:
             from . import sleep as _sleep
             if a.scheduled and _sleep.due() and not (core.HOME / "Library" / "LaunchAgents" /
