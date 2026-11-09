@@ -355,6 +355,20 @@ class Plans(Shared):
             self.assertEqual(sorted(told), sorted(f"{r}.{n}" for r, n in kept),
                              f"round {rnd}: told {told}, the plan keeps {kept}")
 
+    def test_sessions_revising_one_plan_at_once_take_turns_and_all_succeed(self):
+        # Four sessions revise the same plan in the same second: each waits for the one before it instead of being
+        # refused, so every revision succeeds, with a version of its own
+        self.ana.ok("plan", "new", "Invoice export")
+        plan = next(self.ana.handoff.glob(f"plans/{WIDGET}/*-invoice-export.md"))
+        sessions = (("claude", "s1"), ("codex", "t1"), ("claude", "s2"), ())
+        for rnd in range(3):
+            res = self.ana.together([(("plan", "revise", plan, "--why", f"round {rnd} by {n}"), s, None, None)
+                                     for n, s in enumerate(sessions)])
+            self.assertEqual([r.returncode for r in res], [0, 0, 0, 0],
+                             "\n".join(r.stdout + r.stderr for r in res if r.returncode))
+        versions = re.findall(r"(?m)^- v(\d+) · .* · revised", plan.read_text())
+        self.assertEqual(sorted(int(v) for v in versions), list(range(2, 14)))
+
 
 # --------------------------------------------------------------------------- the audit trail
 
