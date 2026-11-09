@@ -1817,6 +1817,25 @@ def _without_toml_tables(text: str, tables) -> str:
     return re.sub(r"\n{3,}", "\n\n", "".join(out))
 
 
+def _replace_text(f: Path, text: str):
+    """Write `text` over `f` whole: a temporary file in the same folder with f's own mode (0600 for a new file), then
+    a rename, so Ctrl+C or a crash leaves the old file or the new one, never half of one, and no temporary file."""
+    import tempfile
+    mode = (os.stat(f).st_mode & 0o7777) if f.exists() else 0o600
+    fd, tmp = tempfile.mkstemp(dir=f.parent, prefix=f".{f.name}.", suffix=".devkit-tmp")
+    try:
+        with os.fdopen(fd, "w") as out:
+            out.write(text)
+        os.chmod(tmp, mode)
+        os.replace(tmp, f)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 _TOML_HEADER = re.compile(r"\s*\[\[?\s*([^\]]+?)\s*\]\]?\s*(#.*)?$")
 CODEX_FULL_ACCESS = {"approval_policy": "never", "sandbox_mode": "danger-full-access"}  # config/codex/config.json
 
@@ -1949,9 +1968,7 @@ def _remove_agent(agent: str, home: Path) -> list:
                 modes.append("the skipped bypass warning")
             if new != cur:
                 backup(f)
-                tmp = f.with_suffix(".json.devkit-tmp")
-                tmp.write_text(json.dumps(new, indent=2, ensure_ascii=False) + "\n")
-                os.replace(tmp, f)
+                _replace_text(f, json.dumps(new, indent=2, ensure_ascii=False) + "\n")
                 if {k: v for k, v in new.items() if k not in ("permissions", "skipDangerousModePermissionPrompt")} != \
                         {k: v for k, v in cur.items() if k not in ("permissions", "skipDangerousModePermissionPrompt")}:
                     gone.append("hooks, status line and plugin entry in settings.json")
@@ -1971,13 +1988,15 @@ def _remove_agent(agent: str, home: Path) -> list:
                 gone.append(f"the {', '.join(removed_plugins)} plugin")
         return gone
     f = CODEX_HOME / "hooks.json"
-    cur = (read_json(f, {}) or {}).get("hooks") if f.is_file() else None
+    doc = read_json(f, None) if f.is_file() else None
+    cur = doc.get("hooks") if isinstance(doc, dict) else None
     if isinstance(cur, dict):
         kept = merge_hooks(cur, {})
         if kept != cur:
             backup(f)
-            if kept:
-                f.write_text(json.dumps({"hooks": kept}, indent=2) + "\n")
+            rest = {k: v for k, v in doc.items() if k != "hooks"}  # keys of the file other than hooks stay
+            if kept or rest:
+                _replace_text(f, json.dumps({**rest, **({"hooks": kept} if kept else {})}, indent=2) + "\n")
             else:
                 f.unlink()
             gone.append(f"hooks ({tilde(f)})")
@@ -1990,7 +2009,7 @@ def _remove_agent(agent: str, home: Path) -> list:
         new, modes = _without_devkit_modes(new, DEV)
         if new != text:
             backup(toml)
-            toml.write_text(new)
+            _replace_text(toml, new)
             if mcp:
                 gone.append(f"MCP servers in config.toml ({', '.join(mcp)})")
             if modes:

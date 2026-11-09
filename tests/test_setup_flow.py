@@ -1196,6 +1196,34 @@ class AgentOffTests(unittest.TestCase):
         self.assertIn("approval_policy never, sandbox_mode danger-full-access and 2 trusted project roots in "
                       "config.toml", gone)
 
+    def test_codex_files_are_replaced_whole_keep_their_mode_and_other_keys(self):
+        """hooks.json and config.toml are written to a temporary file in the same folder and renamed over the old
+        one: config.toml keeps its 0600, hooks.json keeps keys other than `hooks`, and a write that fails halfway
+        leaves the old file whole, with no temporary file behind."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            claude, codex, agents, share = self.homes(tmp)
+            hooks = json.loads((codex / "hooks.json").read_text())
+            (codex / "hooks.json").write_text(json.dumps({**hooks, "version": 2}))
+            os.chmod(codex / "config.toml", 0o600)
+            with self.patched(tmp, claude, codex, agents, share):
+                setup.remove_agent("codex")
+            self.assertEqual(json.loads((codex / "hooks.json").read_text()),
+                             {"version": 2, "hooks": {"Stop": [{"hooks": [OWN_HOOK]}]}})
+            self.assertEqual(stat.S_IMODE((codex / "config.toml").stat().st_mode), 0o600)
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            claude, codex, agents, share = self.homes(tmp)
+            before = (codex / "config.toml").read_text()
+
+            def broken(src, dst):
+                raise OSError("disk full")
+            with self.patched(tmp, claude, codex, agents, share), mock.patch.object(setup.os, "replace", broken):
+                with self.assertRaises(OSError):
+                    setup.remove_agent("codex")
+            self.assertEqual((codex / "config.toml").read_text(), before)
+            self.assertEqual(sorted(p.name for p in codex.iterdir() if "tmp" in p.name), [])
+
     def test_removing_twice_changes_nothing_more(self):
         with tempfile.TemporaryDirectory() as tmp:
             claude, codex, agents, share = self.homes(Path(tmp))
