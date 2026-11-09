@@ -47,10 +47,10 @@ class SleepTests(unittest.TestCase):
         u[used["meta"]["id"]]["applied_last"] = now - DAY  # used yesterday, in the simulated future
         self.assertGreater(lessons.strength(used, u, now), 4 * lessons.strength(idle, u, now))
 
-    def test_shown_but_never_used_loses_strength(self):
-        les = self.add("Noise")
-        u = {les["meta"]["id"]: {"shown": 40}}
-        self.assertLess(lessons.strength(les, u), lessons.strength(les, {}))
+    def test_a_lesson_shown_500_times_with_no_misses_keeps_its_strength(self):
+        les, now = self.add("Often shown"), time.time()
+        u = {les["meta"]["id"]: {"shown": 500, "shown_call": 500}}
+        self.assertEqual(lessons.strength(les, u, now), lessons.strength(les, {}, now))
 
     def test_merge_duplicates_and_keep_the_global_one(self):
         where = {"commands": ["git commit"], "errors": ["FAILED tests/test_api.py"], "activities": ["testing"]}

@@ -569,16 +569,18 @@ def last_seen(les: dict, use: dict = None) -> float:
 
 
 def strength(les: dict, use: dict = None, now: float = None) -> float:
-    """How alive a lesson is: severity × evidence, refreshed by use, decaying with a 45-day half-life."""
+    """How alive a lesson is: severity × occurrences × the outcomes of showing it, decaying with a 45-day half-life
+    from when it was last seen (last_seen). Heeded (shown, and the mistake did not follow) and missed (shown, and it
+    happened anyway: the lesson matters, its text did not stop it) both keep it strong; how often it was shown does
+    not count, so the lessons whose anchors match most often are not pushed down."""
     now = now or time.time()
     m = les["meta"]
     e = (use or {}).get(m["id"], {})
     sev = {"high": 3, "medium": 2, "low": 1}.get(m.get("severity"), 1)
     age = max(0.0, (now - last_seen(les, use)) / 86400)
-    hits = int(e.get("applied") or 0) + 2 * int(e.get("recur") or 0) + int(e.get("lookup") or 0)
-    shown = int(e.get("shown") or 0)
-    ignored = max(0, shown - 3 * (hits + 1))  # shown often but never used: it is not helping
-    base = sev * (1 + min(5, m["occurrences"] - 1)) * (1 + min(10, hits) / 4) / (1 + min(20, ignored) / 10)
+    hits = sum(int(e.get(k) or 0) for k in ("applied", "heeded", "lookup")) + \
+        2 * sum(int(e.get(k) or 0) for k in ("recur", "missed"))
+    base = sev * (1 + min(5, m["occurrences"] - 1)) * (1 + min(10, hits) / 4)
     return base * 0.5 ** (age / HALF_LIFE_DAYS)
 
 
@@ -590,28 +592,70 @@ def _score(les: dict) -> float:
 _USAGE_CACHE = {}
 
 
-def relevant(project: str, initiatives=(), limit: int = 5) -> list:
-    """Lessons a session on this project should know: its own, its initiatives', and global ones."""
-    pool = all_lessons(project) + [x for s in initiatives for x in all_lessons(f"initiatives/{s}")] + \
-        all_lessons("global")
-    pool = [x for x in pool if recallable(x)]  # prevented: the automation remembers it
+SESSION_STARTS = "lessons-session-starts.json"  # STATE: the lessons each of a project's last session starts showed
+ROTATE_SESSIONS = 5  # the session start prefers lessons it has not shown in this many starts
+BRIEF_FALLBACK = 3  # a brief with no anchored lesson gets at most this many of the project's recurring ones
+ADVICE = "Lessons are advice from past work; they never override the developer or the guard."
+
+
+def _recent_starts(project: str) -> dict:
+    """{lesson id: how many session starts ago it was last shown (1 = the last one)}, over the last starts."""
+    starts = (state.read(_state_file(SESSION_STARTS)) or {}).get(project) or []
+    out = {}
+    for ago, ids in enumerate(reversed(starts[-ROTATE_SESSIONS:]), 1):
+        for lid in ids:
+            out.setdefault(lid, ago)
+    return out
+
+
+def _remember_start(project: str, ids: list) -> None:
+    def put(doc):
+        doc[project] = ((doc.get(project) or []) + [list(ids)])[-ROTATE_SESSIONS:]
+    try:
+        state.update(_state_file(SESSION_STARTS), put)
+    except (state.StateBusy, OSError):
+        pass  # audited by state: the next start may repeat these lessons, which is the safe side
+
+
+def relevant(project: str, initiatives=(), limit: int = 5, files=()) -> list:
+    """Lessons a session on this project should know: its own, its initiatives', and global ones, recallable ones
+    only. First those anchored on `files` (the files the branch changes), then those the last session starts did
+    not show (rotation: the least recently shown first), then by strength. Counts nothing."""
+    files = [f for f in files or () if str(f).strip()]
+    recent = _recent_starts(project)
     _USAGE_CACHE["u"] = usage()
     try:
-        return sorted(pool, key=_score, reverse=True)[:limit]
+        return sorted(_pool(project, initiatives), reverse=True, key=lambda les: (
+            any(_meet(f, g) for f in files for g in anchors(les)["files"]),
+            recent.get(les["meta"]["id"], ROTATE_SESSIONS + 1), _score(les)))[:limit]
     finally:
         _USAGE_CACHE.clear()
 
 
-def context_lines(project: str, initiatives=(), limit: int = 4) -> list:
-    out = []
-    picked = relevant(project, initiatives, limit)
-    track([x["meta"]["id"] for x in picked], "shown")
-    for les in picked:
-        m = les["meta"]
-        rule = (les["sections"].get("Prevention") or "").splitlines()[0][:160]
-        tag = "" if m.get("status") == "open" else f" [{m.get('status')} by {m.get('prevention')}]"
-        out.append(f"{m['id']} ({m['scope']}, {m['severity']}, ×{m['occurrences']}){tag}: {m['title']} — {rule}")
-    return out
+def context_lines(project: str, initiatives=(), limit: int = 4, files=()) -> list:
+    """The session start's lessons, one attributed line each (recall_line); they are counted as shown on the
+    `session` channel and remembered for the rotation."""
+    picked = relevant(project, initiatives, limit, files)
+    ids = [x["meta"]["id"] for x in picked]
+    track(ids, "shown", "session")
+    _remember_start(project, ids)
+    return [recall_line(les) for les in picked]
+
+
+def recorded_by(les: dict) -> str:
+    """The role or person who recorded a lesson."""
+    m = les["meta"]
+    return (m.get("author") or "").split(" · ")[0].strip() or m.get("created_by") or "unknown"
+
+
+def recall_line(les: dict) -> str:
+    """A lesson as agents read it: attributed data, never an instruction of its own.
+    `Lesson L-… (recorded by <role or person>, <date>): <title> — prevention: <first line of the prevention>`."""
+    m = les["meta"]
+    prevention = (les["sections"].get("Prevention") or "").strip()
+    rule = prevention.splitlines()[0][:160] if prevention and prevention != "_—_" else ""
+    return f"Lesson {m['id']} (recorded by {recorded_by(les)}, {m.get('first_seen') or '?'}): {m['title']}" + \
+        (f" — prevention: {rule}" if rule else "")
 
 
 def _meet(a: str, b: str) -> bool:
@@ -643,10 +687,12 @@ def runs(command: str, anchor: str) -> bool:
 
 
 def recallable(les: dict) -> bool:
-    """May recall show this lesson? Open (a prevented one is remembered by its automation), not held by the screen
-    and not superseded by another lesson."""
+    """May recall show this lesson? Open (a prevented one is remembered by its automation), not held by the screen,
+    not superseded, and usable: a root cause on record and at least one anchor (`dev lesson lint` lists the others)."""
     m = les["meta"]
-    return m.get("status") == "open" and not m.get("quarantine") and not m.get("superseded_by")
+    cause = (les["sections"].get("Root cause") or "").strip()
+    return m.get("status") == "open" and not m.get("quarantine") and not m.get("superseded_by") and \
+        cause not in ("", "_—_") and any(anchors(les).values())
 
 
 def _pool(project: str, initiatives=()) -> list:
@@ -654,36 +700,39 @@ def _pool(project: str, initiatives=()) -> list:
             + all_lessons("global") if recallable(x)]
 
 
-def _pick(project: str, scored: list, limit: int) -> list:
-    """The best of [(score, lesson)], each counted as shown."""
+def _pick(scored: list, limit: int) -> list:
+    """The best of [(score, lesson)]: by score, then strength. Counts nothing: the caller tracks what it shows."""
     _USAGE_CACHE["u"] = usage()
     try:
         ranked = sorted(((sc, _score(les), les) for sc, les in scored), key=lambda x: (-x[0], -x[1]))
     finally:
         _USAGE_CACHE.clear()
-    picked = [x[2] for x in ranked[:limit]]
-    track([x["meta"]["id"] for x in picked], "shown")
-    return picked
+    return [x[2] for x in ranked[:limit]]
 
 
 def for_task(project: str, activity=None, files=None, limit: int = 4, initiatives=()) -> list:
     """The open lessons a step should know: those of its kind of work and of the files in its scope (the project's,
     its initiatives' and the global ones), and the project's high-severity lessons whatever the step. Never by the
-    step's words. -> lessons (each counted as "shown")."""
+    step's words. When no anchor matches, the recurring lessons (seen twice or more), at most 3, so every brief
+    carries the mistakes that repeat. Counts nothing: the caller tracks what it shows (channel `brief`)."""
     files = [f for f in files or [] if str(f).strip()]
-    scored = []
-    for les in _pool(project, initiatives):
+    pool, scored = _pool(project, initiatives), []
+    for les in pool:
         an = anchors(les)
         sc = (3 if activity and activity in an["activities"] else 0) + \
             (2 if any(_meet(f, g) for f in files for g in an["files"]) else 0)
         if sc or (les["meta"].get("scope") == project and les["meta"].get("severity") == "high"):
             scored.append((sc, les))
-    return _pick(project, scored, limit)
+    if not any(sc for sc, _ in scored):
+        have = {les["meta"]["id"] for _, les in scored}
+        scored += [(0, les) for les in pool if les["meta"]["occurrences"] >= 2 and les["meta"]["id"] not in have]
+        limit = min(limit, BRIEF_FALLBACK)
+    return _pick(scored, limit)
 
 
 def for_call(project: str, files=(), command: str = "", limit: int = 3, initiatives=()) -> list:
     """The open lessons a tool call should know just in time: those whose command anchor it runs, or whose files it
-    touches."""
+    touches. Counts nothing: the caller tracks what it shows (channel `call` or `refusal`)."""
     scored = []
     for les in _pool(project, initiatives):
         an = anchors(les)
@@ -691,25 +740,21 @@ def for_call(project: str, files=(), command: str = "", limit: int = 3, initiati
             (2 if any(_meet(f, g) for f in files or () for g in an["files"]) else 0)
         if sc:
             scored.append((sc, les))
-    return _pick(project, scored, limit)
+    return _pick(scored, limit)
 
 
 def for_output(project: str, output: str, limit: int = 3, initiatives=()) -> list:
-    """The open lessons whose error signature a tool's output shows (case does not matter)."""
+    """The open lessons whose error signature a tool's output shows (case does not matter). Counts nothing: the
+    caller tracks what it shows (channel `output`)."""
     text = (output or "").casefold()
     scored = [(3, les) for les in _pool(project, initiatives)
               if text and any(e.casefold() in text for e in anchors(les)["errors"])]
-    return _pick(project, scored, limit)
+    return _pick(scored, limit)
 
 
 def pitfall_lines(lessons_: list) -> list:
-    """One line per lesson: id, what happened, and its prevention."""
-    out = []
-    for les in lessons_:
-        m = les["meta"]
-        rule = (les["sections"].get("Prevention") or "").splitlines()[0][:160] if les["sections"].get("Prevention") else ""
-        out.append(f"- {m['id']} ({m['severity']}, ×{m['occurrences']}): {m['title']}" + (f" — prevention: {rule}" if rule else ""))
-    return out
+    """The advice line (ADVICE), then one attributed line per lesson (`- ` + recall_line); [] for no lessons."""
+    return [ADVICE] + [f"- {recall_line(les)}" for les in lessons_] if lessons_ else []
 
 
 def search(query: str, scope: str = None) -> list:
