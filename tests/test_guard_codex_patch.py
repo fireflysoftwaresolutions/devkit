@@ -305,6 +305,19 @@ class ShellWritesOnAgentSettings(unittest.TestCase):
             ("git rm --cached --no-cached .claude/settings.json", "git rm -r --cached .claude/settings.json"),
         ])
 
+    def test_only_git_commands_known_to_write_no_work_tree_file_are_text_free(self):
+        # a git command the guard does not list as a reader may write a file it names (an archive, a bundle, a merge
+        # tool, a config file), and a reader's output option or grep's pager writes too
+        self.pairs([
+            ("git diff --output=.claude/settings.json", "git diff --stat .claude/settings.json"),
+            ("git log --outp .claude/settings.json", "git log --oneline .claude/settings.json"),
+            ("git archive -o .claude/settings.json HEAD", "git archive -o out.tar HEAD"),
+            ("git bundle create .claude/settings.json HEAD", "git bundle create repo.bundle HEAD"),
+            ("git mergetool .claude/settings.json", "git blame .claude/settings.json"),
+            ("git config --file .claude/settings.json core.x y", "git config --file notes.ini core.x y"),
+            ("git grep -Ovi hooks .claude/settings.json", "git grep -n hooks .claude/settings.json"),
+        ])
+
     def test_only_a_known_formatter_run_to_check_writes_no_text(self):
         # --check means "write nothing" only to a formatter or linter the guard knows; any other program may write the
         # file it names whatever its flags, and a write flag in any case or abbreviation still writes

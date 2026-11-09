@@ -3032,6 +3032,12 @@ _SHELLS = {"bash", "sh", "zsh", "dash", "ksh", "fish", "csh", "tcsh"}
 # git commands that rewrite tracked files (B2a: in the handoff repository they can bring back an older note)
 _GIT_TREE_WRITES = frozenset("checkout switch reset restore revert merge pull rebase cherry-pick stash apply am mv rm "
                              "clean read-tree checkout-index update-index filter-branch filter-repo".split())
+# git commands that write no work-tree file they name (an option such as diff's --output aside): any other one (archive
+# -o, bundle create, mergetool, config --file, an alias) may write the file it is given
+_GIT_READS = frozenset("add stage commit diff diff-files diff-index diff-tree range-diff log show whatchanged shortlog "
+                       "status blame annotate grep ls-files ls-tree check-ignore check-attr rev-parse rev-list "
+                       "cat-file describe name-rev reflog show-ref for-each-ref merge-base cherry show-branch branch "
+                       "tag fetch push remote ls-remote count-objects verify-commit verify-tag help version".split())
 _INTERP = re.compile(r"^(?:python[0-9.]*|pypy[0-9.]*|node|nodejs|deno|bun|perl[0-9.]*|ruby|php|osascript|lua|tclsh|"
                      r"Rscript|swift|awk|gawk|mawk|nawk|expect|wish)$")
 
@@ -3083,7 +3089,16 @@ def _git_text_free(argv) -> bool:
     if sub == "rm":
         return _git_index_only(gargs, ("--cached", ""), "rfqn",
                                ("--force", "--quiet", "--dry-run", "--ignore-unmatch", "--sparse"))
-    return sub not in _GIT_TREE_WRITES
+    if sub not in _GIT_READS:
+        return False
+    for a in _opts_before_dashdash(gargs):
+        name = a.split("=", 1)[0]
+        if not a.startswith("--") and a.startswith("-") and sub == "grep" and "O" in a:
+            return False  # -O<pager> runs a program on the files it names
+        if a.startswith("--") and any(name.startswith(w) or (len(name) > 2 and w.startswith(name))
+                                      for w in ("--output", "--open-files-in-pager")):
+            return False
+    return True
 
 
 # formatters and linters whose --check or --list-different run writes no file: only these read a check flag as "writes
