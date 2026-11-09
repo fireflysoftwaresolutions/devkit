@@ -31,10 +31,14 @@ _MARK = r"(?:\[\s*firefly\s*>\s*devkit(?:\s*·\s*[^\]\n]{1,80})?\s*\]|devkit\b)"
 CREW_RE = re.compile(r"^[*`_\s]*\[\s*firefly\s*>\s*devkit\s*·\s*([^\]\n]{1,80}?)\s*\]", re.I)
 MARKER_RE = re.compile(r"^[*`_\s]*" + _MARK, re.I)
 LOG = STATE / "canary.jsonl"
+# The event a Codex rollout opens each turn with: task_started (0.166 and later; a spawned agent's turn has no user
+# message), user_message (earlier versions)
+CODEX_TURN_START = ("task_started", "user_message")
 
 
 def last_assistant_text(transcript_path: str):
-    """Last assistant text block of a Claude Code transcript (JSONL), reading from the end."""
+    """Last assistant text of the current turn of a Claude Code transcript or a Codex rollout (JSONL), reading from
+    the end; None when the turn has none yet."""
     try:
         p = Path(transcript_path)
         size = p.stat().st_size
@@ -50,6 +54,16 @@ def last_assistant_text(transcript_path: str):
             continue
         if e.get("type") == "user" and not e.get("isMeta") and _is_human_turn(e):
             return None  # reached the user's prompt without finding assistant text
+        p = e.get("payload") if isinstance(e.get("payload"), dict) else {}
+        if e.get("type") == "event_msg" and p.get("type") in CODEX_TURN_START:
+            return None  # Codex: reached the turn's start without finding assistant text
+        if e.get("type") == "response_item" and p.get("type") == "message" and p.get("role") == "assistant":
+            parts = p.get("content") if isinstance(p.get("content"), list) else []
+            text = "".join(str(c.get("text") or "") for c in parts
+                           if isinstance(c, dict) and c.get("type") == "output_text")
+            if text.strip():
+                return text
+            continue
         if e.get("type") != "assistant":
             continue
         content = (e.get("message") or {}).get("content")

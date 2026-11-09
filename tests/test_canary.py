@@ -8,7 +8,10 @@
 # other (the developer's decision): "Tech lead (Morpheus)", and reports end with "Needs from the tech lead:".
 # Tests carry comments, not docstrings (`dev test prove` leaves out tests with one).
 # Run: python3 -m unittest tests.test_canary
+import json
+import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -79,6 +82,28 @@ class ReasonTests(unittest.TestCase):
         self.assertIn("Backend engineer (Tank)", why)
         self.assertIn("Security engineer (The Keymaker)", why)
         self.assertIn("code spans", why)
+
+
+class CodexTranscriptTests(unittest.TestCase):
+    # a Codex 0.167 rollout: the previous turn's final message, then a new turn (task_started) with no reply yet. The
+    # new turn has no final message: the previous turn's reply is not this turn's
+    def test_a_new_codex_turn_without_a_reply_has_no_final_message(self):
+        recs = [{"type": "response_item", "payload": {"type": "message", "role": "assistant", "phase": "final_answer",
+                                                      "content": [{"type": "output_text", "text": "Done earlier."}]}},
+                {"type": "event_msg", "payload": {"type": "task_complete", "last_agent_message": "Done earlier."}},
+                {"type": "event_msg", "payload": {"type": "task_started", "turn_id": "t2"}},
+                {"type": "response_item", "payload": {"type": "message", "role": "user",
+                                                      "content": [{"type": "input_text", "text": "and now?"}]}}]
+        fd, path = tempfile.mkstemp(suffix=".jsonl")
+        self.addCleanup(os.unlink, path)
+        with os.fdopen(fd, "w") as fh:
+            fh.write("".join(json.dumps(r) + "\n" for r in recs))
+        self.assertIsNone(canary.last_assistant_text(path))
+        with open(path, "a") as fh:
+            fh.write(json.dumps({"type": "response_item", "payload": {
+                "type": "message", "role": "assistant", "phase": "final_answer",
+                "content": [{"type": "output_text", "text": "Now "}, {"type": "output_text", "text": "this."}]}}) + "\n")
+        self.assertEqual(canary.last_assistant_text(path), "Now this.")
 
 
 if __name__ == "__main__":

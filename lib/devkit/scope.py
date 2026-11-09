@@ -145,9 +145,10 @@ def decide(data: dict, sess: dict) -> bool:
     if os.environ.get("DEVKIT_SCOPE") == "all":
         return True
     path = data.get("transcript_path")
-    try:
+    try:  # the payload's final message first (Codex sends it, and Claude Code does too), else the transcript's
         from . import canary
-        declared = canary.has_marker(canary.last_assistant_text(path) or "") if path else False
+        text = data.get("last_assistant_message") or (canary.last_assistant_text(path) if path else "")
+        declared = canary.has_marker(text or "")
     except Exception:
         declared = False
     last = sess.get("scope_last")
