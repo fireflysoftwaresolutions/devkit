@@ -221,6 +221,17 @@ class DevelopersSetup(unittest.TestCase):
                 (why,) = self.verdict(cmd)
                 self.assertIn("own terminal", why)
 
+    def test_a_key_with_extra_dots_names_the_same_setting(self):
+        # dev config set drops empty key parts, so .agents.codex and bugs..share are agents.codex and bugs.share
+        self.assertEqual(self.verdict("dev config set .progress..max_parallel 6"), {"allow"})
+        for cmd, said in (("dev config set .agents.codex false", "own terminal"),
+                          ("dev config set ..safeguards.irreversible_main false", "safeguards"),
+                          ("dev config set .audit.enabled false", "audit"),
+                          ("dev config set bugs..share on", "bugs.share")):
+            with self.subTest(cmd=cmd):
+                (why,) = self.verdict(cmd)
+                self.assertIn(said, why)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -4130,7 +4130,10 @@ class _Shell:
             if vendor_ext_refusal(inner, cwd, names):
                 return deny(EXT_REASON, key="vendor-ext")
         if words[:2] == ["config", "set"]:
-            keys = [k for a in args[2:] for k in {a.casefold(), a.casefold().split("=", 1)[-1]}]
+            # dev config set drops empty key parts (core.config_set): .agents.codex and bugs..share name agents.codex
+            # and bugs.share
+            keys = [".".join(p for p in k.split(".") if p) for a in args[2:]
+                    for k in {a.casefold(), a.casefold().split("=", 1)[-1]}]
             if any(k.startswith("safeguards") for k in keys):
                 return deny(SAFEGUARDS_REASON, key="config-safeguards")
             if any(re.match(r"audit(?:\.|=|$)", k) for k in keys):
