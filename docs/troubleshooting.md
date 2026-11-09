@@ -69,8 +69,10 @@ The wizard shows the failed step with three lines:
 | `Fix:` | The one command that fixes or repeats the step, such as `dev docker up` or `dev setup --resume` |
 
 The other steps still run; a step that needs the failed one shows `waits for <step>`. The summary repeats each item
-with its command, and its **What now?** menu offers to try the failed step again. To continue another time, with the
-answers you gave:
+with its command, and its **What now?** menu offers to try the failed step again. When the failed step is one devkit
+needs (saving your choices, setting up devkit, or installing a chosen agent), the summary opens with
+`✗ devkit is not ready yet.` and lists the step under **Needs attention**, and the setup exits with code `1`. To
+continue another time, with the answers you gave:
 
 ```bash
 dev setup --resume

@@ -56,7 +56,8 @@ command and a few presses of Return. Have your Mac's login password and your Git
    **Sign in with the browser** or **Sign in with a code**, and **Skip for now**. If a sign-in does not finish, the
    panel comes back with the reason and lets you try again.
 9. **The summary.** The setup ends with `✓ devkit is ready.` and the first three things to do, or with what is
-   left for later and the one command that finishes each item.
+   left for later and the one command that finishes each item. When a step devkit needs did not finish, it says
+   `✗ devkit is not ready yet.` and lists that step first, under **Needs attention**, with its command.
 10. **Open a new Terminal window** (Command-N), so that the `dev` command works, and run:
 
     ```bash
@@ -204,9 +205,17 @@ sign-ins at the end.
    panel with **Sign in with the browser**, **Sign in with a code** (Codex), **Sign in with your company's single
    sign-on** or **Sign in with an Anthropic Console account** (Claude Code), and **Skip for now**. If you chose to
    lock Claude Code's settings, the wizard asks for your Mac password here. Then `dev doctor` checks the setup.
-7. **The summary.** `✓ devkit is ready.` with the first three things to do, or what is left for later with the
-   reason and the command for each item, and a **What now?** menu with **Finish**, **Sign in to Codex now**, or
-   **Try Start Docker again**.
+7. **The summary.** It ends the setup in one of three ways:
+   - `✓ devkit is ready.` with what was done and the first three things to do.
+   - `✓ devkit is ready. 2 things are left for later.` with each item left, its reason, and the command that
+     finishes it under `To finish, open a new Terminal window, then run:`.
+   - `✗ devkit is not ready yet. 1 step failed.` when a required step did not finish. **Needs attention** lists that
+     step and the steps that wait for it, then what was done and what is left for later, with the commands. For a
+     devkit bug, the summary also names the crash file to send to your devkit contact.
+
+   When something is left, a **What now?** menu follows. It offers **Finish** and, as they apply, **Try Set up devkit
+   again** (a required step that failed), **Sign in to Codex now** (a skipped sign-in), or **Try Start Docker again**
+   (an optional step that failed).
 
 #### When a step fails or you stop it
 
@@ -308,7 +317,7 @@ with `dev install --only <step>`, which re-applies it from the copy that is inst
 | `cli` | Links `~/.local/bin/dev` to the pinned copy and adds a managed block to `~/.zshrc` that sources its `shell/devkit.zsh` |
 | `git` | Sets `user.name` and `user.email` from your GitHub account, makes `gh` git's credential helper, includes the shared git defaults, and the global ignore file |
 | `handoff` | Clones your handoff repository, or creates it as a private GitHub repository and pushes the first commit; writes the multi-machine merge rules |
-| `instructions` | Generates `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md` from `agents/AGENTS.md` (plus your personal rules), for each agent that is turned on |
+| `instructions` | Generates `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md` from `agents/AGENTS.md` (plus your personal rules), for each agent that is turned on. For an agent turned off in `dev setup`, it removes the file devkit generated and keeps one you wrote yourself, and `dev config repair` no longer counts that agent's missing file as drift |
 | `skills` | Fetches third-party skills at pinned commits (your optional groups included) and links them into each agent that is turned on |
 | `claude` | Merges settings, hooks, plugins, and MCP servers into Claude Code; reinstalls the devkit plugin when the installed copy is stale. When Claude Code is turned off in `dev setup`, removes what devkit wrote there instead: its `CLAUDE.md`, hooks, status line, skill links, MCP servers, and plugin |
 | `codex` | Configures Codex through its own app-server API, writes and trusts the hooks, writes the profiles and the `scout` role, installs plugins and MCP servers, reinstalls a stale devkit plugin. When Codex is turned off in `dev setup`, removes what devkit wrote there instead: its `AGENTS.md`, hooks, skill links, MCP servers in `config.toml`, profiles, agent roles, and plugin; your own keys stay |
