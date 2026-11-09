@@ -1,0 +1,12 @@
+# Who reviews changes to the files below. GitHub asks the owner for a review on every pull request that touches
+# them; the review is required once the main branch's ruleset turns on "Require review from Code Owners".
+#
+# The bug registry's trust: the workflow holds issues: write on every issue and comment, the script decides what it
+# folds, closes and reopens, and the maintainers file decides whose votes and closures count as a member's. The
+# script takes its trust and fold rules from lib/devkit/bugs.py (TRUSTED, fold), so that module is owned too. The
+# owner is the maintainer account that file lists. This file owns itself, so nobody drops a rule without that review.
+/.github/CODEOWNERS @ancongui
+/.github/bug-registry-maintainers @ancongui
+/.github/workflows/bug-registry.yml @ancongui
+/tools/bug_registry_action.py @ancongui
+/lib/devkit/bugs.py @ancongui
