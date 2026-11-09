@@ -257,9 +257,10 @@ you. Each wake is in the audit trail (`watch.wake`).
 Two kinds of watch follow the CI runs of a commit:
 
 - **devkit's background watch.** The PostToolUse hook starts it after a push, a pull request created or made ready,
-  a merge, or a release in a main session: one per repository, branch, and commit. It follows only what reached
-  `origin`: the pushed branch or tag, the merge commit on the default branch, the release tag. Its result reaches the
-  session at the session's next hook.
+  a merge, or a release in a main session: one per repository, branch, and commit; a second session that sends the
+  same commit joins it. It follows only what reached `origin`: the pushed branch or tag, the merge commit on the
+  default branch, the release tag. Its result reaches each of those sessions at its next hook and wakes its
+  `dev watch --wait`; a session's watch closes only once the session holds the result.
 - **The agent's wait.** `dev ci watch --wait` prints one line per finished job and a last line with the result, so
   its output wakes the agent that waits on it: through a Monitor or a background command on Claude Code, and in the
   foreground on Codex.

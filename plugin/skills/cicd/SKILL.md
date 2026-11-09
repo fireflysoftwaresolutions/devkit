@@ -92,7 +92,8 @@ integration and end-to-end tests in their own job; build once and pass the artif
 ## 6. Watch every run, and fix a failure the right way
 
 devkit watches the pipeline after every push, PR, merge or release: the PostToolUse hook starts `dev ci watch` in
-the background, and the result reaches the session that pushed, with its next action, at the session's next hook.
+the background, and the result reaches every session that sent that commit, with its next action, at the session's
+next hook.
 That wakes no idle session. When you wait on a run, arm a watch whose output wakes you, in the same turn, and name
 its task id:
 
