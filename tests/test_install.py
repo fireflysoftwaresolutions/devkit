@@ -72,12 +72,24 @@ case "$1" in
   shellenv) echo "export HOMEBREW_PREFIX='$STUB_PREFIX'; export PATH='$STUB_PREFIX/bin':\\"\\$PATH\\"" ;;
 esac
 """,
+    # `gh auth login` signs in; STUB_GH_LOGIN=fail-once fails the first time with an error line, =hang waits like a
+    # browser page nobody finishes (exec, so that stopping it stops the whole stand-in)
     "gh": """#!/bin/sh
 if [ -t 0 ]; then input=terminal; elif [ -p /dev/stdin ]; then input=pipe; else input=none; fi
 echo "gh $* ($input)" >> "$STUB_LOG"
+case "$1 $2 $3" in
+  "auth login --help") echo "  -c, --clipboard   Copy one-time OAuth device code to clipboard"; exit 0 ;;
+esac
 case "$1 $2" in
   "auth status") [ -f "$STUB_GH_SIGNED_IN" ] ;;
-  "auth login") touch "$STUB_GH_SIGNED_IN" ;;
+  "auth login")
+    echo "! First copy your one-time code: 4F2A-9C1D" >&2
+    case "${STUB_GH_LOGIN:-}" in
+      hang) exec sleep 30 ;;
+      fail-once) if [ ! -f "$STUB_GH_SIGNED_IN.tried" ]; then touch "$STUB_GH_SIGNED_IN.tried"
+                   printf 'Opening github.com in your browser.\nerror: device code expired\n' >&2; exit 1; fi ;;
+    esac
+    touch "$STUB_GH_SIGNED_IN" ;;
   "api user") echo ada ;;
   "--version ") echo "gh version 2.80.0 (2026-10-01)" ;;
 esac
@@ -89,7 +101,8 @@ DEV = """#!/usr/bin/env python3
 import json, os, select, sys
 home = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 rec = {"argv": sys.argv[1:], "stdin_tty": sys.stdin.isatty(), "home": home,
-       "python": os.environ.get("STUB_PYTHON", ""), "version": open(os.path.join(home, "VERSION")).read().strip()}
+       "python": os.environ.get("STUB_PYTHON", ""), "version": open(os.path.join(home, "VERSION")).read().strip(),
+       "installer": os.environ.get("DEVKIT_INSTALLER", "")}
 # what a program that watches its input with kqueue (Claude Code's runtime) gets from this stdin
 try:
     select.kqueue().control([select.kevent(0, select.KQ_FILTER_READ, select.KQ_EV_ADD)], 0, 0)
@@ -211,9 +224,6 @@ class BootstrapTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_through_a_pipe_it_downloads_the_newest_release_and_starts_the_wizard(self):
-        cfg = self.m.home / ".config" / "devkit" / "config.json"  # what the wizard saves: here, Claude Code only
-        cfg.parent.mkdir(parents=True)
-        cfg.write_text(json.dumps({"agents": {"claude": True, "codex": False}}))
         rc, out = self.m.pipe()
         self.assertEqual(rc, 0, out)
         self.assertEqual(self.m.release(), "v26.11.10")  # numbers, not text: 10 > 9 > 2; not main's newer commit
@@ -222,14 +232,48 @@ class BootstrapTests(unittest.TestCase):
         (setup,) = self.m.setups()
         self.assertEqual((setup["home"], setup["version"], setup["python"]),
                          (str(self.m.devkit.resolve()), "26.11.10", "homebrew"))
-        self.assertIn("devkit is for Macs with Apple silicon", out.splitlines()[0])
-        self.assertIn("macOS 26.1 on Apple silicon", out)
+        # the wizard learns the local installer, for its "run it again" lines
+        self.assertEqual(setup["installer"], str(self.m.devkit / "install.sh"))
+        self.assertEqual(out.splitlines()[0], "devkit installer")
+        headings = [ln for ln in out.splitlines() if re.match(r"\d of 5  ", ln)]
+        self.assertEqual(headings, ["1 of 5  This Mac", "2 of 5  Homebrew, git, Python and the GitHub CLI",
+                                    "3 of 5  devkit", "4 of 5  GitHub sign-in", "5 of 5  Your setup"])
+        self.assertIn("✓ macOS 26.1 on Apple silicon", out)
         self.assertNotIn("Intel", out)  # on Apple silicon, no Intel warning and no Intel claim
-        self.assertIn("devkit 26.11.10 (v26.11.10) in ~/Development/fireflysoftwaresolutions/devkit", out)
-        self.assertIn("Claude Code with devkit's shared rules", out)  # what you have now: the agents you chose
-        for first in ("Open a new Terminal window", "dev doctor", "dev dashboard", "then claude (or codex)"):
-            self.assertIn(first, out.split("What to do first")[1])
+        self.assertIn("✓ Homebrew 4.6.0 in", out)
+        self.assertIn("✓ GitHub CLI 2.80.0", out)
+        self.assertIn("✓ Downloaded devkit 26.11.10 to ~/Development/fireflysoftwaresolutions/devkit", out)
+        self.assertIn("✓ Signed in to GitHub as ada", out)
         self.assertFalse([c for c in self.m.calls() if c.startswith("brew install")])
+
+    def test_without_a_terminal_it_starts_at_once_with_no_welcome_question(self):
+        """INSTALL-AC-11: no terminal on stdin or as a device: no welcome to wait at, straight to the first step."""
+        rc, out = self.m.pipe("--no-setup")
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn("Press Enter to start", out)
+        self.assertNotIn("Nothing has changed yet", out)
+        self.assertEqual(out.splitlines()[:3], ["devkit installer", "", "1 of 5  This Mac"])
+
+    def test_after_the_wizard_ran_the_installer_adds_nothing_and_keeps_its_exit_code(self):
+        """INSTALL-AC-42: the wizard's summary is the last thing on screen, whatever its outcome (R25, R27)."""
+        for code in ("0", "1", "2", "130"):
+            with self.subTest(wizard=code):
+                rc, out = self.m.pipe(STUB_SETUP_RC=code)
+                self.assertEqual(rc, int(code), out)
+                self.assertNotIn("Summary", out)
+                self.assertNotIn("exit code", out)
+                last = out.rstrip().splitlines()[-1]
+                self.assertIn("the wizard takes every default", last)  # the line before the wizard started
+
+    def test_a_wizard_that_could_not_start_says_so_with_the_local_installer(self):
+        """INSTALL-AC-49: once devkit is downloaded, "run it again" names its local install.sh, never the URL."""
+        rc, out = self.m.pipe("--skip-packages", STUB_SETUP_RC="3")
+        self.assertEqual(rc, 1, out)
+        after = out.split("the wizard takes every default")[1]
+        self.assertIn("The setup wizard could not start.", after)
+        self.assertIn("~/Development/fireflysoftwaresolutions/devkit/install.sh --skip-packages", after)
+        self.assertIn("~/.local/state/devkit/logs/", after)
+        self.assertNotIn("raw.githubusercontent.com", out)
 
     def test_without_a_terminal_the_wizard_takes_every_default(self):
         rc, out = self.m.pipe("--skip-packages")
@@ -237,13 +281,6 @@ class BootstrapTests(unittest.TestCase):
         (setup,) = self.m.setups()
         self.assertEqual(setup["argv"], ["setup", "--skip-packages", "--yes"])
         self.assertEqual((setup["stdin_tty"], setup["wizard_asks"]), (False, False))
-
-    def test_a_stopped_setup_says_how_to_continue_where_it_stopped(self):
-        rc, out = self.m.pipe(STUB_SETUP_RC="130")
-        self.assertEqual(rc, 130, out)
-        summary = out.split("Summary")[1]
-        self.assertIn("~/Development/fireflysoftwaresolutions/devkit/bin/dev setup --resume", summary)
-        self.assertIn("continues with the answers you gave", summary)
 
     def test_no_command_gets_the_pipe_the_script_arrives_through(self):
         rc, out = self.m.pipe("--skip-packages")
@@ -270,14 +307,43 @@ class BootstrapTests(unittest.TestCase):
         self.assertFalse(self.m.devkit.exists())
         self.assertEqual(self.m.setups(), [])
 
-    def test_a_failed_step_is_named_with_the_command_to_run_again(self):
+    def test_a_failed_step_says_why_and_how_to_run_it_again(self):
+        """I-6 before the download: the reason is git's own error line, and the way to run it again is the command
+        the person started with (INSTALL-AC-49: never a URL they may not have used)."""
         rc, out = self.m.pipe("--yes", DEVKIT_REPO=f"file://{self.m.root}/missing")
-        self.assertNotEqual(rc, 0)
-        self.assertIn('The step "devkit" failed', out)
-        self.assertIn("curl -fsSL https://raw.githubusercontent.com/fireflysoftwaresolutions/devkit/main/install.sh"
-                      " | bash -s -- --yes", out)
-        self.assertEqual(out.count("failed (exit code"), 1)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("✗ devkit did not download.", out)
+        self.assertRegex(out, r"Reason: fatal: '.*missing' does not appear to be a git repository")
+        self.assertIn("Fix: run the installer again (the same command you started with).", out)
+        self.assertIn("If it fails the same way, send the full output file to your devkit contact.", out)
+        self.assertIn("Running it again is safe: finished steps are not repeated.", out)
+        self.assertIn("Full output: ~/.local/state/devkit/logs/install.log", out)
+        self.assertEqual(out.count("Reason:"), 1)
+        self.assertNotIn("raw.githubusercontent.com", out)
+        self.assertNotIn("exit code", out)
         self.assertEqual(self.m.setups(), [])
+        log = self.m.home / ".local" / "state" / "devkit" / "logs" / "install.log"
+        self.assertIn("does not appear to be a git repository", log.read_text())
+        self.assertEqual(log.stat().st_mode & 0o777, 0o600)
+
+    def test_a_failed_homebrew_install_shows_its_error_line_and_where_the_full_output_is(self):
+        """I-6: Homebrew's output stays in the log until a step fails; then its error line is the reason."""
+        (self.m.prefix / "bin" / "python3").unlink()
+        brew = self.m.stubs / "brew"
+        brew.write_text(brew.read_text().replace(
+            'echo "brew $*" >> "$STUB_LOG"',
+            'echo "brew $*" >> "$STUB_LOG"\n'
+            'if [ "$1" = install ]; then echo "==> Fetching python"; '
+            'echo "Error: python@3.15: the bottle needs the Xcode Command Line Tools" >&2; '
+            'echo "==> Cleaning up"; exit 1; fi'))
+        rc, out = self.m.pipe("--no-setup")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("✗ Python did not install.", out)
+        self.assertIn("Reason: Error: python@3.15: the bottle needs the Xcode Command Line Tools", out)
+        self.assertNotIn("==> Fetching python", out)
+        log = (self.m.home / ".local" / "state" / "devkit" / "logs" / "install.log").read_text()
+        self.assertIn("==> Fetching python", log)
+        self.assertFalse(self.m.devkit.exists())  # nothing after the failed step ran
 
     def test_outside_macos_it_stops_before_changing_anything(self):
         rc, out = self.m.pipe(STUB_OS="Linux")
@@ -295,7 +361,7 @@ class BootstrapTests(unittest.TestCase):
             self.assertIn(word, out)
         self.assertEqual(self.m.calls(), [])
 
-    def test_homebrew_installs_without_asking_and_its_output_stays_in_view(self):
+    def test_homebrew_installs_without_asking_and_its_output_goes_to_the_log(self):
         (self.m.prefix / "bin" / "python3").unlink()  # Python is missing: the installer has Homebrew install it
         brew = self.m.stubs / "brew"
         brew.write_text(brew.read_text().replace(
@@ -309,10 +375,14 @@ class BootstrapTests(unittest.TestCase):
         rc, out = self.m.pipe("--no-setup")
         self.assertEqual(rc, 0, out)
         self.assertIn("brew install python (ask: off)", self.m.calls())
-        self.assertIn("==> Installing python", out)
+        self.assertNotIn("==> Installing python", out)  # R23: Homebrew's own output only when it fails
         self.assertNotIn("Do you want to proceed", out)
+        self.assertRegex(out, r"✓ Python \d+\.\d+")
+        log = self.m.home / ".local" / "state" / "devkit" / "logs" / "install.log"
+        self.assertIn("==> Installing python", log.read_text())
 
     def test_an_annotated_release_tag_is_checked_out_without_a_warning(self):
+        """INSTALL-AC-40: git's "is not a commit" warning for an annotated tag never reaches the screen."""
         for version in ("26.11.11", "26.11.12"):
             (self.m.remote / "VERSION").write_text(version + "\n")
             git(self.m.remote, "add", "-A")
@@ -328,7 +398,7 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(head, git(self.m.remote, "rev-parse", "v26.11.12^{commit}"))  # what `dev install` pins
         self.assertNotEqual(subprocess.run(["git", "-C", str(self.m.devkit), "symbolic-ref", "-q", "HEAD"],
                                            env=GIT_ENV, capture_output=True).returncode, 0)  # detached at the tag
-        self.assertIn("downloaded v26.11.12", out)
+        self.assertIn("✓ Downloaded devkit 26.11.12 to ~/Development/fireflysoftwaresolutions/devkit", out)
 
     def test_devkit_ref_and_devkit_home_choose_the_version_and_the_folder(self):
         where = self.m.root / "elsewhere" / "devkit"
@@ -423,9 +493,8 @@ class IntelMacTests(unittest.TestCase):
                 self.assertIn("1. Quit Terminal (Command-Q).", out)
                 self.assertIn('clear "Open using Rosetta"', out)
                 self.assertNotIn("new Terminal window", out)
-                again = out.split("3. Open Terminal again and run the installer:")[1]
-                self.assertIn("curl -fsSL https://raw.githubusercontent.com/fireflysoftwaresolutions/devkit/main/"
-                              "install.sh | bash -s -- --yes", again)  # the command to run again, from the native one
+                again = out.split("3. Open Terminal again and run the same command you started with.")[1]
+                self.assertNotIn("raw.githubusercontent.com", out)  # INSTALL-AC-49: maybe not the command they used
                 self.assertIn("In a shell started with arch -x86_64, type exit instead", again)
                 # anything else, such as iTerm2: the Troubleshooting entry, at a heading that exists
                 (anchor,) = re.findall(r"/docs/troubleshooting\.md#([\w-]+)", again)
@@ -510,8 +579,16 @@ def _take_terminal():
     fcntl.ioctl(1, termios.TIOCSCTTY, 0)
 
 
+ESCAPES = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+WELCOME = "Press Enter to start, or Ctrl+C to stop."
+RETRY = "Press Enter to try again, or type q and press Enter to quit."
+
+
 @unittest.skipUnless(sys.platform == "darwin" or sys.platform.startswith("linux"), "needs a POSIX pseudo-terminal")
 class TerminalTests(unittest.TestCase):
+    """install.sh through a pipe in a terminal of its own, as `curl … | bash` runs in Terminal: the person types a key
+    when the screen shows a given text."""
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.m = Machine(Path(self.tmp.name))
@@ -519,17 +596,20 @@ class TerminalTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def test_through_a_pipe_in_a_terminal_sign_in_and_the_wizard_ask_there(self):
+    def terminal(self, *args, keys=(), **env):
+        """-> (exit code, what the screen showed, without colors). `keys`: [(text, bytes)], each typed once the
+        screen shows its text (after the previous key's); bytes may be a function that returns them, called at that
+        moment, to look at the Mac then."""
         import pty
         master, slave = pty.openpty()
-        proc = subprocess.Popen(["/bin/bash", "-s", "--"], stdin=subprocess.PIPE, stdout=slave, stderr=slave,
-                                env=self.m.env(), cwd=str(self.m.root), start_new_session=True,
+        proc = subprocess.Popen(["/bin/bash", "-s", "--", *args], stdin=subprocess.PIPE, stdout=slave, stderr=slave,
+                                env=self.m.env(**env), cwd=str(self.m.root), start_new_session=True,
                                 preexec_fn=_take_terminal)
         os.close(slave)
         self.addCleanup(lambda: proc.poll() is None and stop_session(proc))
         proc.stdin.write(INSTALL.read_bytes())
         proc.stdin.close()
-        out, deadline = b"", time.monotonic() + 60
+        keys, out, seen, deadline = list(keys), b"", 0, time.monotonic() + 60
         while time.monotonic() < deadline:
             ready = select.select([master], [], [], 0.2)[0]
             try:
@@ -537,16 +617,132 @@ class TerminalTests(unittest.TestCase):
             except OSError:  # the terminal closed: every process that had it has exited
                 break
             out += chunk
+            screen = ESCAPES.sub("", out.decode("utf-8", "replace"))
+            if keys and keys[0][0] in screen[seen:]:
+                text, typed = keys.pop(0)
+                seen = screen.index(text, seen) + len(text)
+                os.write(master, typed() if callable(typed) else typed)
             if not chunk and proc.poll() is not None:
                 break
         os.close(master)
-        self.assertEqual(proc.wait(10), 0, out.decode("utf-8", "replace"))
-        self.assertIn("gh auth login -h github.com -p https -w -s repo,read:org,workflow,gist (terminal)", self.m.calls())
+        rc = proc.wait(10)
+        return rc, ESCAPES.sub("", out.decode("utf-8", "replace").replace("\r\n", "\n"))
+
+    def test_through_a_pipe_in_a_terminal_sign_in_and_the_wizard_ask_there(self):
+        rc, out = self.terminal(keys=[(WELCOME, b"\r")])
+        self.assertEqual(rc, 0, out)
+        self.assertIn("gh auth login -h github.com -p https -w -s repo,read:org,workflow,gist --clipboard (terminal)",
+                      self.m.calls())
         (setup,) = self.m.setups()
         self.assertEqual((setup["argv"], setup["stdin_tty"], setup["wizard_asks"]), (["setup"], True, True))
         # the terminal by its own device: macOS's kqueue refuses /dev/tty, and Claude Code's sign-in crashed on it
         if sys.platform == "darwin":
             self.assertEqual(setup["stdin_kqueue"], "ok")
+        self.assertIn("5 of 5  Your setup\n  Opening the setup wizard. Press Enter to keep a recommended answer.", out)
+
+    def test_the_welcome_waits_for_enter_before_anything_changes(self):
+        """INSTALL-AC-10: the welcome says what will happen, then waits; nothing ran before Enter."""
+        looked = {}
+
+        def at_welcome():
+            looked.update(calls=self.m.calls(), devkit=self.m.devkit.exists(), state=(self.m.home / ".local").exists())
+            return b"\r"
+        self.m.signed_in.touch()
+        rc, out = self.terminal("--skip-packages", keys=[(WELCOME, at_welcome)])
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(looked, {"calls": [], "devkit": False, "state": False})
+        welcome = out.split(WELCOME)[0]
+        for line in ("devkit installer", "This sets up devkit on this Mac. It takes about 15 to 30 minutes, most of it",
+                     "  1  Check this Mac", "  2  Install Homebrew, git, Python and the GitHub CLI, if they are missing",
+                     "  3  Download devkit to ~/Development/fireflysoftwaresolutions/devkit",
+                     "  4  Sign you in to GitHub, in your browser",
+                     "  5  Ask which agents and tools you use, then install and set them up", "Nothing has changed yet."):
+            self.assertIn(line, welcome)
+        self.assertNotIn("Your Mac password", welcome)  # Homebrew is here already: no password to ask for it
+        self.assertLess(out.index(WELCOME), out.index("1 of 5  This Mac"))
+        self.assertEqual(len(self.m.setups()), 1)
+
+    def test_ctrl_c_at_the_welcome_changes_nothing(self):
+        """INSTALL-AC-10: Ctrl+C at the welcome ends the installer with nothing installed, downloaded or written."""
+        (self.m.stubs / "brew").unlink()  # a Mac without Homebrew: its installer will ask for the password
+        rc, out = self.terminal(keys=[(WELCOME, b"\x03")])
+        self.assertEqual(rc, 1, out)
+        self.assertIn("Your Mac password may be asked once, to install Homebrew.", out)
+        self.assertIn("Stopped. Nothing has changed.", out)
+        self.assertEqual(self.m.calls(), [])
+        self.assertFalse(self.m.devkit.exists())
+        self.assertFalse((self.m.home / ".local").exists())
+
+    def test_a_rerun_welcome_says_what_is_done_already(self):
+        git(self.m.root, "clone", "-q", "--branch", "v26.11.10", str(self.m.remote), str(self.m.devkit))
+        env = self.m.move_brew(self.m.brew_paths[0])  # Homebrew where it installs, with its Python
+        rc, out = self.terminal(keys=[(WELCOME, b"\x03")], **env)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("  2  Install Homebrew, git, Python and the GitHub CLI (already done)", out)
+        self.assertIn("  3  Download devkit to ~/Development/fireflysoftwaresolutions/devkit (already done)", out)
+        self.assertIn("This takes a minute, then continues your setup.", out)
+        self.assertNotIn("15 to 30 minutes", out)
+        self.assertNotIn("(already done)", out.split("  2  ")[0])  # checking this Mac is never skipped
+
+    def test_yes_in_a_terminal_starts_without_the_welcome(self):
+        """INSTALL-AC-11, R5: --yes is the consent."""
+        self.m.signed_in.touch()
+        rc, out = self.terminal("--yes", "--skip-packages")
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn(WELCOME, out)
+        self.assertIn("1 of 5  This Mac", out)
+
+    def test_a_failed_github_sign_in_can_be_tried_again(self):
+        """INSTALL-AC-41: the sign-in says why it did not finish, and Enter starts it again."""
+        rc, out = self.terminal(keys=[(WELCOME, b"\r"), (RETRY, b"\r")], STUB_GH_LOGIN="fail-once")
+        self.assertEqual(rc, 0, out)
+        for line in ("Your browser opens GitHub. There:",
+                     "1. Paste the one-time code shown below (it is copied for you).",
+                     "Then come back here. This waits up to 10 minutes; Ctrl+C stops it.",
+                     "✗ You are not signed in to GitHub.", "Reason: GitHub said: error: device code expired",
+                     "devkit needs GitHub for your project notes, so it cannot go on without it.", RETRY,
+                     "✓ Signed in to GitHub as ada"):
+            self.assertIn(line, out)
+        self.assertEqual(len([c for c in self.m.calls() if c.startswith("gh auth login -h")]), 2)
+        self.assertEqual(len(self.m.setups()), 1)
+
+    def test_q_after_a_failed_github_sign_in_quits_before_the_wizard(self):
+        """INSTALL-AC-41: q ends the installer with exit code 2 and the local installer to continue with."""
+        rc, out = self.terminal(keys=[(WELCOME, b"\r"), (RETRY, b"q\r")], STUB_GH_LOGIN="fail-once")
+        self.assertEqual(rc, 2, out)
+        self.assertEqual(self.m.setups(), [])
+        self.assertIn("Stopped before setup. devkit is downloaded; nothing else is set up yet.", out)
+        self.assertIn("To continue, run:  ~/Development/fireflysoftwaresolutions/devkit/install.sh", out)
+        self.assertNotIn("raw.githubusercontent.com", out)
+
+    def test_ctrl_c_stops_only_the_github_sign_in(self):
+        """R24: Ctrl+C in the browser sign-in brings back the choice, with the reason; the installer goes on."""
+        rc, out = self.terminal(keys=[(WELCOME, b"\r"), ("one-time code: 4F2A-9C1D", b"\x03"), (RETRY, b"q\r")],
+                                STUB_GH_LOGIN="hang")
+        self.assertEqual(rc, 2, out)
+        self.assertIn("Reason: you stopped the sign-in.", out)
+        self.assertNotIn("Stopped during", out)
+
+    def test_a_github_sign_in_past_its_time_limit_is_stopped(self):
+        """R24: a browser page nobody finishes is stopped at the time limit (one second here)."""
+        rc, out = self.terminal(keys=[(WELCOME, b"\r"), (RETRY, b"q\r")], STUB_GH_LOGIN="hang",
+                                DEVKIT_TEST_GH_LIMIT="1")
+        self.assertEqual(rc, 2, out)
+        self.assertIn("Reason: the browser page was not finished within 10 minutes.", out)
+
+    def test_ctrl_c_during_a_step_says_how_to_continue(self):
+        """I-6: Ctrl+C stops the installer during a step, says nothing is broken and how to continue."""
+        (self.m.prefix / "bin" / "python3").unlink()
+        brew = self.m.stubs / "brew"
+        brew.write_text(brew.read_text().replace('echo "brew $*" >> "$STUB_LOG"',
+                                                 'echo "brew $*" >> "$STUB_LOG"\n'
+                                                 'if [ "$1" = install ]; then exec sleep 30; fi'))
+        rc, out = self.terminal(keys=[(WELCOME, b"\r"), ("Installing Python", b"\x03")])
+        self.assertEqual(rc, 130, out)
+        self.assertIn('! Stopped during "Homebrew, git, Python and the GitHub CLI".', out)
+        self.assertIn("Nothing is broken.", out)
+        self.assertIn("To continue, run the same command again. Finished steps are not repeated.", out)
+        self.assertFalse(self.m.devkit.exists())
 
 
 if __name__ == "__main__":

@@ -90,7 +90,8 @@ class FreshInstallTests(unittest.TestCase):
         GitHub CLI (test_install.Machine): the newest release of the fixture, its annotated tag checked out."""
         rc, out = self.m.pipe("--no-setup", DEVKIT_REPO=f"file://{self.origin}")
         self.assertEqual(rc, 0, out)
-        self.assertIn(f"downloaded {TAG}", out)
+        self.assertIn(f"✓ Downloaded devkit {VERSION} to ~/Development/fireflysoftwaresolutions/devkit", out)
+        self.assertEqual(git(self.devkit, "describe", "--tags", "--exact-match").stdout.strip(), TAG)
         self.assertNotIn("is not a commit", out)  # git's warning for `clone --branch <annotated tag>`
         return out
 

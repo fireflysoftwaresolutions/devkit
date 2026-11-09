@@ -769,7 +769,9 @@ class InstallRecordGuardTests(unittest.TestCase):
 
 
 class InstallScriptTests(unittest.TestCase):
-    """install.sh ends by naming the pinned copy that the wizard's `dev install` made."""
+    """install.sh from a clone that is not a release says the pin waits for its tests, then leaves the last word to
+    the wizard: its summary is the only one (INSTALL-AC-42). A pin `dev install` refuses shows there, as a step that
+    failed (test_setup_flow.SummaryTests.test_a_refused_pin_is_not_ready_and_says_why)."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -779,7 +781,7 @@ class InstallScriptTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def test_the_summary_names_the_pinned_copy(self):
+    def test_a_clone_says_the_pin_waits_for_its_tests_and_adds_nothing_after_the_wizard(self):
         clone = self.m.root / "work" / "devkit"
         subprocess.run(["git", "clone", "-q", str(self.m.remote), str(clone)], check=True, env=GIT_ENV,
                        capture_output=True)
@@ -793,13 +795,10 @@ class InstallScriptTests(unittest.TestCase):
         rc, out = self.m.run(["/bin/bash", str(clone / "install.sh"), "--skip-packages"])
         self.assertEqual(rc, 0, out)
         self.assertIn("not a release: dev install pins it for the hooks only after its tests pass here", out)
-        self.assertIn("the hooks and the guard run a read-only copy of devkit 26.12.0-dev (abc1234) in "
-                      "~/.local/share/devkit/releases/26.12.0-dev-abc1234", out)
-
-    def test_the_summary_says_when_nothing_is_pinned(self):
-        rc, out = self.m.pipe()
-        self.assertEqual(rc, 0, out)
-        self.assertIn("the hooks are not pinned yet: run dev install", out)
+        after = out[out.index("5 of 5  Your setup"):]
+        self.assertNotIn("Summary", after)
+        self.assertNotIn("exit code", after)
+        self.assertNotIn("read-only copy of devkit", after)
 
 
 if __name__ == "__main__":
