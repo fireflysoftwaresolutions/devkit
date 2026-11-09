@@ -27,17 +27,19 @@ Not yours: the final design (The Architect); production code. Say so in your rep
 
 Load each one with the Skill tool (it may list a plugin skill with its prefix, such as `devkit:testing`). Without the Skill tool, or when it does not list one, read the skill's SKILL.md.
 
-`superpowers:brainstorming`, `working-efficiently`, `architecture`, `communicating`
+`superpowers:brainstorming`, `research`, `working-efficiently`, `architecture`, `communicating`
 
 ## Your procedure
 
 Follow these phases in order. A phase is finished when its gate holds; `proof` marks the devkit command devkit looks for in your session before it accepts your report. Before your final report, every background command you started has ended: keep working until it ends, or stop it.
 
 1. **Question.** Write the question and the criteria (fit, maturity, license, security, cost, lock-in) before searching. skills: `superpowers:brainstorming` · gate: the criteria are written
-2. **Sources.** Read primary sources for the exact version: vendor docs, changelogs, issues and advisories. skills: `working-efficiently` · gate: every claim has a source
-3. **Spike.** Try the top candidates in a scratch folder outside the repository when the docs are not enough. devkit: `dev sec scan` · gate: spike code stays outside the repository
-4. **Recommend.** Report a comparison table, a recommendation and the risks; the Software architect (The Architect) approves. skills: `architecture` · devkit: `dev crew ask` · gate: the recommendation names its risks
-5. **Hand off.** Record the step with its evidence, name who approves it (the RACI), and report with your status block. devkit: `dev progress step`, `dev crew ask` · gate: the step is recorded with its evidence · proof: `dev progress step`
+2. **Prior knowledge.** Look for what the team already knows before searching: the spike notes in the handoff plans (dev plan ls, then search their text) and the lessons; pin the version from the lockfile or manifest. A note older than 90 days or for another major version is re-checked, not reused. skills: `research` · devkit: `dev plan ls`, `dev lesson ls` · gate: the known notes and lessons are read, and the version is pinned
+3. **Sources.** Read primary sources for the exact version: vendor docs, changelogs, issues and advisories. skills: `research`, `working-efficiently` · gate: every claim has a source
+4. **Spike.** Try the top candidates in a scratch folder outside the repository when the docs are not enough. devkit: `dev sec scan` · gate: spike code stays outside the repository
+5. **Recommend.** Report a comparison table, a recommendation and the risks; the Software architect (The Architect) approves. skills: `architecture` · devkit: `dev crew ask` · gate: the recommendation names its risks
+6. **Record.** Record the result as a spike note with the technology, its version, the date checked and the sources in its text, so the next session finds it instead of researching again. skills: `research` · devkit: `dev plan new` · gate: the spike note names the technology, the version, the date and the sources
+7. **Hand off.** Record the step with its evidence, name who approves it (the RACI), and report with your status block. devkit: `dev progress step`, `dev crew ask` · gate: the step is recorded with its evidence · proof: `dev progress step`
 
 ## Your place in the crew's RACI
 

@@ -38,7 +38,7 @@ MAIN, REVIEWER, DEVELOPER = "morpheus", "seraph", "developer"
 # The kinds of work whose result is code or configuration: when their own approver did the work, the Code reviewer
 # approves it. Every other kind goes to the Tech lead. A kind of work may name its own `A_fallback` in crew.json.
 CODE_AND_CONFIG = frozenset({
-    "frontend", "backend", "database", "feature", "mobile", "ai", "tooling", "testing", "security", "cicd",
+    "frontend", "backend", "database", "feature", "debug", "mobile", "ai", "tooling", "testing", "security", "cicd",
     "release", "infrastructure", "migration", "i18n", "dependencies", "accessibility", "sso", "design-system",
     "backup"})
 OTHER_WORK = frozenset({

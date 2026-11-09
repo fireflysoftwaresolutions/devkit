@@ -29,7 +29,7 @@ Not yours: implementation details inside one module (the senior engineer and the
 
 Load each one with the Skill tool (it may list a plugin skill with its prefix, such as `devkit:testing`). Without the Skill tool, or when it does not list one, read the skill's SKILL.md.
 
-`system-design`, `architecture`, `superpowers:brainstorming`, `codebase-design`, `domain-modeling`, `diagrams`, `superpowers:writing-plans`, `communicating`, `threat-model-analyst`
+`system-design`, `architecture`, `research`, `superpowers:brainstorming`, `codebase-design`, `domain-modeling`, `diagrams`, `superpowers:writing-plans`, `communicating`, `threat-model-analyst`
 
 ## Your procedure
 

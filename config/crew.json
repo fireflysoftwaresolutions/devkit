@@ -278,6 +278,7 @@
       ],
       "skills": [
         "domain-modeling",
+        "functional-analysis",
         "communicating",
         "doc-coauthoring",
         "superpowers:brainstorming"
@@ -328,8 +329,9 @@
         },
         {
           "phase": "Specify",
-          "do": "Write the requirements as testable statements and each acceptance criterion as Given / When / Then.",
+          "do": "Write the functional analysis: the requirements as numbered, testable rules and each acceptance criterion as Given / When / Then with an id.",
           "skills": [
+            "functional-analysis",
             "domain-modeling",
             "doc-coauthoring"
           ],
@@ -370,7 +372,7 @@
         },
         {
           "phase": "Hand off",
-          "do": "Record the step with its evidence, name who approves it (the RACI), and report with your status block.",
+          "do": "Record the step with its evidence, name who approves it (the RACI), and hand the spec on: the Software architect (The Architect) for the design, the UX designer (Sati) for the screens, the QA engineer (Mouse) for the test plan and the tech lead for routing; report with your status block.",
           "devkit": [
             "dev progress step",
             "dev crew ask"
@@ -399,6 +401,7 @@
       "skills": [
         "system-design",
         "architecture",
+        "research",
         "superpowers:brainstorming",
         "codebase-design",
         "domain-modeling",
@@ -540,6 +543,7 @@
       ],
       "skills": [
         "superpowers:brainstorming",
+        "research",
         "working-efficiently",
         "architecture",
         "communicating"
@@ -583,9 +587,22 @@
           "gate": "the criteria are written"
         },
         {
+          "phase": "Prior knowledge",
+          "do": "Look for what the team already knows before searching: the spike notes in the handoff plans (dev plan ls, then search their text) and the lessons; pin the version from the lockfile or manifest. A note older than 90 days or for another major version is re-checked, not reused.",
+          "skills": [
+            "research"
+          ],
+          "devkit": [
+            "dev plan ls",
+            "dev lesson ls"
+          ],
+          "gate": "the known notes and lessons are read, and the version is pinned"
+        },
+        {
           "phase": "Sources",
           "do": "Read primary sources for the exact version: vendor docs, changelogs, issues and advisories.",
           "skills": [
+            "research",
             "working-efficiently"
           ],
           "gate": "every claim has a source"
@@ -608,6 +625,17 @@
             "dev crew ask"
           ],
           "gate": "the recommendation names its risks"
+        },
+        {
+          "phase": "Record",
+          "do": "Record the result as a spike note with the technology, its version, the date checked and the sources in its text, so the next session finds it instead of researching again.",
+          "skills": [
+            "research"
+          ],
+          "devkit": [
+            "dev plan new"
+          ],
+          "gate": "the spike note names the technology, the version, the date and the sources"
         },
         {
           "phase": "Hand off",
@@ -634,6 +662,7 @@
         "a bug that needs systematic debugging"
       ],
       "skills": [
+        "root-cause",
         "superpowers:systematic-debugging",
         "superpowers:test-driven-development",
         "backend",
@@ -678,6 +707,7 @@
           "phase": "Reproduce",
           "do": "For a bug, reproduce it with a failing test; for a feature, read the code that owns the behavior and write the first failing test.",
           "skills": [
+            "root-cause",
             "superpowers:systematic-debugging",
             "superpowers:test-driven-development"
           ],
@@ -690,6 +720,7 @@
           "phase": "Root cause and design",
           "do": "Find the root cause, or the smallest design that fits the codebase's patterns; consult the Software architect (The Architect) when a boundary moves.",
           "skills": [
+            "root-cause",
             "backend"
           ],
           "devkit": [
@@ -751,6 +782,7 @@
         "front-end performance"
       ],
       "skills": [
+        "root-cause",
         "frontend-design",
         "superpowers:test-driven-development",
         "impeccable",
@@ -800,6 +832,7 @@
           "phase": "Design in hand",
           "do": "Start from the design of the UX designer (Sati) with every state and its copy; ask for one when it is missing. Load `frontend-design` and `impeccable`, then run impeccable's setup once, from the project's root: `dev impeccable context`. Run the other impeccable commands the skill names the same way, `dev impeccable <verb>`, never by the launcher's path, which the guard refuses. You may run `context`, `detect`, `doctor`, `live`, and the `live-…`, `surface-brief`, `critique-storage`, `comp-spec`, and `build-phase` helpers as the skill uses them, with paths inside the project. The developer runs every other verb, `concept-seed` and `generate-image` included. Follow what it prints, but write PRODUCT.md or DESIGN.md only when the developer asks.",
           "skills": [
+            "root-cause",
             "frontend-design",
             "impeccable"
           ],
@@ -878,6 +911,7 @@
         "Spring, Node, Python, or PHP back ends"
       ],
       "skills": [
+        "root-cause",
         "backend",
         "superpowers:test-driven-development",
         "testing",
@@ -926,6 +960,7 @@
           "phase": "Contract",
           "do": "Write or update the contract first (OpenAPI, schema, events); keep it backward compatible; consult the Software architect (The Architect) on changes and the Security engineer (The Keymaker) when it touches auth, data or outside input.",
           "skills": [
+            "root-cause",
             "backend"
           ],
           "devkit": [
@@ -1023,6 +1058,7 @@
         "Postgres, MySQL, or document stores"
       ],
       "skills": [
+        "root-cause",
         "supabase-postgres-best-practices",
         "testing",
         "superpowers:test-driven-development",
@@ -1072,6 +1108,7 @@
           "phase": "Change as a migration",
           "do": "Write every schema change as a forward-only migration; expand, migrate, contract when the service must keep running.",
           "skills": [
+            "root-cause",
             "supabase-postgres-best-practices"
           ],
           "gate": "the migration exists and never edits an applied one"
@@ -1138,6 +1175,7 @@
         "mobile build and signing issues"
       ],
       "skills": [
+        "root-cause",
         "frontend-design",
         "superpowers:test-driven-development",
         "impeccable",
@@ -1180,6 +1218,7 @@
           "phase": "Design in hand",
           "do": "Start from the design of the UX designer (Sati) and the platform's guidelines. Load `frontend-design` and `impeccable`, then run impeccable's setup once, from the project's root: `dev impeccable context`. Run the other impeccable commands the skill names the same way, `dev impeccable <verb>`, never by the launcher's path, which the guard refuses. You may run `context`, `detect`, `doctor`, `live`, and the `live-…`, `surface-brief`, `critique-storage`, `comp-spec`, and `build-phase` helpers as the skill uses them, with paths inside the project. The developer runs every other verb, `concept-seed` and `generate-image` included. Follow what it prints, but write PRODUCT.md or DESIGN.md only when the developer asks.",
           "skills": [
+            "root-cause",
             "frontend-design",
             "impeccable"
           ],
@@ -1382,6 +1421,7 @@
         "devkit or agent tooling"
       ],
       "skills": [
+        "root-cause",
         "workspace",
         "using-devkit",
         "testing",
@@ -1427,6 +1467,9 @@
         {
           "phase": "Measure",
           "do": "Measure the chore first: the steps, the prompts and the minutes it costs today.",
+          "skills": [
+            "root-cause"
+          ],
           "devkit": [
             "dev time"
           ],
@@ -1588,6 +1631,7 @@
         "mutation testing"
       ],
       "skills": [
+        "root-cause",
         "testing",
         "property-based-testing",
         "superpowers:test-driven-development",
@@ -1632,6 +1676,7 @@
           "phase": "Map the risk",
           "do": "Map what can break: the behavior, the edge cases and the failure paths.",
           "skills": [
+            "root-cause",
             "testing",
             "property-based-testing"
           ],
@@ -2126,6 +2171,7 @@
         "taking over an old project's CI"
       ],
       "skills": [
+        "root-cause",
         "cicd",
         "superpowers:systematic-debugging",
         "github-actions-hardening",
@@ -2186,6 +2232,7 @@
           "phase": "Know the pipeline",
           "do": "Read what CI runs and run the same locally before any push.",
           "skills": [
+            "root-cause",
             "cicd"
           ],
           "devkit": [
@@ -2260,6 +2307,7 @@
         "reliability targets"
       ],
       "skills": [
+        "root-cause",
         "devsecops",
         "otel-instrumentation",
         "otel-collector",
@@ -2305,6 +2353,7 @@
           "phase": "As code",
           "do": "Change infrastructure only as code through a PR; plan before apply.",
           "skills": [
+            "root-cause",
             "devsecops"
           ],
           "gate": "the plan is reviewed before it is applied"
@@ -2356,6 +2405,7 @@
         "a postmortem"
       ],
       "skills": [
+        "root-cause",
         "incident-response",
         "learning-loop",
         "communicating",
@@ -2398,6 +2448,7 @@
           "phase": "Assess",
           "do": "Assess the impact, set the severity and name who does what.",
           "skills": [
+            "root-cause",
             "incident-response"
           ],
           "gate": "the severity and roles are set"
@@ -3373,6 +3424,55 @@
         ]
       },
       "no_files": "a feature crosses layers: each file names its own kind of work, and the step's member decides"
+    },
+    {
+      "id": "debug",
+      "name": "Debugging and root-cause analysis",
+      "R": [
+        "neo"
+      ],
+      "A": "seraph",
+      "C": [
+        "mouse",
+        "merovingian"
+      ],
+      "I": [
+        "morpheus"
+      ],
+      "signals": [
+        "debug",
+        "debugging",
+        "error",
+        "errors",
+        "failing",
+        "fails",
+        "broken",
+        "crash",
+        "crashes",
+        "regression",
+        "root cause",
+        "why does",
+        "stack trace",
+        "causa raíz",
+        "depurar",
+        "fallo",
+        "falla",
+        "no funciona"
+      ],
+      "knowledge": {
+        "skills": [
+          "root-cause",
+          "superpowers:systematic-debugging",
+          "testing",
+          "learning-loop"
+        ],
+        "docs": [
+          "docs/testing.md",
+          "docs/lessons.md",
+          "docs/bug-registry.md"
+        ]
+      },
+      "no_files": "a failure is debugged where it happens: each file names its own kind of work, and the step's member decides"
     },
     {
       "id": "mobile",

@@ -583,6 +583,52 @@
           "work-state"
         ]
       }
+    },
+    {
+      "id": "root-cause",
+      "why": "Root cause before the fix: reproduce, check the known lessons and devkit bugs, prove the cause with an experiment, then fix it",
+      "activities": [
+        "debug"
+      ],
+      "skills": {
+        "claude": [
+          "root-cause"
+        ],
+        "codex": [
+          "root-cause"
+        ]
+      }
+    },
+    {
+      "id": "research",
+      "why": "Research from current, version-matched primary sources, recorded as spike notes the next session reuses",
+      "activities": [
+        "research",
+        "architecture"
+      ],
+      "skills": {
+        "claude": [
+          "research"
+        ],
+        "codex": [
+          "research"
+        ]
+      }
+    },
+    {
+      "id": "functional-analysis",
+      "why": "Requirements before design: actors, flows, numbered rules, edge cases and acceptance criteria with ids that tests trace",
+      "activities": [
+        "requirements"
+      ],
+      "skills": {
+        "claude": [
+          "functional-analysis"
+        ],
+        "codex": [
+          "functional-analysis"
+        ]
+      }
     }
   ]
 }
