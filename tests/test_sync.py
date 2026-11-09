@@ -79,6 +79,30 @@ class NoteConflictTests(unittest.TestCase):
             self.assertIn("Their item", tasks)
             self.assertIn("Our item", tasks)
 
+    def test_the_tasks_block_waits_for_the_next_sync_while_another_process_writes_notes(self):
+        # The same two notes, while another process holds the notes lock (dev note set, an embargo): the sync still
+        # finishes and pushes, and it leaves the note as the pull settled it instead of writing the tasks block over
+        # that process's write; the next sync writes it.
+        from devkit import core
+        with TwoMacs() as m:
+            with m.on_other():
+                work.create(PID, "Their item", a=B)
+                write_note(m.other, note_text("- **Main checkout:** `feat/bob` · clean"))
+                _git(m.other, "add", "-A")
+                _git(m.other, "commit", "-qm", "note from the other Mac")
+                _git(m.other, "push", "-q")
+            work.create(PID, "Our item", a=A)
+            f = write_note(m.here, note_text("- **Main checkout:** `main` · clean"))
+            work._commit([f], "note from this Mac", push=False)
+            with core.Lock("notes") as held:
+                self.assertTrue(held)
+                warned = sync()
+            self.assertEqual(_git(m.here, "rev-list", "--count", "@{u}..HEAD"), "0", warned)
+            pushed = _git(m.here, "show", f"origin/main:projects/{PID}.md")
+            self.assertIn("Our item", pushed)
+            self.assertNotIn("Their item", pushed)
+            self.assertEqual(f.read_text().rstrip("\n"), pushed)
+
     def test_a_conflict_in_a_notes_hand_written_text_keeps_the_remotes_and_still_pushes_everything_else(self):
         # Both Macs rewrite the Current state of acme/api's note; this Mac's commit also changes acme/web's note, and it
         # added a work item. The sync finishes: acme/web's note and the item reach the remote, acme/api's note is the

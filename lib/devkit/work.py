@@ -777,24 +777,30 @@ def _save_note_conflict(rel: str, base: str, mine: str) -> str:
 
 def _rewrite_tasks(rels) -> None:
     """After a pull that settled the generated blocks of these notes, write each one's tasks block again from the work
-    items as they are now, and commit what changed: the note lists the items both Macs added."""
+    items as they are now, and commit what changed: the note lists the items both Macs added. The read and the write
+    hold the notes lock that every note writer takes (`dev note set`, an embargo, `dev sync`'s own), taken without
+    waiting: this runs under _repo_lock, and the notes lock comes first in every other process. While another
+    process holds it, the block waits for the next `dev sync`, which writes it again."""
+    if not rels:
+        return
     from .registry import TASKS_END, TASKS_START, render_tasks_block
     changed = []
-    for rel in dict.fromkeys(rels):
-        f = HANDOFF / rel
-        try:
-            text = f.read_text()
-        except OSError:
-            continue
-        if TASKS_START not in text or TASKS_END not in text.split(TASKS_START, 1)[1]:
-            continue
-        scope = rel[len("projects/"):-len(".md")] if rel.startswith("projects/") else rel.rsplit("/", 1)[0]
-        pre, rest = text.split(TASKS_START, 1)
-        new = pre + render_tasks_block(scope) + rest.split(TASKS_END, 1)[1]
-        if new != text:
-            _replace(f, new)
-            changed.append(f)
-    if changed:
+    with core.Lock("notes", wait=0) as got:
+        for rel in dict.fromkeys(rels) if got else ():
+            f = HANDOFF / rel
+            try:
+                text = f.read_text()
+            except OSError:
+                continue
+            if TASKS_START not in text or TASKS_END not in text.split(TASKS_START, 1)[1]:
+                continue
+            scope = rel[len("projects/"):-len(".md")] if rel.startswith("projects/") else rel.rsplit("/", 1)[0]
+            pre, rest = text.split(TASKS_START, 1)
+            new = pre + render_tasks_block(scope) + rest.split(TASKS_END, 1)[1]
+            if new != text:
+                _replace(f, new)
+                changed.append(f)
+    if changed:  # the commit after the notes lock is released: no git work under it
         _commit(changed, f"sync: the tasks block of {len(changed)} note(s) again after the pull", push=False)
 
 
