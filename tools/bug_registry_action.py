@@ -21,9 +21,10 @@ into a command.
 
 Voters are HMAC-SHA256 digests of the GitHub account id, keyed with the repository secret BUG_REGISTRY_KEY, never
 logins. Trust comes from GitHub's `author_association`: OWNER and MEMBER count. A member whose membership is private
-reaches the workflow as CONTRIBUTOR or NONE, so `.github/bug-registry-maintainers` lists such accounts by login, and a
-listed login counts as MEMBER. The file is read from the workflow's own checkout (the default branch on issue events,
-the tagged commit on a release), so it changes only through a merged pull request, never through an event or a fork.
+reaches the workflow as CONTRIBUTOR or NONE, so `.github/bug-registry-maintainers` lists such accounts by login and
+account id, and an account matching both counts as MEMBER; a login freed by a rename trusts nobody. The file is read
+from the workflow's own checkout (the default branch on issue events, the tagged commit on a release), so it changes
+only through a merged pull request, never through an event or a fork.
 Every rule about payloads, records, trust and score is lib/devkit/bugs.py's, the code every client runs, so the
 workflow and the clients cannot disagree.
 """
@@ -52,12 +53,13 @@ EVENTS = {"issues": "opened", "issue_comment": "created", "release": "published"
 TRIES = 3  # writes of one record that found it changed by another run, before the run gives up
 WAITS, WAIT_S = 4, 15  # a duplicate waits up to a minute for the first issue's own run to write its record
 MAINTAINERS = Path(__file__).resolve().parents[1] / ".github" / "bug-registry-maintainers"
-LOGIN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}")  # a GitHub login: 1 to 39 letters, digits or hyphens
+MAINTAINER_RE = re.compile(r"([A-Za-z0-9][A-Za-z0-9-]{0,38})\s+([1-9][0-9]{0,15})")  # a login, then its account id
 CLOSURE_QUERY = """query($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) {
     issue(number: $number) {
       timelineItems(itemTypes: [CLOSED_EVENT], last: 1) {
-        nodes { ... on ClosedEvent { actor { login } closer { __typename ... on PullRequest { merged } } } }
+        nodes { ... on ClosedEvent { actor { login ... on User { databaseId } }
+                                       closer { __typename ... on PullRequest { merged } } } }
       }
     }
   }
@@ -91,9 +93,9 @@ def _voter(key: bytes, user) -> str:
 
 
 def read_maintainers(path: Path = MAINTAINERS) -> frozenset:
-    """The logins the maintainers file lists, in lower case, since GitHub logins ignore case. One login per line, and
-    `#` starts a comment. A line that is not one GitHub login is ignored with a warning. A missing or unreadable file
-    lists nobody, so only OWNER and MEMBER count."""
+    """The (login in lower case, account id) pairs the maintainers file lists; GitHub logins ignore case. One account
+    per line, its login then its numeric id, and `#` starts a comment. Any other line, a login without its id among
+    them, is ignored with a warning. A missing or unreadable file lists nobody, so only OWNER and MEMBER count."""
     try:
         text = Path(path).read_text(encoding="utf-8")
     except FileNotFoundError:
@@ -101,26 +103,32 @@ def read_maintainers(path: Path = MAINTAINERS) -> frozenset:
     except (OSError, UnicodeDecodeError) as e:
         print(f"bug registry: cannot read {Path(path).name}, so it lists nobody: {e}", file=sys.stderr)
         return frozenset()
-    logins = set()
+    accounts = set()
     for n, raw in enumerate(text.splitlines(), 1):
         line = raw.split("#", 1)[0].strip()
         if not line:
             continue
-        if LOGIN_RE.fullmatch(line):
-            logins.add(line.lower())
+        m = MAINTAINER_RE.fullmatch(line)
+        if m:
+            accounts.add((m.group(1).lower(), int(m.group(2))))
         else:
-            print(f"bug registry: {Path(path).name} line {n} is not one GitHub login: ignored", file=sys.stderr)
-    return frozenset(logins)
+            print(f"bug registry: {Path(path).name} line {n} is not a GitHub login and its account id: ignored",
+                  file=sys.stderr)
+    return frozenset(accounts)
+
+
+def _listed(login, account, maintainers: frozenset) -> bool:
+    """Whether the maintainers file lists this account under this login."""
+    return isinstance(login, str) and _number(account) > 0 and (login.lower(), account) in maintainers
 
 
 def _association(user, assoc, maintainers: frozenset) -> str:
     """The author_association bugs.py's trust rule sees: GitHub's, or MEMBER for a listed maintainer that GitHub shows
     as anything less. Mapping here keeps one trust rule for the workflow and the clients."""
     assoc = assoc if isinstance(assoc, str) else ""
-    if assoc in bugs.TRUSTED:
+    if assoc in bugs.TRUSTED or not isinstance(user, dict):
         return assoc
-    login = user.get("login") if isinstance(user, dict) else None
-    return "MEMBER" if isinstance(login, str) and login.lower() in maintainers else assoc
+    return "MEMBER" if _listed(user.get("login"), user.get("id"), maintainers) else assoc
 
 
 def _by_bot(comment: dict) -> bool:
@@ -381,7 +389,8 @@ def _release(client, event: dict, maintainers: frozenset) -> str:
             continue
         how = client.closure(number) or {}
         actor = str(how.get("actor") or "")
-        if not how.get("merged_pr") and not (actor and (actor.lower() in maintainers or client.is_member(actor))):
+        if not how.get("merged_pr") and not (actor and (_listed(actor, how.get("actor_id"), maintainers)
+                                                        or client.is_member(actor))):
             continue
         if _mark_fixed(client, number, version):
             marked.append(number)
@@ -539,8 +548,9 @@ class GitHub:
         return self._pages(self._issues(), params)
 
     def closure(self, number: int) -> dict:
-        """Who closed the issue last, and whether a merged pull request closed it. REST issue events do not link the
-        pull request; GraphQL's ClosedEvent.closer does. Anything unreadable counts as not merged."""
+        """Who closed the issue last (login and account id), and whether a merged pull request closed it. REST issue
+        events do not link the pull request; GraphQL's ClosedEvent.closer does. Anything unreadable counts as not
+        merged, and an account id it cannot read as 0."""
         owner, name = self.repo.split("/", 1)
         data = self._call("POST", "graphql", body={"query": CLOSURE_QUERY,
                                                    "variables": {"owner": owner, "name": name, "number": int(number)}})[1]
@@ -548,12 +558,13 @@ class GitHub:
         nodes = (node.get("timelineItems") or {}).get("nodes") or []
         last = nodes[-1] if nodes and isinstance(nodes[-1], dict) else {}
         closer = last.get("closer") if isinstance(last.get("closer"), dict) else {}
-        return {"actor": str((last.get("actor") or {}).get("login") or ""),
+        actor = last.get("actor") if isinstance(last.get("actor"), dict) else {}
+        return {"actor": str(actor.get("login") or ""), "actor_id": _number(actor.get("databaseId")),
                 "merged_pr": closer.get("__typename") == "PullRequest" and closer.get("merged") is True}
 
     def is_member(self, login: str) -> bool:
         """The repository's owner, or a public member of the owning organization. The workflow's token cannot read
-        private memberships; the maintainers file lists those members."""
+        private memberships; the maintainers file lists those members by login and account id."""
         owner = self.repo.split("/", 1)[0]
         if login.lower() == owner.lower():
             return True

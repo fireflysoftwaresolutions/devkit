@@ -220,7 +220,7 @@ class FakeGitHub:
 
     def closure(self, number):
         self.calls.append(("closure", number))
-        return dict(self.closers.get(number) or {"actor": "", "merged_pr": False})
+        return dict(self.closers.get(number) or {"actor": "", "actor_id": 0, "merged_pr": False})
 
     def is_member(self, login):
         self.calls.append(("is_member", login))
@@ -496,8 +496,8 @@ def _fixed(number):
 
 
 def _released():
-    """A registry at the 26.11.8 release, with bugs closed in every way that counts or does not; `maint` is a public
-    member, `outsider` is not."""
+    """A registry at the 26.11.8 release, with bugs closed in every way that counts or does not; `maint` (account 9)
+    is a public member, `outsider` (account 41) is not."""
     fake = FakeGitHub()
     fake.release_list = [
         {"id": 1, "tag_name": "v26.11.7", "draft": False, "prerelease": False,
@@ -515,7 +515,7 @@ def _released():
         # a comment after closing moves updated_at, which the API's `since` filters on; closed_at decides
         fake.issues[number].update(state="closed", state_reason=reason, closed_at=_iso(NOW - days_ago * DAY),
                                    updated_at=_iso(NOW - DAY))
-        fake.closers[number] = {"actor": actor, "merged_pr": merged}
+        fake.closers[number] = {"actor": actor, "actor_id": {"maint": 9, "outsider": 41}[actor], "merged_pr": merged}
     return fake
 
 
@@ -560,34 +560,42 @@ class ReleaseTests(unittest.TestCase):
 
 class MaintainersTests(unittest.TestCase):
     """A member whose organization membership is private reaches the workflow as CONTRIBUTOR or NONE. The maintainers
-    file kept in the repository lets the workflow count that account as a member; nothing else widens trust."""
+    file kept in the repository lets the workflow count that account as a member; nothing else widens trust. A line
+    names the login and the account id, and both must match, so a login freed by a rename trusts nobody."""
 
-    def _confirm(self, login, assoc, maintainers):
-        """An outsider's detour, then a confirmation from `login` with `assoc`. -> (the detour's trust, stderr)."""
+    def _confirm(self, login, assoc, maintainers, account=77):
+        """An outsider's detour, then a confirmation from `login` (account `account`) with `assoc`.
+        -> (the detour's trust, stderr)."""
         fake = FakeGitHub()
         fake.registry_issue(12)
         fake.add_comment(12, _body(_payload("detour")), _user(2))
-        cid = fake.add_comment(12, _body(_payload("confirm")), {"login": login, "id": 77, "type": "User"}, assoc)
+        cid = fake.add_comment(12, _body(_payload("confirm")), {"login": login, "id": account, "type": "User"}, assoc)
         rc, _, err = _run(fake, "issue_comment", 12, comment=cid, maintainers=maintainers)
         self.assertEqual(rc, 0, err)
         return fake.record(12)["detours"][0]["trust"], err
 
     def test_a_listed_login_confirms_a_detour_into_verified(self):
-        listed = "# Maintainers whose membership is private\nalice-dev\n"
+        listed = "# Maintainers whose membership is private\nalice-dev 77\n"
         self.assertEqual(self._confirm("alice-dev", "CONTRIBUTOR", listed)[0], "verified")
         self.assertEqual(self._confirm("Alice-Dev", "NONE", listed)[0], "verified")  # GitHub logins ignore case
 
     def test_an_unlisted_contributor_or_collaborator_does_not(self):
         for assoc in ("CONTRIBUTOR", "COLLABORATOR", "NONE"):
-            self.assertEqual(self._confirm("bob", assoc, "alice-dev\n")[0], "proposed", assoc)
+            self.assertEqual(self._confirm("bob", assoc, "alice-dev 77\n")[0], "proposed", assoc)
+
+    def test_a_listed_login_on_another_account_does_not(self):
+        # alice-dev renamed her account and someone registered the freed login; or the line names the wrong account
+        self.assertEqual(self._confirm("alice-dev", "NONE", "alice-dev 77\n", account=78)[0], "proposed")
+        self.assertEqual(self._confirm("alice", "NONE", "alice-dev 77\n")[0], "proposed")  # the renamed account
 
     def test_a_malformed_line_is_ignored_and_the_rest_still_count(self):
-        text = "alice-dev bob\n@carol\nerin  # lead maintainer\n" + "x" * 40 + "\n"
-        for login in ("alice-dev", "bob", "carol", "x" * 40):
+        text = "alice-dev bob\n@carol 77\nerin 77  # lead maintainer\n" + "x" * 40 + " 77\nfrank\ngil 0\n"
+        for login in ("alice-dev", "bob", "carol", "x" * 40, "frank", "gil"):
             self.assertEqual(self._confirm(login, "CONTRIBUTOR", text)[0], "proposed", login)
+        self.assertEqual(self._confirm("gil", "CONTRIBUTOR", text, account=0)[0], "proposed")
         trust, err = self._confirm("erin", "CONTRIBUTOR", text)
         self.assertEqual(trust, "verified")
-        self.assertEqual(re.findall(r"line (\d+)", err), ["1", "2", "4"])
+        self.assertEqual(re.findall(r"line (\d+)", err), ["1", "2", "4", "5", "6"])
 
     def test_without_the_file_only_owner_and_member_count(self):
         unreadable = ROOT / ".github"  # a directory: read as no file, never as a reason to trust more
@@ -600,11 +608,11 @@ class MaintainersTests(unittest.TestCase):
     def test_a_listed_maintainer_reopens_a_fixed_bug_alone(self):
         fake = _fixed(71)
         cid = fake.add_comment(71, _body(_payload("vote", version="26.11.9")), _user(5), "CONTRIBUTOR")
-        self.assertEqual(_run(fake, "issue_comment", 71, comment=cid, maintainers="user5\n")[0], 0)
+        self.assertEqual(_run(fake, "issue_comment", 71, comment=cid, maintainers="user5 5\n")[0], 0)
         self.assertEqual((fake.issues[71]["state"], fake.record(71)["status"]), ("open", "regressed"))
 
     def test_a_bug_a_listed_maintainer_closed_is_marked_fixed(self):
-        for maintainers, fixed_in in ((None, ""), ("outsider\n", "26.11.8")):
+        for maintainers, fixed_in in ((None, ""), ("outsider 42\n", ""), ("outsider 41\n", "26.11.8")):
             fake = _released()
             rc, _, err = _run(fake, "release", maintainers=maintainers)
             self.assertEqual(rc, 0, err)
@@ -659,13 +667,14 @@ class ClientTests(unittest.TestCase):
 
     def test_membership_closures_and_gone_comments(self):
         client, seen = self._client([_Response(status=204), 404, 404, _Response(data={"data": {"repository": {
-            "issue": {"timelineItems": {"nodes": [{"actor": {"login": "maint"}, "stateReason": "COMPLETED",
+            "issue": {"timelineItems": {"nodes": [{"actor": {"login": "maint", "databaseId": 9},
+                                                   "stateReason": "COMPLETED",
                                                    "closer": {"__typename": "PullRequest", "merged": True}}]}}}}})])
         self.assertTrue(client.is_member("maint"))
         self.assertFalse(client.is_member("outsider"))
         self.assertTrue(client.is_member("Owner"))  # the repository's owner, without asking
         client.delete_comment(5)  # already gone: nothing to do
-        self.assertEqual(client.closure(60), {"actor": "maint", "merged_pr": True})
+        self.assertEqual(client.closure(60), {"actor": "maint", "actor_id": 9, "merged_pr": True})
         self.assertEqual(len(seen), 4)
         with self.assertRaises(action.GitHubError):
             self._client([500])[0].issue(1)
