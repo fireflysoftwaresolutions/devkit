@@ -848,6 +848,8 @@ def render_status(v: dict, cols: int = None) -> list:
         pl = cr["plan"]
         left = f", about {ui.duration(pl['left_min'] * 60)} left" if pl.get("left_min") else ""
         out += ui.row("Plan", f"{pl['done']} of {pl['total']} steps done{left}", cols)
+    if v.get("now_warning"):
+        out += ui.row("Tasks", f"{ui.glyph('needs')} {v['now_warning']}", cols, style=ui.amber)
     last = v.get("last_update")
     if last:
         head = f"Last update from {last['agent']}, {last['when']}" + (f", {last['where']}" if last.get("where") else "")
@@ -970,6 +972,8 @@ def cmd_status(a):
         print("\n".join(render_home(v)))
         return 0
     v = status_view(reg, p, w, caller=caller)
+    from . import work
+    v["now_warning"] = work.now_warning(p["id"])
     where = ((w or {}).get("path") or p.get("path")) if a.query else os.getcwd()
     v["needs_you"] += devkit_needs(where)  # the plugins of the project asked about, not of the folder it runs in
     _prompt_refresh(reg, where)
@@ -1912,10 +1916,13 @@ def _scope(a):
     return p["id"], p["id"]
 
 
-def _print_items(scope, label, show_all=False):
+def _print_items(scope, label, show_all=False, rebind=True):
+    """The open items, numbered for `dev task <verb> <n>`. rebind: `dev task` itself, whose numbers the next verbs use;
+    the list printed after a write keeps the numbers of the list shown before and is numbered only while it is that
+    list (work.show)."""
     from . import work
     items = work.all_items(scope)
-    ordered = work.ordered_open(items)
+    ordered, numbered = work.show(scope, items, rebind=rebind)
     print(ui.section(f"{label} · tasks"))
     if not items:
         hint = 'no tasks yet — dev task add "…" --now'
@@ -1930,7 +1937,11 @@ def _print_items(scope, label, show_all=False):
             lock = ui.green(" 🔒 you") if holder.startswith(me) else ui.yellow(f" 🔒 {holder.split(' ')[0]}")
         st = {"doing": ui.cyan("doing"), "blocked": ui.red("blocked")}.get(m.get("status"), ui.dim(m.get("bucket", "")))
         pr = ui.yellow(" !") if m.get("priority") == "high" else ""
-        print(f"  {ui.cyan(str(n).rjust(2))} {ui.dim(m['id'])} {st:<8} {m['title']}{pr}{lock} {ui.dim('v' + str(m['version']))}")
+        num = str(n).rjust(2) if numbered else " ·"
+        print(f"  {ui.cyan(num)} {ui.dim(m['id'])} {st:<8} {m['title']}{pr}{lock} {ui.dim('v' + str(m['version']))}")
+    if ordered and not numbered:
+        why = "this write changed the list" if not rebind else "devkit could not record the list"
+        print(f"  {ui.dim(f'no numbers: {why}; dev task numbers it again, and ids always work')}")
     done = sorted([i for i in items if i["meta"].get("status") == "done"], key=lambda i: i["meta"].get("updated", ""),
                   reverse=True)
     for it in (done if show_all else done[:5]):
@@ -2061,33 +2072,35 @@ def cmd_task(a):
             body = a.body or ("" if a.no_template else work.task_body(a.type, a.why or "", a.done))
             it = work.create(scope, " ".join(a.text), kind=a.type, bucket=bucket, priority=a.priority,
                              body=body, why=a.why or "", due=a.due or "")
-            print(f"{ui.OK} {it['meta']['id']} added to {bucket} · {label}")
+            print(f"{ui.OK} {work.acted('added', it)} to {bucket} · {label}")
             if "_" in body and not a.body:
                 print(ui.dim(f"  fill in the description: dev task edit {it['meta']['id']} --body-file <file> --why \"…\""))
             if a.claim:
                 work.claim(it, why=a.why or "", branch=_task_branch(scope))
                 print(f"{ui.OK} claimed by you")
+            if bucket == "now" and work.now_warning(scope):
+                ui.warn(work.now_warning(scope))
         elif act in ("start", "claim"):
             it = work.claim(work.find(" ".join(a.selector), scope), why=a.why or "", branch=_task_branch(scope))
-            print(f"{ui.OK} {it['meta']['id']} claimed until {it['meta']['lock_expires']} — others see it as yours")
+            print(f"{ui.OK} {work.acted('claimed', it)} until {it['meta']['lock_expires']} — others see it as yours")
         elif act == "release":
             it = work.release(work.find(" ".join(a.selector), scope), why=a.why or "", status="todo")
-            print(f"{ui.OK} {it['meta']['id']} released")
+            print(f"{ui.OK} {work.acted('released', it)}")
         elif act == "done":
             it = work.find(" ".join(a.selector), scope)
             it = work.release(it, why=a.why or "", status="done")
-            print(f"{ui.OK} {it['meta']['id']} done")
+            print(f"{ui.OK} {work.acted('done', it)}")
         elif act == "reopen":
             it = work.reopen(work.find(" ".join(a.selector), scope), why=a.why or "")
-            print(f"{ui.OK} {it['meta']['id']} reopened (todo) · why: {a.why}")
+            print(f"{ui.OK} {work.acted('reopened', it)} (todo) · why: {a.why}")
         elif act == "block":
             it = work.update(work.find(" ".join(a.selector), scope), "block", why=a.why or "", status="blocked")
-            print(f"{ui.OK} {it['meta']['id']} blocked")
+            print(f"{ui.OK} {work.acted('blocked', it)}")
         elif act == "unblock":
             it = work.find(" ".join(a.selector), scope)
             holder, expired = work.lock_holder(it)
             it = work.update(it, "unblock", why=a.why or "", status="doing" if holder and not expired else "todo")
-            print(f"{ui.OK} {it['meta']['id']} unblocked ({it['meta']['status']})")
+            print(f"{ui.OK} {work.acted('unblocked', it)} ({it['meta']['status']})")
         elif act == "link":
             it = work.find(" ".join(a.selector), scope)
             tag = f"initiative:{a.to}"
@@ -2096,15 +2109,17 @@ def cmd_task(a):
                 return 2
             links = list(dict.fromkeys((it["meta"].get("links") or []) + [tag]))
             it = work.update(it, "link", why=a.why or "", links=links)
-            print(f"{ui.OK} {it['meta']['id']} counts toward initiative {a.to}")
+            print(f"{ui.OK} {work.acted('linked', it)}: counts toward initiative {a.to}")
         elif act == "cancel":
             it = work.find(" ".join(a.selector), scope)
             it = work.update(it, "cancel", why=a.why or "", status="cancelled", claimed_by="", claimed_at="",
                              lock_expires="")
-            print(f"{ui.OK} {it['meta']['id']} cancelled")
+            print(f"{ui.OK} {work.acted('cancelled', it)}")
         elif act == "move":
             it = work.update(work.find(" ".join(a.selector), scope), "move", why=a.why or "", bucket=a.to)
-            print(f"{ui.OK} {it['meta']['id']} → {a.to}")
+            print(f"{ui.OK} {work.acted('moved', it)} → {a.to}")
+            if a.to == "now" and work.now_warning(scope):
+                ui.warn(work.now_warning(scope))
         elif act == "edit":
             changes = {}
             if a.title:
@@ -2119,7 +2134,7 @@ def cmd_task(a):
                 ui.err("nothing to change: --title, --body-file, --priority or --due")
                 return 2
             it = work.update(work.find(" ".join(a.selector), scope), "edit", why=a.why or "", **changes)
-            print(f"{ui.OK} {it['meta']['id']} v{it['meta']['version']}")
+            print(f"{ui.OK} {work.acted('edited', it)} v{it['meta']['version']}")
         elif act == "delegate":
             it = work.find(" ".join(a.selector), scope)
             who = a.to.lstrip("@")
@@ -2155,7 +2170,7 @@ def cmd_task(a):
     except ValueError as e:
         ui.err(str(e))
         return 2
-    _print_items(scope, label, getattr(a, "all", False))
+    _print_items(scope, label, getattr(a, "all", False), rebind=act == "ls")
     return 0
 
 
