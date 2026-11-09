@@ -149,10 +149,12 @@ class CodexFailedShellTests(BugState, HookCase):
         ledger = [json.loads(x) for x in f.read_text().splitlines()] if f.exists() else []
         return [x["ok"] for x in ledger if x.get("tool") == "Bash"]
 
-    def test_a_failed_codex_command_is_a_failure_in_the_ledger(self):
+    def test_the_rollout_record_decides_a_codex_commands_outcome_never_its_output(self):
         self._record(1)
-        self._post(1)
-        self.assertEqual(self._ledger_ok(), [False])
+        self._post(1)  # failed; its output is a plain traceback
+        self._record(2, status="completed", code=0)
+        self._post(2, output="Exit code: 1\nTraceback (most recent call last):\nValueError: printed by the test\n")
+        self.assertEqual(self._ledger_ok(), [False, True])
 
     def test_the_same_codex_failure_twice_stops_the_patch_loop(self):
         self._record(1)
@@ -162,11 +164,6 @@ class CodexFailedShellTests(BugState, HookCase):
         self.assertIn(hooks.ROOT_CAUSE_STOP, out)
         # Codex's PostToolUse output schema accepts only its own event name
         self.assertEqual(json.loads(out)["hookSpecificOutput"]["hookEventName"], "PostToolUse")
-
-    def test_a_successful_codex_command_is_a_success_whatever_its_output_says(self):
-        self._record(1, status="completed", code=0)
-        self._post(1, output="Exit code: 1\nTraceback (most recent call last):\nValueError: printed by the test\n")
-        self.assertEqual(self._ledger_ok(), [True])
 
     def test_a_command_whose_record_is_not_written_yet_is_settled_at_the_next_call(self):
         self._post(1)  # its item is not on disk yet: unknown, never a success
