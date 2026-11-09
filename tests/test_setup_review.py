@@ -109,6 +109,18 @@ class SecondCtrlCTests(unittest.TestCase):
         self.assertEqual(r.rc, 130)
 
 
+def review_text(off: str, cols=80) -> tuple:
+    """The review of a rerun where the saved setup had both agents and `off` is turned off -> (lines, the words
+    joined by single spaces)."""
+    d = flow.Mac(saved=BOTH).survey()
+    w = wizard._Wizard(flow.FakeTerm(cols=cols), skip_packages=True)
+    w.d, w.saved_a = d, wizard.tui_defaults(d, detected=False)
+    w.a, w.baseline = wizard.Answers(w.saved_a), wizard.Answers(w.saved_a)
+    w._set_agents("claude" if off == "codex" else "codex")
+    lines = [tui.strip(x) for x in w.review()]
+    return lines, " ".join(" ".join(x.split()) for x in lines)
+
+
 class ScreenWidthTests(unittest.TestCase):
     """The screens at 80 and 60 columns: rows on one line where they fit, nothing cut."""
 
@@ -133,6 +145,20 @@ class ScreenWidthTests(unittest.TestCase):
                         self.assertEqual(" · ".join(x.strip() for x in rights), core.COPYRIGHT)
                         self.assertEqual(len(rights), 1 if width == 80 else 2)  # at 60, broken at the " · "
                         self.assertEqual([x for x in lines if len(x) > width - 1 or x.endswith("…")], [])
+
+    def test_the_review_says_which_permissive_modes_turning_an_agent_off_removes(self):
+        said = {"codex": "! devkit removes its rules, hooks and skills from Codex, and the full-access modes it set "
+                         "(no approvals, no sandbox). Codex and your own settings stay. To remove the app: brew "
+                         "uninstall --cask codex",
+                "claude": "! devkit removes its rules, hooks and skills from Claude Code, and the no-prompt mode it "
+                          "set (bypassPermissions). Claude Code and your own settings stay. To remove the app: "
+                          f"{wizard.REMOVE_APP['claude']}"}
+        for off, sentence in said.items():
+            for cols in (100, 80, 60):
+                with self.subTest(off=off, cols=cols):
+                    lines, text = review_text(off, cols)
+                    self.assertIn(sentence, text)
+                    self.assertEqual([x for x in lines if len(x) > cols - 1], [])
 
 
 if __name__ == "__main__":

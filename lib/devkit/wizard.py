@@ -743,6 +743,9 @@ PANEL_NEEDS = {"claude": "Claude Code needs your Claude account: a Pro, Max, Tea
 AGENT_ONLY = {"claude": "Anthropic's agent, in the terminal and Claude Desktop.",
               "codex": "OpenAI's agent, in the terminal and the ChatGPT app."}
 REMOVE_APP = {"claude": "rm -rf ~/.local/bin/claude ~/.local/share/claude", "codex": "brew uninstall --cask codex"}
+# What dev install also takes out of an agent turned off: the permissive modes devkit set there (setup.py)
+REMOVED_MODES = {"claude": "the no-prompt mode it set (bypassPermissions)",
+                 "codex": "the full-access modes it set (no approvals, no sandbox)"}
 REVIEW_COL = 26  # the review's value column: "  7  " and the section name padded to 20, then a space
 # The command that signs in later (the summary's "To finish"), and each way to sign in from the panel.
 SIGN_IN = {"claude": ["claude", "auth", "login"], "codex": ["codex", "login"]}
@@ -1841,9 +1844,9 @@ class _Wizard:
         for k in ("claude", "codex"):
             if self.saved_a and self.saved_a.get("use_" + k) and not self.a.get("use_" + k):
                 name = AGENT_NAMES[k]
-                text = (f"devkit removes its rules, hooks and skills from {name}. {name} and your own settings "
-                        f"stay. To remove the app: {REMOVE_APP[k]}")
-                lines = tui.wrap(text, width - 1 - REVIEW_COL - 2)  # after the "! " mark
+                text = (f"devkit removes its rules, hooks and skills from {name}, and {REMOVED_MODES[k]}. {name} "
+                        f"and your own settings stay. To remove the app: {REMOVE_APP[k]}")
+                lines = _wrap_words(text, width - 1 - REVIEW_COL - 2)  # after the "! " mark
                 out += [lead + tui.warn("!") + " " + lines[0]] + [lead + "  " + x for x in lines[1:]]
         return out
 
