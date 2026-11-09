@@ -18,14 +18,18 @@ The resolution's channel is the one of the latest show; rates() credits every ch
     on_hit(lesson_ids, session, agent, now=None) -> [id]           record `missed` for the ones pending; return them
     on_end(session, agent, now=None) -> [id]                       record `heeded` for the rest; return them
     fold(now=None) -> {heeded, missed, lessons}                    add heeded and missed to the usage counts
+    prune(days=45, now=None) -> int                                remove the events older than the window, but the
+                                                                   outcomes fold has not counted; the lines removed
     rates(days=30) -> {days, channels, most_missed}                heeded rate per channel; the most missed lessons
     coverage(days=14) -> {days, recurrences, shown_before, unknown, coverage, items}
                                                                    recorded recurrences shown earlier in the session
 
-Writes: each event is one os.write of one line to a file opened with O_APPEND, so concurrent hooks never interleave
-or lose lines. on_hit and on_end read and append under the log's lock (state.hold), so two hooks resolving the same
+Writes: each event is one os.write of one line to a file opened with O_APPEND, under the log's lock (state.hold), so
+concurrent hooks never interleave or lose lines, and prune, which replaces the file under the same lock, never drops
+an append. on_hit and on_end read and append under that lock (it is re-entrant), so two hooks resolving the same
 lesson at once record it once. fold writes through state.update on lessons.USAGE_LOCAL, the lock lessons.track
-uses. A write that fails (a full disk, a read-only home) is dropped: the hooks that call these never fail on it.
+uses. A write that fails (a full disk, a read-only home, a lock that stays busy) is dropped: the hooks that call
+these never fail on it.
 
 The usage counts: lessons.track already counts `shown` and `shown_<channel>` when the hook shows a lesson, so fold
 adds only `heeded` and `missed`, with `heeded_last` and `missed_last`. Its cursor is `folded_last` in each lesson's
@@ -38,6 +42,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import tempfile
 import time
 from pathlib import Path
 
@@ -69,12 +74,13 @@ def record(event: str, lesson_id: str, channel: str, agent: str, session: str, n
     try:
         path = Path(EVENTS)
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
-        try:
-            os.write(fd, line.encode())
-        finally:
-            os.close(fd)
-    except OSError:
+        with state.hold(path):  # prune swaps the file under the same lock: an append never lands in the old one
+            fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+            try:
+                os.write(fd, line.encode())
+            finally:
+                os.close(fd)
+    except (OSError, state.StateBusy):
         pass
 
 
@@ -200,6 +206,59 @@ def fold(now: float = None) -> dict:
 
     state.update(lessons.USAGE_LOCAL, add)
     return totals
+
+
+def _unfolded(e: dict, cursor: dict) -> bool:
+    """An outcome fold has not added to the usage counts yet (fold's own test, against its cursor)."""
+    return e.get("event") in ("heeded", "missed") and isinstance(e.get("id"), str) and \
+        bool(_ID.fullmatch(e["id"])) and e["ts"] > cursor.get(e["id"], 0)
+
+
+def prune(days: int = 45, now: float = None) -> int:
+    """Remove the events older than `days` from the log, and return how many lines went. An outcome fold has not
+    counted yet stays, however old (call fold first to let it go), and so does every event of the window; a line
+    that does not parse as an event (no reader can use it) goes. Under the log's lock, which record also takes: the
+    kept lines go to a temporary file in the log's folder (0600) that replaces the log atomically. Nothing to remove
+    writes nothing; a log that is missing, unreadable or whose lock stays busy (state.WAIT) removes nothing (0)."""
+    if days < 0:
+        raise ValueError(f"days must be 0 or more, not {days}")
+    cutoff = (time.time() if now is None else now) - days * 86400
+    from . import lessons
+    usage = state.read(lessons.USAGE_LOCAL) or {}
+    cursor = {lid: _int(x.get("folded_last")) for lid, x in usage.items() if isinstance(x, dict)}
+    path = Path(EVENTS)
+    try:
+        with state.hold(path):
+            try:
+                lines = path.read_bytes().decode("utf-8", "replace").splitlines(keepends=True)
+            except FileNotFoundError:
+                return 0
+            kept = []
+            for ln in lines:
+                try:
+                    e = json.loads(ln)
+                    e["ts"] = int(e["ts"])
+                except (ValueError, TypeError, KeyError):
+                    continue
+                if e["ts"] >= cutoff or _unfolded(e, cursor):
+                    kept.append(ln if ln.endswith("\n") else ln + "\n")
+            removed = len(lines) - len(kept)
+            if not removed:
+                return 0
+            fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.{os.getpid()}.", suffix=".tmp", dir=str(path.parent))
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    fh.writelines(kept)
+                os.replace(tmp, path)
+            except BaseException:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+                raise
+            return removed
+    except (OSError, state.StateBusy):
+        return 0
 
 
 def rates(days: int = 30) -> dict:

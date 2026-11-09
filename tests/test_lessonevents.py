@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 from devkit import audit, lessonevents, lessons, state  # noqa: E402
 
 T = 1_794_000_000.0  # a fixed clock
+DAY = 86400
 L1, L2, L3, L4 = "L-fx1aaaaaaa1", "L-fx2bbbbbbb2", "L-fx3ccccccc3", "L-fx4ddddddd4"
 SID = "3890e084-8091-4eb8-ace8-1ab104d9a409"
 
@@ -204,6 +205,104 @@ class FoldTests(EventsTestCase):
         t.join()
         self.assertEqual(self.usage()[L3]["shown"], 200)
         self.assertEqual(self.usage()[L1]["missed"], 1)
+
+
+class PruneTests(EventsTestCase):
+    def rec(self, event, lid, at, channel="call", agent="claude", session="s1"):
+        lessonevents.record(event, lid, channel, agent, session, now=at)
+
+    def kept(self) -> list:
+        return [(e["id"], e["event"], e["ts"]) for e in self.lines()]
+
+    def test_prune_removes_the_events_older_than_the_window_and_keeps_the_newer(self):
+        self.rec("shown", L1, T - 50 * DAY)
+        lessonevents.on_end("s1", "claude", now=T - 50 * DAY + 5)
+        self.rec("shown", L2, T - 45 * DAY, session="s2")  # on the window's edge: kept
+        self.rec("shown", L3, T - 2 * DAY, session="s3")
+        lessonevents.fold(now=T)
+        self.assertEqual(lessonevents.prune(45, now=T), 2)
+        self.assertEqual(self.kept(), [(L2, "shown", int(T) - 45 * DAY), (L3, "shown", int(T) - 2 * DAY)])
+
+    def test_an_outcome_the_fold_has_not_counted_is_kept_however_old(self):
+        self.rec("shown", L1, T - 60 * DAY)
+        lessonevents.on_hit([L1], "s1", "claude", now=T - 60 * DAY + 5)
+        lessonevents.fold(now=T - 55 * DAY)  # counts L1's miss
+        self.rec("shown", L2, T - 50 * DAY, session="s2")
+        lessonevents.on_end("s2", "claude", now=T - 50 * DAY + 5)  # recorded after that fold: not counted yet
+        self.assertEqual(lessonevents.prune(45, now=T), 3)
+        self.assertEqual(self.kept(), [(L2, "heeded", int(T) - 50 * DAY + 5)])
+        self.assertEqual(lessonevents.fold(now=T)["heeded"], 1)
+        self.assertEqual(lessonevents.prune(45, now=T), 1)
+        self.assertEqual(self.kept(), [])
+
+    def test_lines_that_do_not_parse_are_removed(self):
+        self.rec("shown", L1, T)
+        with open(lessonevents.EVENTS, "a") as f:
+            f.write('{"ts": 17\nnot json\n{"id": "L-x", "event": "shown"}\n')
+        self.assertEqual(lessonevents.prune(45, now=T), 3)
+        self.assertEqual(self.kept(), [(L1, "shown", int(T))])
+
+    def test_nothing_to_remove_leaves_the_log_as_it_was(self):
+        self.assertEqual(lessonevents.prune(45, now=T), 0)
+        self.assertFalse(lessonevents.EVENTS.exists())
+        self.rec("shown", L1, T - DAY)
+        before = lessonevents.EVENTS.stat()
+        self.assertEqual(lessonevents.prune(45, now=T), 0)
+        after = lessonevents.EVENTS.stat()
+        self.assertEqual((after.st_ino, after.st_mtime_ns), (before.st_ino, before.st_mtime_ns))
+
+    def test_the_pruned_log_replaces_the_old_one_whole_and_stays_private(self):
+        self.rec("shown", L1, T - 50 * DAY)
+        self.rec("shown", L2, T)
+        old = lessonevents.EVENTS.stat().st_ino
+        lessonevents.prune(45, now=T)
+        st = lessonevents.EVENTS.stat()
+        self.assertNotEqual(st.st_ino, old)  # renamed over the log, never rewritten in place
+        self.assertEqual(st.st_mode & 0o777, 0o600)
+        self.assertEqual(sorted(p.name for p in lessonevents.EVENTS.parent.iterdir() if p.is_file()),
+                         ["lessons-events.jsonl"])
+
+    def test_a_negative_window_is_refused(self):
+        self.rec("shown", L1, T)
+        with self.assertRaises(ValueError):
+            lessonevents.prune(-1, now=T)
+        self.assertEqual(len(self.lines()), 1)
+
+    def test_prune_waits_for_the_logs_lock_and_removes_nothing_when_it_stays_busy(self):
+        self.rec("shown", L1, T - 50 * DAY)
+        held, release = threading.Event(), threading.Event()
+
+        def holder():
+            with state.hold(lessonevents.EVENTS):
+                held.set()
+                release.wait(10)
+
+        t = threading.Thread(target=holder)
+        t.start()
+        self.assertTrue(held.wait(10))
+        try:
+            with mock.patch.object(state, "WAIT", 0.05):
+                self.assertEqual(lessonevents.prune(45, now=T), 0)
+            self.assertEqual(len(self.lines()), 1)
+        finally:
+            release.set()
+            t.join()
+
+    def test_an_event_a_hook_records_while_prune_runs_is_kept(self):
+        self.rec("shown", L1, T - 50 * DAY)
+        real_replace, late = os.replace, []
+
+        def replace(src, dst):
+            if str(dst) == str(lessonevents.EVENTS) and not late:  # prune read the log and is about to swap it
+                late.append(threading.Thread(target=self.rec, args=("shown", L2, T), kwargs={"agent": "neo"}))
+                late[0].start()
+                late[0].join(0.3)  # an append that does not wait for the lock lands in the old file by now
+            return real_replace(src, dst)
+
+        with mock.patch("os.replace", side_effect=replace):
+            self.assertEqual(lessonevents.prune(45, now=T), 1)
+        late[0].join(10)
+        self.assertEqual(self.kept(), [(L2, "shown", int(T))])
 
 
 class RatesTests(EventsTestCase):
