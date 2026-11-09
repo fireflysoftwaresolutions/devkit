@@ -1850,8 +1850,25 @@ def parse_patch_paths(patch: str):
 DEVKIT_OFF = [
     (re.compile(r'"disableAllHooks"\s*:\s*true'), "disables every hook, including devkit's context, guard and canary"),
     (re.compile(r'"devkit@firefly-devkit"\s*:\s*false'), "disables the devkit plugin"),
-    (re.compile(r'(^|\n)\s*(codex_)?hooks\s*=\s*false'), "turns Codex hooks off"),
+    # TOML spells the key bare, quoted, dotted (features.hooks) or in an inline table ({ hooks = false })
+    (re.compile(r'(?:^|[\n{,])[ \t]*(?:[\w"\'-]+[ \t]*\.[ \t]*)*["\']?(?:codex_)?hooks["\']?[ \t]*=[ \t]*false\b'),
+     "turns Codex hooks off"),
 ]
+_HOOK_KEYS = ("hooks", "codex_hooks")
+
+
+def _toml_hooks_off(text: str) -> bool:
+    """True when `text` parses as TOML and sets hooks or codex_hooks to false in any table: the spellings a pattern
+    misses, such as a key with a \\u escape, count as Codex reads them."""
+    try:
+        import tomllib
+        data = tomllib.loads(text)
+    except Exception:  # not TOML (yet): the patterns judge it
+        return False
+
+    def off(d) -> bool:
+        return any((k in _HOOK_KEYS and v is False) or (isinstance(v, dict) and off(v)) for k, v in d.items())
+    return off(data)
 
 
 def devkit_off(path: str, tool_input: dict):
@@ -1859,17 +1876,20 @@ def devkit_off(path: str, tool_input: dict):
     if not path:
         return None
     p = Path(path)
-    is_settings = (p.parent.name == ".claude" and p.name in ("settings.json", "settings.local.json")) or \
-        (p.parent.name == ".codex" and p.name in ("config.toml", "hooks.json"))
+    folder, name = p.parent.name.casefold(), p.name.casefold()  # macOS: .Codex/Config.toml is .codex/config.toml
+    is_settings = (folder == ".claude" and name in ("settings.json", "settings.local.json")) or \
+        (folder == ".codex" and name in ("config.toml", "hooks.json"))
     if not is_settings:
         return None
     texts = [tool_input.get("content") or "", tool_input.get("new_string") or ""]
     texts += [e.get("new_string") or "" for e in tool_input.get("edits") or [] if isinstance(e, dict)]
-    for rx, what in DEVKIT_OFF:
-        if any(rx.search(x) for x in texts):
-            return deny(f"This change {what} for {_code(core.tilde(path))}. devkit must stay active in every "
-                        f"Claude and Codex session. If it really should be off, change devkit's configuration "
-                        f"(~/.config/devkit/config.json, `dev config`) — ask the developer.")
+    what = next((w for rx, w in DEVKIT_OFF if any(rx.search(x) for x in texts)), None)
+    if not what and name == "config.toml" and _toml_hooks_off(tool_input.get("content") or ""):
+        what = DEVKIT_OFF[-1][1]
+    if what:
+        return deny(f"This change {what} for {_code(core.tilde(path))}. devkit must stay active in every "
+                    f"Claude and Codex session. If it really should be off, change devkit's configuration "
+                    f"(~/.config/devkit/config.json, `dev config`) — ask the developer.")
     return None
 
 
@@ -2571,6 +2591,26 @@ def _note_text():
 _NOTE_CALLS = re.compile(r"\b(?:set_embargo|set_backup_policy|_edit_records|record_tips|cmd_embargo)\b")
 # a write _CODE_WRITES can miss: an open() whose path argument nests calls, ending in a write mode, or a write method
 _ANY_WRITE = re.compile(r"""['"][rbtU]*[wax+][rbt+]*['"]\s*\)|\bmode\s*=|\.write(?:lines)?\s*\(""")
+
+
+def patch_devkit_off(patch: str, cwd):
+    """apply_patch on an agent settings file (devkit_off): judged by the file's text after the patch and by the lines
+    it adds (all the guard has when a hunk does not apply); a move onto a settings file brings the source's text. The
+    target counts by the path the patch names and by its real path."""
+    for f in _patch_files(patch):
+        if f["op"] == "delete":
+            continue
+        src = resolve(f["path"], cwd)
+        target = f["move"] or f["path"]
+        added = "\n".join(ln[1:] for ln in f["lines"] if ln.startswith("+"))
+        after = added if f["op"] == "add" else patched(
+            _read_small(src, 1 << 20) if src != UNKNOWN and Path(str(src)).is_file() else "", f["lines"])
+        dst = resolve(target, cwd)
+        for path in dict.fromkeys(str(x) for x in (_lexical(target, cwd), dst) if x != UNKNOWN):
+            v = devkit_off(path, {"content": after or "", "new_string": added})
+            if v:
+                return v
+    return None
 
 
 def protected_patch(patch: str, cwd):
@@ -10432,7 +10472,7 @@ def _file_tool_verdict(tool: str, tool_input: dict, cwd: str, agent: str) -> _Ju
         return _Judged(None)
     if tool == "apply_patch":
         for body in _patch_bodies(tool_input):
-            v = protected_patch(body, cwd)
+            v = protected_patch(body, cwd) or patch_devkit_off(body, cwd)
             if v:
                 return _Judged(v)
             for op, path in parse_patch_paths(body):
