@@ -7609,7 +7609,8 @@ _GH_FIELDS = ("-f", "-F", "--field", "--raw-field", "--input")
 _DEV_VALUES = frozenset({
     "-m", "--message", "--body-file", "--title", "--base", "--body", "--version", "--notes-file", "-p", "--project",
     "-i", "--initiative", "--label", "--state", "--assignee", "--interval", "--timeout", "--lines", "--limit",
-    "--branch", "--flaky", "--why", "--action", "--actor", "--agent", "--breaking", "--category", "--commit-template",
+    "--branch", "--flaky", "--why", "--action", "--actor", "--agent", "--breaking", "--category", "--cause",
+    "--commit-template",
     "--days", "--delay", "--format", "--grep", "--lang", "--log", "--member", "--note", "--only", "--out", "--outcome",
     "--pr", "--provider", "--refs", "--tag", "--renew", "--runner", "--search", "--session", "--severity", "--sha", "--since", "--stack",
     "--step-timeout", "--until", "--verified", "-n", "-o"})

@@ -521,6 +521,7 @@ def _audit_commands(days: int, now: float) -> list:
 def _timing_commands(days: int, now: float) -> list:
     """(ts, command) of the shell calls this machine's hooks timed after they succeeded (STATE/timing, slow calls
     only, the first 160 characters)."""
+    from .hooks import SHELL_TOOLS
     out = []
     base = STATE / "timing"
     files = sorted(base.glob("*.jsonl"))[-2:] if base.is_dir() else []
@@ -538,7 +539,7 @@ def _timing_commands(days: int, now: float) -> list:
             if r.get("kind") != "tool" or not isinstance(what, str) or (r.get("ts") or 0) < now - days * 86400:
                 continue
             tool, _, cmd = what.partition(": ")
-            if tool in ("Bash", "Monitor", "exec_command", "shell", "local_shell", "unified_exec") and cmd:
+            if tool in SHELL_TOOLS and cmd:
                 out.append((r.get("ts") or 0, cmd))
     return out
 

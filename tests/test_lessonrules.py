@@ -206,14 +206,17 @@ class CheckTests(RulesCase):
     def test_a_bad_rule_is_ignored_and_the_good_ones_still_load(self):
         doc = self.rule_doc()
         allow = dict(doc["rules"][0], mode="allow")
-        widened = dict(doc["rules"][0], match="python3")  # edited by hand: its id no longer matches
-        doc["rules"] = [allow, widened, doc["rules"][0], "x"]
+        widened = dict(doc["rules"][0], match="python3")  # edited by hand: too broad, and its id no longer matches
+        moved = dict(doc["rules"][0], match="python3 -m")  # a well-shaped pattern edited by hand: only the id tells
+        doc["rules"] = [allow, widened, moved, doc["rules"][0], "x"]
         (self.base / "rules" / "global.json").write_text(json.dumps(doc))
         self.assertEqual([r["id"] for r in lessonrules.load(["global"])], [self.rule["id"]])
         text = " ".join(lessonrules.PROBLEMS)
         self.assertIn("never allows", text)
         self.assertIn("alone", text)
+        self.assertIn("does not match the rule", text)
         self.assertIn("not an object", text)
+        self.assertEqual(lessonrules.check_call("python3 -m pytest", ["global"]), ("", None))
 
     def test_a_widened_pattern_with_a_matching_id_is_still_checked_for_shape(self):
         doc = self.rule_doc()
@@ -301,11 +304,15 @@ class GuardTests(RulesCase):
     def test_no_rule_can_allow_a_call_the_guard_refuses(self):
         les = write_lesson(self.base, lid="L-fxforce0003c", commands=("git push --force",),
                            title="Push with --force-with-lease", prevention="Use --force-with-lease on your branch.")
-        lessonrules.propose(les, match="git push --force", block=False)
-        refused = self.check("git push --force origin feat/x")
-        self.assertEqual(refused[0], "deny")
-        self.assertIn("force-push", refused[1].lower())
-        self.assertNotIn("L-fxforce0003c", refused[1])  # the guard's own refusal, not the lesson's warning
+        for block in (False, True):
+            with self.subTest(block=block):
+                lessonrules.propose(les, match="git push --force", block=block)
+                refused = self.check("git push --force origin feat/x")
+                self.assertEqual(refused[0], "deny")
+                self.assertIn("force-push", refused[1].lower())
+                self.assertNotIn("L-fxforce0003c", refused[1])  # the guard's own refusal, as it was
+                self.assertEqual(guard.LAST_REFUSAL, "check_git:force-push")
+                self.assertEqual(guard.lesson_rule_context(), "")
 
     def test_a_rule_file_that_says_allow_changes_nothing(self):
         doc = self.rule_doc()
