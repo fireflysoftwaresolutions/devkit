@@ -19,7 +19,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
-from devkit import core, providers, setup, toolchain, tui, wizard  # noqa: E402
+from devkit import audit, core, providers, setup, toolchain, tui, wizard  # noqa: E402
 
 UP, DOWN, ENTER, ESC, CTRL_C = b"\x1b[A", b"\x1b[B", b"\r", b"\x1b", b"\x03"
 LIB = str(Path(__file__).resolve().parents[1] / "lib")
@@ -899,7 +899,39 @@ OWN_ANGULAR = {"command": "npx", "args": ["-y", "@angular/cli", "mcp"]}
 
 
 class AgentOffTests(unittest.TestCase):
-    """INSTALL-AC-39 (R21): `dev install` with an agent turned off removes what devkit wrote for it, and only that."""
+    """INSTALL-AC-39 (R21): `dev install` with an agent turned off removes what devkit wrote for it, and only that.
+    Every test writes its audit trail to a temporary folder; after the class, no removal record about a temporary
+    folder may be in this Mac's real trail (live sessions write there too, so the check reads only these records)."""
+
+    REAL_AUDIT = audit.AUDIT
+
+    @classmethod
+    def setUpClass(cls):
+        cls.started = time.time()
+
+    @classmethod
+    def tearDownClass(cls):
+        tmp = os.path.realpath(tempfile.gettempdir())
+        stray = []
+        for f in sorted(cls.REAL_AUDIT.glob("*.jsonl")) if cls.REAL_AUDIT.is_dir() else []:
+            if f.stat().st_mtime < cls.started:
+                continue
+            for line in f.read_text(errors="replace").splitlines():
+                if "remove-agent" not in line and "agent.remove" not in line:
+                    continue
+                rec = json.loads(line)
+                target = os.path.realpath(str(rec.get("target") or ""))
+                if rec.get("ts", 0) >= cls.started and target.startswith(tmp):
+                    stray.append(f"{f.name}: {rec.get('id')} {rec.get('target')}")
+        if stray:
+            raise AssertionError(f"a test wrote to this Mac's audit trail: {stray}")
+
+    def setUp(self):
+        trail = tempfile.TemporaryDirectory()
+        self.addCleanup(trail.cleanup)
+        p = mock.patch.object(audit, "AUDIT", Path(trail.name) / "audit")
+        p.start()
+        self.addCleanup(p.stop)
 
     def homes(self, tmp: Path):
         claude, codex, agents, share = tmp / ".claude", tmp / ".codex", tmp / ".agents", tmp / "share" / "skills"
@@ -972,7 +1004,7 @@ class AgentOffTests(unittest.TestCase):
                 self.assertEqual(after == before, not person)
                 self.assertEqual((claude / "CLAUDE.md").exists(), not person)
                 self.assertEqual((claude / "skills" / "tdd").is_symlink(), not person)
-                self.assertEqual([a[0] for a in audits], ["agent.remove"])
+                self.assertEqual([a[0] for a in audits], ["install.remove-agent"])
                 self.assertEqual(audits[0][3] if len(audits[0]) > 3 else "ok", "ok" if person else "refused")
 
     def test_an_agents_run_of_dev_install_leaves_devkit_in_a_turned_off_agent_and_says_why(self):

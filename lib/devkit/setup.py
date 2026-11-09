@@ -1878,18 +1878,19 @@ def remove_agent(agent: str) -> list:
 
     Taking devkit's hooks out takes the guard out, so only the developer's own run does it: an agent can turn an
     agent off (`dev config set agents.claude false`) and run `dev setup -y`, and that run raises RemovalLeft and
-    changes nothing. Both outcomes leave an `agent.remove` audit record."""
+    changes nothing. Both outcomes leave an `install.remove-agent` audit record (the registered install family)."""
     name = "Claude Code" if agent == "claude" else "Codex"
     home = CLAUDE_HOME if agent == "claude" else CODEX_HOME
     if core.older_copy_skip(f"devkit's entries in {tilde(home)}"):
         return []
     if not core.set_by_developer():
-        _audit("agent.remove", tilde(home), f"{name} is turned off; not the developer's terminal, so nothing removed",
-               "refused")
+        _audit("install.remove-agent", tilde(home),
+               f"{name} is turned off; not the developer's terminal, so nothing removed", "refused")
         raise RemovalLeft(f"{name} is turned off, but this run is not from your terminal, so devkit's hooks, rules "
                           f"and skills stay in {tilde(home)}. Run dev setup in your terminal to remove them.")
     gone = _remove_agent(agent, home)
-    _audit("agent.remove", tilde(home), "removed: " + "; ".join(gone) if gone else "nothing of devkit's was left")
+    _audit("install.remove-agent", tilde(home),
+           ("removed: " + "; ".join(gone)) if gone else "nothing of devkit's was left")
     return gone
 
 
