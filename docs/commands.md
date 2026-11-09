@@ -936,6 +936,7 @@ runs.
 | --- | --- |
 | `-m "…"` | The header; more `-m` options add paragraphs |
 | `--why "…"` | The first paragraph of the body: why the change is needed ([the commit template](git-and-github.md#commits)) |
+| `--cause "…"` | The `Root cause: …` paragraph, right after the why: what caused the problem, as your reproduction proved it. Required for `fix` and `revert` commits; a placeholder (`unknown`, `n/a`, `tbd`, `-`) or a cause under 15 characters is refused. The audit log records that the commit named a cause (`dev.commit.cause`, `cause: yes`), never its text |
 | `--body "…"` | A body paragraph, repeatable: what changed (after `--why`), or the reason without `--why` |
 | `--verified "…"` | The last paragraph of the body, `Verified: …`: how you verified the change |
 | `--refs "…"` | The `Refs:` trailer: `#12`, `owner/repo#12`, a URL, or a ticket key; repeat it for more. Default: the ticket of the task started on this branch. A devkit task id is refused in it, as anywhere in the message |

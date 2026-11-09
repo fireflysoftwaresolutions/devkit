@@ -6,8 +6,10 @@
 #
 # Body, after a blank line, one paragraph each:
 #   1. Why: the problem or need, and who it affects.
-#   2. What changed: the behavior and the parts it touches.
-#   3. Verified: the command you ran and its result, for example
+#   2. Root cause: what caused the problem, as your reproduction proved it.
+#      Required for fix and revert commits (dev commit --cause "...").
+#   3. What changed: the behavior and the parts it touches.
+#   4. Verified: the command you ran and its result, for example
 #      Verified: python3 -m unittest tests.test_parser (12 tests pass)
 #
 # Trailers, last, after a blank line, one per line:

@@ -411,7 +411,8 @@ class CommitTests(unittest.TestCase):
             s.branch("fix/two")
             s.write("a.txt", "a")
             s.write("b.txt", "b")
-            rc, _, err = dev("commit", "-m", "fix: keep a", "a.txt")
+            rc, _, err = dev("commit", "-m", "fix: keep a", "--cause", "the commit took b.txt along with a.txt",
+                             "a.txt")
             self.assertEqual(rc, 0, err)
             self.assertEqual(git(s.repo, "show", "--name-only", "--format=", "HEAD"), "a.txt")
             self.assertIn("?? b.txt", git(s.repo, "status", "--porcelain"))
@@ -419,18 +420,18 @@ class CommitTests(unittest.TestCase):
     def test_refused_on_default_or_agent_branch(self):
         with Sandbox() as s:
             s.write("a.txt", "a")
-            rc, _, err = dev("commit", "-m", "fix: x", "a.txt")
+            rc, _, err = dev("commit", "-m", "fix: x", "--cause", "the tool wrote on the wrong branch", "a.txt")
             self.assertEqual(rc, 2)
             self.assertIn("dev branch new", err)
             s.branch("codex/tmp-1")
-            rc, _, err = dev("commit", "-m", "fix: x", "a.txt")
+            rc, _, err = dev("commit", "-m", "fix: x", "--cause", "the tool wrote on the wrong branch", "a.txt")
             self.assertEqual(rc, 2)
             self.assertIn("dev branch rename", err)
 
     def test_nothing_staged(self):
         with Sandbox() as s:
             s.branch("fix/none")
-            self.assertEqual(dev("commit", "-m", "fix: nothing")[0], 1)
+            self.assertEqual(dev("commit", "-m", "fix: nothing", "--cause", "the empty commit was never checked")[0], 1)
 
     def test_wip_round_trip(self):
         with Sandbox() as s:
