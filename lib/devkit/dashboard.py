@@ -700,14 +700,21 @@ def collisions(team: list, items: list, now: float = None) -> list:
     by = {}
     for person in team:
         who = person.get("who") or f"{person.get('user')}@{person.get('host')}"
-        for s in live_sessions_of(person, now):
+        for i, s in enumerate(live_sessions_of(person, now)):
             if s.get("project") and s.get("branch"):
-                by.setdefault((s["project"], s.get("branch") or ""), []).append((who, s.get("agent") or "agent"))
+                # one entry per session: two sessions of one person and agent on a branch collide too (presence that
+                # names no session id counts each of its entries as one session)
+                sid = s.get("session") or f"#{i}"
+                by.setdefault((s["project"], s.get("branch") or ""), {})[(who, s.get("agent") or "agent", sid)] = 1
     out = []
-    for (proj, br), lst in sorted(by.items()):
-        if len(set(lst)) > 1:
-            out.append({"kind": "same-branch", "project": proj, "branch": br, "who": sorted({f"{w} ({a})" for w, a in lst}),
-                        "text": f"{len(set(lst))} sessions on {proj}@{br or '?'}: " + ", ".join(sorted({f'{w} ({a})' for w, a in lst}))})
+    for (proj, br), found in sorted(by.items()):
+        if len(found) > 1:
+            labels = {}
+            for w, a, _sid in found:
+                labels[f"{w} ({a})"] = labels.get(f"{w} ({a})", 0) + 1
+            named = sorted(f"{lb} ×{n}" if n > 1 else lb for lb, n in labels.items())
+            out.append({"kind": "same-branch", "project": proj, "branch": br, "who": sorted(labels),
+                        "sessions": len(found), "text": f"{len(found)} sessions on {proj}@{br or '?'}: " + ", ".join(named)})
     for it in items:
         if it.get("lock") == "expired" and it.get("status") not in ("done", "cancelled"):
             out.append({"kind": "expired-lock", "id": it["id"], "scope": it["scope"], "holder": it["claimed_by"],
@@ -1446,6 +1453,98 @@ def _prs_at():
         return None
 
 
+PEER_TEXT = 120   # another session's words on the page: one cleaned line, at most this many characters
+PEER_INBOX = 3    # the unread messages shown under a session; the rest are counted
+PEER_STATE = {"working": 0, "waiting": 1, "idle": 2}
+AGENT_NAMES = {"claude": "Claude Code", "codex": "Codex"}
+
+
+def _peer_text(text) -> str:
+    from .watch import clean
+    return clean(text, PEER_TEXT)
+
+
+def _peer_who(agent, sid, project="", branch="") -> dict:
+    agent = str(agent or "")
+    return {"agent": agent, "agent_name": AGENT_NAMES.get(agent, agent or "agent"), "prefix": "@" + str(sid or "")[:8],
+            "project": str(project or ""), "branch": str(branch or "")}
+
+
+def peer_sessions(now: float = None) -> dict:
+    """The agent sessions on this Mac for the Now view (lib/devkit/peers.py, read-only): what blocks first (open
+    escalations with the line the developer types, claims with holder and expiry, warn-level overlaps once per pair),
+    then the live and idle sessions grouped by project (the project that holds what blocks first, then the most
+    recently active), each with its run, crew, waits, claims and the messages waiting for it. Another session's words
+    are cleaned and cut to PEER_TEXT characters. The page belongs to no session, so no row is "me". Never raises:
+    {"error": {title, detail}} when the store cannot be read."""
+    from . import peers
+    from .watch import clean
+    now = now or time.time()
+    try:
+        rows = [r for r in peers.directory(now=now, include_idle=True) if r["state"] != "ended"]
+        who = {r["key"]: _peer_who(r["agent"], r["session"], r["project"], r["branch"]) for r in rows}
+        claims = []
+        for c in peers.claims(now=now):
+            h = c["holder"]
+            claims.append({"resource": c["resource"], "project": peers.resource_project(c["resource"]) or "",
+                           "holder": who.get(h["key"]) or _peer_who(h["agent"], h["session"], h["project"], h["branch"]),
+                           "why": _peer_text(c["why"]), "since": c.get("since"), "until": c.get("until"),
+                           "queue": len(c.get("queue") or [])})
+        escalations = []
+        for e in peers.escalations("open"):
+            parties = [who.get(k) or _peer_who(*str(k).partition(":")[::2]) for k in e.get("parties") or []]
+            opts = [_peer_text(o) for o in e.get("options") or []]
+            letters = [o.split(":", 1)[0] for o in opts if ":" in o]
+            # with no recommendation the line names no option: the developer's choice is never written for them
+            choice = e.get("recommend") or "<" + (" or ".join(letters) + ", or your words" if letters else "your choice") + ">"
+            escalations.append({"id": e["id"], "since": e.get("ts"), "question": _peer_text(e.get("question")),
+                                "options": opts, "recommend": e.get("recommend") or "",
+                                "from": who.get(e.get("from")) or _peer_who(*str(e.get("from") or "").partition(":")[::2]),
+                                "parties": parties, "type": f"settle {e['id']}: {choice}"})
+        overlaps, seen = [], set()
+        for r in rows:
+            if not r["live"]:
+                continue
+            for o in peers.overlaps(r["agent"], r["session"], now=now):
+                pair = (o["kind"], tuple(sorted((r["key"], o["other"]["key"]))))
+                if o["level"] != "warn" or o["kind"] == "claim" or pair in seen:
+                    continue
+                seen.add(pair)
+                overlaps.append({"kind": o["kind"], "a": who[r["key"]], "b": who.get(o["other"]["key"]) or
+                                 _peer_who(o["other"]["agent"], o["other"]["session"], o["other"]["project"],
+                                           o["other"]["branch"]), "branch": o["other"].get("branch") or "",
+                                 "worktree": core.tilde(o["other"].get("worktree") or "")})
+        blocking = {c["project"] for c in claims} | {x[k]["project"].lower() for x in overlaps for k in ("a", "b")} | \
+            {p["project"].lower() for e in escalations for p in e["parties"]}
+        groups = {}
+        for r in rows:
+            # the escalations and their settlements show above, with the line to type: not again under a session
+            unread = [m for m in peers.inbox(r["agent"], r["session"]) if m.get("kind") not in ("escalation", "settled")]
+            run = r.get("run") or None
+            groups.setdefault(r["project"], []).append(dict(who[r["key"]], **{
+                "session": r["session"], "initiatives": r.get("initiatives") or [], "worktree": core.tilde(r["worktree"]),
+                "state": r["state"], "live": r["live"], "last": r["last"], "surface": r.get("surface") or "",
+                "run": {"goal": _peer_text(run.get("goal")), "headline": clean(run.get("headline"), 300)} if run else None,
+                "crew": [{"name": m["name"], "state": m["state"]} for m in r.get("crew") or []],
+                "waits": [{"consumer": w.get("consumer"), "expires": w.get("expires")} for w in r.get("waits") or []],
+                "claims": list(r.get("claims") or []), "unread": len(unread),
+                "inbox": [{"id": m.get("id"), "kind": m.get("kind") or "note", "ts": m.get("ts"), "urgent": bool(m.get("urgent")),
+                           "from": _peer_who((m.get("from") or {}).get("agent") or "devkit", (m.get("from") or {}).get("session"),
+                                             (m.get("from") or {}).get("project"), (m.get("from") or {}).get("branch")),
+                           "text": _peer_text(m.get("text"))} for m in unread[-PEER_INBOX:]]}))
+        out = []
+        for project, ss in groups.items():
+            ss.sort(key=lambda x: (PEER_STATE.get(x["state"], 3), -float(x["last"] or 0), x["session"]))
+            out.append({"project": project, "initiatives": sorted({i for x in ss for i in x["initiatives"]}),
+                        "blocks": project.lower() in blocking, "last": max(float(x["last"] or 0) for x in ss), "sessions": ss})
+        out.sort(key=lambda g: (not g["blocks"], -g["last"], g["project"]))
+        return {"groups": out, "claims": claims, "escalations": escalations, "overlaps": overlaps,
+                "live": sum(1 for r in rows if r["live"]), "idle": sum(1 for r in rows if not r["live"]), "error": None}
+    except Exception as e:  # the rest of the page still draws; this area says what it could not read
+        return {"groups": [], "claims": [], "escalations": [], "overlaps": [], "live": 0, "idle": 0,
+                "error": {"title": "The sessions on this Mac could not be read", "detail": f"{type(e).__name__}: {e}"[:200]}}
+
+
 def collect(reg: dict, handoff: Path = None, now: float = None) -> dict:
     now = now or time.time()
     handoff = Path(handoff) if handoff else core.HANDOFF
@@ -1498,6 +1597,7 @@ def collect(reg: dict, handoff: Path = None, now: float = None) -> dict:
         "runs": now_areas["runs"],
         "merged": merged_prs(cache, now - 30 * 86400)[:200],
         "sessions": [_with_status(s) for s in reg.get("sessions") or []],
+        "peers": peer_sessions(now),   # the agent sessions on this Mac: what blocks, then the sessions by project
         "providers": reg.get("providers") or {},
         "issues": [{"kind": i[0], "text": i[1]} if isinstance(i, (list, tuple)) else {"kind": "info", "text": str(i)}
                    for i in reg.get("issues") or []],
