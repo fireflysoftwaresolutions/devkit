@@ -359,6 +359,75 @@ class IdentityChangeTests(CallerCase):
         self.assertNotIn('"deny"', self.guard("unset DEVKIT_FROM_AGENT", aid=None))
 
 
+class CallerShapeTests(CallerCase):
+    # progress.caller and progress._as_lane are wrappers over the identity module (lib/devkit/identity.py). caller
+    # keeps the dict its readers take apart (_main_only, the continuity brief, work's lock owner): the same keys, and
+    # the same values but one, which narrows: a call the hook marked as a member's lane names that member even when
+    # the ledger lost its call. Neither the tech lead's stamp nor "no crew member works" ever makes a caller main
+    # there: only an open call of main's does, in a session not guessed by recency.
+    def shape(self, args=("crew", "decide", "D1", "yes"), env=None):
+        with mock.patch.dict(os.environ, env or {}):
+            got = pg.caller(str(self.root), argv=list(args))
+        self.assertEqual(set(got), {"agent", "session", "how", "caller", "calls"})
+        return got["agent"], got["session"], got["how"], got["caller"], len(got["calls"])
+
+    def test_caller_shape_unchanged(self):
+        def row(name, want, calls=(), **kw):
+            opened = [self.call(cmd, aid=aid, sid=sid, agent=agent) for cmd, aid, sid, agent in calls]
+            with self.subTest(name):
+                self.assertEqual(self.shape(**kw), want)
+            for data in opened:
+                pg.call_closed(data)
+        decide = "dev crew decide D1 yes"
+        row("the developer's shell", ("human", f"shell-{os.getppid()}", "shell", "human", 0),
+            env={"DEVKIT_SESSION": "", "DEVKIT_AGENT": ""})
+        row("an open call of main's", ("claude", "s1", "env", "main", 1), calls=[(decide, None, "s1", "claude")])
+        row("main's and a member's", ("claude", "s1", "env", "a_tank", 2),
+            calls=[(decide, None, "s1", "claude"), (decide, "a_tank", "s1", "claude")])
+        row("no open call typed it", ("claude", "s1", "env", "unknown", 0), calls=[("make test", None, "s1", "claude")])
+        row("no crew works and nothing typed it", ("claude", "s1", "env", "unknown", 0))
+        row("the tech lead's stamp alone", ("claude", "s1", "env", "unknown", 0), env={"DEVKIT_SPEAKER": "main"})
+        row("the tech lead's stamp and main's call", ("claude", "s1", "env", "main", 1),
+            calls=[(decide, None, "s1", "claude")], env={"DEVKIT_SPEAKER": "main"})
+        row("a member's lane mark, its call gone", ("claude", "s1", "env", "a_tank", 0),
+            env={"DEVKIT_FROM_AGENT": "a_tank"})
+        row("a member's lane mark and main's call", ("claude", "s1", "env", "a_tank", 1),
+            calls=[(decide, None, "s1", "claude")], env={"DEVKIT_FROM_AGENT": "a_tank"})
+        (pg.SESSIONS / "codex-t1.json").write_text(json.dumps({"agent": "codex", "session": "t1",
+                                                                "started": time.time()}))
+        row("a Codex session", ("codex", "t1", "env", "unverified", 0),
+            calls=[(decide, "a_tank", "t1", "codex"), (decide, None, "t1", "codex")], env={"DEVKIT_SESSION": "codex:t1"})
+        top = str(self.root)
+        (pg.SESSIONS / "claude-s1.json").write_text(json.dumps({"agent": "claude", "session": "s1", "top": top,
+                                                                "started": time.time()}))
+        with mock.patch.object(pg.core, "gitout", lambda *a, **k: top):
+            row("a session guessed by recency", ("claude", "s1", "recency", "unknown", 1),
+                calls=[(decide, None, "s1", "claude")], env={"DEVKIT_SESSION": ""})
+            row("a member's call in a session guessed by recency", ("claude", "s1", "recency", "a_tank", 1),
+                calls=[(decide, "a_tank", "s1", "claude")], env={"DEVKIT_SESSION": ""})
+
+    def test_a_lane_command_acts_as_the_member_its_call_or_its_mark_names(self):
+        # Codex 0.167 passes agent_id to a spawned agent's hooks, so its ledger entries name the member too: a
+        # member's `dev progress step` acts in its own lane there as well, never in the main plan
+        def lane(env=None):
+            with mock.patch.object(sys, "argv", ["dev", "progress", "step", "parser done"]), \
+                    mock.patch.dict(os.environ, env or {}):
+                return pg._as_lane(None, str(self.root))
+        self.assertIsNone(lane())
+        main = self.call("dev progress step 'parser done'")
+        self.assertIsNone(lane())
+        pg.call_closed(main)
+        self.call("cd lib && dev progress step 'parser done'", aid="a_tank")
+        self.assertEqual(lane(), "a_tank")
+        self.assertEqual(lane({"DEVKIT_FROM_AGENT": "a_mouse"}), "a_mouse")
+        self.assertEqual(pg._as_lane("a_ghost", str(self.root)), "a_ghost")
+        (pg.SESSIONS / "codex-t1.json").write_text(json.dumps({"agent": "codex", "session": "t1",
+                                                                "started": time.time()}))
+        self.call("dev progress step 'parser done'", aid="01a1d000-64c7-7ac1-81c6-ec8b852e1772", sid="t1",
+                  agent="codex")
+        self.assertEqual(lane({"DEVKIT_SESSION": "codex:t1"}), "01a1d000-64c7-7ac1-81c6-ec8b852e1772")
+
+
 class RewriteTests(CallerCase):
     def test_a_member_lane_command_is_rewritten_without_approving_it(self):
         # S2: updatedInput applies without a permission decision, and the permission check runs on the result

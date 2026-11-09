@@ -399,36 +399,37 @@ def _names_args(entry: dict, args: list) -> bool:
 
 
 def caller(cwd: str | None = None, argv=None, now: float | None = None) -> dict:
-    """Who runs this `dev` command -> {agent, session, how, caller, calls}. caller: main, a member's agent_id (the
-    most restrictive when several match), unknown (no open call holds the command, or the session was only
-    guessed by recency), unverified (Codex, until its spawned agents' hooks carry agent_id: S3), or human (a
-    developer's shell with no agent session). `argv`: the command's arguments, default sys.argv[1:]."""
-    args = [str(a) for a in (sys.argv[1:] if argv is None else argv)]
-    agent, sid, how = resolve_session(cwd, args)
-    out = {"agent": agent, "session": sid, "how": how, "caller": "unknown", "calls": []}
-    if how == "shell":
+    """Who runs this `dev` command, as the commands only the tech lead may run read it (identity.speaker, the one
+    definition) -> {agent, session, how, caller, calls}. caller: main (an open call of main's typed it, in a session
+    not guessed by recency: a lane variable, the tech lead's stamp, a parent process or recency never make it main),
+    a member's agent_id (its lane mark, else the most restrictive member whose open call typed it), unknown,
+    unverified (Codex, whose main thread's hooks carry no mark), or human (a developer's shell with no agent session).
+    how: how the session was found (resolve_session). `argv`: the command's arguments, default sys.argv[1:]."""
+    from . import identity
+    found = identity._find(cwd, argv, now, settle=False)
+    sp = found.speaker
+    out = {"agent": found.agent, "session": sp.session, "how": found.session_how, "caller": "unknown", "calls": []}
+    if sp.how == "human":
         return dict(out, caller="human")
-    if agent == "codex":
+    if found.agent == "codex":
         return dict(out, caller="unverified")
-    hits = [c for c in open_calls(sid, now) if _names_args(c, args)]
-    out["calls"] = [c.get("tool_use_id") for c in hits]
-    members = sorted({str(c.get("caller")) for c in hits if c.get("caller") != "main"})
-    if members:
-        run = load_run(agent, sid) or {}
-        out["caller"] = max(members, key=lambda m: (TOOL_LEVELS.index(lane_tools(run, m) or "read"),
-                                                    ((run.get("agents") or {}).get(m) or {}).get("depth") or 0))
-    elif hits and how != "recency":
-        out["caller"] = "main"
+    out["calls"] = list(found.calls)
+    if sp.how == "stamped" and sp.lane != "main":
+        out["caller"] = sp.lane
+    elif found.ledger:
+        out["caller"] = found.ledger
     return out
 
 
 def _as_lane(from_agent, cwd: str | None = None):
-    """The lane a command acts as: DEVKIT_FROM_AGENT when the hooks set it, else the member the call ledger names.
-    Variables only narrow (spec C4): an empty or missing one grants nothing. None for Morpheus."""
+    """The lane a command acts as: `from_agent` (DEVKIT_FROM_AGENT, as the command passes it), else the crew member
+    identity.speaker names: its lane mark, or its open call in the ledger (Claude Code and Codex alike). Variables
+    only narrow (spec C4): an empty or missing one grants nothing. None for Morpheus."""
     if from_agent:
         return from_agent
-    who = caller(cwd).get("caller")
-    return who if who and who not in NOT_A_LANE else None
+    from . import identity
+    lane = identity._find(cwd, None, None, settle=False).speaker.lane
+    return lane if lane and lane not in NOT_A_LANE else None
 
 
 def run_path(agent: str, sid: str) -> Path:

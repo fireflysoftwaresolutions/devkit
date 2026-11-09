@@ -62,8 +62,9 @@ class WatchCase(unittest.TestCase):
         self.clock = Clock(self.t0)
         patch_if(self.stack, watch, "LIVE", self.root / "watch" / "live")
         patch_if(self.stack, watch, "time", self.clock)
-        for name in ("DEVKIT_FROM_AGENT",):
-            self.stack.enter_context(mock.patch.dict(os.environ, {name: ""}))
+        # the tech lead's own `dev watch` call, as the PreToolUse hook stamps it (DEVKIT_SPEAKER=main); a member's
+        # call carries its lane (DEVKIT_FROM_AGENT), which wins over the stamp
+        self.stack.enter_context(mock.patch.dict(os.environ, {"DEVKIT_FROM_AGENT": "", "DEVKIT_SPEAKER": "main"}))
 
     def run_with_member(self):
         pg.start("Feature", plan=["api", "tests"], now=self.t0)
