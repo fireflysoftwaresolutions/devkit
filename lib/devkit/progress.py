@@ -3043,7 +3043,19 @@ _PLAIN_YES = re.compile(r"(?i)^\s*yes\s*[.!]?\s*$")
 _RELAYED = re.compile(r"^\s*(?:\[[^\]\n]{0,120}\bsent to (?:Claude|Codex)\b[^\]\n]*\]|\[SYSTEM NOTIFICATION|"
                       r"<task-notification|<system-reminder|<agent-message|<command-name>|<local-command)",
                       re.IGNORECASE | re.MULTILINE)
-_DECISION_REF = re.compile(r"\bD(\d+)\b")
+# D3, or D3@9448c4d0 as a decision listed outside its own session shows it (shown_id): the number and the prefix
+_DECISION_REF = re.compile(r"\bD(\d+)(?![0-9A-Za-z_])(?:@([0-9A-Za-z][0-9A-Za-z._-]*))?")
+
+
+def decisions_named(run, text) -> set:
+    """The ids of `run`'s decisions that `text`, written in the run's own session, names: a bare D3 is the run's
+    own, and a qualified D3@9448c4d0 is the run's only when it names the run's session (_names_session), so another
+    session's D3 never stands for this run's."""
+    sid = (run or {}).get("session") or ""
+    return {f"D{n}" for n, prefix in _DECISION_REF.findall(str(text or ""))
+            if not prefix or _names_session(prefix.rstrip("._-"), sid)}
+
+
 _RECOMMENDED = re.compile(r"\s*\(recommended\)\s*$", re.IGNORECASE)
 _ASKED_ID = re.compile(r"\s*(D\d+)\s*[·:]", re.IGNORECASE)  # a question that opens with "D4 ·" or "D4:"
 _HEADER_ID = re.compile(r"D\d+", re.IGNORECASE)  # a question whose header is "D4"
@@ -3554,7 +3566,7 @@ def on_question(agent: str, data: dict, now: float | None = None) -> list:
     shown, new, refused, voided = set(), [], {}, set()
     for q, did in ([] if member else zip(qs, ids)):
         qt = str(q.get("question") or "")
-        shown.update(x for x in [f"D{n}" for n in _DECISION_REF.findall(qt)] + [did] if x in pending)
+        shown.update(x for x in [*decisions_named(run, qt), did] if x in pending)
         d, label = _decision(run, did) if did else None, answers.get(qt)
         if not d or not isinstance(label, str) or not label.strip():
             continue
@@ -3617,8 +3629,8 @@ def on_final_message(agent: str, sid: str, text: str, now: float | None = None):
     f = session_path(agent, sid)
     if not f.exists():
         return
-    ids = {f"D{n}" for n in _DECISION_REF.findall(str(text or ""))}
     run = load_run(agent, sid)
+    ids = decisions_named(run, text)
     named = sorted((d["id"] for d in _awaiting(run) if d["id"] in ids), key=lambda x: int(x[1:]))
     if named:
         _mark_shown(agent, sid, set(named), now)

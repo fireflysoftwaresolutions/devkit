@@ -1781,6 +1781,14 @@ class QualifiedApproveTests(TranscriptCase):
         d = pg.crew_decide("D1", "A: skip")
         self.assertEqual((d["by"], d["verified"], d["answer"]), ("developer", True, "A: skip"))
 
+    def test_a_final_message_shows_a_qualified_decision_only_in_the_run_it_names(self):
+        pg.crew_decision("Skip empty lines or reject the file?", options="A: skip | B: reject", recommend="A")
+        pg.on_final_message("claude", "s1", "**[Firefly> DevKit]** … answer D1@5e1f0a2b in that session's chat.")
+        self.assertIsNone(pg.load_run("claude", "s1")["decisions"][0].get("shown"))  # another run's D1, named here
+        self.assertEqual(self.typed("yes", "p-1"), [])  # nothing was shown, so a plain yes covers nothing
+        pg.on_final_message("claude", "s1", "**[Firefly> DevKit]** … D1@s1 waits for you: skip empty lines?")
+        self.assertIsNotNone(pg.load_run("claude", "s1")["decisions"][0].get("shown"))
+
 
 class UnknownCommandGrantTests(TranscriptCase):
     # M332 (The Keymaker's RT1/RT2): a command whose program is only known when it runs is the action class unknown

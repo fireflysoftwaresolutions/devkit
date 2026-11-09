@@ -623,7 +623,6 @@ class DecisionsAcrossSessions(Crew):
         self.assertNotIn("**You:**", theirs)
         self.assertNotIn("Tag on Friday", k.welcome + theirs)
 
-    @unittest.expectedFailure  # defect: "D1@5e1f0a2b" in run S2's final message marks run S2's own D1 shown
     def test_a_final_message_that_names_another_sessions_decision_shows_none_of_its_own(self):
         self.b.stop("**[Firefly> DevKit]** api · `feat/invoice-export` · Status\n- **Done:** read the status.\n"
                     "- **Check:** – a status\n- **Next:** answer D1@5e1f0a2b in the chat with that session.")
