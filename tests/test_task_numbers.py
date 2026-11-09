@@ -101,6 +101,27 @@ class ShownListTests(unittest.TestCase):
         with self.running(GHOST, "task done 2"), self.assertRaises(ValueError):
             work.find("2", SCOPE)  # still the list the Ghost lane saw before the close
 
+    def test_a_lanes_number_the_ledger_cannot_match_is_refused_not_read_from_the_tech_leads_list(self):
+        with self.lead():
+            work.show(SCOPE)  # the tech lead's list: the login timeout, the CSV export, the parity test
+        loop = "for n in 3 4; do dev task done $n; done"  # the call never holds the words "task done 3" in order
+        with self.running(TANK, "task done 3", cmd=loop), self.assertRaises(ValueError) as e:
+            work.find("3", SCOPE)
+        msg = str(e.exception)
+        self.assertIn("#3: no open call of this session holds this command as typed", msg)
+        self.assertNotIn("another open call", msg)
+        self.assertIn("use the item's id", msg)
+
+    def test_a_list_shown_by_a_command_the_ledger_cannot_match_leaves_the_tech_leads_numbers_alone(self):
+        with self.lead():
+            work.show(SCOPE)
+        work.release(work.load(self.first["path"]), a=B, status="done")
+        with self.running(TANK, "task", cmd="./bin/backlog"):  # a wrapper script runs dev task
+            _, numbered = work.show(SCOPE)
+        self.assertFalse(numbered)
+        with self.lead(), self.assertRaises(ValueError):
+            work.find("1", SCOPE)  # the tech lead's #1 is still the login timeout, closed since
+
     def test_a_codex_thread_started_from_a_claude_code_shell_numbers_its_own_list(self):
         with self.lead():
             work.show(SCOPE)  # the Claude Code session, whose DEVKIT_SESSION the Codex thread inherits
