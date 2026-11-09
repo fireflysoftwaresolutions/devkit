@@ -132,6 +132,31 @@ class ItemTests(unittest.TestCase):
             self.assertEqual(work.recent_sessions("acme/api")[:2], ["second", "first"])
 
 
+class NowLimitTests(unittest.TestCase):
+    """More than five open items in a project's Now gets a one-line warning; nothing is refused."""
+
+    def test_more_than_five_in_now_warns_with_how_many_and_how_many_are_being_worked_on(self):
+        with TempHandoff():
+            items = [work.create("acme/api", f"Now item {n}", bucket="now", a=A) for n in range(6)]
+            work.claim(items[0], a=A)
+            work.claim(items[1], a=B)
+            self.assertEqual(work.now_warning("acme/api"),
+                             "6 items in Now in acme/api, 2 being worked on: more than 5 hides what comes first; "
+                             "move what waits with dev task move <id> --to next --why \"…\"")
+
+    def test_five_open_items_in_now_and_closed_or_other_buckets_do_not_warn(self):
+        with TempHandoff():
+            for n in range(5):
+                work.create("acme/api", f"Now item {n}", bucket="now", a=A)
+            work.create("acme/api", "Next item", bucket="next", a=A)
+            work.create("acme/other", "Another project's Now item", bucket="now", a=A)
+            shipped = work.create("acme/api", "Shipped item", bucket="now", a=A)
+            work.release(shipped, a=A, status="done")
+            self.assertEqual(work.now_warning("acme/api"), "")
+            work.create("acme/api", "Sixth open item", bucket="now", a=A)
+            self.assertTrue(work.now_warning("acme/api").startswith("6 items in Now in acme/api, 0 being worked on"))
+
+
 class IsoTimeTests(unittest.TestCase):
     # A lock time is UTC. Read on a Mac in Madrid, a summer time used to come out an hour late (local summer time
     # was taken for standard time), so locks ran out an hour early or late for seven months of the year.

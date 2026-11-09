@@ -405,7 +405,7 @@ def ordered_open(items: list) -> list:
                                         i["meta"].get("created", "")))
 
 
-# --------------------------------------------------------------------------- numbers in `dev task`
+# --------------------------------------------------------------------------- numbers and the Now limit
 # `dev task` numbers the open items, and `dev task <verb> <n>` takes such a number. The list moves under it: a close,
 # an add or a move renumbers every item after it, so `done 9` and then `done 40` once closed the item that had moved up
 # to #40. A number therefore means the item at that place in the list `dev task` last showed this viewer (the agent
@@ -415,6 +415,7 @@ def ordered_open(items: list) -> list:
 # shown_at}}}, on this Mac only.
 
 LIST_TTL = 30 * 60  # seconds a shown list numbers items
+NOW_LIMIT = 5  # open items in a project's Now above which devkit warns
 
 
 def _viewer() -> str:
@@ -520,6 +521,17 @@ def acted(verb: str, it: dict) -> str:
     """The line a write prints: what it did to which item, by id and title (`done B-… “Fix login”`)."""
     return f"{verb} {it['meta']['id']} “{it['meta'].get('title', '')}”"
 
+
+def now_warning(scope: str, items: list = None) -> str:
+    """'' while the open items in `scope`'s Now are at most NOW_LIMIT, otherwise one line that says how many and how
+    many are being worked on. Only a warning: nothing is refused for it."""
+    items = all_items(scope) if items is None else items
+    now = [i for i in items if i["meta"].get("bucket") == "now" and i["meta"].get("status") in OPEN]
+    if len(now) <= NOW_LIMIT:
+        return ""
+    doing = sum(1 for i in now if i["meta"].get("status") == "doing")
+    return (f"{len(now)} items in Now in {scope}, {doing} being worked on: more than {NOW_LIMIT} hides what comes "
+            f"first; move what waits with dev task move <id> --to next --why \"…\"")
 
 
 # --------------------------------------------------------------------------- git (audit trail)
