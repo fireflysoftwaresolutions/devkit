@@ -2857,11 +2857,14 @@ def patch_devkit_off(patch: str, cwd):
         src = resolve(f["path"], cwd)
         target = f["move"] or f["path"]
         added = "\n".join(ln[1:] for ln in f["lines"] if ln.startswith("+"))
-        after = added if f["op"] == "add" else patched(
-            _read_small(src, 1 << 20) if src != UNKNOWN and Path(str(src)).is_file() else "", f["lines"])
+        before = _read_small(src, 1 << 20) if src != UNKNOWN and Path(str(src)).is_file() else ""
+        after = added if f["op"] == "add" else patched(before, f["lines"])
+        # a hunk that does not apply or only adds lines leaves no text after the patch: its added lines are parsed as
+        # TOML too, after the file's text and alone, so a key with a \u escape counts as Codex reads it
+        texts = [after] if after is not None else ["", before.rstrip("\n") + "\n" + added, added]
         dst = resolve(target, cwd)
         for path in dict.fromkeys(str(x) for x in (_lexical(target, cwd), dst) if x != UNKNOWN):
-            v = devkit_off_texts(path, [after or ""], [added])
+            v = devkit_off_texts(path, texts, [added])
             if v:
                 return v
     return None

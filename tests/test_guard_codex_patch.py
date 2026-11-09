@@ -59,6 +59,16 @@ class ApplyPatchOnAgentSettings(unittest.TestCase):
         self.assertEqual(self.verdict(patch(f"*** Update File: {cfg}", "@@", " no such line", "+codex_hooks = false")),
                          "deny")
 
+    def test_an_escaped_key_in_a_hunk_the_guard_cannot_place_is_read_as_toml(self):
+        # a hunk that does not apply, or only adds lines, leaves no text after the patch: its added lines are parsed
+        # as TOML alone and after the file's text, so a key with a \u escape counts as Codex reads it
+        cfg = self.codex / "config.toml"
+        off, on = '+"codex_hoo\\u006bs" = false', '+"verbos\\u0065" = false'
+        for context in ([" no such line"], []):
+            with self.subTest(context=context):
+                self.assertEqual(self.verdict(patch(f"*** Update File: {cfg}", "@@", *context, off)), "deny")
+                self.assertEqual(self.verdict(patch(f"*** Update File: {cfg}", "@@", *context, on)), "allow")
+
     def test_a_move_onto_the_config_brings_the_sources_text_and_is_denied(self):
         src, cfg = self.codex / "staged.toml", self.codex / "config.toml"
         self.assertEqual(self.verdict(patch(f"*** Update File: {src}", f"*** Move to: {cfg}", "@@",
