@@ -1543,7 +1543,9 @@ class _Wizard:
             "Nothing changes until you choose Apply." if first else
             "Your saved choices are the starting point; nothing changes until you choose Apply.", width - 5)]
         lines += ["", "  " + tui.bold("On this Mac")]
-        lines += [f"  {mark} {tui.pad(what, 12)} {text}" for mark, what, text in self.found()]
+        for mark, what, text in self.found():  # each row's text wraps under its column, never cut
+            parts = _wrap_words(text, width - 19)
+            lines += [f"  {mark} {tui.pad(what, 12)} {parts[0]}"] + [" " * 17 + x for x in parts[1:]]
         return lines + [""]
 
     def welcome_prompt(self, default="recommended"):
@@ -2734,10 +2736,13 @@ def summary_lines(run, width, paused=False, log=None, can_sign_in=True, installe
     else:
         agents = [k for k in ("claude", "codex") if f"signin-{k}" in {s["id"] for s in steps}] or ["claude", "codex"]
         out += [f"  {tui.ok('✓')} {tui.bold('devkit is ready.')}", ""] + done_block(head=False)
-        out += ["", "  " + tui.bold("Start working"),
-                "  1. Open a new Terminal window, so the dev command is loaded.",
-                f"  2. dev new my-app, then dcd my-app, then {' or '.join(agents)}.",
-                "  3. dev dashboard shows your projects and tasks in the browser.", ""]
+        out += ["", "  " + tui.bold("Start working")]
+        for n, step in enumerate(("Open a new Terminal window, so the dev command is loaded.",
+                                  f"dev new my-app, then dcd my-app, then {' or '.join(agents)}.",
+                                  "dev dashboard shows your projects and tasks in the browser."), 1):
+            parts = _wrap_words(step, width - 6)
+            out += [f"  {n}. {parts[0]}"] + [f"     {x}" for x in parts[1:]]
+        out += [""]
         out += [ln for ln in _wrapped("  " + log_line, width - 1)]
         return [tui.fit(x, width - 1) for x in out], None
     commands = []

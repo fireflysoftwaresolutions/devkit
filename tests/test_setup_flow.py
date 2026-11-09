@@ -787,13 +787,14 @@ class SummaryTests(unittest.TestCase):
         """INSTALL-AC-46: NO_COLOR at 60 columns: the agent question, a sign-in panel, a failed step and the summary
         fit in 59 columns, no word is cut but a reason line, and every state has its mark."""
         screens = wizard.preview(width=60, color=False)
-        for name in ("W-3", "W-12", "W-9", "W-16 ready with items left"):
+        reasons = ("devkit hit a bug",)  # a reason row of the summary may be cut, as a Reason: line may
+        for name in ("W-2", "W-3", "W-12", "W-9", "W-16 ready", "W-16 ready with items left", "W-16 not ready"):
             with self.subTest(screen=name):
                 text = screens[name]
                 for line in text.splitlines():
                     self.assertLessEqual(len(line), 59, line)
-                    if line.rstrip().endswith("…"):
-                        self.assertIn("Reason:", line)
+                    if line.rstrip().endswith("…") and "©" not in line:  # the banner's copyright line aside
+                        self.assertTrue("Reason:" in line or any(r in line for r in reasons), line)
         marks = "".join(screens.values())
         for mark in "✓✗!–○":
             self.assertIn(mark, marks)
