@@ -25,6 +25,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tests"))
 import _hermetic  # noqa: E402
+import _sandbox  # noqa: E402  (stand-ins first: no hook reaches this Mac's codex, claude, brew or gh)
 
 _hermetic.activate()
 sys.path.insert(0, str(ROOT / "lib"))
@@ -114,8 +115,9 @@ class Sandbox(unittest.TestCase):
         note.parent.mkdir(parents=True)
         note.write_text("# acme/api\n\n## Current state\n\nWork on the settings reads.\n")
         subprocess.run(["git", "init", "-q", "-b", "main"], cwd=str(note.parents[2]), check=True, capture_output=True)
-        # stubs of the agents' programs first on PATH: a hook must never start the real claude or codex (with this
-        # HOME, which is not signed in, codex opens its login); each stub records its call, and none may happen
+        # stubs of the agents' programs first on PATH, then the run's stand-ins for brew and gh, and devkit keeps them
+        # first (tests/_sandbox.py): a hook must never start the real claude or codex (with this HOME, which is not
+        # signed in, codex opens its login); each agent stub records its call, and none may happen
         self.agents_called = self.home / "agents-called.log"
         stubs = self.home / "stubs"
         stubs.mkdir()
@@ -123,10 +125,10 @@ class Sandbox(unittest.TestCase):
             (stubs / name).write_text(f"#!/bin/sh\necho \"{name} $*\" >> '{self.agents_called}'\nexit 1\n")
             (stubs / name).chmod(0o755)
         self.addCleanup(self._no_agent_started)
-        self.env = {"HOME": str(self.home), "PATH": f"{stubs}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
-                    "LANG": "en_US.UTF-8", "DEVKIT_NO_NOTIFY": "1", "DEVKIT_NO_CI_WATCH": "1",
-                    "DEVKIT_NO_AUTOSYNC": "1",  # the handoff sync work.request_sync would start, detached
-                    **GIT_ID}
+        self.env = _sandbox.env({"HOME": str(self.home), "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
+                                 "LANG": "en_US.UTF-8", "DEVKIT_NO_NOTIFY": "1", "DEVKIT_NO_CI_WATCH": "1",
+                                 "DEVKIT_NO_AUTOSYNC": "1",  # the handoff sync work.request_sync would start, detached
+                                 **GIT_ID}, stubs=[stubs])
 
     def _no_agent_started(self):
         called = self.agents_called.read_text() if self.agents_called.exists() else ""

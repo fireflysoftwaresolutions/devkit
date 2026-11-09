@@ -57,13 +57,19 @@ class IsolatedRun(unittest.TestCase):
                 self.assertTrue(below(getattr(core, name), self.home), f"core.{name} = {getattr(core, name)}")
 
     # nothing in the environment names the developer's live session, moves a root away from HOME, or names one of
-    # their real devkit roots
+    # their real devkit roots; the net's variables name only the run's own temporary folder
     def test_no_variable_names_the_live_session_or_a_real_root(self):
-        names = [k for k in os.environ if k in _hermetic.SCRUB or
-                 (k.startswith("DEVKIT_") and k not in _hermetic.KEEP and k != _hermetic.MARK)]
+        names = [k for k in os.environ if k in _hermetic.SCRUB or (k.startswith("DEVKIT_") and k not in _hermetic.KEEP
+                                                                   and k not in _hermetic.NET and k != _hermetic.MARK)]
         self.assertEqual([], names)
         self.assertEqual({"DEVKIT_HOME": str(Path(__file__).resolve().parents[1]), "DEVKIT_NO_NOTIFY": "1"},
                          {k: os.environ.get(k) for k in _hermetic.KEEP})
+        temp = [os.path.realpath(r) for r in _hermetic._sandbox.TEMP_ROOTS]
+        for k in _hermetic.NET:
+            for p in os.environ[k].split(os.pathsep):
+                with self.subTest(variable=k, path=p):
+                    self.assertTrue(below(p, _hermetic.state()["root"]), f"{k} names {p}, outside the run's root")
+                    self.assertTrue(any(below(p, r) for r in temp), f"{k} names {p}, outside the temporary folders")
         real = [k for k, v in os.environ.items() if any(below(p, r) for p in v.split(os.pathsep) if p.startswith("/")
                                                         for r in _hermetic.state()["real"].values())]
         self.assertEqual([], real)

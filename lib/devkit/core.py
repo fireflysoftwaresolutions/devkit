@@ -37,7 +37,29 @@ def brew_prefix() -> str:
         if Path(p, "bin", "brew").exists():
             return p
     return "/opt/homebrew"
-os.environ["PATH"] = ":".join(dict.fromkeys(_EXTRA_PATH + os.environ.get("PATH", "").split(":")))
+
+
+# devkit's own tests only: DEVKIT_TEST_PATH names folders of stand-ins for codex, claude, brew and gh
+# (tests/_sandbox.py). In a test sandbox they go first and the caller's PATH follows as given, without _EXTRA_PATH,
+# so neither a stand-in nor a tool the test left out is replaced by this Mac's real one. Honored only when the real
+# paths of HOME and of every folder named lie below the system's temporary folders, which a real Mac's HOME never
+# does; there PATH stays as devkit always set it.
+_TEMP_ROOTS = ("/tmp", "/private/tmp", "/var/tmp", "/private/var/tmp", "/var/folders", "/private/var/folders")
+
+
+def sandbox_path(environ=None) -> list:
+    """The folders DEVKIT_TEST_PATH names when devkit runs in a test sandbox (a temporary HOME), else []."""
+    env = os.environ if environ is None else environ
+    folders = [p for p in (env.get("DEVKIT_TEST_PATH") or "").split(os.pathsep) if p]
+
+    def temporary(p):
+        real = os.path.realpath(p)
+        return os.path.isabs(p) and any(real.startswith(root + "/") for root in _TEMP_ROOTS)
+    home = env.get("HOME") or ""
+    return folders if folders and home and temporary(home) and all(temporary(p) for p in folders) else []
+
+
+os.environ["PATH"] = ":".join(dict.fromkeys((sandbox_path() or _EXTRA_PATH) + os.environ.get("PATH", "").split(":")))
 
 # --------------------------------------------------------------------------- config
 

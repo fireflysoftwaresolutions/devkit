@@ -22,7 +22,11 @@ for a run of one of them alone). It:
 5. installs an audit hook that refuses, and records, any file access of this process below the real roots, and any
    process started with the real home, with no HOME (Path.home() then falls back to the real one), with a variable
    or an argument that names a real root, or in a real root;
-6. removes the temporary home when the run ends.
+6. puts the run's stand-ins for codex, claude, brew and gh first on PATH and names them in DEVKIT_TEST_PATH, which
+   devkit keeps first, adding none of Homebrew's folders, in this process and in every process that inherits the
+   variable; the audit hook refuses, and records, a start of one of the four from outside the temporary folders
+   (tests/_sandbox.py has the net and what a test that builds its own environment uses);
+7. removes the temporary home when the run ends.
 
 A second call (tests/__init__.py, then a guard module) changes nothing. When devkit was imported first, `activate()`
 does nothing either: its paths are already bound to the real home, so the run is not hermetic, and test_hermetic
@@ -50,6 +54,10 @@ import sys
 import tempfile
 from pathlib import Path
 
+if os.path.dirname(os.path.abspath(__file__)) not in sys.path:
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _sandbox  # noqa: E402  (the net against this Mac's real codex, claude, brew and gh)
+
 TREE = Path(__file__).resolve().parents[1]
 MARK = "DEVKIT_TEST_HERMETIC"  # the temporary home of the run, for the processes the tests start
 
@@ -66,6 +74,9 @@ SCRUB = ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ID", "CLAU
          "DEVKIT_CONFIG", "DEV_ROOT", "CODEX_HOME", "CLAUDE_CONFIG_DIR", "XDG_CONFIG_HOME", "XDG_STATE_HOME",
          "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_RUNTIME_DIR", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM")
 KEEP = {"DEVKIT_HOME": str(TREE), "DEVKIT_NO_NOTIFY": "1"}  # the DEVKIT_* the run sets itself
+# The net's variables (tests/_sandbox.py), which name folders and files below the run's own root only: its stand-ins,
+# and the log of what the launcher of older devkit copies refused.
+NET = ("DEVKIT_TEST_PATH", "DEVKIT_TEST_TRIPWIRE")
 
 # What devkit's live hooks (the developer's running sessions) write below the real roots; used when the run is not
 # isolated (see the module docstring).
@@ -365,12 +376,35 @@ def _runs_osascript(event, args) -> bool:
     return bool(words and _OSASCRIPT_LINE.match(" ".join(words)))
 
 
+def _test_frame() -> str:
+    """The test method on the stack, as "<file>:<line> <name>", or ''."""
+    f = sys._getframe(2)
+    while f is not None:
+        name = os.path.basename(f.f_code.co_filename)
+        if name.startswith("test_") and f.f_code.co_name.startswith("test"):
+            return f"{name}:{f.f_lineno} {f.f_code.co_name}"
+        f = f.f_back
+    return ""
+
+
+def _trip(why: str):
+    """Refuse a start of this Mac's real codex, claude, brew or gh, and record it for test_zz."""
+    where = _test_frame()
+    _S["violations"].append(f"tripwire {why}" + (f" (in {where})" if where else ""))
+    raise PermissionError(f"test safety: refused to start {why}; a test starts the stand-ins first on PATH, never "
+                          "the real program (tests/_sandbox.py)")
+
+
 def _hook(event, args):
     if _S["allow"] or not _S["active"]:
         return
     if event in ("subprocess.Popen", "os.posix_spawn", "os.exec", "os.system") and _runs_osascript(event, args):
         # a security notice ignores DEVKIT_NO_NOTIFY (devkit's acceptance notice), so the run refuses the program
         _refuse("process", "osascript", "a test never shows the developer a desktop notification")
+    if event in _sandbox.EVENTS:
+        why = _sandbox.refusal(event, args)
+        if why:
+            _trip(why)
     if event == "open":
         rel = isinstance(args[0], (str, bytes, os.PathLike)) and not os.path.isabs(os.fsdecode(os.fspath(args[0])))
         p = "" if rel and _in_fd_walk() else _protected(_path(args[0]))
@@ -467,6 +501,9 @@ def activate() -> dict:
     os.makedirs(os.path.join(home, "Development"))
     _S["scrubbed"].extend(scrub(os.environ))
     os.environ.update({"HOME": home, MARK: home, **KEEP})
+    stand_ins = str(_sandbox.stand_ins(os.path.join(root, "stand-ins")))
+    os.environ.update(dict(zip(NET, (stand_ins, os.path.join(root, "tripwire.jsonl")))))
+    os.environ["PATH"] = os.pathsep.join(dict.fromkeys([stand_ins] + os.environ.get("PATH", "").split(os.pathsep)))
     snap = snapshot(watched())
     _S.update(root=root, home=home, owner=os.getpid(), snapshot=snap, own=outputs(watched(), snap))
     atexit.register(_cleanup, root, os.getpid())
@@ -497,7 +534,9 @@ def report() -> tuple:
     root = _S["root"]
     marks = [root, os.path.realpath(root), os.path.basename(root)] if root else []
     leaks, others = changes(_S["snapshot"], snapshot(watched()), watched(), marks, own=_S["own"])
-    return list(_S["violations"]) + leaks, others
+    tripped = [f"tripwire {t.get('why')} (older devkit {t.get('dev')} {' '.join(t.get('args') or [])})"
+               for t in _sandbox.trips(os.path.join(root, "tripwire.jsonl"))] if root else []
+    return list(_S["violations"]) + tripped + leaks, others
 
 
 def state() -> dict:

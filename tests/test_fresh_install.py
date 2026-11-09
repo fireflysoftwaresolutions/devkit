@@ -21,6 +21,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_install import Machine  # noqa: E402  (install.sh with stand-ins for Homebrew and the GitHub CLI)
+import _sandbox  # noqa: E402  (stand-ins first: no child reaches this Mac's codex, claude, brew or gh)
 
 ROOT = Path(__file__).resolve().parents[1]
 VERSION = (ROOT / "VERSION").read_text().strip()
@@ -96,11 +97,12 @@ class FreshInstallTests(unittest.TestCase):
         return out
 
     def env(self) -> dict:
-        env = {"HOME": str(self.home), "PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "en_US.UTF-8",
-               "TERM": "xterm-256color", "USER": os.environ.get("USER", "ada"), "TMPDIR": str(self.root),
-               "PYTHONUNBUFFERED": "1", "NO_COLOR": "1", "HOMEBREW_NO_AUTO_UPDATE": "1",
-               "GH_PROMPT_DISABLED": "1"}
-        return env
+        # the run's stand-ins for codex, claude, brew and gh first, kept first by devkit (tests/_sandbox.py); the
+        # macOS sandbox stays the second wall
+        return _sandbox.env({"HOME": str(self.home), "PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "en_US.UTF-8",
+                             "TERM": "xterm-256color", "USER": os.environ.get("USER", "ada"), "TMPDIR": str(self.root),
+                             "PYTHONUNBUFFERED": "1", "NO_COLOR": "1", "HOMEBREW_NO_AUTO_UPDATE": "1",
+                             "GH_PROMPT_DISABLED": "1"})
 
     def sandboxed(self, *argv) -> list:
         """argv run in the sandbox; the Python that runs these tests may start."""

@@ -32,6 +32,9 @@ import unittest
 from pathlib import Path
 
 TREE = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(TREE / "tests"))
+import _sandbox  # noqa: E402  (the suite's net against this Mac's codex, claude, brew and gh)
+
 DEV = TREE / "bin" / "dev"
 PROJECT = "acme/widget"
 SESSION = "s1"
@@ -79,13 +82,9 @@ class Sandbox:
                         GIT_CONFIG_NOSYSTEM="1", GIT_AUTHOR_NAME="Ana Dev", GIT_AUTHOR_EMAIL="ana@example.com",
                         GIT_COMMITTER_NAME="Ana Dev", GIT_COMMITTER_EMAIL="ana@example.com", GIT_TERMINAL_PROMPT="0",
                         GH_TOKEN="", GITHUB_TOKEN="")
-        # stand-ins first on PATH: no command of a test may start the real coding agents or the GitHub CLI
-        stubs = self.base / "bin"
-        stubs.mkdir()
-        for tool in ("claude", "codex", "gh"):
-            (stubs / tool).write_text("#!/bin/sh\necho \"$0: stand-in of the acceptance tests\" >&2\nexit 1\n")
-            (stubs / tool).chmod(0o755)
-        self.env["PATH"] = f"{stubs}:{self.env.get('PATH', '')}"
+        # stand-ins first on PATH, kept first by devkit: no command of a test may start the real coding agents,
+        # Homebrew or the GitHub CLI
+        self.env = _sandbox.env(self.env, stubs=[_sandbox.stand_ins(self.base / "bin")])
 
     def run(self, *argv, env=None, cwd=None) -> subprocess.CompletedProcess:
         r = subprocess.run([sys.executable, "-I", "-S", str(DEV), *map(str, argv)], cwd=str(cwd or self.project),

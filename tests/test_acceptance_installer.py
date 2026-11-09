@@ -19,7 +19,6 @@ import io
 import json
 import os
 import select
-import shutil
 import stat
 import struct
 import subprocess
@@ -41,25 +40,25 @@ from devkit import audit, cli, core, setup, tui, wizard  # noqa: E402
 import test_install as inst  # noqa: E402  (the stub Mac install.sh runs on, and its terminal helpers)
 import test_pinned_install as pinned  # noqa: E402  (the pinned-install sandbox)
 import test_setup_flow as flow  # noqa: E402  (the removal's fixture homes)
+import _sandbox  # noqa: E402  (the suite's net against this Mac's codex, claude, brew and gh)
 
 DOWN, ENTER, CTRL_C = b"\x1b[B", b"\r", b"\x03"
 REFUSAL = ("4f2c1ab is not verified: it is not a release, and its tests have not passed here. The hooks and the guard "
            "run only a verified copy.")
 
-# devkit puts /opt/homebrew/bin, /usr/local/bin and ~/.local/bin first on PATH when it is imported, so this Mac's
-# real agents and Homebrew are within reach of any code these tests run in-process. Every process this module starts
-# goes through this check: codex, claude or brew from outside a temporary folder stops the test instead.
+# The suite's net (tests/_sandbox.py) keeps this Mac's real agents, Homebrew and GitHub CLI out of reach: the run's
+# stand-ins come first on PATH, and devkit keeps them first. Every process this module starts also goes through the
+# net's check, even when the module runs without the suite's hermetic home: codex, claude, brew or gh from outside a
+# temporary folder stops the test instead.
 _REAL_POPEN = subprocess.Popen
-_REACHABLE = ("codex", "claude", "brew")
 
 
 def _sandboxed_popen(args, *a, **k):
-    argv = args.split() if isinstance(args, str) else [os.fsdecode(x) for x in args]
-    first = argv[0] if argv else ""
-    if os.path.basename(first) in _REACHABLE:
-        found = first if os.sep in first else shutil.which(first, path=(k.get("env") or os.environ).get("PATH")) or ""
-        if not os.path.realpath(found or first).startswith(os.path.realpath(tempfile.gettempdir())):
-            raise AssertionError(f"a test tried to start {found or first}, outside its sandbox")
+    argv = [args] if isinstance(args, (str, bytes, os.PathLike)) else list(args)
+    argv = ["/bin/sh", "-c", *argv] if k.get("shell") else argv  # what Popen runs
+    why = _sandbox.refusal("subprocess.Popen", (k.get("executable"), argv, k.get("cwd"), k.get("env")))
+    if why:
+        raise AssertionError(f"a test tried to start {why}, outside its sandbox")
     return _REAL_POPEN(args, *a, **k)
 
 

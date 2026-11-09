@@ -20,6 +20,9 @@ import time
 import unittest
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _sandbox  # noqa: E402  (this Mac's codex, claude, brew and gh stay out of reach of every process)
+
 ROOT = Path(__file__).resolve().parents[1]
 INSTALL = ROOT / "install.sh"
 LIB = str(ROOT / "lib")
@@ -186,7 +189,8 @@ class Machine:
         for k in ("DEVKIT_HOME", "DEVKIT_REF", "NO_COLOR", "CI", "GH_TOKEN"):
             env.pop(k, None)
         env.update(extra)
-        return env
+        # the stubs are this Mac's only tools: one a test removed (brew) stays absent in devkit's processes too
+        return _sandbox.env(env, stubs=[self.stubs], run=False)
 
     def pipe(self, *args, script: bytes = None, **env):
         """`curl … | bash -s -- args` with no terminal at all (a new session, as in CI) -> (exit code, output)."""

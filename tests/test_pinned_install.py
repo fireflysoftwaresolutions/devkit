@@ -32,6 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from devkit import approvals, audit, cli, codexrpc, core, gitx, guard, hooks, policy, progress  # noqa: E402
 from devkit import registry, setup  # noqa: E402
 from test_install import Machine  # noqa: E402  (install.sh against stub brew, gh and a local repository)
+import _sandbox  # noqa: E402  (stand-ins first: no child reaches this Mac's codex, claude, brew or gh)
 
 ISOLATED = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
 GIT_ENV = dict(os.environ, GIT_AUTHOR_NAME="Ada", GIT_AUTHOR_EMAIL="ada@example.com", GIT_COMMITTER_NAME="Ada",
@@ -372,8 +373,8 @@ class RealTreeTests(Sandbox):
         (clone / "lib" / "devkit" / "guard.py").write_text("def deny(:\n")  # a member's half-done edit
         payload = json.dumps({"session_id": "k2", "hook_event_name": "PreToolUse", "tool_name": "Bash",
                               "tool_input": {"command": "gh pr merge 12"}, "cwd": str(self.home)})
-        env = {"HOME": str(self.home), "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin", "LANG": "en_US.UTF-8",
-               **ISOLATED}
+        env = _sandbox.env({"HOME": str(self.home), "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
+                            "LANG": "en_US.UTF-8", **ISOLATED})
         run = lambda argv: subprocess.run(argv, input=payload, capture_output=True, text=True, env=env,  # noqa: E731
                                           cwd=str(self.home), timeout=120)
         pinned = run(["/bin/sh", "-c", command])
@@ -477,12 +478,16 @@ class OlderCopyTests(Sandbox):
 WHO_RUNS = "from pathlib import Path\n\n\ndef main():\n    print(Path(__file__).resolve().parents[2].name)\n    return 0\n"
 
 
-def run_dev(copy: Path, home: Path, *args):
-    """`<copy>/bin/dev <args>` as a hook or a background job starts it, in the sandbox HOME -> CompletedProcess."""
-    env = {"HOME": str(home), "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin", "LANG": "en_US.UTF-8",
-           "DEVKIT_NO_NOTIFY": "1", **ISOLATED}
-    return subprocess.run([sys.executable, "-I", "-S", str(copy / "bin" / "dev"), *args], capture_output=True,
-                          text=True, env=env, cwd=str(home), timeout=300)
+def run_dev(copy: Path, home: Path, *args, older=False, tripwire=None):
+    """`<copy>/bin/dev <args>` as a hook or a background job starts it, in the sandbox HOME -> CompletedProcess. The
+    stand-ins come first on PATH (tests/_sandbox.py); an `older` release, whose core.py predates DEVKIT_TEST_PATH,
+    starts through the net's launcher, which writes what it refused to `tripwire`."""
+    env = _sandbox.env({"HOME": str(home), "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
+                        "LANG": "en_US.UTF-8", "DEVKIT_NO_NOTIFY": "1", **ISOLATED},
+                       **({"DEVKIT_TEST_TRIPWIRE": tripwire} if tripwire else {}))
+    dev = copy / "bin" / "dev"
+    argv = _sandbox.boot(dev, *args) if older else [sys.executable, "-I", "-S", str(dev), *args]
+    return subprocess.run(argv, capture_output=True, text=True, env=env, cwd=str(home), timeout=300)
 
 
 class RetireTests(Sandbox):
@@ -589,7 +594,8 @@ class RealOlderReleaseTests(Sandbox):
             setup.write_claude_settings()
             setup.write_agent_instructions(quiet=True)
         self.assertEqual(self.hook_copies(), {new.name})
-        reverted = run_dev(old, self.home, "config", "repair", "--quiet")
+        trips = self.root / "tripwire.jsonl"  # what the net refused the real 26.11.5: it must stay empty
+        reverted = run_dev(old, self.home, "config", "repair", "--quiet", older=True, tripwire=trips)
         self.assertEqual(reverted.returncode, 0, reverted.stderr)
         self.assertIn(old.name, self.hook_copies())  # the finding: the real 26.11.5 writes its own hooks back
         self.assertIn("devkit 26.11.5 ", claude_md.read_text()[:200])
@@ -600,9 +606,10 @@ class RealOlderReleaseTests(Sandbox):
         self.assertEqual(self.hook_copies(), {new.name})
 
         for args in (("config", "repair", "--quiet"), ("config", "repair")):
-            again = run_dev(old, self.home, *args)
+            again = run_dev(old, self.home, *args, older=True, tripwire=trips)
             self.assertEqual(again.returncode, 0, again.stderr)
         self.assertEqual(self.hook_copies(), {new.name})
+        self.assertEqual(_sandbox.trips(trips), [])
         self.assertIn("devkit 26.11.6 ", claude_md.read_text()[:200])
 
 
