@@ -73,7 +73,7 @@ case "$1" in
 esac
 """,
     "gh": """#!/bin/sh
-if [ -t 0 ]; then input=terminal; else input=none; fi
+if [ -t 0 ]; then input=terminal; elif [ -p /dev/stdin ]; then input=pipe; else input=none; fi
 echo "gh $* ($input)" >> "$STUB_LOG"
 case "$1 $2" in
   "auth status") [ -f "$STUB_GH_SIGNED_IN" ] ;;
@@ -86,16 +86,23 @@ esac
 
 # The stand-in for devkit's bin/dev in the fixture repository: it records how `dev setup` was started.
 DEV = """#!/usr/bin/env python3
-import json, os, sys
+import json, os, select, sys
 home = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 rec = {"argv": sys.argv[1:], "stdin_tty": sys.stdin.isatty(), "home": home,
        "python": os.environ.get("STUB_PYTHON", ""), "version": open(os.path.join(home, "VERSION")).read().strip()}
+# what a program that watches its input with kqueue (Claude Code's runtime) gets from this stdin
+try:
+    select.kqueue().control([select.kevent(0, select.KQ_FILTER_READ, select.KQ_EV_ADD)], 0, 0)
+    rec["stdin_kqueue"] = "ok"
+except (AttributeError, OSError) as e:
+    rec["stdin_kqueue"] = getattr(e, "strerror", None) or type(e).__name__
 if os.environ.get("REAL_LIB"):
     sys.path.insert(0, os.environ["REAL_LIB"])
     from devkit import tui, wizard
     rec["wizard_asks"] = tui.available() and not wizard.Prompter("--yes" in sys.argv).yes
 with open(os.environ["SETUP_LOG"], "a") as f:
     f.write(json.dumps(rec) + "\\n")
+sys.exit(int(os.environ.get("STUB_SETUP_RC") or 0))
 """
 
 
@@ -231,6 +238,20 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(setup["argv"], ["setup", "--skip-packages", "--yes"])
         self.assertEqual((setup["stdin_tty"], setup["wizard_asks"]), (False, False))
 
+    def test_a_stopped_setup_says_how_to_continue_where_it_stopped(self):
+        rc, out = self.m.pipe(STUB_SETUP_RC="130")
+        self.assertEqual(rc, 130, out)
+        summary = out.split("Summary")[1]
+        self.assertIn("~/Development/fireflysoftwaresolutions/devkit/bin/dev setup --resume", summary)
+        self.assertIn("continues with the answers you gave", summary)
+
+    def test_no_command_gets_the_pipe_the_script_arrives_through(self):
+        rc, out = self.m.pipe("--skip-packages")
+        self.assertEqual(rc, 0, out)
+        gh = [c for c in self.m.calls() if c.startswith("gh ")]
+        self.assertTrue(gh)
+        self.assertEqual([c for c in gh if c.endswith("(pipe)")], [], gh)  # its input is /dev/null, said plainly
+
     def test_without_a_terminal_it_skips_github_sign_in_and_says_how_to_finish(self):
         self.m.signed_in.unlink()
         rc, out = self.m.pipe()
@@ -273,6 +294,41 @@ class BootstrapTests(unittest.TestCase):
                      "An Intel Mac can run it only if it already has Homebrew"):
             self.assertIn(word, out)
         self.assertEqual(self.m.calls(), [])
+
+    def test_homebrew_installs_without_asking_and_its_output_stays_in_view(self):
+        (self.m.prefix / "bin" / "python3").unlink()  # Python is missing: the installer has Homebrew install it
+        brew = self.m.stubs / "brew"
+        brew.write_text(brew.read_text().replace(
+            'echo "brew $*" >> "$STUB_LOG"',
+            'echo "brew $* (ask: ${HOMEBREW_NO_ASK:+off})" >> "$STUB_LOG"\n'
+            'if [ "$1" = install ]; then echo "==> Installing $2"; '
+            '[ -n "${HOMEBREW_NO_ASK:-}" ] || { echo "Do you want to proceed with the installation? [y/n]"; '
+            'read -r answer || exit 1; }; '
+            'printf \'#!/bin/sh\\nexec "%s" "$@"\\n\' "' + sys.executable + '" > "$STUB_PREFIX/bin/python3"; '
+            'chmod +x "$STUB_PREFIX/bin/python3"; fi'))
+        rc, out = self.m.pipe("--no-setup")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("brew install python (ask: off)", self.m.calls())
+        self.assertIn("==> Installing python", out)
+        self.assertNotIn("Do you want to proceed", out)
+
+    def test_an_annotated_release_tag_is_checked_out_without_a_warning(self):
+        for version in ("26.11.11", "26.11.12"):
+            (self.m.remote / "VERSION").write_text(version + "\n")
+            git(self.m.remote, "add", "-A")
+            git(self.m.remote, "commit", "-q", "-m", version)
+            git(self.m.remote, "tag", "-a", "v" + version, "-m", "v" + version)
+        git(self.m.remote, "commit", "-q", "--allow-empty", "-m", "after the release")
+        rc, out = self.m.pipe("--no-setup")
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn("is not a commit", out)
+        self.assertNotIn("warning:", out)
+        self.assertEqual(self.m.release(), "v26.11.12")
+        head = git(self.m.devkit, "rev-parse", "HEAD")
+        self.assertEqual(head, git(self.m.remote, "rev-parse", "v26.11.12^{commit}"))  # what `dev install` pins
+        self.assertNotEqual(subprocess.run(["git", "-C", str(self.m.devkit), "symbolic-ref", "-q", "HEAD"],
+                                           env=GIT_ENV, capture_output=True).returncode, 0)  # detached at the tag
+        self.assertIn("downloaded v26.11.12", out)
 
     def test_devkit_ref_and_devkit_home_choose_the_version_and_the_folder(self):
         where = self.m.root / "elsewhere" / "devkit"
@@ -488,6 +544,9 @@ class TerminalTests(unittest.TestCase):
         self.assertIn("gh auth login -h github.com -p https -w -s repo,read:org,workflow,gist (terminal)", self.m.calls())
         (setup,) = self.m.setups()
         self.assertEqual((setup["argv"], setup["stdin_tty"], setup["wizard_asks"]), (["setup"], True, True))
+        # the terminal by its own device: macOS's kqueue refuses /dev/tty, and Claude Code's sign-in crashed on it
+        if sys.platform == "darwin":
+            self.assertEqual(setup["stdin_kqueue"], "ok")
 
 
 if __name__ == "__main__":

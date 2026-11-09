@@ -87,9 +87,27 @@ on_error() {
 with_tty() {
   case "$TTY" in
     stdin) "$@" ;;
-    /dev/tty) "$@" </dev/tty ;;
-    *) "$@" </dev/null ;;
+    "") "$@" </dev/null ;;
+    *) "$@" <"$TTY" ;;
   esac
+}
+
+# Prints the terminal's own device (/dev/ttys003), or fails when there is no terminal. Never /dev/tty, its alias:
+# macOS's kqueue refuses a descriptor opened from /dev/tty (EINVAL), so Claude Code, whose runtime watches its input
+# with kqueue, crashed at sign-in when it got /dev/tty.
+terminal_device() {
+  local fd d
+  for fd in 0 1 2; do
+    if [ -t "$fd" ]; then
+      d="$(tty <&"$fd" 2>/dev/null || true)"
+      case "$d" in /dev/tty) ;; /dev/*) if [ -c "$d" ]; then printf '%s\n' "$d"; return 0; fi ;; esac
+    fi
+  done
+  d="$(ps -o tty= -p $$ 2>/dev/null | tr -d ' ' || true)"
+  case "$d" in
+    tty?*) if [ -c "/dev/$d" ] && (exec <"/dev/$d") 2>/dev/null; then printf '/dev/%s\n' "$d"; return 0; fi ;;
+  esac
+  return 1
 }
 
 # --------------------------------------------------------------------------- releases
@@ -237,11 +255,29 @@ get_devkit() {
   fi
   mkdir -p "$(dirname "$DEVKIT_HOME")"
   if [ -n "$ref" ]; then
-    git -c advice.detachedHead=false clone --quiet --branch "$ref" "$DEVKIT_REPO" "$DEVKIT_HOME"
+    git clone --quiet --no-checkout "$DEVKIT_REPO" "$DEVKIT_HOME"
+    check_out "$ref"
   else
     git clone --quiet "$DEVKIT_REPO" "$DEVKIT_HOME"
   fi
   ok "downloaded $(describe) to $where"
+}
+
+# Checks out a fresh clone at a release tag (detached, on the tag's commit) or at a branch, and removes the default
+# branch the clone made. Not `git clone --branch <tag>`: for an annotated tag, which every release is, git prints
+# "warning: refs/tags/… is not a commit!". The tag stays on HEAD, which dev install checks before it pins devkit.
+check_out() {
+  local ref="$1" made
+  made="$(git -C "$DEVKIT_HOME" symbolic-ref -q --short HEAD || true)"
+  if git -C "$DEVKIT_HOME" rev-parse -q --verify "refs/tags/$ref^{commit}" >/dev/null ||
+    git -C "$DEVKIT_HOME" fetch --quiet origin "refs/tags/$ref:refs/tags/$ref" 2>/dev/null; then
+    git -C "$DEVKIT_HOME" -c advice.detachedHead=false checkout --quiet --detach "refs/tags/$ref^{commit}"
+  else
+    git -C "$DEVKIT_HOME" checkout --quiet "$ref"
+  fi
+  if [ -n "$made" ] && [ "$(git -C "$DEVKIT_HOME" symbolic-ref -q --short HEAD || true)" != "$made" ]; then
+    git -C "$DEVKIT_HOME" branch --quiet -D "$made"
+  fi
 }
 
 # An existing checkout at a release moves to the newest release (or to DEVKIT_REF); anything else stays as it is.
@@ -375,8 +411,11 @@ summary() {
       printf '  2. %s\n\n' "$again"
       ;;
     *)
-      note "The setup wizard ended with exit code $SETUP_RC; its output above says what needs attention."
-      printf '\n  %sNext%s: fix that, then run %s again (or dev setup in a new terminal)\n\n' "$C_B" "$C_OFF" "$again"
+      note "The setup wizard stopped (exit code $SETUP_RC). Above, it lists the steps done and what is left, each with"
+      printf '    the command that finishes it.\n'
+      printf '\n  %sNext%s: fix what it shows, if anything, then continue where it stopped:\n' "$C_B" "$C_OFF"
+      printf '    %s/bin/dev setup --resume   continues with the answers you gave\n' "$where"
+      printf '  %sOr run %s again: it is safe to repeat.%s\n\n' "$C_DIM" "$again" "$C_OFF"
       ;;
   esac
 }
@@ -421,10 +460,13 @@ main() {
   fi
 
   # Questions go to the terminal, also when this script arrives through a pipe; without a terminal, nothing asks.
-  if [ -t 0 ]; then TTY=stdin
-  elif (exec </dev/tty) 2>/dev/null; then TTY=/dev/tty
-  else TTY=""
+  # Through a pipe, stdin is this script: every other command reads /dev/null instead, never what is left of it.
+  if [ -t 0 ] && [ "$(tty 2>/dev/null || true)" != /dev/tty ]; then TTY=stdin
+  elif TTY="$(terminal_device)"; then exec </dev/null
+  else TTY="" && exec </dev/null
   fi
+  # Homebrew asks before it installs ("Do you want to proceed? [y/n]") unless this is set: the switch it documents.
+  export HOMEBREW_NO_ASK=1
 
   trap on_error ERR
   check_mac

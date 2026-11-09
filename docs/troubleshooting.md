@@ -43,6 +43,25 @@ The installer names the step that failed and the command to run it again; it is 
 done already. The lines before the message are the failing command's own output (Homebrew's, git's, or the GitHub
 CLI's). Fix that cause, then run the same command again.
 
+When the **setup wizard** stopped, its summary lists the steps done and each step left with the command that finishes
+it. Continue where it stopped, with the answers you gave:
+
+```bash
+~/Development/fireflysoftwaresolutions/devkit/bin/dev setup --resume
+```
+
+A step that shows `devkit crashed (exit code 70)` names its crash file in `~/.local/state/devkit/crashes/`: the full
+traceback, kept on your Mac. `stopped by SIGKILL` (or another signal) means something outside devkit ended the
+command; the preceding lines say which part it was in. The whole output of the run is in
+`~/.local/state/devkit/logs/setup.log`.
+
+### Claude Code's sign-in fails with `EINVAL: invalid argument, kqueue`
+
+Claude Code watches its input with kqueue, which macOS refuses on `/dev/tty`. Installers before 26.11.9 gave the setup
+wizard `/dev/tty` when they ran through `curl … | bash`, and the sign-in crashed on it. The installer and the wizard
+now hand a sign-in the terminal by its own device (such as `/dev/ttys003`). To sign in now, open a new terminal and run
+`claude auth login`.
+
 ### The installer stops on an Intel Mac or in a Rosetta terminal
 
 The first step of the installer (**This Mac**) stops before it downloads or changes anything in two cases. The message
@@ -74,8 +93,10 @@ gh auth login -h github.com -p https -w -s repo,read:org,workflow,gist
 ~/Development/fireflysoftwaresolutions/devkit/install.sh
 ```
 
-In a terminal, `curl … | bash` is interactive: the installer reads the answers from the terminal (`/dev/tty`), not
-from the pipe.
+In a terminal, `curl … | bash` is interactive: the installer reads the answers from the terminal (by its own device,
+such as `/dev/ttys003`), not from the pipe, and every other command reads `/dev/null`, never the rest of the script.
+Homebrew installs with `HOMEBREW_NO_ASK=1`, so it never stops to ask "Do you want to proceed with the installation?";
+its output stays on the screen and, in the wizard, in the setup log.
 
 ### `brew` is not found in a new terminal
 
