@@ -301,6 +301,26 @@ class SessionWriteTests(ClaimCase):
                     with self.subTest(agent=agent, aid=aid, cmd=cmd, twin=True):
                         self.assertIsNone(self.shell(agent, sid, cmd, aid=aid))
 
+    def test_member_cannot_set_codex_thread_id(self):
+        # Codex runs several threads in one process and devkit tells them apart by CODEX_THREAD_ID: a member that set
+        # another thread's id would speak as that thread's session
+        other = "0199a213-9f3e-7c11-b2d4-77e0c1f9a0d2"
+        sets = (f"CODEX_THREAD_ID={other} dev session ls", f"export CODEX_THREAD_ID={other}",
+                f"env CODEX_THREAD_ID={other} python3 tool.py", f"CODEX_THREAD_ID={other}; export CODEX_THREAD_ID",
+                f"declare -x CODEX_THREAD_ID={other}", f"cd /tmp && CODEX_THREAD_ID={other} make check")
+        for agent, sid in (("claude", CLAUDE_A), ("codex", CODEX_A)):
+            for cmd in sets:
+                with self.subTest(agent=agent, cmd=cmd):
+                    self.assert_refused(self.shell(agent, sid, cmd, aid="a_tank"), "CODEX_THREAD_ID")
+            for cmd in ("echo $CODEX_THREAD_ID", "printenv CODEX_THREAD_ID", f"echo CODEX_THREAD_ID={other}"):
+                with self.subTest(agent=agent, cmd=cmd, twin="reads"):
+                    self.assertIsNone(self.shell(agent, sid, cmd, aid="a_tank"))
+            # the tech lead's own session: a devkit call that names another thread is refused, any other program runs
+            with self.subTest(agent=agent, twin="main"):
+                self.assert_refused(self.shell(agent, sid, f"CODEX_THREAD_ID={other} dev session tell all hi"),
+                                    "CODEX_THREAD_ID")
+                self.assertIsNone(self.shell(agent, sid, f"CODEX_THREAD_ID={other} python3 tool.py"))
+
     def test_main_session_stamp_is_never_the_developers_terminal(self):
         # a process that carries the stamp runs under an agent, whatever its parents and terminal say
         self.assertFalse(core.set_by_developer({"DEVKIT_SPEAKER": "main"}, ancestry=[], terminal=True))

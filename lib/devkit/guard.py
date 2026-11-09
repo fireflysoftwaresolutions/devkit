@@ -1266,6 +1266,9 @@ SPEAKER_REASON = ("This command sets DEVKIT_SPEAKER, the stamp that tells devkit
                   "Only devkit's PreToolUse hook puts it on the main session's own `dev watch` and `dev session` "
                   "calls; typed by hand, it would let a crew member or a program speak as the tech lead to other "
                   "sessions. Run the command without it: devkit knows who calls.")
+THREAD_REASON = ("This command sets CODEX_THREAD_ID, which names the Codex thread, and so the agent session, that "
+                 "runs a command: devkit tells Codex threads of one process apart by it. A crew member's command runs "
+                 "in its own thread; run it without that variable.")
 _SESSION_IN_CODE = re.compile(r"(?<![\w.-])dev[\s'\",\[\]]{1,6}session[\s'\",\]]{1,6}(" + "|".join(sorted(PEER_WRITES)) +
                               r")\b")
 # who makes the call check() judges (a _Caller); None while one of devkit's own commands runs a check itself (dev push
@@ -1503,14 +1506,30 @@ def session_write_refusal(argv) -> str | None:
     return SESSION_MEMBER_REASON.format(what=_code(f"dev session {words[1]}")) if caller.member() else None
 
 
-def speaker_forgery(argv0) -> str | None:
-    """SPEAKER_REASON when a segment sets DEVKIT_SPEAKER, for the command it runs (`DEVKIT_SPEAKER=main …`,
-    `env DEVKIT_SPEAKER=…`) or in the shell (a bare assignment, export, declare, typeset, readonly, local), whatever
-    program follows: any agent, the main session too. Reading or unsetting it is fine."""
+def _set_names(argv0) -> set:
+    """The variables a segment sets, for the command it runs (`NAME=… cmd`, `env NAME=…`) or in the shell (a bare
+    assignment, export, declare, typeset, readonly, local)."""
     names, argv = _env_split(argv0)
     if argv:
         names = names | _exports(os.path.basename(str(argv[0])), [str(a) for a in argv[1:]])
-    return SPEAKER_REASON if "DEVKIT_SPEAKER" in names else None
+    return names
+
+
+def speaker_forgery(argv0) -> str | None:
+    """SPEAKER_REASON when a segment sets DEVKIT_SPEAKER (_set_names), whatever program follows: any agent, the main
+    session too. Reading or unsetting it is fine."""
+    return SPEAKER_REASON if "DEVKIT_SPEAKER" in _set_names(argv0) else None
+
+
+def thread_forgery(argv0) -> str | None:
+    """THREAD_REASON when a crew member's segment sets CODEX_THREAD_ID (_set_names), whatever program follows: Codex
+    runs several threads in one process and devkit tells them apart by it, so another thread's id would make the
+    member speak as that thread's session. Blanking or unsetting it is identity_hiding's; the main session's devkit
+    call that sets it is forged_env's."""
+    caller = _CALLER.get()
+    if caller is None or "CODEX_THREAD_ID" not in _set_names(argv0):
+        return None
+    return THREAD_REASON if caller.member() else None
 
 
 PIPE_GATE =re.compile(r"\|(?!\|)[^|&;\n]*&&\s*(?:[A-Z_]+=\S*\s+)*(?:git\s+(?:-C\s+\S+\s+)?(?:commit|push|tag)\b|"
@@ -1939,6 +1958,9 @@ def _check_segments(cmd: str, segs, ecwd: str, agent: str, depth: int = 0, outer
         why = speaker_forgery(argv0)
         if why:
             return deny(why, key="speaker-stamp")
+        why = thread_forgery(argv0)
+        if why:
+            return deny(why, key="thread-id")
         argv = _strip_prefix(argv0)
         while argv and argv[0] in _RESERVED:  # `if …; then rm -rf ~; fi` runs rm
             argv = _strip_prefix(argv[1:])
@@ -4023,8 +4045,9 @@ def _exports(name, args) -> set:
 
 
 def _forged(names) -> list:
-    """The names among `names` that point devkit elsewhere: HOME, DEV_ROOT, DEVKIT_* but the hatches, '?' (unseen)."""
-    return sorted(n for n in names if n in ("HOME", "DEV_ROOT", "?") or
+    """The names among `names` that point devkit elsewhere: HOME, DEV_ROOT, DEVKIT_* but the hatches, CODEX_THREAD_ID
+    (the Codex thread, so the session, devkit acts for), '?' (unseen)."""
+    return sorted(n for n in names if n in ("HOME", "DEV_ROOT", "CODEX_THREAD_ID", "?") or
                   (n.startswith("DEVKIT_") and n not in ENV_HATCHES))
 
 
@@ -4033,7 +4056,8 @@ def forged_env_reason(names, what) -> str:
     head = (f"This sets {', '.join(named[:4])} for {what}" if named else
             f"This sets variables the guard cannot see (`export $(…)`, `env $(…)`) for {what}")
     return (f"{head}. devkit finds its state, configuration and handoff through HOME, DEVKIT_CONFIG and DEV_ROOT, and "
-            f"its DEVKIT_* variables say who calls it, so another value points it at records it never wrote, such "
+            f"its DEVKIT_* variables and CODEX_THREAD_ID say who calls it, so another value points it at records it "
+            f"never wrote or speaks for another session, such "
             f"as an approval nobody gave (spec C11, K1). Run the command without it. If the work needs another "
             f"configuration or a scratch home, ask the developer to run it in a terminal; a test sets its temporary "
             f"HOME inside the test. The one-command hatches (DEVKIT_RAW_FS, DEVKIT_LOCAL_CI_PASSED, …) still work. "
