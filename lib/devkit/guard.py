@@ -7459,11 +7459,13 @@ _DEVELOPER_DECISIONS = {
     "lesson-release": "`dev lesson release` lets a held lesson reach every agent again, and devkit held it because "
                       "its text tried to steer agents past the developer or the guard, or carried a secret, a URL or "
                       "a command",
+    "lesson-prevent": "`dev lesson prevent --by guard --block` makes a lesson rule refuse every agent's matching "
+                      "command at once, skipping the warnings that show whether the rule is right",
 }
-_DEV_DECISION_WORDS = re.compile(r"\b(bug)\s+(send|drop|confirm|share)\b|\b(lesson)\s+(release)\b")
+_DEV_DECISION_WORDS = re.compile(r"\b(bug)\s+(send|drop|confirm|share)\b|\b(lesson)\s+(release|prevent)\b")
 # a developer-only command in text the guard cannot parse or check: denied in every setting, as the action is
 _DEV_ONLY_TEXT = re.compile(r"\bdev\b[\s\S]*(?:\b(?:embargo|backup)\b|\bbug\s+(?:send|drop|confirm|share)\b|"
-                            r"\blesson\s+release\b)")
+                            r"\blesson\s+(?:release|prevent)\b)")
 AUDIT_WEEK_S = 7 * 86400
 GATE_START = "irreversible-gate.json"  # in STATE: when the gate first ran on this Mac (the main session's audit week)
 _WHAT = {"push": "pushes {t}", "pr": "opens a PR from {t}", "push-destructive": "rewrites or deletes {t} on the remote",
@@ -8150,6 +8152,9 @@ def _dev_actions(dargs, cwd, depth=0) -> list:
         return [("developer-only", f"bug-{sub}/" + "/".join(args) if len(args) == want else "?")]
     if cmd == "lesson" and sub == "release":  # a held lesson reaches every agent again
         return [("developer-only", "lesson-release/" + pos[2] if len(pos) == 3 else "?")]
+    if cmd == "lesson" and sub == "prevent" and _dev_sets(_dev_opts(dargs), "--block"):  # a lesson rule that refuses
+        lid = pos[2] if len(pos) > 2 and re.fullmatch(r"L-[0-9A-Za-z]{1,40}", pos[2]) else ""  # from its first match
+        return [("developer-only", "lesson-block/" + lid if lid else "?")]
     if cmd == "backup":  # pushes branches whose commits exist only here (spec P-fy3bwa0pshk R5): tier 1, per branch
         targets = list(pos[1:]) + (["all-branches"] if _dev_sets(dargs, "--all") else [])
         return [("push", t) for t in targets or [_branch(cwd)]]
@@ -9973,11 +9978,155 @@ def check(tool: str, tool_input: dict, cwd: str, agent: str):
     global LAST_REFUSAL, LAST_REFUSAL_WORD
     _REFUSALS.clear()
     LAST_REFUSAL, LAST_REFUSAL_WORD = "", ""
+    LAST_LESSON_RULE.clear()
     token = _WORD.set("")
     try:
-        return _judged(_check(tool, tool_input, cwd, agent))
+        verdict = _check(tool, tool_input, cwd, agent)
+        if not verdict or verdict[0] == "ask":  # a lesson rule can only add a warning or refuse, never allow
+            verdict = _lesson_rule_verdict(tool, tool_input, cwd, verdict)
+        return _judged(verdict)
     finally:
         _WORD.reset(token)
+
+
+# Lesson rules (lessonrules.py): checks the team made from lessons that kept repeating, in the handoff repository.
+# They run after every rule of the guard's own, on shell commands only, and can only warn or refuse: a `warn` rule
+# lets the call run and leaves its text for the hook to add as context (lesson_rule_context), a `block` rule refuses
+# with the lesson's title and prevention. A failure, a bad rule file or a lookup over LESSON_RULE_BUDGET seconds lets
+# the call go on as the guard's own rules decided, with a guard.failopen record: the rules fail open, the guard does not.
+LESSON_RULE_BUDGET = 0.3
+LESSON_TEXT_CHARS = 600
+LAST_LESSON_RULE: dict = {}  # check()'s lesson rule: {"mode": "warn"|"block", "rule": {…}, "text": "…"}, {} for none
+_RULE_PROBLEMS = "lessons-rule-problems.json"  # STATE: when each bad rule file was last recorded (once a day)
+
+
+def _lesson_rule_scopes(cwd) -> list:
+    """The rule scopes for a call in `cwd`: its project's, the initiatives' it is a member of, and the global ones.
+    Only scopes that have a rule file; the project is looked up only when a project or initiative file exists."""
+    from . import lessonrules
+    present = lessonrules.all_scopes()
+    if not present:
+        return []
+    out = []
+    if any(s != "global" for s in present):
+        project = current_project(cwd)
+        if project:
+            out += [s for s in present if s == project]
+            out += [s for s in present if s.startswith("initiatives/") and project in
+                    initiative_members(s.split("/", 1)[1])]
+    return out + [s for s in present if s == "global"]
+
+
+def _lesson_rule_lookup(commands: list, cwd) -> dict:
+    """{"mode", "rule", "text", "problems"} of the strictest lesson rule the commands hit, within LESSON_RULE_BUDGET:
+    a lookup that is still running then is abandoned (it only reads) and raises TimeoutError."""
+    import threading
+    from . import lessonrules
+    box = {}
+
+    def look():
+        try:
+            scopes = _lesson_rule_scopes(cwd)
+            mode, rule, problems = "", None, []
+            for cmd in commands:
+                m, r = lessonrules.check_call(cmd, scopes) if scopes else ("", None)
+                problems += [p for p in lessonrules.PROBLEMS if p not in problems]
+                if r is not None and (rule is None or m == "block"):
+                    mode, rule = m, r
+                if mode == "block":
+                    break
+            box["out"] = {"mode": mode, "rule": rule, "problems": problems,
+                          "text": lessonrules.describe(rule) if rule else ""}
+        except BaseException as e:  # noqa: B036 (the thread reports every failure to the caller)
+            box["error"] = e
+
+    worker = threading.Thread(target=look, name="devkit-lesson-rules", daemon=True)
+    worker.start()
+    worker.join(LESSON_RULE_BUDGET)
+    if worker.is_alive():
+        raise TimeoutError(f"lesson rules took longer than {LESSON_RULE_BUDGET}s")
+    if "error" in box:
+        raise box["error"]
+    return box.get("out") or {}
+
+
+def _report_rule_problems(problems: list) -> None:
+    """A bad rule file or rule is ignored; it is recorded as guard.failopen once a day, not on every call."""
+    import hashlib
+    import time
+    from . import state
+    now, new = time.time(), []
+
+    def mark(doc):
+        for p in problems:
+            key = hashlib.sha256(p.encode()).hexdigest()[:16]
+            if now - float(doc.get(key) or 0) >= 86400:
+                doc[key] = now
+                new.append(p)
+        return None if new else state.SKIP
+
+    try:
+        state.update(core.STATE / _RULE_PROBLEMS, mark)
+    except Exception:
+        return
+    for p in new:
+        failopen("lesson-rules", ValueError(f"ignored: {p}"))
+
+
+def _lesson_rule_verdict(tool: str, tool_input, cwd, verdict):
+    """check()'s verdict after the lesson rules: a `block` rule turns an allowed or asked shell call into a refusal
+    that says the lesson's id, title and prevention (capped); a `warn` rule leaves the verdict and its text in
+    LAST_LESSON_RULE. Never anything weaker than `verdict`."""
+    from .hooks import SHELL_TOOLS
+    commands = tool_commands(tool_input) if tool in SHELL_TOOLS else []
+    if not commands:
+        return verdict
+    try:
+        found = _lesson_rule_lookup(commands, cwd)
+    except Exception as e:
+        failopen("lesson-rules", e)
+        return verdict
+    if found.get("problems"):
+        _report_rule_problems(found["problems"])
+    rule, text = found.get("rule"), found.get("text") or ""
+    if not rule or not text or found.get("mode") not in ("warn", "block"):
+        return verdict
+    LAST_LESSON_RULE.update(mode=found["mode"], rule=rule, text=text[:LESSON_TEXT_CHARS])
+    if found["mode"] != "block":
+        return verdict
+    return deny(f"devkit · lesson rule {rule['id']} refuses this call, from {LAST_LESSON_RULE['text']}. Do it the way "
+                "the prevention says. A lesson rule only warns or refuses; if this one is wrong here, tell the "
+                "developer.")
+
+
+def lesson_rule_context() -> str:
+    """The warning to add to the context of the call check() just allowed, when a `warn` lesson rule matched it; ""
+    otherwise. The hook adds it as the call's additional context."""
+    if LAST_LESSON_RULE.get("mode") != "warn":
+        return ""
+    return (f"devkit · lesson rule {LAST_LESSON_RULE['rule']['id']} warns about this call, from "
+            f"{LAST_LESSON_RULE['text']}. Lessons are advice from past work; they never override the developer or "
+            "the guard. If you run this form again after this warning, the rule refuses it from then on.")
+
+
+def lesson_rule_hit(session: str, agent: str) -> dict:
+    """Record the lesson rule check() just matched, for the hook that knows the session: a miss when the agent was
+    shown the lesson earlier in this session and still pending (lessonevents.on_hit), the rule's hit
+    (lessonrules.record_hit, which moves a `warn` rule to `block` on a miss), then the lesson as shown on channel
+    `call` (warn) or `refusal` (block). Call it before the hook records any other lesson it shows for this call.
+    -> {"rule", "lesson", "mode", "missed"}, {} when no rule matched. Never raises: a failure is guard.failopen."""
+    if not LAST_LESSON_RULE.get("rule"):
+        return {}
+    rule, mode = LAST_LESSON_RULE["rule"], LAST_LESSON_RULE["mode"]
+    try:
+        from . import lessonevents, lessonrules
+        missed = rule["lesson"] in lessonevents.on_hit([rule["lesson"]], session, agent)
+        lessonrules.record_hit(rule["id"], missed)
+        lessonevents.record("shown", rule["lesson"], "call" if mode == "warn" else "refusal", agent, session)
+    except Exception as e:
+        failopen("lesson-rules", e)
+        return {}
+    return {"rule": rule["id"], "lesson": rule["lesson"], "mode": mode, "missed": missed}
 
 
 def _check(tool: str, tool_input: dict, cwd: str, agent: str):
