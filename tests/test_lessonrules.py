@@ -1,9 +1,9 @@
 # Copyright (c) 2026 Firefly Software Solutions Inc.
 # SPDX-License-Identifier: Apache-2.0
 """Lesson rules: a check the guard enforces, made from a lesson that keeps repeating. A rule is accepted only when it
-matches the lesson's recorded mistake and none of this machine's recent successful commands; it warns, then blocks
-after a miss; it can never allow a call; a bad rule file is ignored and reported; and no rule refuses devkit,
-`git status` or the file tools.
+matches the lesson's recorded mistake and none of this machine's recent successful commands; it warns, and blocks only
+when the developer grants it on this machine; it can never allow a call; a bad rule file is ignored and reported; and
+no rule refuses devkit, `git status` or the file tools, whatever a synced file says.
 Run: python3 -m unittest tests.test_lessonrules -v"""
 import json
 import sys
@@ -21,7 +21,7 @@ import _hermetic  # noqa: E402
 _hermetic.activate()  # run alone, this module gets the suite's temporary home too (tests/_hermetic.py)
 sys.path.insert(0, str(ROOT / "lib"))
 
-from devkit import audit, core, guard, lessonevents, lessonrules, lessons  # noqa: E402
+from devkit import audit, bugs, core, guard, hooks, lessonevents, lessonrules, lessons  # noqa: E402
 
 PY_LESSON = "L-fxpy3c0001a"
 
@@ -55,6 +55,7 @@ class RulesCase(unittest.TestCase):
         for target, value in ((lessons, ("LESSONS", self.base)), (lessonrules, ("HITS", self.tmp / "hits.json")),
                               (lessonrules, ("STATE", self.tmp / "state")),
                               (lessonevents, ("EVENTS", self.tmp / "events.jsonl")),
+                              (bugs, ("BUGS", self.tmp / "state" / "bugs")),
                               (core, ("STATE", self.tmp / "state"))):
             p = mock.patch.object(target, value[0], value[1])
             p.start()
@@ -75,6 +76,24 @@ class RulesCase(unittest.TestCase):
 
     def rule_doc(self, scope="global") -> dict:
         return json.loads((self.base / "rules" / f"{scope}.json").read_text())
+
+    def ran(self, command, ok=True, hours_ago=1.0, session="s-ledger"):
+        """A shell call in a session ledger, as the hooks record it: the key of its command words, never its text."""
+        led = self.tmp / "state" / "bugs" / "ledger"
+        led.mkdir(parents=True, exist_ok=True)
+        rec = {"ts": time.time() - hours_ago * 3600, "tool": "Bash", "ok": ok, "dev": "", "codes": [],
+               "cmd": bugs.command_key(hooks.command_words(command)), "who": "main"}
+        with (led / f"{session}.jsonl").open("a") as fh:
+            fh.write(json.dumps(rec) + "\n")
+
+    def synced(self, rules, scope="global"):
+        """A rule file as a teammate's pushed commit leaves it: any mode, ids that match the rules."""
+        doc = {"version": 1, "rules": [{"id": lessonrules.rule_id(scope, lid, "call", pat), "lesson": lid,
+                                        "kind": "call", "match": pat, "mode": mode, "created": "x", "created_by": "x",
+                                        "history": []} for lid, pat, mode in rules]}
+        path = self.base / "rules" / f"{scope}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(doc))
 
 
 # --------------------------------------------------------------------------- proposing a rule
@@ -97,6 +116,21 @@ class ProposeTests(RulesCase):
         with self.assertRaises(ValueError) as cm:
             lessonrules.propose(les, match="python3 -c")
         self.assertIn("succeeded here", str(cm.exception))
+
+    def test_an_ordinary_shell_call_a_session_ledger_records_counts_as_a_success(self):
+        les = write_lesson(self.base, commands=("git commit -m",), title="Write a commit message with dev commit")
+        self.ran("cd /repo && git commit -m 'wip'")
+        with self.assertRaises(ValueError) as cm:
+            lessonrules.propose(les, match="git commit -m")
+        self.assertIn("succeeded here", str(cm.exception))
+        self.assertFalse((self.base / "rules" / "global.json").exists())
+
+    def test_a_failed_or_old_call_in_the_ledger_does_not_count(self):
+        les = write_lesson(self.base, commands=("git commit -m",), title="Write a commit message with dev commit")
+        self.ran("git commit -m 'wip'", ok=False)
+        self.ran("git commit -m 'wip'", hours_ago=15 * 24)
+        self.ran("git commit --amend")
+        self.assertEqual(lessonrules.propose(les, match="git commit -m")["mode"], "warn")
 
     def test_a_success_older_than_fourteen_days_does_not_count(self):
         les = write_lesson(self.base, commands=("dev progress step",), title="Keep dev progress step on its own")
@@ -172,16 +206,37 @@ class CheckTests(RulesCase):
         self.les = write_lesson(self.base)
         self.rule = lessonrules.propose(self.les, match="python3 -c")
 
-    def test_an_accepted_rule_warns_then_blocks_after_a_miss(self):
+    def test_a_miss_is_counted_and_the_rule_stays_a_warning(self):
         self.assertEqual(lessonrules.check_call("python3 -c 'print(1)'", ["global"])[0], "warn")
         lessonrules.record_hit(self.rule["id"], missed=False)
-        self.assertEqual(lessonrules.check_call("python3 -c 'print(1)'", ["global"])[0], "warn")
+        lessonrules.record_hit(self.rule["id"], missed=True)
         lessonrules.record_hit(self.rule["id"], missed=True)
         mode, rule = lessonrules.check_call("python3 -c 'print(1)'", ["global"])
-        self.assertEqual((mode, rule["id"]), ("block", self.rule["id"]))
-        self.assertIn("matched again", self.rule_doc()["rules"][0]["history"][0])
+        self.assertEqual((mode, rule["id"]), ("warn", self.rule["id"]))
+        self.assertEqual(self.rule_doc()["rules"][0]["mode"], "warn")
         hits = json.loads((self.tmp / "hits.json").read_text())[self.rule["id"]]
-        self.assertEqual((hits["hits"], hits["misses"]), (2, 1))
+        self.assertEqual((hits["hits"], hits["misses"]), (3, 2))
+
+    def test_a_block_rule_from_a_synced_file_warns_until_the_developer_grants_it_here(self):
+        self.synced([(PY_LESSON, "python3 -c", "block")])
+        self.assertEqual(lessonrules.check_call("python3 -c 1", ["global"])[0], "warn")
+        self.assertEqual(lessonrules.propose(self.les, match="python3 -c")["mode"], "warn")  # what it does here
+        lessonrules.propose(self.les, match="python3 -c", block=True)  # `dev lesson prevent --block`, granted here
+        self.assertEqual(lessonrules.check_call("python3 -c 1", ["global"])[0], "block")
+        (self.tmp / "state" / "lessons-rule-blocks.json").unlink()  # another machine: no grant there
+        self.assertEqual(lessonrules.check_call("python3 -c 1", ["global"])[0], "warn")
+
+    def test_a_synced_rule_that_would_refuse_devkit_or_git_status_is_ignored_at_load(self):
+        les = write_lesson(self.base, lid="L-fxsync0006f", commands=("git status --short", "dev lesson ls -a",
+                                                                   "git diff --stat", "pytest -x"),
+                           title="Read the state with dev status", prevention="Run dev status.")
+        lid = les["meta"]["id"]
+        self.synced([(lid, "git status", "block"), (lid, "dev lesson ls", "block"), (lid, "git diff", "warn"),
+                     (lid, "pytest -x", "block")])
+        self.assertEqual([r["match"] for r in lessonrules.load(["global"])], ["pytest -x"])
+        self.assertEqual(sum("would refuse" in p for p in lessonrules.PROBLEMS), 3, lessonrules.PROBLEMS)
+        self.assertEqual(lessonrules.check_call("git status", ["global"]), ("", None))
+        self.assertEqual(lessonrules.check_call("pytest -x tests", ["global"])[0], "warn")
 
     def test_the_pattern_matches_command_words_not_text_that_mentions_them(self):
         for cmd, mode in (("cd x&&python3 -c 'print(1)'", "warn"), ("/usr/bin/python3 -c 1", "warn"),
@@ -282,11 +337,18 @@ class GuardTests(RulesCase):
         self.assertIsNone(self.check("python3 probe.py"))
         self.assertEqual(guard.lesson_rule_context(), "")
 
-    def test_a_miss_after_the_warning_makes_the_next_call_refused(self):
+    def test_a_miss_after_the_warning_leaves_the_call_to_the_developers_grant(self):
         self.assertIsNone(self.check("python3 -c 1"))
         self.assertEqual(guard.lesson_rule_hit("s-1", "claude")["missed"], False)
         self.assertIsNone(self.check("python3 -c 2"))  # shown at the warning, run again: a miss
         self.assertEqual(guard.lesson_rule_hit("s-1", "claude")["missed"], True)
+        self.assertIsNone(self.check("python3 -c 3"))  # a teammate's next call: still a warning
+        ctx = guard.lesson_rule_context()
+        self.assertIn(f"grant lesson-block {PY_LESSON}", ctx)
+        self.assertIn("--block", ctx)
+
+    def test_a_rule_the_developer_made_block_refuses_with_the_lesson(self):
+        lessonrules.propose(self.les, match="python3 -c", block=True)
         verdict = self.check("python3 -c 3")
         self.assertEqual(verdict[0], "deny")
         self.assertIn(PY_LESSON, verdict[1])
@@ -398,6 +460,7 @@ class BlockAtOnceIsTheDevelopers(unittest.TestCase):
         why = self.main(cmd) or ""
         self.assertIn("developer's own decision", why)
         self.assertIn("lesson prevent --by guard --block", why)
+        self.assertIn("`grant lesson-block L-fxpy3c0001a`", why)
         self.assertIsNotNone(self.member(cmd))
         acts = guard.irreversible_actions(cmd, self.tmp.name)
         self.assertEqual([(a["action"], a["target"]) for a in acts], [("developer-only", "lesson-block/L-fxpy3c0001a")])

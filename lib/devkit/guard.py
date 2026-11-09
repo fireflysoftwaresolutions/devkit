@@ -4880,7 +4880,39 @@ _EVIDENCE_FNS = frozenset({"on_human_prompt", "on_question", "on_prompt", "confi
                            "_decision_evidence", "_live_grants", "_grant_lookup"})
 _EVIDENCE_COMMON = frozenset({"confirmed", "evidence"})  # common words: they count only on a devkit module
 _STATE_WRITERS = frozenset({"update", "replace", "patch", "remove", "_write"})  # devkit.state's, on that module only
-_EVIDENCE_TEXT = re.compile(r"\b(?:" + "|".join(sorted(_EVIDENCE_FNS - _EVIDENCE_COMMON)) + r")\b")
+# The developer's own decisions behind `dev bug send|drop|confirm|share`, `dev lesson release` and `dev lesson prevent
+# --block`, which the irreversible gate opens only with the developer's typed grant: the functions those commands call
+# and the writers they share. Most are common words (approve, drop, release, update), so each counts only on its own
+# devkit module; the names no other code uses also count on any name, as the evidence functions do. Two count only
+# with the arguments that make them the developer's: lessonrules.propose with `block`, lessons.update with
+# `quarantine` (releasing a held lesson by hand). (module, function) -> (the command, its grant line).
+_DEVELOPER_FNS = {
+    ("devkit.bugs", "approve"): ("dev bug send <id>", "grant bug-send <id>"),
+    ("devkit.bugs", "drop"): ("dev bug drop <id>", "grant bug-drop <id>"),
+    ("devkit.bugs", "_forget_approval"): ("dev bug drop <id>", "grant bug-drop <id>"),
+    ("devkit.bugs", "confirm"): ("dev bug confirm <bug> <detour>", "grant bug-confirm <bug>/<detour>"),
+    ("devkit.bugs", "set_consent"): ("dev bug share on|reports|off", "grant bug-share <setting>"),
+    ("devkit.bugs", "_write_json"): ("dev bug send <id>", "grant bug-send <id>"),
+    ("devkit.bugs", "_write_text"): ("dev bug send <id>", "grant bug-send <id>"),
+    ("devkit.lessons", "release"): ("dev lesson release <L-id>", "grant lesson-release <L-id>"),
+    ("devkit.lessons", "_remember_release"): ("dev lesson release <L-id>", "grant lesson-release <L-id>"),
+    ("devkit.lessons", "update"): ("dev lesson release <L-id>", "grant lesson-release <L-id>"),
+    ("devkit.lessonrules", "_set_mode"): ("dev lesson prevent --by guard <L-id> --match \"…\" --block",
+                                          "grant lesson-block <L-id>"),
+    ("devkit.lessonrules", "_grant_block"): ("dev lesson prevent --by guard <L-id> --match \"…\" --block",
+                                             "grant lesson-block <L-id>"),
+    ("devkit.lessonrules", "_write"): ("dev lesson prevent --by guard <L-id> --match \"…\" --block",
+                                       "grant lesson-block <L-id>"),
+    ("devkit.lessonrules", "propose"): ("dev lesson prevent --by guard <L-id> --match \"…\" --block",
+                                        "grant lesson-block <L-id>"),
+}
+# (keyword, its position or None, True when any value counts): propose(block=False) stays the agents', while any
+# quarantine= changes whether a lesson is held
+_DEVELOPER_ARGS = {("devkit.lessonrules", "propose"): ("block", 3, False),
+                   ("devkit.lessons", "update"): ("quarantine", None, True)}
+_DEVELOPER_BY_NAME = {f"{m.rpartition('.')[2]}.{f}": v for (m, f), v in _DEVELOPER_FNS.items()}
+_DEVELOPER_RARE = frozenset({"set_consent", "_forget_approval", "_remember_release", "_set_mode", "_grant_block"})
+_EVIDENCE_TEXT = re.compile(r"\b(?:" + "|".join(sorted((_EVIDENCE_FNS - _EVIDENCE_COMMON) | _DEVELOPER_RARE)) + r")\b")
 _DEVKIT_LOAD_TEXT = re.compile(r"\b(?:from|import)\s+devkit\b|(?:__import__|import_module)\s*\(\s*['\"]devkit\b")
 _DEVKIT_MODULE_STR = re.compile(r"^devkit(?:\.\w+)*$|(?:^|/)devkit/\w+\.py$")
 FORGERY_REASON = ("This program loads devkit and reaches {fn}, which records or uses the developer's prompts, "
@@ -4889,6 +4921,12 @@ FORGERY_REASON = ("This program loads devkit and reaches {fn}, which records or 
                   "harness fires them. To try it, write or run a test in the repository (tests/test_evidence.py shows "
                   "how, with its state in a temporary folder); to read records, use `dev status`, `dev crew "
                   "decisions` or `dev audit`. For a grant, ask the developer to type `grant <action> <target>`.")
+DEVELOPER_FN_REASON = ("This program loads devkit and reaches {fn}, which only {cmd} runs, after the developer types "
+                       "{line}: it is the developer's own decision, and called from an agent's program it would skip "
+                       "that grant, so no session runs it, the main session included. Run {cmd} instead; the guard "
+                       "tells you when it needs the developer's grant, and the developer opens it by typing {line} on "
+                       "its own. To try the function, write or run a test in the repository with its state in a "
+                       "temporary folder.")
 
 
 def _const_str(n):
@@ -5031,7 +5069,50 @@ def evidence_reached(code, cwd=None, depth: int = 0) -> str:
         return m.group(0) if m else ""
     loads, maybe, star, dynamic, hit = False, False, False, False, ""
     mods = {}  # local name -> the devkit module it is bound to
+    fns = {}  # local name -> a developer-only function imported by name, (module, function)
     alias = _aliases(tree)
+    called = {id(n.func): n for n in ast.walk(tree) if isinstance(n, ast.Call)}
+
+    def module_of(node) -> str:
+        """The devkit module an expression is: a name bound to one, an attribute of devkit, or an import_module or
+        __import__ of a constant devkit module name."""
+        if isinstance(node, ast.Name):
+            return mods.get(node.id, "")
+        if isinstance(node, ast.Attribute):
+            parent = module_of(node.value)
+            return f"{parent}.{node.attr}" if parent else ""
+        if isinstance(node, ast.Call) and node.args:
+            f = node.func
+            fname = alias.get(f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", ""), "") or \
+                (f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", ""))
+            arg = _const_str(node.args[0])
+            if fname.rpartition(".")[2] in ("import_module", "__import__") and arg and _devkit_module(arg):
+                return arg
+        return ""
+
+    def developer_fn(key, node) -> str:
+        """`module.function` when `node` (a reference to the function `key` names) reaches a developer-only
+        decision: always, or for propose and update only when the call passes their argument or cannot be read."""
+        if key not in _DEVELOPER_FNS:
+            return ""
+        name = f"{key[0].rpartition('.')[2]}.{key[1]}"
+        if key not in _DEVELOPER_ARGS:
+            return name
+        kw, pos, any_value = _DEVELOPER_ARGS[key]
+        call = called.get(id(node))
+        if call is None:  # passed around, wrapped or stored: the guard cannot see what it is called with
+            return name
+        for k in call.keywords:
+            if k.arg is None or (k.arg == kw and (any_value or not (isinstance(k.value, ast.Constant)
+                                                                    and not k.value.value))):
+                return name
+        if any(isinstance(a, ast.Starred) for a in call.args):
+            return name
+        if pos is not None and len(call.args) > pos and not (isinstance(call.args[pos], ast.Constant)
+                                                             and not call.args[pos].value):
+            return name
+        return ""
+
     for n in ast.walk(tree):
         if isinstance(n, ast.Import):
             for a in n.names:
@@ -5045,8 +5126,15 @@ def evidence_reached(code, cwd=None, depth: int = 0) -> str:
                     star = True
                 elif a.name in _EVIDENCE_FNS or (n.module == "devkit.state" and a.name in _STATE_WRITERS):
                     hit = hit or a.name
+                elif (n.module, a.name) in _DEVELOPER_FNS:
+                    fns[a.asname or a.name] = (n.module, a.name)
                 else:
                     mods[a.asname or a.name] = f"{n.module}.{a.name}"
+        elif isinstance(n, ast.Assign) and isinstance(n.value, ast.Call):
+            for t in n.targets:  # `b = importlib.import_module("devkit.bugs")`
+                if isinstance(t, ast.Name) and _const_str(n.value.args[0] if n.value.args else None) and \
+                        _devkit_module(_const_str(n.value.args[0])):
+                    mods[t.id] = _const_str(n.value.args[0])
         elif isinstance(n, ast.Constant) and isinstance(n.value, str):
             if _DEVKIT_MODULE_STR.search(n.value):
                 loads = True
@@ -5069,6 +5157,8 @@ def evidence_reached(code, cwd=None, depth: int = 0) -> str:
                     dynamic = True
                 elif name in _EVIDENCE_FNS:
                     hit = hit or name
+                elif (module_of(n.args[0]), name) in _DEVELOPER_FNS:
+                    hit = hit or developer_fn((module_of(n.args[0]), name), None)
             elif fname in ("eval", "exec", "compile", "vars"):
                 inner = first
                 path = _read_call_path(n.args[0]) if n.args and inner is None else None
@@ -5091,16 +5181,25 @@ def evidence_reached(code, cwd=None, depth: int = 0) -> str:
             base = n.value.id if isinstance(n.value, ast.Name) else n.value.attr if isinstance(n.value, ast.Attribute) \
                 else ""
             on = mods.get(base, "")
+            mod = module_of(n.value)
             if n.attr in _EVIDENCE_FNS - _EVIDENCE_COMMON or (on and n.attr in _EVIDENCE_COMMON):
                 hit = hit or n.attr
+            elif (mod, n.attr) in _DEVELOPER_FNS:
+                hit = hit or developer_fn((mod, n.attr), n)
+            elif n.attr in _DEVELOPER_RARE:
+                hit = hit or developer_fn(next(k for k in _DEVELOPER_FNS if k[1] == n.attr), n)
             elif n.attr in _STATE_WRITERS and (on == "devkit.state" or (base == "state" and loads)):
                 hit = hit or f"state.{n.attr}"
             elif n.attr in ("__dict__", "__getattribute__") and on:
                 dynamic = True
         elif isinstance(n, ast.Name) and star and n.id in _EVIDENCE_FNS:
             hit = hit or n.id
+        elif isinstance(n, ast.Name) and n.id in fns and not isinstance(n.ctx, ast.Store):
+            hit = hit or developer_fn(fns[n.id], n)
         elif isinstance(n, ast.Constant) and isinstance(n.value, str) and n.value in _EVIDENCE_FNS - _EVIDENCE_COMMON:
             hit = hit or n.value
+        elif isinstance(n, ast.Constant) and isinstance(n.value, str) and n.value in _DEVELOPER_RARE:
+            hit = hit or developer_fn(next(k for k in _DEVELOPER_FNS if k[1] == n.value), None)
     if hit and (loads or maybe):
         return hit
     return "a name looked up at run time" if loads and dynamic else ""
@@ -5198,6 +5297,10 @@ def evidence_forgery(cmd: str, cwd):
         return deny(DECODED_REASON, key="decoded")
     if fn == NESTED:
         return deny(NESTED_REASON, key="nested")
+    fn = next((k for k in _DEVELOPER_BY_NAME if k.endswith("." + fn)), fn) if fn in _DEVELOPER_RARE else fn
+    if fn in _DEVELOPER_BY_NAME:  # the text of a program the parser cannot read names it bare
+        cmd_, line = _DEVELOPER_BY_NAME[fn]
+        return deny(DEVELOPER_FN_REASON.format(fn=_code(fn), cmd=_code(cmd_), line=_code(line)), key="developer-only")
     return deny(FORGERY_REASON.format(fn=_code(fn)), key="forgery") if fn else None
 
 
@@ -7444,10 +7547,11 @@ REGISTRY_REASON = ("Agents do not post to devkit's bug registry directly. Use `d
 # developer-only <target>` names the gate's own target and opens it too. Exact targets only, never a pattern.
 # The bug registry's and the lessons' own decisions read the same way: `grant bug-send 7` sends one held item,
 # `grant bug-drop 7` drops one, `grant bug-confirm 42/d1` confirms one workaround of one bug, `grant bug-share on`
-# sets the consent to one value, `grant lesson-release L-…` releases one held lesson.
+# sets the consent to one value, `grant lesson-release L-…` releases one held lesson, `grant lesson-block L-…` lets
+# one lesson's rule refuse (`dev lesson prevent --by guard L-… --block`).
 DEVELOPER_GRANTS = {"embargo/": "embargo", "backup-public/": "backup", "backup-policy/": "backup",
                     "bug-send/": "bug-send", "bug-drop/": "bug-drop", "bug-confirm/": "bug-confirm",
-                    "bug-share/": "bug-share", "lesson-release/": "lesson-release"}
+                    "bug-share/": "bug-share", "lesson-release/": "lesson-release", "lesson-block/": "lesson-block"}
 # why each of those decisions is the developer's, for the refusal (embargo and backup keep their own text)
 _DEVELOPER_DECISIONS = {
     "bug-send": "`dev bug send` posts a held report publicly and for good, under the developer's GitHub account, and "
@@ -7460,7 +7564,7 @@ _DEVELOPER_DECISIONS = {
     "lesson-release": "`dev lesson release` lets a held lesson reach every agent again, and devkit held it because "
                       "its text tried to steer agents past the developer or the guard, or carried a secret, a URL or "
                       "a command",
-    "lesson-prevent": "`dev lesson prevent --by guard --block` makes a lesson rule refuse every agent's matching "
+    "lesson-block": "`dev lesson prevent --by guard --block` makes a lesson rule refuse every agent's matching "
                       "command at once, skipping the warnings that show whether the rule is right",
 }
 _DEV_DECISION_WORDS = re.compile(r"\b(bug)\s+(send|drop|confirm|share)\b|\b(lesson)\s+(release|prevent)\b")
@@ -8016,9 +8120,14 @@ def _gh_api(rest, endpoint, cwd, repo) -> list:
         k += 1
     endpoint = endpoint.lstrip("/")
     if endpoint == "graphql":
-        text = " ".join(_read_small(resolve(v, cwd)) if f == "--input" else
-                        _read_small(resolve(v.split("=@", 1)[1], cwd)) if "=@" in v else v for f, v in fields)
+        text, unread = _graphql_query(fields, cwd)
+        if unread:  # stdin, a file it cannot open, a substitution: it may be mergePullRequest or a forced updateRef
+            return [("unknown", _unknown("gh api graphql " + " ".join(rest))[1], repo,
+                     ("unsure", f"a GraphQL query from {unread}, which the guard cannot read, so it may be a mutation "
+                                f"(a merge, a forced ref update)"))]
         writes = bool(re.search(r"\bmutation\b", text))
+        if writes and _GRAPHQL_ISSUE.search(text):  # a node id does not say its repository: any may be the registry
+            return [("registry-write", "api/graphql", core.DEVKIT_REPO)]
     elif method:
         writes = method.upper() not in ("GET", "HEAD")
     else:
@@ -8026,6 +8135,49 @@ def _gh_api(rest, endpoint, cwd, repo) -> list:
     if writes and _registry_endpoint(endpoint, repo, cwd):
         return [("registry-write", "api/" + endpoint, core.DEVKIT_REPO)]
     return [("api-write", "api/" + (endpoint or "?"), repo)] if writes else []
+
+
+# a mutation of an issue, a comment or a reaction (a vote): addComment, createIssue, updateIssue, closeIssue,
+# updateIssueComment, addReaction, lockLockable, … ; a pull request's own review comments are not the registry's
+_GRAPHQL_ISSUE = re.compile(r"\b(?!\w*PullRequest)[a-z]\w*(?:Issue|Comment|Reaction|Lockable)\w*\b")
+# the shell fills these in when it runs: a substitution, backticks, a variable that is not a GraphQL variable (one
+# follows `(`, `,`, `:`, `[` or `=` in a query)
+_SHELL_FILLED = re.compile(r"\$[({]|`|(?:^|(?<=[^\s(,:\[=]))\s*\$[\w@*#?!$-]|^\$[\w@*#?!$-]")
+
+
+def _graphql_query(fields, cwd) -> tuple:
+    """(the text of a `gh api graphql` call's query, '' or what the guard could not read). The query is the `query`
+    field (`-f query=…`, `-F query=@file`) or the body of `--input file`; one read from stdin (`@-`, `--input -`),
+    from a file the guard cannot open, or filled in by the shell (a substitution, a variable) is unread."""
+    texts, unread = [], ""
+    for f, v in fields:
+        if f == "--input":
+            src = v
+        else:
+            key, eq, val = v.partition("=")
+            if not eq or key != "query":
+                texts.append(val if eq else v)
+                continue
+            if f in ("-F", "--field") and val.startswith("@"):
+                src = val[1:]
+            else:
+                if _SHELL_FILLED.search(val):
+                    unread = unread or f"text the shell fills in ({_code(val[:40])})"
+                texts.append(val)
+                continue
+        if src in ("-", ""):
+            unread = unread or "its standard input"
+            continue
+        if _SHELL_FILLED.search(src):
+            unread = unread or f"a file the shell names when it runs ({_code(src[:40])})"
+            continue
+        path = resolve(src, cwd)
+        body = _read_small(path) if path != UNKNOWN else ""
+        if not body:
+            unread = unread or f"{_code(src[:60])}, a file the guard cannot read"
+            continue
+        texts.append(body)
+    return " ".join(texts), unread
 
 
 def _names_registry(repo) -> bool:
@@ -8081,6 +8233,8 @@ def _registry_endpoint(endpoint, repo, cwd) -> bool:
         path = posixpath.normpath("/" + c).lstrip("/").lower()
         m = re.match(r"repos/([^/]+/[^/]+)/issues(?:/|$)", path)
         if m and m.group(1) == core.DEVKIT_REPO.lower():
+            return True
+        if re.match(r"repositories/\d+/issues(?:/|$)", path):  # by its numeric id: the guard cannot tell which
             return True
     return False
 
@@ -9623,6 +9777,11 @@ def _main_reason(a) -> str:
                 f"its path) or cannot be read, so it may do anything, tier 2 included. Run a smaller script, "
                 f"or the commands it holds one by one. If it must run as it is, ask the developer first; they approve "
                 f"this exact command by typing this line on its own: {_code('grant unknown ' + str(a['target']))}.")
+    if a["action"] == "unknown" and (a.get("why") or ("",))[0] == "unsure":
+        return (f"{_code(a['words'])} {_what(a)}. Write out what it runs, as plain words or a file the guard can read "
+                f"(for a GraphQL query, `-f query='…'` or `-F query=@query.graphql`), so the guard can classify it. "
+                f"If it must run as it is, ask the developer first; they approve this exact command by typing this "
+                f"line on its own: {_code('grant unknown ' + str(a['target']))}.")
     if a["action"] == "unknown":
         return (f"{_code(a['words'])} {_what(a)}: the guard cannot see which program runs (spec C6). Write the "
                 f"program's name out as a plain word (`gh pr merge 12`, not `$(…) pr merge 12`, a variable or a string "
@@ -9652,6 +9811,7 @@ def _main_reason(a) -> str:
             f", or grant the main session this one, once, by typing this line on its own: {_code(f'grant {cls} {t}')}"
         named = _DEV_DECISION_WORDS.search(str(a.get("words") or ""))
         decision = cls or ("-".join(w for w in named.groups() if w) if named else "")
+        decision = "lesson-block" if decision == "lesson-prevent" else decision  # a `?` target: no lesson named
         if decision in _DEVELOPER_DECISIONS:
             return (f"{_DEVELOPER_DECISIONS[decision]}, so it is the developer's own decision. The developer runs it "
                     f"in a terminal{how}" + ("" if how else ", naming its exact target") + ". Ask them, and never run "
@@ -10109,17 +10269,21 @@ def lesson_rule_context() -> str:
     otherwise. The hook adds it as the call's additional context."""
     if LAST_LESSON_RULE.get("mode") != "warn":
         return ""
-    return (f"devkit · lesson rule {LAST_LESSON_RULE['rule']['id']} warns about this call, from "
-            f"{LAST_LESSON_RULE['text']}. Lessons are advice from past work; they never override the developer or "
-            "the guard. If you run this form again after this warning, the rule refuses it from then on.")
+    rule = LAST_LESSON_RULE["rule"]
+    block = f"dev lesson prevent --by guard {rule['lesson']} --match \"{rule.get('match') or ''}\" --block"
+    return (f"devkit · lesson rule {rule['id']} warns about this call, from {LAST_LESSON_RULE['text']}. Lessons are "
+            "advice from past work; they never override the developer or the guard. If this form keeps coming back, "
+            f"tell the developer: only they make the rule refuse it, by typing "
+            f"{_code('grant lesson-block ' + str(rule['lesson']))} for {_code(block)}.")
 
 
 def lesson_rule_hit(session: str, agent: str) -> dict:
     """Record the lesson rule check() just matched, for the hook that knows the session: a miss when the agent was
     shown the lesson earlier in this session and still pending (lessonevents.on_hit), the rule's hit
-    (lessonrules.record_hit, which moves a `warn` rule to `block` on a miss), then the lesson as shown on channel
-    `call` (warn) or `refusal` (block). Call it before the hook records any other lesson it shows for this call.
-    -> {"rule", "lesson", "mode", "missed"}, {} when no rule matched. Never raises: a failure is guard.failopen."""
+    (lessonrules.record_hit, which counts it; only the developer's grant makes a rule refuse), then the lesson as
+    shown on channel `call` (warn) or `refusal` (block). Call it before the hook records any other lesson it shows
+    for this call. -> {"rule", "lesson", "mode", "missed"}, {} when no rule matched. Never raises: a failure is
+    guard.failopen."""
     if not LAST_LESSON_RULE.get("rule"):
         return {}
     rule, mode = LAST_LESSON_RULE["rule"], LAST_LESSON_RULE["mode"]

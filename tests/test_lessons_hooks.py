@@ -155,21 +155,28 @@ class RuleTests(LessonHookCase):
         return lessons.add("global", title, cause="cause of " + title, prevention=prevention, a=A,
                            happened="it happened: " + title, **anchors)
 
-    def test_a_warn_rules_text_reaches_the_calls_context_and_a_miss_turns_it_to_block(self):
+    def test_a_warn_rules_text_reaches_the_calls_context_and_only_the_developers_grant_makes_it_block(self):
         les = self.global_lesson("Run probes as a script file, not python3 -c",
                                  "Write the probe to the scratch folder and run it as a file.", commands=["python3 -c"])
         lid, rule = les["meta"]["id"], lessonrules.propose(les, match="python3 -c")
         first = self.context(self.hook("guard", self.bash("python3 -c 1", tid="t1"), real_guard=True))
         self.hook("guard", self.bash("python3 -c 2", tid="t2"), real_guard=True)  # shown, then run again: a miss
-        denied = self.reason(self.hook("guard", self.bash("python3 -c 3", tid="t3"), real_guard=True))
+        third = self.hook("guard", self.bash("python3 -c 3", tid="t3"), real_guard=True)
         self.assertIn(rule["id"], first)
-        self.assertEqual(first.count(lid), 1)  # the rule says it; it is not repeated as a pitfall
-        self.assertIn(lid, denied)
+        self.assertEqual(first.count("Run probes as a script file"), 1)  # the rule says it; not repeated as a pitfall
+        self.assertEqual(self.reason(third), "")  # a miss alone never makes the rule refuse
+        self.assertIn(f"grant lesson-block {lid}", self.context(third))
         # one outcome per call: the rule records the miss, the call's command anchor does not record it again
         self.assertEqual(self.events(lid), [("shown", "call", "main"), ("missed", "call", "main"),
                                             ("shown", "call", "main"), ("missed", "call", "main"),
-                                            ("shown", "refusal", "main")])
-        self.assertEqual(lessons.usage().get(lid, {}).get("shown_call"), 2)
+                                            ("shown", "call", "main")])
+        self.assertEqual(lessons.usage().get(lid, {}).get("shown_call"), 3)
+        # the developer typed `grant lesson-block <lesson>`, which opens `dev lesson prevent --block` once
+        # (test_guard_bugs.DeveloperGrantLines); that command makes the rule refuse on this machine
+        lessonrules.propose(les, match="python3 -c", block=True)
+        denied = self.reason(self.hook("guard", self.bash("python3 -c 4", tid="t4"), real_guard=True))
+        self.assertIn(lid, denied)
+        self.assertEqual(self.events(lid)[-1], ("shown", "refusal", "main"))
 
     def test_an_output_rule_names_its_lesson_when_the_output_shows_its_error(self):
         les = self.global_lesson("Import devkit from lib, not from the tests folder",

@@ -287,7 +287,9 @@ class DeveloperOnlyBugActions(unittest.TestCase):
         for cmd, line in (("dev bug send 7", "grant bug-send 7"), ("dev bug drop 7", "grant bug-drop 7"),
                           ("dev bug confirm 42 d1", "grant bug-confirm 42/d1"),
                           ("dev bug share on", "grant bug-share on"), ("dev bug share off", "grant bug-share off"),
-                          ("dev lesson release L-abc123", "grant lesson-release L-abc123")):
+                          ("dev lesson release L-abc123", "grant lesson-release L-abc123"),
+                          ('dev lesson prevent --by guard L-abc123 --match "python3 -c" --block',
+                           "grant lesson-block L-abc123")):
             with self.subTest(cmd=cmd):
                 why = self.main(cmd) or ""
                 self.assertIn(f"`{line}`", why)
@@ -355,7 +357,10 @@ class DeveloperGrantLines(tp.TranscriptCase):
                                  ("grant bug-drop 7", "dev bug drop 7", "dev bug drop 8"),
                                  ("grant bug-confirm 42/d1", "dev bug confirm 42 d1", "dev bug confirm 42 d2"),
                                  ("grant bug-share on", "dev bug share on", "dev bug share reports"),
-                                 ("grant lesson-release L-abc", "dev lesson release L-abc", "dev lesson release L-x")):
+                                 ("grant lesson-release L-abc", "dev lesson release L-abc", "dev lesson release L-x"),
+                                 ("grant lesson-block L-abc",
+                                  'dev lesson prevent --by guard L-abc --match "python3 -c" --block',
+                                  'dev lesson prevent --by guard L-x --match "python3 -c" --block')):
             with self.subTest(line=line):
                 self.type_line(line)
                 self.assertIsNotNone(self.main(other))
@@ -553,6 +558,155 @@ class LessonPreventOptions(unittest.TestCase):
                          ["lesson", "supersede", "L-old"])
         self.assertEqual(guard._dev_words(["lesson", "add", "a", "title", "--error", "boom"]),
                          ["lesson", "add", "a", "title"])
+
+
+
+class DeveloperOnlyFunctionsInAProgram(unittest.TestCase):
+    # what `dev bug send|drop|confirm|share`, `dev lesson release` and `dev lesson prevent --block` do, called from an
+    # agent's own program, skips the typed grant those commands need: the guard refuses the program and names the
+    # command and its grant line, for every agent
+
+    LIB = "/Users/ana/Development/acme/devkit/lib"
+
+    def bash(self, code, agent="claude"):
+        cmd = f"python3 -c \"import sys; sys.path.insert(0, '{self.LIB}'); {code}\""
+        v = guard.check("Bash", {"command": cmd}, str(ROOT), agent)
+        return v[1] if v and v[0] == "deny" else None
+
+    def test_each_developer_only_function_is_refused_with_its_command_and_grant_line(self):
+        for code, line in (("from devkit import bugs; bugs.set_consent('on', 'ana-dev')", "grant bug-share"),
+                           ("from devkit import bugs; bugs.approve('7')", "grant bug-send"),
+                           ("from devkit import bugs; bugs.drop('7')", "grant bug-drop"),
+                           ("from devkit import bugs; bugs.confirm('42', 'd1')", "grant bug-confirm"),
+                           ("from devkit import bugs; bugs._write_json(bugs.BUGS / 'approvals.json', {})",
+                            "grant bug-send"),
+                           ("from devkit import lessons; lessons.release(lessons.find('L-abc'), 'ok')",
+                            "grant lesson-release"),
+                           ("from devkit import lessons; lessons.update(lessons.find('L-abc'), 'x', quarantine='')",
+                            "grant lesson-release"),
+                           ("from devkit import lessonrules as r; r._set_mode(r.find('LR-0123456789'), 'block', 'x')",
+                            "grant lesson-block"),
+                           ("from devkit import lessonrules as r; r._write('global', lambda d: d)",
+                            "grant lesson-block"),
+                           ("from devkit import lessonrules as r, lessons as l; r.propose(l.find('L-a'), match='x', "
+                            "block=True)", "grant lesson-block"),
+                           ("from devkit import lessonrules as r, lessons as l; r.propose(l.find('L-a'), 'x', '', 1)",
+                            "grant lesson-block")):
+            for agent in ("claude", "codex"):
+                with self.subTest(code=code[-50:], agent=agent):
+                    why = self.bash(code, agent) or ""
+                    self.assertIn(f"`{line} ", why)
+                    self.assertIn("developer", why)
+
+    def test_every_way_of_reaching_the_module_counts(self):
+        for code in ("import devkit.bugs as b; b.approve('7')", "import devkit.bugs; devkit.bugs.approve('7')",
+                     "from devkit.bugs import approve; approve('7')",
+                     "import importlib; importlib.import_module('devkit.bugs').approve('7')",
+                     "import importlib; b = importlib.import_module('devkit.bugs'); b.approve('7')",
+                     "from devkit import bugs; getattr(bugs, 'approve')('7')",
+                     "from devkit import lessonrules, lessons; f = lessonrules.propose; f(lessons.find('L-a'), 'x')",
+                     "from devkit import lessonrules, lessons; lessonrules.propose(lessons.find('L-a'), **{'match': "
+                     "'x', 'block': True})"):
+            with self.subTest(code=code):
+                self.assertIsNotNone(self.bash(code))
+
+    def test_a_program_the_parser_cannot_read_is_judged_by_its_text(self):
+        why = self.bash("from devkit import bugs; bugs.set_consent('on', 'x'); if") or ""
+        self.assertIn("`grant bug-share ", why)
+
+    def test_the_same_names_elsewhere_and_the_agents_own_calls_still_run(self):
+        for code in ("from devkit import bugs; print(bugs.pending())", "import pandas as pd; df.drop('a'); x.release()",
+                     "from devkit import bugs; df.drop('a'); q.approve(1)",
+                     "from devkit import lessons; print(lessons.find('L-abc'))",
+                     "from devkit import lessons; lessons.update(lessons.find('L-abc'), 'recurred', 'x')",
+                     "from devkit import lessonrules, lessons; lessonrules.propose(lessons.find('L-a'), match='x')",
+                     "from devkit import lessonrules as r, lessons; r.propose(lessons.find('L-a'), 'x', '', False)"):
+            with self.subTest(code=code):
+                self.assertIsNone(self.bash(code))
+
+
+class GraphQLQueries(unittest.TestCase):
+    # `gh api graphql` writes only with a mutation, and the guard can only tell when it reads the query: one it cannot
+    # read (stdin, a file it cannot open, a substitution or a variable) may merge a pull request or force a ref, so it
+    # is a command known only when it runs, tier 2, which the developer grants for that exact command
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.repo = make_repo(self.root, "other", origin="https://github.com/acme/widget.git")
+        (Path(self.repo) / "merge.graphql").write_text('mutation { mergePullRequest(input: {pullRequestId: "PR_k"}) '
+                                                       '{ clientMutationId } }')
+        (Path(self.repo) / "read.graphql").write_text("query { viewer { login } }")
+        for p in (mock.patch.object(audit, "AUDIT", self.root / "audit"),
+                  mock.patch.object(audit, "policy_file", lambda: self.root / "no-policy.json")):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def acts(self, cmd):
+        return [(a["action"], "cmd" if a["target"].startswith("cmd-") else a["target"])
+                for a in guard.irreversible_actions(cmd, self.repo) or []]
+
+    def main(self, cmd, setting="enforce"):
+        with settings(main=setting):
+            v = guard.irreversible_verdict(cmd, self.repo, agent="claude", session="s1", grant=DenyAll())
+        return v[1] if v else None
+
+    def test_a_query_the_guard_cannot_read_is_unknown_and_tier_two(self):
+        merge = 'mutation { mergePullRequest(input: {pullRequestId: "PR_k"}) { clientMutationId } }'
+        for cmd in (f"gh api graphql -F query=@- <<'EOF'\n{merge}\nEOF",
+                    'gh api graphql -f query="$(cat /tmp/m.graphql)"',
+                    "gh api graphql -f query=`cat /tmp/m.graphql`",
+                    "gh api graphql -f query=$Q", 'gh api graphql -f query="${Q}"', "gh api graphql -f query=$1",
+                    'gh api graphql -f query="query { viewer { login } } $M"',
+                    f"echo '{merge}' | gh api graphql --input -",
+                    "gh api graphql -F query=@missing.graphql",
+                    "gh api graphql --field=query=@- < /tmp/m.graphql"):
+            with self.subTest(cmd=cmd[:60]):
+                self.assertEqual(self.acts(cmd), [("unknown", "cmd")])
+                why = self.main(cmd) or ""
+                self.assertIn("grant unknown cmd-", why)
+                self.assertIn("GraphQL", why)
+
+    def test_a_query_the_guard_reads_writes_only_with_a_mutation(self):
+        self.assertEqual(self.acts("gh api graphql -F query=@merge.graphql"), [("api-write", "api/graphql")])
+        self.assertEqual(self.acts("gh api graphql --input merge.graphql"), [("api-write", "api/graphql")])
+        for cmd in ("gh api graphql -F query=@read.graphql",
+                    "gh api graphql -f query='query($o: String!, $r: String!) { repository(owner: $o, name: $r) "
+                    "{ id } }' -f o=acme -f r=widget",
+                    'gh api graphql -f query="query { viewer { login } }" -f note="$(date)"'):
+            with self.subTest(cmd=cmd[:60]):
+                self.assertEqual(self.acts(cmd), [])
+
+    def test_issue_and_comment_mutations_are_registry_writes_whatever_the_target(self):
+        for m in ('addComment(input: {subjectId: "I_kw", body: "x"}) { clientMutationId }',
+                  'createIssue(input: {repositoryId: "R_kg", title: "t"}) { clientMutationId }',
+                  'updateIssue(input: {id: "I_kw", title: "t"}) { clientMutationId }',
+                  'closeIssue(input: {issueId: "I_kw"}) { clientMutationId }',
+                  'updateIssueComment(input: {id: "IC_kw", body: "x"}) { clientMutationId }'):
+            cmd = f"gh api graphql -f query='mutation {{ {m} }}'"
+            with self.subTest(m=m[:20]):
+                self.assertEqual(self.acts(cmd), [("registry-write", "api/graphql")])
+                self.assertIn("devkit's bug registry", self.main(cmd, setting="audit") or "")
+        star = "gh api graphql -f query='mutation { addStar(input: {starrableId: \"R_kg\"}) { clientMutationId } }'"
+        self.assertEqual(self.acts(star), [("api-write", "api/graphql")])
+        self.assertIn("grant api-write api/graphql", self.main(star) or "")
+
+    def test_a_repository_named_by_its_numeric_id_may_be_the_registry(self):
+        for cmd in ("gh api repositories/834512345/issues/12/comments -f body=x",
+                    "gh api -X POST /repositories/834512345/issues -f title=x -f body=y",
+                    "gh api -X PATCH repositories/834512345/issues/comments/9 -f body=y",
+                    'curl -s -X POST -H "Authorization: Bearer $(gh auth token)" '
+                    "https://api.github.com/repositories/834512345/issues/12/comments -d @body.json"):
+            with self.subTest(cmd=cmd[:60]):
+                self.assertIn("devkit's bug registry", self.main(cmd, setting="audit") or "")
+        for cmd in ("gh api repositories/834512345/issues/12/comments",
+                    "curl https://api.github.com/repositories/834512345/issues/12/comments"):
+            with self.subTest(cmd=cmd[:60]):
+                self.assertIsNone(self.main(cmd))
+        why = self.main("gh api repositories/834512345/pulls/3/reviews -f body=x") or ""
+        self.assertNotIn("bug registry", why)
+        self.assertIn("grant api-write", why)
 
 
 class CommandWords(unittest.TestCase):

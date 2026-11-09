@@ -8,8 +8,14 @@ the text a tool printed. A rule only ever warns or refuses: nothing here can all
     warn    the guard lets the call run and adds the lesson's title and prevention to the call's context
     block   the guard refuses the call with the lesson's title and prevention as the reason
 
-A rule starts in `warn` and moves to `block` when it matches again after the agent was shown the lesson (a miss,
-record_hit), or when the developer asks for `block` at once.
+A rule starts in `warn`. Only the developer makes it `block`: `dev lesson prevent --by guard <lesson> --block`, which
+the guard opens with their typed `grant lesson-block <lesson>`. A miss (the rule matched again after the agent was shown
+the lesson, record_hit) is counted and the warning then names that grant; it never changes the mode by itself.
+
+A rule file is shared, so what it says is a teammate's word: on each machine a rule refuses only when its file says
+`block` and the developer granted that block on this machine (STATE/lessons-rule-blocks.json, never synced); any other
+rule warns. And no rule, whatever its file says, may refuse devkit, `git status` or a file tool (PROBES): load()
+ignores it and lists it in PROBLEMS.
 
 Rules live in the handoff repository, so the team shares them: lessons/rules/<scope>.json, one file per lesson scope
 (`acme/api`, `global`, `initiatives/<slug>`), changed as state.update changes a record (lock, re-read, atomic replace;
@@ -34,7 +40,7 @@ screen, superseded, retired or gone turns its rule off.
     load(scopes) -> [rule]                                        the valid rules of these scopes; PROBLEMS the rest
     check_call(command, scopes) -> ("", None) | ("warn", rule) | ("block", rule)
     check_output(text, scopes) -> [rule]                          the output rules the text shows
-    record_hit(rule_id, missed) -> None                           count a hit; a miss moves a warn rule to block
+    record_hit(rule_id, missed) -> None                           count a hit and a miss on this machine
     describe(rule) -> str                                         the lesson's title and prevention, capped
 """
 from __future__ import annotations
@@ -55,6 +61,7 @@ VERSION = 1
 KINDS = ("call", "output")
 MODES = ("warn", "block")
 HITS = STATE / "lessons-rule-hits.json"  # local counts: hits and misses per rule, never synced
+BLOCKS_NAME = "lessons-rule-blocks.json"  # in STATE: the rules the developer let refuse on this machine, never synced
 WINDOW_DAYS = 14  # a proposed pattern must match none of the commands that succeeded here in this window
 
 MAX_FILE_BYTES = 256 * 1024
@@ -240,7 +247,16 @@ def _rule_problem(rule, scope: str) -> str:
         return f"{rid}: {why}"
     if rule_id(scope, rule["lesson"], rule["kind"], pattern) != rid:
         return f"{rid}: the id does not match the rule (edited by hand?)"
+    refused = probe_refused(pattern) if rule["kind"] == "call" else ""
+    if refused:
+        return f"{rid}: it would refuse `{refused}`; a rule never refuses devkit, git status or the file tools"
     return ""
+
+
+def probe_refused(match: str) -> str:
+    """The first call of PROBES a call pattern matches, or ""."""
+    pat = _pattern_words(match)
+    return next((p for p in PROBES if runs(pat, words(p))), "")
 
 
 def _read_file(path: Path):
@@ -267,9 +283,12 @@ def _scope_of(path: Path) -> str:
 
 def load(scopes) -> list:
     """The valid rules of these scopes, in file order, each with its `scope`. A file or rule that fails validation is
-    left out and described in PROBLEMS, which this call resets; it never raises for what a file holds."""
+    left out and described in PROBLEMS, which this call resets; it never raises for what a file holds. A rule's `mode`
+    is what it does here: `block` only when its file says so and the developer granted it on this machine
+    (granted_blocks), else `warn`; `stored_mode` is what its file says."""
     del PROBLEMS[:]
     out, seen = [], set()
+    granted = granted_blocks()
     for scope in dict.fromkeys(scopes or ()):
         try:
             path = rule_file(scope)
@@ -293,8 +312,30 @@ def load(scopes) -> list:
             if rule["id"] in seen:
                 continue
             seen.add(rule["id"])
-            out.append(dict(rule, scope=scope))
+            mode = "block" if rule["mode"] == "block" and rule["id"] in granted else "warn"
+            out.append(dict(rule, scope=scope, mode=mode, stored_mode=rule["mode"]))
     return out
+
+
+def _blocks_file() -> Path:
+    return STATE / BLOCKS_NAME
+
+
+def granted_blocks() -> dict:
+    """{rule id: {"ts", "why"}}: the rules the developer let refuse on this machine."""
+    try:
+        doc = json.loads(_blocks_file().read_text())
+    except (OSError, ValueError):
+        return {}
+    return {k: v for k, v in doc.items() if isinstance(k, str) and _ID.fullmatch(k)} if isinstance(doc, dict) else {}
+
+
+def _grant_block(rule_id_: str, why: str) -> None:
+    """Record that the developer let this rule refuse on this machine. Only `dev lesson prevent --block` calls it,
+    through propose, after the guard checked the developer's typed grant."""
+    def put(doc):
+        doc[rule_id_] = {"ts": int(time.time()), "why": _clean(why, 200)}
+    state.update(_blocks_file(), put)
 
 
 def all_scopes() -> list:
@@ -440,9 +481,10 @@ def _commit(scope: str, message: str) -> None:
 
 
 def record_hit(rule_id_: str, missed: bool) -> None:
-    """Count a hit of the rule on this machine (STATE/lessons-rule-hits.json). A hit with a miss (the agent was shown
-    the lesson earlier in its session and ran the call again) moves a `warn` rule to `block` in the shared file.
-    Unknown ids and busy files are dropped: the hook that calls this never fails on it."""
+    """Count a hit of the rule on this machine (STATE/lessons-rule-hits.json), and a miss when the agent was shown the
+    lesson earlier in its session and ran the call again. A miss never changes the rule's mode: only the developer's
+    grant makes a rule refuse (propose with block). Unknown ids and busy files are dropped: the hook that calls this
+    never fails on it."""
     if not isinstance(rule_id_, str) or not _ID.fullmatch(rule_id_):
         return
     now = int(time.time())
@@ -457,30 +499,6 @@ def record_hit(rule_id_: str, missed: bool) -> None:
         state.update(HITS, count)
     except (OSError, state.StateBusy, ValueError):
         pass
-    if not missed:
-        return
-    rule = find(rule_id_)
-    if not rule or rule["mode"] != "warn":
-        return
-    _set_mode(rule, "block", "matched again after the lesson was shown (a miss)")
-
-
-def _set_mode(rule: dict, mode: str, why: str) -> None:
-    stamp = f"{_now_iso()} · {_who()} · {mode}: {why}"
-
-    def change(doc):
-        for r in doc["rules"]:
-            if isinstance(r, dict) and r.get("id") == rule["id"] and r.get("mode") != mode:
-                r["mode"] = mode
-                r["history"] = ([stamp] + [h for h in r.get("history") or [] if isinstance(h, str)])[:20]
-                return None
-        return state.SKIP
-
-    try:
-        _write(rule["scope"], change)
-    except (OSError, state.StateBusy, ValueError):
-        return
-    _commit(rule["scope"], f"{rule['id']}: {mode} ({rule['lesson']}) — {why}")
 
 
 def _now_iso() -> str:
@@ -551,14 +569,59 @@ def recent_successes(days: int = WINDOW_DAYS, now: float = None) -> list:
     return _audit_commands(days, now) + _timing_commands(days, now)
 
 
+def _ledger_successes(days: int, now: float) -> dict:
+    """{command key: ts} of the shell calls that succeeded in this machine's sessions in the last `days`: the
+    session ledgers the hooks keep (bugs.ledger_append), which hold each call's command key (bugs.command_key of its
+    command words), never its text."""
+    from . import bugs
+    base = Path(bugs.BUGS) / "ledger"
+    out = {}
+    try:
+        files = [f for f in base.glob("*.jsonl") if f.stat().st_mtime >= now - days * 86400] if base.is_dir() else []
+    except OSError:
+        return out
+    for f in files:
+        for r in bugs._tail_records(f):
+            ts = r.get("ts") if isinstance(r.get("ts"), (int, float)) else 0
+            key = r.get("cmd")
+            if r.get("ok") is True and isinstance(key, str) and key and ts >= now - days * 86400:
+                out[key] = max(ts, out.get(key, 0))
+    return out
+
+
+def _ledger_match(pat: list, lesson: dict, days: int = WINDOW_DAYS, now: float = None):
+    """(ts, command) when a session ledger shows a successful shell call the pattern refuses, else None. The ledger
+    keeps keys, not text, so the commands compared are the ones the pattern names: its words alone or with one
+    quoted argument (`git commit -m 'wip'`), and each recorded mistake it matches, each alone or after `cd <folder>
+    &&` (a key leaves out paths, so one folder stands for all)."""
+    from . import bugs
+    from .hooks import command_words
+    now = time.time() if now is None else now
+    seen = _ledger_successes(days, now)
+    if not seen:
+        return None
+    cands = []
+    if not any("*" in w for w in pat):
+        base = " ".join(shlex.quote(w) for w in pat)
+        cands += [base, base + " ''", base + ' ""']
+    cands += [t for t in _mistake_texts(lesson) if runs(pat, words(t))]
+    for cmd in cands + [f"cd . && {c}" for c in cands]:
+        key = bugs.command_key(command_words(cmd))
+        if key and key in seen:
+            return seen[key], cmd
+    return None
+
+
 def propose(lesson: dict, match: str = "", error: str = "", block: bool = False) -> dict:
     """Validate a rule for this lesson and write it to lessons/rules/<scope>.json; -> the rule. Exactly one of a call
     pattern (`match`) or an output text (`error`). Raises ValueError with the reason when:
     the lesson is held by the screen, superseded or retired; the pattern is badly shaped (pattern_problem,
     error_problem); it does not match the lesson's recorded mistake (its command or error anchors, or its evidence);
     a call pattern would refuse devkit, `git status` or a file tool (PROBES); or it matches a command that succeeded
-    on this machine in the last WINDOW_DAYS days. The same rule proposed again returns the one on file, moved to
-    `block` when `block` asks for it."""
+    on this machine in the last WINDOW_DAYS days (recent_successes, and the session ledgers' shell calls). The same
+    rule proposed again returns the one on file, moved to `block` when `block` asks for it. `block` is the developer's
+    (the guard opens `dev lesson prevent --block` with their typed grant): it is recorded as granted on this machine,
+    where the rule then refuses."""
     m = (lesson or {}).get("meta") or {}
     lid, scope = str(m.get("id") or ""), str(m.get("scope") or "")
     if not _LESSON_ID.fullmatch(lid):
@@ -580,15 +643,16 @@ def propose(lesson: dict, match: str = "", error: str = "", block: bool = False)
         if not any(runs(pat, words(t)) for t in _mistake_texts(lesson)):
             raise ValueError(f"the pattern matches none of {lid}'s recorded commands (its command anchors or its "
                              f"evidence); record the command that went wrong first")
-        refused = [p for p in PROBES if runs(pat, words(p))]
+        refused = probe_refused(match)
         if refused:
-            raise ValueError(f"the pattern would refuse `{refused[0]}`; a rule never refuses devkit, git status or "
+            raise ValueError(f"the pattern would refuse `{refused}`; a rule never refuses devkit, git status or "
                              f"the file tools outright")
-        for ts, cmd in recent_successes():
-            if runs(pat, words(cmd)):
-                day = time.strftime("%Y-%m-%d", time.localtime(ts or 0))
-                raise ValueError(f"the pattern matches a command that succeeded here on {day}: "
-                                 f"`{_clean(cmd, 80)}`; make it name only the form that goes wrong")
+        found = next(((ts, cmd) for ts, cmd in recent_successes() if runs(pat, words(cmd))), None) or \
+            _ledger_match(pat, lesson)
+        if found:
+            day = time.strftime("%Y-%m-%d", time.localtime(found[0] or 0))
+            raise ValueError(f"the pattern matches a command that succeeded here on {day}: "
+                             f"`{_clean(found[1], 80)}`; make it name only the form that goes wrong")
     else:
         why = error_problem(error)
         if why:
@@ -623,8 +687,11 @@ def propose(lesson: dict, match: str = "", error: str = "", block: bool = False)
         return None
 
     _write(scope, change)
+    if block:  # the developer's grant, which the guard checked for `dev lesson prevent --block`, holds on this machine
+        _grant_block(rid, f"dev lesson prevent --by guard {lid} --block")
     _commit(scope, f"{rid}: {result.get('mode')} rule for {lid} ({kind}: {_clean(pattern, 60)})")
-    return dict(result, scope=scope)
+    here = "block" if result.get("mode") == "block" and (block or rid in granted_blocks()) else "warn"
+    return dict(result, scope=scope, mode=here, stored_mode=result.get("mode"))
 
 
 def scopes_for(project: str = "", initiatives=()) -> list:
