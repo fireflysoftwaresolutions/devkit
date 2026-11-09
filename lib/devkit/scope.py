@@ -74,7 +74,9 @@ def _is_prompt(rec: dict) -> bool:
 
 # Codex code mode (on by default since 0.167): the model calls one tool, `exec`, whose input is JavaScript that awaits
 # nested tools, `text(await tools.exec_command({cmd: "git push"}))` and `tools.apply_patch("*** Begin Patch ...")`.
-_EXEC_CALL_RE = re.compile(r"\btools\s*\.\s*(exec_command|apply_patch)\s*\(\s*")
+# One walk of the script: a comment or a string literal is skipped whole (a call inside one never runs), and the walk
+# goes on after each call's argument, so the script is read once whatever it holds.
+_JS_SCAN_RE = re.compile(r"//|/\*|['\"`]|\btools\s*\.\s*(exec_command|apply_patch)\s*\(\s*")
 _JS_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "b": "\b", "f": "\f", "v": "\v", "0": "\0", "\n": ""}
 _JS_IDENT_RE = re.compile(r"[A-Za-z_$][\w$]*")
 
@@ -113,70 +115,117 @@ def _js_string(src: str, i: int):
     return None, i
 
 
-def _js_field(src: str, i: int, field: str):
-    """The string value of `field` in the object literal at src[i] ("{"), or None (no such field, or not a literal
-    string)."""
-    if src[i:i + 1] != "{":
-        return None
-    j, depth = i + 1, 0
-    while j < len(src):
-        while j < len(src) and (src[j].isspace() or src[j] == ","):
+def _js_skip(src: str, j: int) -> int:
+    """The index after the whitespace and comments at src[j]."""
+    n = len(src)
+    while j < n:
+        if src[j].isspace():
             j += 1
-        if src[j:j + 1] in ("}", ""):
-            return None
+        elif src.startswith("//", j):
+            nl = src.find("\n", j)
+            j = n if nl < 0 else nl + 1
+        elif src.startswith("/*", j):
+            close = src.find("*/", j + 2)
+            j = n if close < 0 else close + 2
+        else:
+            break
+    return j
+
+
+def _js_value_end(src: str, j: int) -> int:
+    """The index of the "," or closing bracket that ends the expression at src[j], strings, comments and nested
+    brackets skipped; len(src) when nothing ends it."""
+    n, depth = len(src), 0
+    while j < n:
+        c = src[j]
+        if c in "'\"`":
+            _, end = _js_string(src, j)
+            if end <= j:
+                return n  # a string that never ends: neither does the expression
+            j = end
+            continue
+        if src.startswith("//", j) or src.startswith("/*", j):
+            j = _js_skip(src, j)
+            continue
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            if depth == 0:
+                return j
+            depth -= 1
+        elif c == "," and depth == 0:
+            return j
+        j += 1
+    return n
+
+
+def _js_object(src: str, i: int) -> tuple:
+    """(fields, end) of the object literal at src[i] ("{"): fields maps each key to its string value, or to None when
+    the value is not a lone literal string (a variable, a concatenation, a template built at run time); end is the
+    index after the closing brace. fields is None when there is no object, it never closes, or a property hides what
+    the call gets (a shorthand, spread or computed one)."""
+    n = len(src)
+    if src[i:i + 1] != "{":
+        return None, i
+    fields, readable, j = {}, True, i + 1
+    while True:
+        j = _js_skip(src, j)
+        if j >= n:
+            return None, n
+        c = src[j]
+        if c == "}":
+            return (fields if readable else None), j + 1
+        if c == ",":
+            j += 1
+            continue
+        if c in ")]":
+            return None, j
         key, end = _js_string(src, j)
         if key is None:
             m = _JS_IDENT_RE.match(src, j)
-            if not m:
-                return None
-            key, end = m.group(0), m.end()
-        j = end
-        while j < len(src) and src[j].isspace():
-            j += 1
-        if src[j:j + 1] != ":":
-            return None  # a shorthand or spread property: the value is not in the text
-        j += 1
-        while j < len(src) and src[j].isspace():
-            j += 1
-        value, end = _js_string(src, j)
-        if key == field:
-            return value
-        if value is not None:
-            j = end
+            key, end = (m.group(0), m.end()) if m else (None, j)
+        colon = _js_skip(src, end) if key is not None else j
+        if key is None or src[colon:colon + 1] != ":":  # its value is not in the text
+            readable = False
+            j = max(_js_value_end(src, j), j + 1)
             continue
-        while j < len(src):  # any other value: up to the next comma or the closing brace at this depth
-            c = src[j]
-            if c in "'\"`":
-                _, end = _js_string(src, j)
-                j = end if end > j else j + 1
-                continue
-            if c in "([{":
-                depth += 1
-            elif c in ")]}":
-                if depth == 0:
-                    break
-                depth -= 1
-            elif c == "," and depth == 0:
-                break
-            j += 1
-    return None
+        at = _js_skip(src, colon + 1)
+        value, end = _js_string(src, at)
+        after = _js_skip(src, end) if value is not None else at
+        if value is not None and src[after:after + 1] in (",", "}"):
+            fields[key], j = value, after
+        else:
+            fields[key], j = None, _js_value_end(src, at)  # at its "," or bracket, which the loop reads next
 
 
 def exec_calls(script: str) -> list:
     """The nested shell and patch calls of a Codex code-mode `exec` script, in order: [("exec_command", {"cmd": …,
-    "workdir": … when given}), ("apply_patch", {"input": patch})]. A call whose argument is not a literal (a variable,
-    a template built at run time) is left out: its text is not in the transcript."""
-    out = []
-    for m in _EXEC_CALL_RE.finditer(script or ""):
-        if m.group(1) == "apply_patch":
-            patch, _ = _js_string(script, m.end())
+    "workdir": … when given}), ("apply_patch", {"input": patch})]. Only calls in the script's code count: one in a
+    comment or a string literal (a patch that adds one) never runs. A call whose command or folder is not a lone
+    literal string (a variable, a concatenation, a template built at run time) is left out: its text is not in the
+    transcript, and the command's own record (item_command) names it."""
+    src, out, i, n = script or "", [], 0, len(script or "")
+    while i < n:
+        m = _JS_SCAN_RE.search(src, i)
+        if not m:
+            break
+        tok = m.group(0)
+        if tok in ("//", "/*"):
+            i = _js_skip(src, m.start())
+        elif tok in ("'", '"', "`"):
+            _, end = _js_string(src, m.start())
+            i = end if end > m.start() else n  # a string that never ends holds the rest of the script
+        elif m.group(1) == "apply_patch":
+            patch, end = _js_string(src, m.end())
             if patch is not None:
                 out.append(("apply_patch", {"input": patch}))
-            continue
-        cmd = _js_field(script, m.end(), "cmd")
-        if cmd is not None:
-            workdir = _js_field(script, m.end(), "workdir")
-            out.append(("exec_command", dict({"cmd": cmd}, **({"workdir": workdir} if workdir else {}))))
+            i = max(end, m.end())
+        else:
+            fields, end = _js_object(src, m.end())
+            cmd, workdir = (fields or {}).get("cmd"), (fields or {}).get("workdir")
+            if cmd is not None and (workdir is not None or "workdir" not in fields):
+                out.append(("exec_command", dict({"cmd": cmd}, **({"workdir": workdir} if workdir else {}))))
+            i = max(end, m.end())
     return out
 
 

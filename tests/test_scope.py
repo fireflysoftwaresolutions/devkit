@@ -5,6 +5,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -142,6 +143,38 @@ class TurnActionTests(unittest.TestCase):
             ("exec_command", {"cmd": "echo 'a' é\n", "workdir": "/r"}),
             ("exec_command", {"cmd": "make test"}),
             ("apply_patch", {"input": "*** Begin Patch\n*** Delete File: old.txt\n*** End Patch"})])
+
+    def test_exec_calls_skips_text_that_only_looks_like_a_call(self):
+        # a call in a comment, or inside a string such as a patch that adds one, never ran (review probes)
+        patch = ("*** Begin Patch\n*** Update File: t.py\n+x = 'tools.exec_command({cmd: \"git push origin main\"})'\n"
+                 "*** End Patch")
+        script = ("await tools.apply_patch(`" + patch + "`);\n"
+                  "await tools.apply_patch(\"*** Begin Patch\\n+tools.exec_command({cmd: 'git push'})\\n*** End Patch\");\n"
+                  "// await tools.exec_command({cmd: \"git push\"})\n"
+                  "/* tools.exec_command({cmd: \"dev release\"}) */\n"
+                  "const s = `x tools.exec_command({cmd: \"dev watch --wait\"}) y`;\n"
+                  "text(await tools.exec_command({cmd: \"echo tools.exec_command({cmd: 'git push'})\"}));\n"
+                  "text(await tools.exec_command({cmd: \"make test\"}));  // the tests\n")
+        self.assertEqual(scope.exec_calls(script), [
+            ("apply_patch", {"input": patch}),
+            ("apply_patch", {"input": "*** Begin Patch\n+tools.exec_command({cmd: 'git push'})\n*** End Patch"}),
+            ("exec_command", {"cmd": "echo tools.exec_command({cmd: 'git push'})"}),
+            ("exec_command", {"cmd": "make test"})])
+
+    def test_exec_calls_reads_a_script_with_an_unclosed_bracket_in_linear_time(self):
+        # 72 KB of calls whose arguments never close took 4.2 s, scanned again from every call (review probe)
+        script = "tools.exec_command({a: `x`, b: [" + "tools.exec_command({a: [" * 3000
+        started = time.perf_counter()
+        self.assertEqual(scope.exec_calls(script), [])
+        self.assertLess(time.perf_counter() - started, 1.0)
+
+    def test_exec_calls_leaves_out_a_value_built_by_concatenation(self):
+        # "git push origin " + branch is no command: the part read would be counted beside the command's own record
+        script = ('await tools.exec_command({cmd: "git push origin " + branch});\n'
+                  'await tools.exec_command({cmd: "rm -rf " + dir, workdir: "/r"});\n'
+                  'await tools.exec_command({workdir: "/a" + b, cmd: "git push"});\n'  # its folder: from its record
+                  'await tools.exec_command({cmd: "ls", workdir: "/r"});\n')
+        self.assertEqual(scope.exec_calls(script), [("exec_command", {"cmd": "ls", "workdir": "/r"})])
 
     def test_dev_turn_decisions(self):
         nothing = {"edits": [], "commands": [], "skills": [], "tools": set()}
