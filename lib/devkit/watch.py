@@ -389,7 +389,8 @@ def _peer_reasons(agent: str, sid: str, now) -> list:
     try:
         for q in (peers.open_questions(agent, sid, now) or [])[:PEER_REASONS_MAX]:
             to = [k for k in q.get("to") or [] if k]
-            who = _session_words(to[0]) if len(to) == 1 else clean(q.get("target") or f"{len(to)} sessions", 80)
+            who = clean(q["who"], 160) if q.get("who") else _session_words(to[0]) if len(to) == 1 else \
+                f"{len(to)} sessions"  # the store names the recipient with its project and branch
             out.append(f"your question {clean(q.get('id'), 20)} to {who} waits for an answer")
         for c in (peers.queued(agent, sid, now) or [])[:PEER_REASONS_MAX]:
             h = c.get("holder") or {}
