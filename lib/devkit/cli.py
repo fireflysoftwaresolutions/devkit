@@ -758,6 +758,26 @@ def _issue_needs(reg: dict, p: dict) -> list:
     return out
 
 
+def _status_for(sl: dict, caller) -> dict:
+    """The saved status to show: this session's own latest when the record keeps one per session (`sessions`, keyed
+    "<agent>:<session id>"), else the project's latest."""
+    own = (sl.get("sessions") or {}).get(f"{caller[0]}:{caller[1]}") if caller and isinstance(sl.get("sessions"),
+                                                                                                dict) else None
+    return own if isinstance(own, dict) and own.get("line") else sl
+
+
+def _status_who(sl: dict, caller) -> dict:
+    """Who saved a status that names its session: {"who": "this session"} for the caller's own, else {"who": "Codex
+    session @0199a213", "by": "Codex @0199a213"}; {} for a record without a session (an older devkit's)."""
+    sid, agent = str(sl.get("session") or ""), str(sl.get("agent") or "")
+    if not sid:
+        return {}
+    if caller and (agent, sid) == (str(caller[0]), str(caller[1])):
+        return {"who": "this session", "by": ""}
+    name = AGENT_NAMES.get(agent, agent or "agent")
+    return {"who": f"{name} session @{sid[:8]}", "by": f"{name} @{sid[:8]}"}
+
+
 def status_view(reg: dict, p: dict, w: dict = None, runs=None, ci=None, roster=None, now=None, caller=None) -> dict:
     """Everything `dev status` shows for one project, in Sati's order: what needs you, what happens now (checks, the
     crew, the plan), the last update, then the details. `--json` prints this. `caller`: the (agent, session id) that
@@ -778,7 +798,7 @@ def status_view(reg: dict, p: dict, w: dict = None, runs=None, ci=None, roster=N
              for d in pg.pending_decisions(r)]
     needs += [_message_need(m, roster, pg.shown_id(r, m.get("id"), caller)) for r in mine
               for m in pg.waiting_messages(r)]
-    sl = p.get("status_line") or registry.status_line(p["id"]) or {}
+    sl = _status_for(p.get("status_line") or registry.status_line(p["id"]) or {}, caller)
     parsed = canary.parse_line(sl.get("line") or "") if sl.get("line") else {}
     if local and not p.get("canonical_ok", True):
         needs.append(_layout_need(p, alias, True))
@@ -788,7 +808,7 @@ def status_view(reg: dict, p: dict, w: dict = None, runs=None, ci=None, roster=N
     crew_now = _crew_now(mine, roster, now)
     last = None
     if sl.get("line"):
-        last = {"agent": (sl.get("agent") or "").capitalize() or "an agent", "ts": sl.get("ts"),
+        last = {"agent": (sl.get("agent") or "").capitalize() or "an agent", **_status_who(sl, caller), "ts": sl.get("ts"),
                 "when": ui.rel_time(sl.get("ts"), now), "title": parsed.get("task") or "",
                 "done": parsed.get("done") if parsed else sl["line"], "check": parsed.get("check", ""),
                 "next": parsed.get("next", ""), "where": _where_from(p, co, sl, parsed) if parsed and local else ""}
@@ -803,6 +823,156 @@ def status_view(reg: dict, p: dict, w: dict = None, runs=None, ci=None, roster=N
             "checks": checks, "crew": crew_now, "last_update": last,
             "branches": branchmap.ordered(p.get("branches")) if local else [], "details": details,
             "tasks": ((p.get("note_summary") or {}).get("tasks") or {}), "plans": p.get("plans") or []}
+
+
+AGENT_NAMES = {"claude": "Claude Code", "codex": "Codex"}
+
+
+def peer_name(agent, prefix) -> str:
+    """Another agent session as every surface names it: "Codex @0199a213"."""
+    p = str(prefix or "")
+    return f"{AGENT_NAMES.get(str(agent or ''), str(agent or 'agent'))} {p if p.startswith('@') else '@' + p[:8]}"
+
+
+def quoted(text, limit: int = 300) -> str:
+    """Another session's words as one inert quoted span (watch.clean: no line break, backtick, escape sequence,
+    direction mark or quote mark of its own), cut at `limit` characters."""
+    from . import watch
+    return f"“{watch.clean(text, limit)}”"
+
+
+def _split_key(k) -> tuple:
+    agent, _, sid = str(k or "").partition(":")
+    return agent, sid
+
+
+def _escalation_view(e: dict, names: dict, limit: int = 300) -> dict:
+    agent, sid = _split_key(e.get("from"))
+    return {"id": e.get("id"), "ts": e.get("ts"), "question": quoted(e.get("question"), limit),
+            "options": [quoted(o, limit)[1:-1] for o in e.get("options") or []], "recommend": e.get("recommend") or "",
+            "from": names.get(e.get("from")) or peer_name(agent, sid[:8]),
+            "parties": [names.get(p) or peer_name(*_split_key(p)) for p in e.get("parties") or []]}
+
+
+def sessions_view(project, caller=None, now=None) -> dict:
+    """The Sessions block of `dev status`: the live agent sessions of `project` (every one with None), a count of the
+    others on this Mac, this session's overlaps, the claims on the project, this session's questions that wait for
+    an answer, its unread messages, and the open escalations this project's sessions are party to. Another session's
+    words appear only quoted and cleaned (a claim's reason, an escalation's question and options), never a message's
+    text. It never raises: {"error": …} says what could not be read."""
+    from . import peers
+    now = now or time.time()
+    try:
+        me = peers.key(*caller) if caller and caller[0] and caller[1] else None
+        rows = peers.directory(now=now, me=me, include_idle=True)
+        names = {r["key"]: peer_name(r["agent"], r["prefix"]) for r in rows}
+        pl = (project or "").lower()
+        live = [r for r in rows if r["live"]]
+        here = [r for r in live if not pl or r["project"].lower() == pl]
+        mine = {r["key"] for r in rows if r.get("me")} | ({me} if me else set())
+        out = {"project": project, "here": [], "others": len(live) - len(here), "overlaps": [], "claims": [],
+               "asked": [], "inbox": None, "escalations": [], "error": ""}
+        for r in here:
+            run = r.get("run") or {}
+            state = {"working": "working", "waiting": "waiting", "idle": "idle"}.get(r["state"], r["state"])
+            text = f"{names[r['key']]} on {r['branch'] or 'no branch'}, {state}"
+            if run.get("goal"):
+                head = f" ({run['headline']})" if run.get("headline") else ""
+                text += f": {quoted(run['goal'], 120)[1:-1]}{head}"
+            if r.get("crew"):
+                text += f", {len(r['crew'])} crew"
+            text += " · this session" if r.get("me") else f" · {ui.rel_time(r['last'], now)}"
+            out["here"].append({k: r.get(k) for k in ("key", "agent", "prefix", "project", "branch", "state", "last",
+                                                      "me", "run", "crew", "claims", "initiatives")} | {"text": text})
+        n, me_here = len(here), any(r.get("me") for r in here)
+        if project:
+            word = "none here" if not n else "only this one here" if n == 1 and me_here else f"{n} here"
+            out["summary"] = word + (f", {out['others']} more on this Mac" if out["others"] else "")
+        else:
+            out["summary"] = f"{n} live on this Mac" if n else "none live on this Mac"
+        if me:
+            agent, sid = caller[0], caller[1]
+            for o in peers.overlaps(agent, sid, now=now):
+                if o["kind"] == "claim":
+                    continue  # the claims below say it, with the holder's reason
+                ot = o["other"]
+                who = f"{peer_name(ot['agent'], ot['prefix'])} ({ot['project'] or '-'} · {ot['branch'] or '-'})"
+                text = {"checkout": f"{who} works in this same checkout",
+                        "branch": f"{who} is on this branch in another checkout ({tilde(ot['worktree'])})",
+                        "repo": f"{who} works in another worktree of this repository ({tilde(ot['worktree'])})",
+                        "item": f"{who} works on a branch linked to your work item {o['key'].rsplit(':', 1)[-1]}"
+                        }.get(o["kind"], o.get("detail") or "")
+                out["overlaps"].append({"kind": o["kind"], "level": o["level"], "other": ot, "text": text})
+            for q in peers.open_questions(agent, sid, now=now):
+                to = q.get("to") or []
+                who = names.get(to[0]) or peer_name(*_split_key(to[0])) if len(to) == 1 else f"{len(to)} sessions"
+                out["asked"].append({"id": q["id"], "to": to, "text": f"{q['id']} to {who} waits for an answer"})
+            unread = peers.inbox(agent, sid)
+            if unread:
+                senders = list(dict.fromkeys(
+                    peer_name((m.get("from") or {}).get("agent") or "devkit", ((m.get("from") or {}).get("session")
+                                                                               or "")[:8])
+                    if (m.get("from") or {}).get("session") else "devkit" for m in unread))
+                joined = senders[0] if len(senders) == 1 else ", ".join(senders[:-1]) + " and " + senders[-1]
+                out["inbox"] = {"unread": len(unread), "from": senders,
+                                "text": f"{len(unread)} unread from {joined}: dev session inbox"}
+        for c in peers.claims(now=now, project=project or None):
+            h = c["holder"]
+            who = "this session" if h["key"] in mine else names.get(h["key"]) or peer_name(h["agent"], h["prefix"])
+            queue = len(c.get("queue") or [])
+            text = (f"{c['resource']} held by {who} until {time.strftime('%H:%M', time.localtime(c['until']))}: "
+                    f"{quoted(c['why'], 200)}" + (f" · {queue} waiting for it" if queue else ""))
+            out["claims"].append({"resource": c["resource"], "holder": h["key"], "mine": h["key"] in mine,
+                                  "until": c["until"], "why": quoted(c["why"], 200), "queue": queue, "text": text})
+        projects = {r["key"]: r["project"].lower() for r in rows}
+        for e in peers.escalations("open"):
+            keys = [e.get("from")] + list(e.get("parties") or [])
+            if not pl or mine & set(keys) or any(projects.get(k) == pl for k in keys):
+                out["escalations"].append(_escalation_view(e, names))
+        return out
+    except Exception as e:  # a store that cannot be read says so; dev status still shows the rest
+        return {"project": project, "here": [], "others": 0, "overlaps": [], "claims": [], "asked": [], "inbox": None,
+                "escalations": [], "summary": "could not be read", "error": f"{type(e).__name__}: {e}"[:200]}
+
+
+def _escalation_need(e: dict) -> dict:
+    """An open escalation needs the developer: settled only by a line they type in any agent session."""
+    rec = f" {e['from']} recommends {e['recommend']}." if e.get("recommend") else ""
+    letters = [o.split(":", 1)[0] for o in e.get("options") or [] if ":" in o]
+    choice = e.get("recommend") or ("<" + " or ".join(letters) + ", or your words>" if letters else "<your choice>")
+    return {"kind": "escalation", "id": e["id"], "ts": e.get("ts"),
+            "text": f"Sessions ask you to settle: {e['question']} Options: {'; '.join(e.get('options') or [])}.{rec} "
+                    f"Type it in any agent session:", "command": f"settle {e['id']}: {choice}"}
+
+
+def add_sessions(v: dict, project, caller=None, now=None) -> dict:
+    """`dev status` gains its Sessions block (v["sessions"]) and the open escalations among what needs you."""
+    s = sessions_view(project, caller, now)
+    v["sessions"] = s
+    v["needs_you"] = list(v.get("needs_you") or []) + [_escalation_need(e) for e in s["escalations"]]
+    return v
+
+
+def render_sessions(s: dict, cols: int) -> list:
+    """The Sessions block: the summary, this project's sessions, then overlaps, claims, questions asked, unread."""
+    if not s:
+        return []
+    out = ["", "  " + ui.bold(f"Sessions · {s.get('summary') or ''}".rstrip(" ·"))]
+    if s.get("error"):
+        return out + ui.row("", f"{ui.glyph('none')} {s['error']}", cols)
+    for i, r in enumerate(s["here"]):
+        out += ui.row("Here" if i == 0 else "", r["text"], cols)
+    for o in s["overlaps"]:
+        warn = o.get("level") == "warn"
+        out += ui.row("Overlap", (f"{ui.glyph('needs')} " if warn else "") + o["text"], cols,
+                      style=ui.amber if warn else None)
+    for i, c in enumerate(s["claims"]):
+        out += ui.row("Claims" if i == 0 else "", c["text"], cols)
+    for i, q in enumerate(s["asked"]):
+        out += ui.row("Asked" if i == 0 else "", q["text"], cols)
+    if s.get("inbox"):
+        out += ui.row("Inbox", s["inbox"]["text"], cols)
+    return out
 
 
 def _render_needs(needs: list, cols: int, title: str = "Needs you") -> list:
@@ -850,9 +1020,11 @@ def render_status(v: dict, cols: int = None) -> list:
         out += ui.row("Plan", f"{pl['done']} of {pl['total']} steps done{left}", cols)
     if v.get("now_warning"):
         out += ui.row("Tasks", f"{ui.glyph('needs')} {v['now_warning']}", cols, style=ui.amber)
+    out += render_sessions(v.get("sessions"), cols)
     last = v.get("last_update")
     if last:
-        head = f"Last update from {last['agent']}, {last['when']}" + (f", {last['where']}" if last.get("where") else "")
+        head = f"Last update from {last.get('who') or last['agent']}, {last['when']}" + \
+            (f", {last['where']}" if last.get("where") else "")
         head += f": {last['title']}" if last.get("title") else ""
         out += [""] + ["  " + ui.bold(x) for x in ui.wrap(head, W - 3)]
         if last.get("done"):
@@ -936,6 +1108,7 @@ def render_home(v: dict, cols: int = None) -> list:
     out = ["", ui.rule_title(head, cols)]
     out += ui.para(f"{v['greeting']} You are not inside a project; dev status <name> shows one from here.", cols)
     out += _render_needs(v["needs_you"], cols)
+    out += render_sessions(v.get("sessions"), cols)
     if v["projects"]:
         out += ["", "  " + ui.bold("Projects")] + _project_table(v["projects"], cols)
     else:
@@ -965,6 +1138,7 @@ def cmd_status(a):
     if not p:
         v = home_view(reg, offline=False, caller=caller)
         v["needs_you"] += _bug_needs()
+        add_sessions(v, None, caller)
         _prompt_refresh(reg)
         if getattr(a, "json", False):
             print(json.dumps(v, indent=2, ensure_ascii=False, default=str))
@@ -976,6 +1150,7 @@ def cmd_status(a):
     v["now_warning"] = work.now_warning(p["id"]) if p.get("id") else ""  # a folder with no project id has no tasks
     where = ((w or {}).get("path") or p.get("path")) if a.query else os.getcwd()
     v["needs_you"] += devkit_needs(where)  # the plugins of the project asked about, not of the folder it runs in
+    add_sessions(v, p.get("id"), caller)
     _prompt_refresh(reg, where)
     v["show_all"] = bool(getattr(a, "all", False))
     if getattr(a, "json", False):
@@ -4380,6 +4555,9 @@ def build_parser():
     w.add_argument("--timeout", type=float, help="minutes before it ends with the command to arm it again (default "
                                                  "240 for the main session on Claude Code, 10 on Codex, 9 for a crew "
                                                  "member)")
+    w.add_argument("--standby", action="store_true",
+                   help="with --wait: wait for other agent sessions' messages even when nothing else can arrive (a "
+                        "session that coordinates others; never required)")
     w.add_argument("--json", action="store_true", help="the peek as JSON (for tools)")
     w = add("watches", watch.cmd_watches, "Every wait (dev watch --wait) and CI watch: live, expired or superseded, "
                                           "with the command to arm it again, and what can still arrive")
