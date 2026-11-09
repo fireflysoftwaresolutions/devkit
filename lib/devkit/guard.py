@@ -2174,9 +2174,33 @@ OTHER_SESSION_HINT = ("Only do it if the user asked: the work belongs to a sessi
                       "there with `dev session tell`), or to a portfolio-level session.")
 
 
-def _names_own_project(value, pid) -> bool:
-    """True when a project value of a dev command (-p, `dev handoff <project>`) names session project `pid`."""
-    return str(value).strip().rstrip("/").casefold() == pid.casefold()
+def _names_own_project(value, pid, here=None) -> bool:
+    """True when a project value of a dev command (-p, `dev handoff <project>`) names session project `pid` as dev
+    reads it (registry.match): its id in any case; a folder (`.`, a path, read from `here`, the folder the dev command
+    runs in) of its checkout; or a name or alias that matches `pid` alone among the projects devkit knows. A value
+    the shell makes at run time names none."""
+    v = str(value).strip().rstrip("/")
+    if v.casefold() == pid.casefold():
+        return True
+    if not v or _shell_made(v):
+        return False
+    if v.startswith(("/", "~", ".")):
+        t = resolve(v, here)
+        return t != UNKNOWN and (current_project(str(t)) or "").casefold() == pid.casefold()
+    from . import registry
+    found = registry.match({"projects": _known_projects(pid)}, v)["projects"]
+    return len(found) == 1 and str(found[0].get("id") or "").casefold() == pid.casefold()
+
+
+def _known_projects(pid) -> list:
+    """The projects dev matches a name or alias against: those of the handoff's registry.json (what `dev sync` last
+    wrote) and session project `pid`, which may not be in it yet."""
+    reg = core.read_json(core.HANDOFF / "registry.json", {}) or {}
+    ps = [x for x in (reg.get("projects") if isinstance(reg, dict) else None) or []
+          if isinstance(x, dict) and isinstance(x.get("id"), str)]
+    if not any(x["id"].casefold() == pid.casefold() for x in ps):
+        ps.append({"id": pid, "name": pid.rsplit("/", 1)[-1], "worktrees": []})
+    return ps
 
 
 def _dev_cross_violation(args, cwd, fed=False):
@@ -2199,7 +2223,7 @@ def _dev_cross_violation(args, cwd, fed=False):
                     f"{_code('dev ' + ' '.join(words[:2]))} when it runs, so the guard cannot tell whose handoff it "
                     f"writes. Run the dev command once per project or plan, with its words written out.",
                     key="dev-fed-words")
-    if words[:1] == ["handoff"] and len(words) > 1 and not _names_own_project(words[1], pid):
+    if words[:1] == ["handoff"] and len(words) > 1 and not _names_own_project(words[1], pid, cwd):
         return deny(f"This session works on {_code(pid)}; {_code(f'dev handoff {words[1]}')} with --log or --edit "
                     f"would write another project's session log or note. Log this session's work with "
                     f"`dev handoff --log \"…\"`. " + OTHER_SESSION_HINT, key="other-project-log")
@@ -2209,7 +2233,7 @@ def _dev_cross_violation(args, cwd, fed=False):
             return deny(why, key="other-project-plan")
     projs = _dev_values(args, ("-p", "--project"))
     inits = _dev_values(args, ("-i", "--initiative"))
-    proj = next((v for v in projs if not _names_own_project(v, pid)), None)
+    proj = next((v for v in projs if not _names_own_project(v, pid, cwd)), None)
     init = next((v for v in inits if pid not in initiative_members(v)), None)
     if words[:1] == ["initiative"] and len(words) > 2 and words[1] in ("add", "rm", "new"):
         return deny("Changing an initiative's membership is a portfolio decision: ask the user, or run it from "

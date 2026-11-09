@@ -8,6 +8,7 @@
 # that only reads, a portfolio-level session, or the developer's recorded hatch. The guard reads command text and
 # paths: no command runs.
 # Run: python3 -m unittest tests.test_guard_projects -v
+import json
 import os
 import shutil
 import subprocess
@@ -183,6 +184,23 @@ class OneProjectPerSession(unittest.TestCase):
             allowed=[f"echo {OTHER} | xargs dev handoff", f"echo {o} | xargs dev plan ls",
                      f"find {o.parent} -name a.md -exec dev lesson show {{}} \\;", "parallel dev lesson show ::: L-1",
                      f"find {own.parent} -name a.md -exec cat {{}} \\;", f"dev plan revise {own} --why y"])
+
+    def test_the_own_project_named_by_alias_or_folder_is_its_own(self):
+        # dev reads a project value as an id, a folder of its checkout, or a name or alias (registry.match)
+        self.assert_rulings(
+            refused=["dev handoff gadget --log x", "dev plan new x -p gadget", "dev handoff ../gadget --log x",
+                     f"dev plan new x -p {self.other_top}", "dev handoff wid* --log x"],
+            allowed=["dev handoff widget --log x", "dev handoff . --log x", "dev plan new x -p widget",
+                     "dev plan new x -p WIDGET", f"dev plan new x -p {self.top}", "dev handoff wid --log x"])
+        # the team's aliases and the projects dev sync last recorded: each alias names its own project only
+        aliases = {"wdg": {"project": OWN, "by": "t", "at": "2026-11-01"},
+                   "gdg": {"project": OTHER, "by": "t", "at": "2026-11-02"}}
+        self.file("aliases.json", json.dumps({"version": 1, "aliases": aliases}))
+        known = [{"id": OTHER, "name": "gadget", "worktrees": []},
+                 {"id": "acme/widgets", "name": "widgets", "worktrees": []}]
+        self.file("registry.json", json.dumps({"projects": known}))
+        self.assert_rulings(refused=["dev handoff gdg --log x", "dev plan new x -p gadget", "dev handoff wid --log x"],
+                            allowed=["dev handoff wdg --log x", "dev plan new x -p widget"])
 
     def test_a_portfolio_session_and_the_developers_hatch_may_write_any_project(self):
         cmds = [f"dev plan new x -p {OTHER}", f"dev handoff {OTHER} --log done", f"dev lesson recur L-1 -p {OTHER}",
