@@ -4151,8 +4151,9 @@ def build_parser():
     p.add_argument("--log", metavar="TEXT", help="append a line to the session log")
     p.add_argument("--agent", default="human", help="who is logging (human, claude, codex)")
     from . import continuity
-    continuity.add_arguments(add("session", continuity.cmd_session, "A session's continuity: what devkit kept "
-                                                                    "through compaction, /clear and resume"))
+    continuity.add_arguments(add("session", continuity.cmd_session, "Agent sessions: continuity through compaction, "
+                                                                    "/clear and resume; talk, claim and escalate "
+                                                                    "between sessions on this Mac"))
     p = add("task", cmd_task, "Work items of a project (or of an initiative with -i): add, claim, done, history")
     p.add_argument("-p", "--project", help="project (default: the one you are in)")
     p.add_argument("-i", "--initiative", help="an initiative instead of a project")
