@@ -223,6 +223,18 @@ class ShellWritesOnAgentSettings(unittest.TestCase):
             ("echo 'model = 1' >> .codex/config.toml", "git add .codex/config.toml"),
         ])
 
+    def test_a_json_hooks_off_split_across_two_commands_is_refused(self):
+        settings = Path(self.cwd) / ".claude" / "settings.json"
+        self.assertEqual(self.verdicts("printf '{\"disableAllHooks\": ' > .claude/settings.json"), {"allow"})
+        settings.write_text('{"disableAllHooks": ')  # what the first command leaves in the file
+        self.assertEqual(self.verdicts("printf 'true}' >> .claude/settings.json"), {"deny"})
+        self.assertEqual(self.verdicts("printf 'true}' | tee -a .claude/settings.json"), {"deny"})
+        # the twin: the same append after a key that switches nothing off
+        settings.write_text('{"includeCoAuthoredBy": ')
+        self.assertEqual(self.verdicts("printf 'true}' >> .claude/settings.json"), {"allow"})
+        settings.write_text('{"enabledPlugins": {"devkit@firefly-devkit": ')
+        self.pairs([("printf 'false}}' >> .claude/settings.json", "printf 'true}}' >> .claude/settings.json")])
+
     def test_reading_the_settings_files_stays_allowed(self):
         for cmd in ("cat .codex/config.toml", "grep -n hooks .claude/settings.json", "sed -n 1p .codex/config.toml",
                     "cat .codex/config.toml > /dev/null", "git log -p .claude/settings.json",

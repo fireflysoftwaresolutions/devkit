@@ -3665,15 +3665,18 @@ class _Shell:
         if text is None:
             return deny(SETTINGS_UNSEEN_REASON.format(what=_code(core.tilde(str(where)))), key="settings-unseen")
         toml = hit is None or hit.name.casefold().endswith(".toml")
-        now = _read_small(hit, 1 << 20) if hit is not None and mode != "truncate" else ""
-        # an earlier write of this command, then this one, can spell what neither does alone (`> f; >> f`)
-        before = [""] if mode == "truncate" else self.written.get(str(where), [""])
-        texts = list(dict.fromkeys(b + w for b in before for w in text))
+        # the file's text before this write: none for `>`; else what an earlier write of this command left (`> f;
+        # >> f`), or what the file holds now. An append is judged by the whole text it leaves, so text split across
+        # two commands (`printf '{"disableAllHooks": ' > f`, then `printf 'true}' >> f`) counts as one.
+        if mode == "truncate":
+            before = [""]
+        else:
+            before = self.written.get(str(where)) or [_read_small(hit, 1 << 20) if hit is not None else ""]
+        texts = list(dict.fromkeys((w + b[len(w):]) if mode == "overwrite" else b + w for b in before for w in text))
         if len(texts) > 64:  # too many readings to judge: refused as unseen
             return deny(SETTINGS_UNSEEN_REASON.format(what=_code(core.tilde(str(where)))), key="settings-readings")
-        for written in texts:
-            what = settings_off(written, toml) or (DEVKIT_OFF[-1][1] if toml and now and _toml_hooks_off(now + written)
-                                                   else None)
+        for after in texts:
+            what = settings_off(after, toml)
             if what:
                 return deny(devkit_off_reason(what, where), key="settings-off")
         self.written[str(where)] = texts
