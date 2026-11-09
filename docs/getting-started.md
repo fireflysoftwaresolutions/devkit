@@ -262,8 +262,8 @@ removes devkit's rules, hooks, skill links, MCP servers, and plugin from that ag
 settings; the review says so before you apply, with the command that removes the app if you want that too.
 
 The full output of the steps is in `~/.local/state/devkit/logs/setup.log`, readable only by you.
-`dev setup --preview` draws every screen of the setup with sample data and changes nothing (`--width 60` draws them
-60 columns wide).
+`dev setup --preview` draws every screen of the setup with sample data and changes nothing
+(`COLUMNS=60 dev setup --preview` draws them 60 columns wide).
 
 #### Line prompts and `--yes`
 

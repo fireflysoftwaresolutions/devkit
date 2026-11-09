@@ -1341,7 +1341,7 @@ write and push, settings repair, cleanup, and job run, with secrets redacted. Se
 
 ## Environment
 
-### `dev setup [-y] [--skip-packages] [--resume] [--preview [--width N]]` · `dev setup prompt | commit-template | shell [--remove] [-y]`
+### `dev setup [-y] [--skip-packages] [--resume] [--preview]` · `dev setup prompt | commit-template | shell [--remove] [-y]`
 
 The installation and configuration wizard. It detects the Mac, GitHub, and both agents. It asks which agents to use
 (Claude Code and Codex, Claude Code only, or Codex only), and, in Customize, the development root, the handoff
@@ -1354,7 +1354,7 @@ left. Run it again to change your choices; turning an agent off removes what dev
 | Option | Effect |
 | --- | --- |
 | `--resume` | Continue the last setup where it stopped: a quick check of the steps done, then every step that is not done, with the answers you gave. With nothing to continue, it says so and exits with `0`. Plain `dev setup` offers the same when a saved setup did not finish |
-| `--preview` | Draw every screen of the setup with fixed sample data, one after the other, and change nothing; `--width N` draws them `N` columns wide |
+| `--preview` | Draw every screen of the setup with fixed sample data, one after the other, as wide as the terminal, and change nothing; `COLUMNS=60 dev setup --preview` draws them 60 columns wide |
 | `-y`, `--yes` | Take every default without asking; in a terminal, the sign-ins still ask |
 | `--skip-packages` | Install no Homebrew or npm packages |
 

@@ -2687,8 +2687,7 @@ _dev__setup() {
     '(--yes -y)'{-y,--yes}'[accept every default]' \
     '--skip-packages[do not install Homebrew/npm packages]' \
     '--resume[continue the last setup]' \
-    '--preview[draw every screen of the setup with sample data]' \
-    '--width=[with --preview]:columns: ' \
+    '--preview[draw every screen of the setup with sample data, as wide as the terminal]' \
     '::what:(prompt commit-template shell)'
 }
 

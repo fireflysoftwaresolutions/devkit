@@ -1245,8 +1245,8 @@ class PreviewTests(unittest.TestCase):
     def test_dev_setup_preview_prints_the_screens_and_starts_no_setup(self):
         from devkit import cli
         with mock.patch.object(wizard, "run", side_effect=AssertionError("the preview starts no setup")), \
-                mock.patch("sys.stdout", io.StringIO()) as out:
-            self.assertEqual(cli.main(["setup", "--preview", "--width", "60"]), 0)
+                mock.patch.dict(os.environ, {"COLUMNS": "60"}), mock.patch("sys.stdout", io.StringIO()) as out:
+            self.assertEqual(cli.main(["setup", "--preview"]), 0)  # as wide as the terminal says (COLUMNS here)
         text = plain(out.getvalue())
         self.assertIn("── W-3 ", text)
         self.assertIn("Which coding agents do you want to use?", text)
