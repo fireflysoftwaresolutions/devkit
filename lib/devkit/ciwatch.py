@@ -1141,7 +1141,7 @@ def _shell_calls(path, now: float) -> tuple:
     command (alone()), the only way a background command or a Monitor wakes the agent when the wait ends."""
     from .gates import BG_LAUNCH_RE, DENIAL_RE, ENDED, STOP_TOOLS, _notifications, _records, _tag, _task_of, _text
     from .hooks import SHELL_TOOLS
-    from .scope import _is_prompt
+    from .scope import _is_prompt, exec_calls
 
     def call(cmd, cwd, ts):
         spec, everything = _wait_spec(cmd), global_wait(cmd)
@@ -1156,7 +1156,11 @@ def _shell_calls(path, now: float) -> tuple:
             if _tag(note, "status").lower() in ENDED or _tag(note, "status").lower() in GONE:
                 gone.update({_tag(note, "task-id"), _tag(note, "tool-use-id")} - {""})
         p = rec.get("payload") or {}
-        if p.get("type") in ("function_call", "custom_tool_call") and p.get("name") in SHELL_TOOLS:  # Codex
+        if p.get("type") in ("function_call", "custom_tool_call") and p.get("name") == "exec" and \
+                isinstance(p.get("input"), str):  # Codex code mode: the shell calls of the model's exec script
+            calls.extend(call(args["cmd"], args.get("workdir") or "", rec.get("timestamp"))
+                         for name, args in exec_calls(p["input"]) if name in SHELL_TOOLS)
+        elif p.get("type") in ("function_call", "custom_tool_call") and p.get("name") in SHELL_TOOLS:  # Codex
             args = p.get("arguments") if p.get("type") == "function_call" else p.get("input")
             if isinstance(args, str):
                 try:

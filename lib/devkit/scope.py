@@ -162,9 +162,9 @@ def _js_field(src: str, i: int, field: str):
 
 
 def exec_calls(script: str) -> list:
-    """The nested shell and patch calls of a Codex code-mode `exec` script, in order: [("exec_command", {"cmd": …}),
-    ("apply_patch", {"input": patch})]. A call whose argument is not a literal (a variable, a template built at run
-    time) is left out: its text is not in the transcript."""
+    """The nested shell and patch calls of a Codex code-mode `exec` script, in order: [("exec_command", {"cmd": …,
+    "workdir": … when given}), ("apply_patch", {"input": patch})]. A call whose argument is not a literal (a variable,
+    a template built at run time) is left out: its text is not in the transcript."""
     out = []
     for m in _EXEC_CALL_RE.finditer(script or ""):
         if m.group(1) == "apply_patch":
@@ -174,7 +174,8 @@ def exec_calls(script: str) -> list:
             continue
         cmd = _js_field(script, m.end(), "cmd")
         if cmd is not None:
-            out.append(("exec_command", {"cmd": cmd}))
+            workdir = _js_field(script, m.end(), "workdir")
+            out.append(("exec_command", dict({"cmd": cmd}, **({"workdir": workdir} if workdir else {}))))
     return out
 
 

@@ -125,7 +125,7 @@ class TurnActionTests(unittest.TestCase):
         self.assertEqual(scope.exec_calls(script), [
             ("exec_command", {"cmd": "dev crew raci"}),
             ("exec_command", {"cmd": "pwd && rg --files -g 'AGENTS.md' && git branch --show-current"}),
-            ("exec_command", {"cmd": "echo 'a' é\n"}),
+            ("exec_command", {"cmd": "echo 'a' é\n", "workdir": "/r"}),
             ("exec_command", {"cmd": "make test"}),
             ("apply_patch", {"input": "*** Begin Patch\n*** Delete File: old.txt\n*** End Patch"})])
 

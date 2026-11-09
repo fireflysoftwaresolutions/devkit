@@ -118,6 +118,19 @@ class WaitRuleTests(StopRuleCase):
         self.write()
         self.assertNotIn("dev watch --wait", self.stop("codex").get("reason") or "")  # waited in this turn
 
+    def test_a_codex_code_mode_wait_in_the_foreground_lets_the_turn_end(self):
+        # Codex 0.167 (code mode on by default): the turn opens with task_started and the wait runs inside the
+        # model's exec script, as a real rollout records it
+        self.member_works("codex")
+        self.records += [{"type": "event_msg", "timestamp": iso(self.now - 20),
+                          "payload": {"type": "task_started", "turn_id": "t2"}},
+                         {"type": "response_item", "timestamp": iso(self.now - 10),
+                          "payload": {"type": "custom_tool_call", "status": "completed", "call_id": "call_w",
+                                      "name": "exec", "input": "text(await tools.exec_command({cmd:\"dev watch "
+                                                               "--wait --timeout 10\",max_output_tokens:2000}));\n"}}]
+        self.write()
+        self.assertNotIn("dev watch --wait", self.stop("codex").get("reason") or "")
+
     def test_a_live_background_wait_lets_the_turn_end(self):
         self.member_works()
         self.assertIn("dev watch --wait", self.stop().get("reason") or "")  # nothing armed yet
