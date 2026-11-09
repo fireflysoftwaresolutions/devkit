@@ -412,7 +412,7 @@ def ordered_open(items: list) -> list:
 # Codex thread, else the agent session and the crew lane in it, else the shell that ran `dev`), and it is refused once
 # the open items are no longer that list in that order, or the list is more than LIST_TTL old. The refusal names the
 # id #n had, and has now, so the caller acts by id. Ids always work. Each viewer's lists live in
-# STATE/task-lists/<viewer>.json: {viewer, lists: {scope: {ids, fingerprint, shown_at}}}, on this Mac only.
+# STATE/task-lists/<viewer>.json: {viewer, lists: {scope: {ids, shown_at}}}, on this Mac only.
 
 LIST_TTL = 30 * 60  # seconds a shown list numbers items
 NOW_LIMIT = 5  # open items in a project's Now above which devkit warns
@@ -455,9 +455,17 @@ def _lists_file(viewer: str) -> Path:
     return core.STATE / "task-lists" / f"{name}.json"
 
 
-def fingerprint(ids: list) -> str:
-    """A short name for a list of ids in its order: it changes with any close, add or move."""
-    return hashlib.sha256("\n".join(ids).encode()).hexdigest()[:8]
+def _fresh(shown_at: float, now: float) -> bool:
+    """A list shown less than LIST_TTL ago numbers items. One shown at a time still to come (this Mac's clock was set
+    back, or the record was edited) does not: it would never expire."""
+    return 0 <= now - shown_at < LIST_TTL
+
+
+def _when(shown_at: float) -> str:
+    """When a list was shown, by this Mac's clock: the time, with the day when that was not today."""
+    at = time.localtime(shown_at)
+    same_day = time.strftime("%Y-%m-%d", at) == time.strftime("%Y-%m-%d", time.localtime(time.time()))
+    return time.strftime("%H:%M" if same_day else "%Y-%m-%d %H:%M", at)
 
 
 def _shown_lists(viewer: str) -> dict:
@@ -476,8 +484,8 @@ def _record_shown(viewer: str, scope: str, ids: list, now: float) -> bool:
         return False
     f = _lists_file(viewer)
     lists = {s: x for s, x in _shown_lists(viewer).items()
-             if isinstance(x, dict) and now - parse_iso(x.get("shown_at", "")) < LIST_TTL}
-    lists[scope or ""] = {"ids": ids, "fingerprint": fingerprint(ids), "shown_at": now_iso(now)}
+             if isinstance(x, dict) and _fresh(parse_iso(x.get("shown_at", "")), now)}
+    lists[scope or ""] = {"ids": ids, "shown_at": now_iso(now)}
     try:
         f.parent.mkdir(parents=True, exist_ok=True)
         _replace(f, json.dumps({"viewer": viewer, "lists": lists}, indent=1, ensure_ascii=False) + "\n")
@@ -501,7 +509,7 @@ def show(scope: str, items: list = None, rebind: bool = True) -> tuple:
     if not rebind:
         shown = _shown_lists(viewer).get(scope or "") if viewer else None
         if not isinstance(shown, dict) or shown.get("ids") != ids or \
-                now - parse_iso(shown.get("shown_at", "")) >= LIST_TTL:
+                not _fresh(parse_iso(shown.get("shown_at", "")), now):
             return ordered, False
     return ordered, _record_shown(viewer, scope, ids, now)
 
@@ -521,19 +529,20 @@ def by_number(n: int, scope: str, items: list = None) -> dict:
     if not isinstance(then, list) or not all(isinstance(x, str) for x in then):  # none, or a damaged record
         raise ValueError(f"#{n}: no list of {where} was shown here, so the number points at nothing: run dev task and "
                          f"use its numbers, or use the item's id (T-…, F-…, B-…, S-…)")
-    shown_at = parse_iso(shown.get("shown_at", ""))
-    at = time.strftime("%H:%M", time.localtime(shown_at))
+    shown_at, now = parse_iso(shown.get("shown_at", "")), time.time()
+    at = _when(shown_at)
     if not 1 <= n <= len(then):
         raise ValueError(f"no #{n} in the list of {where} shown at {at} ({len(then)} open items): run dev task to "
                          f"number the list again, or use an id")
     was = then[n - 1]
-    if time.time() - shown_at < LIST_TTL and then == ids:
+    if _fresh(shown_at, now) and then == ids:
         return current[n - 1]
     titles = {i["meta"]["id"]: i["meta"].get("title", "") for i in all_items(scope)}
     name = lambda iid: f"{iid} “{titles.get(iid, '')}”"  # noqa: E731
-    if time.time() - shown_at >= LIST_TTL:
-        raise ValueError(f"#{n} was {name(was)} in the list of {where} shown at {at}, more than "
-                         f"{LIST_TTL // 60} minutes ago: use its id, or run dev task to number the list again")
+    if not _fresh(shown_at, now):
+        age = f"more than {LIST_TTL // 60} minutes ago" if now >= shown_at else "a time the clock has not reached"
+        raise ValueError(f"#{n} was {name(was)} in the list of {where} shown at {at}, {age}: use its id, or run "
+                         f"dev task to number the list again")
     closed, added = len(set(then) - set(ids)), len(set(ids) - set(then))
     change = ", ".join(x for x in (f"{closed} closed" if closed else "", f"{added} added" if added else "") if x) \
         or "the order changed"

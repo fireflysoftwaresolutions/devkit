@@ -3,6 +3,7 @@
 """`dev task <verb> <n>`: a number means the item at that place in the list `dev task` showed, and is refused once the
 open items changed, so closing #9 and then #40 never closes the item that moved up to #40.
 Run: python3 -m unittest tests.test_task_numbers -v"""
+import calendar
 import contextlib
 import json
 import os
@@ -189,6 +190,31 @@ class ShownListTests(unittest.TestCase):
             work.find("3", SCOPE)
         self.assertIn(f"#3 was {self.third['meta']['id']} “Codex parity test”", str(e.exception))
         self.assertIn("more than 30 minutes ago", str(e.exception))
+
+    def test_a_refusal_names_the_day_of_a_list_shown_on_an_earlier_day(self):
+        self.addCleanup(time.tzset)  # after the patch below puts TZ back
+        utc = mock.patch.dict(os.environ, {"TZ": "UTC"})
+        utc.start()
+        self.addCleanup(utc.stop)
+        time.tzset()
+        shown_at = calendar.timegm((2026, 11, 8, 23, 50, 0, 0, 0, 0))
+        with mock.patch.object(work.time, "time", return_value=shown_at):
+            work.show(SCOPE)
+        with mock.patch.object(work.time, "time", return_value=shown_at + 45 * 60), \
+                self.assertRaises(ValueError) as e:
+            work.find("1", SCOPE)  # 00:35 the next day
+        self.assertIn("shown at 2026-11-08 23:50, more than 30 minutes ago", str(e.exception))
+
+    def test_a_list_shown_at_a_time_still_to_come_numbers_nothing(self):
+        now = time.time()
+        with mock.patch.object(work.time, "time", return_value=now + 3600):
+            work.show(SCOPE)  # the clock ran an hour ahead, then was set back
+        with mock.patch.object(work.time, "time", return_value=now):
+            _, numbered = work.show(SCOPE, rebind=False)
+            with self.assertRaises(ValueError) as e:
+                work.find("1", SCOPE)
+        self.assertFalse(numbered)
+        self.assertIn(f"#1 was {self.first['meta']['id']} “Fix the login timeout”", str(e.exception))
 
     def test_the_list_printed_after_a_write_is_numbered_only_while_it_is_the_list_shown(self):
         work.show(SCOPE)
