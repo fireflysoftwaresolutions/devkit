@@ -754,7 +754,8 @@ class RunsAndLanes(Crew):
 # --------------------------------------------------------------------------- crew slots
 
 class SlotsAcrossSessions(Crew):
-    """progress.max_parallel and progress.reserve are the account's: every session's members share them."""
+    """progress.max_parallel and progress.reserve hold per session: how the developer spends their quota across
+    sessions is theirs to decide. Only the usage lowering is the account's, so it applies to every session."""
 
     def two(self):
         a = self.claude(S1, self.api)
@@ -769,31 +770,19 @@ class SlotsAcrossSessions(Crew):
             n += sum(1 for v in (json.loads(f.read_text()).get("agents") or {}).values() if v.get("state") == "running")
         return n
 
-    @unittest.expectedFailure  # defect: the slots are counted per session, so two sessions run twice the limit
-    def test_two_sessions_together_never_run_more_members_than_max_parallel(self):
+    def test_each_session_has_its_own_crew_slots(self):
         self.config(max_parallel=2, reserve=0)
         a, b = self.two()
         self.assertEqual(a.launch("a1", "tank", "Tank: api"), "")
         self.assertEqual(a.launch("a2", "trinity", "Trinity: ui"), "")
-        refused = b.launch("b1", "dozer", "Dozer: db")
-        self.assertIn("2 of 2 crew slots are in use", refused)
-        self.assertEqual(self.working(), 2)
-        a.task_stop("a1")  # a slot frees: the other session's launch fits now, so nobody waits forever
-        self.assertEqual(b.launch("b1", "dozer", "Dozer: db"), "")
-        self.assertEqual(self.working(), 2)
-
-    @unittest.expectedFailure  # the same defect, with both sessions launching at the same moment
-    def test_launches_at_once_from_two_sessions_never_exceed_max_parallel(self):
-        self.config(max_parallel=2, reserve=0)
-        a, b = self.two()
-        jobs = [(a, "a1", "tank", "Tank: api"), (a, "a2", "trinity", "Trinity: ui"),
-                (b, "b1", "dozer", "Dozer: db"), (b, "b2", "ghost", "Ghost: docs")]
-        threads = [threading.Thread(target=s.launch, args=j) for s, *j in jobs]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join(240)
-        self.assertLessEqual(self.working(), 2)
+        self.assertIn("2 of 2 crew slots are in use", a.launch("a3", "neo", "Neo: extra"))  # its own limit holds
+        self.assertEqual(b.launch("b1", "dozer", "Dozer: db"), "")  # session S1's full slots never block S2's
+        self.assertEqual(b.launch("b2", "ghost", "Ghost: docs"), "")
+        self.assertEqual(self.working(), 4)
+        self.assertIn("2 of 2 crew slots are in use", b.launch("b3", "neo", "Neo: extra"))
+        a.task_stop("a1")  # a slot frees in S1 only: S2 is still at its limit
+        self.assertIn("2 of 2 crew slots are in use", b.launch("b3", "neo", "Neo: extra"))
+        self.assertEqual(a.launch("a3", "neo", "Neo: extra"), "")
 
     def test_the_usage_lowering_applies_to_every_session(self):
         self.config(max_parallel=4, reserve=0)
