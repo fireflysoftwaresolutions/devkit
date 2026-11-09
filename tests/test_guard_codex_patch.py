@@ -190,6 +190,21 @@ class ShellWritesOnAgentSettings(unittest.TestCase):
         with mock.patch.object(guard.core, "CODEX_HOME", home):
             self.pairs([("echo 'hooks = false' > codex-home/config.toml", "echo 'hooks = false' > staged/config.toml")])
 
+    def test_message_text_that_names_a_settings_file_writes_nothing(self):
+        # a commit message, a PR body or a devkit command's words name a settings file without writing it; the twin
+        # writes the file that text names
+        self.pairs([
+            ("cp x .codex/config.toml", 'dev guard check "cat ~/.codex/config.toml"'),
+            ("cp x .claude/settings.json", 'dev commit -m "docs: explain ~/.claude/settings.json"'),
+            ("cp x $CODEX_HOME/config.toml", 'gh pr create --title t --body "honors $CODEX_HOME/config.toml"'),
+            ("vim .claude/settings.json", 'say "edit ~/.claude/settings.json"'),
+            ("cp x .claude/settings.json", "dev commit -m docs .claude/settings.json"),
+            # a devkit command's or gh's output option still names a file it writes
+            ("dev report -o .claude/settings.json", "dev report -o notes.md"),
+            ("gh release download v1 -O .codex/config.toml", "gh release download v1 -O notes.toml"),
+            ("dev audit export --out=.codex/config.toml", "dev audit export --out=audit.jsonl"),
+        ])
+
     def test_reading_the_settings_files_stays_allowed(self):
         for cmd in ("cat .codex/config.toml", "grep -n hooks .claude/settings.json", "sed -n 1p .codex/config.toml",
                     "cat .codex/config.toml > /dev/null", "git log -p .claude/settings.json",

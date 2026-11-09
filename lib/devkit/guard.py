@@ -3562,9 +3562,10 @@ class _Shell:
         self.stdin = None  # what the segment being walked reads from its input, when the command shows it
         self.written = {}  # agent settings file -> the texts this command has written to it so far
 
-    def target(self, t, cwd, verb="write", holds=False, track=True, text=None):
+    def target(self, t, cwd, verb="write", holds=False, track=True, text=None, settings="all"):
         """A deny when writing `t` (`verb`) reaches what agents may not write. `text`: the texts the write puts in the
-        file, when the command shows them (None: it does not)."""
+        file, when the command shows them (None: it does not). `settings`: how the agent settings rule reads `t`
+        (settings_write)."""
         lp = _lexical(t, cwd)
         if is_dev_command(lp) or (holds and holds_dev_command(lp)):
             return deny(dev_command_reason(lp, verb), key="dev-command")
@@ -3572,7 +3573,7 @@ class _Shell:
         if p == UNKNOWN:
             if track and t:
                 self.unresolved.append(t)
-            return self.settings_write(t, cwd, text) if verb in ("write", "link") else None
+            return self.settings_write(t, cwd, text, settings) if verb in ("write", "link") else None
         if is_protected(p) or (holds and holds_protected(p)):
             return deny(protected_reason(p, verb), key="protected")
         if handoff_record(p) or (holds and holds_handoff_record(p)):  # B2a
@@ -3585,24 +3586,35 @@ class _Shell:
             return deny(dev_command_reason(p, verb), key="dev-command-holder")
         if env_file_kind(p, lp) and self.keys:
             return deny(_settings_reason(p, self.keys), key="settings-env")
-        return self.settings_write(t, cwd, text) if verb in ("write", "link") else None
+        return self.settings_write(t, cwd, text, settings) if verb in ("write", "link") else None
 
-    def targets(self, ts, cwd, verb="write", holds=False, track=True, text=None):
+    def targets(self, ts, cwd, verb="write", holds=False, track=True, text=None, settings="all"):
         for t in ts:
-            v = self.target(t, cwd, verb, holds, track, text)
+            v = self.target(t, cwd, verb, holds, track, text, settings)
             if v:
                 return v
         return None
 
-    def settings_write(self, t, cwd, text):
+    def settings_write(self, t, cwd, text, settings="all"):
         """A write to an agent settings file (agent_settings: by the path as written, as the system resolves it, or
         cleaned) is judged by the texts it writes, as Write is (settings_off), and, since an append keeps the file's
         text, by the file's text with it; a write whose text the command does not show is refused. A target the guard
-        cannot resolve counts when its text names a settings file (or hides its name and writes devkit off)."""
+        cannot resolve counts when its text names a settings file (or hides its name and writes devkit off).
+        `settings`: "all" for a word that is a path (a redirect, a copy's target); "word" for an argument of a program
+        the guard does not know, which may be a message: a word with a space counts only when its folder exists, and
+        an unresolved one never by the name it holds; "text" for an argument that is text unless it is a real path
+        (gh's), the same without the name rule for any word; None for a word that is never a path (dev's)."""
+        if not settings:
+            return None
         paths = [q for q in (_lexical(t, cwd), resolve(t, cwd), _normal(t, cwd)) if q != UNKNOWN]
+        spaced = settings != "all" and bool(re.search(r"\s", str(t)))
+        if spaced:  # `-m "docs: explain ~/.claude/settings.json"` names no folder that exists
+            paths = [q for q in paths if Path(str(q)).parent.is_dir()]
+            if not paths:
+                return None
         hit = next((q for q in paths if agent_settings(q)), None)
         if hit is None:
-            named = not paths and _names_settings(t)
+            named = not paths and settings in ("all", "word") and _names_settings(t)
             hidden = not paths and re.search(r"[$`]", os.path.basename(str(t)))
             if not named and not (hidden and text):
                 return None
@@ -3863,7 +3875,12 @@ class _Shell:
         # rewrites no work-tree file (diff, log, add, commit) writes no text into an agent settings file it names
         inside = is_protected(Path(cwd)) if cwd and str(cwd) != str(UNKNOWN) else False
         reads = name == "git" and _git_split(argv)[1] not in _GIT_TREE_WRITES
-        return self.targets([c for c in _candidates(args) if inside or _pathlike(c)], cwd, text=[""] if reads else None)
+        words = [c for c in _candidates(args) if inside or _pathlike(c)]
+        if name == "gh":  # its words are titles and bodies, except the file a download writes (-O, --output)
+            outs = _dev_values(args, ("-O", "--output"))
+            v = self.targets(outs, cwd, text=None)
+            return v or self.targets([w for w in words if w not in outs], cwd, text=None, settings="text")
+        return self.targets(words, cwd, text=[""] if reads else None, settings="word")
 
     def git_handoff(self, argv, cwd):
         """B2a: a git command that rewrites files in the handoff repository (a checkout, reset or merge can bring back
@@ -3920,8 +3937,11 @@ class _Shell:
             return self.segment(args[0], args, [], cwd)
         if args[:1] and (args[0] in _DEV_READ or args[0] in _DEV_TEXT):
             return None
-        # devkit's own commands write the state in their process; only a path argument that lands in it is refused
-        return self.targets([c for c in _candidates(args[1:]) if _pathlike(c)], cwd, track=False)
+        # devkit's own commands write the state in their process; only a path argument that lands in it is refused.
+        # Their words are messages and paths they read, never text written into an agent settings file: only an output
+        # option (`dev report -o`, `dev audit export --out`) names a file they write.
+        v = self.targets([c for c in _candidates(args[1:]) if _pathlike(c)], cwd, track=False, settings=None)
+        return v or self.targets(_dev_values(args, ("-o", "--out", "--output")), cwd, track=False)
 
     def copy(self, name, args, cwd):
         pos = [a for a in args if not a.startswith("-")]
@@ -6249,7 +6269,7 @@ class _ScratchShell(_Shell):
         inner.exported = self.exported | set(names)  # what the parent or the program exports reaches the nested line
         return inner
 
-    def target(self, t, cwd, verb="write", holds=False, track=True, text=None):
+    def target(self, t, cwd, verb="write", holds=False, track=True, text=None, settings="all"):
         p = resolve(t, cwd)
         why = scratch_refusal(p, self.member, holds) if p != UNKNOWN else None
         return deny(why, key="scratch") if why else None
