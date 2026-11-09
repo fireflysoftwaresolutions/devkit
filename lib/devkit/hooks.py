@@ -1826,25 +1826,28 @@ def _output_text(data: dict) -> str:
 # Codex has no PostToolUseFailure event, and its PostToolUse result is the command's output alone (Codex 0.167): the
 # exit code is in the rollout, in the CommandExecution item whose id is the hook's tool_use_id. A call whose item is
 # not on disk yet is unknown, never a success: its ledger line waits until the session's next PostToolUse or Stop finds
-# the item (_codex_settle), or CODEX_SETTLE_S passes and the call leaves with no line.
+# the item (_codex_settle), or CODEX_SETTLE_S passes and the call leaves with no line. A rollout that writes no such
+# items (a Codex older than CODEX_RECORDS_SINCE) gets each line at once, as a success, as before Codex wrote them.
 CODEX_SETTLE_S = 600
-CODEX_TAIL = 4_000_000  # bytes at the end of the rollout searched for an item
+CODEX_TAIL = 4_000_000  # bytes at the end of the rollout searched for the items
+CODEX_RECORDS_SINCE = (0, 167)  # the first Codex CLI that writes a CommandExecution item for each command
 
 
-def codex_command_item(transcript, call_id: str):
-    """The CommandExecution item of Codex call `call_id` in its rollout, or None when it is not there (yet)."""
-    if not transcript or not call_id:
-        return None
-    needle = call_id.encode()
+def codex_rollout(transcript) -> tuple:
+    """({item id: CommandExecution item} in the last CODEX_TAIL bytes of a Codex rollout, whether the rollout is known
+    to write those items: its session_meta names Codex CODEX_RECORDS_SINCE or later, or its tail holds one). ({},
+    False) when it cannot be read."""
     try:
         with open(transcript, "rb") as fh:
+            first = fh.readline()
             size = fh.seek(0, 2)
             fh.seek(max(0, size - CODEX_TAIL))
             lines = fh.read().splitlines()
     except (OSError, TypeError, ValueError):
-        return None
-    for ln in reversed(lines):
-        if needle not in ln:
+        return {}, False
+    items = {}
+    for ln in lines:
+        if b'"CommandExecution"' not in ln:
             continue
         try:
             rec = json.loads(ln)
@@ -1852,9 +1855,28 @@ def codex_command_item(transcript, call_id: str):
             continue
         p = rec.get("payload") if isinstance(rec, dict) and isinstance(rec.get("payload"), dict) else {}
         item = p.get("item") if rec.get("type") == "event_msg" and p.get("type") == "item_completed" else None
-        if isinstance(item, dict) and item.get("type") == "CommandExecution" and item.get("id") == call_id:
-            return item
-    return None
+        if isinstance(item, dict) and item.get("type") == "CommandExecution" and item.get("id"):
+            items[str(item["id"])] = item
+    return items, bool(items) or _codex_version(first) >= CODEX_RECORDS_SINCE
+
+
+def _codex_version(line: bytes) -> tuple:
+    """The Codex CLI version a rollout's first record (its session_meta) names, as numbers; () when it names none."""
+    try:
+        rec = json.loads(line)
+    except ValueError:
+        return ()
+    meta = rec.get("payload") if isinstance(rec, dict) and rec.get("type") == "session_meta" else None
+    version = meta.get("cli_version") if isinstance(meta, dict) else None
+    return tuple(int(x) for x in re.findall(r"\d+", str(version))[:3]) if version else ()
+
+
+def _rollout_once(read: dict, transcript) -> tuple:
+    """codex_rollout of `transcript`, read once per hook: `read` keeps what this hook read."""
+    key = str(transcript or "")
+    if key not in read:
+        read[key] = codex_rollout(key) if key else ({}, False)
+    return read[key]
 
 
 def codex_outcome(item):
@@ -1872,13 +1894,16 @@ def _codex_call(agent: str, data: dict) -> tuple:
     context of the session's earlier commands settled now (_codex_settle); (True, "") for any other call."""
     if agent != "codex" or data.get("tool_name") not in SHELL_TOOLS:
         return True, ""
+    read = {}  # the rollouts this hook read, once each
     try:
-        settled = _codex_settle(agent, data)
+        settled = _codex_settle(agent, data, read=read)
     except Exception:
         _log(f"post-tool settle {agent}: {traceback.format_exc()[-300:]}")
         settled = ""
     try:
-        outcome = codex_outcome(codex_command_item(data.get("transcript_path"), str(data.get("tool_use_id") or "")))
+        items, writes = _rollout_once(read, data.get("transcript_path"))
+        item = items.get(str(data.get("tool_use_id") or ""))
+        outcome = codex_outcome(item) if item else (None if writes else True)
     except Exception:
         _log(f"post-tool outcome {agent}: {traceback.format_exc()[-300:]}")
         outcome = None
@@ -1901,19 +1926,26 @@ def _codex_defer(data: dict):
     state.update(_codex_pending(sid), lambda d: d.update(calls=(d.get("calls") or [])[-49:] + [keep]))
 
 
-def _codex_settle(agent: str, data: dict, loop: bool = True) -> str:
+def _codex_settle(agent: str, data: dict, loop: bool = True, read: dict = None) -> str:
     """The session's deferred Codex commands (_codex_defer) whose CommandExecution item is in their rollout now get
     their ledger line; a failure counts toward the patch-loop stop, whose root-cause paragraph comes back when it is
     due. `loop` False (Stop, which has no context to give): the ledger lines only, so the agent is not marked told
     and no lesson counts as shown; the next failure counts the streak from the ledger. One still missing after
     CODEX_SETTLE_S leaves with no line and a hooks.log entry. Only the calls of this hook's own agent settle here
     (the same agent_id, or none for the main session): Codex members share the main session's session_id, and a
-    paragraph given in another agent's hook would reach the wrong agent. -> the context to give."""
+    paragraph given in another agent's hook would reach the wrong agent. Each rollout is read once, before the
+    pending record's lock (`read`: the rollouts the hook read already). -> the context to give."""
     sid = str(data.get("session_id") or "")
     f = _codex_pending(sid) if sid else None
     if not f or not f.exists():
         return ""
     settled, now, who = [], time.time(), str(data.get("agent_id") or "")
+    read = {} if read is None else read
+    mine = [c for c in (state.read(f) or {}).get("calls") or [] if str(c.get("agent_id") or "") == who]
+    if not mine:
+        return ""
+    for c in mine:
+        _rollout_once(read, c.get("transcript_path"))
 
     def take(doc):
         keep = []
@@ -1921,7 +1953,8 @@ def _codex_settle(agent: str, data: dict, loop: bool = True) -> str:
             if str(c.get("agent_id") or "") != who:  # another agent's call: it waits for that agent's hooks
                 keep.append(c)
                 continue
-            outcome = codex_outcome(codex_command_item(c.get("transcript_path"), str(c.get("tool_use_id") or "")))
+            got = read.get(str(c.get("transcript_path") or ""))  # None: deferred after the read, for the next hook
+            outcome = codex_outcome(got[0].get(str(c.get("tool_use_id") or ""))) if got else None
             if outcome is None and now - (c.get("ts") or 0) < CODEX_SETTLE_S:
                 keep.append(c)
             else:

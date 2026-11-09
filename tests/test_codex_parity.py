@@ -118,8 +118,13 @@ class CodexFailedShellTests(BugState, HookCase):
         super().setUp()
         self.bug_state()
         self.rollout = self.root / "rollout.jsonl"
-        self.rollout.write_text(json.dumps({"type": "event_msg", "payload": {"type": "task_started",
-                                                                              "turn_id": "t1"}}) + "\n")
+        self._rollout("0.167.0")
+
+    def _rollout(self, version):
+        # a rollout's first records as Codex writes them: its session_meta, which names the CLI version, then the turn
+        self.rollout.write_text("".join(json.dumps(r) + "\n" for r in (
+            {"type": "session_meta", "payload": {"id": "c1", "cli_version": version, "originator": "codex_exec"}},
+            {"type": "event_msg", "payload": {"type": "task_started", "turn_id": "t1"}})))
 
     def _record(self, n, status="failed", code=1, rollout=None):
         # the rollout's item for the command, as Codex 0.167.0 wrote it
@@ -212,6 +217,26 @@ class CodexFailedShellTests(BugState, HookCase):
         self._record(4, status="completed", code=0)
         self.assertIn(hooks.ROOT_CAUSE_STOP, self._post(4))  # the main session's next call settles it and is told
         self.assertEqual(self._ledger_ok(), [False, True, False, True])
+
+    def test_a_rollout_without_command_records_gets_each_line_at_once(self):
+        # a Codex older than 0.167 writes no CommandExecution items: waiting for one would lose every ledger line
+        self._rollout("0.160.0")
+        self._post(1)
+        self.assertEqual(self._ledger_ok(), [True])  # a PostToolUse is a success, as before Codex wrote the items
+        self._record(2)  # once the tail shows the items, a missing one is waited for whatever the version says
+        self._post(2)
+        self._post(3)
+        self.assertEqual(self._ledger_ok(), [True, False])
+
+    def test_a_settle_reads_the_rollout_once_whatever_the_calls_it_waits_for(self):
+        for n in (1, 2, 3):
+            self._post(n)  # three calls whose items are not written yet
+        for n in (1, 2, 3, 4):
+            self._record(n)
+        with mock.patch.object(hooks, "codex_rollout", wraps=hooks.codex_rollout) as read:
+            self._post(4)
+        self.assertEqual(read.call_count, 1)  # the three settled calls and the new one share one read of the tail
+        self.assertEqual(self._ledger_ok(), [False, False, False, False])
 
     def test_a_command_never_recorded_leaves_no_ledger_line_and_is_logged(self):
         self._post(1)
