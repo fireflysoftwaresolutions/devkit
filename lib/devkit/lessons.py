@@ -395,10 +395,12 @@ def _unarchive(les: dict) -> tuple:
     return les, arc
 
 
-def recur(les: dict, evidence: str = "", why: str = "", a=None) -> dict:
+def recur(les: dict, evidence: str = "", why: str = "", a=None, project: str = "") -> dict:
     """Count a repeat, from the lesson as it is on disk (two agents recording the same repeat both count). An
     archived lesson comes back to its scope. A retired or prevented lesson that happens again is open again: its
-    prevention did not hold, and recall shows only open lessons. The changelog line says which prevention failed."""
+    prevention did not hold, and recall shows only open lessons. The changelog line says which prevention failed.
+    Every third occurrence opens a work item to automate the prevention (`automate`); `project`: where a global
+    lesson's item goes (the project the repeat happened in)."""
     day = today()
     les, moved = _settle(les, a), ()
     if is_archived(les):
@@ -423,7 +425,53 @@ def recur(les: dict, evidence: str = "", why: str = "", a=None) -> dict:
             ev = (ev + "\n" if ev and ev != "_—_" else "") + f"- {day}: {evidence}"
         return {"occurrences": m["occurrences"] + 1, "last_seen": day, "Evidence": ev,
                 "status": "open" if moved or m.get("status") in ("retired", "prevented") else m.get("status")}
-    return update(les, what, why or evidence, a, apply=bump, paths=moved)
+    les = update(les, what, why or evidence, a, apply=bump, paths=moved)
+    if les["meta"]["occurrences"] % AUTOMATE_EVERY == 0:
+        les = automate(les, a, project)
+    return les
+
+
+AUTOMATE_EVERY = 3  # every third occurrence asks for automation
+PREVENTION_GRACE_DAYS = 7  # a repeat sooner than this after `prevent` means the prevention failed
+
+
+def about_devkit(les: dict) -> bool:
+    """Is the lesson about devkit itself, so its fix is a devkit change? Its scope is devkit's repository, or an
+    anchor names a `dev` command, devkit's code or an error that says devkit."""
+    m, an = les["meta"], anchors(les)
+    return m.get("scope") == core.DEVKIT_REPO or any(_words_of(c)[:1] == ["dev"] for c in an["commands"]) or \
+        any(str(f).startswith(("lib/devkit/", "bin/dev", "plugin/")) for f in an["files"]) or \
+        any("devkit" in e.casefold() for e in an["errors"])
+
+
+def _item_open(ref: str, scope: str) -> bool:
+    if not ref:
+        return False
+    try:
+        return work.find(ref, scope)["meta"].get("status") in work.OPEN
+    except ValueError:
+        return False
+
+
+def automate(les: dict, a=None, project: str = "") -> dict:
+    """Open one work item to automate a recurring lesson's prevention (a bug when the lesson is about devkit, a task
+    otherwise) in the lesson's scope, or in `project` for a global lesson, and record it as `task_ref`. Nothing while
+    the item already recorded is open, or for a global lesson with no project."""
+    m = les["meta"]
+    scope = project if m["scope"] == "global" else m["scope"]
+    if not scope or _item_open(m.get("task_ref"), scope):
+        return les
+    kind, n = ("bug" if about_devkit(les) else "task"), m["occurrences"]
+    prevention = (les["sections"].get("Prevention") or "").strip()
+    rule = prevention.splitlines()[0][:160] if prevention and prevention != "_—_" else ""
+    why = f"lesson {m['id']} happened {n} times and its prevention is still a {m.get('prevention') or 'rule'}"
+    body = work.task_body(kind, why=why + (f": {rule}" if rule else ""), done=[
+        f"a test, lint, guard rule, skill or CI check stops it, recorded with `dev lesson prevent {m['id']} --by … "
+        f"--ref …`"])
+    it = work.create(scope, f"Automate the prevention of {m['id']}: {m['title'][:60]}", kind=kind, body=body, why=why,
+                     a=a, links=[f"lesson:{m['id']}"])
+    return update(les, f"work item {it['meta']['id']} opened to automate it (#{n})", why, a,
+                  task_ref=it["meta"]["id"])
 
 
 def release(les: dict, why: str, a=None) -> dict:
@@ -813,17 +861,54 @@ def signals(project: str = None, repo=None, days: int = 14) -> list:
     return out
 
 
+def _entry_ts(entry: str) -> float:
+    parts = entry.split(" · ")
+    return work.parse_iso(parts[1].strip()) if len(parts) > 1 else 0.0
+
+
+def prevention_failure(les: dict):
+    """When the lesson happened again within 7 days of its latest prevention: {by, ref, days}; else None (also when
+    a newer prevention replaced the one that failed)."""
+    log = les["changelog"]  # newest first
+    for i, entry in enumerate(log):
+        op = _op(entry).partition(" — why: ")[0]
+        if op.startswith("prevented by"):
+            return None
+        if "reopened: its prevention by" in op:
+            for older in log[i + 1:]:
+                was = _op(older).partition(" — why: ")[0]
+                if was.startswith("prevented by"):
+                    days = (_entry_ts(entry) - _entry_ts(older)) / 86400
+                    if days > PREVENTION_GRACE_DAYS:
+                        return None
+                    by, _, ref = was[len("prevented by"):].partition(":")
+                    return {"by": by.strip(), "ref": ref.strip(), "days": round(days, 1)}
+            return None
+    return None
+
+
 def review(scope: str = None) -> dict:
-    """Recurring but unprevented (automate them), stale (retire or confirm), and the counts."""
+    """What to act on: `automate` (open lessons agents missed twice or more after seeing them, most missed first),
+    `prevention_failed` (a repeat within 7 days of `prevent`: [{lesson, by, ref, days}]), `recurring` (open, seen
+    twice or more), `stale` (retire or confirm), and the counts."""
     items = all_lessons(scope)
-    now = time.time()
+    now, use = time.time(), usage()
+    missed = (lambda x: int((use.get(x["meta"]["id"]) or {}).get("missed") or 0))
+    automate_ = sorted((x for x in items if x["meta"].get("status") == "open" and missed(x) >= 2),
+                       key=lambda x: -missed(x))
+    failed = []
+    for x in items:
+        f = prevention_failure(x)
+        if f:
+            failed.append(dict(lesson=x, **f))
     recurring = [x for x in items if x["meta"]["occurrences"] >= 2 and x["meta"].get("status") == "open"]
     stale = [x for x in items if x["meta"].get("status") == "open" and
              now - work.parse_iso((x["meta"].get("last_seen") or "2000-01-01") + "T00:00:00Z") > 120 * 86400]
     counts = {}
     for x in items:
         counts[x["meta"].get("status")] = counts.get(x["meta"].get("status"), 0) + 1
-    return {"recurring": recurring, "stale": stale, "counts": counts, "total": len(items)}
+    return {"automate": automate_, "prevention_failed": failed, "recurring": recurring, "stale": stale,
+            "counts": counts, "total": len(items)}
 
 
 def fixed_in_session(top: str, start_head: str) -> list:
