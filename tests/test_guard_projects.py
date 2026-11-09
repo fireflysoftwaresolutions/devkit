@@ -40,11 +40,12 @@ class OneProjectPerSession(unittest.TestCase):
     def setUp(self):
         d = tempfile.mkdtemp(dir=str(core.HOME))
         self.addCleanup(shutil.rmtree, d, True)
-        self.top = Path(d) / "acme" / "widget"
-        self.top.mkdir(parents=True)
-        for args in (["init", "-q"], ["remote", "add", "origin", f"https://github.com/{OWN}.git"]):
-            subprocess.run(["git", "-C", str(self.top), *args], check=True, capture_output=True)
-        self.assertEqual(guard.current_project(str(self.top)), OWN)
+        self.top, self.other_top = Path(d) / "acme" / "widget", Path(d) / "acme" / "gadget"
+        for top, pid in ((self.top, OWN), (self.other_top, OTHER)):
+            top.mkdir(parents=True)
+            for args in (["init", "-q"], ["remote", "add", "origin", f"https://github.com/{pid}.git"]):
+                subprocess.run(["git", "-C", str(top), *args], check=True, capture_output=True)
+            self.assertEqual(guard.current_project(str(top)), pid)
         self.made = []
         self.initiative("platform", [OWN])
         self.initiative("payments", [OTHER])
@@ -117,8 +118,62 @@ class OneProjectPerSession(unittest.TestCase):
                      f"dev lesson add 'x' --cause c --prevent p -p {OWN}", "dev lesson add 'x' -i platform",
                      f"dev note set status=blocked -p {OWN}"])
 
+    def test_the_session_decides_the_project_not_the_folder_a_command_moves_to(self):
+        # the session started in acme/widget: a cd, pushd, env -C, subshell or shell line that moves the command to
+        # another folder does not make another project's handoff files its own
+        p, o = self.plans, self.other_top
+        self.assert_rulings(
+            refused=[f"cd /tmp && dev plan new x -p {OTHER}", f"cd ~ && dev handoff {OTHER} --log x",
+                     f'cd "$D" && dev plan new x -p {OTHER}', f'cd "$D" && dev handoff {OTHER} --log x',
+                     'cd "$D" && dev handoff --log x', f"cd {core.DEV} && dev lesson recur L-1 -p {OTHER}",
+                     f"cd {core.HANDOFF} && dev plan revise plans/{OTHER}/2026-11-01-design.md --why y",
+                     "cd ../gadget && dev handoff --log x", "cd ../gadget && dev task add x --why y",
+                     "pushd ../gadget && dev handoff --log x", f"env -C {o} dev handoff --log x",
+                     "(cd ../gadget; dev handoff --log x)", "sh -c 'cd ../gadget && dev handoff --log x'",
+                     f"cd ~ && echo x > {p['other'].parent}/z.md"],
+            allowed=[f"cd /tmp && dev plan new x -p {OWN}", f"cd ~ && dev handoff {OWN} --log x",
+                     f'cd "$D" && dev plan new x -p {OWN}', f'cd "$D" && dev handoff {OWN} --log x',
+                     f"cd {core.DEV} && dev lesson recur L-1 -p {OWN}",
+                     f"cd {core.HANDOFF} && dev plan revise plans/{OWN}/2026-11-01-design.md --why y",
+                     "cd ../widget && dev handoff --log x", "cd . && dev task add x --why y",
+                     f"pushd {self.top} && dev handoff --log x", f"env -C {self.top} dev handoff --log x",
+                     "(cd .; dev handoff --log x)", "sh -c 'cd . && dev handoff --log x'",
+                     f"cd ~ && echo x > {p['own'].parent}/z.md", "cd ../gadget && dev handoff",
+                     "cd ../gadget && dev plan ls"])
+
+    def test_a_codex_workdir_is_where_the_command_runs_not_whose_session_it_is(self):
+        o = str(self.other_top)
+        for inp, want in (({"cmd": "dev handoff --log x", "workdir": o}, "deny"),
+                          ({"cmd": f"dev plan new x -p {OTHER}", "workdir": "/tmp"}, "deny"),
+                          ({"command": ["bash", "-lc", f"dev plan new x -p {OTHER}"], "workdir": "/tmp"}, "deny"),
+                          ({"cmd": f"echo x > {self.plans['other'].parent}/z.md", "workdir": "/tmp"}, "deny"),
+                          ({"cmd": "dev handoff --log x", "workdir": str(self.top)}, "allow"),
+                          ({"cmd": f"dev plan new x -p {OWN}", "workdir": "/tmp"}, "allow"),
+                          ({"command": ["bash", "-lc", "dev handoff --log x"], "workdir": "."}, "allow"),
+                          ({"cmd": f"echo x > {self.plans['own'].parent}/z.md", "workdir": "/tmp"}, "allow"),
+                          # a relative path is read from the workdir, as the command reads it
+                          ({"cmd": "echo x > z.md", "workdir": str(self.plans["other"].parent)}, "deny"),
+                          ({"cmd": "echo x > z.md", "workdir": str(self.plans["own"].parent)}, "allow"),
+                          ({"cmd": "rm -rf Development", "workdir": str(core.HOME)}, "deny"),
+                          ({"cmd": "rm -rf Development", "workdir": "/tmp"}, "allow")):
+            tool = "shell" if "command" in inp else "exec_command"
+            with self.subTest(inp=inp):
+                v = guard.check(tool, inp, str(self.top), "codex")
+                self.assertEqual(v[0] if v else "allow", want, v)
+
+    def test_the_refusal_names_a_session_of_that_project_not_its_folder(self):
+        for cmd in (f"dev plan new x -p {OTHER}", f"dev handoff {OTHER} --log x", "cd ../gadget && dev handoff --log x",
+                    f"dev plan revise {self.plans['other']} --why y"):
+            with self.subTest(cmd=cmd):
+                v = guard.check("Bash", {"command": cmd}, str(self.top), "claude")
+                self.assertEqual(v[0], "deny")
+                self.assertNotIn("from that project's folder", v[1])
+                self.assertIn("dev session tell", v[1])
+
+
     def test_a_portfolio_session_and_the_developers_hatch_may_write_any_project(self):
-        cmds = [f"dev plan new x -p {OTHER}", f"dev handoff {OTHER} --log done", f"dev lesson recur L-1 -p {OTHER}"]
+        cmds = [f"dev plan new x -p {OTHER}", f"dev handoff {OTHER} --log done", f"dev lesson recur L-1 -p {OTHER}",
+                f"env -C {self.other_top} dev handoff --log done"]
         self.assert_rulings(refused=[], allowed=cmds, cwd=core.DEV)  # a session started in ~/Development
         for cmd in cmds:
             with self.subTest(hatch=cmd):

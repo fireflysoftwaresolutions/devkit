@@ -371,6 +371,19 @@ def layout_violation(p: Path, creating_dir=False):
 GENERATED = {"PROJECTS.md", "TASKS.md", "ACTIVITY.md", "registry.json"}
 
 
+# the folder of the session that makes the call check() judges (the hook payload's cwd), which names the session's
+# project; a command's own cd, pushd, env -C, subshell or Codex workdir moves only the folder its words are read from
+_SESSION_DIR = contextvars.ContextVar("devkit_guard_session_dir", default=None)
+
+
+def session_project(cwd):
+    """The project of the session that makes the call check() judges, from the session's folder, never from the folder
+    a command moved to (`cd ~ && dev plan new x -p other` is still the session's write); from `cwd` when no check()
+    runs (a rule called on its own). None for a portfolio-level session."""
+    sdir = _SESSION_DIR.get()
+    return current_project(sdir if sdir is not None else cwd)
+
+
 def current_project(cwd):
     """Project id of the session's working directory, or None for portfolio-level sessions."""
     if not cwd or str(cwd) == str(UNKNOWN):
@@ -416,7 +429,7 @@ def handoff_violation(rel: str, cwd, envs=frozenset()):
                 f"(`dev task`, `dev note set`, `dev handoff --edit`).")
     if "DEVKIT_CROSS_PROJECT" in envs or os.environ.get("DEVKIT_CROSS_PROJECT"):
         return None
-    pid = current_project(cwd)
+    pid = session_project(cwd)  # the session's, not the folder a `cd` before the write moved to
     if not pid:
         return None  # portfolio-level session (~/Development, the handoff repo itself)
     if low.startswith("projects/"):
@@ -427,7 +440,7 @@ def handoff_violation(rel: str, cwd, envs=frozenset()):
                     f"project needs.")
     elif low.startswith("plans/"):
         if not low[len("plans/"):].startswith(pid.casefold() + "/"):
-            return f"Plans of this session go to plans/{pid}/ — not to another project's plans."
+            return (f"Plans of this session go to plans/{pid}/ — not to another project's plans. " + OTHER_SESSION_HINT)
     elif low.startswith("initiatives/"):
         slug = low.split("/")[1] if low.count("/") >= 1 else ""
         if slug and pid not in initiative_members(slug):
@@ -2052,7 +2065,7 @@ def _check_segments(cmd: str, segs, ecwd: str, agent: str, depth: int = 0, outer
             elif argv[1:2] and argv[1] in ("pr", "issue", "release", "api"):
                 res = _attribution(cmd)
         elif (_dev_args(argv) or [""])[0] in _DEV_CROSS:
-            res = check_dev_cross(_dev_args(argv), ecwd, envs)
+            res = check_dev_cross(_dev_args(argv), _prefix_chdir(argv0[:len(argv0) - len(argv)], ecwd), envs)
         elif name in ("rm", "unlink"):
             res = check_rm(argv[1:], ecwd, envs) if name == "rm" else steer_rm(argv[1:], ecwd, envs)
         elif name == "find" and ("-delete" in argv or any(x in argv for x in ("-exec", "-execdir")) and
@@ -2137,35 +2150,63 @@ _DEV_CROSS = {"task": None, "note": None, "handoff": None, "initiative": None, "
               "lesson": frozenset({"", "ls", "show", "scan", "review", "lint", "eval"}), "delivery": frozenset({""})}
 
 
+# what a refusal of another project's handoff write tells the agent: the folder a command runs in never makes the
+# write the session's own, so the work goes to a session of that project
+OTHER_SESSION_HINT = ("Only do it if the user asked: the work belongs to a session started in that project (send it "
+                      "there with `dev session tell`), or to a portfolio-level session.")
+
+
+def _names_own_project(value, pid) -> bool:
+    """True when a project value of a dev command (-p, `dev handoff <project>`) names session project `pid`."""
+    return str(value).strip().rstrip("/").casefold() == pid.casefold()
+
+
 def _dev_cross_violation(args, cwd):
+    """Why a dev command that writes a project's or an initiative's handoff files may not run in this session, or
+    None. The session's project decides (session_project: the folder the session started in, never the one a cd, pushd,
+    env -C or Codex workdir moved the command to); `cwd` is the folder the dev command runs in, which names the project
+    dev writes when no project is named, and against which relative paths are read."""
     words = _dev_words(args)  # every -p/-i value counts: argparse keeps the last, so a first one proves nothing
     reads = _DEV_CROSS.get(words[0] if words else "")
     if reads is not None and (words[1] if len(words) > 1 else "") in reads:
         return None
     if words[:1] == ["handoff"] and not _dev_sets(args, "--log", "--edit"):
         return None  # shows the note or its path
-    pid = current_project(cwd)
+    pid = session_project(cwd)
     if not pid:
         return None
-    if words[:1] == ["handoff"] and len(words) > 1 and words[1].lower() != pid:
+    if words[:1] == ["handoff"] and len(words) > 1 and not _names_own_project(words[1], pid):
         return deny(f"This session works on {_code(pid)}; {_code(f'dev handoff {words[1]}')} with --log or --edit "
                     f"would write another project's session log or note. Log this session's work with "
-                    f"`dev handoff --log \"…\"`; only do it for another project if the user asked, from that "
-                    f"project's folder or a portfolio session.", key="other-project-log")
+                    f"`dev handoff --log \"…\"`. " + OTHER_SESSION_HINT, key="other-project-log")
     if words[:1] == ["plan"] and len(words) > 2 and words[1] != "new":  # revise, approve, supersede: its folder decides
         why = _plan_path_violation(words[2], cwd, pid)
         if why:
             return deny(why, key="other-project-plan")
-    proj = next((v for v in _dev_values(args, ("-p", "--project")) if v.lower() != pid), None)
-    init = next((v for v in _dev_values(args, ("-i", "--initiative")) if pid not in initiative_members(v)), None)
+    projs = _dev_values(args, ("-p", "--project"))
+    inits = _dev_values(args, ("-i", "--initiative"))
+    proj = next((v for v in projs if not _names_own_project(v, pid)), None)
+    init = next((v for v in inits if pid not in initiative_members(v)), None)
     if words[:1] == ["initiative"] and len(words) > 2 and words[1] in ("add", "rm", "new"):
         return deny("Changing an initiative's membership is a portfolio decision: ask the user, or run it from "
                     f"{tilde(core.DEV)} (a portfolio-level session).", key="initiative-membership")
-    if proj and proj.lower() != pid:
+    if proj is not None:
         return deny(f"This session works on {_code(pid)}; {_code(f'-p {proj}')} would edit another project's handoff. "
-                    f"Only do it if the user asked, from that project's folder or a portfolio session.", key="other-project")
+                    + OTHER_SESSION_HINT, key="other-project")
     if init and pid not in initiative_members(init):
         return deny(f"{_code(pid)} is not a member of initiative {_code(init)}.", key="not-member")
+    named = projs or inits or (words[:1] == ["handoff"] and len(words) > 1)
+    if not named:  # dev writes the project of the folder it runs in
+        if str(cwd) == str(UNKNOWN) or not cwd:
+            return deny(f"This session works on {_code(pid)}, and this dev command runs in a folder known only when it "
+                        f"runs, which names the project whose handoff it writes. Run it in the session's own folder, "
+                        f"or name the project with {_code(f'-p {pid}')}.", key="dev-folder-unknown")
+        sdir = _SESSION_DIR.get()
+        here = pid if sdir is not None and str(cwd) == str(sdir) else current_project(cwd)
+        if here and here.casefold() != pid.casefold():
+            return deny(f"This session works on {_code(pid)}; this dev command runs in {_code(tilde(cwd))}, a folder "
+                        f"of {_code(here)}, so it would write {_code(here)}'s handoff. " + OTHER_SESSION_HINT,
+                        key="other-project-folder")
     return None
 
 
@@ -2191,8 +2232,7 @@ def _plan_path_violation(path, cwd, pid) -> str | None:
     if rel.startswith(f"plans/{pid.casefold()}/"):
         return None
     return (f"This session works on {_code(pid)}; {_code(tilde(target))} is not one of its plans. Plans of this "
-            f"session are below plans/{pid}/; only change another project's plan if the user asked, from that "
-            f"project's folder or a portfolio session.")
+            f"session are below plans/{pid}/. " + OTHER_SESSION_HINT)
 
 
 def _patch_lines(patch: str) -> list:
@@ -11245,12 +11285,14 @@ def check(tool: str, tool_input: dict, cwd: str, agent: str, call: dict | None =
     LAST_LESSON_RULE.clear()
     token = _WORD.set("")
     caller = _CALLER.set(_Caller(agent, cwd, call if call is not None else _hook_payload(tool_input)))
+    session_dir = _SESSION_DIR.set(cwd or "")
     try:
         verdict = _check(tool, tool_input, cwd, agent)
         if not verdict or verdict[0] == "ask":  # a lesson rule can only add a warning or refuse, never allow
             verdict = _lesson_rule_verdict(tool, tool_input, cwd, verdict)
         return _judged(verdict)
     finally:
+        _SESSION_DIR.reset(session_dir)
         _CALLER.reset(caller)
         _WORD.reset(token)
 
@@ -11443,7 +11485,12 @@ def _tool_command(tool_input) -> str:
 def _check_shell(tool_input, cwd, agent):
     """check_bash for each command a tool input carries (tool_commands): the first refusal, else the first other
     verdict, else None. A call with no command is judged as the empty command, as before. A command whose variables
-    the command itself sets from literals is judged once per value they hold (literal_variants)."""
+    the command itself sets from literals is judged once per value they hold (literal_variants). Codex's `workdir`
+    is the folder the command runs in (relative to the session's folder), as a `cd` before it would be; the session's
+    project stays the one of `cwd` (session_project)."""
+    wd = tool_input.get("workdir") if isinstance(tool_input, dict) else None
+    if isinstance(wd, str) and wd:
+        cwd = str(resolve(wd, cwd)) if os.path.isabs(wd) or cwd else str(UNKNOWN)
     verdicts = [check_bash(v, cwd, agent) for c in tool_commands(tool_input) or [""] for v in literal_variants(c) or [c]]
     return next((v for v in verdicts if v and v[0] == "deny"), None) or next((v for v in verdicts if v), None)
 
