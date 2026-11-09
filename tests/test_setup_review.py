@@ -194,5 +194,22 @@ class CtrlDTests(unittest.TestCase):
         self.assertEqual((rc, cfg, calls), (1, None, []))
 
 
+class SetupLogTests(unittest.TestCase):
+    def test_a_resumed_setup_adds_to_the_log_the_earlier_summary_named(self):
+        earlier = "$ dev install\ndevkit hit a bug while pinning its copy\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            flow.saved_run(tmp, flow.PAUSED)
+            log = tmp / "state" / "logs" / "setup.log"
+            log.parent.mkdir(parents=True)
+            log.write_text(earlier)
+            r = flow.run_wizard(flow.Mac(saved=BOTH), ENTER, resume=True, tmp=tmp)
+            text, mode = log.read_text(), log.stat().st_mode & 0o777
+        self.assertEqual(r.rc, 0)
+        self.assertTrue(text.startswith(earlier), text[:200])
+        self.assertRegex(text[len(earlier):], r"^\n──── dev setup · \d{4}-\d\d-\d\d \d\d:\d\d:\d\d ────\n\n\$ ")
+        self.assertEqual(mode, 0o600)
+
+
 if __name__ == "__main__":
     unittest.main()

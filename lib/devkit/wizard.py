@@ -826,17 +826,19 @@ class _Q:
 
 
 class _Log:
-    """The full output of an interactive run (`~/.local/state/devkit/logs/setup.log`, private to the user)."""
+    """The full output of each setup's steps (`~/.local/state/devkit/logs/setup.log`, private to the user). A run adds
+    to it under a dated line, so the log an earlier summary named stays whole when the setup is resumed."""
 
     def __init__(self):
         self.path = STATE / "logs" / "setup.log"
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            fd = os.open(str(self.path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            fd = os.open(str(self.path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
             os.chmod(str(self.path), 0o600)
-            self.f = os.fdopen(fd, "w", encoding="utf-8")
+            self.f = os.fdopen(fd, "a", encoding="utf-8")
         except OSError:
             self.f = None
+        self.write(f"\n──── dev setup · {time.strftime('%Y-%m-%d %H:%M:%S')} ────\n")
 
     def write(self, s: str):
         if self.f:
