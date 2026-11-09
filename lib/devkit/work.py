@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import calendar
 import contextlib
+import hashlib
 import json
 import os
 import re
@@ -375,7 +376,8 @@ def all_items(scope: str = None) -> list:
 
 
 def find(selector: str, scope: str = None) -> dict:
-    """By id (exact or unique prefix), by number in `dev task` order, or by a unique part of the title."""
+    """By id (exact or unique prefix), by number in the list `dev task` showed (`by_number`), or by a unique part of
+    the title."""
     items = [i for i in all_items(scope) if i["meta"].get("status") not in ("done", "cancelled")] if not \
         selector.upper().startswith(("T-", "F-", "B-", "S-")) else all_items(scope)
     sel = selector.strip()
@@ -388,11 +390,7 @@ def find(selector: str, scope: str = None) -> dict:
             return by_id[0]
         raise ValueError(f"“{sel}” matches {len(by_id)} items")
     if sel.isdigit():
-        ordered = ordered_open(items)
-        n = int(sel)
-        if 1 <= n <= len(ordered):
-            return ordered[n - 1]
-        raise ValueError(f"no open item #{n}")
+        return by_number(int(sel), scope, items)
     hits = [i for i in items if sel.lower() in i["meta"].get("title", "").lower()]
     if len(hits) == 1:
         return hits[0]
@@ -405,6 +403,123 @@ def ordered_open(items: list) -> list:
     open_ = [i for i in items if i["meta"].get("status") not in ("done", "cancelled")]
     return sorted(open_, key=lambda i: (order.get(i["meta"].get("bucket"), 3), pr.get(i["meta"].get("priority"), 1),
                                         i["meta"].get("created", "")))
+
+
+# --------------------------------------------------------------------------- numbers in `dev task`
+# `dev task` numbers the open items, and `dev task <verb> <n>` takes such a number. The list moves under it: a close,
+# an add or a move renumbers every item after it, so `done 9` and then `done 40` once closed the item that had moved up
+# to #40. A number therefore means the item at that place in the list `dev task` last showed this viewer (the agent
+# session, else the terminal), and it is refused once the open items are no longer that list in that order, or the
+# list is more than LIST_TTL old. The refusal names the id #n had, and has now, so the caller acts by id. Ids always
+# work. Each viewer's lists live in STATE/task-lists/<viewer>.json: {viewer, lists: {scope: {ids, fingerprint,
+# shown_at}}}, on this Mac only.
+
+LIST_TTL = 30 * 60  # seconds a shown list numbers items
+
+
+def _viewer() -> str:
+    """Who reads the numbers: the agent session, else the terminal, else this user's shell."""
+    sid = os.environ.get("DEVKIT_SESSION") or os.environ.get("CODEX_THREAD_ID") or ""
+    if sid:
+        return sid
+    for fd in (0, 1, 2):
+        try:
+            return os.ttyname(fd)
+        except OSError:
+            continue
+    return "shell"
+
+
+def _lists_file() -> Path:
+    name = re.sub(r"[^A-Za-z0-9._-]+", "_", _viewer()).strip("._")[:80] or "shell"
+    return core.STATE / "task-lists" / f"{name}.json"
+
+
+def fingerprint(ids: list) -> str:
+    """A short name for a list of ids in its order: it changes with any close, add or move."""
+    return hashlib.sha256("\n".join(ids).encode()).hexdigest()[:8]
+
+
+def _shown_lists() -> dict:
+    try:
+        data = json.loads(_lists_file().read_text())
+    except (OSError, ValueError):
+        return {}
+    lists = data.get("lists") if isinstance(data, dict) else None
+    return lists if isinstance(lists, dict) else {}
+
+
+def _record_shown(scope: str, ids: list, now: float) -> bool:
+    """Record `ids` as the list of `scope` this viewer was shown; drop the viewer's expired lists and the files of
+    viewers gone for a day. -> whether it was recorded (unrecorded numbers are refused, so print none)."""
+    f = _lists_file()
+    lists = {s: x for s, x in _shown_lists().items()
+             if isinstance(x, dict) and now - parse_iso(x.get("shown_at", "")) < LIST_TTL}
+    lists[scope or ""] = {"ids": ids, "fingerprint": fingerprint(ids), "shown_at": now_iso(now)}
+    try:
+        f.parent.mkdir(parents=True, exist_ok=True)
+        _replace(f, json.dumps({"viewer": _viewer(), "lists": lists}, indent=1, ensure_ascii=False) + "\n")
+    except OSError:
+        return False
+    for old in f.parent.glob("*.json"):
+        with contextlib.suppress(OSError):
+            if old != f and now - old.stat().st_mtime > 86400:
+                old.unlink()
+    return True
+
+
+def show(scope: str, items: list = None, rebind: bool = True) -> tuple:
+    """-> (the open items of `scope` in `dev task` order, whether to print their numbers). rebind (the `dev task`
+    list): this list is the one this viewer's numbers point into from now on. rebind=False (the list printed after a
+    write): numbers keep pointing into the list shown before, so this one is numbered only while it is still that list
+    (which then counts as shown again); after a close, an add or a move it is printed without numbers."""
+    ordered = ordered_open(all_items(scope) if items is None else items)
+    ids = [i["meta"]["id"] for i in ordered]
+    now = time.time()
+    if not rebind:
+        shown = _shown_lists().get(scope or "")
+        if not isinstance(shown, dict) or shown.get("ids") != ids or \
+                now - parse_iso(shown.get("shown_at", "")) >= LIST_TTL:
+            return ordered, False
+    return ordered, _record_shown(scope, ids, now)
+
+
+def by_number(n: int, scope: str, items: list = None) -> dict:
+    """The open item at #n of the list `dev task` showed this viewer, while the open items are still that list in that
+    order and it was shown less than LIST_TTL ago. Otherwise a ValueError that names the id #n had, and has now."""
+    current = ordered_open(all_items(scope) if items is None else items)
+    ids = [i["meta"]["id"] for i in current]
+    where = scope or "all projects"
+    shown = _shown_lists().get(scope or "")
+    then = shown.get("ids") if isinstance(shown, dict) else None
+    if not isinstance(then, list):
+        raise ValueError(f"#{n}: no list of {where} was shown here, so the number points at nothing: run dev task and "
+                         f"use its numbers, or use the item's id (T-…, F-…, B-…, S-…)")
+    shown_at = parse_iso(shown.get("shown_at", ""))
+    at = time.strftime("%H:%M", time.localtime(shown_at))
+    if not 1 <= n <= len(then):
+        raise ValueError(f"no #{n} in the list of {where} shown at {at} ({len(then)} open items): run dev task to "
+                         f"number the list again, or use an id")
+    was = then[n - 1]
+    if time.time() - shown_at < LIST_TTL and then == ids:
+        return current[n - 1]
+    titles = {i["meta"]["id"]: i["meta"].get("title", "") for i in all_items(scope)}
+    name = lambda iid: f"{iid} “{titles.get(iid, '')}”"  # noqa: E731
+    if time.time() - shown_at >= LIST_TTL:
+        raise ValueError(f"#{n} was {name(was)} in the list of {where} shown at {at}, more than "
+                         f"{LIST_TTL // 60} minutes ago: use its id, or run dev task to number the list again")
+    closed, added = len(set(then) - set(ids)), len(set(ids) - set(then))
+    change = ", ".join(x for x in (f"{closed} closed" if closed else "", f"{added} added" if added else "") if x) \
+        or "the order changed"
+    now_is = "" if n > len(ids) else " and still is" if ids[n - 1] == was else f" and is {name(ids[n - 1])} now"
+    raise ValueError(f"the open items of {where} changed since the list was shown at {at} ({change}): #{n} was "
+                     f"{name(was)} then{now_is}. Use the id you mean, or run dev task to number the list again")
+
+
+def acted(verb: str, it: dict) -> str:
+    """The line a write prints: what it did to which item, by id and title (`done B-… “Fix login”`)."""
+    return f"{verb} {it['meta']['id']} “{it['meta'].get('title', '')}”"
+
 
 
 # --------------------------------------------------------------------------- git (audit trail)

@@ -93,9 +93,10 @@ class ItemTests(unittest.TestCase):
             self.assertEqual(len(work.expire_locks()), 0)
 
     def test_find_and_summary(self):
-        with TempHandoff():
+        with TempHandoff(), tempfile.TemporaryDirectory() as state, mock.patch.object(core, "STATE", Path(state)):
             work.create("acme/api", "Later thing", bucket="later", a=A)
             now = work.create("acme/api", "Now thing", bucket="now", priority="high", a=A)
+            work.show("acme/api")  # numbers point into the list `dev task` showed (tests/test_task_numbers.py)
             self.assertEqual(work.find("1", "acme/api")["meta"]["id"], now["meta"]["id"])
             self.assertEqual(work.find(now["meta"]["id"], "acme/api")["meta"]["id"], now["meta"]["id"])
             self.assertEqual(work.find("later", "acme/api")["meta"]["title"], "Later thing")
