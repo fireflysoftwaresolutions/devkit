@@ -91,7 +91,9 @@ devkit keeps these out of every record it writes:
   - The value of an option that names something, such as `--to`, `--type`, `--scope`, `--project`, or `--step`
     in `dev`, and `-C`, `-R`, `--repo`, `--base`, and `--head` in `git` and `gh`.
   - The arguments of `dev` that name something, such as a branch, a path, a project, or a crew member. An argument
-    that selects a task, a lesson, or a step stays only as an id or a number, since it can be part of a title.
+    that selects a task, a lesson, a step, or something of the [bug registry](bug-registry.md) (a bug, a detour, an
+    outbox item) stays only as an id or a number, since it can be part of a title; a fingerprint or a detour id
+    becomes its length.
     `dev crew raci` also classifies a task given in words, so its argument stays only as a kind of work or a crew
     member of devkit's roster, such as `backend` or `tank`, and its `--set` value only as `R`, `A`, `C`, and `I`
     with crew members.
@@ -105,7 +107,7 @@ devkit keeps these out of every record it writes:
     short word, such as `DEVKIT_GUARD=off`.
 
   Everything else becomes its length: free text, such as a `dev crew ask` message, the text of `--why`, `--check`,
-  or `-m`, a heredoc's body, a here-string, and a comment; and a word that only might be free text, such as a
+  `-m`, or `--cause`, a lesson rule's `--match`, a detour's `--hint`, `--dev`, and `--text`, a heredoc's body, a here-string, and a comment; and a word that only might be free text, such as a
   filename, a branch passed to `git push`, or a value devkit does not know. A line whose program is none of these
   keeps its operators, the program's name when the list has it, and each other word's length: `rm -rf src` is
   recorded as `rm [text not recorded: 3 characters] [text not recorded: 3 characters]`, and `globex-sync --all` as

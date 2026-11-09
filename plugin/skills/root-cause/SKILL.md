@@ -85,7 +85,7 @@ dev commit -m "fix(prices): include the price version in the cache key" \
   the why, and refuses a fix or revert without it, or with a placeholder (`unknown`, `n/a`, `tbd`, `-`, fewer than
   15 characters).
 - **A lesson when it can repeat** (the `learning-loop` skill):
-  `dev lesson add "<the rule>" --kind bug --cause "…" --prevent "…"`, with an anchor (`--file`, `--command`, or
+  `dev lesson add "<the rule>" --kind bug --happened "…" --cause "…" --prevent "…"`, with an anchor (`--file`, `--command`, or
   `--error`). A known lesson that happened again gets `dev lesson recur <id> --evidence "…"` instead.
 - **devkit's own defect** goes to the bug registry, not to a lesson: apply the detour devkit gives; when a way you
   found works, record it with `dev bug detour <fingerprint>`; after two failed attempts, run

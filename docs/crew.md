@@ -436,7 +436,7 @@ each check that fails, naming every missing item and the command that fixes it:
    | Skills | The skills of each procedure phase it worked in, and the skills devkit's rules require for the files it changed |
    | Unfinished work | No stubs, placeholders, or untracked TODOs in the files it changed |
    | Tests | No test that cannot fail in the test files it changed |
-   | Lessons | Two or more guard refusals answered with `dev lesson add` or `dev lesson recur` |
+   | Lessons | Two or more guard refusals answered with `dev lesson add` or `dev lesson recur`, or, when the guard was wrong, with `dev bug report --guard` or a vote on the bug a refusal's marker names. A refusal the [bug registry](bug-registry.md) served a workaround for in the session, or one an open lesson covers, owes nothing |
    | Background work | Every command it put in the background has ended (its task notification arrived, `TaskStop` stopped it, or a read of its output showed it exited), because Claude Code keeps a member in its agent list while one runs; Codex transcripts have no such launch, so this gate finds nothing there |
 
 Members with read-only tools have no shell, so they skip the proofs and lessons gates. The unfinished-work and test

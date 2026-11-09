@@ -123,7 +123,7 @@ dev pr create                the PR, from the template                dev pr che
 dev pr merge                 when checks and reviews allow it         dev release   tag and publish by the policy
 dev ci status --watch        the branch's pipelines: jobs, current step, ETA (GitHub, GitLab, Bitbucket, Azure)
 dev ci watch --wait --pr 12  wake when that PR's CI ends              dev backup   this branch, when no CI starts
-dev lesson add "…" --cause "…" --prevent "…"                          a lesson every later session recalls
+dev lesson add "…" --happened "…" --cause "…" --prevent "…" --file …   a lesson, recalled before that work
 dev bug                      devkit's own known bugs and their detours   dev bug top   what the next hotfix fixes
 dev jobs                     the scheduled jobs and their last runs   dev audit --team   what devkit did, everywhere
 dev delivery                 the project's release policy and gaps     dev delivery apply --why "…"   record it

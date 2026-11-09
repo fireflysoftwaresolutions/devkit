@@ -170,7 +170,7 @@ devkit recognizes its own failures and shares them, without project data, throug
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `bugs.share` | unset | Your consent to post under your GitHub account: `on` (reports, votes, and detours), `reports` (reports and detours, without votes), or `off`. Unset means you have not been asked yet, and nothing is posted. Developer only: change it with `dev bug share`; an agent's `dev config set bugs.share` is refused |
+| `bugs.share` | unset | `off` turns posting off on this Mac, whatever your consent says. Your consent itself (`on` for reports, votes, and detours; `reports` for reports and detours without votes; or `off`) is not this key: `dev bug share` records it with the GitHub login it is for, and until you give it nothing is posted. An agent's `dev config set bugs.share` is refused |
 | `bugs.sync` | `true` | The hourly sync refreshes the registry cache and sends the outbox; `false` leaves both to `dev bug sync` |
 
 ### Background AI

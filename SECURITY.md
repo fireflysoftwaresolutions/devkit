@@ -34,9 +34,11 @@ Redact secrets before you send logs or transcripts: devkit's logs can contain co
 ### Reports devkit files for you
 
 devkit can file a security report itself, through its [bug registry](docs/bug-registry.md). A report you file with
-`dev bug report --security`, and any failure devkit treats as security-sensitive (a crash in the guard or the crew's
-file-scope checks, a guard failure that let a call through, or free text about bypassing, allowing, injecting, tokens,
-or secrets), never goes to a public issue:
+`dev bug report --security`, and any failure devkit treats as security-sensitive, never goes to a public issue.
+Security-sensitive means a crash in the guard, the crew's file-scope checks, the lesson rules the guard runs, the code
+that reads grant lines, or the code that builds and checks reports; a guard failure that let a call through; or free
+text or an error message about bypassing, allowing, injecting, tokens, secrets, credentials, passwords, leaks,
+exfiltration, traversal, escalation, privileges, the sandbox, grants, or exploits. Such a report goes this way:
 
 1. devkit holds it on your Mac. `dev bug pending` prints exactly what it would send: devkit facts only, never paths,
    names, code, or output from your projects.

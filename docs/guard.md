@@ -74,6 +74,13 @@ the net under your own review, not as a replacement for it.
 | ask | you are asked to confirm (used only for writes outside the workspace) | not supported by Codex, so it becomes deny |
 | deny | the tool call is blocked and the reason goes to the agent | the same |
 
+**Every refusal has an id.** Each place in the guard that refuses has a stable refusal id, which the audit trail
+records with the refusal (`refusal_id`, see [The audit trail](audit.md)) and which `dev bug report --guard <refusal id>`
+takes when the refusal was wrong. When devkit's [bug registry](bug-registry.md) knows a bug for a refusal, the
+refusal adds what the registry serves: up to two workarounds a maintainer confirmed or a team agent found, as data
+that never overrides you, or a note that the refusal stands; then a `devkit-bug:` marker line. The verdict itself
+does not change.
+
 ## Rules
 
 ### File writes (Write, Edit, `apply_patch`, and `>` redirections)
@@ -223,7 +230,7 @@ apply the same rule. Change the lists with `branches.types` and `branches.forbid
 | `gh pr create --head <branch>` with a branch that breaks the naming rule | deny |
 | `gh pr …`, `gh issue …`, `gh release …`, `gh api …` containing AI attribution | deny |
 | `gh config set pager …` (or a key the guard cannot read) | deny: gh runs its pager as a command for every later read |
-| An agent's `gh issue create`, `gh issue comment`, `gh issue edit`, or `gh api` on the issues of devkit's own repository | deny: "Agents do not post to devkit's bug registry directly. Use `dev bug report` or `dev bug detour`: devkit checks what leaves this machine." (see [The bug registry](bug-registry.md)) |
+| An agent's `gh issue create`, `gh issue comment`, `gh issue edit`, or `gh api` on the issues of devkit's own repository, and an MCP tool call that writes an issue or a comment there | deny, in the main session and the crew alike, whatever grants exist: "Agents do not post to devkit's bug registry directly. Use `dev bug report` or `dev bug detour`: devkit checks what leaves this machine. A comment on a pull request goes through `gh pr comment` or `dev pr comment`." (see [The bug registry](bug-registry.md)) |
 
 ### Files and folders from the shell
 
@@ -269,7 +276,7 @@ three folders readable and writable by your account only (`0700`) every time it 
 | --- | --- |
 | A file write (Write, Edit, `apply_patch`) in those three folders, or in a subagent's meta file | deny, with the `dev` command that owns the record |
 | A shell write there: a redirect, `tee`, `cp`, `mv`, `ln`, `rm`, `dev rm`, `sed -i`, an interpreter that writes files, also inside `sh -c`, `eval`, `xargs`, or `find -exec` | deny |
-| `dev config set safeguards.*` or `dev config edit`, or a `DEVKIT_*` or `DEV_ROOT` value added to the `env` block of an agent settings file or to a shell startup file such as `~/.zshrc` | deny |
+| `dev config set safeguards.*`, `audit.*`, or `bugs.share`, or `dev config edit`, or a `DEVKIT_*` or `DEV_ROOT` value added to the `env` block of an agent settings file or to a shell startup file such as `~/.zshrc` | deny: `bugs.share` decides whether devkit posts under your GitHub account, so only you set it, with `dev bug share` in a terminal |
 | Replacing, writing, or deleting a `dev` that a shell finds: `~/.local/bin/dev` (the link itself) or another `dev` earlier on `PATH` | deny → the developer runs `dev install --only cli` |
 | Unsetting or blanking a variable that tells a program an agent runs it (`CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_PID`, `CODEX_SANDBOX`, `CODEX_THREAD_ID`, `DEVKIT_SESSION`, `DEVKIT_AGENT`, `DEVKIT_FROM_AGENT`): `unset`, `env -u`, `env -i`, or an empty assignment before a command or after `export`, also inside `sh -c` | deny: a project's own tools read them to act differently for agents, and an agent must not hide from them |
 | `HOME`, `DEVKIT_CONFIG`, `DEV_ROOT`, or another `DEVKIT_*` variable set for `dev`, `python -m devkit`, a program that imports devkit, or a nested `claude` or `codex` session; `launchctl setenv` of one of them | deny; the one-command [escape hatches](#escape-hatches) still work |
@@ -514,6 +521,7 @@ tier 2:
 | `dev bug confirm <bug> <detour>` | `grant bug-confirm <bug>/<detour>` |
 | `dev bug share on\|reports\|off` | `grant bug-share <setting>` |
 | `dev lesson release <lesson>` | `grant lesson-release <lesson>` |
+| `dev lesson prevent <lesson> --by guard --match "…"\|--error "…" --block` | `grant developer-only lesson-block/<lesson>`; the refusal prints no grant line and asks you to run it in a terminal, because a lesson rule that refuses from the start skips the warnings that show whether it is right (see [Lessons › Lesson rules](lessons.md#lesson-rules)) |
 
 A push from inside a repository's git folder (`<repo>/.git`, `<repo>/.git/worktrees/<name>`), or one that
 `env -C <dir>` or `sudo -D <dir>` runs in another folder, is judged as the project of that folder, so
@@ -542,8 +550,23 @@ grant backup acme/api
 A grant opens one of these commands, for that branch or project only, in the repository of the session you typed it
 in, and expires after 30 minutes. `grant backup <project>` opens one public backup or one policy change, not both.
 `grant developer-only <target>` with the target the refusal names (`embargo/<branch>`, `backup-public/<project>`,
-`backup-policy/<project>`) works too. None of them is ever pre-approved with `dev crew mode auto --approve`. A dry run,
+`backup-policy/<project>`, `lesson-block/<lesson>`) works too. None of them is ever pre-approved with `dev crew mode auto --approve`. A dry run,
 the help, `dev branch embargo` (the list), and `dev backup policy` (the read) need no grant.
+
+### Lesson rules
+
+A team can add its own rules, made from lessons that keep repeating (see
+[Lessons › Lesson rules](lessons.md#lesson-rules)). The guard checks them after every other rule on this page, on
+shell commands only, and they can only make its verdict stricter:
+
+| Rule mode | Decision |
+| --- | --- |
+| `warn` | allow, with the lesson's title and prevention added to the call's context |
+| `block` | deny: "devkit · lesson rule LR-… refuses this call, from lesson L-…: … Do it the way the prevention says." |
+
+A lesson rule never allows a call that the guard's own rules refuse or ask about. A rule file the guard cannot read, a
+lookup that takes longer than 0.3 seconds, or any other failure lets the call go on as the guard's own rules decided,
+with a `guard.failopen` record.
 
 ### Unfinished work in a commit
 

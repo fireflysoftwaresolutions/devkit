@@ -161,11 +161,13 @@ To get a deleted branch back, take its last commit from the audit record or the 
 you list. More `-m` options add paragraphs, and `--body` adds the reason.
 
 The message follows devkit's commit template, [`config/git/commit-template.txt`](../config/git/commit-template.txt):
-the header, then why, what changed, and how it was verified, then the trailers. `dev commit` writes it for you:
+the header, then why, the root cause of a fix, what changed, and how it was verified, then the trailers.
+`dev commit` writes it for you:
 
 ```bash
 dev commit parser.py -m "fix(parser): keep quoted commas" \
   --why "Rows with quoted commas were split in two." \
+  --cause "the tokenizer split on every comma before it read the quotes" \
   --body "The tokenizer reads a quoted field whole." \
   --verified "python3 -m unittest tests.test_parser (12 tests pass)"
 ```
@@ -174,6 +176,8 @@ dev commit parser.py -m "fix(parser): keep quoted commas" \
 fix(parser): keep quoted commas
 
 Rows with quoted commas were split in two.
+
+Root cause: the tokenizer split on every comma before it read the quotes
 
 The tokenizer reads a quoted field whole.
 
@@ -185,6 +189,7 @@ Refs: PROJ-142
 | Option | Writes |
 | --- | --- |
 | `--why` | The first paragraph: why the change is needed |
+| `--cause` | The `Root cause: …` paragraph, right after the why: what caused the problem, as your reproduction proved it. Required for `fix` and `revert` commits; a placeholder such as `unknown`, `n/a`, or `tbd`, or a cause under 15 characters, is refused. The `root-cause` skill has the procedure that proves it |
 | `--body`, more `-m` | What changed; repeat `--body` for more paragraphs. Without `--why`, `--body` is the reason, as before |
 | `--verified` | The last paragraph, `Verified: …` (the label is added when you leave it out) |
 | `--refs` | The `Refs:` trailer: `#12`, `owner/repo#12`, a URL, or a ticket key such as `PROJ-142`. Repeat it for more |
