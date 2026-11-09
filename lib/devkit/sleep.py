@@ -8,7 +8,8 @@ Runs nightly as the `sleep` job (`dev jobs`), or by hand (--dry-run previews and
             fold that worked (one that failed keeps them for the next night)
   check     a prevented lesson whose prevention is gone (the test, guard rule, skill or lint rule its prevention_ref
             names no longer exists in its project's checkout) is open again, with the reason in its changelog;
-            projects not checked out on this Mac, and lessons with no project (global, initiatives), are not judged
+            projects not checked out on this Mac are not judged, and lessons with no project (global, initiatives)
+            only for the guard rules they name, which exist on every machine
   lessons   no cap on how many lessons a scope keeps: a lesson leaves only by the archive policy (retired 30 days
             after retirement; prevented, idle 90 days and weak; open, idle 180 days, weak, seen once and older than
             30 days; never one younger than 30 days, seen twice or more, or kept by a merge that night) or as the
@@ -112,19 +113,36 @@ def checkouts() -> dict:
     return out
 
 
+def _guard_rules_only(les: dict):
+    """A global or initiative lesson as the nightly check judges it: the guard rule ids its guard prevention names
+    (the parts of prevention_ref that are one word), which exist on every machine; None when it names none. Its tests,
+    skills and files belong to no checkout here, so they are not judged."""
+    from . import lessonlint
+    m = les["meta"]
+    if m.get("prevention") != "guard":
+        return None
+    ids = [p for p in lessonlint._parts(str(m.get("prevention_ref") or "")) if len(p.split()) == 1]
+    return dict(les, meta=dict(m, prevention_ref=", ".join(ids))) if ids else None
+
+
 def check_preventions(dry_run: bool = False, a=None) -> list:
-    """Reopen each prevented lesson whose prevention no longer exists in its project's checkout
-    (lessonlint.prevention_gone), with the reason in its changelog. Open again, it is not judged on a later night.
-    Lessons of projects not checked out here, and those with no project (global, initiatives), are skipped.
-    -> [("reopen", lesson id, reason)]; with dry_run nothing changes."""
+    """Reopen each prevented lesson whose prevention no longer exists (lessonlint.prevention_gone), with the reason in
+    its changelog. Open again, it is not judged on a later night. A project's lesson is judged in its checkout on this
+    Mac, and skipped when there is none; a global or initiative lesson is judged for the guard rules it names only
+    (_guard_rules_only). -> [("reopen", lesson id, reason)]; with dry_run nothing changes."""
     from . import lessonlint, work
     roots = checkouts()
     acts = []
     for les in lessons.all_lessons():
-        root = roots.get(les["meta"]["scope"])
-        if les["meta"].get("status") != "prevented" or root is None:
+        scope = les["meta"]["scope"]
+        if les["meta"].get("status") != "prevented":
             continue
-        reason = lessonlint.prevention_gone(les, root)
+        if scope == "global" or scope.startswith("initiatives/"):
+            judged = _guard_rules_only(les)
+            reason = lessonlint.prevention_gone(judged, None) if judged else ""
+        else:
+            root = roots.get(scope)
+            reason = lessonlint.prevention_gone(les, root) if root is not None else ""
         if not reason:
             continue
         acts.append(("reopen", les["meta"]["id"], reason))

@@ -109,13 +109,31 @@ class PreventionCheckTests(SleepCase):
         self.projects({"acme/api": str(self.repo), "acme/web": None, "acme/old": str(self.root / "moved-away")})
         rule = "no-such-rule-zq9"  # in no guard and no lesson rule: gone wherever it is judged
         skipped = [lessons.prevent(self.add(f"Guarded in {s}", scope=s, files=["src/**"]), "guard", rule, "guarded",
-                                   a=A) for s in ("acme/web", "acme/old", "global")]
+                                   a=A) for s in ("acme/web", "acme/old")]
         checked = lessons.prevent(self.add("Guarded here", files=["lib/**"]), "guard", rule, "guarded", a=A)
 
         result, _ = self.sleep(quiet=True)
 
         self.assertEqual([i for k, i, _ in result["lessons"] if k == "reopen"], [checked["meta"]["id"]])
         for les in skipped:
+            self.assertEqual(lessons.find(les["meta"]["id"])["meta"]["status"], "prevented")
+
+    def test_global_and_initiative_lessons_are_checked_for_guard_rules_only(self):
+        # guard rules exist on every machine; the tests and skills such a lesson names belong to no checkout here
+        rule = "no-such-rule-zq9"
+        guarded = [lessons.prevent(self.add(f"Guarded in {s}", scope=s, files=["src/**"]), "guard", rule, "guarded",
+                                   a=A)["meta"]["id"] for s in ("global", "initiatives/billing")]
+        unjudged = [lessons.prevent(self.add("Covered by a deleted test", scope="global", files=["lib/**"]), "test",
+                                    "tests/test_gone.py", "covered", a=A),
+                    lessons.prevent(self.add("Covered by a missing skill", scope="global", files=["web/**"]), "skill",
+                                    "no-such-skill-zq9", "covered", a=A),
+                    lessons.prevent(self.add("Guarded by a file that moved", scope="global", files=["ops/**"]),
+                                    "guard", "lib/devkit/guard_gone.py NO_SUCH_GATE", "guarded", a=A)]
+
+        result, _ = self.sleep(quiet=True)
+
+        self.assertEqual(sorted(i for k, i, _ in result["lessons"] if k == "reopen"), sorted(guarded))
+        for les in unjudged:
             self.assertEqual(lessons.find(les["meta"]["id"])["meta"]["status"], "prevented")
 
 
