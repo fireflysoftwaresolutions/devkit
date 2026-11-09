@@ -2,14 +2,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # `dev lesson` as a terminal runs it: lint lists the anchors to fix by kind, eval says whether recall showed a lesson
 # before each repeat, supersede and release change a lesson's place in recall, add refuses a second lesson for the same
-# mistake unless `--new` says why and points devkit's own friction to the bug registry, review shows what reached
+# mistake unless `--new` says why, points devkit's own friction to the bug registry and names who recorded it (the
+# crew member of the lane, the tech lead, or the developer by their git name), review shows what reached
 # agents and what to act on, and prevent turns a lesson into a lesson rule the guard enforces. Each test drives cli.main
 # in a checkout of its own, over a temporary handoff repository and devkit state.
 # Tests carry comments, not docstrings (`dev test prove` leaves out tests with one).
 # Run: python3 -m unittest tests.test_lessons_cli
 import contextlib
 import io
+import json
 import os
+import shlex
 import subprocess
 import sys
 import time
@@ -20,6 +23,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from devkit import audit, cli, core, lessonevents, lessonrules, lessons  # noqa: E402
+from devkit import progress as pg  # noqa: E402
 from test_lessons_base import A, LessonCase  # noqa: E402
 
 SID = "4f2a9c1d-7b3e-4c55-9a0e-1d2c3b4a5f60"
@@ -220,6 +224,57 @@ class AddTests(LessonCLI):
                            "--error", "IndexError: list index out of range")
         self.assertEqual(rc, 0, out)
         self.assertNotIn("dev bug report", out)
+
+
+class AuthorTests(LessonCLI):
+    # Who recorded a lesson, as recall names it: the crew member whose lane runs `dev lesson add` (found the way the
+    # hooks record its call), the tech lead in the main agent session, or the developer by their git name in a
+    # terminal. A run in this session has a lane for the DevEx engineer (Kid).
+    def setUp(self):
+        super().setUp()
+        state = self.root / "state"
+        for name, value in (("RUNS", state / "runs"), ("SESSIONS", state / "sessions"), ("CALLS", state / "calls")):
+            p = mock.patch.object(pg, name, value)
+            p.start()
+            self.addCleanup(p.stop)
+        pg.RUNS.mkdir(parents=True)
+        (pg.RUNS / f"claude-{SID}.json").write_text(json.dumps({
+            "v": 2, "agent": "claude", "session": SID, "goal": "Hotfix", "state": "running", "intervals": [],
+            "plan": [], "agents": {"a_kid": {"persona": "Kid", "state": "running", "parent": "main"}}}))
+        agent_env = {k: v for k, v in os.environ.items() if k not in core.AGENT_MARKERS}
+        self.env = dict(agent_env, CLAUDECODE="1", DEVKIT_SESSION=f"claude:{SID}")
+        gitconfig = self.root / "gitconfig"
+        gitconfig.write_text("[user]\n\tname = Ana Pérez\n")
+        p = mock.patch.dict(core.GIT_ENV, {"GIT_CONFIG_GLOBAL": str(gitconfig), "GIT_CONFIG_NOSYSTEM": "1"})
+        p.start()
+        self.addCleanup(p.stop)
+
+    def add_as(self, caller, developer=False, env=None):
+        # `dev lesson add` as the shell call of `caller` (a lane's agent id, or main) that the hooks hold in the call
+        # ledger while it runs; `developer`: run in the developer's own terminal instead
+        argv = ["lesson", "add", "Wait for the database before the migration", *WHY, "--happened", "it timed out",
+                "--error", "connection to the database timed out"]
+        calls = pg.CALLS / SID
+        calls.mkdir(parents=True, exist_ok=True)
+        (calls / "toolu_1.json").write_text(json.dumps({"tool_use_id": "toolu_1", "caller": caller,
+                                                        "ts": time.time(), "ttl": 3600, "cmd": "dev " + " ".join(
+                                                            shlex.quote(x) for x in argv)}))
+        with mock.patch.dict(os.environ, env if env is not None else self.env, clear=True), \
+                mock.patch.object(sys, "argv", ["dev", *argv]), \
+                mock.patch.object(core, "set_by_developer", lambda *a, **k: developer):
+            rc, out = self.dev(*argv[1:])
+        self.assertEqual(rc, 0, out)
+        return lessons.recorded_by(lessons.all_lessons("acme/api")[0])
+
+    def test_a_lesson_a_crew_member_adds_names_its_role_and_name(self):
+        self.assertEqual(self.add_as("a_kid"), "DevEx engineer (Kid)")
+
+    def test_a_lesson_the_main_agent_session_adds_names_the_tech_lead(self):
+        self.assertEqual(self.add_as("main"), "Tech lead (Morpheus)")
+
+    def test_a_lesson_the_developer_adds_in_a_terminal_names_them_by_their_git_name(self):
+        terminal = {k: v for k, v in self.env.items() if k not in core.AGENT_MARKERS}
+        self.assertEqual(self.add_as("main", developer=True, env=terminal), "Ana Pérez")
 
 
 class ReviewTests(LessonCLI):

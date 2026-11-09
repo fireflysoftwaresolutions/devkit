@@ -2437,6 +2437,27 @@ def _lesson_anchors(a) -> dict:
             "stack": getattr(a, "stack", None) or []}
 
 
+def _lesson_author() -> str:
+    """Who records a lesson, as recall names it: the developer by their git user name in their own terminal; the
+    crew member whose lane runs the command, as `<Role> (<Name>)` (its lane as `dev commit` finds it: DEVKIT_FROM_AGENT,
+    else the call the hooks hold); the tech lead in an agent's main session. '' when it cannot be told (a script, or
+    a lane the run does not know): the lesson then names the agent or the user and host, as before."""
+    if core.set_by_developer():
+        return core.gitout(Path.home(), "config", "--get", "user.name", timeout=10).strip()
+    from . import crew, progress, work
+    try:
+        aid = progress._as_lane(os.environ.get("DEVKIT_FROM_AGENT") or None)
+        if aid:
+            _, lane = progress.lane_of(*progress.current_session(), aid)
+            mem = crew._for_lane(lane) if lane else None
+            return crew.who(mem) if mem else ""
+    except (OSError, ValueError) as e:  # a busy run record too (StateBusy): who wrote it never stops the lesson
+        print(ui.dim(f"  could not tell which crew lane runs this ({type(e).__name__}): the lesson names the agent"),
+              file=sys.stderr)
+        return ""
+    return crew.who("main") if work.actor()["agent"] != "human" else ""
+
+
 def _lesson_scoped(a) -> bool:
     """Did the command name a scope (-p, -i or --global)? Without one, `dev lesson lint` checks every scope."""
     return bool(getattr(a, "project", None) or getattr(a, "initiative", None) or getattr(a, "global_", False))
@@ -2670,7 +2691,8 @@ def cmd_lesson(a):
             les = lessons.add(scope, " ".join(a.title), kind=a.kind, severity=a.severity, happened=a.happened or "",
                               cause=a.cause or "", fix=a.fix or "", prevention=a.prevent or "",
                               detection=a.detect or "", evidence=a.evidence or [], tags=a.tag or [], why=a.why or "",
-                              retire_when=a.retire_when or "", new=a.new, **_lesson_anchors(a))
+                              retire_when=a.retire_when or "", new=a.new, author=_lesson_author(),
+                              **_lesson_anchors(a))
             print(f"{ui.OK} {les['meta']['id']} recorded in {scope} → {tilde(les['path'])}")
             if les["meta"].get("quarantine"):
                 print(f"  {ui.WARN} held, not recalled: {les['meta']['quarantine']}. Only the developer releases it: "
