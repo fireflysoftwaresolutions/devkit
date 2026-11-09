@@ -470,12 +470,20 @@ def _manifest() -> Path:
     return core.STATE / "trash.jsonl"
 
 
+MANIFEST_WAIT = 30.0  # seconds an append waits for `dev sleep`, which rewrites the manifest under the same lock
+
+
 def _record(entries):
+    """Append `entries` to the manifest under its lock (core.file_lock): `dev sleep` trims it under the same lock, so
+    a record is never written into a copy the trim is about to replace. Raises OSError when the lock stays busy."""
     f = _manifest()
     f.parent.mkdir(parents=True, exist_ok=True)
-    with f.open("a") as fh:
-        for e in entries:
-            fh.write(json.dumps(e, ensure_ascii=False, sort_keys=True) + "\n")
+    with core.file_lock(f, MANIFEST_WAIT) as got:
+        if not got:
+            raise OSError(f"{core.tilde(f)} stayed locked for {MANIFEST_WAIT:.0f} s, so this run is not recorded: "
+                          "`dev rm --undo` cannot restore it (the items are in the Trash)")
+        with f.open("a") as fh:
+            fh.write("".join(json.dumps(e, ensure_ascii=False, sort_keys=True) + "\n" for e in entries))
 
 
 def _history() -> list:

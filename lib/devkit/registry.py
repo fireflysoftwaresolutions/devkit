@@ -3,10 +3,12 @@
 """Project discovery and inspection, the projects map and the per-project handoff notes."""
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
 import socket
+import threading
 import time
 from pathlib import Path
 
@@ -344,7 +346,7 @@ def prs(slug: str, refresh=False, max_age=900):
     if rc != 0:
         return read_json(f) if f.exists() else None
     f.parent.mkdir(parents=True, exist_ok=True)
-    f.write_text(out)
+    core.replace_text(f, out)  # whole: a reader in another process never takes a half-written cache for none
     return json.loads(out or "[]")
 
 
@@ -487,31 +489,48 @@ def pr_fresh(slug: str, branch: str):
 # --------------------------------------------------------------------------- sizes
 
 
-def sizes(paths, refresh=False, max_age=3600) -> dict:
+SIZES_WAIT = 10.0  # seconds a size measurement waits to be stored; then it is not kept (measured again later)
+
+
+def _store_sizes(measured: dict, prune: bool):
+    """Add `measured` ({path: [KB, when]}) to the size cache: read, merged and replaced under the cache's lock, so
+    sizes stored by other processes meanwhile are kept. With `prune`, paths that no longer exist leave it. -> the
+    cache as written, or None when another process kept the lock."""
     cache_f = STATE / "cache" / "sizes.json"
-    cache = read_json(cache_f, {}) or {}
+    with core.file_lock(cache_f, SIZES_WAIT) as got:
+        if not got:
+            return None
+        cache = read_json(cache_f, {}) or {}
+        cache.update(measured)
+        if prune:
+            cache = {k: v for k, v in cache.items() if os.path.exists(k)}
+        cache_f.parent.mkdir(parents=True, exist_ok=True)
+        write_if_changed(cache_f, json.dumps(cache))
+        return cache
+
+
+def sizes(paths, refresh=False, max_age=3600) -> dict:
+    """{path: KB} of `paths`, from the cache when its size is younger than `max_age` seconds, else measured (du,
+    which can take minutes: outside the cache's lock)."""
+    cache = read_json(STATE / "cache" / "sizes.json", {}) or {}
     now = time.time()
+    measured = {}
     for p in paths:
         hit = cache.get(p)
         if refresh or not hit or now - hit[1] > max_age:
             kb = core.du_kb(p, exclude="worktrees")
             if kb is not None:
-                cache[p] = [kb, now]
-    cache = {k: v for k, v in cache.items() if os.path.exists(k)}
-    cache_f.parent.mkdir(parents=True, exist_ok=True)
-    cache_f.write_text(json.dumps(cache))
+                measured[p] = [kb, now]
+    stored = _store_sizes(measured, prune=True)
+    cache = stored if stored is not None else {**cache, **measured}
     return {p: cache.get(p, [None, None])[0] for p in paths}
 
 
 def remember_sizes(measured: dict, now: float = None):
     """Store sizes measured elsewhere (`dev du`) in the same cache, so `dev ls`, the dashboard and `dev du` show the
     same numbers. `measured`: {path: KB}."""
-    cache_f = core.STATE / "cache" / "sizes.json"
-    cache = read_json(cache_f, {}) or {}
     now = now or time.time()
-    cache.update({p: [kb, now] for p, kb in measured.items() if kb is not None})
-    cache_f.parent.mkdir(parents=True, exist_ok=True)
-    cache_f.write_text(json.dumps(cache))
+    _store_sizes({p: [kb, now] for p, kb in measured.items() if kb is not None}, prune=False)
 
 
 # --------------------------------------------------------------------------- registry
@@ -890,11 +909,26 @@ def _short(pid: str) -> str:
     return pid.rsplit("/", 1)[-1]
 
 
+ALIASES_WAIT = 30.0  # seconds an alias change waits for another process changing the alias file
+
+
+@contextlib.contextmanager
+def _aliases_lock():
+    """The alias file's lock (core.file_lock), held from the read of the aliases to the commit of the change, so
+    aliases set at the same moment are all kept. Raises AliasError when another process keeps it."""
+    with core.file_lock(aliases_file(), ALIASES_WAIT) as got:
+        if not got:
+            raise AliasError(f"another devkit process kept {tilde(aliases_file())} locked for {ALIASES_WAIT:.0f} s; "
+                             "nothing changed, run the command again.")
+        yield
+
+
 def _save_aliases(aliases: dict, message: str):
+    """Write the aliases and commit them; the caller holds _aliases_lock from its read of them."""
     f = aliases_file()
     f.parent.mkdir(parents=True, exist_ok=True)
-    f.write_text(json.dumps({"version": 1, "aliases": dict(sorted(aliases.items()))}, indent=2,
-                            ensure_ascii=False) + "\n")
+    core.replace_text(f, json.dumps({"version": 1, "aliases": dict(sorted(aliases.items()))}, indent=2,
+                                    ensure_ascii=False) + "\n")
     from . import work
     work._commit([f], message)
 
@@ -910,36 +944,38 @@ def set_alias(alias: str, pid: str, projects, move: bool = False, by: str = None
     known = {p["id"]: p for p in projects}
     if pid not in known:
         raise AliasError(f"no project “{pid}”: dev ls --all lists them.")
-    explicit = load_aliases()
-    amap = alias_map(projects, explicit)
-    owner = next((q for q, x in amap.items() if x == a and q != pid), "")
-    if owner and a not in explicit:
-        raise AliasError(f"“{a}” is the repository name of {owner}. Pick another alias.")
-    if owner and not move:
-        raise AliasError(f"“{a}” is already the alias of {_short(owner)}. Pick another, or move it: "
-                         f"dev alias {a} {amap.get(pid, pid)} --move.")
-    clash = next((q for q in known.values() if q["id"] != pid and (q.get("name") or "").lower() == a), None)
-    if clash and (known[pid].get("name") or "").lower() != a:
-        raise AliasError(f"“{a}” is the repository name of {clash['id']}. Pick another alias.")
-    for old, rec in list(explicit.items()):
-        if rec["project"] == pid or old == a:
-            explicit.pop(old)
     from . import work
-    explicit[a] = {"project": pid, "by": by or core.github_user() or os.environ.get("USER", ""),
-                   "at": time.strftime("%Y-%m-%d")}
-    _save_aliases(explicit, f"alias: {a} → {pid} ({work.actor_str(work.actor())})")
+    by = by or core.github_user() or os.environ.get("USER", "")
+    with _aliases_lock():
+        explicit = load_aliases()
+        amap = alias_map(projects, explicit)
+        owner = next((q for q, x in amap.items() if x == a and q != pid), "")
+        if owner and a not in explicit:
+            raise AliasError(f"“{a}” is the repository name of {owner}. Pick another alias.")
+        if owner and not move:
+            raise AliasError(f"“{a}” is already the alias of {_short(owner)}. Pick another, or move it: "
+                             f"dev alias {a} {amap.get(pid, pid)} --move.")
+        clash = next((q for q in known.values() if q["id"] != pid and (q.get("name") or "").lower() == a), None)
+        if clash and (known[pid].get("name") or "").lower() != a:
+            raise AliasError(f"“{a}” is the repository name of {clash['id']}. Pick another alias.")
+        for old, rec in list(explicit.items()):
+            if rec["project"] == pid or old == a:
+                explicit.pop(old)
+        explicit[a] = {"project": pid, "by": by, "at": time.strftime("%Y-%m-%d")}
+        _save_aliases(explicit, f"alias: {a} → {pid} ({work.actor_str(work.actor())})")
     return owner
 
 
 def remove_alias(alias: str) -> str:
     """Remove an alias the team set: the project gets its repository name back. -> its project id."""
     a = (alias or "").strip().lower()
-    explicit = load_aliases()
-    if a not in explicit:
-        raise AliasError(f"“{a}” is not an alias anyone set (dev alias lists them); a repository name stays.")
-    pid = explicit.pop(a)["project"]
     from . import work
-    _save_aliases(explicit, f"alias: remove {a} from {pid} ({work.actor_str(work.actor())})")
+    with _aliases_lock():
+        explicit = load_aliases()
+        if a not in explicit:
+            raise AliasError(f"“{a}” is not an alias anyone set (dev alias lists them); a repository name stays.")
+        pid = explicit.pop(a)["project"]
+        _save_aliases(explicit, f"alias: remove {a} from {pid} ({work.actor_str(work.actor())})")
     return pid
 
 
@@ -1163,7 +1199,50 @@ def migrate_note_tasks(scope: str, f: Path) -> bool:
     return True
 
 
+_NOTES = threading.local()  # per thread: how deep its holds of the notes lock go
+
+
+@contextlib.contextmanager
+def notes_lock(wait: float = 30.0):
+    """The lock every writer of a handoff note or initiative README takes around its read and its write (the one
+    core.Lock("notes") takes), reentrant within a thread: `dev sync` holds it around its note writes, which take it
+    again without waiting for themselves. -> whether it is held (False after `wait` seconds: another process kept
+    it)."""
+    if getattr(_NOTES, "depth", 0):
+        _NOTES.depth += 1
+        try:
+            yield True
+        finally:
+            _NOTES.depth -= 1
+        return
+    with core.Lock("notes", wait=wait) as got:
+        if not got:
+            yield False
+            return
+        _NOTES.depth = 1
+        try:
+            yield True
+        finally:
+            _NOTES.depth = 0
+
+
+def _note_wait() -> float:
+    """Seconds a note write waits for the notes lock: state.WAIT, 10 in a `dev` command and 2 in a hook."""
+    from . import state
+    return state.WAIT
+
+
 def update_note(p: dict, create=True) -> bool:
+    """Write the project's note again with its generated blocks (tasks, auto) brought up to date. -> whether it
+    changed. The read and the write hold the notes lock, so an embargo or a `dev note set` written meanwhile by
+    another process is never written over; while another process keeps the lock the note is left as it is (the next
+    session start or sync writes it) and False is returned."""
+    migrate_note_tasks(p["id"], note_path(p["id"]))  # first, outside the lock: it commits work items, never the note
+    with notes_lock(_note_wait()) as got:
+        return _update_note(p, create) if got else False
+
+
+def _update_note(p: dict, create: bool) -> bool:
     f = note_path(p["id"])
     if not f.exists():
         if not create:
@@ -1171,7 +1250,6 @@ def update_note(p: dict, create=True) -> bool:
         text = notesmod.new_note(p["id"])
     else:
         text = notesmod.ensure_structure(f.read_text(), p["id"])
-    migrate_note_tasks(p["id"], f)
     block = render_tasks_block(p["id"])
     if TASKS_START in text and TASKS_END in text:
         pre, rest = text.split(TASKS_START, 1)
@@ -1198,7 +1276,13 @@ def update_note(p: dict, create=True) -> bool:
 
 
 def add_session_line(pid: str, line: str, key: str) -> bool:
-    """Insert (or replace, by session key) a line at the top of the note's session log."""
+    """Insert (or replace, by session key) a line at the top of the note's session log, under the notes lock (see
+    update_note). -> whether the note changed."""
+    with notes_lock(_note_wait()) as got:
+        return _add_session_line(pid, line, key) if got else False
+
+
+def _add_session_line(pid: str, line: str, key: str) -> bool:
     f = note_path(pid)
     if not f.exists():
         return False
@@ -1312,6 +1396,13 @@ def render_activity(reg: dict, days: int = 30) -> str:
 
 
 def write_outputs(reg: dict) -> list:
+    """Write the notes, the initiatives' task blocks and the generated maps of the handoff repository. -> the files
+    that changed. Holds the notes lock (a caller may hold it already); [] while another process keeps it."""
+    with notes_lock(_note_wait()) as got:
+        return _write_outputs(reg) if got else []
+
+
+def _write_outputs(reg: dict) -> list:
     changed = []
     HANDOFF.mkdir(parents=True, exist_ok=True)
     for p in reg["projects"]:

@@ -31,11 +31,17 @@ STOP_DEBOUNCE_S = 120  # session line, lock renewal and presence at most every 2
 
 
 def _log(msg: str):
+    """One line in the hooks log, under its lock (core.file_lock): `dev sleep` trims the log under the same lock,
+    so a line is never written into a copy the trim is about to replace. A lock still busy after HOOK_WAIT seconds
+    drops the line, as a write error does: logging never fails a hook."""
     try:
         d = STATE / "logs"
         d.mkdir(parents=True, exist_ok=True)
-        with (d / "hooks.log").open("a") as f:
-            f.write(f"{core.fmt_ts(time.time())} {msg}\n")
+        log = d / "hooks.log"
+        with core.file_lock(log, state.HOOK_WAIT) as got:
+            if got:
+                with log.open("a") as f:
+                    f.write(f"{core.fmt_ts(time.time())} {msg}\n")
     except OSError:
         pass
 

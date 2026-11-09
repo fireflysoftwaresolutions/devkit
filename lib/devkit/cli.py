@@ -1550,7 +1550,7 @@ def cmd_sync(a):
         except OSError:
             pass
     if a.session:
-        with core.Lock("notes", wait=60):
+        with registry.notes_lock(wait=60):  # reentrant: the note writes inside take it again
             hooks.record_session(a.session)
     with core.Lock("sync", wait=300 if (a.session or a.scheduled) else 10) as ok:
         if not ok:
@@ -1626,7 +1626,7 @@ def cmd_sync(a):
         except Exception as e:
             if not a.quiet:
                 ui.warn(f"work items: {e}")
-        with core.Lock("notes", wait=60):
+        with registry.notes_lock(wait=60):  # reentrant: write_outputs and update_note take it again
             changed = registry.write_outputs(reg)
         try:
             from . import dashboard

@@ -70,33 +70,76 @@ def hygiene_plan(now: float = None) -> list:
         plan.append(("hooks-log", log, "hooks log over 5 MB (keep the newest 1 MB)"))
     trash = STATE / "trash.jsonl"
     if trash.exists():
-        old = [ln for ln in trash.read_text().splitlines() if ln.strip() and
-               now - (json.loads(ln).get("ts") or now) > 90 * 86400]
+        old = [ln for ln in trash.read_text().splitlines() if _old_record(ln, now)]
         if old:
             plan.append(("trash-manifest", trash, f"{len(old)} dev rm records older than 90 days"))
     return plan
+
+
+TRASH_DAYS = 90  # dev rm records older than this leave the manifest
+HOOKS_LOG_KEEP = 1_000_000  # bytes of the hooks log a trim keeps, the newest
+LOCK_WAIT = 30.0  # seconds a trim waits for the processes appending to its log; then it waits for the next night
+
+
+def _old_record(line: str, now: float) -> bool:
+    """Whether a manifest line is a record older than TRASH_DAYS. A line that does not parse is kept: a trim never
+    drops what it cannot read."""
+    try:
+        ts = json.loads(line).get("ts")
+    except (ValueError, AttributeError):
+        return False
+    return isinstance(ts, (int, float)) and now - ts > TRASH_DAYS * 86400
+
+
+def _trim_log(f: Path, what: str, now: float):
+    """Rewrite one of the logs that other processes append to, under the lock its appenders take (core.file_lock:
+    hooks._log for the hooks log, fs._record for the dev rm manifest), so no line lands in the copy being replaced;
+    then replace it whole. A lock still busy after LOCK_WAIT seconds leaves the log for the next night."""
+    with core.file_lock(f, LOCK_WAIT) as got:
+        if not got or not f.exists():
+            return
+        if what == "hooks-log":
+            data = f.read_bytes()
+            if len(data) > HOOKS_LOG_KEEP:
+                data = data[-HOOKS_LOG_KEEP:]
+                data = data[data.find(b"\n") + 1:]  # the first line kept may start mid-line
+            text = data.decode("utf-8", "replace")
+        else:
+            text = "".join(ln + "\n" for ln in f.read_text().splitlines() if ln.strip() and not _old_record(ln, now))
+        core.replace_text(f, text)
+
+
+def _drop_presence(files: list):
+    """Remove the presence files of machines that went quiet, in one commit of the handoff repository, while
+    holding devkit's lock on its git work (work._repo_lock): a commit made during another process's pull lands on
+    the rebase's detached HEAD and is lost. Busy: the files wait for the next night."""
+    from . import work
+    with work._repo_lock() as got:
+        if not got:
+            return
+        work.recover_rebase("dev sleep")  # a rebase left stopped is aborted first, as before every commit
+        for f in files:
+            core.git(core.HANDOFF, "rm", "-q", "--cached", str(f))
+            try:
+                f.unlink()
+            except OSError:
+                pass
+        core.git(core.HANDOFF, "commit", "-q", "-m", "sleep: presence of machines quiet for 14 days removed")
 
 
 def apply_hygiene(plan: list, now: float = None):
     now = now or time.time()
     for what, f, _ in plan:
         try:
-            if what == "hooks-log":
-                data = f.read_bytes()[-1_000_000:]
-                f.write_bytes(data[data.find(b"\n") + 1:])
-            elif what == "trash-manifest":
-                keep = [ln for ln in f.read_text().splitlines() if ln.strip() and
-                        now - (json.loads(ln).get("ts") or now) <= 90 * 86400]
-                f.write_text("".join(ln + "\n" for ln in keep))
-            elif what == "presence":
-                core.git(core.HANDOFF, "rm", "-q", "--cached", str(f))
-                f.unlink()
-            else:
+            if what in ("hooks-log", "trash-manifest"):
+                _trim_log(f, what, now)
+            elif what != "presence":
                 f.unlink()
         except OSError:
             pass
-    if any(w == "presence" for w, _, _ in plan):
-        core.git(core.HANDOFF, "commit", "-q", "-m", "sleep: presence of machines quiet for 14 days removed")
+    presence = [f for w, f, _ in plan if w == "presence"]
+    if presence:
+        _drop_presence(presence)
 
 
 EVENTS_KEEP_DAYS = 45  # lesson outcome events older than this leave the log, once folded into the usage counts
@@ -195,9 +238,9 @@ def run(dry_run: bool = False, quiet: bool = False, now: float = None) -> dict:
         except Exception as e:  # never let the bug records break the night's consolidation
             if not quiet:
                 print(ui.dim(f"  bug records: {e}"))
-        LAST.parent.mkdir(parents=True, exist_ok=True)
-        LAST.write_text(json.dumps({"ts": int(now), "lessons": acts and [list(a) for a in acts], "hygiene": len(plan),
-                                    "counts": counts, "errors": errors}))
+        LAST.parent.mkdir(parents=True, exist_ok=True)  # replaced whole: due() in another process never reads a part
+        core.replace_text(LAST, json.dumps({"ts": int(now), "lessons": acts and [list(a) for a in acts],
+                                            "hygiene": len(plan), "counts": counts, "errors": errors}))
         if acts or plan or pruned or errors:
             from . import gc
             gc._log(f"sleep · lessons: {_counted(counts)} · events: {counts['folded']} folded, {counts['pruned']} "
