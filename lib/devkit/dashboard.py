@@ -647,8 +647,19 @@ def read_session_log(handoff: Path, months: int = 2, limit: int = 1500) -> list:
     return out[:limit]
 
 
-def read_plans(handoff: Path) -> list:
-    """Versioned plans and specs (<handoff>/plans/<scope>/*.md)."""
+def plan_home(folder: str, homes) -> tuple:
+    """(home, group) of a plan stored in plans/<folder>/: the longest of `homes` (project ids, "initiatives/<id>")
+    that is the folder or holds it, and the sub-folder below that home ("" for a plan at its top). A folder no home
+    holds is its own home, so its plans stay where they were."""
+    home = max((x for x in homes if folder == x or folder.startswith(x + "/")), key=len, default=folder)
+    return home, folder[len(home) + 1:]
+
+
+def read_plans(handoff: Path, homes=()) -> list:
+    """Versioned plans and specs (<handoff>/plans/<scope>/**/*.md), list metadata only: the page opens a body on demand.
+
+    A plan in a sub-folder of a project's or an initiative's plans folder (plans/<project>/product/spec.md) belongs to
+    that page: `home` is the project or initiative (one of `homes`), `group` the sub-folder the page groups it under."""
     from . import plans as plansmod
     base = Path(handoff) / "plans"
     out = []
@@ -658,7 +669,9 @@ def read_plans(handoff: Path) -> list:
         except OSError:
             continue
         title = meta.get("title") or next((ln[2:].strip() for ln in body.splitlines() if ln.startswith("# ")), f.stem)
-        out.append({"scope": meta.get("scope") or str(f.parent.relative_to(base)), "id": meta.get("id") or "", "title": title,
+        home, group = plan_home(f.parent.relative_to(base).as_posix(), homes)
+        out.append({"scope": meta.get("scope") or str(f.parent.relative_to(base)), "home": home, "group": group,
+                    "id": meta.get("id") or "", "title": title,
                     "status": meta.get("status") or "unversioned", "version": meta.get("version") or "",
                     "updated": meta.get("updated") or "", "updated_by": meta.get("updated_by") or "",
                     "needs_revision": plansmod.needs_revision(f), "changelog": log[:20],
@@ -1474,7 +1487,8 @@ def collect(reg: dict, handoff: Path = None, now: float = None) -> dict:
         "team": team,
         "people": ppl,
         "session_log": slog,
-        "plans": read_plans(handoff),
+        "plans": read_plans(handoff, [p.get("id") for p in reg.get("projects", []) if p.get("id")]
+                            + ["initiatives/" + i["id"] for i in reg.get("initiatives") or [] if isinstance(i, dict) and i.get("id")]),
         "collisions": colls,
         "since": now_areas["since"],
         "safety": now_areas["safety"],
