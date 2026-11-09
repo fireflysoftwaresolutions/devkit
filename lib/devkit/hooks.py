@@ -1036,8 +1036,8 @@ def stop(agent: str):
     data = _stdin_json()
     from . import canary
     if agent == "codex":  # the turn's commands whose rollout record came after their PostToolUse get their ledger line
-        try:
-            _codex_settle(agent, data)
+        try:  # only the line: Stop cannot give the agent the root-cause paragraph, so the next failure counts it
+            _codex_settle(agent, data, loop=False)
         except Exception as e:
             _swallowed("stop", e)
     sid = data.get("session_id") or "-"
@@ -1901,10 +1901,12 @@ def _codex_defer(data: dict):
     state.update(_codex_pending(sid), lambda d: d.update(calls=(d.get("calls") or [])[-49:] + [keep]))
 
 
-def _codex_settle(agent: str, data: dict) -> str:
+def _codex_settle(agent: str, data: dict, loop: bool = True) -> str:
     """The session's deferred Codex commands (_codex_defer) whose CommandExecution item is in their rollout now get
     their ledger line; a failure counts toward the patch-loop stop, whose root-cause paragraph comes back when it is
-    due. One still missing after CODEX_SETTLE_S leaves with no line and a hooks.log entry. -> the context to give."""
+    due. `loop` False (Stop, which has no context to give): the ledger lines only, so the agent is not marked told
+    and no lesson counts as shown; the next failure counts the streak from the ledger. One still missing after
+    CODEX_SETTLE_S leaves with no line and a hooks.log entry. -> the context to give."""
     sid = str(data.get("session_id") or "")
     f = _codex_pending(sid) if sid else None
     if not f or not f.exists():
@@ -1929,7 +1931,7 @@ def _codex_settle(agent: str, data: dict) -> str:
             continue
         keys = _call_keys(c, outcome)
         _output_bugs(agent, c, outcome, keys)
-        if not outcome and _patch_loop(agent, c, keys):
+        if loop and not outcome and _patch_loop(agent, c, keys):
             found = _recall_quietly(agent, c)
             try:
                 _shown(c, [x["meta"]["id"] for x in found], "output")

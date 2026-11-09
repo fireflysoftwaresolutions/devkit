@@ -174,15 +174,25 @@ class CodexFailedShellTests(BugState, HookCase):
         self.assertEqual(self._ledger_ok(), [False, False])
         self.assertIn(hooks.ROOT_CAUSE_STOP, out)  # the second identical failure, counted with the settled first
 
-    def test_a_command_whose_record_comes_late_is_settled_at_stop(self):
-        self._post(1)
-        self._record(1)
+    def _stop(self):
         payload = {"cwd": str(self.root), "hook_event_name": "Stop", "model": "gpt-6.1-sol",
                    "permission_mode": "bypassPermissions", "session_id": "c1", "stop_hook_active": False,
                    "last_assistant_message": BLOCK, "transcript_path": str(self.rollout), "turn_id": "t1"}
-        with mock.patch("sys.stdin", io.StringIO(json.dumps(payload))), contextlib.redirect_stdout(io.StringIO()):
+        out = io.StringIO()
+        with mock.patch("sys.stdin", io.StringIO(json.dumps(payload))), contextlib.redirect_stdout(out):
             hooks.run("stop", "codex")
-        self.assertEqual(self._ledger_ok(), [False])
+        return out.getvalue()
+
+    def test_a_command_whose_record_comes_late_is_settled_at_stop(self):
+        self._record(1)
+        self._post(1)  # the first failure, known at once
+        self._post(2)  # the same failure again, its record not on disk yet
+        self._record(2)
+        self.assertNotIn(hooks.ROOT_CAUSE_STOP, self._stop())  # Stop writes the ledger line; it cannot tell the agent
+        self.assertEqual(self._ledger_ok(), [False, False])
+        self._record(3)
+        # the next identical failure counts the streak from the ledger, and the paragraph reaches the agent now
+        self.assertIn(hooks.ROOT_CAUSE_STOP, self._post(3))
 
     def test_a_command_never_recorded_leaves_no_ledger_line_and_is_logged(self):
         self._post(1)
