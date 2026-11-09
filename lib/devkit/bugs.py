@@ -341,6 +341,8 @@ def public_word(word: str) -> str:
     w = (word or "").strip()
     if not w:
         return ""
+    if w in ("<path>", "<program>"):
+        return w  # already public: a report built from an occurrence keeps the word its fingerprint hashed
     if "/" in w or "\\" in w or w.startswith((".", "~")):
         return "<path>"
     if w.startswith("-") or "=" in w:
@@ -486,6 +488,12 @@ def _fits(value, pattern) -> str:
     return value if isinstance(value, str) and pattern.fullmatch(value) else ""
 
 
+def _one_of(value, choices) -> bool:
+    """Whether `value` is text and one of `choices`. The type comes first: a list or an object from someone else's
+    JSON cannot be looked up in a dict or a set, so a bare `in` would raise instead of saying no."""
+    return isinstance(value, str) and value in choices
+
+
 def build_report(occ: dict) -> dict:
     """A report from an occurrence: only REPORT_KEYS, each value checked against its vocabulary or pattern. Nothing
     else in `occ` (a working folder, arguments, a message) is ever copied."""
@@ -497,20 +505,20 @@ def build_report(occ: dict) -> dict:
         "channel": install_channel(),
         "macos": mac if mac.isdigit() else "",
         "python": f"{sys.version_info[0]}.{sys.version_info[1]}",
-        "agent": occ.get("agent") if occ.get("agent") in AGENTS else "",
-        "surface": occ.get("surface") if occ.get("surface") in _surfaces() else "",
+        "agent": occ.get("agent") if _one_of(occ.get("agent"), AGENTS) else "",
+        "surface": occ.get("surface") if _one_of(occ.get("surface"), _surfaces()) else "",
         "command": _public_command(occ.get("command")),
         "exc_class": _exc_class(occ.get("exc_class")),
         "frames": _frames(occ.get("frames")),
         "refusal_id": _refusal_id(occ.get("refusal_id")),
         "word": public_word(occ.get("word") if isinstance(occ.get("word"), str) else ""),
-        "event": occ.get("event") if occ.get("event") in _hook_events() else "",
+        "event": occ.get("event") if _one_of(occ.get("event"), _hook_events()) else "",
         "exit": exit_code if isinstance(exit_code, int) and not isinstance(exit_code, bool) and 0 <= exit_code < 256
         else None,
         "duration": _duration(occ.get("duration")),
         "fingerprint": _fits(occ.get("fingerprint"), _FP_RE),
-        "impact": occ.get("impact") if occ.get("impact") in IMPACT else "blocked",
-        "kind": occ.get("kind") if occ.get("kind") in KINDS else "",
+        "impact": occ.get("impact") if _one_of(occ.get("impact"), IMPACT) else "blocked",
+        "kind": occ.get("kind") if _one_of(occ.get("kind"), KINDS) else "",
     }
 
 
@@ -795,7 +803,7 @@ def _dev_step_problems(value: str) -> list:
 
 
 _SLOT_CHECKS = {
-    "tool": lambda v: v in HINT_TOOLS,
+    "tool": lambda v: _one_of(v, HINT_TOOLS),
     "word": lambda v: isinstance(v, str) and bool(v) and public_word(v) == v,
     "dev": _dev_path_ok,
     "version": lambda v: isinstance(v, str) and bool(_HINT_VERSION_RE.fullmatch(v)),
@@ -808,6 +816,9 @@ def _step_problems(step) -> list:
     if not all(isinstance(v, str) for v in step.values()):
         return ["every value must be text"]
     out = [p for v in step.values() for p in _text_problems(v)]
+    if any(len(_written(v)) - 2 > MAX_TEXT for v in step.values()):
+        out.append(f"a value takes more than {MAX_TEXT} characters as the record writes it (@, <, > and a backtick "
+                   f"take 6, a letter outside ASCII 6 or 12)")
     if "hint" in step:
         template = HINTS.get(step["hint"])
         if template is None:
@@ -819,7 +830,7 @@ def _step_problems(step) -> list:
     elif set(step) == {"dev"}:
         out += _dev_step_problems(step["dev"])
     elif set(step) == {"text"}:
-        if not step["text"].strip() or len(step["text"]) > MAX_TEXT:
+        if not step["text"].strip():
             out.append(f"free text must have 1 to {MAX_TEXT} characters")
     else:
         out.append("a step is one of {hint, slots…}, {dev} or {text}")
@@ -878,7 +889,7 @@ def _evidence_problems(ev) -> list:
     out = [f"evidence {k} must be a count" for k in EVIDENCE_COUNTS
            if k in ev and (isinstance(ev[k], bool) or not isinstance(ev[k], int) or not 0 <= ev[k] <= 10000)]
     tools = ev.get("tools", [])
-    if not isinstance(tools, list) or len(tools) > 10 or any(t not in tool_names() for t in tools):
+    if not isinstance(tools, list) or len(tools) > 10 or not all(_one_of(t, tool_names()) for t in tools):
         out.append("evidence tools must be agent tool names")
     return out
 
@@ -888,20 +899,20 @@ def _free_text_ok(v) -> bool:
 
 
 _REPORT_CHECKS = {
-    "channel": lambda v: v in ("release", "checkout"),
+    "channel": lambda v: _one_of(v, ("release", "checkout")),
     "macos": lambda v: isinstance(v, str) and (v == "" or (v.isdigit() and len(v) <= 3)),
     "python": lambda v: isinstance(v, str) and (v == "" or re.fullmatch(r"\d\.\d{1,2}", v) is not None),
-    "agent": lambda v: v in AGENTS or v == "",
-    "surface": lambda v: v == "" or v in _surfaces(),
+    "agent": lambda v: v == "" or _one_of(v, AGENTS),
+    "surface": lambda v: v == "" or _one_of(v, _surfaces()),
     "command": lambda v: v == "" or (isinstance(v, str) and _public_command(v) == v),
     "exc_class": lambda v: v == "" or _exc_class(v) == v,
     "frames": lambda v: isinstance(v, list) and len(v) <= MAX_FRAMES and _frames(v) == v,
     "refusal_id": lambda v: v == "" or _refusal_id(v) == v,
-    "word": lambda v: v in ("", "<path>", "<program>") or (isinstance(v, str) and public_word(v) == v),
-    "event": lambda v: v == "" or v in _hook_events(),
+    "word": lambda v: isinstance(v, str) and (v == "" or public_word(v) == v),
+    "event": lambda v: v == "" or _one_of(v, _hook_events()),
     "exit": lambda v: v is None or (isinstance(v, int) and not isinstance(v, bool) and 0 <= v < 256),
     "duration": lambda v: v == "" or (isinstance(v, str) and _duration(v) == v),
-    "kind": lambda v: v in KINDS,
+    "kind": lambda v: _one_of(v, KINDS),
     "title": _free_text_ok,
     "text": _free_text_ok,
     "template": _free_text_ok,
@@ -909,13 +920,14 @@ _REPORT_CHECKS = {
 
 
 def validate_payload(obj: dict) -> list:
-    """The problems of a client payload, as error strings; [] when it is valid. Unknown fields are rejected."""
+    """The problems of a client payload, as error strings; [] when it is valid. Unknown fields are rejected. A value
+    of any JSON type in any field is a problem, never an exception: strangers write these payloads."""
     if not isinstance(obj, dict):
         return ["a payload is a JSON object"]
     if obj.get("devkit_bug") != SCHEMA_VERSION or isinstance(obj.get("devkit_bug"), bool):
         return [f"devkit_bug must be {SCHEMA_VERSION}"]
     kind = obj.get("type")
-    if kind not in PAYLOAD_TYPES:
+    if not _one_of(kind, PAYLOAD_TYPES):
         return [f"type must be one of {', '.join(PAYLOAD_TYPES)}"]
     out = [f"unknown field {k}" for k in sorted(set(obj) - _FIELDS[kind])]
     out += [f"missing field {k}" for k in sorted((_COMMON_FIELDS | _REQUIRED[kind]) - set(obj))]
@@ -923,7 +935,7 @@ def validate_payload(obj: dict) -> list:
         out.append("fingerprint must be 12 lowercase hex characters")
     if "version" in obj and not _fits(obj["version"], _HINT_VERSION_RE):
         out.append("version must look like 26.11.7")
-    if "impact" in obj and obj["impact"] not in IMPACT:
+    if "impact" in obj and not _one_of(obj["impact"], IMPACT):
         out.append(f"impact must be one of {', '.join(IMPACT)}")
     if "window" in obj and not _fits(obj["window"], _WINDOW_RE):
         out.append("window must be a day, YYYY-MM-DD")
@@ -937,6 +949,21 @@ def validate_payload(obj: dict) -> list:
         out += [f"report field {k} has a value it does not allow" for k, ok in _REPORT_CHECKS.items()
                 if k in obj and k not in _COMMON_FIELDS and not ok(obj[k])]
     return out
+
+
+_HASHED = ("exc_class", "frames", "refusal_id", "word")  # the report fields a fingerprint hashes, after its kind
+
+
+def fingerprint_matches(report: dict) -> bool:
+    """Whether a valid report's fingerprint is the one its own fields give, as the client computed it: a crash or a
+    hook failure hashes its class and frames, a guard refusal its id and word. So a report cannot take another bug's
+    fingerprint and give that bug its own title. A command that misbehaves without an error hashes nothing (its
+    fingerprint is random), so it must carry none of those fields."""
+    if report.get("kind") == "command":
+        return not any(report.get(k) for k in _HASHED)
+    return report.get("fingerprint") == fingerprint(
+        report.get("kind") or "", exc_class=report.get("exc_class") or "", frames=tuple(report.get("frames") or ()),
+        refusal_id=report.get("refusal_id") or "", word=report.get("word") or "")
 
 
 # --------------------------------------------------------------------------- the registry record
@@ -954,16 +981,27 @@ HALF_LIFE_DAYS = 14
 MAX_DETOURS = 20
 MAX_MARKS = 50
 MAX_VERSIONS = 20
+REGRESSION_ACCOUNTS = 3  # accounts outside the team whose votes on a fixed version reopen it
+VOTER_DAYS = 90  # a voter quiet this long no longer counts anywhere
+# GitHub refuses a comment over 65,536 characters, and a record it refuses freezes its bug: a rendered record stays
+# under RECORD_MAX, and past MAX_VOTERS_PER_IMPACT voters of one impact it names only the newest (fit_record)
+RECORD_MAX = 60000
+MAX_VOTERS_PER_IMPACT = 100
 _BLOCK_RE = re.compile(r"^```json\n(.*?)\n```$", re.M | re.S)
 _SUMMARY_SAFE = re.compile(r"[^A-Za-z0-9._ -]")
 _TITLE_SAFE = re.compile(r"[^A-Za-z0-9._ :-]")
 
 
-def _json_block(obj) -> str:
+def _written(obj) -> str:
+    """`obj` as JSON the way a record or a payload writes it: ASCII only, with backticks, <, > and @ as \\u escapes."""
     text = json.dumps(obj, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
     for ch, esc in (("`", "\\u0060"), ("<", "\\u003c"), (">", "\\u003e"), ("@", "\\u0040")):
         text = text.replace(ch, esc)
-    return f"```json\n{text}\n```"
+    return text
+
+
+def _json_block(obj) -> str:
+    return f"```json\n{_written(obj)}\n```"
 
 
 def _one_block(body):
@@ -974,20 +1012,103 @@ def _one_block(body):
         return None
     try:
         obj = json.loads(blocks[0])
-    except ValueError:
+    except (ValueError, RecursionError):  # nested past the parser's depth: no payload either
         return None
     return obj if isinstance(obj, dict) else None
 
 
-def render_record(rec: dict) -> str:
-    """A record as the bot's comment: a summary line for people, the marker, and one escaped JSON block."""
+def _render(rec: dict) -> str:
     def safe(v):
         return _SUMMARY_SAFE.sub("", str(v if v is not None else ""))[:40]
-    people = len(rec.get("voters") or {})
+    people = sum(n for _, _, n in _tallies(rec))
     summary = (f"**Bug {safe(rec.get('fingerprint'))}** · {safe(rec.get('kind'))} · {safe(rec.get('component'))} · "
                f"{people} {'person' if people == 1 else 'people'} · score {float(rec.get('score') or 0):.1f} · "
                f"{safe(rec.get('status'))}" + (f" · fixed in {safe(rec['fixed_in'])}" if rec.get("fixed_in") else ""))
     return f"{summary}\n\n{RECORD_MARK}\n{_json_block(rec)}"
+
+
+def render_record(rec: dict) -> str:
+    """A record as the bot's comment: a summary line for people, the marker, and one escaped JSON block. Never more
+    than RECORD_MAX characters: a record that would be longer is fitted first (fit_record), as of its last vote."""
+    body = _render(rec)
+    if len(body) <= RECORD_MAX:
+        return body
+    last = rec.get("last_seen")
+    return _render(fit_record(rec, last if _is_ts(last) else 0.0))
+
+
+def _is_ts(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _tallies(rec: dict):
+    """(impact, ts, people) for each voter a record names, and for each impact's voters it keeps only as a total
+    (`older_voters`: how many, and the mean time of their votes)."""
+    voters = rec.get("voters")
+    for v in (voters.values() if isinstance(voters, dict) else ()):
+        if isinstance(v, dict) and _one_of(v.get("impact"), IMPACT) and _is_ts(v.get("ts")):
+            yield v["impact"], v["ts"], 1
+    older = rec.get("older_voters")
+    for k, t in (older.items() if isinstance(older, dict) else ()):
+        if _one_of(k, IMPACT) and isinstance(t, dict) and _is_ts(t.get("ts")) and isinstance(t.get("n"), int) \
+                and not isinstance(t.get("n"), bool) and t["n"] > 0:
+            yield k, t["ts"], t["n"]
+
+
+def _keep_newest_voters(rec: dict, keep: int) -> None:
+    """Keep by name the `keep` newest voters of each impact; the others join that impact's total in `older_voters`,
+    so they still count in the score and in how many people a bug hit. A flood of minor votes never pushes out a
+    blocked voter."""
+    voters, older = rec["voters"], rec.setdefault("older_voters", {})
+    for k in IMPACT:
+        mine = sorted((h for h, v in voters.items() if v["impact"] == k), key=lambda h: (voters[h]["ts"], h),
+                      reverse=True)
+        for h in mine[keep:]:
+            t = older.get(k) or {"n": 0, "ts": 0.0}
+            n = t["n"] + 1
+            older[k] = {"n": n, "ts": round((t["ts"] * t["n"] + voters.pop(h)["ts"]) / n, 1)}
+    if not older:
+        del rec["older_voters"]
+
+
+def fit_record(rec: dict, now: float, limit: int = RECORD_MAX) -> dict:
+    """The record made to fit in `limit` characters once rendered, without changing `rec`. While it does not fit, it
+    drops in this order: voters (and totals) quiet for VOTER_DAYS; all but the newest MAX_VOTERS_PER_IMPACT voters of
+    each impact by name, kept as totals that still count; the steps of retired detours, which are never served; the
+    detours' marks from outside the team, which never change a detour's trust (a flagged detour stays flagged); then
+    fewer voters by name, halving down to none. What is left is what the team posted and fixed-size fields, so
+    nothing an account outside the team posts can make a record GitHub refuses."""
+    rec = json.loads(json.dumps(rec))
+
+    def fits() -> bool:
+        return len(_render(rec)) <= limit
+    if fits():
+        return rec
+    cut = now - VOTER_DAYS * 86400
+    voters = rec.get("voters") if isinstance(rec.get("voters"), dict) else {}
+    rec["voters"] = {h: {"impact": v["impact"], "ts": v["ts"]} for h, v in voters.items() if isinstance(v, dict)
+                     and _one_of(v.get("impact"), IMPACT) and _is_ts(v.get("ts")) and v["ts"] >= cut}
+    totals = {k: {"n": n, "ts": ts} for k, ts, n in _tallies({"older_voters": rec.pop("older_voters", None)})
+              if ts >= cut}
+    if totals:
+        rec["older_voters"] = totals
+    keep = MAX_VOTERS_PER_IMPACT
+    if not fits():
+        _keep_newest_voters(rec, keep)
+    detours = [d for d in rec.get("detours") or [] if isinstance(d, dict)]
+    if not fits():
+        for d in detours:
+            if trust_of(d, d.get("confirmations")) == "retired":
+                d["steps"] = []
+    if not fits():
+        for d in detours:
+            for marks in ("confirmations", "failures"):
+                d[marks] = [m for m in d.get(marks) or [] if isinstance(m, dict) and _one_of(m.get("author_assoc"),
+                                                                                             TRUSTED)]
+    while not fits() and keep:
+        keep //= 2
+        _keep_newest_voters(rec, keep)
+    return rec
 
 
 def parse_record(body: str):
@@ -1041,23 +1162,28 @@ def component_of(report: dict) -> str:
     return frame.rsplit(".", 1)[0] if frame else str(report.get("kind") or "")
 
 
+def _hash_of(mark: dict) -> str:
+    h = mark.get("author_hash")
+    return h if isinstance(h, str) else ""
+
+
 def trust_of(detour: dict, confirmations: list) -> str:
     """`retired` when members' failure marks outnumber trusted confirmations; `verified` when an OWNER or MEMBER
     other than the author confirmed it; `team` when every step is a hint, the author is OWNER or MEMBER and evidence
     is present; else `proposed`."""
     author = detour.get("author_hash")
     confirmed = {c.get("author_hash") for c in confirmations or []
-                 if isinstance(c, dict) and c.get("author_assoc") in TRUSTED and c.get("author_hash")
+                 if isinstance(c, dict) and _one_of(c.get("author_assoc"), TRUSTED) and _hash_of(c)
                  and c.get("author_hash") != author}
     failed = {f.get("author_hash") for f in detour.get("failures") or []
-              if isinstance(f, dict) and f.get("author_assoc") in TRUSTED and f.get("author_hash")}
+              if isinstance(f, dict) and _one_of(f.get("author_assoc"), TRUSTED) and _hash_of(f)}
     if len(failed) > len(confirmed):
         return "retired"
     if confirmed:
         return "verified"
     steps = detour.get("steps") or []
     if steps and all(isinstance(s, dict) and "hint" in s for s in steps) and \
-            detour.get("author_assoc") in TRUSTED and detour.get("evidence"):
+            _one_of(detour.get("author_assoc"), TRUSTED) and detour.get("evidence"):
         return "team"
     return "proposed"
 
@@ -1065,14 +1191,13 @@ def trust_of(detour: dict, confirmations: list) -> str:
 def score(rec: dict, now: float) -> float:
     """Each voter of the last 30 days counts with the weight of their worst impact (blocked 3, detoured 1, minor
     0.3), halved every 14 days since their vote; crashes and hook failures on the paths every session runs (hooks,
-    dev progress, dev commit) count 1.5 times."""
+    dev progress, dev commit) count 1.5 times. Voters a long record keeps only as a total count as that many votes
+    at their mean time."""
     total = 0.0
-    for v in (rec.get("voters") or {}).values():
-        if not isinstance(v, dict) or not isinstance(v.get("ts"), (int, float)) or v.get("impact") not in IMPACT:
-            continue
-        age = max(0.0, now - v["ts"]) / 86400
+    for impact, ts, n in _tallies(rec):
+        age = max(0.0, now - ts) / 86400
         if age <= WINDOW_DAYS:
-            total += IMPACT[v["impact"]] * 0.5 ** (age / HALF_LIFE_DAYS)
+            total += n * IMPACT[impact] * 0.5 ** (age / HALF_LIFE_DAYS)
     if rec.get("kind") in ("hook", "crash") and rec.get("component") in BOOSTED_COMPONENTS:
         total *= 1.5
     return total
@@ -1094,8 +1219,14 @@ def _add_vote(rec: dict, who: str, impact: str, version: str, trusted: bool, now
     voters = rec.setdefault("voters", {})
     old = voters.get(who) or {}
     voters[who] = {"impact": _worse(old.get("impact"), impact), "ts": now}
-    for h in [h for h, v in voters.items() if now - (v.get("ts") or 0) > 90 * 86400]:
+    for h in [h for h, v in voters.items() if now - (v.get("ts") or 0) > VOTER_DAYS * 86400]:
         del voters[h]  # a voter quiet for 90 days no longer counts anywhere
+    older = rec.get("older_voters")
+    if isinstance(older, dict):
+        rec["older_voters"] = {k: t for k, t in older.items()
+                               if isinstance(t, dict) and _is_ts(t.get("ts")) and now - t["ts"] <= VOTER_DAYS * 86400}
+        if not rec["older_voters"]:
+            del rec["older_voters"]
     versions = rec.setdefault("versions", [])
     if version not in versions:
         versions.append(version)
@@ -1105,19 +1236,22 @@ def _add_vote(rec: dict, who: str, impact: str, version: str, trusted: bool, now
     fixed, seen_at = core.version_key(rec.get("fixed_in")), core.version_key(version)
     if fixed and seen_at and seen_at >= fixed:
         regressed = rec.setdefault("regression", [])
-        if who not in regressed:
+        if who not in regressed and len(regressed) < REGRESSION_ACCOUNTS:  # more would only grow the record
             regressed.append(who)
-        if trusted or len(regressed) >= 3:
+        if trusted or len(regressed) >= REGRESSION_ACCOUNTS:
             rec["status"] = "regressed"
 
 
 def fold(rec: dict, payload: dict, *, author_hash: str, author_assoc: str, now: float) -> dict:
     """The record after one payload, without changing `rec`. A report creates the record or counts as a vote; a
     vote counts its author once, with their worst impact; a detour adds new steps; a confirm or failed mark changes
-    the detour's trust. An invalid payload, one for another fingerprint, or one about an unknown detour changes
-    nothing. The per-account daily cap is the workflow's."""
+    the detour's trust. An invalid payload, one for another fingerprint, a report whose fingerprint is not the one
+    its fields give (fingerprint_matches), or one about an unknown detour changes nothing. The per-account daily cap
+    is the workflow's."""
     rec = json.loads(json.dumps(rec or {}))
     if validate_payload(payload) or not author_hash or (rec and rec.get("fingerprint") != payload["fingerprint"]):
+        return rec
+    if payload["type"] == "report" and not fingerprint_matches(payload):
         return rec
     kind, version, trusted = payload["type"], payload["version"], author_assoc in TRUSTED
     if not rec:
@@ -1153,8 +1287,8 @@ def fold(rec: dict, payload: dict, *, author_hash: str, author_assoc: str, now: 
                 d["flagged"] = True  # a failure mark from outside the team only asks a maintainer to look
     for d in detours:
         d["trust"] = trust_of(d, d.get("confirmations"))
-    recent = [v for v in rec.get("voters", {}).values() if v.get("ts", 0) >= now - WINDOW_DAYS * 86400]
-    rec["impacts"] = {k: sum(1 for v in recent if v.get("impact") == k) for k in IMPACT}
+    counted = people(rec, now)
+    rec["impacts"] = {k: counted[k] for k in IMPACT}
     rec["score"] = round(score(rec, now), 4)
     return rec
 
@@ -1589,12 +1723,24 @@ class _NoIssue(Exception):
     """No registry issue is known for this fingerprint yet."""
 
 
+def registry_issue_number(item) -> int:
+    """The number of a search hit that is a registry issue: an issue, not a pull request, labeled LABEL, which only
+    the registry workflow sets. Else 0: an issue that merely quotes a fingerprint takes no report."""
+    if not isinstance(item, dict) or "pull_request" in item:
+        return 0
+    labels = item.get("labels") if isinstance(item.get("labels"), list) else []
+    labels = [lb.get("name") if isinstance(lb, dict) else lb for lb in labels]  # a list: `in` never hashes
+    number = item.get("number")
+    ok = LABEL in labels and isinstance(number, int) and not isinstance(number, bool) and number > 0
+    return number if ok else 0
+
+
 def _send(client, p: dict, cache: dict):
     """Post one payload: a comment on the bug's issue; a report for a bug nobody filed yet creates the issue."""
     number = _issue_number(p["fingerprint"], cache)
     if number is None and p["type"] == "report":
         finder = getattr(client, "find", None)
-        found = finder(p["fingerprint"]) if finder else []
+        found = [n for n in map(registry_issue_number, (finder(p["fingerprint"]) if finder else None) or []) if n]
         number = min(found) if found else None
         if number is None:
             number = client.create_issue(TITLE_PREFIX + title_for(p), render_payload(p))
@@ -2420,10 +2566,10 @@ def detour_status(rec: dict) -> str:
 
 
 def people(rec: dict, now: float) -> dict:
-    """{impact: voters of the last 30 days}, and "all": how many voters that is."""
-    recent = [v for v in (rec.get("voters") or {}).values() if isinstance(v, dict)
-              and isinstance(v.get("ts"), (int, float)) and now - v["ts"] <= WINDOW_DAYS * 86400]
-    return {"all": len(recent), **{k: sum(1 for v in recent if v.get("impact") == k) for k in IMPACT}}
+    """{impact: voters of the last 30 days}, and "all": how many voters that is, counting the voters a long record
+    keeps only as totals."""
+    recent = [(impact, n) for impact, ts, n in _tallies(rec) if now - ts <= WINDOW_DAYS * 86400]
+    return {"all": sum(n for _, n in recent), **{k: sum(n for i, n in recent if i == k) for k in IMPACT}}
 
 
 def issue_url(number) -> str:
@@ -2518,8 +2664,11 @@ class GhClient:
                             "-f", "sort=updated", "-f", "direction=asc", "-f", "per_page=100"])
 
     def find(self, fp: str) -> list:
-        data = self._json(["-X", "GET", "search/issues", "-f", f"q=repo:{self.repo} is:issue in:body {fp}"])
-        return [int(i["number"]) for i in (data or {}).get("items", []) if isinstance(i, dict) and "number" in i]
+        """The registry issues whose body holds `fp`, as GitHub's search items: only issues labeled LABEL."""
+        query = f"q=repo:{self.repo} is:issue label:{LABEL} in:body {fp}"
+        data = self._json(["-X", "GET", "search/issues", "-f", query])
+        items = (data or {}).get("items") if isinstance(data, dict) else None
+        return [i for i in items or [] if registry_issue_number(i)]
 
     def create_issue(self, title: str, body: str) -> int:
         return int(self._json(["-X", "POST", f"repos/{self.repo}/issues", "-f", f"title={title}",

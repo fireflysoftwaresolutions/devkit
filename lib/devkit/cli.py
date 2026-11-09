@@ -2612,9 +2612,11 @@ def _lesson_prevent(a, les, lessons) -> int:
     les = lessons.prevent(les, "guard", rule["id"], a.why)
     print(f"{ui.OK} {les['meta']['id']} prevented by lesson rule {rule['id']} ({rule['mode']}), in "
           f"lessons/rules/{rule['scope']}.json")
-    print(ui.dim("  warn: the guard adds the lesson to each matching call, and refuses the call once an agent repeats "
-                 "it after the warning" if rule["mode"] == "warn" else
-                 "  block: the guard refuses each matching call with the lesson's prevention as the reason"))
+    print(ui.dim("  warn: the guard adds the lesson to each matching call and counts a repeat after the warning; only "
+                 "the developer's typed `grant lesson-block <lesson>`, then `dev lesson prevent --by guard <lesson> "
+                 "--block` in a terminal, makes it refuse" if rule["mode"] == "warn" else
+                 "  block: on this machine the guard refuses each matching call with the lesson's prevention as the "
+                 "reason; elsewhere it warns until that developer grants it too"))
     return 0
 
 

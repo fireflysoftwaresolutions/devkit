@@ -2529,10 +2529,11 @@ def _with_context(agent: str, out: dict, data: dict, skip=()) -> dict:
 def _lesson_rule_hit(agent: str, data: dict) -> dict:
     """Right after the guard's check: the lesson rule it matched, recorded for this session's agent
     (guard.lesson_rule_hit: a miss when that agent was shown the lesson earlier and it is still pending, the rule's
-    hit, which a miss turns from warn to block, and the lesson shown again), then counted as shown (`call` for a
-    warning, `refusal` for a block). It runs before any other lesson this call shows is recorded, or the rule's own
-    lesson would count as a miss of this very call. -> guard.lesson_rule_hit's {"rule", "lesson", "mode",
-    "missed"}, {} for none."""
+    hit and miss counted, and the lesson shown again; a miss never changes the rule's mode, since only the developer's
+    typed `grant lesson-block <lesson>` with `dev lesson prevent --by guard … --block` in a terminal makes a rule
+    refuse), then counted as shown (`call` for a warning, `refusal` for a block). It runs before any other lesson
+    this call shows is recorded, or the rule's own lesson would count as a miss of this very call.
+    -> guard.lesson_rule_hit's {"rule", "lesson", "mode", "missed"}, {} for none."""
     sid = str(data.get("session_id") or "")
     if not sid or _headless():
         return {}

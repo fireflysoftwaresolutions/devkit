@@ -327,6 +327,37 @@ class OutboxTests(StateCase):
         self.assertEqual(len(client.created), 1)  # the second report goes to the issue this machine filed
         self.assertEqual([n for n, _ in client.posted], [101])
 
+    def test_a_new_report_goes_only_to_an_issue_the_registry_labeled(self):
+        class Searching(FakeClient):
+            def __init__(self, hits):
+                super().__init__()
+                self.hits = hits
+
+            def find(self, fp):
+                return self.hits
+        label = [{"name": "devkit-bug"}]
+        quoting = Searching([3, {"number": 4, "labels": []}, {"number": 5, "labels": label, "pull_request": {}},
+                             {"number": 6, "labels": [["devkit-bug"]]}])  # issues that only quote the fingerprint
+        bugs.queue({"payload": _payload("report", fp=NEW_FP)})
+        self.assertEqual(bugs.flush(quoting, now=NOW + 60)["sent"], 1)
+        self.assertEqual((len(quoting.created), quoting.posted), (1, []))
+        registry = Searching([{"number": 4, "labels": []}, {"number": 9, "labels": label}])
+        bugs.queue({"payload": _payload("report", fp="0a0b0c0d0e0f")})
+        bugs.flush(registry, now=NOW + 120)
+        self.assertEqual(([n for n, _ in registry.posted], registry.created), ([9], []))
+
+    def test_the_gh_search_asks_only_for_registry_issues(self):
+        asked = []
+
+        def gh(args, timeout=60):
+            asked.append(args)
+            return 0, json.dumps({"items": [{"number": 4, "labels": []},
+                                            {"number": 9, "labels": [{"name": "devkit-bug"}]}]}), ""
+        with mock.patch("devkit.gitx.GH", gh):
+            found = bugs.GhClient("owner/registry").find(NEW_FP)
+        self.assertEqual([i["number"] for i in found], [9])
+        self.assertIn(f"q=repo:owner/registry is:issue label:devkit-bug in:body {NEW_FP}", asked[0])
+
     def test_an_old_item_that_never_went_out_is_given_up_after_7_days(self):
         bugs.queue({"payload": _payload("detour")})  # no issue is known for it, so it cannot go anywhere
         self.assertEqual(bugs.flush(FakeClient(), now=NOW + 60)["skipped"], 1)

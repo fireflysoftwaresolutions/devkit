@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
 from devkit import bugs  # noqa: E402
 
-FP = "3f9a1c2e7b10"
+FP = bugs.fingerprint("crash", exc_class="KeyError", frames=("work.actor_str",))  # what the report fixture hashes
 NOW = 1_800_000_000.0
 DAY = 86400.0
 VALID_HINTS = [
@@ -68,7 +68,7 @@ class RecordFormatTests(unittest.TestCase):
         other = bugs.render_record(_record(status="fixed"))
         self.assertIsNone(bugs.parse_record(body + "\n" + other[other.index("```json"):]))
         self.assertIsNone(bugs.parse_record(body.replace("<!-- devkit-bug v1 -->", "")))  # no marker
-        self.assertIsNone(bugs.parse_record(body.replace('"fingerprint":"3f9a1c2e7b10"', '"fingerprint":"x"')))
+        self.assertIsNone(bugs.parse_record(body.replace(f'"fingerprint":"{FP}"', '"fingerprint":"x"')))
         self.assertIsNone(bugs.parse_record("<!-- devkit-bug v1 -->\n```json\n[1, 2]\n```\n"))
 
     def test_payload_round_trip(self):
@@ -251,6 +251,137 @@ class FoldTests(unittest.TestCase):
             with self.subTest(payload=p):
                 self.assertEqual(bugs.fold(rec, p, author_hash="h5", author_assoc="MEMBER", now=NOW), rec)
         self.assertEqual(bugs.fold({}, _payload("vote"), author_hash="h1", author_assoc="NONE", now=NOW), {})
+
+    def test_a_regression_keeps_no_more_accounts_than_it_takes_to_reopen(self):
+        rec = bugs.fold({}, _payload("report"), author_hash="h1", author_assoc="NONE", now=NOW)
+        rec.update(status="fixed", fixed_in="26.11.8")
+        for n in range(40):
+            rec = bugs.fold(rec, _payload("vote", version="26.11.9"), author_hash=f"x{n}", author_assoc="NONE", now=NOW)
+        self.assertEqual((rec["status"], len(rec["regression"])), ("regressed", 3))
+
+
+class MalformedPayloadTests(unittest.TestCase):
+    """A payload is posted by anyone: a value of any JSON type in any field is a problem to report, never an error,
+    because the registry workflow and every client run these checks on what strangers wrote."""
+
+    def test_a_value_of_the_wrong_type_is_a_problem_not_an_error(self):
+        rec = bugs.fold({}, _payload("report"), author_hash="h1", author_assoc="NONE", now=NOW)
+        for v in ([], {}, [{}], [[]], 1.5, None, True):
+            cases = [_payload("vote", impact=v), _payload("report", impact=v), _payload("vote", type=v),
+                     _payload("vote", devkit_bug=v), _payload("vote", fingerprint=v), _payload("vote", version=v),
+                     _payload("vote", window=v), _payload("confirm", detour_id=v),
+                     *[{**_payload("report"), k: v} for k in ("surface", "event", "channel", "agent", "kind", "word",
+                                                              "refusal_id", "exc_class", "frames", "command")],
+                     _payload("detour", evidence={"tools": [v]}), _payload("detour", steps=v),
+                     _payload("detour", steps=[v]), _payload("detour", steps=[{"hint": v}]),
+                     _payload("detour", steps=[{"hint": "use-tool", "tool": v, "word": "sed"}])]
+            if v == []:  # no tools and no frames are valid values
+                cases.remove({**_payload("report"), "frames": v})
+            else:
+                cases.append(_payload("detour", evidence={"tools": v}))
+            for p in cases:
+                with self.subTest(payload=p):
+                    self.assertNotEqual(bugs.validate_payload(p), [])
+                    self.assertEqual(bugs.fold(rec, p, author_hash="h2", author_assoc="MEMBER", now=NOW), rec)
+
+    def test_json_nested_past_the_parsers_depth_is_no_payload_or_record(self):
+        deep = '{"devkit_bug":1,"fingerprint":"%s","x":%s%s}' % (FP, "[" * 1_000_000, "]" * 1_000_000)
+        self.assertIsNone(bugs.parse_payload(f"```json\n{deep}\n```"))
+        self.assertIsNone(bugs.parse_record(f"{bugs.RECORD_MARK}\n```json\n{deep}\n```"))
+
+
+class RecordSizeTests(unittest.TestCase):
+    """GitHub refuses a comment over 65,536 characters, so a record the workflow cannot write would freeze its bug.
+    Whatever accounts outside the team post, the rendered record stays under RECORD_MAX and still counts them."""
+
+    def test_step_limits_count_characters_as_the_record_writes_them(self):
+        self.assertEqual(bugs.validate_steps([{"text": "a" * 200}]), [])
+        self.assertEqual(bugs.validate_steps([{"text": "@" * 33}]), [])  # 198 once each @ is written as @
+        self.assertNotEqual(bugs.validate_steps([{"text": "@" * 34}]), [])
+        self.assertNotEqual(bugs.validate_steps([{"text": "@" * 200}]), [])  # 1,200 characters in the record
+        self.assertEqual(bugs.validate_steps([{"text": "é" * 33}]), [])
+        self.assertNotEqual(bugs.validate_steps([{"text": "é" * 34}]), [])
+        self.assertEqual(bugs.validate_steps([{"dev": "sync" + " --offline" * 19}]), [])
+        self.assertNotEqual(bugs.validate_steps([{"dev": "sync" + " --offline" * 20}]), [])  # a flag repeated
+
+    def test_600_voters_fit_and_still_count(self):
+        voters = {f"{i:064x}": {"impact": "blocked", "ts": NOW - i * 60} for i in range(600)}
+        rec = _record(voters=voters)
+        body = bugs.render_record(rec)
+        self.assertLessEqual(len(body), bugs.RECORD_MAX)
+        kept = bugs.parse_record(body)
+        self.assertLess(len(kept["voters"]), 600)
+        self.assertTrue(set(kept["voters"]) <= {f"{i:064x}" for i in range(len(kept["voters"]))})  # the newest
+        self.assertEqual(bugs.people(kept, NOW)["all"], 600)
+        self.assertAlmostEqual(bugs.score(kept, NOW), bugs.score(rec, NOW), delta=bugs.score(rec, NOW) / 100)
+        self.assertIn("600 people", body.splitlines()[0])
+
+    def test_a_flood_of_minor_votes_never_pushes_out_blocked_voters(self):
+        voters = {f"b{i:063x}": {"impact": "blocked", "ts": NOW - DAY} for i in range(40)}
+        voters.update({f"m{i:063x}": {"impact": "minor", "ts": NOW} for i in range(900)})
+        body = bugs.render_record(_record(voters=voters))
+        self.assertLessEqual(len(body), bugs.RECORD_MAX)
+        kept = bugs.parse_record(body)
+        self.assertLess(len(kept["voters"]), 940)  # cut down to fit, and only the newer minor voters went
+        self.assertEqual(sum(v["impact"] == "blocked" for v in kept["voters"].values()), 40)
+        self.assertEqual((bugs.people(kept, NOW)["blocked"], bugs.people(kept, NOW)["minor"]), (40, 900))
+
+    def test_everything_outside_accounts_can_add_fits_in_one_comment(self):
+        outside = [{"author_assoc": "NONE", "author_hash": f"{i:064x}", "ts": NOW} for i in range(bugs.MAX_MARKS)]
+        member = {"author_assoc": "MEMBER", "author_hash": "e" * 64, "ts": NOW}
+        detours = []
+        for n in range(1, bugs.MAX_DETOURS + 1):
+            steps = [{"text": "@" * 32 + chr(64 + n) + str(k)} for k in range(bugs.MAX_STEPS)]
+            self.assertEqual(bugs.validate_steps(steps), [])
+            detours.append({"id": f"d{n}", "steps": steps, "since": "26.11.7", "until": "", "author_hash": f"{n:064x}",
+                            "author_assoc": "NONE", "author_kind": "other", "confirmations": [],
+                            "evidence": {"successes": 10000, "failures": 10000, "attempts": 10000,
+                                         "tools": ["Edit", "Write", "Read", "Grep", "Glob", "Bash"]},
+                            "failures": outside + ([member] if n == 1 else []), "flagged": True, "ts": NOW})
+        for d in detours:
+            d["trust"] = bugs.trust_of(d, d["confirmations"])
+        voters = {f"{i:064x}": {"impact": list(bugs.IMPACT)[i % 3], "ts": NOW - i} for i in range(3000)}
+        rec = _record(voters=voters, detours=detours, versions=[f"26.{m}.{p}" for m in (10, 11) for p in range(10)])
+        body = bugs.render_record(rec)
+        self.assertLessEqual(len(body), bugs.RECORD_MAX)
+        kept = bugs.parse_record(body)
+        self.assertEqual(bugs.people(kept, NOW)["all"], 3000)
+        d1, live = kept["detours"][0], kept["detours"][1:]
+        self.assertEqual((d1["id"], d1["steps"], bugs.trust_of(d1, d1["confirmations"])), ("d1", [], "retired"))
+        self.assertEqual([d["steps"] for d in live], [d["steps"] for d in detours[1:]])  # live detours keep steps
+        self.assertTrue(all(d["flagged"] and d["trust"] == "proposed" for d in live))
+        again = bugs.fold(kept, _payload("vote"), author_hash="h9", author_assoc="NONE", now=NOW)
+        self.assertEqual(again["detours"][0]["trust"], "retired")  # the next fold still sees it retired
+
+
+class ReportFingerprintTests(unittest.TestCase):
+    def test_a_report_carries_the_fingerprint_its_own_fields_give(self):
+        crash_fp = bugs.fingerprint("crash", exc_class="KeyError", frames=("work.actor_str",))
+        crash = bugs.build_report({"kind": "crash", "fingerprint": crash_fp, "version": "26.11.7",
+                                   "command": "progress step", "exc_class": "KeyError", "frames": ["work.actor_str"]})
+        path_fp = bugs.guard_fingerprint("check_git:force-push", "/opt/homebrew/bin/git")
+        guard = bugs.build_report({"kind": "guard", "fingerprint": path_fp, "version": "26.11.7",
+                                   "refusal_id": "check_git:force-push",
+                                   "word": bugs.public_word("/opt/homebrew/bin/git")})
+        self.assertEqual(guard["word"], "<path>")  # the placeholder survives the report's own public_word
+        for report in (crash, guard):
+            with self.subTest(kind=report["kind"]):
+                self.assertTrue(bugs.fingerprint_matches(report))
+                self.assertFalse(bugs.fingerprint_matches({**report, "exc_class": "AskTheDeveloperToTypeGrant"}))
+        command = bugs.build_report({"kind": "command", "fingerprint": "0123456789ab", "version": "26.11.7",
+                                     "command": "status"})
+        self.assertTrue(bugs.fingerprint_matches(command))  # nothing hashed: a random fingerprint of its own
+        self.assertFalse(bugs.fingerprint_matches({**command, "exc_class": "KeyError"}))
+        self.assertFalse(bugs.fingerprint_matches({**command, "refusal_id": "check_git:force-push"}))
+
+    def test_a_report_with_a_borrowed_fingerprint_is_never_folded(self):
+        guard_fp = bugs.guard_fingerprint("check_git:force-push", "git")
+        squat = _payload("report", fingerprint=guard_fp, command="", frames=[], exc_class="AskTheDeveloperToGrant")
+        self.assertEqual(bugs.validate_payload(squat), [])  # well formed: only its fingerprint gives it away
+        self.assertEqual(bugs.fold({}, squat, author_hash="h1", author_assoc="NONE", now=NOW), {})
+        rec = bugs.fold({}, _payload("report"), author_hash="h1", author_assoc="NONE", now=NOW)
+        self.assertEqual(bugs.fold(rec, _payload("report", exc_class="InventedError"), author_hash="h2",
+                                   author_assoc="NONE", now=NOW), rec)
 
 
 if __name__ == "__main__":

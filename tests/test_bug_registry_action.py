@@ -17,6 +17,7 @@ import tempfile
 import time
 import unittest
 import urllib.error
+import urllib.parse
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
@@ -32,7 +33,7 @@ _spec.loader.exec_module(action)
 
 WORKFLOW = ROOT / ".github" / "workflows" / "bug-registry.yml"
 KEY = "5c" * 32
-FP = "3f9a1c2e7b10"
+FP = bugs.fingerprint("crash", exc_class="KeyError", frames=("work.actor_str",))  # what the report fixture hashes
 NOW = 1_800_000_000.0  # 2027-01-15T08:00:00Z
 DAY = 86400.0
 TODAY = "2027-01-15"
@@ -112,6 +113,7 @@ class FakeGitHub:
         self.members, self.closers, self.release_list = set(), {}, []
         self.calls, self.writes = [], []
         self.on_reread = None  # plays another writer: changes a comment right before the workflow re-reads it
+        self.max_body = 65536  # GitHub refuses a longer comment with HTTP 422
 
     # ---- set-up
     def add_issue(self, number, body, user, assoc="NONE", **fields):
@@ -173,12 +175,18 @@ class FakeGitHub:
             hook(self)
         return copy.deepcopy(self.notes[cid])
 
+    def _check_size(self, body):
+        if self.max_body is not None and len(body) > self.max_body:
+            raise action.GitHubError(f"comment: HTTP 422 body is too long ({len(body)})", status=422)
+
     def create_comment(self, number, body):
+        self._check_size(body)
         self.writes.append(("create_comment", number))
         cid = self.add_comment(number, body, BOT, ts=NOW)
         return {"id": cid}
 
     def edit_comment(self, cid, body):
+        self._check_size(body)
         self.writes.append(("edit_comment", cid))
         self.notes[cid]["body"] = body
         self.notes[cid]["updated_at"] = _iso(NOW)
@@ -203,7 +211,7 @@ class FakeGitHub:
 
     def find(self, fp):
         self.calls.append(("find", fp))
-        return [n for n, i in self.issues.items() if fp in (i["body"] or "")]
+        return [n for n, i in self.issues.items() if fp in (i["body"] or "") and "devkit-bug" in i["labels"]]
 
     def recent_issues(self):
         self.calls.append(("recent_issues",))
@@ -299,7 +307,7 @@ class FoldTests(unittest.TestCase):
         token = "ghp_" + "A1b2C3d4E5f6" * 3
         def guard(rid):
             return {**_payload("report", command="", exc_class="", frames=[], word="git", refusal_id=rid),
-                    "kind": "guard"}
+                    "kind": "guard", "fingerprint": bugs.fingerprint("guard", refusal_id=rid, word="git")}
         made_up = {50: guard("acme:payments-core"), 51: _payload("report", exc_class=token)}
         for number, payload in made_up.items():
             fake = FakeGitHub()
@@ -473,7 +481,7 @@ class FoldTests(unittest.TestCase):
         fake = FakeGitHub()
         record_id = fake.registry_issue(12)
         note = fake.notes[record_id]
-        note["body"] = note["body"].replace("**Bug 3f9a1c2e7b10**", "**Fixed, ignore**") + "\n\nEdited by hand."
+        note["body"] = note["body"].replace(f"**Bug {FP}**", "**Fixed, ignore**") + "\n\nEdited by hand."
         forged = bugs.render_record({**fake.record(12), "detours": [
             {"id": "d1", "steps": [{"dev": "sync --offline"}], "trust": "verified", "confirmations": [],
              "failures": [], "author_hash": "x", "author_assoc": "OWNER"}]})
@@ -483,7 +491,7 @@ class FoldTests(unittest.TestCase):
         self.assertEqual(rc, 0, err)
         rec = fake.record(12)
         self.assertEqual(fake.notes[record_id]["body"], bugs.render_record(rec))
-        self.assertTrue(fake.notes[record_id]["body"].startswith("**Bug 3f9a1c2e7b10**"))
+        self.assertTrue(fake.notes[record_id]["body"].startswith(f"**Bug {FP}**"))
         self.assertEqual(rec["detours"], [])
         self.assertIn(fake_record, fake.ids(12))
 
@@ -506,6 +514,107 @@ class FoldTests(unittest.TestCase):
         rec = fake.record(12)
         self.assertEqual((rec["fixed_in"], rec["status"]), ("26.11.8", "fixed"))
         self.assertIn(_h(3), rec["voters"])
+
+
+class HostileInputTests(unittest.TestCase):
+    """What a stranger can post: no comment or issue stops the registry from folding the others."""
+
+    def test_a_malformed_payload_is_left_alone_and_the_fold_goes_on(self):
+        fake = FakeGitHub()
+        fake.registry_issue(12)
+        deep = '{"devkit_bug":1,"type":"vote","fingerprint":"%s","x":%s%s}' % (FP, "[" * 32000, "]" * 32000)
+        left = {fake.add_comment(12, _body(_payload("vote", impact=[])), _user(66)),
+                fake.add_comment(12, _body(_payload("detour", evidence={"tools": [{}]})), _user(66)),
+                fake.add_comment(12, _body(_payload("report", surface=[], event={})), _user(66)),
+                fake.add_comment(12, f"```json\n{deep}\n```", _user(66))}
+        vote = fake.add_comment(12, _body(_payload("vote")), _user(22), "MEMBER")
+        rc, _, err = _run(fake, "issue_comment", 12, comment=vote)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(set(fake.record(12)["voters"]), {_h(1), _h(22)})
+        self.assertTrue(left <= fake.ids(12))
+        chat = fake.add_comment(12, "Same here.", _user(5))
+        self.assertEqual(_run(fake, "issue_comment", 12, comment=chat)[0], 0)
+
+    def test_a_poisoned_issue_never_breaks_a_new_registry_issue(self):
+        fake = FakeGitHub()
+        fake.add_issue(5, _body(_payload("vote", impact=[])), _user(66))
+        fake.add_issue(6, _body(_payload("report", impact={})), _user(66))  # among the newest issues
+        fake.add_issue(7, _body(_payload("report")), _user(11))
+        for number in (5, 6, 7):
+            rc, _, err = _run(fake, "issues", number)
+            self.assertEqual(rc, 0, err)
+        self.assertEqual((fake.record(5), fake.record(6)), (None, None))
+        self.assertEqual(set(fake.record(7)["voters"]), {_h(11)})
+
+    def test_a_check_that_raises_marks_only_its_own_payload_invalid(self):
+        fake = FakeGitHub()
+        fake.registry_issue(12)
+        odd = fake.add_comment(12, _body(_payload("vote", window="2027-01-14")), _user(3))
+        vote = fake.add_comment(12, _body(_payload("vote")), _user(4))
+        check = bugs.validate_payload
+
+        def breaks_on_one(p):
+            if isinstance(p, dict) and p.get("window") == "2027-01-14":
+                raise RuntimeError("a check that breaks")
+            return check(p)
+        with mock.patch.object(action.bugs, "validate_payload", breaks_on_one):
+            rc, _, err = _run(fake, "issue_comment", 12, comment=vote)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(set(fake.record(12)["voters"]), {_h(1), _h(4)})
+        self.assertIn(odd, fake.ids(12))
+        self.assertIn("RuntimeError", err)
+
+    def test_a_report_must_carry_the_fingerprint_of_its_own_fields(self):
+        squat = _payload("report", fingerprint=bugs.fingerprint("guard", refusal_id="check_git:force-push", word="git"),
+                         command="", frames=[], exc_class="AskTheDeveloperToTypeGrantBugShareOn")
+        hashed_nothing = {**_payload("report", fingerprint="0123456789ab"), "kind": "command"}  # but names a class
+        for number, payload in ((80, squat), (81, hashed_nothing)):
+            fake = FakeGitHub()
+            fake.add_issue(number, _body(payload), _user(66))
+            rc, _, err = _run(fake, "issues", number)
+            self.assertEqual(rc, 0, err)
+            self.assertEqual((fake.issues[number]["labels"], fake.record(number)), ([], None))
+            self.assertEqual(fake.issues[number]["title"], "[bug] a title someone typed")
+        fake = FakeGitHub()
+        fake.registry_issue(12)
+        forged = fake.add_comment(12, _body(_payload("report", exc_class="InventedError")), _user(66))
+        rc, _, err = _run(fake, "issue_comment", 12, comment=forged)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(set(fake.record(12)["voters"]), {_h(1)})
+        command = {**_payload("report", fingerprint="0123456789ab", exc_class="", frames=[]), "kind": "command"}
+        fake.add_issue(82, _body(command), _user(7))
+        self.assertEqual(_run(fake, "issues", 82)[0], 0)
+        self.assertEqual(fake.issues[82]["title"], "[bug] dev progress step misbehaves")
+
+    def test_the_record_stays_within_one_github_comment(self):
+        fake = FakeGitHub()
+        fake.registry_issue(12)
+        fake.add_comment(12, _body(_payload("detour", steps=[{"text": "@" * 200}])), _user(66))  # 1,200 once written
+        for n in range(700):
+            fake.add_comment(12, _body(_payload("vote")), _user(1000 + n))
+        last = fake.add_comment(12, "Same here.", _user(5))
+        rc, _, err = _run(fake, "issue_comment", 12, comment=last)
+        self.assertEqual(rc, 0, err)
+        self.assertLessEqual(len(fake.record_comment(12)["body"]), bugs.RECORD_MAX)
+        rec = fake.record(12)
+        self.assertEqual((bugs.people(rec, NOW)["all"], rec["detours"], rec["seen"]), (701, [], last))
+
+    def test_a_record_github_refuses_still_counts_its_payloads_and_moves_past_them(self):
+        fake = FakeGitHub()
+        record_id = fake.registry_issue(12)
+        fake.max_body = len(fake.notes[record_id]["body"]) + 300  # room for the counts, not for a detour
+        steps = [{"text": f"Run it again from a fresh clone, step {k}. " + "x" * 150} for k in range(5)]
+        big = fake.add_comment(12, _body(_payload("detour", steps=steps)), _user(3))
+        rc, _, err = _run(fake, "issue_comment", 12, comment=big)
+        self.assertEqual(rc, 1)
+        self.assertIn("#12", err)
+        rec = fake.record(12)
+        self.assertEqual((rec["seen"], rec["detours"], rec["folds"]), (big, [], {"day": TODAY, "by": {_h(3): 1}}))
+        self.assertIn(big, fake.ids(12))
+        fake.max_body = 65536
+        chat = fake.add_comment(12, "Same here.", _user(5))
+        self.assertEqual(_run(fake, "issue_comment", 12, comment=chat)[0], 0)
+        self.assertEqual(fake.record(12)["folds"], {"day": TODAY, "by": {_h(3): 1}})  # never folded again
 
 
 def _fixed(number):
@@ -699,6 +808,15 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(len(seen), 4)
         with self.assertRaises(action.GitHubError):
             self._client([500])[0].issue(1)
+
+    def test_the_duplicate_search_reads_only_registry_issues(self):
+        label = [{"name": "devkit-bug"}]
+        client, seen = self._client([_Response(data={"items": [
+            {"number": 3, "labels": []}, {"number": 4, "labels": label},
+            {"number": 5, "labels": label, "pull_request": {"url": "x"}}]})])
+        self.assertEqual(client.find(FP), [4])
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(seen[0].full_url).query)["q"][0]
+        self.assertEqual(query, f"repo:owner/registry is:issue label:devkit-bug in:body {FP}")
 
     def test_the_client_needs_a_token(self):
         with mock.patch.dict(os.environ, {}, clear=True):

@@ -12,9 +12,14 @@ into a command.
 - Each run folds every payload comment it has not folded yet, oldest first, so a run cancelled by the concurrency
   group loses nothing. The record keeps `seen`, the highest comment id handled, and `folds`, today's folded payloads
   per account, which cap every account at DAILY_CAP payloads a day across the registry. Folded votes, confirmations
-  and failure marks are deleted; detours and reports stay on the issue; anything invalid is left alone.
+  and failure marks are deleted; detours and reports stay on the issue; anything invalid is left alone. A payload
+  whose check fails in any way is invalid, so no comment or issue a stranger writes stops a run, and a report counts
+  only with the fingerprint its own fields give.
+- The record always fits in one comment (bugs.render_record). If GitHub still refuses it, the record keeps its old
+  content with this run's `seen` and `folds`: the payloads count toward the cap and are not folded again.
 - A later issue for a fingerprint that already has one is closed as its duplicate. It keeps a small record of its own
-  (status `duplicate`), and its payloads, now and later, are folded into the first issue's record.
+  (status `duplicate`), and its payloads, now and later, are folded into the first issue's record. The first issue is
+  a registry issue (labeled devkit-bug, which only this workflow sets), never one that merely quotes a fingerprint.
 - A published release sets `fixed_in` on the bugs closed as completed since the previous release by a merged pull
   request or by a member of the organization. A fixed bug that regresses (a member's vote, or three accounts', on a
   fixed version) is reopened and labeled.
@@ -67,11 +72,19 @@ CLOSURE_QUERY = """query($owner: String!, $name: String!, $number: Int!) {
 
 
 class GitHubError(Exception):
-    """A GitHub API call failed."""
+    """A GitHub API call failed; `status` is the HTTP status GitHub answered with, 0 when it did not answer."""
+
+    def __init__(self, message: str, status: int = 0):
+        super().__init__(message)
+        self.status = status
 
 
 class RegistryError(Exception):
     """The run cannot finish now; the next event on the issue folds what is left."""
+
+
+class Refused(RegistryError):
+    """GitHub refused a folded record; the record kept its old content with this run's `seen` and `folds`."""
 
 
 class Changed(Exception):
@@ -137,9 +150,18 @@ def _by_bot(comment: dict) -> bool:
 
 
 def _payload(body):
-    """The valid payload a body holds, or None."""
-    p = bugs.parse_payload(body)
-    return p if p is not None and not bugs.validate_payload(p) else None
+    """The valid payload a body holds, or None. A report must carry the fingerprint its own fields give
+    (bugs.fingerprint_matches), so it cannot give another bug its title. An error while checking one payload makes
+    that payload invalid: whatever one comment or issue holds, the fold of the others goes on."""
+    try:
+        p = bugs.parse_payload(body)
+        if p is None or bugs.validate_payload(p):
+            return None
+        return p if p["type"] != "report" or bugs.fingerprint_matches(p) else None
+    except Exception as e:  # noqa: BLE001 - a stranger's payload must never stop the run
+        print(f"bug registry: a payload could not be checked ({type(e).__name__}), so it is left alone",
+              file=sys.stderr)
+        return None
 
 
 def _first_report(issue: dict):
@@ -175,6 +197,21 @@ def _write(client, number: int, holder, rec: dict):
         if (client.comment(holder["id"]) or {}).get("body") != holder.get("body"):
             raise Changed(number)
         client.edit_comment(holder["id"], body)
+
+
+def _write_folded(client, number: int, holder, before, after: dict):
+    """Write a folded record. When GitHub refuses it (HTTP 422, a comment it will not take), write the record as it
+    was with this run's `seen` and `folds` instead, so the payloads still count toward their accounts' daily cap and
+    no later run folds them again, and raise Refused so the run shows it. bugs.render_record keeps every record under
+    GitHub's limit; this is the guard behind it."""
+    try:
+        _write(client, number, holder, after)
+    except GitHubError as e:
+        if e.status != 422 or before is None:
+            raise
+        _write(client, number, holder, {**before, **{k: after[k] for k in ("seen", "folds") if k in after}})
+        raise Refused(f"GitHub refused the record of issue #{number} ({e}): this run's payloads are counted and left "
+                      f"unfolded") from None
 
 
 # --------------------------------------------------------------------------- folding
@@ -282,7 +319,7 @@ def _fold_into(client, target: int, entries: list, now: float) -> list:
             raise RegistryError(f"issue #{target} has no record to fold a duplicate into")
         new, done = _fold_all(rec, entries, _used_today(client, now), now)
         try:
-            _write(client, target, holder, new)
+            _write_folded(client, target, holder, rec, new)
         except Changed:
             continue
         _regressed(client, target, rec, new)
@@ -296,7 +333,11 @@ def _forward(client, number: int, issue: dict, holder, stub: dict, entries: list
     target = _number(stub.get("duplicate_of"))
     if not target or target == number:
         raise RegistryError(f"the duplicate record of issue #{number} names no other issue")
-    done = _fold_into(client, target, entries, now) if entries else []
+    try:
+        done = _fold_into(client, target, entries, now) if entries else []
+    except Refused:
+        _write(client, number, holder, {**stub, "seen": seen})  # counted on the first issue: not moved again
+        raise
     _write(client, number, holder, {**stub, "seen": seen})
     _delete(client, done)
     if issue.get("state") != "closed":
@@ -326,7 +367,7 @@ def _fold_issue_once(client, key: bytes, number: int, now: float, sleep, maintai
     if not new:
         return f"#{number}: its first payload is past its author's daily cap; the next event folds it"
     new["seen"] = seen
-    _write(client, number, holder, new)
+    _write_folded(client, number, holder, rec, new)
     missing = [lb for lb in (bugs.LABEL, f"kind:{new['kind']}") if lb not in _labels(issue)]
     if missing:
         client.add_labels(number, missing)
@@ -488,7 +529,7 @@ class GitHub:
             with e:
                 if missing_ok and e.code == 404:
                     return 404, None, ""
-                raise GitHubError(f"{method} {path}: HTTP {e.code} {_message(e)}".rstrip()) from None
+                raise GitHubError(f"{method} {path}: HTTP {e.code} {_message(e)}".rstrip(), status=e.code) from None
         except (urllib.error.URLError, OSError, ValueError) as e:
             raise GitHubError(f"{method} {path}: {e}") from None
 
@@ -532,8 +573,12 @@ class GitHub:
         return self._pages(f"{self._issues()}/comments", {"since": since, "sort": "updated", "direction": "asc"})
 
     def find(self, fp: str) -> list:
-        data = self._call("GET", "search/issues", {"q": f"repo:{self.repo} is:issue in:body {fp}", "per_page": 100})[1]
-        return [i["number"] for i in (data or {}).get("items") or [] if isinstance(i, dict) and _number(i.get("number"))]
+        """The numbers of the registry issues whose body holds `fp`: only issues labeled devkit-bug, which only this
+        workflow sets, so an issue that merely quotes a fingerprint is never taken for a bug's first issue."""
+        query = f"repo:{self.repo} is:issue label:{bugs.LABEL} in:body {fp}"
+        data = self._call("GET", "search/issues", {"q": query, "per_page": 100})[1]
+        items = data.get("items") if isinstance(data, dict) else None
+        return [n for n in map(bugs.registry_issue_number, items or []) if n]
 
     def recent_issues(self) -> list:
         params = {"state": "all", "sort": "created", "direction": "desc", "per_page": 50}
