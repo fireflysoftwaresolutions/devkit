@@ -19,9 +19,11 @@ test output). They reach agents marked as data, never as instructions, with secr
 error lines.
 
 Results land in ~/.local/state/devkit/ci/watch/, in the audit trail (ci.watch), as a desktop notification, and in
-the session that pushed: a message to its main agent with its next action. Each result (repository, run, how it
-ended) is reported once, whichever of the watches started for one commit ends first (reported.json keeps them), and
-a watch starts only for what a command sent to origin: a pushed branch or tag, a merge commit, a release tag.
+every session that sent the commit: a message to its main agent with its next action. One background watcher follows
+a commit; a session that sends a commit already watched joins that watcher with a record of its own, and each
+session's record closes only once the session holds the result (_settle). Each result (repository, run, how it ended)
+is recorded once, whichever of the watches started for one commit ends first (reported.json keeps them), and a watch
+starts only for what a command sent to origin: a pushed branch or tag, a merge commit, a release tag.
 
 That background watch reports at the session's next hook, which an idle agent never reaches. An agent that waits on
 a run runs `dev ci watch --wait` (cmd_wait) where its output wakes it: on Claude Code a Monitor (one event per line,
@@ -297,11 +299,13 @@ def _finish(top, data, branch, sha, runs, state, start, clock, always_diagnose=F
                      "elapsed": round((r.get("elapsed") or 0) / 60, 1)} for r, (word, _), k in zip(runs, ends, keys)],
            "started": max((r.get("started") or 0 for r in runs), default=0) or None,  # how recent the commit's CI is
            "diagnoses": [], "repeat": not fresh}
-    if fresh or always_diagnose:  # a repeat nobody waits on is not diagnosed: each diagnosis reads a log online
+    # a repeat nobody waits on is not diagnosed (each diagnosis reads a log online); one a joined session still has to
+    # hear is, so its message carries the class and the next action
+    if fresh or always_diagnose or (state in FINAL and _owed(branch, sha)):
         res["diagnoses"] = [dict(diagnose(provider, top, r), new=k in fresh)
                             for r, (_, mark), k in zip(runs, ends, keys) if mark == "failed"]
     if state in FINAL:
-        _settle(branch, sha, state)
+        res["told"] = sorted(f"{a}:{s}" for a, s in _settle(res))
     record(top, res)
     return res
 
@@ -378,27 +382,46 @@ def message(res: dict) -> str:
 
 
 def deliver(agent: str, sid: str, res: dict):
-    """Give the result to the session that pushed: a crew message to its main agent when it has a live progress run,
-    else a pending CI event in its session record (shown with its next action). A run that is done, or orphaned
-    because its session ended, has no reader for its messages. A repeat goes nowhere: an earlier watch reported it,
-    to this session or another one. Nor does a result the session waits on itself (`dev ci watch --wait`): that
-    watch's own output tells it."""
-    if res.get("repeat") or _waits(agent, sid, res.get("branch"), res.get("sha")):
+    """The end of devkit's background watcher (`dev ci watch --session`): its result reaches the session that started
+    it and every session joined to it. A final result reached them while the watch settled the commit's records
+    (_settle, res["told"]), so none hears it twice; a watcher that stopped before the run ended tells each session
+    whose record names this watcher that the run still goes on. A repeat goes nowhere: an earlier watch reported it,
+    and told the sessions whose records were open then."""
+    if res.get("repeat"):
         return
+    told, who = set(res.get("told") or ()), [(agent, sid)]
+    if res.get("state") not in FINAL:
+        who += [(r.get("agent") or "", r.get("session") or "") for r in _records()
+                if r.get("by") == "devkit" and r.get("pid") == os.getpid() and r.get("state") == "live"
+                and _on(r, res.get("branch"), res.get("sha"))]
+    for a, s in dict.fromkeys(who):
+        if f"{a}:{s}" not in told:
+            _tell(a, s, res)
+
+
+def _tell(agent: str, sid: str, res: dict) -> bool:
+    """Give a result to one session: a CI message to its main agent when it has a live progress run, else a pending CI
+    event in its session record (shown with its next action). Either reaches the session's next hook and wakes its
+    `dev watch --wait`, Claude Code's in the background and Codex's in the foreground. A run that is done, or orphaned
+    because its session ended, has no reader for its messages. A session that follows the commit with its own
+    `dev ci watch --wait` is not told: that watch's own output tells it. The session is named, never found from this
+    process, which may be another session's (an agent's own wait tells the other sessions). -> whether it was told."""
+    if not sid or _waits(agent, sid, res.get("branch"), res.get("sha")):
+        return False
     text = message(res)
     try:
         from . import progress
         run = progress.load_run(agent, sid)
         if run and run.get("state") not in ("done", "orphaned"):
-            os.environ["DEVKIT_SESSION"] = f"{agent}:{sid}"
-            progress.crew_ask(text, to="main", from_agent="ci")
-            return
+            progress._ask_into(agent, sid, text, "main", "ci", time.time())
+            return True
         ev = {"ts": res["ts"], "text": text, "delivered": False, "repo": res.get("repo"), "branch": res.get("branch"),
               "sha": res.get("sha"), "state": res.get("state"), "at": res.get("started") or res["ts"]}
-        state.update(progress.SESSIONS / f"{agent}-{sid}.json",  # the append on the fresh record
-                     lambda s: s.update(ci_events=((s.get("ci_events") or []) + [ev])[-10:]), create=False)
+        return state.update(progress.SESSIONS / f"{agent}-{sid}.json",  # the append on the fresh record
+                            lambda s: s.update(ci_events=((s.get("ci_events") or []) + [ev])[-10:]),
+                            create=False) is not None
     except Exception:
-        pass
+        return False
 
 
 def _pending(ev) -> bool:
@@ -661,7 +684,7 @@ def targets(cmd, cwd: str) -> list:
 def start_background(top: str, session: str = "", branch: str = "", sha: str = "") -> bool:
     """One detached watcher per repository, branch and commit (the hooks call this after a push or a PR). Each
     session that sent the commit gets a record of it (`dev ci watches`; what `dev ci watch --wait` follows by
-    default), naming the watcher, a new one or the one already running."""
+    default), naming the watcher, a new one or the one already running, and hears the watcher's result (deliver)."""
     if os.environ.get("DEVKIT_NO_CI_WATCH"):
         return False
     branch = branch or core.gitout(top, "branch", "--show-current")
@@ -740,12 +763,54 @@ def register(target: dict, by: str, agent: str, sid: str, pid, timeout_min: floa
     return rid
 
 
-def _settle(ref: str, sha: str, result: str):
-    """A watch saw the commit's runs end: every watch recorded on that commit has its result."""
+OPEN = ("live", "expired")  # a watch record that has no result yet
+TAKEN_S = 120  # a record a watch took to tell its session stays its own this long; then another watch may take it
+
+
+def _on(rec: dict, ref, sha) -> bool:
+    """Is the watch record on this branch or tag and commit?"""
+    return rec.get("ref") == ref and (rec.get("sha") or "")[:7] == (sha or "")[:7]
+
+
+def _owed(ref, sha) -> bool:
+    """Does a session joined to devkit's background watch of the commit still wait to hear its result?"""
+    return any(r.get("by") == "devkit" and r.get("state") in OPEN and _on(r, ref, sha) for r in _records())
+
+
+def _take(rid: str) -> bool:
+    """Take an open record to tell its session: True for the one watch that finds it open and not taken."""
+    got = []
+
+    def take(doc):
+        if doc.get("state") not in OPEN or time.time() - (doc.get("taken") or 0) < TAKEN_S:
+            return state.SKIP
+        doc["taken"] = round(time.time())
+        got.append(True)
+    try:
+        state.update(LIVE / f"{rid}.json", take, create=False)
+    except Exception:
+        return False
+    return bool(got)
+
+
+def _settle(res: dict) -> set:
+    """A watch saw the commit's runs end: every watch recorded on that commit gets its result. A session joined to
+    devkit's background watch of the commit (a record by devkit) is told first (_tell), and its record closes only
+    after that, so a wait that finds the record closed finds the result already there. One watch takes each record,
+    so a session hears the result once, whichever watch ends first: devkit's watcher, another session's, or an agent's
+    `dev ci watch --wait`. -> the sessions told, as (agent, session)."""
+    told = set()
     for rec in _records():
-        if rec.get("ref") == ref and (rec.get("sha") or "")[:7] == (sha or "")[:7] and \
-                rec.get("state") in ("live", "expired"):
-            _update(rec["id"], state=result)
+        if rec.get("state") not in OPEN or not _on(rec, res.get("branch"), res.get("sha")):
+            continue
+        if rec.get("by") == "devkit":
+            if not _take(rec["id"]):
+                continue  # another watch tells this session, and closes its record after
+            who = (rec.get("agent") or "", rec.get("session") or "")
+            if who not in told and _tell(*who, res):
+                told.add(who)
+        _update(rec["id"], state=res["state"])
+    return told
 
 
 def _results() -> set:

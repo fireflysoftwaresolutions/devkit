@@ -549,7 +549,6 @@ class CIWatchSessionTests(WatchSandbox):
                 ciwatch.start_background({str(top)!r}, session="claude:{sid}", branch="main", sha="{self.sha}")
             ''', cwd=top, DEVKIT_NO_CI_WATCH="")
 
-    @known_defect
     def test_a_ci_result_wakes_every_session_that_sent_the_commit(self):
         # The defect: the watcher delivers to the session that started it only (cli.cmd_ci_watch → ciwatch.deliver
         # with its --session), then settles every record on the commit. s2's Stop rule let its turn end on the one
