@@ -2679,6 +2679,11 @@ SETTINGS_UNREAD_REASON = ("{what} is an agent settings file the guard cannot rea
                           "so it cannot tell what an append, a `<>` write or a patch leaves in it, or whether that "
                           "turns devkit's hooks off. Write the file's whole text with the Write tool or a `>` redirect "
                           "that holds it in full, or ask the developer why the file is that large.")
+SETTINGS_OVERWRITE_REASON = ("{what} is an agent settings file, and this `<>` write puts bytes over its first bytes "
+                             "while the file or the text written holds more than ASCII, where a character can be "
+                             "several bytes, so the guard cannot tell what the write leaves there, or whether that "
+                             "turns devkit's hooks off. Write the file's whole text with the Write tool or a `>` "
+                             "redirect that holds it in full.")
 
 
 # --------------------------------------------------------------------------- protected state (spec C11, K1)
@@ -4359,6 +4364,10 @@ class _Shell:
             if whole is None:
                 return deny(SETTINGS_UNREAD_REASON.format(what=_code(core.tilde(str(where)))), key="settings-unread")
             before = [whole]
+        # `<>` writes bytes over the file's first bytes, and the model below counts characters: they match only for
+        # ASCII (two spaces over a two-byte é leave what follows it whole), so any other text on either side is refused
+        if mode == "overwrite" and not all(x.isascii() for x in (*before, *text)):
+            return deny(SETTINGS_OVERWRITE_REASON.format(what=_code(core.tilde(str(where)))), key="settings-overwrite-bytes")
         texts = list(dict.fromkeys((w + b[len(w):]) if mode == "overwrite" else b + w for b in before for w in text))
         if len(texts) > 64:  # too many readings to judge: refused as unseen
             return deny(SETTINGS_UNSEEN_REASON.format(what=_code(core.tilde(str(where)))), key="settings-readings")

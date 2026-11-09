@@ -528,6 +528,34 @@ class ShellWritesOnAgentSettings(unittest.TestCase):
             ("printf '{}' 1<> .claude/settings.json", "printf '{}' > .claude/settings.json"),
         ])
 
+    def test_a_byte_overwrite_with_non_ascii_text_on_either_side_is_refused(self):
+        # `<>` writes bytes over the file's first bytes; the guard models it in characters, which match bytes only for
+        # ASCII. An e with an acute accent is two bytes: two spaces written over it leave the JSON after it whole. A
+        # byte-order mark written as three bytes over that letter and one more, or over "XYZ", leaves a mark before
+        # the JSON, which the agent drops. So a `<>` write to a settings file is refused when the file or the text
+        # written holds anything but ASCII. The twins: the same write to another file, and ASCII text written over an
+        # ASCII settings file.
+        root = Path(self.cwd)
+        settings, other = root / ".claude" / "settings.json", root / "staged" / "notes.json"
+        off = '{"disableAllHook\\u0073": true}'
+        for head, cmd in (("\u00e9", "printf '  ' 1<> {f}"), ("\u00e9X", "printf '\\xef\\xbb\\xbf' 1<> {f}"),
+                          ("XYZ", "printf '\\xef\\xbb\\xbf' 1<> {f}"), ("\u00e9", "echo -n '  ' 1<> {f}")):
+            with self.subTest(head=head, cmd=cmd):
+                settings.write_text(head + off)
+                other.write_text(head + off)
+                self.assertEqual(self.all_payloads(cmd.format(f=".claude/settings.json")), {"deny"})
+                self.assertEqual(self.all_payloads(cmd.format(f="staged/notes.json")), {"allow"})
+        settings.write_text('{"model": "opus"}')
+        for cmd in ("printf '  ' 1<> .claude/settings.json", "printf '{\"model\":\"haiku\"}' 1<> .claude/settings.json"):
+            with self.subTest(ascii=cmd):
+                self.assertEqual(self.all_payloads(cmd), {"allow"})
+
+    def all_payloads(self, cmd):
+        """The verdicts on `cmd` as Claude Code's Bash and Codex's exec_command and shell (bash -lc) send it."""
+        return {(guard.check(tool, inp, self.cwd, agent) or ("allow",))[0]
+                for tool, inp, agent in (("Bash", {"command": cmd}, "claude"), ("exec_command", {"cmd": cmd}, "codex"),
+                                         ("shell", {"command": ["bash", "-lc", cmd]}, "codex"))}
+
     def test_reading_the_settings_files_stays_allowed(self):
         for cmd in ("cat .codex/config.toml", "grep -n hooks .claude/settings.json", "sed -n 1p .codex/config.toml",
                     "cat .codex/config.toml > /dev/null", "git log -p .claude/settings.json",
