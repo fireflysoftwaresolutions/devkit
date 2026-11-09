@@ -2185,6 +2185,9 @@ def cmd_plan(a):
             return 0
         if act in ("revise", "approve", "supersede"):
             path = Path(os.path.expanduser(a.path)).resolve()
+            if not path.is_file():
+                ui.err(f"no plan at {a.path}: check the path; `dev plan ls` lists the plans")
+                return 2
             status = {"approve": "approved", "supersede": "superseded"}.get(act)
             meta = plans.revise(path, a.why or ("approved" if act == "approve" else ""), status=status)
             print(f"{ui.OK} {meta['id']} v{meta['version']} · {meta['status']}")

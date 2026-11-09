@@ -1,6 +1,8 @@
 # Copyright (c) 2026 Firefly Software Solutions Inc.
 # SPDX-License-Identifier: Apache-2.0
 """Plan records keep their whole body: only the record's own changelog, at the end, is read as the changelog."""
+import contextlib
+import io
 import sys
 import tempfile
 import unittest
@@ -9,7 +11,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
-from devkit import core, plans, work  # noqa: E402
+from devkit import cli, core, plans, work  # noqa: E402
 
 A = {"user": "ana", "host": "mbp1", "agent": "claude", "session": "s1"}
 ENTRY = "v1 · 2026-11-07T10:00:00Z · ana@mbp1 (claude:s1) · created"
@@ -152,6 +154,22 @@ class ReviseTests(unittest.TestCase):
             front, _ = work.split_frontmatter(path.read_text())
             self.assertEqual([ln for ln in front.splitlines() if ln in extra], extra)
             self.assertIn("version: 2", front.splitlines())
+
+
+class PlanCommandTests(unittest.TestCase):
+    def test_a_plan_path_that_does_not_exist_is_a_plain_error_that_names_it(self):
+        # a typo in the path is the caller's mistake: exit 2 and the path, never devkit's bug report (exit 70)
+        with TempPlans():
+            missing = plans.PLANS / "acme" / "api" / "no-such-plan.md"
+            for verb in ("revise", "approve", "supersede"):
+                with self.subTest(verb=verb):
+                    out, err = io.StringIO(), io.StringIO()
+                    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                        rc = cli.main(["plan", verb, str(missing), "--why", "a reason"])
+                    self.assertEqual(rc, 2, err.getvalue())
+                    self.assertIn(f"no plan at {missing}:", err.getvalue())  # as typed
+                    self.assertNotIn("devkit bug", err.getvalue() + out.getvalue())
+                    self.assertFalse(missing.exists())
 
 
 if __name__ == "__main__":
