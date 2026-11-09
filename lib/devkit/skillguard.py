@@ -243,6 +243,37 @@ def _shell_command(inp) -> str:
     return " ".join(map(str, cmd)) if isinstance(cmd, list) else str(cmd)
 
 
+def fork_start(lines: list) -> int:
+    """The index of a Codex rollout's first line of its own. A spawned agent's rollout opens with a copy of its
+    parent's history (its session_meta names forked_from_id), whose commands, skills and edits are the parent's: the
+    agent's own records start at its first task_started at or after the subagent_history_start_ordinal its
+    session_meta gives (Codex 0.167), past the end of the rollout when it has not started yet. 0 for a rollout that
+    is not forked or gives no start."""
+    try:
+        first = json.loads(lines[0]) if lines else {}
+    except ValueError:
+        return 0
+    meta = first.get("payload") if isinstance(first, dict) and first.get("type") == "session_meta" else None
+    start = meta.get("subagent_history_start_ordinal") if isinstance(meta, dict) and meta.get("forked_from_id") \
+        else None
+    if not isinstance(start, int) or isinstance(start, bool):
+        return 0
+    for i, ln in enumerate(lines):
+        if '"task_started"' not in ln:
+            continue
+        try:
+            rec = json.loads(ln)
+        except ValueError:
+            continue
+        p = rec.get("payload") if isinstance(rec, dict) and rec.get("type") == "event_msg" else None
+        if not isinstance(p, dict) or p.get("type") != "task_started":
+            continue
+        ordinal = rec.get("ordinal")
+        if (ordinal if isinstance(ordinal, int) and not isinstance(ordinal, bool) else i) >= start:
+            return i
+    return len(lines)
+
+
 def read(agent: str, transcript: str, offset: int = 0):
     """-> (loaded skill names, changed file paths, shell commands, new offset) from the transcript since
     `offset`."""
@@ -259,7 +290,10 @@ def read(agent: str, transcript: str, offset: int = 0):
             data = fh.read().decode("utf-8", "ignore")
     except (OSError, TypeError):
         return loaded, files, commands, offset
-    for ln in data.splitlines():
+    lines = data.splitlines()
+    if agent != "claude" and offset == 0:  # a spawned Codex agent's rollout: from its own first record
+        lines = lines[fork_start(lines):]
+    for ln in lines:
         if agent == "claude":
             if '"tool_use"' not in ln:
                 continue

@@ -13,7 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
-from devkit import core, skillguard as sg  # noqa: E402
+from devkit import core, gates, skillguard as sg  # noqa: E402
 
 # A repository that does not use Postgres: a Laravel app on MySQL, devkit-like docs and skills, and code of each stack.
 APP = {
@@ -252,6 +252,67 @@ class CommandsAtStop(unittest.TestCase):
                                                    sess=sess) or "")
         self.assertIsNone(self.stop(tool_use("Bash", command='dev lesson add "z" --cause w'), sess=sess))
 
+
+
+# A spawned Codex agent's rollout, shaped like the real scout's (Codex 0.167.0, 2026-11-09,
+# rollout-2026-11-09T10-00-55-01a1c178-64c7-7ac1-81c6-ec8b852e1772.jsonl): its session_meta names the parent
+# (forked_from_id) and where its own history starts (subagent_history_start_ordinal); then a copy of the parent's
+# history: the parent's session_meta, its turn with the exec call that read a skill and ran a command, the spawn and
+# the turn_aborted that ends the copy; then the agent's own records, from its task_started.
+PARENT, SCOUT = "01a1c178-2665-7ca1-9a5d-046a95cee8bc", "01a1c178-64c7-7ac1-81c6-ec8b852e1772"
+PARENT_TURN, SCOUT_TURN = "01a1c178-28b7-7fa1-a67c-2bd8b7433d66", "01a1c178-651e-7bc1-a532-a2415b26e099"
+PARENT_SCRIPT = ("text(await tools.exec_command({cmd:\"cat /Users/me/.codex/plugins/cache/openai-curated-remote/superpowers/"
+                 "7.0.1/skills/using-superpowers/SKILL.md\",\"max_output_tokens\":3000}));\n"
+                 "text(await tools.exec_command({cmd:\"python3 -c 'import nosuchmod'\",\"max_output_tokens\":1000}));\n")
+SCOUT_SCRIPT = ("const r = await tools.exec_command({cmd:\"rg --files\",\"workdir\":\"/repo\",\"max_output_tokens\":1200});"
+                "\ntext(r.output);\n")
+
+
+def _scout_rollout(path):
+    recs = [
+        ("session_meta", {"id": SCOUT, "forked_from_id": PARENT, "parent_thread_id": PARENT, "cli_version": "0.167.0",
+                          "thread_source": "subagent", "agent_role": "scout", "agent_path": "/root/list_files",
+                          "subagent_history_start_ordinal": 9}),
+        ("session_meta", {"id": PARENT, "cli_version": "0.167.0", "source": "exec", "thread_source": "user"}),
+        ("event_msg", {"type": "task_started", "turn_id": PARENT_TURN,
+                       "turn_attribution": {"turn_id": PARENT_TURN, "turn_trigger": "exec", "parent_turn_id": None}}),
+        ("response_item", {"type": "message", "role": "user", "content": [
+            {"type": "input_text", "text": "Run python3 -c 'import nosuchmod', then spawn a scout agent to list the files"}]}),
+        ("response_item", {"type": "custom_tool_call", "status": "completed", "call_id": "call_eac2505c", "name": "exec",
+                           "input": PARENT_SCRIPT}),
+        ("response_item", {"type": "custom_tool_call_output", "call_id": "call_eac2505c",
+                           "output": [{"type": "input_text", "text": "Script completed\n"}]}),
+        ("response_item", {"type": "function_call", "status": "completed", "name": "spawn_agent",
+                           "namespace": "collaboration", "arguments": json.dumps(
+                               {"task_name": "list_files", "agent_type": "scout", "message": "gAAAAABq8gpX"})}),
+        ("event_msg", {"type": "turn_aborted", "turn_id": PARENT_TURN, "reason": "interrupted"}),
+        ("response_item", {"type": "message", "role": "developer", "content": [
+            {"type": "input_text", "text": "You are now a newly spawned child agent. The preceding conversation is "
+                                           "inherited parent context."}]}),
+        ("event_msg", {"type": "thread_settings_applied", "thread_id": SCOUT}),
+        ("event_msg", {"type": "task_started", "turn_id": SCOUT_TURN, "turn_attribution": {
+            "turn_id": SCOUT_TURN, "turn_trigger": "exec", "parent_turn_id": PARENT_TURN,
+            "initiating_agent_path": "/root"}}),
+        ("response_item", {"type": "custom_tool_call", "status": "completed", "call_id": "call_c2cc5bca", "name": "exec",
+                           "input": SCOUT_SCRIPT}),
+        ("event_msg", {"type": "item_completed", "thread_id": SCOUT, "turn_id": SCOUT_TURN, "item": {
+            "type": "CommandExecution", "id": "exec-723551dd-b4f5-454b-aa9e-dd740a2de705",
+            "command": ["/bin/zsh", "-lc", "rg --files"], "cwd": "file:///repo", "status": "completed", "exit_code": 0}}),
+    ]
+    Path(path).write_text("".join(json.dumps({"timestamp": "2026-11-09T18:00:55.302Z", "ordinal": i, "type": t,
+                                              "payload": p}) + "\n" for i, (t, p) in enumerate(recs)))
+
+
+class ForkedCodexRollout(unittest.TestCase):
+    # a member is credited with its own commands and skills only, never with the parent's history its rollout copies
+    def test_a_spawned_agent_is_credited_only_with_its_own_records(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "rollout.jsonl")
+            _scout_rollout(path)
+            loaded, _, commands, _ = sg.read("codex", path)
+            self.assertEqual(commands, ["rg --files"])
+            self.assertNotIn("using-superpowers", loaded)
+            self.assertEqual(gates._activity(path, "codex"), (["rg --files"], []))  # what the crew gates count
 
 if __name__ == "__main__":
     unittest.main()
