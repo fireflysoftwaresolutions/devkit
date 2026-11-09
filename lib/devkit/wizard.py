@@ -743,6 +743,7 @@ PANEL_NEEDS = {"claude": "Claude Code needs your Claude account: a Pro, Max, Tea
 AGENT_ONLY = {"claude": "Anthropic's agent, in the terminal and Claude Desktop.",
               "codex": "OpenAI's agent, in the terminal and the ChatGPT app."}
 REMOVE_APP = {"claude": "rm -rf ~/.local/bin/claude ~/.local/share/claude", "codex": "brew uninstall --cask codex"}
+REVIEW_COL = 26  # the review's value column: "  7  " and the section name padded to 20, then a space
 # The command that signs in later (the summary's "To finish"), and each way to sign in from the panel.
 SIGN_IN = {"claude": ["claude", "auth", "login"], "codex": ["codex", "login"]}
 DEVICE_SIGN_IN = ["codex", "login", "--device-auth"]  # Codex's sign-in with a code: a link and a code for any device
@@ -1492,12 +1493,21 @@ class _Wizard:
         return out + ([""] if answered else [])
 
     def banner(self) -> list:
-        """The banner; on a small window its one-line form, split in two when even that is too wide."""
+        """The banner; on a small window its one-line form, split in two when even that is too wide. A version line
+        too wide for the copyright beside it puts the copyright on a line of its own, never cut."""
         width, height = self.term.size()
         lines = ui.banner("setup", framed=height >= 40 and width >= ui.FRAME_INNER + 6).strip("\n").split("\n")
+        meta = f"v{core.VERSION} · setup"
+        rights = ["  " + tui.dim(x) for x in _wrap_parts(core.COPYRIGHT, width - 3)]
         if len(lines) == 1 and tui.vlen(lines[0]) > width - 1:
-            lines = [f"  {ui.logo_inline()}  {tui.dim(f'v{core.VERSION} · setup')}", f"  {tui.dim(core.COPYRIGHT)}"]
-        return lines
+            return [f"  {ui.logo_inline()}  {tui.dim(meta)}"] + rights
+        out = []
+        for line in lines:
+            if tui.vlen(line) > width - 1 and core.COPYRIGHT in tui.strip(line):
+                out += [f"  {tui.dim(meta)}"] + rights
+            else:
+                out.append(line)
+        return out
 
     def intro(self) -> list:
         return self.banner() + [""]
@@ -1552,8 +1562,8 @@ class _Wizard:
             "Nothing changes until you choose Apply." if first else
             "Your saved choices are the starting point; nothing changes until you choose Apply.", width - 5)]
         lines += ["", "  " + tui.bold("On this Mac")]
-        for mark, what, text in self.found():  # each row's text wraps under its column, never cut
-            parts = _wrap_words(text, width - 19)
+        for mark, what, text in self.found():  # each row's text wraps under its column (17), never cut
+            parts = _wrap_words(text, width - 1 - 17)
             lines += [f"  {mark} {tui.pad(what, 12)} {parts[0]}"] + [" " * 17 + x for x in parts[1:]]
         return lines + [""]
 
@@ -1827,13 +1837,13 @@ class _Wizard:
     def _removal_lines(self, width) -> list:
         """Under the Agents row, for an agent the saved setup had and these answers turn off: what devkit removes from
         it, what stays, and how to remove the app (devkit does not)."""
-        out, lead = [], " " * 26
+        out, lead = [], " " * REVIEW_COL
         for k in ("claude", "codex"):
             if self.saved_a and self.saved_a.get("use_" + k) and not self.a.get("use_" + k):
                 name = AGENT_NAMES[k]
                 text = (f"devkit removes its rules, hooks and skills from {name}. {name} and your own settings "
                         f"stay. To remove the app: {REMOVE_APP[k]}")
-                lines = tui.wrap(text, width - 31)
+                lines = tui.wrap(text, width - 1 - REVIEW_COL - 2)  # after the "! " mark
                 out += [lead + tui.warn("!") + " " + lines[0]] + [lead + "  " + x for x in lines[1:]]
         return out
 
@@ -1874,9 +1884,10 @@ class _Wizard:
                                                        "again, which repairs anything that drifted.")))
             out.append("")
         kw, lead = 20, " " * 25
+        room = width - 1 - REVIEW_COL  # the value column, up to the last column but one
 
         def value(v) -> list:  # a value wrapped under its column, never cut, never broken at a hyphen
-            return _wrap_words(v, width - 28)
+            return _wrap_words(v, room)
         for n, (k, v) in enumerate(rows, 1):
             parts = value(v)
             out.append(f"  {tui.dim(str(n))}  {tui.warn(tui.pad(k, kw)) if k in changed else tui.pad(k, kw)} {parts[0]}")
@@ -1896,7 +1907,7 @@ class _Wizard:
             out += [lead + " " + x for x in value(
                 f"+ {' and '.join(AGENT_NAMES[k] for k in agents)}, from "
                 f"{'their own installers' if len(agents) > 1 else 'its own installer'}")]
-        parts = _path_lines("", str(core.tilde(CONFIG_FILE)), width - 28)
+        parts = _path_lines("", str(core.tilde(CONFIG_FILE)), room)
         out += [f"     {tui.pad('Config file', kw)} {parts[0]}"] + [lead + " " + x for x in parts[1:]] + [""]
         mins = max(5, -(-todo * 20 // 300) * 5) if todo else 0
         work = (f"about {mins} minutes of installing that needs nothing from you," if mins else
@@ -2601,6 +2612,17 @@ def _wrap_words(text: str, width: int) -> list:
     if tui.vlen(text) <= width:
         return [text]
     return textwrap.wrap(text, max(10, width), break_on_hyphens=False, break_long_words=False) or [text]
+
+
+def _wrap_parts(text: str, width: int, sep=" · ") -> list:
+    """Text made of parts joined by `sep`, as few parts a line as fit; a part too wide on its own wraps at spaces."""
+    lines = []
+    for part in text.split(sep):
+        if lines and tui.vlen(lines[-1] + sep + part) <= width:
+            lines[-1] += sep + part
+        else:
+            lines += _wrap_words(part, width)
+    return lines
 
 
 def _path_lines(prefix: str, path: str, width: int) -> list:

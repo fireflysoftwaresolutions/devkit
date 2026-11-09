@@ -17,7 +17,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "lib"))
 sys.path.insert(0, str(HERE))
 
-from devkit import tui, wizard  # noqa: E402
+from devkit import core, tui, ui, wizard  # noqa: E402
 import test_setup_flow as flow  # noqa: E402  (the fake Mac, its keys and the saved-run writer)
 
 DOWN, ENTER = flow.DOWN, flow.ENTER
@@ -107,6 +107,32 @@ class SecondCtrlCTests(unittest.TestCase):
         self.assertIn("dev setup --resume", r.text.split("Setup paused")[1])
         self.assertEqual(r.state("doctor"), "pending")
         self.assertEqual(r.rc, 130)
+
+
+class ScreenWidthTests(unittest.TestCase):
+    """The screens at 80 and 60 columns: rows on one line where they fit, nothing cut."""
+
+    def test_every_review_row_fits_on_one_line_at_80_columns(self):
+        text = wizard.preview(width=80, color=False)["W-7"]
+        self.assertIn("  6  Docker               3 CPUs · 4 GB memory · 80 GB disk · starts at the end\n", text)
+        rows = text.split("  1  ")[1].split("Packages")[0]
+        self.assertEqual([x for x in rows.splitlines() if x.startswith(" " * 26)], [])
+
+    def test_a_welcome_row_that_fits_stays_on_one_line_at_80_columns(self):
+        text = wizard.preview(width=80, color=False)["W-2"]
+        self.assertIn("  ✓ Mac          macOS 26.2 · Apple silicon · 10 CPUs · 16 GB memory · Homebrew\n", text)
+
+    def test_the_banner_shows_the_whole_copyright_at_80_and_60_columns(self):
+        with mock.patch.object(ui, "width", lambda: 120):  # the large wordmark, whatever this terminal is
+            for width in (80, 60):
+                for name in ("W-2", "W-17"):
+                    with self.subTest(width=width, screen=name):
+                        lines = wizard.preview(width=width, color=False)[name].splitlines()
+                        at = lines.index(f"  v{core.VERSION} · setup")
+                        rights = lines[at + 1:lines.index("", at)]
+                        self.assertEqual(" · ".join(x.strip() for x in rights), core.COPYRIGHT)
+                        self.assertEqual(len(rights), 1 if width == 80 else 2)  # at 60, broken at the " · "
+                        self.assertEqual([x for x in lines if len(x) > width - 1 or x.endswith("…")], [])
 
 
 if __name__ == "__main__":
