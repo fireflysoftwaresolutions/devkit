@@ -9,10 +9,13 @@ prevention still exists.
                                           the capture shape: the title is the rule, one line of at most 80
                                           characters, not starting with "["; what happened or evidence is given
     screen(fields) -> str                 the reason to hold (quarantine) a lesson, or "": text that tells agents to
-                                          override the developer or the guard, a secret-like value, a URL, a pipe
-                                          into a shell, a command substitution, a backtick command, download-and-run,
-                                          a path in the agents' or devkit's configuration folders, or invisible
-                                          characters
+                                          override the developer or the guard (an escape hatch or the caller's
+                                          identity set as a variable, --no-verify with or without its dashes, and
+                                          the like), a secret-like value, a URL, a pipe
+                                          into a shell, download-and-run, a path in the agents' or devkit's
+                                          configuration folders, or invisible characters, in any field; a command
+                                          substitution or a backtick command in the fields an agent acts on (the
+                                          title, Prevention, Fix), not in the ones that explain the mistake
     lint(lessons, repo_root=None) -> [{id, kind, problem, fix}]
                                           recorded lessons that recall cannot use well: broad, missing and wrong
                                           anchors, file anchors that match no file, no root cause, held lessons
@@ -141,8 +144,26 @@ _OVERRIDE = re.compile(
     r"|\b(?:disable|turn\s+off|switch\s+off|bypass|skip|circumvent|deactivate|silence)\s+(?:the\s+|all\s+|any\s+"
     r"|devkit'?s?\s+|its\s+)*(?:guard|hooks?|sandbox|verification|permission\s+checks?|safeguards?)\b"
     r"|\b(?:override|overrule|disobey)\s+(?:the\s+)?(?:developer|user|guard)\b"
-    r"|--no-verify\b|--dangerously-[\w-]+|\bdangerously(?:disable|skip|bypass)\w*|\bbypasspermissions\b",
+    r"|\bno-verify\b|--dangerously-[\w-]+|\bdangerously[\s_-]*(?:disable|skip|bypass)\w*|\bbypasspermissions\b",
     re.I)
+# variables that say who is calling devkit or where it reads: set by an agent, they point devkit at another session or
+# state tree (guard.py refuses them for devkit calls); the guard's own one-command hatches join them when screened
+IDENTITY_VARS = ("DEVKIT_SESSION", "DEVKIT_FROM_AGENT", "DEVKIT_AGENT", "DEVKIT_CONFIG", "DEV_ROOT", "HOME")
+
+
+def _hatch_set(text: str):
+    """An assignment (NAME=…) of one of the guard's escape hatches (guard.ENV_HATCHES, read at each call so the screen
+    follows the guard) or of IDENTITY_VARS; any DEVKIT_ assignment when the guard cannot be read."""
+    try:
+        from .guard import ENV_HATCHES
+        names = "|".join(sorted(re.escape(n) for n in set(ENV_HATCHES) | set(IDENTITY_VARS)))
+    except Exception:
+        names = "|".join(IDENTITY_VARS) + r"|DEVKIT_[A-Z0-9_]+"
+    return re.search(r"(?<![\w$])(?:" + names + r")=", text)
+
+
+def _override(text: str):
+    return _OVERRIDE.search(text) or _hatch_set(text)
 _SHELLS = r"(?:(?:ba|z|da|k|c|tc|fi)?sh|python[\d.]*|perl|ruby|node|php|pwsh|powershell|iex)"
 _DOWNLOAD_RUN = re.compile(
     r"<\(\s*(?:curl|wget|fetch|iwr|irm)\b"
@@ -160,7 +181,7 @@ _CONFIG = re.compile(r"(?:~|\$HOME|\$\{HOME\}|/Users/[^/\s]+|/home/[^/\s]+|/root
 SCREENS = (
     ("has invisible or direction-changing characters", _HIDDEN.search),
     ("has a secret-like value", None),  # the audit redactor's patterns, loaded when first used
-    ("tells agents to override the developer or the guard", _OVERRIDE.search),
+    ("tells agents to override the developer or the guard", _override),
     ("downloads and runs code", _DOWNLOAD_RUN.search),
     ("pipes into a shell", _PIPE_SHELL.search),
     ("has a command substitution", _SUBST.search),
@@ -168,6 +189,10 @@ SCREENS = (
     ("has a URL", _URL.search),
     ("names a path in the agents' or devkit's configuration folders", _CONFIG.search),
 )
+# the sections that explain a mistake rather than tell an agent what to do: a command substitution or a backtick
+# command there is the story of what ran, so those two screens skip them (every other screen still reads them)
+EXPLANATION = frozenset(("what happened", "root cause", "detection", "evidence"))
+_ACTING_ONLY = frozenset((_SUBST.search, _BACKTICK.search))
 
 
 def _secret(text: str):
@@ -187,14 +212,22 @@ def _field(key) -> str:
     return " ".join(str(key).split()).lstrip("[")[:40] or "text"
 
 
+def _explains(key) -> bool:
+    return " ".join(str(key).split()).casefold() in EXPLANATION
+
+
 def screen(fields: dict) -> str:
     """Why a lesson must be held instead of recalled, as one line ("Prevention pipes into a shell"), or "". Every
-    string value is screened, whatever its key, and so are lists of strings. Text is compared after NFKC
-    normalization (fullwidth letters become plain ones) with Unicode dashes read as "-". The reason never quotes the
-    text it found, so a secret is never copied into the lesson's front matter."""
+    string value is screened, whatever its key, and so are lists of strings, with one exception: a command
+    substitution or a backtick command holds the lesson only outside What happened, Root cause, Detection and
+    Evidence (in the title, Prevention, Fix and any other key), because those four explain what ran. Text is compared
+    after NFKC normalization (fullwidth letters become plain ones) with Unicode dashes read as "-". The reason never
+    quotes the text it found, so a secret is never copied into the lesson's front matter."""
     texts = [(key, s) for key, value in (fields or {}).items() for s in _strings(value) if s]
     for what, test in SCREENS:
         for key, raw in texts:
+            if test in _ACTING_ONLY and _explains(key):
+                continue
             text = raw if test is _HIDDEN.search else unicodedata.normalize("NFKC", raw).translate(_DASHES)
             if (test or _secret)(text):
                 return f"{_field(key)} {what}"
