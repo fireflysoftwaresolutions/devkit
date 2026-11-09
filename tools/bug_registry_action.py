@@ -20,8 +20,12 @@ into a command.
   fixed version) is reopened and labeled.
 
 Voters are HMAC-SHA256 digests of the GitHub account id, keyed with the repository secret BUG_REGISTRY_KEY, never
-logins. Trust comes from GitHub's `author_association`. Every rule about payloads, records, trust and score is
-lib/devkit/bugs.py's, the code every client runs, so the workflow and the clients cannot disagree.
+logins. Trust comes from GitHub's `author_association`: OWNER and MEMBER count. A member whose membership is private
+reaches the workflow as CONTRIBUTOR or NONE, so `.github/bug-registry-maintainers` lists such accounts by login, and a
+listed login counts as MEMBER. The file is read from the workflow's own checkout (the default branch on issue events,
+the tagged commit on a release), so it changes only through a merged pull request, never through an event or a fork.
+Every rule about payloads, records, trust and score is lib/devkit/bugs.py's, the code every client runs, so the
+workflow and the clients cannot disagree.
 """
 from __future__ import annotations
 
@@ -47,6 +51,8 @@ REGRESSION = "regression"
 EVENTS = {"issues": "opened", "issue_comment": "created", "release": "published"}
 TRIES = 3  # writes of one record that found it changed by another run, before the run gives up
 WAITS, WAIT_S = 4, 15  # a duplicate waits up to a minute for the first issue's own run to write its record
+MAINTAINERS = Path(__file__).resolve().parents[1] / ".github" / "bug-registry-maintainers"
+LOGIN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}")  # a GitHub login: 1 to 39 letters, digits or hyphens
 CLOSURE_QUERY = """query($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) {
     issue(number: $number) {
@@ -82,6 +88,39 @@ def _voter(key: bytes, user) -> str:
     if isinstance(uid, bool) or not isinstance(uid, int):
         return ""
     return hmac.new(key, str(uid).encode(), hashlib.sha256).hexdigest()
+
+
+def read_maintainers(path: Path = MAINTAINERS) -> frozenset:
+    """The logins the maintainers file lists, in lower case, since GitHub logins ignore case. One login per line, and
+    `#` starts a comment. A line that is not one GitHub login is ignored with a warning. A missing or unreadable file
+    lists nobody, so only OWNER and MEMBER count."""
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return frozenset()
+    except (OSError, UnicodeDecodeError) as e:
+        print(f"bug registry: cannot read {Path(path).name}, so it lists nobody: {e}", file=sys.stderr)
+        return frozenset()
+    logins = set()
+    for n, raw in enumerate(text.splitlines(), 1):
+        line = raw.split("#", 1)[0].strip()
+        if not line:
+            continue
+        if LOGIN_RE.fullmatch(line):
+            logins.add(line.lower())
+        else:
+            print(f"bug registry: {Path(path).name} line {n} is not one GitHub login: ignored", file=sys.stderr)
+    return frozenset(logins)
+
+
+def _association(user, assoc, maintainers: frozenset) -> str:
+    """The author_association bugs.py's trust rule sees: GitHub's, or MEMBER for a listed maintainer that GitHub shows
+    as anything less. Mapping here keeps one trust rule for the workflow and the clients."""
+    assoc = assoc if isinstance(assoc, str) else ""
+    if assoc in bugs.TRUSTED:
+        return assoc
+    login = user.get("login") if isinstance(user, dict) else None
+    return "MEMBER" if isinstance(login, str) and login.lower() in maintainers else assoc
 
 
 def _by_bot(comment: dict) -> bool:
@@ -132,19 +171,22 @@ def _write(client, number: int, holder, rec: dict):
 
 # --------------------------------------------------------------------------- folding
 
-def _entries(key: bytes, issue: dict, comments: list, rec, fp: str) -> list:
+def _entries(key: bytes, issue: dict, comments: list, rec, fp: str, maintainers: frozenset) -> list:
     """What this run folds, oldest first: the issue's body when it has no record yet, then every comment past `seen`
-    holding a valid payload for this fingerprint. -> [(payload, voter, author_association, comment id or None)]"""
+    holding a valid payload for this fingerprint. -> [(payload, voter, author_association, comment id or None)], with
+    a listed maintainer's association as MEMBER."""
     out = []
     if rec is None:
-        out.append((_first_report(issue), _voter(key, issue.get("user")), issue.get("author_association") or "", None))
+        out.append((_first_report(issue), _voter(key, issue.get("user")),
+                    _association(issue.get("user"), issue.get("author_association"), maintainers), None))
     seen = _number((rec or {}).get("seen"))
     for c in comments:
         if c["id"] <= seen or _by_bot(c):
             continue
         p = _payload(c.get("body"))
         if p is not None and p["fingerprint"] == fp:
-            out.append((p, _voter(key, c.get("user")), c.get("author_association") or "", c["id"]))
+            out.append((p, _voter(key, c.get("user")), _association(c.get("user"), c.get("author_association"),
+                                                                       maintainers), c["id"]))
     return [e for e in out if e[0] is not None and e[1]]
 
 
@@ -255,7 +297,7 @@ def _forward(client, number: int, issue: dict, holder, stub: dict, entries: list
     return f"#{number} duplicates #{target}: {len(done)} payload(s) moved"
 
 
-def _fold_issue_once(client, key: bytes, number: int, now: float, sleep) -> str:
+def _fold_issue_once(client, key: bytes, number: int, now: float, sleep, maintainers: frozenset) -> str:
     issue = client.issue(number) or {}
     if issue.get("pull_request"):
         return f"#{number} is a pull request: skipped"
@@ -264,7 +306,7 @@ def _fold_issue_once(client, key: bytes, number: int, now: float, sleep) -> str:
     if rec is None and first is None:
         return f"#{number} has no valid first payload: left alone"
     fp = (rec or first)["fingerprint"]
-    entries = _entries(key, issue, comments, rec, fp)
+    entries = _entries(key, issue, comments, rec, fp, maintainers)
     seen = max([c["id"] for c in comments] + [_number((rec or {}).get("seen"))])
     if rec is None:
         target = _first_issue(client, fp, number, sleep)
@@ -289,10 +331,10 @@ def _fold_issue_once(client, key: bytes, number: int, now: float, sleep) -> str:
     return f"#{number}: {len(done)} payload(s) folded"
 
 
-def _fold_issue(client, key: bytes, number: int, now: float, sleep) -> str:
+def _fold_issue(client, key: bytes, number: int, now: float, sleep, maintainers: frozenset) -> str:
     for _ in range(TRIES):
         try:
-            return _fold_issue_once(client, key, number, now, sleep)
+            return _fold_issue_once(client, key, number, now, sleep, maintainers)
         except Changed:
             continue
     raise RegistryError(f"the record of issue #{number} kept changing while this run wrote it")
@@ -316,9 +358,9 @@ def _mark_fixed(client, number: int, version: str) -> bool:
     raise RegistryError(f"the record of issue #{number} kept changing while this run wrote it")
 
 
-def _release(client, event: dict) -> str:
-    """Set `fixed_in` on the bugs closed as completed since the previous release by a merged pull request or by a
-    member. A draft or a prerelease marks nothing."""
+def _release(client, event: dict, maintainers: frozenset) -> str:
+    """Set `fixed_in` on the bugs closed as completed since the previous release by a merged pull request, a member
+    or a listed maintainer. A draft or a prerelease marks nothing."""
     rel = event.get("release") if isinstance(event.get("release"), dict) else {}
     if rel.get("draft") or rel.get("prerelease"):
         return "a draft or a prerelease: no bug marked fixed"
@@ -338,7 +380,8 @@ def _release(client, event: dict) -> str:
                 (since and closed < since) or (published and closed > published):
             continue
         how = client.closure(number) or {}
-        if not how.get("merged_pr") and not (how.get("actor") and client.is_member(how["actor"])):
+        actor = str(how.get("actor") or "")
+        if not how.get("merged_pr") and not (actor and (actor.lower() in maintainers or client.is_member(actor))):
             continue
         if _mark_fixed(client, number, version):
             marked.append(number)
@@ -353,9 +396,11 @@ def _fail(message: str, code: int) -> int:
     return code
 
 
-def main(event_path: str, event_name: str, client, *, now: float = None, sleep=time.sleep) -> int:
+def main(event_path: str, event_name: str, client, *, now: float = None, sleep=time.sleep,
+         maintainers: Path = MAINTAINERS) -> int:
     """Handle one event. -> 0 when done or when there is nothing to do, 1 when the run could not finish (the next
-    event on the issue folds what is left), 2 when the registry secret is missing."""
+    event on the issue folds what is left), 2 when the registry secret is missing. `maintainers` is the maintainers
+    file to read."""
     try:
         with open(event_path, encoding="utf-8") as fh:
             event = json.load(fh)
@@ -378,14 +423,15 @@ def main(event_path: str, event_name: str, client, *, now: float = None, sleep=t
         return _fail("the repository secret BUG_REGISTRY_KEY is not set, so nothing was folded. A maintainer creates "
                      "it once (32 random bytes as hex) under Settings, Secrets and variables, Actions.", 2)
     now = time.time() if now is None else now
+    listed = read_maintainers(maintainers)
     try:
         if event_name == "release":
-            message = _release(client, event)
+            message = _release(client, event, listed)
         else:
             number = _number(issue.get("number"))
             if not number:
                 return _fail("the event names no issue", 1)
-            message = _fold_issue(client, key.encode(), number, now, sleep)
+            message = _fold_issue(client, key.encode(), number, now, sleep, listed)
     except (GitHubError, RegistryError) as e:
         return _fail(str(e), 1)
     print(f"bug registry: {message}")
@@ -507,7 +553,7 @@ class GitHub:
 
     def is_member(self, login: str) -> bool:
         """The repository's owner, or a public member of the owning organization. The workflow's token cannot read
-        private memberships, so a private member counts only through a merged pull request."""
+        private memberships; the maintainers file lists those members."""
         owner = self.repo.split("/", 1)[0]
         if login.lower() == owner.lower():
             return True

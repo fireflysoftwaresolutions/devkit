@@ -227,9 +227,10 @@ class FakeGitHub:
         return login in self.members
 
 
-def _run(fake, event_name, number=None, comment=None, key=KEY, sleep=None, **release):
+def _run(fake, event_name, number=None, comment=None, key=KEY, sleep=None, maintainers=None, **release):
     """Run the workflow's script on one event, as the runner would: the event JSON in a file, the secret in the
-    environment. -> (exit code, stdout, stderr)."""
+    environment. `maintainers` is the maintainers file's text, a path to read instead, or None for no file, so the
+    repository's own list never changes what a test sees. -> (exit code, stdout, stderr)."""
     event = copy.deepcopy(EVENTS[event_name])
     if number is not None:
         event["issue"] = fake.issue(number)
@@ -243,11 +244,14 @@ def _run(fake, event_name, number=None, comment=None, key=KEY, sleep=None, **rel
         path = os.path.join(d, "event.json")
         with open(path, "w", encoding="utf-8") as fh:
             json.dump(event, fh)
+        listed = maintainers if isinstance(maintainers, Path) else Path(d) / "maintainers"
+        if isinstance(maintainers, str):
+            listed.write_text(maintainers, encoding="utf-8")
         with mock.patch.dict(os.environ, {"BUG_REGISTRY_KEY": key or ""}), redirect_stdout(out), \
                 redirect_stderr(err):
             if key is None:
                 del os.environ["BUG_REGISTRY_KEY"]
-            rc = action.main(path, event_name, fake, now=NOW, sleep=sleep or (lambda s: None))
+            rc = action.main(path, event_name, fake, now=NOW, sleep=sleep or (lambda s: None), maintainers=listed)
     return rc, out.getvalue(), err.getvalue()
 
 
@@ -483,15 +487,41 @@ class FoldTests(unittest.TestCase):
         self.assertIn(_h(3), rec["voters"])
 
 
-class RegressionTests(unittest.TestCase):
-    def _fixed(self, number):
-        fake = FakeGitHub()
-        fake.registry_issue(number, fixed_in="26.11.8", status="fixed")
-        fake.issues[number].update(state="closed", state_reason="completed", closed_at=_iso(NOW - 5 * DAY))
-        return fake
+def _fixed(number):
+    """A registry issue for a bug fixed in 26.11.8, closed as completed."""
+    fake = FakeGitHub()
+    fake.registry_issue(number, fixed_in="26.11.8", status="fixed")
+    fake.issues[number].update(state="closed", state_reason="completed", closed_at=_iso(NOW - 5 * DAY))
+    return fake
 
+
+def _released():
+    """A registry at the 26.11.8 release, with bugs closed in every way that counts or does not; `maint` is a public
+    member, `outsider` is not."""
+    fake = FakeGitHub()
+    fake.release_list = [
+        {"id": 1, "tag_name": "v26.11.7", "draft": False, "prerelease": False,
+         "published_at": _iso(NOW - 10 * DAY)},
+        {"id": 3, "tag_name": "v26.11.8-rc.1", "draft": False, "prerelease": True,
+         "published_at": _iso(NOW - 3 * DAY)},
+        {"id": 2, "tag_name": "v26.11.8", "draft": False, "prerelease": False, "published_at": _iso(NOW)},
+    ]
+    fake.members = {"maint"}
+    cases = {60: ("completed", 2, "outsider", True), 61: ("completed", 2, "maint", False),
+             62: ("completed", 2, "outsider", False), 63: ("not_planned", 2, "maint", False),
+             64: ("completed", 20, "maint", True)}
+    for number, (reason, days_ago, actor, merged) in cases.items():
+        fake.registry_issue(number, rec_ts=NOW - 30 * DAY)
+        # a comment after closing moves updated_at, which the API's `since` filters on; closed_at decides
+        fake.issues[number].update(state="closed", state_reason=reason, closed_at=_iso(NOW - days_ago * DAY),
+                                   updated_at=_iso(NOW - DAY))
+        fake.closers[number] = {"actor": actor, "merged_pr": merged}
+    return fake
+
+
+class RegressionTests(unittest.TestCase):
     def test_three_accounts_reopen_a_fixed_bug(self):
-        fake = self._fixed(70)
+        fake = _fixed(70)
         for n in (2, 3):
             cid = fake.add_comment(70, _body(_payload("vote", version="26.11.9")), _user(n))
         self.assertEqual(_run(fake, "issue_comment", 70, comment=cid)[0], 0)
@@ -505,7 +535,7 @@ class RegressionTests(unittest.TestCase):
         self.assertEqual(fake.record(70)["status"], "regressed")
 
     def test_one_member_reopens_a_fixed_bug(self):
-        fake = self._fixed(71)
+        fake = _fixed(71)
         cid = fake.add_comment(71, _body(_payload("vote", version="26.11.9")), _user(5), "MEMBER")
         self.assertEqual(_run(fake, "issue_comment", 71, comment=cid)[0], 0)
         self.assertEqual(fake.issues[71]["state"], "open")
@@ -513,29 +543,8 @@ class RegressionTests(unittest.TestCase):
 
 
 class ReleaseTests(unittest.TestCase):
-    def _registry(self):
-        fake = FakeGitHub()
-        fake.release_list = [
-            {"id": 1, "tag_name": "v26.11.7", "draft": False, "prerelease": False,
-             "published_at": _iso(NOW - 10 * DAY)},
-            {"id": 3, "tag_name": "v26.11.8-rc.1", "draft": False, "prerelease": True,
-             "published_at": _iso(NOW - 3 * DAY)},
-            {"id": 2, "tag_name": "v26.11.8", "draft": False, "prerelease": False, "published_at": _iso(NOW)},
-        ]
-        fake.members = {"maint"}
-        cases = {60: ("completed", 2, "outsider", True), 61: ("completed", 2, "maint", False),
-                 62: ("completed", 2, "outsider", False), 63: ("not_planned", 2, "maint", False),
-                 64: ("completed", 20, "maint", True)}
-        for number, (reason, days_ago, actor, merged) in cases.items():
-            fake.registry_issue(number, rec_ts=NOW - 30 * DAY)
-            # a comment after closing moves updated_at, which the API's `since` filters on; closed_at decides
-            fake.issues[number].update(state="closed", state_reason=reason, closed_at=_iso(NOW - days_ago * DAY),
-                                       updated_at=_iso(NOW - DAY))
-            fake.closers[number] = {"actor": actor, "merged_pr": merged}
-        return fake
-
     def test_fixed_in_only_for_bugs_closed_as_completed_by_a_merged_pr_or_a_member(self):
-        fake = self._registry()
+        fake = _released()
         rc, _, err = _run(fake, "release")
         self.assertEqual(rc, 0, err)
         fixed = {n: (fake.record(n)["fixed_in"], fake.record(n)["status"]) for n in (60, 61, 62, 63, 64)}
@@ -543,10 +552,74 @@ class ReleaseTests(unittest.TestCase):
                                  63: ("", "open"), 64: ("", "open")})
 
     def test_a_prerelease_marks_nothing(self):
-        fake = self._registry()
+        fake = _released()
         rc, _, err = _run(fake, "release", tag_name="v26.11.9-rc.1", prerelease=True)
         self.assertEqual(rc, 0, err)
         self.assertEqual(fake.writes, [])
+
+
+class MaintainersTests(unittest.TestCase):
+    """A member whose organization membership is private reaches the workflow as CONTRIBUTOR or NONE. The maintainers
+    file kept in the repository lets the workflow count that account as a member; nothing else widens trust."""
+
+    def _confirm(self, login, assoc, maintainers):
+        """An outsider's detour, then a confirmation from `login` with `assoc`. -> (the detour's trust, stderr)."""
+        fake = FakeGitHub()
+        fake.registry_issue(12)
+        fake.add_comment(12, _body(_payload("detour")), _user(2))
+        cid = fake.add_comment(12, _body(_payload("confirm")), {"login": login, "id": 77, "type": "User"}, assoc)
+        rc, _, err = _run(fake, "issue_comment", 12, comment=cid, maintainers=maintainers)
+        self.assertEqual(rc, 0, err)
+        return fake.record(12)["detours"][0]["trust"], err
+
+    def test_a_listed_login_confirms_a_detour_into_verified(self):
+        listed = "# Maintainers whose membership is private\nalice-dev\n"
+        self.assertEqual(self._confirm("alice-dev", "CONTRIBUTOR", listed)[0], "verified")
+        self.assertEqual(self._confirm("Alice-Dev", "NONE", listed)[0], "verified")  # GitHub logins ignore case
+
+    def test_an_unlisted_contributor_or_collaborator_does_not(self):
+        for assoc in ("CONTRIBUTOR", "COLLABORATOR", "NONE"):
+            self.assertEqual(self._confirm("bob", assoc, "alice-dev\n")[0], "proposed", assoc)
+
+    def test_a_malformed_line_is_ignored_and_the_rest_still_count(self):
+        text = "alice-dev bob\n@carol\nerin  # lead maintainer\n" + "x" * 40 + "\n"
+        for login in ("alice-dev", "bob", "carol", "x" * 40):
+            self.assertEqual(self._confirm(login, "CONTRIBUTOR", text)[0], "proposed", login)
+        trust, err = self._confirm("erin", "CONTRIBUTOR", text)
+        self.assertEqual(trust, "verified")
+        self.assertEqual(re.findall(r"line (\d+)", err), ["1", "2", "4"])
+
+    def test_without_the_file_only_owner_and_member_count(self):
+        unreadable = ROOT / ".github"  # a directory: read as no file, never as a reason to trust more
+        for maintainers in (None, unreadable):
+            got = {assoc: self._confirm("alice-dev", assoc, maintainers)[0]
+                   for assoc in ("OWNER", "MEMBER", "COLLABORATOR", "CONTRIBUTOR")}
+            self.assertEqual(got, {"OWNER": "verified", "MEMBER": "verified", "COLLABORATOR": "proposed",
+                                   "CONTRIBUTOR": "proposed"})
+
+    def test_a_listed_maintainer_reopens_a_fixed_bug_alone(self):
+        fake = _fixed(71)
+        cid = fake.add_comment(71, _body(_payload("vote", version="26.11.9")), _user(5), "CONTRIBUTOR")
+        self.assertEqual(_run(fake, "issue_comment", 71, comment=cid, maintainers="user5\n")[0], 0)
+        self.assertEqual((fake.issues[71]["state"], fake.record(71)["status"]), ("open", "regressed"))
+
+    def test_a_bug_a_listed_maintainer_closed_is_marked_fixed(self):
+        for maintainers, fixed_in in ((None, ""), ("outsider\n", "26.11.8")):
+            fake = _released()
+            rc, _, err = _run(fake, "release", maintainers=maintainers)
+            self.assertEqual(rc, 0, err)
+            self.assertEqual(fake.record(62)["fixed_in"], fixed_in)  # closed by hand, by a private member
+
+    def test_the_workflow_reads_the_file_kept_in_the_repository(self):
+        self.assertEqual(action.MAINTAINERS, ROOT / ".github" / "bug-registry-maintainers")
+        err = io.StringIO()
+        with redirect_stderr(err):
+            listed = action.read_maintainers(action.MAINTAINERS)
+        self.assertEqual(err.getvalue(), "")  # no ignored line
+        self.assertTrue(listed)
+        text = action.MAINTAINERS.read_text(encoding="utf-8")
+        self.assertIn("pull request", text)
+        self.assertNotIn("devkit", text.lower())  # no brand words: the rebrand rewrites one constant
 
 
 class _Response:

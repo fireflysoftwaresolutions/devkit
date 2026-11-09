@@ -1,0 +1,8 @@
+# Maintainers the bug registry workflow trusts as members of the organization, for accounts whose membership is
+# private (GitHub shows them to the workflow as CONTRIBUTOR or NONE). Owners and public members need no line here.
+# One GitHub login per line; text after # is a comment; a line that is not one login is ignored.
+# Only a maintainer already listed here or an owner of the organization may add a name, and each name needs its own
+# pull request, reviewed and merged like any code change. The workflow reads this file from its own checkout of
+# the repository, never from an issue, a comment or a fork.
+# Remove a login in the same way when its account leaves the team or is renamed: a freed login can be taken by anyone.
+ancongui
