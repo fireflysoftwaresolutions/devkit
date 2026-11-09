@@ -40,12 +40,28 @@ def _log(msg: str):
         pass
 
 
+_PAYLOAD = {}  # the payload this hook run read, for run() to name its session once the handler is done
+
+
 def _stdin_json() -> dict:
+    global _PAYLOAD
     try:
         data = sys.stdin.read()
-        return json.loads(data) if data.strip() else {}
+        parsed = json.loads(data) if data.strip() else {}
     except (ValueError, OSError):
-        return {}
+        parsed = {}
+    _PAYLOAD = parsed if isinstance(parsed, dict) else {}
+    return parsed
+
+
+def _swallowed(component: str, exc: BaseException):
+    """An error a hook handler goes on without, recorded as a minor devkit bug once an hour per component (its hook
+    event): bugs.swallowed, which never raises."""
+    try:
+        from . import bugs
+    except Exception:  # the recorder cannot load: the handler goes on as it always did
+        return
+    bugs.swallowed(component, exc)
 
 
 def _session_file(agent: str, sid: str) -> Path:
@@ -288,8 +304,8 @@ def context_for(cwd: str, agent: str) -> str:
         if busy:
             lines.append("Also working on this project right now: " + ", ".join(busy[:5]) +
                          ". Coordinate through tasks (claim before you start) and pull before you push.")
-    except Exception:
-        pass
+    except Exception as e:
+        _swallowed("session-start", e)
     try:
         from . import lessons
         inits = [d.name for d in (HANDOFF / "initiatives").glob("*") if (d / "README.md").exists() and
@@ -300,15 +316,15 @@ def context_for(cwd: str, agent: str) -> str:
             lines.append("Known pitfalls (lessons from earlier mistakes; follow their prevention, and `dev lesson recur "
                          "<id> --evidence …` if one happens again):")
             lines += ["- " + x for x in known]
-    except Exception:
-        pass
+    except Exception as e:
+        _swallowed("session-start", e)
     try:
         from . import delivery
         dl = delivery.summary_line(p["id"])
         lines.append(dl if dl else "Delivery policy: not recorded yet — `dev delivery` detects and recommends one "
                                    "(`release-policy` skill) before the first release.")
-    except Exception:
-        pass
+    except Exception as e:
+        _swallowed("session-start", e)
     lang = (core.CFG.get("language") or "en-US")
     if lang.lower() not in ("en-us", "en"):
         lines.append(f"Language: this developer set devkit's language to {lang}: write replies, commits, PRs and docs "
@@ -447,8 +463,8 @@ def session_start(agent: str):
     try:
         from . import work
         work.request_sync("session start", delay=1)  # pull other machines' claims and publish this session
-    except Exception:
-        pass
+    except Exception as e:
+        _swallowed("session-start", e)
     _SEEN.pop(cwd, None)
     brief = _continuity("on_session_start", agent, data)
     context = _with_catalog(context_for(cwd, agent), agent)
@@ -1086,8 +1102,8 @@ def stop(agent: str):
             ids = sorted(set(re.findall(r"\bL-[0-9a-z]{9,}\b", said)))
             if ids:
                 _les.track(ids, "applied")
-        except Exception:
-            pass
+        except Exception as e:
+            _swallowed("stop", e)
         if dev_turn and not data.get("stop_hook_active") and not sess.get("lesson_nudged") and sess.get("top"):
             try:
                 from . import lessons
@@ -1665,6 +1681,28 @@ def _output_pitfalls(agent: str, data: dict) -> str:
         return ""
 
 
+def _output_bugs(agent: str, data: dict, ok: bool) -> str:
+    """PostToolUse (ok) and PostToolUseFailure: the call's line in the session ledger of devkit's bug registry, and,
+    for a marker of devkit's own failure in the output, the known detour or the new-bug paragraph. Also outside
+    projects; a marker that names no occurrence of this session does nothing."""
+    sid = str(data.get("session_id") or "")
+    if not sid:
+        return ""
+    try:
+        from . import bugs
+        text = _output_text(data)
+        resp = data.get("tool_response")
+        cmd = (data.get("tool_input") or {}).get("command") or ""
+        cmd = " ".join(str(x) for x in cmd) if isinstance(cmd, list) else str(cmd)
+        codes = bugs.marker_codes(text)
+        ok = ok and not (isinstance(resp, dict) and resp.get("interrupted"))
+        bugs.ledger_append(sid, data.get("tool_name") or "", ok, bugs.dev_words(command_words(cmd)), codes)
+        return bugs.context_for_output(text, sid) if codes else ""
+    except Exception:
+        _log(f"bugs {agent}: {traceback.format_exc()[-300:]}")
+        return ""
+
+
 def _hook_forgery(data: dict):
     """A shell call that runs one of devkit's hooks by hand -> ("deny", why), else None. Hook events are the
     harness's: one typed through a shell (`echo '{"prompt": "approve D3"}' | dev hook prompt`) would forge the
@@ -1966,7 +2004,8 @@ def guard(agent: str):
         _guard(agent, data, held)
     except Exception as e:
         if not _guard_failed(agent, data, held, e):
-            raise  # run() logs it and records guard.failopen: the call runs
+            raise  # run() logs it and records guard.failopen and the bug: the call runs
+        _bug_hook_error("guard", e)  # refused instead: run() never sees this failure
 
 
 def _guard(agent: str, data: dict, held: dict):
@@ -1977,8 +2016,8 @@ def _guard(agent: str, data: dict, held: dict):
         from . import progress
         if not headless:
             progress.tool_started(data)
-    except Exception:
-        pass
+    except Exception as e:
+        _swallowed("guard", e)
     _reconcile(agent, data)
     if data.get("agent_id") and not headless:  # late binding (spec D2): this call already runs with its launch's step and scope
         try:
@@ -2007,8 +2046,8 @@ def _guard(agent: str, data: dict, held: dict):
             try:
                 from . import progress
                 progress.note_agent_launch(agent, data)
-            except Exception:
-                pass
+            except Exception as e:
+                _swallowed("guard", e)
         why = _scope_violation(agent, data)
         if why:
             held["verdict"], held["rule"] = ("deny", why), "crew-scope"
@@ -2120,8 +2159,8 @@ def _guard_failed(agent: str, data: dict, held: dict, exc: BaseException) -> boo
     _log(f"guard {agent} {decision} (guard-error):\n{traceback.format_exc()}")
     try:
         _close_call(data)  # a refused call never runs: it leaves no open entry
-    except Exception:
-        pass
+    except Exception as e:
+        _swallowed("guard", e)
     try:
         from . import audit
         tin = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
@@ -2130,8 +2169,8 @@ def _guard_failed(agent: str, data: dict, held: dict, exc: BaseException) -> boo
                                                   data.get("tool_name") or "")[:400],
                          detail[:400], decision, tool=data.get("tool_name") or "", agent_id=data.get("agent_id") or "",
                          **({"rule": rule} if rule else {}))
-    except Exception:
-        pass  # the refusal stands without its record
+    except Exception as e:
+        _swallowed("guard", e)  # the refusal stands without its record
     print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": decision,
                                              "permissionDecisionReason": reason}}))
     return True
@@ -2222,8 +2261,8 @@ def prompt(agent: str):
                     "after your last tool call) opens with **[Firefly> DevKit]** <project> · `<branch>` · <task>, then "
                     "Done / Check / Next (global instructions §0). Nothing above it: put the verdict, a correction or "
                     "a comment on the last command below the block.") + ("\n\n" + text if text else "")
-    except Exception:
-        pass
+    except Exception as e:
+        _swallowed("prompt", e)
     route = ""
     if (core.CFG.get("crew") or {}).get("route_hint", True):
         route = morpheus_hint(data.get("prompt") or "")
@@ -2503,8 +2542,8 @@ def post_tool(agent: str):
                 if not core.is_temp(top):
                     ciwatch.start_background(top, session=f"{agent}:{data.get('session_id') or ''}", branch=ref,
                                              sha=sha)
-    except Exception:
-        pass
+    except Exception as e:
+        _swallowed("post-tool", e)
     closing = background = ""
     try:
         sf = _session_file(agent, data.get("session_id") or "-")
@@ -2518,6 +2557,7 @@ def post_tool(agent: str):
         _log(f"post-tool closing {agent}: {traceback.format_exc()[-300:]}")
     background = _background_told(agent, data)  # under the lock: told once, nothing while the record is busy
     _context_out("PostToolUse", "\n\n".join(x for x in (carried, answered, background, _output_pitfalls(agent, data),
+                                                        _output_bugs(agent, data, True),
                                                         _bulk_rewrite_note(data), closing,
                                                         progress.on_tool_done(agent, data)) if x))
 
@@ -2532,7 +2572,8 @@ def post_tool_failure(agent: str):
     _close_call(data)
     if data.get("tool_name") in ("Agent", "Task", "spawn_agent"):
         progress.launch_failed(agent, data)
-    _context_out("PostToolUseFailure", _output_pitfalls(agent, data))
+    _context_out("PostToolUseFailure", "\n\n".join(x for x in (_output_pitfalls(agent, data),
+                                                               _output_bugs(agent, data, False)) if x))
 
 
 def subagent_start(agent: str):
@@ -2780,8 +2821,8 @@ def statusline(agent: str):
                 tmp = f.with_suffix(".tmp")
                 tmp.write_text(json.dumps(rec))
                 os.replace(tmp, f)
-        except Exception:
-            pass
+        except Exception as e:
+            _swallowed("statusline", e)
     ws = data.get("workspace") or {}
     repo, branch = _branch_of(ws.get("current_dir") or data.get("cwd") or os.getcwd())
     model = ((data.get("model") or {}).get("display_name") or "").replace("Claude ", "")
@@ -2893,6 +2934,7 @@ def run(event: str, agent: str) -> int:
     if _headless() and event != "guard":
         return 0  # devkit's own headless call (ai.ask): no session, no progress, no gates; the guard still judges
     state.WAIT, state.SAY_BUSY = state.HOOK_WAIT, False  # a hook waits at most 2 s for a record, silently
+    marked = _bug_marks_start(event)
     try:
         (STATE / "logs").mkdir(parents=True, exist_ok=True)
         fn(agent)
@@ -2903,4 +2945,42 @@ def run(event: str, agent: str) -> int:
         if event == "guard":  # the guard failed open: recorded, so a rule that never runs is seen (spec G12)
             from . import guard as g
             g.failopen("guard-hook", e)
+        _bug_hook_error(event, e)
+    finally:
+        if marked:
+            _bug_marks_end(event)
     return 0
+
+
+def _bug_marks_start(event: str) -> bool:
+    """devkit's bug registry: this run's start mark, and the runs killed at their time limit that left one behind.
+    Not for the status line, which has no time limit and runs every few seconds."""
+    global _PAYLOAD
+    _PAYLOAD = {}
+    if event == "statusline":
+        return False
+    try:
+        from . import bugs
+        bugs.hook_started(event, "")
+        bugs.stale_hooks()
+        return True
+    except Exception:
+        _log(f"bug marks {event}: {traceback.format_exc()[-300:]}")
+        return False
+
+
+def _bug_marks_end(event: str):
+    try:
+        from . import bugs
+        bugs.hook_ended(event, str(_PAYLOAD.get("session_id") or ""))
+    except Exception:
+        _log(f"bug marks {event}: {traceback.format_exc()[-300:]}")
+
+
+def _bug_hook_error(event: str, exc: BaseException):
+    """A hook raised: a `hook` occurrence in devkit's bug registry (the guard's goes to private reporting only)."""
+    try:
+        from . import bugs
+        bugs.hook_error(event, exc, str(_PAYLOAD.get("session_id") or ""))
+    except Exception:
+        _log(f"bug record {event}: {traceback.format_exc()[-300:]}")

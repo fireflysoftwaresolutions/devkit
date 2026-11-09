@@ -3829,6 +3829,17 @@ def build_parser():
     return ap
 
 
+def _crashed(argv, exc: BaseException) -> int:
+    """A command raised: devkit's bug registry reports it (bugs.handle_crash). Exit 70 even when that module cannot
+    load, with one plain line instead of a second traceback."""
+    try:
+        from . import bugs
+    except Exception:
+        print("devkit bug: internal error while reporting", file=sys.stderr)
+        return 70
+    return bugs.handle_crash(argv, exc)
+
+
 def main(argv=None) -> int:
     global _ARGV
     argv = sys.argv[1:] if argv is None else argv
@@ -3856,6 +3867,9 @@ def main(argv=None) -> int:
     except KeyboardInterrupt:
         rc = 130
         return 130
+    except Exception as e:  # devkit's own bug: a notice with its marker and exit 70, never a traceback
+        rc = _crashed(argv, e)
+        return rc
     finally:
         if track:
             try:
