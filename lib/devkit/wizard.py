@@ -1958,7 +1958,14 @@ class _Wizard:
                 if st:
                     run.set(st.sid, "failed" if st.required else "skipped", "interrupted", st.fix)
                 return True
-        return self._stage4([s for s in steps if s.stage == 4], run)
+        last = [s for s in steps if s.stage == 4]
+        try:
+            return self._stage4(last, run)
+        except (KeyboardInterrupt, tui.Cancelled):  # Ctrl-C in the sign-ins or between them and the check: a pause
+            for st in last:
+                if run.state(st.sid) == "running" or st.sid in ALWAYS_RUN:
+                    run.set(st.sid, "pending")  # not run this time: dev setup --resume runs it
+            return True
 
     def _checklist(self, labels, footer=()):
         return tui.LineChecklist(self.term, labels) if self.lines else tui.Checklist(self.term, labels, footer=footer)
@@ -2219,7 +2226,10 @@ class _Wizard:
                 return None
             way = way if choice == "again" else choice
             got = self._sign_in_with(k, way)
-            x = self._status().get(k) or {}
+            try:
+                x = self._status().get(k) or {}
+            except KeyboardInterrupt:  # a second Ctrl+C while the status is read: still the sign-in they stopped
+                got, x = _Ended("interrupted"), {}
             if x.get("logged_in"):
                 detail = _signed(x)
                 run.set(st.sid, "done", detail=detail, plan=_plan(x))

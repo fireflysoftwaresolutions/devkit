@@ -68,5 +68,46 @@ class ReviewOfASavedSetupTests(unittest.TestCase):
         self.assertEqual(r.cfg["agents"], {"claude": True, "codex": False})
 
 
+class InterruptedMac(flow.Mac):
+    """A Mac where Ctrl+C lands while the wizard reads the agents' status: `after_sign_in` right after a sign-in
+    (the second Ctrl+C of a stopped sign-in), else at the first status read of the sign-ins."""
+
+    def __init__(self, after_sign_in, **kw):
+        super().__init__(**kw)
+        self.after_sign_in, self.armed = after_sign_in, not after_sign_in
+
+    def attach(self, argv, timeout=None, device=None, clock=None):
+        self.armed = self.armed or self.after_sign_in
+        return super().attach(argv, timeout, device, clock)
+
+    def status(self, include_account=True):
+        if self.armed:
+            self.armed = False
+            raise KeyboardInterrupt
+        return super().status(include_account)
+
+
+class SecondCtrlCTests(unittest.TestCase):
+    """Ctrl+C in the sign-ins and the check ends with the summary, never with nothing on the screen."""
+
+    def test_ctrl_c_right_after_a_stopped_sign_in_counts_as_the_stopped_sign_in(self):
+        mac = InterruptedMac(after_sign_in=True, claude="signed-in", codex="installed")
+        mac.sign_ins["codex"] = ["interrupted"]
+        r = flow.run_wizard(mac, flow.BOTH_FROM_CLAUDE + ENTER, device=os.devnull)
+        self.assertEqual(mac.titles().count("Codex is not signed in yet"), 1)
+        self.assertIn("Reason: you stopped the sign-in.", r.text)
+        self.assertEqual(r.step("signin-codex")["reason"], wizard.SKIPPED_BY_CHOICE)
+        self.assertIn("devkit is ready.", r.text)
+        self.assertEqual(r.rc, 0)
+
+    def test_ctrl_c_in_the_sign_ins_pauses_the_setup_with_its_summary(self):
+        mac = InterruptedMac(after_sign_in=False, claude="signed-in", codex="installed")
+        r = flow.run_wizard(mac, flow.BOTH_FROM_CLAUDE, device=os.devnull)
+        self.assertRegex(r.text, r"Setup paused\. \d of \d steps are done\.")
+        self.assertIn("dev setup --resume", r.text.split("Setup paused")[1])
+        self.assertEqual(r.state("doctor"), "pending")
+        self.assertEqual(r.rc, 130)
+
+
 if __name__ == "__main__":
     unittest.main()
