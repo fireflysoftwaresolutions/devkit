@@ -297,6 +297,9 @@ COMMAND_ARGS = {
     "clone": "repo:name",
     "codex": "query:name? args:text...",
     "commit": "paths:name*",
+    "bug": "", "bug confirm": "bug:select detour:select", "bug detour": "fingerprint:select", "bug drop": "id:select",
+    "bug ls": "", "bug pending": "", "bug report": "fingerprint:select?", "bug search": "words:text+",
+    "bug send": "id:select", "bug share": "setting:name", "bug show": "bug:select", "bug sync": "", "bug top": "",
     "completion": "shell:name",
     "config": "config_cmd:name? key:name? value:select?",
     "cp": "paths:name+",
@@ -401,10 +404,11 @@ COMMAND_MARK = {"crew ask": "[message text not recorded: {n} characters]",
 TEXT_OPTIONS = frozenset({
     "--why", "--check", "--next", "--title", "--body", "-m", "--message", "--log", "--note", "--done", "--evidence",
     "--cause", "--prevent", "--detect", "--fix", "--happened", "--error", "--retire-when", "--verified", "--breaking",
-    "--options", "--flaky", "--plan", "--search", "--grep"})
+    "--options", "--flaky", "--plan", "--search", "--grep", "--hint", "--dev", "--text"})
 NAME_OPTIONS = frozenset({
     "--action", "--activity", "--actor", "--after", "--agent", "--allow", "--approve", "--approves", "--ask",
     "--assignee", "--at", "--base", "--body-file", "--branch", "--by", "--category", "--command", "--commit-template",
+    "--guard",
     "--config", "--context", "--cwd", "--days", "--delay", "--depth", "--due", "--estimate", "--every", "--export",
     "--ext", "--fd", "--file", "--files", "--first", "--fold", "--for", "--format", "--from", "--glob", "--hours",
     "--initiative", "--interval", "--irreversible", "--kind", "--label", "--lang", "--license", "--limit", "--lines",
@@ -417,7 +421,8 @@ NAME_OPTIONS = frozenset({
     "-C", "-d", "-e", "-g", "-i", "-n", "-o", "-p", "-t", "-U", "-w"})
 # NAME_OPTIONS that a command reads as a flag, or whose value it may leave out: there the next word is no value
 NAME_FLAGS = {
-    "ci": frozenset({"--runs"}), "crew decisions": frozenset({"--ask"}), "dashboard": frozenset({"--path"}),
+    "bug report": frozenset({"--guard"}), "ci": frozenset({"--runs"}), "crew decisions": frozenset({"--ask"}),
+    "dashboard": frozenset({"--path"}),
     "ext disable": frozenset({"--project"}), "ext enable": frozenset({"--project"}),
     "find": frozenset({"--glob", "-g", "-p"}), "grep": frozenset({"--files", "-i", "-w"}),
     "handoff": frozenset({"--path"}), "pr review": frozenset({"--approve"}), "rm": frozenset({"--undo"}),
@@ -431,9 +436,11 @@ FLAG_OPTIONS = frozenset((
     "--history --ignore-case --include-heavy --json --keep-branch --keep-going --later --latest --lift --list --local "
     "--mark-passed --markdown --members --merge --mermaid --mine --move --name-only --names --no-check --no-copy "
     "--no-deps --no-git --no-index --no-open --no-prose --no-push --no-template --no-validate --now --offline --online "
-    "--outside --patch --pending --prerelease --public --publish --quiet --ready --rebase --record --recursive "
-    "--refresh --regex --remote --remove --replace --request-changes --resume --run --safe --scheduled --sign --skip "
-    "--skip-heavy --skip-packages --squash --staged --stat --status --stop --strict --syntax --tab --tasks --team "
+    "--open --outside --patch --pending --prerelease --public --publish --quiet --ready --rebase --record --recursive "
+    "--refresh --regex --remote --remove --replace --request-changes --resume --run --safe --scheduled --security "
+    "--sign --skip "
+    "--skip-heavy --skip-packages --squash --staged --stat --status --stop --strict --syntax --tab --task --tasks "
+    "--team "
     "--tracked --unverified --unwip --verbose --wait --watch --wip --word --yes -F -R -a -f -h -l -r -s -v -y").split())
 DEV_OPTIONS = TEXT_OPTIONS | NAME_OPTIONS | FLAG_OPTIONS
 # dev note set's keys whose value is one of a fixed set: that value stays, every other key's value is masked
