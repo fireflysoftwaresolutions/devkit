@@ -1197,7 +1197,16 @@ def _crash_reason(rc, part: str) -> tuple:
 
 RUN_STATES = ("pending", "running", "done", "failed", "skipped")
 ALWAYS_RUN = ("doctor",)  # a resumed run checks the setup again, after the steps it finished
+REDO_ON_CHANGE = ("save", "configure", "doctor")  # steps done with the answers, run again when they change
 REQUIRED_HINT = "devkit cannot be ready without this step."
+
+
+def answers_changed(before, after) -> bool:
+    """Whether `after` changes an answer that a saved run recorded in `before`. A key `before` lacks is the default
+    of a question a newer devkit asks, not a change."""
+    def norm(v):
+        return json.loads(json.dumps(v))
+    return any(norm(after.get(k)) != norm(v) for k, v in (before or {}).items())
 
 
 class SetupRun:
@@ -1916,8 +1925,12 @@ class _Wizard:
         self.by_id = {s.sid: s for s in steps}
         run = self.run_state or SetupRun.start(a, self.skip)
         self.run_state = run
+        changed = answers_changed(run.answers, a)
         run.data["answers"] = dict(a)
         run.plan([(s.sid, s.title, s.required, s.fix) for s in steps])
+        if changed:  # answers changed on the review: save them, and set up and check devkit with them, again
+            for sid in REDO_ON_CHANGE:
+                run.set(sid, "pending")
         if self.lines:
             term.write(f"\n  {tui.bold('Applying your plan')}\n")
         else:
