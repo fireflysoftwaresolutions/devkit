@@ -4,6 +4,8 @@
 # background watcher; a second session that sends the same commit joins that watcher with a record of its own. The
 # watcher's result must reach every session joined to it, Claude Code and Codex alike, each once, and a session's
 # record closes only once the session holds the result: a wait that sees the record closed must find the event there.
+# A fork and its upstream can hold the same branch and commit in folders of the same name: each watcher, watch record
+# and result belongs to its own repository.
 #
 # Tests carry comments, not docstrings (`dev test prove` leaves out tests with one).
 # Run: python3 -m unittest tests.test_ciwatch_sessions -v
@@ -13,6 +15,7 @@ import os
 import subprocess
 import sys
 import textwrap
+import time
 import types
 import unittest
 from pathlib import Path
@@ -38,8 +41,8 @@ def repository(root: Path, owner: str) -> Path:
     top = root / owner / "api"
     top.mkdir(parents=True)
     env = dict(GIT_ENV, **FIXED)
-    for args in (["init", "-q", "-b", "main"],
-                 ["-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", "start"],
+    who = ["-c", "user.name=t", "-c", "user.email=t@example.com"]
+    for args in (["init", "-q", "-b", "main"], [*who, "commit", "-q", "--allow-empty", "-m", "start"],
                  ["remote", "add", "origin", f"https://github.com/{owner}/api.git"]):
         subprocess.run(["git", "-C", str(top), *args], env=env, check=True, capture_output=True)
     return top
@@ -159,6 +162,62 @@ class JoinedSessionTests(SessionsCase):
             with self.subTest(f"{agent}:{sid}"):
                 self.assertEqual(self.heard(agent, sid, "still running after the watch limit"), 1,
                                  self.told(agent, sid))
+
+
+class RepositoryTests(SessionsCase):
+    # acme/api and its fork fork/api: checkouts in folders named api, both at the same commit on main
+    def setUp(self):
+        super().setUp()
+        self.fork = repository(self.root, "fork")
+        self.assertEqual(subprocess.run(["git", "-C", str(self.fork), "rev-parse", "--short=7", "HEAD"], env=GIT_ENV,
+                                        capture_output=True, text=True).stdout.strip(), self.sha)
+        self.session("claude", "s2")
+
+    def watched(self, top, by, sid):
+        # a watch record of `top`'s main at the commit for session `sid`, whose process (this one) runs
+        ciwatch.register({"top": str(top), "ref": "main", "sha": self.sha, "kind": "branch"}, by, "claude", sid,
+                         os.getpid(), 90)
+
+    def test_a_fork_and_its_upstream_each_get_their_own_background_watcher(self):
+        self.assertTrue(self.start(self.up, "claude:s1"))
+        self.assertTrue(self.start(self.fork, "claude:s2"), "the fork's push joined the upstream's watcher")
+        self.assertEqual(self.spawned, [str(self.up), str(self.fork)])
+
+    def test_a_result_in_the_upstream_leaves_the_forks_watch_running_and_its_session_untold(self):
+        self.watched(self.up, "devkit", "s1")
+        self.watched(self.fork, "devkit", "s2")
+        self.ends(self.up, "claude:s1")
+        with self.subTest("the fork's watch still runs"):
+            self.assertEqual([(w["session"], w["status"], w["top"]) for w in ciwatch.watches()],
+                             [("s2", "live", str(self.fork))])
+        with self.subTest("the fork's session hears nothing"):
+            self.assertEqual(self.told("claude", "s2"), [])
+
+    def test_a_session_waiting_on_the_upstream_itself_still_hears_the_forks_result(self):
+        # s1 sent the commit to both; it follows the upstream with its own `dev ci watch --wait`, the fork through
+        # devkit's background watcher
+        self.watched(self.up, "agent", "s1")
+        self.watched(self.fork, "devkit", "s1")
+        self.ends(self.fork, "claude:s1")
+        self.assertEqual(self.heard("claude", "s1", f"CI failed on main @ {self.sha}"), 1, self.told("claude", "s1"))
+
+    def test_the_upstreams_result_does_not_excuse_the_forks_unfinished_run_at_the_end_of_a_turn(self):
+        # s2 pushed the fork's main this turn and arms no wait; the upstream's run of the same commit has ended
+        subprocess.run(["git", "-C", str(self.fork), "update-ref", "refs/remotes/origin/main", "HEAD"], env=GIT_ENV,
+                       check=True)
+        self.ends(self.up, "claude:s1")
+        at = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(time.time() - 60))
+        records = [
+            {"type": "user", "timestamp": at, "message": {"role": "user", "content": "ship the fork"}},
+            {"type": "assistant", "timestamp": at, "cwd": str(self.fork), "message": {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {"command": "git push origin main"}}]}},
+            {"type": "user", "timestamp": at, "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"}]}}]
+        transcript = self.root / "transcript.jsonl"
+        transcript.write_text("\n".join(json.dumps(r) for r in records) + "\n")
+        turn = {"transcript_path": str(transcript), "cwd": str(self.fork), "session_id": "s2"}
+        why = ciwatch.stop_gate("claude", turn, runs_fn=self.host(self.fork, status="running", conclusion=None))
+        self.assertIn(f"dev ci watch --wait --branch main --sha {self.sha}", why or "")
 
 
 class CodexForegroundTests(WatchSandbox):

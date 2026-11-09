@@ -111,6 +111,22 @@ def _key(repo: str, branch: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "_", f"{repo}-{branch}")[:180]
 
 
+def repo_id(top: str) -> str:
+    """The repository a checkout belongs to, as devkit names a project (core.pid_for): owner/repo for an origin on
+    GitHub, host/owner/repo on another host. A fork and its upstream differ although their folders, branches and
+    commits can match; the worktrees of one repository share it. A checkout whose origin devkit cannot read (none, or
+    a local path, which runs no CI devkit follows): its folder name. Every watcher, watch record and result is keyed by
+    it, with the branch and the commit."""
+    url = core.gitout(top, "config", "--get", "remote.origin.url") if top else ""
+    parsed = core.parse_remote(url) if url else None
+    return core.pid_for(*parsed) if parsed else Path(top or "").name
+
+
+def _repo_of(rec: dict) -> str:
+    """The repository of a watch record; one written before records named it, from its checkout."""
+    return rec.get("repo_id") or repo_id(rec.get("top") or "")
+
+
 def conclusion(run: dict) -> tuple:
     """-> (the word for how a finished run ended, its verdict: passed, failed or none). An end devkit does not know
     counts as failed: it is never reported as passed."""
@@ -287,13 +303,13 @@ def _finish(top, data, branch, sha, runs, state, start, clock, always_diagnose=F
     """The result of a watch. Each run carries how it ended and whether this watch is the first to report it (new);
     `repeat` when no run is new: a result reported before, which record and deliver then leave alone. A final result
     ends the watches recorded on the commit (`dev ci watches` no longer lists them)."""
-    provider, repo = data.get("provider") or "", data.get("repo") or Path(top).name
+    provider, repo, ident = data.get("provider") or "", data.get("repo") or Path(top).name, repo_id(top)
     ends = [conclusion(r) if r.get("status") in DONE else (r.get("status") or "running", "") for r in runs]
     keys = [f"{repo}|{r.get('id') or r.get('number')}|{word}" for r, (word, _) in zip(runs, ends)] \
         or [f"{repo}|{branch}@{sha}|{state}"]
     fresh = claim(keys, clock())
-    res = {"ts": round(clock()), "state": state, "provider": provider, "repo": data.get("repo"), "branch": branch,
-           "sha": sha, "minutes": round((clock() - start) / 60, 1), "error": data.get("error"),
+    res = {"ts": round(clock()), "state": state, "provider": provider, "repo": data.get("repo"), "repo_id": ident,
+           "branch": branch, "sha": sha, "minutes": round((clock() - start) / 60, 1), "error": data.get("error"),
            "runs": [{"name": r.get("name"), "number": r.get("number"), "id": r.get("id"), "status": r.get("status"),
                      "conclusion": word, "new": k in fresh, "url": r.get("url"),
                      "elapsed": round((r.get("elapsed") or 0) / 60, 1)} for r, (word, _), k in zip(runs, ends, keys)],
@@ -301,7 +317,7 @@ def _finish(top, data, branch, sha, runs, state, start, clock, always_diagnose=F
            "diagnoses": [], "repeat": not fresh}
     # a repeat nobody waits on is not diagnosed (each diagnosis reads a log online); one a joined session still has to
     # hear is, so its message carries the class and the next action
-    if fresh or always_diagnose or (state in FINAL and _owed(branch, sha)):
+    if fresh or always_diagnose or (state in FINAL and _owed(ident, branch, sha)):
         res["diagnoses"] = [dict(diagnose(provider, top, r), new=k in fresh)
                             for r, (_, mark), k in zip(runs, ends, keys) if mark == "failed"]
     if state in FINAL:
@@ -393,7 +409,7 @@ def deliver(agent: str, sid: str, res: dict):
     if res.get("state") not in FINAL:
         who += [(r.get("agent") or "", r.get("session") or "") for r in _records()
                 if r.get("by") == "devkit" and r.get("pid") == os.getpid() and r.get("state") == "live"
-                and _on(r, res.get("branch"), res.get("sha"))]
+                and _on(r, res.get("repo_id"), res.get("branch"), res.get("sha"))]
     for a, s in dict.fromkeys(who):
         if f"{a}:{s}" not in told:
             _tell(a, s, res)
@@ -406,7 +422,7 @@ def _tell(agent: str, sid: str, res: dict) -> bool:
     because its session ended, has no reader for its messages. A session that follows the commit with its own
     `dev ci watch --wait` is not told: that watch's own output tells it. The session is named, never found from this
     process, which may be another session's (an agent's own wait tells the other sessions). -> whether it was told."""
-    if not sid or _waits(agent, sid, res.get("branch"), res.get("sha")):
+    if not sid or _waits(agent, sid, res.get("repo_id"), res.get("branch"), res.get("sha")):
         return False
     text = message(res)
     try:
@@ -692,9 +708,10 @@ def start_background(top: str, session: str = "", branch: str = "", sha: str = "
     if not branch or not sha:
         return False
     WATCH.mkdir(parents=True, exist_ok=True)
-    lock = WATCH / f"{_key(Path(top).name, branch)}-{sha}.lock"
+    repo = repo_id(top)
+    lock = WATCH / f"{_key(repo, branch)}-{sha}.lock"
     agent, _, sid = session.partition(":")
-    target = {"top": top, "ref": branch, "sha": sha,
+    target = {"top": top, "ref": branch, "sha": sha, "repo_id": repo,
               "kind": "tag" if _rev(top, f"refs/tags/{branch}") and not _rev(top, f"refs/heads/{branch}") else "branch"}
     try:
         if lock.exists() and time.time() - lock.stat().st_mtime < 3 * 3600:
@@ -749,11 +766,11 @@ def register(target: dict, by: str, agent: str, sid: str, pid, timeout_min: floa
     hook) or an agent's `dev ci watch --wait` (by "agent": its output wakes the agent). A record already there for
     the same watch stays. -> its id, "" when it cannot be written."""
     now = round(now or time.time())
-    rid = re.sub(r"[^A-Za-z0-9_.-]+", "_", f"{by}-{agent}-{sid}-{Path(target['top']).name}-{target['ref']}-"
-                                           f"{target['sha'][:7]}-{pid}")[:200]
+    repo = target.get("repo_id") or repo_id(target["top"])
+    rid = re.sub(r"[^A-Za-z0-9_.-]+", "_", f"{by}-{agent}-{sid}-{repo}-{target['ref']}-{target['sha'][:7]}-{pid}")[:200]
     rec = {"id": rid, "by": by, "agent": agent, "session": sid, "top": target["top"], "repo": Path(target["top"]).name,
-           "ref": target["ref"], "sha": target["sha"], "kind": target.get("kind") or "branch", "pid": pid,
-           "started": now, "expires": now + round(timeout_min * 60), "timeout_min": timeout_min, "state": "live",
+           "repo_id": repo, "ref": target["ref"], "sha": target["sha"], "kind": target.get("kind") or "branch",
+           "pid": pid, "started": now, "expires": now + round(timeout_min * 60), "timeout_min": timeout_min, "state": "live",
            "last_event": "", "last_ts": None}
     try:
         LIVE.mkdir(parents=True, exist_ok=True)
@@ -767,14 +784,15 @@ OPEN = ("live", "expired")  # a watch record that has no result yet
 TAKEN_S = 120  # a record a watch took to tell its session stays its own this long; then another watch may take it
 
 
-def _on(rec: dict, ref, sha) -> bool:
-    """Is the watch record on this branch or tag and commit?"""
-    return rec.get("ref") == ref and (rec.get("sha") or "")[:7] == (sha or "")[:7]
+def _on(rec: dict, repo, ref, sha) -> bool:
+    """Is the watch record on this repository's branch or tag and commit? A fork and its upstream can share the
+    branch and the commit, never the repository."""
+    return rec.get("ref") == ref and (rec.get("sha") or "")[:7] == (sha or "")[:7] and _repo_of(rec) == repo
 
 
-def _owed(ref, sha) -> bool:
+def _owed(repo, ref, sha) -> bool:
     """Does a session joined to devkit's background watch of the commit still wait to hear its result?"""
-    return any(r.get("by") == "devkit" and r.get("state") in OPEN and _on(r, ref, sha) for r in _records())
+    return any(r.get("by") == "devkit" and r.get("state") in OPEN and _on(r, repo, ref, sha) for r in _records())
 
 
 def _take(rid: str) -> bool:
@@ -801,7 +819,7 @@ def _settle(res: dict) -> set:
     `dev ci watch --wait`. -> the sessions told, as (agent, session)."""
     told = set()
     for rec in _records():
-        if rec.get("state") not in OPEN or not _on(rec, res.get("branch"), res.get("sha")):
+        if rec.get("state") not in OPEN or not _on(rec, res.get("repo_id"), res.get("branch"), res.get("sha")):
             continue
         if rec.get("by") == "devkit":
             if not _take(rec["id"]):
@@ -814,12 +832,13 @@ def _settle(res: dict) -> set:
 
 
 def _results() -> set:
-    """(branch, commit) of each saved watch result that says how its runs ended."""
+    """(repository, branch, commit) of each saved watch result that says how its runs ended. A result saved before
+    results named their repository gives the host's owner/repo, which is the repository on GitHub."""
     out = set()
     for f in WATCH.glob("*.json") if WATCH.exists() else []:
         r = state.read(f) or {}
         if r.get("state") in FINAL:
-            out.add((r.get("branch"), (r.get("sha") or "")[:7]))
+            out.add((r.get("repo_id") or r.get("repo"), r.get("branch"), (r.get("sha") or "")[:7]))
     return out
 
 
@@ -836,17 +855,17 @@ def watches(now: float | None = None) -> list:
         if rec.get("state") not in ("live", "expired"):
             continue
         live = rec["state"] == "live" and _alive(rec.get("pid")) and now < (rec.get("expires") or 0) + 600
-        if not live and (rec.get("ref"), (rec.get("sha") or "")[:7]) in done:
+        if not live and (_repo_of(rec), rec.get("ref"), (rec.get("sha") or "")[:7]) in done:
             continue
         out.append(dict(rec, status="live" if live else "expired"))
     return sorted(out, key=lambda r: -(r.get("started") or 0))
 
 
-def _waits(agent: str, sid: str, ref, sha) -> bool:
-    """This session runs its own `dev ci watch --wait` on the commit, or ran one that printed the result."""
-    return any(r.get("by") == "agent" and r.get("agent") == agent and r.get("session") == sid and r.get("ref") == ref
-               and (r.get("sha") or "")[:7] == (sha or "")[:7] and (r.get("printed") or _alive(r.get("pid")))
-               for r in _records())
+def _waits(agent: str, sid: str, repo, ref, sha) -> bool:
+    """This session runs its own `dev ci watch --wait` on the repository's commit, or ran one that printed the
+    result."""
+    return any(r.get("by") == "agent" and r.get("agent") == agent and r.get("session") == sid
+               and _on(r, repo, ref, sha) and (r.get("printed") or _alive(r.get("pid"))) for r in _records())
 
 
 def _wait_command(target: dict, agent: str = "", cwd: str | None = None) -> str:
@@ -1283,7 +1302,7 @@ def _unfinished(sent: dict, runs_fn=None, now: float | None = None) -> tuple:
     cannot say within HOST_WAIT; (False, runs) once each run ended or a watch saw them end, or when origin is no CI
     host devkit reads."""
     sha7 = sent["sha"][:7]
-    if (sent["ref"], sha7) in _results():
+    if (sent.get("repo_id") or repo_id(sent["top"]), sent["ref"], sha7) in _results():
         return False, []
     from . import cistatus
     try:
@@ -1344,14 +1363,14 @@ def stop_gate(agent: str, data: dict, runs_fn=None, now: float | None = None, de
         for top, ref, sha, draft in _sent(c["command"], c["cwd"] or data.get("cwd") or os.getcwd()):
             if all((top, ref, sha) != (s["top"], s["ref"], s["sha"]) for s in sent):
                 sent.append({"top": top, "ref": ref, "sha": sha, "draft": draft, "at": c["at"] or now,
-                             "kind": _kind(top, ref)})
+                             "kind": _kind(top, ref), "repo_id": repo_id(top)})
     sid = data.get("session_id") or ""
     for w in watches(now):
         if w["status"] == "expired" and w.get("by") == "agent" and (w.get("agent"), w.get("session")) == (agent, sid) \
                 and now - (w.get("started") or 0) < 12 * 3600 and \
-                all((w["ref"], w["sha"][:7]) != (s["ref"], s["sha"][:7]) for s in sent):
+                all(not _on(w, s["repo_id"], s["ref"], s["sha"]) for s in sent):
             sent.append({"top": w["top"], "ref": w["ref"], "sha": w["sha"], "draft": False,
-                         "at": w.get("started") or now, "kind": w.get("kind") or "branch"})
+                         "at": w.get("started") or now, "kind": w.get("kind") or "branch", "repo_id": _repo_of(w)})
     if not sent:
         return None
     fits = WAKES.get(agent, WAKES["claude"])
@@ -1378,6 +1397,6 @@ def stop_gate(agent: str, data: dict, runs_fn=None, now: float | None = None, de
 
 def _devkit_watches(agent: str, sid: str, sent: dict, now: float) -> bool:
     """devkit's background watch of what was sent runs for this session: its result reaches the session's run."""
+    repo = sent.get("repo_id") or repo_id(sent["top"])
     return any(w.get("by") == "devkit" and w.get("status") == "live" and (w.get("agent"), w.get("session")) ==
-               (agent, sid) and w.get("ref") == sent["ref"] and (w.get("sha") or "")[:7] == (sent["sha"] or "")[:7]
-               for w in watches(now))
+               (agent, sid) and _on(w, repo, sent["ref"], sent["sha"]) for w in watches(now))

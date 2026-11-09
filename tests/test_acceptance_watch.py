@@ -587,7 +587,6 @@ class CIRepositoryTests(WatchSandbox):
         return self.py(f'from devkit import watch; print(json.dumps(watch.can_arrive("claude", {sid!r})))',
                        session=f"claude:{sid}", lead=False)
 
-    @known_defect
     def test_a_result_in_one_repository_leaves_the_other_repositorys_watch_running(self):
         # The defect: ciwatch._settle closes every record whose branch and commit match, whatever its repository,
         # and ciwatch._results keys the saved results by branch and commit too. acme/api's result closes s2's watch
