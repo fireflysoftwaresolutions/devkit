@@ -12,6 +12,7 @@ import json
 import os
 import re
 import stat
+import subprocess
 import sys
 import tempfile
 import time
@@ -167,7 +168,10 @@ class TimedOut(BugState, unittest.TestCase):
         with mock.patch.object(bugs.time, "time", lambda: now - 30):
             bugs.hook_started("post-tool", "s1")  # killed at its 10 s limit: never ended
             bugs.hook_started("session-start", "s1")  # 30 s limit: still within it
-        bugs._RUNNING.clear()  # those were other processes
+        bugs._RUNNING.clear()  # those were other processes, now gone
+        dead = mock.patch.object(bugs, "_alive", lambda pid: False)
+        dead.start()
+        self.addCleanup(dead.stop)
         found = bugs.stale_hooks(now=now)
         self.assertEqual([m["event"] for m in found], ["post-tool"])
         self.assertEqual(bugs.stale_hooks(now=now), [])  # recorded once
@@ -292,14 +296,27 @@ class HookWiringTests(BugState, HookCase):
         self.assertEqual(len(audit.records(1, action="guard.failopen")), 1)  # as before
         self.assertEqual(list((bugs.BUGS / "hooks-running").glob("*")), [])  # both runs ended
 
-    def test_timed_out_hook_is_seen_next_run(self):
+    def _old_mark(self, pid):
         then = time.time() - 60
         with mock.patch.object(bugs.time, "time", lambda: then):
             bugs.hook_started("prompt", "s1")
-        bugs._RUNNING.clear()  # that run was killed at its limit, in another process
+        bugs._RUNNING.clear()  # that run belongs to another process
+        mark = next((bugs.BUGS / "hooks-running").glob("*.json"))
+        mark.write_text(json.dumps({**json.loads(mark.read_text()), "pid": pid}))
+        return mark
+
+    def test_timed_out_hook_is_seen_next_run(self):
+        done = subprocess.run([sys.executable, "-c", "import os; print(os.getpid())"], capture_output=True, text=True)
+        self._old_mark(int(done.stdout))  # that run was killed at its limit: its process is gone
         self.hook("stop", {"session_id": "s1", "hook_event_name": "Stop", "cwd": str(self.root)})
         occ = self.occurrences()
         self.assertEqual([(o["kind"], o["event"]) for o in occ], [("hook", "prompt")])
+
+    def test_a_hook_still_running_past_its_limit_is_not_recorded(self):
+        mark = self._old_mark(os.getpid())  # alive: the Mac slept, or the developer raised the hook's timeout
+        self.hook("stop", {"session_id": "s1", "hook_event_name": "Stop", "cwd": str(self.root)})
+        self.assertEqual([o for o in self.occurrences() if o["event"] == "prompt"], [])
+        self.assertTrue(mark.exists())  # its own run removes it when it ends
 
     def test_post_tool_writes_the_ledger_and_answers_a_real_marker_outside_projects(self):
         fp = bugs.fingerprint("crash", exc_class="KeyError", frames=("cli.main",))

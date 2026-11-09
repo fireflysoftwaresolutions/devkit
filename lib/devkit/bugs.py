@@ -2045,6 +2045,24 @@ def hook_ended(event: str, session: str) -> None:
     _ledger_write(session, {"hook": event})
 
 
+HOOK_ALIVE_MAX = 86400  # a mark whose process still answers is a live run, unless it is a day old (a reused pid)
+
+
+def _alive(pid) -> bool:
+    """Whether a process with this id exists (a signal 0 probe); False for a missing or malformed id."""
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # it exists, owned by someone else
+    except OSError:
+        return False
+    return True
+
+
 def stale_hooks(now: float = None) -> list:
     """The start marks older than their event's time limit (plus HOOK_GRACE): each is removed and recorded once as
     a `hook` occurrence for that event, with no exception class (a timeout). -> the marks."""
@@ -2066,6 +2084,8 @@ def stale_hooks(now: float = None) -> list:
         event = mark.get("event") if isinstance(mark.get("event"), str) else f.name.split(".", 1)[0]
         if now - ts < _hook_limits().get(event, UNKNOWN_HOOK_LIMIT) + HOOK_GRACE:
             continue
+        if _alive(mark.get("pid")) and now - ts < HOOK_ALIVE_MAX:
+            continue  # still running: the Mac slept, or the developer raised that hook's timeout; its run removes it
         try:
             f.unlink()
         except FileNotFoundError:
