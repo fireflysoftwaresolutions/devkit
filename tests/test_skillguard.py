@@ -219,6 +219,16 @@ class CommandsAtStop(unittest.TestCase):
         self.assertIn("`release-policy`", why or "")
         self.assertIn("`delivery`", why or "")
 
+    # Codex 0.167 runs shell commands inside its code-mode `exec` script (a real rollout's record): they count the same
+    def test_a_codex_code_mode_push_owes_the_delivery_skill(self):
+        call = json.dumps({"type": "response_item", "payload": {
+            "type": "custom_tool_call", "status": "completed", "call_id": "call_fb4583ade17e43f49e878334175021a6",
+            "name": "exec", "input": "text(await tools.exec_command({cmd:\"git push origin main\","
+                                     "max_output_tokens:1000}));\n"}})
+        why = self.stop(call, agent="codex")
+        self.assertIn("`delivery`", why or "")
+        self.assertIn("git push", why or "")
+
     # text that only mentions a command, reading a CI run and listing lessons owe nothing; each skill is asked once
     def test_mentions_and_reads_owe_nothing_and_each_skill_is_asked_once(self):
         self.assertIsNone(self.stop(tool_use("Bash", command='echo "git push"'),

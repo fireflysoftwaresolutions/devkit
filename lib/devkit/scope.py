@@ -24,6 +24,7 @@ import json
 import os
 import re
 
+from .canary import CODEX_TURN_START
 from .hooks import SHELL_TOOLS  # Bash, Monitor and Codex's shells
 
 CONSULTING_SKILL_RE = re.compile(r"\bfirefly-(consult|deck|document|pitch|cobrand|review|event|storytelling|proposal|"
@@ -57,7 +58,8 @@ def _tail_lines(path: str, max_bytes: int = 3_000_000) -> list:
 
 
 def _is_prompt(rec: dict) -> bool:
-    """A real user prompt (not a tool result) in a Claude or Codex transcript."""
+    """The start of a turn: a real user prompt (not a tool result) in a Claude transcript, or the event a Codex
+    rollout opens each turn with (canary.CODEX_TURN_START)."""
     if rec.get("type") == "user":
         msg = rec.get("message") or {}
         content = msg.get("content")
@@ -66,7 +68,114 @@ def _is_prompt(rec: dict) -> bool:
         if isinstance(content, list):
             return not any(isinstance(c, dict) and c.get("type") == "tool_result" for c in content)
     p = rec.get("payload") or {}
-    return p.get("type") == "user_message"
+    return rec.get("type") == "event_msg" and p.get("type") in CODEX_TURN_START
+
+
+# Codex code mode (on by default since 0.167): the model calls one tool, `exec`, whose input is JavaScript that awaits
+# nested tools, `text(await tools.exec_command({cmd: "git push"}))` and `tools.apply_patch("*** Begin Patch ...")`.
+_EXEC_CALL_RE = re.compile(r"\btools\s*\.\s*(exec_command|apply_patch)\s*\(\s*")
+_JS_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "b": "\b", "f": "\f", "v": "\v", "0": "\0", "\n": ""}
+_JS_IDENT_RE = re.compile(r"[A-Za-z_$][\w$]*")
+
+
+def _js_string(src: str, i: int):
+    """(value, end) of the JavaScript string literal at src[i]; (None, i) when there is none (or it never ends), and
+    (None, end) for a template literal with a ${...} substitution, whose value exists only at run time."""
+    q = src[i:i + 1]
+    if q not in ("'", '"', "`"):
+        return None, i
+    out, j, built = [], i + 1, False
+    while j < len(src):
+        c = src[j]
+        if c == q:
+            if built:
+                return None, j + 1
+            return "".join(out).encode("utf-16", "surrogatepass").decode("utf-16", "replace"), j + 1
+        if c == "\\" and j + 1 < len(src):
+            n = src[j + 1]
+            hexits = {"u": 4, "x": 2}.get(n, 0)
+            if hexits and re.fullmatch(r"[0-9a-fA-F]+", src[j + 2:j + 2 + hexits] or "-"):
+                out.append(chr(int(src[j + 2:j + 2 + hexits], 16)))
+                j += 2 + hexits
+                continue
+            out.append(_JS_ESCAPES.get(n, n))
+            j += 2
+            continue
+        if q == "`" and src.startswith("${", j):  # skip the substitution, braces balanced
+            built, j, depth = True, j + 2, 1
+            while j < len(src) and depth:
+                depth += {"{": 1, "}": -1}.get(src[j], 0)
+                j += 1
+            continue
+        out.append(c)
+        j += 1
+    return None, i
+
+
+def _js_field(src: str, i: int, field: str):
+    """The string value of `field` in the object literal at src[i] ("{"), or None (no such field, or not a literal
+    string)."""
+    if src[i:i + 1] != "{":
+        return None
+    j, depth = i + 1, 0
+    while j < len(src):
+        while j < len(src) and (src[j].isspace() or src[j] == ","):
+            j += 1
+        if src[j:j + 1] in ("}", ""):
+            return None
+        key, end = _js_string(src, j)
+        if key is None:
+            m = _JS_IDENT_RE.match(src, j)
+            if not m:
+                return None
+            key, end = m.group(0), m.end()
+        j = end
+        while j < len(src) and src[j].isspace():
+            j += 1
+        if src[j:j + 1] != ":":
+            return None  # a shorthand or spread property: the value is not in the text
+        j += 1
+        while j < len(src) and src[j].isspace():
+            j += 1
+        value, end = _js_string(src, j)
+        if key == field:
+            return value
+        if value is not None:
+            j = end
+            continue
+        while j < len(src):  # any other value: up to the next comma or the closing brace at this depth
+            c = src[j]
+            if c in "'\"`":
+                _, end = _js_string(src, j)
+                j = end if end > j else j + 1
+                continue
+            if c in "([{":
+                depth += 1
+            elif c in ")]}":
+                if depth == 0:
+                    break
+                depth -= 1
+            elif c == "," and depth == 0:
+                break
+            j += 1
+    return None
+
+
+def exec_calls(script: str) -> list:
+    """The nested shell and patch calls of a Codex code-mode `exec` script, in order: [("exec_command", {"cmd": …}),
+    ("apply_patch", {"input": patch})]. A call whose argument is not a literal (a variable, a template built at run
+    time) is left out: its text is not in the transcript."""
+    out = []
+    for m in _EXEC_CALL_RE.finditer(script or ""):
+        if m.group(1) == "apply_patch":
+            patch, _ = _js_string(script, m.end())
+            if patch is not None:
+                out.append(("apply_patch", {"input": patch}))
+            continue
+        cmd = _js_field(script, m.end(), "cmd")
+        if cmd is not None:
+            out.append(("exec_command", {"cmd": cmd}))
+    return out
 
 
 def turn_actions(transcript_path: str) -> dict:
@@ -87,12 +196,17 @@ def turn_actions(transcript_path: str) -> dict:
         p = r.get("payload") or {}
         if p.get("type") in ("function_call", "custom_tool_call"):
             args = p.get("arguments") if p.get("type") == "function_call" else p.get("input")
-            if isinstance(args, str):
+            if p.get("name") == "exec" and isinstance(args, str):  # code mode: the script's nested calls
+                out["tools"].add("exec")
+                calls.extend(exec_calls(args))
+                args = None
+            elif isinstance(args, str):
                 try:
                     args = json.loads(args)
                 except ValueError:
                     args = {"input": args}
-            calls.append((p.get("name") or "", args or {}))
+            if args is not None:
+                calls.append((p.get("name") or "", args or {}))
         for name, inp in calls:
             out["tools"].add(name)
             if name in EDIT_TOOLS:

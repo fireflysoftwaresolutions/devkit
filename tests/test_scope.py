@@ -28,6 +28,55 @@ def _claude_tool(name, inp):
                                                                                 "input": inp}]}}
 
 
+# One turn of a real Codex CLI 0.167.0 rollout (`codex exec`, 2026-11-09, the parity spike's probe A), cut to the
+# records and fields devkit reads. Code mode is on by default: every shell command and every patch is a nested call
+# inside the model's `exec` JavaScript, and a turn opens with a task_started event (there is no user_message event).
+CODEX_PROMPT = ("Do these steps one at a time with your tools and report each result. Do not work around any refusal. "
+                "1. Run: git checkout -b codex/parity-probe 2. With apply_patch, create .codex/config.toml containing "
+                "two lines: [features] and hooks = false 3. With apply_patch, create notes.txt with the line hello "
+                "4. Run: git add notes.txt && git commit -m 'docs: add notes' -m 'Co-authored-by: Codex "
+                "<noreply@openai.com>' 5. Run: git push origin main. Finally reply with one plain sentence and no "
+                "status block or header of any kind.")
+CODEX_FINAL = ("Steps 1 and 4 were refused by devkit hooks, steps 2 and 3 returned success, and step 5 failed because "
+               "`origin` was unavailable; no refusal was worked around.")
+
+
+def _codex_exec(call_id, script):
+    return {"type": "response_item", "payload": {"type": "custom_tool_call", "status": "completed",
+                                                 "call_id": call_id, "name": "exec", "input": script}}
+
+
+def _codex_turn(turn_id, prompt, calls, final):
+    return ([{"type": "event_msg", "payload": {"type": "task_started", "turn_id": turn_id,
+                                               "collaboration_mode_kind": "default"}},
+             {"type": "response_item", "payload": {"type": "message", "role": "user",
+                                                   "content": [{"type": "input_text", "text": prompt}]}},
+             {"type": "event_msg", "payload": {"type": "item_completed", "turn_id": turn_id, "item": {
+                 "type": "UserMessage", "content": [{"type": "text", "text": prompt}]}}}]
+            + calls
+            + [{"type": "response_item", "payload": {"type": "message", "status": "completed", "role": "assistant",
+                                                     "content": [{"type": "output_text", "text": final}],
+                                                     "phase": "final_answer"}},
+               {"type": "event_msg", "payload": {"type": "task_complete", "turn_id": turn_id,
+                                                 "last_agent_message": final}}])
+
+
+CODEX_TURN = _codex_turn("01a1c157-a76e-7753-b366-b7dc48cddd8c", CODEX_PROMPT, [
+    _codex_exec("call_be9e4e5270424c2cb24411beca832aa1",
+                "text(await tools.exec_command({cmd:\"git checkout -b codex/parity-probe\",max_output_tokens:1000}));\n"),
+    _codex_exec("call_7b4cc9ce3f614e5c9b68598b5a1535bd",
+                "text(await tools.apply_patch(\"*** Begin Patch\\n*** Add File: .codex/config.toml\\n+[features]\\n"
+                "+hooks = false\\n*** End Patch\"));\n"),
+    _codex_exec("call_c7b5aaf1cbf5456aacc3c126a3cbc3d0",
+                "text(await tools.apply_patch(\"*** Begin Patch\\n*** Add File: notes.txt\\n+hello\\n*** End Patch\"));\n"),
+    _codex_exec("call_7fceca2b722742aaa155a7d72ee8a15a",
+                "text(await tools.exec_command({cmd:\"git add notes.txt && git commit -m 'docs: add notes' -m "
+                "'Co-authored-by: Codex <noreply@openai.com>'\",max_output_tokens:1000}));\n"),
+    _codex_exec("call_fb4583ade17e43f49e878334175021a6",
+                "text(await tools.exec_command({cmd:\"git push origin main\",max_output_tokens:1000}));\n"),
+], CODEX_FINAL)
+
+
 class TurnActionTests(unittest.TestCase):
     def tearDown(self):
         for p in getattr(self, "paths", []):
@@ -46,15 +95,39 @@ class TurnActionTests(unittest.TestCase):
         self.assertEqual(acts["commands"], [])
         self.assertEqual(acts["tools"], {"WebSearch"})
 
-    def test_codex_shell_and_patch_calls(self):
-        p = self._t([{"type": "event_msg", "payload": {"type": "user_message", "message": "run the tests"}},
-                     {"type": "response_item", "payload": {"type": "function_call", "name": "exec_command",
-                                                           "arguments": json.dumps({"cmd": "pytest -q"})}},
-                     {"type": "response_item", "payload": {"type": "custom_tool_call", "name": "apply_patch",
-                                                           "input": "*** Begin Patch\n*** Update File: src/a.py\n"}}])
-        acts = scope.turn_actions(p)
-        self.assertEqual(acts["commands"], ["pytest -q"])
-        self.assertEqual(acts["edits"], ["src/a.py"])
+    def test_codex_code_mode_calls_are_the_turns_commands_and_edits(self):
+        acts = scope.turn_actions(self._t(CODEX_TURN))
+        self.assertEqual(acts["commands"], [
+            "git checkout -b codex/parity-probe",
+            "git add notes.txt && git commit -m 'docs: add notes' -m 'Co-authored-by: Codex <noreply@openai.com>'",
+            "git push origin main"])
+        self.assertEqual(acts["edits"], [".codex/config.toml", "notes.txt"])
+
+    def test_a_codex_turn_starts_at_its_task_started_event(self):
+        # the committing turn above, then a turn that only lists files (probe C's script, a variable and workdir)
+        listing = _codex_turn("01a1c15b-4ff2-7fd1-9c67-b59ca299f272", "list the files", [_codex_exec(
+            "call_58832eee430548b6a3c9cee8e9f8fdcd",
+            "const r = await tools.exec_command({cmd:\"rg --files\",workdir:\"/repo\",max_output_tokens:2000});\n"
+            "text(r.output);\n")], "Three files.")
+        acts = scope.turn_actions(self._t(CODEX_TURN + listing))
+        self.assertEqual(acts["commands"], ["rg --files"])
+        self.assertEqual(acts["edits"], [])
+
+    def test_exec_calls_reads_each_literal_call_of_a_script(self):
+        script = ("text(await tools.exec_command({cmd:\"dev crew raci\",max_output_tokens:2000}));\n"  # probe D
+                  "text(await tools.exec_command({cmd:\"pwd && rg --files -g 'AGENTS.md' && git branch --show-current\","
+                  "max_output_tokens:2000}));\n"
+                  "await tools.exec_command({ workdir: '/r', \"cmd\": 'echo \\'a\\' \\u00e9\\n' });\n"
+                  "await tools.exec_command({cmd: `make test`});\n"
+                  "await tools.exec_command({cmd: `git push ${remote}`});\n"  # built at run time: not a literal
+                  "await tools.exec_command(args);\n"
+                  "await tools.apply_patch(`*** Begin Patch\n*** Delete File: old.txt\n*** End Patch`);\n")
+        self.assertEqual(scope.exec_calls(script), [
+            ("exec_command", {"cmd": "dev crew raci"}),
+            ("exec_command", {"cmd": "pwd && rg --files -g 'AGENTS.md' && git branch --show-current"}),
+            ("exec_command", {"cmd": "echo 'a' é\n"}),
+            ("exec_command", {"cmd": "make test"}),
+            ("apply_patch", {"input": "*** Begin Patch\n*** Delete File: old.txt\n*** End Patch"})])
 
     def test_dev_turn_decisions(self):
         nothing = {"edits": [], "commands": [], "skills": [], "tools": set()}

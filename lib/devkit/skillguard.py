@@ -294,6 +294,11 @@ def read(agent: str, transcript: str, offset: int = 0):
             except ValueError:
                 continue
             pl = rec.get("payload") if isinstance(rec, dict) else None
+            if isinstance(pl, dict) and pl.get("type") in ("custom_tool_call", "function_call") and \
+                    pl.get("name") == "exec" and isinstance(pl.get("input"), str):  # code mode: its nested calls
+                from .scope import exec_calls
+                commands.extend(_shell_command(inp) for name, inp in exec_calls(pl["input"]) if name in SHELL_TOOLS)
+                continue
             if isinstance(pl, dict) and pl.get("type") == "function_call" and pl.get("name") in SHELL_TOOLS:
                 args = pl.get("arguments")
                 try:
