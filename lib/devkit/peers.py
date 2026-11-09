@@ -82,6 +82,8 @@ HISTORY_MAX = 20
 NOTIFY_EVERY = 600  # seconds between two desktop notifications for one recipient
 DELIVER_WAIT = 2.0  # seconds a fan-out waits for one recipient's box before it lists it as busy
 SWEEP_EVERY = 3600
+SETTLE_WAIT = 1800  # seconds a settle line waits for its prompt's record in the session's transcript
+SETTLE_WAITING_MAX = 20  # prompts with settle lines a session record keeps waiting
 QUESTION_MAX = 300  # an escalation's question: one plain question the developer reads at a glance
 OPTION_MAX = 200
 OPTIONS = (2, 6)
@@ -244,8 +246,10 @@ def _new_id(prefix: str, taken=()) -> str:
 # --------------------------------------------------------------------------- text
 
 def _strip_controls(text) -> str:
-    """Text as stored: escape sequences, controls and direction marks dropped; line breaks and tabs kept."""
-    return _CONTROL.sub("", _ANSI.sub("", str(text or "").replace("\r\n", "\n").replace("\r", "\n")))
+    """Text as stored: escape sequences, controls and every invisible character (watch.visible: format characters,
+    tag characters, variation selectors) dropped; line breaks and tabs kept."""
+    from .watch import visible
+    return visible(_CONTROL.sub("", _ANSI.sub("", str(text or "").replace("\r\n", "\n").replace("\r", "\n"))))
 
 
 def _secret(text: str) -> bool:
@@ -268,7 +272,7 @@ def _inert(text, limit: int) -> str:
     """Someone else's words as one inert span of a line: watch.clean (escapes and controls dropped, secrets redacted,
     no backticks, whitespace as one space, cut with …), and no quote mark that could close the span."""
     from .watch import clean
-    return _QUOTES.sub('"', clean(_CONTROL.sub(" ", _ANSI.sub("", str(text or ""))), limit))
+    return _QUOTES.sub('"', clean(_ANSI.sub("", str(text or "")), limit))
 
 
 def quote(text, limit: int = TEXT_MAX) -> str:
@@ -1141,8 +1145,8 @@ def overlaps(agent: str, sid: str, now=None) -> list:
     """Where another live (or idle) session overlaps this one -> [{"kind", "level", "other", "detail", "key"}]:
     checkout (the same worktree, warn), branch (the same branch in another checkout, warn), repo (the same repository
     in another worktree, info), item (a work item this session holds is on another session's branch, warn), claim (a
-    claim on this project held by another session, warn). `key` is stable per kind and pair, so watch.notice tells
-    each once."""
+    claim on this project held by another session, warn). `key` is stable per kind and pair, so the prompt hook
+    (hooks._peer_overlaps) tells each once."""
     view = _View(now)
     me = view.current(key(agent, sid))
     rec = view.rec(me)
@@ -1600,7 +1604,8 @@ def _parties(view: _View, me: _Me, about: str) -> list:
 def escalate(sender: dict, about: str, question: str, options: list, recommend="", now=None) -> dict:
     """A disagreement for the developer: E-<8>, shown to every party, with a desktop notification. `about` is a
     message id (S-…) whose other side becomes the party, or a target -> {"id", "message", "parties", "to",
-    "skipped", "notified"}."""
+    "skipped", "notified"}; `notified`, as send's and answer's, lists sessions: every recipient, since the one desktop
+    notification tells the developer about the whole escalation."""
     view = _View(now)
     now = view.now
     me = _sender(sender, view, "escalate")
@@ -1628,17 +1633,17 @@ def escalate(sender: dict, about: str, question: str, options: list, recommend="
         if res.get("eid"):
             break
     text = (f"escalation {eid} for the developer: {question} · options: " + "; ".join(opts) +
-            (f" · recommended: {rec}" if rec else "") + f" · the developer settles it by typing: settle {eid}: "
-                                                         f"<choice>")
+            (f" · recommended: {rec}" if rec else "") + f" · the developer settles it by typing, in a Claude Code "
+                                                         f"session: settle {eid}: <choice>")
     msg = _message(mid, "escalation", me.frm(), str(about)[:80], text, now, ref=eid)
     to, skipped, _ = _fan_out(view, me, others, msg, False)
     _record_sent(me, {"id": mid, "ts": now, "kind": "escalation", "target": msg["target"], "to": to,
                       "skipped": skipped, "answered_by": [], "closed": False})
     _notify("escalation for the developer", f"{eid} from {me.project or '-'}: {_one_line(question)} · settle it "
-                                            f"in any session: settle {eid}: <choice>")
+                                            f"in a Claude Code session: settle {eid}: <choice>")
     _audit("peer.escalate", eid, f"{len(opts)} options, {len(parties)} parties", kind="escalation",
            count=len(parties), recipients=parties)
-    return {"id": eid, "message": mid, "parties": parties, "to": to, "skipped": skipped, "notified": True}
+    return {"id": eid, "message": mid, "parties": parties, "to": to, "skipped": skipped, "notified": list(to)}
 
 
 def escalations(state="open", me: str | None = None) -> list:  # noqa: A002 - the contract's name
@@ -1669,29 +1674,146 @@ def _used_prompts() -> set:
 
 def settle_from_prompt(agent: str, sid: str, lines: list, prompt_uuid: str, now=None) -> list:
     """The developer's `settle E-<8>: <choice>` lines (case-insensitive), from the lines progress._own_lines gives for
-    a UserPromptSubmit prompt, in any devkit session with someone at the keyboard -> the escalations settled. A
-    prompt counts once: a prompt uuid that settled before settles nothing again. Every party gets `settled`."""
+    a UserPromptSubmit prompt, in a Claude Code session with someone at the keyboard -> the escalations settled. A
+    line is the developer's only when the session's own transcript shows its prompt as typed by them
+    (progress.confirmed, the confirmation a typed grant needs). Claude Code writes the prompt there after this hook
+    runs, so the lines of an open escalation wait in the session record's `settle_waiting` list (`settling` names
+    them) until a later hook of the session settles them (the function settle_waiting). A Codex prompt settles
+    nothing while devkit reads no Codex transcript (the rule typed grants follow): the developer settles from a Claude
+    Code session. A prompt counts once: a prompt uuid that settled before settles nothing again. Every party gets
+    `settled`."""
     from . import progress
     now = _now(now)
+    wanted = settle_lines(lines)
+    if not wanted:
+        return []
+    if agent != "claude":
+        _audit("peer.refused", ", ".join(eid for eid, _, _ in wanted)[:80],
+               "settle: devkit reads no Codex transcript yet, so a Codex prompt settles nothing", "refused")
+        return []
     rec = state.read(_session_path(agent, sid))
     if not isinstance(rec, dict) or progress.headless(rec):
         return []
     uuid = str(prompt_uuid or "")
-    wanted = []
-    for ln in lines or []:
-        m = _SETTLE.match(str(ln or "").strip())
-        if m:
-            wanted.append(("E-" + m.group(1)[2:].lower(), m.group(2)))
-    if not wanted:
+    if not uuid:
+        _audit("peer.refused", wanted[0][0], "settle: a prompt without an id is not found in the transcript", "refused")
         return []
-    if uuid and uuid in _used_prompts():
+    if uuid in _used_prompts():
         _audit("peer.refused", uuid[:80], "settle: a prompt that settled before counts once", "refused")
         return []
+    if all(_typed(sid, uuid, line) for _, _, line in wanted):
+        return _settle(agent, sid, rec, wanted, uuid, now)
+    waiting = [ln for eid, _, ln in wanted if _open(eid)]
+    if waiting:
+        def fn(d):
+            kept = [w for w in d.get("settle_waiting") or [] if isinstance(w, dict) and w.get("prompt_uuid") != uuid]
+            d["settle_waiting"] = (kept + [{"prompt_uuid": uuid, "lines": waiting, "ts": now}])[-SETTLE_WAITING_MAX:]
+        try:
+            state.update(_session_path(agent, sid), fn, create=False)
+        except state.StateBusy:
+            return []
+    for eid, _, _ in wanted:
+        if not _open(eid):
+            _audit("peer.refused", eid, "settle: not an open escalation", "refused")
+    return []
+
+
+def settling(agent: str, sid: str) -> list:
+    """The escalations whose settle lines wait in this session for their prompt's record in the transcript."""
+    rec = state.read(_session_path(agent, sid)) or {}
+    out = []
+    for w in rec.get("settle_waiting") or []:
+        for eid, _, _ in settle_lines((w or {}).get("lines") if isinstance(w, dict) else []):
+            if eid not in out:
+                out.append(eid)
+    return out
+
+
+def settle_waiting(agent: str, sid: str, now=None) -> list:
+    """A later hook of the session (a tool call's, the turn's end, the next prompt): the settle lines that waited for
+    their prompt's record (settle_from_prompt) -> the escalations settled now. They settle once the session's
+    transcript shows their prompt as typed by the developer, the whole prompt at once; a prompt whose record has not
+    shown that after SETTLE_WAIT seconds settles nothing and leaves. Only the hook that takes a prompt out of the
+    record under its lock settles it, so two hooks never settle one prompt twice."""
+    from . import progress
+    now = _now(now)
+    if agent != "claude":
+        return []
+    f = _session_path(agent, sid)
+    rec = state.read(f)
+    if not isinstance(rec, dict) or not rec.get("settle_waiting"):
+        return []
+    ready, stale = [], []
+    for w in rec["settle_waiting"]:
+        if not isinstance(w, dict) or not w.get("prompt_uuid"):
+            continue
+        uuid, wanted = str(w["prompt_uuid"]), settle_lines(w.get("lines"))
+        if wanted and all(_typed(sid, uuid, line) for _, _, line in wanted):
+            ready.append((uuid, wanted))
+        elif not wanted or now - _num(w.get("ts")) > SETTLE_WAIT:
+            stale.append(uuid)
+    gone = {u for u, _ in ready} | set(stale)
+    if not gone:
+        return []
+    taken = set()
+
+    def fn(d):
+        items = [w for w in d.get("settle_waiting") or [] if isinstance(w, dict)]
+        taken.update(str(w.get("prompt_uuid")) for w in items if str(w.get("prompt_uuid")) in gone)
+        if not taken:
+            return state.SKIP
+        d["settle_waiting"] = [w for w in items if str(w.get("prompt_uuid")) not in gone]
+    try:
+        state.update(f, fn, create=False)
+    except state.StateBusy:
+        return []
+    for uuid in stale:
+        if uuid in taken:
+            _audit("peer.refused", uuid[:80], "settle: the transcript never showed the prompt as the developer's",
+                   "refused")
+    rec = state.read(f) or rec
+    if progress.headless(rec):
+        return []
+    done, used = [], _used_prompts()
+    for uuid, wanted in ready:
+        if uuid in taken and uuid not in used:
+            done += _settle(agent, sid, rec, wanted, uuid, now)
+    return done
+
+
+def settle_lines(lines) -> list:
+    """The settle lines among `lines` -> [(escalation id, what the developer said, the line)]."""
+    out = []
+    for ln in lines or []:
+        line = str(ln or "").strip()
+        m = _SETTLE.match(line)
+        if m:
+            out.append(("E-" + m.group(1)[2:].lower(), m.group(2), line))
+    return out
+
+
+def _typed(sid: str, uuid: str, line: str) -> bool:
+    """Does the session's own transcript show prompt `uuid`, holding `line`, as typed by the developer?"""
+    from . import progress
+    return progress.confirmed({"agent": "claude", "channel": "E2", "transcript_uuid": uuid, "excerpt": line,
+                               "session": sid}, sid)
+
+
+def _open(eid: str) -> bool:
+    try:
+        return (_read(escalation_path(eid)) or {}).get("state") == "open"
+    except PeerError:
+        return False
+
+
+def _settle(agent: str, sid: str, rec: dict, wanted: list, uuid: str, now: float) -> list:
+    """Settle the open escalations of `wanted` (settle_lines) from prompt `uuid` of the session -> the escalations
+    settled. Every party gets `settled`."""
     view = _View(now)
     k = view.current(key(agent, sid))
     srec = view.rec(k) or rec
     done = []
-    for eid, said in wanted:
+    for eid, said, _ in wanted:
         res = {}
 
         def fn(doc, said=said):
@@ -1727,6 +1849,23 @@ def settle_from_prompt(agent: str, sid: str, lines: list, prompt_uuid: str, now=
 def _secret_free(text: str) -> str:
     from . import audit
     return audit.redact(text)
+
+
+def _remove_void_claim(f: Path, now: float) -> bool:
+    """Delete a claim file the sweep found void, under the claim's lock and only while the claim read there is still
+    void, judged on the session records as they are now: a session that claims the resource between the sweep's
+    check and this delete keeps its claim. -> True when the file was deleted."""
+    try:
+        with state.hold(f):
+            doc = _read(f)
+            if doc is None and not f.exists():
+                return False
+            if doc and _holder_live(_View(now), doc, now):
+                return False
+            f.unlink()
+            return True
+    except (OSError, state.StateBusy, PeerError):
+        return False
 
 
 # --------------------------------------------------------------------------- the sweep
@@ -1801,11 +1940,8 @@ def sweep(now=None) -> dict:
             continue
         if doc.get("holder") and doc.get("resource"):
             _lapse(view, str(doc["resource"]), now)
-        try:
-            state.remove(f)
+        if _remove_void_claim(f, now):
             out["claims"] += 1
-        except (OSError, state.StateBusy):
-            pass
     base = PEERS / "escalations"
     for f in sorted(base.glob("E-*.json")) if base.is_dir() else []:
         try:

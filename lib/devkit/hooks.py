@@ -1046,6 +1046,10 @@ def stop(agent: str):
     sf = _session_file(agent, sid)
     out = {}
     if sf.exists():  # only sessions that started with devkit active (they loaded the global instructions)
+        try:  # the developer's settle lines that waited for their prompt's record (a turn with no tool call)
+            _peer_settle_waiting(agent, data)
+        except Exception:
+            _log(f"stop settle {agent}: {traceback.format_exc()[-300:]}")
         try:  # the developer saw this message: the decisions it names are shown from now on (spec C5)
             from . import progress as _shown
             _shown.on_final_message(agent, sid, data.get("last_assistant_message") or canary.last_assistant_text(
@@ -2879,7 +2883,6 @@ OVERLAP_WORDS = {"checkout": "works in this same checkout", "branch": "works on 
                  "repo": "works in another worktree of this repository",
                  "item": "works on the branch of a work item you hold", "claim": "holds a claim on this project"}
 OVERLAPS_TOLD_MAX = 200  # overlap keys a session record remembers as told
-_SETTLE_LINE = re.compile(r"(?i)^settle\s+(E-[0-9a-z]{8})\s*:")
 
 
 def peer_overlap_text(o: dict) -> str:
@@ -2917,11 +2920,19 @@ def _peer_overlaps(agent: str, data: dict) -> str:
     return "\n".join("devkit · " + peer_overlap_text(o) for o in new)
 
 
+def _settled_echo(d: dict, when: str) -> str:
+    from . import peers
+    return (f"the developer settled escalation {d['id']} {when} (every party hears it): {peers.OPEN_Q}"
+            f"{peers.quote((d.get('settled') or {}).get('text') or '', 300)}{peers.CLOSE_Q}")
+
+
 def _peer_settle(agent: str, data: dict) -> str:
     """UserPromptSubmit: the developer's own `settle E-<8>: <choice>` lines settle those escalations (peers), from
-    the lines they typed themselves (progress._own_lines: no code block, quote or indented line), never from a relayed
-    comment, a notification or an event naming another transcript. The prompt's id (Claude Code's prompt_id, Codex's
-    turn_id) counts it once. -> the echo for the context, or ''."""
+    the lines they typed themselves (progress._own_lines: no code block, quote or indented line) and only once the
+    session's transcript shows the prompt as theirs, never from a relayed comment, a notification or an event naming
+    another transcript. Claude Code writes the prompt to the transcript after this hook, so a line usually waits and
+    a later hook settles it (_peer_settle_waiting); a Codex prompt settles nothing while devkit reads no Codex
+    transcript. The prompt's id counts it once. -> the echo for the context, or ''."""
     sid = str(data.get("session_id") or "")
     text = str(data.get("prompt") or "")
     if not sid or data.get("agent_id") or "settle" not in text.lower():
@@ -2929,18 +2940,40 @@ def _peer_settle(agent: str, data: dict) -> str:
     from . import progress
     if progress._RELAYED.search(text) or progress._foreign_transcript(agent, sid, data.get("transcript_path")):
         return ""
-    lines = [ln for ln in progress._own_lines(text) if _SETTLE_LINE.match(ln)]
-    if not lines:
+    from . import peers
+    found = peers.settle_lines(progress._own_lines(text))
+    if not found:
+        return ""
+    done = peers.settle_from_prompt(agent, sid, [ln for _, _, ln in found],
+                                    str(data.get("prompt_id") or data.get("turn_id") or ""))
+    wanted = list(dict.fromkeys(eid for eid, _, _ in found))
+    got = {d.get("id") for d in done}
+    waiting = set(peers.settling(agent, sid)) if agent == "claude" else set()
+    out = [_settled_echo(d, "in this prompt") for d in done]
+    for eid in wanted:
+        if eid in got:
+            continue
+        if agent != "claude":
+            out.append(f"devkit settles nothing from a Codex prompt yet, because it reads no Codex transcript: "
+                       f"settle {eid} from a Claude Code session")
+        elif eid in waiting:
+            out.append(f"devkit settles {eid} once the session's transcript shows this prompt as the developer's "
+                       f"(at the next tool call or the end of this turn)")
+        else:
+            out.append(f"{eid} is not an open escalation, or this prompt settled one before "
+                       f"(dev session escalations --all)")
+    return "devkit · " + "; ".join(out)
+
+
+def _peer_settle_waiting(agent: str, data: dict) -> str:
+    """A later hook of the main session (a tool call's, the turn's end, the next prompt): the settle lines that waited
+    for their prompt's record in the transcript settle now (peers.settle_waiting). -> the echo, or ''."""
+    sid = str(data.get("session_id") or "")
+    if agent != "claude" or not sid or data.get("agent_id"):
         return ""
     from . import peers
-    done = peers.settle_from_prompt(agent, sid, lines, str(data.get("prompt_id") or data.get("turn_id") or ""))
-    wanted = list(dict.fromkeys("E-" + _SETTLE_LINE.match(ln).group(1)[2:].lower() for ln in lines))
-    got = {d.get("id") for d in done}
-    out = [f"the developer settled escalation {d['id']} in this prompt (every party hears it): {peers.OPEN_Q}"
-           f"{peers.quote((d.get('settled') or {}).get('text') or '', 300)}{peers.CLOSE_Q}" for d in done]
-    out += [f"{eid} is not an open escalation, or this prompt settled one before (dev session escalations --all)"
-            for eid in wanted if eid not in got]
-    return "devkit · " + "; ".join(out)
+    done = peers.settle_waiting(agent, sid)
+    return "devkit · " + "; ".join(_settled_echo(d, "in their prompt") for d in done) if done else ""
 
 
 def prompt(agent: str):
@@ -2991,8 +3024,8 @@ def prompt(agent: str):
         granted = progress.evidence_lines(progress.on_human_prompt(agent, data))
     except Exception:
         _log(f"prompt evidence {agent}: {traceback.format_exc()[-300:]}")
-    try:  # the developer's `settle E-…: <choice>` lines (sessions on this Mac)
-        settled = _peer_settle(agent, data)
+    try:  # the developer's `settle E-…: <choice>` lines (sessions on this Mac): an earlier prompt's first
+        settled = "\n".join(x for x in (_peer_settle_waiting(agent, data), _peer_settle(agent, data)) if x)
         granted = "\n".join(x for x in (granted, settled) if x)
     except Exception:
         _log(f"prompt settle {agent}: {traceback.format_exc()[-300:]}")
@@ -3269,6 +3302,11 @@ def post_tool(agent: str):
             progress.answered_by_sendmessage(agent, data)
     except Exception:
         _log(f"post-tool requests {agent}: {traceback.format_exc()[-300:]}")
+    peer_settled = ""
+    try:  # the developer's settle lines that waited for their prompt's record in the transcript
+        peer_settled = _peer_settle_waiting(agent, data)
+    except Exception:
+        _log(f"post-tool settle {agent}: {traceback.format_exc()[-300:]}")
     answered = ""
     if data.get("tool_name") in progress.QUESTION_TOOLS:  # the developer's answer to a decision (spec C5, E1)
         try:
@@ -3312,7 +3350,7 @@ def post_tool(agent: str):
             _codex_defer(agent, data)
         except Exception as e:
             _swallowed("post-tool", e)
-    _context_out("PostToolUse", "\n\n".join(x for x in (settled, carried, answered, background,
+    _context_out("PostToolUse", "\n\n".join(x for x in (settled, carried, peer_settled, answered, background,
                                                         _output_pitfalls(agent, data), bug_text,
                                                         _bulk_rewrite_note(data), closing,
                                                         progress.on_tool_done(agent, data)) if x))

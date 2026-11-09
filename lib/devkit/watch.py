@@ -41,6 +41,7 @@ import select
 import signal
 import sys
 import time
+import unicodedata
 from pathlib import Path
 
 from . import core, state
@@ -49,7 +50,6 @@ from .core import STATE
 LIVE = STATE / "watch" / "live"  # one record per `dev watch --wait`: `dev watches`
 LIVE_DAYS = 3
 KINDS = ("question", "decision", "ready", "member", "ci", "notice", "peer")
-PEER_WAKES = ("question", "answer", "escalation", "settled", "claim-free")  # and a note marked urgent
 PEER_REASONS_MAX = 5  # reasons of each kind can_arrive lists from other sessions
 EXIT = {"events": 0, "error": 1, "nothing": 2, "timeout": 3, "superseded": 5}
 BACKGROUND_MIN = 240  # a Claude Code background command: one notification when it exits, no 30-minute limit
@@ -69,17 +69,33 @@ _ANSI = re.compile(r"(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]|(?:\x1b\]|\x9d)[^\x07\x1b\
                    r"\x1b[ -/]*[0-~]")
 _CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028\u2029\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]")
 _QUOTES = {0x201c: '"', 0x201d: '"', 0x201e: '"', 0x201f: '"'}  # devkit's own quotes, which open and close a span
+# characters a model reads and a person never sees, besides the format characters (category Cf): the whole tag block
+# (its unassigned code points too) and the variation selectors, the Mongolian free ones included
+_HIDDEN_RANGES = ((0xE0000, 0xE007F), (0xFE00, 0xFE0F), (0xE0100, 0xE01EF), (0x180B, 0x180F))
+
+
+def _hidden(c: str) -> bool:
+    o = ord(c)
+    return unicodedata.category(c) == "Cf" or any(lo <= o <= hi for lo, hi in _HIDDEN_RANGES)
+
+
+def visible(text: str) -> str:
+    """`text` without the characters a model reads and a person never sees: every format character (Unicode category
+    Cf: zero-width and direction marks, tag characters, the soft hyphen, ...), the rest of the tag block and every
+    variation selector. Text spelled in tag characters renders as nothing in the terminal, the dashboard and
+    `dev session inbox`, yet reaches the model whole."""
+    return text if text.isascii() else "".join(c for c in text if not _hidden(c))
 
 
 def clean(text, limit: int = LINE_MAX) -> str:
     """Text someone else wrote (a member, CI, another session) as one inert span of a line: escape sequences, C0 and
-    C1 controls, and bidi and zero-width characters dropped (a line break, a tab or another control that separates
-    words becomes a space); devkit's curly quotes become plain ones, so the text cannot close the span it is quoted
-    in and write words of devkit's after it; then hooks._inline (no backticks, whitespace as one space, at most
-    `limit` characters)."""
+    C1 controls, and every invisible character (`visible`) dropped (a line break, a tab or another control that
+    separates words becomes a space); devkit's curly quotes become plain ones, so the text cannot close the span it is
+    quoted in and write words of devkit's after it; then hooks._inline (secrets redacted, no backticks, whitespace as
+    one space, at most `limit` characters)."""
     from .hooks import _inline
     s = _CONTROL.sub(lambda m: " " if m.group().isspace() else "", _ANSI.sub("", str(text or "")))
-    return _inline(s.translate(_QUOTES), limit)
+    return _inline(visible(s).translate(_QUOTES), limit)
 
 
 def _ev(kind: str, ident: str, wakes: bool, line: str, ts=None) -> dict:
@@ -286,9 +302,7 @@ def _peer_box(agent: str, sid: str):
 
 
 def _peer_event(peers, m: dict) -> dict:
-    kind = str(m.get("kind") or "")
-    wakes = kind in PEER_WAKES or (kind == "note" and bool(m.get("urgent")))
-    return _ev("peer", m.get("id"), wakes, peers.frame(m), m.get("ts"))
+    return _ev("peer", m.get("id"), peers.wakes(m), peers.frame(m), m.get("ts"))
 
 
 def _peer_mail(agent, sid, mark, want, limit):

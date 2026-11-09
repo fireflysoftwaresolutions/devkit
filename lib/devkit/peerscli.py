@@ -349,7 +349,8 @@ def _escalate(a) -> int:
     others = [k for k in res.get("parties") or [] if k != sp.key()]
     print(f"✓ {res['id']} escalated to the developer · parties: this session"
           + "".join(", " + _label(k, rows) for k in others) + " · a desktop notification tells the developer")
-    print(f"  the developer settles it by typing, in any devkit session: settle {res['id']}: <letter or their words>")
+    print(f"  the developer settles it by typing, in a Claude Code session: settle {res['id']}: "
+          "<letter or their words>")
     return 0
 
 

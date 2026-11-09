@@ -15,6 +15,7 @@ import io
 import json
 import os
 import sys
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -75,9 +76,12 @@ class PeerHookCase(PeerCase):
         return mk("PreToolUse", tool_name="Bash", tool_use_id=f"toolu_{self.n}",
                   tool_input=dict({"command": cmd}, **more.pop("tool_input", {})), **more)
 
-    def prompt(self, agent, sid, text):
+    # a prompt through the prompt hook; a Claude Code prompt is in the transcript first unless `typed` is False
+    def prompt(self, agent, sid, text, typed=True):
         self.n += 1
         if agent == "claude":
+            if typed:
+                self.typed(sid, text, f"p-{self.n}")
             return self.context(self.hook("prompt", "claude", self.claude("UserPromptSubmit", sid, prompt=text,
                                                                           prompt_id=f"p-{self.n}")))
         return self.context(self.hook("prompt", "codex", self.codex("UserPromptSubmit", sid, prompt=text,
@@ -202,17 +206,57 @@ class SettleTests(PeerHookCase):
         line = next(ln for ln in ctx.splitlines() if eid in ln)
         self.assertIn("“B: kit-consulting first”", line)
         self.assertEqual([m["kind"] for m in peers.take("claude", CLAUDE_A)], ["settled"])
-        with self.subTest(agent="codex"):  # a Codex prompt: no prompt id, the turn id counts it once
+        with self.subTest(agent="codex"):  # devkit reads no Codex transcript yet: the echo says where to settle it
             e2 = peers.escalate(sender(CLAUDE_A), "@0199a213", "Tag now or after the review?",
                                 ["A: now", "B: after the review"])["id"]
             ctx = self.prompt("codex", CODEX_A, f"settle {e2}: wait until Friday")
-            done = peers.escalations("settled", me=f"codex:{CODEX_A}")[-1]
-            self.assertEqual((done["id"], done["settled"]["text"]), (e2, "wait until Friday"))
-            self.assertIn(e2, ctx)
+            self.assertIn(e2, [e["id"] for e in peers.escalations("open")])
+            self.assertIn(f"settle {e2} from a Claude Code session", ctx)
         with self.subTest("an id that is not open says so"):
             ctx = self.prompt("claude", CLAUDE_B, f"settle {eid}: A")
             self.assertEqual(peers.escalations("settled", me=f"claude:{CLAUDE_A}")[0]["settled"]["choice"], "B")
             self.assertIn(f"{eid} is not an open escalation", ctx)
+
+    # Claude Code writes a prompt to the transcript only after its prompt hook ran: the settle line waits for that
+    # record and settles at the next tool call's hook, once, with the echo there
+    def test_a_settle_line_settles_once_its_prompt_reaches_the_transcript(self):
+        eid = self.escalation()
+        ctx = self.prompt("claude", CLAUDE_B, f"settle {eid}: A", typed=False)
+        self.assertEqual([e["id"] for e in peers.escalations("open")], [eid])
+        self.assertIn(f"devkit settles {eid} once", ctx)
+        self.typed(CLAUDE_B, f"settle {eid}: A", f"p-{self.n}")
+
+        def tool_done(n):
+            return self.context(self.hook("post-tool", "claude", self.claude(
+                "PostToolUse", CLAUDE_B, tool_name="Bash", tool_use_id=f"toolu_s{n}", tool_input={"command": "ls"},
+                tool_response={"stdout": "", "stderr": "", "interrupted": False})))
+        out = tool_done(1)
+        self.assertEqual(peers.escalations("settled")[0]["settled"]["choice"], "A")
+        self.assertIn(f"the developer settled escalation {eid}", out)
+        self.assertEqual([m["kind"] for m in peers.take("claude", CLAUDE_A)], ["settled"])
+        self.assertNotIn("settled escalation", tool_done(2))  # once
+
+    # a turn with no tool call: the Stop hook settles what waited; a prompt whose record never showed within
+    # SETTLE_WAIT leaves the session record and settles nothing when it shows later
+    def test_the_turn_end_settles_a_waiting_line_and_a_late_record_settles_nothing(self):
+        eid = self.escalation()
+        self.prompt("claude", CLAUDE_B, f"settle {eid}: B", typed=False)
+        self.typed(CLAUDE_B, f"settle {eid}: B", f"p-{self.n}")
+        with mock.patch.object(canary, "check", lambda *a, **k: None), \
+                mock.patch("devkit.scope.decide", lambda *a, **k: False), \
+                mock.patch.object(hooks, "_spawn", lambda *a, **k: None):  # no background `dev sync` from a test
+            self.hook("stop", "claude", self.claude("Stop", CLAUDE_B, last_assistant_message="Settled."))
+        self.assertEqual(peers.escalations("settled")[0]["settled"]["choice"], "B")
+        e2 = peers.escalate(sender(CLAUDE_A), "@0199a213", "Tag now or after the review?",
+                            ["A: now", "B: after the review"])["id"]
+        self.prompt("claude", CLAUDE_B, f"settle {e2}: A", typed=False)
+        self.assertEqual(peers.settling("claude", CLAUDE_B), [e2])
+        late = time.time() + peers.SETTLE_WAIT + 60
+        self.assertEqual(peers.settle_waiting("claude", CLAUDE_B, now=late), [])
+        self.assertEqual(peers.settling("claude", CLAUDE_B), [])
+        self.typed(CLAUDE_B, f"settle {e2}: A", f"p-{self.n}")
+        self.assertEqual(peers.settle_waiting("claude", CLAUDE_B), [])
+        self.assertEqual([e["id"] for e in peers.escalations("open")], [e2])
 
     def test_relayed_notification_cannot_settle(self):
         eid = self.escalation()

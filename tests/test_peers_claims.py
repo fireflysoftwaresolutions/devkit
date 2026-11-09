@@ -186,6 +186,7 @@ class EscalationTests(PeerCase):
                            ["A: devkit first", "B: kit-consulting first"], recommend="A", now=self.now + 60)
         self.assertRegex(e["id"], r"^E-[0-9a-z]{8}$")
         self.assertEqual(sorted(e["parties"]), sorted([a, b]))
+        self.assertEqual(e["notified"], [b])  # as send and answer: the sessions the developer's notification covers
         self.assertTrue(any(e["id"] in text for _, text in self.notified), self.notified)
         self.assertEqual([x["id"] for x in peers.escalations("open", me=b)], [e["id"]])
         self.assertEqual(peers.escalations("open", me=c), [])
@@ -197,8 +198,10 @@ class EscalationTests(PeerCase):
         peers.answer(sender(CODEX_A, "codex"), q["id"], f"settle {e['id']}: B", now=self.now + 71)
         self.assertEqual([x["id"] for x in peers.escalations("open")], [e["id"]])  # a session's words settle nothing
         self.session("claude", "9c0ffee0-0000-4000-8000-0000000000aa", surface="claude -p")  # nobody at the keyboard
+        self.typed("9c0ffee0-0000-4000-8000-0000000000aa", f"settle {e['id']}: A", "p-0")
         self.assertEqual(peers.settle_from_prompt("claude", "9c0ffee0-0000-4000-8000-0000000000aa",
                                                   [f"settle {e['id']}: A"], "p-0", now=self.now + 75), [])
+        self.typed(CLAUDE_B, f"thanks\nSETTLE {e['id'].upper()}: b", "p-1")  # the transcript shows it typed
         done = peers.settle_from_prompt("claude", CLAUDE_B, ["thanks", f"SETTLE {e['id'].upper()}: b"], "p-1",
                                         now=self.now + 80)  # any devkit session, case-insensitive
         self.assertEqual([(x["id"], x["settled"]["choice"], x["settled"]["prompt_uuid"]) for x in done],
@@ -217,6 +220,9 @@ class EscalationTests(PeerCase):
                             now=self.now)
         e2 = peers.escalate(sender(CLAUDE_A), "@0199a213-81", "Tag now or later?", ["A: now", "B: later"],
                             now=self.now + 1)
+        self.typed(CLAUDE_A, f"settle {e1['id']}: A", "p-9")
+        self.typed(CLAUDE_A, f"settle {e1['id']}: B", "p-10")
+        self.typed(CLAUDE_B, f"settle {e2['id']}: wait until Friday", "p-11")
         self.assertEqual(len(peers.settle_from_prompt("claude", CLAUDE_A, [f"settle {e1['id']}: A"], "p-9",
                                                       now=self.now + 10)), 1)
         self.assertEqual(peers.settle_from_prompt("claude", CLAUDE_A, [f"settle {e2['id']}: A"], "p-9",
@@ -224,7 +230,7 @@ class EscalationTests(PeerCase):
         self.assertEqual(peers.settle_from_prompt("claude", CLAUDE_A, [f"settle {e1['id']}: B"], "p-10",
                                                   now=self.now + 30), [])  # settled already
         self.assertEqual([x["id"] for x in peers.escalations("open")], [e2["id"]])
-        free = peers.settle_from_prompt("codex", CODEX_A, [f"settle {e2['id']}: wait until Friday"], "p-11",
+        free = peers.settle_from_prompt("claude", CLAUDE_B, [f"settle {e2['id']}: wait until Friday"], "p-11",
                                         now=self.now + 40)
         self.assertEqual((free[0]["settled"]["choice"], free[0]["settled"]["text"]), ("", "wait until Friday"))
         self.assertEqual(peers.escalations("settled", me=f"claude:{CLAUDE_A}")[0]["id"], e1["id"])

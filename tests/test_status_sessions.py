@@ -54,7 +54,8 @@ class SessionsMac(unittest.TestCase):
         st, ho = self.root / "state", self.root / "handoff"
         for obj, name, value in (
                 (core, "STATE", st), (core, "HANDOFF", ho), (core, "NOTES", ho / "projects"),
-                (core, "DEV", self.root / "dev"), (registry, "STATE", st), (pg, "RUNS", st / "runs"),
+                (core, "DEV", self.root / "dev"), (core, "CLAUDE_HOME", self.root / ".claude"),
+                (registry, "STATE", st), (pg, "RUNS", st / "runs"),
                 (pg, "SESSIONS", st / "sessions"), (pg, "CALLS", st / "calls"), (peers, "PEERS", st / "peers"),
                 (watch, "LIVE", st / "watch" / "live"), (audit, "AUDIT", st / "audit"),
                 (continuity, "CONT", st / "continuity"), (ciwatch, "WATCH", st / "ci" / "watch"),
@@ -190,6 +191,11 @@ class StatusSessions(SessionsMac):
                                now=NOW)["id"]
         done = peers.escalate(sender(CLAUDE_A), f"@{CODEX_A[:8]}", "Keep the old endpoint?", ["Keep", "Drop"],
                               now=NOW)["id"]
+        typed = core.CLAUDE_HOME / "projects" / "-acme-api" / f"{CLAUDE_A}.jsonl"  # the developer typed the line
+        typed.parent.mkdir(parents=True)
+        typed.write_text(json.dumps({"type": "user", "promptId": "prompt-1", "isSidechain": False,
+                                     "origin": {"kind": "human"},
+                                     "message": {"role": "user", "content": f"settle {done}: A"}}) + "\n")
         peers.settle_from_prompt("claude", CLAUDE_A, [f"settle {done}: A"], "prompt-1", now=NOW)
         needs = [n for n in self.status()["needs_you"] if n["kind"] == "escalation"]
         self.assertEqual([n["id"] for n in needs], [eid])
