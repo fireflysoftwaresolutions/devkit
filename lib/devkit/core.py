@@ -420,7 +420,7 @@ def expand(p) -> Path:
 # refuses the same assignments in an agent's command text; this check covers what the text does not show.
 
 AGENT_MARKERS = ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_PID", "CODEX_SANDBOX", "CODEX_THREAD_ID",
-                 "DEVKIT_SESSION", "DEVKIT_AGENT", "DEVKIT_FROM_AGENT")
+                 "DEVKIT_SESSION", "DEVKIT_AGENT", "DEVKIT_FROM_AGENT", "DEVKIT_SPEAKER")
 _LOOKUP = object()
 
 
