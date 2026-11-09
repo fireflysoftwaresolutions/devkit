@@ -1,0 +1,38 @@
+{
+  "name": "bug-registry",
+  "kind": "flow",
+  "title": "When devkit itself fails",
+  "desc": "A devkit failure on your Mac gets a fingerprint, and devkit matches it against the local cache of the bug registry without any network call. A known bug with a trusted detour gives the agent the detour, and the work goes on; otherwise the agent looks for its own detour or reports the bug. Votes, reports, and detours leave through the checked outbox for the registry in GitHub Issues, which ranks the bugs for the next hotfix, and dev bug sync brings the registry's records back into the cache.",
+  "legend": [
+    {"label": "devkit", "family": "firefly"},
+    {"label": "local data", "family": "slate"},
+    {"label": "GitHub", "family": "steel"}
+  ],
+  "nodes": [
+    {"id": "failure", "label": "devkit fails", "sub": "crash · hook · wrong refusal", "col": 1, "row": 0},
+    {"id": "fp", "label": "Fingerprint", "sub": "12 hex · one-time code", "col": 1, "row": 1, "family": "firefly"},
+    {"id": "cache", "label": "Local cache", "sub": "matched, no network", "col": 1, "row": 2, "family": "slate", "shape": "store"},
+    {"id": "detour", "label": "Known detour", "sub": "the work goes on", "col": 0, "row": 3, "emphasis": true},
+    {"id": "own", "label": "Agent's own detour", "sub": "or a report, then ask you", "col": 2, "row": 3, "family": "firefly"},
+    {"id": "outbox", "label": "Outbox", "sub": "checked before it leaves", "col": 1, "row": 4, "family": "slate", "shape": "store"},
+    {"id": "registry", "label": "Bug registry", "sub": "GitHub Issues · bot record", "col": 0, "row": 5, "family": "steel"},
+    {"id": "rank", "label": "Ranking", "sub": "dev bug top", "col": 1, "row": 5, "family": "firefly"},
+    {"id": "hotfix", "label": "Hotfix release", "sub": "sets fixed_in", "col": 2, "row": 5, "family": "steel"}
+  ],
+  "groups": [
+    {"id": "mac", "title": "Your Mac", "nodes": ["failure", "fp", "cache", "detour", "own", "outbox"], "dashed": true},
+    {"id": "github", "title": "GitHub", "nodes": ["registry", "rank", "hotfix"], "dashed": true}
+  ],
+  "edges": [
+    {"from": "failure", "to": "fp", "label": "recorded"},
+    {"from": "fp", "to": "cache", "label": "looked up"},
+    {"from": "cache", "to": "detour", "label": "served detour", "from_side": "bottom", "to_side": "right", "route": "vh"},
+    {"from": "cache", "to": "own", "label": "none served", "from_side": "bottom", "to_side": "left", "route": "vh"},
+    {"from": "detour", "to": "outbox", "label": "vote", "from_side": "bottom", "to_side": "left", "route": "vh"},
+    {"from": "own", "to": "outbox", "label": "detour or report", "from_side": "bottom", "to_side": "right", "route": "vh"},
+    {"from": "outbox", "to": "registry", "label": "dev bug sync", "from_side": "bottom", "to_side": "top", "route": "vh"},
+    {"from": "registry", "to": "rank", "label": "votes"},
+    {"from": "rank", "to": "hotfix", "label": "fix first"},
+    {"from": "registry", "to": "cache", "label": "bot records", "style": "dashed", "from_side": "left", "to_side": "left", "via": [[-0.85, 5], [-0.85, 2]]}
+  ]
+}

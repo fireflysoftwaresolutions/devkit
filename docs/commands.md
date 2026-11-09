@@ -7,8 +7,9 @@ A `<query>` is a project id, a project name, a path, or part of an id. When more
 in a terminal, an fzf picker opens.
 
 Commands that fail print a reason on stderr and exit with a non-zero code: `2` for usage problems (an unknown or
-ambiguous project, a bad argument, a missing `--why`), `1` for an operation that did not complete, and `130` when you
-cancel a picker or press Ctrl-C.
+ambiguous project, a bad argument, a missing `--why`), `1` for an operation that did not complete, `70` when devkit
+itself failed (a short notice names the bug and any known detour; see [The bug registry](bug-registry.md)), and `130`
+when you cancel a picker or press Ctrl-C.
 
 ## Home
 
@@ -396,33 +397,60 @@ devkit's specialist agents. See [The crew](crew.md).
 
 ## Lessons
 
-Learn from mistakes: blameless lessons in the handoff repository, recalled in every session, counted when they repeat,
-and turned into automation. The guide is [Lessons](lessons.md).
+Learn from mistakes: blameless lessons in the handoff repository, recalled before the work they apply to, measured by
+whether agents heeded them, and turned into automation. The guide is [Lessons](lessons.md).
 
-### `dev lesson [add | anchor | ls | show | recur | prevent | retire | restore | scan | review] [-p PROJECT | -i SLUG | --global]`
+### `dev lesson [add | anchor | ls | show | recur | prevent | supersede | retire | restore | release | scan | review | lint | eval] [-p PROJECT | -i SLUG | --global]`
 
 The scope is the project you are in (or `-p`), an initiative (`-i`), or `--global`. `<lesson>` is an id, a unique
 start of one, or words of a title.
 
 | Command | Effect |
 | --- | --- |
-| `dev lesson add "<title>" --cause "…" --prevent "…" [options] [anchors]` | Records a lesson; the root cause and the prevention are required. Options: `--kind bug\|mistake\|process\|tooling\|security\|performance\|design`, `--severity low\|medium\|high`, `--happened`, `--fix`, `--detect`, `--evidence` (repeatable), `--tag` (repeatable), `--retire-when`, `--why`. Anchors say where it applies, each repeatable: `--file "<glob>"`, `--command "<command words>"`, `--activity <id>` (a kind of work from `dev crew raci`), `--error "<text the tool output shows>"`, `--stack <stack>`. Without anchors, only the session start can recall it, and the command says so |
-| `dev lesson anchor <lesson> --why "…" [--file …] [--command …] [--activity …] [--error …] [--stack …]` | Adds anchors to a lesson, for example one written before anchors existed; they join the ones it has. An anchor cannot contain a comma, and an unknown kind of work is refused |
+| `dev lesson add "<title>" --cause "…" --prevent "…" --happened "…"\|--evidence "…" [options] [anchors]` | Records a lesson. The title is the rule (at most 80 characters, one line, not starting with `[`); the root cause, the prevention, and `--happened` or `--evidence` are required. Options: `--kind bug\|mistake\|process\|tooling\|security\|performance\|design`, `--severity low\|medium\|high`, `--fix`, `--detect`, `--evidence` (repeatable), `--tag` (repeatable), `--retire-when`, `--why`, `--new`. Anchors say where it applies, each repeatable: `--file "<glob>"`, `--command "<command words>"`, `--activity <id>` (a kind of work from `dev crew raci`), `--error "<text the tool output shows>"`, `--stack <stack>`. A bare common program as a command anchor, or an error anchor shorter than 12 characters or too generic, is refused. When an open or archived lesson shares an error or command anchor, the command refuses and names it: count the repeat with `recur`, or add `--new --why "…"`. A lesson whose text tries to override the developer or the guard, or holds a secret, a URL, or a download-and-run, is held and not recalled. In a project, anchors on guard refusals or `dev` commands get a suggestion to file `dev bug report` instead |
+| `dev lesson anchor <lesson> --why "…" [--file …] [--command …] [--activity …] [--error …] [--stack …]` | Adds anchors to a lesson, for example one written before anchors existed; they join the ones it has. An anchor cannot contain a comma, and an unknown kind of work or a too-broad anchor is refused |
 | `dev lesson [--search WORDS] [--all] [ls]` | The lessons of this scope plus the global ones, strongest first. `--search` keeps those with the words in the title or any section, and `--all` lists every scope and retired lessons. Both options belong to `dev lesson` itself: put them before `ls`, or leave `ls` out, because after `ls` they are refused |
-| `dev lesson show <lesson>` | All fields, sections, and the history |
-| `dev lesson recur <lesson> [--evidence "…"] [--why "…"]` | It happened again: counts the repeat, adds the evidence, and reopens a retired lesson |
+| `dev lesson show <lesson>` | All fields, sections, the author, and the history; archived lessons too |
+| `dev lesson recur <lesson> [--evidence "…"] [--why "…"]` | It happened again: counts the repeat, adds the evidence, reopens a prevented or retired lesson, and brings an archived one back. The third occurrence, and every third after it, creates one work item to automate it |
 | `dev lesson prevent <lesson> --by test\|lint\|type\|guard\|skill\|ci\|rule\|doc --ref "…" --why "…"` | Automation now prevents it; the lesson leaves the session context |
+| `dev lesson prevent <lesson> --by guard --match "<command pattern>"\|--error "<text>" [--block] --why "…"` | Proposes a lesson rule the guard enforces, kept in `lessons/rules/<scope>.json`. It is accepted only when it matches the lesson's recorded mistake and no command that succeeded here in the last 14 days; it warns first and blocks after a miss, or at once with `--block` |
+| `dev lesson supersede <old> --by <new> --why "…"` | Marks a lesson as replaced by a newer one, so only the newer one is recalled |
 | `dev lesson retire <lesson> --why "…"` | It no longer applies |
 | `dev lesson restore <lesson> --why "…"` | Brings an archived lesson back as open |
+| `dev lesson release <lesson>` | Releases a held lesson so it can be recalled. Developer only: an agent's call is refused with the line to type, `grant lesson-release <lesson>` |
 | `dev lesson scan [--days N]` | Signals worth a lesson that have none yet: reverts, fixes, repeated guard refusals, missed status blocks, bouncing tasks (default 14 days) |
-| `dev lesson review` | Recurring lessons that are not prevented, and open lessons not seen for four months |
+| `dev lesson review` | Lessons missed twice after being shown, preventions that failed, recurring lessons that are not prevented, held lessons, open lessons not seen for four months, and how often shown lessons were heeded, per place |
+| `dev lesson lint` | Anchors to fix: broad, missing, or wrong ones, file anchors that match no file, and lessons that cannot be recalled |
+| `dev lesson eval` | Replays this machine's hook records of the last 14 days and reports, for each repeat, whether recall would have shown the lesson before it |
 
 ### `dev sleep [--dry-run] [--quiet]`
 
-Consolidates and forgets, like a brain at night: merges near-duplicate lessons, archives lessons that no longer help
-into `lessons/archive/`, keeps at most 25 active lessons per scope, proposes global lessons for patterns seen in
-two or more projects, and trims devkit's own old records, caches, and logs. The `sleep` job runs it every night;
+Consolidates and forgets, like a brain at night: folds the day's lesson outcomes into usage counts, merges
+near-duplicate lessons, archives lessons that no longer help into `lessons/archive/`, reopens prevented lessons whose
+prevention is gone, proposes global lessons for patterns seen in two or more projects, and trims devkit's own old
+records, caches, and logs. It sets no limit on the number of active lessons. The `sleep` job runs it every night;
 `--dry-run` shows what would change. See [Lessons › Sleep](lessons.md#sleep).
+
+## Bug registry
+
+devkit's own bugs, shared through a public registry in GitHub Issues: known detours for agents, reports without
+project data, and hotfix rankings. The guide is [The bug registry](bug-registry.md).
+
+### `dev bug [ls | show | search | report | detour | top | sync | pending | send | drop | confirm | share]`
+
+| Command | Effect |
+| --- | --- |
+| `dev bug` or `dev bug ls [--open\|--fixed\|--kind KIND\|--mine\|--local]` | The bugs in the cache, ranked, with votes, impact, detour status, and fix version. `--local` lists the failures recorded on this Mac |
+| `dev bug show <number\|fingerprint>` | One bug: versions, votes, detours with their trust, related lessons. In an agent session, only the registry's bot-written fields; proposed detours as a count |
+| `dev bug search <words\|fingerprint>` | Bugs by generated title or fingerprint |
+| `dev bug report [fingerprint] [--title "…"] [--guard <refusal id>] [--security]` | Files a bug, or votes on a known one. `--guard` flags a wrong refusal; `--security` holds the report for private vulnerability reporting |
+| `dev bug detour <fingerprint> --hint …\|--dev "…"\|--text "…"` | Records a detour once the session ledger shows it worked |
+| `dev bug top [--task]` | Open bugs by score, each with its reason, and a suggested hotfix scope; `--task` adds the chosen bugs as work items |
+| `dev bug sync` | Refreshes the cache and sends the outbox; the hourly sync job does the same |
+| `dev bug pending` | Items held for review, printed exactly as they would be sent |
+| `dev bug send <id>` · `dev bug drop <id>` | Sends or drops a held item. Developer only: `grant bug-send <id>`, `grant bug-drop <id>` |
+| `dev bug confirm <bug> <detour>` | Confirms a detour, which makes it `verified` when you are an owner or member other than its author. Developer only: `grant bug-confirm <bug>/<detour>` |
+| `dev bug share on\|reports\|off` | Your consent to post under your GitHub account: everything, reports and detours without votes, or nothing. Developer only: `grant bug-share <setting>` |
 
 ## Agents
 

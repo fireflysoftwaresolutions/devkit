@@ -25,6 +25,7 @@ Docker and the background automation, and keeps them that way.
 [From plan to operate](#from-plan-to-operate) ·
 [Features](#features) ·
 [For your agents](#for-your-agents) ·
+[When devkit fails](#when-devkit-itself-fails) ·
 [How it fits together](#how-it-fits-together) ·
 [What's inside](#whats-inside) ·
 [Docs](#documentation) ·
@@ -47,7 +48,8 @@ Docker and the background automation, and keeps them that way.
 | Claude and Codex behave differently, and settings drift | One set of rules, skills, and hooks for both; drift is blocked and repaired; `dev config diff` previews everything |
 | Agents skip the skill that fits the job | Required skills follow the files, commands, and kind of work, in any language: added to subagent briefs, and checked before a turn ends |
 | Nobody knows what is in flight | A shared handoff repository with initiatives, projects, task boards, a team view, status reports, and a dashboard, synced within seconds of every commit, push, and PR |
-| The same mistake, made again next month | Blameless lessons, recalled at the start of every session; a repeat is counted, and a recurring lesson becomes a test or a guard rule |
+| The same mistake, made again next month | Blameless lessons, recalled before the work they apply to; devkit measures whether agents heeded them, and a lesson that keeps repeating becomes a test or a guard rule |
+| Every agent rediscovers the same devkit bug | A public bug registry: a detour found once reaches every agent, and votes rank what the next hotfix fixes |
 | "What did the agent do last night?" | Scheduled jobs you can see and change, and an audit trail of every change, guard decision, and job run, for the whole team |
 | "Did the agent even read the rules?" | Every reply starts with the `[Firefly> DevKit]` status block; devkit checks it, scores it, records it, and reports deviations |
 
@@ -122,6 +124,7 @@ dev pr merge                 when checks and reviews allow it         dev releas
 dev ci status --watch        the branch's pipelines: jobs, current step, ETA (GitHub, GitLab, Bitbucket, Azure)
 dev ci watch --wait --pr 12  wake when that PR's CI ends              dev backup   this branch, when no CI starts
 dev lesson add "…" --cause "…" --prevent "…"                          a lesson every later session recalls
+dev bug                      devkit's own known bugs and their detours   dev bug top   what the next hotfix fixes
 dev jobs                     the scheduled jobs and their last runs   dev audit --team   what devkit did, everywhere
 dev delivery                 the project's release policy and gaps     dev delivery apply --why "…"   record it
 dev files · find · grep · diff   token-light views of the tree, names, contents and changes
@@ -172,7 +175,8 @@ stage's guide is in [Concepts › From plan to operate](docs/concepts.md#from-pl
 | Testing | `dev test` runs the last failures first, then only what your changes can break; `dev test audit` finds tests that cannot fail, and `dev test prove` checks that new tests fail without the change; `dev ci --run --resume` repeats only what a fix affects | [Testing](docs/testing.md) |
 | Unfinished work | `dev stubs` finds TODOs, placeholders, and stubs without a task; the end of a turn and every commit refuse them | [Commands › Quality](docs/commands.md#quality) |
 | Files | `dev files`, `find`, `grep`, and `diff` with compact, capped output; `dev rm`, `mv`, and `cp` with the Trash, undo, and refusals instead of lost work | [Commands › Files](docs/commands.md#files) |
-| Lessons | Blameless lessons from mistakes, recalled as known pitfalls in every session, counted when they repeat, turned into automation, and consolidated every night by `dev sleep` | [Lessons](docs/lessons.md) |
+| Lessons | Blameless lessons from mistakes, recalled before the work they apply to, measured by whether agents heeded or missed them, screened before any agent sees them, turned into tests and guard rules when they repeat, and consolidated every night by `dev sleep` without losing any that still matter | [Lessons](docs/lessons.md) |
+| Bug registry | When devkit itself fails, agents get the known detour from a public registry in GitHub Issues, share the ones they find under trust rules, and report what nobody solved, with devkit facts only; votes rank the bugs for hotfixes | [The bug registry](docs/bug-registry.md) |
 | Scheduled jobs and audit | Sync, sleep, cleanup, repair, audit, update check, health, and lesson review as launchd jobs you can see and reschedule; an audit trail of everything devkit changed or decided, with secrets redacted | [Scheduled jobs and the audit trail](docs/jobs-and-audit.md) |
 | Git hosts and clouds | The CLIs for GitLab, Bitbucket, Azure DevOps, AWS, Azure, Google Cloud, DigitalOcean, Kubernetes, and OpenTofu, installed and checked for sign-in | [Getting started](docs/getting-started.md#the-setup-wizard) |
 | Security | `dev sec scan` (gitleaks, osv-scanner, Semgrep, Trivy, zizmor), a secret check before every commit, devkit run isolated from Python's environment, and the DevSecOps skills and plugins | [Skills and plugins](docs/skills-and-plugins.md), [Guard rules](docs/guard.md) |
@@ -218,6 +222,17 @@ devkit is also a plugin for **Claude Code** and **Codex**, installed automatical
   explains the right way in one sentence. It is a seatbelt, not a sandbox: keep reviewing what agents do.
 - **Continuity:** after a compaction, a resume, or `/clear`, the session gets devkit's record of its run, the crew
   working now, the decisions waiting, and your latest requests, which wins over the summary.
+
+## When devkit itself fails
+
+When a `dev` command crashes, a hook fails, or the guard refuses something it should allow, devkit says the bug is its
+own, not your project's, and looks it up in a public bug registry kept in this repository's GitHub Issues. If someone
+already found a workaround, your agent gets it and carries on. If not, the agent looks for one and shares what works,
+or reports the bug and asks you. Reports carry devkit facts only (the version, the command, the exception class,
+devkit's own function names), never paths, names, code, or output from your projects, and anything with free text
+waits for your review. devkit posts only after you consent, under your own GitHub account; security-sensitive reports
+go to private vulnerability reporting instead. Votes rank the bugs, so each hotfix fixes what hurts most. See
+[The bug registry](docs/bug-registry.md).
 
 ## How it fits together
 
@@ -268,7 +283,8 @@ The ideas behind it are in [docs/concepts.md](docs/concepts.md).
 | [Testing](docs/testing.md) | `dev test`: failures first, then the blast radius; tests that can fail; TDD with devkit |
 | [CI/CD pipelines](docs/ci-cd.md) | `dev ci audit`, `--fix`, `dev ci init`, `dev ci watch`, and the agent's wait, `dev ci watch --wait`, on GitHub, GitLab, Bitbucket, and Azure |
 | [Delivery](docs/delivery.md) | Local-first GitOps: the delivery policy, one integration, one push, one CI run, following CI, releases |
-| [Lessons](docs/lessons.md) | Learning from mistakes: lessons, known pitfalls, prevention by automation, `dev sleep` |
+| [Lessons](docs/lessons.md) | Learning from mistakes: lessons, recall before the work, heeded and missed, held lessons, lesson rules, `dev sleep` |
+| [The bug registry](docs/bug-registry.md) | When devkit itself fails: known detours, what is sent and never sent, trust, consent, `dev bug`, hotfix rankings |
 | [Scheduled jobs and the audit trail](docs/jobs-and-audit.md) | The background jobs and their schedules, logs, and journal; the audit trail |
 | [The audit trail](docs/audit.md) | What each record holds, the hash chain and `dev audit verify`, exports, retention, and the GDPR rights of the people recorded |
 | [Guard rules](docs/guard.md) | Everything the guard blocks, and why, including typing into a terminal session and commands it cannot read |

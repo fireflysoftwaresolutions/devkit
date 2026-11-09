@@ -31,6 +31,22 @@ Include what helps the maintainers reproduce it:
 
 Redact secrets before you send logs or transcripts: devkit's logs can contain command lines and file paths.
 
+### Reports devkit files for you
+
+devkit can file a security report itself, through its [bug registry](docs/bug-registry.md). A report you file with
+`dev bug report --security`, and any failure devkit treats as security-sensitive (a crash in the guard or the crew's
+file-scope checks, a guard failure that let a call through, or free text about bypassing, allowing, injecting, tokens,
+or secrets), never goes to a public issue:
+
+1. devkit holds it on your Mac. `dev bug pending` prints exactly what it would send: devkit facts only, never paths,
+   names, code, or output from your projects.
+2. When you approve it with `dev bug send <id>`, devkit sends it to this repository's private vulnerability
+   reporting, under your GitHub account.
+3. If that fails, or private reporting is off, the report stays held and devkit tells you; it never falls back to a
+   public issue.
+
+Then add the steps and the impact to the advisory, as in the list of what to include.
+
 ## What happens next
 
 1. The maintainers confirm in the advisory that they received the report, and keep you updated there.
@@ -47,7 +63,9 @@ In scope:
 - the installer (`install.sh`, `dev setup`, `dev install`) and the settings, hooks, and instructions it writes;
 - the MCP server (`dev mcp`) and the Claude Desktop extension;
 - the dashboard, a generated HTML file: data it shows without escaping is in scope;
-- the CI/CD templates that `dev ci init` writes.
+- the CI/CD templates that `dev ci init` writes;
+- the bug registry: its workflow (`.github/workflows/bug-registry.yml`) and what devkit sends to it. A way to make
+  devkit send project data, or to plant a detour that reaches other people's agents, is a vulnerability.
 
 Out of scope:
 

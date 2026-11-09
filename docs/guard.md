@@ -223,6 +223,7 @@ apply the same rule. Change the lists with `branches.types` and `branches.forbid
 | `gh pr create --head <branch>` with a branch that breaks the naming rule | deny |
 | `gh pr …`, `gh issue …`, `gh release …`, `gh api …` containing AI attribution | deny |
 | `gh config set pager …` (or a key the guard cannot read) | deny: gh runs its pager as a command for every later read |
+| An agent's `gh issue create`, `gh issue comment`, `gh issue edit`, or `gh api` on the issues of devkit's own repository | deny: "Agents do not post to devkit's bug registry directly. Use `dev bug report` or `dev bug detour`: devkit checks what leaves this machine." (see [The bug registry](bug-registry.md)) |
 
 ### Files and folders from the shell
 
@@ -496,7 +497,10 @@ pre-approved with `dev crew mode auto --approve`.
 
 Lifting an embargo and publishing a branch make its commits public, and the backup policy decides whether devkit
 publishes a project's branches at all. An embargo holds an agent's pushes of a branch and its commits, so pushing an
-embargoed branch is the developer's decision too. These commands are the action `developer-only`, tier 2:
+embargoed branch is the developer's decision too, and so are posting to the [bug registry](bug-registry.md) under
+your GitHub account (your consent, and each held item), confirming a detour that every agent then gets, and releasing a
+held [lesson](lessons.md#held-lessons) that every agent then recalls. These commands are the action `developer-only`,
+tier 2:
 
 | Command | Grant line that opens it once |
 | --- | --- |
@@ -506,6 +510,10 @@ embargoed branch is the developer's decision too. These commands are the action 
 | `git push`, `dev push`, `dev pr create` or `gh pr create` from a folder known only when it runs (`cd "$X"`, `git -C "$(…)"`, `GIT_DIR=$G`, anything after `source` or `.`) or from a folder that is no project (a temporary clone, a folder that does not exist yet), while any project on this Mac has an embargo or devkit cannot read an embargo list | none: the target is `?`; the agent writes out the path of the project's checkout instead |
 | `dev backup --public` | `grant backup <project>` |
 | `dev backup policy on\|off\|ask` | `grant backup <project>` |
+| `dev bug send <id>` · `dev bug drop <id>` | `grant bug-send <id>` · `grant bug-drop <id>` |
+| `dev bug confirm <bug> <detour>` | `grant bug-confirm <bug>/<detour>` |
+| `dev bug share on\|reports\|off` | `grant bug-share <setting>` |
+| `dev lesson release <lesson>` | `grant lesson-release <lesson>` |
 
 A push from inside a repository's git folder (`<repo>/.git`, `<repo>/.git/worktrees/<name>`), or one that
 `env -C <dir>` or `sudo -D <dir>` runs in another folder, is judged as the project of that folder, so
