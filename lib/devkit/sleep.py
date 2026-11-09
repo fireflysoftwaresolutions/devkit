@@ -169,9 +169,9 @@ def run(dry_run: bool = False, quiet: bool = False, now: float = None) -> dict:
     folded = None
     if not dry_run:
         folded = step("outcome events", lambda: lessonevents.fold(now=now), None)  # before strength is judged
-        lessons.publish_usage()
+        step("usage", lessons.publish_usage, None)
     acts = step("prevention check", lambda: check_preventions(dry_run), [])
-    acts += lessons.consolidate(dry_run=dry_run, now=now)
+    acts += step("lessons", lambda: lessons.consolidate(dry_run=dry_run, now=now), [])
     pruned = 0
     if folded is not None:
         pruned = step("event log", lambda: int(lessonevents.prune(days=EVENTS_KEEP_DAYS, now=now) or 0), 0)

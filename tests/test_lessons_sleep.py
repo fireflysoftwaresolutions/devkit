@@ -86,6 +86,18 @@ class PruneTests(SleepCase):
         self.assertIn("disk full", out)
         self.assertEqual(result["counts"]["pruned"], 0)
 
+    def test_a_consolidation_that_fails_lets_the_rest_of_the_night_run(self):
+        trimmed = []
+        with mock.patch.object(lessons, "consolidate", side_effect=OSError("git mv failed")), \
+                mock.patch.object(lessons, "publish_usage", side_effect=OSError("usage locked")), \
+                mock.patch.object(bugs, "trim", lambda now=None: trimmed.append(1) or {}):
+            result, out = self.sleep()
+        self.assertIn("git mv failed", out)
+        self.assertIn("usage locked", out)
+        self.prune.assert_called_once()  # the event log is still pruned
+        self.assertEqual(trimmed, [1])  # and the registry's local files trimmed
+        self.assertTrue(sleep.LAST.exists())  # and the night recorded
+
 
 class PreventionCheckTests(SleepCase):
     def test_a_prevented_lesson_whose_test_is_gone_is_reopened_once(self):
