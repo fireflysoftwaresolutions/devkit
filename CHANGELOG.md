@@ -3,6 +3,106 @@
 All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH restarts at 0 each month); tags are
 `vYY.MM.PATCH`. Sections follow [Keep a Changelog](https://keepachangelog.com/).
 
+## [26.11.9] - 2026-11-09
+
+This release makes the first install work for someone who has never used a terminal, and gives Codex sessions the
+same checks as Claude Code. The installer asks before it changes anything, the setup wizard asks which coding agents
+you use and installs only those, a step that fails or that you stop no longer ends the setup, and
+`dev setup --resume` finishes what is left. Task numbers can no longer close the wrong item. On Codex, devkit now
+sees the commands inside its scripts, checks the end of every turn, and notices failed commands; Codex crew launches
+are not recorded yet, so crew slots do not apply there. [Getting started](docs/getting-started.md) walks through the
+new install.
+
+After `dev update`: restart your open Claude Code and Codex sessions. Name work items by id in agents and scripts;
+a number from `dev task` now counts only in the list you were shown.
+
+### Added
+
+- **Choose your coding agents.** `dev setup` asks on every first run whether you use Claude Code and Codex, Claude
+  Code only, or Codex only, with the account each one needs, and installs, sets up, and signs in only those. Codex
+  has its own install step and is no longer installed on every Mac. Turning an agent off removes devkit's rules,
+  hooks, skill links, MCP servers, and plugin from it, and keeps the agent and your own settings; the review says so
+  before you apply.
+- **Finish a setup later.** The setup saves your answers and each step's state, readable only by you.
+  `dev setup --resume`, plain `dev setup`, and the installer open **Pick up where you left off?**, check the steps
+  already done, and run the rest.
+- **Sign-in panels you can retry.** Each agent that is not signed in gets a panel with named ways to sign in and
+  **Skip for now**. When a sign-in fails, runs past its time limit (10 minutes, 15 with a code), or you press Ctrl-C,
+  the panel comes back with the reason, **Try again**, and the other way to sign in.
+- **A summary that says what is left.** The setup ends with `✓ devkit is ready.` and the first three things to do,
+  with the items left for later and the command that finishes each, or with `✗ devkit is not ready yet.` and the
+  step that needs attention. Its **What now?** menu signs you in or tries a failed step again right away.
+- **The installer's welcome.** In a terminal, the installer lists its five steps, says that nothing has changed yet,
+  and waits for Return; Ctrl-C there stops it with nothing changed. Each step shows `N of 5` and its name.
+- **`dev setup --preview`** draws every screen of the setup with sample data and changes nothing.
+  `COLUMNS=60 dev setup --preview` draws them 60 columns wide.
+- **A warning when Now holds more than five items.** `dev task add --now`, `dev task move <id> --to now`, and a new
+  **Tasks** row in `dev status` say how many items are in Now and how many are being worked on. Nothing is refused.
+- **Plans in sub-folders on the dashboard.** A project's or initiative's Plans tab lists the plans kept in
+  sub-folders of its plans folder, such as `product/`, each folder in a titled panel after the page's own plans.
+
+### Changed
+
+- **Task numbers mean the list you were shown.** A number in `dev task <verb> <n>` points into the last `dev task`
+  list shown to you (your session, your crew lane, a Codex thread, or your terminal) for 30 minutes. Once an item was
+  closed, added, or moved, devkit refuses the number and names the id it had and the item at its place now. Ids
+  always work, and agents use them. Every write prints its item, as `✓ done T-… “<title>”`. See
+  [Work states › Numbers and ids](docs/work-states.md#numbers-and-ids).
+- **The install steps ask nothing.** Whether to start Docker is now a question in the Docker section, so you can
+  leave the Mac during the 10 to 20 minutes of installing.
+- **One failed step no longer ends the setup.** Saving your choices, setting up devkit, and installing each chosen
+  agent are required. Any other step that fails, runs past its time limit, or is stopped is skipped with the
+  command that finishes it, and the rest runs; a step that needs it shows `waits for <step>`. Ctrl-C during a step
+  offers **Skip it and go on**, **Try it again**, or **Stop the setup here**.
+- **Each failed step says why,** in three lines: `Reason:` (the command's error line, or how it ended; for a devkit
+  bug, the error and its crash file), `This means:`, and `Fix:`. A banner is never shown as the reason.
+- **Exit codes.** `dev setup` exits with `0` when devkit is ready, `1` when a required step is not done or you quit
+  before applying, `2` without GitHub, and `130` when paused. The installer exits with the wizard's code and prints
+  nothing after the wizard's summary.
+- **The installer keeps tool output in a log.** git's and Homebrew's output goes to
+  `~/.local/state/devkit/logs/install.log`, and the screen shows a line from it only when a step fails. When the
+  GitHub sign-in fails, is stopped, or runs past 10 minutes, the installer says why and offers to try again or quit.
+- **Read-only crew members can read work state.** Review and read-only lanes may run `dev overview`, `dev standup`,
+  `dev team`, `dev initiative ls|show`, `dev report` without `-o`, and `dev plan ls`. A member Responsible for
+  requirements, architecture, research, UX, or docs records its plan with `dev plan new` and `dev plan revise`, in
+  its run's project only.
+
+### Fixed
+
+- **Closing tasks by number one after another closed the wrong ones.** After `dev task done 9`, the next number
+  pointed at the item that had moved up into that place. A number now means the item you were shown there, or
+  nothing.
+- **Claude Code's sign-in crashed** with `EINVAL: invalid argument, kqueue` when the installer ran through
+  `curl … | bash`. Sign-ins now get the terminal's own device instead of `/dev/tty`, and every other command reads
+  `/dev/null`, never the rest of the piped script.
+- **The installer's noise on steps that worked.** git no longer warns that the release tag "is not a commit," and
+  Homebrew no longer stops to ask before it installs. A "run it again" line names the local `install.sh`, never a URL
+  that a private repository refuses.
+- **A setup step that failed showed only a banner.** When `dev install` died partway, the wizard saw none of its
+  lines; its output is now written line by line, so the reason reaches the screen.
+- **Codex turns skipped every end-of-turn check.** On Codex CLI 0.167, devkit read no turn as development work, so
+  the status block check and every Stop send-back (skills, unfinished work, test audit, handoff note, CI wait) were
+  off. devkit now reads the turn's final message from the Stop payload.
+- **devkit saw no commands in a Codex turn.** Codex 0.167 runs every shell command and patch inside one `exec` tool.
+  devkit now reads the calls in that script's code and the commands Codex records as it runs them, so the
+  required-skill rules, the CI-wait check, and a foreground `dev watch --wait` work on Codex. A call that only
+  appears in a comment or a string does not count.
+- **A failed Codex command counted as a success.** devkit now reads its exit code from the Codex rollout, so the bug
+  ledger, lesson outcomes, and the patch-loop stop see Codex failures. A Codex older than 0.167, which records no
+  exit codes, counts its commands as successes, as before.
+- **A Codex hook recorded its calls under another session.** A Codex started from a Claude Code terminal or a crew
+  member's shell inherited that session's identity; each hook now takes its agent and session from its own call. A
+  Codex subagent is judged without the copy of its parent's history its rollout opens with.
+
+### Security
+
+- **Codex patches and shell writes could turn agent hooks off.** The guard refused `hooks = false` in
+  `.codex/config.toml` through Write and Edit only, so `apply_patch` or a plain `printf … > .codex/config.toml` went
+  through. Write, Edit, `apply_patch`, and shell writes now follow one rule for the four agent settings files: names
+  in any case, every TOML form, judged by the text after the write. A shell write whose text the guard cannot see,
+  such as a copy, `sed -i`, or a variable, is refused for these files. [Guard rules › Agent settings that switch
+  devkit off](docs/guard.md#agent-settings-that-switch-devkit-off) lists the forms and what is not covered yet.
+
 ## [26.11.8] - 2026-11-09
 
 This release teaches devkit to learn from its own failures and from yours. When devkit itself fails, it now says so
