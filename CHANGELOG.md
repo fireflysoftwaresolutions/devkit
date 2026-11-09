@@ -8,10 +8,11 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
 This release makes the first install work for someone who has never used a terminal, and gives Codex sessions the
 same checks as Claude Code. The installer asks before it changes anything, the setup wizard asks which coding agents
 you use and installs only those, a step that fails or that you stop no longer ends the setup, and
-`dev setup --resume` finishes what is left. Task numbers can no longer close the wrong item. On Codex, devkit now
-sees the commands inside its scripts, checks the end of every turn, and notices failed commands; Codex crew launches
-are not recorded yet, so crew slots do not apply there. [Getting started](docs/getting-started.md) walks through the
-new install.
+`dev setup --resume` finishes what is left. Turning an agent off also takes out the no-prompt modes devkit set in it.
+Task numbers can no longer close the wrong item. On Codex, devkit now sees the commands inside its scripts, checks the
+end of every turn, and notices failed commands; Codex crew launches are not recorded yet, so crew slots and the
+crew's report checks do not apply there. The guard reads every way an agent can write an agent settings file, and
+leaves `dev setup` to you. [Getting started](docs/getting-started.md) walks through the new install.
 
 After `dev update`: restart your open Claude Code and Codex sessions. Name work items by id in agents and scripts;
 a number from `dev task` now counts only in the list you were shown.
@@ -21,12 +22,13 @@ a number from `dev task` now counts only in the list you were shown.
 - **Choose your coding agents.** `dev setup` asks on every first run whether you use Claude Code and Codex, Claude
   Code only, or Codex only, with the account each one needs, and installs, sets up, and signs in only those. Codex
   has its own install step and is no longer installed on every Mac. Turning an agent off removes devkit's rules,
-  hooks, skill links, MCP servers, and plugin from it, and keeps the agent and your own settings; the review says so
-  before you apply. Only your own run in a terminal removes them: an agent's run leaves devkit, and with it the guard,
-  in place.
+  hooks, status line, skill links, MCP servers, plugin, and, for Codex, profiles and agent roles, with a private
+  backup of every file it deletes or rewrites; it keeps the agent and your own settings, and the review says so
+  before you apply. Only your own run in a terminal removes them: a run that is not from your terminal leaves devkit,
+  and with it the guard, in place, and says so in the setup and in `dev doctor`.
 - **Finish a setup later.** The setup saves your answers and each step's state, readable only by you.
   `dev setup --resume`, plain `dev setup`, and the installer open **Pick up where you left off?**, check the steps
-  already done, and run the rest.
+  already done, and run the rest. Saved choices whose install never finished open the same screen.
 - **Sign-in panels you can retry.** Each agent that is not signed in gets a panel with named ways to sign in and
   **Skip for now**. When a sign-in fails, runs past its time limit (10 minutes, 15 with a code), or you press Ctrl-C,
   the panel comes back with the reason, **Try again**, and the other way to sign in.
@@ -41,6 +43,11 @@ a number from `dev task` now counts only in the list you were shown.
   **Tasks** row in `dev status` say how many items are in Now and how many are being worked on. Nothing is refused.
 - **Plans in sub-folders on the dashboard.** A project's or initiative's Plans tab lists the plans kept in
   sub-folders of its plans folder, such as `product/`, each folder in a titled panel after the page's own plans.
+- **`dev doctor` shows devkit left in an agent you turned off,** with the command to run in your terminal.
+- **End-to-end tests for this release.** The installer runs in a pseudo-terminal against a stand-in Mac; every hook
+  event and the guard run through `dev hook` with Claude Code's and Codex CLI 0.167's payloads; and task numbers, the
+  Now warning, and plan folders run through `bin/dev`. Each test fails without the change it covers, and none can
+  start a real `claude` or `codex`.
 
 ### Changed
 
@@ -66,7 +73,15 @@ a number from `dev task` now counts only in the list you were shown.
 - **Read-only crew members can read work state.** Review and read-only lanes may run `dev overview`, `dev standup`,
   `dev team`, `dev initiative ls|show`, `dev report` without `-o`, and `dev plan ls`. A member Responsible for
   requirements, architecture, research, UX, or docs records its plan with `dev plan new` and `dev plan revise`, in
-  its run's project only.
+  its run's project only, as a command of its own (no `cd`, `pushd`, `popd`, or subshell before it).
+- **`setup.log` keeps every run.** Each run of the setup adds its output at the end of
+  `~/.local/state/devkit/logs/setup.log`, under a dated line, so resuming a setup no longer erases the log an earlier
+  summary pointed to.
+- **"Already set up" means a finished `dev install`.** The setup counts a Mac as set up only when a whole
+  `dev install` recorded what it installed and pinned a release; `dev config repair`, which the hooks run, only
+  updates that record when it exists.
+- **The surfaces page says what was verified on Codex.** [Surfaces](docs/surfaces.md#what-was-verified-on-codex)
+  lists what works on Codex CLI 0.167.0, the known gaps, and what was not run yet.
 
 ### Fixed
 
@@ -89,11 +104,42 @@ a number from `dev task` now counts only in the list you were shown.
   required-skill rules, the CI-wait check, and a foreground `dev watch --wait` work on Codex. A call that only
   appears in a comment or a string does not count.
 - **A failed Codex command counted as a success.** devkit now reads its exit code from the Codex rollout, so the bug
-  ledger, lesson outcomes, and the patch-loop stop see Codex failures. A Codex older than 0.167, which records no
-  exit codes, counts its commands as successes, as before.
+  ledger, lesson outcomes, and the patch-loop stop see Codex failures. devkit waits for that record only when the
+  rollout names Codex 0.167 or later or already holds one; in any other rollout, the commands count as successes, as
+  before.
 - **A Codex hook recorded its calls under another session.** A Codex started from a Claude Code terminal or a crew
   member's shell inherited that session's identity; each hook now takes its agent and session from its own call. A
   Codex subagent is judged without the copy of its parent's history its rollout opens with.
+- **A Mac whose install failed was greeted as already set up.** Saved choices without a finished `dev install` were
+  taken as a finished setup, so the setup skipped the agent question, and opening Claude Code after a half-done
+  install had the same effect. Such choices now open **Pick up where you left off?**, and `dev setup --resume`
+  continues them, in the line prompts too.
+- **Answers changed on the review of a saved setup were not applied.** The setup kept the earlier steps done and
+  said devkit was ready with the old agents. A changed answer now runs **Save your choices**, **Set up devkit**,
+  **Lock Claude Code settings**, and **Check the setup** again, so the settings lock takes the new Claude Code mode.
+- **Ctrl-D at a line prompt crashed the setup** with exit code `70`. It now counts as an answer there. At a sign-in
+  or the lock it means **Skip for now**, at the summary **Finish**, and before anything is applied it quits with
+  `Nothing changed.` and exit code `1`.
+- **A second Ctrl-C right after a stopped sign-in ended the setup silently.** It now counts as stopping that
+  sign-in; any other Ctrl-C during the sign-ins pauses the setup with `Setup paused.` and `dev setup --resume`.
+- **The review and the banner wrapped early** at 80 and 60 columns; the banner cut its copyright line. Rows now wrap
+  only when they do not fit, and the copyright moves under the version.
+- **Turning an agent off removed more than devkit's own.** It removed every MCP server whose name devkit's catalog
+  uses, also one you set up yourself, and every Codex project trust under the dev root, also one you accepted in
+  Codex; it replaced a `config.toml` or `hooks.json` linked from a dotfiles folder with a plain file; it rewrote files
+  in place, so an interrupt could leave a cut-off config, and it dropped `hooks.json`'s other keys. It now removes
+  only the servers that run what devkit's catalog writes and only the trust devkit gave, keeps links, and replaces
+  each file whole with its own mode. The rules, profiles, and roles it deletes, and `~/.claude.json`, are backed up
+  first.
+- **A removal note was hidden without a terminal.** With no terminal, the setup hid that devkit stayed in a
+  turned-off agent and said devkit was ready; and every such run recorded a refused removal, even on a Mac where
+  devkit had never written to that agent. The setup now shows the note, and a removal is refused only when something
+  of devkit's is there. Removals are audited as `install.remove-agent`.
+- **Commit messages and pull request text that named an agent settings file were refused** as writes to it, as
+  were `git restore --staged`, `git rm --cached`, `prettier --check`, and a `>` that rewrites a config to repair it.
+  The guard reads a `dev` command's words, `gh`'s words, and another program's word with a space as text, and judges
+  a write by how it opens the file.
+- **Agent profiles taught a `dev lesson add` that the lesson check refuses.** They now include `--happened`.
 
 ### Security
 
@@ -103,6 +149,26 @@ a number from `dev task` now counts only in the list you were shown.
   in any case, every TOML form, judged by the text after the write. A shell write whose text the guard cannot see,
   such as a copy, `sed -i`, or a variable, is refused for these files. [Guard rules › Agent settings that switch
   devkit off](docs/guard.md#agent-settings-that-switch-devkit-off) lists the forms and what is not covered yet.
+- **More ways to turn hooks off are refused.** Edit and MultiEdit are judged by the whole file they leave, so a
+  change of `true` to `false` no longer passes. An append, `tee -a`, or `<>` is judged with what the file already
+  holds, so JSON split across two commands counts as one. A key spelled with a `\u` escape counts in JSON and in
+  TOML, also on Python 3.9, which has no TOML reader. A patch hunk that does not apply is read as TOML. An append or
+  patch update to a settings file too large to read in full (over 1 MiB) is refused.
+- **Writes hidden behind check flags and git options are refused.** Only known formatters (`prettier`, `black`,
+  `ruff`, and nine more) run with `--check` or `--list-different` count as writing nothing; any other program with
+  `--check` counts as a write. git options are read as git parses them (abbreviations, attached values, negations),
+  only git's readers count as writing no text, and `--output` or `git grep -O` counts as a write.
+- **Turning an agent off left it with no prompts and no guard.** devkit sets Claude Code to `bypassPermissions` and
+  Codex to no approvals and no sandbox on the premise that its guard runs; removing devkit took the guard out and
+  left those modes. Each now goes too, while it still holds devkit's value, after a backup.
+- **Backups are private.** devkit's backups, which now include `~/.claude.json` and Codex's `config.toml`, are kept
+  in a folder only you can open, each copy readable only by you, and a second copy in the same second no longer
+  replaces the first.
+- **Agents may not run `dev setup` or set `agents.*`.** Both decide which agents devkit sets up and rewrite their
+  settings, hooks, and instructions, so the guard refuses them from an agent. A key with leading or doubled dots
+  (`.agents.codex`), which `dev config set` reads as the same key, is refused too. `dev setup --preview` stays open.
+- **A read-only crew member could write another project's plan** by changing folder first
+  (`cd ../other && dev plan new x`). Plan writes now run only as a command of their own.
 
 ## [26.11.8] - 2026-11-09
 
