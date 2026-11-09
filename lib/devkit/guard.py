@@ -6011,8 +6011,12 @@ _RO_GIT_READ = frozenset({"status", "log", "show", "diff", "blame", "annotate", 
                           "check-ignore", "check-attr", "whatchanged", "version", "help"})
 _RO_GIT_GLOBAL = frozenset({"--no-pager", "-P", "--no-optional-locks", "--literal-pathspecs", "--no-replace-objects"})
 _RO_GH_READ = frozenset({"view", "list", "diff", "checks", "status"})
+# the work-management reads (overview, standup, report, team, initiatives, plans) change no record: they refresh only
+# devkit's own caches of pull requests and agent providers, as `dev status` does (`dev report -o` writes, refused)
 _RO_DEV = {"status": None, "grep": None, "find": None, "files": None, "diff": None, "stubs": None, "help": None,
-           "version": None, "sec": ("scan",), "test": ("", "run", "plan", "audit", "prove"), "plan": ("show",),
+           "version": None, "sec": ("scan",), "test": ("", "run", "plan", "audit", "prove"),
+           "plan": ("", "ls", "show"), "overview": None, "standup": None, "report": None, "team": None,
+           "initiative": ("", "ls", "show"),
            "lesson": ("", "ls", "list", "show", "add", "recur", "lint", "eval", "review", "scan"),
            "task": ("", "ls", "list", "show"),
            "ci": ("", "status", "ls", "list"), "guard": ("check",),
@@ -6284,7 +6288,52 @@ def _ro_gh(args) -> str | None:
     return f"{_code(f'gh {pos[0]}')} is not a read"
 
 
-def _ro_dev(args) -> str | None:
+# the kinds of work whose output is a plan or spec (dev plan new|revise): their members record it from a review lane
+_PLAN_KINDS = frozenset({"requirements", "architecture", "research", "ux", "docs"})
+
+
+def lane_plans_project(member, level, origin) -> str | None:
+    """The project whose plans a read-only lane may write with `dev plan new|revise`: the project of `origin` (the
+    run's repository, else the lane's folder), when the lane works at review level and its member is Responsible for a
+    kind of work that produces plans (_PLAN_KINDS, by the team's RACI); None otherwise, and when anything fails."""
+    if level != "review" or not member:
+        return None
+    try:
+        from . import raci
+        if not {a.get("id") for a in raci.roles_of(str(member))["R"]} & _PLAN_KINDS:
+            return None
+        return current_project(origin)
+    except Exception:
+        return None
+
+
+def _ro_plan_write(args, pos, here, project) -> str | None:
+    """Why a read-only lane may not run `dev plan new|revise` (`pos`: its words), or None when it writes only below
+    plans/<project>/ of the handoff repository: `new` from the project's own checkout, without -p or -i, and `revise`
+    of one Markdown file whose real path lies there (links and `..` resolved)."""
+    what = _code(f"dev plan {pos[1]}")
+    if not project:
+        return (f"{what} writes the handoff repository: only members whose kinds of work produce plans "
+                f"({', '.join(sorted(_PLAN_KINDS))}) run it from a review lane, in their run's project")
+    if _dev_sets(args, "-p", "--project", "-i", "--initiative"):
+        return f"{what} with -p or -i writes other plans; this lane writes only plans/{project}/"
+    verb = pos[1]
+    if verb == "new":
+        if current_project(here) != project:
+            return (f"`dev plan new` outside the checkout of {project} writes another folder's plans; this lane "
+                    f"writes only plans/{project}/")
+        return None
+    target = resolve(pos[2], here) if len(pos) == 3 else UNKNOWN
+    root = real(core.HANDOFF / "plans" / project)
+    if target == UNKNOWN or not str(target).casefold().endswith(".md") or not _under_ci(str(target), root) or \
+            str(target).casefold() == root.casefold():
+        return f"`dev plan revise` takes one plan below plans/{project}/ of the handoff repository"
+    return None
+
+
+def _ro_dev(args, here=None, plans=None) -> str | None:
+    """Why a read-only lane may not run `dev` with `args`, or None. `here`: the folder it runs in; `plans`: a call
+    that gives the project whose plans the lane may write (lane_plans_project), or None."""
     kind = _crew_kind(args)
     if kind:  # dev progress and dev crew: the lane rules of crew_shell_verdict decide
         return None
@@ -6292,11 +6341,15 @@ def _ro_dev(args) -> str | None:
     sub = pos[0] if pos else ""
     if sub == "impeccable":  # its words go to the engine as they are: the read verbs' own rules decide
         return _ro_impeccable(args[args.index(sub) + 1:])
+    if sub == "plan" and len(pos) > 1 and pos[1] in ("new", "revise"):
+        return _ro_plan_write(args, pos, here, plans() if plans else None)
     if sub in _RO_DEV and (_RO_DEV[sub] is None or (pos[1] if len(pos) > 1 else "") in _RO_DEV[sub]):
         if sub == "ci" and _dev_sets(args, "--run", "--resume"):
             return "`dev ci --run` runs the pipeline's build and package steps"
         if sub == "audit" and _dev_sets(args, "--publish", "-o", "--out"):
             return "`dev audit --publish` commits the audit trail to the handoff repository, and `-o` writes a file"
+        if sub == "report" and _dev_sets(args, "-o", "--out"):
+            return "`dev report -o` writes a file"
         return None
     return f"{_code('dev ' + (' '.join(pos[:2]) or '…'))} changes devkit's records or the repository"
 
@@ -6737,8 +6790,8 @@ def _own_scratch_script(argv, cwd, member) -> bool:
     return False
 
 
-def _ro_program(argv0, cwd, member=None) -> str | None:
-    """Why one command of a read-only lane (its words, prefixes included) is refused, or None."""
+def _ro_program(argv0, cwd, member=None, plans=None) -> str | None:
+    """Why one command of a read-only lane (its words, prefixes included) is refused, or None. `plans`: as _ro_dev."""
     argv = _unwrap(argv0)
     pre = argv0[:len(argv0) - len(argv)]
     runner = False
@@ -6771,7 +6824,7 @@ def _ro_program(argv0, cwd, member=None) -> str | None:
         return None if name.startswith("#") else "a program named by a variable"
     dev = _dev_args(argv)
     if dev is not None:
-        return _ro_dev(dev)
+        return _ro_dev(dev, cwd, plans)
     why = _check_refusal(argv)
     if why is not None:
         if not why and _INTERP.match(name) and not runner and _own_scratch_script(argv, cwd, member):
@@ -6981,17 +7034,19 @@ def _mask_substitutions(s: str):
     return "".join(out), inner
 
 
-def readonly_refusal(cmd: str, cwd, member=None, depth: int = 0) -> str | None:
+def readonly_refusal(cmd: str, cwd, member=None, depth: int = 0, plans=None) -> str | None:
     """Why a review or read-only lane may not run `cmd` (spec F7, consultation §4), or None when every segment is on
     the read-only allowlist: a command that parses, redirects only to /dev/null or a temp folder, and each program a
     reader, a read of git, gh or dev, one of the project's checks, or a script from crew member `member`'s own scratch
     folder. A command substitution (`$(…)`, backticks) or process substitution (`<(…)`, `>(…)`) passes when the
-    command inside it does, by the same rules; never as the program a command runs, and never arithmetic."""
+    command inside it does, by the same rules; never as the program a command runs, and never arithmetic. `plans`: a
+    call that gives the project whose plans the lane may write with `dev plan new|revise` (lane_plans_project); a
+    substitution never writes one."""
     if not cmd or not str(cmd).strip():
         return None
     readings = _continued_readings(cmd)
     if readings:  # a backslash-newline: the readings shells use (joined; a comment ended at its newline), each judged
-        return next((why for why in (readonly_refusal(r, cwd, member, depth) for r in readings) if why), None)
+        return next((why for why in (readonly_refusal(r, cwd, member, depth, plans) for r in readings) if why), None)
     masked = _mask_substitutions(strip_heredocs(cmd)) if depth < 3 else None
     if masked is None:
         return READONLY_REASON.format(what="`$((…))` and substitutions nested deeper than three levels run code the "
@@ -7018,7 +7073,7 @@ def readonly_refusal(cmd: str, cwd, member=None, depth: int = 0) -> str | None:
         argv = _unwrap(argv0)
         if argv and os.path.basename(argv[0]) in ("cd", "pushd") and len(argv) > 1 and argv[1] != "-":
             here = str(resolve(argv[1], here))
-        why = _ro_program(argv0, here, member)
+        why = _ro_program(argv0, here, member, plans)
         if why:
             return READONLY_REASON.format(what=why)
     return None
@@ -7126,7 +7181,13 @@ def crew_shell_verdict(cmd: str, cwd, scope=None, member=None, level=None, base=
                 if v:
                     return v
     if level in ("review", "read"):
-        why = readonly_refusal(cmd, cwd, member)
+        found = []  # the plans project, looked up once and only for a `dev plan new|revise`
+
+        def plans():
+            if not found:
+                found.append(lane_plans_project(member, level, base or cwd))
+            return found[0]
+        why = readonly_refusal(cmd, cwd, member, plans=plans)
         if why:
             return deny(why, key="readonly")
     why = _member_gate(cmd, cwd, member, lane, agent, session, grant, now)

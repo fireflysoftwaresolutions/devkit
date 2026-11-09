@@ -128,5 +128,108 @@ class ReadOnlyLanes(unittest.TestCase):
                             f"python3 -m http.server {self.pad}/seraph/p.py")
 
 
+def verdict(cmd, member, level="review", cwd=CWD, base=None):
+    """The refusal of a lane's command at tool level `level` (crew_shell_verdict), or None."""
+    v = guard.crew_shell_verdict(cmd, str(cwd), None, member, level=level, base=None if base is None else str(base))
+    return v[1] if v else None
+
+
+def _git(*args, cwd):
+    import subprocess
+    subprocess.run(["git", *args], cwd=str(cwd), check=True, capture_output=True)
+
+
+class PortfolioReads(unittest.TestCase):
+    """The work-management reads (overview, standup, report, team, initiatives, plans) write no record: they run in
+    every read-only lane, and their forms that write stay refused."""
+
+    READS = ("dev overview", "dev overview --json --days 3 --all", "dev standup", "dev standup --days 2",
+             "dev report", "dev report --days 14 -p acme/shop", "dev report -i payments", "dev team",
+             "dev team --hours 4", "dev initiative", "dev initiative ls", "dev initiative show payments",
+             "dev plan", "dev plan ls", "dev plan show")
+    WRITES = ("dev report -o status.md", "dev report --out=status.md", "dev report --ou status.md",
+              "dev report -ostatus.md", "dev report --days 3 -- -o x", "dev initiative new payments",
+              "dev initiative add payments acme/shop", "dev initiative rm payments acme/shop",
+              "dev plan approve x.md", "dev plan supersede x.md")
+
+    def test_the_reads_run_in_review_and_read_lanes(self):
+        for level in ("review", "read"):
+            for cmd in self.READS:
+                with self.subTest(level=level, cmd=cmd):
+                    self.assertIsNone(verdict(cmd, "seraph", level))
+
+    def test_the_forms_that_write_stay_refused(self):
+        for level in ("review", "read"):
+            for cmd in self.WRITES:
+                with self.subTest(level=level, cmd=cmd):
+                    self.assertIn("read-only lane", verdict(cmd, "oracle", level) or "")
+
+
+class PlanWritesFromReadOnlyLanes(unittest.TestCase):
+    """`dev plan new|revise` run in a review lane of a member whose kinds of work produce plans (requirements,
+    architecture, research, ux, docs), and write only below plans/<the lane's project>/ of the handoff repository."""
+
+    WRITERS = ("oracle", "architect", "roland", "sati", "ghost")
+
+    @classmethod
+    def setUpClass(cls):
+        cls.shop, cls.other = core.DEV / "acme" / "shop", core.DEV / "acme" / "other"
+        for repo, name in ((cls.shop, "shop"), (cls.other, "other")):
+            repo.mkdir(parents=True, exist_ok=True)
+            _git("init", "-q", cwd=repo)
+            _git("remote", "add", "origin", f"https://github.com/acme/{name}.git", cwd=repo)
+        cls.plans = core.HANDOFF / "plans" / "acme" / "shop"
+        cls.plans.mkdir(parents=True, exist_ok=True)
+        cls.spec = cls.plans / "2026-11-09-checkout.md"
+        cls.spec.write_text("# Checkout\n")
+        theirs = core.HANDOFF / "plans" / "acme" / "other"
+        theirs.mkdir(parents=True, exist_ok=True)
+        cls.theirs = theirs / "2026-11-09-billing.md"
+        cls.theirs.write_text("# Billing\n")
+        (core.HANDOFF / "crew").mkdir(parents=True, exist_ok=True)
+        cls.crew = core.HANDOFF / "crew" / "crew.json"
+        cls.crew.write_text("{}\n")
+        cls.link = cls.plans / "2026-11-09-link.md"
+        if not cls.link.is_symlink():
+            cls.link.symlink_to(cls.crew)
+
+    def writes(self):
+        return ('dev plan new "Checkout spec" --kind spec', "dev plan new Payment retries",
+                f"dev plan revise {self.spec} --why 'acceptance criteria'",
+                f"cd {self.plans} && dev plan revise 2026-11-09-checkout.md --why scope")
+
+    def test_plan_writers_create_and_revise_their_projects_plans(self):
+        for member in self.WRITERS:
+            for cmd in self.writes():
+                with self.subTest(member=member, cmd=cmd):
+                    self.assertIsNone(verdict(cmd, member, cwd=self.shop))
+
+    def test_a_plan_write_outside_the_projects_folder_is_refused(self):
+        h = core.HANDOFF
+        for cmd in ("dev plan new x -p acme/other", "dev plan new x --project=acme/shop", "dev plan new x -i payments",
+                    "dev plan -p acme/other new x", f"cd {self.other} && dev plan new x", f"cd {h} && dev plan new x",
+                    f"dev plan revise {self.theirs} --why y", f"dev plan revise {self.plans}/../other/x.md --why y",
+                    f"dev plan revise {self.crew} --why y", f"dev plan revise {h}/projects/acme/shop.md --why y",
+                    f"dev plan revise {self.plans}/notes.txt --why y", f"dev plan revise {self.link} --why y",
+                    f"dev plan revise {self.spec} {self.theirs} --why y", "dev plan revise $PLAN --why y",
+                    f"echo $(dev plan revise {self.spec} --why y)", f"dev plan approve {self.spec}"):
+            with self.subTest(cmd=cmd):
+                self.assertIn("read-only lane", verdict(cmd, "oracle", cwd=self.shop) or "")
+
+    def test_the_lanes_project_comes_from_the_runs_repository(self):
+        # a lane whose shell sits in another project still writes only its run's plans
+        self.assertIsNone(verdict(f"dev plan revise {self.spec} --why y", "architect", cwd=self.other, base=self.shop))
+        self.assertIsNotNone(verdict("dev plan new x", "architect", cwd=self.other, base=self.shop))
+        self.assertIsNotNone(verdict(f"dev plan revise {self.theirs} --why y", "architect", cwd=self.other,
+                                     base=self.shop))
+
+    def test_members_whose_work_produces_no_plans_and_read_lanes_are_refused(self):
+        for member, level in (("seraph", "review"), ("smith", "review"), ("tank", "review"), ("keymaker", "review"),
+                              ("sparks", "read"), ("oracle", "read"), (None, "review")):
+            for cmd in self.writes():
+                with self.subTest(member=member, level=level, cmd=cmd):
+                    self.assertIn("read-only lane", verdict(cmd, member, level, cwd=self.shop) or "")
+
+
 if __name__ == "__main__":
     unittest.main()
