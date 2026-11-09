@@ -36,6 +36,8 @@ class StateCase(unittest.TestCase):
 def _raise_from(source: str, path: Path, call: str):
     """Run `call` from code compiled as if it lived at `path`, -> the exception it raised."""
     ns = {}
+    # the test's own literal source, compiled at a path under lib/devkit so its traceback carries devkit frames
+    # nosemgrep: python.lang.security.audit.exec-detected.exec-detected
     exec(compile(source, str(path), "exec"), ns)
     try:
         ns[call]()
