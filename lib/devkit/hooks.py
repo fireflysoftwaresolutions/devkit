@@ -707,12 +707,7 @@ def record_session(spec: str):
     a = work.actor(agent, sid)
     key = f"<!-- s:{sid[:12]} -->"
     line = " · ".join(parts[:1] + [f"{a['user']}@{a['host']}"] + parts[1:]) + f" {key}"
-    f = work.SESSIONS / pid / f"{time.strftime('%Y-%m')}.md"
-    if f.exists() and key in f.read_text():  # replace this session's line (Stop runs repeatedly)
-        txt = "\n".join(ln if key not in ln else f"- {line}" for ln in f.read_text().splitlines()) + "\n"
-        f.write_text(txt)
-    else:
-        work.log_session(pid, line)
+    work.replace_session_line(pid, key, line)  # Stop runs repeatedly: one line per session, under the log's lock
 
 
 HANDOFF_CHECK = STATE / "handoff-check"  # per project: the hash of the note's human sections and when it changed
