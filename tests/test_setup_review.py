@@ -19,6 +19,7 @@ sys.path.insert(0, str(HERE))
 
 from devkit import core, tui, ui, wizard  # noqa: E402
 import test_setup_flow as flow  # noqa: E402  (the fake Mac, its keys and the saved-run writer)
+from test_wizard import line_mode  # noqa: E402  (the line prompts with detection and commands stubbed)
 
 DOWN, ENTER = flow.DOWN, flow.ENTER
 REVIEW = DOWN + ENTER                       # W-17: Review my answers first
@@ -159,6 +160,38 @@ class ScreenWidthTests(unittest.TestCase):
                     lines, text = review_text(off, cols)
                     self.assertIn(sentence, text)
                     self.assertEqual([x for x in lines if len(x) > cols - 1], [])
+
+
+def closed_after(first: str):
+    """Typed answers for the line prompts: the defaults, both agents, and Ctrl+D at the first prompt that contains
+    `first`; every prompt after that reads a closed input too, as a real terminal does."""
+    closed = []
+
+    def typed(prompt):
+        if closed or first in prompt:
+            closed.append(prompt)
+            raise EOFError
+        return "1" if "Which coding agents" in prompt else ""
+    typed.closed = closed
+    return typed
+
+
+class CtrlDTests(unittest.TestCase):
+    """Ctrl+D (a closed input) at a line prompt is an answer, never a crash."""
+
+    def test_ctrl_d_at_a_sign_in_prompt_skips_that_sign_in(self):
+        typed = closed_after("Sign in to Codex")
+        rc, cfg, out, calls = line_mode(yes=False, typed=typed, device=os.devnull)
+        self.assertRegex(out, r"– Codex +skipped · sign in later with codex login")
+        self.assertIn("devkit is ready.", out)
+        self.assertEqual(line_mode.run["steps"][-1]["id"], "doctor")
+        self.assertEqual(rc, 0)
+        self.assertIn("What now?", typed.closed[-1])  # the summary's menu read the closed input too, and finished
+
+    def test_ctrl_d_in_the_questions_quits_with_nothing_changed(self):
+        rc, cfg, out, calls = line_mode(yes=False, typed=closed_after("Development root"))
+        self.assertIn("Nothing changed. Run dev setup when you are ready.", out)
+        self.assertEqual((rc, cfg, calls), (1, None, []))
 
 
 if __name__ == "__main__":

@@ -128,11 +128,20 @@ class Prompter:
         self.n += 1
         print(f"\n  {ui.bold(ui.cyan(f'{self.n:>2}'))} {ui.bold(title)}")
 
+    @staticmethod
+    def read(prompt: str) -> str:
+        """One answer; Ctrl+D (a closed input) quits the questions, before anything has changed."""
+        try:
+            return input(prompt)
+        except EOFError:
+            print()
+            raise _Quit() from None
+
     def ask(self, q: str, default: str) -> str:
         if self.yes:
             print(f"     {q} {ui.dim('→')} {default}")
             return default
-        a = input(f"     {q} {ui.dim('[' + str(default) + ']')} ").strip()
+        a = self.read(f"     {q} {ui.dim('[' + str(default) + ']')} ").strip()
         return a or default
 
     def yesno(self, q: str, default: bool) -> bool:
@@ -140,7 +149,7 @@ class Prompter:
         if self.yes:
             print(f"     {q} {ui.dim('→')} {'yes' if default else 'no'}")
             return default
-        a = input(f"     {q} {ui.dim('[' + d + ']')} ").strip().lower()
+        a = self.read(f"     {q} {ui.dim('[' + d + ']')} ").strip().lower()
         return default if not a else a in ("y", "yes", "s", "si", "sí")
 
     def choose(self, q: str, options: dict, default: str) -> str:
@@ -152,7 +161,7 @@ class Prompter:
             print(f"     {q} {ui.dim('→')} {default}")
             return default
         while True:
-            a = input(f"     {q} {ui.dim('[' + str(keys.index(default) + 1) + ']')} ").strip()
+            a = self.read(f"     {q} {ui.dim('[' + str(keys.index(default) + 1) + ']')} ").strip()
             if not a:
                 return default
             if a.isdigit() and 1 <= int(a) <= len(keys):
@@ -167,7 +176,7 @@ class Prompter:
         if self.yes:
             print(f"     {q} {ui.dim('→')} {', '.join(defaults)}")
             return defaults
-        a = input(f"     {q} {ui.dim('[' + ','.join(str(keys.index(d) + 1) for d in defaults) + ']')} ").strip()
+        a = self.read(f"     {q} {ui.dim('[' + ','.join(str(keys.index(d) + 1) for d in defaults) + ']')} ").strip()
         if not a:
             return defaults
         picked = [keys[int(x) - 1] for x in a.replace(" ", "").split(",") if x.isdigit() and 1 <= int(x) <= len(keys)]
@@ -192,7 +201,11 @@ def run(assume_yes=False, skip_packages=False, resume=False) -> int:
     continues it, or says there is nothing to continue."""
     if not assume_yes and tui.available():
         return interactive(tui.Terminal(), skip_packages, resume)
-    return _run_lines(assume_yes, skip_packages, resume)
+    try:
+        return _run_lines(assume_yes, skip_packages, resume)
+    except _Quit:  # Ctrl+D in the line questions: nothing has changed yet
+        print(f"  {ui.WARN} Nothing changed. Run {again_command()} when you are ready.")
+        return 1
 
 
 def interactive(term, skip_packages=False, resume=False) -> int:
@@ -2287,7 +2300,11 @@ class _Wizard:
         shorts = [WAY_WORDS[o.value][1] if o.value in WAY_WORDS else o.label[:1].lower() + o.label[1:] for o in opts]
         ask = (line or f"     {prompt.title}: ") + ", ".join(f"{n} {s}" for n, s in enumerate(shorts, 1)) \
             + f" [{prompt.i + 1}] "
-        a = input(ask).strip()
+        try:
+            a = input(ask).strip()
+        except EOFError:  # Ctrl+D or a closed input: as Ctrl+C here, Skip for now or Finish
+            print()
+            raise tui.Cancelled() from None
         if a.isdigit() and 1 <= int(a) <= len(opts):
             return opts[int(a) - 1].value
         return prompt.value
