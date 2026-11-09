@@ -18,12 +18,17 @@ Safety rules:
 from __future__ import annotations
 
 import ast
+import functools
+import getpass
 import hashlib
 import json
 import os
+import platform
 import re
 import secrets
+import socket
 import string
+import sys
 import time
 from pathlib import Path
 
@@ -240,3 +245,275 @@ def occurrence_for(fp: str, code: str, session: str, within_s: int = MATCH_WINDO
             fresh = isinstance(ts, (int, float)) and now - within_s <= ts <= now + 60
             return rec if fresh and rec.get("session") == session else None
     return None
+
+
+# --------------------------------------------------------------------------- privacy: what a report may carry
+#
+# A report is built from fields devkit produces itself, each checked against a closed vocabulary or a strict
+# pattern; a value that does not fit is left empty (or `<local>` for a frame). Free text (a title, a description, a
+# detour's free step, an exception message) is templated or scrubbed against this machine's private words and is
+# always held for the developer's review before its first send.
+
+REPORT_KEYS = ("version", "channel", "macos", "python", "agent", "surface", "command", "exc_class", "frames",
+               "refusal_id", "word", "event", "exit", "duration", "fingerprint", "impact", "kind")
+AGENTS = ("claude", "codex")
+_VERSION_RE = re.compile(r"(\d{2}\.\d{1,2}\.\d+)(?:[-+][0-9A-Za-z.-]*)?")
+_IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}")
+_FRAME_RE = re.compile(r"[a-z_][a-z0-9_]*(?:\.[a-z_][a-z0-9_]*)*\.(?:<[a-z]+>|[A-Za-z_][A-Za-z0-9_]{0,63})")
+_REFUSAL_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}(?:[:.][A-Za-z0-9_-]{1,40})?")
+_FP_RE = re.compile(r"[0-9a-f]{12}")
+_DURATIONS = ((1, "<1s"), (10, "1-10s"), (60, "10-60s"), (600, "1-10m"))
+_WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9._+-]{0,30}")
+# the guard's sets of command words it reasons about by name; with the common tools below, the public vocabulary
+_GUARD_WORD_SETS = ("COMMAND_WORDS", "PREFIX_CMDS", "_FILTERS", "_CHECK_TOOLS", "_PATH_TAKERS", "_POSIX_SHELLS",
+                    "_READERS", "_CREATORS", "_CHANGERS", "_COPIERS", "_MOVERS", "_SHELLS", "_KNOWN_PROGRAMS",
+                    "_JS_RUNTIMES", "_AGENT_CLIS", "_EXPORTERS")
+_COMMON_WORDS = frozenset("""git gh dev sed awk gawk find xargs python python3 pip pip3 uv uvx node npm npx pnpm yarn
+    bun deno brew make docker colima kubectl terraform curl wget open osascript perl ruby php composer mvn mvnw gradle
+    gradlew java go cargo yq jq claude codex ssh scp rsync tar zip unzip gzip kill pkill launchctl defaults plutil
+    chmod rm mv cp ln mkdir touch cat head tail grep rg ls echo printf env sudo bash sh zsh pytest ruff mypy tsc
+    eslint""".split())
+
+_URL_TEXT = re.compile(r"\b[A-Za-z][A-Za-z0-9+.-]*://[^\s'\"<>`]+|\bwww\.[^\s'\"<>`]+")
+_EMAIL_TEXT = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+")
+_PATH_TEXT = re.compile(r"[^\s'\"()<>\[\]{},;`]*[/\\][^\s'\"()<>\[\]{},;`]*")
+_QUOTED_TEXT = re.compile(r"'[^'\n]*'|\"[^\"\n]*\"|`[^`\n]*`")
+_RUN_TEXT = re.compile(r"[A-Za-z0-9_+/=-]{16,}")
+_HEX_RUN = re.compile(r"[0-9A-Fa-f]{16,}")
+_NUM_TEXT = re.compile(r"\d+")
+_TEMPLATE_MAX = 200
+
+_PUBLIC_HOSTS = frozenset({"github.com", "gitlab.com", "bitbucket.org", "dev.azure.com", "ssh.dev.azure.com",
+                           "vs-ssh.visualstudio.com"})
+_GENERIC_WORDS = frozenset({"main", "master", "develop", "trunk", "gh-pages", "head", "origin", "local", "localhost",
+                            "localdomain", "lan", "home", "users", "development", "wip", "feat", "fix", "refactor",
+                            "perf", "docs", "test", "build", "chore", "deps", "style", "revert", "hotfix", "release",
+                            "integration"})
+_SECURITY_TEXT = re.compile(r"\b(bypass\w*|allow\w*|inject\w*|token\w*|secret\w*|exploit\w*)\b", re.I)
+
+
+@functools.lru_cache(maxsize=1)
+def _public_words() -> frozenset:
+    from . import guard
+    words = set(_COMMON_WORDS)
+    for name in _GUARD_WORD_SETS:
+        value = getattr(guard, name, ())
+        if isinstance(value, (set, frozenset, tuple, list)):
+            words |= {w for w in value if isinstance(w, str)}
+    return frozenset(w for w in words if _WORD_RE.fullmatch(w))
+
+
+def public_word(word: str) -> str:
+    """A command word as a report may carry it: the word itself when the guard knows it (`sed`, `git`, `python3`),
+    `<path>` for a path, else `<program>`."""
+    w = (word or "").strip()
+    if not w:
+        return ""
+    if "/" in w or "\\" in w or w.startswith((".", "~")):
+        return "<path>"
+    return w if w in _public_words() else "<program>"
+
+
+@functools.lru_cache(maxsize=1)
+def _dev_tree() -> dict:
+    """{dev subcommand: (its parser, {its subcommand: parser})} from devkit's own parser."""
+    import argparse
+    from . import cli
+
+    def subs(p) -> dict:
+        for act in p._actions:
+            if isinstance(act, argparse._SubParsersAction):
+                return dict(act.choices)
+        return {}
+    return {name: (p, subs(p)) for name, p in subs(cli.build_parser()).items() if not name.startswith("_")}
+
+
+def _public_command(command) -> str:
+    """The first one or two words of a `dev` command as devkit's parser names them, or ''."""
+    words = str(command or "").split()
+    tree = _dev_tree()
+    if not words or words[0] not in tree:
+        return ""
+    if len(words) > 1 and words[1] in tree[words[0]][1]:
+        return f"{words[0]} {words[1]}"
+    return words[0]
+
+
+@functools.lru_cache(maxsize=1)
+def _surfaces() -> frozenset:
+    from .canary import SURFACES
+    return frozenset(SURFACES.values()) | {"ChatGPT app", "unknown"}
+
+
+@functools.lru_cache(maxsize=1)
+def _hook_events() -> frozenset:
+    from .hooks import HANDLERS
+    return frozenset(HANDLERS)
+
+
+def _public_version(value) -> str:
+    for v in (value, core.VERSION):
+        m = _VERSION_RE.fullmatch(str(v or "").strip())
+        if m:
+            return m.group(1)
+    return ""
+
+
+def _duration(value) -> str:
+    if isinstance(value, str):
+        return value if value in {b for _, b in _DURATIONS} | {">10m"} else ""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+        return ""
+    return next((b for limit, b in _DURATIONS if value < limit), ">10m")
+
+
+def _frames(value) -> list:
+    frames = value if isinstance(value, (list, tuple)) else []
+    return [f if isinstance(f, str) and (f == LOCAL or _FRAME_RE.fullmatch(f)) else LOCAL for f in frames][:MAX_FRAMES]
+
+
+def _fits(value, pattern) -> str:
+    return value if isinstance(value, str) and pattern.fullmatch(value) else ""
+
+
+def build_report(occ: dict) -> dict:
+    """A report from an occurrence: only REPORT_KEYS, each value checked against its vocabulary or pattern. Nothing
+    else in `occ` (a working folder, arguments, a message) is ever copied."""
+    exit_code = occ.get("exit")
+    mac = platform.mac_ver()[0].split(".")[0]
+    return {
+        "version": _public_version(occ.get("version")),
+        "channel": install_channel(),
+        "macos": mac if mac.isdigit() else "",
+        "python": f"{sys.version_info[0]}.{sys.version_info[1]}",
+        "agent": occ.get("agent") if occ.get("agent") in AGENTS else "",
+        "surface": occ.get("surface") if occ.get("surface") in _surfaces() else "",
+        "command": _public_command(occ.get("command")),
+        "exc_class": _fits(occ.get("exc_class"), _IDENT_RE),
+        "frames": _frames(occ.get("frames")),
+        "refusal_id": _fits(occ.get("refusal_id"), _REFUSAL_RE),
+        "word": public_word(occ.get("word") if isinstance(occ.get("word"), str) else ""),
+        "event": occ.get("event") if occ.get("event") in _hook_events() else "",
+        "exit": exit_code if isinstance(exit_code, int) and not isinstance(exit_code, bool) and 0 <= exit_code < 256
+        else None,
+        "duration": _duration(occ.get("duration")),
+        "fingerprint": _fits(occ.get("fingerprint"), _FP_RE),
+        "impact": occ.get("impact") if occ.get("impact") in IMPACT else "blocked",
+        "kind": occ.get("kind") if occ.get("kind") in KINDS else "",
+    }
+
+
+def _run_placeholder(m) -> str:
+    run = m.group(0)
+    if run.isalpha() and run.islower() and not _HEX_RUN.fullmatch(run):
+        return run  # a long ordinary word, not a token
+    return "<hex>"
+
+
+@functools.lru_cache(maxsize=8)
+def _deny_re(deny: frozenset):
+    words = sorted((w for w in deny if w), key=len, reverse=True)
+    return re.compile("|".join(re.escape(w) for w in words), re.I) if words else None
+
+
+def template_message(msg: str, deny: frozenset = None) -> str:
+    """An exception message with its values replaced, in this order: URLs, e-mail addresses, paths (anything with
+    `/` or `\\`), quoted strings, hex or base64 runs of 16 or more characters, numbers. '' when a word of the deny
+    list (default: deny_words()) is still in it: the whole template is dropped, never patched."""
+    s = _URL_TEXT.sub("<url>", str(msg or ""))
+    s = _EMAIL_TEXT.sub("<email>", s)
+    s = _PATH_TEXT.sub("<path>", s)
+    s = _QUOTED_TEXT.sub("<str>", s)
+    s = _RUN_TEXT.sub(_run_placeholder, s)
+    s = _NUM_TEXT.sub("<num>", s)
+    s = " ".join(s.split())[:_TEMPLATE_MAX]
+    rx = _deny_re(deny_words() if deny is None else frozenset(deny))
+    return "" if rx is not None and rx.search(s) else s
+
+
+def scrub_text(text: str, deny: frozenset) -> tuple:
+    """Free text with URLs, e-mail addresses, paths, tokens and this machine's private words replaced -> (scrubbed,
+    held). `held` is True for any non-empty text: free text always waits for the developer's review before its
+    first send."""
+    if not text or not str(text).strip():
+        return "", False
+    s = _URL_TEXT.sub("<url>", str(text).strip())
+    s = _EMAIL_TEXT.sub("<email>", s)
+    s = _PATH_TEXT.sub("<path>", s)
+    s = _RUN_TEXT.sub(_run_placeholder, s)
+    rx = _deny_re(frozenset(deny or ()))
+    if rx is not None:
+        s = rx.sub("<private>", s)
+    return s, True
+
+
+def deny_words() -> frozenset:
+    """This machine's private words, in lower case: project ids, owners and repository names of the projects map,
+    their local branch names and remote URLs, the handoff repository's project ids and initiative slugs, the user and
+    host names and the home folder. Words shorter than 3 characters, devkit's own repository, public hosts, default
+    branches and branch type prefixes are left out."""
+    devkit_parts = set(core.DEVKIT_REPO.lower().split("/")) | {core.DEVKIT_REPO.lower()}
+    words = set()
+
+    def add(value, split: str = ""):
+        value = str(value or "").strip().lower()
+        if not value:
+            return
+        parts = [value] + ([p for p in value.split(split) if p] if split else [])
+        for p in parts:
+            if len(p) >= 3 and p not in _GENERIC_WORDS and p not in _PUBLIC_HOSTS and p not in devkit_parts \
+                    and not re.fullmatch(r"[\d.]+", p):
+                words.add(p)
+
+    def add_remote(url):
+        add(url)
+        parsed = core.parse_remote(url or "")
+        if parsed:
+            host, owner_path, repo = parsed
+            add(host)
+            add(owner_path, "/")
+            add(repo)
+
+    reg = core.read_json(core.HANDOFF / "registry.json", {}) or {}
+    for p in reg.get("projects") or [] if isinstance(reg, dict) else []:
+        if not isinstance(p, dict):
+            continue
+        add(p.get("id"), "/")
+        add(p.get("owner"), "/")
+        add(p.get("name"))
+        add_remote(p.get("remote"))
+        for b in (p.get("branches") or []) + (p.get("worktrees") or []):
+            if isinstance(b, dict):
+                add(b.get("name") or b.get("branch"), "/")
+    projects = core.HANDOFF / "projects"
+    for f in projects.rglob("*.md") if projects.is_dir() else []:
+        add(f.relative_to(projects).with_suffix("").as_posix(), "/")
+    initiatives = core.HANDOFF / "initiatives"
+    for d in initiatives.iterdir() if initiatives.is_dir() else []:
+        if d.is_dir():
+            add(d.name)
+    try:
+        add(getpass.getuser())
+    except Exception:  # getuser raises when no user name can be found: then there is none to deny
+        pass
+    add(socket.gethostname(), ".")
+    home = Path.home()
+    add(str(home))
+    add(home.name)
+    return frozenset(words)
+
+
+def is_security(occ: dict, text: str = "") -> bool:
+    """True when a failure must go to private vulnerability reporting, never to Issues: frames in the guard or the
+    crew scope code or the guard hook, a guard bug that allowed something, a guard fail-open, a report filed as a
+    security report, or text about bypassing, allowing, injecting, tokens, secrets or exploits."""
+    for f in occ.get("frames") or ():
+        if isinstance(f, str) and (f.split(".", 1)[0] in ("guard", "scope") or f.startswith(("hooks._guard",
+                                                                                           "hooks.guard"))):
+            return True
+    if occ.get("kind") == "guard" and occ.get("outcome") == "allow":
+        return True
+    if occ.get("event") in ("guard", "guard.failopen") or occ.get("failopen") or occ.get("security"):
+        return True
+    texts = [text] + [occ.get(k) for k in ("title", "text", "description", "template")]
+    return any(isinstance(t, str) and _SECURITY_TEXT.search(t) for t in texts)
