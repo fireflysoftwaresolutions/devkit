@@ -79,14 +79,31 @@ def load_conf(name: str):
 
 
 def backup(path: Path, keep: int = 10):
-    """Timestamped copy in ~/.local/state/devkit/backups; keeps the newest `keep` per file."""
-    if path.exists():
-        d = STATE / "backups"
-        d.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(path, d / f"{path.name}.{time.strftime('%Y%m%d-%H%M%S')}")
-        olds = sorted(d.glob(f"{path.name}.*"))
-        for o in olds[:-keep]:
-            o.unlink()
+    """Timestamped copy in ~/.local/state/devkit/backups; keeps the newest `keep` per file. A copy can hold MCP tokens
+    (config.toml) or account state (~/.claude.json), so the folder is the owner's alone (0700) and each copy is
+    created 0600, never through a link already there; a second copy in the same second is named `-1`, `-2`, so it
+    never replaces the first. -> the copy, or None when there is no file."""
+    if not path.exists():
+        return None
+    d = STATE / "backups"
+    d.mkdir(parents=True, exist_ok=True)
+    os.chmod(d, 0o700)
+    stamp = time.strftime('%Y%m%d-%H%M%S')
+    for n in range(1000):
+        dest = d / f"{path.name}.{stamp}{f'-{n}' if n else ''}"
+        try:
+            fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        except FileExistsError:
+            continue
+        with os.fdopen(fd, "wb") as out, open(path, "rb") as src:
+            shutil.copyfileobj(src, out)
+        break
+    else:
+        raise OSError(f"no free backup name for {path.name} in {d}")
+    olds = sorted(d.glob(f"{path.name}.*"))
+    for o in olds[:-keep]:
+        o.unlink()
+    return dest
 
 
 _QUIET = [False]

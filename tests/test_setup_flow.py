@@ -1091,6 +1091,26 @@ class AgentOffTests(unittest.TestCase):
             self.assertFalse((codex / "AGENTS.md").exists())
         self.assertEqual(saved, [text])
 
+    def test_backups_are_private_and_a_second_one_in_the_same_second_keeps_the_first(self):
+        """A backup can hold MCP tokens (config.toml) or account state (~/.claude.json): the folder is the owner's
+        alone (0700) and each copy 0600, whatever the file's own mode; two copies of one file in the same second are
+        both kept."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            f = tmp / "config.toml"
+            f.write_text("first\n")
+            os.chmod(f, 0o644)
+            with mock.patch.object(setup, "STATE", tmp / "state"), \
+                    mock.patch.object(setup.time, "strftime", lambda *a: "20261109-101500"):
+                setup.backup(f)
+                f.write_text("second\n")
+                setup.backup(f)
+            d = tmp / "state" / "backups"
+            copies = sorted(d.glob("config.toml.*"))
+            self.assertEqual([p.read_text() for p in copies], ["first\n", "second\n"])
+            self.assertEqual(stat.S_IMODE(d.stat().st_mode), 0o700)
+            self.assertEqual({stat.S_IMODE(p.stat().st_mode) for p in copies}, {0o600})
+
     def test_removing_twice_changes_nothing_more(self):
         with tempfile.TemporaryDirectory() as tmp:
             claude, codex, agents, share = self.homes(Path(tmp))
