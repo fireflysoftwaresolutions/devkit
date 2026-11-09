@@ -9,7 +9,9 @@ When the work needs more than one kind of expertise, the main session is the **t
 the delivery manager: he plans, assigns, integrates, and speaks for the crew to the developer. Every other member is
 a subagent with one job. On Claude Code (terminal and Claude Desktop's Code tab) you launch them with the Agent tool
 as `devkit:<id>`; on Codex (CLI and the ChatGPT app) with `spawn_agent` and agent type `<id>`. `dev crew` lists them;
-`dev crew show <name>` has the details.
+`dev crew show <name>` has the details. devkit does not record a Codex launch yet (Codex fires no hook for
+`spawn_agent`), so on Codex nothing enforces the crew slots, the depth limit, or the binding of a launch to its step:
+keep to the slots and the order `dev crew next` shows.
 
 **Name them by role.** In every message, report, and brief, write a member as `<Role> (<Name>)`, such as Backend
 engineer (Tank), or by the role alone, in the developer's language; never by the Matrix name alone. The end-of-turn
@@ -182,6 +184,10 @@ files.
   commands run anywhere: `dev crew graph`, `show`, `rules`, `history`, `next`, and `dev crew raci` without `--set`.
   After a compaction, Claude Code gives your conversation a new session id; devkit moves your open run and its
   working lanes to it (`session.adopt`), so your plan commands keep working.
+- **Read-only members** may run the reads of work state (`dev overview`, `dev standup`, `dev team`,
+  `dev initiative ls|show`, `dev report` without `-o`, `dev plan ls`). A member Responsible for requirements,
+  architecture, research, UX, or docs also records its plan from its review lane with `dev plan new` (in the run's
+  project checkout, without `-p` or `-i`) and `dev plan revise <file>` (a plan below that project's plans folder).
 - **Helpers:** a member may launch a helper for a narrow lookup or a slice of its own files. The helper gets the
   member's tools and files, takes a slot, and no launch goes deeper than `progress.max_depth` (2). A member that needs
   another specialist asks you.

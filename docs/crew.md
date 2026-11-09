@@ -76,6 +76,10 @@ without the role is sent back once (`canary.roles`). Commands and code keep the 
 `dev crew sync` regenerates the Claude agents from `config/crew.json`, and `dev install --only codex` writes the Codex
 roles. Edit a member there, never in the generated files.
 
+devkit does not record a Codex launch yet, because Codex fires no PreToolUse hook for `spawn_agent`. On Codex, the
+crew slots, the depth limit, and the binding of a launch to its step therefore do not apply. `dev crew next` still
+shows the slots and the order to launch in; keep to them yourself (see [Agents › Hooks](agents.md#hooks)).
+
 ## Leading the crew
 
 The main session leads when work needs more than one kind of expertise. The `crew` skill is the full manual; the

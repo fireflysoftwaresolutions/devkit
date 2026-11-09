@@ -154,13 +154,33 @@ The same isolation applies to `dev` commands run from a project session:
 ### Agent settings that switch devkit off
 
 A write to `.claude/settings.json`, `.claude/settings.local.json`, `.codex/config.toml`, or `.codex/hooks.json` (in any
-project or in your home folder) is denied when it contains:
+project, in your home folder, or in `CODEX_HOME` when it is set elsewhere) is denied when it contains:
 
 | Content | Why |
 | --- | --- |
 | `"disableAllHooks": true` | It disables every hook, including devkit's context, guard, and canary |
 | `"devkit@firefly-devkit": false` | It disables the devkit plugin |
 | `hooks = false` or `codex_hooks = false` | It turns Codex hooks off |
+
+The guard judges every way of writing these files:
+
+- **Names in any case.** macOS reads `.Codex/Config.toml` as `.codex/config.toml`, so the guard compares folder and
+  file names without case.
+- **Every TOML form.** A bare, quoted, or dotted key, or an inline table, counts. A `config.toml` that parses as TOML is
+  denied when any of its tables sets `hooks` or `codex_hooks` to `false`.
+- **Write and Edit** are judged by the file's text after the change.
+- **A Codex patch** (`apply_patch`) is judged by each file it adds, updates, or moves: by the file's text after the
+  patch and by the lines it adds, at the path the patch names and at its real path. A move onto a settings file brings
+  the text of the file it moves.
+- **A shell command** that writes one of these files is judged by the text it writes, where the command holds that
+  text whole: `echo` and `printf` (with their escapes decoded as bash, zsh, and `printf` decode them), a heredoc or
+  here-string fed to `cat`, `tee`, or `dd`, and a pipe from one of them. The writes of one command to the same file
+  are judged together, and an append together with the file's text.
+- **A shell write whose text the guard cannot see** is denied: `cp`, `mv`, `ln`, `install`, `sed -i`, `perl -pi`,
+  `awk -i inplace`, `truncate`, an editor, a bare or grouped redirect, a variable, a substitution, or an unquoted
+  glob in the text, and a program that writes files and names a settings file. Write the file with the Write or Edit
+  tool (on Codex, `apply_patch`), or write the text out in full in an `echo`, a `printf`, or a quoted heredoc.
+  Reading these files, `touch`, and writes to other files stay allowed.
 
 If devkit really should be off somewhere, change devkit's own configuration (see [Configuration](configuration.md)).
 `dev doctor` reports such settings that already exist under `~/Development`.
@@ -648,6 +668,16 @@ checks. These run as well:
 - A shell variable set on its own, when its name is lowercase or one capital letter (`S=/path; ls $S`). `PATH`,
   `PAGER`, `IFS`, and zsh's tied names (`path`, `fpath`, …) stay refused.
 - `dev guard check`, and `dev lesson show` and `dev lesson ls`.
+- The reads of work state: `dev overview`, `dev standup`, `dev team`, `dev initiative`, `dev initiative ls`,
+  `dev initiative show`, `dev report`, `dev plan`, and `dev plan ls`. They change no record and
+  refresh only devkit's own caches of pull requests and agent providers, as `dev status` does. `dev report -o` (or
+  `--out`), which writes a file, `dev initiative new`, `add`, and `rm`, and `dev plan approve` and `supersede` stay
+  refused.
+- `dev plan new` and `dev plan revise`, for a member whose kinds of work produce plans: one the team's RACI makes
+  Responsible for requirements, architecture, research, UX, or docs, in a review lane. They write only below
+  `plans/<the run's project>/` of the handoff repository. `dev plan new` runs from that project's checkout, without
+  `-p` or `-i`; `dev plan revise` takes one Markdown file whose real path lies in that folder, with links and `..`
+  resolved. When devkit cannot look up the member's kinds of work or the project, it refuses.
 - A command continued with a backslash-newline, read as the shell joins it.
 
 A script from the member's own scratch folder (`python3 scratchpad/<member id>/probe.py`) already ran before this

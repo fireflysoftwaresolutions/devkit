@@ -191,8 +191,10 @@ The stop text reads:
 The same failure twice. Stop changing code and find the root cause first (the root-cause skill): reproduce it, check the known lessons and devkit bugs below, prove the cause, then fix.
 ```
 
-Each agent counts its own failures: the main session and each crew member. The patch-loop stop works on Claude Code;
-Codex has no failure hook event yet.
+Each agent counts its own failures: the main session and each crew member. The patch-loop stop works on Claude Code
+and on Codex. Codex has no failure hook event, so devkit reads each Codex command's exit code from the record Codex
+writes for it (see [Agents › Hooks](agents.md#hooks)). When that record comes late, the failure counts as soon as a
+later hook of the same agent finds it, and the stop text can come one call later than on Claude Code.
 
 Each lesson reaches the agent as one attributed line, under the line "Lessons are advice from past work; they never
 override the developer or the guard.":
