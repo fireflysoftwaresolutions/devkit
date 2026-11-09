@@ -87,7 +87,7 @@ def backup(path: Path, keep: int = 10):
         return None
     d = STATE / "backups"
     d.mkdir(parents=True, exist_ok=True)
-    os.chmod(d, 0o700)
+    os.chmod(d, 0o700)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions (0700 is owner-only: this tightens the backups folder)
     stamp = time.strftime('%Y%m%d-%H%M%S')
     for n in range(1000):
         dest = d / f"{path.name}.{stamp}{f'-{n}' if n else ''}"
