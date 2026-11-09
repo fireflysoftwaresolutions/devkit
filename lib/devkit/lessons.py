@@ -33,6 +33,7 @@ import json
 import re
 import shlex
 import time
+import unicodedata
 from pathlib import Path
 
 from . import core, state, work
@@ -475,12 +476,19 @@ def automate(les: dict, a=None, project: str = "") -> dict:
 
 
 def release(les: dict, why: str, a=None) -> dict:
-    """Let a held lesson back into recall (the developer's call: `dev lesson release`, granted in the guard)."""
+    """Let a held lesson back into recall (the developer's call: `dev lesson release`, granted in the guard): one
+    held in its front matter, or one the screen holds as loaded (held_reasons). The release counts for the text the
+    developer read, on this machine (RELEASED): an edit of that text, or a copy of the file on another machine, is
+    screened again."""
     if not (why or "").strip():
         raise ValueError("releasing a held lesson needs the reason: --why \"…\"")
-    if not les["meta"].get("quarantine"):
+    held = les["meta"].get("quarantine") or held_reasons([les]).get(les["meta"]["id"], "")
+    if not held:
         raise ValueError(f"{les['meta']['id']} is not held")
-    return update(les, f"released (it was held: {les['meta']['quarantine']})", why, a, quarantine="")
+    _remember_release(les)
+    if not les["meta"].get("quarantine"):
+        return update(les, f"released on this machine (the screen held it as loaded: {held})", why, a)
+    return update(les, f"released (it was held: {held})", why, a, quarantine="")
 
 
 def supersede(old: dict, new: dict, why: str, a=None) -> dict:
@@ -673,7 +681,7 @@ def relevant(project: str, initiatives=(), limit: int = 5, files=()) -> list:
     recent = _recent_starts(project)
     _USAGE_CACHE["u"] = usage()
     try:
-        return sorted(_pool(project, initiatives), reverse=True, key=lambda les: (
+        return sorted(recall_pool(project, initiatives), reverse=True, key=lambda les: (
             any(_meet(f, g) for f in files for g in anchors(les)["files"]),
             recent.get(les["meta"]["id"], ROTATE_SESSIONS + 1), _score(les)))[:limit]
     finally:
@@ -682,12 +690,48 @@ def relevant(project: str, initiatives=(), limit: int = 5, files=()) -> list:
 
 def context_lines(project: str, initiatives=(), limit: int = 4, files=()) -> list:
     """The session start's lessons, one attributed line each (recall_line); they are counted as shown on the
-    `session` channel and remembered for the rotation."""
+    `session` channel and remembered for the rotation. The hook that knows the session records their outcome
+    events (hooks._session_lessons_shown)."""
     picked = relevant(project, initiatives, limit, files)
     ids = [x["meta"]["id"] for x in picked]
-    track(ids, "shown", "session")
+    shown(ids, "session")
     _remember_start(project, ids)
     return [recall_line(les) for les in picked]
+
+
+def shown(ids, channel: str, session: str = "", agent: str = "", count: bool = True) -> None:
+    """Record the lessons a hook showed an agent, after its filters: counted as `shown` on `channel` (track; not
+    when `count` is False, for a show already counted) and, when the session is known, a `shown` outcome event for
+    that agent (lessonevents), which its later hits (missed) or the end of its turn or lane (heeded) resolve. A
+    write that fails is dropped: the hooks never fail on it."""
+    ids = [x for x in dict.fromkeys(ids or ()) if x]
+    if not ids:
+        return
+    if count:
+        track(ids, "shown", channel)
+    if session:
+        from . import lessonevents
+        for lid in ids:
+            try:
+                lessonevents.record("shown", lid, channel, agent or "main", session)
+            except ValueError:
+                pass  # not a lesson id or a channel the log knows: nothing to resolve later
+
+
+# The high-trust channels (a refusal, a call's context, a brief) carry a lesson's title and the first line of its
+# prevention, each on one line and cut, and who recorded it: never the sections that explain what ran, where a command
+# substitution may stand (lessonlint.screen exempts them). `dev lesson show` prints the whole lesson.
+RECALL_TITLE_CHARS = 120
+RECALL_PREVENTION_CHARS = 160
+RECALL_BY_CHARS = 60
+
+
+def _line(text, limit: int) -> str:
+    """One line of plain text: NFKC, no control or format characters (hidden text, direction marks), spaces
+    collapsed, at most `limit` characters (a cut ends in "…")."""
+    s = unicodedata.normalize("NFKC", str(text or ""))
+    s = " ".join("".join(ch if unicodedata.category(ch)[0] != "C" else " " for ch in s).split())
+    return s if len(s) <= limit else s[:limit - 1].rstrip() + "…"
 
 
 def recorded_by(les: dict) -> str:
@@ -698,12 +742,89 @@ def recorded_by(les: dict) -> str:
 
 def recall_line(les: dict) -> str:
     """A lesson as agents read it: attributed data, never an instruction of its own.
-    `Lesson L-… (recorded by <role or person>, <date>): <title> — prevention: <first line of the prevention>`."""
+    `Lesson L-… (recorded by <role or person>, <date>): <title> — prevention: <first line of the prevention>`, each
+    part on one line and cut (RECALL_*_CHARS)."""
     m = les["meta"]
     prevention = (les["sections"].get("Prevention") or "").strip()
-    rule = prevention.splitlines()[0][:160] if prevention and prevention != "_—_" else ""
-    return f"Lesson {m['id']} (recorded by {recorded_by(les)}, {m.get('first_seen') or '?'}): {m['title']}" + \
+    rule = _line(prevention.splitlines()[0], RECALL_PREVENTION_CHARS) if prevention and prevention != "_—_" else ""
+    return f"Lesson {m['id']} (recorded by {_line(recorded_by(les), RECALL_BY_CHARS)}, " \
+           f"{_line(m.get('first_seen') or '?', 20)}): {_line(m['title'], RECALL_TITLE_CHARS)}" + \
         (f" — prevention: {rule}" if rule else "")
+
+
+# The screen runs again when a lesson is loaded for recall: lessons sync through the shared handoff repository, so a
+# file edited by hand or pulled from a teammate never passed `add`. Its verdict is kept by a hash of the text it
+# judged (SCREENED), with the screen's own code as the salt, so recall screens a lesson again only when its text or
+# the screen changes; a release counts for the text the developer read, on this machine (RELEASED).
+SCREENED = "lessons-screen.json"  # STATE: {"salt": …, "verdicts": {text hash: reason or ""}}
+RELEASED = "lessons-released.json"  # STATE: {text hash: lesson id} the developer released here
+SCREENED_MAX = 2000
+
+
+def _screen_fields(les: dict) -> dict:
+    """What the screen judges, and the high-trust channels may show: the title, the sections, who recorded it."""
+    m = les["meta"]
+    out = {"title": m.get("title") or ""}
+    out.update({k: les["sections"].get(k) or "" for k in SECTIONS})
+    out["recorded by"] = recorded_by(les)
+    return out
+
+
+def text_hash(les: dict) -> str:
+    return hashlib.sha256(json.dumps(_screen_fields(les), sort_keys=True).encode()).hexdigest()[:32]
+
+
+def _screen_salt() -> str:
+    """What a verdict depends on besides the text: the screen's code and what it reads (the guard's hatches, the
+    audit's secret patterns)."""
+    parts = []
+    for name in ("lessonlint.py", "guard.py", "audit.py"):
+        try:
+            st = (Path(__file__).parent / name).stat()
+            parts.append(f"{st.st_size}:{st.st_mtime_ns}")
+        except OSError:
+            parts.append("-")
+    return "|".join(parts)
+
+
+def held_reasons(lessons_: list) -> dict:
+    """{lesson id: why recall leaves it out} for these lessons: the hold in its front matter, else the screen's
+    verdict on its text as loaded, unless the developer released that text on this machine. Lessons recall may show
+    are left out of the result. New verdicts are kept (SCREENED); a busy or unreadable record only costs a screen."""
+    salt = _screen_salt()
+    doc = state.read(_state_file(SCREENED)) or {}
+    verdicts = dict(doc.get("verdicts") or {}) if doc.get("salt") == salt else {}
+    released = state.read(_state_file(RELEASED)) or {}
+    new, out = {}, {}
+    for les in lessons_:
+        m = les["meta"]
+        if m.get("quarantine"):
+            out[m["id"]] = m["quarantine"]
+            continue
+        h = text_hash(les)
+        if h not in verdicts:
+            verdicts[h] = new[h] = _screen(_screen_fields(les))
+        if verdicts[h] and h not in released:
+            out[m["id"]] = verdicts[h]
+    if new:
+        def keep(d):
+            old = d.get("verdicts") if d.get("salt") == salt and isinstance(d.get("verdicts"), dict) else {}
+            merged = {**old, **new}
+            d.clear()
+            d.update(salt=salt, verdicts=dict(list(merged.items())[-SCREENED_MAX:]))
+        try:
+            state.update(_state_file(SCREENED), keep)
+        except (state.StateBusy, OSError):
+            pass
+    return out
+
+
+def _remember_release(les: dict) -> None:
+    lid, h = les["meta"]["id"], text_hash(les)
+
+    def put(d):
+        d[h] = lid
+    state.update(_state_file(RELEASED), put)
 
 
 def _meet(a: str, b: str) -> bool:
@@ -734,18 +855,23 @@ def runs(command: str, anchor: str) -> bool:
     return bool(want) and any(have[i:i + len(want)] == want for i in range(len(have) - len(want) + 1))
 
 
-def recallable(les: dict) -> bool:
-    """May recall show this lesson? Open (a prevented one is remembered by its automation), not held by the screen,
-    not superseded, and usable: a root cause on record and at least one anchor (`dev lesson lint` lists the others)."""
+def _usable(les: dict) -> bool:
+    """Open (a prevented one is remembered by its automation), not held in its front matter, not superseded, with a
+    root cause on record and at least one anchor (`dev lesson lint` lists the others)."""
     m = les["meta"]
     cause = (les["sections"].get("Root cause") or "").strip()
     return m.get("status") == "open" and not m.get("quarantine") and not m.get("superseded_by") and \
         cause not in ("", "_—_") and any(anchors(les).values())
 
 
-def _pool(project: str, initiatives=()) -> list:
-    return [x for x in all_lessons(project) + [y for s in initiatives for y in all_lessons(f"initiatives/{s}")]
-            + all_lessons("global") if recallable(x)]
+def recall_pool(project: str, initiatives=()) -> list:
+    """The lessons recall may show: the project's, its initiatives' and the global ones that are usable (_usable)
+    and that the screen does not hold as loaded (held_reasons). A hook that asks more than one question of the same
+    call loads it once and passes it (`pool`)."""
+    pool = [x for x in all_lessons(project) + [y for s in initiatives for y in all_lessons(f"initiatives/{s}")]
+            + all_lessons("global") if _usable(x)]
+    held = held_reasons(pool)
+    return [x for x in pool if x["meta"]["id"] not in held]
 
 
 def _pick(scored: list, limit: int) -> list:
@@ -764,7 +890,7 @@ def for_task(project: str, activity=None, files=None, limit: int = 4, initiative
     step's words. When no anchor matches, the recurring lessons (seen twice or more), at most 3, so every brief
     carries the mistakes that repeat. Counts nothing: the caller tracks what it shows (channel `brief`)."""
     files = [f for f in files or [] if str(f).strip()]
-    pool, scored = _pool(project, initiatives), []
+    pool, scored = recall_pool(project, initiatives), []
     for les in pool:
         an = anchors(les)
         sc = (3 if activity and activity in an["activities"] else 0) + \
@@ -778,11 +904,11 @@ def for_task(project: str, activity=None, files=None, limit: int = 4, initiative
     return _pick(scored, limit)
 
 
-def for_call(project: str, files=(), command: str = "", limit: int = 3, initiatives=()) -> list:
+def for_call(project: str, files=(), command: str = "", limit: int = 3, initiatives=(), pool=None) -> list:
     """The open lessons a tool call should know just in time: those whose command anchor it runs, or whose files it
     touches. Counts nothing: the caller tracks what it shows (channel `call` or `refusal`)."""
     scored = []
-    for les in _pool(project, initiatives):
+    for les in recall_pool(project, initiatives) if pool is None else pool:
         an = anchors(les)
         sc = (3 if command and any(runs(command, c) for c in an["commands"]) else 0) + \
             (2 if any(_meet(f, g) for f in files or () for g in an["files"]) else 0)
@@ -791,11 +917,11 @@ def for_call(project: str, files=(), command: str = "", limit: int = 3, initiati
     return _pick(scored, limit)
 
 
-def for_output(project: str, output: str, limit: int = 3, initiatives=()) -> list:
+def for_output(project: str, output: str, limit: int = 3, initiatives=(), pool=None) -> list:
     """The open lessons whose error signature a tool's output shows (case does not matter). Counts nothing: the
     caller tracks what it shows (channel `output`)."""
     text = (output or "").casefold()
-    scored = [(3, les) for les in _pool(project, initiatives)
+    scored = [(3, les) for les in (recall_pool(project, initiatives) if pool is None else pool)
               if text and any(e.casefold() in text for e in anchors(les)["errors"])]
     return _pick(scored, limit)
 
@@ -889,9 +1015,13 @@ def prevention_failure(les: dict):
 
 def review(scope: str = None) -> dict:
     """What to act on: `automate` (open lessons agents missed twice or more after seeing them, most missed first),
-    `prevention_failed` (a repeat within 7 days of `prevent`: [{lesson, by, ref, days}]), `recurring` (open, seen
-    twice or more), `stale` (retire or confirm), and the counts."""
+    `prevention_failed` (a repeat within 7 days of `prevent`: [{lesson, by, ref, days}]), `held` (lessons recall
+    leaves out because the screen holds them, in their front matter or as loaded: [{lesson, reason}]; the developer
+    releases one with `dev lesson release`), `recurring` (open, seen twice or more), `stale` (retire or confirm),
+    and the counts."""
     items = all_lessons(scope)
+    why = held_reasons([x for x in items if x["meta"].get("status") != "retired"])
+    held = [{"lesson": x, "reason": why[x["meta"]["id"]]} for x in items if x["meta"]["id"] in why]
     now, use = time.time(), usage()
     missed = (lambda x: int((use.get(x["meta"]["id"]) or {}).get("missed") or 0))
     automate_ = sorted((x for x in items if x["meta"].get("status") == "open" and missed(x) >= 2),
@@ -907,7 +1037,7 @@ def review(scope: str = None) -> dict:
     counts = {}
     for x in items:
         counts[x["meta"].get("status")] = counts.get(x["meta"].get("status"), 0) + 1
-    return {"automate": automate_, "prevention_failed": failed, "recurring": recurring, "stale": stale,
+    return {"automate": automate_, "prevention_failed": failed, "held": held, "recurring": recurring, "stale": stale,
             "counts": counts, "total": len(items)}
 
 
