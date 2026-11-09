@@ -167,34 +167,70 @@ Write, Edit, `apply_patch`, and shell commands follow this one rule. The guard f
 - **Any spelling of the path.** Folder and file names count in any case, because macOS reads `.Codex/Config.toml` as
   `.codex/config.toml`. Any path that resolves there counts too: `~`, `$HOME`, `../`, a linked folder, or a `cd`
   earlier in the same command.
-- **Every TOML form.** A bare, quoted, or dotted key, or an inline table, counts. A `config.toml` that parses as TOML is
-  denied when any of its tables sets `hooks` or `codex_hooks` to `false`.
+- **Every TOML form.** A bare, quoted, or dotted key, an inline table, or a key spelled with a `\u` escape
+  (`"codex_hoo\u006bs"`) counts, on every Python devkit runs on: where Python has no TOML reader (Python 3.9, the one
+  in `/usr/bin/python3`), the guard reads the keys itself. A `config.toml` that parses as TOML is denied when any of
+  its tables sets `hooks` or `codex_hooks` to `false`. A quoted key with an escape that TOML does not have, set to
+  `false`, is denied too.
+- **Every JSON form.** A `settings.json` or `settings.local.json` that parses as JSON is denied when it sets
+  `disableAllHooks` to `true` or `devkit@firefly-devkit` to `false`, also when a key is spelled with an escape
+  (`disabl\u0065AllHooks`). When a key appears twice, the last one counts, as Claude Code reads it.
 
 It judges the text each kind of call writes:
 
-- **Write and Edit:** the file's text after the change.
+- **Write:** the file's text after the write.
+- **Edit and MultiEdit:** the guard applies the edits to the file as it is now, as the tools do (in order;
+  `replace_all` for every match, otherwise the first), and judges the whole result. An edit whose `old_string` is not
+  in the settings file is denied.
 - **A Codex patch** (`apply_patch`): each file it adds, updates, or moves, by the file's text after the patch and by
   the lines it adds, at the path the patch names and at its real path. A move onto a settings file brings the text of
-  the file it moves.
-- **A shell command whose text is visible:** `>` and `>>` with `echo` or `printf` (with their escapes decoded as bash,
-  zsh, and `printf` decode them), `tee` and `tee -a`, a heredoc or here-string into `cat` or `tee`, and `dd of=` fed
-  from one of these. Two or more writes to the file in one command are judged together, and `>>` together with what
-  the file already holds. Such a write is denied only when the result turns hooks off, and allowed otherwise.
+  the file it moves. When a hunk does not apply, or only adds lines, its added lines are also parsed as TOML alone and
+  after the file's current text.
+- **A shell command whose text is visible:** `>`, `>>`, and `<>` with `echo` or `printf` (with their escapes decoded
+  as bash, zsh, and `printf` decode them), `tee` and `tee -a`, a heredoc or here-string into `cat` or `tee`, and
+  `dd of=` fed from one of these. How the command opens the file decides what is judged: `>` and `tee` replace the
+  file and are judged by what they write; `>>`, `tee -a`, and `<>` keep the file's text and are judged together with
+  what it already holds, in JSON files as in TOML files. Text split across two commands therefore counts as one:
+  `printf '{"disableAllHooks": ' > f`, then `printf 'true}' >> f`, is denied. Two or more writes to the file in one
+  command are judged together. Such a write is denied only when the result turns hooks off, and allowed otherwise.
+- **A settings file the guard cannot read in full** (over 1 MiB): `>>`, `tee -a`, or `<>` to it, and a patch that
+  updates it or moves a file onto it, are denied, because the part the guard cannot read could finish what the write
+  adds. `>`, Write, and a patch that adds the file whole are still judged by the whole text they write.
 - **A shell command that hides its text** is denied for these files, whatever it writes: `cp`, `mv`, `install`, `ln`,
-  `sed -i`, `perl -pi`, `awk -i inplace`, `ed`, `truncate`, `dd` with other options, `git checkout` or
-  `git restore` of these files, a variable, `$(…)`, backticks, `$'…'`, or an unquoted glob in the text, `exec 3>`, and
-  interpreter code that names a settings file. Write the file with the Write or Edit tool (on Codex, `apply_patch`),
-  or write the text out in full in an `echo`, a `printf`, or a quoted heredoc.
+  `sed -i`, `perl -pi`, `awk -i inplace`, `ed`, `truncate`, `dd` with other options, a variable, `$(…)`, backticks,
+  `$'…'`, or an unquoted glob in the text, `exec 3>`, and interpreter code that names a settings file. Among git
+  commands: `git checkout`; `git restore` without `--staged` (`-S`), or with an option other than `--staged`,
+  `--source` (`-s`), and `--quiet` (`-q`); `git rm` without `--cached`, or with an option other than `--cached`, `-r`,
+  `-f`, `-q`, `-n`, their long forms, `--ignore-unmatch`, and `--sparse`; every git command outside the readers (`git archive`, `git bundle`, `git mergetool`, `git config --file`, an alias);
+  and a reader that writes a file, such as `git diff --output`, `git log --output`, or `git grep -O`. The guard reads
+  git's options as git parses them: an abbreviation (`--wor` for `--worktree`), a value attached to a short option
+  (`-sS1`), and a negation (`--no-cached`) count. A program with `--check` that is not one of the formatters below is
+  read as a write too. Write the file with the Write or Edit tool (on Codex, `apply_patch`), or write the text out in
+  full in an `echo`, a `printf`, or a quoted heredoc.
 
-Reading these files (`cat`, `grep`, `jq`, `sed -n`, `git diff`, `git log`), `git add`, `touch`, `mkdir .claude/agents`,
-and writes to other files stay allowed. `dev setup` and `dev install` write these files in their own process, so the
-rule does not apply to them.
+These stay allowed:
+
+- reading these files (`cat`, `grep`, `jq`, `sed -n`, and git's readers, such as `git diff` and `git log`), `git add`,
+  `touch`, `mkdir .claude/agents`, and writes to other files;
+- `git restore --staged` and `git rm --cached`, which change only git's index;
+- a known formatter or linter run with `--check` or `--list-different` and no option that writes: `prettier`,
+  `black`, `ruff`, `isort`, `taplo`, `biome`, `dprint`, `shfmt`, `rustfmt`, `eslint`, `stylelint`, and `djlint`. A long
+  option that starts with or abbreviates a write option (`--write`, `--fix`, `--wr`), and a short option cluster with
+  `w`, `i`, or `o` in any case (`-w`, `-O`), count as a write;
+- words that are messages, not files: a `dev` command's arguments (except the file of `-o` or `--out`), `gh`'s words
+  (except the file of `-O` or `--output`), and another program's word that holds a space and names a folder that does
+  not exist, such as `git commit -m "docs: explain ~/.claude/settings.json"`.
+
+Agents may not run `dev setup` (except `dev setup --preview` and `--help`) or `dev install`: the developer runs them in
+a terminal, where they write these files in their own process (see
+[devkit's own state, configuration, and install](#devkits-own-state-configuration-and-install)).
 
 **Not covered yet.** The rule judges what a write adds, not what it takes away: deleting a settings file, or writing
 one without devkit's hooks in it, is allowed. A path the guard cannot resolve counts as a settings file only when it
 names `.codex`, `.claude`, `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, or a settings filename (`config.toml`, `hooks.json`,
-`settings.json`, `settings.local.json`), or when its filename is hidden (`"$F"`) and the text turns hooks off. When
-both the filename and the text are hidden, as in `echo "$X" > "$F"`, the guard cannot tell, and the write is allowed.
+`settings.json`, `settings.local.json`), or when its filename is hidden (`"$F"`) and the text turns hooks off. It
+counts by the name it holds only when it is a word without a space, and never for `gh` or `dev`. When both the
+filename and the text are hidden, as in `echo "$X" > "$F"`, the guard cannot tell, and the write is allowed.
 
 If devkit really should be off somewhere, change devkit's own configuration (see [Configuration](configuration.md)).
 `dev doctor` reports such settings that already exist under `~/Development`.
@@ -311,7 +347,8 @@ three folders readable and writable by your account only (`0700`) every time it 
 | --- | --- |
 | A file write (Write, Edit, `apply_patch`) in those three folders, or in a subagent's meta file | deny, with the `dev` command that owns the record |
 | A shell write there: a redirect, `tee`, `cp`, `mv`, `ln`, `rm`, `dev rm`, `sed -i`, an interpreter that writes files, also inside `sh -c`, `eval`, `xargs`, or `find -exec` | deny |
-| `dev config set safeguards.*`, `audit.*`, or `bugs.share`, or `dev config edit`, or a `DEVKIT_*` or `DEV_ROOT` value added to the `env` block of an agent settings file or to a shell startup file such as `~/.zshrc` | deny: `bugs.share` decides whether devkit posts under your GitHub account, so only you set it, with `dev bug share` in a terminal |
+| `dev config set safeguards.*`, `audit.*`, `bugs.share`, or `agents.*`, also spelled with leading or doubled dots (`.agents.codex`, `bugs..share`), which `dev config set` reads as the same key; `dev config edit`; or a `DEVKIT_*` or `DEV_ROOT` value added to the `env` block of an agent settings file or to a shell startup file such as `~/.zshrc` | deny: `bugs.share` decides whether devkit posts under your GitHub account, so only you set it, with `dev bug share` in a terminal. `agents.*` turns devkit on or off for an agent, and the next `dev install` or `dev setup` takes devkit's hooks and rules out of an agent turned off, so only you set it, in your terminal |
+| `dev setup`, except `dev setup --preview` and `dev setup --help` | deny: it decides which agents devkit sets up and rewrites their settings, hooks, and instructions, so you run it in your own terminal. `--preview` only draws the setup's screens with sample data and changes nothing |
 | Replacing, writing, or deleting a `dev` that a shell finds: `~/.local/bin/dev` (the link itself) or another `dev` earlier on `PATH` | deny → the developer runs `dev install --only cli` |
 | Unsetting or blanking a variable that tells a program an agent runs it (`CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_PID`, `CODEX_SANDBOX`, `CODEX_THREAD_ID`, `DEVKIT_SESSION`, `DEVKIT_AGENT`, `DEVKIT_FROM_AGENT`): `unset`, `env -u`, `env -i`, or an empty assignment before a command or after `export`, also inside `sh -c` | deny: a project's own tools read them to act differently for agents, and an agent must not hide from them |
 | `HOME`, `DEVKIT_CONFIG`, `DEV_ROOT`, or another `DEVKIT_*` variable set for `dev`, `python -m devkit`, a program that imports devkit, or a nested `claude` or `codex` session; `launchctl setenv` of one of them | deny; the one-command [escape hatches](#escape-hatches) still work |
@@ -690,8 +727,10 @@ checks. These run as well:
 - `dev plan new` and `dev plan revise`, for a member whose kinds of work produce plans: one the team's RACI makes
   Responsible for requirements, architecture, research, UX, or docs, in a review lane. They write only below
   `plans/<the run's project>/` of the handoff repository. `dev plan new` runs from that project's checkout, without
-  `-p` or `-i`; `dev plan revise` takes one Markdown file whose real path lies in that folder, with links and `..`
-  resolved. When devkit cannot look up the member's kinds of work or the project, it refuses.
+  `-p` or `-i`; `dev plan revise` takes the full path of one Markdown file whose real path lies in that folder, with
+  links and `..` resolved. Either one runs only as a command of its own: with a `cd`, `pushd`, `popd`, or subshell
+  earlier in the same command (`cd ../other && dev plan new x`), the guard cannot be sure which folder it runs in, and
+  refuses it. When devkit cannot look up the member's kinds of work or the project, it refuses.
 - A command continued with a backslash-newline, read as the shell joins it.
 
 A script from the member's own scratch folder (`python3 scratchpad/<member id>/probe.py`) already ran before this
