@@ -3054,14 +3054,30 @@ def _git_text_free(argv) -> bool:
     return sub not in _GIT_TREE_WRITES
 
 
-_WRITE_FLAG = re.compile(r"--(?:write|fix|in-place|inplace|out|output|output-file)(?:=.*)?|-[A-Za-z]*[wio][A-Za-z]*")
+# formatters and linters whose --check or --list-different run writes no file: only these read a check flag as "writes
+# nothing"; any other program (a script, wget, curl) may write the file it names whatever its flags say
+_CHECKERS = frozenset("prettier black ruff isort taplo biome dprint shfmt rustfmt eslint stylelint djlint".split())
+_WRITE_LONGS = ("--write", "--fix", "--in-place", "--inplace", "--output", "--output-file", "--outfile", "--out",
+                "--save", "--overwrite", "--apply")
 
 
-def _check_only(args) -> bool:
-    """True for a formatter or linter run only to check (`prettier --check`, `--list-different`): a check flag and no
-    flag that writes (--write, --fix, --in-place, an output, a short -w, -i or -o)."""
+def _write_flag(a: str) -> bool:
+    """True for an option that makes a formatter write: a long one that starts with a write option (--write,
+    --fix-only, --output-dir) or abbreviates one (--wr, --in), and a short cluster with w, i or o (-w, -O, -iO), in
+    any case."""
+    a = a.casefold()
+    if a.startswith("--"):
+        name = a.split("=", 1)[0]
+        return any(name.startswith(w) or (len(name) > 2 and w.startswith(name)) for w in _WRITE_LONGS)
+    return bool(re.match(r"-[a-z0-9]*[wio]", a))
+
+
+def _check_only(name: str, args) -> bool:
+    """True for a known formatter or linter (_CHECKERS, the program after _unwrap) run only to check (`prettier
+    --check`, `--list-different`): a check flag and no flag that writes (_write_flag)."""
     opts = _opts_before_dashdash(args)
-    return any(a in ("--check", "--list-different") for a in opts) and not any(_WRITE_FLAG.fullmatch(a) for a in opts)
+    return name in _CHECKERS and any(a in ("--check", "--list-different") for a in opts) and \
+        not any(_write_flag(a) for a in opts)
 
 
 _READERS = {"cat", "head", "tail", "less", "more", "bat", "ls", "stat", "file", "wc", "grep", "egrep", "fgrep", "rg",
@@ -3988,7 +4004,7 @@ class _Shell:
         # anything else (editors, sqlite3, git, curl, tar, …) may write the paths it is given; a git command that
         # rewrites no work-tree file (diff, log, add, commit) writes no text into an agent settings file it names
         inside = is_protected(Path(cwd)) if cwd and str(cwd) != str(UNKNOWN) else False
-        reads = _git_text_free(argv) if name == "git" else _check_only(args)
+        reads = _git_text_free(argv) if name == "git" else _check_only(name, args)
         words = [c for c in _candidates(args) if inside or _pathlike(c)]
         if name == "gh":  # its words are titles and bodies, except the file a download writes (-O, --output)
             outs = _dev_values(args, ("-O", "--output"))

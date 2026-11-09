@@ -293,6 +293,18 @@ class ShellWritesOnAgentSettings(unittest.TestCase):
             ("npx prettier --write .claude/settings.json", "npx prettier --check .claude/settings.json"),
         ])
 
+    def test_only_a_known_formatter_run_to_check_writes_no_text(self):
+        # --check means "write nothing" only to a formatter or linter the guard knows; any other program may write the
+        # file it names whatever its flags, and a write flag in any case or abbreviation still writes
+        self.pairs([
+            ("./fmt.sh --check .claude/settings.json", "npx prettier --check .claude/settings.json"),
+            ("wget --check -O .claude/settings.json https://example.com/s.json",
+             "wget --check -O notes.json https://example.com/s.json"),
+            ("npx prettier --check --WRITE .claude/settings.json", "npx prettier --list-different .claude/settings.json"),
+            ("npx prettier --check --wr .claude/settings.json", "npx prettier --check --no-color .claude/settings.json"),
+            ("black --check -W .claude/settings.json", "black --check -l 100 .claude/settings.json"),
+        ])
+
     def test_a_truncating_write_replaces_the_files_text_and_only_an_append_keeps_it(self):
         # the file already turns hooks off: an append keeps that text, a `>` (the repair) and touch do not add to it
         (Path(self.cwd) / ".codex" / "config.toml").write_text("[features]\nhooks = false\n")
