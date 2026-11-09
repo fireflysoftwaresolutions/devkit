@@ -433,8 +433,9 @@ def body(m: dict, roster=None, alias=None) -> str:
     out += ["- Learn from mistakes with devkit's lesson manager: follow the prevention of the known pitfalls your brief "
             "lists; when you make or find a mistake that could repeat (a refused command you had to redo, a test you "
             "broke, a wrong assumption), record it with where it applies, so devkit recalls it in any language: "
-            "`dev lesson add \"…\" --cause \"…\" --prevent \"…\" --file <glob> --command \"<command words>\" "
-            "--error \"<text the output shows>\"`. A known one: `dev lesson recur <id> --evidence \"…\"`; one "
+            "`dev lesson add \"…\" --happened \"…\" --cause \"…\" --prevent \"…\" --file <glob> "
+            "--command \"<command words>\" "
+            "--error \"<output text>\"`. A known one: `dev lesson recur <id> --evidence \"…\"`; one "
             "without anchors: `dev lesson anchor <id> --file … --why \"…\"`." if shell else
             "- Learn from mistakes: follow the prevention of the known pitfalls your brief lists, and name in your "
             "report any mistake that could repeat, with the files, commands or error text it applies to, so the tech "

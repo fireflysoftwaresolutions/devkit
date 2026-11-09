@@ -641,8 +641,9 @@ def catalog_context(agent: str) -> str:
             "Kinds of work: one per plan step (`[id]` in a plan spec, as in `api=1h after design [backend]`, or "
             "`--activity <id>` when you assign it) and per brief (`--activity <id>`). Without one, a step takes its "
             "member's Responsible kind of work, then its files'."]
-    tail = ['Lesson anchors, where a lesson applies: dev lesson add "…" --cause "…" --prevent "…" --file <glob> '
-            '--command "<command words>" --activity <id> --error "<text the output shows>" --stack <name>.',
+    tail = ['Lesson anchors, where a lesson applies: dev lesson add "…" --happened "…" --cause "…" --prevent "…" '
+            '--file <glob> '
+            '--command "<command words>" --activity <id> --error "<output text>" --stack <name>.',
             f"The rest: who does and who approves each kind of work, `dev crew raci [<id>]`; every crew rule and the "
             f"check that enforces it, `dev crew rules`; the skills each kind of work, file and command requires, "
             f"{rules} (a brief carries them, and the Stop hook checks them)."]

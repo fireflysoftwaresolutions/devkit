@@ -260,7 +260,7 @@ class RenderTests(unittest.TestCase):
     # without a shell names them for Morpheus
     def test_the_learn_text_asks_for_the_lessons_anchors(self):
         shell = crew.body(member(), roster())
-        for needle in ('dev lesson add "…" --cause "…" --prevent "…" --file', "--command", "--error",
+        for needle in ('dev lesson add "…" --happened "…" --cause "…" --prevent "…" --file', "--command", "--error",
                        'dev lesson anchor <id>'):
             self.assertIn(needle, shell)
         read = crew.body(member(tools="read", skills=[]), roster())
