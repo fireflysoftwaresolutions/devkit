@@ -480,6 +480,8 @@ LOCAL = DEV / "_local"
 NOTES = HANDOFF / "projects"
 LOGDIR = HANDOFF / "log"
 STATE = HOME / ".local" / "state" / "devkit"
+# the repository whose issues hold devkit's public bug registry; nothing else names it, so a rebrand changes one line
+DEVKIT_REPO = "fireflysoftwaresolutions/devkit"
 RESERVED_TOP = {HANDOFF.name, ".worktrees", ".tmp", "_local"}
 CLAUDE_HOME = HOME / ".claude"
 CODEX_HOME = expand(os.environ.get("CODEX_HOME", str(HOME / ".codex")))
