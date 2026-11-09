@@ -228,6 +228,11 @@ class StopUnderANewSessionIdTests(OwnerCase):
 
 
 class CarryTests(OwnerCase):
+    def cleared(self):
+        # s1 is the conversation of s2 after /clear (same live process): its continuity record links it
+        continuity.CONT.mkdir(parents=True, exist_ok=True)
+        continuity.record_path("claude", "s1").write_text(json.dumps({"session": "s1", "cleared_from": "s2"}))
+
     def test_carry_closes_ended_and_stale_lanes_with_the_reason_and_takes_the_run(self):
         stale = approvals.limits()["stale_minutes"]
         self.other_run({"a_kid": self.lane("Kid", "Kid: branches", ["lib/branches/**"], active=25 * MIN),
@@ -235,6 +240,7 @@ class CarryTests(OwnerCase):
                        steps=[{"name": "branches", "state": "running", "owner": "a_kid"},
                               {"name": "docs", "state": "running", "owner": "a_ghost"}])
         self.claude_meta("s1", "a_kid", finished=True, at=self.now - 25 * MIN, log_at=self.now - 26 * MIN)
+        self.cleared()
         out = continuity.carry("claude", "s2", "s1", now=self.now)
         self.assertEqual(out["to"], "s1")
         run = pg.load_run("claude", "s1")
@@ -248,6 +254,7 @@ class CarryTests(OwnerCase):
         self.other_run({"a_kid": self.lane("Kid", "Kid: branches", ["lib/branches/**"], active=2 * MIN),
                         "a_key": self.lane("The Keymaker", "Keymaker: guard", ["lib/guard/**"], active=40 * MIN)})
         self.claude_meta("s1", "a_key", finished=True, at=self.now - 40 * MIN, log_at=self.now - 41 * MIN)
+        self.cleared()
         with self.assertRaises(ValueError) as e:
             continuity.carry("claude", "s2", "s1", now=self.now)
         self.assertIn("Kid still running", str(e.exception))

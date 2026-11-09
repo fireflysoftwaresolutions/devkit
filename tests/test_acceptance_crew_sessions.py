@@ -711,13 +711,13 @@ class RunsAndLanes(Crew):
         self.assertIn("May I rename the invoice table?", a2.ok("crew", "inbox"))
         self.assertIn("no new messages", b.ok("crew", "inbox"))
 
-    @unittest.expectedFailure  # defect: dev session carry moves a live session's run from another project
     def test_carry_takes_no_run_from_a_live_session_of_another_project(self):
         a = self.claude(S1, self.api)
         a.ok("progress", "start", "Invoice export", "--plan", "api=30m [backend]; ui=30m [frontend]")
         k = self.claude(S3, self.kit)
         r = k.dev("session", "carry", "--from", S1)
         self.assertEqual(r["rc"], 2, r)
+        self.assertIn("dev session tell @5e1f0a2b", r["err"])  # what to do instead: ask the run's owner
         self.assertEqual((a.has_run(), k.has_run()), (True, False))
         self.assertEqual(a.run_doc()["project"], "acme/api")
 

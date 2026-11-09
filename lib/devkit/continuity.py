@@ -1534,16 +1534,55 @@ def latest(cwd=None, project=None, now=None):
     return (best[1], best[2]) if best else None
 
 
-def carry(agent: str, from_sid: str, to_sid: str, now=None) -> dict:
-    """Move the open run of `from_sid` (the session /clear ended) to `to_sid`, under both sessions' locks. Its lanes
-    whose member ended or went stale close first, with the reason in the run's history (progress.close_quiet_lanes);
-    refused while a member of that run still works (its results go to the old session) and when this session already
-    has an open run. A run the reconciler orphaned when that session ended runs again here, with the reason in its
-    history (progress.take_back). Audited as session.carry."""
+def _shared_initiative(a: str, b: str) -> bool:
+    """Are projects `a` and `b` members of one initiative of the handoff repository?"""
+    from . import peers
+    a, b = str(a or "").lower(), str(b or "").lower()
+    return bool(a and b) and any(a in ps and b in ps for ps in peers._initiatives().values())
+
+
+def _carry_refused(agent: str, from_sid: str, to_sid: str, run: dict, cwd=None) -> str:
+    """Why `to_sid` may not take the run of `from_sid`, or '': a run moves only within its project (or an initiative
+    both projects share), and only from a session that no longer works on it, because it ended (progress._session_gone)
+    or because it is this conversation before /clear (the continuity record's cleared_from) or before a compaction
+    (Claude Code superseded its record with this session). Read before any lock: the process check runs ps."""
+    goal, there = _excerpt(run.get("goal"), 80), f"{agent}:{from_sid[:12]}"
+    tell = f"`dev session tell @{progress.session_prefix(from_sid)} \"…\"`"
+    mine = progress.session_path(agent, to_sid)
+    here = (core.read_json(mine, {}) or {}).get("project") or (progress._project(cwd) if cwd else "")
+    theirs = run.get("project") or ""
+    if theirs.lower() != str(here).lower() and not _shared_initiative(theirs, here):
+        return (f"the run «{goal}» of {there} belongs to {theirs or 'no project'}, and this session works in "
+                f"{here or 'no project'}: a run moves only within its project or an initiative both share. Ask its "
+                f"owner with {tell}, or start this project's own run here (dev progress start)")
+    if (read(agent, to_sid) or {}).get("cleared_from") == from_sid:
+        return ""
+    if (core.read_json(progress.session_path(agent, from_sid), {}) or {}).get("superseded_by") == to_sid:
+        return ""
+    if progress._session_gone(run):
+        return ""
+    return (f"{there} is still live, so its run «{goal}» stays there: carry takes a run only from a session that "
+            f"ended, or from this conversation before /clear or a compaction. Ask its owner with {tell}")
+
+
+def carry(agent: str, from_sid: str, to_sid: str, now=None, cwd=None) -> dict:
+    """Move the open run of `from_sid` (the session /clear ended) to `to_sid`, under both sessions' locks. Refused,
+    before any lock, for a run of another project (unless an initiative holds both) and for a session that still
+    works on it (_carry_refused). Its lanes whose member ended or went stale close first, with the reason in the
+    run's history (progress.close_quiet_lanes); refused while a member of that run still works (its results go to the
+    old session) and when this session already has an open run. A run the reconciler orphaned when that session
+    ended runs again here, with the reason in its history (progress.take_back). Audited as session.carry. `cwd`: where
+    this session's project is read when its record names none."""
     now = now or time.time()
     if not from_sid or from_sid == to_sid:
         raise ValueError("nothing to carry: name the cleared session with --from <session id>")
     src, dst = progress.run_path(agent, from_sid), progress.run_path(agent, to_sid)
+    seen = state.read(src)
+    why = _carry_refused(agent, from_sid, to_sid, seen, cwd) if isinstance(seen, dict) else ""
+    if why:
+        audit.record("session.carry", f"{agent}:{to_sid[:12]}", f"run from {agent}:{from_sid[:12]}: refused",
+                     "refused", project=seen.get("project") or "", session=f"{agent}:{to_sid[:12]}")
+        raise ValueError(why)
     a, b = sorted((src, dst), key=str)
     closed = []
     with state.hold(a), state.hold(b):
@@ -1647,7 +1686,10 @@ def add_arguments(p):
                    help="brief: for a chat surface (devkit_resume): each request cut to 200 characters")
     p.add_argument("--provider", help="brief: who will read it (claude, codex, anthropic, openai); request text "
                                       "only for the session's own provider, otherwise their count and times")
-    p.add_argument("--from", dest="from_sid", help="carry: the cleared session (default: the one /clear ended)")
+    p.add_argument("--from", dest="from_sid",
+                   help="carry: the cleared session (default: the one /clear ended); a session of this project or "
+                        "of an initiative both share that ended, or that this conversation continues after /clear "
+                        "or a compaction. A live session keeps its run: ask its owner with dev session tell")
     p.add_argument("--members", action="store_true", help="compactions: the members' transcripts too")
     p.add_argument("--all", action="store_true", help="forget: every continuity record and clear link here · ls: the "
                                                       "idle and ended sessions too · inbox: every message kept · "
@@ -1745,7 +1787,7 @@ def _session_command(a) -> int:
         if how == "shell":
             raise ValueError("dev session carry runs inside the agent session that takes the run over")
         from_sid = a.from_sid or (read(agent, to_sid) or {}).get("cleared_from")
-        out = carry(agent, from_sid, to_sid)
+        out = carry(agent, from_sid, to_sid, cwd=cwd)
         print(f"✓ run «{out['goal']}» moved from {agent}:{from_sid[:12]} to this session ({out['steps']} steps)")
         return 0
     if not a.all and not a.session:
