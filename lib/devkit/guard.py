@@ -656,13 +656,15 @@ def strip_heredocs(cmd: str) -> str:
 
 
 def split_commands(cmd: str, ops: bool = False, newline: str = ";", inputs: list | None = None,
-                   stripped: bool = False, heredocs: list | None = None):
+                   stripped: bool = False, heredocs: list | None = None, modes: list | None = None):
     """-> list of (argv, redirect_targets). None when the command cannot be tokenised. With `ops`, each entry is
     (argv, redirect_targets, the operator after the segment ('|', '&&', ';', … or ''), its here-strings (<<< …)).
     `newline`: the operator a newline outside quotes becomes (`&` for tmux_list_refusal only). `inputs`: a list that
     gets, for each segment, the files its input is redirected from (`< f`, `0< f`, `<> f`). `stripped`: `cmd` is
     already without its heredoc bodies (strip_heredocs); stripping it again would read the line after a `<<EOF` as
-    a body and hide it. `heredocs`: a list that gets, for each segment, whether a heredoc is its input."""
+    a body and hide it. `heredocs`: a list that gets, for each segment, whether a heredoc is its input. `modes`: a
+    list that gets, for each segment, how each of its redirect targets is opened, in order: "truncate" (`>`, `&>`),
+    "append" (`>>`, `&>>`) or "overwrite" (`<>`, which keeps what it does not write over)."""
     try:
         lex = shlex.shlex(_newlines_to_semicolons(cmd if stripped else strip_heredocs(cmd), newline), posix=True,
                           punctuation_chars=";&|()<>")
@@ -672,7 +674,7 @@ def split_commands(cmd: str, ops: bool = False, newline: str = ";", inputs: list
     except ValueError:
         return None
     segs, argv, redirs, expect_redir, here, herestr = [], [], [], False, [], False
-    fd, stdin, ins, hd = None, False, [], False
+    fd, stdin, ins, hd, opened, mode = None, False, [], False, [], "truncate"
     for k, t in enumerate(tokens):
         nxt = tokens[k + 1] if k + 1 < len(tokens) else ""
         if t.isdigit() and nxt[:1] in ("<", ">"):
@@ -683,6 +685,7 @@ def split_commands(cmd: str, ops: bool = False, newline: str = ";", inputs: list
                 expect_redir = None  # fd duplication: skip the fd number
             else:
                 expect_redir = ">" in t
+                mode = "append" if ">>" in t else "truncate"
             fd = None
             continue
         if t and set(t) <= set(";&|()"):
@@ -692,7 +695,9 @@ def split_commands(cmd: str, ops: bool = False, newline: str = ";", inputs: list
                     inputs.append(ins)
                 if heredocs is not None:
                     heredocs.append(hd)
-            argv, redirs, here, ins, hd = [], [], [], [], False
+                if modes is not None:
+                    modes.append(opened)
+            argv, redirs, here, ins, hd, opened = [], [], [], [], False, []
             continue
         if t and set(t) <= set("<>"):
             herestr = t == "<<<"
@@ -700,6 +705,7 @@ def split_commands(cmd: str, ops: bool = False, newline: str = ";", inputs: list
             stdin = t in ("<", "<>") and fd in (None, "0")
             fd = None
             expect_redir = ">" in t
+            mode = "append" if ">>" in t else "overwrite" if t == "<>" else "truncate"
             if not expect_redir:
                 expect_redir = None  # input redirect: skip next token
             continue
@@ -708,6 +714,7 @@ def split_commands(cmd: str, ops: bool = False, newline: str = ";", inputs: list
                 ins.append(t)
             if expect_redir and t not in ("<(", ">("):  # `> >(…)` writes into a substitution, whose command is read
                 redirs.append(t)
+                opened.append(mode)
             elif herestr:
                 here.append(t)
             expect_redir, herestr, stdin = False, False, False
@@ -719,6 +726,8 @@ def split_commands(cmd: str, ops: bool = False, newline: str = ";", inputs: list
             inputs.append(ins)
         if heredocs is not None:
             heredocs.append(hd)
+        if modes is not None:
+            modes.append(opened)
     return segs
 
 
@@ -2974,6 +2983,36 @@ _GIT_TREE_WRITES = frozenset("checkout switch reset restore revert merge pull re
                              "clean read-tree checkout-index update-index filter-branch filter-repo".split())
 _INTERP = re.compile(r"^(?:python[0-9.]*|pypy[0-9.]*|node|nodejs|deno|bun|perl[0-9.]*|ruby|php|osascript|lua|tclsh|"
                      r"Rscript|swift|awk|gawk|mawk|nawk|expect|wish)$")
+
+
+def _opts_before_dashdash(args) -> list:
+    return list(itertools.takewhile(lambda a: a != "--", args))
+
+
+def _git_text_free(argv) -> bool:
+    """True when a git command writes no text into a work-tree file it names: a command that rewrites none (diff, log,
+    add, commit), `git restore --staged` without --worktree and `git rm --cached`, which change only the index."""
+    _, sub, gargs = _git_split(argv)
+    opts = [a for a in _opts_before_dashdash(gargs) if a.startswith("-")]
+    if sub == "restore":
+        short = "".join(a[1:] for a in opts if not a.startswith("--"))
+        staged = "--staged" in opts or "S" in short
+        return staged and not ("--worktree" in opts or "W" in short)
+    if sub == "rm":
+        return "--cached" in opts
+    return sub not in _GIT_TREE_WRITES
+
+
+_WRITE_FLAG = re.compile(r"--(?:write|fix|in-place|inplace|out|output|output-file)(?:=.*)?|-[A-Za-z]*[wio][A-Za-z]*")
+
+
+def _check_only(args) -> bool:
+    """True for a formatter or linter run only to check (`prettier --check`, `--list-different`): a check flag and no
+    flag that writes (--write, --fix, --in-place, an output, a short -w, -i or -o)."""
+    opts = _opts_before_dashdash(args)
+    return any(a in ("--check", "--list-different") for a in opts) and not any(_WRITE_FLAG.fullmatch(a) for a in opts)
+
+
 _READERS = {"cat", "head", "tail", "less", "more", "bat", "ls", "stat", "file", "wc", "grep", "egrep", "fgrep", "rg",
             "ag", "ack", "jq", "diff", "cmp", "comm", "md5", "md5sum", "shasum", "sha1sum", "sha256sum", "cksum", "du",
             "df", "realpath", "readlink", "basename", "dirname", "test", "[", "[[", "echo", "printf", "hexdump", "xxd",
@@ -3562,10 +3601,10 @@ class _Shell:
         self.stdin = None  # what the segment being walked reads from its input, when the command shows it
         self.written = {}  # agent settings file -> the texts this command has written to it so far
 
-    def target(self, t, cwd, verb="write", holds=False, track=True, text=None, settings="all"):
+    def target(self, t, cwd, verb="write", holds=False, track=True, text=None, settings="all", mode="truncate"):
         """A deny when writing `t` (`verb`) reaches what agents may not write. `text`: the texts the write puts in the
-        file, when the command shows them (None: it does not). `settings`: how the agent settings rule reads `t`
-        (settings_write)."""
+        file, when the command shows them (None: it does not). `settings`, `mode`: how the agent settings rule reads
+        `t` and how the write opens it (settings_write)."""
         lp = _lexical(t, cwd)
         if is_dev_command(lp) or (holds and holds_dev_command(lp)):
             return deny(dev_command_reason(lp, verb), key="dev-command")
@@ -3573,7 +3612,7 @@ class _Shell:
         if p == UNKNOWN:
             if track and t:
                 self.unresolved.append(t)
-            return self.settings_write(t, cwd, text, settings) if verb in ("write", "link") else None
+            return self.settings_write(t, cwd, text, settings, mode) if verb in ("write", "link") else None
         if is_protected(p) or (holds and holds_protected(p)):
             return deny(protected_reason(p, verb), key="protected")
         if handoff_record(p) or (holds and holds_handoff_record(p)):  # B2a
@@ -3586,20 +3625,22 @@ class _Shell:
             return deny(dev_command_reason(p, verb), key="dev-command-holder")
         if env_file_kind(p, lp) and self.keys:
             return deny(_settings_reason(p, self.keys), key="settings-env")
-        return self.settings_write(t, cwd, text, settings) if verb in ("write", "link") else None
+        return self.settings_write(t, cwd, text, settings, mode) if verb in ("write", "link") else None
 
-    def targets(self, ts, cwd, verb="write", holds=False, track=True, text=None, settings="all"):
+    def targets(self, ts, cwd, verb="write", holds=False, track=True, text=None, settings="all", mode="truncate"):
         for t in ts:
-            v = self.target(t, cwd, verb, holds, track, text, settings)
+            v = self.target(t, cwd, verb, holds, track, text, settings, mode)
             if v:
                 return v
         return None
 
-    def settings_write(self, t, cwd, text, settings="all"):
+    def settings_write(self, t, cwd, text, settings="all", mode="truncate"):
         """A write to an agent settings file (agent_settings: by the path as written, as the system resolves it, or
         cleaned) is judged by the texts it writes, as Write is (settings_off), and, since an append keeps the file's
         text, by the file's text with it; a write whose text the command does not show is refused. A target the guard
         cannot resolve counts when its text names a settings file (or hides its name and writes devkit off).
+        `mode`: "truncate" (`>`, tee) replaces the file's text, "append" (`>>`, tee -a) and "overwrite" (`<>`) keep
+        it, and "keep" (touch, git add, a formatter's --check) writes no text into the file.
         `settings`: "all" for a word that is a path (a redirect, a copy's target); "word" for an argument of a program
         the guard does not know, which may be a message: a word with a space counts only when its folder exists, and
         an unresolved one never by the name it holds; "text" for an argument that is text unless it is a real path
@@ -3619,12 +3660,14 @@ class _Shell:
             if not named and not (hidden and text):
                 return None
         where = hit or t
+        if mode == "keep":
+            return None
         if text is None:
             return deny(SETTINGS_UNSEEN_REASON.format(what=_code(core.tilde(str(where)))), key="settings-unseen")
         toml = hit is None or hit.name.casefold().endswith(".toml")
-        now = _read_small(hit, 1 << 20) if hit is not None else ""
+        now = _read_small(hit, 1 << 20) if hit is not None and mode != "truncate" else ""
         # an earlier write of this command, then this one, can spell what neither does alone (`> f; >> f`)
-        before = self.written.get(str(where), [""])
+        before = [""] if mode == "truncate" else self.written.get(str(where), [""])
         texts = list(dict.fromkeys(b + w for b in before for w in text))
         if len(texts) > 64:  # too many readings to judge: refused as unseen
             return deny(SETTINGS_UNSEEN_REASON.format(what=_code(core.tilde(str(where)))), key="settings-readings")
@@ -3637,7 +3680,8 @@ class _Shell:
         return None
 
     def run(self):
-        segs = split_commands(self.cmd)
+        modes = []  # how each segment's redirects open their files (truncate, append, overwrite)
+        segs = split_commands(self.cmd, modes=modes)
         if segs is None:
             if self.mentions and re.search(r">|\b(tee|cp|mv|rm|ln|sed|python|perl|ruby|node|dd|install)\b", self.cmd):
                 return deny("This command names devkit's state, configuration or install, writes files, and the guard "
@@ -3660,13 +3704,17 @@ class _Shell:
             argv0, clobber, k = list(argv0), [], 0
             while k < len(argv0):  # `>|` reaches argv as a token; the next token is its target
                 if argv0[k] in (">|", ">>|"):
-                    clobber.append(argv0[k + 1] if k + 1 < len(argv0) else "")
+                    clobber.append((argv0[k + 1] if k + 1 < len(argv0) else "",
+                                    "append" if argv0[k] == ">>|" else "truncate"))
                     del argv0[k:k + 2]
                     continue
                 k += 1
-            v = self.targets(list(redirs) + clobber, cwd, text=outs[seg])
-            if v:
-                return v
+            opened = modes[seg] if seg < len(modes) else []
+            # every redirect is judged; one whose mode is unknown keeps the file's text, the stricter reading
+            for t, mode in [(r, opened[i] if i < len(opened) else "append") for i, r in enumerate(redirs)] + clobber:
+                v = self.target(t, cwd, text=outs[seg], mode=mode)
+                if v:
+                    return v
             self.stdin = stdins[seg]
             prefix = argv0[:len(argv0) - len(_strip_prefix(argv0))]
             assigns = [a.split("=", 1)[1] for a in prefix if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", a)]
@@ -3845,7 +3893,9 @@ class _Shell:
             return self.copy(name, args, cwd)
         if name in _CREATORS:  # tee writes its input; touch, mkdir and mkfifo write no text; truncate cuts it
             text = self.stdin if name == "tee" else None if name == "truncate" else [""]
-            return self.targets(_candidates(args), cwd, text=text)
+            appends = any(a == "--append" or re.fullmatch(r"-[aip]*a[aip]*", a) for a in args)
+            mode = ("append" if appends else "truncate") if name in ("tee", "truncate") else "keep"
+            return self.targets(_candidates(args), cwd, text=text, mode=mode)
         if name in ("ln", "gln"):  # a link at a settings file, or to one, is a way to write it
             v = self.targets(_candidates(args), cwd, "link", track=False)
             if v:
@@ -3874,13 +3924,14 @@ class _Shell:
         # anything else (editors, sqlite3, git, curl, tar, …) may write the paths it is given; a git command that
         # rewrites no work-tree file (diff, log, add, commit) writes no text into an agent settings file it names
         inside = is_protected(Path(cwd)) if cwd and str(cwd) != str(UNKNOWN) else False
-        reads = name == "git" and _git_split(argv)[1] not in _GIT_TREE_WRITES
+        reads = _git_text_free(argv) if name == "git" else _check_only(args)
         words = [c for c in _candidates(args) if inside or _pathlike(c)]
         if name == "gh":  # its words are titles and bodies, except the file a download writes (-O, --output)
             outs = _dev_values(args, ("-O", "--output"))
             v = self.targets(outs, cwd, text=None)
             return v or self.targets([w for w in words if w not in outs], cwd, text=None, settings="text")
-        return self.targets(words, cwd, text=[""] if reads else None, settings="word")
+        return self.targets(words, cwd, text=[""] if reads else None, settings="word", mode="keep" if reads else
+                            "truncate")
 
     def git_handoff(self, argv, cwd):
         """B2a: a git command that rewrites files in the handoff repository (a checkout, reset or merge can bring back
@@ -6269,7 +6320,7 @@ class _ScratchShell(_Shell):
         inner.exported = self.exported | set(names)  # what the parent or the program exports reaches the nested line
         return inner
 
-    def target(self, t, cwd, verb="write", holds=False, track=True, text=None, settings="all"):
+    def target(self, t, cwd, verb="write", holds=False, track=True, text=None, settings="all", mode="truncate"):
         p = resolve(t, cwd)
         why = scratch_refusal(p, self.member, holds) if p != UNKNOWN else None
         return deny(why, key="scratch") if why else None

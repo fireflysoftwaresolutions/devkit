@@ -205,6 +205,24 @@ class ShellWritesOnAgentSettings(unittest.TestCase):
             ("dev audit export --out=.codex/config.toml", "dev audit export --out=audit.jsonl"),
         ])
 
+    def test_index_only_git_commands_and_check_flags_write_no_text(self):
+        self.pairs([
+            ("git restore .claude/settings.json", "git restore --staged .claude/settings.json"),
+            ("git restore --staged --worktree .claude/settings.json", "git restore -S .claude/settings.json"),
+            ("git rm .claude/settings.json", "git rm --cached .claude/settings.json"),
+            ("npx prettier --write .claude/settings.json", "npx prettier --check .claude/settings.json"),
+        ])
+
+    def test_a_truncating_write_replaces_the_files_text_and_only_an_append_keeps_it(self):
+        # the file already turns hooks off: an append keeps that text, a `>` (the repair) and touch do not add to it
+        (Path(self.cwd) / ".codex" / "config.toml").write_text("[features]\nhooks = false\n")
+        self.pairs([
+            ("printf 'model = 1\\n' >> .codex/config.toml", "printf 'model = 1\\n' > .codex/config.toml"),
+            ("tee -a .codex/config.toml <<< 'model = 1'", "tee .codex/config.toml <<< 'model = 1'"),
+            ("echo 'model = 1' >> .codex/config.toml", "touch .codex/config.toml"),
+            ("echo 'model = 1' >> .codex/config.toml", "git add .codex/config.toml"),
+        ])
+
     def test_reading_the_settings_files_stays_allowed(self):
         for cmd in ("cat .codex/config.toml", "grep -n hooks .claude/settings.json", "sed -n 1p .codex/config.toml",
                     "cat .codex/config.toml > /dev/null", "git log -p .claude/settings.json",
