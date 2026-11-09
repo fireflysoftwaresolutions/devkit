@@ -7,7 +7,9 @@ virtualenv (Homebrew python3 or the system /usr/bin/python3).
 """
 from __future__ import annotations
 
+import contextlib
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -15,6 +17,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -834,13 +837,94 @@ def replace_text(path, text: str) -> None:
 def write_if_changed(path: Path, text: str) -> bool:
     """Write `text` to `path` unless it already holds it (replace_text). -> whether it wrote. Safe while other
     processes write the same file: the last rename wins whole. A caller that builds `text` from what it read (a
-    read-modify-write) holds the lock its writers share around both."""
+    read-modify-write) holds the file's lock around both (file_lock, or the lock its writers share)."""
     path = Path(path)
     if path.exists() and path.read_text() == text:
         return False
     path.parent.mkdir(parents=True, exist_ok=True)
     replace_text(path, text)
     return True
+
+
+_FILE_LOCKS = threading.local()  # per thread: {real path: depth} of the file locks it holds
+
+
+class _LockWait(Exception):
+    """The timer of _flock_within ran out."""
+
+
+def _flock_within(fd: int, wait: float) -> bool:
+    """Take an exclusive flock on `fd` within `wait` seconds. -> whether it is held. On the main thread it waits in
+    the kernel (a blocking flock, ended by a SIGALRM timer), where a waiter gets the lock when it is released, even
+    from a process that takes it again at once; polling would rarely catch that moment. Other threads, which cannot
+    take signals, poll."""
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except BlockingIOError:
+        pass
+    if threading.current_thread() is not threading.main_thread() or wait <= 0:
+        deadline = time.monotonic() + wait
+        while time.monotonic() < deadline:
+            time.sleep(0.002)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return True
+            except BlockingIOError:
+                pass
+        return False
+    import signal
+
+    def ran_out(signum, frame):
+        raise _LockWait()
+
+    before = signal.signal(signal.SIGALRM, ran_out)
+    started = time.monotonic()
+    pending = signal.setitimer(signal.ITIMER_REAL, wait)[0]  # a timer the caller had set: restored below
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        return True
+    except _LockWait:
+        return False
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, before)
+        if pending:
+            signal.setitimer(signal.ITIMER_REAL, max(pending - (time.monotonic() - started), 0.001))
+
+
+@contextlib.contextmanager
+def file_lock(path, wait: float = 30.0):
+    """This Mac's lock on one file, held across a read-modify-write so that another devkit process changing the same
+    file waits for it instead of writing over it. An advisory lock (flock) on STATE/locks/files/<hash of the path>,
+    released by the system if the process dies; reentrant within a thread. -> whether it is held: False when another
+    process kept it for `wait` seconds."""
+    key = os.path.realpath(str(path))
+    held = getattr(_FILE_LOCKS, "held", None)
+    if held is None:
+        held = _FILE_LOCKS.held = {}
+    if held.get(key):
+        held[key] += 1
+        try:
+            yield True
+        finally:
+            held[key] -= 1
+        return
+    lock = STATE / "locks" / "files" / f"{hashlib.sha256(key.encode()).hexdigest()[:24]}.lock"
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(lock), os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        if not _flock_within(fd, wait):
+            yield False
+            return
+        held[key] = 1
+        try:
+            yield True
+        finally:
+            held.pop(key, None)
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
 
 
 # --------------------------------------------------------------------------- the pinned install (spec C10)

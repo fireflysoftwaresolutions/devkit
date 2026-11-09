@@ -336,7 +336,6 @@ class WorkItemLocks(Shared):
 # --------------------------------------------------------------------------- plans
 
 class Plans(Shared):
-    @unittest.expectedFailure  # open defect B-g3dzphv2ihz: no lock between the lost-line check and the rename
     def test_sessions_revising_one_plan_at_once_lose_no_revision(self):
         # Four sessions run `dev plan revise` on the same plan in the same second, round after round (up to ten,
         # stopping at the first loss): every revision a session was told succeeded is in the plan's changelog, each

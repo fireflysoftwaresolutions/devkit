@@ -21,9 +21,7 @@ import hashlib
 import json
 import os
 import re
-import secrets
 import socket
-import stat
 import time
 from collections import Counter
 from pathlib import Path
@@ -234,40 +232,50 @@ def lost_lines(before: str, after: str, edited=()) -> list:
 
 
 def _replace(path: Path, text: str) -> None:
-    """Write `text` to a new file in the same folder, then swap it in (os.replace): a reader sees the old record or
-    the new one, never part of one. The temporary name ends in `.tmp`, which the handoff repository ignores."""
-    tmp = path.with_name(f".{path.name}.{secrets.token_hex(4)}.tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)  # the umask applies, as to a plain write
-    try:
-        with os.fdopen(fd, "w") as fh:
-            fh.write(text)
-            fh.flush()
-            os.fsync(fh.fileno())
-        try:
-            os.chmod(tmp, stat.S_IMODE(path.stat().st_mode))  # keep the record's own permissions
-        except FileNotFoundError:
-            pass
-        os.replace(tmp, path)
-    except BaseException:
-        try:
-            tmp.unlink()
-        except OSError:
-            pass
-        raise
+    """Write `text` to a new file in the same folder, then swap it in (core.replace_text): a reader sees the old
+    record or the new one, never part of one."""
+    core.replace_text(path, text)
+
+
+RECORD_WAIT = 30  # seconds a write waits for another process's write of the same file on this Mac
+
+
+class RecordBusyError(RecordLossError):
+    """Another devkit process held the record's lock for RECORD_WAIT seconds: nothing was written."""
+
+    def __init__(self, path, wait):
+        self.path, self.lost = Path(path), []
+        ValueError.__init__(self, f"refused to write {path}: another devkit process on this Mac kept it locked for "
+                                  f"{wait:.0f} s. Nothing was written; run the command again.")
+
+
+@contextlib.contextmanager
+def record_lock(path, wait: float = RECORD_WAIT):
+    """Hold this Mac's lock on a shared file (a record, the month's session log) across a read-modify-write: another
+    devkit process that writes the same file waits, then reads what this one wrote. Reentrant; write_record and the
+    session log writers take it themselves. Raises RecordBusyError after `wait` seconds."""
+    with core.file_lock(path, wait) as got:
+        if not got:
+            raise RecordBusyError(path, wait)
+        yield
 
 
 def write_record(path: Path, text: str, edited=()) -> None:
     """Write a record file, but refuse (RecordLossError, the file unchanged) when the text would drop lines of the
-    version on disk that this change does not edit: a misread record must stop the command, never shrink."""
+    version on disk that this change does not edit: a misread record must stop the command, never shrink. The read,
+    the check and the rename hold the record's lock (record_lock), so a write that another process made after this
+    one's caller read the record is seen by the check and refused, never overwritten: a caller is never told a write
+    succeeded that the record then lost. A caller that holds record_lock from its own read takes turns instead."""
     path = Path(path)
-    try:
-        before = path.read_text()
-    except FileNotFoundError:
-        before = ""
-    lost = lost_lines(before, text, edited)
-    if lost:
-        raise RecordLossError(path, lost)
-    _replace(path, text)
+    with record_lock(path):
+        try:
+            before = path.read_text()
+        except FileNotFoundError:
+            before = ""
+        lost = lost_lines(before, text, edited)
+        if lost:
+            raise RecordLossError(path, lost)
+        _replace(path, text)
 
 
 def parse(text: str) -> dict:
@@ -915,7 +923,9 @@ def _push_change(path: Path, change, what: str, must_reach: bool) -> dict:
     """Apply `change` to the item at `path`, commit it and push it now. `change(item)` checks the item as it is and
     changes it (ValueError when it may not) -> the commit message. When another Mac pushed a change to the item
     first and the two cannot be merged, the item is read again as the remote has it and `change` applied again, so
-    its checks run on the remote's version: a lock taken there first refuses this one. `must_reach`: raise when the
+    its checks run on the remote's version: a lock taken there first refuses this one. On this Mac the read, the
+    change and the commit hold the item's lock (record_lock), so two sessions changing it at once take turns and the
+    second one's checks see the first one's change. `must_reach`: raise when the
     change is not on the remote after three tries (it stays committed here, and `dev sync` pushes it later); without
     a remote the commit is the whole change. -> the item."""
     remote, rel = _pushes(), str(Path(path).relative_to(HANDOFF))
@@ -923,12 +933,13 @@ def _push_change(path: Path, change, what: str, must_reach: bool) -> dict:
     for attempt in range(3):
         if remote and attempt == 0:
             pull(retake=[rel])
-        it = load(path)
-        if entry is None or not _has_entry(it, entry):
-            message = change(it)
-            entry = it["changelog"][0]
-            write_record(path, render(it))
-            _commit([path], message, push=False)
+        with record_lock(path):  # another session of this Mac changing the item waits, then checks this change
+            it = load(path)
+            if entry is None or not _has_entry(it, entry):
+                message = change(it)
+                entry = it["changelog"][0]
+                write_record(path, render(it))
+                _commit([path], message, push=False)
         if not remote:
             return it
         ok, problem = push_now(retake=[rel])

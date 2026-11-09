@@ -95,5 +95,67 @@ class WriteIfChangedTests(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(f.stat().st_mode), 0o600)
 
 
+# A writer of a record: reads it, adds a changelog entry of its own (as `dev plan revise` and `dev task` do) and
+# writes it back, `rounds` times; with locked=True it holds the record's lock across its read. -> the entries it was
+# told were written, as JSON.
+RECORD_WRITER = """
+    import json
+    from devkit import work
+    a = {{"user": "{who}", "host": "mac", "agent": "claude", "session": "{who}"}}
+    path, told = Path({path!r}), []
+    for i in range({rounds}):
+        try:
+            with (work.record_lock(path) if {locked} else __import__("contextlib").nullcontext()):
+                it = work.parse(path.read_text())
+                work._touch(it, a, "edit", why=f"{who} {{i}}")
+                work.write_record(path, work.render(it))
+            told.append(f"{who} {{i}}")
+        except work.RecordLossError:
+            pass
+    print(json.dumps(told))
+    """
+
+
+class WriteRecordTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = Path(self.tmp.name)
+        self.path = self.dir / "T-1.md"
+        from devkit import work
+        it = {"meta": {"id": "T-1", "type": "task", "title": "Export invoices", "status": "todo", "version": 1},
+              "body": "", "changelog": ["v1 · 2026-11-09T10:00:00Z · ana@mac (claude:ana) · create"]}
+        self.path.write_text(work.render(it))
+
+    def entries(self) -> list:
+        import re
+        return re.findall(r"(?m)^- v(\d+) · .* — why: (\w+ \d+)$", self.path.read_text())
+
+    def test_writers_racing_on_one_record_are_never_told_a_write_succeeded_that_the_record_lost(self):
+        # Four processes each change the record 40 times at once, every one from the version it read: a write the
+        # record cannot keep is refused (RecordLossError); every write reported as done is in the record, each with a
+        # version of its own.
+        import json
+        out = together([RECORD_WRITER.format(who=w, path=str(self.path), rounds=40, locked=False)
+                        for w in ("ana", "bob", "cid", "dee")], self.dir)
+        told = sorted(e for o in out for e in json.loads(o))
+        kept = self.entries()
+        self.assertEqual(told, sorted(why for _, why in kept), "told it was written, but the record lost it")
+        versions = [v for v, _ in kept]
+        self.assertEqual(len(versions), len(set(versions)), "two writes share a version")
+
+    def test_writers_holding_the_records_lock_across_their_read_all_succeed_in_turn(self):
+        # The same race, each writer holding the record's lock from its read to its write: they take turns, none is
+        # refused, and the versions run without a gap.
+        import json
+        out = together([RECORD_WRITER.format(who=w, path=str(self.path), rounds=25, locked=True)
+                        for w in ("ana", "bob", "cid")], self.dir)
+        told = [e for o in out for e in json.loads(o)]
+        self.assertEqual(len(told), 75)
+        kept = self.entries()
+        self.assertEqual(sorted(told), sorted(why for _, why in kept))
+        self.assertEqual(sorted(int(v) for v, _ in kept), list(range(2, 77)))
+
+
 if __name__ == "__main__":
     unittest.main()
