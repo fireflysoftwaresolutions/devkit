@@ -378,8 +378,9 @@ Sleep also tidies devkit's own records, so local state does not grow forever: ti
 progress runs older than 14 days, session records and instruction-load logs older than 30 days, CI status caches older
 than seven days, the presence files of machines quiet for 14 days, the hooks log once it passes 5 MB (the newest 1 MB
 is kept), `dev rm` manifest entries older than 90 days, and the [bug registry's](bug-registry.md#local-files) local
-records (occurrences after 90 days, session ledgers after 7, crash files after 30). Only devkit's records and caches
-are trimmed, never your files.
+records (occurrences after 90 days, session ledgers after 7, crash files after 30), and the records of Codex commands
+still waiting for their rollout record after a day, with their locks. Only devkit's records and caches are trimmed,
+never your files.
 
 ## When devkit itself is the problem
 

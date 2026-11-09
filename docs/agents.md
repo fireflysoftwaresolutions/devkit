@@ -265,13 +265,14 @@ devkit works per turn and per tool call. The consistency checks compare this tab
 [Developing devkit › Consistency checks](development.md#consistency-checks)).
 
 **How devkit reads a Codex turn.** Codex CLI 0.167 runs every shell command and patch inside one tool, `exec`, whose
-input is a short JavaScript program. devkit reads the commands and patches that program names as written, and the
-commands Codex records as it runs them: its CommandExecution records in the rollout, which keep each command as it
-ran and its folder. The required-skill rules, the Stop hook's checks, and the CI-wait check therefore see each command
+input is a short JavaScript program. devkit reads the calls that program's code makes with literal text (a call in a
+comment or a string does not count), and the commands Codex records as it runs them: its CommandExecution records in
+the rollout, which keep each command as it ran and its folder. The required-skill rules, the Stop hook's checks, and the CI-wait check therefore see each command
 once, also one the program builds as it runs. The Stop hook reads the turn's final message from its payload, so the
 status block check and every end-of-turn send-back apply to Codex turns as they do to Claude Code's. Each hook takes
 its agent from its own arguments and its session from its payload, so a Codex started from a Claude Code terminal or
-from a crew member's shell records its calls as its own, never as that session's or that lane's.
+from a crew member's shell records its calls as its own, never as that session's or that lane's. A Codex subagent's
+rollout opens with a copy of its parent's history; the crew gates skip that copy and judge only what the subagent did.
 
 **A failed Codex command.** Codex has no PostToolUseFailure, ConfigChange, or InstructionsLoaded event, so a failed
 Codex command reaches PostToolUse, whose result is the command's output alone. devkit reads the exit code from the
@@ -279,7 +280,11 @@ command's CommandExecution record in the rollout (the record whose id is the cal
 PostToolUseFailure path for a failed command. When that record is not written yet, the call counts as neither a
 success nor a failure until a later PostToolUse or Stop of the same agent finds it. A failure found at Stop counts
 toward the [patch-loop stop](lessons.md#recall), and its root-cause paragraph comes with that agent's next identical
-failure. A record still missing after 10 minutes leaves the call out of the ledger, with a line in `hooks.log`.
+failure. A record still missing after 10 minutes leaves the call out of the ledger, with a line in `hooks.log`. While a
+call waits, devkit keeps only what it needs to settle it (the error's key, devkit's own marker lines, the lessons the
+output recalled, and the command with its secrets redacted), never the command's output, and `dev sleep` removes a
+wait older than a day. A Codex older than 0.167 writes no CommandExecution records, so devkit does not wait for one:
+its commands count as successes, as before.
 
 **Codex crew launches** are not recorded yet: no PreToolUse fires for `spawn_agent`, so crew slots, the depth limit,
 and the binding of a launch to its step do not apply to a Codex launch.
