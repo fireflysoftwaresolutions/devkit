@@ -7,17 +7,21 @@ A hook knows who calls from its own payload: Claude Code and Codex pass `agent_i
 member, and nothing for the main session (from_hook). A `dev` command has no payload. It takes, in order, the first
 rule that applies (speaker):
 
-1. no agent session runs it (progress.resolve_session finds none): the developer's own shell, `human`;
+1. no agent session runs it (progress.resolve_session finds none, or devkit read the process's parents, none is a
+   session's, and it carries no agent's marker, as in the developer's own terminal beside a session that just
+   worked in the repository): the developer's own shell, `human`;
 2. DEVKIT_FROM_AGENT=<agent id>, which the PreToolUse hook puts in front of a member's lane calls: that lane;
 3. DEVKIT_SPEAKER=main, which the PreToolUse hook puts in front of the main session's own `dev watch` and
-   `dev session` calls: the main session. Variables only narrow: when 2 also holds, the lane wins, and so does a
-   member whose own open call typed exactly this command (a member the guard should have stopped setting it);
+   `dev session` calls: the main session, in a session not guessed by recency. Variables only narrow: when 2 also
+   holds, the lane wins, and so does a member whose own open call typed exactly this command (a member the guard
+   should have stopped setting it);
 4. the call ledger: an open call of a member whose text holds this command makes it that member's (the most
    restrictive one, as progress.caller decides); open calls of main's only, in a session not guessed by recency,
    make it main's;
 5. no crew member of the session's run may still be speaking (no running lane that has not ended, no launch whose
-   agent has not started): the main session, which nobody else could be;
-6. otherwise devkit does not know (`unknown`), and a command that needs to know refuses.
+   agent has not started), in a session not guessed by recency: the main session, which nobody else could be;
+6. otherwise devkit does not know (`unknown`), and a command that needs to know refuses. A session found only by
+   recency (an agent's command whose process no session record holds) always ends here or at a member.
 
 A wait (consumer) reads the ledger more strictly: a call counts only when it typed this very `dev` command, nothing
 more, so the tech lead's `dev watch --wait` never becomes a member's because the member's open
@@ -149,11 +153,12 @@ def _find(cwd=None, argv=None, now=None, exact: bool = False, settle: bool = Tru
         return _Found(Speaker(agent, sid, lane_, how_, verified), agent, how, calls, ledger)
     if lane:
         return found(lane, "stamped", True)
-    if os.environ.get(SPEAKER_VAR) == "main" and not any(c.get("caller") != "main" for c in typed):
+    guessed = how == "recency"  # a session devkit only guessed never makes its caller the tech lead (rules 3 to 5)
+    if os.environ.get(SPEAKER_VAR) == "main" and not guessed and not any(c.get("caller") != "main" for c in typed):
         return found("main", "stamped", verified_main)  # a member's own call of this very command beats the stamp
     if ledger:
         return found(ledger, "ledger", verified_main if ledger == "main" else True)
-    if settle and not _may_speak(progress, agent, sid, run, now):
+    if settle and not guessed and not _may_speak(progress, agent, sid, run, now):
         return found("main", "sole", verified_main)
     return found("", "unknown", False)
 

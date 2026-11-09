@@ -6,9 +6,9 @@
 # change.
 #
 # - Only the developer settles an escalation: a line whose prompt the session's own transcript does not show as typed
-#   by the developer settles nothing, nor does a prompt that an agent wrote for a nested agent session (`claude -p`
-#   started by another session), nor a Codex prompt while devkit reads no Codex transcript (the rule typed grants
-#   already follow).
+#   by the developer settles nothing, nor does a prompt of a nested agent session (`claude -p` or `codex exec` started
+#   by another session, whatever surface it inherited), nor a Codex prompt while devkit reads no Codex transcript (the
+#   rule typed grants already follow).
 # - A session devkit only guessed by recency never speaks as its tech lead: not to other sessions, not for its wait.
 # - The hourly sweep never deletes a claim that another session took after the sweep looked at it.
 # - Another session's words reach this one with no invisible characters (Unicode tag characters, variation
@@ -55,12 +55,10 @@ class SettleOnlyByTheDeveloperTests(PeerHookCase):
         return peers.escalate(sender(CLAUDE_A), "@0199a213", "Which project releases 26.11.9 first?",
                               ["A: devkit first", "B: kit-consulting first"], recommend="A")["id"]
 
-    # Open defect: settle_from_prompt trusts every prompt of a session that progress.headless does not flag, and
-    # headless reads only the session's surface, which comes from CLAUDE_CODE_ENTRYPOINT. Claude Code rewrites an
-    # inherited `cli` to `sdk-cli` for -p, but keeps an inherited `claude-desktop` or `claude-vscode` and any value set
-    # on the command line, and the guard lets a main session start `claude -p "settle E-…: A"`. Expected rule: a session
-    # whose agent process runs under another session's agent process is nested and settles nothing.
-    @unittest.expectedFailure
+    # A session's surface comes from CLAUDE_CODE_ENTRYPOINT: Claude Code rewrites an inherited `cli` to `sdk-cli` for
+    # -p, but keeps an inherited `claude-desktop` or `claude-vscode` and any value set on the command line, and the
+    # guard lets a main session start `claude -p "settle E-…: A"`. A session whose agent process runs under another
+    # session's agent process is nested (progress.headless), whatever its surface, and settles nothing.
     def test_nested_session_prompt_settles_nothing(self):
         eid = self.escalation()
         self.session("claude", NESTED, pid=99500, surface="VS Code")  # the entrypoint it inherited from its parent
@@ -159,19 +157,18 @@ class RecencyGuessTests(PeerCase):
         self.three_sessions()
         saved = {k: os.environ.pop(k) for k in IDENTITY_VARS if k in os.environ}
         self.addCleanup(os.environ.update, saved)
-        for p in (mock.patch.object(pg, "_ancestor_pids", lambda: [424242, 1]),  # no agent session among its parents
+        for p in (mock.patch.object(pg, "_ancestor_pids", lambda: [424242, 1]),  # no session's process among them
                   mock.patch.object(pg.core, "gitout", lambda *a, **k: str(self.repo)),
                   # an agent's process (Claude Code's marker): without one it is the developer's own terminal
                   mock.patch.dict(os.environ, {"CLAUDECODE": "1"})):
             p.start()
             self.addCleanup(p.stop)
 
-    # Open defect: identity._find applies the main-session stamp (rule 3) and "nobody else could be speaking" (rule 5)
-    # to a session that progress.resolve_session only guessed by recency, while the call ledger (rule 4) already
-    # refuses that guess. A process with no agent session among its parents, such as the developer's own terminal or a
-    # detached command, then sends, claims and escalates as the newest agent session of the repository, and its
-    # `dev watch --wait` takes that session's events. Expected: the guess is `unknown`, and require and consumer refuse.
-    @unittest.expectedFailure
+    # A session progress.resolve_session only guessed by recency (an agent's command whose process no session record
+    # holds) never speaks as its tech lead: identity._find refuses the guess for the main-session stamp (rule 3), the
+    # call ledger (rule 4) and "nobody else could be speaking" (rule 5), so it never sends, claims or escalates as the
+    # newest agent session of the repository, and its `dev watch --wait` never takes that session's events. The guess
+    # is `unknown`, and require and consumer refuse.
     def test_session_guessed_by_recency_never_speaks_as_main(self):
         args = ["session", "tell", "all", "hello"]
         self.assertEqual(pg.resolve_session(str(self.repo), args)[2], "recency")

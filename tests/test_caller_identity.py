@@ -211,18 +211,36 @@ class RunTests(CallerCase):
         self.assertIsNone(self.run_())
 
     def test_a_session_found_only_by_recency_is_not_morpheus(self):
-        # no parent process and no DEVKIT_SESSION: the session is a guess, so a call of main's does not vouch
+        # an agent's command (its marker) with no parent process and no DEVKIT_SESSION: the session is a guess, so a
+        # call of main's does not vouch
         top = str(self.root)
         (pg.SESSIONS / "claude-s1.json").write_text(json.dumps({"agent": "claude", "session": "s1", "top": top,
                                                                 "started": time.time()}))
         self.plan_with_tank()
         self.call("dev crew decide D1 yes")
         os.environ.pop("DEVKIT_SESSION")
-        with mock.patch.object(pg.core, "gitout", lambda *a, **k: top):  # this shell's repository is the session's
+        with mock.patch.object(pg.core, "gitout", lambda *a, **k: top), \
+                mock.patch.dict(os.environ, {"CLAUDECODE": "1"}):  # this shell's repository is the session's
             self.assertEqual(pg.resolve_session()[2], "recency")
             rc, out = self.dev("crew", "decide", "D1", "yes")
         self.assertEqual(rc, 2)
         self.assertIn("only the tech lead", out)
+        self.assertEqual(self.decision()["state"], "pending")
+
+    def test_the_developers_terminal_never_acts_on_the_newest_sessions_run(self):
+        # the same command typed in the developer's terminal (a shell for a parent, no agent's marker) beside that
+        # session: it acts for the developer's own shell, never on the session's run
+        top = str(self.root)
+        (pg.SESSIONS / "claude-s1.json").write_text(json.dumps({"agent": "claude", "session": "s1", "top": top,
+                                                                "started": time.time()}))
+        self.plan_with_tank()
+        os.environ.pop("DEVKIT_SESSION")
+        with mock.patch.object(pg.core, "gitout", lambda *a, **k: top), \
+                mock.patch.dict(os.environ, {k: "" for k in pg.core.AGENT_MARKERS}), \
+                mock.patch.object(pg, "_ancestor_pids", lambda: [424242, 1]):
+            self.assertEqual(pg.resolve_session(), ("human", f"shell-{os.getppid()}", "shell"))
+            rc, out = self.dev("crew", "decide", "D1", "yes")
+        self.assertEqual(rc, 2, out)
         self.assertEqual(self.decision()["state"], "pending")
 
     def test_two_sessions_in_one_repository_each_update_their_own_run(self):
@@ -401,11 +419,15 @@ class CallerShapeTests(CallerCase):
         top = str(self.root)
         (pg.SESSIONS / "claude-s1.json").write_text(json.dumps({"agent": "claude", "session": "s1", "top": top,
                                                                 "started": time.time()}))
+        unmarked = {k: "" for k in pg.core.AGENT_MARKERS}
         with mock.patch.object(pg.core, "gitout", lambda *a, **k: top):
             row("a session guessed by recency", ("claude", "s1", "recency", "unknown", 1),
-                calls=[(decide, None, "s1", "claude")], env={"DEVKIT_SESSION": ""})
+                calls=[(decide, None, "s1", "claude")], env={"DEVKIT_SESSION": "", "CLAUDECODE": "1"})
             row("a member's call in a session guessed by recency", ("claude", "s1", "recency", "a_tank", 1),
-                calls=[(decide, "a_tank", "s1", "claude")], env={"DEVKIT_SESSION": ""})
+                calls=[(decide, "a_tank", "s1", "claude")], env={"DEVKIT_SESSION": "", "CLAUDECODE": "1"})
+            with mock.patch.object(pg, "_ancestor_pids", lambda: [424242, 1]):  # a shell, no session's process
+                row("the developer's terminal beside that session",
+                    ("human", f"shell-{os.getppid()}", "shell", "human", 0), env=unmarked)
 
     def test_a_lane_command_acts_as_the_member_its_call_or_its_mark_names(self):
         # Codex 0.167 passes agent_id to a spawned agent's hooks, so its ledger entries name the member too: a

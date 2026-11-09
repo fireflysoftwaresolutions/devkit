@@ -77,8 +77,14 @@ def resolve_session(cwd: str | None = None, argv=None):
               repository that no live process holds does: Claude Code gave the running conversation a new session id
               (a compaction), and the older record still holds the process until the new one registers it
     env       DEVKIT_SESSION, which Claude Code exports to the session's shells (no parent matched)
-    recency   the most recently active devkit session in the same repository (Codex without a recorded pid)
-    shell     none of these: a shell of the developer's, with a session of its own
+    recency   the most recently active devkit session in the same repository, for a process that carries an agent's
+              marker (core.AGENT_MARKERS) or whose parents devkit could not read (a detached command, whose parent is
+              launchd): a Codex thread whose process devkit never recorded, a detached command of a session. A guess:
+              it never makes the caller the tech lead (identity._find)
+    shell     none of these, or a process whose parents devkit read, none of them a session's process, with no
+              agent's marker in its environment (Claude Code and Codex mark every command they run): the developer's
+              own terminal, a shell of the developer's with a session of its own, however recently an agent session
+              worked in this repository
     `argv`: the command's arguments, default sys.argv[1:] (the ledger's match, as caller reads it)."""
     env = os.environ.get("DEVKIT_SESSION", "")
     args = [str(a) for a in (sys.argv[1:] if argv is None else argv)]
@@ -114,6 +120,8 @@ def resolve_session(cwd: str | None = None, argv=None):
     if ":" in env:
         agent, sid = env.split(":", 1)
         return agent, sid, "env"
+    if pids and not any(os.environ.get(k) for k in core.AGENT_MARKERS):  # the developer's own terminal
+        return "human", f"shell-{os.getppid()}", "shell"
     top = core.gitout(cwd, "rev-parse", "--show-toplevel") or cwd
     best = None
     for f in SESSIONS.glob("*.json") if SESSIONS.exists() else []:
@@ -209,7 +217,7 @@ def _ps() -> dict:
     return procs
 
 
-_ANCESTRY: dict = {}
+_ANCESTRY: dict = {}  # {this process's pid: {"chain": its parents' pids, "args": {parent pid: command line}}}
 
 
 def _ancestor_pids() -> list:
@@ -219,8 +227,47 @@ def _ancestor_pids() -> list:
         while pid > 1 and pid not in chain and len(chain) < 64:
             chain.append(pid)
             pid = procs.get(pid, (0, ""))[0]
-        _ANCESTRY[os.getpid()] = chain
-    return _ANCESTRY[os.getpid()]
+        _ANCESTRY[os.getpid()] = {"chain": chain, "args": {p: procs[p][1] for p in chain if p in procs}}
+    return _ANCESTRY[os.getpid()]["chain"]
+
+
+def _parents_of(pid: int):
+    """-> (the parents of process `pid`, nearest first, up to launchd; {parent pid: command line} of those whose
+    command line devkit read). From this process's own parents when `pid` is one of them, else from `ps` while `pid`
+    still runs (a process that ended has no parents left to read)."""
+    chain = _ancestor_pids()
+    if pid in chain:
+        return chain[chain.index(pid) + 1:], (_ANCESTRY.get(os.getpid()) or {}).get("args") or {}
+    if not _pid_running(pid):
+        return [], {}
+    procs, above, p = _ps(), [], pid
+    while p in procs and len(above) < 64:
+        p = procs[p][0]
+        if p <= 1 or p in above:
+            break
+        above.append(p)
+    return above, {p: procs[p][1] for p in above if p in procs}
+
+
+def nested(sess: dict) -> bool:
+    """Does this session's agent process run below another agent session's process? Then another session started it
+    (`claude -p`, `codex exec`, or any entrypoint set on a command line), whatever surface it recorded, and its
+    prompts are that session's text. A parent counts when another session's record holds its pid and it is an agent
+    process (core.is_agent_process), or devkit could not read its command line: a pid an ended session left behind
+    that now names a shell or a terminal is no session. Codex threads of one process share its pid, never a parent."""
+    pid = (sess or {}).get("pid")
+    if not isinstance(pid, int) or pid <= 1:
+        return False
+    above, args = _parents_of(pid)
+    cands = {p for p in above if p > 1 and (p not in args or core.is_agent_process(args[p]))}
+    if not cands:
+        return False
+    me = ((sess or {}).get("agent"), (sess or {}).get("session"))
+    for f in SESSIONS.glob("*.json") if SESSIONS.exists() else []:
+        s = core.read_json(f, {}) or {}
+        if isinstance(s, dict) and s.get("pid") in cands and (s.get("agent"), s.get("session")) != me:
+            return True
+    return False
 
 
 def agent_pid(procs: dict | None = None):
@@ -3365,8 +3412,12 @@ def _audit_refused(run, action: str, target: str, covers, session: str):
 
 
 def headless(sess: dict) -> bool:
-    """A session with nobody at the keyboard (`claude -p`, the SDK, `codex exec`, devkit's own headless calls)."""
-    return str((sess or {}).get("surface") or "") in HEADLESS_SURFACES or os.environ.get("DEVKIT_HEADLESS") == "1"
+    """A session with nobody at the keyboard (`claude -p`, the SDK, `codex exec`, devkit's own headless calls), or a
+    session another agent session started (nested), whatever surface it inherited: Claude Code rewrites an inherited
+    `cli` entrypoint to `sdk-cli` for `-p`, but keeps an inherited `claude-desktop` or `claude-vscode` and any value
+    set on the command line. None of its prompts, typed grants or answers is the developer's."""
+    return str((sess or {}).get("surface") or "") in HEADLESS_SURFACES or os.environ.get("DEVKIT_HEADLESS") == "1" \
+        or nested(sess)
 
 
 def preapproved(cls: str, target: str) -> bool:
