@@ -136,7 +136,7 @@ TIPS_KEPT = 20  # the newest tips of an embargoed branch the note keeps
 def note_text(text: str) -> str:
     """A note's text as devkit reads it: no byte-order mark, LF line endings. An editor that saves a BOM or CRLF must
     never turn the embargo list or the backup policy into "none" (B2a; the guard reads notes the same way)."""
-    return str(text or "").lstrip("﻿").replace("\r\n", "\n").replace("\r", "\n")
+    return str(text or "").lstrip(chr(0xFEFF)).replace("\r\n", "\n").replace("\r", "\n")
 
 
 def _note_meta(pid: str):
