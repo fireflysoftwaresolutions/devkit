@@ -71,7 +71,10 @@ class PeerCase(IdentityCase):
         return out.strip().splitlines()
 
 
-class DeliveryBehavior:
+class DeliveryTests(PeerCase):
+    # each behavior with Claude Code's shapes; CodexDeliveryTests runs every one again with Codex 0.167's
+    AGENT = "claude"
+
     def test_peer_question_wakes_wait(self):
         self.crew()
         msg = {}
@@ -216,7 +219,8 @@ class DeliveryBehavior:
         self.crew()
         pg.crew_ask("May I rename the column?", from_agent=self.member, now=self.t0)
         msg = self.post("question", "Is devkit 26.11.9 out yet?")
-        self.assertEqual(watch.mail(self.agent, self.sid, "main", only=["peer"]), f"{peers.FRAME_HEADER}\n{peers.frame(msg)}")
+        self.assertEqual(watch.mail(self.agent, self.sid, "main", only=["peer"]),
+                         f"{peers.FRAME_HEADER}\n{peers.frame(msg)}")
         self.assertEqual([ev["kind"] for ev in watch.pending(self.agent, self.sid)], ["question"])
 
     def cmd(self, a):
@@ -226,12 +230,25 @@ class DeliveryBehavior:
         return rc, out.getvalue()
 
 
-class ClaudeDeliveryTests(DeliveryBehavior, PeerCase):
-    AGENT = "claude"
-
-
-class CodexDeliveryTests(DeliveryBehavior, PeerCase):
+class CodexDeliveryTests(DeliveryTests):
     AGENT = "codex"
+
+
+class ClosedOutputTests(PeerCase):
+    # a wait whose reader is gone (`dev watch --wait 2>&1 | tail -4`, its tail stopped) must end, not go on taking
+    # events into a pipe nobody reads: a BrokenPipeError is an OSError, which the file-change function swallows
+    class Closed(io.StringIO):
+        def write(self, s):
+            raise BrokenPipeError(32, "Broken pipe")
+
+    def test_a_wait_whose_output_is_closed_ends_and_says_so_in_its_record(self):
+        self.crew()
+        self.world(lambda: pg.crew_ask("May I rename the column?", from_agent=self.member, now=self.clock.t))
+        with self.assertRaises(SystemExit) as e:
+            watch.wait(self.agent, self.sid, "main", 5, out=self.Closed(), clock=self.clock.time)
+        self.assertEqual(e.exception.code, watch.EXIT["timeout"])
+        self.assertEqual([(r["state"], r["last_event"]) for r in watch._records()],
+                         [("expired", "its output was closed")])
 
 
 class BoxFolderTests(unittest.TestCase):

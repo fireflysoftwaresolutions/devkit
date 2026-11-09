@@ -396,7 +396,8 @@ class CallerShapeTests(CallerCase):
         (pg.SESSIONS / "codex-t1.json").write_text(json.dumps({"agent": "codex", "session": "t1",
                                                                 "started": time.time()}))
         row("a Codex session", ("codex", "t1", "env", "unverified", 0),
-            calls=[(decide, "a_tank", "t1", "codex"), (decide, None, "t1", "codex")], env={"DEVKIT_SESSION": "codex:t1"})
+            calls=[(decide, "a_tank", "t1", "codex"), (decide, None, "t1", "codex")],
+            env={"DEVKIT_SESSION": "codex:t1"})
         top = str(self.root)
         (pg.SESSIONS / "claude-s1.json").write_text(json.dumps({"agent": "claude", "session": "s1", "top": top,
                                                                 "started": time.time()}))
@@ -426,6 +427,44 @@ class CallerShapeTests(CallerCase):
         self.call("dev progress step 'parser done'", aid="01a1d000-64c7-7ac1-81c6-ec8b852e1772", sid="t1",
                   agent="codex")
         self.assertEqual(lane({"DEVKIT_SESSION": "codex:t1"}), "01a1d000-64c7-7ac1-81c6-ec8b852e1772")
+
+
+class CodexThreadSessionTests(CallerCase):
+    # The Codex app runs several threads in one process: their records hold the same pid, and each thread's ledger
+    # may hold an open call that typed the same command (two foreground waits at once). The pid cannot tell them
+    # apart: CODEX_THREAD_ID, which Codex gives every command it runs, names the thread; without it, the thread whose
+    # repository the command runs in does.
+    def setUp(self):
+        super().setUp()
+        self.repos = {}
+        for sid, repo, age in (("x1", "api", 200), ("x2", "web", 100)):
+            top = self.root / repo
+            top.mkdir()
+            self.repos[sid] = str(top)
+            (pg.SESSIONS / f"codex-{sid}.json").write_text(json.dumps({
+                "agent": "codex", "session": sid, "pid": 4242, "started": time.time() - age, "top": str(top),
+                "cwd": str(top)}))
+            self.call("dev watch --wait --timeout 10", sid=sid, agent="codex")
+        for p in (mock.patch.object(pg, "_ancestor_pids", lambda: [9999, 4242, 1]),
+                  mock.patch.dict(os.environ, {"DEVKIT_SESSION": "", "CODEX_THREAD_ID": ""})):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def resolve(self, sid_of_cwd, thread=""):
+        with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": thread}):
+            return pg.resolve_session(self.repos[sid_of_cwd], ["watch", "--wait", "--timeout", "10"])
+
+    def test_the_thread_id_names_the_thread_among_one_process(self):
+        self.assertEqual(self.resolve("x1", thread="x1"), ("codex", "x1", "ancestry"))
+        self.assertEqual(self.resolve("x1", thread="x2"), ("codex", "x2", "ancestry"))  # a thread may cd elsewhere
+
+    def test_without_a_thread_id_the_threads_repository_decides(self):
+        self.assertEqual(self.resolve("x1"), ("codex", "x1", "ancestry"))
+        self.assertEqual(self.resolve("x2"), ("codex", "x2", "ancestry"))
+
+    def test_a_thread_id_of_no_session_here_narrows_nothing(self):
+        # a spawned agent's own thread id, or one this process does not run: the ledger and the repository decide
+        self.assertEqual(self.resolve("x1", thread="01a1d000-64c7-7ac1-81c6-ec8b852e1772"), ("codex", "x1", "ancestry"))
 
 
 class RewriteTests(CallerCase):

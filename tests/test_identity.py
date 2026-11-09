@@ -137,8 +137,9 @@ class IdentityCase(WatchCase):
         return next(r for r in watch._records() if r["id"] == rid)
 
 
-class SpeakerBehavior:
-    # each behavior, for the agent of the class it is mixed into
+class SpeakerTests(IdentityCase):
+    # each behavior with Claude Code's shapes; CodexSpeakerTests runs every one again with Codex 0.167's
+    AGENT = "claude"
 
     def test_member_wait_without_for_me_is_the_members(self):
         # B-g3di13i0nfx, as the kit-consulting session saw it: the tech lead's wait runs in the background while a
@@ -299,11 +300,7 @@ class SpeakerBehavior:
             identity.require(identity.Speaker(self.agent, self.sid, "", "unknown", False))
 
 
-class ClaudeSpeakerTests(SpeakerBehavior, IdentityCase):
-    AGENT = "claude"
-
-
-class CodexSpeakerTests(SpeakerBehavior, IdentityCase):
+class CodexSpeakerTests(SpeakerTests):
     AGENT = "codex"
 
 

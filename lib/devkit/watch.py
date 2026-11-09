@@ -59,6 +59,7 @@ CODEX_MIN = 10  # Codex has no background wake-up: the main session waits in the
 BATCH = 2.0  # seconds a burst of writes settles before the wait reads it
 POLL = 2.0  # seconds between two stats of the watched files, with kqueue or without
 HEARTBEAT = 60.0  # seconds between two reconciles of the session's run while it waits
+REGISTER_WAIT = 30.0  # seconds a new wait waits for another registration to finish (it lists, supersedes, writes)
 MAX_EVENTS = 20  # events one wake takes and prints; the rest waits for the next
 NOTICES_MAX = 20  # notices kept in a session record
 LINE_MAX = 300  # characters of a member's or CI's text in one line
@@ -504,6 +505,14 @@ def register(agent: str, sid: str, me: str, pid, timeout_min: float, now=None, s
     now = now or time.time()
     rid = re.sub(r"[^A-Za-z0-9_.-]+", "_", f"global-{agent}-{sid[:16]}-{me[:24]}-{pid}-{int(now)}-"
                                            f"{os.urandom(3).hex()}")[:200]
+    try:  # one registration at a time: two waits of one consumer that start together would each miss the other
+        with state.hold(LIVE / "register.json", wait=REGISTER_WAIT):
+            return _register(rid, agent, sid, me, pid, timeout_min, now, standby)
+    except state.StateBusy:
+        return _register(rid, agent, sid, me, pid, timeout_min, now, standby)  # audited by state; a wait never fails
+
+
+def _register(rid, agent, sid, me, pid, timeout_min, now, standby) -> str:
     for rec in _records():
         if _stale(rec, now):
             continue
@@ -691,6 +700,14 @@ def _ended(agent: str, sid: str) -> bool:
     return not s or bool(s.get("ended"))
 
 
+def _moved(agent: str, sid: str) -> str:
+    """The session id this conversation goes on under, when a compaction gave it a new one (its run moved there, or
+    the new record took its process), else "": a wait of the old id would wake nobody."""
+    from . import progress
+    s = state.read(progress.session_path(agent, sid)) or {}
+    return str(s.get("run_moved_to") or s.get("superseded_by") or "")
+
+
 def wait(agent: str, sid: str, me: str, timeout_min: float, only=None, out=None, clock=None, changes=None,
          standby: bool = False) -> int:
     """`dev watch --wait`: block until at least one event `me` must act on arrives for this session, print each once
@@ -702,10 +719,20 @@ def wait(agent: str, sid: str, me: str, timeout_min: float, only=None, out=None,
     from . import progress
     out = out or sys.stdout
     clock = clock or time.time
+    rid = ""
 
     def emit(line):
-        out.write(line + "\n")
-        out.flush()
+        try:
+            out.write(line + "\n")
+            out.flush()
+        except OSError:  # the reader of its output is gone (a pipe whose tail was stopped): nobody hears it any more
+            _update(rid, state="expired", ended=round(clock()), last_event="its output was closed")
+            if out is sys.stdout:
+                try:  # nothing more reaches the closed pipe, not even the interpreter's last flush
+                    os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+                except (OSError, ValueError):
+                    pass
+            raise SystemExit(EXIT["timeout"])  # not an OSError: no caller may take it for a passing failure
     if not progress.session_path(agent, sid).exists():
         emit(f"watch: no devkit session {agent}:{sid[:12]} on this Mac: run it from the agent session that waits")
         return EXIT["error"]
@@ -721,8 +748,10 @@ def wait(agent: str, sid: str, me: str, timeout_min: float, only=None, out=None,
         return code
 
     def killed(signum, frame):
-        finish("expired", f"watch: stopped before anything arrived · arm again: {arm}", 0)
-        raise SystemExit(EXIT["timeout"])
+        try:
+            finish("expired", f"watch: stopped before anything arrived · arm again: {arm}", 0)
+        finally:  # the wait ends, whatever its last line met
+            raise SystemExit(EXIT["timeout"])
     saved = {}
     for sig in (signal.SIGTERM, signal.SIGHUP):
         try:
@@ -753,6 +782,10 @@ def wait(agent: str, sid: str, me: str, timeout_min: float, only=None, out=None,
                 return EXIT["superseded"]
             if _ended(agent, sid):
                 return finish("ended", "watch: the session ended", EXIT["nothing"])
+            moved = _moved(agent, sid)
+            if moved:
+                return finish("expired", f"watch: this conversation goes on under session {agent}:{clean(moved, 12)} "
+                                         f"(a compaction gave it a new id) · arm again: {arm}", EXIT["timeout"])
             now = clock()
             if now >= deadline:
                 return finish("expired", f"watch: nothing arrived in {timeout_min:g} min · arm again: {arm}",

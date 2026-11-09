@@ -330,12 +330,12 @@ class CrewLaneWaitTests(WatchSandbox):
             print(json.dumps((routed or data["tool_input"])["command"]))
         ''', session="claude:s1")
 
-    @known_defect
     def test_a_members_piped_wait_never_supersedes_the_tech_leads_wait_or_takes_its_events(self):
-        # The defect seen on this Mac in the kit-consulting session: a member ran `dev watch --wait --timeout 9 2>&1 |
-        # tail -4`. A pipeline is not one command, so the PreToolUse lane router leaves it without the member's lane
-        # (hooks._watch_route), and a wait with neither the lane nor --for me is the main session's
-        # (watch._consumer): the member's wait superseded the tech lead's (exit 5) and took the tech lead's events.
+        # Before the fix, as seen on this Mac in the kit-consulting session: a member ran
+        # `dev watch --wait --timeout 9 2>&1 | tail -4`. A pipeline is not one command, so the PreToolUse lane router
+        # left it without the member's lane (hooks._watch_route), and a wait with neither the lane nor --for me was the
+        # main session's (watch._consumer): the member's wait superseded the tech lead's (exit 5) and took the tech
+        # lead's events. Now the member's own open call in the ledger makes the wait the member's.
         main = self.spawn(["watch", "--wait", "--timeout", "1"], session="claude:s1")
         lead = self.armed_wait(main, "s1")
         command = self.member_call("dev watch --wait --timeout 9 2>&1 | tail -4")
@@ -508,9 +508,8 @@ class CodexThreadTests(WatchSandbox):
         rec = self.armed_wait(p, "x1")
         self.assertEqual((rec["agent"], rec["consumer"], rec["state"]), ("codex", "main", "live"))
 
-    @known_defect
     def test_two_threads_of_one_codex_process_waiting_at_once_each_wait_for_their_own_thread(self):
-        # The defect: progress.resolve_session finds both threads by the shared pid, both ledgers hold an open call
+        # Before the fix: progress.resolve_session found both threads by the shared pid, both ledgers hold an open call
         # typing these arguments, and it takes the newest (max of the matches): thread x1's wait registers as x2's,
         # supersedes x2's own wait and takes x2's events, while x1's wake nobody.
         self.open_call("x2", "call_x2")
@@ -606,9 +605,8 @@ class CompactionTests(WatchSandbox):
     # Claude Code gives a running conversation a new session id after a compaction: SessionStart registers the new
     # id in the same agent process (hooks._claim_process), the older record gives the pid up, and the open run moves
     # to the new id. The tech lead's wait, armed before the compaction, still runs under the old id.
-    @known_defect
     def test_a_wait_armed_before_a_compaction_ends_once_the_conversation_goes_on_under_a_new_id(self):
-        # The defect: nothing ends the old wait. Its session is not ended (watch._ended reads only `ended`), its run
+        # Before the fix: nothing ended the old wait. Its session is not ended (watch._ended reads only `ended`), its run
         # has moved, and a newer wait of the new id never supersedes it (another session): it stays live, able to
         # wake nobody, until its 240-minute timeout.
         self.session("claude", "old", pid=os.getpid(), started=time.time() - 3600)
@@ -656,9 +654,8 @@ class WaitLifetimeTests(WatchSandbox):
             self.assertEqual(rc, 0, out)
             self.assertIn("May I rename the amount column?", out)
 
-    @known_defect
     def test_a_stopped_wait_in_a_pipeline_ends_and_leaves_its_events_to_the_next_wait(self):
-        # The defect: stopping `dev watch --wait 2>&1 | tail -4` (TaskStop ends the shell's process group) kills the
+        # Before the fix: stopping `dev watch --wait 2>&1 | tail -4` (TaskStop ends the shell's process group) kills the
         # reader of the pipe first. The wait's SIGTERM handler marks its record expired, then writes its last line
         # to the closed pipe: the BrokenPipeError it raises inside kqueue.control is an OSError, which
         # watch.Changes.__call__ swallows. The wait keeps running, marked expired so no newer wait supersedes it, and
@@ -736,9 +733,8 @@ class WaitLifetimeTests(WatchSandbox):
         self.assertEqual([recs[i] for i in ids] + [recs[again]],
                          ["superseded", "live", "live", "live", "live", "live"])
 
-    @known_defect
     def test_two_waits_of_one_consumer_registering_at_once_leave_one_live(self):
-        # The defect: watch.register lists the live waits, marks the consumer's older ones superseded, then writes
+        # Before the fix: watch.register listed the live waits, marks the consumer's older ones superseded, then writes
         # its own record, with no lock around the three. Two waits of one consumer that register at once each miss
         # the other: both stay live, and the second takes events the consumer re-armed for.
         got = self.py('''

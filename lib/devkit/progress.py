@@ -89,12 +89,21 @@ def resolve_session(cwd: str | None = None, argv=None):
         if isinstance(s.get("pid"), int) and s["pid"] in pids and s.get("agent") and s.get("session"):
             held.setdefault(s["pid"], []).append((s.get("started") or 0, s["agent"], s["session"]))
     mine = next((held[pid] for pid in pids if pid in held), None)
+    cwd = cwd or os.getcwd()
     if mine:
+        # the Codex app runs several threads in one process, so the pid names them all: the thread Codex names to
+        # the command (CODEX_THREAD_ID) is the one, when this process runs it
+        thread = os.environ.get("CODEX_THREAD_ID", "")
+        named = [c for c in mine if c[1] == "codex" and c[2] == thread] if thread else []
+        if named:
+            return named[0][1], named[0][2], "ancestry"
         typed = [c for c in mine if _ledger_holds(c[2], args)]
+        if len(typed) > 1:
+            here = _same_repo_sessions(typed, cwd)
+            typed = here or typed
         if typed:
             _, agent, sid = max(typed)
             return agent, sid, "ancestry"
-    cwd = cwd or os.getcwd()
     found = _pidless_typed(args, {c[2] for c in mine or []}, pids, cwd)
     if found:
         return found[0], found[1], "ledger"
@@ -114,6 +123,18 @@ def resolve_session(cwd: str | None = None, argv=None):
     if best and time.time() - best[0] < 12 * 3600:
         return best[1], best[2], "recency"
     return os.environ.get("DEVKIT_AGENT") or "human", f"shell-{os.getppid()}", "shell"
+
+
+def _same_repo_sessions(cands: list, cwd: str) -> list:
+    """Of several sessions (started, agent, session id) one process runs, those of the repository the command runs in
+    (their record's top, or cwd): two threads of one Codex process that typed the same command at once."""
+    top = core.gitout(cwd, "rev-parse", "--show-toplevel") or cwd
+    out = []
+    for c in cands:
+        rec = core.read_json(session_path(c[1], c[2]), {}) or {}
+        if (rec.get("top") or rec.get("cwd")) == top:
+            out.append(c)
+    return out
 
 
 def _ledger_holds(sid: str, args: list) -> bool:
