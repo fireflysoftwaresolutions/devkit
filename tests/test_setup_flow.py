@@ -1056,6 +1056,41 @@ class AgentOffTests(unittest.TestCase):
         self.assertEqual(saved, [original])
         self.assertIn("MCP servers (chrome-devtools)", gone)
 
+    def test_every_file_the_removal_deletes_is_backed_up_first_with_the_persons_lines(self):
+        """The rules file (with a line the person added under devkit's mark), the profile and the agent role are
+        deleted only after a copy of each is in devkit's backups, and the message says where."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            claude, codex, agents, share = self.homes(tmp)
+            own = setup.GENERATED_MARK + " 26.11.8 -->\n# rules\n\nMy own note I added by hand.\n"
+            (codex / "AGENTS.md").write_text(own)
+            originals = {n: (codex / n).read_text() for n in ("AGENTS.md", "fast.config.toml")}
+            originals["neo.toml"] = (codex / "agents" / "neo.toml").read_text()
+            with self.patched(tmp, claude, codex, agents, share):
+                gone = setup.remove_agent("codex")
+            saved = {n: [p.read_text() for p in (tmp / "state" / "backups").glob(f"{n}.*")] for n in originals}
+        self.assertFalse((codex / "AGENTS.md").exists())
+        self.assertEqual(saved, {n: [text] for n, text in originals.items()})
+        rules = next(g for g in gone if g.startswith("rules"))
+        self.assertIn("backups", rules)
+
+    def test_the_rules_step_backs_up_the_rules_it_removes_from_a_turned_off_agent(self):
+        """The repair path's rules step keeps a copy too, before it deletes devkit's AGENTS.md."""
+        with tempfile.TemporaryDirectory() as tmp:
+            claude, codex = Path(tmp) / ".claude", Path(tmp) / ".codex"
+            codex.mkdir()
+            text = setup.GENERATED_MARK + " 26.11.8 -->\n# old rules\n\nA line of mine.\n"
+            (codex / "AGENTS.md").write_text(text)
+            with mock.patch.dict(setup.CFG, {"agents": {"claude": True, "codex": False}}), \
+                    mock.patch.object(setup, "CLAUDE_HOME", claude), mock.patch.object(setup, "CODEX_HOME", codex), \
+                    mock.patch.object(setup, "STATE", Path(tmp) / "state"), \
+                    mock.patch.object(core, "set_by_developer", lambda *a, **k: True), \
+                    mock.patch.object(core, "older_copy", lambda: None), mock.patch("sys.stdout", io.StringIO()):
+                setup.write_agent_instructions(quiet=True)
+            saved = [p.read_text() for p in (Path(tmp) / "state" / "backups").glob("AGENTS.md.*")]
+            self.assertFalse((codex / "AGENTS.md").exists())
+        self.assertEqual(saved, [text])
+
     def test_removing_twice_changes_nothing_more(self):
         with tempfile.TemporaryDirectory() as tmp:
             claude, codex, agents, share = self.homes(Path(tmp))

@@ -904,7 +904,8 @@ def write_agent_instructions(quiet=False):
             if not agent_on(agent):  # a turned-off agent gets no rules: devkit's come out, the person's own stay
                 # only in the developer's own run: the repair a hook runs for an agent leaves them (remove_agent)
                 if core.set_by_developer() and remove_generated_rules(target):
-                    done(f"{tilde(target)} removed: {'Claude Code' if agent == 'claude' else 'Codex'} is turned off")
+                    done(f"{tilde(target)} removed: {'Claude Code' if agent == 'claude' else 'Codex'} is turned off "
+                         f"(a copy is in {tilde(STATE / 'backups')})")
                 continue
             target.parent.mkdir(parents=True, exist_ok=True)
             if target.is_symlink():
@@ -1766,9 +1767,11 @@ def agent_on(agent: str) -> bool:
 
 
 def remove_generated_rules(target: Path) -> bool:
-    """Remove an agent's rules file when devkit generated it (its mark on top); a hand-written one stays. -> removed."""
+    """Remove an agent's rules file when devkit generated it (its mark on top); a hand-written one stays. A copy goes
+    to devkit's backups first, so lines the person added under devkit's mark are kept there. -> removed."""
     try:
         if target.is_file() and not target.is_symlink() and GENERATED_MARK in target.read_text()[:200]:
+            backup(target)
             target.unlink()
             return True
     except OSError as e:
@@ -1855,7 +1858,7 @@ def _remove_agent(agent: str, home: Path) -> list:
     gone, catalog, own = [], ext.effective_mcp(agent), _own_plugin_ids(agent)
     rules = home / ("CLAUDE.md" if agent == "claude" else "AGENTS.md")
     if remove_generated_rules(rules):
-        gone.append(f"rules ({tilde(rules)})")
+        gone.append(f"rules ({tilde(rules)}; a copy is in {tilde(STATE / 'backups')})")
     links = _devkit_skill_links((CLAUDE_HOME if agent == "claude" else AGENTS_HOME) / "skills")
     for p in links:
         p.unlink()
@@ -1918,6 +1921,7 @@ def _remove_agent(agent: str, home: Path) -> list:
     owned += [p for p in sorted((CODEX_HOME / "agents").glob("*.toml"))
               if p.read_text()[:len(CODEX_ROLE_MARK)] == CODEX_ROLE_MARK]
     for p in owned:
+        backup(p)
         p.unlink()
     if owned:
         gone.append(f"{len(owned)} profile and agent role file{'s' if len(owned) != 1 else ''}")
