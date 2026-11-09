@@ -257,9 +257,19 @@ PostToolUse refreshes it at most every 5 seconds; UserPromptSubmit, Stop, Subage
 at once, so an answered decision or a member that starts or finishes shows in your next prompt. A refresh reads a few
 files and runs no git, network call, or other program.
 
-Claude Code registers 13 events and Codex 10, because Codex has no PostToolUseFailure, ConfigChange, or
-InstructionsLoaded event. The consistency checks compare this table with `config/claude/settings.json` and `config/codex/hooks.json`
-(see [Developing devkit › Consistency checks](development.md#consistency-checks)).
+Claude Code registers 13 events and Codex 10. Codex CLI 0.167 has 14 hook events, and devkit registers the 10 in this
+table. It leaves out PermissionRequest, because the guard already judges every call at PreToolUse; Interrupt, which
+devkit does not use yet; and PreModelRequest and PostModelRequest, which fire around every model request, while
+devkit works per turn and per tool call. Codex has no PostToolUseFailure,
+ConfigChange, or InstructionsLoaded event, so a failed Codex command reaches PostToolUse, whose result is the
+command's output alone. devkit reads the exit code from the command's CommandExecution record in the Codex rollout
+(the record whose id is the call's `tool_use_id`) and takes the PostToolUseFailure path for a failed command. When
+that record is not written yet, the call counts as neither a success nor a failure until the session's next
+PostToolUse or Stop finds it; a record still missing after 10 minutes leaves the call out of the ledger, with a line in
+`hooks.log`. Codex crew launches are not recorded yet: no PreToolUse fires for `spawn_agent`, so crew slots, the depth
+limit, and the binding of a launch to its step do not apply to a Codex launch. The consistency checks compare this
+table with `config/claude/settings.json` and `config/codex/hooks.json` (see
+[Developing devkit › Consistency checks](development.md#consistency-checks)).
 
 ### The session context
 
