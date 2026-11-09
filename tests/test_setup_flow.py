@@ -892,6 +892,7 @@ class ResumeTests(unittest.TestCase):
 
 DEVKIT_HOOK = {"type": "command", "command": "'/home/x/.local/share/devkit/releases/26.11.9/bin/dev' hook stop"}
 OWN_HOOK = {"type": "command", "command": "/usr/local/bin/my-notifier"}
+DEVKIT_MCP = {"chrome-devtools": {"command": "npx", "args": ["chrome-devtools-mcp"]}}  # devkit's catalog, in tests
 
 
 class AgentOffTests(unittest.TestCase):
@@ -922,15 +923,67 @@ class AgentOffTests(unittest.TestCase):
             "enabledPlugins": {"devkit@firefly-devkit": True, "superpowers@claude-plugins-official": True}}))
         return claude, codex, agents, share
 
-    def remove(self, tmp: Path, agent: str):
+    def patched(self, tmp: Path, claude, codex, agents, share, person=True, audits=None):
+        """The removal's world in `tmp`: the agents' folders, devkit's state, no agent CLIs, and the caller (`person`:
+        the developer in a terminal, or a process an agent started). Audit records go to `audits`, never this Mac's."""
+        stack = contextlib.ExitStack()
+        for p in (mock.patch.object(setup, "CLAUDE_HOME", claude), mock.patch.object(setup, "CODEX_HOME", codex),
+                  mock.patch.object(setup, "AGENTS_HOME", agents), mock.patch.object(setup, "SKILLS_SHARE", share),
+                  mock.patch.object(setup, "STATE", tmp / "state"), mock.patch.object(setup, "HOME", tmp),
+                  mock.patch.object(core, "older_copy", lambda: None), mock.patch.object(core, "have", lambda t: False),
+                  mock.patch.object(core, "set_by_developer", lambda *a, **k: person),
+                  mock.patch.object(setup, "_audit", lambda *a, **k: (audits if audits is not None else []).append(a)),
+                  mock.patch("devkit.ext.effective_mcp", lambda a: dict(DEVKIT_MCP))):
+            stack.enter_context(p)
+        return stack
+
+    def remove(self, tmp: Path, agent: str, person=True, audits=None):
         claude, codex, agents, share = self.homes(tmp)
-        with mock.patch.object(setup, "CLAUDE_HOME", claude), mock.patch.object(setup, "CODEX_HOME", codex), \
-                mock.patch.object(setup, "AGENTS_HOME", agents), mock.patch.object(setup, "SKILLS_SHARE", share), \
-                mock.patch.object(setup, "STATE", tmp / "state"), mock.patch.object(core, "older_copy", lambda: None), \
-                mock.patch.object(core, "have", lambda t: False), \
-                mock.patch("devkit.ext.effective_mcp", lambda a: {"chrome-devtools": {"command": "npx"}}):
+        with self.patched(tmp, claude, codex, agents, share, person, audits):
             gone = setup.remove_agent(agent)
         return gone, claude, codex, agents
+
+    def test_an_agent_cannot_take_devkits_hooks_out_by_turning_an_agent_off(self):
+        """An agent may run `dev config set agents.claude false` and `dev setup -y` (the guard allows both): the
+        removal then leaves the guard's hooks, the rules and the skills in place and says the developer runs it in a
+        terminal. The developer's own run (the allowed twin) removes them."""
+        for person in (False, True):
+            with self.subTest(person=person), tempfile.TemporaryDirectory() as tmp:
+                audits = []
+                tmp = Path(tmp)
+                claude, codex, agents, share = self.homes(tmp)
+                before = (claude / "settings.json").read_text()
+                with self.patched(tmp, claude, codex, agents, share, person, audits):
+                    if person:
+                        setup.remove_agent("claude")
+                    else:
+                        with self.assertRaises(setup.RemovalLeft) as cm:
+                            setup.remove_agent("claude")
+                        self.assertIn("dev setup", str(cm.exception))
+                        self.assertIn("terminal", str(cm.exception))
+                after = (claude / "settings.json").read_text()
+                self.assertEqual(after == before, not person)
+                self.assertEqual((claude / "CLAUDE.md").exists(), not person)
+                self.assertEqual((claude / "skills" / "tdd").is_symlink(), not person)
+                self.assertEqual([a[0] for a in audits], ["agent.remove"])
+                self.assertEqual(audits[0][3] if len(audits[0]) > 3 else "ok", "ok" if person else "refused")
+
+    def test_an_agents_run_of_dev_install_leaves_devkit_in_a_turned_off_agent_and_says_why(self):
+        """run_install with Claude Code off, run by an agent: a note says the hooks stay and who removes them; the
+        install goes on."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            claude, codex, agents, share = self.homes(tmp)
+            with self.patched(tmp, claude, codex, agents, share, person=False), \
+                    mock.patch.dict(setup.CFG, {"agents": {"claude": False, "codex": True}}), \
+                    mock.patch.object(setup, "_choose_copy", lambda *a, **k: setup.DEVKIT_HOME), \
+                    mock.patch.object(core, "is_current_pin", lambda: False), \
+                    mock.patch("sys.stdout", io.StringIO()) as out:
+                self.assertEqual(setup.run_install(only={"claude"}, as_pinned=True), 0)
+            self.assertIn("hook", json.loads((claude / "settings.json").read_text())["hooks"]["Stop"][0]["hooks"][0]
+                          ["command"])
+        self.assertIn("Run dev setup in your terminal", out.getvalue())
+        self.assertNotIn("removed devkit's", out.getvalue())
 
     def test_ac39_turning_codex_off_removes_devkit_from_codex_and_keeps_the_rest(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -967,14 +1020,7 @@ class AgentOffTests(unittest.TestCase):
     def test_removing_twice_changes_nothing_more(self):
         with tempfile.TemporaryDirectory() as tmp:
             claude, codex, agents, share = self.homes(Path(tmp))
-            patches = (mock.patch.object(setup, "CLAUDE_HOME", claude), mock.patch.object(setup, "CODEX_HOME", codex),
-                       mock.patch.object(setup, "AGENTS_HOME", agents), mock.patch.object(setup, "SKILLS_SHARE", share),
-                       mock.patch.object(setup, "STATE", Path(tmp) / "state"),
-                       mock.patch.object(core, "older_copy", lambda: None), mock.patch.object(core, "have", lambda t: False),
-                       mock.patch("devkit.ext.effective_mcp", lambda a: {"chrome-devtools": {"command": "npx"}}))
-            with contextlib.ExitStack() as stack:
-                for p in patches:
-                    stack.enter_context(p)
+            with self.patched(Path(tmp), claude, codex, agents, share):
                 self.assertTrue(setup.remove_agent("codex"))
                 self.assertEqual(setup.remove_agent("codex"), [])
 
@@ -990,6 +1036,7 @@ class AgentOffTests(unittest.TestCase):
                     mock.patch.object(setup, "_choose_copy", lambda *a, **k: setup.DEVKIT_HOME), \
                     mock.patch.object(core, "is_current_pin", lambda: False), \
                     mock.patch.object(setup, "remove_agent", lambda a: removed.append(a) or ["hooks"]), \
+                    mock.patch.object(core, "set_by_developer", lambda *a, **k: True), \
                     mock.patch.object(setup, "setup_codex", side_effect=AssertionError("Codex is off")), \
                     mock.patch("sys.stdout", io.StringIO()) as out:
                 self.assertEqual(setup.run_install(only={"instructions", "codex"}, as_pinned=True), 0)
@@ -1000,9 +1047,10 @@ class AgentOffTests(unittest.TestCase):
 
     def test_the_rules_step_takes_devkits_rules_out_of_a_turned_off_agent_and_keeps_hand_written_ones(self):
         """R21 on the repair path too: writing the rules with Codex off removes the AGENTS.md devkit generated; a
-        hand-written one (no devkit mark) stays as the person wrote it."""
-        for generated in (True, False):
-            with self.subTest(generated=generated), tempfile.TemporaryDirectory() as tmp:
+        hand-written one (no devkit mark) stays as the person wrote it. Only the developer's own run takes them out: the
+        repair a hook runs for an agent leaves devkit's rules where they are."""
+        for generated, person in ((True, True), (False, True), (True, False)):
+            with self.subTest(generated=generated, person=person), tempfile.TemporaryDirectory() as tmp:
                 claude, codex = Path(tmp) / ".claude", Path(tmp) / ".codex"
                 codex.mkdir()
                 text = (setup.GENERATED_MARK + " 26.11.8 -->\n# old rules\n") if generated else "# my own rules\n"
@@ -1010,12 +1058,13 @@ class AgentOffTests(unittest.TestCase):
                 with mock.patch.dict(setup.CFG, {"agents": {"claude": True, "codex": False}}), \
                         mock.patch.object(setup, "CLAUDE_HOME", claude), mock.patch.object(setup, "CODEX_HOME", codex), \
                         mock.patch.object(setup, "STATE", Path(tmp) / "state"), \
+                        mock.patch.object(core, "set_by_developer", lambda *a, **k: person), \
                         mock.patch.object(core, "older_copy", lambda: None), mock.patch("sys.stdout", io.StringIO()):
                     setup.write_agent_instructions(quiet=True)
                 self.assertIn(setup.GENERATED_MARK, (claude / "CLAUDE.md").read_text()[:200])
-                self.assertEqual((codex / "AGENTS.md").exists(), not generated)
-                if not generated:
-                    self.assertEqual((codex / "AGENTS.md").read_text(), "# my own rules\n")
+                self.assertEqual((codex / "AGENTS.md").exists(), not (generated and person))
+                if (codex / "AGENTS.md").exists():
+                    self.assertEqual((codex / "AGENTS.md").read_text(), text)
 
     def test_a_turned_off_agents_rules_are_no_drift(self):
         """R21 on the repair path: with Codex off, a missing or hand-written AGENTS.md is not drift for the

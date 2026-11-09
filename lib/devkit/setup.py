@@ -902,7 +902,8 @@ def write_agent_instructions(quiet=False):
         personal_f = CONFIG_FILE.parent / "AGENTS.personal.md"
         for agent, target in (("claude", CLAUDE_HOME / "CLAUDE.md"), ("codex", CODEX_HOME / "AGENTS.md")):
             if not agent_on(agent):  # a turned-off agent gets no rules: devkit's come out, the person's own stay
-                if remove_generated_rules(target):
+                # only in the developer's own run: the repair a hook runs for an agent leaves them (remove_agent)
+                if core.set_by_developer() and remove_generated_rules(target):
                     done(f"{tilde(target)} removed: {'Claude Code' if agent == 'claude' else 'Codex'} is turned off")
                 continue
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -1805,21 +1806,40 @@ def _own_plugin_ids(agent: str) -> list:
         [f"devkit@{m}" for m in markets]
 
 
+class RemovalLeft(Exception):
+    """remove_agent() left devkit in a turned-off agent: the run is not the developer's own, in a terminal."""
+
+
 def remove_agent(agent: str) -> list:
     """An agent turned off in `dev setup`: remove what devkit wrote for it, never the agent itself or the person's own
     settings -> what was removed, in words. The rules file devkit generated, devkit's hooks and status line, its
     skill links, its MCP servers, its plugin, and for Codex its profiles and agent roles. Each file is backed up
-    before it changes. Safe to run again: what is gone stays gone."""
+    before it changes. Safe to run again: what is gone stays gone.
+
+    Taking devkit's hooks out takes the guard out, so only the developer's own run does it: an agent can turn an
+    agent off (`dev config set agents.claude false`) and run `dev setup -y`, and that run raises RemovalLeft and
+    changes nothing. Both outcomes leave an `agent.remove` audit record."""
     name = "Claude Code" if agent == "claude" else "Codex"
     home = CLAUDE_HOME if agent == "claude" else CODEX_HOME
     if core.older_copy_skip(f"devkit's entries in {tilde(home)}"):
         return []
+    if not core.set_by_developer():
+        _audit("agent.remove", tilde(home), f"{name} is turned off; not the developer's terminal, so nothing removed",
+               "refused")
+        raise RemovalLeft(f"{name} is turned off, but this run is not from your terminal, so devkit's hooks, rules "
+                          f"and skills stay in {tilde(home)}. Run dev setup in your terminal to remove them.")
+    gone = _remove_agent(agent, home)
+    _audit("agent.remove", tilde(home), "removed: " + "; ".join(gone) if gone else "nothing of devkit's was left")
+    return gone
+
+
+def _remove_agent(agent: str, home: Path) -> list:
     from . import ext
     gone, mcp, own = [], list(ext.effective_mcp(agent)), _own_plugin_ids(agent)
     rules = home / ("CLAUDE.md" if agent == "claude" else "AGENTS.md")
     if remove_generated_rules(rules):
         gone.append(f"rules ({tilde(rules)})")
-    links =_devkit_skill_links((CLAUDE_HOME if agent == "claude" else AGENTS_HOME) / "skills")
+    links = _devkit_skill_links((CLAUDE_HOME if agent == "claude" else AGENTS_HOME) / "skills")
     for p in links:
         p.unlink()
     if links:
@@ -2338,6 +2358,9 @@ def run_install(only=None, unverified_why=None, version=None, as_pinned=False, c
             step(f"{label}: turned off in `dev setup`")
             try:
                 gone = remove_agent(name)
+            except RemovalLeft as e:
+                note(str(e))
+                continue
             except Exception as e:  # keep going; doctor reports what is left
                 fail(f"{name}: {e}")
                 continue
