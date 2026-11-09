@@ -347,7 +347,7 @@ _dev_spec() {
     'branch clean') o='-h --help --offline --json --apply' ;;
     'branch prune') o='-h --help --apply --remote --local --offline --json' ;;
     'branch embargo') o='-h --help --why --until --lift --json' v='--why=n --until=n' p='l:branches:-::' ;;
-    'commit') o='-h --help -m --message --why --body --verified --refs --breaking -a --all --amend --wip --unwip' v='-m=n --message=n --why=n --body=n --verified=n --refs=n --breaking=n' p='*f' ;;
+    'commit') o='-h --help -m --message --why --cause --body --verified --refs --breaking -a --all --amend --wip --unwip' v='-m=n --message=n --why=n --cause=n --body=n --verified=n --refs=n --breaking=n' p='*f' ;;
     'rebase') o='-h --help --base --continue --abort --skip' v='--base=l:branches:-::' ;;
     'push') o='-h --help --force-with-lease --ci-passed --allow-behind --dry-run' ;;
     'pr') c='create view ls checks merge ready comment review diff' o='-h --help' ;;

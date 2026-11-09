@@ -1862,6 +1862,7 @@ _dev__commit() {
     '(- *)'{-h,--help}'[show this help message and exit]' \
     '*'{-m+,--message=}'[header `type(scope)]:message: ' \
     '--why=[first paragraph of the body]:why: ' \
+    '--cause=[the root cause, as `Root cause]:cause: ' \
     '*--body=[a body paragraph]:body: ' \
     '--verified=[last paragraph of the body]:verified: ' \
     '*--refs=[trailer `Refs:`, an issue]:refs: ' \
