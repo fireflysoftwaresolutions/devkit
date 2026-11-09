@@ -1979,7 +1979,13 @@ def _json_off(text: str) -> str | None:
 def settings_off(text: str, toml: bool) -> str | None:
     """What `text`, written to an agent settings file, does to devkit (a DEVKIT_OFF pattern, JSON that sets
     disableAllHooks or turns the devkit plugin off, or TOML that sets hooks or codex_hooks to false in any table), else
-    None."""
+    None. One leading byte-order mark is dropped first, as Claude Code drops it before it parses the file: json.loads
+    and tomllib reject it, and it stands before a first-line key the TOML pattern anchors at the start. It counts as
+    U+FEFF or as its three UTF-8 bytes one character each, as shell_unescape reads `printf '\\xef\\xbb\\xbf'`."""
+    for bom in (chr(0xFEFF), "\xef\xbb\xbf"):
+        if text.startswith(bom):
+            text = text[len(bom):]
+            break
     what = next((w for rx, w in DEVKIT_OFF if rx.search(text)), None) or _json_off(text)
     return what or (DEVKIT_OFF[-1][1] if toml and _toml_hooks_off(text) else None)
 

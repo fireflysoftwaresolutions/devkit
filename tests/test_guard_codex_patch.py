@@ -25,6 +25,9 @@ def patch(*lines):
     return "*** Begin Patch\n" + "\n".join(lines) + "\n*** End Patch\n"
 
 
+BOM = chr(0xFEFF)  # the byte-order mark an editor may put before a file's first character
+
+
 class ApplyPatchOnAgentSettings(unittest.TestCase):
 
     def setUp(self):
@@ -112,6 +115,19 @@ class ApplyPatchOnAgentSettings(unittest.TestCase):
                 self.assertEqual((v or ("allow",))[0], want)
                 body = patch(f"*** Add File: {cfg}", *("+" + ln for ln in text.split("\n")))
                 self.assertEqual(self.verdict(body), want)
+
+    def test_a_leading_byte_order_mark_hides_no_hooks_key(self):
+        # Codex reads the key after a byte-order mark, so the text after it counts, with tomllib and without it
+        cfg = Path(self.cwd) / "app" / ".codex" / "config.toml"
+        cases = [("features.hooks = false", "deny"), ('"codex_hoo\\u006bs" = false', "deny"),
+                 ("features.hooks = true", "allow"), ("features.my_hooks = false", "allow")]
+        for hidden in (False, True):
+            for text, want in cases:
+                with self.subTest(text=text, tomllib_hidden=hidden), \
+                        mock.patch.dict(sys.modules, {"tomllib": None} if hidden else {}):
+                    v = guard.check("Write", {"file_path": str(cfg), "content": BOM + text + "\n"}, self.cwd, "codex")
+                    self.assertEqual((v or ("allow",))[0], want)
+                    self.assertEqual(self.verdict(patch(f"*** Add File: {cfg}", "+" + BOM + text)), want)
 
 
 class TomlWithoutTomllib(unittest.TestCase):
@@ -260,6 +276,11 @@ class JsonAsClaudeReadsIt(unittest.TestCase):
     def test_shell(self):
         self.each(lambda t: self.verdict("Bash", {"command": f"cat > .claude/settings.json <<'EOF'\n{t}\nEOF"}))
 
+    def test_a_leading_byte_order_mark_hides_nothing(self):
+        # Claude Code drops a byte-order mark before it parses the file, so the JSON after it is what counts
+        self.each(lambda t: self.verdict("Write", {"file_path": "~/.claude/settings.json", "content": BOM + t}))
+        self.each(lambda t: self.verdict("Bash", {"command": f"cat > .claude/settings.json <<'EOF'\n{BOM}{t}\nEOF"}))
+
 
 class ShellWritesOnAgentSettings(unittest.TestCase):
     """A shell write to an agent settings file is judged by the text it writes, as Write is; a write whose text the
@@ -305,6 +326,15 @@ class ShellWritesOnAgentSettings(unittest.TestCase):
             ("echo 'hooks = \\0146alse' > .codex/config.toml", "echo 'hooks = \\0164rue' > .codex/config.toml"),
             ("printf '%s = %s\\n' hooks false > .codex/config.toml",
              "printf '%s = %s\\n' hooks true > .codex/config.toml"),
+        ])
+
+    def test_a_byte_order_mark_spelled_as_bytes_hides_no_hooks_key(self):
+        # the escapes write the three UTF-8 bytes of a byte-order mark, which Codex reads as one mark before the key
+        self.pairs([
+            ("printf '\\xef\\xbb\\xbffeatures.hooks = false\\n' > .codex/config.toml",
+             "printf '\\xef\\xbb\\xbffeatures.hooks = true\\n' > .codex/config.toml"),
+            ("printf '\\357\\273\\277features.hooks = false\\n' > .codex/config.toml",
+             "printf '\\357\\273\\277features.my_hooks = false\\n' > .codex/config.toml"),
         ])
 
     def test_tee_and_a_heredoc_are_judged_by_their_input(self):
