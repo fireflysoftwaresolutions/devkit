@@ -1588,6 +1588,7 @@ EXTRAS = {
     "id": "ref.id", "by": "ref.by", "was": "ref.was", "type": "ref.type", "result": "ref.result",
     "answer": "ref.answer", "asked_by": "ref.asked_by", "irreversible": "ref.irreversible", "mode": "ref.mode",
     "overrides": "ref.overrides", "routed": "ref.routed", "session": "ref.session",
+    "refusal_id": "ref.refusal_id",  # a guard refusal's stable id (guard.refusal_of, or hooks:<rule> for the hook's own)
     # the irreversible-action gate (guard._gate_record): tier 1 or 2, setting audit or enforce, the grant's id, its
     # source (E1, E2, step or preapproval) and the owner/repo acted on (gh -R can name another)
     "tier": "ref.tier", "setting": "ref.setting", "grant": "ref.grant", "source": "ref.source", "repo": "ref.repo",

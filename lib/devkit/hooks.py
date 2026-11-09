@@ -2032,11 +2032,16 @@ def _guard(agent: str, data: dict, held: dict):
         except Exception:
             _log(f"guard ledger {agent}: {traceback.format_exc()[-300:]}")
     from . import guard as g
-    verdict = _hook_forgery(data) or \
-        g.check(data.get("tool_name") or "", data.get("tool_input") or {}, data.get("cwd") or os.getcwd(), agent)
+    verdict, made = _hook_forgery(data), "hook-forgery"  # `made`: the hook's own judge, for its refusal id
     if not verdict:
-        verdict = _identity_verdict(data) or _crew_limits(agent, data) or _stub_commit_gate(data) or \
-            _irreversible_main(agent, data)
+        verdict, made = g.check(data.get("tool_name") or "", data.get("tool_input") or {},
+                                data.get("cwd") or os.getcwd(), agent), ""
+    for name, judge in (("identity", lambda: _identity_verdict(data)), ("crew-limits", lambda: _crew_limits(agent, data)),
+                        ("stub-commit", lambda: _stub_commit_gate(data)),
+                        ("irreversible", lambda: _irreversible_main(agent, data))):
+        if verdict:
+            break
+        verdict, made = judge(), name
     held["verdict"] = verdict
     held["rule"] = None  # a verdict of the guard's own rules is recorded with no rule of its own
     if verdict and (verdict[0] == "deny" or agent == "codex"):  # Codex turns ask into deny below
@@ -2056,10 +2061,11 @@ def _guard(agent: str, data: dict, held: dict):
             from . import audit
             audit.record("guard.deny", (data.get("tool_input") or {}).get("file_path") or data.get("tool_name") or "",
                          why[:400], "deny", tool=data.get("tool_name") or "", rule="crew-scope",
-                         agent_id=data.get("agent_id") or "")
+                         agent_id=data.get("agent_id") or "", refusal_id="hooks:crew-scope")
             held["recorded"] = True  # a failure after this keeps the refusal, and records it no second time
+            told = _with_pitfalls(agent, data, _refusal_with_bug("hooks:crew-scope", "", why, data))
             print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
-                                                     "permissionDecisionReason": _with_pitfalls(agent, data, why)}}))
+                                                     "permissionDecisionReason": told}}))
             return
         routed = _route_subagent_progress(data, agent)
         if routed:
@@ -2077,11 +2083,14 @@ def _guard(agent: str, data: dict, held: dict):
             held["verdict"], held["rule"] = ("deny", why), _lane_rule(why)
             _close_call(data)
             from . import audit
+            rid = f"hooks:{held['rule']}"
             audit.record("guard.deny", (data.get("tool_input") or {}).get("command", "")[:200], why, "deny",
-                         tool=data.get("tool_name") or "", rule=held["rule"], agent_id=data.get("agent_id") or "")
+                         tool=data.get("tool_name") or "", rule=held["rule"], agent_id=data.get("agent_id") or "",
+                         refusal_id=rid)
             held["recorded"] = True
+            told = _with_pitfalls(agent, data, _refusal_with_bug(rid, "", why, data))
             print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
-                                                     "permissionDecisionReason": _with_pitfalls(agent, data, why)}}))
+                                                     "permissionDecisionReason": told}}))
             return
         held["done"] = True  # every rule has run and allowed the call: a later failure only loses context
         if data.get("tool_name") in ("Agent", "Task"):  # subagent briefs get the skills their work requires
@@ -2108,12 +2117,18 @@ def _guard(agent: str, data: dict, held: dict):
     decision, reason = verdict
     if agent == "codex" and decision == "ask":
         decision = "deny"
+    rid, word = g.refusal_of(verdict)  # by the exact reason: before anything adds to it
+    if verdict[0] == "deny" and not rid and made:
+        rid = f"hooks:{made}"  # a refusal the hook made itself
+    if rid:
+        reason = _refusal_with_bug(rid, word, reason, data)
     reason = _with_pitfalls(agent, data, reason)
     _log(f"guard {agent} {decision}: {reason[:160]}")
     from . import audit
     tin = data.get("tool_input") or {}
     audit.record(f"guard.{decision}", tin.get("command") or tin.get("file_path") or data.get("tool_name") or "",
-                 reason[:400], decision, tool=data.get("tool_name") or "", agent_id=data.get("agent_id") or "")
+                 reason[:400], decision, tool=data.get("tool_name") or "", agent_id=data.get("agent_id") or "",
+                 refusal_id=rid)
     held["recorded"] = True
     print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": decision,
                                              "permissionDecisionReason": reason}}))
@@ -2174,6 +2189,24 @@ def _guard_failed(agent: str, data: dict, held: dict, exc: BaseException) -> boo
     print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": decision,
                                              "permissionDecisionReason": reason}}))
     return True
+
+
+def _refusal_with_bug(refusal_id: str, word: str, reason: str, data: dict) -> str:
+    """A refusal through devkit's bug registry: noted in the session ledger, and, for a bug the cache knows, the
+    served detour and a marker (guard.refusal_note) with its vote queued (bugs.after_refusal). The refusal stands
+    whatever fails here."""
+    sid = str(data.get("session_id") or "")
+    if _headless():
+        return reason
+    try:
+        from . import bugs, guard as g
+        text = g.refusal_note(reason, refusal_id, word, sid)
+        bugs.note_refusal(sid, refusal_id, word)
+        bugs.after_refusal(text, sid)
+        return text
+    except Exception:
+        _log(f"guard refusal note: {traceback.format_exc()[-300:]}")
+        return reason
 
 
 def _with_pitfalls(agent: str, data: dict, reason: str) -> str:

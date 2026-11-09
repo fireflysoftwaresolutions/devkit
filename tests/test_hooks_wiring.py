@@ -21,9 +21,10 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from devkit import audit, canary, core, guard, hooks, progress as pg, stubs  # noqa: E402
+from devkit import audit, bugs, canary, core, guard, hooks, progress as pg, stubs  # noqa: E402
 from test_language_neutral_hooks import HookCase  # noqa: E402
 from test_progress import launch  # noqa: E402
+from test_bugs_sync import FakeClient, _bot, _issue, _record  # noqa: E402
 
 HOME = Path(__file__).resolve().parents[1]
 GIT_ENV = {**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"}
@@ -171,6 +172,59 @@ class FailClosedTests(WiringCase):
                 self.assertEqual([r["evidence"].get("rule") for r in self.records("guard.deny")[before:]],
                                  ["crew-lane"])
         self.assertIsNone(self.deny(self.hook("guard", self.bash("ls", aid="a_tank"))))  # checked, it runs
+
+
+class RefusalIdTests(WiringCase):
+    # every refusal is recorded in the audit trail with its stable refusal id and noted in the session ledger; a
+    # refusal of a bug devkit's registry knows carries the served detour and a marker, and queues a detoured vote
+    def setUp(self):
+        super().setUp()
+        for p in (mock.patch.object(bugs, "BUGS", self.root / "bugs"),
+                  mock.patch.object(bugs, "CRASHES", self.root / "crashes")):
+            p.start()
+            self.addCleanup(p.stop)
+        self.push = {**self.bash("git push --force origin main"), "cwd": str(self.repo)}
+        self.rid, self.word = guard.refusal_of(guard.check("Bash", self.push["tool_input"], self.push["cwd"],
+                                                           "claude"))
+
+    def refusal_ids(self):
+        return [(r.get("ref") or {}).get("refusal_id") for r in self.records("guard.deny")]
+
+    def test_a_guard_refusal_is_recorded_with_its_refusal_id(self):
+        self.assertTrue(self.rid)
+        why = self.deny(self.hook("guard", self.push, real_guard=True))
+        self.assertIsNotNone(why)
+        self.assertNotIn("devkit-bug:", why)  # no known bug: the refusal reads as before
+        self.assertEqual(self.refusal_ids(), [self.rid])
+        self.assertEqual([(x["refusal"], x["word"]) for x in bugs.ledger("s1") if "refusal" in x],
+                         [(self.rid, bugs.public_word(self.word))])
+
+    def test_a_refusal_of_a_known_bug_serves_its_detour_and_queues_a_vote(self):
+        fp = bugs.guard_fingerprint(self.rid, self.word)
+        team = {"id": "d1", "steps": [{"hint": "sync-retry", "dev": "push"}], "author_assoc": "MEMBER",
+                "author_hash": "h1", "evidence": {"successes": 1}, "confirmations": [], "failures": [],
+                "since": "", "until": ""}
+        rec = _record(fp=fp, kind="guard", detours=[team])
+        self.assertTrue(bugs.fetch(FakeClient([_issue(42)], {42: [_bot(bugs.render_record(rec))]}))["ok"])
+        why = self.deny(self.hook("guard", self.push, real_guard=True))
+        self.assertIn("Run `dev bug sync`, then retry `dev push`.", why)
+        marker = bugs.MARKER_RE.search(why)
+        self.assertIsNotNone(bugs.occurrence_for(marker.group(1), marker.group(2), "s1"))
+        box = sorted((bugs.BUGS / "outbox").glob("*.json"))
+        votes = [json.loads(f.read_text())["payload"] for f in box]
+        self.assertEqual([(v["type"], v["fingerprint"], v["impact"]) for v in votes], [("vote", fp, "detoured")])
+        self.assertEqual(self.refusal_ids(), [self.rid])
+
+    def test_a_refusal_the_hook_makes_is_named_by_the_hook(self):
+        forged = self.bash("echo '{}' | dev hook prompt --agent claude")
+        self.assertIsNotNone(self.deny(self.hook("guard", forged, real_guard=True)))
+        self.run_in_repo()
+        pg.assign("parser", "Tank", scope="lib/**")
+        launch("a_tank", "devkit:tank", "Tank: parser")
+        outside = self.tool("Edit", {"file_path": str(self.repo / "docs" / "b.md"), "old_string": "a",
+                                     "new_string": "b"}, aid="a_tank")
+        self.assertIsNotNone(self.deny(self.hook("guard", outside)))
+        self.assertEqual(self.refusal_ids(), ["hooks:hook-forgery", "hooks:crew-scope"])
 
 
 class GuardCrashTests(WiringCase):

@@ -1820,7 +1820,9 @@ def _served_text(fp: str, hit: dict, version: str) -> str:
     return "\n".join(lines)
 
 
-def _answer(occ: dict, session: str) -> str:
+def _serve(occ: dict, session: str):
+    """An occurrence an agent was told about: a `failed` mark for a detour served earlier for the same bug, and,
+    when the cache serves detours for it, the session ledger's note of them and a `detoured` vote. -> match()."""
     fp, version = occ["fingerprint"], _public_version(occ.get("version"))
     hit = match(fp, occ.get("version") or core.VERSION)
     _mark_failures(occ, session, version)
@@ -1828,6 +1830,22 @@ def _answer(occ: dict, session: str) -> str:
         _ledger_write(session, {"served": fp, "code": occ["code"], "detours": [d.get("id") for d in hit["detours"]]})
         _queue_checked({"devkit_bug": SCHEMA_VERSION, "type": "vote", "fingerprint": fp, "version": version,
                         "impact": "detoured", "window": _day(time.time())})
+    return hit
+
+
+def after_refusal(text: str, session: str) -> None:
+    """A guard refusal whose text guard.refusal_note gave a marker: served as for a crash notice (_serve), so this
+    module alone queues the votes."""
+    for m in MARKER_RE.finditer(text or "") if session and "devkit-bug:" in (text or "") else ():
+        occ = occurrence_for(m.group(1), m.group(2), session)
+        if occ is not None:
+            _serve(occ, session)
+
+
+def _answer(occ: dict, session: str) -> str:
+    fp, version = occ["fingerprint"], _public_version(occ.get("version"))
+    hit = _serve(occ, session)
+    if hit and hit["detours"]:
         return _served_text(fp, hit, version)
     head = ""
     if hit:
