@@ -692,7 +692,7 @@ def handoff_conflict_issues() -> list:
     copies = sorted(folder.rglob("*.mine.md")) if folder.is_dir() else []
     notes = []
     for c in copies:
-        rel = re.sub(r"\.\d{8}-\d{6}\.mine\.md$", "", c.relative_to(folder).as_posix())
+        rel = re.sub(r"\.\d{8}-\d{6}(?:-\d+)?\.mine\.md$", "", c.relative_to(folder).as_posix())
         name = rel[len("projects/"):] if rel.startswith("projects/") else re.sub(r"/README$", "", rel)
         if name not in notes:
             notes.append(name)

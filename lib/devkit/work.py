@@ -593,9 +593,13 @@ def now_warning(scope: str, items: list = None) -> str:
 # is settled item by item (`merge_item`), a conflict in a project's note or an initiative's README file by file
 # (`_settle_note`), any other conflict aborts the rebase, and a rebase found stopped is aborted before the next pull
 # or commit. Each abort is a sync problem: an audit record, kept at every audit level, and handoff-push-failed.json,
-# which `dev status` and the dashboard show until a push succeeds.
+# which `dev status` and the dashboard show until a push succeeds. A rebase rewrites notes in the working tree, so it
+# also holds the notes lock that every note writer takes, before _repo_lock as every process takes them
+# (`_rebase_locks`); the fetch and the push, which can take a minute, hold _repo_lock alone, so a note writer never
+# waits for the network.
 
 _REBASE_DIRS = ("rebase-merge", "rebase-apply")
+_BUSY = "another devkit process kept the handoff repository busy"
 _held = [0]
 
 
@@ -616,6 +620,22 @@ def _repo_lock(wait: float = 90):
             yield got
         finally:
             _held[0] -= 1 if got else 0
+
+
+@contextlib.contextmanager
+def _rebase_locks(wait: float = 90):
+    """The locks a rebase of the handoff repository holds: the notes lock (registry.notes_lock), then _repo_lock, the
+    order every devkit process takes them in. While git and the settling of conflicts rewrite notes, some with
+    conflict markers, a note writer (dev note set, an embargo, dev sync's own) waits: it never reads a note mid-rebase,
+    nor writes one between the settling and its `git add`. Only local git work runs under them. Never enter it while
+    holding _repo_lock. -> whether both are held."""
+    from . import registry
+    with registry.notes_lock(wait) as notes:
+        if not notes:
+            yield False
+            return
+        with _repo_lock(wait) as got:
+            yield got
 
 
 def push_failed_file() -> Path:
@@ -738,16 +758,16 @@ def _merge_text(base: str, remote: str, mine: str):
     return out + "\n" if rc == 0 else None
 
 
-def _settle_note(rel: str) -> tuple:
+def _settle_note(rel: str, set_aside: dict = None) -> tuple:
     """A note in conflict during the rebase -> (the text to keep, the problem when this Mac's hand-written change
-    could not be merged and was saved aside, else ""). See _NOTE_FILE."""
+    could not be merged and was saved aside, else ""). See _NOTE_FILE; `set_aside`: see _save_note_conflict."""
     base, remote, mine = _stage(rel, 1), _stage(rel, 2), _stage(rel, 3)  # in a rebase, 2 is the remote's side
     if remote is None or mine is None:  # one side deleted the note: keep the text the other side has
         return remote or mine or "", ""
     (hb, _), (hr, remote_blocks), (hm, my_blocks) = _hollow(base or ""), _hollow(remote), _hollow(mine)
     merged = _merge_text(hb, hr, hm)
     if merged is None:
-        return remote, _save_note_conflict(rel, base or "", mine)
+        return remote, _save_note_conflict(rel, base or "", mine, set_aside)
     for start, end in _generated_blocks():
         block = my_blocks.get(start) or remote_blocks.get(start)
         if block:
@@ -755,13 +775,26 @@ def _settle_note(rel: str) -> tuple:
     return merged, ""
 
 
-def _save_note_conflict(rel: str, base: str, mine: str) -> str:
+def _save_note_conflict(rel: str, base: str, mine: str, set_aside: dict = None) -> str:
     """Save this Mac's version of a note whose hand-written text conflicts, and the version both sides started from,
-    in STATE/handoff-conflicts/; record it (audit, kept at every level) and say how to bring it back. -> the problem."""
+    in STATE/handoff-conflicts/; record it (audit, kept at every level) and say how to bring it back. -> the problem.
+    `set_aside`: the notes this pull saved already ({rel: (the saved copy, the problem)}). When a later commit of this
+    Mac conflicts on the same note in the same pull, only the saved copy changes, to this Mac's latest version: the
+    copy then holds every local commit's change against the version the first one started from, so the command the
+    first warning printed brings them all back. A copy never replaces another pull's: a second one saved in the same
+    second takes a counter after the time."""
     import shlex
-    stamp = time.strftime("%Y%m%d-%H%M%S")
-    saved = core.STATE / "handoff-conflicts" / f"{rel[:-len('.md')]}.{stamp}.mine.md"
-    started = saved.with_name(saved.name.replace(".mine.md", ".base.md"))
+    set_aside = {} if set_aside is None else set_aside
+    if rel in set_aside:
+        saved, problem = set_aside[rel]
+        core.replace_text(saved, mine)
+        return problem
+    stem = f"{rel[:-len('.md')]}.{time.strftime('%Y%m%d-%H%M%S')}"
+    saved, n = core.STATE / "handoff-conflicts" / f"{stem}.mine.md", 1
+    while saved.exists():
+        n += 1
+        saved = saved.with_name(f"{Path(stem).name}-{n}.mine.md")
+    started = saved.with_name(saved.name[:-len(".mine.md")] + ".base.md")
     saved.parent.mkdir(parents=True, exist_ok=True)
     core.replace_text(saved, mine)
     core.replace_text(started, base)
@@ -772,57 +805,85 @@ def _save_note_conflict(rel: str, base: str, mine: str) -> str:
     from . import audit, ui
     audit.record("handoff.note-conflict", rel, problem[:300], outcome="blocked")
     ui.warn(f"handoff repository: {problem}")
+    set_aside[rel] = (saved, problem)
     return problem
 
 
 def _rewrite_tasks(rels) -> None:
     """After a pull that settled the generated blocks of these notes, write each one's tasks block again from the work
-    items as they are now, and commit what changed: the note lists the items both Macs added. The read and the write
-    hold the notes lock that every note writer takes (`dev note set`, an embargo, `dev sync`'s own), taken without
-    waiting: this runs under _repo_lock, and the notes lock comes first in every other process. While another
-    process holds it, the block waits for the next `dev sync`, which writes it again."""
+    items as they are now, and commit what changed: the note lists the items both Macs added. It runs within the
+    rebase, under the notes lock that every note writer takes (_rebase_locks), so no writer changes a note between
+    this read and this write."""
     if not rels:
         return
     from .registry import TASKS_END, TASKS_START, render_tasks_block
     changed = []
-    with core.Lock("notes", wait=0) as got:
-        for rel in dict.fromkeys(rels) if got else ():
-            f = HANDOFF / rel
-            try:
-                text = f.read_text()
-            except OSError:
-                continue
-            if TASKS_START not in text or TASKS_END not in text.split(TASKS_START, 1)[1]:
-                continue
-            scope = rel[len("projects/"):-len(".md")] if rel.startswith("projects/") else rel.rsplit("/", 1)[0]
-            pre, rest = text.split(TASKS_START, 1)
-            new = pre + render_tasks_block(scope) + rest.split(TASKS_END, 1)[1]
-            if new != text:
-                _replace(f, new)
-                changed.append(f)
-    if changed:  # the commit after the notes lock is released: no git work under it
+    for rel in dict.fromkeys(rels):
+        f = HANDOFF / rel
+        try:
+            text = f.read_text()
+        except OSError:
+            continue
+        if TASKS_START not in text or TASKS_END not in text.split(TASKS_START, 1)[1]:
+            continue
+        scope = rel[len("projects/"):-len(".md")] if rel.startswith("projects/") else rel.rsplit("/", 1)[0]
+        pre, rest = text.split(TASKS_START, 1)
+        new = pre + render_tasks_block(scope) + rest.split(TASKS_END, 1)[1]
+        if new != text:
+            _replace(f, new)
+            changed.append(f)
+    if changed:
         _commit(changed, f"sync: the tasks block of {len(changed)} note(s) again after the pull", push=False)
 
 
-def pull_rebase(retake=()) -> tuple:
-    """Pull the handoff repository, rebasing this Mac's commits on the remote's. A conflict in an item is settled
-    (`_settle`), one in a note file by file (`_settle_note`: never a stop, so the other files still go through); any
-    other conflict aborts the rebase, leaves the commits as they were and records a sync problem. `retake`: item
-    paths (relative) whose change the caller applies again itself. Call it under `_repo_lock`.
+def fetch_handoff() -> tuple:
+    """Fetch the remote's commits of the handoff repository (the network), under _repo_lock alone.
     -> (ok, the problem when not ok)."""
-    rc, out, err = core.git(HANDOFF, "pull", "-q", "--rebase", "--autostash", timeout=60)
+    with _repo_lock() as got:
+        if not got:
+            return False, _BUSY
+        rc, out, err = core.git(HANDOFF, "fetch", "-q", timeout=60)
+        return rc == 0, ("" if rc == 0 else (err or out).strip()[:300] or "git fetch failed")
+
+
+def pull_rebase(retake=()) -> tuple:
+    """Pull the handoff repository: fetch, then rebase this Mac's commits on the remote's (rebase_fetched). Never call
+    it while holding _repo_lock (the rebase takes the notes lock first). -> (ok, the problem when not ok)."""
+    ok, problem = fetch_handoff()
+    return rebase_fetched(retake) if ok else (False, problem)
+
+
+def rebase_fetched(retake=()) -> tuple:
+    """Rebase this Mac's commits on the remote's as last fetched: local git work only, under _rebase_locks, and nothing
+    to do (no lock taken) when the remote has no new commit or the branch follows none. A conflict in an item is
+    settled (`_settle`), one in a note file by file (`_settle_note`: never a stop, so the other files still go
+    through); any other conflict aborts the rebase, leaves the commits as they were and records a sync problem.
+    `retake`: item paths (relative) whose change the caller applies again itself. Never call it while holding
+    _repo_lock. -> (ok, the problem when not ok)."""
+    if core.gitout(HANDOFF, "rev-list", "--count", "HEAD..@{u}") in ("", "0"):
+        return True, ""
+    with _rebase_locks() as got:
+        if not got:
+            return False, "another devkit process kept the handoff notes or repository busy"
+        recover_rebase("a pull")
+        return _rebase(retake)
+
+
+def _rebase(retake) -> tuple:
+    """rebase_fetched's work, under _rebase_locks."""
+    rc, out, err = core.git(HANDOFF, "rebase", "-q", "--autostash", timeout=60)
     if rc == 0:
         return True, ""
-    if not _stopped():  # the network or the remote: nothing changed here
-        return False, (err or out).strip()[:300] or "git pull failed"
-    settled_notes = []
+    if not _stopped():  # git refused to start it: nothing changed here
+        return False, (err or out).strip()[:300] or "git rebase failed"
+    settled_notes, set_aside = [], {}
     for _ in range(200):  # one round per commit of this Mac that conflicts
         files = _conflicted()
         if not files:
             break
         for rel in files:
             if _NOTE_FILE.match(rel):
-                text, problem = _settle_note(rel)
+                text, problem = _settle_note(rel, set_aside)
                 if not problem:
                     settled_notes.append(rel)
             else:
@@ -851,15 +912,22 @@ def _pushes() -> bool:
 
 
 def push_now(retake=()) -> tuple:
-    """Pull (rebase), then push, now. -> (ok, the problem when not ok)."""
+    """Pull (rebase), then push, now: the fetch and the push under _repo_lock alone, the rebase under the notes lock
+    too (pull_rebase). -> (ok, the problem when not ok)."""
     with _repo_lock() as got:
         if not got:
-            return False, "another devkit process kept the handoff repository busy"
+            return False, _BUSY
         recover_rebase("a push")
-        ok, problem = pull_rebase(retake)
-        if not ok:
-            return False, problem
-        rc, _, err = core.git(HANDOFF, "push", "-q", timeout=60)
+    ok, problem = pull_rebase(retake)
+    return push_handoff() if ok else (False, problem)
+
+
+def push_handoff(timeout: int = 60) -> tuple:
+    """Push the handoff repository's commits (the network), under _repo_lock alone. -> (ok, the problem when not ok)."""
+    with _repo_lock() as got:
+        if not got:
+            return False, _BUSY
+        rc, _, err = core.git(HANDOFF, "push", "-q", timeout=timeout)
         return rc == 0, (err.strip()[:300] if rc else "")
 
 
@@ -932,7 +1000,7 @@ def pull(retake=()) -> bool:
         recover_rebase("a pull")
         if not core.gitout(HANDOFF, "remote"):
             return True
-        return pull_rebase(retake)[0]
+    return pull_rebase(retake)[0]  # after _repo_lock is released: the rebase takes the notes lock first
 
 
 # --------------------------------------------------------------------------- operations

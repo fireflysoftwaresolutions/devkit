@@ -180,8 +180,9 @@ def _state(co):
 
 def commit_push(push=True, quiet=False):
     """Commit what changed in the handoff repository and push it. A rebase left stopped is aborted first, a pull
-    settles conflicts in items and stops cleanly on any other (work.pull_rebase), and every failure is recorded in
-    handoff-push-failed.json, which `dev status` shows until a push succeeds."""
+    settles conflicts in items and stops cleanly on any other (work.rebase_fetched), and every failure is recorded in
+    handoff-push-failed.json, which `dev status` shows until a push succeeds. The commit, the fetch and the push hold
+    work._repo_lock; the rebase holds the notes lock first, so it runs after that lock is released."""
     from . import audit, work
     root = work.HANDOFF  # the repository work.pull_rebase works on, read now (tests point it elsewhere)
     if not (root / ".git").exists():
@@ -201,33 +202,30 @@ def commit_push(push=True, quiet=False):
         if not push or not core.gitout(root, "remote"):
             return
         core.git(root, "fetch", "-q", "origin", timeout=60)
-        ok, err = True, ""
-        if core.gitout(root, "rev-list", "--count", "HEAD..@{u}") not in ("", "0"):
+    ok, err = work.rebase_fetched()
+    ahead = core.gitout(root, "rev-list", "--count", "@{u}..HEAD")
+    if ok and ahead not in ("", "0"):
+        ok, err = work.push_handoff(timeout=120)
+        if not ok:  # someone pushed in between: rebase on it and try once more
             ok, err = work.pull_rebase()
-        ahead = core.gitout(root, "rev-list", "--count", "@{u}..HEAD")
-        if ok and ahead not in ("", "0"):
-            rc, _, err = core.git(root, "push", "-q", timeout=120)
-            if rc != 0:  # someone pushed in between: rebase on it and try once more
-                ok, err = work.pull_rebase()
-                rc, _, err = core.git(root, "push", "-q", timeout=120) if ok else (1, "", err)
-            ok = rc == 0
-            if ok:
-                audit.record("handoff.push", core.handoff_repo(), f"{ahead} commit(s)")
-                if failed.exists():
-                    failed.unlink()
-            else:
-                audit.record("handoff.push", core.handoff_repo(), err[:300], "failed")
-                failed.write_text(json.dumps({"ts": int(time.time()), "error": err[:300]}))
-                try:  # each live session hears of it once, with its next wake or hook
-                    from . import watch
-                    watch.notice_all("notice", f"push:{int(time.time())}",
-                                     f"the handoff push failed at {time.strftime('%H:%M')}: "
-                                     f"{' '.join(err.split())[:200] or 'no reason given'}. dev status shows it; "
-                                     "the next dev sync tries again")
-                except Exception:
-                    pass
-        if not ok and not quiet:
-            ui.warn(f"handoff push failed: {err}")
+            ok, err = work.push_handoff(timeout=120) if ok else (False, err)
+        if ok:
+            audit.record("handoff.push", core.handoff_repo(), f"{ahead} commit(s)")
+            if failed.exists():
+                failed.unlink()
+        else:
+            audit.record("handoff.push", core.handoff_repo(), err[:300], "failed")
+            failed.write_text(json.dumps({"ts": int(time.time()), "error": err[:300]}))
+            try:  # each live session hears of it once, with its next wake or hook
+                from . import watch
+                watch.notice_all("notice", f"push:{int(time.time())}",
+                                 f"the handoff push failed at {time.strftime('%H:%M')}: "
+                                 f"{' '.join(err.split())[:200] or 'no reason given'}. dev status shows it; "
+                                 "the next dev sync tries again")
+            except Exception:
+                pass
+    if not ok and not quiet:
+        ui.warn(f"handoff push failed: {err}")
 
 
 # --------------------------------------------------------------------------- dashboard & help
