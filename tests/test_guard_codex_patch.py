@@ -293,6 +293,18 @@ class ShellWritesOnAgentSettings(unittest.TestCase):
             ("npx prettier --write .claude/settings.json", "npx prettier --check .claude/settings.json"),
         ])
 
+    def test_git_options_are_read_as_git_parses_them(self):
+        # git takes a unique prefix of a long option (--wor is --worktree), a short option's value attached (-sS1 is
+        # --source=S1) and the last of --cached and --no-cached: only a command that touches the index alone is allowed
+        self.pairs([
+            ("git restore --staged --wor .claude/settings.json", "git restore --staged .claude/settings.json"),
+            ("git restore --staged --source=FETCH_HEAD --wor .claude/settings.json",
+             "git restore --staged --source=FETCH_HEAD .claude/settings.json"),
+            ("git restore -sS1 .claude/settings.json", "git restore --staged -sWIP .claude/settings.json"),
+            ("git restore --staged -s HEAD -W .claude/settings.json", "git restore -qS -s HEAD .claude/settings.json"),
+            ("git rm --cached --no-cached .claude/settings.json", "git rm -r --cached .claude/settings.json"),
+        ])
+
     def test_only_a_known_formatter_run_to_check_writes_no_text(self):
         # --check means "write nothing" only to a formatter or linter the guard knows; any other program may write the
         # file it names whatever its flags, and a write flag in any case or abbreviation still writes

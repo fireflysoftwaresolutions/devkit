@@ -3040,17 +3040,49 @@ def _opts_before_dashdash(args) -> list:
     return list(itertools.takewhile(lambda a: a != "--", args))
 
 
+def _git_index_only(args, mark: tuple, flags: str, longs: tuple, value: str = "", value_long: str = "") -> bool:
+    """True when git's options before `--` hold `mark` (its long and short spelling) and nothing else but harmless
+    `flags` (short letters) and `longs`, with `value`/`value_long` an option whose value is attached (-sS1,
+    --source=S1) or the next word, as git reads it. Any other option, an abbreviation (--wor is --worktree) or a
+    negation (--no-cached) is not index-only."""
+    seen, i = False, 0
+    while i < len(args):
+        a = args[i]
+        i += 1
+        if a == "--":
+            break
+        if not a.startswith("-") or a == "-":
+            continue  # a path
+        if a.startswith("--"):
+            name, eq, _ = a.partition("=")
+            if name == mark[0] and not eq:
+                seen = True
+            elif value_long and name == value_long:
+                i += 0 if eq else 1
+            elif name not in longs or eq:
+                return False
+            continue
+        for j, c in enumerate(a[1:], 1):
+            if c == mark[1]:
+                seen = True
+            elif value and c == value:
+                i += 0 if j + 1 < len(a) else 1  # the rest of the word is its value, else the next word
+                break
+            elif c not in flags:
+                return False
+    return seen
+
+
 def _git_text_free(argv) -> bool:
     """True when a git command writes no text into a work-tree file it names: a command that rewrites none (diff, log,
-    add, commit), `git restore --staged` without --worktree and `git rm --cached`, which change only the index."""
+    add, commit), `git restore --staged` without --worktree and `git rm --cached`, which change only the index, read
+    as git parses their options (_git_index_only)."""
     _, sub, gargs = _git_split(argv)
-    opts = [a for a in _opts_before_dashdash(gargs) if a.startswith("-")]
     if sub == "restore":
-        short = "".join(a[1:] for a in opts if not a.startswith("--"))
-        staged = "--staged" in opts or "S" in short
-        return staged and not ("--worktree" in opts or "W" in short)
+        return _git_index_only(gargs, ("--staged", "S"), "q", ("--quiet",), "s", "--source")
     if sub == "rm":
-        return "--cached" in opts
+        return _git_index_only(gargs, ("--cached", ""), "rfqn",
+                               ("--force", "--quiet", "--dry-run", "--ignore-unmatch", "--sparse"))
     return sub not in _GIT_TREE_WRITES
 
 
