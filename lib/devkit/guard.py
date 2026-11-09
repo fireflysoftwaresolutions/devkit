@@ -624,14 +624,15 @@ def _split_heredocs(cmd: str):
         elif cmd.startswith("<<", i) and not cmd.startswith("<<<", i) and cmd[i - 1:i] != "<":
             m = _HEREDOC_AT.match(cmd, i)
             if m:
-                pending.append((m.group(1) or m.group(2) or m.group(3), bool(m.group(3)) and "\\" not in m.group(0)))
+                pending.append((m.group(1) or m.group(2) or m.group(3), bool(m.group(3)) and "\\" not in m.group(0),
+                                m.group(0).startswith("<<-")))
                 out.append(m.group(0))
                 i = m.end()
                 continue
         elif c == "\n" and pending:
             out.append(c)
             i += 1
-            for delim, expands in pending:
+            for delim, expands, dash in pending:
                 body = []
                 while i < n:
                     j = cmd.find("\n", i)
@@ -642,7 +643,7 @@ def _split_heredocs(cmd: str):
                     if ln.startswith(delim + ")"):  # bash 3.2 ends it here in a `$(…)` and reads on from the `)`,
                         i = start + len(delim)      # zsh does not: read it as bash does, so what bash runs is seen
                         break                       # (B-fy5f5i8c1hx)
-                    body.append(ln)
+                    body.append(ln.lstrip("\t") if dash else ln)  # `<<-`: bash and zsh drop each line's leading tabs
                 bodies.append(("\n".join(body), expands))
             pending = []
             continue
@@ -1733,26 +1734,46 @@ def identity_hiding(argv0) -> str | None:
     anyone drop it: without it devkit only knows less about who speaks."""
     names = set(core.AGENT_MARKERS) - {"DEVKIT_FROM_AGENT", "DEVKIT_SPEAKER"}
     words = [str(w) for w in argv0]
+    rest = _strip_prefix(words)
+    while rest and rest[0] in _RESERVED:  # `if X= make`, `then unset X`, `! X= make`: the keyword's command
+        rest = _strip_prefix(rest[1:])
+    pre = words[:len(words) - len(rest)]
+    # only the words the shell or env reads as the environment: the assignments before the command, and env's own
+    # options and assignments wherever env stands (`timeout 5 env -u X …` and `find -exec env -u X …` run env
+    # too); a program's arguments (`grep -n "CODEX_THREAD_ID=" tests/`) set nothing. The lines that `sh -c` and
+    # `eval` run are judged as segments of their own.
+    blanks = [w for w in pre if _ASSIGN.match(w)]
     for k, w in enumerate(words):
+        if os.path.basename(w) != "env":
+            continue
+        opts, end = _prefix_opts("env", words, k + 1)
+        if "-" in words[k + 1:end]:  # `env -`: an empty environment, as -i
+            return IDENTITY_REASON.format(name="every variable")
+        for flag, val in opts:
+            if flag == "-i" or flag.startswith("--ig") and "--ignore-environment".startswith(flag):
+                return IDENTITY_REASON.format(name="every variable")
+            if (flag == "-u" or flag.startswith("--u") and "--unset".startswith(flag)) and val in names:
+                return IDENTITY_REASON.format(name=_code(val))
+        while end < len(words) and _ASSIGN.match(words[end]):
+            blanks.append(words[end])
+            end += 1
+    for w in blanks:
         m = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)=", w)
         if m and m.group(1) in names:
             return IDENTITY_REASON.format(name=_code(m.group(1)))
-        base = os.path.basename(w)
-        if base == "unset" and (k == 0 or words[k - 1] in ("builtin", "command")) and "-f" not in words[k + 1:]:
-            hit = next((a for a in words[k + 1:] if a in names), None)
-            if hit:
-                return IDENTITY_REASON.format(name=_code(hit))
-        if base == "env":
-            j = k + 1
-            while j < len(words) and (words[j].startswith("-") or _ASSIGN.match(words[j])):
-                a = words[j]
-                if a in ("-", "--ignore-environment") or re.fullmatch(r"-[A-Za-z]*i[A-Za-z]*", a):
-                    return IDENTITY_REASON.format(name="every variable")
-                val = words[j + 1] if a in ("-u", "--unset") and j + 1 < len(words) else \
-                    a.split("=", 1)[1] if a.startswith("--unset=") else a[2:] if re.fullmatch(r"-u\w+", a) else ""
-                if val in names:
-                    return IDENTITY_REASON.format(name=_code(val))
-                j += 2 if a in ("-u", "--unset", "-C", "--chdir", "-S", "--split-string", "-P") else 1
+    if not rest:
+        return None
+    base, operands = os.path.basename(rest[0]), rest[1:]
+    if base == "unset" and "-f" not in operands:
+        hit = next((a for a in operands if a in names), None)
+        if hit:
+            return IDENTITY_REASON.format(name=_code(hit))
+    if base in _EXPORTERS:  # `export NAME=` blanks it; `export -n NAME`, `declare +x NAME` stop passing it on
+        unexport = any(a == "-n" or a.startswith("+") and "x" in a for a in operands if a[:1] in "-+")
+        for a in operands:
+            m = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)(=?)", a)
+            if m and m.group(1) in names and (m.group(2) or unexport):
+                return IDENTITY_REASON.format(name=_code(m.group(1)))
     return None
 
 
@@ -2027,7 +2048,7 @@ def _check_segments(cmd: str, segs, ecwd: str, agent: str, depth: int = 0, outer
                 res = deny(branch_violation(_opt_value(argv[3:], ("--head", "-H"))), key="gh-pr-head-branch")
             elif argv[1:2] and argv[1] in ("pr", "issue", "release", "api"):
                 res = _attribution(cmd)
-        elif (_dev_args(argv) or [""])[0] in ("task", "note", "handoff", "initiative"):
+        elif (_dev_args(argv) or [""])[0] in _DEV_CROSS:
             res = check_dev_cross(_dev_args(argv), ecwd, envs)
         elif name in ("rm", "unlink"):
             res = check_rm(argv[1:], ecwd, envs) if name == "rm" else steer_rm(argv[1:], ecwd, envs)
@@ -2097,19 +2118,41 @@ def _check_segments(cmd: str, segs, ecwd: str, agent: str, depth: int = 0, outer
 
 
 def check_dev_cross(args, cwd, envs):
-    """`dev task|note|handoff -p X / -i S` from inside another project. DEVKIT_CROSS_PROJECT as the command's prefix
-    (a recorded use, spec F8) or in the hook's own environment (the developer started the session with it) allows it."""
+    """A `dev` command that writes another project's handoff files (_DEV_CROSS) from inside a project.
+    DEVKIT_CROSS_PROJECT as the command's prefix (a recorded use, spec F8) or in the hook's own environment (the
+    developer started the session with it) allows it."""
     why = _dev_cross_violation(args, cwd)
     if not why or os.environ.get("DEVKIT_CROSS_PROJECT") or _hatch(envs, "DEVKIT_CROSS_PROJECT", "cross-project", why):
         return None
     return why
 
 
+# the dev commands that write a project's or an initiative's handoff files, with the subcommands of each that only
+# read (None: every subcommand counts). A subcommand not listed counts as a write, so a new or misread one is judged.
+# `dev handoff` writes only with --log (the session log) or --edit (the note).
+_DEV_CROSS = {"task": None, "note": None, "handoff": None, "initiative": None, "plan": frozenset({"", "ls"}),
+              "lesson": frozenset({"", "ls", "show", "scan", "review", "lint", "eval"}), "delivery": frozenset({""})}
+
+
 def _dev_cross_violation(args, cwd):
+    words = _dev_words(args)  # every -p/-i value counts: argparse keeps the last, so a first one proves nothing
+    reads = _DEV_CROSS.get(words[0] if words else "")
+    if reads is not None and (words[1] if len(words) > 1 else "") in reads:
+        return None
+    if words[:1] == ["handoff"] and not _dev_sets(args, "--log", "--edit"):
+        return None  # shows the note or its path
     pid = current_project(cwd)
     if not pid:
         return None
-    words = _dev_words(args)  # every -p/-i value counts: argparse keeps the last, so a first one proves nothing
+    if words[:1] == ["handoff"] and len(words) > 1 and words[1].lower() != pid:
+        return deny(f"This session works on {_code(pid)}; {_code(f'dev handoff {words[1]}')} with --log or --edit "
+                    f"would write another project's session log or note. Log this session's work with "
+                    f"`dev handoff --log \"…\"`; only do it for another project if the user asked, from that "
+                    f"project's folder or a portfolio session.", key="other-project-log")
+    if words[:1] == ["plan"] and len(words) > 2 and words[1] != "new":  # revise, approve, supersede: its folder decides
+        why = _plan_path_violation(words[2], cwd, pid)
+        if why:
+            return deny(why, key="other-project-plan")
     proj = next((v for v in _dev_values(args, ("-p", "--project")) if v.lower() != pid), None)
     init = next((v for v in _dev_values(args, ("-i", "--initiative")) if pid not in initiative_members(v)), None)
     if words[:1] == ["initiative"] and len(words) > 2 and words[1] in ("add", "rm", "new"):
@@ -2121,6 +2164,32 @@ def _dev_cross_violation(args, cwd):
     if init and pid not in initiative_members(init):
         return deny(f"{_code(pid)} is not a member of initiative {_code(init)}.", key="not-member")
     return None
+
+
+def _plan_path_violation(path, cwd, pid) -> str | None:
+    """Why project `pid`'s session may not revise, approve or supersede the plan at `path`, or None: a plan below
+    plans/<pid>/, below plans/initiatives/<slug>/ of an initiative `pid` is a member of, or outside the handoff
+    repository. The real path decides (links and `..` resolved, as `dev plan` resolves it), without case, as macOS
+    reads it; a path the shell fills in at run time is refused, since it may name any plan."""
+    target = resolve(path, cwd)
+    if target == UNKNOWN:
+        return (f"{_code(path)} is known only when the command runs, so the guard cannot tell whose plan it is. Name "
+                f"the plan's path below plans/{pid}/.")
+    root = real(core.HANDOFF).rstrip(os.sep)
+    if not _under_ci(str(target), root):
+        return None
+    rel = str(target)[len(root):].lstrip(os.sep).casefold()
+    if rel.startswith("plans/initiatives/"):
+        slug = rel.split("/")[2] if rel.count("/") >= 3 else ""
+        if slug and pid in initiative_members(slug):
+            return None
+        return (f"{_code(pid)} is not a member of initiative {_code(slug or '?')}: its plans are written only by "
+                f"member projects.")
+    if rel.startswith(f"plans/{pid.casefold()}/"):
+        return None
+    return (f"This session works on {_code(pid)}; {_code(tilde(target))} is not one of its plans. Plans of this "
+            f"session are below plans/{pid}/; only change another project's plan if the user asked, from that "
+            f"project's folder or a portfolio session.")
 
 
 def _patch_lines(patch: str) -> list:
@@ -2795,9 +2864,16 @@ def _note_unread(p):
 
 def _whole_text(p, limit: int = 1 << 20):
     """The text of file `p` ("" when there is none), or None when it exists and the guard cannot read it in full
-    (larger than `limit`, or unreadable); an outer _skipped_reads still hears of it."""
+    (larger than `limit`, unreadable, or not valid UTF-8); an outer _skipped_reads still hears of it. Bytes that are
+    not UTF-8 are no text the guard can judge: a lone `\\xef` read as U+FFFD would let an append of `\\xbb\\xbf{…}`
+    finish a byte-order mark the agent drops, and the JSON or TOML after it would be read unjudged."""
     with _skipped_reads() as unread:
         text = _read_small(p, limit)
+        if chr(0xFFFD) in text:  # replaced bytes, or a real U+FFFD: only the strict decoding tells them apart
+            try:
+                Path(str(p)).read_bytes().decode("utf-8")
+            except (OSError, UnicodeError, ValueError):
+                _note_unread(p)
     for q in unread:
         _note_unread(q)
     return None if unread else text

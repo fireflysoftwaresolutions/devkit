@@ -588,7 +588,6 @@ class Initiatives(Shared):
         self.assertEqual(self.rulings(self.ana.projects[WIDGET], calls), ["allow", "allow"])
         self.assertEqual(self.rulings(self.ana.projects[GADGET], calls), ["deny", "deny"])
 
-    @unittest.expectedFailure  # open defect B-g3e4cykpp7r: dev plan new -p and dev handoff <project> --log pass the guard
     def test_a_member_projects_session_writes_no_other_projects_plans_or_log(self):
         # A session in acme/widget may write its own plans and session log through dev, and the guard refuses the
         # same commands aimed at acme/gadget, as it refuses a direct write of gadget's note.

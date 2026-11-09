@@ -1,0 +1,131 @@
+# Copyright (c) 2026 Firefly Software Solutions Inc.
+# SPDX-License-Identifier: Apache-2.0
+# One project per session: a session in a project's checkout writes only that project's handoff files through dev,
+# as it does with a file tool. The guard refuses the dev commands that would write another project's plans, session
+# log, note, lessons or delivery policy (-p, a project named as the argument, a plan path below another project's
+# folder) and the ones aimed at an initiative the project is not a member of, for Claude Code's Bash and Codex's
+# exec_command and shell. Each refusal has an allowed twin: the same command for the session's own project, a command
+# that only reads, a portfolio-level session, or the developer's recorded hatch. The guard reads command text and
+# paths: no command runs.
+# Run: python3 -m unittest tests.test_guard_projects -v
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "tests"))
+import _hermetic  # noqa: E402
+
+_hermetic.activate()
+sys.path.insert(0, str(ROOT / "lib"))
+
+from devkit import core, guard  # noqa: E402
+
+OWN, OTHER = "acme/widget", "acme/gadget"
+HATCH = "DEVKIT" + "_CROSS_PROJECT"  # built here: a test module that spells the hatch as text is refused to run
+
+
+def payloads(cmd):
+    """The same command as each agent sends it: Claude Code's Bash, Codex's exec_command and its shell tool."""
+    return [("Bash", {"command": cmd}, "claude"), ("exec_command", {"cmd": cmd}, "codex"),
+            ("shell", {"command": ["bash", "-lc", cmd]}, "codex")]
+
+
+class OneProjectPerSession(unittest.TestCase):
+
+    def setUp(self):
+        d = tempfile.mkdtemp(dir=str(core.HOME))
+        self.addCleanup(shutil.rmtree, d, True)
+        self.top = Path(d) / "acme" / "widget"
+        self.top.mkdir(parents=True)
+        for args in (["init", "-q"], ["remote", "add", "origin", f"https://github.com/{OWN}.git"]):
+            subprocess.run(["git", "-C", str(self.top), *args], check=True, capture_output=True)
+        self.assertEqual(guard.current_project(str(self.top)), OWN)
+        self.made = []
+        self.initiative("platform", [OWN])
+        self.initiative("payments", [OTHER])
+        self.plans = {k: self.file(f"plans/{rel}/2026-11-01-design.md", "# Design\n")
+                      for k, rel in (("own", OWN), ("other", OTHER), ("member", "initiatives/platform"),
+                                     ("stranger", "initiatives/payments"))}
+
+    def file(self, rel, text):
+        f = core.HANDOFF / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(text)
+        self.addCleanup(f.unlink)
+        return f
+
+    def initiative(self, slug, members):
+        self.file(f"initiatives/{slug}/README.md",
+                  f"---\nkind: initiative\ntitle: {slug}\nprojects: [{', '.join(members)}]\n---\n# {slug}\n")
+
+    def verdicts(self, cmd, cwd=None):
+        """{agent payload: "allow" | "deny"} for `cmd` run in the session's checkout (or `cwd`)."""
+        out = {}
+        for tool, inp, agent in payloads(cmd):
+            v = guard.check(tool, inp, str(cwd or self.top), agent)
+            out[tool] = v[0] if v else "allow"
+        return out
+
+    def assert_rulings(self, refused, allowed, cwd=None):
+        for cmd in refused:
+            with self.subTest(refused=cmd):
+                self.assertEqual(set(self.verdicts(cmd, cwd).values()), {"deny"}, self.verdicts(cmd, cwd))
+        for cmd in allowed:
+            with self.subTest(allowed=cmd):
+                self.assertEqual(set(self.verdicts(cmd, cwd).values()), {"allow"}, self.verdicts(cmd, cwd))
+
+    def test_a_plan_for_another_project_is_refused_and_one_for_its_own_is_not(self):
+        p = self.plans
+        self.assert_rulings(
+            refused=[f"dev plan new 'Export design' -p {OTHER}", f"dev plan -p {OTHER} new x",
+                     f"dev plan new x --project={OTHER}", f"dev plan new x -p {OWN} -p {OTHER}",
+                     f"dev plan revise {p['other']} --why y", f"dev plan approve {p['other']}",
+                     f"dev plan supersede {p['other']} --why y", "dev plan new x -i payments",
+                     f"dev plan revise {p['stranger']} --why y",
+                     f"cd {self.top} && dev plan revise ../../../{p['other'].relative_to(core.HOME)} --why y"],
+            allowed=[f"dev plan new 'Export design' -p {OWN}", "dev plan new x",
+                     f"dev plan revise {p['own']} --why y", f"dev plan approve {p['own']}",
+                     f"dev plan revise {p['member']} --why y", "dev plan new x -i platform",
+                     f"dev plan ls -p {OTHER}", f"dev plan -p {OTHER}"])
+
+    def test_a_plan_path_found_only_at_run_time_is_refused(self):
+        # "$P" may name any plan: the guard cannot tell whose it is
+        self.assert_rulings(refused=['dev plan revise "$P" --why y', "dev plan approve $(ls plans/*.md)"],
+                            allowed=[f"dev plan revise {self.plans['own']} --why y"])
+
+    def test_the_session_log_and_note_of_another_project_are_refused(self):
+        self.assert_rulings(
+            refused=[f"dev handoff {OTHER} --log 'finished the export'", f"dev handoff {OTHER} --edit",
+                     f"dev handoff --lo done {OTHER}", f"dev handoff --log=done {OTHER}",
+                     f"dev handoff {OTHER.upper()[:-1]}x --log done"],
+            allowed=[f"dev handoff {OWN} --log 'finished the export'", "dev handoff --log done",
+                     f"dev handoff {OWN.upper()} --log done", f"dev handoff {OTHER}", f"dev handoff {OTHER} --path"])
+
+    def test_lessons_and_the_delivery_policy_of_another_project_are_refused(self):
+        self.assert_rulings(
+            refused=[f"dev lesson add 'x' --cause c --prevent p -p {OTHER}", f"dev lesson recur L-1 -p {OTHER}",
+                     f"dev lesson -p {OTHER} retire L-1 --why w", f"dev delivery apply -p {OTHER} --why w",
+                     f"dev delivery -p {OTHER} apply --why w", "dev lesson add 'x' -i payments",
+                     f"dev note set status=blocked -p {OTHER}", f"dev task add x -p {OTHER} --why y"],
+            allowed=[f"dev lesson ls -p {OTHER}", f"dev lesson -p {OTHER} lint", f"dev lesson show L-1 -p {OTHER}",
+                     f"dev delivery -p {OTHER}", f"dev delivery apply -p {OWN} --why w",
+                     f"dev lesson add 'x' --cause c --prevent p -p {OWN}", "dev lesson add 'x' -i platform",
+                     f"dev note set status=blocked -p {OWN}"])
+
+    def test_a_portfolio_session_and_the_developers_hatch_may_write_any_project(self):
+        cmds = [f"dev plan new x -p {OTHER}", f"dev handoff {OTHER} --log done", f"dev lesson recur L-1 -p {OTHER}"]
+        self.assert_rulings(refused=[], allowed=cmds, cwd=core.DEV)  # a session started in ~/Development
+        for cmd in cmds:
+            with self.subTest(hatch=cmd):
+                v = guard.check("Bash", {"command": f"{HATCH}=1 {cmd}"}, str(self.top), "claude")
+                self.assertIsNone(v)
+                self.assertEqual([(b["flag"], b["rule"]) for b in guard.last_bypasses()], [(HATCH, "cross-project")])
+
+
+if __name__ == "__main__":
+    unittest.main()

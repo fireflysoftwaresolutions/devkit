@@ -128,6 +128,10 @@ class ApplyPatchOnAgentSettings(unittest.TestCase):
                     v = guard.check("Write", {"file_path": str(cfg), "content": BOM + text + "\n"}, self.cwd, "codex")
                     self.assertEqual((v or ("allow",))[0], want)
                     self.assertEqual(self.verdict(patch(f"*** Add File: {cfg}", "+" + BOM + text)), want)
+                    # `<<-` drops the tab before the mark, as the shell writes the file
+                    v = guard.check("exec_command", {"cmd": f"cat > {cfg} <<-'EOF'\n\t{BOM}{text}\n\tEOF"}, self.cwd,
+                                    "codex")
+                    self.assertEqual((v or ("allow",))[0], want)
 
 
 class TomlWithoutTomllib(unittest.TestCase):
@@ -280,6 +284,11 @@ class JsonAsClaudeReadsIt(unittest.TestCase):
         # Claude Code drops a byte-order mark before it parses the file, so the JSON after it is what counts
         self.each(lambda t: self.verdict("Write", {"file_path": "~/.claude/settings.json", "content": BOM + t}))
         self.each(lambda t: self.verdict("Bash", {"command": f"cat > .claude/settings.json <<'EOF'\n{BOM}{t}\nEOF"}))
+        # `<<-` drops each body line's leading tabs, so a tab before the mark hides it from no one
+        dash = "cat > .claude/settings.json <<-'EOF'\n{tabs}{text}\n{end}EOF"
+        self.each(lambda t: self.verdict("Bash", {"command": dash.format(tabs="\t", text=BOM + t, end="\t")}))
+        self.each(lambda t: self.verdict("exec_command", {"cmd": dash.format(tabs="\t\t", text=BOM + t, end="")},
+                                         "codex"))
 
 
 class ShellWritesOnAgentSettings(unittest.TestCase):
@@ -483,6 +492,29 @@ class ShellWritesOnAgentSettings(unittest.TestCase):
         self.assertEqual(self.verdicts("printf 'true}' >> .claude/settings.json"), {"allow"})
         settings.write_text('{"enabledPlugins": {"devkit@firefly-devkit": ')
         self.pairs([("printf 'false}}' >> .claude/settings.json", "printf 'true}}' >> .claude/settings.json")])
+
+    def test_a_byte_order_mark_split_across_two_commands_is_refused(self):
+        # the first command leaves one or two bytes of a mark, which are no UTF-8 text the guard can judge; the append
+        # finishes the mark, and the agent drops it and reads the key after it. Refused unread, as a file too big to
+        # read; the twins hold a whole mark, or a real U+FFFD, and append a key that switches nothing off.
+        root = Path(self.cwd)
+        cases = [(root / ".claude" / "settings.json", "{\"disableAllHooks\": true}", "{\"model\": \"opus\"}"),
+                 (root / ".codex" / "config.toml", "features.hooks = false\\n", "features.model = 1\\n")]
+        for f, off, on in cases:
+            rel = f.relative_to(root)
+            for head, rest in ((b"\xef", "\\xbb\\xbf"), (b"\xef\xbb", "\\xbf")):
+                with self.subTest(file=str(rel), head=head):
+                    f.write_bytes(head)
+                    self.assertEqual(self.verdicts(f"printf '{rest}{off}' >> {rel}"), {"deny"})
+                    self.assertEqual(self.verdicts(f"printf '{rest}{on}' >> {rel}"), {"deny"})  # unread: any append
+                    self.assertEqual(self.verdicts(f"printf '{rest}{on}' | tee -a {rel}"), {"deny"})
+                    self.assertEqual(self.verdicts(f"printf '\\xef\\xbb\\xbf{on}' > {rel}"), {"allow"})
+            for text in ("﻿", "�"):
+                with self.subTest(file=str(rel), whole=text):
+                    f.write_text(text)
+                    self.assertEqual(self.verdicts(f"printf '{on}' >> {rel}"), {"allow"})
+        (root / ".claude" / "settings.json").write_text("﻿")
+        self.assertEqual(self.verdicts("printf '{\"disableAllHooks\": true}' >> .claude/settings.json"), {"deny"})
 
     def test_an_append_to_a_settings_file_too_big_to_read_is_refused(self):
         # over the guard's read limit the file's text is unknown, so an append or a <> could finish a key the file
