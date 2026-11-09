@@ -275,8 +275,13 @@ TEXT_MARK = "[text not recorded: {n} characters]"
 # the classes of dev's positionals: text is free text; name names something (a member, a branch, a path, a project, a
 # number) and stays; select picks an item by its id or number, or by a part of its title, so it stays only as an id or
 # a number; pair is key=value (dev note set), whose key stays and whose value only when the key takes one of a fixed
-# set (PAIR_VALUES); roster is a crew member's or a kind of work's id from devkit's roster, and free text otherwise
-ARG_CLASSES = ("text", "name", "select", "pair", "roster")
+# set (PAIR_VALUES); roster is a crew member's or a kind of work's id from devkit's roster, and free text otherwise;
+# target is what `dev session` acts on (a session target, a message or escalation id, a claimed resource, or a
+# transcript), which stays only in one of those shapes (PEER_TARGET): a message typed where the target goes is masked
+ARG_CLASSES = ("text", "name", "select", "pair", "roster", "target")
+PEER_TARGET = re.compile(r"@[0-9a-z-]{1,40}|all|repo|project|(?:project|initiative):[\w.-]+(?:/[\w.-]+)*|"
+                         r"[SE]-[0-9a-z]{1,24}|(?:release|handoff|push|branch|item):[\w.-]+(?:/[\w.-]+)*(?:@[\w./-]+)?|"
+                         r"custom:[a-z0-9-]{1,40}|[\w./~-]+\.jsonl")
 # every dev command, by its path in dev's parser -> its positionals in the parser's order: dest:class, then the
 # parser's nargs (? * + ..., nothing for one word). A word past the last positional takes its class when it repeats,
 # else it is a select. "..." takes the rest of the line, options included (argparse.REMAINDER)
@@ -375,7 +380,7 @@ COMMAND_ARGS = {
     "rm": "paths:name*",
     "run": "", "run ls": "", "run rerun": "id:name", "run view": "id:name?",
     "sec": "scan:name query:name?",
-    "session": "session_cmd:name transcript:name?",
+    "session": "session_cmd:name target:target? text:text*",
     "setup": "what:name?",
     "sleep": "",
     "standup": "",
@@ -437,13 +442,16 @@ FLAG_OPTIONS = frozenset((
     "--history --ignore-case --include-heavy --json --keep-branch --keep-going --later --latest --lift --list --local "
     "--mark-passed --markdown --members --merge --mermaid --mine --move --name-only --names --new --no-check --no-copy "
     "--no-deps --no-git --no-index --no-open --no-prose --no-push --no-template --no-validate --now --offline --online "
-    "--open --outside --patch --pending --prerelease --preview --public --publish --quiet --ready --rebase --record "
+    "--open --outside --patch --pending --prerelease --preview --public --publish --queue --quiet --ready --rebase "
+    "--record "
     "--recursive "
     "--refresh --regex --remote --remove --replace --request-changes --resume --run --safe --scheduled --security "
     "--sign --skip "
-    "--skip-heavy --skip-packages --squash --staged --stat --status --stop --strict --syntax --tab --task --tasks "
+    "--skip-heavy --skip-packages --squash --staged --standby --stat --status --stop --strict --syntax --tab --task "
+    "--tasks "
     "--team "
-    "--tracked --unverified --unwip --verbose --wait --watch --wip --word --yes -F -R -a -f -h -l -r -s -v -y").split())
+    "--tracked --unverified --unwip --urgent --verbose --wait --watch --wip --word --yes -F -R -a -f -h -l -r -s -v -y"
+).split())
 DEV_OPTIONS = TEXT_OPTIONS | NAME_OPTIONS | FLAG_OPTIONS
 # dev note set's keys whose value is one of a fixed set: that value stays, every other key's value is masked
 PAIR_VALUES = {"status": frozenset(notes.STATUSES), "priority": frozenset(notes.PRIORITIES)}
@@ -890,7 +898,7 @@ def _pos_act(w, cls: str, form: str, mark: str, group):
     """A positional by its class: None when it stays, else how it is masked."""
     v = w[3]
     if w[0] == "mark" or (cls == "name" and _keeps(v, form)) or (cls in ("select", "pair") and _SAFE.fullmatch(v)) \
-            or (cls == "roster" and v.lower() in _roster_ids()):
+            or (cls == "roster" and v.lower() in _roster_ids()) or (cls == "target" and PEER_TARGET.fullmatch(v)):
         return None
     m = _PAIR.match(v) if cls == "pair" else None
     if m:  # L3: a value stays only from its key's fixed set
@@ -1573,6 +1581,12 @@ ACTIONS = {
     "run": ("lifecycle", "notice"),  # a run orphaned by its ended session, or taken back by its resumed one
     "scope.write": ("security", "notice"),  # a review or read-only lane's shell call wrote files (F7); a caller sure
     #                                         of it passes severity="warning"
+    # sessions on one Mac (peers.py): a note, question or answer sent (never its text), a refusal, a claim taken,
+    # renewed, queued or released, a claim broken with the developer's grant, an escalation and its settlement, and
+    # the hourly sweep
+    "peer": ("lifecycle", "info"), "peer.refused": ("refusal", "notice"), "peer.claim": ("decision", "info"),
+    "peer.release": ("decision", "info"), "peer.break": ("security", "warning"),
+    "peer.escalate": ("decision", "notice"), "peer.settle": ("decision", "notice"), "peer.sweep": ("job", "info"),
 }
 
 # a caller's keyword -> where it goes in the record; callers pass nothing else (anything else is dropped)
@@ -1598,6 +1612,8 @@ EXTRAS = {
     # them as ref.options, crew.evidence never stores them
     "options": "",
     "layer": "ref.layer",  # dev ext: the layer a change or drift is in (team, user, project, retired)
+    # peers.py: the claimed resource, the sessions a message or an escalation went to (their keys), and its kind
+    "resource": "ref.resource", "recipients": "ref.recipients", "kind": "ref.kind",
 }
 RAISE = {"tampered": "critical"}  # a caller's outcome word that makes the record more severe
 EVIDENCE_KEYS = {p.split(".", 1)[1] for p in EXTRAS.values() if p.startswith("evidence.")}
@@ -2059,7 +2075,8 @@ READ_SUB = {("task", "ls"), ("task", "show"), ("task", "history"), ("task", None
             ("crew", "show"), ("crew", "brief"), ("crew", "inbox"), ("crew", "decisions"), ("crew", "next"),
             ("crew", "owner"),
             ("ci", None), ("ci", "status"), ("ci", "audit"), ("session", "brief"), ("session", "compactions"),
-            ("session", None), ("alias", None)}
+            ("session", None), ("session", "ls"), ("session", "inbox"), ("session", "claims"),
+            ("session", "escalations"), ("alias", None)}
 # `ci audit --fix` edits workflow files and `ci init` writes a pipeline (unless --dry-run): both are audited;
 # `alias` alone lists the aliases, and `free` (or `gc`) without item numbers, --safe or --apply prints the plan
 # crew sync, ask, answer, decide, delegate, decline, mode <guided|auto> and route --apply change state;

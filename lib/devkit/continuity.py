@@ -1624,23 +1624,35 @@ def forget(session=None, all_: bool = False) -> dict:
 
 
 def add_arguments(p):
-    """`dev session …` (cli.py: continuity.add_arguments(add("session", continuity.cmd_session, …)))."""
-    p.add_argument("session_cmd", choices=("brief", "carry", "compactions", "forget"),
-                   metavar="brief|carry|compactions|forget",
+    """`dev session …` (cli.py: continuity.add_arguments(add("session", continuity.cmd_session, …))): a session's
+    continuity (brief, carry, compactions, forget) and the commands between sessions on this Mac (peerscli)."""
+    from . import peerscli
+    cmds = ("brief", "carry", "compactions", "forget") + peerscli.COMMANDS
+    p.add_argument("session_cmd", choices=cmds, metavar="|".join(cmds),
                    help="brief: what devkit kept for a session · carry: move the run here after /clear · "
-                        "compactions: count a transcript's compactions (reads only) · forget: delete the records")
-    p.add_argument("transcript", nargs="?", help="compactions: the transcript (.jsonl) to read")
+                        "compactions: count a transcript's compactions (reads only) · forget: delete the records · "
+                        + peerscli.COMMANDS_HELP)
+    p.add_argument("target", nargs="?",
+                   help="compactions: the transcript (.jsonl) to read · tell, ask: @<id prefix>, project, "
+                        "project:<id>, initiative:<slug>, repo or all · answer: the message id S-… · claim, release: "
+                        "the resource (release:<project>, push:<project>@<branch>, handoff:<project>, "
+                        "branch:<project>@<branch>, custom:<name>) · escalate: a message id S-… or a target")
+    p.add_argument("text", nargs="*", help="tell, ask, answer: the message · escalate: the question")
     p.add_argument("--session", help="<agent>:<session id> (brief: default this session; forget: that session)")
     p.add_argument("--latest", action="store_true",
                    help="brief: the project's newest session with an open run or requests (last 12 hours)")
-    p.add_argument("-p", "--project", help="brief --latest: a project id, e.g. owner/repo (default: this folder's)")
+    p.add_argument("-p", "--project", help="brief --latest: a project id, e.g. owner/repo (default: this folder's) · "
+                                            "claims: that project's claims only")
     p.add_argument("--for-chat", action="store_true",
                    help="brief: for a chat surface (devkit_resume): each request cut to 200 characters")
     p.add_argument("--provider", help="brief: who will read it (claude, codex, anthropic, openai); request text "
                                       "only for the session's own provider, otherwise their count and times")
     p.add_argument("--from", dest="from_sid", help="carry: the cleared session (default: the one /clear ended)")
     p.add_argument("--members", action="store_true", help="compactions: the members' transcripts too")
-    p.add_argument("--all", action="store_true", help="forget: every continuity record and clear link here")
+    p.add_argument("--all", action="store_true", help="forget: every continuity record and clear link here · ls: the "
+                                                      "idle and ended sessions too · inbox: every message kept · "
+                                                      "escalations: the settled ones too")
+    peerscli.add_options(p)
     return p
 
 
@@ -1675,10 +1687,12 @@ def _reader(given, chat: bool, cwd: str):
 
 
 def cmd_session(a) -> int:
-    """dev session brief | carry | compactions | forget. A refusal (a crew member's call, which only Morpheus may
-    make, or a missing argument) is one line on stderr and exit 2, as with the other dev commands, never a
-    traceback."""
-    from . import ui
+    """dev session brief | carry | compactions | forget, and the commands between sessions (peerscli.run, with its
+    own exit codes). A refusal (a crew member's call, which only Morpheus may make, or a missing argument) is one
+    line on stderr and exit 2, as with the other dev commands, never a traceback."""
+    from . import peerscli, ui
+    if a.session_cmd in peerscli.COMMANDS:
+        return peerscli.run(a)
     try:
         return _session_command(a)
     except ValueError as e:  # progress.StepError is one
@@ -1690,17 +1704,18 @@ def _session_command(a) -> int:
     cwd = os.getcwd()
     act = a.session_cmd
     if act == "compactions":
-        if not a.transcript:
+        transcript = a.target
+        if not transcript:
             raise ValueError("give the transcript: dev session compactions <path.jsonl>")
-        if _is_codex(a.transcript):
+        if _is_codex(transcript):
             print("devkit: reading compactions from a Codex rollout is not supported on Codex yet (its compaction "
                   "item is checked live after 2026-11-09)")
             return 0
-        if not os.path.isfile(a.transcript):
-            raise ValueError(f"no transcript at {a.transcript}")
-        _print_compactions(a.transcript)
+        if not os.path.isfile(transcript):
+            raise ValueError(f"no transcript at {transcript}")
+        _print_compactions(transcript)
         if a.members:
-            folder = Path(a.transcript).with_suffix("") / "subagents"
+            folder = Path(transcript).with_suffix("") / "subagents"
             total = 0
             for f in sorted(folder.glob("agent-*.jsonl")) if folder.is_dir() else []:
                 total += len(scan(f, 0, cap=None).boundaries)
