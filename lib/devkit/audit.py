@@ -347,6 +347,7 @@ COMMAND_ARGS = {
     "lesson": "", "lesson add": "title:text+", "lesson anchor": "selector:select+", "lesson ls": "",
     "lesson prevent": "selector:select+", "lesson recur": "selector:select+", "lesson restore": "selector:select+",
     "lesson retire": "selector:select+", "lesson review": "", "lesson scan": "", "lesson show": "selector:select+",
+    "lesson eval": "", "lesson lint": "", "lesson release": "lesson:select", "lesson supersede": "old:select",
     "ls": "",
     "mcp": "",
     "mv": "paths:name+",
@@ -403,8 +404,8 @@ COMMAND_MARK = {"crew ask": "[message text not recorded: {n} characters]",
 # number, a date); an option in neither takes no value
 TEXT_OPTIONS = frozenset({
     "--why", "--check", "--next", "--title", "--body", "-m", "--message", "--log", "--note", "--done", "--evidence",
-    "--cause", "--prevent", "--detect", "--fix", "--happened", "--error", "--retire-when", "--verified", "--breaking",
-    "--options", "--flaky", "--plan", "--search", "--grep", "--hint", "--dev", "--text"})
+    "--cause", "--prevent", "--detect", "--fix", "--happened", "--error", "--match", "--retire-when", "--verified",
+    "--breaking", "--options", "--flaky", "--plan", "--search", "--grep", "--hint", "--dev", "--text"})
 NAME_OPTIONS = frozenset({
     "--action", "--activity", "--actor", "--after", "--agent", "--allow", "--approve", "--approves", "--ask",
     "--assignee", "--at", "--base", "--body-file", "--branch", "--by", "--category", "--command", "--commit-template",
@@ -430,11 +431,11 @@ NAME_FLAGS = {
 # dev's options that take no value: with TEXT_OPTIONS and NAME_OPTIONS, every option name dev's parser knows
 FLAG_OPTIONS = frozenset((
     "--abort --accept-ci --affected --all --all-branches --all-jobs --all-projects --allow-behind --amend --apply "
-    "--as-pinned --ast --auto --auto-only --cached --case-sensitive --changed --ci-passed --claim --commands --comment "
+    "--as-pinned --ast --auto --auto-only --block --cached --case-sensitive --changed --ci-passed --claim --commands --comment "
     "--comments --continue --count --cross --decision --discard --draft --dry-run --edit --fail-fast --failed --fill "
     "--finish --fixed --for-chat --force --force-in-use --force-with-lease --full-path --github --global --help "
     "--history --ignore-case --include-heavy --json --keep-branch --keep-going --later --latest --lift --list --local "
-    "--mark-passed --markdown --members --merge --mermaid --mine --move --name-only --names --no-check --no-copy "
+    "--mark-passed --markdown --members --merge --mermaid --mine --move --name-only --names --new --no-check --no-copy "
     "--no-deps --no-git --no-index --no-open --no-prose --no-push --no-template --no-validate --now --offline --online "
     "--open --outside --patch --pending --prerelease --public --publish --quiet --ready --rebase --record --recursive "
     "--refresh --regex --remote --remove --replace --request-changes --resume --run --safe --scheduled --security "
