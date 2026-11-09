@@ -2799,7 +2799,8 @@ def cmd_lesson(a):
     items = [x for x in items if a.all or x["meta"].get("status") != "retired"]
     print(ui.section(f"Lessons · {len(items)}"))
     if not items:
-        print("  none yet — record one after a fix, a revert or a repeated mistake: dev lesson add \"…\" --cause … --prevent …")
+        print("  none yet — record one after a fix, a revert or a repeated mistake: dev lesson add \"…\" --happened \"…\" "
+              "--cause \"…\" --prevent \"…\" --file <glob> --command \"<command words>\" --error \"<output text>\"")
     for x in sorted(items, key=lessons._score, reverse=True):
         m = x["meta"]
         st = {"open": ui.yellow("open"), "prevented": ui.green(f"prevented·{m.get('prevention')}"),
