@@ -305,6 +305,29 @@ class PruneTests(EventsTestCase):
         self.assertEqual(self.kept(), [(L2, "shown", int(T))])
 
 
+class LiveWritersTests(unittest.TestCase):
+    """A test run that is not isolated tells this run's writes from those of the developer's live sessions by the
+    list of what the live hooks and jobs write (tests/_hermetic.py): the lesson and bug state is on it."""
+
+    def test_the_lesson_and_bug_state_is_listed_as_written_by_live_sessions(self):
+        import _hermetic
+        from devkit import bugs, core
+
+        def rel(path, root):
+            return Path(path).relative_to(root).as_posix()
+
+        for path in (lessonevents.EVENTS, state.lock_file(lessonevents.EVENTS), core.STATE / lessons.CAP_RESTORE,
+                     core.STATE / lessons.VERDICTS, state.lock_file(lessons._lock_of(L1)),
+                     bugs.BUGS / "cache.json", bugs.BUGS / "ledger" / "2026-11-08.jsonl",
+                     bugs.CRASHES / "c1.json"):
+            self.assertTrue(_hermetic._live("state", rel(path, core.STATE)), rel(path, core.STATE))
+        handoff = lessons.LESSONS.parent
+        for path in (lessons.LESSONS / "global" / f"{L1}.md", lessons.LESSONS / "archive" / "acme" / f"{L2}.md",
+                     lessons.LESSONS / "rules" / "acme.json"):
+            self.assertTrue(_hermetic._live("handoff", rel(path, handoff)), rel(path, handoff))
+        self.assertFalse(_hermetic._live("state", "lessons-other.json"))
+
+
 class RatesTests(EventsTestCase):
     def test_rates_count_each_channel_that_showed_a_lesson_and_list_the_most_missed(self):
         now = time.time()
