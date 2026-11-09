@@ -362,6 +362,13 @@ class DeveloperGrantLines(tp.TranscriptCase):
                 self.assertIsNone(self.main(cmd))
                 self.assertIn(line, self.main(cmd) or "")  # used once
 
+    def test_the_typed_grant_opens_a_blocking_rule_with_its_options_first(self):
+        cmd = 'dev lesson prevent --by guard L-abc --match "python3 -c" --block'
+        self.assertIsNotNone(self.main(cmd))
+        self.type_line("grant developer-only lesson-block/L-abc")
+        self.assertIsNotNone(self.main('dev lesson prevent --by guard L-x --match "python3 -c" --block'))
+        self.assertIsNone(self.main(cmd))
+
     def test_no_typed_grant_opens_a_registry_write(self):
         for line in ("grant pr-write issue/new", "grant registry-write issue/new", "grant developer-only issue/new"):
             self.type_line(line)
@@ -476,6 +483,76 @@ class RegistryWrites(unittest.TestCase):
             self.assertIsNone(guard.irreversible_tool_verdict(
                 "mcp__github__add_issue_comment", {"owner": "acme", "repo": "widget", "issue_number": 5}, self.repo,
                 agent="claude", session="s1", grant=DenyAll()))
+
+
+class ReadOnlyLessonVerbs(unittest.TestCase):
+    # a review lane checks the lessons it is told about: lint, eval, review and scan only read the lesson records,
+    # the outcome log and git history; the verbs that change a lesson stay closed to it
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.repo = make_repo(self.tmp.name)
+        root = Path(self.tmp.name)
+        for p in (mock.patch.object(audit, "AUDIT", root / "audit"),
+                  mock.patch.object(audit, "policy_file", lambda: root / "no-policy.json")):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def lane(self, cmd, level):
+        with settings():
+            v = guard.crew_shell_verdict(cmd, self.repo, None, None, level=level, lane="a1", session="s1",
+                                         grant=DenyAll())
+        return v[1] if v else None
+
+    def test_a_review_lane_runs_the_lesson_checks(self):
+        for cmd in ("dev lesson lint", "dev lesson eval", "dev lesson eval --days 30", "dev lesson review",
+                    "dev lesson scan", "dev lesson scan --days 7", "dev lesson -p acme/api lint",
+                    "dev lesson --search sed lint"):
+            for level in ("review", "read"):
+                with self.subTest(cmd=cmd, level=level):
+                    self.assertIsNone(self.lane(cmd, level))
+
+    def test_a_review_lane_still_cannot_change_a_lesson(self):
+        for cmd in ("dev lesson retire L-abc --why x", "dev lesson prevent L-abc --by test --ref t.py",
+                    "dev lesson supersede L-abc --by L-def", "dev lesson anchor L-abc --why x --file a.py",
+                    "dev lesson restore L-abc", "dev lesson release L-abc", "dev lesson lint && dev lesson retire L-a"):
+            with self.subTest(cmd=cmd):
+                self.assertIn("changes devkit's records", self.lane(cmd, "review") or "")
+
+
+class LessonPreventOptions(unittest.TestCase):
+    # `dev lesson prevent` takes --by, --ref, --match and --error with a value, in any order: the guard reads the
+    # lesson id the parser reads, so a blocking rule names its lesson whatever order the options come in
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.repo = make_repo(self.tmp.name)
+
+    def targets(self, cmd):
+        return [(a["action"], a["target"]) for a in guard.irreversible_actions(cmd, self.repo) or []]
+
+    def test_a_blocking_rule_names_its_lesson_in_any_option_order(self):
+        want = [("developer-only", "lesson-block/L-abc123")]
+        for cmd in ('dev lesson prevent --by guard L-abc123 --match "python3 -c" --block',
+                    'dev lesson prevent --match "python3 -c" --by guard L-abc123 --block',
+                    'dev lesson prevent --error "No such file" --by guard L-abc123 --block',
+                    'dev lesson prevent --ref tests/t.py --by guard L-abc123 --block',
+                    'dev lesson prevent L-abc123 --by guard --match "python3 -c" --block'):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.targets(cmd), want)
+
+    def test_an_option_value_is_never_read_as_the_lesson(self):
+        # the value that looks like a lesson id is --ref's, and no lesson is named: no grant can open it
+        self.assertEqual(self.targets("dev lesson prevent --by guard --ref L-abc123 --block"),
+                         [("developer-only", "?")])
+
+    def test_the_other_commands_that_take_these_options_keep_their_words(self):
+        self.assertEqual(guard._dev_words(["lesson", "supersede", "L-old", "--by", "L-new"]),
+                         ["lesson", "supersede", "L-old"])
+        self.assertEqual(guard._dev_words(["lesson", "add", "a", "title", "--error", "boom"]),
+                         ["lesson", "add", "a", "title"])
 
 
 class CommandWords(unittest.TestCase):

@@ -5910,7 +5910,8 @@ _RO_GIT_GLOBAL = frozenset({"--no-pager", "-P", "--no-optional-locks", "--litera
 _RO_GH_READ = frozenset({"view", "list", "diff", "checks", "status"})
 _RO_DEV = {"status": None, "grep": None, "find": None, "files": None, "diff": None, "stubs": None, "help": None,
            "version": None, "sec": ("scan",), "test": ("", "run", "plan", "audit", "prove"), "plan": ("show",),
-           "lesson": ("", "ls", "list", "show", "add", "recur"), "task": ("", "ls", "list", "show"),
+           "lesson": ("", "ls", "list", "show", "add", "recur", "lint", "eval", "review", "scan"),
+           "task": ("", "ls", "list", "show"),
            "ci": ("", "status", "ls", "list"), "guard": ("check",),
            "delivery": ("", "show"), "audit": ("", "verify", "show", "stats", "config"), "completion": None,
            "__complete": None}
@@ -7613,7 +7614,10 @@ _DEV_VALUES = frozenset({
     "--commit-template",
     "--days", "--delay", "--format", "--grep", "--lang", "--log", "--member", "--note", "--only", "--out", "--outcome",
     "--pr", "--provider", "--refs", "--tag", "--renew", "--runner", "--search", "--session", "--severity", "--sha", "--since", "--stack",
-    "--step-timeout", "--until", "--verified", "-n", "-o"})
+    "--step-timeout", "--until", "--verified", "-n", "-o",
+    # dev lesson prevent and supersede (--by), prevent (--ref, --match), prevent, add and anchor (--error): without
+    # them `prevent --by guard L-x --block` reads `guard` as the lesson and no grant can name the rule it makes
+    "--by", "--ref", "--match", "--error"})
 _CURL_VALUES = frozenset(
     "-X --request -H --header -d --data --data-raw --data-binary --data-ascii --data-urlencode --json -F --form "
     "--form-string -T --upload-file -o --output -u --user -A --user-agent -e --referer -b --cookie -c --cookie-jar -w "
