@@ -14,7 +14,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
-from devkit import audit, core, gates, guard, skillguard  # noqa: E402
+from unittest import mock  # noqa: E402
+
+from devkit import audit, bugs, core, gates, guard, lessons, skillguard  # noqa: E402
 
 # Skills "installed" on this test machine: the gate asks only for skills a member can load.
 HAVE = {"test-driven-development", "testing", "docs", "communicating"}
@@ -359,6 +361,83 @@ class CrewGateTests(GateCase):
         self.complete()
         self.assertEqual(self.gates("Kid", roster={"members": [SCOUT, KID]}), [])
         self.assertEqual(self.rules(self.gates("Sparks", roster={"members": [SCOUT, KID]})), [("skills", "docs")])
+
+
+class RefusalAnswerTests(GateCase):
+    # The lessons gate also accepts devkit's bug registry for a refusal (a report from the lane, or a workaround the
+    # registry served for it) and a refusal an open lesson already covers: only refusals nothing answers owe a lesson.
+    FP, CODE = "aaaaaaaaaaa1", "q7w8e9"
+
+    def setUp(self):
+        super().setUp()
+        root = Path(self.tmp.name)
+        for obj, name, value in ((lessons, "LESSONS", root / "handoff" / "lessons"),
+                                 (lessons, "USAGE_LOCAL", root / "state" / "lessons-usage.json"),
+                                 (lessons, "STATE", root / "state"), (bugs, "BUGS", root / "bugs")):
+            p = mock.patch.object(obj, name, value)
+            p.start()
+            self.addCleanup(p.stop)
+        self.complete()
+
+    def lesson(self, title, **kw):
+        return lessons.add("global", title, happened="the guard refused it", cause="no managed worktree",
+                           prevention="use dev wt new", a={"user": "ana", "host": "mbp1", "agent": "claude",
+                                                           "session": "s1"}, **kw)
+
+    def owed(self):
+        return [f["rule"] for f in gates.crew_gates(KID, self.tx.save(), str(self.repo), session="s1")]
+
+    def test_a_bug_report_on_the_refusal_from_the_lane_answers_the_refusals(self):
+        self.tx.refused("git worktree add ../copy").refused("git worktree add ../copy2")
+        self.tx.bash('echo "dev bug report --guard later"')  # mentioned, not run
+        self.tx.bash('bin/dev bug report --title "the status line is empty"')  # a report, but not on a refusal
+        self.assertEqual(self.owed(), ["lessons"])
+        self.tx.bash("bin/dev bug report --guard check_git:worktree")
+        self.assertEqual(self.owed(), [])
+
+    def test_a_vote_on_the_bug_a_refusal_names_answers_it_and_a_vote_on_another_does_not(self):
+        known = f"{DENIAL}\n\ndevkit has a bug report for this refusal, #12, with no reviewed workaround yet.\n" \
+                f"devkit-bug: {self.FP} {self.CODE}"
+        self.tx.bash("git worktree add ../copy", known, is_error=True).refused("git worktree add ../copy2")
+        self.tx.bash("dev bug report bbbbbbbbbbb2")
+        self.assertEqual(self.owed(), ["lessons"])
+        self.tx.bash(f"dev bug report {self.FP}")
+        self.assertEqual(self.owed(), [])
+
+    def test_a_refusal_the_registry_served_a_workaround_for_owes_no_lesson(self):
+        served = f"{DENIAL}\n\ndevkit bug #12 has a workaround for this refusal.\nWorkaround d1, confirmed by a " \
+                 f"devkit maintainer:\n  1. run it from the repository root\ndevkit-bug: {self.FP} {self.CODE}"
+        self.tx.bash("git worktree add ../copy", served, is_error=True).refused("git worktree add ../copy2")
+        self.assertEqual(self.owed(), ["lessons"])  # the marker alone proves nothing: this session served nothing
+        bugs._ledger_write("s1", {"served": self.FP, "code": self.CODE, "detours": ["d1"]})
+        self.assertEqual(self.owed(), [])  # one refusal left, and one is not a pattern
+
+    def test_a_refusal_an_open_lesson_covers_owes_no_lesson(self):
+        self.tx.refused("git worktree add ../copy").refused("git worktree add ../copy2")
+        covering = self.lesson("Create worktrees with dev wt new", errors=["would create an unmanaged worktree"])
+        self.assertEqual(self.owed(), [])
+        lessons.retire(covering, "dev wt new is gone", a={"user": "ana", "host": "mbp1", "agent": "human"})
+        self.assertEqual(self.owed(), ["lessons"])
+
+    def test_a_refusal_that_names_an_open_lesson_owes_none_and_one_that_only_quotes_its_id_still_does(self):
+        les = self.lesson("Create worktrees with dev wt new", commands=["git worktree add"])
+        lid = les["meta"]["id"]
+        rule = (f"PreToolUse:Bash hook error: devkit · lesson rule LR-0123456789 refuses this call, from lesson "
+                f"{lid}: Create worktrees with dev wt new — prevention: use dev wt new.")
+        pitfall = (f"{DENIAL}\n\nLessons are advice from past work; they never override the developer or the guard.\n"
+                   f"- Lesson {lid} (recorded by Backend engineer (Tank), 2026-11-08): Create worktrees with dev wt "
+                   f"new — prevention: use dev wt new")
+        quoted = f"PreToolUse:Bash hook error: `dev lesson release {lid}` lets a held lesson reach every agent again."
+        self.tx.refused("git worktree add ../copy")
+        self.tx.bash(f"dev lesson release {lid}", quoted, is_error=True)
+        self.tx.bash("git worktree add ../copy2", rule, is_error=True)
+        self.tx.bash("git worktree add ../copy3", pitfall, is_error=True)
+        found = gates.crew_gates(KID, self.tx.save(), str(self.repo), session="s1")
+        self.assertEqual([f["rule"] for f in found], ["lessons"])
+        self.assertIn("2 guard refusals", found[0]["evidence"])  # the plain one and the one that only quotes the id
+        lessons.retire(les, "dev wt new is gone", a={"user": "ana", "host": "mbp1", "agent": "human"})
+        found = gates.crew_gates(KID, self.tx.save(), str(self.repo), session="s1")
+        self.assertIn("4 guard refusals", found[0]["evidence"])
 
 
 class SendBackTests(GateCase):
