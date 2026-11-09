@@ -2148,6 +2148,18 @@ def install_shell():
         note("not set up yet: dev setup shell turns on the fzf pickers")
 
 
+def _line_buffered():
+    """Write each line of `dev install` as it is printed, also into a pipe (the setup wizard reads one). bin/dev runs
+    with -I, which ignores PYTHONUNBUFFERED, so a pipe got its output in blocks of 8 KB: when the second half (the
+    pinned copy, started with os.execv) was killed, every line it had printed was lost, and the wizard could show only
+    the first half's banner."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(line_buffering=True)
+        except (AttributeError, ValueError, OSError):  # not a text stream (tests), or already closed
+            pass
+
+
 def run_install(only=None, unverified_why=None, version=None, as_pinned=False, commit_template=None,
                 assume_yes=False) -> int:
     """`dev install`. From a checkout it pins the checkout (or switches to `version`), then starts itself again from
@@ -2155,6 +2167,7 @@ def run_install(only=None, unverified_why=None, version=None, as_pinned=False, c
     some steps from the installed copy without pinning. Before it changes anything it names the running sessions that
     use devkit, which must be restarted (hooks.confirm_restart; `assume_yes`: go on without asking). -> exit code (1
     when the copy was refused or the developer stopped it)."""
+    _line_buffered()
     if not as_pinned:
         print(ui.banner("install"))
         from . import hooks
