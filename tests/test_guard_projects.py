@@ -171,6 +171,19 @@ class OneProjectPerSession(unittest.TestCase):
                 self.assertIn("dev session tell", v[1])
 
 
+    def test_words_that_arrive_at_run_time_cannot_name_the_project(self):
+        # xargs, find -exec and parallel add words the command line does not show: a write may be another project's
+        o, own = self.plans["other"], self.plans["own"]
+        self.assert_rulings(
+            refused=[f"echo {OTHER} | xargs dev handoff --log x", f"echo {o} | xargs dev plan revise --why y",
+                     f"find {o.parent} -name a.md -exec dev plan revise {{}} --why y \\;",
+                     f"find {o.parent} -name a.md -exec dev plan approve {{}} +",
+                     f"parallel dev plan approve ::: {o}", f"echo x | xargs dev task add y --why z",
+                     "dev plan revise {} --why y"],
+            allowed=[f"echo {OTHER} | xargs dev handoff", f"echo {o} | xargs dev plan ls",
+                     f"find {o.parent} -name a.md -exec dev lesson show {{}} \\;", "parallel dev lesson show ::: L-1",
+                     f"find {own.parent} -name a.md -exec cat {{}} \\;", f"dev plan revise {own} --why y"])
+
     def test_a_portfolio_session_and_the_developers_hatch_may_write_any_project(self):
         cmds = [f"dev plan new x -p {OTHER}", f"dev handoff {OTHER} --log done", f"dev lesson recur L-1 -p {OTHER}",
                 f"env -C {self.other_top} dev handoff --log done"]

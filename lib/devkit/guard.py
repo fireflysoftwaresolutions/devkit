@@ -1978,10 +1978,11 @@ def _nested_lines(argv, cwd=None) -> list:
     return [shlex.join(x) for x in runs if x and os.path.basename(x[0]) not in _PATH_TAKERS]
 
 
-def _check_segments(cmd: str, segs, ecwd: str, agent: str, depth: int = 0, outer_envs=frozenset()):
+def _check_segments(cmd: str, segs, ecwd: str, agent: str, depth: int = 0, outer_envs=frozenset(), fed=False):
     """The rules on destructive commands for each segment of `cmd`, then for the lines it runs one level down
     (_nested_lines, to depth 4). `outer_envs`: the variables set for the shell that runs this line, which its
-    commands inherit (an escape hatch on `sh -c` reaches the line)."""
+    commands inherit (an escape hatch on `sh -c` reaches the line). `fed`: this line is run by xargs, find -exec or
+    GNU parallel, which add words the line does not show (_feeds_words)."""
     raw_segments = re.split(r"&&|\|\||;|\n|\|", cmd)
     pending_adds = []
     for idx, (argv0, redirs) in enumerate(segs):
@@ -2065,7 +2066,7 @@ def _check_segments(cmd: str, segs, ecwd: str, agent: str, depth: int = 0, outer
             elif argv[1:2] and argv[1] in ("pr", "issue", "release", "api"):
                 res = _attribution(cmd)
         elif (_dev_args(argv) or [""])[0] in _DEV_CROSS:
-            res = check_dev_cross(_dev_args(argv), _prefix_chdir(argv0[:len(argv0) - len(argv)], ecwd), envs)
+            res = check_dev_cross(_dev_args(argv), _prefix_chdir(argv0[:len(argv0) - len(argv)], ecwd), envs, fed)
         elif name in ("rm", "unlink"):
             res = check_rm(argv[1:], ecwd, envs) if name == "rm" else steer_rm(argv[1:], ecwd, envs)
         elif name == "find" and ("-delete" in argv or any(x in argv for x in ("-exec", "-execdir")) and
@@ -2115,9 +2116,10 @@ def _check_segments(cmd: str, segs, ecwd: str, agent: str, depth: int = 0, outer
         lines = _nested_lines(argv, ecwd)
         if lines and depth >= 4:  # too deep to read is no "nothing found": refused
             return deny(NESTED_REASON, key="nested-depth")
+        feeds = fed or _feeds_words(argv)
         for line in lines:
             inner = split_commands(line)
-            res = _check_segments(line, inner, ecwd, agent, depth + 1, envs) if inner else None
+            res = _check_segments(line, inner, ecwd, agent, depth + 1, envs, feeds) if inner else None
             if res:
                 return res
     # what `<(…)`, `>(…)` and the `$(…)` and backticks inside a word run: the tokenizer leaves their words in the
@@ -2127,17 +2129,33 @@ def _check_segments(cmd: str, segs, ecwd: str, agent: str, depth: int = 0, outer
         return deny(NESTED_REASON, key="substitution-depth")
     for line in subs:
         inner = split_commands(line)
-        res = _check_segments(line, inner, ecwd, agent, depth + 1, outer_envs) if inner else None
+        res = _check_segments(line, inner, ecwd, agent, depth + 1, outer_envs, fed) if inner else None
         if res:
             return res
     return None
 
 
-def check_dev_cross(args, cwd, envs):
+# the programs that run a command with words they read when they run: xargs and GNU parallel (and its sem) add their
+# input's words, find -exec, -execdir, -ok and -okdir the names it finds ({})
+_INPUT_RUNNERS = frozenset({"xargs", "parallel", "sem"})
+_FIND_EXECS = frozenset({"-exec", "-execdir", "-ok", "-okdir"})
+
+
+def _feeds_words(argv) -> bool:
+    """True when a segment runs a command with words it reads at run time (_INPUT_RUNNERS, find -exec): a word of the
+    segment names one of them, so a runner behind a prefix or timeout (`timeout 5 parallel …`) counts too."""
+    for k, w in enumerate(argv):
+        n = os.path.basename(str(w))
+        if n in _INPUT_RUNNERS or (n == "find" and any(a in _FIND_EXECS for a in argv[k + 1:])):
+            return True
+    return False
+
+
+def check_dev_cross(args, cwd, envs, fed=False):
     """A `dev` command that writes another project's handoff files (_DEV_CROSS) from inside a project.
     DEVKIT_CROSS_PROJECT as the command's prefix (a recorded use, spec F8) or in the hook's own environment (the
-    developer started the session with it) allows it."""
-    why = _dev_cross_violation(args, cwd)
+    developer started the session with it) allows it. `fed`: xargs, find -exec or parallel runs it (_feeds_words)."""
+    why = _dev_cross_violation(args, cwd, fed)
     if not why or os.environ.get("DEVKIT_CROSS_PROJECT") or _hatch(envs, "DEVKIT_CROSS_PROJECT", "cross-project", why):
         return None
     return why
@@ -2161,11 +2179,12 @@ def _names_own_project(value, pid) -> bool:
     return str(value).strip().rstrip("/").casefold() == pid.casefold()
 
 
-def _dev_cross_violation(args, cwd):
+def _dev_cross_violation(args, cwd, fed=False):
     """Why a dev command that writes a project's or an initiative's handoff files may not run in this session, or
     None. The session's project decides (session_project: the folder the session started in, never the one a cd, pushd,
     env -C or Codex workdir moved the command to); `cwd` is the folder the dev command runs in, which names the project
-    dev writes when no project is named, and against which relative paths are read."""
+    dev writes when no project is named, and against which relative paths are read. `fed`: a runner adds words the
+    command does not show, which may name any project or plan, so a write is refused."""
     words = _dev_words(args)  # every -p/-i value counts: argparse keeps the last, so a first one proves nothing
     reads = _DEV_CROSS.get(words[0] if words else "")
     if reads is not None and (words[1] if len(words) > 1 else "") in reads:
@@ -2175,6 +2194,11 @@ def _dev_cross_violation(args, cwd):
     pid = session_project(cwd)
     if not pid:
         return None
+    if fed:
+        return deny(f"This session works on {_code(pid)}, and xargs, find -exec or parallel adds words to this "
+                    f"{_code('dev ' + ' '.join(words[:2]))} when it runs, so the guard cannot tell whose handoff it "
+                    f"writes. Run the dev command once per project or plan, with its words written out.",
+                    key="dev-fed-words")
     if words[:1] == ["handoff"] and len(words) > 1 and not _names_own_project(words[1], pid):
         return deny(f"This session works on {_code(pid)}; {_code(f'dev handoff {words[1]}')} with --log or --edit "
                     f"would write another project's session log or note. Log this session's work with "
@@ -2215,7 +2239,7 @@ def _plan_path_violation(path, cwd, pid) -> str | None:
     plans/<pid>/, below plans/initiatives/<slug>/ of an initiative `pid` is a member of, or outside the handoff
     repository. The real path decides (links and `..` resolved, as `dev plan` resolves it), without case, as macOS
     reads it; a path the shell fills in at run time is refused, since it may name any plan."""
-    target = resolve(path, cwd)
+    target = UNKNOWN if _BRACED.search(str(path)) else resolve(path, cwd)  # {} a runner fills, {a,b} the shell
     if target == UNKNOWN:
         return (f"{_code(path)} is known only when the command runs, so the guard cannot tell whose plan it is. Name "
                 f"the plan's path below plans/{pid}/.")
