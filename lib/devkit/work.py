@@ -408,31 +408,50 @@ def ordered_open(items: list) -> list:
 # --------------------------------------------------------------------------- numbers and the Now limit
 # `dev task` numbers the open items, and `dev task <verb> <n>` takes such a number. The list moves under it: a close,
 # an add or a move renumbers every item after it, so `done 9` and then `done 40` once closed the item that had moved up
-# to #40. A number therefore means the item at that place in the list `dev task` last showed this viewer (the agent
-# session, else the terminal), and it is refused once the open items are no longer that list in that order, or the
-# list is more than LIST_TTL old. The refusal names the id #n had, and has now, so the caller acts by id. Ids always
-# work. Each viewer's lists live in STATE/task-lists/<viewer>.json: {viewer, lists: {scope: {ids, fingerprint,
-# shown_at}}}, on this Mac only.
+# to #40. A number therefore means the item at that place in the list `dev task` last showed this viewer (_viewer: the
+# Codex thread, else the agent session and the crew lane in it, else the shell that ran `dev`), and it is refused once
+# the open items are no longer that list in that order, or the list is more than LIST_TTL old. The refusal names the
+# id #n had, and has now, so the caller acts by id. Ids always work. Each viewer's lists live in
+# STATE/task-lists/<viewer>.json: {viewer, lists: {scope: {ids, fingerprint, shown_at}}}, on this Mac only.
 
 LIST_TTL = 30 * 60  # seconds a shown list numbers items
 NOW_LIMIT = 5  # open items in a project's Now above which devkit warns
 
 
 def _viewer() -> str:
-    """Who reads the numbers: the agent session, else the terminal, else this user's shell."""
-    sid = os.environ.get("DEVKIT_SESSION") or os.environ.get("CODEX_THREAD_ID") or ""
-    if sid:
-        return sid
-    for fd in (0, 1, 2):
-        try:
-            return os.ttyname(fd)
-        except OSError:
-            continue
-    return "shell"
+    """Who reads the numbers, as the key of their record:
+    codex:<thread>             a Codex thread (CODEX_THREAD_ID), also one started from a Claude Code shell, whose
+                               DEVKIT_SESSION it inherits
+    <agent>:<session>[:<lane>] the agent session that runs the command (progress.resolve_session) and the crew lane in
+                               it: DEVKIT_FROM_AGENT, else the member whose open call the ledger matches to this
+                               command. Every shell of a Claude Code session, its lanes' too, has one DEVKIT_SESSION.
+    shell-<parent pid>         no session of its own: a developer's shell (a recent session of the folder is a guess)
+    ''                         more than one open call of the session names this command, so the ledger cannot say
+                               whose it is: no numbers"""
+    from . import progress
+    thread = os.environ.get("CODEX_THREAD_ID", "")
+    if thread:
+        return f"codex:{thread}"
+    lane = os.environ.get("DEVKIT_FROM_AGENT") or ""
+    if lane:
+        agent, sid, how = progress.resolve_session()
+        calls = []
+    else:
+        who = progress.caller()
+        agent, sid, how, calls = who["agent"], who["session"], who["how"], who["calls"]
+        lane = "" if who["caller"] in progress.NOT_A_LANE else who["caller"]
+    if how in ("recency", "shell"):
+        return f"shell-{os.getppid()}"
+    if len(calls) > 1:
+        return ""
+    return f"{agent}:{sid}" + (f":{lane}" if lane else "")
 
 
-def _lists_file() -> Path:
-    name = re.sub(r"[^A-Za-z0-9._-]+", "_", _viewer()).strip("._")[:80] or "shell"
+def _lists_file(viewer: str) -> Path:
+    """The record of `viewer`'s lists. A name cut to fit keeps a hash of the whole key: two viewers never share one."""
+    name = re.sub(r"[^A-Za-z0-9._-]+", "_", viewer).strip("._") or "shell"
+    if len(name) > 80:
+        name = f"{name[:63]}-{hashlib.sha256(viewer.encode()).hexdigest()[:16]}"
     return core.STATE / "task-lists" / f"{name}.json"
 
 
@@ -441,25 +460,27 @@ def fingerprint(ids: list) -> str:
     return hashlib.sha256("\n".join(ids).encode()).hexdigest()[:8]
 
 
-def _shown_lists() -> dict:
+def _shown_lists(viewer: str) -> dict:
     try:
-        data = json.loads(_lists_file().read_text())
+        data = json.loads(_lists_file(viewer).read_text())
     except (OSError, ValueError):
         return {}
     lists = data.get("lists") if isinstance(data, dict) else None
     return lists if isinstance(lists, dict) else {}
 
 
-def _record_shown(scope: str, ids: list, now: float) -> bool:
+def _record_shown(viewer: str, scope: str, ids: list, now: float) -> bool:
     """Record `ids` as the list of `scope` this viewer was shown; drop the viewer's expired lists and the files of
     viewers gone for a day. -> whether it was recorded (unrecorded numbers are refused, so print none)."""
-    f = _lists_file()
-    lists = {s: x for s, x in _shown_lists().items()
+    if not viewer:
+        return False
+    f = _lists_file(viewer)
+    lists = {s: x for s, x in _shown_lists(viewer).items()
              if isinstance(x, dict) and now - parse_iso(x.get("shown_at", "")) < LIST_TTL}
     lists[scope or ""] = {"ids": ids, "fingerprint": fingerprint(ids), "shown_at": now_iso(now)}
     try:
         f.parent.mkdir(parents=True, exist_ok=True)
-        _replace(f, json.dumps({"viewer": _viewer(), "lists": lists}, indent=1, ensure_ascii=False) + "\n")
+        _replace(f, json.dumps({"viewer": viewer, "lists": lists}, indent=1, ensure_ascii=False) + "\n")
     except OSError:
         return False
     for old in f.parent.glob("*.json"):
@@ -476,13 +497,13 @@ def show(scope: str, items: list = None, rebind: bool = True) -> tuple:
     (which then counts as shown again); after a close, an add or a move it is printed without numbers."""
     ordered = ordered_open(all_items(scope) if items is None else items)
     ids = [i["meta"]["id"] for i in ordered]
-    now = time.time()
+    now, viewer = time.time(), _viewer()
     if not rebind:
-        shown = _shown_lists().get(scope or "")
+        shown = _shown_lists(viewer).get(scope or "") if viewer else None
         if not isinstance(shown, dict) or shown.get("ids") != ids or \
                 now - parse_iso(shown.get("shown_at", "")) >= LIST_TTL:
             return ordered, False
-    return ordered, _record_shown(scope, ids, now)
+    return ordered, _record_shown(viewer, scope, ids, now)
 
 
 def by_number(n: int, scope: str, items: list = None) -> dict:
@@ -491,7 +512,11 @@ def by_number(n: int, scope: str, items: list = None) -> dict:
     current = ordered_open(all_items(scope) if items is None else items)
     ids = [i["meta"]["id"] for i in current]
     where = scope or "all projects"
-    shown = _shown_lists().get(scope or "")
+    viewer = _viewer()
+    if not viewer:
+        raise ValueError(f"#{n}: another open call of this session runs the same command, so devkit cannot tell whose "
+                         f"list the number points into: use the item's id (T-…, F-…, B-…, S-…)")
+    shown = _shown_lists(viewer).get(scope or "")
     then = shown.get("ids") if isinstance(shown, dict) else None
     if not isinstance(then, list) or not all(isinstance(x, str) for x in then):  # none, or a damaged record
         raise ValueError(f"#{n}: no list of {where} was shown here, so the number points at nothing: run dev task and "

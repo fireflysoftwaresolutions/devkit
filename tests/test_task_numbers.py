@@ -3,7 +3,10 @@
 """`dev task <verb> <n>`: a number means the item at that place in the list `dev task` showed, and is refused once the
 open items changed, so closing #9 and then #40 never closes the item that moved up to #40.
 Run: python3 -m unittest tests.test_task_numbers -v"""
+import contextlib
+import json
 import os
+import shlex
 import sys
 import tempfile
 import time
@@ -14,10 +17,12 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from devkit import core, work  # noqa: E402
+from devkit import core, progress, work  # noqa: E402
 from test_work import A, B, TempHandoff  # noqa: E402
 
 SCOPE = "acme/api"
+SESSION = "session-one"
+TANK, GHOST = "a-tank", "a-ghost"  # two crew lanes' agent ids in SESSION
 
 
 class ShownListTests(unittest.TestCase):
@@ -26,10 +31,16 @@ class ShownListTests(unittest.TestCase):
         self.addCleanup(self.handoff.__exit__, None, None, None)
         state = tempfile.TemporaryDirectory()
         self.addCleanup(state.cleanup)
-        for patch in (mock.patch.object(core, "STATE", Path(state.name)),
-                      mock.patch.dict(os.environ, {"DEVKIT_SESSION": "claude:session-one"})):
+        root = Path(state.name)
+        for patch in (mock.patch.object(core, "STATE", root),
+                      mock.patch.object(progress, "RUNS", root / "runs"),
+                      mock.patch.object(progress, "SESSIONS", root / "sessions"),
+                      mock.patch.object(progress, "CALLS", root / "calls"),
+                      mock.patch.dict(os.environ, {"DEVKIT_SESSION": f"claude:{SESSION}"})):
             patch.start()
             self.addCleanup(patch.stop)
+        for name in ("CODEX_THREAD_ID", "DEVKIT_FROM_AGENT"):  # the patch of os.environ puts them back
+            os.environ.pop(name, None)
         # In `dev task` order (Now, Next, Later); items made in the same second would tie on their creation time.
         self.first = work.create(SCOPE, "Fix the login timeout", bucket="now", a=A)
         self.second = work.create(SCOPE, "Export invoices as CSV", bucket="next", a=A)
@@ -37,6 +48,79 @@ class ShownListTests(unittest.TestCase):
 
     def ids(self, items):
         return [i["meta"]["id"] for i in items]
+
+    @contextlib.contextmanager
+    def running(self, who, words, *others):
+        """`dev <words>` as a shell call of `who` (a crew lane's agent id, or main) in SESSION: the call ledger holds
+        it, and the `others` [(caller, command)] open beside it, as the hooks record them. `dev task` is not a routed
+        lane call, so DEVKIT_FROM_AGENT stays unset."""
+        folder = progress.CALLS / SESSION
+        folder.mkdir(parents=True, exist_ok=True)
+        entries = []
+        for n, (caller, cmd) in enumerate([(who, f"dev {words}"), *others]):
+            entries.append(folder / f"toolu_{n}.json")
+            entries[-1].write_text(json.dumps({"tool_use_id": f"toolu_{n}", "caller": caller, "ts": time.time(),
+                                               "ttl": 3600, "cmd": cmd}))
+        try:
+            with mock.patch.object(sys, "argv", ["dev", *shlex.split(words)]):
+                yield
+        finally:
+            for e in entries:
+                e.unlink()
+
+    def assert_lanes_keep_their_own_lists(self, lane_a, lane_b):
+        with self.running(lane_a, "task"):
+            work.show(SCOPE)  # lane A: the login timeout, the CSV export, the parity test
+        work.release(work.load(self.first["path"]), a=B, status="done")
+        with self.running(lane_b, "task"):
+            work.show(SCOPE)  # lane B, after the close: the CSV export, the parity test
+        with self.running(lane_a, "task done 2"), self.assertRaises(ValueError) as e:
+            work.find("2", SCOPE)  # A's #2 is the CSV export; in B's list #2 is the parity test
+        self.assertIn(f"#2 was {self.second['meta']['id']} “Export invoices as CSV”", str(e.exception))
+        self.assertEqual(work.load(self.third["path"])["meta"]["status"], "todo")
+
+    def test_a_crew_lanes_number_points_into_its_own_list_not_the_one_another_lane_showed_since(self):
+        self.assert_lanes_keep_their_own_lists(TANK, GHOST)
+
+    def test_lanes_whose_ids_differ_only_past_the_length_of_a_file_name_keep_their_own_lists(self):
+        self.assert_lanes_keep_their_own_lists("a-" + "x" * 90 + "-tank", "a-" + "x" * 90 + "-ghost")
+
+    def test_while_two_open_calls_name_the_same_words_the_list_is_not_numbered_for_either(self):
+        with self.running(GHOST, "task"):
+            work.show(SCOPE)
+        work.release(work.load(self.first["path"]), a=B, status="done")
+        with self.running(TANK, "task", (GHOST, "dev task")):  # both lanes run `dev task` at once
+            _, numbered = work.show(SCOPE)
+        self.assertFalse(numbered)  # the ledger cannot say which call is this one
+        with self.running(GHOST, "task done 2"), self.assertRaises(ValueError):
+            work.find("2", SCOPE)  # still the list the Ghost lane saw before the close
+
+    def test_a_codex_thread_started_from_a_claude_code_shell_numbers_its_own_list(self):
+        work.show(SCOPE)  # the Claude Code session, whose DEVKIT_SESSION the Codex thread inherits
+        with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-1"}):
+            with self.assertRaises(ValueError) as e:
+                work.find("1", SCOPE)
+            self.assertIn("no list of acme/api was shown here", str(e.exception))
+            work.show(SCOPE)
+            self.assertEqual(work.find("1", SCOPE)["meta"]["id"], self.first["meta"]["id"])
+
+    def test_shells_with_no_session_of_their_own_keep_their_own_lists(self):
+        # An agent session was active in this folder a minute ago; the two shells below are not part of it.
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        self.addCleanup(os.chdir, os.getcwd())
+        os.chdir(folder.name)
+        progress.SESSIONS.mkdir(parents=True)
+        (progress.SESSIONS / "claude-session-recent.json").write_text(json.dumps(
+            {"agent": "claude", "session": "session-recent", "top": os.getcwd()}))
+        os.environ.pop("DEVKIT_SESSION")
+        with mock.patch.object(os, "getppid", return_value=4101):
+            work.show(SCOPE)
+        with mock.patch.object(os, "getppid", return_value=4102), self.assertRaises(ValueError) as e:
+            work.find("1", SCOPE)
+        self.assertIn("no list of acme/api was shown here", str(e.exception))
+        with mock.patch.object(os, "getppid", return_value=4101):
+            self.assertEqual(work.find("1", SCOPE)["meta"]["id"], self.first["meta"]["id"])
 
     def test_a_number_finds_the_item_at_that_place_in_the_list_that_was_shown(self):
         shown, numbered = work.show(SCOPE)
