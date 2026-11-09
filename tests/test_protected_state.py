@@ -16,7 +16,9 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 LIB = str(ROOT / "lib")
 sys.path.insert(0, LIB)
+sys.path.insert(0, str(ROOT / "tests"))
 
+import _sandbox  # noqa: E402
 from devkit import core, fs, guard, policy  # noqa: E402
 
 HOME = core.HOME
@@ -273,8 +275,9 @@ class ShellStartupFileTests(unittest.TestCase):
 
 def _run_core(env, code="from devkit import core; print(core.CONFIG_FILE); print(core.DEV)"):
     base = {"PATH": "/usr/bin:/bin", "LANG": "en_US.UTF-8"}
+    # the sandbox's environment, so the devkit child keeps the test net (its stand-ins first on PATH)
     return subprocess.run([sys.executable, "-c", f"import sys; sys.path.insert(0, {LIB!r}); {code}"],
-                          env={**base, **env}, capture_output=True, text=True, timeout=60)
+                          env=_sandbox.env(base={**base, **env}), capture_output=True, text=True, timeout=60)
 
 
 class ForgedConfigTests(unittest.TestCase):

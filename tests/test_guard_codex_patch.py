@@ -509,11 +509,11 @@ class ShellWritesOnAgentSettings(unittest.TestCase):
                     self.assertEqual(self.verdicts(f"printf '{rest}{on}' >> {rel}"), {"deny"})  # unread: any append
                     self.assertEqual(self.verdicts(f"printf '{rest}{on}' | tee -a {rel}"), {"deny"})
                     self.assertEqual(self.verdicts(f"printf '\\xef\\xbb\\xbf{on}' > {rel}"), {"allow"})
-            for text in ("﻿", "�"):
+            for text in ("\ufeff", "\ufffd"):
                 with self.subTest(file=str(rel), whole=text):
                     f.write_text(text)
                     self.assertEqual(self.verdicts(f"printf '{on}' >> {rel}"), {"allow"})
-        (root / ".claude" / "settings.json").write_text("﻿")
+        (root / ".claude" / "settings.json").write_text("\ufeff")
         self.assertEqual(self.verdicts("printf '{\"disableAllHooks\": true}' >> .claude/settings.json"), {"deny"})
 
     def test_an_append_to_a_settings_file_too_big_to_read_is_refused(self):
