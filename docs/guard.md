@@ -74,6 +74,13 @@ the net under your own review, not as a replacement for it.
 | ask | you are asked to confirm (used only for writes outside the workspace) | not supported by Codex, so it becomes deny |
 | deny | the tool call is blocked and the reason goes to the agent | the same |
 
+**Every refusal has an id.** Each place in the guard that refuses has a stable refusal id, which the audit trail
+records with the refusal (`refusal_id`, see [The audit trail](audit.md)) and which `dev bug report --guard <refusal id>`
+takes when the refusal was wrong. When devkit's [bug registry](bug-registry.md) knows a bug for a refusal, the
+refusal adds what the registry serves: up to two workarounds a maintainer confirmed or a team agent found, as data
+that never overrides you, or a note that the refusal stands; then a `devkit-bug:` marker line. The verdict itself
+does not change.
+
 ## Rules
 
 ### File writes (Write, Edit, `apply_patch`, and `>` redirections)
@@ -223,6 +230,8 @@ apply the same rule. Change the lists with `branches.types` and `branches.forbid
 | `gh pr create --head <branch>` with a branch that breaks the naming rule | deny |
 | `gh pr …`, `gh issue …`, `gh release …`, `gh api …` containing AI attribution | deny |
 | `gh config set pager …` (or a key the guard cannot read) | deny: gh runs its pager as a command for every later read |
+| An agent's `gh issue create`, `gh issue comment`, `gh issue edit`, or `gh api` on the issues of devkit's own repository, a `gh api repositories/<id>/issues…` route in any repository (a numeric id does not say which one), a `gh api graphql` mutation of an issue, a comment, or a reaction in any repository (a node id does not say which one either), and an MCP tool call that writes an issue or a comment there | deny, in the main session and the crew alike, whatever grants exist: "Agents do not post to devkit's bug registry directly. Use `dev bug report` or `dev bug detour`: devkit checks what leaves this machine. A comment on a pull request goes through `gh pr comment` or `dev pr comment`." (see [The bug registry](bug-registry.md)) |
+| `gh api graphql` with a query the guard cannot read: from standard input (`-F query=@-`, `--input -`), from a file it cannot open, or filled in by the shell (a substitution or a variable) | the action `unknown`, tier 2: it may be a merge or a forced ref update. Write the query out with `-f query='…'` or `-F query=@query.graphql`; if it must run as it is, the developer types `grant unknown cmd-<hash>` |
 
 ### Files and folders from the shell
 
@@ -268,7 +277,7 @@ three folders readable and writable by your account only (`0700`) every time it 
 | --- | --- |
 | A file write (Write, Edit, `apply_patch`) in those three folders, or in a subagent's meta file | deny, with the `dev` command that owns the record |
 | A shell write there: a redirect, `tee`, `cp`, `mv`, `ln`, `rm`, `dev rm`, `sed -i`, an interpreter that writes files, also inside `sh -c`, `eval`, `xargs`, or `find -exec` | deny |
-| `dev config set safeguards.*` or `dev config edit`, or a `DEVKIT_*` or `DEV_ROOT` value added to the `env` block of an agent settings file or to a shell startup file such as `~/.zshrc` | deny |
+| `dev config set safeguards.*`, `audit.*`, or `bugs.share`, or `dev config edit`, or a `DEVKIT_*` or `DEV_ROOT` value added to the `env` block of an agent settings file or to a shell startup file such as `~/.zshrc` | deny: `bugs.share` decides whether devkit posts under your GitHub account, so only you set it, with `dev bug share` in a terminal |
 | Replacing, writing, or deleting a `dev` that a shell finds: `~/.local/bin/dev` (the link itself) or another `dev` earlier on `PATH` | deny → the developer runs `dev install --only cli` |
 | Unsetting or blanking a variable that tells a program an agent runs it (`CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_PID`, `CODEX_SANDBOX`, `CODEX_THREAD_ID`, `DEVKIT_SESSION`, `DEVKIT_AGENT`, `DEVKIT_FROM_AGENT`): `unset`, `env -u`, `env -i`, or an empty assignment before a command or after `export`, also inside `sh -c` | deny: a project's own tools read them to act differently for agents, and an agent must not hide from them |
 | `HOME`, `DEVKIT_CONFIG`, `DEV_ROOT`, or another `DEVKIT_*` variable set for `dev`, `python -m devkit`, a program that imports devkit, or a nested `claude` or `codex` session; `launchctl setenv` of one of them | deny; the one-command [escape hatches](#escape-hatches) still work |
@@ -287,6 +296,7 @@ three folders readable and writable by your account only (`0700`) every time it 
 | `dev hook <event>`, in any shell form (a pipe, `sudo`, `bash -c`, `eval`, `find -exec`, `python3 bin/dev`) | deny, for every session: only the harness runs a hook, when its event fires. A hook event typed through a shell could forge your prompt or answer |
 | A write, move, or delete of a Claude Code transcript (`~/.claude/projects/**/*.jsonl`, a subagent's too) or a Codex session file (`~/.codex/sessions`, `archived_sessions`), with a file tool, a patch, or the shell | deny: devkit reads your approvals from them. Claude Code's memory files stay writable |
 | A program an agent runs (inline, from its input or a pipe, or a script outside the workspace) that loads a devkit module and reaches a function that records or uses your prompts, answers, and grants, or `devkit.state`'s writers | deny, for every session. The guard also reads the agent's own files the program loads (`sys.path` plus `import`, `python -m`, `runpy`, `exec(open(…).read())`, `SourceFileLoader`), three levels deep, and refuses code the program decodes and runs at run time. A repository's own scripts and tests are not judged by this rule |
+| A program an agent runs that loads a devkit module and reaches a function behind one of [the developer's own decisions](#the-developers-own-decisions): `bugs.approve`, `bugs.drop`, `bugs.confirm`, `bugs.set_consent`, `lessons.release`, or the block of `lessonrules` | deny, for every session, the main session included: the refusal names the `dev` command to run instead and the grant line that opens it. A repository's own scripts and tests are not judged by this rule |
 
 devkit checks this a second time when it starts: it takes a `DEVKIT_CONFIG` other than
 `~/.config/devkit/config.json`, or a `DEV_ROOT` other than the configured `dev_root`, only from your terminal, with no
@@ -496,7 +506,10 @@ pre-approved with `dev crew mode auto --approve`.
 
 Lifting an embargo and publishing a branch make its commits public, and the backup policy decides whether devkit
 publishes a project's branches at all. An embargo holds an agent's pushes of a branch and its commits, so pushing an
-embargoed branch is the developer's decision too. These commands are the action `developer-only`, tier 2:
+embargoed branch is the developer's decision too, and so are posting to the [bug registry](bug-registry.md) under
+your GitHub account (your consent, and each held item), confirming a detour that every agent then gets, and releasing a
+held [lesson](lessons.md#held-lessons) that every agent then recalls. These commands are the action `developer-only`,
+tier 2:
 
 | Command | Grant line that opens it once |
 | --- | --- |
@@ -506,6 +519,14 @@ embargoed branch is the developer's decision too. These commands are the action 
 | `git push`, `dev push`, `dev pr create` or `gh pr create` from a folder known only when it runs (`cd "$X"`, `git -C "$(…)"`, `GIT_DIR=$G`, anything after `source` or `.`) or from a folder that is no project (a temporary clone, a folder that does not exist yet), while any project on this Mac has an embargo or devkit cannot read an embargo list | none: the target is `?`; the agent writes out the path of the project's checkout instead |
 | `dev backup --public` | `grant backup <project>` |
 | `dev backup policy on\|off\|ask` | `grant backup <project>` |
+| `dev bug send <id>` · `dev bug drop <id>` | `grant bug-send <id>` · `grant bug-drop <id>` |
+| `dev bug confirm <bug> <detour>` | `grant bug-confirm <bug>/<detour>` |
+| `dev bug share on\|reports\|off` | `grant bug-share <setting>` |
+| `dev lesson release <lesson>` | `grant lesson-release <lesson>` |
+| `dev lesson prevent <lesson> --by guard --match "…"\|--error "…" --block` | `grant lesson-block <lesson>`, because a lesson rule that refuses skips the warnings that show whether it is right; the block holds on this machine only (see [Lessons › Lesson rules](lessons.md#lesson-rules)) |
+
+A program that imports devkit and calls the functions behind these commands is refused too, with the command and
+its grant line (see [devkit's own state, configuration, and install](#devkits-own-state-configuration-and-install)).
 
 A push from inside a repository's git folder (`<repo>/.git`, `<repo>/.git/worktrees/<name>`), or one that
 `env -C <dir>` or `sudo -D <dir>` runs in another folder, is judged as the project of that folder, so
@@ -534,8 +555,23 @@ grant backup acme/api
 A grant opens one of these commands, for that branch or project only, in the repository of the session you typed it
 in, and expires after 30 minutes. `grant backup <project>` opens one public backup or one policy change, not both.
 `grant developer-only <target>` with the target the refusal names (`embargo/<branch>`, `backup-public/<project>`,
-`backup-policy/<project>`) works too. None of them is ever pre-approved with `dev crew mode auto --approve`. A dry run,
+`backup-policy/<project>`, `lesson-block/<lesson>`) works too. None of them is ever pre-approved with `dev crew mode auto --approve`. A dry run,
 the help, `dev branch embargo` (the list), and `dev backup policy` (the read) need no grant.
+
+### Lesson rules
+
+A team can add its own rules, made from lessons that keep repeating (see
+[Lessons › Lesson rules](lessons.md#lesson-rules)). The guard checks them after every other rule on this page, on
+shell commands only, and they can only make its verdict stricter:
+
+| Rule mode | Decision |
+| --- | --- |
+| `warn` | allow, with the lesson's title and prevention added to the call's context |
+| `block` | deny: "devkit · lesson rule LR-… refuses this call, from lesson L-…: … Do it the way the prevention says." |
+
+A lesson rule never allows a call that the guard's own rules refuse or ask about. A rule file the guard cannot read, a
+lookup that takes longer than 0.3 seconds, or any other failure lets the call go on as the guard's own rules decided,
+with a `guard.failopen` record.
 
 ### Unfinished work in a commit
 

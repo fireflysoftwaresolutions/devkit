@@ -780,7 +780,7 @@ class RedTeam2(unittest.TestCase):
                               "\n", "unknown"),
                  "plain_small": (push + "\n", "push-destructive"),
                  "plain_big": ("# pad\n" * 45000 + push + "\n", "unknown"),
-                 "bom_big": ("﻿#!/bin/sh\n" + "# pad\n" * 45000 + push + "\n", "unknown")}
+                 "bom_big": (chr(0xFEFF) + "#!/bin/sh\n" + "# pad\n" * 45000 + push + "\n", "unknown")}
         for name, (text, action) in files.items():
             p = root / name
             p.write_text(text)
@@ -1478,7 +1478,7 @@ class NotesInAnotherEncoding(EmbargoCase):
     # guard now read it as the same note.
     def test_b2a_a_note_with_a_bom_or_crlf_keeps_its_embargo_and_backup_policy(self):
         from devkit import branches
-        for text in ("﻿" + NOTE, NOTE.replace("\n", "\r\n"), "﻿" + NOTE.replace("\n", "\r\n")):
+        for text in (chr(0xFEFF) + NOTE, NOTE.replace("\n", "\r\n"), chr(0xFEFF) + NOTE.replace("\n", "\r\n")):
             with self.subTest(text=repr(text[:6])):
                 self.note.write_bytes(text.encode())
                 held, why = branches.read_embargoes(self.PID)

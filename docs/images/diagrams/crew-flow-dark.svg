@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="920" height="1248" viewBox="0 0 920 1248" role="img" aria-labelledby="dk-title dk-desc">
+<title id="dk-title">How work flows through the crew</title>
+<desc id="dk-desc">A request moves from the tech lead (Morpheus) through requirements, research, and architecture, each only when it applies, then build, review and security, and release. Each stage hands the next one an artifact: plan steps, a spec with criterion ids, a spike note, an ADR, commits with tests, an approval. A failure at any stage goes to debug, where the cause is proven before the fix returns with its regression test.</desc>
+<rect width="920" height="1248" fill="#10110F"/>
+<g font-family="Manrope, 'Manrope Variable', system-ui, -apple-system, 'Segoe UI', Arial, sans-serif">
+<circle cx="68" cy="74" r="4" fill="#FFB34A"/>
+<text x="80" y="78.5" font-size="12" font-weight="600" fill="#BFB8AB" letter-spacing="0.48">HOW WORK FLOWS THROUGH THE CREW</text>
+<g transform="translate(96.0,104.0)">
+<rect x="-32.0" y="160.0" width="312.0" height="920.0" rx="12" fill="#1A1B17" stroke="#2E302A" stroke-width="1"/>
+<text x="-16.0" y="184.0" font-size="12" font-weight="600" fill="#BFB8AB" text-anchor="start" letter-spacing="0.48">STAGES</text>
+<path d="M128.0,80.0 L128.0,200.5" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="128.0,208.0 124.0,200.0 132.0,200.0" fill="#BFB8AB"/>
+<rect x="70.4" y="132.0" width="115.1" height="24.0" rx="11.0" fill="#10110F"/>
+<text x="128.0" y="148.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">goal · plan steps</text>
+<path d="M128.0,288.0 L128.0,352.5" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="128.0,360.0 124.0,352.0 132.0,352.0" fill="#BFB8AB"/>
+<rect x="65.2" y="312.0" width="125.6" height="24.0" rx="11.0" fill="#1A1B17"/>
+<text x="128.0" y="328.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">spec · criterion ids</text>
+<path d="M128.0,440.0 L128.0,504.5" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="128.0,512.0 124.0,504.0 132.0,504.0" fill="#BFB8AB"/>
+<rect x="89.0" y="464.0" width="78.0" height="24.0" rx="11.0" fill="#1A1B17"/>
+<text x="128.0" y="480.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">spike note</text>
+<path d="M128.0,592.0 L128.0,656.5" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="128.0,664.0 124.0,656.0 132.0,656.0" fill="#BFB8AB"/>
+<rect x="72.4" y="616.0" width="111.1" height="24.0" rx="11.0" fill="#1A1B17"/>
+<text x="128.0" y="632.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">ADR · contracts</text>
+<path d="M128.0,744.0 L128.0,808.5" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="128.0,816.0 124.0,808.0 132.0,808.0" fill="#BFB8AB"/>
+<rect x="74.7" y="768.0" width="106.5" height="24.0" rx="11.0" fill="#1A1B17"/>
+<text x="128.0" y="784.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">commits · tests</text>
+<path d="M128.0,896.0 L128.0,960.5" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="128.0,968.0 124.0,960.0 132.0,960.0" fill="#BFB8AB"/>
+<rect x="93.9" y="920.0" width="68.2" height="24.0" rx="11.0" fill="#1A1B17"/>
+<text x="128.0" y="936.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">approval</text>
+<path d="M287.5,624.0 L484.5,624.0" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-dasharray="6 5" stroke-linecap="butt"/><polygon points="492.0,624.0 484.0,628.0 484.0,620.0" fill="#BFB8AB"/><polygon points="280.0,624.0 288.0,620.0 288.0,628.0" fill="#BFB8AB"/>
+<rect x="324.3" y="612.0" width="123.4" height="24.0" rx="11.0" fill="#10110F"/>
+<text x="386.0" y="628.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">failure · proven fix</text>
+<rect x="-4.0" y="0.0" width="264.0" height="80.0" rx="40.0" fill="#1F201C" stroke="#4C4E45" stroke-width="1.5"/>
+<text x="128.0" y="34.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Request</text>
+<text x="128.0" y="56.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">Tech lead (Morpheus)</text>
+<rect x="-4.0" y="208.0" width="264.0" height="80.0" rx="6.0" fill="#1F201C" stroke="#4C4E45" stroke-width="1.5" stroke-dasharray="6 4"/>
+<text x="128.0" y="242.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Requirements</text>
+<text x="128.0" y="264.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">Business analyst · if unclear</text>
+<rect x="-4.0" y="360.0" width="264.0" height="80.0" rx="6.0" fill="#1F201C" stroke="#4C4E45" stroke-width="1.5" stroke-dasharray="6 4"/>
+<text x="128.0" y="394.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Research</text>
+<text x="128.0" y="416.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">Technical researcher · if new</text>
+<rect x="-4.0" y="512.0" width="264.0" height="80.0" rx="6.0" fill="#1F201C" stroke="#4C4E45" stroke-width="1.5" stroke-dasharray="6 4"/>
+<text x="128.0" y="546.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Architecture</text>
+<text x="128.0" y="568.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">Software architect · if 2+ parts</text>
+<rect x="-4.0" y="664.0" width="264.0" height="80.0" rx="6.0" fill="#1F201C" stroke="#4C4E45" stroke-width="1.5"/>
+<text x="128.0" y="698.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Build</text>
+<text x="128.0" y="720.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">Responsible member · QA engineer</text>
+<rect x="-4.0" y="816.0" width="264.0" height="80.0" rx="6.0" fill="#1F201C" stroke="#4C4E45" stroke-width="1.5"/>
+<text x="128.0" y="850.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Review and security</text>
+<text x="128.0" y="872.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">Code reviewer · Security engineer</text>
+<rect x="-4.0" y="968.0" width="264.0" height="80.0" rx="6.0" fill="#1F201C" stroke="#4C4E45" stroke-width="1.5"/>
+<text x="128.0" y="1002.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Release</text>
+<text x="128.0" y="1024.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">Release engineer (Link)</text>
+<rect x="492.0" y="584.0" width="264.0" height="80.0" rx="6.0" fill="#FFB34A" stroke="#FFB34A" stroke-width="2"/>
+<text x="624.0" y="618.0" font-size="16" font-weight="600" fill="#272820" text-anchor="middle">Debug: root cause first</text>
+<text x="624.0" y="640.0" font-size="13" font-weight="400" fill="#272820" text-anchor="middle">Senior engineer (Neo)</text>
+</g>
+</g>
+</svg>

@@ -210,7 +210,7 @@ _dev_here='tasks steps plans branches worktrees'
 _dev_spec() {
   c= o= v= p=
   case "$1" in
-    '') c='help ls go alias status clone new adopt open claude codex handoff-import handoff session task note plan progress time delivery lesson sleep jobs audit report rm mv cp files find grep diff stubs team initiative overview standup dashboard config agents calver plugin guard wt backup sync du free gc canary ci watch watches branch commit rebase push pr run release issue git gh test mcp desktop crew ext impeccable doctor install docs sec diagram setup prompt update docker version completion' o='-h --help' ;;
+    '') c='help ls go alias status clone new adopt open claude codex handoff-import handoff session task note plan progress time delivery lesson bug sleep jobs audit report rm mv cp files find grep diff stubs team initiative overview standup dashboard config agents calver plugin guard wt backup sync du free gc canary ci watch watches branch commit rebase push pr run release issue git gh test mcp desktop crew ext impeccable doctor install docs sec diagram setup prompt update docker version completion' o='-h --help' ;;
     'help') o='-h --help' ;;
     'ls') o='-h --help --offline --names --all --json' ;;
     'go') o='-h --help' p='l:projects:-:: l:worktrees:@1::' ;;
@@ -267,17 +267,34 @@ _dev_spec() {
     'time') o='-h --help --days -p --project' v='--days=n -p=l:projects:-:: --project=l:projects:-::' ;;
     'delivery') c='apply' o='-h --help -p --project -i --initiative --json' v='-p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' ;;
     'delivery apply') o='-h --help --set --why --tasks -p --project -i --initiative' v='--set=n --why=n -p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' ;;
-    'lesson') c='add anchor show recur retire restore prevent scan review ls' o='-h --help -p --project -i --initiative --global --all --search' v='-p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-:: --search=n' ;;
-    'lesson add') o='-h --help --kind --severity --happened --cause --fix --prevent --detect --evidence --tag --retire-when --why --file --command --activity --error --stack -p --project -i --initiative --global' v='--kind=c:bug,mistake,process,tooling,security,performance,design --severity=c:low,medium,high --happened=n --cause=n --fix=n --prevent=n --detect=n --evidence=n --tag=n --retire-when=n --why=n --file=n --command=n --activity=l:activities:-:: --error=n --stack=n -p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' p='*n' ;;
+    'lesson') c='add anchor show recur retire restore prevent supersede release scan review lint eval ls' o='-h --help -p --project -i --initiative --global --all --search' v='-p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-:: --search=n' ;;
+    'lesson add') o='-h --help --kind --severity --happened --cause --fix --prevent --detect --evidence --tag --retire-when --why --new --file --command --activity --error --stack -p --project -i --initiative --global' v='--kind=c:bug,mistake,process,tooling,security,performance,design --severity=c:low,medium,high --happened=n --cause=n --fix=n --prevent=n --detect=n --evidence=n --tag=n --retire-when=n --why=n --file=n --command=n --activity=l:activities:-:: --error=n --stack=n -p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' p='*n' ;;
     'lesson anchor') o='-h --help --why --file --command --activity --error --stack -p --project -i --initiative --global' v='--why=n --file=n --command=n --activity=l:activities:-:: --error=n --stack=n -p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' p='*n' ;;
     'lesson show') o='-h --help --evidence --why -p --project -i --initiative --global' v='--evidence=n --why=n -p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' p='*n' ;;
     'lesson recur') o='-h --help --evidence --why -p --project -i --initiative --global' v='--evidence=n --why=n -p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' p='*n' ;;
     'lesson retire') o='-h --help --evidence --why -p --project -i --initiative --global' v='--evidence=n --why=n -p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' p='*n' ;;
     'lesson restore') o='-h --help --evidence --why -p --project -i --initiative --global' v='--evidence=n --why=n -p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' p='*n' ;;
-    'lesson prevent') o='-h --help --by --ref --why -p --project -i --initiative --global' v='--by=c:test,lint,type,guard,skill,ci,rule,doc --ref=n --why=n -p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' p='*n' ;;
+    'lesson prevent') o='-h --help --by --ref --match --error --block --why -p --project -i --initiative --global' v='--by=c:test,lint,type,guard,skill,ci,rule,doc --ref=n --match=n --error=n --why=n -p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' p='*n' ;;
+    'lesson supersede') o='-h --help --by --why -p --project -i --initiative --global' v='--by=n --why=n -p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' p='n' ;;
+    'lesson release') o='-h --help --why -p --project -i --initiative --global' v='--why=n -p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' p='n' ;;
     'lesson scan') o='-h --help --days -p --project -i --initiative --global' v='--days=n -p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' ;;
     'lesson review') o='-h --help -p --project -i --initiative --global' v='-p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' ;;
+    'lesson lint') o='-h --help -p --project -i --initiative --global' v='-p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' ;;
+    'lesson eval') o='-h --help --days -p --project -i --initiative --global' v='--days=n -p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' ;;
     'lesson ls') o='-h --help -p --project -i --initiative --global' v='-p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' ;;
+    'bug') c='ls show search report detour top sync pending send drop confirm share' o='-h --help' ;;
+    'bug ls') o='-h --help --open --fixed --kind --mine --local' v='--kind=c:crash,hook,guard,command' ;;
+    'bug show') o='-h --help' p='n' ;;
+    'bug search') o='-h --help' p='*n' ;;
+    'bug report') o='-h --help --title --guard --security' v='--title=n --guard=n' p='n' ;;
+    'bug detour') o='-h --help --hint --dev --text' v='--hint=n --dev=n --text=n' p='n' ;;
+    'bug top') o='-h --help --task' ;;
+    'bug sync') o='-h --help' ;;
+    'bug pending') o='-h --help' ;;
+    'bug send') o='-h --help' p='n' ;;
+    'bug drop') o='-h --help' p='n' ;;
+    'bug confirm') o='-h --help' p='n n' ;;
+    'bug share') o='-h --help' p='c:on,reports,off' ;;
     'sleep') o='-h --help --dry-run --quiet' ;;
     'jobs') c='ls install show run enable disable logs set journal' o='-h --help' ;;
     'jobs ls') o='-h --help' ;;
@@ -334,7 +351,7 @@ _dev_spec() {
     'branch clean') o='-h --help --offline --json --apply' ;;
     'branch prune') o='-h --help --apply --remote --local --offline --json' ;;
     'branch embargo') o='-h --help --why --until --lift --json' v='--why=n --until=n' p='l:branches:-::' ;;
-    'commit') o='-h --help -m --message --why --body --verified --refs --breaking -a --all --amend --wip --unwip' v='-m=n --message=n --why=n --body=n --verified=n --refs=n --breaking=n' p='*f' ;;
+    'commit') o='-h --help -m --message --why --cause --body --verified --refs --breaking -a --all --amend --wip --unwip' v='-m=n --message=n --why=n --cause=n --body=n --verified=n --refs=n --breaking=n' p='*f' ;;
     'rebase') o='-h --help --base --continue --abort --skip' v='--base=l:branches:-::' ;;
     'push') o='-h --help --force-with-lease --ci-passed --allow-behind --dry-run' ;;
     'pr') c='create view ls checks merge ready comment review diff' o='-h --help' ;;

@@ -163,6 +163,16 @@ not a key here: it lives in the project's handoff note, set with `dev backup pol
 | `backup.auto` | `true` | `dev sync` backs up the branches that need it, every hour and at the end of a session; `false` leaves backups to `dev backup` |
 | `backup.after_minutes` | `30` | `dev sync` backs up only commits older than this (0 to 1,440 minutes), because a younger commit may still be amended; `dev backup` takes them all |
 
+### Bug registry
+
+devkit recognizes its own failures and shares them, without project data, through a public registry in GitHub Issues
+(see [The bug registry](bug-registry.md)). Reading the registry and matching failures need no setting.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `bugs.share` | unset | `off` turns posting off on this Mac, whatever your consent says. Your consent itself (`on` for reports, votes, and detours; `reports` for reports and detours without votes; or `off`) is not this key: `dev bug share` records it with the GitHub login it is for, and until you give it nothing is posted. An agent's `dev config set bugs.share` is refused |
+| `bugs.sync` | `true` | The hourly sync refreshes the registry cache and sends the outbox; `false` leaves both to `dev bug sync` |
+
 ### Background AI
 
 Jobs that run with no agent session, such as `dev sleep` merging lessons written in different languages, can ask a

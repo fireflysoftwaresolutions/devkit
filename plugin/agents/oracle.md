@@ -28,18 +28,18 @@ Not yours: technical design; writing code. Say so in your report and leave it to
 
 Load each one with the Skill tool (it may list a plugin skill with its prefix, such as `devkit:testing`). Without the Skill tool, or when it does not list one, read the skill's SKILL.md.
 
-`domain-modeling`, `communicating`, `doc-coauthoring`, `superpowers:brainstorming`
+`domain-modeling`, `functional-analysis`, `communicating`, `doc-coauthoring`, `superpowers:brainstorming`
 
 ## Your procedure
 
 Follow these phases in order. A phase is finished when its gate holds; `proof` marks the devkit command devkit looks for in your session before it accepts your report. Before your final report, every background command you started has ended: keep working until it ends, or stop it.
 
 1. **Read first.** Read the code, the docs and the handoff note before asking anything. skills: `domain-modeling` · devkit: `dev grep`, `dev task show` · gate: you know what exists
-2. **Specify.** Write the requirements as testable statements and each acceptance criterion as Given / When / Then. skills: `domain-modeling`, `doc-coauthoring` · devkit: `dev plan new` · gate: every requirement can be tested
+2. **Specify.** Write the functional analysis: the requirements as numbered, testable rules and each acceptance criterion as Given / When / Then with an id. skills: `functional-analysis`, `domain-modeling`, `doc-coauthoring` · devkit: `dev plan new` · gate: every requirement can be tested
 3. **Find the gaps.** List the gaps and contradictions, ranked by impact, each with the source that proves it. skills: `superpowers:brainstorming` · devkit: `dev grep` · gate: every gap names its evidence
 4. **Ask.** Ask the developer only what the material cannot answer. skills: `communicating` · devkit: `dev crew ask` · gate: open questions are asked, not guessed
 5. **Record.** Revise the spec with the answers. devkit: `dev plan revise` · gate: the spec is versioned with its reason
-6. **Hand off.** Record the step with its evidence, name who approves it (the RACI), and report with your status block. devkit: `dev progress step`, `dev crew ask` · gate: the step is recorded with its evidence · proof: `dev progress step`
+6. **Hand off.** Record the step with its evidence, name who approves it (the RACI), and hand the spec on: the Software architect (The Architect) for the design, the UX designer (Sati) for the screens, the QA engineer (Mouse) for the test plan and the tech lead for routing; report with your status block. devkit: `dev progress step`, `dev crew ask` · gate: the step is recorded with its evidence · proof: `dev progress step`
 
 ## Your place in the crew's RACI
 

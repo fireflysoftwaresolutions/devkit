@@ -21,7 +21,11 @@ the file, or a command naming it that the guard's read-only allowlist does not h
 file (cat, grep, sed -n, git diff) does not make it the member's, and neither does a file another caller edited with
 its own edit tool during the lane (the session's edit record, progress.edits_since), unless a redirection of the
 member wrote into it. Only its own lines are blamed on it (`_mine`).
-  lessons  two or more guard refusals are answered with `dev lesson add` or `dev lesson recur`
+  lessons  two or more guard refusals are answered with `dev lesson add` or `dev lesson recur`, or with devkit's bug
+           registry: a `dev bug report --guard …` from the lane, or a vote on the bug a refusal's marker names. A
+           refusal the registry served a workaround for in this session (the session ledger, by the marker's
+           fingerprint and code), or that an open lesson covers (it names the lesson, or shows its error signature),
+           owes nothing and does not count (`_owed`)
   background  every command it put in the background has ended: Claude Code keeps a member in its agent list while
            one still runs, after its report. Ended means its task notification arrived, a TaskStop (or KillShell)
            call stopped it, or a TaskOutput (or BashOutput) read showed it exited (`background_work`). Codex
@@ -398,6 +402,65 @@ def _ran(command: str, invocations) -> bool:
     return any(w[:len(want)] == want for w in invocations)
 
 
+# A lesson a refusal shows, in the two forms devkit writes: a lesson rule's refusal ("… from lesson L-…: <title>") and
+# a recalled pitfall ("Lesson L-… (recorded by …"). An id the refusal only quotes (`dev lesson release L-…`) is not one.
+_SHOWN_LESSON = re.compile(r"\bfrom lesson (L-[0-9A-Za-z]{6,40}):|\bLesson (L-[0-9A-Za-z]{6,40}) \(recorded by ")
+
+
+def _markers(text: str) -> list:
+    """The (fingerprint, code) of each devkit-bug marker line in a refusal's text (guard.refusal_note)."""
+    from . import bugs
+    return [m.groups() for m in bugs.MARKER_RE.finditer(text)] if "devkit-bug:" in text else []
+
+
+def _answered(invocations, refusals) -> bool:
+    """The lane answered its refusals: a lesson recorded or counted, a refusal reported to devkit's bug registry
+    (`dev bug report --guard`, with an id or the session's last refusal), or a vote on a bug that a refusal's marker
+    names (what the refusal itself asks for)."""
+    if _ran("dev lesson add", invocations) or _ran("dev lesson recur", invocations):
+        return True
+    reports = [w[3:] for w in invocations if w[:3] == ["dev", "bug", "report"]]
+    if any(a == "--guard" or a.startswith("--guard=") for args in reports for a in args):
+        return True
+    named = {fp for text in refusals for fp, _ in _markers(text)}
+    return any(a in named for args in reports for a in args)
+
+
+def _owed(refusals, session: str, top: str) -> list:
+    """The refusals that still owe a lesson: those the registry served no workaround for in this session (the session
+    ledger's `served` rows, matched by the marker's fingerprint and one-time code, so text alone proves nothing) and
+    that no open lesson covers (the refusal shows it, as a lesson rule's refusal or the call's recalled pitfalls do,
+    or shows its error signature: the project's lessons and the global ones, or the global ones alone outside a
+    checkout). A lookup that fails covers nothing: the refusal counts, as it did before."""
+    try:
+        from . import bugs
+        served = {(r.get("served"), r.get("code")) for r in bugs.ledger(session) if r.get("served")} if session \
+            else set()
+    except Exception:
+        served = set()
+    open_ids = None
+    project = "global"
+    out = []
+    for text in refusals:
+        if any(m in served for m in _markers(text)):
+            continue
+        try:
+            from . import lessons
+            if open_ids is None:
+                open_ids = {x["meta"]["id"] for x in lessons.all_lessons()
+                            if x["meta"].get("status") == "open" and not x["meta"].get("superseded_by")}
+                if top:
+                    from . import delivery
+                    project = delivery.scope_for(top) or "global"
+            shown = {i for pair in _SHOWN_LESSON.findall(text) for i in pair if i}
+            if open_ids & shown or lessons.for_output(project, text, limit=1):
+                continue
+        except Exception:
+            pass
+        out.append(text)
+    return out
+
+
 # --------------------------------------------------------------------------- the gates
 
 def _member(member, roster):
@@ -549,14 +612,17 @@ def crew_gates(member, transcript_path, cwd, roster=None, agent: str = "", sessi
         changed = in_repo + sorted(shell)
         found += _stub_findings(top, changed, written)
         found += _test_findings(top, changed, written)
-    if not read_only and len(refusals) >= 2 and not (_ran("dev lesson add", inv) or _ran("dev lesson recur", inv)):
-        first = (re.sub(r"^[:\s]+", "", DENIAL_RE.sub("", refusals[0], 1)).splitlines() or [""])[0][:120]
+    owed = _owed(refusals, session, top) if not read_only and len(refusals) >= 2 and \
+        not _answered(inv, refusals) else []
+    if len(owed) >= 2:
+        first = (re.sub(r"^[:\s]+", "", DENIAL_RE.sub("", owed[0], 1)).splitlines() or [""])[0][:120]
         found.append(_finding("lessons", "dev lesson add",
-                              f"{len(refusals)} guard refusals and no dev lesson add or dev lesson recur; the first: "
+                              f"{len(owed)} guard refusals and no dev lesson add or dev lesson recur; the first: "
                               f"\"{first}\"",
                               'run `dev lesson add "<what the guard refused>" --cause "<why it happened>" --prevent '
                               '"<the rule for next time>"`, or `dev lesson recur <id> --evidence "<what happened>"` '
-                              'for a known pitfall'))
+                              'for a known pitfall; when the guard was wrong, `dev bug report --guard <refusal id>` '
+                              'instead'))
     for t in background_work(transcript_path):
         found.append(dict(_finding("background", t["command"], "you started it, and nothing in your transcript shows "
                                    "that it ended (no task notification, TaskStop or exit)",

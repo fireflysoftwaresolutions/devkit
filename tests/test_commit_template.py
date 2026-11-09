@@ -21,6 +21,7 @@ from devkit import cli, core, gitx, registry, setup, work  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 TEMPLATE = ROOT / "config" / "git" / "commit-template.txt"
+CAUSE = "the tokenizer split on every comma, quoted or not"  # a fix commit names its root cause
 GITHUB_URL = "https://github.com/acme/widget.git"
 PID = "acme/widget"
 ISOLATE = {"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1", "GIT_AUTHOR_NAME": "Ana Dev",
@@ -156,10 +157,10 @@ class CommitBodyTests(Case):
         # a second --body used to replace the first without a word (lesson L-fy910l5ji04)
         self.change()
         rc, _, err = dev("commit", "parser.py", "-m", "fix(parser): keep quoted commas", "--body", "The tokenizer changed.",
-                         "--body", "The reader changed too.")
+                         "--body", "The reader changed too.", "--cause", CAUSE)
         self.assertEqual(rc, 0, err)
-        self.assertEqual(self.message(), "fix(parser): keep quoted commas\n\nThe tokenizer changed.\n\n"
-                                         "The reader changed too.")
+        self.assertEqual(self.message(), f"fix(parser): keep quoted commas\n\nRoot cause: {CAUSE}\n\n"
+                                         "The tokenizer changed.\n\nThe reader changed too.")
 
     def test_refs_and_breaking_change_close_the_message(self):
         self.change()
@@ -176,7 +177,7 @@ class CommitBodyTests(Case):
     def test_refs_takes_an_issue_a_url_or_a_ticket_key_only(self):
         self.change()
         head = git(self.repo, "rev-parse", "HEAD")
-        rc, _, err = dev("commit", "parser.py", "-m", "fix: x", "--refs", "the login bug")
+        rc, _, err = dev("commit", "parser.py", "-m", "fix: x", "--cause", CAUSE, "--refs", "the login bug")
         self.assertEqual(rc, 2)
         self.assertIn("Refs takes an issue number", err)
         self.assertEqual(git(self.repo, "rev-parse", "HEAD"), head)
@@ -185,7 +186,7 @@ class CommitBodyTests(Case):
         self.change()
         head = git(self.repo, "rev-parse", "HEAD")
         for extra in (["--body", "Fixes B-fy6l2ihfpgm from the release report."], ["--refs", "T-fy0000abc12"]):
-            rc, _, err = dev("commit", "parser.py", "-m", "fix(parser): keep quoted commas", *extra)
+            rc, _, err = dev("commit", "parser.py", "-m", "fix(parser): keep quoted commas", "--cause", CAUSE, *extra)
             self.assertEqual(rc, 2, extra)
             self.assertIn("devkit task id", err)
             self.assertIn("handoff", err)
@@ -203,7 +204,8 @@ class TaskRefsTests(Case):
         self.change("feat/parser")
         it = self.task("Keep quoted commas", ["ticket:PROJ-142"], "feat/parser")
         self.task("Another branch", ["issue:#99"], "feat/other")
-        rc, out, err = dev("commit", "parser.py", "-m", "fix(parser): keep quoted commas", "--body", "Rows were split.")
+        rc, out, err = dev("commit", "parser.py", "-m", "fix(parser): keep quoted commas", "--cause", CAUSE,
+                         "--body", "Rows were split.")
         self.assertEqual(rc, 0, err)
         msg = self.message()
         self.assertTrue(msg.endswith("\n\nRefs: PROJ-142"), msg)
@@ -227,7 +229,7 @@ class TaskRefsTests(Case):
         self.change("release/26.11.3")
         self.task("One", ["ticket:PROJ-1"], "release/26.11.3")
         self.task("Two", ["ticket:PROJ-2"], "release/26.11.3")
-        rc, out, err = dev("commit", "parser.py", "-m", "fix(parser): keep quoted commas")
+        rc, out, err = dev("commit", "parser.py", "-m", "fix(parser): keep quoted commas", "--cause", CAUSE)
         self.assertEqual(rc, 0, err)
         self.assertNotIn("Refs:", self.message())
         self.assertIn("--refs", out)  # says which tickets it found and how to name one
@@ -235,7 +237,8 @@ class TaskRefsTests(Case):
     def test_an_explicit_refs_wins_over_the_task_ticket(self):
         self.change("feat/parser")
         self.task("Keep quoted commas", ["ticket:PROJ-142"], "feat/parser")
-        rc, _, err = dev("commit", "parser.py", "-m", "fix(parser): keep quoted commas", "--refs", "#7")
+        rc, _, err = dev("commit", "parser.py", "-m", "fix(parser): keep quoted commas", "--cause", CAUSE,
+                         "--refs", "#7")
         self.assertEqual(rc, 0, err)
         self.assertTrue(self.message().endswith("\n\nRefs: #7"), self.message())
 

@@ -3,6 +3,92 @@
 All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH restarts at 0 each month); tags are
 `vYY.MM.PATCH`. Sections follow [Keep a Changelog](https://keepachangelog.com/).
 
+## [26.11.8] - 2026-11-09
+
+This release teaches devkit to learn from its own failures and from yours. When devkit itself fails, it now says so
+plainly, looks the failure up in a shared bug registry on GitHub, and gives the agent a known workaround so the work
+continues; what nobody has solved yet is reported without anything about your projects, and votes rank the bugs for
+the next hotfix. Lessons are no longer lost to a storage cap, devkit measures whether a lesson shown to an agent was
+heeded or missed, lessons reach agents before they act, and a lesson that keeps repeating can become a checked guard
+rule. Agents now find the root cause before they fix anything: a fix commit states its cause, and the second
+identical failure stops a patch loop. [Bug registry](docs/bug-registry.md) and [Lessons](docs/lessons.md) explain
+both.
+
+After `dev update`: run `dev jobs enable sleep` if you paused the nightly job, restart your open sessions, and give
+your consent to share reports once with `dev bug share on` (reports are posted publicly under your own GitHub
+account; only devkit facts are sent).
+
+### Added
+
+- **The bug registry and `dev bug`.** devkit recognizes its own failures: a `dev` command that crashes prints a short
+  notice and exits with 70 instead of a traceback, keeping the details in a local crash file; hook errors, timeouts
+  and silently swallowed exceptions are recorded; a guard refusal can be reported as wrong. Each failure gets a
+  fingerprint, which devkit looks up in the registry kept in GitHub Issues on this repository, from a local cache, so
+  hooks never call the network. `dev bug ls|show|search|report|detour|top|sync|pending|send|drop|confirm|share`
+  browse, report, record workarounds, and rank hotfix candidates; `dev status` shows a line when a bug hit this Mac
+  today or an item waits for your review.
+- **Workarounds that reach other agents safely.** A detour is structured (hints from a fixed list, `dev` commands, or
+  short text). A team agent's hint-only detour reaches other agents at once; anything that runs a command waits for a
+  second maintainer's confirmation; outsiders' detours never reach agents until a maintainer confirms them. Detours
+  are checked against evidence from the session, and a detour that fails is retired.
+- **Privacy by allowlist.** Reports carry only fields devkit produces: version, OS, the `dev` command, the exception
+  class, devkit's own function names, the guard's refusal id. Any free text waits for your review in
+  `dev bug pending`; every field is checked again before sending against a deny list built from this Mac (project,
+  owner, branch, user, host and remote names, in any spelling); security-sensitive failures go only to GitHub's
+  private vulnerability reporting, never to public issues. Sending a held item, confirming a detour, and turning
+  sharing on are yours alone, by a typed grant line such as `grant bug-send 7`.
+- **The registry workflow** (`.github/workflows/bug-registry.yml`, `tools/bug_registry_action.py`) folds votes,
+  detours and confirmations into one record comment written by the workflow's bot, the only data clients trust. It
+  counts distinct voters with a keyed hash, caps each account at 20 folds a day, closes duplicates, ignores malformed
+  payloads, keeps records within GitHub's comment limit, recomputes fingerprints, sets the fixed version on release,
+  and reopens a regression only on a member's or three accounts' report. `.github/bug-registry-maintainers` lists
+  the maintainers (login and account id), and `.github/CODEOWNERS` covers the registry files.
+- **Root cause first.** A new `root-cause` skill (reproduce, check known lessons and bugs, prove the cause with an
+  experiment, fix the cause, verify, record) and a new `debug` kind of work for the crew. `dev commit --cause` writes a
+  `Root cause:` paragraph, and `dev commit` refuses a `fix` or `revert` commit without one. When the same command
+  fails twice in a session with the same error, devkit tells the agent to stop patching and find the cause, with the
+  matching lessons and devkit bugs; a crew member's third identical failure sends the tech lead a notice.
+- **Research and functional analysis.** New `research` skill (version-matched, primary sources first, dated claims,
+  results saved for the next session) and `functional-analysis` skill (actors, rules, edge cases, acceptance criteria
+  with ids that tests reference). The crew's procedures use them, and the crew skill describes how work flows from
+  requirements to release.
+- **Lesson rules.** `dev lesson prevent <id> --by guard --match "…"` turns a lesson into a checked guard rule. It is
+  accepted only when it matches the recorded mistake and none of the last 14 days' successful commands; it warns
+  first and refuses only after you grant it with `grant lesson-block <lesson>`. A rule can never allow anything.
+- **New lesson commands.** `dev lesson lint`, `eval`, `supersede`, `release` and `add --new`; `dev lesson review` shows
+  how often shown lessons were heeded or missed per channel, the lessons to automate, and failed preventions. A
+  third repeat of a lesson opens one work item.
+- **A source-character test** that refuses invisible and direction-changing characters in devkit's Python files.
+
+### Changed
+
+- **Lessons are kept, not capped.** The nightly job no longer archives lessons to stay under 25 per project; it
+  archives by age, use and repeats, never a lesson younger than 30 days or one that repeats. Its first run restores
+  the lessons the old cap archived and merges duplicates.
+- **Lessons are measured by what happens next.** devkit counts a lesson as shown only when it reached the agent, and
+  records it as heeded or missed by whether the mistake came back. Lessons reach crew briefs and session starts by
+  the files your branch changes, and each recall line names who recorded the lesson.
+- **Lessons are screened against poisoning** when they are recorded, changed and loaded: text that tries to override
+  you or the guard, secrets, download-and-run, commands run from a substitution or decoded text, and protected paths
+  hold a lesson for your review. High-trust channels show only a lesson's title and the first line of its prevention.
+- **Capture is checked.** `dev lesson add` refuses a duplicate of an existing or archived lesson, a bare common
+  program as a command anchor, and a title over 80 characters, and asks for `--happened` or `--evidence`.
+- **Guard refusals carry stable ids**, recorded in the audit trail, and a refusal that matches a known registry bug
+  carries its workaround. Agents cannot post to the registry by `gh`, `gh api`, GraphQL, `curl` or MCP tools, and
+  developer-only actions are refused when called from a Python import too.
+
+### Security
+
+- A GraphQL query the guard cannot read (from standard input, a file, or a substitution) is now treated as an action
+  that needs your grant; before, a hidden mutation could skip the irreversible-action gate.
+
+### Fixed
+
+- Lesson usage counts and lesson files are written under a lock with an atomic replace; a changelog heading inside a
+  code block no longer cuts a lesson file; lesson dates are local time.
+- Hook tests no longer leak recorded devkit failures into each other.
+- Three hidden byte-order-mark characters in older code are written as explicit code points.
+
 ## [26.11.7] - 2026-11-08
 
 This release makes sure nothing that needs an agent or you waits unseen. An idle tech lead heard nothing while crew

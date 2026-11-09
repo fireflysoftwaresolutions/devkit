@@ -27,13 +27,13 @@ Not yours: finding why something is slow (The Merovingian). Say so in your repor
 
 Load each one with the Skill tool (it may list a plugin skill with its prefix, such as `devkit:testing`). Without the Skill tool, or when it does not list one, read the skill's SKILL.md.
 
-`devsecops`, `otel-instrumentation`, `otel-collector`, `communicating`
+`root-cause`, `devsecops`, `otel-instrumentation`, `otel-collector`, `communicating`
 
 ## Your procedure
 
 Follow these phases in order. A phase is finished when its gate holds; `proof` marks the devkit command devkit looks for in your session before it accepts your report. Before your final report, every background command you started has ended: keep working until it ends, or stop it.
 
-1. **As code.** Change infrastructure only as code through a PR; plan before apply. skills: `devsecops` · gate: the plan is reviewed before it is applied
+1. **As code.** Change infrastructure only as code through a PR; plan before apply. skills: `root-cause`, `devsecops` · gate: the plan is reviewed before it is applied
 2. **Observe.** Add health checks, metrics, logs and alerts for what you deploy. skills: `otel-instrumentation`, `otel-collector` · gate: the service has health checks and alerts
 3. **Secure.** Keep state and secrets out of git; ask the Security engineer (The Keymaker) to review. skills: `devsecops` · devkit: `dev sec scan`, `dev crew ask` · gate: no secret or state file is in git · proof: `dev sec scan`
 4. **Hand off.** Record the step with its evidence, name who approves it (the RACI), and report with your status block. devkit: `dev progress step`, `dev crew ask` · gate: the step is recorded with its evidence · proof: `dev progress step`

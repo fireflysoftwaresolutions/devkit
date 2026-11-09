@@ -28,13 +28,13 @@ Not yours: cloud infrastructure (Niobe). Say so in your report and leave it to t
 
 Load each one with the Skill tool (it may list a plugin skill with its prefix, such as `devkit:testing`). Without the Skill tool, or when it does not list one, read the skill's SKILL.md.
 
-`cicd`, `superpowers:systematic-debugging`, `github-actions-hardening`, `dependabot`, `delivery`, `release-policy`, `superpowers:verification-before-completion`, `communicating`
+`root-cause`, `cicd`, `superpowers:systematic-debugging`, `github-actions-hardening`, `dependabot`, `delivery`, `release-policy`, `superpowers:verification-before-completion`, `communicating`
 
 ## Your procedure
 
 Follow these phases in order. A phase is finished when its gate holds; `proof` marks the devkit command devkit looks for in your session before it accepts your report. Before your final report, every background command you started has ended: keep working until it ends, or stop it.
 
-1. **Know the pipeline.** Read what CI runs and run the same locally before any push. skills: `cicd` · devkit: `dev ci`, `dev ci --run` · gate: the local run matches CI · proof: `dev ci --run`
+1. **Know the pipeline.** Read what CI runs and run the same locally before any push. skills: `root-cause`, `cicd` · devkit: `dev ci`, `dev ci --run` · gate: the local run matches CI · proof: `dev ci --run`
 2. **Diagnose.** For a failure, read the first error, reproduce it locally, fix it, and push once. skills: `superpowers:systematic-debugging` · devkit: `dev run view`, `dev ci --run --resume` · gate: the failure reproduces locally before the fix
 3. **Harden.** Keep pipelines pinned, least-privilege, cached and secure. skills: `github-actions-hardening`, `dependabot` · devkit: `dev ci audit` · gate: the audit has no high finding
 4. **Release.** Release from the verified integration branch, then download and verify the published artifact. skills: `delivery`, `release-policy`, `superpowers:verification-before-completion` · devkit: `dev pr merge`, `dev release`, `dev delivery` · gate: the published artifact is verified

@@ -741,9 +741,42 @@ def task_tickets(c) -> list:
     return out
 
 
-def commit_message(header: str, why: str = "", paragraphs=(), verified: str = "", refs=(), breaking: str = "") -> str:
-    """The message in the commit template's order. `verified` gets its `Verified:` label when it has none."""
-    body = [p.strip() for p in [why, *paragraphs] if p and p.strip()]
+CAUSE_TYPES = ("fix", "revert")  # the commits that must name their root cause (--cause)
+CAUSE_MIN = 15  # characters: a cause is a sentence about what made it fail, not a word
+# the words a root cause may not be (a list, not unfinished work)
+CAUSE_PLACEHOLDERS = frozenset({"unknown", "n/a", "na", "tbd", "todo", "none", "-", "?"})  # devkit: allow-stub list
+_CAUSE_LABEL = re.compile(r"(?i)^root cause:\s*")
+
+
+def cause_text(cause) -> str:
+    """The root cause as one line, without a `Root cause:` label the caller already wrote."""
+    return _CAUSE_LABEL.sub("", " ".join(str(cause or "").split()))
+
+
+def cause_violation(header: str, cause):
+    """Why a commit's root cause is refused, or None. A fix or revert commit names one (`--cause`); a cause is a
+    sentence of at least CAUSE_MIN characters, never a placeholder. `cause` is None when the flag was not given."""
+    m = CC_RE.match((header or "").strip())
+    kind = m.group("type") if m else ""
+    if cause is None:
+        return f"a `{kind}` commit names its root cause: add --cause" if kind in CAUSE_TYPES else None
+    text = cause_text(cause)
+    if not text:
+        return "--cause is empty: say what caused the problem"
+    if text.lower().rstrip(".!") in CAUSE_PLACEHOLDERS:
+        return f"--cause `{text}` is a placeholder, not a cause: say what caused the problem"
+    if len(text) < CAUSE_MIN:
+        return (f"--cause `{text}` has {len(text)} characters; a root cause takes at least {CAUSE_MIN} characters: "
+                "say what caused the problem")
+    return None
+
+
+def commit_message(header: str, why: str = "", paragraphs=(), verified: str = "", refs=(), breaking: str = "",
+                   cause: str = "") -> str:
+    """The message in the commit template's order. `cause` becomes the `Root cause:` paragraph right after the why;
+    `verified` gets its `Verified:` label when it has none."""
+    c = cause_text(cause)
+    body = [p.strip() for p in [why, f"Root cause: {c}" if c else "", *paragraphs] if p and p.strip()]
     v = (verified or "").strip()
     if v:
         body.append(v if v.lower().startswith("verified:") else f"Verified: {v}")
@@ -910,7 +943,7 @@ def cmd_commit(a) -> int:
     if a.wip:
         return _wip(c, a)
     msgs = list(a.message or [])
-    template = [f"--{k}" for k in ("why", "verified", "refs", "breaking") if getattr(a, k, None)]
+    template = [f"--{k}" for k in ("why", "cause", "verified", "refs", "breaking") if getattr(a, k, None)]
     if template and not msgs:
         return refuse(f"{', '.join(template)} {'writes' if len(template) == 1 else 'write'} the message around its "
                       f"header", 'dev commit -m "type(scope): summary" --why "…" --verified "…"')
@@ -927,12 +960,17 @@ def cmd_commit(a) -> int:
         v = message_violation(header)
         if v:
             return refuse(v)
+        cause = getattr(a, "cause", None)
+        v = cause_violation(header, cause)
+        if v:
+            return refuse(v, f'dev commit -m {shlex.quote(header)} --why "…" --cause "<what caused it, as your '
+                             f'reproduction proved>" --verified "…" (the root-cause skill)')
         refs, refused, said = _commit_refs(c, a, "\n".join(what))
         if refused is not None:
             return refused
         message, removed = strip_attribution(commit_message(header, getattr(a, "why", None) or "", what,
                                                             getattr(a, "verified", None) or "", refs,
-                                                            getattr(a, "breaking", None) or ""))
+                                                            getattr(a, "breaking", None) or "", cause or ""))
         ids = list(dict.fromkeys(_WORK_ID.findall(message)))
         if ids:
             return _task_id_refusal(ids)
@@ -1005,6 +1043,10 @@ def cmd_commit(a) -> int:
     if pushed_before:
         extra.append("amended a pushed commit: the next push needs dev push --force-with-lease")
     ok(f"{sha} {subject} · " + " · ".join(extra))
+    if message and cause_text(getattr(a, "cause", None)):  # that the commit names its root cause, never the cause
+        from . import audit
+        audit.record("dev.commit.cause", sha, "", "ok", commit=core.gitout(c.top, "rev-parse", "HEAD"),
+                     check="cause: yes")
     return 0
 
 
@@ -3516,6 +3558,8 @@ def register(add):
                                   "crew lane, only the staged files inside its scope (the others stay staged)")
     p.add_argument("-m", "--message", action="append", help="header `type(scope): summary`; more -m add paragraphs")
     p.add_argument("--why", help="first paragraph of the body: why the change is needed (the commit template)")
+    p.add_argument("--cause", help="the root cause, as `Root cause: …` right after the why; required for fix and "
+                                   "revert commits, at least 15 characters, never a placeholder such as tbd")  # devkit: allow-stub help
     p.add_argument("--body", action="append", help="a body paragraph (repeat for more): what changed (after --why), "
                                                    "or the reason without --why")
     p.add_argument("--verified", help="last paragraph of the body: how you verified it, as `Verified: …`")

@@ -74,10 +74,12 @@ LIVE_WRITERS = {
               "lessons-usage.json", "locks/**", "logs/**", "progress.publish", "quota/**", "runs/**", "sessions/**",
               "status/**", "timing/**", "tests/**", "ci/**", "ci-pushes.json", "cache/**", "captures/**",
               "providers.json", "trash.jsonl", "backups/**", "jobs/**", "prs/**", "handoff-check/**",
-              "instructions/**"),
+              "instructions/**", "lessons-events.jsonl", "lessons-cap-restore.json", "lessons-merge-verdicts.json",
+              "lessons/locks/**", "bugs/**", "crashes/**"),
     "config": (),
     "handoff": (".git/**", "log/**", "sessions/**", "presence/**", "projects/**", "plans/**", "items/**",
-                "initiatives/**", "crew/**", "PROJECTS.md", "TASKS.md", "ACTIVITY.md", "registry.json"),
+                "initiatives/**", "crew/**", "lessons/**", "PROJECTS.md", "TASKS.md", "ACTIVITY.md",
+                "registry.json"),
 }
 
 _S = {"active": False, "late": False, "owner": None, "root": None, "home": None, "real": {}, "snapshot": {},

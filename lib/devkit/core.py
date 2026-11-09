@@ -85,6 +85,9 @@ DEFAULTS = {
     "handoff": {"enforce": True},
     "canary": {"enforce": True},
     "dashboard": {"idle_minutes": 30},  # the live dashboard server stops after this long with no page open
+    # devkit's public bug registry: share is the developer's consent to post (on, reports, off; unset asks), and
+    # sync lets the hourly sync refresh the known bugs and send what the outbox holds
+    "bugs": {"share": None, "sync": True},
     # the audit trail (docs/audit.md). The team policy (<handoff>/policy/audit.json) sets a floor: a machine may
     # record more and keep longer, never less. Only the developer changes these, in a terminal (spec C11).
     # Retention (compliance review): the team copy is read more widely, so it keeps no longer than this machine by
@@ -480,6 +483,8 @@ LOCAL = DEV / "_local"
 NOTES = HANDOFF / "projects"
 LOGDIR = HANDOFF / "log"
 STATE = HOME / ".local" / "state" / "devkit"
+# the repository whose issues hold devkit's public bug registry; nothing else names it, so a rebrand changes one line
+DEVKIT_REPO = "fireflysoftwaresolutions/devkit"
 RESERVED_TOP = {HANDOFF.name, ".worktrees", ".tmp", "_local"}
 CLAUDE_HOME = HOME / ".claude"
 CODEX_HOME = expand(os.environ.get("CODEX_HOME", str(HOME / ".codex")))

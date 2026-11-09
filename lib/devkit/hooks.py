@@ -40,12 +40,28 @@ def _log(msg: str):
         pass
 
 
+_PAYLOAD = {}  # the payload this hook run read, for run() to name its session once the handler is done
+
+
 def _stdin_json() -> dict:
+    global _PAYLOAD
     try:
         data = sys.stdin.read()
-        return json.loads(data) if data.strip() else {}
+        parsed = json.loads(data) if data.strip() else {}
     except (ValueError, OSError):
-        return {}
+        parsed = {}
+    _PAYLOAD = parsed if isinstance(parsed, dict) else {}
+    return parsed
+
+
+def _swallowed(component: str, exc: BaseException):
+    """An error a hook handler goes on without, recorded as a minor devkit bug once an hour per component (its hook
+    event): bugs.swallowed, which never raises."""
+    try:
+        from . import bugs
+    except Exception:  # the recorder cannot load: the handler goes on as it always did
+        return
+    bugs.swallowed(component, exc)
 
 
 def _session_file(agent: str, sid: str) -> Path:
@@ -184,7 +200,8 @@ _SEEN = {}  # cwd -> what context_for inspected there last ("top", "repo"): the 
 
 def context_for(cwd: str, agent: str) -> str:
     """The workspace context the model reads at session start. What it inspects stays in _SEEN for the welcome:
-    "top" (the checkout's root, "" outside a repository) and "repo" (the project, as registry.inspect_repo gave it)."""
+    "top" (the checkout's root, "" outside a repository) and "repo" (the project, as registry.inspect_repo gave it);
+    and for the hook that knows the session, "lessons": the known pitfalls it shows (_session_lessons_shown)."""
     from . import registry
     top = core.gitout(cwd, "rev-parse", "--show-toplevel")
     seen = _SEEN[cwd] = {"top": top or ""}
@@ -288,27 +305,35 @@ def context_for(cwd: str, agent: str) -> str:
         if busy:
             lines.append("Also working on this project right now: " + ", ".join(busy[:5]) +
                          ". Coordinate through tasks (claim before you start) and pull before you push.")
-    except Exception:
-        pass
+    except Exception as e:
+        _swallowed("session-start", e)
     try:
         from . import lessons
         inits = [d.name for d in (HANDOFF / "initiatives").glob("*") if (d / "README.md").exists() and
                  p["id"] in notesmod.summarize((d / "README.md").read_text())["projects"]] \
             if (HANDOFF / "initiatives").exists() else []
-        known = lessons.context_lines(p["id"], inits, limit=PITFALLS_MAX)
+        try:  # the lessons of the files this branch changes come first
+            from . import testx
+            changed = testx.changed_files(top)
+        except Exception as e:
+            changed = []
+            _swallowed("session-start", e)
+        known = lessons.context_lines(p["id"], inits, limit=PITFALLS_MAX, files=changed)
+        seen["lessons"] = re.findall(r"^Lesson (L-[0-9A-Za-z]{1,40}) \(recorded by ", "\n".join(known), re.M)
         if known:
             lines.append("Known pitfalls (lessons from earlier mistakes; follow their prevention, and `dev lesson recur "
                          "<id> --evidence …` if one happens again):")
+            lines.append(lessons.ADVICE)
             lines += ["- " + x for x in known]
-    except Exception:
-        pass
+    except Exception as e:
+        _swallowed("session-start", e)
     try:
         from . import delivery
         dl = delivery.summary_line(p["id"])
         lines.append(dl if dl else "Delivery policy: not recorded yet — `dev delivery` detects and recommends one "
                                    "(`release-policy` skill) before the first release.")
-    except Exception:
-        pass
+    except Exception as e:
+        _swallowed("session-start", e)
     lang = (core.CFG.get("language") or "en-US")
     if lang.lower() not in ("en-us", "en"):
         lines.append(f"Language: this developer set devkit's language to {lang}: write replies, commits, PRs and docs "
@@ -323,6 +348,15 @@ def context_for(cwd: str, agent: str) -> str:
                  f"skill before you finish or when the user says handoff/pause/wrap up.")
     lines += ["", "--- handoff note ---", _note_excerpt(ns)]
     return "\n".join(lines)
+
+
+def _session_lessons_shown(data: dict, seen: dict):
+    """The known pitfalls the session's context showed (context_for, which counted them) are pending for its main
+    agent until it hits them (missed) or its turn ends (heeded)."""
+    try:
+        _shown(data, (seen or {}).get("lessons") or [], "session", count=False)
+    except Exception as e:
+        _swallowed("session-start", e)
 
 
 def _note_excerpt(ns) -> str:
@@ -447,12 +481,13 @@ def session_start(agent: str):
     try:
         from . import work
         work.request_sync("session start", delay=1)  # pull other machines' claims and publish this session
-    except Exception:
-        pass
+    except Exception as e:
+        _swallowed("session-start", e)
     _SEEN.pop(cwd, None)
     brief = _continuity("on_session_start", agent, data)
     context = _with_catalog(context_for(cwd, agent), agent)
     seen = _SEEN.pop(cwd, {})  # what context_for inspected, for the welcome
+    _session_lessons_shown(data, seen)
     shown = [older] if older else []  # the notices the developer must see when no welcome carries them
     told = [older] if older else []  # the notices the model reads, before the workspace context: a cut keeps them
     said = set()  # the notices this start has: the welcome turns them into need lines
@@ -1086,8 +1121,8 @@ def stop(agent: str):
             ids = sorted(set(re.findall(r"\bL-[0-9a-z]{9,}\b", said)))
             if ids:
                 _les.track(ids, "applied")
-        except Exception:
-            pass
+        except Exception as e:
+            _swallowed("stop", e)
         if dev_turn and not data.get("stop_hook_active") and not sess.get("lesson_nudged") and sess.get("top"):
             try:
                 from . import lessons
@@ -1126,6 +1161,7 @@ def stop(agent: str):
         _patch_quietly(sf, before, sess)  # a subagent that started meanwhile stays; an ended session stays ended
         if ended:  # the turn is not sent back: keep its prompts only for development work, refresh the checkpoint
             _continuity("on_stop", agent, data, sess=sess, dev_turn=classed)
+            _lessons_end(data, "main")  # what the turn was shown and did not hit again was heeded
     if out:
         print(json.dumps(out))
     if sid == "-":
@@ -1305,6 +1341,13 @@ def _lane_verdict(data: dict, agent: str, cmd: str, routed: bool = False):
                 f"rather than run unchecked. Run it once more; if it is refused again, ask the tech lead with "
                 f"`dev crew ask \"…\"` and name the command.")
     return v[1] if v else None
+
+
+# The refusals the guard hook makes itself, each recorded as hooks:<rule> (guard.py's deny() calls name the rest).
+# devkit's bug registry takes a guard refusal id only from these and guard.py (bugs.guard_refusal_ids): a new one
+# goes here, or its refusals cannot be reported.
+HOOK_REFUSALS = ("hook-forgery", "identity", "crew-limits", "stub-commit", "irreversible", "crew-scope", "readonly",
+                 "hatch", "crew-lane")
 
 
 def _lane_rule(why: str) -> str:
@@ -1596,12 +1639,29 @@ def _headless() -> bool:
     return os.environ.get("DEVKIT_HEADLESS") == "1"
 
 
-def _pitfalls(agent: str, data: dict, found: list, remember: bool = True) -> str:
-    """The context line for the lessons a call or its output met, each once an hour per agent of the session."""
+PITFALL_SHOW = 3  # lessons a call, its output or a refusal shows, the most relevant first
+LESSON_HITS_MAX = 20  # lessons a call, its output or a refusal is matched against to find a miss
+CALLS_KEPT = 20  # calls whose shown lessons the session record keeps, so a call's own output is no miss of them
+BRIEFS_KEPT = 50  # launches whose brief lessons wait for their member's first call
+
+
+def _lesson_agent(data: dict) -> str:
+    """Who in the session a lesson reached, for its outcome: the member's agent id, or "main"."""
+    return str(data.get("agent_id") or "main")
+
+
+def _session_record(agent: str, data: dict) -> dict:
+    sf = _session_file(agent, data.get("session_id") or "-")
+    return (state.read(sf) or {}) if sf.exists() else {}
+
+
+def _pitfalls(agent: str, data: dict, found: list, remember: bool = True, channel: str = "call") -> str:
+    """The context line for the lessons a call or its output met, each once an hour per agent of the session. What
+    it shows, after that filter, is recorded as shown on `channel` (lessons.shown)."""
     if not found:
         return ""
     from . import lessons
-    who, now = data.get("agent_id") or "main", time.time()
+    who, now = _lesson_agent(data), time.time()
     sf = _session_file(agent, data.get("session_id") or "-")
     if remember and sf.exists():
         seen = (state.read(sf) or {}).get("pitfalls_seen") or {}
@@ -1613,33 +1673,139 @@ def _pitfalls(agent: str, data: dict, found: list, remember: bool = True) -> str
             kept = {k: v for k, v in (d.get("pitfalls_seen") or {}).items() if now - float(v or 0) < PITFALL_REPEAT_S}
             kept.update({f"{who}:{x['meta']['id']}": now for x in found})
             d["pitfalls_seen"] = kept
+            if channel == "call":
+                _note_call(d, data, [x["meta"]["id"] for x in found])
         try:
             state.update(sf, mark, create=False)
         except state.StateBusy:
             pass  # audited by state: the lesson may come again, which is the safe side
+    _shown(data, [x["meta"]["id"] for x in found], channel)
     return ("devkit · known pitfalls for this call (lessons from earlier mistakes; follow their prevention):\n"
             + "\n".join(lessons.pitfall_lines(found)))
 
 
-def _project_of(agent: str, data: dict) -> str:
-    sf = _session_file(agent, data.get("session_id") or "-")
-    return str((state.read(sf) or {}).get("project") or "") if sf.exists() else ""
+def _shown(data: dict, ids: list, channel: str, count: bool = True):
+    """Lessons that reached the agent of this hook event: counted on `channel`, and pending for that agent until it
+    hits them again (missed) or its turn or lane ends (heeded). devkit's own headless calls record nothing."""
+    if ids and not _headless():
+        from . import lessons
+        lessons.shown(ids, channel, str(data.get("session_id") or ""), _lesson_agent(data), count=count)
 
 
-def _call_pitfalls(agent: str, data: dict, remember: bool = True) -> str:
-    """PreToolUse: the open lessons anchored on the command this call runs or the file it writes."""
+def _note_call(sess: dict, data: dict, ids: list):
+    """Remember, in the session record, the lessons shown with this call (by its tool_use_id): that call's own output
+    is no miss of them, since the agent read them only as the call ran."""
+    tid = str(data.get("tool_use_id") or "")
+    if tid and ids:
+        calls = dict(sess.get("lessons_by_call") or {})
+        calls[tid] = list(dict.fromkeys((calls.get(tid) or []) + list(ids)))
+        sess["lessons_by_call"] = dict(list(calls.items())[-CALLS_KEPT:])
+
+
+def _lesson_hits(data: dict, ids: list):
+    """The agent hit these lessons' refusal, command or error anchors: those shown to it earlier in this session and
+    still pending are missed (lessonevents.on_hit). Nothing is read when nothing was hit."""
+    sid = str(data.get("session_id") or "")
+    ids = [x for x in dict.fromkeys(ids) if x]
+    if ids and sid and not _headless():
+        from . import lessonevents
+        lessonevents.on_hit(ids, sid, _lesson_agent(data))
+
+
+def _lessons_end(data: dict, who: str):
+    """The turn of the main session, or a member's lane, ended without a send-back: the lessons still pending for
+    that agent were heeded (lessonevents.on_end)."""
+    sid = str(data.get("session_id") or "")
+    if not sid or not who or _headless():
+        return
     try:
-        project = _project_of(agent, data)
+        from . import lessonevents
+        lessonevents.on_end(sid, who)
+    except Exception as e:
+        _swallowed("lessons", e)
+
+
+def _brief_lessons(prompt) -> list:
+    """The lesson ids a crew brief carries, as lessons.pitfall_lines writes them."""
+    return list(dict.fromkeys(re.findall(r"(?m)^- Lesson (L-[0-9A-Za-z]{1,40}) \(recorded by ", str(prompt or ""))))
+
+
+def _stash_brief(agent: str, data: dict, prompt):
+    """A launch's brief carried lessons: keep their ids by the launch's tool_use_id until the member's first call,
+    which binds it to its agent id (_brief_shown). They were counted when the brief was written."""
+    tid, ids = str(data.get("tool_use_id") or ""), _brief_lessons(prompt)
+    sf = _session_file(agent, data.get("session_id") or "-")
+    if not (tid and ids and sf.exists()) or _headless():
+        return
+    now = time.time()
+
+    def put(d):
+        briefs = {k: v for k, v in (d.get("brief_lessons") or {}).items()
+                  if isinstance(v, dict) and now - float(v.get("ts") or 0) < 86400}
+        briefs[tid] = {"ids": ids, "ts": now}
+        d["brief_lessons"] = dict(list(briefs.items())[-BRIEFS_KEPT:])
+    try:
+        state.update(sf, put, create=False)
+    except state.StateBusy:
+        pass  # audited by state: the brief's lessons go uncounted as outcomes, never shown twice
+
+
+def _brief_shown(agent: str, data: dict, sess: dict):
+    """A member's call, once its launch is bound: the lessons its brief carried are recorded as shown to it on the
+    `brief` channel (once; the brief already counted them)."""
+    aid, briefs = str(data.get("agent_id") or ""), sess.get("brief_lessons") or {}
+    if not aid or not briefs:
+        return
+    tid = ((sess.get("subagents") or {}).get(aid) or {}).get("launch") or next(
+        (k for k, v in (sess.get("launches") or {}).items() if isinstance(v, dict) and v.get("agent_id") == aid), "")
+    if tid not in briefs:
+        return
+    taken = {}
+
+    def take(d):
+        rest = dict(d.get("brief_lessons") or {})
+        if tid not in rest:
+            return state.SKIP
+        taken.update(rest.pop(tid) or {})
+        d["brief_lessons"] = rest
+    try:
+        state.update(_session_file(agent, data.get("session_id") or "-"), take, create=False)
+    except state.StateBusy:
+        return
+    _shown(data, taken.get("ids") or [], "brief", count=False)
+
+
+def _call_pitfalls(agent: str, data: dict, remember: bool = True, channel: str = "call", show: bool = True,
+                   skip=(), refused: str = "") -> str:
+    """PreToolUse: the open lessons anchored on the command this call runs or the file it writes, and, for a refusal
+    (`refused`: its own text), those anchored on that text as an error, first. A lesson whose command or refusal
+    anchor the call hits is first resolved as missed when it was shown to the agent earlier and still pending; then
+    what is shown is recorded. `show=False` only resolves (a Codex call, which reads no context). `skip`: the lesson
+    of a lesson rule this call matched, which the rule already said and recorded."""
+    try:
+        sess = _session_record(agent, data)
+        project = str(sess.get("project") or "")
         if not project:
             return ""
         from . import lessons
+        _brief_shown(agent, data, sess)
         inp = data.get("tool_input") or {}
         cmd = inp.get("command") or ""
         cmd = " ".join(str(x) for x in cmd) if isinstance(cmd, list) else str(cmd)
         files = [x for x in (inp.get("file_path"), inp.get("notebook_path")) if x]
-        if not (cmd or files):
+        if not (cmd or files or refused):
             return ""
-        return _pitfalls(agent, data, lessons.for_call(project, files=files, command=cmd), remember)
+        pool = lessons.recall_pool(project)  # loaded once for both questions
+        found = lessons.for_call(project, files=files, command=cmd, limit=LESSON_HITS_MAX, pool=pool) \
+            if cmd or files else []
+        by_refusal = lessons.for_output(project, refused, limit=LESSON_HITS_MAX, pool=pool) if refused else []
+        skip = {x for x in skip if x}
+        hit = by_refusal + [x for x in found if cmd and any(lessons.runs(cmd, c) for c in lessons.anchors(x)["commands"])]
+        _lesson_hits(data, [x["meta"]["id"] for x in hit if x["meta"]["id"] not in skip])
+        if not show:
+            return ""
+        picked = list({x["meta"]["id"]: x for x in by_refusal + found if x["meta"]["id"] not in skip}.values())
+        return _pitfalls(agent, data, picked[:PITFALL_SHOW], remember, channel)
     except Exception:
         _log(f"pitfalls {agent}: {traceback.format_exc()[-300:]}")
         return ""
@@ -1652,17 +1818,172 @@ def _output_text(data: dict) -> str:
     return (str(r or "") + "\n" + str(data.get("error") or ""))[-50_000:]
 
 
-def _output_pitfalls(agent: str, data: dict) -> str:
-    """PostToolUse and PostToolUseFailure: the open lessons whose error signature the tool's output shows."""
+def _output_pitfalls(agent: str, data: dict, take: int = 0, taken: list = None) -> str:
+    """PostToolUse and PostToolUseFailure: the lesson rules whose error text the tool's output shows, then the open
+    lessons whose error signature it shows. A lesson the output hits is first resolved as missed when it was shown to
+    the agent earlier and still pending (not with this very call: the agent read it only as the call ran). `take`:
+    the best that many lessons go to `taken` instead, for the root-cause paragraph of this call (_root_cause)."""
     try:
-        project, text = _project_of(agent, data), _output_text(data)
+        sess, text = _session_record(agent, data), _output_text(data)
+        project = str(sess.get("project") or "")
         if not project or not text.strip():
             return ""
         from . import lessons
-        return _pitfalls(agent, data, lessons.for_output(project, text))
+        same_call = set((sess.get("lessons_by_call") or {}).get(str(data.get("tool_use_id") or "")) or [])
+        rules, said = _output_rules(data, project, text, same_call)
+        found = [x for x in lessons.for_output(project, text, limit=LESSON_HITS_MAX) if x["meta"]["id"] not in said]
+        _lesson_hits(data, [x["meta"]["id"] for x in found if x["meta"]["id"] not in same_call])
+        if take and taken is not None:
+            taken.extend(found[:take])
+            found = found[take:]
+        return "\n\n".join(x for x in (rules, _pitfalls(agent, data, found[:PITFALL_SHOW], channel="output")) if x)
     except Exception:
         _log(f"pitfalls {agent}: {traceback.format_exc()[-300:]}")
         return ""
+
+
+def _output_rules(data: dict, project: str, text: str, same_call=()) -> tuple:
+    """The output rules (lessonrules.check_output) of the project's, its initiatives' and the global scopes that the
+    output shows: each said with its lesson's title and prevention, its hit recorded (lessonrules.record_hit, a miss
+    when the agent was shown that lesson earlier in the session), and the lesson recorded as shown on `output`.
+    -> (context text, {lesson ids said}); ("", set()) when no scope has rules."""
+    from . import lessonrules
+    scopes = lessonrules.all_scopes()
+    if not scopes or _headless():
+        return "", set()
+    slugs = [s.split("/", 1)[1] for s in scopes if s.startswith("initiatives/")]
+    if slugs:
+        from .guard import initiative_members
+        slugs = [s for s in slugs if project in initiative_members(s)]
+    rules = lessonrules.check_output(text, lessonrules.scopes_for(project, slugs))
+    if not rules:
+        return "", set()
+    from . import lessonevents, lessons
+    sid, who, lines, said = str(data.get("session_id") or ""), _lesson_agent(data), [], set()
+    for r in rules[:PITFALL_SHOW]:
+        lid = r["lesson"]
+        missed = bool(sid) and lid not in same_call and lid in lessonevents.on_hit([lid], sid, who)
+        lessonrules.record_hit(r["id"], missed)
+        _shown(data, [lid], "output")
+        lines.append(f"devkit · lesson rule {r['id']} matches this output, from {lessonrules.describe(r)}.")
+        said.add(lid)
+    return "\n".join(lines + [lessons.ADVICE]), said
+
+
+def _command_of(data: dict) -> str:
+    cmd = (data.get("tool_input") or {}).get("command") or ""
+    return " ".join(str(x) for x in cmd) if isinstance(cmd, list) else str(cmd)
+
+
+def _interrupted(data: dict) -> bool:
+    resp = data.get("tool_response")
+    return bool(data.get("is_interrupt")) or (isinstance(resp, dict) and bool(resp.get("interrupted")))
+
+
+def _call_keys(data: dict, ok: bool) -> tuple:
+    """(command key, error key) of a shell call for the patch-loop count (bugs.command_key, bugs.error_signature);
+    the error key only for a failure that was not an interruption. ('', '') for any other tool."""
+    if data.get("tool_name") not in SHELL_TOOLS:
+        return "", ""
+    from . import bugs
+    key = bugs.command_key(command_words(_command_of(data)))
+    if ok or not key or _interrupted(data):
+        return key, ""
+    return key, bugs.error_signature(_output_text(data))
+
+
+def _output_bugs(agent: str, data: dict, ok: bool, keys=None) -> str:
+    """PostToolUse (ok) and PostToolUseFailure: the call's line in the session ledger of devkit's bug registry, and,
+    for a marker of devkit's own failure in the output, the known detour or the new-bug paragraph. Also outside
+    projects; a marker that names no occurrence of this session does nothing. `keys`: the call's (command key,
+    error key) when the caller has them (_call_keys)."""
+    sid = str(data.get("session_id") or "")
+    if not sid:
+        return ""
+    try:
+        from . import bugs
+        text = _output_text(data)
+        cmd = _command_of(data)
+        codes = bugs.marker_codes(text)
+        ok = ok and not _interrupted(data)
+        cmd_key, sig = keys if keys is not None else _call_keys(data, ok)
+        bugs.ledger_append(sid, data.get("tool_name") or "", ok, bugs.dev_words(command_words(cmd)), codes,
+                           cmd_key=cmd_key, sig=sig, who=_lesson_agent(data))
+        return bugs.context_for_output(text, sid) if codes else ""
+    except Exception:
+        _log(f"bugs {agent}: {traceback.format_exc()[-300:]}")
+        return ""
+
+
+# The patch-loop stop. An agent whose command fails twice in a row with the same error is told once to find the root
+# cause before it changes more code; a crew member that fails a third time is reported to the tech lead once.
+ROOT_CAUSE_STOP = ("The same failure twice. Stop changing code and find the root cause first (the root-cause skill): "
+                   "reproduce it, check the known lessons and devkit bugs below, prove the cause, then fix.")
+NOTHING_KNOWN = "No known lesson or devkit bug matches this error yet."
+LOOP_STOP_AT = 2  # identical failures in a row that stop the agent
+LOOP_LEAD_AT = 3  # identical failures in a row in a crew lane that the tech lead hears about
+LOOP_SHOW = 3  # lessons, and devkit bugs, the paragraph lists
+
+
+def _patch_loop(agent: str, data: dict, keys: tuple) -> bool:
+    """PostToolUseFailure of a shell call, after its ledger line: how many times in a row this agent's command
+    failed with this error (bugs.failure_streak). The third time in a crew member's lane, once: a notice to the tech
+    lead (_tell_lead). -> True the second time, once per command and agent in the session: the root-cause paragraph
+    is due (_root_cause)."""
+    cmd_key, sig = keys
+    sid = str(data.get("session_id") or "")
+    if not (sid and cmd_key and sig):
+        return False
+    try:
+        from . import bugs
+        who = _lesson_agent(data)
+        count, told = bugs.failure_streak(sid, who, cmd_key, sig)
+        stop = count >= LOOP_STOP_AT and "agent" not in told
+        if stop:
+            bugs.note_loop(sid, who, cmd_key, "agent")
+        if count >= LOOP_LEAD_AT and data.get("agent_id") and "lead" not in told and _tell_lead(agent, data):
+            bugs.note_loop(sid, who, cmd_key, "lead")
+        return stop
+    except Exception:
+        _log(f"patch loop {agent}: {traceback.format_exc()[-300:]}")
+        return False
+
+
+def _root_cause(data: dict, found: list) -> str:
+    """The root-cause paragraph: ROOT_CAUSE_STOP, then the lessons whose error anchor the output shows (`found`, the
+    best LOOP_SHOW of the output recall) and the registry's devkit bugs the output shows (bugs.registry_lines), or
+    NOTHING_KNOWN."""
+    from . import bugs, lessons
+    try:
+        known = bugs.registry_lines(_output_text(data), str(data.get("session_id") or ""), limit=LOOP_SHOW)
+    except Exception:
+        _log(f"patch loop bugs: {traceback.format_exc()[-300:]}")
+        known = []
+    lines = [ROOT_CAUSE_STOP] + lessons.pitfall_lines(found) + known
+    return "\n".join(lines + ([] if found or known else [NOTHING_KNOWN]))
+
+
+def _tell_lead(agent: str, data: dict) -> bool:
+    """A crew member's third identical failure: one notice from devkit to the tech lead in the run's messages,
+    naming the member, the command, and how to reach it. -> posted (False when the run has no lane for it)."""
+    from . import crew, progress
+    sid, aid = str(data.get("session_id") or ""), str(data.get("agent_id") or "")
+    with progress._tx(agent, sid):
+        run = progress.load_run(agent, sid)
+        if not isinstance(((run or {}).get("agents") or {}).get(aid), dict):
+            return False
+        run = progress.normalize(run)
+        lane = run["agents"][aid]
+        mem = crew._for_lane(lane)
+        who = crew.who(mem) if mem else crew.who(lane.get("persona") or lane.get("label") or "A crew member")
+        ask = f'dev crew ask --to {mem["id"]} "…"' if mem else 'dev crew ask --to <member> "…"'
+        progress._post(run, "devkit", "main",
+                       f"devkit: {who} hit the same failure a third time: `{_inline(_command_of(data))}` failed again "
+                       f"with the same error after devkit told it to stop and find the root cause. Check on it "
+                       f"({ask}), or stop it and route the debugging (`dev crew raci debug` names who takes it).",
+                       time.time(), from_name="devkit", kind="notice")
+        progress._save(run, touch_session=False)
+    return True
 
 
 def _hook_forgery(data: dict):
@@ -1966,7 +2287,8 @@ def guard(agent: str):
         _guard(agent, data, held)
     except Exception as e:
         if not _guard_failed(agent, data, held, e):
-            raise  # run() logs it and records guard.failopen: the call runs
+            raise  # run() logs it and records guard.failopen and the bug: the call runs
+        _bug_hook_error("guard", e)  # refused instead: run() never sees this failure
 
 
 def _guard(agent: str, data: dict, held: dict):
@@ -1977,8 +2299,8 @@ def _guard(agent: str, data: dict, held: dict):
         from . import progress
         if not headless:
             progress.tool_started(data)
-    except Exception:
-        pass
+    except Exception as e:
+        _swallowed("guard", e)
     _reconcile(agent, data)
     if data.get("agent_id") and not headless:  # late binding (spec D2): this call already runs with its launch's step and scope
         try:
@@ -1993,11 +2315,19 @@ def _guard(agent: str, data: dict, held: dict):
         except Exception:
             _log(f"guard ledger {agent}: {traceback.format_exc()[-300:]}")
     from . import guard as g
-    verdict = _hook_forgery(data) or \
-        g.check(data.get("tool_name") or "", data.get("tool_input") or {}, data.get("cwd") or os.getcwd(), agent)
+    verdict, made = _hook_forgery(data), "hook-forgery"  # `made`: the hook's own judge, for its refusal id
+    rule = {}
     if not verdict:
-        verdict = _identity_verdict(data) or _crew_limits(agent, data) or _stub_commit_gate(data) or \
-            _irreversible_main(agent, data)
+        verdict, made = g.check(data.get("tool_name") or "", data.get("tool_input") or {},
+                                data.get("cwd") or os.getcwd(), agent), ""
+        rule = _lesson_rule_hit(agent, data)  # before any other lesson this call shows is recorded
+    skip = (rule.get("lesson"),) if rule else ()  # the rule said its lesson: not again as a pitfall
+    for name, judge in (("identity", lambda: _identity_verdict(data)), ("crew-limits", lambda: _crew_limits(agent, data)),
+                        ("stub-commit", lambda: _stub_commit_gate(data)),
+                        ("irreversible", lambda: _irreversible_main(agent, data))):
+        if verdict:
+            break
+        verdict, made = judge(), name
     held["verdict"] = verdict
     held["rule"] = None  # a verdict of the guard's own rules is recorded with no rule of its own
     if verdict and (verdict[0] == "deny" or agent == "codex"):  # Codex turns ask into deny below
@@ -2007,8 +2337,8 @@ def _guard(agent: str, data: dict, held: dict):
             try:
                 from . import progress
                 progress.note_agent_launch(agent, data)
-            except Exception:
-                pass
+            except Exception as e:
+                _swallowed("guard", e)
         why = _scope_violation(agent, data)
         if why:
             held["verdict"], held["rule"] = ("deny", why), "crew-scope"
@@ -2017,17 +2347,18 @@ def _guard(agent: str, data: dict, held: dict):
             from . import audit
             audit.record("guard.deny", (data.get("tool_input") or {}).get("file_path") or data.get("tool_name") or "",
                          why[:400], "deny", tool=data.get("tool_name") or "", rule="crew-scope",
-                         agent_id=data.get("agent_id") or "")
+                         agent_id=data.get("agent_id") or "", refusal_id="hooks:crew-scope")
             held["recorded"] = True  # a failure after this keeps the refusal, and records it no second time
+            told = _with_pitfalls(agent, data, _refusal_with_bug("hooks:crew-scope", "", why, data), why, skip)
             print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
-                                                     "permissionDecisionReason": _with_pitfalls(agent, data, why)}}))
+                                                     "permissionDecisionReason": told}}))
             return
         routed = _route_subagent_progress(data, agent)
         if routed:
             out = _rewrite(agent, routed)
             held["done"] = True  # judged and routed to its lane: a failure adding its context must not refuse it
             try:
-                out = _with_context(agent, out, data)
+                out = _with_context(agent, out, data, skip)
             except Exception as e:  # without the pitfalls, the call still goes to its lane
                 g.failopen("guard-context", e)
             _log(f"progress {agent}: a subagent's dev progress call goes to its lane")
@@ -2038,11 +2369,14 @@ def _guard(agent: str, data: dict, held: dict):
             held["verdict"], held["rule"] = ("deny", why), _lane_rule(why)
             _close_call(data)
             from . import audit
+            rid = f"hooks:{held['rule']}"
             audit.record("guard.deny", (data.get("tool_input") or {}).get("command", "")[:200], why, "deny",
-                         tool=data.get("tool_name") or "", rule=held["rule"], agent_id=data.get("agent_id") or "")
+                         tool=data.get("tool_name") or "", rule=held["rule"], agent_id=data.get("agent_id") or "",
+                         refusal_id=rid)
             held["recorded"] = True
+            told = _with_pitfalls(agent, data, _refusal_with_bug(rid, "", why, data), why, skip)
             print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
-                                                     "permissionDecisionReason": _with_pitfalls(agent, data, why)}}))
+                                                     "permissionDecisionReason": told}}))
             return
         held["done"] = True  # every rule has run and allowed the call: a later failure only loses context
         if data.get("tool_name") in ("Agent", "Task"):  # subagent briefs get the skills their work requires
@@ -2053,6 +2387,10 @@ def _guard(agent: str, data: dict, held: dict):
                 updated = skillguard.on_agent_brief(agent, data.get("tool_input") or {}, _session_project(data, sess_))
             except Exception:
                 updated = None
+            try:  # the brief's lessons, for the member it launches (its first call records them as shown to it)
+                _stash_brief(agent, data, (updated or data.get("tool_input") or {}).get("prompt"))
+            except Exception as e:
+                _swallowed("guard", e)
             if updated:
                 _log(f"skills {agent}: appended required skills and known pitfalls to a subagent brief")
                 print(json.dumps({"hookSpecificOutput": _rewrite(agent, updated)}))
@@ -2062,19 +2400,25 @@ def _guard(agent: str, data: dict, held: dict):
             _watch_writes(agent, data)
         except Exception as e:
             g.failopen("guard-allow", e)
-        out = _with_context(agent, {"hookEventName": "PreToolUse"}, data)
+        out = _with_context(agent, {"hookEventName": "PreToolUse"}, data, skip)
         if out.get("additionalContext"):
             print(json.dumps({"hookSpecificOutput": out}))
         return
     decision, reason = verdict
     if agent == "codex" and decision == "ask":
         decision = "deny"
-    reason = _with_pitfalls(agent, data, reason)
+    rid, word = g.refusal_of(verdict)  # by the exact reason: before anything adds to it
+    if verdict[0] == "deny" and not rid and made:
+        rid = f"hooks:{made}"  # a refusal the hook made itself
+    if rid:
+        reason = _refusal_with_bug(rid, word, reason, data)
+    reason = _with_pitfalls(agent, data, reason, verdict[1] if decision == "deny" else "", skip)
     _log(f"guard {agent} {decision}: {reason[:160]}")
     from . import audit
     tin = data.get("tool_input") or {}
     audit.record(f"guard.{decision}", tin.get("command") or tin.get("file_path") or data.get("tool_name") or "",
-                 reason[:400], decision, tool=data.get("tool_name") or "", agent_id=data.get("agent_id") or "")
+                 reason[:400], decision, tool=data.get("tool_name") or "", agent_id=data.get("agent_id") or "",
+                 refusal_id=rid)
     held["recorded"] = True
     print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": decision,
                                              "permissionDecisionReason": reason}}))
@@ -2120,8 +2464,8 @@ def _guard_failed(agent: str, data: dict, held: dict, exc: BaseException) -> boo
     _log(f"guard {agent} {decision} (guard-error):\n{traceback.format_exc()}")
     try:
         _close_call(data)  # a refused call never runs: it leaves no open entry
-    except Exception:
-        pass
+    except Exception as e:
+        _swallowed("guard", e)
     try:
         from . import audit
         tin = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
@@ -2130,25 +2474,84 @@ def _guard_failed(agent: str, data: dict, held: dict, exc: BaseException) -> boo
                                                   data.get("tool_name") or "")[:400],
                          detail[:400], decision, tool=data.get("tool_name") or "", agent_id=data.get("agent_id") or "",
                          **({"rule": rule} if rule else {}))
-    except Exception:
-        pass  # the refusal stands without its record
+    except Exception as e:
+        _swallowed("guard", e)  # the refusal stands without its record
     print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": decision,
                                              "permissionDecisionReason": reason}}))
     return True
 
 
-def _with_pitfalls(agent: str, data: dict, reason: str) -> str:
-    """A refusal with the lessons of the call it refuses, every time (a refusal is read when it happens)."""
-    known = "" if _headless() else _call_pitfalls(agent, data, remember=False)
+def _refusal_with_bug(refusal_id: str, word: str, reason: str, data: dict) -> str:
+    """A refusal through devkit's bug registry: noted in the session ledger, and, for a bug the cache knows, the
+    served detour and a marker (guard.refusal_note) with its vote queued (bugs.after_refusal). The refusal stands
+    whatever fails here."""
+    sid = str(data.get("session_id") or "")
+    if _headless():
+        return reason
+    try:
+        from . import bugs, guard as g
+        text = g.refusal_note(reason, refusal_id, word, sid)
+        bugs.note_refusal(sid, refusal_id, word)
+        bugs.after_refusal(text, sid)
+        return text
+    except Exception:
+        _log(f"guard refusal note: {traceback.format_exc()[-300:]}")
+        return reason
+
+
+def _with_pitfalls(agent: str, data: dict, reason: str, why: str = "", skip=()) -> str:
+    """A refusal with the lessons of the call it refuses, every time (a refusal is read when it happens): first those
+    anchored on the refusal's own text (`why`) as an error, then those of the call's command and files."""
+    known = "" if _headless() else _call_pitfalls(agent, data, remember=False, channel="refusal", skip=skip,
+                                                  refused=why)
     return f"{reason}\n\n{known}" if known else reason
 
 
-def _with_context(agent: str, out: dict, data: dict) -> dict:
-    """A PreToolUse output with the call's pitfalls as context (Claude reads it; Codex gets them with refusals)."""
-    if agent != "claude" or _headless():
+def _with_context(agent: str, out: dict, data: dict, skip=()) -> dict:
+    """A PreToolUse output with the call's context: the warning of a lesson rule the call matched
+    (guard.lesson_rule_context), then the call's pitfalls. Claude reads it; Codex gets the lessons with refusals,
+    and its calls still resolve the lessons they hit."""
+    if _headless():
         return out
-    known = _call_pitfalls(agent, data)
+    if agent != "claude":
+        _call_pitfalls(agent, data, show=False, skip=skip)
+        return out
+    from . import guard as g
+    try:
+        warned = g.lesson_rule_context()
+    except Exception as e:  # the rule's warning is lost; the pitfalls still come
+        warned = ""
+        _swallowed("guard", e)
+    known = "\n\n".join(x for x in (warned, _call_pitfalls(agent, data, skip=skip)) if x)
     return dict(out, additionalContext=known) if known else out
+
+
+def _lesson_rule_hit(agent: str, data: dict) -> dict:
+    """Right after the guard's check: the lesson rule it matched, recorded for this session's agent
+    (guard.lesson_rule_hit: a miss when that agent was shown the lesson earlier and it is still pending, the rule's
+    hit and miss counted, and the lesson shown again; a miss never changes the rule's mode, since only the developer's
+    typed `grant lesson-block <lesson>` with `dev lesson prevent --by guard … --block` in a terminal makes a rule
+    refuse), then counted as shown (`call` for a warning, `refusal` for a block). It runs before any other lesson
+    this call shows is recorded, or the rule's own lesson would count as a miss of this very call.
+    -> guard.lesson_rule_hit's {"rule", "lesson", "mode", "missed"}, {} for none."""
+    sid = str(data.get("session_id") or "")
+    if not sid or _headless():
+        return {}
+    try:
+        from . import guard as g, lessons
+        hit = g.lesson_rule_hit(sid, _lesson_agent(data)) or {}
+    except Exception as e:
+        _swallowed("guard", e)
+        return {}
+    if hit:
+        try:
+            lessons.track([hit["lesson"]], "shown", "call" if hit["mode"] == "warn" else "refusal")
+            if hit["mode"] == "warn":
+                state.update(_session_file(agent, sid), lambda d: _note_call(d, data, [hit["lesson"]]),
+                             create=False)
+        except Exception as e:  # the hit stands; only its count or this call's note is lost
+            _swallowed("guard", e)
+    return hit
 
 
 def _context_out(event: str, text: str):
@@ -2185,6 +2588,7 @@ def prompt(agent: str):
         cwd = data.get("cwd") or os.getcwd()
         _register_session(agent, sid, cwd, data)
         extra = _fit(_with_catalog(context_for(cwd, agent), agent))
+        _session_lessons_shown(data, _SEEN.pop(cwd, {}))
         _log(f"prompt {agent}: session {sid[:12]} had no SessionStart; devkit context injected")
     elif sid and agent == "claude" and not (state.read(_session_file(agent, sid)) or {}).get("pid"):
         try:  # a record an earlier prompt made without its process
@@ -2222,8 +2626,8 @@ def prompt(agent: str):
                     "after your last tool call) opens with **[Firefly> DevKit]** <project> · `<branch>` · <task>, then "
                     "Done / Check / Next (global instructions §0). Nothing above it: put the verdict, a correction or "
                     "a comment on the last command below the block.") + ("\n\n" + text if text else "")
-    except Exception:
-        pass
+    except Exception as e:
+        _swallowed("prompt", e)
     route = ""
     if (core.CFG.get("crew") or {}).get("route_hint", True):
         route = morpheus_hint(data.get("prompt") or "")
@@ -2373,10 +2777,12 @@ NOTICE_COMMAND_MAX = 80  # characters of a member's command the tech lead's cont
 
 
 def _inline(text, limit: int = NOTICE_COMMAND_MAX) -> str:
-    """Text a member wrote, as one inert code span of the tech lead's context: backticks dropped (it cannot close
-    its span), every run of whitespace, newlines and carriage returns included, one space, at most `limit`
+    """Text a member wrote, as one inert code span of the tech lead's context: secrets redacted as the audit redacts
+    them (audit.redact, before the cut, so a token the cut would halve is still found), backticks dropped (it cannot
+    close its span), every run of whitespace, newlines and carriage returns included, one space, at most `limit`
     characters with "…" at the cut. Then no part of it can start a line that reads as devkit's own."""
-    s = " ".join(str(text or "").replace("`", "").split())
+    from . import audit
+    s = " ".join(audit.redact(str(text or "")).replace("`", "").split())
     return s if len(s) <= limit else s[:limit - 1] + "…"
 
 
@@ -2503,8 +2909,8 @@ def post_tool(agent: str):
                 if not core.is_temp(top):
                     ciwatch.start_background(top, session=f"{agent}:{data.get('session_id') or ''}", branch=ref,
                                              sha=sha)
-    except Exception:
-        pass
+    except Exception as e:
+        _swallowed("post-tool", e)
     closing = background = ""
     try:
         sf = _session_file(agent, data.get("session_id") or "-")
@@ -2518,6 +2924,7 @@ def post_tool(agent: str):
         _log(f"post-tool closing {agent}: {traceback.format_exc()[-300:]}")
     background = _background_told(agent, data)  # under the lock: told once, nothing while the record is busy
     _context_out("PostToolUse", "\n\n".join(x for x in (carried, answered, background, _output_pitfalls(agent, data),
+                                                        _output_bugs(agent, data, True),
                                                         _bulk_rewrite_note(data), closing,
                                                         progress.on_tool_done(agent, data)) if x))
 
@@ -2525,14 +2932,31 @@ def post_tool(agent: str):
 def post_tool_failure(agent: str):
     """PostToolUseFailure: a subagent launch that failed (an unknown agent type, an interrupt) starts no agent, so its
     launch record leaves at once: it never labels another agent or holds a crew slot (spec F0, S6). A shell call
-    that failed or was interrupted has ended: it leaves the call ledger."""
+    that failed or was interrupted has ended: it leaves the call ledger. The same failure twice in a row stops the
+    agent with the root-cause paragraph (_patch_loop, _root_cause): it takes the best lessons of the output recall,
+    after the recall resolved their earlier showings, and they count as shown on the output channel."""
     from . import progress
     data = _stdin_json()
     _check_writes(agent, data)  # a call that failed may have written too
     _close_call(data)
     if data.get("tool_name") in ("Agent", "Task", "spawn_agent"):
         progress.launch_failed(agent, data)
-    _context_out("PostToolUseFailure", _output_pitfalls(agent, data))
+    keys = ("", "")
+    try:
+        keys = _call_keys(data, False)
+    except Exception:
+        _log(f"call keys {agent}: {traceback.format_exc()[-300:]}")
+    bug_text = _output_bugs(agent, data, False, keys)  # the ledger line the loop count reads
+    taken = []
+    stop = _patch_loop(agent, data, keys)
+    pitfalls = _output_pitfalls(agent, data, take=LOOP_SHOW if stop else 0, taken=taken)
+    if stop:
+        try:
+            _shown(data, [x["meta"]["id"] for x in taken], "output")
+        except Exception as e:
+            _swallowed("post-tool-failure", e)
+    _context_out("PostToolUseFailure", "\n\n".join(x for x in (_root_cause(data, taken) if stop else "", pitfalls,
+                                                               bug_text) if x))
 
 
 def subagent_start(agent: str):
@@ -2740,6 +3164,7 @@ def subagent_stop(agent: str):
     if out:
         print(json.dumps(out))
         return
+    _lessons_end(data, str(data.get("agent_id") or ""))  # the member's lane ended: what it did not hit was heeded
     progress.on_subagent(agent, data, False)
     _continuity("on_subagent_stop", agent, data)  # a last read of its transcript: a compaction no hook saw
     _prompt_refresh(data, force=True)  # a lane closed: the prompt's crew count follows
@@ -2780,8 +3205,8 @@ def statusline(agent: str):
                 tmp = f.with_suffix(".tmp")
                 tmp.write_text(json.dumps(rec))
                 os.replace(tmp, f)
-        except Exception:
-            pass
+        except Exception as e:
+            _swallowed("statusline", e)
     ws = data.get("workspace") or {}
     repo, branch = _branch_of(ws.get("current_dir") or data.get("cwd") or os.getcwd())
     model = ((data.get("model") or {}).get("display_name") or "").replace("Claude ", "")
@@ -2893,6 +3318,7 @@ def run(event: str, agent: str) -> int:
     if _headless() and event != "guard":
         return 0  # devkit's own headless call (ai.ask): no session, no progress, no gates; the guard still judges
     state.WAIT, state.SAY_BUSY = state.HOOK_WAIT, False  # a hook waits at most 2 s for a record, silently
+    marked = _bug_marks_start(event)
     try:
         (STATE / "logs").mkdir(parents=True, exist_ok=True)
         fn(agent)
@@ -2903,4 +3329,42 @@ def run(event: str, agent: str) -> int:
         if event == "guard":  # the guard failed open: recorded, so a rule that never runs is seen (spec G12)
             from . import guard as g
             g.failopen("guard-hook", e)
+        _bug_hook_error(event, e)
+    finally:
+        if marked:
+            _bug_marks_end(event)
     return 0
+
+
+def _bug_marks_start(event: str) -> bool:
+    """devkit's bug registry: this run's start mark, and the runs killed at their time limit that left one behind.
+    Not for the status line, which has no time limit and runs every few seconds."""
+    global _PAYLOAD
+    _PAYLOAD = {}
+    if event == "statusline":
+        return False
+    try:
+        from . import bugs
+        bugs.hook_started(event, "")
+        bugs.stale_hooks()
+        return True
+    except Exception:
+        _log(f"bug marks {event}: {traceback.format_exc()[-300:]}")
+        return False
+
+
+def _bug_marks_end(event: str):
+    try:
+        from . import bugs
+        bugs.hook_ended(event, str(_PAYLOAD.get("session_id") or ""))
+    except Exception:
+        _log(f"bug marks {event}: {traceback.format_exc()[-300:]}")
+
+
+def _bug_hook_error(event: str, exc: BaseException):
+    """A hook raised: a `hook` occurrence in devkit's bug registry (the guard's goes to private reporting only)."""
+    try:
+        from . import bugs
+        bugs.hook_error(event, exc, str(_PAYLOAD.get("session_id") or ""))
+    except Exception:
+        _log(f"bug record {event}: {traceback.format_exc()[-300:]}")

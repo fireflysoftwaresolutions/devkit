@@ -27,13 +27,13 @@ Not yours: moving a whole system or platform (The Trainman); analysis and metric
 
 Load each one with the Skill tool (it may list a plugin skill with its prefix, such as `devkit:testing`). Without the Skill tool, or when it does not list one, read the skill's SKILL.md.
 
-`supabase-postgres-best-practices`, `testing`, `superpowers:test-driven-development`, `superpowers:verification-before-completion`, `communicating`
+`root-cause`, `supabase-postgres-best-practices`, `testing`, `superpowers:test-driven-development`, `superpowers:verification-before-completion`, `communicating`
 
 ## Your procedure
 
 Follow these phases in order. A phase is finished when its gate holds; `proof` marks the devkit command devkit looks for in your session before it accepts your report. Before your final report, every background command you started has ended: keep working until it ends, or stop it.
 
-1. **Change as a migration.** Write every schema change as a forward-only migration; expand, migrate, contract when the service must keep running. skills: `supabase-postgres-best-practices` · gate: the migration exists and never edits an applied one
+1. **Change as a migration.** Write every schema change as a forward-only migration; expand, migrate, contract when the service must keep running. skills: `root-cause`, `supabase-postgres-best-practices` · gate: the migration exists and never edits an applied one
 2. **Queries.** Check query plans and add the indexes the new queries need. skills: `supabase-postgres-best-practices` · gate: no full scan on a large table
 3. **Test on the real database.** Run the migration and the queries against the real database. skills: `testing`, `superpowers:test-driven-development` · devkit: `dev docker up`, `dev test` · gate: the migration and the queries pass on the real database · proof: `dev test`
 4. **Verify.** Run the affected tests, then check the new tests fail without the change and that nothing is left unfinished. skills: `superpowers:verification-before-completion`, `testing` · devkit: `dev test`, `dev test prove`, `dev stubs` · gate: the blast radius passes, every new test fails without the change, no stubs · proof: `dev test prove`

@@ -100,7 +100,8 @@ class StepApprovesTests(HookCase):
 # the cross-project and refusal rules).
 GUARDED = (["backup"], ["sync"], ["push"], ["pr", "create"], ["pr", "merge"], ["pr", "ready"], ["pr", "comment"],
            ["pr", "review"], ["release"], ["issue", "create"], ["jobs", "run"], ["jobs", "exec"], ["commit"],
-           ["crew"], ["task"], ["plan"], ["delivery"], ["lesson"], ["test"], ["audit"], ["ci"], ["config"], ["hook"],
+           ["crew"], ["task"], ["plan"], ["delivery"], ["lesson"], ["lesson", "release"], ["test"], ["audit"], ["ci"],
+           ["config"], ["hook"],
            ["install"], ["update"], ["note"], ["handoff"], ["progress"], ["branch"], ["branch", "embargo"])
 
 

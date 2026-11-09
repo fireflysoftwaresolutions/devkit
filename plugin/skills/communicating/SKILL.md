@@ -233,6 +233,7 @@ whether new commit messages open with it (`commit.template` in each repository t
 ```bash
 dev commit -a -m "fix(parser): keep quoted commas" \
   --why "Rows with quoted commas were split in two, so imports lost data." \
+  --cause "the tokenizer split on every comma before it read the quotes" \
   --body "The tokenizer reads a quoted field whole." \
   --verified "python3 -m unittest tests.test_parser (12 tests pass)"
 ```
@@ -241,6 +242,8 @@ dev commit -a -m "fix(parser): keep quoted commas" \
 fix(parser): keep quoted commas                ← Conventional Commit, imperative, ≤ 72 chars, no period
 
 Rows with quoted commas were split in two, so imports lost data.     ← why (--why)
+
+Root cause: the tokenizer split on every comma before it read the quotes   ← --cause, required on fix and revert
 
 The tokenizer reads a quoted field whole.      ← what changed (--body, repeatable)
 
@@ -255,6 +258,10 @@ BREAKING CHANGE: …                             ← only for a breaking change 
   commit to its task; a message that names one is refused.
 - The why says the problem and who it affects, not the files. The Verified line quotes the command you ran and its
   result, never "tested."
+- **A fix or revert states its root cause.** `--cause` writes the `Root cause:` paragraph right after the why: what
+  caused the problem, as your reproduction proved it (the `root-cause` skill). `dev commit` refuses a `fix` or
+  `revert` commit without it, or with a placeholder such as `unknown`, `n/a`, or `tbd`, or a cause under 15
+  characters.
 - **No plan labels.** The summary and body say the behavior and the reason in plain words, never the labels of the
   plan or review that produced the change ("Phase 1," "Wave 2," "step C6," a finding or row number): the reader of
   `git log` never saw that plan. An id the host knows goes in `Refs:` only.

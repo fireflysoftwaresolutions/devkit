@@ -1,0 +1,78 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1224" height="1160" viewBox="0 0 1224 1160" role="img" aria-labelledby="dk-title dk-desc">
+<title id="dk-title">When devkit itself fails</title>
+<desc id="dk-desc">A devkit failure on your Mac gets a fingerprint, and devkit matches it against the local cache of the bug registry without any network call. A known bug with a trusted detour gives the agent the detour, and the work goes on; otherwise the agent looks for its own detour or reports the bug. Votes, reports, and detours leave through the checked outbox for the registry in GitHub Issues, which ranks the bugs for the next hotfix, and dev bug sync brings the registry's records back into the cache.</desc>
+<rect width="1224" height="1160" fill="#10110F"/>
+<g font-family="Manrope, 'Manrope Variable', system-ui, -apple-system, 'Segoe UI', Arial, sans-serif">
+<circle cx="68" cy="74" r="4" fill="#FFB34A"/>
+<text x="80" y="78.5" font-size="12" font-weight="600" fill="#BFB8AB" letter-spacing="0.48">WHEN DEVKIT ITSELF FAILS</text>
+<text x="1117.7" y="78.5" font-size="13" font-weight="400" fill="#BFB8AB">GitHub</text>
+<g transform="translate(1085.7,74)"><rect x="0" y="-7" width="24" height="14" rx="3" fill="#222726" stroke="#7C8583" stroke-width="1.5"/></g>
+<text x="1003.4" y="78.5" font-size="13" font-weight="400" fill="#BFB8AB">local data</text>
+<g transform="translate(971.4,74)"><rect x="0" y="-7" width="24" height="14" rx="3" fill="#293235" stroke="#8EA3AB" stroke-width="1.5"/></g>
+<text x="911.9" y="78.5" font-size="13" font-weight="400" fill="#BFB8AB">devkit</text>
+<g transform="translate(879.9,74)"><rect x="0" y="-7" width="24" height="14" rx="3" fill="#2C2416" stroke="#FFB34A" stroke-width="1.5"/></g>
+<g transform="translate(201.2,152.0)">
+<rect x="-32.0" y="-48.0" width="984.0" height="776.0" rx="12" fill="#1A1B17" stroke="#2E302A" stroke-width="1" stroke-dasharray="6 4"/>
+<text x="-16.0" y="-24.0" font-size="12" font-weight="600" fill="#BFB8AB" text-anchor="start" letter-spacing="0.48">YOUR MAC</text>
+<rect x="-32.0" y="784.0" width="984.0" height="160.0" rx="12" fill="#1A1B17" stroke="#2E302A" stroke-width="1" stroke-dasharray="6 4"/>
+<text x="-16.0" y="808.0" font-size="12" font-weight="600" fill="#BFB8AB" text-anchor="start" letter-spacing="0.48">GITHUB</text>
+<path d="M456.0,80.0 L456.0,144.5" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="456.0,152.0 452.0,144.0 460.0,144.0" fill="#BFB8AB"/>
+<rect x="421.2" y="104.0" width="69.7" height="24.0" rx="11.0" fill="#1A1B17"/>
+<text x="456.0" y="120.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">recorded</text>
+<path d="M456.0,232.0 L456.0,300.5" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="456.0,308.0 452.0,300.0 460.0,300.0" fill="#BFB8AB"/>
+<rect x="418.5" y="258.0" width="75.0" height="24.0" rx="11.0" fill="#1A1B17"/>
+<text x="456.0" y="274.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">looked up</text>
+<path d="M444.0,396.0 L444.0,492.0 Q444.0,504.0 432.0,504.0 L203.5,504.0" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="196.0,504.0 204.0,500.0 204.0,508.0" fill="#BFB8AB"/>
+<rect x="270.4" y="492.0" width="99.1" height="24.0" rx="11.0" fill="#1A1B17"/>
+<text x="320.0" y="508.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">served detour</text>
+<path d="M468.0,396.0 L468.0,492.0 Q468.0,504.0 480.0,504.0 L724.5,504.0" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="732.0,504.0 724.0,508.0 724.0,500.0" fill="#BFB8AB"/>
+<rect x="554.6" y="492.0" width="90.8" height="24.0" rx="11.0" fill="#1A1B17"/>
+<text x="600.0" y="508.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">none served</text>
+<path d="M96.0,544.0 L96.0,644.0 Q96.0,656.0 108.0,656.0 L344.5,656.0" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="352.0,656.0 344.0,660.0 344.0,652.0" fill="#BFB8AB"/>
+<rect x="203.2" y="644.0" width="41.7" height="24.0" rx="11.0" fill="#1A1B17"/>
+<text x="224.0" y="660.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">vote</text>
+<path d="M832.0,544.0 L832.0,644.0 Q832.0,656.0 820.0,656.0 L567.5,656.0" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="560.0,656.0 568.0,652.0 568.0,660.0" fill="#BFB8AB"/>
+<rect x="641.1" y="644.0" width="109.8" height="24.0" rx="11.0" fill="#1A1B17"/>
+<text x="696.0" y="660.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">detour or report</text>
+<path d="M456.0,700.0 L456.0,756.0 Q456.0,768.0 444.0,768.0 L108.0,768.0 Q96.0,768.0 96.0,780.0 L96.0,824.5" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="96.0,832.0 92.0,824.0 100.0,824.0" fill="#BFB8AB"/>
+<rect x="228.0" y="756.0" width="96.0" height="24.0" rx="11.0" fill="#10110F"/>
+<text x="276.0" y="772.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">dev bug sync</text>
+<path d="M196.0,872.0 L344.5,872.0" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="352.0,872.0 344.0,876.0 344.0,868.0" fill="#BFB8AB"/>
+<rect x="249.8" y="860.0" width="48.4" height="24.0" rx="11.0" fill="#1A1B17"/>
+<text x="274.0" y="876.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">votes</text>
+<path d="M560.0,872.0 L724.5,872.0" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="732.0,872.0 724.0,876.0 724.0,868.0" fill="#BFB8AB"/>
+<rect x="618.4" y="860.0" width="55.3" height="24.0" rx="11.0" fill="#1A1B17"/>
+<text x="646.0" y="876.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">fix first</text>
+<path d="M-4.0,872.0 L-83.2,872.0 Q-95.2,872.0 -95.2,860.0 L-95.2,364.0 Q-95.2,352.0 -83.2,352.0 L344.5,352.0" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-dasharray="6 5" stroke-linecap="butt"/><polygon points="352.0,352.0 344.0,356.0 344.0,348.0" fill="#BFB8AB"/>
+<rect x="-137.2" y="600.0" width="84.0" height="24.0" rx="11.0" fill="#10110F"/>
+<text x="-95.2" y="616.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">bot records</text>
+<rect x="352.0" y="0.0" width="208.0" height="80.0" rx="6.0" fill="#1F201C" stroke="#4C4E45" stroke-width="1.5"/>
+<text x="456.0" y="34.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">devkit fails</text>
+<text x="456.0" y="56.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">crash · hook · wrong refusal</text>
+<rect x="352.0" y="152.0" width="208.0" height="80.0" rx="6.0" fill="#2C2416" stroke="#FFB34A" stroke-width="1.5"/>
+<text x="456.0" y="186.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Fingerprint</text>
+<text x="456.0" y="208.0" font-size="13" font-weight="400" fill="#FFB34A" text-anchor="middle">12 hex · one-time code</text>
+<path d="M352.0,316.0 A104.0,8 0 0 1 560.0,316.0 L560.0,388.0 A104.0,8 0 0 1 352.0,388.0 Z" fill="#293235" stroke="#8EA3AB" stroke-width="1.5"/><path d="M352.0,316.0 A104.0,8 0 0 0 560.0,316.0" fill="none" stroke="#8EA3AB" stroke-width="1.5"/>
+<text x="456.0" y="354.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Local cache</text>
+<text x="456.0" y="376.0" font-size="13" font-weight="400" fill="#A4B4B9" text-anchor="middle">matched, no network</text>
+<rect x="-4.0" y="464.0" width="200.0" height="80.0" rx="6.0" fill="#FFB34A" stroke="#FFB34A" stroke-width="2"/>
+<text x="96.0" y="498.0" font-size="16" font-weight="600" fill="#272820" text-anchor="middle">Known detour</text>
+<text x="96.0" y="520.0" font-size="13" font-weight="400" fill="#272820" text-anchor="middle">the work goes on</text>
+<rect x="732.0" y="464.0" width="200.0" height="80.0" rx="6.0" fill="#2C2416" stroke="#FFB34A" stroke-width="1.5"/>
+<text x="832.0" y="498.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Agent's own detour</text>
+<text x="832.0" y="520.0" font-size="13" font-weight="400" fill="#FFB34A" text-anchor="middle">or a report, then ask you</text>
+<path d="M352.0,620.0 A104.0,8 0 0 1 560.0,620.0 L560.0,692.0 A104.0,8 0 0 1 352.0,692.0 Z" fill="#293235" stroke="#8EA3AB" stroke-width="1.5"/><path d="M352.0,620.0 A104.0,8 0 0 0 560.0,620.0" fill="none" stroke="#8EA3AB" stroke-width="1.5"/>
+<text x="456.0" y="658.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Outbox</text>
+<text x="456.0" y="680.0" font-size="13" font-weight="400" fill="#A4B4B9" text-anchor="middle">checked before it leaves</text>
+<rect x="-4.0" y="832.0" width="200.0" height="80.0" rx="6.0" fill="#222726" stroke="#7C8583" stroke-width="1.5"/>
+<text x="96.0" y="866.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Bug registry</text>
+<text x="96.0" y="888.0" font-size="13" font-weight="400" fill="#A7AEAC" text-anchor="middle">GitHub Issues · bot record</text>
+<rect x="352.0" y="832.0" width="208.0" height="80.0" rx="6.0" fill="#2C2416" stroke="#FFB34A" stroke-width="1.5"/>
+<text x="456.0" y="866.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Ranking</text>
+<text x="456.0" y="888.0" font-size="13" font-weight="400" fill="#FFB34A" text-anchor="middle">dev bug top</text>
+<rect x="732.0" y="832.0" width="200.0" height="80.0" rx="6.0" fill="#222726" stroke="#7C8583" stroke-width="1.5"/>
+<text x="832.0" y="866.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Hotfix release</text>
+<text x="832.0" y="888.0" font-size="13" font-weight="400" fill="#A7AEAC" text-anchor="middle">sets fixed_in</text>
+</g>
+</g>
+</svg>

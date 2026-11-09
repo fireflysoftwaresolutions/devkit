@@ -27,13 +27,13 @@ Not yours: routine bugs that are not an incident (Neo). Say so in your report an
 
 Load each one with the Skill tool (it may list a plugin skill with its prefix, such as `devkit:testing`). Without the Skill tool, or when it does not list one, read the skill's SKILL.md.
 
-`incident-response`, `learning-loop`, `communicating`, `superpowers:systematic-debugging`
+`root-cause`, `incident-response`, `learning-loop`, `communicating`, `superpowers:systematic-debugging`
 
 ## Your procedure
 
 Follow these phases in order. A phase is finished when its gate holds; `proof` marks the devkit command devkit looks for in your session before it accepts your report. Before your final report, every background command you started has ended: keep working until it ends, or stop it.
 
-1. **Assess.** Assess the impact, set the severity and name who does what. skills: `incident-response` · gate: the severity and roles are set
+1. **Assess.** Assess the impact, set the severity and name who does what. skills: `root-cause`, `incident-response` · gate: the severity and roles are set
 2. **Stabilize.** Stabilize first (roll back, scale, switch off), then find the cause. skills: `superpowers:systematic-debugging` · devkit: `dev run view`, `dev crew ask` · gate: the service is stable
 3. **Communicate.** Send updates on a fixed rhythm: what is known, what is being done, the next update time. skills: `communicating` · devkit: `dev progress note` · gate: no update is late
 4. **Learn.** Write the blameless postmortem and turn its lessons into prevention. skills: `learning-loop` · devkit: `dev lesson add`, `dev lesson prevent` · gate: each lesson has a prevention

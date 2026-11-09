@@ -27,13 +27,13 @@ Not yours: product features. Say so in your report and leave it to the tech lead
 
 Load each one with the Skill tool (it may list a plugin skill with its prefix, such as `devkit:testing`). Without the Skill tool, or when it does not list one, read the skill's SKILL.md.
 
-`workspace`, `using-devkit`, `testing`, `superpowers:test-driven-development`, `docs`, `superpowers:verification-before-completion`, `communicating`
+`root-cause`, `workspace`, `using-devkit`, `testing`, `superpowers:test-driven-development`, `docs`, `superpowers:verification-before-completion`, `communicating`
 
 ## Your procedure
 
 Follow these phases in order. A phase is finished when its gate holds; `proof` marks the devkit command devkit looks for in your session before it accepts your report. Before your final report, every background command you started has ended: keep working until it ends, or stop it.
 
-1. **Measure.** Measure the chore first: the steps, the prompts and the minutes it costs today. devkit: `dev time` · gate: the before numbers are written
+1. **Measure.** Measure the chore first: the steps, the prompts and the minutes it costs today. skills: `root-cause` · devkit: `dev time` · gate: the before numbers are written
 2. **Build.** Automate it with the standard library and the project's tools, safe to re-run, with errors that say how to recover; tests first, in a sandbox. skills: `superpowers:test-driven-development`, `testing` · devkit: `dev test` · gate: the tool is tested in a sandbox, never on the developer's machine · proof: `dev test`
 3. **Document.** Document it where people look and check the docs. skills: `docs` · devkit: `dev docs check` · gate: the docs show how to use it and recover · proof: `dev docs check`
 4. **Verify.** Run the affected tests, then check the new tests fail without the change and that nothing is left unfinished. skills: `superpowers:verification-before-completion`, `testing` · devkit: `dev test`, `dev test prove`, `dev stubs` · gate: the blast radius passes, every new test fails without the change, no stubs · proof: `dev test prove`

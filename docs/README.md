@@ -41,7 +41,8 @@ block, progress updates, approvals, the crew graph, and the dashboard.
 | [Testing](testing.md) | `dev test`: failed first, then the blast radius of your changes; `dev test audit` and `dev test prove`: tests that can fail; `dev ci --run --resume` |
 | [CI/CD pipelines](ci-cd.md) | `dev ci audit` and `dev ci init` on GitHub Actions, GitLab, Bitbucket, and Azure; `dev ci watch`: every run followed to the end, each result reported once, failures diagnosed; `dev ci watch --wait` and `dev ci watches`: a wait that wakes the agent |
 | [Delivery](delivery.md) | The delivery policy, local-first GitOps (one integration branch, one push, one CI run), following CI with `dev ci status`, releases |
-| [Lessons](lessons.md) | Learning from mistakes: recording, recalling, counting repeats, automating prevention, and `dev sleep` |
+| [Lessons](lessons.md) | Learning from mistakes: recording, recall before the work, heeded and missed lessons, held lessons, counting repeats, lesson rules and other automated prevention, and `dev sleep` |
+| [The bug registry](bug-registry.md) | When devkit itself fails: known detours for agents, what is sent and never sent, trust, consent, `dev bug`, hotfix rankings, and the registry workflow for maintainers |
 | [Scheduled jobs and the audit trail](jobs-and-audit.md) | `dev jobs`: the background jobs, their schedules, logs, and journal; `dev audit`: everything devkit changed or decided |
 | [The audit trail](audit.md) | What each record holds (schema v2), levels, the hash chain and `dev audit verify`, queries and exports (JSONL, CSV, OCSF, CEF), retention, and the GDPR rights of the people recorded |
 | [Diagrams](diagrams.md) | `dev diagram`: specs, validation, design rules, devkit's own diagrams |
@@ -53,7 +54,7 @@ block, progress updates, approvals, the crew graph, and the dashboard.
 
 | Guide | What it covers |
 | --- | --- |
-| [Commands](commands.md) | Every `dev` command and option: git and GitHub, `dev progress` and `dev crew`, lessons, jobs and audit, the file commands, `dev test` and `dev stubs`, `dev ci status`, `watch`, `audit`, and `init`, `dev delivery`, `dev ext`, `dev impeccable`, `dev update --check`, the `dcd` and `dwt` shell functions, and `dev completion` |
+| [Commands](commands.md) | Every `dev` command and option: git and GitHub, `dev progress` and `dev crew`, lessons, `dev bug`, jobs and audit, the file commands, `dev test` and `dev stubs`, `dev ci status`, `watch`, `audit`, and `init`, `dev delivery`, `dev ext`, `dev impeccable`, `dev update --check`, the `dcd` and `dwt` shell functions, and `dev completion` |
 | [Configuration](configuration.md) | Every key of `~/.config/devkit/config.json`, personal agent rules, environment variables, the files that apply to everyone |
 | [Agents](agents.md) | What devkit configures in Claude Code and Codex, the crew's agents and Codex roles, the global instructions, every hook, how devkit stays on |
 | [Skills and plugins](skills-and-plugins.md) | The devkit plugin, required skills, the curated catalog and optional groups, impeccable and `dev impeccable`, who changes extensions with `dev ext` and how drift shows, and what was left out |

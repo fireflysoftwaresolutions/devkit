@@ -43,8 +43,9 @@ class SessionContext(WelcomeHook):
         for i in range(25):
             work.create(self.pid, f"Next item {i}: a follow-up for the export screens", bucket="next", a=A)
         for i in range(6):
-            lessons.add(self.pid, f"Lesson {i}: a migration ran twice because the job retried a whole batch without "
-                        f"its idempotency key", cause="the retry wrapped the batch",
+            lessons.add(self.pid, f"Lesson {i}: a migration ran twice because a retry lacked its key",
+                        happened="the job retried a whole batch without its idempotency key",
+                        files=[f"jobs/batch{i}/**"], cause="the retry wrapped the batch",
                         prevention="Key each batch by its id and skip a key already applied; check the job log "
                                    "before rerunning a failed batch by hand", a=A)
 

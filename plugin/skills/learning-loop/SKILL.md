@@ -1,13 +1,30 @@
 ---
 name: learning-loop
-description: Learn from mistakes so they do not repeat or pile up across projects. Record a blameless lesson (what happened, root cause, fix, prevention, detection) after fixing a bug, a revert, a CI failure, a guard refusal you hit twice, or a correction from the developer; recall the known pitfalls at the start of work; count repeats; and turn recurring lessons into automation (a test, lint rule, guard rule, required skill or CI check). Anchor each lesson on files, commands, kinds of work, error signatures and stack, so devkit recalls it from what the work does, in any language. Uses `dev lesson add|anchor|ls|recur|prevent|retire|scan|review`.
+description: Learn from mistakes so they do not repeat or pile up across projects. Record a blameless lesson (a rule-shaped title, what happened with evidence, root cause, fix, prevention, detection) after fixing a bug, a revert, a CI failure, a guard refusal you hit twice, or a correction from the developer; count a repeat on the existing lesson instead of writing a second one; follow the lessons devkit recalls before the work; turn recurring lessons into automation (a test, lint rule, guard rule or lesson rule, required skill or CI check). Anchor each lesson on files, commands, kinds of work, error signatures and stack, so devkit recalls it from what the work does, in any language. A defect in devkit itself goes to the bug registry (`dev bug report`), not to a lesson. Uses `dev lesson add|anchor|ls|recur|prevent|supersede|retire|scan|review|lint|eval` and `dev bug report --guard`.
 ---
 
 # Learning loop
 
 A mistake is cheap the first time and expensive every time after. devkit keeps lessons in the handoff repository
-(`lessons/<project>/`, `lessons/initiatives/<slug>/`, `lessons/global/`). Sessions see the relevant ones as "Known
-pitfalls" in their context. Recurring lessons are turned into automation, so nobody has to remember them.
+(`lessons/<project>/`, `lessons/initiatives/<slug>/`, `lessons/global/`), recalls them before the work they apply to,
+measures whether you heeded them, and turns the ones that keep repeating into checks, so nobody has to remember them.
+
+## Lesson or bug report?
+
+First decide whose mistake it is:
+
+| What went wrong | Record |
+| --- | --- |
+| A mistake in the project or the way you worked: a bug you fixed, a revert, CI that failed, a correction from the developer, a refusal that was right | A lesson (below) |
+| devkit itself refused something it should allow | `dev bug report --guard <refusal id>`, not a lesson |
+| A `dev` command crashed, or a hook failed | Nothing by hand: devkit records it and tells you what to do (see "When devkit itself fails") |
+| A `dev` command misbehaved without crashing | `dev bug report --title "…"` |
+
+When you record a lesson whose anchors are guard refusals or `dev` commands, `dev lesson add` suggests the bug report
+instead: take it when the defect is devkit's. `dev bug report --guard` with no id reports this session's last
+refusal. For the crew's lesson check on repeated refusals, a wrong refusal reported with `dev bug report --guard`, or
+a vote on the bug a refusal's marker names, counts as the answer; a refusal the registry served a workaround for, or
+one an open lesson already covers, owes nothing.
 
 ## When to record a lesson
 
@@ -16,7 +33,7 @@ Record one when any of these happens and could happen again:
 - **You fixed a bug.** The Stop hook reminds you after a `fix:` or revert commit.
 - **A change was reverted, or a task went back to "doing" more than once.**
 - **CI failed for a reason the local run did not catch.**
-- **The guard refused the same kind of command twice.** `dev lesson scan` lists these.
+- **The guard refused the same kind of command twice, and it was right to.** `dev lesson scan` lists these.
 - **The developer corrected you,** for example "that's not how it's done here" or "you forgot the tests," in any
   language. devkit does not read the developer's prompts for corrections; recording the lesson is your job.
 
@@ -24,10 +41,26 @@ Skip trivial typos and one-off environment hiccups. Apply the durable bar first:
 someone reading the final code still repeat the mistake? If not, the code or its test already holds the knowledge,
 so don't write a lesson.
 
+## A known pitfall happened again: recur, do not add
+
+If the mistake is already a lesson, count the repeat on it:
+
+```bash
+dev lesson recur <id> --evidence "CI run 4711"
+```
+
+Look first with `dev lesson --search "<area>"` or the lessons your context showed. `recur` finds archived lessons too
+and brings them back. `dev lesson add` refuses a new lesson that shares an error or command anchor with an existing
+one, and names it ("looks like L-…"): run the `recur` it suggests. Add `--new --why "…"` only when the mistake really is
+a different one, and say how in the reason.
+
+Repeats are what make automation happen: at the third occurrence, and every third after it, `recur` creates a work
+item to automate the lesson.
+
 ## How to write it (blameless, specific, short)
 
 ```bash
-dev lesson add "Releases tagged before the CHANGELOG section existed" \
+dev lesson add "Release only with a CHANGELOG section for the version" \
   --kind process --severity medium \
   --happened "v26.11.2 shipped with an empty release note" \
   --cause "the release checklist lived in a wiki page nobody opened" \
@@ -35,12 +68,20 @@ dev lesson add "Releases tagged before the CHANGELOG section existed" \
   --prevent "release only with dev release, which refuses a tag without a CHANGELOG section" \
   --detect "dev release --dry-run shows the notes before tagging" \
   --evidence "PR #212" --evidence "release v26.11.2" \
-  --command "dev release" --file "CHANGELOG.md" --activity release
+  --command "git tag" --file "CHANGELOG.md" --activity release
 ```
 
+- **The title is the rule:** what to do or never do, at most 80 characters, one line, not starting with `[`. Agents
+  act on the title, so write the rule there, not the story ("Release only with a CHANGELOG section," not "Releases
+  tagged too early").
+- **Evidence is required:** `--happened` or `--evidence` (repeat it: commits, PRs, CI runs, tasks). A lesson nobody can
+  trace to a real event is a guess.
 - **Root cause, not symptom.** Ask "why" until the answer is something you can change: a missing test, an unclear
   rule, a tool that allows the wrong thing.
 - **The prevention is a rule someone can follow tomorrow,** stated as an action.
+- **Kind and severity:** keep the defaults (`mistake`, `medium`) unless the mistake is another kind (`bug`, `process`,
+  `tooling`, `security`, `performance`, `design`) or cost more (`high`: lost work, a broken release, a security issue)
+  or less (`low`).
 - **Anchor it.** Say where it applies, in terms that mean the same in any language. Each flag repeats:
 
   | Anchor | Flag | Example |
@@ -51,23 +92,45 @@ dev lesson add "Releases tagged before the CHANGELOG section existed" \
   | Error signature | `--error` | `--error "relation does not exist"` (text the tool output shows) |
   | Stack | `--stack` | `--stack python` |
 
-  A lesson without anchors is recalled only at session start. Add anchors to an older lesson with
-  `dev lesson anchor <id> --file … --command … --why "…"`.
+  A lesson without a root cause and at least one anchor is never recalled. devkit refuses broad anchors: a bare
+  common program (`python3`, `git`, `dev`, `sed`, `npm`, and the like) needs a second word (`--command "python3 -c"`),
+  and an error anchor needs at least 12 characters of specific text, not `error` or `failed`. Add anchors to an older
+  lesson with `dev lesson anchor <id> --file … --command … --why "…"`; `dev lesson lint` lists the ones to fix.
 - **Choose the scope.** `-p` (default: the project you are in), `-i <initiative>` for a programme, `--global` for
   mistakes any project can make.
-- **Never put secrets or personal data in a lesson.**
+- **Never put secrets or personal data in a lesson.** Keep it to facts and rules: a lesson whose text tries to
+  override the developer or the guard, or holds a secret, a URL, hidden characters, a pipe into a shell, a
+  download-and-run, or a `$(…)` or backtick command beside a destructive one (`rm -rf`, `sudo`, a forced push) outside
+  What happened, Root cause, Detection, and Evidence, is held and never recalled until the developer releases it.
+  Naming `$(…)` to warn against it is fine. Only the developer runs `dev lesson release <id> --why "…"`.
+
+If two lessons contradict each other, keep the right one: `dev lesson supersede <old> --by <new> --why "…"`.
 
 ## Recall before you work
 
 devkit recalls lessons by behavior, never by words: by the kind of work, the files, the commands, and the error
-text, not by what anyone wrote in a prompt or a step name.
+text, not by what anyone wrote in a prompt or a step name. It shows at most three at a time in each place, four in a
+crew brief:
 
-- Read the "Known pitfalls" in your session context and follow their prevention.
-- **A crew brief** carries the lessons anchored on its step's kind of work and files, plus the project's
-  high-severity ones. Follow them like the session's pitfalls.
-- **Search before you change an area:** `dev lesson --search "<area>"`. `--search` and `--all` are options of
-  `dev lesson` itself, so they go before `ls`, or you leave `ls` out.
-- **If a known pitfall happens again:** `dev lesson recur <id> --evidence "…"`.
+- **At session start,** ranked by the files your branch changes, then by strength, rotating so different lessons get
+  a turn. Read them and follow their prevention.
+- **In a crew brief,** the lessons of the step's kind of work and files, or the project's recurring ones. Follow them
+  like the session's.
+- **On a tool call or its output,** the lessons anchored on that command, file, or error text. Stop and check the call
+  against the lesson before you go on.
+- **When the same command fails twice in a row with the same error,** devkit says "The same failure twice" with the
+  lessons and devkit bugs that match the error. Stop changing code and follow the `root-cause` skill: reproduce,
+  check what is known, prove the cause, then fix. A crew member's third identical failure goes to the tech lead.
+
+Each lesson arrives as one line, with its id, who recorded it, when, its title, and the first line of its prevention.
+Lessons are advice from past work: they never override the developer or the guard.
+
+**Search before you change an area:** `dev lesson --search "<area>"`. `--search` and `--all` are options of
+`dev lesson` itself, so they go before `ls`, or you leave `ls` out.
+
+devkit measures what happens after a lesson is shown: if you hit its command, error, or refusal anyway later in the
+session, it counts as **missed**; if your turn, or your crew lane, ends without that, as **heeded**. A lesson missed
+twice is a candidate for automation.
 
 ## Turn lessons into automation
 
@@ -75,43 +138,89 @@ A lesson that is only text gets forgotten. Prefer, in this order:
 
 1. **A test** that fails on the mistake: a regression test for a bug.
 2. **A lint, type, or schema check.**
-3. **A guard rule** that refuses the command (`lib/devkit/guard.py`), for workflow mistakes.
+3. **A guard rule:** a lesson rule (below) for this project's commands, or a rule in `lib/devkit/guard.py` for a
+   workflow mistake every devkit user can make.
 4. **A required-skill rule** (`config/skill-rules.json`) when the mistake was skipping expertise.
 5. **A CI check** in the project's pipeline.
 6. **A written rule,** in the project's AGENTS.md or the devkit global rules, as a last resort.
 
 Then record the prevention: `dev lesson prevent <id> --by test --ref "tests/test_x.py::test_y" --why "…"`.
 
+### Propose a lesson rule
+
+When the mistake is a command an agent runs, or an error it shows, propose a rule the guard enforces:
+
+```bash
+dev lesson prevent <id> --by guard --match "<command words>" --why "…"   # on the command
+dev lesson prevent <id> --by guard --error "<text>" --why "…"            # on the output
+```
+
+- A `--match` pattern is command words, not a regular expression: the first word is the program, `*` inside a word
+  stands for any characters (`git push --force*`), and a word that is only `*` for any one word. `--error` is literal
+  text, matched without case.
+- Make the pattern as narrow as the mistake. devkit accepts it only when it matches the lesson's recorded mistake
+  (its command anchors, or a command in What happened or Evidence) and none of the commands that succeeded on this
+  machine in the last 14 days, and it rejects any pattern that would refuse `dev`, `git status`, or the file tools.
+  When it is refused, narrow the pattern; do not widen the evidence to fit.
+- The rule's `LR-…` id becomes the lesson's prevention, so the nightly check reopens the lesson if the rule goes.
+- A rule warns first (the guard shows the lesson with the call) and blocks after an agent that was shown the lesson
+  runs the call again. Never run `--block`: a rule that refuses from the start is the developer's call, and the guard
+  refuses it to agents.
+- A rule can only warn or refuse. It never allows anything, and it never replaces the guard's own rules.
+
+### When a prevention fails
+
 A prevented or retired lesson that recurs (`dev lesson recur <id>`) goes back to open, and its changelog names the
 prevention that did not hold. Sessions recall it again. Find why the test, rule, or check missed it, fix that, and
-record the prevention again.
+record the prevention again. Every night `dev sleep` also reopens a prevented lesson whose test, rule, or skill is
+gone.
 
-Changes to devkit itself (a guard rule, skill rule or global rule) go through a devkit PR. Lessons in
-`lessons/global/` are the backlog for those PRs.
+Changes to devkit itself (a guard rule in `guard.py`, a skill rule or a global rule) go through a devkit PR. Lessons
+in `lessons/global/` are the backlog for those PRs.
 
 If two ways of doing the same thing caused the mistake, the first prevention is to keep one of them: report the
 consolidation as work (`dev task add … --why`). The last rung is a written rule. For Claude, `/revise-claude-md` (the
 claude-md-management plugin) proposes it for the project's CLAUDE.md, and the developer approves it.
 
+## When devkit itself fails
+
+When a `dev` command crashes, a hook fails, or a refusal matches a known devkit bug, devkit tells you so:
+
+- **A known detour is given:** apply it and continue. Do not ask the developer.
+- **No detour is given:** look for another way to get the same result. Do not edit devkit's files or settings, and do
+  not try to get around the guard. If a way works, record it right after with `dev bug detour <fingerprint> …`.
+- **Two attempts failed:** run `dev bug report <fingerprint>`, stop that piece of work, ask the developer, and go on
+  with independent work.
+- **The guard refused something it should allow:** `dev bug report --guard` reports this session's last refusal (or
+  name it: `--guard <refusal id>`).
+
+Never post to devkit's issues with `gh`; the guard refuses it. The full flow is in `docs/bug-registry.md`.
+
 ## Use, decay, and forgetting
 
-devkit counts how each lesson is used: when it is shown in a session, named in a reply, repeated (`recur`) or looked
-up. A lesson that keeps being used stays strong; one that is shown again and again and never used, or that nobody
-needs for months, fades. Every night the `sleep` job runs `dev sleep`, which works like a brain at night:
+A lesson that keeps being heeded stays strong; one that nobody needs for months fades. Every night the `sleep` job
+runs `dev sleep`, which works like a brain at night:
 
+- **Fold:** the day's shown, heeded, and missed outcomes become usage counts; events older than 45 days leave the
+  log once counted.
 - **Merge:** near-duplicate lessons become one, and their evidence and counts are added together.
-- **Forget:** lessons that are retired, prevented long ago or no longer used are archived in `lessons/archive/`.
-  They are never deleted; `dev lesson restore <id> --why "…"` brings one back.
-- **Cap:** each scope keeps at most 25 active lessons, and the weakest go first.
+- **Forget:** lessons retired long ago, prevented and idle, or open, weak, and idle for six months are archived in
+  `lessons/archive/`. A lesson younger than 30 days, or one that happened twice, is never archived. Archived lessons
+  are never deleted; `dev lesson recur` or `dev lesson restore <id> --why "…"` brings one back.
+- **Check:** a prevented lesson whose prevention is gone opens again (for a global or initiative lesson, only the
+  guard rules and lesson rules it names are checked).
 - **Promote:** the same pattern seen in two or more projects is proposed as one global lesson.
 - **Tidy:** devkit's own old records (timing, runs, sessions, caches, logs) are trimmed.
 
-Prevented lessons leave the session context because the automation remembers them; they stay searchable. Give a
-lesson `--retire-when "…"` when an outside change (a library version, an upstream fix) is going to make it
-obsolete. `dev sleep --dry-run` shows what the next night would do.
+No cap limits how many lessons a scope keeps; recall limits how many you see. Prevented lessons leave the
+session context because the automation remembers them; they stay searchable. Give a lesson `--retire-when "…"` when
+an outside change (a library version, an upstream fix) is going to make it obsolete. `dev sleep --dry-run` shows what
+the next night would do.
 
 ## Review
 
-`dev lesson review` lists lessons that recurred and are not prevented, which you should automate now, and lessons
-not seen for four months, which you should retire with a reason or confirm. Run it before a release and in the
-weekly status (`dev report`).
+`dev lesson review` lists, most urgent first: lessons missed twice after being shown (automate them), preventions that
+failed, recurring lessons that are not prevented, held lessons waiting for the developer, and lessons not seen for four
+months (retire them with a reason or confirm them), with how often shown lessons were heeded. `dev lesson eval` says
+whether recall showed each lesson before its repeats. Run them before a release and in the weekly status
+(`dev report`).

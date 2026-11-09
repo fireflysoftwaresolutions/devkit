@@ -127,7 +127,8 @@ full record, its categories and levels, the hash chain, and the exports are in [
 | Action | Recorded when |
 | --- | --- |
 | `dev.<command>` | A `dev` command that changes something runs: its arguments, the result (`ok` or `exit N`), the duration, and the folder. Read-only commands and dry runs are not recorded, unless `audit.level` is `all` |
-| `guard.deny` · `guard.ask` | The guard refuses a command or a file write, or asks you about one, with the reason |
+| `dev.commit.cause` | `dev commit` wrote a `Root cause:` paragraph: the commit, with `cause: yes`, never the cause's text |
+| `guard.deny` · `guard.ask` | The guard refuses a command or a file write, or asks you about one, with the reason and the refusal's id |
 | `config.blocked` | ConfigChange refuses an edit to a devkit-managed setting, or a `DEVKIT_*` variable in a settings file |
 | `config` | `dev config repair` restores a setting |
 | `canary.miss` | A final message lacks the status block |

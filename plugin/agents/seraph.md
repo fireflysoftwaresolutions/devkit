@@ -45,6 +45,7 @@ Follow these phases in order. A phase is finished when its gate holds; `proof` m
 - **You approve** back-end services and APIs done by Backend engineer (Tank).
 - **You approve** schemas, migrations and queries done by Database engineer (Dozer).
 - **You approve** cross-layer features, refactors and bug fixes done by Senior engineer (Neo).
+- **You approve** debugging and root-cause analysis done by Senior engineer (Neo).
 - **You approve** mobile apps done by Mobile engineer (Switch).
 - **You approve** AI and ML features done by AI engineer (Rama-Kandra).
 - **You approve** developer tooling and experience done by DevEx engineer (Kid).

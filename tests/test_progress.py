@@ -45,11 +45,13 @@ class TempState:
     def __enter__(self):
         self.tmp = tempfile.TemporaryDirectory()
         root = Path(self.tmp.name)
-        from devkit import audit
+        from devkit import audit, bugs
         self.saved = (pg.RUNS, pg.TIMING, pg.PENDING, pg.SESSIONS, pg.QUOTA, pg._publish,
                       os.environ.get("DEVKIT_SESSION"))
         self.audit_saved = audit.AUDIT
         audit.AUDIT = root / "audit"  # tests never write to the real audit trail
+        self.bugs_saved = (bugs.BUGS, bugs.CRASHES)
+        bugs.BUGS, bugs.CRASHES = root / "bugs", root / "crashes"  # devkit bugs a hook records stay in this test
         pg.RUNS, pg.TIMING, pg.SESSIONS = root / "runs", root / "timing", root / "sessions"
         pg.PENDING = pg.TIMING / "pending"
         pg.QUOTA = root / "quota"  # the real 5-hour usage never changes the parallel limit under test
@@ -66,8 +68,9 @@ class TempState:
         return self
 
     def __exit__(self, *exc):
-        from devkit import audit
+        from devkit import audit, bugs
         audit.AUDIT = self.audit_saved
+        bugs.BUGS, bugs.CRASHES = self.bugs_saved
         pg.RUNS, pg.TIMING, pg.PENDING, pg.SESSIONS, pg.QUOTA, pg._publish, env = self.saved
         for p in reversed(self.boundary):
             p.stop()
