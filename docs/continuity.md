@@ -69,6 +69,11 @@ oldest ones.
   the tech lead runs `dev session carry`; to close it, `dev session carry` and then
   `dev progress done "<outcome>" --why "…"`. `carry` is refused while a member of that run is still running.
 
+`dev session carry` takes a run only from a session of this project, or of an initiative both projects share, that
+has ended or that this conversation continues after `/clear` or a compaction. A live session keeps its run: `carry`
+exits 2 with the reason. To ask that session's owner, run `dev session tell @<session> "…"` (see
+[Teams and machines › Sessions on one Mac](teams.md#sessions-on-one-mac)).
+
 When a session ends with its run still open, devkit marks the run orphaned, so that no view shows it as running.
 The run runs again in the session that works on it: when its own session resumes, or when `dev session carry` moves
 it into the session `/clear` started. Its history records why (`run.running` in the audit trail). See

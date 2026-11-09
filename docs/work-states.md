@@ -117,7 +117,8 @@ to a crew member, and each crew member works in a lane of its own (see [The crew
 A run is `running` or `blocked` while it is open, and `done` when `dev progress done` ends it. It becomes `orphaned`
 when its session ends with the run still open. An orphaned run runs again in the session that works on it: when
 its own session resumes, or when `dev session carry` moves it into the session that `/clear` started. The run's
-history records why it ran again.
+history records why it ran again. `carry` never takes the run of a live session, or of a session in another project
+that shares no initiative with this one: it exits 2 and names `dev session tell` to ask that session instead.
 
 `dev progress done` refuses to end a run that does not match what happened:
 
