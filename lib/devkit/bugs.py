@@ -1230,6 +1230,13 @@ def consent() -> dict:
     return {"login": str(c.get("login") or ""), "share": share, "ts": c.get("ts") or 0}
 
 
+def consent_text(login: str) -> str:
+    """What the developer consents to, word for word, for the GitHub account `login`."""
+    return (f"Reports, votes and workarounds are posted publicly on github.com/{core.DEVKIT_REPO} under your GitHub "
+            f"account `{login}`. They are public and permanent: deleting a comment does not remove it from "
+            f"notification e-mails or public archives. Only devkit facts are sent, never anything about your projects.")
+
+
 def set_consent(share: str, login: str) -> None:
     """Record the developer's consent: `on` (reports, votes and detours), `reports` (no votes) or `off`."""
     if share not in ("on", "reports", "off"):
@@ -1798,6 +1805,305 @@ def context_for_output(text: str, session: str) -> str:
         if occ is not None:
             out.append(_answer(occ, session))
     return "\n\n".join(out)
+
+
+# --------------------------------------------------------------------------- what `dev bug` reads and files
+#
+# Reports, votes, detours and confirmations are built here from what devkit recorded itself, checked against the
+# payload schema, and queued; the outbox and its sender decide what leaves the machine and when.
+
+AGENT_FIELDS = ("fingerprint", "kind", "component", "title", "first_version", "versions", "impacts", "score",
+                "status", "fixed_in", "last_seen")
+_OCCURRENCES_MAX = 16 * 1024 * 1024  # bytes of occurrences a command reads (90 days of them, trimmed nightly)
+
+
+def guard_fingerprint(refusal_id: str, word: str) -> str:
+    """The fingerprint of a guard refusal: its refusal id and the public form of the refused program's word."""
+    return fingerprint("guard", refusal_id=refusal_id, word=public_word(word))
+
+
+def note_refusal(session: str, refusal_id: str, word: str) -> None:
+    """A guard refusal in the session ledger (its id and the public word): `dev bug report --guard` with no id
+    takes the session's last one, and a guard detour's evidence counts from it."""
+    _ledger_write(session, {"refusal": refusal_id, "word": public_word(word)})
+
+
+def occurrences(fp: str = "", session: str = "") -> list:
+    """This machine's occurrences, oldest first, of `fp` and in `session` when given."""
+    return [o for o in _tail_records(BUGS / "occurrences.jsonl", _OCCURRENCES_MAX)
+            if (not fp or o.get("fingerprint") == fp) and (not session or o.get("session") == session)]
+
+
+def _dev_path(value) -> str:
+    """The `dev` command a step or ledger line names, as devkit's parser names it (`progress step`)."""
+    return _public_command(" ".join(str(value or "").split()[:2]))
+
+
+def _named_calls(steps: list) -> tuple:
+    """(tools, dev commands) a detour's steps name."""
+    tools = {s["tool"] for s in steps if isinstance(s, dict) and isinstance(s.get("tool"), str)}
+    devs = {_dev_path(s["dev"]) for s in steps if isinstance(s, dict) and isinstance(s.get("dev"), str)}
+    return tools, devs - {""}
+
+
+def _evidence(fp: str, session: str, kind: str, steps: list) -> tuple:
+    """(ok, why, counts) for a detour of `fp` from the session ledger and occurrences; see evidence."""
+    rows = ledger(session)
+    occs = occurrences(fp, session)
+    refusals = [{"ts": r["ts"], "kind": "guard"} for r in rows if isinstance(r.get("refusal"), str)
+                and isinstance(r.get("ts"), (int, float)) and guard_fingerprint(r["refusal"], r.get("word") or "") == fp]
+    bases = sorted(occs + refusals, key=lambda o: o.get("ts") or 0)
+    if not bases:
+        return False, (f"no failure {fp} in this session: record a detour in the session that hit the failure and "
+                       f"got past it"), {}
+    base = bases[-1]
+    t0, codes = float(base.get("ts") or 0), {o.get("code") for o in occs}
+    calls = [r for r in rows if "tool" in r and isinstance(r.get("ts"), (int, float)) and r["ts"] >= t0]
+    clean = [r for r in calls if r.get("ok") and not codes & set(r.get("codes") or [])]
+    tools, devs = _named_calls(steps)
+    if kind in ("crash", "command"):
+        target = _dev_path(base.get("command")) or next(iter(sorted(devs)), "")
+        if not target:
+            return False, "the failure names no `dev` command and neither does the detour", {}
+        wins = [r for r in clean if _dev_path(r.get("dev")) == target]
+        why_not = (f"no later successful `dev {target}` in this session: run it again the way the detour says, then "
+                   f"record the detour")
+    elif kind == "guard":
+        if not (tools or devs):
+            return False, ("a detour for a refusal names the allowed call that got past it: a tool (use-tool, "
+                           "scratch-tool) or a `dev` command"), {}
+        wins = [r for r in clean if r.get("tool") in tools or (r.get("dev") and _dev_path(r["dev"]) in devs)]
+        why_not = "no call that the detour names succeeded after the refusal in this session"
+    elif kind == "hook":
+        event = base.get("event") or ""
+        wins = [r for r in rows if r.get("hook") == event and isinstance(r.get("ts"), (int, float)) and r["ts"] > t0]
+        why_not = f"the {event or 'failing'} hook has not run again without the failure in this session"
+    else:
+        return False, f"no evidence rule for a {kind or 'failure of unknown kind'}", {}
+    counts = {"successes": min(len(wins), 10000), "failures": min(len(occs) or 1, 10000),
+              "attempts": min(len(calls), 10000),
+              "tools": sorted({r["tool"] for r in wins if r.get("tool") in tool_names()})[:10]}
+    if not wins:
+        return False, why_not, counts
+    return True, f"{len(wins)} successful call{'s' if len(wins) != 1 else ''} after the failure", counts
+
+
+def evidence(fp: str, session: str, kind: str, steps: list) -> tuple:
+    """(ok, why): does the session ledger show the detour worked? For `crash` and `command`: the failing `dev`
+    command later succeeded; for `guard`: a call the detour names succeeded after the refusal; for `hook`: the hook
+    ran again without the failure. Advisory: it shapes what an agent may post, it never makes a detour trusted."""
+    ok, why, _ = _evidence(fp, session, kind, steps)
+    return ok, why
+
+
+def parse_hint(text: str) -> dict:
+    """`use-tool tool=Edit word=sed` -> {"hint": "use-tool", "tool": "Edit", "word": "sed"}; a word without `=`
+    continues the value before it (`from-root dev=progress step`)."""
+    words = str(text or "").split()
+    if not words:
+        raise ValueError("a hint names its template: " + ", ".join(HINTS))
+    step, key = {"hint": words[0]}, None
+    for w in words[1:]:
+        if "=" in w:
+            key, _, value = w.partition("=")
+            step[key] = value
+        elif key is None:
+            raise ValueError(f"`{w}` is not slot=value; the hint {words[0]} takes: "
+                             + ", ".join(sorted(set(_SLOT_RE.findall(HINTS.get(words[0], ""))))))
+        else:
+            step[key] += " " + w
+    return step
+
+
+def _kind_of(fp: str, session: str) -> str:
+    occ = (occurrences(fp, session) or occurrences(fp) or [{}])[-1]
+    if occ.get("kind") in KINDS:
+        return occ["kind"]
+    if any(isinstance(r.get("refusal"), str) and guard_fingerprint(r["refusal"], r.get("word") or "") == fp
+           for r in ledger(session)):
+        return "guard"
+    entry = load_cache()["bugs"].get(fp) or {}
+    return str((entry.get("record") or {}).get("kind") or "")
+
+
+def file_detour(fp: str, steps: list, session: str) -> dict:
+    """Queue a detour for `fp` once its steps pass the validator and the session ledger shows it worked. Free text
+    that names something of this Mac is refused, not scrubbed (a placeholder helps no other agent); other free text
+    makes the item wait for the developer. -> {"id", "held", "security", "why"}; ValueError says what is missing."""
+    if not _fits(fp, _FP_RE):
+        raise ValueError("a fingerprint is 12 lowercase hex characters (`dev bug ls --local` lists them)")
+    for s in steps:
+        if set(s) == {"text"} and isinstance(s["text"], str) and scrub_text(s["text"], deny_words())[0] != s["text"]:
+            raise ValueError("the free text names something of this Mac (a project, a path, a URL, an e-mail address "
+                             "or a token): describe the step without it")
+    problems = validate_steps(steps)
+    if problems:
+        raise ValueError("the detour is not valid: " + "; ".join(problems))
+    kind = _kind_of(fp, session)
+    ok, why, counts = _evidence(fp, session, kind, steps)
+    if not ok:
+        raise ValueError(f"no evidence that the detour worked: {why}")
+    payload = {"devkit_bug": SCHEMA_VERSION, "type": "detour", "fingerprint": fp,
+               "version": _public_version(core.VERSION), "impact": "detoured", "steps": steps, "evidence": counts}
+    problems = validate_payload(payload)
+    if problems:
+        raise ValueError("the detour does not pass devkit's checks: " + "; ".join(problems))
+    base = (occurrences(fp, session) or [{}])[-1]
+    item = _load_item(queue({"payload": payload, **({"security": True} if base.get("security") else {})})) or {}
+    return {"id": item.get("id"), "held": bool(item.get("held")), "security": bool(item.get("security")), "why": why}
+
+
+def file_report(fp: str = "", *, title: str = "", refusal_id=None, security: bool = False, session: str = "",
+                agent: str = "") -> dict:
+    """File a bug, or vote on a known one, with impact `blocked`. `fp`: a fingerprint this machine recorded;
+    `refusal_id`: a guard refusal ('' for the session's last one); `title`: a command that misbehaves without an
+    error (free text, held for review). A report of a security failure, or with `security`, waits for the developer
+    and goes only to private vulnerability reporting. -> {"id", "fingerprint", "type", "held", "security"};
+    ValueError says what to name instead."""
+    occ = None
+    if refusal_id is not None:
+        refusals = [r for r in ledger(session) if isinstance(r.get("refusal"), str)]
+        if not refusal_id:
+            if not refusals:
+                raise ValueError("no refusal in this session: name it, `dev bug report --guard <refusal id>`")
+            refusal_id = refusals[-1]["refusal"]
+        if not _fits(refusal_id, _REFUSAL_RE):
+            raise ValueError(f"`{refusal_id}` is not a refusal id")
+        word = next((r.get("word") or "" for r in reversed(refusals) if r["refusal"] == refusal_id), "")
+        fp = guard_fingerprint(refusal_id, word)
+        occ = record_occurrence("guard", fp, refusal_id=refusal_id, word=public_word(word), session=session)
+    elif fp:
+        if not _fits(fp, _FP_RE):
+            raise ValueError("a fingerprint is 12 lowercase hex characters (`dev bug ls --local` lists them)")
+        occ = (occurrences(fp) or [None])[-1]
+    elif title:
+        fp = _hex(6)  # a misbehavior without an error has nothing to hash: its own new bug
+        occ = record_occurrence("command", fp, session=session)
+    else:
+        raise ValueError("name what failed: `dev bug report <fingerprint>` (`dev bug ls --local` lists them), "
+                         "`--guard` for a wrong refusal, or `--title \"…\"` for a command that misbehaves without "
+                         "an error")
+    version = _public_version(core.VERSION)
+    known = fp in load_cache()["bugs"]
+    if known and not security:
+        payload = {"devkit_bug": SCHEMA_VERSION, "type": "vote", "fingerprint": fp, "version": version,
+                   "impact": "blocked", "window": _day(time.time())}
+    elif occ is None:
+        raise ValueError(f"no failure {fp} on this Mac and no such bug in the cache: `dev bug ls --local` lists "
+                         f"this Mac's failures")
+    else:
+        payload = {"devkit_bug": SCHEMA_VERSION, "type": "report",
+                   **build_report({**occ, "impact": "blocked", "agent": agent})}
+        if title:
+            payload["title"] = scrub_text(title, deny_words())[0][:MAX_TEXT]
+    problems = validate_payload(payload)
+    if problems:
+        raise ValueError("the report does not pass devkit's checks: " + "; ".join(problems))
+    private = bool(security or (occ and is_security(occ)))
+    item = _load_item(queue({"payload": payload, **({"security": True} if private else {})})) or {}
+    return {"id": item.get("id"), "fingerprint": fp, "type": payload["type"], "held": bool(item.get("held")),
+            "security": bool(item.get("security"))}
+
+
+def confirm(bug: str, detour_id: str) -> str:
+    """Queue a confirmation of a cached bug's detour (`bug`: issue number or fingerprint). -> the item id."""
+    fp = find_bug(bug)
+    if fp is None:
+        raise ValueError(f"no bug {bug} in the cache: `dev bug sync` refreshes it")
+    rec = load_cache()["bugs"][fp]["record"]
+    if not any(isinstance(d, dict) and d.get("id") == detour_id for d in rec.get("detours") or []):
+        raise ValueError(f"bug {bug} has no detour {detour_id}: `dev bug show {bug}` lists them")
+    payload = {"devkit_bug": SCHEMA_VERSION, "type": "confirm", "fingerprint": fp,
+               "version": _public_version(core.VERSION), "detour_id": detour_id}
+    problems = validate_payload(payload)
+    if problems:
+        raise ValueError("; ".join(problems))
+    return queue({"payload": payload})
+
+
+def find_bug(ref: str):
+    """The fingerprint of a cached bug named by its issue number (`42`, `#42`) or its fingerprint, or None."""
+    ref = str(ref or "").strip().lstrip("#")
+    bugs = load_cache()["bugs"]
+    if ref in bugs:
+        return ref
+    if ref.isdigit():
+        return next((fp for fp, e in bugs.items() if str(e.get("number")) == ref), None)
+    return None
+
+
+def _trust(d: dict) -> str:
+    return trust_of(d, d.get("confirmations"))
+
+
+def detour_status(rec: dict) -> str:
+    """`verified detour`, `team detour`, `2 proposed detours` or `no detour`."""
+    trusts = [_trust(d) for d in rec.get("detours") or [] if isinstance(d, dict)]
+    for t in ("verified", "team"):
+        if t in trusts:
+            return f"{t} detour"
+    n = trusts.count("proposed")
+    return f"{n} proposed detour{'s' if n != 1 else ''}" if n else "no detour"
+
+
+def people(rec: dict, now: float) -> dict:
+    """{impact: voters of the last 30 days}, and "all": how many voters that is."""
+    recent = [v for v in (rec.get("voters") or {}).values() if isinstance(v, dict)
+              and isinstance(v.get("ts"), (int, float)) and now - v["ts"] <= WINDOW_DAYS * 86400]
+    return {"all": len(recent), **{k: sum(1 for v in recent if v.get("impact") == k) for k in IMPACT}}
+
+
+def issue_url(number) -> str:
+    return f"https://github.com/{core.DEVKIT_REPO}/issues/{int(number)}"
+
+
+def top(limit: int = 5, now: float = None) -> list:
+    """The open bugs by score, highest first, at most `limit`: {"number", "fingerprint", "title", "score",
+    "reason", "url"}, the reason like `14 people, 9 blocked, no detour`."""
+    now = time.time() if now is None else now
+    out = []
+    for fp, e in load_cache()["bugs"].items():
+        rec = e.get("record") if isinstance(e, dict) else None
+        if not isinstance(rec, dict) or e.get("state") != "open" or rec.get("status") == "fixed" \
+                or not isinstance(e.get("number"), int):
+            continue
+        n = people(rec, now)
+        reason = f"{n['all']} {'person' if n['all'] == 1 else 'people'}" + \
+            (f", {n['blocked']} blocked" if n["blocked"] else "") + f", {detour_status(rec)}"
+        out.append({"number": e["number"], "fingerprint": fp, "title": _title(rec), "score": round(score(rec, now), 2),
+                    "reason": reason, "url": issue_url(e["number"])})
+    out.sort(key=lambda b: (-b["score"], b["number"]))
+    return out[:limit]
+
+
+def agent_view(rec: dict) -> dict:
+    """What an agent session may see of a bot record: its fields and generated title, the detours served to agents
+    (verified, team) as structured steps, and how many proposed ones there are; never their free text."""
+    out = {k: rec[k] for k in AGENT_FIELDS if k in rec}
+    out["title"] = _title(rec)
+    detours = [d for d in rec.get("detours") or [] if isinstance(d, dict)]
+    out["detours"] = [{"id": d.get("id"), "trust": _trust(d), "steps": d.get("steps"), "since": d.get("since") or "",
+                       "until": d.get("until") or ""} for d in detours if _trust(d) in SERVED]
+    out["proposed"] = sum(1 for d in detours if _trust(d) == "proposed")
+    return out
+
+
+def status_line(now: float = None):
+    """`dev status`: {"text", "command"} when items wait for review or devkit bugs hit this machine today; None
+    otherwise."""
+    now = time.time() if now is None else now
+    held = [it for it in pending() if not it.get("approved")]
+    midnight = time.mktime(time.localtime(now)[:3] + (0, 0, 0, 0, 0, -1))
+    hit = {o.get("fingerprint") for o in occurrences() if isinstance(o.get("ts"), (int, float)) and o["ts"] >= midnight}
+    parts = []
+    if held:
+        parts.append(f"{len(held)} item{'s wait' if len(held) != 1 else ' waits'} for your review")
+    if hit:
+        parts.append(f"{len(hit)} devkit bug{'s' if len(hit) != 1 else ''} hit this Mac today")
+    if not parts:
+        return None
+    return {"text": "devkit's bug registry: " + " · ".join(parts),
+            "command": "dev bug pending" if held else "dev bug ls --local"}
 
 
 # --------------------------------------------------------------------------- GitHub clients

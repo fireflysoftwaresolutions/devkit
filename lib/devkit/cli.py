@@ -962,6 +962,7 @@ def cmd_status(a):
     caller = _status_caller()
     if not p:
         v = home_view(reg, offline=False, caller=caller)
+        v["needs_you"] += _bug_needs()
         _prompt_refresh(reg)
         if getattr(a, "json", False):
             print(json.dumps(v, indent=2, ensure_ascii=False, default=str))
@@ -1004,7 +1005,18 @@ def devkit_needs(cwd: str = None) -> list:
     except Exception as e:  # a notice never breaks dev status
         out.append({"kind": "devkit", "text": f"devkit's notices could not be read ({type(e).__name__})",
                     "command": ""})
-    return out
+    return out + _bug_needs()
+
+
+def _bug_needs() -> list:
+    """`dev status`: one line when items of devkit's bug registry wait for review or devkit bugs hit this Mac today."""
+    try:
+        from . import bugs
+        line = bugs.status_line()
+    except Exception as e:  # a notice never breaks dev status
+        return [{"kind": "devkit", "text": f"devkit's bug registry could not be read ({type(e).__name__})",
+                 "command": ""}]
+    return [{"kind": "devkit", **line}] if line else []
 
 
 def cmd_branch(a):
@@ -2535,6 +2547,305 @@ def cmd_lesson(a):
     return 0
 
 
+def cmd_bug(a):
+    """`dev bug`: devkit's own bugs, from this Mac's copy of the public registry (bugs.py, docs/bug-registry.md).
+    An agent session sees only the fields of the registry's bot-written records and their generated titles."""
+    from . import bugs
+    act = getattr(a, "bug_cmd", None) or "ls"
+    try:
+        return {"ls": _bug_ls, "show": _bug_show, "search": _bug_search, "report": _bug_report,
+                "detour": _bug_detour, "top": _bug_top, "sync": _bug_sync, "pending": _bug_pending,
+                "send": _bug_send, "drop": _bug_drop, "confirm": _bug_confirm, "share": _bug_share}[act](a, bugs)
+    except ValueError as e:
+        ui.err(str(e))
+        return 1
+
+
+def _bug_session() -> tuple:
+    from . import progress as pg
+    try:
+        agent, sid = pg.current_session()
+        return str(agent or ""), str(sid or "")
+    except Exception:  # no session to name: the ledger and this session's occurrences are then empty
+        return "", ""
+
+
+def _bug_cache_line(bugs, cache: dict, shown: int) -> str:
+    if not cache.get("ts"):
+        return "devkit's bug registry has not been read on this Mac yet: `dev bug sync` reads it."
+    c = bugs.consent()
+    line = f"devkit's bug registry · {shown} bug{'s' if shown != 1 else ''} · read {ui.rel_time(cache['ts'])}"
+    if c["share"] == "off":
+        line += " · sharing is off: reports and votes are kept locally"
+    return line
+
+
+def _bug_rows(bugs, entries: list, now: float) -> list:
+    out = []
+    for e in entries:
+        rec = e.get("record") or {}
+        n = bugs.people(rec, now)
+        votes = f"{n['all']} {'person' if n['all'] == 1 else 'people'}" + \
+            (f", {n['blocked']} blocked" if n["blocked"] else "")
+        state = "fixed in " + rec["fixed_in"] if rec.get("fixed_in") else str(e.get("state") or rec.get("status"))
+        out.append(f"  #{e.get('number')}  {rec.get('fingerprint')}  {bugs._title(rec)}")
+        out.append(ui.dim(f"       score {bugs.score(rec, now):.1f} · {votes} · {bugs.detour_status(rec)} · {state}"))
+    return out
+
+
+def _bug_ls(a, bugs):
+    if getattr(a, "local", False):
+        return _bug_local(bugs)
+    cache, now = bugs.load_cache(), time.time()
+    mine = {o.get("fingerprint") for o in bugs.occurrences()} if getattr(a, "mine", False) else None
+    entries = []
+    for fp, e in cache["bugs"].items():
+        rec = e.get("record") or {}
+        if (getattr(a, "open", False) and e.get("state") != "open") or \
+                (getattr(a, "fixed", False) and not (rec.get("fixed_in") or e.get("state") == "closed")) or \
+                (getattr(a, "kind", None) and rec.get("kind") != a.kind) or (mine is not None and fp not in mine):
+            continue
+        entries.append(e)
+    entries.sort(key=lambda e: (-bugs.score(e.get("record") or {}, now), e.get("number") or 0))
+    print(_bug_cache_line(bugs, cache, len(entries)))
+    print("\n".join(_bug_rows(bugs, entries, now)))
+    return 0
+
+
+def _bug_local(bugs):
+    """`dev bug ls --local`: the failures recorded on this Mac, newest first, with their bug number when known."""
+    groups = {}
+    for o in bugs.occurrences():
+        groups.setdefault(o.get("fingerprint"), []).append(o)
+    known = bugs.load_cache()["bugs"]
+    print(f"On this Mac · {len(groups)} devkit failure{'s' if len(groups) != 1 else ''} recorded")
+    for fp, occ in sorted(groups.items(), key=lambda g: -(g[1][-1].get("ts") or 0)):
+        last = occ[-1]
+        what = f"dev {last['command']}" if last.get("command") else last.get("event") or \
+            " on ".join(x for x in (last.get("refusal_id"), last.get("word")) if x) or ""
+        times = f"{len(occ)} time{'s' if len(occ) != 1 else ''}, last {ui.rel_time(last.get('ts'))}"
+        where = f"#{known[fp].get('number')}" if fp in known else "not in the registry"
+        print(f"  {fp}  {last.get('kind') or '?'}  {what}  {times} · {where}" +
+              (" · private (security)" if last.get("security") else ""))
+    if groups:
+        print(ui.dim("  dev bug show <fingerprint> for one; dev bug report <fingerprint> files it"))
+    return 0
+
+
+def _bug_show(a, bugs):
+    fp = bugs.find_bug(a.bug)
+    local = bugs.occurrences(fp or a.bug)
+    if fp is None:
+        if not local:
+            raise ValueError(f"no bug {a.bug} in the cache or on this Mac: `dev bug sync` refreshes the cache")
+        last = local[-1]
+        print(f"Bug {a.bug} · not in the registry yet · {last.get('kind')}")
+        print(f"  This Mac   {len(local)} occurrence{'s' if len(local) != 1 else ''}, last "
+              f"{ui.rel_time(last.get('ts'))}")
+        print(ui.dim(f"  dev bug report {a.bug} files it"))
+        return 0
+    entry, now = bugs.load_cache()["bugs"][fp], time.time()
+    person = core.set_by_developer()
+    rec = entry["record"] if person else bugs.agent_view(entry["record"])
+    n = bugs.people(entry["record"], now)
+    print(f"Bug #{entry.get('number')} · {fp} · {bugs._title(rec)}")
+    print(f"  Kind       {rec.get('kind')} · component {rec.get('component')} · status {rec.get('status')} "
+          f"(issue {entry.get('state')})")
+    print(f"  Versions   {', '.join(rec.get('versions') or []) or '—'} · first {rec.get('first_version') or '—'} · "
+          f"fixed in {rec.get('fixed_in') or '—'}")
+    print(f"  Votes      {n['all']} {'person' if n['all'] == 1 else 'people'} in 30 days: " +
+          ", ".join(f"{n[k]} {k}" for k in bugs.IMPACT) + f" · score {bugs.score(entry['record'], now):.1f}")
+    detours = rec.get("detours") or []
+    lines = [f"{d.get('id')} · {d.get('trust') or bugs._trust(d)} · {bugs._detour_text(d)}" for d in detours]
+    if not person and rec.get("proposed"):
+        k = rec["proposed"]
+        lines.append(f"{k} proposed detour{'s' if k != 1 else ''} (a person sees {'them' if k != 1 else 'it'} with "
+                     f"`dev bug show` in a terminal)")
+    for i, ln in enumerate(lines or ["none"]):
+        print(f"  {'Detours' if i == 0 else '':<10} {ln}")
+    if local:
+        print(f"  This Mac   {len(local)} occurrence{'s' if len(local) != 1 else ''}, last "
+              f"{ui.rel_time(local[-1].get('ts'))}")
+    related = _bug_lessons(entry["record"])
+    if related:
+        print(f"  Lessons    {', '.join(related)}")
+    print(f"  Issue      {bugs.issue_url(entry['number'])}" if isinstance(entry.get("number"), int) else "")
+    return 0
+
+
+def _bug_lessons(rec: dict) -> list:
+    """Lessons that name the bug's fingerprint, refusal id or `dev` command, as `L-… title`."""
+    try:
+        from . import lessons
+        keys = [rec.get("fingerprint")] + [(rec.get("report") or {}).get(k) for k in ("refusal_id", "command")]
+        found = {}
+        for k in (k for k in keys if k):
+            for x in lessons.search(k):
+                found.setdefault(x["meta"]["id"], f"{x['meta']['id']} {x['meta']['title'][:60]}")
+        return list(found.values())[:5]
+    except Exception:  # lessons are a hint here: a bug shows without them
+        return []
+
+
+def _bug_search(a, bugs):
+    words = [w.lower() for w in a.words]
+    cache, now = bugs.load_cache(), time.time()
+    hits = [e for fp, e in cache["bugs"].items()
+            if all(w in bugs._title(e.get("record") or {}).lower() or fp.startswith(w) for w in words)]
+    hits.sort(key=lambda e: (-bugs.score(e.get("record") or {}, now), e.get("number") or 0))
+    print(f"{len(hits)} bug{'s' if len(hits) != 1 else ''} match {' '.join(a.words)!r}")
+    print("\n".join(_bug_rows(bugs, hits, now)))
+    return 0
+
+
+def _bug_queued(bugs, r: dict, what: str):
+    """How a queued item leaves: held for review, private, or with the next sync; and the consent it still needs."""
+    if r["security"]:
+        print(f"  Held for the developer: it goes only to private vulnerability reporting, never to public issues. "
+              f"`dev bug pending` shows it; `dev bug send {r['id']}` sends it.")
+    elif r["held"]:
+        print(f"  Held for the developer's review: `dev bug pending` shows it exactly as it would be sent; "
+              f"`dev bug send {r['id']}` sends it.")
+    else:
+        print(f"  The {what} goes out with the next `dev bug sync` (the hourly sync runs it too).")
+    share = bugs.consent()["share"]
+    if share is None:
+        print("  Posting needs the developer's consent once: ask them to type `grant bug-share on` in the chat, or "
+              "to run `dev bug share on` in a terminal.")
+    elif share == "off":
+        print("  Sharing is off: it is kept locally.")
+    elif share == "reports" and what == "vote":
+        print("  Sharing is set to reports: votes are kept locally.")
+
+
+def _bug_report(a, bugs):
+    agent, session = _bug_session()
+    r = bugs.file_report(a.fingerprint, title=a.title, refusal_id=a.guard, security=a.security, session=session,
+                         agent=agent)
+    print(f"{ui.OK} queued {r['type']} {r['id']} for devkit bug {r['fingerprint']}")
+    _bug_queued(bugs, r, r["type"])
+    if not core.set_by_developer():
+        print("  Stop this piece of work and ask the developer; independent work can go on.")
+    return 0
+
+
+def _bug_detour(a, bugs):
+    steps = [bugs.parse_hint(v) if kind == "hint" else {kind: v} for kind, v in a.steps or []]
+    if not steps:
+        raise ValueError("a detour has 1 to 5 steps: --hint, --dev or --text")
+    r = bugs.file_detour(a.fingerprint, steps, _bug_session()[1])
+    print(f"{ui.OK} queued detour {r['id']} for devkit bug {a.fingerprint} ({r['why']})")
+    _bug_queued(bugs, r, "detour")
+    return 0
+
+
+def _bug_top(a, bugs):
+    found = bugs.top(limit=10)
+    if not found:
+        print("No open devkit bugs in the cache." + ("" if bugs.load_cache().get("ts") else
+                                                     " `dev bug sync` reads the registry."))
+        return 0
+    print(f"Hotfix recommendations · {len(found)} open bug{'s' if len(found) != 1 else ''} by score")
+    for i, b in enumerate(found, 1):
+        print(f"  {i}. #{b['number']}  score {b['score']:.1f}  {b['title']} — {b['reason']}")
+    scope = found[:5]
+    print("Suggested hotfix scope: " + ", ".join(f"#{b['number']}" for b in scope))
+    if not getattr(a, "task", False):
+        print(ui.dim("  dev bug top --task adds them as work items with the issue link"))
+        return 0
+    from . import work
+    have = {ln for it in work.all_items(core.DEVKIT_REPO) for ln in it["meta"].get("links") or []}
+    for b in scope:
+        if b["url"] in have:
+            print(ui.dim(f"  #{b['number']} already has a work item"))
+            continue
+        why = f"devkit bug #{b['number']} ({b['title']}): {b['reason']}. Registry issue: {b['url']}"
+        it = work.create(core.DEVKIT_REPO, f"Fix devkit bug #{b['number']}: {b['title']}"[:120], kind="bug",
+                         links=[b["url"]], why=why,
+                         body=work.task_body("bug", why, [f"A failing test reproduces devkit bug #{b['number']} and "
+                                                          f"now passes",
+                                                          f"The fix's pull request says `Fixes #{b['number']}`"]))
+        print(f"{ui.OK} {it['meta']['id']} added for #{b['number']}")
+    return 0
+
+
+def _bug_sync(a, bugs):
+    r = bugs.sync()
+    f, s = r["fetch"], r["flush"]
+    if f.get("ok"):
+        print(f"{ui.OK} registry read: {f['bugs']} bug{'s' if f['bugs'] != 1 else ''} in the cache")
+    else:
+        print(f"{ui.FAIL} registry not read ({f.get('error')}): the cache from "
+              f"{ui.rel_time(bugs.load_cache().get('ts')) if bugs.load_cache().get('ts') else 'never'} stays")
+    counts = ", ".join(f"{s.get(k, 0)} {k}" for k in ("sent", "held", "failed", "skipped"))
+    print(f"{ui.OK if not s.get('error') else ui.WARN} outbox: {counts}" +
+          (f" · {s['error']}" if s.get("error") else ""))
+    return 0 if f.get("ok") else 1
+
+
+def _bug_pending(a, bugs):
+    items = bugs.pending()
+    if not items:
+        print("Nothing waits for review.")
+        return 0
+    print(f"{len(items)} item{'s' if len(items) != 1 else ''} held for review, each exactly as it would be sent:")
+    for it in items:
+        where = "private vulnerability reporting" if it.get("security") else "a public issue comment"
+        state = "approved, goes with the next sync" if it.get("approved") else f"dev bug send {it.get('id')}"
+        print(f"\n  {it.get('id')} · {it['payload'].get('type')} · {it['payload'].get('fingerprint')} · to {where} · "
+              f"{state}" + (f" · {it['problem']}" if it.get("problem") else ""))
+        print(bugs.render_payload(it["payload"]))
+    return 0
+
+
+def _bug_send(a, bugs):
+    try:
+        bugs.approve(a.id)
+    except KeyError:
+        raise ValueError(f"no outbox item {a.id}: `dev bug pending` lists them") from None
+    print(f"{ui.OK} item {a.id} approved as printed by `dev bug pending`; a change to it now stops it")
+    s = bugs.flush()
+    print(f"{ui.OK if not s.get('error') else ui.WARN} outbox: " +
+          ", ".join(f"{s.get(k, 0)} {k}" for k in ("sent", "held", "failed", "skipped")) +
+          (f" · {s['error']}" if s.get("error") else ""))
+    return 0
+
+
+def _bug_drop(a, bugs):
+    try:
+        bugs.drop(a.id)
+    except KeyError:
+        raise ValueError(f"no outbox item {a.id}: `dev bug pending` lists them") from None
+    print(f"{ui.OK} item {a.id} dropped")
+    return 0
+
+
+def _bug_confirm(a, bugs):
+    item = bugs.confirm(a.bug, a.detour)
+    print(f"{ui.OK} queued confirmation {item} of detour {a.detour} on bug {a.bug}; it goes out with the next "
+          f"`dev bug sync` and counts when you are an owner or member other than the detour's author")
+    return 0
+
+
+def _bug_share(a, bugs):
+    if a.setting == "off":
+        bugs.set_consent("off", "")
+        print(f"{ui.OK} sharing is off: reports, votes and detours are kept on this Mac")
+        return 0
+    try:
+        login = bugs.default_client().login()
+    except Exception as e:  # gh missing or offline: consent needs the account it is for
+        raise ValueError(f"cannot tell which GitHub account would post ({type(e).__name__}): run `gh auth login`, "
+                         f"then try again") from None
+    if not login:
+        raise ValueError("no GitHub login to post as: run `gh auth login`, then try again")
+    print(bugs.consent_text(login))
+    bugs.set_consent(a.setting, login)
+    print(f"{ui.OK} sharing is {'on' if a.setting == 'on' else 'on for reports and detours, without votes'} for "
+          f"`{login}`")
+    return 0
+
+
 def cmd_sleep(a):
     from . import sleep
     sleep.run(dry_run=a.dry_run, quiet=a.quiet)
@@ -3590,6 +3901,43 @@ def build_parser():
         sub.add_argument("-p", "--project", default=argparse.SUPPRESS)
         sub.add_argument("-i", "--initiative", default=argparse.SUPPRESS)
         sub.add_argument("--global", dest="global_", action="store_true", default=argparse.SUPPRESS)
+    p = add("bug", cmd_bug, "devkit's own bugs: known detours, reports without project data, hotfix ranking")
+    bsp = p.add_subparsers(dest="bug_cmd")
+    x = bsp.add_parser("ls", help="bugs in the cache, ranked: votes, impact, detours, fix version")
+    x.add_argument("--open", action="store_true", help="open bugs only")
+    x.add_argument("--fixed", action="store_true", help="bugs with a fix version or closed")
+    x.add_argument("--kind", choices=["crash", "hook", "guard", "command"])
+    x.add_argument("--mine", action="store_true", help="bugs this Mac hit")
+    x.add_argument("--local", action="store_true", help="the failures recorded on this Mac")
+    x = bsp.add_parser("show", help="one bug: versions, votes, detours with their trust, related lessons")
+    x.add_argument("bug", help="issue number or fingerprint")
+    x = bsp.add_parser("search", help="bugs by generated title or fingerprint")
+    x.add_argument("words", nargs="+")
+    x = bsp.add_parser("report", help="file a bug, or vote on a known one")
+    x.add_argument("fingerprint", nargs="?", default="")
+    x.add_argument("--title", default="", help="a command that misbehaves without an error (held for review)")
+    x.add_argument("--guard", nargs="?", const="", default=None, metavar="REFUSAL_ID",
+                   help="a wrong refusal (default: this session's last one)")
+    x.add_argument("--security", action="store_true", help="for private vulnerability reporting only")
+    x = bsp.add_parser("detour", help="record a detour, once the session ledger shows it worked")
+    x.add_argument("fingerprint")
+    x.add_argument("--hint", dest="steps", action="append", type=lambda v: ("hint", v), metavar="'NAME SLOT=VALUE …'",
+                   help="a hint template: use-tool, from-root, one-at-a-time, scratch-tool, sync-retry, ask-update")
+    x.add_argument("--dev", dest="steps", action="append", type=lambda v: ("dev", v), metavar="'COMMAND'",
+                   help="a dev command of devkit's own subcommands and flags")
+    x.add_argument("--text", dest="steps", action="append", type=lambda v: ("text", v), metavar="'TEXT'",
+                   help="free text, at most 200 characters (held for review)")
+    x = bsp.add_parser("top", help="hotfix recommendations: open bugs by score, with a reason each")
+    x.add_argument("--task", action="store_true", help="add the suggested bugs as work items with the issue link")
+    bsp.add_parser("sync", help="refresh the cache and send the outbox")
+    bsp.add_parser("pending", help="items held for review, printed exactly as they would be sent")
+    for verb, h_ in (("send", "send a held item (developer only)"), ("drop", "drop an item (developer only)")):
+        bsp.add_parser(verb, help=h_).add_argument("id")
+    x = bsp.add_parser("confirm", help="confirm a detour (maintainers; developer only)")
+    x.add_argument("bug", help="issue number or fingerprint")
+    x.add_argument("detour", help="the detour's id, such as d1")
+    x = bsp.add_parser("share", help="consent to post: on, reports (no votes) or off (developer only)")
+    x.add_argument("setting", choices=["on", "reports", "off"])
     p = add("sleep", cmd_sleep, "Consolidate and forget: lessons decay unless used, duplicates merge, old records go")
     p.add_argument("--dry-run", action="store_true", help="show what would change")
     p.add_argument("--quiet", action="store_true")

@@ -210,7 +210,7 @@ _dev_here='tasks steps plans branches worktrees'
 _dev_spec() {
   c= o= v= p=
   case "$1" in
-    '') c='help ls go alias status clone new adopt open claude codex handoff-import handoff session task note plan progress time delivery lesson sleep jobs audit report rm mv cp files find grep diff stubs team initiative overview standup dashboard config agents calver plugin guard wt backup sync du free gc canary ci watch watches branch commit rebase push pr run release issue git gh test mcp desktop crew ext impeccable doctor install docs sec diagram setup prompt update docker version completion' o='-h --help' ;;
+    '') c='help ls go alias status clone new adopt open claude codex handoff-import handoff session task note plan progress time delivery lesson bug sleep jobs audit report rm mv cp files find grep diff stubs team initiative overview standup dashboard config agents calver plugin guard wt backup sync du free gc canary ci watch watches branch commit rebase push pr run release issue git gh test mcp desktop crew ext impeccable doctor install docs sec diagram setup prompt update docker version completion' o='-h --help' ;;
     'help') o='-h --help' ;;
     'ls') o='-h --help --offline --names --all --json' ;;
     'go') o='-h --help' p='l:projects:-:: l:worktrees:@1::' ;;
@@ -278,6 +278,19 @@ _dev_spec() {
     'lesson scan') o='-h --help --days -p --project -i --initiative --global' v='--days=n -p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' ;;
     'lesson review') o='-h --help -p --project -i --initiative --global' v='-p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' ;;
     'lesson ls') o='-h --help -p --project -i --initiative --global' v='-p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' ;;
+    'bug') c='ls show search report detour top sync pending send drop confirm share' o='-h --help' ;;
+    'bug ls') o='-h --help --open --fixed --kind --mine --local' v='--kind=c:crash,hook,guard,command' ;;
+    'bug show') o='-h --help' p='n' ;;
+    'bug search') o='-h --help' p='*n' ;;
+    'bug report') o='-h --help --title --guard --security' v='--title=n --guard=n' p='n' ;;
+    'bug detour') o='-h --help --hint --dev --text' v='--hint=n --dev=n --text=n' p='n' ;;
+    'bug top') o='-h --help --task' ;;
+    'bug sync') o='-h --help' ;;
+    'bug pending') o='-h --help' ;;
+    'bug send') o='-h --help' p='n' ;;
+    'bug drop') o='-h --help' p='n' ;;
+    'bug confirm') o='-h --help' p='n n' ;;
+    'bug share') o='-h --help' p='c:on,reports,off' ;;
     'sleep') o='-h --help --dry-run --quiet' ;;
     'jobs') c='ls install show run enable disable logs set journal' o='-h --help' ;;
     'jobs ls') o='-h --help' ;;

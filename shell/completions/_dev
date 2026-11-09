@@ -154,6 +154,7 @@ _dev() {
         'time:How long things take'
         'delivery:Versioning, release, test and deploy policy'
         'lesson:Learn from mistakes'
+        'bug:devkit'\''s own bugs'
         'sleep:Consolidate and forget'
         'jobs:Scheduled jobs'
         'audit:The audit trail'
@@ -239,6 +240,7 @@ _dev() {
         (time) _dev__time && ret=0 ;;
         (delivery) _dev__delivery && ret=0 ;;
         (lesson) _dev__lesson && ret=0 ;;
+        (bug) _dev__bug && ret=0 ;;
         (sleep) _dev__sleep && ret=0 ;;
         (jobs) _dev__jobs && ret=0 ;;
         (audit) _dev__audit && ret=0 ;;
@@ -1094,6 +1096,132 @@ _dev__lesson__ls() {
     '(--project -p)'{-p+,--project=}'[project]:project: _dev_live projects -' \
     '(--initiative -i)'{-i+,--initiative=}'[initiative]:initiative: _dev_live initiatives -' \
     '--global[global]'
+}
+
+_dev__bug() {
+  local curcontext=$curcontext state state_descr line ret=1
+  typeset -A opt_args
+  _arguments -C -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '1: :->cmds' \
+    '*:: :->args' && ret=0
+  case $state in
+    (cmds)
+      local -a cmds
+      cmds=(
+        'ls:bugs in the cache, ranked'
+        'show:one bug: versions, votes, detours with their trust, related lessons'
+        'search:bugs by generated title or fingerprint'
+        'report:file a bug, or vote on a known one'
+        'detour:record a detour, once the session ledger shows it worked'
+        'top:hotfix recommendations'
+        'sync:refresh the cache and send the outbox'
+        'pending:items held for review, printed exactly as they would be sent'
+        'send:send a held item'
+        'drop:drop an item'
+        'confirm:confirm a detour'
+        'share:consent to post'
+      )
+      _describe -t commands 'dev bug command' cmds && ret=0 ;;
+    (args)
+      curcontext=${curcontext%:*:*}:dev-bug-$words[1]:
+      case $words[1] in
+        (ls) _dev__bug__ls && ret=0 ;;
+        (show) _dev__bug__show && ret=0 ;;
+        (search) _dev__bug__search && ret=0 ;;
+        (report) _dev__bug__report && ret=0 ;;
+        (detour) _dev__bug__detour && ret=0 ;;
+        (top) _dev__bug__top && ret=0 ;;
+        (sync) _dev__bug__sync && ret=0 ;;
+        (pending) _dev__bug__pending && ret=0 ;;
+        (send) _dev__bug__send && ret=0 ;;
+        (drop) _dev__bug__drop && ret=0 ;;
+        (confirm) _dev__bug__confirm && ret=0 ;;
+        (share) _dev__bug__share && ret=0 ;;
+      esac ;;
+  esac
+  return ret
+}
+
+_dev__bug__ls() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--open[open bugs only]' \
+    '--fixed[bugs with a fix version or closed]' \
+    '--kind=[kind]:kind:(crash hook guard command)' \
+    '--mine[bugs this Mac hit]' \
+    '--local[the failures recorded on this Mac]'
+}
+
+_dev__bug__show() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    ':bug: '
+}
+
+_dev__bug__search() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '*:words: '
+}
+
+_dev__bug__report() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--title=[a command that misbehaves without an error]:title: ' \
+    '--guard=[a wrong refusal]::refusal id: ' \
+    '--security[for private vulnerability reporting only]' \
+    '::fingerprint: '
+}
+
+_dev__bug__detour() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '*--hint=[a hint template]:'\''name slot=value …'\'': ' \
+    '*--dev=[a dev command of devkit'\''s own subcommands and flags]:'\''command'\'': ' \
+    '*--text=[free text, at most 200 characters]:'\''text'\'': ' \
+    ':fingerprint: '
+}
+
+_dev__bug__top() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--task[add the suggested bugs as work items with the issue link]'
+}
+
+_dev__bug__sync() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]'
+}
+
+_dev__bug__pending() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]'
+}
+
+_dev__bug__send() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    ':id: '
+}
+
+_dev__bug__drop() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    ':id: '
+}
+
+_dev__bug__confirm() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    ':bug: ' \
+    ':detour: '
+}
+
+_dev__bug__share() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    ':setting:(on reports off)'
 }
 
 _dev__sleep() {
