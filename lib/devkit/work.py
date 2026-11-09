@@ -1424,17 +1424,47 @@ def recent_sessions(scope: str, limit: int = 12) -> list:
     return out[:limit]
 
 
+RUN_TEXT = ("goal", "state", "headline", "last", "next")  # what run_summary keeps of a run brief, as it is
+RUN_NUMBERS = ("step", "steps", "estimate", "started", "updated", "eta_min", "eta_lo", "eta_hi", "active_min",
+               "wall_min", "pace")
+CURRENT_SHOWN = 3  # steps running now that presence names
+
+
+def run_summary(brief):
+    """What presence publishes of a session's run (progress.brief): its goal and state, the step counts (done, that
+    count, skipped), the steps running or blocked now (at most CURRENT_SHOWN, by name; `current_more` counts the
+    rest), how many crew lanes work (`crew`), and the ETA. Never the whole plan or the lanes: a run of 60 steps made
+    one Mac's presence 49 KB, and above 256 KB another Mac's dashboard hides it. `plan` keeps only the current steps,
+    in the shape older dashboards read. None when the session has no run."""
+    if not isinstance(brief, dict):
+        return None
+    plan = [s for s in brief.get("plan") or [] if isinstance(s, dict)]
+    states = Counter(s.get("state") for s in plan)
+    now = [s for s in plan if s.get("state") in ("running", "blocked")]
+    out = {k: brief[k][:200] if isinstance(brief[k], str) else brief[k] for k in RUN_TEXT if k in brief}
+    out.update({k: brief[k] for k in RUN_NUMBERS if k in brief})
+    out.update(steps_done=states["done"], steps_total=len(plan) - states["skipped"], steps_skipped=states["skipped"],
+               current=[str(s.get("name") or "")[:120] for s in now[:CURRENT_SHOWN]],
+               current_more=max(0, len(now) - CURRENT_SHOWN),
+               crew=sum(1 for g in brief.get("agents") or [] if isinstance(g, dict) and g.get("state") == "running"),
+               plan=[dict({k: s.get(k) for k in ("state", "est", "min", "owner")}, name=str(s.get("name") or "")[:120])
+                     for s in now[:CURRENT_SHOWN]])
+    return out
+
+
 def write_presence(sessions: list, a=None):
     """presence/<user>@<host>.json: this machine's tracked sessions, each with its `active` flag (a session still
-    tracked a while after its agent stopped is not active), and held locks (written only by this machine)."""
+    tracked a while after its agent stopped is not active) and a summary of its run (run_summary), and held locks
+    (written only by this machine)."""
     a = a or actor("human")
     me = f"{a['user']}@{a['host']}"
     held = [{"id": i["meta"]["id"], "title": i["meta"]["title"], "scope": i["scope"],
              "until": i["meta"]["lock_expires"]} for i in all_items()
             if (i["meta"].get("claimed_by") or "").startswith(me) and not lock_holder(i)[1]]
     data = {"user": a["user"], "host": a["host"], "updated": now_iso(),
-            "sessions": [{k: s.get(k) for k in ("agent", "project", "branch", "started", "status", "last_seen",
-                                                "progress", "subagents", "turn_started", "active")}
+            "sessions": [dict({k: s.get(k) for k in ("agent", "project", "branch", "started", "status", "last_seen",
+                                                     "subagents", "turn_started", "active")},
+                              progress=run_summary(s.get("progress")))
                          for s in sessions], "locks": held}
     f = PRESENCE / f"{me}.json"
     f.parent.mkdir(parents=True, exist_ok=True)

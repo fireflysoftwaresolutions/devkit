@@ -524,6 +524,39 @@ class PresenceTests(unittest.TestCase):
                              [("codex", "feat/b")])
             self.assertFalse((state / "sessions" / "claude-ended1.json").exists())
 
+    def test_presence_publishes_a_summary_of_each_run_and_not_its_plan(self):
+        # Presence carried each session's whole run, every plan step and crew lane: 49 KB for one Mac, changed on most
+        # handoff commits, and above 256 KB the dashboard hides that Mac. A session in a run of 60 steps (40 done,
+        # 2 skipped, 2 running, 1 blocked) with 6 lanes (4 working) publishes the goal, the step counts, the steps
+        # running now, the crew at work and the ETA, and another Mac's dashboard still shows the run.
+        import time as _time
+        from devkit import dashnow
+        states = ["done"] * 40 + ["skipped"] * 2 + ["running", "running", "blocked"] + ["pending"] * 15
+        plan = [{"name": f"{i + 1}. step {i + 1}: what this step builds, checks and hands over to the next one",
+                 "state": st, "est": 30, "min": 12.5, "owner": "main" if i % 2 else "Backend engineer (Tank)"}
+                for i, st in enumerate(states)]
+        lanes = [{"label": f"Backend engineer (Tank) · lane {i}", "state": "running" if i < 4 else "done", "min": 9.5,
+                  "live": "working", "why": "reported 2 min ago"} for i in range(6)]
+        now = _time.time()
+        brief = {"goal": "Hotfix 26.11.9", "state": "running", "step": 41, "steps": 60, "estimate": 120,
+                 "started": round(now - 18000), "eta_min": 40, "eta_lo": 30, "eta_hi": 60, "active_min": 291.0,
+                 "wall_min": 305.0, "pace": 1.1, "plan": plan, "agents": lanes, "headline": "41 of 58 steps",
+                 "last": "Lane tests green", "next": "three commits", "updated": round(now - 60)}
+        with TempHandoff():
+            work.write_presence([dict(agent="claude", session="s1", project="acme/api", branch="main", active=True,
+                                      started=round(now - 18000), progress=brief)], a=A)
+            f = work.PRESENCE / "ana@mbp1.json"
+            p = json.loads(f.read_text())["sessions"][0]["progress"]
+            self.assertEqual((p["goal"], p["steps_done"], p["steps_total"], p["steps_skipped"], p["crew"]),
+                             ("Hotfix 26.11.9", 40, 58, 2, 4))
+            self.assertEqual((p["eta_min"], p["eta_lo"], p["eta_hi"]), (40, 30, 60))
+            self.assertEqual([c.split(":")[0] for c in p["current"]], ["43. step 43", "44. step 44", "45. step 45"])
+            self.assertNotIn("agents", p)
+            self.assertEqual([s["state"] for s in p["plan"]], ["running", "running", "blocked"])
+            self.assertLess(f.stat().st_size, 2500)
+            run = dashnow._remote_run(json.loads(f.read_text())["sessions"][0], "mbp1", "ana", int(now), now)
+            self.assertEqual((run["goal"], len(run["plan"])), ("Hotfix 26.11.9", 3))
+
 
 class ReusedBranchTests(unittest.TestCase):
     # Branch names come back (fix/login-timeout): a merge of the name's earlier use closed a new item linked to it.
