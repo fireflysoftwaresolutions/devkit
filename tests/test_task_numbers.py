@@ -79,6 +79,14 @@ class ShownListTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"DEVKIT_SESSION": "claude:session-two"}):
             self.assertEqual(work.find("1", SCOPE)["meta"]["id"], self.first["meta"]["id"])
 
+    def test_a_damaged_record_of_the_shown_list_counts_as_no_list_shown(self):
+        work.show(SCOPE)
+        f = next((core.STATE / "task-lists").glob("*.json"))
+        f.write_text('{"lists": {"acme/api": {"ids": [["T-1"], {"a": 1}], "shown_at": "2026-11-09T09:00:00Z"}}}')
+        with self.assertRaises(ValueError) as e:
+            work.find("1", SCOPE)
+        self.assertIn("run dev task", str(e.exception))
+
     def test_a_number_past_the_end_of_the_shown_list_is_refused(self):
         work.show(SCOPE)
         with self.assertRaises(ValueError) as e:

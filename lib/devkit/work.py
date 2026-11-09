@@ -493,7 +493,7 @@ def by_number(n: int, scope: str, items: list = None) -> dict:
     where = scope or "all projects"
     shown = _shown_lists().get(scope or "")
     then = shown.get("ids") if isinstance(shown, dict) else None
-    if not isinstance(then, list):
+    if not isinstance(then, list) or not all(isinstance(x, str) for x in then):  # none, or a damaged record
         raise ValueError(f"#{n}: no list of {where} was shown here, so the number points at nothing: run dev task and "
                          f"use its numbers, or use the item's id (T-…, F-…, B-…, S-…)")
     shown_at = parse_iso(shown.get("shown_at", ""))
