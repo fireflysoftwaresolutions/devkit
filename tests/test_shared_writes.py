@@ -157,5 +157,57 @@ class WriteRecordTests(unittest.TestCase):
         self.assertEqual(sorted(int(v) for v, _ in kept), list(range(2, 77)))
 
 
+class SessionLogTests(unittest.TestCase):
+    def setUp(self):
+        from devkit import work
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = Path(self.tmp.name)
+        self.saved = work.SESSIONS
+        work.SESSIONS = self.dir / "sessions"
+        self.addCleanup(setattr, work, "SESSIONS", self.saved)
+
+    def month(self) -> Path:
+        import time
+        return self.dir / "sessions" / "acme" / "widget" / f"{time.strftime('%Y-%m')}.md"
+
+    def test_a_session_line_rewritten_on_every_turn_never_drops_a_line_another_session_appends(self):
+        # Session A rewrites its own line 60 times (the Stop hook) while session B appends lines (dev handoff --log)
+        # until A is done: every line B appended is kept, and A's line is there once, as A last wrote it.
+        done = self.dir / "a-done"
+        setup = f"""
+            from devkit import work
+            work.SESSIONS = Path({str(self.dir / 'sessions')!r})
+            """
+        rewrite = setup + f"""
+            for i in range(60):
+                work.replace_session_line("acme/widget", "<!-- s:sA -->", f"session A turn {{i}} <!-- s:sA -->")
+            Path({str(done)!r}).touch()
+            """
+        append = setup + f"""
+            n = 0
+            while not Path({str(done)!r}).exists():
+                work.log_session("acme/widget", f"bob line {{n}}")
+                n += 1
+            print(n)
+            """
+        written = int(together([rewrite, append], self.dir)[1])
+        text = self.month().read_text()
+        self.assertGreater(written, 20)
+        self.assertEqual(len([ln for ln in text.splitlines() if ln.startswith("- bob line ")]), written,
+                         "lines of session B were lost")
+        self.assertEqual([ln for ln in text.splitlines() if "<!-- s:sA -->" in ln],
+                         ["- session A turn 59 <!-- s:sA -->"])
+
+    def test_a_session_line_is_appended_when_the_month_has_none_and_replaced_in_place_when_it_has_one(self):
+        from devkit import work
+        work.log_session("acme/widget", "first")
+        f = work.replace_session_line("acme/widget", "<!-- s:s1 -->", "s1 turn 1 <!-- s:s1 -->")
+        work.log_session("acme/widget", "last")
+        work.replace_session_line("acme/widget", "<!-- s:s1 -->", "s1 turn 2 <!-- s:s1 -->")
+        self.assertEqual(f, self.month())
+        self.assertEqual(f.read_text().splitlines()[2:], ["- first", "- s1 turn 2 <!-- s:s1 -->", "- last"])
+
+
 if __name__ == "__main__":
     unittest.main()

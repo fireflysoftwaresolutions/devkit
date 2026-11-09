@@ -1262,14 +1262,42 @@ def reconcile(scope: str, merged: dict, apply: bool = False, a=None) -> dict:
 
 # --------------------------------------------------------------------------- sessions log and presence
 
-def log_session(scope: str, line: str):
-    """Append-only, one file per scope and month (merge=union): concurrent machines never conflict."""
-    f = SESSIONS / scope / f"{time.strftime('%Y-%m')}.md"
-    f.parent.mkdir(parents=True, exist_ok=True)
+def _append_session(f: Path, scope: str, month: str, line: str) -> None:
+    """Append one line to the month's log, starting the file with its heading; the caller holds its record_lock."""
     if not f.exists():
-        f.write_text(f"# Sessions · {scope} · {time.strftime('%Y-%m')}\n\n")
+        core.replace_text(f, f"# Sessions · {scope} · {month}\n\n")
     with f.open("a") as fh:
         fh.write(f"- {line}\n")
+
+
+def log_session(scope: str, line: str):
+    """Append-only, one file per scope and month (merge=union): concurrent machines never conflict. On this Mac the
+    append holds the month file's lock (record_lock), so a session that rewrites its own line at the same moment
+    (replace_session_line) never writes over this one. -> the month's file."""
+    month = time.strftime("%Y-%m")
+    f = SESSIONS / scope / f"{month}.md"
+    f.parent.mkdir(parents=True, exist_ok=True)
+    with record_lock(f):
+        _append_session(f, scope, month, line)
+    return f
+
+
+def replace_session_line(scope: str, key: str, line: str):
+    """One session's line in the month's log, which the Stop hook rewrites on every turn: the lines that carry `key`
+    (the session's marker, such as `<!-- s:<id> -->`) become `- <line>`, in place; with none, the line is appended
+    (log_session). The read and the rewrite hold the same lock as log_session's appends, and the rewrite replaces the
+    file in one step, so lines other sessions append meanwhile are never lost. -> the month's file."""
+    month = time.strftime("%Y-%m")
+    f = SESSIONS / scope / f"{month}.md"
+    f.parent.mkdir(parents=True, exist_ok=True)
+    with record_lock(f):
+        text = f.read_text() if f.exists() else ""
+        if key not in text:
+            _append_session(f, scope, month, line)
+            return f
+        new = "\n".join(f"- {line}" if key in ln else ln for ln in text.splitlines()) + "\n"
+        if new != text:
+            core.replace_text(f, new)
     return f
 
 
