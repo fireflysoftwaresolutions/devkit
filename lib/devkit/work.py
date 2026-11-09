@@ -412,8 +412,8 @@ def ordered_open(items: list) -> list:
 # Codex thread, else the agent session and the crew lane in it, else the shell that ran `dev`; a command the call
 # ledger cannot tie to one caller gets no numbers), and it is refused once the open items are no longer that list in
 # that order, or the list is more than LIST_TTL old. The refusal names the id #n had, and has now, so the caller acts
-# by id. Ids always work. Each viewer's lists live in STATE/task-lists/<viewer>.json: {viewer, lists: {scope: {ids,
-# shown_at}}}, on this Mac only.
+# by id. Ids always work. Each viewer's lists live in STATE/task-lists/<viewer>-<hash>.json (_lists_file): {viewer,
+# lists: {scope: {ids, shown_at}}}, on this Mac only.
 
 LIST_TTL = 30 * 60  # seconds a shown list numbers items
 NOW_LIMIT = 5  # open items in a project's Now above which devkit warns
@@ -456,11 +456,13 @@ def _viewer() -> tuple:
 
 
 def _lists_file(viewer: str) -> Path:
-    """The record of `viewer`'s lists. A name cut to fit keeps a hash of the whole key: two viewers never share one."""
-    name = re.sub(r"[^A-Za-z0-9._-]+", "_", viewer).strip("._") or "shell"
-    if len(name) > 80:
-        name = f"{name[:63]}-{hashlib.sha256(viewer.encode()).hexdigest()[:16]}"
-    return core.STATE / "task-lists" / f"{name}.json"
+    """The record of `viewer`'s lists: the key written for a file name and cut to 63 characters, then a hash of the
+    whole key, so two viewers never share one, also when their keys differ only in characters a name cannot hold
+    (`a:b` and `a_b` both read a_b). A record named before every name had the hash (claude_<session>.json) is not
+    read: the first `dev task` after the update records the list afresh, and _record_shown removes the old file once
+    it is a day old."""
+    name = re.sub(r"[^A-Za-z0-9._-]+", "_", viewer).strip("._")[:63] or "shell"
+    return core.STATE / "task-lists" / f"{name}-{hashlib.sha256(viewer.encode()).hexdigest()[:16]}.json"
 
 
 def _fresh(shown_at: float, now: float) -> bool:

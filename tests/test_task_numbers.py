@@ -91,6 +91,30 @@ class ShownListTests(unittest.TestCase):
     def test_lanes_whose_ids_differ_only_past_the_length_of_a_file_name_keep_their_own_lists(self):
         self.assert_lanes_keep_their_own_lists("a-" + "x" * 90 + "-tank", "a-" + "x" * 90 + "-ghost")
 
+    def test_viewers_whose_keys_differ_only_in_characters_a_file_name_cannot_hold_keep_their_own_lists(self):
+        with self.running(TANK, "task"):
+            work.show(SCOPE)  # claude:session-one:a-tank sees the login timeout, the CSV export, the parity test
+        work.release(work.load(self.first["path"]), a=B, status="done")
+        other = f"{SESSION}_{TANK}"  # claude:session-one_a-tank: the same name once ':' is written as '_'
+        with mock.patch.dict(os.environ, {"DEVKIT_SESSION": f"claude:{other}"}), self.lead(session=other):
+            work.show(SCOPE)  # the CSV export, the parity test
+        with self.running(TANK, "task done 2"), self.assertRaises(ValueError) as e:
+            work.find("2", SCOPE)  # the lane's #2 is the CSV export; in the other list #2 is the parity test
+        self.assertIn(f"#2 was {self.second['meta']['id']} “Export invoices as CSV”", str(e.exception))
+
+    def test_a_list_recorded_under_a_name_without_a_hash_is_not_read_and_dev_task_records_it_afresh(self):
+        ids = [self.first["meta"]["id"], self.second["meta"]["id"], self.third["meta"]["id"]]
+        old = core.STATE / "task-lists" / f"claude_{SESSION}.json"  # the tech lead's record before every name had one
+        old.parent.mkdir(parents=True)
+        old.write_text(json.dumps({"viewer": f"claude:{SESSION}",
+                                   "lists": {SCOPE: {"ids": ids, "shown_at": work.now_iso(time.time())}}}))
+        with self.lead(), self.assertRaises(ValueError) as e:
+            work.find("1", SCOPE)
+        self.assertIn("no list of acme/api was shown here", str(e.exception))
+        with self.lead():
+            work.show(SCOPE)
+            self.assertEqual(work.find("1", SCOPE)["meta"]["id"], self.first["meta"]["id"])
+
     def test_while_two_open_calls_name_the_same_words_the_list_is_not_numbered_for_either(self):
         with self.running(GHOST, "task"):
             work.show(SCOPE)
