@@ -124,10 +124,12 @@ class ConsolidationTests(_Handoff):
         self.assertIn(merged[0], (en["meta"]["id"], es["meta"]["id"]))
 
     def test_with_ai_the_model_decides_duplicates_in_any_language_within_its_budget(self):
-        self.add("Commit after a pipe hides failing tests", cause="tail hides the exit code", prevention="pipefail")
+        self.add("Commit after a pipe hides failing tests", cause="tail hides the exit code", prevention="pipefail",
+                 commands=["git commit"], stack=["python"])
         self.add("Un commit tras un pipe oculta tests rotos", cause="tail oculta el código de salida",
-                 prevention="usa pipefail")
-        self.add("Releases tagged before the changelog", cause="no check", prevention="dev release")
+                 prevention="usa pipefail", commands=["git commit"], stack=["java"])
+        self.add("Releases tagged before the changelog", cause="no check", prevention="dev release",
+                 commands=["git commit"], files=["CHANGELOG.md"])
         calls, real = [], subprocess.run
 
         def fake(argv, **kw):

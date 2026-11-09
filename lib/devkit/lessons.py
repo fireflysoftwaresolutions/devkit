@@ -21,19 +21,21 @@ The loop:
   use       every time a lesson is shown in a session, applied (named in a reply), repeated or looked up, its usage is
             counted (per machine: lessons/usage/<user>@<host>.json, summed across the team)
   sleep     `dev sleep` (nightly, the `sleep` job) consolidates like a brain at night: strength decays unless
-            a lesson is used; weak, prevented or retired lessons are forgotten into lessons/archive/ (restorable);
-            near-duplicates are merged; the active set per scope is capped
+            a lesson is seen again; near-duplicates are merged; lessons are archived into lessons/archive/
+            (restorable) only by the archive policy (`consolidate`), never to fit a count: storage is unbounded and
+            recall has its own limits
 """
 from __future__ import annotations
 
 import fnmatch
+import hashlib
 import json
 import re
 import shlex
 import time
 from pathlib import Path
 
-from . import core, work
+from . import core, state, work
 from .core import HANDOFF, STATE
 
 LESSONS = HANDOFF / "lessons"
@@ -298,16 +300,36 @@ def usage() -> dict:
     return total
 
 
+def _state_file(name: str) -> Path:
+    return STATE / name
+
+
+def _day_ts(day: str) -> float:
+    """A `YYYY-MM-DD` date (local, like the rest of the handoff) -> its local midnight in epoch seconds; 0.0 when
+    unreadable."""
+    try:
+        return time.mktime(time.strptime(str(day or "").strip(), "%Y-%m-%d"))
+    except (ValueError, OverflowError):
+        return 0.0
+
+
+SEEN_BY = ("recur", "applied", "heeded", "missed")  # usage kinds that are sightings: occurrences and outcomes
+
+
+def last_seen(les: dict, use: dict = None) -> float:
+    """When the lesson was last seen: its last occurrence, or the last outcome of showing it (applied, heeded,
+    missed). Editing its text, anchoring, merging or preventing it is not a sighting."""
+    e = (use or {}).get(les["meta"]["id"], {})
+    return max([_day_ts(les["meta"].get("last_seen"))] + [float(e.get(f"{k}_last") or 0) for k in SEEN_BY])
+
+
 def strength(les: dict, use: dict = None, now: float = None) -> float:
     """How alive a lesson is: severity × evidence, refreshed by use, decaying with a 45-day half-life."""
     now = now or time.time()
     m = les["meta"]
     e = (use or {}).get(m["id"], {})
     sev = {"high": 3, "medium": 2, "low": 1}.get(m.get("severity"), 1)
-    last = max(work.parse_iso((m.get("last_seen") or "2000-01-01") + "T00:00:00Z"),
-               work.parse_iso(m.get("updated") or "2000-01-01T00:00:00Z"),
-               float(e.get("applied_last") or 0), float(e.get("recur_last") or 0), float(e.get("lookup_last") or 0))
-    age = max(0.0, (now - last) / 86400)
+    age = max(0.0, (now - last_seen(les, use)) / 86400)
     hits = int(e.get("applied") or 0) + 2 * int(e.get("recur") or 0) + int(e.get("lookup") or 0)
     shown = int(e.get("shown") or 0)
     ignored = max(0, shown - 3 * (hits + 1))  # shown often but never used: it is not helping
@@ -518,7 +540,10 @@ def fixed_in_session(top: str, start_head: str) -> list:
 # --------------------------------------------------------------------------- sleep: consolidate and forget
 
 ARCHIVE = "archive"
-MAX_ACTIVE_PER_SCOPE = 25
+CAP_REASON = "over the active cap"  # why an older devkit archived a lesson to fit 25 per scope
+CAP_RESTORE = "lessons-cap-restore.json"  # STATE: the marker of the one-time restore of those lessons
+VERDICTS = "lessons-merge-verdicts.json"  # STATE: the model's merge verdicts, by pair hash
+YOUNG_DAYS = 30  # a lesson younger than this is never archived by the policy
 
 
 def _anchor_set(les: dict) -> set:
@@ -536,20 +561,43 @@ def _text(les: dict) -> str:
                                  les["sections"].get("Prevention", "")) if x and x != "_—_")
 
 
+def _pair_key(x: dict, y: dict) -> str:
+    """The hash of a pair of lessons as the model would judge them: both ids and texts, in either order."""
+    a, b = sorted([(x["meta"]["id"], _text(x)), (y["meta"]["id"], _text(y))])
+    return hashlib.sha256("\0".join(a + b).encode()).hexdigest()[:24]
+
+
+def _remember_verdict(key: str, same: bool) -> None:
+    def put(doc):
+        doc[key] = {"same": bool(same), "ts": int(time.time())}
+    try:
+        state.update(_state_file(VERDICTS), put)
+    except (state.StateBusy, OSError):
+        pass  # audited by state: the pair is asked again on a later night, within the model's budget
+
+
 def same_mistake(x: dict, y: dict, threshold: float = 0.6):
     """-> (same?, why). By the anchors: alike, and the same error signature or command, so a shared file or kind of
     work alone never makes two lessons one. When background AI is on (`ai`), the model decides the pairs the anchors
-    leave open, in any language, within its daily budget."""
+    leave open, in any language, within its daily budget, but only pairs that share an error or command anchor, and
+    each pair once: its verdict is remembered by the pair's hash (ids and texts) in STATE/lessons-merge-verdicts.json."""
     sim = similarity(x, y)
     sig = {i for i in _anchor_set(x) & _anchor_set(y) if i.startswith(("errors:", "commands:"))}
     if sim >= threshold and sig:
         return True, f"{sim:.0%} same anchors"
-    if sim > 0 or not (_anchor_set(x) and _anchor_set(y)):
-        from . import ai
-        verdict = ai.same_mistake(_text(x), _text(y))
-        if verdict is not None:
-            return verdict, "the same mistake, says the model" if verdict else "different, says the model"
-    return False, f"{sim:.0%} same anchors"
+    if not sig:
+        return False, f"{sim:.0%} same anchors, no error or command in common"
+    key = _pair_key(x, y)
+    known = (state.read(_state_file(VERDICTS)) or {}).get(key)
+    if isinstance(known, dict) and "same" in known:
+        same = bool(known["same"])
+        return same, ("the same mistake" if same else "different") + ", as the model said before"
+    from . import ai
+    verdict = ai.same_mistake(_text(x), _text(y))
+    if verdict is None:
+        return False, f"{sim:.0%} same anchors"
+    _remember_verdict(key, verdict)
+    return verdict, "the same mistake, says the model" if verdict else "different, says the model"
 
 
 def archive(les: dict, why: str, a=None) -> dict:
@@ -557,14 +605,18 @@ def archive(les: dict, why: str, a=None) -> dict:
     a = a or work.actor("devkit")
     les = update(les, "forgotten", why, a, status=les["meta"].get("status") if les["meta"].get("status") == "retired"
                  else "dormant")
-    dest = LESSONS / ARCHIVE / les["meta"]["scope"] / les["path"].name
+    _move(les, LESSONS / ARCHIVE / les["meta"]["scope"] / les["path"].name)
+    work._commit([les["path"]], f"{les['meta']['id']}: forgotten (archived) — {why}")
+    return les
+
+
+def _move(les: dict, dest: Path) -> None:
+    """Move a lesson's file (git keeps the history when it is tracked)."""
     dest.parent.mkdir(parents=True, exist_ok=True)
     core.git(HANDOFF, "mv", str(les["path"]), str(dest))
     if les["path"].exists():  # not tracked yet
         les["path"].rename(dest)
     les["path"] = dest
-    work._commit([dest], f"{les['meta']['id']}: forgotten (archived) — {why}")
-    return les
 
 
 def restore(selector: str, why: str, a=None) -> dict:
@@ -572,28 +624,103 @@ def restore(selector: str, why: str, a=None) -> dict:
     hits = [x for x in items if x["meta"]["id"].lower() == selector.lower() or selector.lower() in x["meta"]["title"].lower()]
     if len(hits) != 1:
         raise ValueError(f"“{selector}” matches {len(hits)} archived lessons")
-    les = hits[0]
-    dest = _dir(les["meta"]["scope"]) / les["path"].name
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    core.git(HANDOFF, "mv", str(les["path"]), str(dest))
-    if les["path"].exists():
-        les["path"].rename(dest)
-    les["path"] = dest
-    return update(les, "restored", why or "needed again", a, status="open")
+    return _bring_back(hits[0], "restored", why or "needed again", a, status="open")
+
+
+def _bring_back(les: dict, op: str, why: str, a=None, **changes) -> dict:
+    """Move an archived lesson back to its scope and record it."""
+    _move(les, _dir(les["meta"]["scope"]) / les["path"].name)
+    return update(les, op, why, a, **changes)
+
+
+def _op(entry: str) -> str:
+    """The operation of a changelog entry (`v3 · <when> · <who> · <op>[ — why: …]`)."""
+    parts = entry.split(" · ", 3)
+    return parts[3] if len(parts) == 4 else ""
+
+
+def archive_reason(les: dict) -> str:
+    """Why the lesson was last archived (the why of its latest `forgotten` entry), or ""."""
+    for entry in les["changelog"]:  # newest first
+        op = _op(entry)
+        if op.startswith("forgotten"):
+            return op.partition(" — why: ")[2].strip()
+    return ""
+
+
+def status_before_archive(les: dict) -> str:
+    """The status a lesson had when it was last archived, read from its changelog: archiving made it dormant."""
+    st = before = "open"
+    for entry in reversed(les["changelog"]):  # oldest first
+        op = _op(entry)
+        if op.startswith("forgotten"):
+            before = st
+        elif op.startswith("prevented by"):
+            st = "prevented"
+        elif op.startswith("retired"):
+            st = "retired"
+        elif op.startswith("restored") or "reopened" in op:
+            st = "open"
+    return before
+
+
+def _restore_capped(dry_run: bool, now: float, a, acts: list) -> list:
+    """Once: bring back every lesson an older devkit archived only to fit its per-scope cap, with the status it had.
+    -> the lessons restored (in a dry run, as they would be, their files unmoved). The marker
+    STATE/lessons-cap-restore.json makes it run once."""
+    marker = _state_file(CAP_RESTORE)
+    if marker.exists():
+        return []
+    active = {x["meta"]["id"] for x in all_lessons()}
+    out = []
+    for les in all_lessons(archived=True):
+        if les["meta"]["id"] in active or not archive_reason(les).startswith(CAP_REASON):
+            continue
+        before = status_before_archive(les)
+        acts.append(("restore", les["meta"]["id"], f"archived only by the old per-scope cap; back as {before}"))
+        if dry_run:
+            les["meta"]["status"] = before
+        else:
+            les = _bring_back(les, "restored", "archived only by the old per-scope cap, which is gone", a,
+                              status=before)
+        out.append(les)
+    if not dry_run:
+        state.update(marker, lambda d: d.update(ts=int(now), restored=[x["meta"]["id"] for x in out]))
+    return out
+
+
+def _archive_why(les: dict, use: dict, now: float, kept: set):
+    """The archive policy: why to archive this lesson tonight, or None. Never a lesson younger than 30 days, one
+    seen twice or more, or one a merge kept in the same run; otherwise a retired lesson 30 days after its retirement,
+    a prevented one idle 90 days and weak (strength below 1.0), an open one idle 180 days, weak (below 0.5), seen
+    once and older than 30 days."""
+    m = les["meta"]
+    if m["id"] in kept or m["occurrences"] >= 2 or now - _day_ts(m.get("first_seen")) < YOUNG_DAYS * 86400:
+        return None
+    idle = (now - last_seen(les, use)) / 86400
+    st = strength(les, use, now)
+    if m.get("status") == "retired" and (now - work.parse_iso(m.get("updated"))) / 86400 > 30:
+        return "retired more than 30 days ago"
+    if m.get("status") == "prevented" and idle > 90 and st < 1.0:
+        return f"prevented by {m.get('prevention')} and unused for {int(idle)} days: the automation remembers it"
+    if m.get("status") == "open" and idle > 180 and st < 0.5:
+        return f"not seen or used for {int(idle)} days (strength {st:.2f})"
+    return None
 
 
 def consolidate(dry_run: bool = False, now: float = None, a=None) -> list:
-    """One night's sleep. -> [(action, lesson id, detail)]; with dry_run nothing changes."""
+    """One night's sleep. -> [(action, lesson id, detail)]; with dry_run nothing changes. Storage is unbounded: a
+    lesson leaves only by the archive policy (`_archive_why`) or as the dropped side of a merge."""
     now = now or time.time()
     use = usage()
     acts = []
+    restored = _restore_capped(dry_run, now, a, acts)
     items = all_lessons()
-
-    def days(iso):
-        return (now - work.parse_iso(iso)) / 86400 if iso else 9999
+    if dry_run:
+        items += restored
 
     # 1. merge near-duplicates (same scope, or a project lesson that repeats a global one)
-    gone = set()
+    gone, kept = set(), set()
     for i, x in enumerate(items):
         for y in items[i + 1:]:
             if x["meta"]["id"] in gone or y["meta"]["id"] in gone:
@@ -604,6 +731,7 @@ def consolidate(dry_run: bool = False, now: float = None, a=None) -> list:
                 keep, drop = sorted((x, y), key=lambda z: (z["meta"]["scope"] != "global", -strength(z, use, now)))
                 acts.append(("merge", drop["meta"]["id"], f"into {keep['meta']['id']} ({why})"))
                 gone.add(drop["meta"]["id"])
+                kept.add(keep["meta"]["id"])
                 if not dry_run:
                     ev = "\n".join(v for v in (keep["sections"].get("Evidence"), drop["sections"].get("Evidence"),
                                                 f"- merged {drop['meta']['id']}") if v and v != "_—_")
@@ -616,35 +744,18 @@ def consolidate(dry_run: bool = False, now: float = None, a=None) -> list:
                     keep["meta"] = keep_["meta"]
                     archive(drop, f"merged into {keep['meta']['id']}", a)
     items = [x for x in items if x["meta"]["id"] not in gone]
-    # 2. forget what no longer helps
+    # 2. archive by the policy, never to fit a count
+    forgotten = set()
     for x in items:
-        m, st = x["meta"], strength(x, use, now)
-        idle = min(days((m.get("last_seen") or "2000-01-01") + "T00:00:00Z"), days(m.get("updated")))
-        reason = None
-        if m.get("status") == "retired" and days(m.get("updated")) > 30:
-            reason = "retired more than 30 days ago"
-        elif m.get("status") == "prevented" and idle > 90 and st < 1.0:
-            reason = f"prevented by {m.get('prevention')} and unused for {int(idle)} days: the automation remembers it"
-        elif m.get("status") == "open" and idle > 180 and st < 0.5:
-            reason = f"not seen or used for {int(idle)} days (strength {st:.2f})"
+        reason = _archive_why(x, use, now, kept)
         if reason:
-            acts.append(("forget", m["id"], reason))
+            acts.append(("forget", x["meta"]["id"], reason))
+            forgotten.add(x["meta"]["id"])
             if not dry_run:
                 archive(x, reason, a)
-    # 3. cap the active set per scope (weakest go dormant first)
-    by_scope = {}
-    for x in items:
-        if x["meta"]["id"] not in {i for _, i, _ in acts}:
-            by_scope.setdefault(x["meta"]["scope"], []).append(x)
-    for scope, xs in by_scope.items():
-        if len(xs) > MAX_ACTIVE_PER_SCOPE:
-            for x in sorted(xs, key=lambda z: strength(z, use, now))[:len(xs) - MAX_ACTIVE_PER_SCOPE]:
-                acts.append(("forget", x["meta"]["id"], f"over the {MAX_ACTIVE_PER_SCOPE}-lesson cap for {scope}"))
-                if not dry_run:
-                    archive(x, f"over the active cap for {scope}", a)
-    # 4. a pattern seen in two or more projects belongs in the global lessons
+    # 3. a pattern seen in two or more projects belongs in the global lessons
     proj = [x for x in items if x["meta"]["scope"] not in ("global",) and not x["meta"]["scope"].startswith("initiatives/")
-            and x["meta"]["id"] not in {i for _, i, _ in acts}]
+            and x["meta"]["id"] not in forgotten]
     for i, x in enumerate(proj):
         for y in proj[i + 1:]:
             if x["meta"]["scope"] != y["meta"]["scope"] and same_mistake(x, y, 0.5)[0]:
