@@ -389,10 +389,11 @@ changes until you confirm.
 
 
 def line_mode(saved=None, yes=True, typed=None, clouds=("aws",), state=None, call=None, resume=False, device=None,
-              tools=("gh", "brew", "claude", "codex")):
+              tools=("gh", "brew", "claude", "codex"), first=True):
     """Run `dev setup` through the line prompts with detection and commands stubbed: (rc, config, output, calls).
     `clouds`: the cloud and infrastructure tools this Mac shows. `state`: devkit's state folder (default: a temp one).
-    `call(argv)`: what a started command returns (default 0). `device`: the terminal a sign-in would get (none)."""
+    `call(argv)`: what a started command returns (default 0). `device`: the terminal a sign-in would get (none).
+    `resume`: then `dev setup --resume`; `first`: run plain `dev setup` before it (else only the resume runs)."""
     seen = {"hosts": ["github", "gitlab"], "clouds": list(clouds), "evidence": {"gitlab": "x", "aws": "y"}}
     with tempfile.TemporaryDirectory() as d:
         cfgf = Path(d) / "config.json"
@@ -423,14 +424,15 @@ def line_mode(saved=None, yes=True, typed=None, clouds=("aws",), state=None, cal
                 mock.patch("subprocess.Popen", side_effect=AssertionError("no command may really run here")), \
                 mock.patch("builtins.input", answer), \
                 mock.patch("sys.stdin", _Stdin(not yes)), mock.patch("sys.stdout", io.StringIO()) as out:
-            rc = wizard.run(assume_yes=yes, skip_packages=True)
+            rc = wizard.run(assume_yes=yes, skip_packages=True) if first else None
             if resume:
                 rc = wizard.run(assume_yes=yes, resume=True)
             run = core.read_json((state or Path(d)) / "setup-run.json", None)
         text = ui.ANSI_RE.sub("", out.getvalue()).replace(str(cfgf), "<CONFIG>")
         text = re.sub(r"Good (morning|afternoon|evening)", "Good <time>", text)
         line_mode.run = run
-        return rc, (json.loads(cfgf.read_text()) if cfgf.exists() else None), text[text.index("Good <time>"):], calls
+        return rc, (json.loads(cfgf.read_text()) if cfgf.exists() else None), text[max(text.find("Good <time>"), 0):], \
+            calls
 
 
 class LineModeTests(unittest.TestCase):
@@ -505,6 +507,17 @@ class LineModeTests(unittest.TestCase):
                                                         ["install", "--commit-template", "yes"], ["doctor"]])
         self.assertEqual({s["id"]: s["state"] for s in line_mode.run["steps"]}["configure"], "done")
         self.assertEqual(rc, 0)  # the resumed run finished
+
+    def test_resume_continues_saved_choices_whose_install_never_finished(self):
+        """dev setup --resume in the line prompts on a Mac with saved choices but no finished install and no setup run
+        (an install that failed right after Save your choices): it continues the setup with the saved choices, as
+        plain dev setup and the full-screen wizard do, never "no setup is saved"."""
+        rc, cfg, out, calls = line_mode(saved=SAVED, resume=True, first=False)
+        self.assertNotIn("Nothing to continue", out)
+        self.assertEqual([dev_args(c)[0] for c in calls if dev_args(c)], ["install", "doctor"])
+        self.assertEqual(cfg, SNAPSHOT_RERUN)
+        self.assertIn("✓ devkit is ready.", out)
+        self.assertEqual(rc, 0)
 
     def test_falls_back_to_line_prompts_without_a_terminal_or_with_yes(self):
         with mock.patch.object(wizard, "_run_lines", return_value=7) as lines, \

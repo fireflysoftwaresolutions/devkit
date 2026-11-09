@@ -380,7 +380,7 @@ AGENT_LINE = {"both": "Claude Code and Codex", "claude": "Claude Code only", "co
 def _run_lines(assume_yes=False, skip_packages=False, resume=False) -> int:
     saved, old = SetupRun.saved()
     unfinished = saved is not None and not old and saved.unfinished_run()
-    if resume and not unfinished:
+    if resume and not unfinished and not unfinished_config():  # saved choices with no finished install: go on
         print("\n".join(nothing_to_continue(saved)))
         return 0
     if unfinished:
