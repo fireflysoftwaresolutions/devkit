@@ -898,8 +898,12 @@ def file_lock(path, wait: float = 30.0):
     """This Mac's lock on one file, held across a read-modify-write so that another devkit process changing the same
     file waits for it instead of writing over it. An advisory lock (flock) on STATE/locks/files/<hash of the path>,
     released by the system if the process dies; reentrant within a thread. -> whether it is held: False when another
-    process kept it for `wait` seconds."""
+    process kept it for `wait` seconds. On macOS the path's letter case is ignored, as the volume ignores it by
+    default: Plan.md and plan.md are one file, so they take one lock (two files that differ only in case on a
+    case-sensitive volume then share one, which costs a wait; two locks on one file would lose a write)."""
     key = os.path.realpath(str(path))
+    if sys.platform == "darwin":
+        key = key.lower()
     held = getattr(_FILE_LOCKS, "held", None)
     if held is None:
         held = _FILE_LOCKS.held = {}

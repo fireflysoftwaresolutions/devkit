@@ -157,6 +157,31 @@ class WriteRecordTests(unittest.TestCase):
         self.assertEqual(sorted(int(v) for v, _ in kept), list(range(2, 77)))
 
 
+class FileLockTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == "darwin", "only macOS volumes ignore letter case by default")
+    def test_one_file_named_with_two_spellings_of_its_path_has_one_lock(self):
+        # `dev plan revise plans/Acme/Plan.md` and `… plans/acme/plan.md` change one file on a macOS volume: while one
+        # writer holds the file's lock through one spelling, another writer (a thread, with a lock of its own) asking
+        # through the other spelling does not get it.
+        import threading
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(core, "STATE", Path(tmp) / "state"):
+            plan = Path(tmp) / "Plan.md"
+            plan.write_text("# Plan\n")
+            other = []
+
+            def other_writer():
+                with core.file_lock(Path(tmp) / "plan.md", wait=0) as got:
+                    other.append(got)
+
+            with core.file_lock(plan) as held:
+                t = threading.Thread(target=other_writer)
+                t.start()
+                t.join(10)
+            self.assertTrue(held)
+            self.assertEqual(other, [False], "the other spelling took a lock of its own on the same file")
+
+
 class SessionLogTests(unittest.TestCase):
     def setUp(self):
         from devkit import work
