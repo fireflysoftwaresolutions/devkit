@@ -1470,11 +1470,7 @@ def write_codex_config(quiet=False):
             backup(hooks_f)
             hooks_f.write_text(json.dumps(merged, indent=2) + "\n")
         done(f"{tilde(hooks_f)}: " + " / ".join(ours))
-        projects = {str(DEV): {"trust_level": "trusted"}}
-        from . import registry
-        mains, _, _ = registry.discover()
-        for m in mains:
-            projects[str(m)] = {"trust_level": "trusted"}
+        projects = {p: {"trust_level": "trusted"} for p in codex_trusted_roots()}  # what the removal takes back
         try:
             with CodexRPC() as rpc:
                 edits = [(k, v, "replace") for k, v in conf["settings"].items()]
@@ -1844,12 +1840,20 @@ _TOML_HEADER = re.compile(r"\s*\[\[?\s*([^\]]+?)\s*\]\]?\s*(#.*)?$")
 CODEX_FULL_ACCESS = {"approval_policy": "never", "sandbox_mode": "danger-full-access"}  # config/codex/config.json
 
 
-def _without_devkit_modes(text: str, dev_root: Path) -> tuple:
+def codex_trusted_roots() -> list:
+    """The project folders write_codex_config trusts in Codex: the dev root and each main checkout
+    registry.discover() finds in it, as the paths it writes them."""
+    from . import registry
+    mains, _, _ = registry.discover()
+    return list(dict.fromkeys([str(DEV)] + [str(m) for m in mains]))
+
+
+def _without_devkit_modes(text: str, trusted) -> tuple:
     """Codex's config.toml without what devkit set on the premise that its guard runs: approval_policy "never" and
     sandbox_mode "danger-full-access" at the top level, and the project roots it trusts (a [projects."<path>"] table
-    for the dev root or a folder in it whose only key is trust_level = "trusted"). A value the person chose, a table
-    in a profile, a project outside the dev root and a project table with keys of the person's own stay.
-    -> (text, [what went, in words])"""
+    for a folder of `trusted`, codex_trusted_roots(), whose only key is trust_level = "trusted"). A value the person
+    chose, a table in a profile, a trust the person accepted in Codex for any other folder, and a project table with
+    keys of the person's own stay. -> (text, [what went, in words])"""
     blocks = [[None, []]]
     for line in text.splitlines(keepends=True):
         m = _TOML_HEADER.match(line)
@@ -1857,7 +1861,7 @@ def _without_devkit_modes(text: str, dev_root: Path) -> tuple:
             blocks.append([m.group(1), [line]])
         else:
             blocks[-1][1].append(line)
-    out, modes, roots, root = [], [], 0, str(dev_root).rstrip("/")
+    out, modes, roots, ours = [], [], 0, {str(t).rstrip("/") for t in trusted}
     for name, lines in blocks:
         if name is None:
             for line in lines:
@@ -1870,7 +1874,7 @@ def _without_devkit_modes(text: str, dev_root: Path) -> tuple:
         p = re.fullmatch(r"""projects\s*\.\s*(?:"([^"\\]+)"|'([^']+)')""", name)
         path = p and (p.group(1) or p.group(2))
         body = [s for s in (ln.strip() for ln in lines[1:]) if s and not s.startswith("#")]
-        if path and (path == root or path.startswith(root + "/")) and len(body) == 1 and \
+        if path and path.rstrip("/") in ours and len(body) == 1 and \
                 re.fullmatch(r"""trust_level\s*=\s*(["'])trusted\1""", body[0]):
             roots += 1
             continue
@@ -2045,7 +2049,7 @@ def _remove_agent(agent: str, home: Path, dry: bool = False) -> list:
         servers, _ = ext.codex_mcp_servers(text)  # a server with lines the reader cannot read is never devkit's
         mcp = _devkit_mcp(catalog, {n: e["table"] for n, e in servers.items() if not e["unread"]})
         new = _without_toml_tables(text, [f"mcp_servers.{m}" for m in mcp]) if mcp else text
-        new, modes = _without_devkit_modes(new, DEV)
+        new, modes = _without_devkit_modes(new, codex_trusted_roots())
         if new != text:
             if not dry:
                 backup(toml)

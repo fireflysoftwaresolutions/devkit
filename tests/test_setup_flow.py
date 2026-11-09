@@ -987,9 +987,10 @@ class AgentOffTests(unittest.TestCase):
             "enabledPlugins": {"devkit@firefly-devkit": True, "superpowers@claude-plugins-official": True}}))
         return claude, codex, agents, share
 
-    def patched(self, tmp: Path, claude, codex, agents, share, person=True, audits=None):
-        """The removal's world in `tmp`: the agents' folders, devkit's state, no agent CLIs, and the caller (`person`:
-        the developer in a terminal, or a process an agent started). Audit records go to `audits`, never this Mac's."""
+    def patched(self, tmp: Path, claude, codex, agents, share, person=True, audits=None, mains=()):
+        """The removal's world in `tmp`: the agents' folders, devkit's state, no agent CLIs, the projects devkit found
+        in the dev root (`mains`), and the caller (`person`: the developer in a terminal, or a process an agent
+        started). Audit records go to `audits`, never this Mac's."""
         stack = contextlib.ExitStack()
         for p in (mock.patch.object(setup, "CLAUDE_HOME", claude), mock.patch.object(setup, "CODEX_HOME", codex),
                   mock.patch.object(setup, "AGENTS_HOME", agents), mock.patch.object(setup, "SKILLS_SHARE", share),
@@ -997,7 +998,8 @@ class AgentOffTests(unittest.TestCase):
                   mock.patch.object(core, "older_copy", lambda: None), mock.patch.object(core, "have", lambda t: False),
                   mock.patch.object(core, "set_by_developer", lambda *a, **k: person),
                   mock.patch.object(setup, "_audit", lambda *a, **k: (audits if audits is not None else []).append(a)),
-                  mock.patch("devkit.ext.effective_mcp", lambda a: dict(CATALOG_MCP))):
+                  mock.patch("devkit.ext.effective_mcp", lambda a: dict(CATALOG_MCP)),
+                  mock.patch("devkit.registry.discover", lambda: ([Path(m) for m in mains], [], []))):
             stack.enter_context(p)
         return stack
 
@@ -1255,9 +1257,9 @@ class AgentOffTests(unittest.TestCase):
 
     def test_turning_codex_off_drops_the_full_access_modes_and_project_trust_devkit_set(self):
         """Codex: approval_policy "never", sandbox_mode "danger-full-access" and the project roots devkit trusts (the
-        dev root and folders in it, trust_level alone) go, after a backup; a value the person chose, a project
-        outside the dev root, and a project table with keys of the person's own stay. A second run changes
-        nothing."""
+        dev root and the projects it found there, trust_level alone) go, after a backup; a value the person chose, a
+        trust the person accepted in Codex for another folder of the dev root, a project outside it, and a project
+        table with keys of the person's own stay. A second run changes nothing."""
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
             claude, codex, agents, share = self.homes(tmp)
@@ -1265,16 +1267,19 @@ class AgentOffTests(unittest.TestCase):
             text = ('model = "gpt-6"\napproval_policy = "never"\nsandbox_mode = "danger-full-access"\n\n'
                     f'[projects."{dev}"]\ntrust_level = "trusted"\n\n'
                     f'[projects."{dev}/acme/api"]\ntrust_level = "trusted"\n\n'
+                    f'[projects."{dev}/acme/api/docs"]\ntrust_level = "trusted"\n\n'
                     f'[projects."{dev}/acme/web"]\ntrust_level = "trusted"\nmodel = "mine"\n\n'
                     '[projects."/Users/ana/work"]\ntrust_level = "trusted"\n\n'
                     '[profiles.safe]\nsandbox_mode = "danger-full-access"\n')
             (codex / "config.toml").write_text(text)
-            with self.patched(tmp, claude, codex, agents, share), mock.patch.object(setup, "DEV", dev):
+            with self.patched(tmp, claude, codex, agents, share, mains=[dev / "acme" / "api", dev / "acme" / "web"]), \
+                    mock.patch.object(setup, "DEV", dev):
                 gone = setup.remove_agent("codex")
                 after = (codex / "config.toml").read_text()
                 self.assertEqual(setup.remove_agent("codex"), [])
             saved = [p.read_text() for p in (tmp / "state" / "backups").glob("config.toml.*")]
         self.assertEqual(after, 'model = "gpt-6"\n\n'
+                                f'[projects."{dev}/acme/api/docs"]\ntrust_level = "trusted"\n\n'
                                 f'[projects."{dev}/acme/web"]\ntrust_level = "trusted"\nmodel = "mine"\n\n'
                                 '[projects."/Users/ana/work"]\ntrust_level = "trusted"\n\n'
                                 '[profiles.safe]\nsandbox_mode = "danger-full-access"\n')
