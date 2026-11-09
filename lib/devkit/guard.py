@@ -2145,6 +2145,10 @@ SETTINGS_UNSEEN_REASON = ("This command writes {what}, an agent settings file, a
                           "the text), so it cannot tell whether the write turns devkit's hooks off. Write the file "
                           "with the Write or Edit tool (Codex: apply_patch), which the guard judges by the file's "
                           "text, or write the text out in full in an echo, printf or quoted heredoc.")
+SETTINGS_UNREAD_REASON = ("{what} is an agent settings file the guard cannot read in full (too large, or unreadable), "
+                          "so it cannot tell what an append, a `<>` write or a patch leaves in it, or whether that "
+                          "turns devkit's hooks off. Write the file's whole text with the Write tool or a `>` redirect "
+                          "that holds it in full, or ask the developer why the file is that large.")
 
 
 # --------------------------------------------------------------------------- protected state (spec C11, K1)
@@ -2392,6 +2396,16 @@ def _note_unread(p):
     seen = _UNREAD.get()
     if seen is not None:
         seen.append(str(p))
+
+
+def _whole_text(p, limit: int = 1 << 20):
+    """The text of file `p` ("" when there is none), or None when it exists and the guard cannot read it in full
+    (larger than `limit`, or unreadable); an outer _skipped_reads still hears of it."""
+    with _skipped_reads() as unread:
+        text = _read_small(p, limit)
+    for q in unread:
+        _note_unread(q)
+    return None if unread else text
 
 
 def _shell_script_head(p) -> bool:
@@ -2857,13 +2871,18 @@ def patch_devkit_off(patch: str, cwd):
         src = resolve(f["path"], cwd)
         target = f["move"] or f["path"]
         added = "\n".join(ln[1:] for ln in f["lines"] if ln.startswith("+"))
-        before = _read_small(src, 1 << 20) if src != UNKNOWN and Path(str(src)).is_file() else ""
+        dst = resolve(target, cwd)
+        paths = list(dict.fromkeys(str(x) for x in (_lexical(target, cwd), dst) if x != UNKNOWN))
+        before = _whole_text(src) if src != UNKNOWN and Path(str(src)).is_file() else ""
+        if before is None:  # a source the guard cannot read in full: what an update or a move leaves is unknown
+            if f["op"] != "add" and any(agent_settings(p) for p in paths):
+                return deny(SETTINGS_UNREAD_REASON.format(what=_code(core.tilde(str(target)))), key="settings-unseen")
+            before = ""
         after = added if f["op"] == "add" else patched(before, f["lines"])
         # a hunk that does not apply or only adds lines leaves no text after the patch: its added lines are parsed as
         # TOML too, after the file's text and alone, so a key with a \u escape counts as Codex reads it
         texts = [after] if after is not None else ["", before.rstrip("\n") + "\n" + added, added]
-        dst = resolve(target, cwd)
-        for path in dict.fromkeys(str(x) for x in (_lexical(target, cwd), dst) if x != UNKNOWN):
+        for path in paths:
             v = devkit_off_texts(path, texts, [added])
             if v:
                 return v
@@ -3792,10 +3811,12 @@ class _Shell:
         # the file's text before this write: none for `>`; else what an earlier write of this command left (`> f;
         # >> f`), or what the file holds now. An append is judged by the whole text it leaves, so text split across
         # two commands (`printf '{"disableAllHooks": ' > f`, then `printf 'true}' >> f`) counts as one.
-        if mode == "truncate":
-            before = [""]
-        else:
-            before = self.written.get(str(where)) or [_read_small(hit, 1 << 20) if hit is not None else ""]
+        before = [""] if mode == "truncate" else self.written.get(str(where))
+        if not before:  # the file's text now; one the guard cannot read in full could finish what this adds
+            whole = _whole_text(hit) if hit is not None else ""
+            if whole is None:
+                return deny(SETTINGS_UNREAD_REASON.format(what=_code(core.tilde(str(where)))), key="settings-unseen")
+            before = [whole]
         texts = list(dict.fromkeys((w + b[len(w):]) if mode == "overwrite" else b + w for b in before for w in text))
         if len(texts) > 64:  # too many readings to judge: refused as unseen
             return deny(SETTINGS_UNSEEN_REASON.format(what=_code(core.tilde(str(where)))), key="settings-readings")

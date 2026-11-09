@@ -78,6 +78,18 @@ class ApplyPatchOnAgentSettings(unittest.TestCase):
         self.assertEqual(self.verdict(patch(f"*** Update File: {src}", f"*** Move to: {cfg}", "@@",
                                             '-model = "a"', '+model = "b"')), "allow")
 
+    def test_an_update_of_a_settings_file_too_big_to_read_is_denied(self):
+        # over the guard's read limit the patch cannot be placed in the file's text, so its added lines could finish
+        # a key the file starts; an Add writes the whole text and is judged by it
+        cfg, big = self.codex / "config.toml", self.codex / "big.toml"
+        for f in (cfg, big):
+            f.write_text("[features]\n" + "# pad\n" * (1 << 18) + "hooks =\n")
+        self.assertEqual(self.verdict(patch(f"*** Update File: {cfg}", "@@", "+false")), "deny")
+        self.assertEqual(self.verdict(patch(f"*** Update File: {big}", f"*** Move to: {self.codex / 'hooks.json'}",
+                                            "@@", "+false")), "deny")
+        self.assertEqual(self.verdict(patch(f"*** Update File: {big}", "@@", "+false")), "allow")
+        self.assertEqual(self.verdict(patch(f"*** Add File: {cfg}", "+[features]", '+model = "b"')), "allow")
+
     def test_a_path_in_another_case_names_the_same_file_on_macos_and_is_denied(self):
         for name in (".Codex/config.toml", ".codex/Config.TOML"):
             with self.subTest(name=name):
@@ -351,6 +363,18 @@ class ShellWritesOnAgentSettings(unittest.TestCase):
         self.assertEqual(self.verdicts("printf 'true}' >> .claude/settings.json"), {"allow"})
         settings.write_text('{"enabledPlugins": {"devkit@firefly-devkit": ')
         self.pairs([("printf 'false}}' >> .claude/settings.json", "printf 'true}}' >> .claude/settings.json")])
+
+    def test_an_append_to_a_settings_file_too_big_to_read_is_refused(self):
+        # over the guard's read limit the file's text is unknown, so an append or a <> could finish a key the file
+        # starts; a > replaces the text and is judged by what it writes
+        big = '{"pad": "' + "x" * (1 << 20) + '", "disableAllHooks": '
+        (Path(self.cwd) / ".claude" / "settings.json").write_text(big)
+        (Path(self.cwd) / "staged" / "big.json").write_text(big)
+        self.pairs([
+            ("printf 'true}' >> .claude/settings.json", "printf 'true}' >> staged/big.json"),
+            ("printf 'true}' | tee -a .claude/settings.json", "printf '{}' | tee .claude/settings.json"),
+            ("printf '{}' 1<> .claude/settings.json", "printf '{}' > .claude/settings.json"),
+        ])
 
     def test_reading_the_settings_files_stays_allowed(self):
         for cmd in ("cat .codex/config.toml", "grep -n hooks .claude/settings.json", "sed -n 1p .codex/config.toml",
