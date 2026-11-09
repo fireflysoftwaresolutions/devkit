@@ -99,6 +99,59 @@ class SettleOnlyByTheDeveloperTests(PeerHookCase):
                 self.assertEqual([e["id"] for e in peers.escalations("open")], [eid])
                 self.assertEqual(peers.take("claude", CLAUDE_A), [])
 
+    # a tool call's PostToolUse in session `sid`, the main session's unless `more` names a crew member
+    def tool_done(self, sid, **more):
+        self.n += 1
+        self.hook("post-tool", "claude", self.claude(
+            "PostToolUse", sid, tool_name="Bash", tool_use_id=f"toolu_{self.n}", tool_input={"command": "ls"},
+            tool_response={"stdout": "", "stderr": "", "interrupted": False}, **more))
+
+    # A waiting line is bound to the prompt id its prompt hook saw: a record of another prompt of the developer that
+    # holds the same line does not confirm it
+    def test_a_waiting_line_needs_the_record_of_its_own_prompt_id(self):
+        eid = self.escalation()
+        line = f"settle {eid}: A"
+        self.prompt("claude", CLAUDE_B, line, typed=False)
+        self.typed(CLAUDE_B, line, f"p-{self.n}-later")
+        self.tool_done(CLAUDE_B)
+        self.assertEqual([e["id"] for e in peers.escalations("open")], [eid])
+        self.assertEqual(peers.take("claude", CLAUDE_A), [])
+
+    # Two hooks of the session racing on one waiting line: the one that takes it out of the session record under the
+    # lock settles it, and the other acts on nothing (it does not even try to settle)
+    def test_two_hooks_racing_on_a_waiting_line_settle_it_once(self):
+        eid = self.escalation()
+        line = f"settle {eid}: A"
+        self.prompt("claude", CLAUDE_B, line, typed=False)
+        self.typed(CLAUDE_B, line, f"p-{self.n}")
+        typed, settle, raced, inner, calls = peers._typed, peers._settle, [], [], []
+
+        def racing(sid, uuid, ln):  # the other hook runs while this one reads the transcript
+            if not raced:
+                raced.append(True)
+                inner.extend(peers.settle_waiting("claude", CLAUDE_B))
+            return typed(sid, uuid, ln)
+
+        def counted(*a, **k):
+            calls.append(a[4])
+            return settle(*a, **k)
+        with mock.patch.object(peers, "_typed", racing), mock.patch.object(peers, "_settle", counted):
+            outer = peers.settle_waiting("claude", CLAUDE_B)
+        self.assertEqual(([d["id"] for d in inner], outer, len(calls)), ([eid], [], 1))
+        self.assertEqual([m["kind"] for m in peers.take("claude", CLAUDE_A)], ["settled"])
+
+    # A crew member's hook (its payload carries agent_id) never settles a waiting line; the main session's next hook
+    # does
+    def test_a_crew_members_hook_settles_nothing(self):
+        eid = self.escalation()
+        line = f"settle {eid}: B"
+        self.prompt("claude", CLAUDE_B, line, typed=False)
+        self.typed(CLAUDE_B, line, f"p-{self.n}")
+        self.tool_done(CLAUDE_B, agent_id="a_tank", agent_type="devkit:tank")
+        self.assertEqual([e["id"] for e in peers.escalations("open")], [eid])
+        self.tool_done(CLAUDE_B)
+        self.assertEqual(peers.escalations("settled")[0]["settled"]["choice"], "B")
+
 
 class RecencyGuessTests(PeerCase):
     def setUp(self):

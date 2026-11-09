@@ -1633,14 +1633,14 @@ def escalate(sender: dict, about: str, question: str, options: list, recommend="
         if res.get("eid"):
             break
     text = (f"escalation {eid} for the developer: {question} · options: " + "; ".join(opts) +
-            (f" · recommended: {rec}" if rec else "") + f" · the developer settles it by typing, in a Claude Code "
-                                                         f"session: settle {eid}: <choice>")
+            (f" · recommended: {rec}" if rec else "") + f" · the developer settles it by typing: settle {eid}: "
+                                                         f"<choice>")
     msg = _message(mid, "escalation", me.frm(), str(about)[:80], text, now, ref=eid)
     to, skipped, _ = _fan_out(view, me, others, msg, False)
     _record_sent(me, {"id": mid, "ts": now, "kind": "escalation", "target": msg["target"], "to": to,
                       "skipped": skipped, "answered_by": [], "closed": False})
     _notify("escalation for the developer", f"{eid} from {me.project or '-'}: {_one_line(question)} · settle it "
-                                            f"in a Claude Code session: settle {eid}: <choice>")
+                                            f"in any session: settle {eid}: <choice>")
     _audit("peer.escalate", eid, f"{len(opts)} options, {len(parties)} parties", kind="escalation",
            count=len(parties), recipients=parties)
     return {"id": eid, "message": mid, "parties": parties, "to": to, "skipped": skipped, "notified": list(to)}
