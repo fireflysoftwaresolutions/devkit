@@ -57,6 +57,7 @@ class HookCase(unittest.TestCase):
 
     def lesson(self, title, **anchors):
         return lessons.add("acme/api", title, cause="cause of " + title, prevention="prevention of " + title, a=A,
+                           happened="it happened: " + title,
                            **anchors)["meta"]["id"]
 
     def bash(self, cmd, aid=None, tid="toolu_1"):

@@ -1,38 +1,21 @@
 # Copyright (c) 2026 Firefly Software Solutions Inc.
 # SPDX-License-Identifier: Apache-2.0
-"""The lessons tests' shared fixture: a temporary handoff repository and devkit state for each test, a fixed actor, a
-lesson writer with a valid capture shape, and the lesson checks (lessonlint) ready to patch."""
+"""The lessons tests' shared fixture: a temporary handoff repository and devkit state for each test, a fixed actor, and
+a lesson writer whose lessons pass the capture checks (lessonlint) unless a test patches them."""
 import os
 import sys
 import tempfile
 import time
-import types
 import unittest
 from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
-from devkit import core, lessons, work  # noqa: E402
+from devkit import core, lessonlint, lessons, work  # noqa: E402
 
 A = {"user": "ana", "host": "mbp1", "agent": "claude", "session": "s1"}
 DAY = 86400
-
-
-def lint_module():
-    """devkit.lessonlint; while it is not built yet, a stand-in whose checks pass, so the wiring can be tested."""
-    try:
-        from devkit import lessonlint
-        return lessonlint
-    except ImportError:
-        stand_in = sys.modules.get("devkit.lessonlint")
-        if stand_in is None:
-            stand_in = types.ModuleType("devkit.lessonlint")
-            stand_in.check_anchors = lambda anchors: []
-            stand_in.check_shape = lambda title, happened, evidence: []
-            stand_in.screen = lambda fields: ""
-            sys.modules["devkit.lessonlint"] = stand_in
-        return stand_in
 
 
 class LessonCase(unittest.TestCase):
@@ -51,7 +34,7 @@ class LessonCase(unittest.TestCase):
         ai_off = mock.patch.dict(core.CFG, {"ai": {"enabled": False}})  # never a real model call in tests
         ai_off.start()
         self.addCleanup(ai_off.stop)
-        self.lint = lint_module()
+        self.lint = lessonlint
 
     def add(self, title, scope="acme/api", **kw):
         kw.setdefault("happened", "it happened in " + title)

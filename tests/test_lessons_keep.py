@@ -25,7 +25,7 @@ class ArchivePolicyTests(LessonCase):
             lessons.recur(les, "seen again", a=A)
         where = {"commands": ["make deploy"], "errors": ["deploy key was rejected"], "files": ["deploy/**"]}
         x = self.add("Deploy key rejected on the first run", **where)
-        y = self.add("Deploy key rejected again", **where)
+        y = self.add("Deploy key rejected again", new=True, why="a near-duplicate for the merge", **where)
         acts = lessons.consolidate()
         merges = [(i, d) for k, i, d in acts if k == "merge"]
         self.assertEqual(len(merges), 1)
@@ -82,7 +82,8 @@ class CapRestoreTests(LessonCase):
 class MergeVerdictTests(LessonCase):
     def test_the_model_judges_a_pair_once_and_only_when_it_shares_an_error_or_command(self):
         x = self.add("Deploy key rejected", commands=["make deploy"], files=["deploy/a/**"], activities=["release"])
-        y = self.add("Deploy failed on staging", commands=["make deploy"], files=["deploy/b/**"], stack=["python"])
+        y = self.add("Deploy failed on staging", commands=["make deploy"], files=["deploy/b/**"], stack=["python"],
+                     new=True, why="a different failure of the same command")
         self.add("Web build broke", files=["web/**"], stack=["angular"])
         self.add("Web styles broke", files=["web/**"], activities=["frontend"])
         asked = []

@@ -44,10 +44,15 @@ SEVERITIES = ("low", "medium", "high")
 PREVENTIONS = ("test", "lint", "type", "guard", "skill", "ci", "rule", "doc")
 ANCHORS = ("files", "commands", "activities", "errors", "stack")
 LISTS = ("tags",) + ANCHORS
+# task_ref: the work item recurrence opened; bug_ref: a bug-registry fingerprint or issue; quarantine: why the screen
+# holds the lesson out of recall; superseded_by: the lesson that replaced it; author: who wrote it. Optional: a file
+# written before them reads them as "".
+REFS = ("task_ref", "bug_ref", "quarantine", "superseded_by")
 FIELDS = ("id", "title", "scope", "kind", "severity", "status", "occurrences", "prevention", "prevention_ref",
-          "retire_when", "tags") + ANCHORS + ("first_seen", "last_seen", "version", "created_by", "updated",
-                                              "updated_by")
+          "retire_when") + REFS + ("tags",) + ANCHORS + ("first_seen", "last_seen", "version", "author", "created_by",
+                                                         "updated", "updated_by")
 SECTIONS = ("What happened", "Root cause", "Fix", "Prevention", "Detection", "Evidence")
+TEXT = ("title",) + SECTIONS  # what agents read, and what the screen judges
 
 
 def _dir(scope: str) -> Path:
@@ -73,6 +78,8 @@ def parse(text: str) -> dict:
             sections[cur].append(ln)
     meta["occurrences"] = int(meta.get("occurrences") or 1)
     meta["version"] = int(meta.get("version") or 1)
+    for k in REFS + ("author",):
+        meta[k] = meta.get(k) or ""
     return {"meta": meta, "extra": extra, "sections": {k: "\n".join(v).strip() for k, v in sections.items()},
             "changelog": changelog}
 
@@ -111,17 +118,29 @@ def all_lessons(scope: str = None, archived: bool = False) -> list:
     return [load(f) for f in files]
 
 
+def is_archived(les: dict) -> bool:
+    try:
+        return Path(les["path"]).relative_to(LESSONS).parts[0] == ARCHIVE
+    except (KeyError, ValueError, IndexError):
+        return False
+
+
 def find(selector: str, scope: str = None) -> dict:
+    """A lesson by id (exact or unique prefix) or a unique part of its title: active lessons first, then the
+    archive, so a mistake that repeats an archived lesson finds it."""
     sel = selector.strip().lower()
-    items = all_lessons(scope) or all_lessons()
-    exact = [x for x in items if x["meta"]["id"].lower() == sel]
-    if exact:
-        return exact[0]
-    hits = [x for x in items if x["meta"]["id"].lower().startswith(sel) or sel in x["meta"]["title"].lower()]
-    if len(hits) == 1:
-        return hits[0]
-    raise ValueError(f"“{selector}” matches {len(hits)} lessons" + (": " + ", ".join(h["meta"]["id"] for h in hits[:5])
-                                                                    if hits else ""))
+    shelves = (all_lessons(scope) or all_lessons(), all_lessons(scope, archived=True) or all_lessons(archived=True))
+    for items in shelves:
+        exact = [x for x in items if x["meta"]["id"].lower() == sel]
+        if exact:
+            return exact[0]
+    for items in shelves:
+        hits = [x for x in items if x["meta"]["id"].lower().startswith(sel) or sel in x["meta"]["title"].lower()]
+        if len(hits) == 1:
+            return hits[0]
+        if hits:
+            raise ValueError(f"“{selector}” matches {len(hits)} lessons: " + ", ".join(h["meta"]["id"] for h in hits[:5]))
+    raise ValueError(f"“{selector}” matches 0 lessons")
 
 
 def _log(les: dict, a: dict, op: str, why: str = ""):
@@ -137,9 +156,21 @@ def anchors(les: dict) -> dict:
     return {k: [str(x) for x in m.get(k)] if isinstance(m.get(k), list) else [] for k in ANCHORS}
 
 
+def _lint():
+    """The capture checks (lessonlint), imported when a lesson is written."""
+    from . import lessonlint
+    return lessonlint
+
+
+def _refuse(errors: list) -> None:
+    if errors:
+        raise ValueError("; ".join(errors))
+
+
 def _clean_anchors(**given) -> dict:
-    """The anchors given, validated: one line each, no commas (the front matter's list separator), and activity ids
-    the crew's RACI knows."""
+    """The anchors given, validated: one line each, no commas (the front matter's list separator), activity ids the
+    crew's RACI knows, and the anchor gate (lessonlint.check_anchors: no bare common program as a command, no short or
+    stoplisted error). Only anchors being added are judged: a lesson written before the gate still loads."""
     out = {}
     for k in ANCHORS:
         items = []
@@ -155,12 +186,67 @@ def _clean_anchors(**given) -> dict:
             if x not in items:
                 items.append(x)
         out[k] = items
+    _refuse(_lint().check_anchors(out))
     return out
+
+
+class Duplicate(ValueError):
+    """`add` found a lesson, active or archived, that records the same mistake: an error or command anchor in common.
+    `lesson`: that lesson."""
+
+    def __init__(self, les: dict):
+        self.lesson = les
+        lid = les["meta"]["id"]
+        where = ", archived" if is_archived(les) else ""
+        super().__init__(f"looks like {lid} (“{les['meta']['title'][:80]}”{where}): run `dev lesson recur {lid} "
+                         f"--evidence …`, or add `--new --why …` if it is another mistake")
+
+
+def same_record(scope: str, anchored: dict) -> list:
+    """The lessons of this scope and the global ones, active or archived, that share an error anchor (any case) or a
+    command anchor with these anchors: the active ones first, then by occurrences. A superseded lesson is left out
+    (its successor is the one to recur)."""
+    errs = {e.casefold() for e in anchored.get("errors") or []}
+    cmds = set(anchored.get("commands") or [])
+    if not (errs or cmds):
+        return []
+    scopes = [scope] + ([] if scope == "global" else ["global"])
+    hits, seen = [], set()
+    for archived in (False, True):
+        for s in scopes:
+            for les in all_lessons(s, archived=archived):
+                m, an = les["meta"], anchors(les)
+                if m["id"] in seen or m.get("superseded_by") or m.get("scope") != s:
+                    continue
+                if errs & {e.casefold() for e in an["errors"]} or cmds & set(an["commands"]):
+                    seen.add(m["id"])
+                    hits.append((archived, -m["occurrences"], les))
+    return [les for _, _, les in sorted(hits, key=lambda h: h[:2])]
+
+
+def author_of(a: dict, role: str = "") -> str:
+    """Who writes a lesson: a person as user@host; an agent as `<role or agent> · <agent>:<session> · user@host`."""
+    person = f"{a['user']}@{a['host']}"
+    if (a.get("agent") or "human") == "human":
+        return f"{role} · {person}" if role else person
+    run = f"{a['agent']}:{a['session']}" if a.get("session") else a["agent"]
+    return " · ".join((role or f"{a['agent']} agent", run, person))
+
+
+def _screen(fields: dict) -> str:
+    """The reason the screen (lessonlint.screen) holds this text out of recall, or ""."""
+    return _lint().screen({k: v for k, v in fields.items() if v}) if fields else ""
 
 
 def add(scope: str, title: str, kind: str = "mistake", severity: str = "medium", happened: str = "", cause: str = "",
         fix: str = "", prevention: str = "", detection: str = "", evidence=None, tags=None, why: str = "",
-        a=None, retire_when: str = "", files=None, commands=None, activities=None, errors=None, stack=None) -> dict:
+        a=None, retire_when: str = "", files=None, commands=None, activities=None, errors=None, stack=None,
+        new: bool = False, author: str = "") -> dict:
+    """Record a lesson. Refused (ValueError) by the anchor gate, the capture shape (lessonlint.check_shape), or a
+    lesson of this scope or the global ones, active or archived, that shares an error or command anchor (Duplicate;
+    `new=True` with a `why` records it anyway). Text the screen judges unsafe is recorded but held: `quarantine`
+    says why, and recall leaves it out until the developer releases it. `author`: the writer's role (an agent) or
+    name; the agent, session and machine are added."""
     anchored = _clean_anchors(files=files, commands=commands, activities=activities, errors=errors, stack=stack)
     if kind not in KINDS:
         raise ValueError(f"kind must be one of {', '.join(KINDS)}")
@@ -169,18 +255,29 @@ def add(scope: str, title: str, kind: str = "mistake", severity: str = "medium",
     if not (cause.strip() and prevention.strip()):
         raise ValueError("a lesson needs the root cause (--cause) and the prevention (--prevent): what makes it not "
                          "happen again")
+    evidence = [str(e) for e in evidence or []]
+    _refuse(_lint().check_shape(title, happened, evidence))
+    twins = same_record(scope, anchored)
+    if twins and not new:
+        raise Duplicate(twins[0])
+    if twins and not why.strip():
+        raise ValueError(f"it looks like {twins[0]['meta']['id']}: say why it is another mistake (--why \"…\")")
     a = a or work.actor()
     lid = "L-" + work.new_id("task")[2:]
     now, day = work.now_iso(), today()
+    sections = {"What happened": happened, "Root cause": cause, "Fix": fix, "Prevention": prevention,
+                "Detection": detection, "Evidence": "\n".join(f"- {e}" for e in evidence)}
     les = {"meta": {"id": lid, "title": title.strip(), "scope": scope, "kind": kind, "severity": severity,
                     "status": "open", "occurrences": 1, "prevention": "rule", "prevention_ref": "",
-                    "retire_when": retire_when.strip(),
+                    "retire_when": retire_when.strip(), "task_ref": "", "bug_ref": "",
+                    "quarantine": _screen({"title": title, **sections}), "superseded_by": "",
                     "tags": list(tags or []), **anchored, "first_seen": day, "last_seen": day, "version": 1,
-                    "created_by": f"{a['user']}@{a['host']}", "updated": now, "updated_by": f"{a['user']}@{a['host']}"},
-           "extra": [],
-           "sections": {"What happened": happened, "Root cause": cause, "Fix": fix, "Prevention": prevention,
-                        "Detection": detection, "Evidence": "\n".join(f"- {e}" for e in evidence or [])},
-           "changelog": [f"v1 · {now} · {work.actor_str(a)} · recorded" + (f" — why: {why}" if why else "")]}
+                    "author": author_of(a, author.strip()), "created_by": f"{a['user']}@{a['host']}", "updated": now,
+                    "updated_by": f"{a['user']}@{a['host']}"},
+           "extra": [], "sections": sections,
+           "changelog": [f"v1 · {now} · {work.actor_str(a)} · recorded" +
+                         (f" as another mistake than {twins[0]['meta']['id']}" if twins else "") +
+                         (f" — why: {why}" if why else "")]}
     path = _dir(scope) / f"{lid}.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     work.write_record(path, render(les))
@@ -199,11 +296,13 @@ def _lock_of(lid: str) -> Path:
     return _state_file("lessons") / f"{lid}.md"
 
 
-def update(les: dict, op, why: str = "", a=None, apply=None, **changes) -> dict:
+def update(les: dict, op, why: str = "", a=None, apply=None, paths=(), **changes) -> dict:
     """Change a lesson and record it, under the lesson's lock: re-read the file, apply the changes (and those
     `apply(fresh lesson) -> dict` computes from what is on disk, so concurrent writers never undo each other), then
     replace the file atomically, refusing to drop any line this change does not edit (work.write_record). `op` may
-    be a function of the fresh lesson. The commit to the handoff repository runs after the lock is released."""
+    be a function of the fresh lesson. Text that changes is screened: when the screen holds it, `quarantine` says
+    why (only `release` clears it). The commit, with any other `paths` the change moved or removed, runs after the
+    lock is released."""
     a = a or work.actor()
     path = Path(les["path"])
     with state.hold(_lock_of(les["meta"]["id"])):
@@ -212,40 +311,110 @@ def update(les: dict, op, why: str = "", a=None, apply=None, **changes) -> dict:
             changes = {**changes, **apply(les)}
         if callable(op):
             op = op(les)
-        m, edited = les["meta"], []
+        m, edited, changed = les["meta"], [], {}
         for k, v in changes.items():
             if k in les["sections"] or k in SECTIONS:
                 old = les["sections"].get(k) or ""
                 if old != v:
                     edited += old.splitlines()
+                    changed[k] = v
                 les["sections"][k] = v
             else:
                 if k == "title" and m.get("title") != v:
                     edited.append(f"# {m.get('title')}")
+                    changed[k] = v
                 m[k] = v
+        held = _screen(changed)
+        if held:
+            m["quarantine"] = held
         m["version"] = int(m.get("version") or 1) + 1
-        _log(les, a, op, why)
+        _log(les, a, op + (f"; held: {held}" if held else ""), why)
         work.write_record(path, render(les), edited)
     les["path"] = path
-    work._commit([path], f"{m['id']}: {op} v{m['version']} ({work.actor_str(a)})" + (f" — {why}" if why else ""))
+    work._commit([path] + _committable(paths),
+                 f"{m['id']}: {op} v{m['version']} ({work.actor_str(a)})" + (f" — {why}" if why else ""))
     return les
 
 
+def _committable(paths) -> list:
+    """The paths a commit can name: those that exist, and removed ones git tracks (git add refuses the others)."""
+    out = []
+    for p in paths:
+        p = Path(p)
+        if p.exists():
+            out.append(p)
+        elif (work.HANDOFF / ".git").exists():
+            try:
+                rel = str(p.relative_to(work.HANDOFF))
+            except ValueError:
+                continue
+            if core.git(work.HANDOFF, "ls-files", "--error-unmatch", "--", rel)[0] == 0:
+                out.append(p)
+    return out
+
+
+def _copies(les: dict):
+    """(active path, archived path) of a lesson's id in its scope."""
+    name, scope = f"{les['meta']['id']}.md", les["meta"]["scope"]
+    return _dir(scope) / name, LESSONS / ARCHIVE / scope / name
+
+
+def _settle(les: dict, a=None) -> dict:
+    """One id, one file. When a lesson is both active and archived (a restore that raced an archive, or a repeat
+    recorded on another machine while it was archived), keep the copy with the most history (version, then
+    occurrences; the active one on a tie) at the active path, remove the other, and record it. -> the lesson."""
+    act, arc = _copies(les)
+    if not (act.exists() and arc.exists()):
+        return les
+    with state.hold(_lock_of(les["meta"]["id"])):
+        if not (act.exists() and arc.exists()):
+            return load(act if act.exists() else arc)
+        mine, other = load(act), load(arc)
+        rank = (lambda x: (x["meta"]["version"], x["meta"]["occurrences"]))
+        if rank(other) > rank(mine):
+            work._replace(act, arc.read_text())
+            op = f"kept the archived copy (v{other['meta']['version']}) over the active one (v{mine['meta']['version']})"
+            changes = {"status": status_before_archive(other)}
+        else:
+            op = f"kept the active copy (v{mine['meta']['version']}); removed the archived one " \
+                 f"(v{other['meta']['version']})"
+            changes = {}
+        arc.unlink()
+    return update(load(act), op, "one lesson, one file", a, paths=[arc], **changes)
+
+
+def _unarchive(les: dict) -> tuple:
+    """Move an archived lesson's file back to its scope, under its lock (a second writer finds it moved).
+    -> (the lesson at its active path, the archived path to commit)."""
+    act, arc = _copies(les)
+    with state.hold(_lock_of(les["meta"]["id"])):
+        if arc.exists() and not act.exists():
+            act.parent.mkdir(parents=True, exist_ok=True)
+            arc.rename(act)
+    les["path"] = act
+    return les, arc
+
+
 def recur(les: dict, evidence: str = "", why: str = "", a=None) -> dict:
-    """Count a repeat, from the lesson as it is on disk (two agents recording the same repeat both count). A retired
-    or prevented lesson that happens again is open again: its prevention did not hold, and recall shows only open
-    lessons. The changelog line says which prevention failed."""
+    """Count a repeat, from the lesson as it is on disk (two agents recording the same repeat both count). An
+    archived lesson comes back to its scope. A retired or prevented lesson that happens again is open again: its
+    prevention did not hold, and recall shows only open lessons. The changelog line says which prevention failed."""
     day = today()
+    les, moved = _settle(les, a), ()
+    if is_archived(les):
+        les, arc = _unarchive(les)
+        moved = (arc,)
 
     def what(fresh):
         m = fresh["meta"]
+        was = status_before_archive(fresh) if moved else m.get("status")
         op = f"happened again (#{m['occurrences'] + 1})"
-        if m.get("status") == "prevented":
+        if was == "prevented":
             ref = f" ({m['prevention_ref']})" if m.get("prevention_ref") else ""
             op += f"; reopened: its prevention by {m.get('prevention') or 'rule'}{ref} did not hold"
-        elif m.get("status") == "retired":
+        elif was == "retired":
             op += "; reopened: it was retired"
-        return op
+        return op + ("; restored from the archive" if moved else "")
 
     def bump(fresh):
         m = fresh["meta"]
@@ -253,8 +422,38 @@ def recur(les: dict, evidence: str = "", why: str = "", a=None) -> dict:
         if evidence:
             ev = (ev + "\n" if ev and ev != "_—_" else "") + f"- {day}: {evidence}"
         return {"occurrences": m["occurrences"] + 1, "last_seen": day, "Evidence": ev,
-                "status": "open" if m.get("status") in ("retired", "prevented") else m.get("status")}
-    return update(les, what, why or evidence, a, apply=bump)
+                "status": "open" if moved or m.get("status") in ("retired", "prevented") else m.get("status")}
+    return update(les, what, why or evidence, a, apply=bump, paths=moved)
+
+
+def release(les: dict, why: str, a=None) -> dict:
+    """Let a held lesson back into recall (the developer's call: `dev lesson release`, granted in the guard)."""
+    if not (why or "").strip():
+        raise ValueError("releasing a held lesson needs the reason: --why \"…\"")
+    if not les["meta"].get("quarantine"):
+        raise ValueError(f"{les['meta']['id']} is not held")
+    return update(les, f"released (it was held: {les['meta']['quarantine']})", why, a, quarantine="")
+
+
+def supersede(old: dict, new: dict, why: str, a=None) -> dict:
+    """Mark `old` replaced by `new`, so two contradicting lessons never both reach an agent. `new` must be a lesson
+    recall can show: active, not retired, not held, not itself superseded."""
+    o, n = old["meta"], new["meta"]
+    if not (why or "").strip():
+        raise ValueError("say why the new lesson replaces the old one: --why \"…\"")
+    if o["id"] == n["id"]:
+        raise ValueError("a lesson cannot supersede itself")
+    fresh = load(new["path"])["meta"]
+    if is_archived(new) or fresh.get("status") == "retired":
+        raise ValueError(f"{n['id']} is {'archived' if is_archived(new) else 'retired'}: restore it first")
+    if fresh.get("quarantine"):
+        raise ValueError(f"{n['id']} is held ({fresh['quarantine']}): it can replace a lesson once the developer "
+                         f"releases it")
+    if fresh.get("superseded_by"):
+        raise ValueError(f"{n['id']} is itself superseded by {fresh['superseded_by']}")
+    old = update(old, f"superseded by {n['id']}", why, a, superseded_by=n["id"])
+    update(new, f"supersedes {o['id']}", why, a)
+    return old
 
 
 def prevent(les: dict, by: str, ref: str, why: str, a=None) -> dict:
@@ -395,7 +594,7 @@ def relevant(project: str, initiatives=(), limit: int = 5) -> list:
     """Lessons a session on this project should know: its own, its initiatives', and global ones."""
     pool = all_lessons(project) + [x for s in initiatives for x in all_lessons(f"initiatives/{s}")] + \
         all_lessons("global")
-    pool = [x for x in pool if x["meta"].get("status") == "open"]  # prevented: the automation remembers it
+    pool = [x for x in pool if recallable(x)]  # prevented: the automation remembers it
     _USAGE_CACHE["u"] = usage()
     try:
         return sorted(pool, key=_score, reverse=True)[:limit]
@@ -443,9 +642,16 @@ def runs(command: str, anchor: str) -> bool:
     return bool(want) and any(have[i:i + len(want)] == want for i in range(len(have) - len(want) + 1))
 
 
+def recallable(les: dict) -> bool:
+    """May recall show this lesson? Open (a prevented one is remembered by its automation), not held by the screen
+    and not superseded by another lesson."""
+    m = les["meta"]
+    return m.get("status") == "open" and not m.get("quarantine") and not m.get("superseded_by")
+
+
 def _pool(project: str, initiatives=()) -> list:
     return [x for x in all_lessons(project) + [y for s in initiatives for y in all_lessons(f"initiatives/{s}")]
-            + all_lessons("global") if x["meta"].get("status") == "open"]
+            + all_lessons("global") if recallable(x)]
 
 
 def _pick(project: str, scored: list, limit: int) -> list:
@@ -651,8 +857,9 @@ def archive(les: dict, why: str, a=None) -> dict:
     a = a or work.actor("devkit")
     les = update(les, "forgotten", why, a, status=les["meta"].get("status") if les["meta"].get("status") == "retired"
                  else "dormant")
+    src = les["path"]
     _move(les, LESSONS / ARCHIVE / les["meta"]["scope"] / les["path"].name)
-    work._commit([les["path"]], f"{les['meta']['id']}: forgotten (archived) — {why}")
+    work._commit([les["path"]] + _committable([src]), f"{les['meta']['id']}: forgotten (archived) — {why}")
     return les
 
 
@@ -674,9 +881,13 @@ def restore(selector: str, why: str, a=None) -> dict:
 
 
 def _bring_back(les: dict, op: str, why: str, a=None, **changes) -> dict:
-    """Move an archived lesson back to its scope and record it."""
-    _move(les, _dir(les["meta"]["scope"]) / les["path"].name)
-    return update(les, op, why, a, **changes)
+    """Move an archived lesson back to its scope and record it; when the same id is active too, keep one file."""
+    act, _ = _copies(les)
+    if act.exists():
+        return update(_settle(les, a), op, why, a, **changes)
+    src = les["path"]
+    _move(les, act)
+    return update(les, op, why, a, paths=[src], **changes)
 
 
 def _op(entry: str) -> str:

@@ -25,11 +25,13 @@ class CrewPitfallTests(unittest.TestCase):
         lessons.LESSONS, work.HANDOFF, lessons.USAGE_LOCAL = root / "lessons", root, root / "usage.json"
         self.regex = lessons.add("acme/api", "A regex rewrite broke the parser", cause="sed -i on nested code",
                                  prevention="exact-string edits that must match once", a=A,
+                                 happened="sed -i rewrote a nested call and the parser broke",
                                  activities=["feature"], files=["src/parser/**"], commands=["sed -i"])
         self.push = lessons.add("acme/api", "A third push in an hour was refused", severity="high",
-                                cause="speculative CI fixes", prevention="reproduce locally, push once", a=A)
+                                cause="speculative CI fixes", prevention="reproduce locally, push once", a=A,
+                                happened="three pushes to try CI fixes", commands=["git push"])
         self.other = lessons.add("global", "The status block came after text", cause="a note before the block",
-                                 prevention="write the block first", a=A)
+                                 prevention="write the block first", a=A, happened="a reply began with a note")
 
     def tearDown(self):
         lessons.LESSONS, work.HANDOFF, lessons.USAGE_LOCAL = self.saved
@@ -83,7 +85,7 @@ class LessonTests(unittest.TestCase):
 
     def test_record_needs_cause_and_prevention(self):
         with self.assertRaises(ValueError):
-            lessons.add("acme/api", "x", cause="", prevention="p", a=A)
+            lessons.add("acme/api", "x", cause="", prevention="p", happened="h", a=A)
         les = lessons.add("acme/api", "Tag before CHANGELOG", kind="process", cause="checklist in a wiki",
                           prevention="release only with dev release", evidence=["PR #212"], a=A)
         again = lessons.load(les["path"])
@@ -93,7 +95,7 @@ class LessonTests(unittest.TestCase):
 
     def test_recur_prevent_retire_and_review(self):
         les = lessons.add("acme/api", "Flaky clock test", kind="bug", cause="real clock", prevention="fixed clock",
-                          a=A)
+                          happened="the clock test failed at midnight", a=A)
         les = lessons.recur(les, "CI run 77", a=A)
         self.assertEqual(les["meta"]["occurrences"], 2)
         self.assertEqual([x["meta"]["id"] for x in lessons.review()["recurring"]], [les["meta"]["id"]])
@@ -110,7 +112,7 @@ class LessonTests(unittest.TestCase):
     # again, although its prevention had just failed.
     def test_a_prevented_lesson_that_happens_again_reopens_with_a_changelog_line_and_is_recalled(self):
         les = lessons.add("acme/api", "Flaky clock test", kind="bug", cause="real clock", prevention="fixed clock",
-                          a=A)
+                          happened="the clock test failed at midnight", files=["tests/test_clock.py"], a=A)
         les = lessons.prevent(les, "test", "tests/test_clock.py", "the test pins the clock", a=A)
         self.assertEqual(lessons.relevant("acme/api"), [])
         les = lessons.recur(les, "CI run 91", a=A)
@@ -119,11 +121,15 @@ class LessonTests(unittest.TestCase):
         self.assertEqual([x["meta"]["id"] for x in lessons.relevant("acme/api")], [les["meta"]["id"]])
 
     def test_recall_ranks_open_severe_repeated_and_includes_global(self):
-        low = lessons.add("acme/api", "Typo in docs", severity="low", cause="c", prevention="p", a=A)
-        high = lessons.add("acme/api", "Data loss on migration", severity="high", cause="c", prevention="p", a=A)
-        glob = lessons.add("global", "Commit after a pipe", severity="high", cause="c", prevention="pipefail", a=A)
+        low = lessons.add("acme/api", "Typo in docs", severity="low", cause="c", prevention="p", happened="h",
+                          files=["docs/**"], a=A)
+        high = lessons.add("acme/api", "Data loss on migration", severity="high", cause="c", prevention="p",
+                           happened="h", files=["db/**"], a=A)
+        glob = lessons.add("global", "Commit after a pipe", severity="high", cause="c", prevention="pipefail",
+                           happened="h", commands=["git commit"], a=A)
         lessons.recur(glob, "again", a=A)
-        lessons.add("acme/other", "Not ours", severity="high", cause="c", prevention="p", a=A)
+        lessons.add("acme/other", "Not ours", severity="high", cause="c", prevention="p", happened="h",
+                    files=["src/**"], a=A)
         ids = [x["meta"]["id"] for x in lessons.relevant("acme/api")]
         self.assertEqual(ids[0], glob["meta"]["id"])
         self.assertLess(ids.index(high["meta"]["id"]), ids.index(low["meta"]["id"]))

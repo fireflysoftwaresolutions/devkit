@@ -42,7 +42,8 @@ class _Handoff(unittest.TestCase):
 
     def add(self, title, scope="acme/api", **kw):
         return lessons.add(scope, title, cause=kw.pop("cause", "cause of " + title),
-                           prevention=kw.pop("prevention", "prevention of " + title), a=A, **kw)
+                           prevention=kw.pop("prevention", "prevention of " + title),
+                           happened=kw.pop("happened", "it happened: " + title), a=A, **kw)
 
 
 class AnchoredLessonTests(_Handoff):
@@ -92,6 +93,7 @@ class AnchoredLessonTests(_Handoff):
     def test_the_cli_records_anchors_and_backfills_them_on_an_older_lesson(self):
         a = cli.build_parser().parse_args(["lesson", "add", "Tag pushed before the changelog", "--global",
                                            "--cause", "no check", "--prevent", "release with dev release",
+                                           "--happened", "v3 was tagged before its changelog entry",
                                            "--command", "git tag", "--activity", "release", "--file", "CHANGELOG.md"])
         with mock.patch("sys.stdout"):
             self.assertEqual(a.fn(a), 0)
@@ -110,14 +112,14 @@ class ConsolidationTests(_Handoff):
         en = self.add("Edited an applied migration", files=["db/migrations/**"], activities=["database"],
                       errors=["checksum mismatch"])
         es = self.add("Se editó una migración ya aplicada", files=["db/migrations/**"], activities=["database"],
-                      errors=["checksum mismatch"])
+                      errors=["checksum mismatch"], new=True, why="the same mistake in Spanish, for the merge")
         self.add("Commit after a pipe hides failing tests", cause="tail hides the exit code", prevention="pipefail")
         self.add("Commit chained after a pipe hides failing tests", cause="tail hides the exit code",
                  prevention="pipefail")
         self.add("The guard refused a heredoc", files=["lib/devkit/guard.py"], activities=["tooling"],
                  errors=["Run as a command of its own"])
         self.add("The guard missed a nested shell", files=["lib/devkit/guard.py"], activities=["tooling"],
-                 errors=["bash -c"])
+                 errors=["a nested bash -c call"])
         with mock.patch.dict(core.CFG, {"ai": {"enabled": False}}):
             merged = [i for k, i, _ in lessons.consolidate() if k == "merge"]
         self.assertEqual(len(merged), 1)
@@ -127,9 +129,10 @@ class ConsolidationTests(_Handoff):
         self.add("Commit after a pipe hides failing tests", cause="tail hides the exit code", prevention="pipefail",
                  commands=["git commit"], stack=["python"])
         self.add("Un commit tras un pipe oculta tests rotos", cause="tail oculta el código de salida",
-                 prevention="usa pipefail", commands=["git commit"], stack=["java"])
+                 prevention="usa pipefail", commands=["git commit"], stack=["java"], new=True,
+                 why="the same mistake in Spanish, for the model to judge")
         self.add("Releases tagged before the changelog", cause="no check", prevention="dev release",
-                 commands=["git commit"], files=["CHANGELOG.md"])
+                 commands=["git commit"], files=["CHANGELOG.md"], new=True, why="another mistake, same command")
         calls, real = [], subprocess.run
 
         def fake(argv, **kw):

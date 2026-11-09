@@ -37,7 +37,7 @@ class SleepTests(unittest.TestCase):
 
     def add(self, title, scope="acme/api", **kw):
         return lessons.add(scope, title, cause=kw.pop("cause", "c " + title), prevention=kw.pop("prevention", "p"),
-                           a=A, **kw)
+                           happened=kw.pop("happened", "it happened: " + title), a=A, **kw)
 
     def test_use_keeps_a_lesson_alive_and_unused_ones_fade(self):
         used, idle = self.add("Used often"), self.add("Never used")
@@ -53,11 +53,12 @@ class SleepTests(unittest.TestCase):
         self.assertLess(lessons.strength(les, u), lessons.strength(les, {}))
 
     def test_merge_duplicates_and_keep_the_global_one(self):
-        where = {"commands": ["git commit"], "errors": ["FAILED"], "activities": ["testing"]}
+        where = {"commands": ["git commit"], "errors": ["FAILED tests/test_api.py"], "activities": ["testing"]}
         g = self.add("Commit chained after a pipe hides failing tests", scope="global",
                      cause="tail exit code hides failing tests", prevention="use pipefail before commit", **where)
         p = self.add("Un commit tras un pipe oculta tests rotos", cause="tail oculta el código de salida",
-                     prevention="usa pipefail antes del commit", stack=["python"], **where)
+                     prevention="usa pipefail antes del commit", stack=["python"], new=True,
+                     why="a near-duplicate in another language, for the merge", **where)
         acts = lessons.consolidate()
         self.assertIn(("merge", p["meta"]["id"]), [(k, i) for k, i, _ in acts])
         kept = lessons.find(g["meta"]["id"])
@@ -89,8 +90,8 @@ class SleepTests(unittest.TestCase):
         self.assertEqual(len(lessons.all_lessons()), 1)
 
     def test_prevented_lessons_leave_the_context(self):
-        a_ = self.add("Open one")
-        b_ = self.add("Prevented one")
+        a_ = self.add("Open one", files=["src/a/**"])
+        b_ = self.add("Prevented one", files=["src/b/**"])
         lessons.prevent(b_, "guard", "rule", "automated", a=A)
         ids = [x["meta"]["id"] for x in lessons.relevant("acme/api")]
         self.assertEqual(ids, [a_["meta"]["id"]])
