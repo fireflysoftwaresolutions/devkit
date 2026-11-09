@@ -832,7 +832,8 @@ def saved_run(tmp: Path, states: dict, reasons=None, answers=None, finished=None
     """Write a setup-run.json with these step states (in this order) and the saved answers of a first run."""
     titles = {"save": "Save your choices", "brew": "Install Homebrew packages", "npm": "Install npm packages",
               "claude": "Install Claude Code", "configure": "Set up devkit", "signin-claude": "Sign in to Claude Code",
-              "signin-codex": "Sign in to Codex", "docker": "Start Docker", "doctor": "Check the setup"}
+              "signin-codex": "Sign in to Codex", "docker": "Start Docker", "lock": "Lock Claude Code settings",
+              "doctor": "Check the setup"}
     d = Mac().survey()
     a = dict(answers or wizard.tui_defaults(d))
     now = finished or time.time()

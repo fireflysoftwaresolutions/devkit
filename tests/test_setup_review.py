@@ -72,6 +72,25 @@ class ReviewOfASavedSetupTests(unittest.TestCase):
         self.assertEqual(r.cfg["agents"], {"claude": True, "codex": False})
 
 
+class LockAgainTests(unittest.TestCase):
+    """The settings lock writes the Claude Code mode into managed settings, so it is one of the steps done with the
+    answers."""
+
+    def test_answers_changed_on_the_review_lock_claude_code_settings_again(self):
+        """A paused setup whose lock is done, resumed through Review with changed answers: the lock runs again with
+        them (dev config lock), never "done earlier", so the managed settings cannot keep the old mode."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            answers = dict(wizard.tui_defaults(flow.Mac().survey()), lock=True)
+            flow.saved_run(tmp, {"save": "done", "configure": "done", "signin-claude": "done", "lock": "done",
+                                 "doctor": "pending"}, answers=answers)
+            mac = flow.Mac(saved=dict(BOTH, lock=True))
+            r = flow.run_wizard(mac, REVIEW + CLAUDE_ONLY + ENTER + ENTER, tmp=tmp)  # Apply, then Enter my password
+        self.assertEqual(r.cfg["agents"], {"claude": True, "codex": False})
+        self.assertEqual([flow.dev_args(a) for a in mac.attached if flow.dev_args(a)], [["config", "lock"]])
+        self.assertEqual(r.state("lock"), "done")
+
+
 class InterruptedMac(flow.Mac):
     """A Mac where Ctrl+C lands while the wizard reads the agents' status: `after_sign_in` right after a sign-in
     (the second Ctrl+C of a stopped sign-in), else at the first status read of the sign-ins."""

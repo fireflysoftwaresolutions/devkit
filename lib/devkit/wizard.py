@@ -1235,7 +1235,8 @@ def _crash_reason(rc, part: str) -> tuple:
 
 RUN_STATES = ("pending", "running", "done", "failed", "skipped")
 ALWAYS_RUN = ("doctor",)  # a resumed run checks the setup again, after the steps it finished
-REDO_ON_CHANGE = ("save", "configure", "doctor")  # steps done with the answers, run again when they change
+REDO_ON_CHANGE = ("save", "configure", "lock", "doctor")  # steps done with the answers, run again when they change
+# (the lock writes the Claude Code mode into managed settings)
 REQUIRED_HINT = "devkit cannot be ready without this step."
 
 
