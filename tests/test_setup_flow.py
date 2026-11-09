@@ -1310,6 +1310,36 @@ class AgentOffTests(unittest.TestCase):
             self.assertEqual((codex / "config.toml").read_text(), before)
             self.assertEqual(sorted(p.name for p in codex.iterdir() if "tmp" in p.name), [])
 
+    def test_a_linked_codex_file_stays_a_link_and_its_target_is_written(self):
+        """config.toml and hooks.json linked from a dotfiles folder: the removal writes the files they point to, whole
+        and with their own mode, and the links stay links. A linked hooks.json that held only devkit's hooks is
+        emptied, never unlinked, so the dotfiles copy loses devkit's hooks too."""
+        for only_devkit in (False, True):
+            with self.subTest(only_devkit_hooks=only_devkit), tempfile.TemporaryDirectory() as tmp:
+                tmp = Path(tmp)
+                claude, codex, agents, share = self.homes(tmp)
+                dots = tmp / "dotfiles"
+                dots.mkdir()
+                (dots / "config.toml").write_text('approval_policy = "never"\n' + (codex / "config.toml").read_text())
+                hooks = {"hooks": {"Stop": [{"hooks": [DEVKIT_HOOK] + ([] if only_devkit else [OWN_HOOK])}]}}
+                (dots / "hooks.json").write_text(json.dumps(hooks))
+                for name in ("config.toml", "hooks.json"):
+                    os.chmod(dots / name, 0o600)
+                    (codex / name).unlink()
+                    (codex / name).symlink_to(dots / name)
+                with self.patched(tmp, claude, codex, agents, share):
+                    gone = setup.remove_agent("codex")
+                self.assertIn(f"hooks ({core.tilde(codex / 'hooks.json')})", gone)
+                for name in ("config.toml", "hooks.json"):
+                    self.assertTrue((codex / name).is_symlink(), name)
+                    self.assertEqual(stat.S_IMODE((dots / name).stat().st_mode), 0o600, name)
+                toml = (dots / "config.toml").read_text()
+                self.assertNotIn('approval_policy = "never"', toml)
+                self.assertIn("[mcp_servers.mine]", toml)
+                self.assertEqual(json.loads((dots / "hooks.json").read_text()),
+                                 {} if only_devkit else {"hooks": {"Stop": [{"hooks": [OWN_HOOK]}]}})
+                self.assertEqual([p.name for p in list(dots.iterdir()) + list(codex.iterdir()) if "tmp" in p.name], [])
+
     def test_removing_twice_changes_nothing_more(self):
         with tempfile.TemporaryDirectory() as tmp:
             claude, codex, agents, share = self.homes(Path(tmp))

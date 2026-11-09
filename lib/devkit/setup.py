@@ -1821,8 +1821,10 @@ def _without_toml_tables(text: str, tables) -> str:
 
 def _replace_text(f: Path, text: str):
     """Write `text` over `f` whole: a temporary file in the same folder with f's own mode (0600 for a new file), then
-    a rename, so Ctrl+C or a crash leaves the old file or the new one, never half of one, and no temporary file."""
+    a rename, so Ctrl+C or a crash leaves the old file or the new one, never half of one, and no temporary file. A
+    link (a dotfiles setup) stays a link: the file it points to is the one written, in its own folder."""
     import tempfile
+    f = f.resolve() if f.is_symlink() else f
     mode = (os.stat(f).st_mode & 0o7777) if f.exists() else 0o600
     fd, tmp = tempfile.mkstemp(dir=f.parent, prefix=f".{f.name}.", suffix=".devkit-tmp")
     try:
@@ -2031,7 +2033,7 @@ def _remove_agent(agent: str, home: Path, dry: bool = False) -> list:
         if kept != cur and not dry:
             backup(f)
             rest = {k: v for k, v in doc.items() if k != "hooks"}  # keys of the file other than hooks stay
-            if kept or rest:
+            if kept or rest or f.is_symlink():  # a linked file is emptied: its dotfiles copy loses the hooks too
                 _replace_text(f, json.dumps({**rest, **({"hooks": kept} if kept else {})}, indent=2) + "\n")
             else:
                 f.unlink()
