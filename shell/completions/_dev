@@ -954,8 +954,12 @@ _dev__lesson() {
         'retire:no longer applies'
         'restore:bring back a forgotten lesson'
         'prevent:automation now prevents it'
+        'supersede:a newer lesson replaces this one'
+        'release:let a lesson the screen held back into recall'
         'scan:signals worth a lesson'
-        'review:recurring lessons to automate, stale ones to retire'
+        'review:what to act on'
+        'lint:anchors to fix and lessons recall cannot show'
+        'eval:would recall have shown the lesson before each repeat recorded here?'
         'ls:lessons for this project, its initiatives and global ones'
       )
       _describe -t commands 'dev lesson command' cmds && ret=0 ;;
@@ -969,8 +973,12 @@ _dev__lesson() {
         (retire) _dev__lesson__retire && ret=0 ;;
         (restore) _dev__lesson__restore && ret=0 ;;
         (prevent) _dev__lesson__prevent && ret=0 ;;
+        (supersede) _dev__lesson__supersede && ret=0 ;;
+        (release) _dev__lesson__release && ret=0 ;;
         (scan) _dev__lesson__scan && ret=0 ;;
         (review) _dev__lesson__review && ret=0 ;;
+        (lint) _dev__lesson__lint && ret=0 ;;
+        (eval) _dev__lesson__eval && ret=0 ;;
         (ls) _dev__lesson__ls && ret=0 ;;
       esac ;;
   esac
@@ -982,7 +990,7 @@ _dev__lesson__add() {
     '(- *)'{-h,--help}'[show this help message and exit]' \
     '--kind=[kind]:kind:(bug mistake process tooling security performance design)' \
     '--severity=[severity]:severity:(low medium high)' \
-    '--happened=[happened]:happened: ' \
+    '--happened=[what happened]:happened: ' \
     '--cause=[the root cause]:cause: ' \
     '--fix=[fix]:fix: ' \
     '--prevent=[the rule that stops it happening again]:prevent: ' \
@@ -991,6 +999,7 @@ _dev__lesson__add() {
     '*--tag=[tag]:tag: ' \
     '--retire-when=[the outside condition that makes it obsolete]:retire when: ' \
     '--why=[why]:why: ' \
+    '--new[record it although a lesson shares an error or command anchor]' \
     '*--file=[a file or glob it applies to]:file: ' \
     '*--command=[the command words it applies to, e.g. "git push --force"]:command: ' \
     '*--activity=[the kind of work it applies to]:kind of work: _dev_live activities -' \
@@ -1066,11 +1075,35 @@ _dev__lesson__prevent() {
     '(- *)'{-h,--help}'[show this help message and exit]' \
     '--by=[by]:by:(test lint type guard skill ci rule doc)' \
     '--ref=[the test, rule or file that prevents it]:ref: ' \
+    '--match=[with --by guard]:match: ' \
+    '--error=[with --by guard]:error: ' \
+    '--block[the lesson rule refuses from the start]' \
     '--why=[why]:why: ' \
     '(--project -p)'{-p+,--project=}'[project]:project: _dev_live projects -' \
     '(--initiative -i)'{-i+,--initiative=}'[initiative]:initiative: _dev_live initiatives -' \
     '--global[global]' \
     '*:selector: '
+}
+
+_dev__lesson__supersede() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--by=[the lesson that replaces it]:by: ' \
+    '--why=[why]:why: ' \
+    '(--project -p)'{-p+,--project=}'[project]:project: _dev_live projects -' \
+    '(--initiative -i)'{-i+,--initiative=}'[initiative]:initiative: _dev_live initiatives -' \
+    '--global[global]' \
+    ':old: '
+}
+
+_dev__lesson__release() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--why=[why]:why: ' \
+    '(--project -p)'{-p+,--project=}'[project]:project: _dev_live projects -' \
+    '(--initiative -i)'{-i+,--initiative=}'[initiative]:initiative: _dev_live initiatives -' \
+    '--global[global]' \
+    ':lesson: '
 }
 
 _dev__lesson__scan() {
@@ -1085,6 +1118,23 @@ _dev__lesson__scan() {
 _dev__lesson__review() {
   _arguments -s -S : \
     '(- *)'{-h,--help}'[show this help message and exit]' \
+    '(--project -p)'{-p+,--project=}'[project]:project: _dev_live projects -' \
+    '(--initiative -i)'{-i+,--initiative=}'[initiative]:initiative: _dev_live initiatives -' \
+    '--global[global]'
+}
+
+_dev__lesson__lint() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '(--project -p)'{-p+,--project=}'[project]:project: _dev_live projects -' \
+    '(--initiative -i)'{-i+,--initiative=}'[initiative]:initiative: _dev_live initiatives -' \
+    '--global[global]'
+}
+
+_dev__lesson__eval() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--days=[days]:days: ' \
     '(--project -p)'{-p+,--project=}'[project]:project: _dev_live projects -' \
     '(--initiative -i)'{-i+,--initiative=}'[initiative]:initiative: _dev_live initiatives -' \
     '--global[global]'

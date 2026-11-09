@@ -2437,6 +2437,222 @@ def _lesson_anchors(a) -> dict:
             "stack": getattr(a, "stack", None) or []}
 
 
+def _lesson_scoped(a) -> bool:
+    """Did the command name a scope (-p, -i or --global)? Without one, `dev lesson lint` checks every scope."""
+    return bool(getattr(a, "project", None) or getattr(a, "initiative", None) or getattr(a, "global_", False))
+
+
+def _lesson_root(scope: str):
+    """The checkout of a project scope on this Mac, against which `dev lesson lint` checks file anchors; None for the
+    global and initiative scopes, and for a project not cloned here."""
+    if not scope or scope == "global" or scope.startswith("initiatives/"):
+        return None
+    path = core.canonical_path(scope)
+    return path if path.is_dir() else None
+
+
+LINT_ORDER = ("no-cause", "missing", "quarantined", "broad", "wrong", "no-file")  # what recall cannot show comes first
+
+
+def _lesson_lint(a, lessons) -> int:
+    """`dev lesson lint`: lessonlint.lint over the active lessons (one scope, or every scope), each project's file
+    anchors checked against its own checkout, printed by kind with the command that fixes each finding. Exit 1 when
+    something needs fixing."""
+    from . import lessonlint
+    items = lessons.all_lessons(_lesson_scope(a) if _lesson_scoped(a) else None)
+    scopes = {}
+    for x in items:
+        scopes.setdefault(x["meta"].get("scope") or "", []).append(x)
+    found = [f for scope, group in scopes.items() for f in lessonlint.lint(group, _lesson_root(scope))]
+    if not found:
+        print(f"{ui.OK} {len(items)} lesson{'s' if len(items) != 1 else ''}: nothing to fix")
+        return 0
+    rank = {k: i for i, k in enumerate(LINT_ORDER)}
+    print(ui.section(f"Lesson lint · {len(found)} finding{'s' if len(found) != 1 else ''} in "
+                     f"{len({f['id'] for f in found})} of {len(items)} lessons"))
+    for kind in sorted({f["kind"] for f in found}, key=lambda k: (rank.get(k, len(rank)), k)):
+        mine = [f for f in found if f["kind"] == kind]
+        print(ui.section(f"{kind} · {len(mine)}"))
+        for f in mine:
+            print(f"  {ui.WARN} {f['id']}  {f['problem']}\n      {ui.dim('fix: ' + f['fix'])}")
+    return 1
+
+
+def _lesson_eval(a, lessons) -> int:
+    """`dev lesson eval`: for each repeat this Mac recorded (`dev lesson recur`) in the window, whether recall showed
+    the lesson in that session before it (lessonevents.coverage)."""
+    from . import lessonevents
+    c = lessonevents.coverage(a.days)
+    print(ui.section(f"Recall coverage · last {c['days']} days"))
+    if not c["recurrences"]:
+        print(f"  no repeat recorded here in the last {c['days']} days (a repeat is a `dev lesson recur` on this Mac)")
+        return 0
+    n = c["recurrences"]
+    rate = f" ({round(c['coverage'] * 100)}%)" if c["coverage"] is not None else ""
+    print(f"  {n} repeat{'s' if n != 1 else ''} · {c['shown_before']} shown before{rate}"
+          + (f" · {c['unknown']} with no session recorded" if c["unknown"] else ""))
+    titles = {x["meta"]["id"]: x["meta"]["title"] for x in lessons.all_lessons() + lessons.all_lessons(archived=True)}
+    newest = sorted(c["items"], key=lambda it: -it["ts"])
+    for it in newest[:EVAL_SHOWN]:
+        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(it["ts"]))
+        if it["shown_before"] is None:
+            mark, how = ui.INFO, "no session recorded"
+        elif it["shown_before"]:
+            mark, how = ui.OK, "shown before by " + ", ".join(it["channels"])
+        else:
+            mark, how = ui.FAIL, "not shown before"
+        print(f"  {mark} {it['id']}  {when}  {how}" + (f"  {ui.dim(titles[it['id']])}" if it["id"] in titles else ""))
+    if len(newest) > EVAL_SHOWN:
+        print(ui.dim(f"  … and {len(newest) - EVAL_SHOWN} older repeats (--days narrows the window)"))
+    return 0
+
+
+EVAL_SHOWN = 25  # repeats `dev lesson eval` lists, newest first; the totals count them all
+
+
+def _lesson_review(lessons) -> int:
+    """`dev lesson review`: what to act on, most urgent first (lessons missed twice after being shown, preventions
+    that failed, recurring lessons, held lessons, stale ones), then how often shown lessons were heeded per channel
+    over 30 days and the lessons missed most (lessonevents.rates)."""
+    from . import lessonevents
+    r = lessons.review()
+    held = r.get("held")
+    if held is None:  # a review() that does not list held lessons: the holds its lessons carry in their front matter
+        held = [{"lesson": x, "reason": x["meta"]["quarantine"]} for x in lessons.all_lessons()
+                if x["meta"].get("quarantine")]
+    use = lessons.usage()
+    print(ui.section(f"Lessons · {r['total']} · " + ", ".join(f"{v} {k}" for k, v in sorted(r["counts"].items()))))
+
+    def named(x) -> str:
+        return f"{x['meta']['title']}  {ui.dim(x['meta']['scope'])}"
+    if r["automate"]:
+        print(ui.section("Missed twice or more after being shown — automate these"))
+        for x in r["automate"]:
+            n = int((use.get(x["meta"]["id"]) or {}).get("missed") or 0)
+            print(f"  {ui.FAIL} {x['meta']['id']} missed {n}× {named(x)}")
+    if r["prevention_failed"]:
+        print(ui.section("Preventions that failed — fix or strengthen them"))
+        for f in r["prevention_failed"]:
+            ref = f" ({f['ref']})" if f["ref"] else ""
+            print(f"  {ui.FAIL} {f['lesson']['meta']['id']} prevented by {f['by']}{ref}, repeated {f['days']} days "
+                  f"later · {named(f['lesson'])}")
+    if r["recurring"]:
+        print(ui.section("Recurring and not prevented — automate these"))
+        for x in r["recurring"]:
+            print(f"  {ui.WARN} {x['meta']['id']} ×{x['meta']['occurrences']} {named(x)}")
+    if held:
+        print(ui.section("Held by the screen — the developer releases them"))
+        for h in held:
+            x = h["lesson"]
+            print(f"  {ui.WARN} {x['meta']['id']} {named(x)}\n      {ui.dim('held: ' + h['reason'])}"
+                  f"\n      {ui.dim('dev lesson release ' + x['meta']['id'] + ' --why “…” (the developer only)')}")
+    if r["stale"]:
+        print(ui.section("Not seen for 4 months — retire or confirm"))
+        for x in r["stale"]:
+            print(f"  {ui.dim('·')} {x['meta']['id']} {x['meta']['title']}  {ui.dim('last ' + x['meta']['last_seen'])}")
+    if not any((r["automate"], r["prevention_failed"], r["recurring"], held, r["stale"])):
+        print(f"  {ui.OK} nothing to act on")
+    rates = lessonevents.rates(30)
+    print(ui.section(f"Shown lessons heeded · last {rates['days']} days"))
+    for ch, c in rates["channels"].items():
+        if not (c["shown"] or c["heeded"] or c["missed"]):
+            print(f"  {ch:<8} nothing shown")
+            continue
+        pct = f"{round(c['heeded_rate'] * 100)}% heeded" if c["heeded_rate"] is not None else "none resolved yet"
+        print(f"  {ch:<8} {c['shown']} shown · {c['heeded']} heeded · {c['missed']} missed · {pct}")
+    if rates["most_missed"]:
+        print("  missed most: " + ", ".join(f"{m['id']} ×{m['missed']}" for m in rates["most_missed"][:5]))
+    return 0
+
+
+def _lesson_prevent(a, les, lessons) -> int:
+    """`dev lesson prevent`: record what prevents a lesson (`--ref`), or, with `--by guard --match|--error`, propose a
+    lesson rule (lessonrules.propose, which refuses an unsafe or untested pattern with its reason) and record that
+    rule as the prevention, so the nightly check finds it gone if the rule is removed."""
+    rule_given = bool(a.match or a.error)
+    if rule_given and a.by != "guard":
+        raise ValueError("--match and --error propose a lesson rule the guard enforces: use them with --by guard")
+    if a.block and not rule_given:
+        raise ValueError("--block asks for a lesson rule that refuses: give its pattern with --match or --error")
+    if rule_given and a.ref:
+        raise ValueError("give what prevents it (--ref) or a lesson rule to propose (--match or --error), not both")
+    if not rule_given:
+        if not (a.ref or "").strip():
+            raise ValueError("name what prevents it: --ref \"…\"" + (
+                "; or propose a lesson rule: --match \"<command words>\" or --error \"<output text>\""
+                if a.by == "guard" else ""))
+        les = lessons.prevent(les, a.by, a.ref, a.why or "")
+        print(f"{ui.OK} {les['meta']['id']} prevented by {a.by}: {a.ref}")
+        return 0
+    if not (a.why or "").strip():
+        raise ValueError("say why this prevents it: --why \"…\"")
+    from . import lessonrules
+    rule = lessonrules.propose(les, match=a.match or "", error=a.error or "", block=a.block)
+    les = lessons.prevent(les, "guard", rule["id"], a.why)
+    print(f"{ui.OK} {les['meta']['id']} prevented by lesson rule {rule['id']} ({rule['mode']}), in "
+          f"lessons/rules/{rule['scope']}.json")
+    print(ui.dim("  warn: the guard adds the lesson to each matching call, and refuses the call once an agent repeats "
+                 "it after the warning" if rule["mode"] == "warn" else
+                 "  block: the guard refuses each matching call with the lesson's prevention as the reason"))
+    return 0
+
+
+# A hook's denial as the agent's tool output shows it, or the guard's lesson-rule refusal (gates.DENIAL_RE reads the
+# whole tool result; an anchor is a piece of one).
+_HOOK_DENIAL = re.compile(r"\b(?:PreToolUse|PermissionRequest)\b[^\n]*\bhook (?:blocking )?error\b", re.I)
+_GUARD_TEXTS: list = []
+
+
+def _guard_texts() -> list:
+    """The text of the guard's refusals as its source holds it: every string literal of guard.py of 12 characters or
+    more but the docstrings (an f-string's literal parts each on their own), whitespace folded, case-folded."""
+    if not _GUARD_TEXTS:
+        import ast
+        from . import guard
+        tree = ast.parse(Path(guard.__file__).read_text())
+        docs = set()
+        for n in ast.walk(tree):
+            body = getattr(n, "body", None)
+            if isinstance(n, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) and body and \
+                    isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
+                docs.add(id(body[0].value))
+        _GUARD_TEXTS.extend(" ".join(n.value.split()).casefold() for n in ast.walk(tree)
+                            if isinstance(n, ast.Constant) and isinstance(n.value, str) and id(n) not in docs
+                            and len(n.value) >= 12)
+    return _GUARD_TEXTS
+
+
+def _refusal_anchor(error: str) -> bool:
+    """Is this error anchor a piece of a guard refusal: the hook's denial line, or text of one of the guard's own
+    refusal messages?"""
+    if _HOOK_DENIAL.search(error or ""):
+        return True
+    text = " ".join(str(error or "").split()).casefold().strip(" .,:;!?`\"'")
+    try:
+        return len(text) >= 12 and any(text in t for t in _guard_texts())
+    except (OSError, SyntaxError, ValueError):
+        return False  # the hint is advice: without the guard's source, give none
+
+
+def _registry_hint(scope: str, anchored: dict) -> list:
+    """For a lesson outside devkit's own repository whose anchors are guard refusals or `dev` commands: the lines that
+    point it to devkit's bug registry, which fixes devkit's friction once for every devkit user. [] otherwise."""
+    if scope == core.DEVKIT_REPO:
+        return []
+    refusals = [e for e in anchored.get("errors") or [] if _refusal_anchor(e)]
+    devs = [c for c in anchored.get("commands") or [] if os.path.basename((c.split() or [""])[0]) == "dev"]
+    if not (refusals or devs):
+        return []
+    what = f"the guard's refusal “{refusals[0]}”" if refusals else f"the devkit command `{devs[0]}`"
+    lines = [f"  {ui.WARN} this lesson is about devkit itself ({what}). devkit's bug registry fixes that once for "
+             f"every devkit user:",
+             f"      dev bug report --guard <refusal id>   a refusal that should not have happened (with no id: this "
+             f"session's last refusal)"]
+    if devs:
+        lines.append("      dev bug report --title \"…\"            a dev command that misbehaves without an error")
+    return lines
+
+
 def _anchor_flags(x):
     x.add_argument("--file", action="append", help="a file or glob it applies to (repeat)")
     x.add_argument("--command", action="append", help="the command words it applies to, e.g. \"git push --force\"")
@@ -2454,13 +2670,31 @@ def cmd_lesson(a):
             les = lessons.add(scope, " ".join(a.title), kind=a.kind, severity=a.severity, happened=a.happened or "",
                               cause=a.cause or "", fix=a.fix or "", prevention=a.prevent or "",
                               detection=a.detect or "", evidence=a.evidence or [], tags=a.tag or [], why=a.why or "",
-                              retire_when=a.retire_when or "", **_lesson_anchors(a))
+                              retire_when=a.retire_when or "", new=a.new, **_lesson_anchors(a))
             print(f"{ui.OK} {les['meta']['id']} recorded in {scope} → {tilde(les['path'])}")
+            if les["meta"].get("quarantine"):
+                print(f"  {ui.WARN} held, not recalled: {les['meta']['quarantine']}. Only the developer releases it: "
+                      f"dev lesson release {les['meta']['id']} --why …")
             if not any(_lesson_anchors(a).values()):
                 print(ui.dim("  no anchors: only the session start recalls it. Add where it applies: dev lesson anchor "
                              + les["meta"]["id"] + " --file … --command … --activity … --error … --why …"))
+            for line in _registry_hint(scope, lessons.anchors(les)):
+                print(line)
             print(ui.dim("  automate it when you can: dev lesson prevent " + les["meta"]["id"] +
                          " --by test|lint|guard|skill|ci --ref … --why …"))
+            return 0
+        if act == "lint":
+            return _lesson_lint(a, lessons)
+        if act == "eval":
+            return _lesson_eval(a, lessons)
+        if act == "supersede":
+            old = lessons.supersede(lessons.find(a.old), lessons.find(a.by), a.why or "")
+            new = old["meta"]["superseded_by"]
+            print(f"{ui.OK} {old['meta']['id']} superseded by {new}: recall shows only {new}")
+            return 0
+        if act == "release":
+            les = lessons.release(lessons.find(a.lesson), a.why or "")
+            print(f"{ui.OK} {les['meta']['id']} released: recall can show it again")
             return 0
         if act == "anchor":
             les = lessons.set_anchors(lessons.find(" ".join(a.selector)), a.why or "", **_lesson_anchors(a))
@@ -2480,9 +2714,7 @@ def cmd_lesson(a):
                       + ("automate the prevention now (dev lesson prevent)" if les["meta"]["occurrences"] >= 2 else "noted"))
                 return 0
             if act == "prevent":
-                les = lessons.prevent(les, a.by, a.ref, a.why or "")
-                print(f"{ui.OK} {les['meta']['id']} prevented by {a.by}: {a.ref}")
-                return 0
+                return _lesson_prevent(a, les, lessons)
             if act == "retire":
                 les = lessons.retire(les, a.why or "")
                 print(f"{ui.OK} {les['meta']['id']} retired")
@@ -2513,20 +2745,7 @@ def cmd_lesson(a):
                 print(f"  {ui.WARN} {kind:<7} {detail}\n          {ui.dim(cmd)}")
             return 0
         if act == "review":
-            r = lessons.review()
-            print(ui.section(f"Lessons · {r['total']} · " + ", ".join(f"{v} {k}" for k, v in sorted(r["counts"].items()))))
-            if r["recurring"]:
-                print(ui.section("Recurring and not prevented — automate these"))
-                for x in r["recurring"]:
-                    print(f"  {ui.WARN} {x['meta']['id']} ×{x['meta']['occurrences']} {x['meta']['title']}  "
-                          f"{ui.dim(x['meta']['scope'])}")
-            if r["stale"]:
-                print(ui.section("Not seen for 4 months — retire or confirm"))
-                for x in r["stale"]:
-                    print(f"  {ui.dim('·')} {x['meta']['id']} {x['meta']['title']}  {ui.dim('last ' + x['meta']['last_seen'])}")
-            if not r["recurring"] and not r["stale"]:
-                print(f"  {ui.OK} nothing to review")
-            return 0
+            return _lesson_review(lessons)
     except ValueError as e:
         ui.err(str(e))
         return 2
@@ -3868,15 +4087,18 @@ def build_parser():
     x.add_argument("--kind", default="mistake", choices=["bug", "mistake", "process", "tooling", "security",
                                                          "performance", "design"])
     x.add_argument("--severity", default="medium", choices=["low", "medium", "high"])
-    x.add_argument("--happened")
+    x.add_argument("--happened", help="what happened (this or --evidence is required)")
     x.add_argument("--cause", help="the root cause (required)")
     x.add_argument("--fix")
     x.add_argument("--prevent", help="the rule that stops it happening again (required)")
     x.add_argument("--detect", help="how to notice it early")
-    x.add_argument("--evidence", action="append", help="commit, PR, CI run, task (repeat)")
+    x.add_argument("--evidence", action="append", help="commit, PR, CI run, task (repeat; this or --happened is "
+                                                       "required)")
     x.add_argument("--tag", action="append")
     x.add_argument("--retire-when", help="the outside condition that makes it obsolete (a tool version, an issue)")
     x.add_argument("--why")
+    x.add_argument("--new", action="store_true",
+                   help="record it although a lesson shares an error or command anchor: another mistake (needs --why)")
     _anchor_flags(x)
     x = lsp.add_parser("anchor", help="add where a lesson applies (files, commands, kinds of work, errors, stack)")
     x.add_argument("selector", nargs="+")
@@ -3888,14 +4110,28 @@ def build_parser():
         x.add_argument("selector", nargs="+")
         x.add_argument("--evidence")
         x.add_argument("--why")
-    x = lsp.add_parser("prevent", help="automation now prevents it (test, lint, guard, skill, ci, rule)")
+    x = lsp.add_parser("prevent", help="automation now prevents it (test, lint, guard, skill, ci, rule), or a lesson "
+                                       "rule the guard enforces (--by guard --match|--error)")
     x.add_argument("selector", nargs="+")
     x.add_argument("--by", required=True, choices=["test", "lint", "type", "guard", "skill", "ci", "rule", "doc"])
-    x.add_argument("--ref", required=True, help="the test, rule or file that prevents it")
+    x.add_argument("--ref", help="the test, rule or file that prevents it")
+    x.add_argument("--match", help="with --by guard: propose a lesson rule on these command words, e.g. \"python3 -c\"")
+    x.add_argument("--error", help="with --by guard: propose a lesson rule on this text of a tool's output")
+    x.add_argument("--block", action="store_true", help="the lesson rule refuses from the start (the developer only)")
+    x.add_argument("--why")
+    x = lsp.add_parser("supersede", help="a newer lesson replaces this one: only the newer one is recalled")
+    x.add_argument("old", help="the lesson replaced")
+    x.add_argument("--by", required=True, help="the lesson that replaces it")
+    x.add_argument("--why")
+    x = lsp.add_parser("release", help="let a lesson the screen held back into recall (the developer only)")
+    x.add_argument("lesson", help="the held lesson's id")
     x.add_argument("--why")
     x = lsp.add_parser("scan", help="signals worth a lesson: reverts, fixes, repeated guard refusals, canary misses")
     x.add_argument("--days", type=int, default=14)
-    lsp.add_parser("review", help="recurring lessons to automate, stale ones to retire")
+    lsp.add_parser("review", help="what to act on: missed, failed preventions, recurring, held, stale; heeded rates")
+    lsp.add_parser("lint", help="anchors to fix and lessons recall cannot show (exit 1 when there are any)")
+    x = lsp.add_parser("eval", help="would recall have shown the lesson before each repeat recorded here?")
+    x.add_argument("--days", type=int, default=14)
     lsp.add_parser("ls", help="lessons for this project, its initiatives and global ones")
     for sub in lsp.choices.values():
         sub.add_argument("-p", "--project", default=argparse.SUPPRESS)
