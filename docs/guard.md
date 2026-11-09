@@ -162,25 +162,39 @@ project, in your home folder, or in `CODEX_HOME` when it is set elsewhere) is de
 | `"devkit@firefly-devkit": false` | It disables the devkit plugin |
 | `hooks = false` or `codex_hooks = false` | It turns Codex hooks off |
 
-The guard judges every way of writing these files:
+Write, Edit, `apply_patch`, and shell commands follow this one rule. The guard finds the file however a call names it:
 
-- **Names in any case.** macOS reads `.Codex/Config.toml` as `.codex/config.toml`, so the guard compares folder and
-  file names without case.
+- **Any spelling of the path.** Folder and file names count in any case, because macOS reads `.Codex/Config.toml` as
+  `.codex/config.toml`. Any path that resolves there counts too: `~`, `$HOME`, `../`, a linked folder, or a `cd`
+  earlier in the same command.
 - **Every TOML form.** A bare, quoted, or dotted key, or an inline table, counts. A `config.toml` that parses as TOML is
   denied when any of its tables sets `hooks` or `codex_hooks` to `false`.
-- **Write and Edit** are judged by the file's text after the change.
-- **A Codex patch** (`apply_patch`) is judged by each file it adds, updates, or moves: by the file's text after the
-  patch and by the lines it adds, at the path the patch names and at its real path. A move onto a settings file brings
-  the text of the file it moves.
-- **A shell command** that writes one of these files is judged by the text it writes, where the command holds that
-  text whole: `echo` and `printf` (with their escapes decoded as bash, zsh, and `printf` decode them), a heredoc or
-  here-string fed to `cat`, `tee`, or `dd`, and a pipe from one of them. The writes of one command to the same file
-  are judged together, and an append together with the file's text.
-- **A shell write whose text the guard cannot see** is denied: `cp`, `mv`, `ln`, `install`, `sed -i`, `perl -pi`,
-  `awk -i inplace`, `truncate`, an editor, a bare or grouped redirect, a variable, a substitution, or an unquoted
-  glob in the text, and a program that writes files and names a settings file. Write the file with the Write or Edit
-  tool (on Codex, `apply_patch`), or write the text out in full in an `echo`, a `printf`, or a quoted heredoc.
-  Reading these files, `touch`, and writes to other files stay allowed.
+
+It judges the text each kind of call writes:
+
+- **Write and Edit:** the file's text after the change.
+- **A Codex patch** (`apply_patch`): each file it adds, updates, or moves, by the file's text after the patch and by
+  the lines it adds, at the path the patch names and at its real path. A move onto a settings file brings the text of
+  the file it moves.
+- **A shell command whose text is visible:** `>` and `>>` with `echo` or `printf` (with their escapes decoded as bash,
+  zsh, and `printf` decode them), `tee` and `tee -a`, a heredoc or here-string into `cat` or `tee`, and `dd of=` fed
+  from one of these. Two or more writes to the file in one command are judged together, and `>>` together with what
+  the file already holds. Such a write is denied only when the result turns hooks off, and allowed otherwise.
+- **A shell command that hides its text** is denied for these files, whatever it writes: `cp`, `mv`, `install`, `ln`,
+  `sed -i`, `perl -pi`, `awk -i inplace`, `ed`, `truncate`, `dd` with other options, `git checkout` or
+  `git restore` of these files, a variable, `$(…)`, backticks, `$'…'`, or an unquoted glob in the text, `exec 3>`, and
+  interpreter code that names a settings file. Write the file with the Write or Edit tool (on Codex, `apply_patch`),
+  or write the text out in full in an `echo`, a `printf`, or a quoted heredoc.
+
+Reading these files (`cat`, `grep`, `jq`, `sed -n`, `git diff`, `git log`), `git add`, `touch`, `mkdir .claude/agents`,
+and writes to other files stay allowed. `dev setup` and `dev install` write these files in their own process, so the
+rule does not apply to them.
+
+**Not covered yet.** The rule judges what a write adds, not what it takes away: deleting a settings file, or writing
+one without devkit's hooks in it, is allowed. A path the guard cannot resolve counts as a settings file only when it
+names `.codex`, `.claude`, `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, or a settings filename (`config.toml`, `hooks.json`,
+`settings.json`, `settings.local.json`), or when its filename is hidden (`"$F"`) and the text turns hooks off. When
+both the filename and the text are hidden, as in `echo "$X" > "$F"`, the guard cannot tell, and the write is allowed.
 
 If devkit really should be off somewhere, change devkit's own configuration (see [Configuration](configuration.md)).
 `dev doctor` reports such settings that already exist under `~/Development`.
