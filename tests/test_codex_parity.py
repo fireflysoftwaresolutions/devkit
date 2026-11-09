@@ -186,7 +186,8 @@ class CodexFailedShellTests(BugState, HookCase):
                    "permission_mode": "bypassPermissions", "session_id": "c1", "stop_hook_active": False,
                    "last_assistant_message": BLOCK, "transcript_path": str(self.rollout), "turn_id": "t1"}
         out = io.StringIO()
-        with mock.patch("sys.stdin", io.StringIO(json.dumps(payload))), contextlib.redirect_stdout(out):
+        with mock.patch("sys.stdin", io.StringIO(json.dumps(payload))), contextlib.redirect_stdout(out), \
+                mock.patch.object(hooks, "_spawn", lambda *a, **k: None):  # no real `dev` in the background
             hooks.run("stop", "codex")
         return out.getvalue()
 
