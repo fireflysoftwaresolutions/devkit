@@ -3148,6 +3148,16 @@ INSTALL_REASON = ("`dev install` and `dev update` change what every hook, the gu
                   f"installed now. {_TAIL}")
 
 
+SETUP_REASON = ("`dev setup` decides which agents devkit sets up and rewrites their settings, hooks and instructions, "
+                "so the developer runs it, in their own terminal. Ask them to run it, and say what should change and "
+                "why. `dev setup --preview` only draws its screens with sample data and changes nothing: agents may "
+                "run that.")
+AGENTS_REASON = ("`dev config set agents.…` turns devkit on or off for an agent: the next `dev install` or `dev setup` "
+                 "takes devkit's hooks and rules out of an agent turned off. Only the developer decides that, in their "
+                 "own terminal. Ask them: name the agent, the value and why; `dev config show` prints the current "
+                 "values.")
+
+
 TERMINAL_REASON = ("Opening a Terminal or iTerm window, or a .command or .tool file (which macOS runs in one), starts "
                    "a shell the guard cannot read, with no agent marker, re-parented to launchd and with a terminal: "
                    "to devkit it looks like the developer's terminal, where `dev install` and `dev ext ack` are "
@@ -4006,6 +4016,8 @@ class _Shell:
         words = _dev_words(args)
         if args[:1] in (["install"], ["update"]) and not helps and not _update_check(args):
             return deny(INSTALL_REASON, key="install")
+        if words[:1] == ["setup"] and not helps and args[args.index("setup") + 1:] != ["--preview"]:
+            return deny(SETUP_REASON, key="setup")
         if _ext_refusal(args) and not helps:
             return deny(EXT_REASON, key="ext")
         if args[:1] in (["claude"], ["codex"]):  # dev claude|codex execs the agent with the words after the query
@@ -4023,6 +4035,8 @@ class _Shell:
                 return deny(AUDIT_REASON, key="config-audit")
             if any(re.match(r"bugs(?:\.share|=|$)", k) for k in keys):
                 return deny(BUGS_SHARE_REASON, key="config-bugs-share")
+            if any(re.match(r"agents(?:\.|=|$)", k) for k in keys):
+                return deny(AGENTS_REASON, key="config-agents")
         if words[:2] == ["config", "edit"]:
             return deny(protected_reason(Path(real(core.CONFIG_FILE)), "edit"), key="config-edit")
         if words[:2] in (["config", "lock"], ["config", "unlock"]) and not helps:
