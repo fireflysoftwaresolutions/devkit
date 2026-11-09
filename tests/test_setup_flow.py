@@ -997,6 +997,38 @@ class AgentOffTests(unittest.TestCase):
         self.assertEqual(removed, ["codex"])
         self.assertIn("removed devkit's hooks; Codex and your own settings stay", out.getvalue())
 
+    def test_the_rules_step_takes_devkits_rules_out_of_a_turned_off_agent_and_keeps_hand_written_ones(self):
+        """R21 on the repair path too: writing the rules with Codex off removes the AGENTS.md devkit generated; a
+        hand-written one (no devkit mark) stays as the person wrote it."""
+        for generated in (True, False):
+            with self.subTest(generated=generated), tempfile.TemporaryDirectory() as tmp:
+                claude, codex = Path(tmp) / ".claude", Path(tmp) / ".codex"
+                codex.mkdir()
+                text = (setup.GENERATED_MARK + " 26.11.8 -->\n# old rules\n") if generated else "# my own rules\n"
+                (codex / "AGENTS.md").write_text(text)
+                with mock.patch.dict(setup.CFG, {"agents": {"claude": True, "codex": False}}), \
+                        mock.patch.object(setup, "CLAUDE_HOME", claude), mock.patch.object(setup, "CODEX_HOME", codex), \
+                        mock.patch.object(setup, "STATE", Path(tmp) / "state"), \
+                        mock.patch.object(core, "older_copy", lambda: None), mock.patch("sys.stdout", io.StringIO()):
+                    setup.write_agent_instructions(quiet=True)
+                self.assertIn(setup.GENERATED_MARK, (claude / "CLAUDE.md").read_text()[:200])
+                self.assertEqual((codex / "AGENTS.md").exists(), not generated)
+                if not generated:
+                    self.assertEqual((codex / "AGENTS.md").read_text(), "# my own rules\n")
+
+    def test_a_turned_off_agents_rules_are_no_drift(self):
+        """R21 on the repair path: with Codex off, a missing or hand-written AGENTS.md is not drift for the
+        ConfigChange repair, while Claude Code's edited CLAUDE.md still is."""
+        from devkit import policy
+        with tempfile.TemporaryDirectory() as tmp:
+            claude, codex = Path(tmp) / ".claude", Path(tmp) / ".codex"
+            claude.mkdir()
+            (claude / "CLAUDE.md").write_text("# edited by hand\n")
+            with mock.patch.dict(core.CFG, {"agents": {"claude": True, "codex": False}}), \
+                    mock.patch.object(policy, "CLAUDE_HOME", claude), mock.patch.object(policy, "CODEX_HOME", codex):
+                drifts = [d.key for d in policy.diff_instructions()]
+        self.assertEqual(drifts, [str(core.tilde(claude / "CLAUDE.md"))])
+
     def test_ac39_the_review_says_what_turning_codex_off_removes(self):
         """INSTALL-AC-39: on a rerun, Agents changed to Claude Code only: the review says so before Apply."""
         saved = {"agents": {"claude": True, "codex": True}, "stacks": ["python"]}

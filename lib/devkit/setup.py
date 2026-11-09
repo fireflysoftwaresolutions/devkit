@@ -901,7 +901,9 @@ def write_agent_instructions(quiet=False):
         text = render_instructions()
         personal_f = CONFIG_FILE.parent / "AGENTS.personal.md"
         for agent, target in (("claude", CLAUDE_HOME / "CLAUDE.md"), ("codex", CODEX_HOME / "AGENTS.md")):
-            if not agent_on(agent):  # a turned-off agent gets no rules (remove_agent takes devkit's out)
+            if not agent_on(agent):  # a turned-off agent gets no rules: devkit's come out, the person's own stay
+                if remove_generated_rules(target):
+                    done(f"{tilde(target)} removed: {'Claude Code' if agent == 'claude' else 'Codex'} is turned off")
                 continue
             target.parent.mkdir(parents=True, exist_ok=True)
             if target.is_symlink():
@@ -1762,6 +1764,17 @@ def agent_on(agent: str) -> bool:
     return bool((CFG.get("agents") or {}).get(agent, True))
 
 
+def remove_generated_rules(target: Path) -> bool:
+    """Remove an agent's rules file when devkit generated it (its mark on top); a hand-written one stays. -> removed."""
+    try:
+        if target.is_file() and not target.is_symlink() and GENERATED_MARK in target.read_text()[:200]:
+            target.unlink()
+            return True
+    except OSError as e:
+        fail(f"{tilde(target)}: {e}")
+    return False
+
+
 def _devkit_skill_links(folder: Path) -> list:
     """The links devkit made in an agent's skills folder: those that point into devkit's shared skills."""
     if not folder.is_dir():
@@ -1804,13 +1817,9 @@ def remove_agent(agent: str) -> list:
     from . import ext
     gone, mcp, own = [], list(ext.effective_mcp(agent)), _own_plugin_ids(agent)
     rules = home / ("CLAUDE.md" if agent == "claude" else "AGENTS.md")
-    try:
-        if rules.is_file() and not rules.is_symlink() and GENERATED_MARK in rules.read_text()[:200]:
-            rules.unlink()
-            gone.append(f"rules ({tilde(rules)})")
-    except OSError as e:
-        fail(f"{tilde(rules)}: {e}")
-    links = _devkit_skill_links((CLAUDE_HOME if agent == "claude" else AGENTS_HOME) / "skills")
+    if remove_generated_rules(rules):
+        gone.append(f"rules ({tilde(rules)})")
+    links =_devkit_skill_links((CLAUDE_HOME if agent == "claude" else AGENTS_HOME) / "skills")
     for p in links:
         p.unlink()
     if links:
