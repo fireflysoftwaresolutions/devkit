@@ -1817,6 +1817,46 @@ def _without_toml_tables(text: str, tables) -> str:
     return re.sub(r"\n{3,}", "\n\n", "".join(out))
 
 
+_TOML_HEADER = re.compile(r"\s*\[\[?\s*([^\]]+?)\s*\]\]?\s*(#.*)?$")
+CODEX_FULL_ACCESS = {"approval_policy": "never", "sandbox_mode": "danger-full-access"}  # config/codex/config.json
+
+
+def _without_devkit_modes(text: str, dev_root: Path) -> tuple:
+    """Codex's config.toml without what devkit set on the premise that its guard runs: approval_policy "never" and
+    sandbox_mode "danger-full-access" at the top level, and the project roots it trusts (a [projects."<path>"] table
+    for the dev root or a folder in it whose only key is trust_level = "trusted"). A value the person chose, a table
+    in a profile, a project outside the dev root and a project table with keys of the person's own stay.
+    -> (text, [what went, in words])"""
+    blocks = [[None, []]]
+    for line in text.splitlines(keepends=True):
+        m = _TOML_HEADER.match(line)
+        if m:
+            blocks.append([m.group(1), [line]])
+        else:
+            blocks[-1][1].append(line)
+    out, modes, roots, root = [], [], 0, str(dev_root).rstrip("/")
+    for name, lines in blocks:
+        if name is None:
+            for line in lines:
+                kv = re.match(r"""\s*(approval_policy|sandbox_mode)\s*=\s*(["'])([^"']*)\2\s*(#.*)?$""", line)
+                if kv and CODEX_FULL_ACCESS[kv.group(1)] == kv.group(3):
+                    modes.append(f"{kv.group(1)} {kv.group(3)}")
+                    continue
+                out.append(line)
+            continue
+        p = re.fullmatch(r"""projects\s*\.\s*(?:"([^"\\]+)"|'([^']+)')""", name)
+        path = p and (p.group(1) or p.group(2))
+        body = [s for s in (ln.strip() for ln in lines[1:]) if s and not s.startswith("#")]
+        if path and (path == root or path.startswith(root + "/")) and len(body) == 1 and \
+                re.fullmatch(r"""trust_level\s*=\s*(["'])trusted\1""", body[0]):
+            roots += 1
+            continue
+        out.extend(lines)
+    if roots:
+        modes.append(f"{roots} trusted project root{'s' if roots != 1 else ''}")
+    return re.sub(r"\n{3,}", "\n\n", "".join(out)), modes
+
+
 def _own_plugin_ids(agent: str) -> list:
     """The ids of devkit's own plugin for this agent: those of the marketplace devkit builds from its checkout."""
     from . import ext
@@ -1894,12 +1934,28 @@ def _remove_agent(agent: str, home: Path) -> list:
                 new.pop("statusLine", None)
             if isinstance(cur.get("enabledPlugins"), dict):
                 new["enabledPlugins"] = {k: v for k, v in cur["enabledPlugins"].items() if k not in own}
+            # devkit set no prompts on the premise that its guard runs: without the guard, its values go and the
+            # vendor default returns; a mode the person chose stays
+            modes, perms = [], cur.get("permissions")
+            if isinstance(perms, dict) and perms.get("defaultMode") == "bypassPermissions":
+                kept_perms = {k: v for k, v in perms.items() if k != "defaultMode"}
+                new.pop("permissions")
+                if kept_perms:
+                    new["permissions"] = kept_perms
+                modes.append("bypassPermissions")
+            if cur.get("skipDangerousModePermissionPrompt") is True:
+                new.pop("skipDangerousModePermissionPrompt")
+                modes.append("the skipped bypass warning")
             if new != cur:
                 backup(f)
                 tmp = f.with_suffix(".json.devkit-tmp")
                 tmp.write_text(json.dumps(new, indent=2, ensure_ascii=False) + "\n")
                 os.replace(tmp, f)
-                gone.append("hooks, status line and plugin entry in settings.json")
+                if {k: v for k, v in new.items() if k not in ("permissions", "skipDangerousModePermissionPrompt")} != \
+                        {k: v for k, v in cur.items() if k not in ("permissions", "skipDangerousModePermissionPrompt")}:
+                    gone.append("hooks, status line and plugin entry in settings.json")
+                if modes:
+                    gone.append(f"the permission mode devkit set ({' and '.join(modes)}) in settings.json")
         if core.have("claude"):
             claude_json = HOME / ".claude.json"  # Claude Code's user-scope MCP servers, beside its account state
             servers = (read_json(claude_json, {}) or {}).get("mcpServers") if claude_json.is_file() else None
@@ -1925,15 +1981,19 @@ def _remove_agent(agent: str, home: Path) -> list:
                 f.unlink()
             gone.append(f"hooks ({tilde(f)})")
     toml = CODEX_HOME / "config.toml"
-    if toml.is_file() and catalog:
+    if toml.is_file():
         text = toml.read_text()
         servers, _ = ext.codex_mcp_servers(text)  # a server with lines the reader cannot read is never devkit's
         mcp = _devkit_mcp(catalog, {n: e["table"] for n, e in servers.items() if not e["unread"]})
         new = _without_toml_tables(text, [f"mcp_servers.{m}" for m in mcp]) if mcp else text
+        new, modes = _without_devkit_modes(new, DEV)
         if new != text:
             backup(toml)
             toml.write_text(new)
-            gone.append(f"MCP servers in config.toml ({', '.join(mcp)})")
+            if mcp:
+                gone.append(f"MCP servers in config.toml ({', '.join(mcp)})")
+            if modes:
+                gone.append(f"{', '.join(modes[:-1]) + ' and ' if len(modes) > 1 else ''}{modes[-1]} in config.toml")
     owned = [p for p in sorted(CODEX_HOME.glob("*.config.toml")) if p.read_text()[:30].startswith("# Managed by devkit")]
     owned += [p for p in sorted((CODEX_HOME / "agents").glob("*.toml"))
               if p.read_text()[:len(CODEX_ROLE_MARK)] == CODEX_ROLE_MARK]

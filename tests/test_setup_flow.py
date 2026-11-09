@@ -1111,6 +1111,59 @@ class AgentOffTests(unittest.TestCase):
             self.assertEqual(stat.S_IMODE(d.stat().st_mode), 0o700)
             self.assertEqual({stat.S_IMODE(p.stat().st_mode) for p in copies}, {0o600})
 
+    def test_turning_claude_code_off_drops_the_no_prompt_mode_devkit_set_and_keeps_the_persons_choice(self):
+        """Without devkit's guard, bypassPermissions and its skipped warning would leave Claude Code with no prompts
+        and no guard: each goes when it still holds devkit's value (the vendor default returns), after a backup. A
+        mode the person chose stays, and so do their own permission rules. A second run changes nothing."""
+        cases = (({"defaultMode": "bypassPermissions", "allow": ["Bash(ls:*)"]}, True, {"allow": ["Bash(ls:*)"]}, None),
+                 ({"defaultMode": "acceptEdits"}, None, {"defaultMode": "acceptEdits"}, None))
+        for perms, skip, want_perms, want_skip in cases:
+            with self.subTest(mode=perms["defaultMode"]), tempfile.TemporaryDirectory() as tmp:
+                tmp = Path(tmp)
+                claude, codex, agents, share = self.homes(tmp)
+                doc = {"theme": "dark", "permissions": perms, **({"skipDangerousModePermissionPrompt": skip}
+                                                               if skip is not None else {})}
+                (claude / "settings.json").write_text(json.dumps(doc))
+                with self.patched(tmp, claude, codex, agents, share):
+                    gone = setup.remove_agent("claude")
+                    after = json.loads((claude / "settings.json").read_text())
+                    self.assertEqual(setup.remove_agent("claude"), [])
+                saved = [json.loads(p.read_text()) for p in (tmp / "state" / "backups").glob("settings.json.*")]
+            self.assertEqual(after.get("permissions"), want_perms)
+            self.assertEqual(after.get("skipDangerousModePermissionPrompt"), want_skip)
+            bypass = perms["defaultMode"] == "bypassPermissions"
+            self.assertEqual(saved, [doc] if bypass else [])  # the person's own mode: nothing changed, nothing copied
+            self.assertEqual(any("bypassPermissions" in g for g in gone), bypass)
+
+    def test_turning_codex_off_drops_the_full_access_modes_and_project_trust_devkit_set(self):
+        """Codex: approval_policy "never", sandbox_mode "danger-full-access" and the project roots devkit trusts (the
+        dev root and folders in it, trust_level alone) go, after a backup; a value the person chose, a project
+        outside the dev root, and a project table with keys of the person's own stay. A second run changes
+        nothing."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            claude, codex, agents, share = self.homes(tmp)
+            dev = tmp / "Development"
+            text = ('model = "gpt-6"\napproval_policy = "never"\nsandbox_mode = "danger-full-access"\n\n'
+                    f'[projects."{dev}"]\ntrust_level = "trusted"\n\n'
+                    f'[projects."{dev}/acme/api"]\ntrust_level = "trusted"\n\n'
+                    f'[projects."{dev}/acme/web"]\ntrust_level = "trusted"\nmodel = "mine"\n\n'
+                    '[projects."/Users/ana/work"]\ntrust_level = "trusted"\n\n'
+                    '[profiles.safe]\nsandbox_mode = "danger-full-access"\n')
+            (codex / "config.toml").write_text(text)
+            with self.patched(tmp, claude, codex, agents, share), mock.patch.object(setup, "DEV", dev):
+                gone = setup.remove_agent("codex")
+                after = (codex / "config.toml").read_text()
+                self.assertEqual(setup.remove_agent("codex"), [])
+            saved = [p.read_text() for p in (tmp / "state" / "backups").glob("config.toml.*")]
+        self.assertEqual(after, 'model = "gpt-6"\n\n'
+                                f'[projects."{dev}/acme/web"]\ntrust_level = "trusted"\nmodel = "mine"\n\n'
+                                '[projects."/Users/ana/work"]\ntrust_level = "trusted"\n\n'
+                                '[profiles.safe]\nsandbox_mode = "danger-full-access"\n')
+        self.assertEqual(saved, [text])
+        self.assertIn("approval_policy never, sandbox_mode danger-full-access and 2 trusted project roots in "
+                      "config.toml", gone)
+
     def test_removing_twice_changes_nothing_more(self):
         with tempfile.TemporaryDirectory() as tmp:
             claude, codex, agents, share = self.homes(Path(tmp))
