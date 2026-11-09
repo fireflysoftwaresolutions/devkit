@@ -405,17 +405,15 @@ class SessionLogs(Shared):
 
     def test_sessions_logging_at_once_keep_every_line_and_commit_each(self):
         # Three sessions (Claude Code, Codex, a terminal) run `dev handoff --log` in the same second, the first lines
-        # of the month in a project whose note does not exist yet: the month's log has the line of every command that
-        # succeeded, once, and each is committed. (A command that fails on the note's shared temporary file, a defect
-        # tested on its own below, logs nothing.)
+        # of the month in a project whose note does not exist yet: every command succeeds, the month's log has each
+        # line once, and each is committed.
         sessions = [("claude", "s1"), ("codex", "t1"), ()]
         res = self.ana.together([(("handoff", "--log", f"line from session {i}"), s, None, None)
                                  for i, s in enumerate(sessions)])
-        logged = [i for i, r in enumerate(res) if r.returncode == 0]
-        self.assertTrue(logged, "\n".join(r.stdout + r.stderr for r in res))
+        self.assertEqual([r.returncode for r in res], [0, 0, 0], "\n".join(r.stdout + r.stderr for r in res))
         text = self.month_file(self.ana).read_text()
         for i in range(3):
-            self.assertEqual(len(self.lines_of(text, rf"line from session {i}$")), 1 if i in logged else 0, text)
+            self.assertEqual(len(self.lines_of(text, rf"line from session {i}$")), 1, text)
         self.assertEqual(git(self.ana.handoff, "status", "--porcelain", "--", "sessions"), "")
         self.assertEqual(git(self.ana.handoff, "show", f"HEAD:sessions/{WIDGET}/{time.strftime('%Y-%m')}.md"), text)
 
@@ -605,7 +603,6 @@ class Initiatives(Shared):
 
 
 class SharedFileWrites(Shared):
-    @unittest.expectedFailure  # open defect B-g3dspvf8z13: one fixed temporary name for every writer
     def test_two_processes_regenerating_one_note_at_once_never_fail_or_leave_a_torn_note(self):
         # Two processes regenerate the same project note at the same moment (a session start and `dev sync`, two
         # sessions starting): neither fails, and the note is always one writer's whole text.

@@ -803,14 +803,43 @@ def read_json(path, default=None):
         return default
 
 
+def replace_text(path, text: str) -> None:
+    """Write `text` to `path` in one step: a temporary file of this writer's own in the same folder (mkstemp, so two
+    processes writing the same file never share one), flushed to disk, then renamed over `path`. A reader sees the
+    old text or the new one, never part of either. The file keeps its permissions; a new one gets what a plain write
+    gives it (the umask applies). The temporary name ends in `.tmp`, which the handoff repository ignores."""
+    path = Path(path)
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        try:
+            mode = stat.S_IMODE(path.stat().st_mode)
+        except FileNotFoundError:
+            mask = os.umask(0)
+            os.umask(mask)
+            mode = 0o666 & ~mask
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def write_if_changed(path: Path, text: str) -> bool:
+    """Write `text` to `path` unless it already holds it (replace_text). -> whether it wrote. Safe while other
+    processes write the same file: the last rename wins whole. A caller that builds `text` from what it read (a
+    read-modify-write) holds the lock its writers share around both."""
     path = Path(path)
     if path.exists() and path.read_text() == text:
         return False
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(text)
-    os.replace(tmp, path)
+    replace_text(path, text)
     return True
 
 
