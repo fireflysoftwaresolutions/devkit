@@ -741,7 +741,10 @@ class HandoffSyncTests(unittest.TestCase):
             _git(m.other, "push", "-q")
             plan.write_text("# Export\n\nState: our words.\n")
             work._commit([plan], "plan: our words", push=False)
-            cli.commit_push(quiet=True)
+            warned = io.StringIO()
+            with contextlib.redirect_stderr(warned):
+                cli.commit_push(quiet=True)
+            self.assertIn(f"stopped on a conflict in {rel}", warned.getvalue())
             self.assertEqual(m.stopped(), [], m.problem())
             self.assertEqual(_git(m.here, "branch", "--show-current"), "main")
             self.assertEqual(_git(m.here, "rev-list", "--count", "@{u}..HEAD"), "1")
