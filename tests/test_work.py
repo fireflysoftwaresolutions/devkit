@@ -808,6 +808,49 @@ class PlanTests(unittest.TestCase):
             self.assertEqual((meta["status"], int(meta["version"])), ("draft", 1))
             self.assertFalse(plans.needs_revision(raw))
 
+    def test_a_revision_that_follows_at_once_is_committed_after_the_first_with_its_own_text(self):
+        # Another session revises the plan just as this revision commits: it waits for that commit, so the history
+        # holds this revision's version under this revision's message, then the other's under its own.
+        import fcntl
+        import threading
+        with TwoMacs():
+            path = plans.new("acme/api", "Invoice export", a=A)
+            rel = str(path.relative_to(work.HANDOFF))
+            settled = threading.Event()
+            real_flock, real_commit = core._flock_within, work._commit
+
+            def other_session():
+                try:
+                    plans.revise(path, "second", a=B)
+                finally:
+                    settled.set()
+
+            other = threading.Thread(target=other_session)
+
+            def flock_within(fd, wait):  # the other session asks for the plan's lock
+                if threading.current_thread() is other:
+                    try:
+                        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        return True
+                    except BlockingIOError:
+                        settled.set()  # it waits for this revision
+                return real_flock(fd, wait)
+
+            def commit(paths, message, **kw):
+                if threading.current_thread() is threading.main_thread() and message.endswith("— first"):
+                    other.start()
+                    settled.wait(10)  # the other session waits for the plan's lock, or has revised and committed
+                return real_commit(paths, message, **kw)
+
+            with mock.patch.object(core, "_flock_within", flock_within), mock.patch.object(work, "_commit", commit):
+                plans.revise(path, "first", a=A)
+                other.join(30)
+            subjects = _git(work.HANDOFF, "log", "-2", "--format=%s").splitlines()
+            self.assertEqual([(re.findall(r" v(\d+) ", s), s.rsplit(" — ", 1)[-1]) for s in subjects],
+                             [(["3"], "second"), (["2"], "first")])
+            self.assertIn("\nversion: 2\n", _git(work.HANDOFF, "show", f"HEAD~1:{rel}"))
+            self.assertIn("\nversion: 3\n", _git(work.HANDOFF, "show", f"HEAD:{rel}"))
+
 
 class TemplateTests(unittest.TestCase):
     def test_task_bodies_by_type(self):

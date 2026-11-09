@@ -96,7 +96,9 @@ def revise(path: Path, why: str, a=None, status: str = None) -> dict:
     path = Path(path)
     with work.record_lock(path):  # another session revising this plan waits, then reads what this one wrote
         meta = _revise_locked(path, why, a, status)
-    work._commit([path], f"{meta['id']}: {meta['_change']} v{meta['version']} ({work.actor_str(a)}) — {why}")
+        # committed before the lock is released (the plan's lock, then the repository's, as for items): a revision
+        # that follows at once waits, so each commit holds its own revision's text under its own message
+        work._commit([path], f"{meta['id']}: {meta['_change']} v{meta['version']} ({work.actor_str(a)}) — {why}")
     meta.pop("_change", None)
     return meta
 
