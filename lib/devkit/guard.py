@@ -4214,7 +4214,7 @@ class _Shell:
         if not before:  # the file's text now; one the guard cannot read in full could finish what this adds
             whole = _whole_text(hit) if hit is not None else ""
             if whole is None:
-                return deny(SETTINGS_UNREAD_REASON.format(what=_code(core.tilde(str(where)))), key="settings-unseen")
+                return deny(SETTINGS_UNREAD_REASON.format(what=_code(core.tilde(str(where)))), key="settings-unread")
             before = [whole]
         texts = list(dict.fromkeys((w + b[len(w):]) if mode == "overwrite" else b + w for b in before for w in text))
         if len(texts) > 64:  # too many readings to judge: refused as unseen
