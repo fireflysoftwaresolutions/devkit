@@ -21,7 +21,7 @@ import re
 import time
 from pathlib import Path
 
-from . import core
+from . import core, state
 from .core import DEV, STATE
 
 MARKER = "[Firefly> DevKit]"
@@ -411,12 +411,7 @@ def check(agent: str, data: dict):
     else:
         rec["excerpt"] = re.sub(r"\s+", " ", text.strip())[:120]
         rec["instructions_loaded"] = instructions_loaded(agent, data.get("session_id") or "")
-    try:
-        LOG.parent.mkdir(parents=True, exist_ok=True)
-        with LOG.open("a") as f:
-            f.write(json.dumps(rec) + "\n")
-    except OSError:
-        pass
+    _append(rec)
     return ok, pid, line
 
 
@@ -442,9 +437,15 @@ def bounded(line: str, limit: int = STATUS_MAX) -> str:
     return cut.rstrip() + " …"
 
 
-def save_status(pid, agent: str, line: str, branch=None, path=None):
-    """The latest status block of a project, whole (dev status shows every bullet). `path` is the checkout the
-    session worked in, so dev status can say when an update came from a worktree or a copy."""
+STATUS_SESSIONS = 8  # the sessions of a project whose own latest status block is kept
+
+
+def save_status(pid, agent: str, line: str, branch=None, path=None, session=None):
+    """The latest status block of a project, whole (dev status shows every bullet), at the top level of
+    status/<project>.json as before; `session` (the session id) names who wrote it, and `sessions` keeps each of the
+    STATUS_SESSIONS most recent sessions' own latest, by "<agent>:<session id>", so a second session of the project
+    never reads the first one's as its own. `path` is the checkout the session worked in, so dev status can say
+    when an update came from a worktree or a copy. Written under the record's lock, replaced whole."""
     if not pid or not line:
         return
     d = STATE / "status"
@@ -452,7 +453,22 @@ def save_status(pid, agent: str, line: str, branch=None, path=None):
     rec = {"ts": round(time.time()), "agent": agent, "line": bounded(line), "branch": branch}
     if path:
         rec["path"] = str(path)
-    (d / (pid.replace("/", "__") + ".json")).write_text(json.dumps(rec))
+    if session:
+        rec["session"] = str(session)
+
+    def fn(doc):
+        mine = {k: v for k, v in (doc.get("sessions") or {}).items() if isinstance(v, dict)}
+        if session:  # the writer moves to the end: the map's order is the order of the sessions' latest writes
+            mine.pop(f"{agent}:{session}", None)
+            mine[f"{agent}:{session}"] = dict(rec)
+        new = dict(rec)
+        if mine:
+            new["sessions"] = dict(list(mine.items())[-STATUS_SESSIONS:])
+        return new
+    try:
+        state.update(d / (pid.replace("/", "__") + ".json"), fn)
+    except state.StateBusy:
+        pass  # audited by state; the next Stop saves it again
 
 
 def parse_line(line: str) -> dict:
@@ -508,13 +524,8 @@ def records(days: int = 7) -> list:
 
 def record_corrected(agent: str, sid: str, pid, line: str = ""):
     """A missed reply that the agent corrected after the Stop hook's reminder (kept apart from first-time results)."""
-    try:
-        LOG.parent.mkdir(parents=True, exist_ok=True)
-        with LOG.open("a") as f:
-            f.write(json.dumps({"ts": round(time.time()), "agent": agent, "session": (sid or "")[:12], "project": pid,
-                                "ok": True, "corrected": True, "status": (line or "")[:200]}) + "\n")
-    except OSError:
-        pass
+    _append({"ts": round(time.time()), "agent": agent, "session": (sid or "")[:12], "project": pid, "ok": True,
+             "corrected": True, "status": (line or "")[:200]})
 
 
 def corrected(days: int = 7) -> int:
@@ -534,12 +545,7 @@ def check_subagent(agent: str, data: dict, sess: dict, pid=None, member: str = "
         rec["status"] = status_text(text)[:300]
     else:
         rec["excerpt"] = re.sub(r"\s+", " ", text.strip())[:120]
-    try:
-        LOG.parent.mkdir(parents=True, exist_ok=True)
-        with LOG.open("a") as f:
-            f.write(json.dumps(rec) + "\n")
-    except OSError:
-        pass
+    _append(rec)
     return ok
 
 
@@ -615,8 +621,25 @@ def summary_line(days: int = 7) -> str:
                                                                             if fixed else "")
 
 
+def _append(rec: dict):
+    """One result at the end of the log, under the log's lock: prune rewrites the log under the same lock, so an
+    append never lands between its read and its write. A lock that stays busy (a hook waits 2 s) drops the result,
+    as a write error does: the hooks never fail for the canary."""
+    try:
+        LOG.parent.mkdir(parents=True, exist_ok=True)
+        with state.hold(LOG), LOG.open("a") as f:
+            f.write(json.dumps(rec) + "\n")
+    except (OSError, state.StateBusy):
+        pass
+
+
 def prune(max_days: int = 90):
+    """The log without results older than `max_days`, rewritten under its lock (see _append) and replaced whole,
+    so a reader sees the old log or the new one, never a part."""
     if not LOG.exists():
         return
-    keep = records(max_days)
-    LOG.write_text("".join(json.dumps(r) + "\n" for r in keep))
+    with state.hold(LOG):
+        keep = records(max_days)
+        tmp = LOG.with_name(f".{LOG.name}.{os.getpid()}.tmp")
+        tmp.write_text("".join(json.dumps(r) + "\n" for r in keep))
+        os.replace(tmp, LOG)

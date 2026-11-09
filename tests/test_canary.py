@@ -10,13 +10,18 @@
 # Run: python3 -m unittest tests.test_canary
 import json
 import os
+import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
 TESTS = Path(__file__).resolve().parent
 sys.path.insert(0, str(TESTS.parent / "lib"))
+sys.path.insert(0, str(TESTS))
+
+import _sandbox  # noqa: E402
 
 from devkit import canary, crew  # noqa: E402
 
@@ -104,6 +109,88 @@ class CodexTranscriptTests(unittest.TestCase):
                 "type": "message", "role": "assistant", "phase": "final_answer",
                 "content": [{"type": "output_text", "text": "Now "}, {"type": "output_text", "text": "this."}]}}) + "\n")
         self.assertEqual(canary.last_assistant_text(path), "Now this.")
+
+
+# A process of the canary log, for the race test: it points devkit's state at the test's folder, then appends one
+# result, or prunes while holding its read open until the append is done or 1.5 s pass. Nothing here starts an agent.
+LOG_CHILD = r"""
+import json, sys, time
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+root, role = Path(sys.argv[2]), sys.argv[3]
+from devkit import canary
+canary.STATE, canary.LOG = root, root / "canary.jsonl"
+if role == "prune":
+    read = canary.records
+
+    def records(days=7):
+        got = read(days)
+        (root / "read-done").touch()
+        end = time.time() + 1.5
+        while not (root / "appended").exists() and time.time() < end:
+            time.sleep(0.01)
+        return got
+    canary.records = records
+    canary.prune(90)
+else:
+    end = time.time() + 15
+    while not (root / "read-done").exists() and time.time() < end:
+        time.sleep(0.005)
+    canary.record_corrected("codex", "0199a213-81c0", "acme/api", "the late result")
+    (root / "appended").touch()
+"""
+
+
+class SharedStateTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(os.path.realpath(self.tmp.name))
+        saved = (canary.STATE, canary.LOG)
+        canary.STATE, canary.LOG = self.root, self.root / "canary.jsonl"
+        self.addCleanup(lambda: setattr(canary, "STATE", saved[0]) or setattr(canary, "LOG", saved[1]))
+
+    def status(self) -> dict:
+        return json.loads((self.root / "status" / "acme__api.json").read_text())
+
+    def test_status_keeps_the_latest_of_each_session(self):
+        # two sessions of one project: the file's top level is the latest of either (what dev status read before),
+        # and each session keeps its own latest, so a second session never reads the first one's as its own
+        canary.save_status("acme/api", "claude", "A: tests green", "main", "/dev/acme/api", session="4d1cffc7-1b2c")
+        canary.save_status("acme/api", "codex", "B: release cut", "rel", "/wt/rel", session="0199a213-81c0")
+        doc = self.status()
+        self.assertEqual((doc["line"], doc["agent"], doc["session"]), ("B: release cut", "codex", "0199a213-81c0"))
+        self.assertEqual({k: v["line"] for k, v in doc["sessions"].items()},
+                         {"claude:4d1cffc7-1b2c": "A: tests green", "codex:0199a213-81c0": "B: release cut"})
+        self.assertEqual(doc["sessions"]["codex:0199a213-81c0"]["branch"], "rel")
+        canary.save_status("acme/api", "claude", "A: pushed", "main", session="4d1cffc7-1b2c")
+        self.assertEqual(self.status()["sessions"]["claude:4d1cffc7-1b2c"]["line"], "A: pushed")
+        for i in range(canary.STATUS_SESSIONS):  # the most recent sessions only
+            canary.save_status("acme/api", "codex", f"thread {i}", "main", session=f"0199a300-{i:04d}")
+        kept = self.status()["sessions"]
+        self.assertEqual(len(kept), canary.STATUS_SESSIONS)
+        self.assertNotIn("claude:4d1cffc7-1b2c", kept)
+
+    def test_an_append_during_a_prune_is_kept(self):
+        # another session's Stop hook appends its result while `dev sleep` prunes the log: the rewrite and the
+        # appends share one lock, so the late line survives (before, the prune wrote back what it had read)
+        old = [{"ts": round(time.time()) - 60, "agent": "claude", "ok": True, "project": "acme/api"}] * 3
+        canary.LOG.write_text("".join(json.dumps(r) + "\n" for r in old))
+        procs = [subprocess.Popen([sys.executable, "-c", LOG_CHILD, str(TESTS.parent / "lib"), str(self.root), role],
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=_sandbox.env())
+                 for role in ("prune", "append")]
+        try:
+            for p in procs:
+                _, err = p.communicate(timeout=30)
+                self.assertEqual(p.returncode, 0, err.decode()[-600:])
+        finally:
+            for p in procs:
+                if p.poll() is None:
+                    p.kill()
+                    p.wait(5)
+        lines = [json.loads(ln) for ln in canary.LOG.read_text().splitlines()]
+        self.assertEqual(len(lines), 4, lines)
+        self.assertEqual(lines[-1].get("status"), "the late result")
 
 
 if __name__ == "__main__":
