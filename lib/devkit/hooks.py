@@ -3394,6 +3394,7 @@ def run(event: str, agent: str) -> int:
         return 0  # devkit's own headless call (ai.ask): no session, no progress, no gates; the guard still judges
     state.WAIT, state.SAY_BUSY = state.HOOK_WAIT, False  # a hook waits at most 2 s for a record, silently
     marked = _bug_marks_start(event)
+    saved = _own_identity(event, agent)
     try:
         (STATE / "logs").mkdir(parents=True, exist_ok=True)
         fn(agent)
@@ -3406,9 +3407,47 @@ def run(event: str, agent: str) -> int:
             g.failopen("guard-hook", e)
         _bug_hook_error(event, e)
     finally:
+        _restore_identity(saved)
         if marked:
             _bug_marks_end(event)
     return 0
+
+
+IDENTITY_VARS = ("DEVKIT_AGENT", "DEVKIT_SESSION", "DEVKIT_FROM_AGENT")
+
+
+def _own_identity(event: str, agent: str) -> dict:
+    """The identity this hook run's records carry (audit.actor, work.actor, audit.context): the agent of the hook's
+    arguments and the session of its payload. The variables a hook inherits name whatever launched the agent: a Codex
+    started from a Claude Code terminal carries that session, from a crew member's shell its lane too. The member a
+    hook acts for is its payload's agent_id, never DEVKIT_FROM_AGENT. The payload stays on stdin for the handler.
+    -> the variables as they were, for _restore_identity."""
+    saved = {k: os.environ.get(k) for k in IDENTITY_VARS}
+    try:
+        raw = sys.stdin.read()
+        sys.stdin = io.StringIO(raw)
+        payload = json.loads(raw) if raw.strip() else {}
+        sid = str(payload.get("session_id") or "") if isinstance(payload, dict) else ""
+    except (OSError, ValueError, TypeError):
+        sid = ""
+    try:
+        os.environ["DEVKIT_AGENT"] = agent
+        if sid:
+            os.environ["DEVKIT_SESSION"] = f"{agent}:{sid}"
+        elif not os.environ.get("DEVKIT_SESSION", "").startswith(f"{agent}:"):
+            os.environ.pop("DEVKIT_SESSION", None)
+        os.environ.pop("DEVKIT_FROM_AGENT", None)
+    except (ValueError, TypeError):  # a session id no environment can hold: the records keep what they inherited
+        _log(f"{event} {agent}: identity not set: {traceback.format_exc()[-200:]}")
+    return saved
+
+
+def _restore_identity(saved: dict):
+    for k, v in saved.items():
+        if v is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = v
 
 
 def _bug_marks_start(event: str) -> bool:

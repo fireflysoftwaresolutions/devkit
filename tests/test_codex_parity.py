@@ -14,6 +14,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -21,9 +22,11 @@ from unittest import mock
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "lib"))
 sys.path.insert(0, str(REPO / "tests"))
-from devkit import bugs, canary, hooks, scope  # noqa: E402
+from devkit import audit, bugs, canary, hooks, scope  # noqa: E402
+from devkit import progress as pg  # noqa: E402
 from test_bugs_detect import BugState  # noqa: E402
 from test_language_neutral_hooks import HookCase  # noqa: E402
+from test_progress import TempState  # noqa: E402
 
 BLOCK = ("**[Firefly> DevKit]** proj · `main` · Run requested steps\n\n- **Done:** ran the steps.\n"
          "- **Check:** ✓ git log shows the seed commit\n- **Next:** nothing.")
@@ -69,6 +72,37 @@ class CodexTranscriptTests(unittest.TestCase):
     def test_last_assistant_text_reads_a_codex_rollout(self):
         # SubagentStop and the shown-decisions record fall back to the transcript when the payload has no text.
         self.assertEqual(canary.last_assistant_text(self.path), BLOCK)
+
+
+class CodexStopTests(unittest.TestCase):
+    # Live (probe A): a Codex turn that committed ended without what the rules ask and was not sent back. Here the
+    # Stop hook runs its own classifier (scope.decide is not replaced), on a 0.167 rollout and payload
+    def setUp(self):
+        self.state = TempState()
+        self.state.__enter__()
+        self.addCleanup(self.state.__exit__, None, None, None)
+        self.path = _codex_rollout("git commit -m 'docs: add notes'", BLOCK)
+        self.addCleanup(os.unlink, self.path)
+
+    def test_a_codex_turn_without_the_progress_line_is_sent_back(self):
+        (pg.SESSIONS / "codex-c1.json").write_text(json.dumps({
+            "agent": "codex", "session": "c1", "started": time.time() - 600, "turn_started": time.time() - 60}))
+        with mock.patch.dict(os.environ, {"DEVKIT_SESSION": "codex:c1"}):
+            pg.start("Hotfix", plan=["plan=10m", "api=20m"])
+        data = {"session_id": "c1", "turn_id": "t1", "hook_event_name": "Stop", "cwd": self.state.tmp.name,
+                "model": "gpt-6", "permission_mode": "bypassPermissions", "transcript_path": self.path,
+                "last_assistant_message": BLOCK, "stop_hook_active": False}
+        out = io.StringIO()
+        with mock.patch.object(hooks, "_session_file", lambda a, sid: pg.SESSIONS / f"{a}-{sid}.json"), \
+                mock.patch.object(hooks, "STATE", Path(self.state.tmp.name)), \
+                mock.patch.object(hooks, "_continuity", lambda *a, **k: None), \
+                mock.patch.object(hooks, "_spawn_sync", lambda args: None), \
+                mock.patch.object(canary, "LOG", Path(self.state.tmp.name) / "canary.jsonl"), \
+                mock.patch("sys.stdin", io.StringIO(json.dumps(data))), contextlib.redirect_stdout(out):
+            hooks.stop("codex")
+        sent = json.loads(out.getvalue() or "{}")
+        self.assertEqual(sent.get("decision"), "block")
+        self.assertIn("- **Progress:** 0 of 2 steps · now 1. plan · ", sent.get("reason", ""))
 
 
 class CodexFailedShellTests(BugState, HookCase):
@@ -130,6 +164,43 @@ class CodexFailedShellTests(BugState, HookCase):
         self.assertEqual(self._ledger_ok(), [True, True])
         log = (self.root / "logs" / "hooks.log").read_text()
         self.assertEqual(log.count("no exit code in its tool_response"), 1, log)
+
+
+class CodexHookIdentityTests(HookCase):
+    """A Codex started from a Claude Code terminal (or a crew member's shell) inherits that session's variables."""
+
+    def setUp(self):
+        super().setUp()
+        env = mock.patch.dict(os.environ, {"DEVKIT_AGENT": "claude", "CLAUDECODE": "1", "DEVKIT_FROM_AGENT": "a_tank"})
+        env.start()
+        self.addCleanup(env.stop)
+        self.launcher = dict(os.environ)  # DEVKIT_SESSION=claude:s1 comes from HookCase
+
+    def _deny(self, **member):
+        # PreToolUse as Codex 0.167 sends it (captured): a member's call carries agent_id and agent_type beside the
+        # main session's session_id
+        payload = dict({"session_id": "c1", "turn_id": "t1", "hook_event_name": "PreToolUse", "tool_name": "Bash",
+                        "tool_use_id": "exec-5f125236-dd03-45f9-8fd3-db673fc2b9b0", "cwd": str(self.root),
+                        "model": "gpt-6.1-sol", "permission_mode": "bypassPermissions", "transcript_path": None,
+                        "tool_input": {"command": "git checkout -b codex/parity-probe"}}, **member)
+        out = io.StringIO()
+        with mock.patch("sys.stdin", io.StringIO(json.dumps(payload))), contextlib.redirect_stdout(out):
+            hooks.run("guard", "codex")
+        self.assertIn('"deny"', out.getvalue())
+        recs = [json.loads(ln) for f in sorted(audit.AUDIT.glob("*.jsonl")) for ln in f.read_text().splitlines()]
+        return [r for r in recs if r["action"] == "guard.deny"]
+
+    def test_a_codex_hooks_records_carry_codex_and_its_own_session(self):
+        denials = self._deny()
+        self.assertEqual([(r["actor"]["agent"], r["actor"]["session"]) for r in denials], [("codex", "c1")])
+        self.assertNotIn("crew", denials[0])  # never the launcher's crew lane
+        self.assertEqual(dict(os.environ), self.launcher)  # the caller's own variables are left as they were
+
+    def test_a_codex_members_records_carry_the_main_session_and_its_own_lane(self):
+        aid = "01a1c178-64c7-7ac1-81c6-ec8b852e1772"  # the captured scout's agent_id
+        denials = self._deny(agent_id=aid, agent_type="scout")
+        self.assertEqual([(r["actor"]["agent"], r["actor"]["session"]) for r in denials], [("codex", "c1")])
+        self.assertEqual(denials[0]["crew"]["lane"], aid)  # its own lane, never the launcher's a_tank
 
 
 if __name__ == "__main__":
