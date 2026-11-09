@@ -1356,7 +1356,8 @@ repository, the agents' permission modes, your stacks, your git hosts and the co
 (and whether to start it at the end), automation, and the settings lock. It shows the review and applies it only after
 you choose **Apply**: the packages for your stacks, hosts, and clouds, each chosen agent that is missing, `dev install`,
 Docker; then the sign-in panels, the settings lock, and `dev doctor`, and a summary with the command for each item
-left. Run it again to change your choices; turning an agent off removes what devkit wrote in it.
+left. Run it again to change your choices; turning an agent off removes what devkit wrote in it, but only in your own
+run in a terminal (an agent's run leaves it and says so).
 
 | Option | Effect |
 | --- | --- |

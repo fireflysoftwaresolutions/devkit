@@ -22,7 +22,8 @@ a number from `dev task` now counts only in the list you were shown.
   Code only, or Codex only, with the account each one needs, and installs, sets up, and signs in only those. Codex
   has its own install step and is no longer installed on every Mac. Turning an agent off removes devkit's rules,
   hooks, skill links, MCP servers, and plugin from it, and keeps the agent and your own settings; the review says so
-  before you apply.
+  before you apply. Only your own run in a terminal removes them: an agent's run leaves devkit, and with it the guard,
+  in place.
 - **Finish a setup later.** The setup saves your answers and each step's state, readable only by you.
   `dev setup --resume`, plain `dev setup`, and the installer open **Pick up where you left off?**, check the steps
   already done, and run the rest.

@@ -270,6 +270,11 @@ value. Applying an unchanged plan runs `dev install` again, which repairs anythi
 removes devkit's rules, hooks, skill links, MCP servers, and plugin from that agent, and keeps the agent and your own
 settings; the review says so before you apply, with the command that removes the app if you want that too.
 
+Only your own run in a terminal removes them, because taking devkit's hooks out also takes the guard out. When an
+agent turns an agent off (`dev config set agents.claude false`) and runs `dev setup -y` or `dev install`, or when the
+hooks repair the settings, devkit leaves everything in place and says that you run `dev setup` in your terminal to
+remove it. Each removal, done or refused, is in the audit trail (`dev audit --action agent.remove`).
+
 The full output of the steps is in `~/.local/state/devkit/logs/setup.log`, readable only by you.
 `dev setup --preview` draws every screen of the setup with sample data and changes nothing
 (`COLUMNS=60 dev setup --preview` draws them 60 columns wide).
@@ -317,10 +322,10 @@ with `dev install --only <step>`, which re-applies it from the copy that is inst
 | `cli` | Links `~/.local/bin/dev` to the pinned copy and adds a managed block to `~/.zshrc` that sources its `shell/devkit.zsh` |
 | `git` | Sets `user.name` and `user.email` from your GitHub account, makes `gh` git's credential helper, includes the shared git defaults, and the global ignore file |
 | `handoff` | Clones your handoff repository, or creates it as a private GitHub repository and pushes the first commit; writes the multi-machine merge rules |
-| `instructions` | Generates `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md` from `agents/AGENTS.md` (plus your personal rules), for each agent that is turned on. For an agent turned off in `dev setup`, it removes the file devkit generated and keeps one you wrote yourself, and `dev config repair` no longer counts that agent's missing file as drift |
+| `instructions` | Generates `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md` from `agents/AGENTS.md` (plus your personal rules), for each agent that is turned on. For an agent turned off in `dev setup`, your own run in a terminal removes the file devkit generated and keeps one you wrote yourself, and `dev config repair` no longer counts that agent's missing file as drift |
 | `skills` | Fetches third-party skills at pinned commits (your optional groups included) and links them into each agent that is turned on |
-| `claude` | Merges settings, hooks, plugins, and MCP servers into Claude Code; reinstalls the devkit plugin when the installed copy is stale. When Claude Code is turned off in `dev setup`, removes what devkit wrote there instead: its `CLAUDE.md`, hooks, status line, skill links, MCP servers, and plugin |
-| `codex` | Configures Codex through its own app-server API, writes and trusts the hooks, writes the profiles and the `scout` role, installs plugins and MCP servers, reinstalls a stale devkit plugin. When Codex is turned off in `dev setup`, removes what devkit wrote there instead: its `AGENTS.md`, hooks, skill links, MCP servers in `config.toml`, profiles, agent roles, and plugin; your own keys stay |
+| `claude` | Merges settings, hooks, plugins, and MCP servers into Claude Code; reinstalls the devkit plugin when the installed copy is stale. When Claude Code is turned off in `dev setup`, your own run in a terminal removes what devkit wrote there instead: its `CLAUDE.md`, hooks, status line, skill links, MCP servers, and plugin |
+| `codex` | Configures Codex through its own app-server API, writes and trusts the hooks, writes the profiles and the `scout` role, installs plugins and MCP servers, reinstalls a stale devkit plugin. When Codex is turned off in `dev setup`, your own run in a terminal removes what devkit wrote there instead: its `AGENTS.md`, hooks, skill links, MCP servers in `config.toml`, profiles, agent roles, and plugin; your own keys stay |
 | `desktop` | When Claude Desktop is installed: builds the devkit extension for chat and Cowork and opens its installer when it is missing or out of date (choose **Install**); see [Claude Desktop chat and Cowork](tutorials/desktop-chat-and-cowork.md) |
 | `docker` | Adds the Compose and Buildx plugin folder and the keychain credential store to `~/.docker/config.json`; registers Colima at login if you chose that |
 | `docs` | Checks markdownlint, lychee, and Vale, and syncs the Google and write-good Vale styles |
