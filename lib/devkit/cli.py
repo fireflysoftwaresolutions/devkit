@@ -3839,6 +3839,8 @@ def cmd_setup(a):
         from . import setup as setup_mod
         return setup_mod.setup_shell(assume_yes=a.yes, remove=a.remove)
     from . import wizard
+    if getattr(a, "preview", False):
+        return wizard.print_preview(getattr(a, "width", None))
     return wizard.run(assume_yes=a.yes, skip_packages=a.skip_packages, resume=bool(getattr(a, "resume", False)))
 
 
@@ -4430,6 +4432,9 @@ def build_parser():
     p.add_argument("--skip-packages", action="store_true", help="do not install Homebrew/npm packages")
     p.add_argument("--resume", action="store_true",
                    help="continue the last setup: run its steps that are not done, with the saved answers")
+    p.add_argument("--preview", action="store_true",
+                   help="draw every screen of the setup with sample data; changes nothing (for reviews and tests)")
+    p.add_argument("--width", type=int, metavar="COLUMNS", help="with --preview: draw the screens this wide")
     add("prompt", cmd_prompt, "What devkit's prompt helper shows here; refresh writes it for this Mac").add_argument(
         "action", nargs="?", choices=["refresh"])
     p = add("update", cmd_update, "Update devkit: the newest release, or a pull of its branch; --check only tells")

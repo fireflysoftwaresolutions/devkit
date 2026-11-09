@@ -900,7 +900,9 @@ def write_agent_instructions(quiet=False):
         step("Global agent instructions (Claude CLAUDE.md, Codex AGENTS.md)")
         text = render_instructions()
         personal_f = CONFIG_FILE.parent / "AGENTS.personal.md"
-        for target in (CLAUDE_HOME / "CLAUDE.md", CODEX_HOME / "AGENTS.md"):
+        for agent, target in (("claude", CLAUDE_HOME / "CLAUDE.md"), ("codex", CODEX_HOME / "AGENTS.md")):
+            if not agent_on(agent):  # a turned-off agent gets no rules (remove_agent takes devkit's out)
+                continue
             target.parent.mkdir(parents=True, exist_ok=True)
             if target.is_symlink():
                 target.unlink()
@@ -1306,6 +1308,8 @@ def _install_skills():
     managed_f = STATE / "skills-managed.json"
     previous = set(read_json(managed_f, []) or [])  # a list, or {name: [agents]} since 26.11.0
     for agent, home in (("claude", CLAUDE_HOME / "skills"), ("codex", AGENTS_HOME / "skills")):
+        if not agent_on(agent):  # a turned-off agent gets no skill links (remove_agent takes devkit's out)
+            continue
         home.mkdir(parents=True, exist_ok=True)
         mine = {n: tg for n, tg in wanted.items() if agent in only.get(n, {"claude", "codex"})}
         for name in previous - set(mine):
@@ -1753,6 +1757,124 @@ def _extensions(agent: str):
         fail(f"extensions: {e}")
 
 
+def agent_on(agent: str) -> bool:
+    """Whether this agent is turned on in `dev setup` (config `agents`; on unless false)."""
+    return bool((CFG.get("agents") or {}).get(agent, True))
+
+
+def _devkit_skill_links(folder: Path) -> list:
+    """The links devkit made in an agent's skills folder: those that point into devkit's shared skills."""
+    if not folder.is_dir():
+        return []
+    share = str(SKILLS_SHARE)
+    return [p for p in sorted(folder.iterdir()) if p.is_symlink() and str(os.readlink(p)).startswith(share)]
+
+
+def _without_toml_tables(text: str, tables) -> str:
+    """TOML text without the tables `tables` names ("mcp_servers.x") and their sub-tables; every other line kept."""
+    out, skip = [], False
+    for line in text.splitlines(keepends=True):
+        m = re.match(r"\s*\[\[?\s*([^\]]+?)\s*\]\]?\s*(#.*)?$", line)
+        if m:
+            name = re.sub(r"""["'\s]""", "", m.group(1))
+            skip = any(name == t or name.startswith(t + ".") for t in tables)
+        if not skip:
+            out.append(line)
+    return re.sub(r"\n{3,}", "\n\n", "".join(out))
+
+
+def _own_plugin_ids(agent: str) -> list:
+    """The ids of devkit's own plugin for this agent: those of the marketplace devkit builds from its checkout."""
+    from . import ext
+    raw = read_json(CONF / agent / "plugins.json", {}) or {}  # unrendered: {{DEVKIT}} names devkit's own marketplace
+    markets = [m for m, src in (raw.get("marketplaces") or {}).items() if src == "{{DEVKIT}}"]
+    return [p for p in ext.effective_plugin_ids(agent) if any(p.endswith("@" + m) for m in markets)] or \
+        [f"devkit@{m}" for m in markets]
+
+
+def remove_agent(agent: str) -> list:
+    """An agent turned off in `dev setup`: remove what devkit wrote for it, never the agent itself or the person's own
+    settings -> what was removed, in words. The rules file devkit generated, devkit's hooks and status line, its
+    skill links, its MCP servers, its plugin, and for Codex its profiles and agent roles. Each file is backed up
+    before it changes. Safe to run again: what is gone stays gone."""
+    name = "Claude Code" if agent == "claude" else "Codex"
+    home = CLAUDE_HOME if agent == "claude" else CODEX_HOME
+    if core.older_copy_skip(f"devkit's entries in {tilde(home)}"):
+        return []
+    from . import ext
+    gone, mcp, own = [], list(ext.effective_mcp(agent)), _own_plugin_ids(agent)
+    rules = home / ("CLAUDE.md" if agent == "claude" else "AGENTS.md")
+    try:
+        if rules.is_file() and not rules.is_symlink() and GENERATED_MARK in rules.read_text()[:200]:
+            rules.unlink()
+            gone.append(f"rules ({tilde(rules)})")
+    except OSError as e:
+        fail(f"{tilde(rules)}: {e}")
+    links = _devkit_skill_links((CLAUDE_HOME if agent == "claude" else AGENTS_HOME) / "skills")
+    for p in links:
+        p.unlink()
+    if links:
+        gone.append(f"{len(links)} skill link{'s' if len(links) != 1 else ''}")
+    if agent == "claude":
+        f = CLAUDE_HOME / "settings.json"
+        cur = read_json(f, None)
+        if isinstance(cur, dict):
+            new = dict(cur)
+            hooks = merge_hooks(cur.get("hooks") or {}, {})
+            new.pop("hooks", None)
+            if hooks:
+                new["hooks"] = hooks
+            if "hook statusline" in str((cur.get("statusLine") or {}).get("command") or ""):
+                new.pop("statusLine", None)
+            if isinstance(cur.get("enabledPlugins"), dict):
+                new["enabledPlugins"] = {k: v for k, v in cur["enabledPlugins"].items() if k not in own}
+            if new != cur:
+                backup(f)
+                tmp = f.with_suffix(".json.devkit-tmp")
+                tmp.write_text(json.dumps(new, indent=2, ensure_ascii=False) + "\n")
+                os.replace(tmp, f)
+                gone.append("hooks, status line and plugin entry in settings.json")
+        if core.have("claude"):
+            removed = [m for m in mcp if sh(["claude", "mcp", "remove", "-s", "user", m], timeout=30)[0] == 0]
+            removed_plugins = [p for p in own if sh(["claude", "plugin", "uninstall", p], timeout=120)[0] == 0]
+            if removed:
+                gone.append(f"MCP servers ({', '.join(removed)})")
+            if removed_plugins:
+                gone.append(f"the {', '.join(removed_plugins)} plugin")
+        return gone
+    f = CODEX_HOME / "hooks.json"
+    cur = (read_json(f, {}) or {}).get("hooks") if f.is_file() else None
+    if isinstance(cur, dict):
+        kept = merge_hooks(cur, {})
+        if kept != cur:
+            backup(f)
+            if kept:
+                f.write_text(json.dumps({"hooks": kept}, indent=2) + "\n")
+            else:
+                f.unlink()
+            gone.append(f"hooks ({tilde(f)})")
+    toml = CODEX_HOME / "config.toml"
+    if toml.is_file() and mcp:
+        text = toml.read_text()
+        new = _without_toml_tables(text, [f"mcp_servers.{m}" for m in mcp])
+        if new != text:
+            backup(toml)
+            toml.write_text(new)
+            gone.append(f"MCP servers in config.toml ({', '.join(mcp)})")
+    owned = [p for p in sorted(CODEX_HOME.glob("*.config.toml")) if p.read_text()[:30].startswith("# Managed by devkit")]
+    owned += [p for p in sorted((CODEX_HOME / "agents").glob("*.toml"))
+              if p.read_text()[:len(CODEX_ROLE_MARK)] == CODEX_ROLE_MARK]
+    for p in owned:
+        p.unlink()
+    if owned:
+        gone.append(f"{len(owned)} profile and agent role file{'s' if len(owned) != 1 else ''}")
+    if core.have("codex"):
+        removed_plugins = [p for p in own if sh(["codex", "plugin", "remove", p], timeout=120)[0] == 0]
+        if removed_plugins:
+            gone.append(f"the {', '.join(removed_plugins)} plugin")
+    return gone
+
+
 def setup_tools():
     """Homebrew packages for the configured stacks, git hosts and clouds (only what is missing)."""
     step("Tools for your stacks, git hosts and clouds")
@@ -1760,7 +1882,8 @@ def setup_tools():
     if not core.have("brew"):
         fail("Homebrew not found — run install.sh")
         return
-    groups = set(wizard.BASE_GROUPS) | set(CFG.get("stacks") or []) | set(toolchain.groups())
+    agents = [g for g in wizard.agent_groups(CFG.get("agents")) if g == "codex"]  # Claude Code is not a package
+    groups = set(wizard.BASE_GROUPS) | set(CFG.get("stacks") or []) | set(toolchain.groups()) | set(agents)
     missing = wizard.missing_packages(groups)
     if not missing:
         done(f"all installed · {', '.join(sorted(groups))}")
@@ -1769,7 +1892,7 @@ def setup_tools():
         return
     else:
         rc = wizard.install_packages(CFG.get("stacks") or [], CFG.get("agents", {}).get("claude", True),
-                                     extra=toolchain.groups())
+                                     extra=toolchain.groups(), with_codex="codex" in agents)
         done("installed what was missing") if rc == 0 else fail("some packages failed — `brew bundle` output above")
     for line in toolchain.postinstall(toolchain.selected()):
         done(line)
@@ -2201,8 +2324,16 @@ def run_install(only=None, unverified_why=None, version=None, as_pinned=False, c
     for name, fn in steps:
         if only and name not in only:
             continue
-        if name in ("claude", "codex") and not CFG.get("agents", {}).get(name, True):
-            step(f"{'Claude Code' if name == 'claude' else 'Codex'}: skipped (disabled in `dev setup`)")
+        if name in ("claude", "codex") and not agent_on(name):
+            label = "Claude Code" if name == "claude" else "Codex"
+            step(f"{label}: turned off in `dev setup`")
+            try:
+                gone = remove_agent(name)
+            except Exception as e:  # keep going; doctor reports what is left
+                fail(f"{name}: {e}")
+                continue
+            done(f"removed devkit's {', '.join(gone)}; {label} and your own settings stay" if gone else
+                 f"nothing of devkit's is left in {label}; {label} and your own settings stay")
             continue
         try:
             fn()
@@ -2295,8 +2426,9 @@ def tools_check(stacks, have=None) -> tuple:
     from . import wizard
     have = have or core.have
     off = [a for a in wizard.AGENT_NAMES if not CFG.get("agents", {}).get(a, True)]
-    tools = {t: how for g, group in wizard.DOCTOR_TOOLS.items() if g in wizard.BASE_GROUPS or g in stacks
-             for t, how in group.items() if not (g == "agents" and t in off)}  # the agents group's tools are the agents
+    on = wizard.agent_groups(CFG.get("agents"))  # each agent's group holds that agent alone
+    tools = {t: how for g, group in wizard.DOCTOR_TOOLS.items() if g in wizard.BASE_GROUPS or g in stacks or g in on
+             for t, how in group.items()}
     missing = [t for t in tools if not have(t)]
     skipped = [wizard.STACK_UI[s][0] for s in wizard.STACKS if s not in stacks]
     detail = f"{len(tools) - len(missing)}/{len(tools)} present"
@@ -2408,7 +2540,9 @@ def doctor() -> int:
     for row in selfcheck.work_state_checks():  # the project you are in: stale work items and runs, each with its fix
         check(*row)
 
-    for target in (CLAUDE_HOME / "CLAUDE.md", CODEX_HOME / "AGENTS.md"):
+    for agent, target in (("claude", CLAUDE_HOME / "CLAUDE.md"), ("codex", CODEX_HOME / "AGENTS.md")):
+        if not agent_on(agent):  # turned off: devkit took its rules out
+            continue
         state = instructions_state(target)
         check("Agents", f"{tilde(target)}", state == "current",
               {"current": f"current: devkit {core.VERSION}'s rules", "outdated": "out of date: an older devkit wrote it",
@@ -2420,9 +2554,10 @@ def doctor() -> int:
         check("Agents", "crew agents", not stale, f"{len(crew.load()['members']) - 1} members generated from "
               f"config/crew.json" if not stale else f"out of date: {', '.join(map(str, stale[:4]))}", "dev crew sync")
         roles = crew.codex_roles()
-        stale = stale_codex_roles(CODEX_HOME / "agents", roles)
-        check("Codex", "crew roles", not stale, f"{len(roles)} roles in ~/.codex/agents, current" if not stale else
-              f"missing or out of date: {', '.join(stale[:5])}", "dev install --only codex")
+        stale = stale_codex_roles(CODEX_HOME / "agents", roles) if agent_on("codex") else []
+        if agent_on("codex"):
+            check("Codex", "crew roles", not stale, f"{len(roles)} roles in ~/.codex/agents, current" if not stale
+                  else f"missing or out of date: {', '.join(stale[:5])}", "dev install --only codex")
     except Exception as e:
         check("Agents", "crew agents", False, f"crew: {e}", "dev crew sync")
     for row in crew_skill_checks([a for a in ("claude", "codex") if CFG.get("agents", {}).get(a, True)]) + \
@@ -2432,6 +2567,8 @@ def doctor() -> int:
     if not isinstance(managed, dict):  # before 26.11.0: every skill went to both agents
         managed = {n: ["claude", "codex"] for n in managed}
     for agent, home in (("claude", CLAUDE_HOME / "skills"), ("codex", AGENTS_HOME / "skills")):
+        if not agent_on(agent):  # turned off: devkit took its skill links out
+            continue
         mine = [n for n, agents in managed.items() if agent in agents]
         broken = [n for n in mine if not (home / n / "SKILL.md").exists()]
         check("Agents", f"skills in {tilde(home)}", bool(mine) and not broken, f"{len(mine) - len(broken)}/{len(mine)} linked"
