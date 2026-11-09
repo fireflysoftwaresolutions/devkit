@@ -16,7 +16,9 @@ from __future__ import annotations
 import json
 import os
 import re
+import selectors
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -153,8 +155,20 @@ def detect() -> dict:
             "providers": prov, "config": core.read_json(CONFIG_FILE, None)}
 
 
-def run(assume_yes=False, skip_packages=False) -> int:
-    """The interactive wizard in a terminal; the line prompts otherwise (and always with --yes)."""
+def run(assume_yes=False, skip_packages=False, resume=False) -> int:
+    """The interactive wizard in a terminal; the line prompts otherwise (and always with --yes). `resume`: continue
+    the last setup from its first step that is not done, with its saved answers (`dev setup --resume`)."""
+    if resume:
+        saved = SetupRun.load()
+        if not saved:
+            print(f"  {ui.WARN} No setup to resume on this Mac: run {ui.bold('dev setup')}.")
+            return 1
+        if not saved.unfinished():
+            print(f"  {ui.OK} The last setup finished every step; nothing to resume. {ui.bold('dev doctor')} checks it.")
+            return 0
+        if not assume_yes and tui.available():
+            return _Wizard(tui.Terminal(), bool(saved.data.get("skip_packages"))).resume(saved)
+        return _resume_lines(saved, assume_yes)
     if not assume_yes and tui.available():
         return _Wizard(tui.Terminal(), skip_packages).run()
     return _run_lines(assume_yes, skip_packages)
@@ -357,38 +371,131 @@ def _run_lines(assume_yes=False, skip_packages=False) -> int:
     if not p.yesno("Apply this plan?", True):
         print(f"  {ui.WARN} nothing changed")
         return 1
+    return _apply_lines(p, a, d, skip_packages, SetupRun.start(a, skip_packages))
 
-    CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
-    CONFIG_FILE.write_text(json.dumps(new, indent=2, ensure_ascii=False) + "\n")
-    print(f"\n  {ui.OK} saved {core.tilde(CONFIG_FILE)}")
+
+def _apply_lines(p, a, d, skip_packages, run) -> int:
+    """The apply steps in the line prompts, with the rules of the interactive wizard: an optional step that fails or
+    is interrupted is skipped with the command that finishes it; a required one stops the run, which `dev setup
+    --resume` continues. Commands print straight to this terminal."""
+    from . import toolchain
+    doctor = {"rc": 1}
+
+    def save():
+        new = build_config(d["config"], a, d["gh"]["login"])
+        CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        CONFIG_FILE.write_text(json.dumps(new, indent=2, ensure_ascii=False) + "\n")
+        print(f"\n  {ui.OK} saved {core.tilde(CONFIG_FILE)}")
+
+    def packages():
+        rc = install_packages(a["stacks"], a["use_claude"],
+                              extra=toolchain.groups({"hosts": a["hosts"], "clouds": a["clouds"]}))
+        return None if rc == 0 else f"some packages failed ({_ended(rc)})"
+
+    def configure():
+        rc = subprocess.call(_dev("install", *_template_args(a)), env=dict(os.environ, HOMEBREW_NO_ASK="1"))
+        return None if rc == 0 else f"dev install: {_ended(rc)}"
+
+    def lock():
+        rc = subprocess.call(_dev("config", "lock"))
+        return None if rc == 0 else f"dev config lock: {_ended(rc)}"
+
+    def check():
+        print(f"\n  {ui.ARROW} Verifying …")
+        doctor["rc"] = subprocess.call(_dev("doctor"))
+    steps = [("save", "Save your choices", True, save, "dev setup")]
     if not skip_packages:
-        rc = install_packages(a["stacks"], a["use_claude"], extra=toolchain.groups({"hosts": a["hosts"], "clouds": a["clouds"]}))
-        if rc != 0:
-            print(f"  {ui.WARN} some packages failed; continuing with the configuration")
-    subprocess.call(_dev("install", *_template_args(a)))
-    _post_install(p, a["use_claude"], a["use_codex"])
+        steps.append(("packages", "Install packages", False, packages, "dev install --only tools"))
+    steps.append(("configure", "Configure devkit", True, configure, "dev install"))
+    want = [k for k in ("claude", "codex") if a["use_" + k]]
+    if want:
+        steps.append(("sign-in", "Check agent sign-in", False, lambda: _sign_in_lines(p, want),
+                      "; ".join(" ".join(SIGN_IN[k]) for k in want)))
+    steps.append(("docker", "Start Docker", False, lambda: _docker_lines(p), "dev docker up"))
     if a["lock"]:
-        subprocess.call(_dev("config", "lock"))
-    print(f"\n  {ui.ARROW} Verifying …")
-    rc = subprocess.call(_dev("doctor"))
+        steps.append(("lock", "Lock Claude Code settings", False, lock, "dev config lock"))
+    steps.append(("doctor", "Check the setup", False, check, "dev doctor"))
+    run.plan([(s[0], s[1], s[2], s[4]) for s in steps])
+    for sid, title, required, fn, fix in steps:
+        if run.state(sid) == "done" and sid not in ALWAYS_RUN:
+            continue
+        run.set(sid, "running")
+        try:
+            why = fn()
+        except KeyboardInterrupt:
+            why = "interrupted"
+        except Exception as e:  # the step's own error: that step's failure, never the end of the setup
+            why = f"{type(e).__name__}: {e}"
+        if why is None:
+            run.set(sid, "done")
+            continue
+        why, how = why if isinstance(why, tuple) else (why, fix)
+        run.set(sid, "failed" if required else "skipped", why, how)
+        if required:
+            print(f"\n  {ui.FAIL} Setup stopped at {title}: {why}. Your choices and the steps done so far are saved; "
+                  f"fix what is shown above if anything is, then run {ui.bold('dev setup --resume')}.\n")
+            return 130 if why == "interrupted" else 1
+        print(f"  {ui.WARN} {title}: {why}. Later: {how}")
+    rest = run.unfinished()
+    if rest:
+        print(f"\n  {ui.WARN} Not done: " + "; ".join(f"{s['title']} ({s['fix']})" for s in rest)
+              + f". {ui.bold('dev setup --resume')} runs them with the same answers.")
     print(f"\n  {ui.bold('Next:')} open a new terminal (or `exec zsh`), then `dev` — and in any project, start "
           f"Claude Code or Codex as usual. `dev agents test` runs a live check of both agents.\n")
-    return rc
+    return doctor["rc"]
 
 
-def _post_install(p, use_claude, use_codex):
-    """Offer the interactive steps a script cannot do alone: sign-ins and starting Docker."""
+def _sign_in_lines(p, want):
+    """Sign in the agents that are not, on the terminal; without one, or with --yes, say the command for later."""
     from . import providers
     st = providers.status(include_account=False)
-    if use_claude and st["claude"].get("installed") and not st["claude"].get("logged_in"):
-        if p.yesno("Claude Code is not signed in. Sign in now (opens the browser)?", True) and not p.yes:
-            subprocess.call(["claude", "auth", "login"])
-    if use_codex and st["codex"].get("installed") and not st["codex"].get("logged_in"):
-        if p.yesno("Codex is not signed in. Sign in now (opens the browser)?", True) and not p.yes:
-            subprocess.call(["codex", "login"])
-    if core.have("colima") and core.sh(["colima", "status"], timeout=20)[0] != 0:
-        if p.yesno("Start Docker (Colima VM) now?", not p.yes):
-            subprocess.call(_dev("docker", "up"))
+    need = [k for k in want if (st.get(k) or {}).get("installed") and not (st.get(k) or {}).get("logged_in")]
+    if not need:
+        return None
+    device, ended = terminal_device(), {}
+    for k in need:
+        if not device or p.yes:
+            ended[k] = "no terminal to sign in from" if not device else "--yes asks nothing"
+            continue
+        if not p.yesno(f"{AGENT_NAMES[k]} is not signed in. Sign in now (opens the browser)?", True):
+            ended[k] = "you chose later"
+            continue
+        got = _attached(SIGN_IN[k], SIGN_IN_TIMEOUT, device)
+        if got != "ok" and k == "codex" and p.yesno("The browser sign-in did not finish. Sign in with a code instead?",
+                                                    True):
+            got = _attached(DEVICE_SIGN_IN, DEVICE_TIMEOUT, device)
+        ended[k] = SIGN_IN_ENDED.get(got, "")
+    st = providers.status(include_account=False)
+    still = [k for k in want if not ((st.get(k) or {}).get("installed") and (st.get(k) or {}).get("logged_in"))]
+    if not still:
+        return None
+    return ("not signed in: " + ", ".join(AGENT_NAMES[k] + (f" ({ended[k]})" if ended.get(k) else "") for k in still),
+            "; ".join(" ".join(SIGN_IN[k]) for k in still))
+
+
+def _docker_lines(p):
+    """Start Colima when it is installed and stopped, if the person wants it now."""
+    if not core.have("colima") or core.sh(["colima", "status"], timeout=20)[0] == 0:
+        return None
+    if not p.yesno("Start Docker (Colima VM) now?", not p.yes):
+        return "you chose later"
+    try:
+        rc = subprocess.call(_dev("docker", "up"), timeout=DOCKER_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return "dev docker up: stopped at its time limit"
+    return None if rc == 0 else f"dev docker up: {_ended(rc)}"
+
+
+def _resume_lines(run, assume_yes=False) -> int:
+    """`dev setup --resume` in the line prompts: the saved answers, and every step that is not done."""
+    d = detect()
+    if not d["gh"].get("login"):
+        print(f"\n  {ui.FAIL} devkit needs your GitHub account, and you are not signed in. Run "
+              f"{' '.join(GH_LOGIN)}, then dev setup --resume.")
+        return 2
+    print(f"  {ui.ARROW} Resuming the setup of {core.fmt_ts(run.data.get('started') or 0)}: "
+          + ", ".join(s["title"] for s in run.unfinished()))
+    return _apply_lines(Prompter(assume_yes), Answers(run.answers), d, bool(run.data.get("skip_packages")), run)
 
 
 # --------------------------------------------------------------------------- packages
@@ -459,7 +566,7 @@ def install_packages(stacks, with_claude=True, extra=()) -> int:
     with tempfile.NamedTemporaryFile("w", suffix=".Brewfile", delete=False) as tf:
         tf.write("\n".join(brew) + "\n")
         bf = tf.name
-    rc = subprocess.call(["brew", "bundle", f"--file={bf}", "--no-upgrade"])
+    rc = subprocess.call(["brew", "bundle", f"--file={bf}", "--no-upgrade"], env=dict(os.environ, HOMEBREW_NO_ASK="1"))
     os.unlink(bf)
     npm = [x for x in filtered(DEVKIT_HOME / "config" / "npm-globals.txt", groups)]
     if npm:
@@ -641,6 +748,9 @@ HOST_HELP = {"github": "Always included: your handoff repository and the gh CLI 
              "azure-devops": "Installs the Azure CLI and its azure-devops extension."}
 AGENT_NAMES = {"claude": "Claude Code", "codex": "Codex"}
 SIGN_IN = {"claude": ["claude", "auth", "login"], "codex": ["codex", "login"]}
+DEVICE_SIGN_IN = ["codex", "login", "--device-auth"]  # Codex's sign-in with a code, when the browser's does not finish
+SIGN_IN_ENDED = {"failed": "it did not finish", "interrupted": "stopped with Ctrl-C", "timeout": "time limit reached",
+                 "missing": "the command was not found", "no-terminal": "no terminal to sign in from"}
 
 
 def _label(key: str) -> str:
@@ -716,34 +826,141 @@ class _Log:
             self.f.close()
 
 
-def _exec(argv, on_line=None, log=None, env=None) -> int:
-    """Run a command with its output captured: each line goes to the log and to `on_line`."""
+CRASH_EXIT = 70  # bugs.CRASH_EXIT: a `dev` command that crashed printed devkit's crash notice on stderr
+_CRASH_START = re.compile(r"^devkit bug [0-9a-f]{12}\b")
+_CRASH_FILE = re.compile(r"^\s*Details: (\S+)")
+
+
+class _Exit(int):
+    """A child's exit code, as an int, with how it ended: the last lines it wrote on stderr, the signal that stopped
+    it ("" when none), and whether its time limit stopped it."""
+
+    def __new__(cls, rc, err=(), signal_name="", timed_out=False):
+        self = super().__new__(cls, rc)
+        self.err, self.signal, self.timed_out = [x for x in err if x], signal_name, timed_out
+        return self
+
+    @property
+    def crash(self) -> list:
+        """devkit's crash notice (`dev` printed it on stderr and exited 70), its first line first; [] when none."""
+        start = next((n for n, x in enumerate(self.err) if _CRASH_START.match(x)), None)
+        return self.err[start:] if start is not None else []
+
+    @property
+    def crash_file(self) -> str:
+        """The crash file the notice names (the traceback, kept on this Mac), or ""."""
+        return next((m.group(1) for m in map(_CRASH_FILE.match, self.crash) if m), "")
+
+
+def _exec(argv, on_line=None, log=None, env=None, timeout=None) -> _Exit:
+    """Run a command with stdout and stderr captured apart, as they come: each line goes to the log and to
+    `on_line`; stderr's last lines stay with the exit code. A command still running after `timeout` seconds is
+    stopped. Ctrl-C stops the command, then reaches the caller."""
     argv = [str(x) for x in argv]
     if log:
         log.write(f"\n$ {' '.join(argv)}\n")
     try:
-        p = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, env=env)
+        p = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL, env=env)
     except OSError as e:
         if log:
             log.write(f"{e}\n")
         if on_line:
             on_line(str(e))
-        return 127
+        return _Exit(127, [str(e)])
+    err, pending = deque(maxlen=40), {p.stdout.fileno(): b"", p.stderr.fileno(): b""}
+    errfd = p.stderr.fileno()
+
+    def emit(raw: bytes, fd: int):
+        line = raw.decode("utf-8", "replace")
+        if log:
+            log.write(line + "\n")
+        shown = line.split("\r")[-1]
+        if fd == errfd:
+            err.append(tui.clean(shown))
+        if on_line:
+            on_line(shown)
+    sel = selectors.DefaultSelector()
+    for f in (p.stdout, p.stderr):
+        sel.register(f, selectors.EVENT_READ)
+    deadline, timed_out, quiet_since = (time.monotonic() + timeout) if timeout else None, False, None
     try:
-        for raw in p.stdout:
-            line = raw.decode("utf-8", "replace")
-            if log:
-                log.write(line)
-            if on_line:
-                on_line(line.rstrip("\n").split("\r")[-1])
-        return p.wait()
+        while sel.get_map():
+            left = None if deadline is None else deadline - time.monotonic()
+            if left is not None and left <= 0:
+                timed_out = True
+                _stop(p)
+                break
+            events = sel.select(0.5 if left is None else min(left, 0.5))
+            if not events and p.poll() is not None:  # it exited; a process it left behind may hold the pipes open
+                quiet_since = quiet_since or time.monotonic()
+                if time.monotonic() - quiet_since > 2:
+                    break
+                continue
+            quiet_since = None
+            for key, _ in events:
+                chunk = os.read(key.fd, 65536)
+                if not chunk:
+                    sel.unregister(key.fileobj)
+                    continue
+                *lines, pending[key.fd] = (pending[key.fd] + chunk).split(b"\n")
+                for raw in lines:
+                    emit(raw, key.fd)
+        for fd, rest in pending.items():  # a last line without its newline
+            if rest:
+                emit(rest, fd)
+        rc = p.wait()
     except BaseException:
-        p.terminate()
-        try:
-            p.wait(5)
-        except subprocess.TimeoutExpired:
-            p.kill()
+        _stop(p)
         raise
+    finally:
+        sel.close()
+        p.stdout.close()
+        p.stderr.close()
+    name = ""
+    if rc < 0:
+        try:
+            name = signal.Signals(-rc).name
+        except ValueError:
+            name = f"signal {-rc}"
+    return _Exit(rc, err, name, timed_out)
+
+
+def _stop(p):
+    """Stop a child: SIGTERM, then SIGKILL when it is still there after 5 seconds."""
+    if p.poll() is not None:
+        return
+    p.terminate()
+    try:
+        p.wait(5)
+    except subprocess.TimeoutExpired:
+        p.kill()
+        p.wait()
+
+
+def _ended(rc) -> str:
+    """How a child ended, in words."""
+    if getattr(rc, "timed_out", False):
+        return "stopped at its time limit"
+    if getattr(rc, "signal", ""):
+        return f"stopped by {rc.signal}"
+    if rc < 0:
+        try:
+            return f"stopped by {signal.Signals(-rc).name}"
+        except ValueError:
+            return f"stopped by signal {-rc}"
+    if rc == CRASH_EXIT and getattr(rc, "crash", None):
+        return f"devkit crashed (exit code {int(rc)})"
+    return f"exit code {int(rc)}"
+
+
+def _reasons(rc, tail=(), part="", n=4) -> list:
+    """Why a child failed, for a step's detail: the part it was in, then devkit's crash notice and crash file, or the
+    last lines it wrote on stderr, or else its last output lines."""
+    out = [f"in {part}"] if part else []
+    crash = getattr(rc, "crash", [])
+    if crash:
+        return out + [crash[0]] + ([f"Details: {rc.crash_file}"] if rc.crash_file else [])
+    return out + ((getattr(rc, "err", []) or [x for x in tail if x])[-n:])
 
 
 @contextmanager
@@ -757,11 +974,157 @@ def _brewfile(lines):
 
 
 def _dev(*args) -> list:
-    return [sys.executable, "-I", "-S", str(DEVKIT_HOME / "bin" / "dev"), *args]  # as its shebang
+    """A `dev` command with the flags of its shebang (-I -S), and -u: -I ignores PYTHONUNBUFFERED, and a child killed
+    by a signal loses whatever its block-buffered output still held."""
+    return [sys.executable, "-I", "-S", "-u", str(DEVKIT_HOME / "bin" / "dev"), *args]
 
 
 def _child_env() -> dict:
-    return dict(os.environ, PYTHONUNBUFFERED="1", NO_COLOR="1")
+    """The environment of the wizard's children: no colors, and Homebrew never stops to ask (`HOMEBREW_NO_ASK`,
+    Homebrew's documented switch for its default ask mode)."""
+    return dict(os.environ, PYTHONUNBUFFERED="1", NO_COLOR="1", HOMEBREW_NO_ASK="1")
+
+
+# --------------------------------------------------------------------------- the terminal, for commands that talk
+
+SIGN_IN_TIMEOUT = 600   # a browser sign-in still open after 10 minutes is stopped
+DEVICE_TIMEOUT = 900    # a device-code sign-in gets 15 minutes
+DOCKER_TIMEOUT = 900    # `dev docker up` starts a VM; after 15 minutes it is stopped and can be run later
+
+
+def terminal_device():
+    """This Mac's terminal by its own device name (/dev/ttys003), for a command that talks to the person, or None
+    without a terminal. Never /dev/tty, its alias: macOS's kqueue refuses a descriptor opened from /dev/tty with
+    EINVAL, and Claude Code's runtime watches its input with kqueue, so it crashed when the installer, run through a
+    pipe, gave it /dev/tty."""
+    for fd in (0, 1, 2):
+        try:
+            if os.isatty(fd):
+                name = os.ttyname(fd)
+                if name and name != "/dev/tty":
+                    return name
+        except OSError:
+            pass
+    rc, out, _ = core.sh(["ps", "-o", "tty=", "-p", str(os.getpid())], timeout=5)
+    name = out.strip()
+    if rc == 0 and re.fullmatch(r"tty[\w.]+", name or "") and os.path.exists("/dev/" + name):
+        return "/dev/" + name
+    return None
+
+
+def _attached(argv, timeout=None, device=None) -> str:
+    """Run a command that talks to the person (a sign-in) on the terminal device, with a time limit -> "ok",
+    "failed", "interrupted" (Ctrl-C: the command got it too and stops; only this command ends), "timeout",
+    "missing" (not installed) or "no-terminal" (nothing ran: there is no one to talk to)."""
+    device = device or terminal_device()
+    if not device:
+        return "no-terminal"
+    try:
+        fd = os.open(device, os.O_RDWR | os.O_NOCTTY)
+    except OSError:
+        return "no-terminal"
+    try:
+        try:
+            p = subprocess.Popen([str(a) for a in argv], stdin=fd, stdout=fd, stderr=fd)
+        except OSError:
+            return "missing"
+        try:
+            return "ok" if p.wait(timeout) == 0 else "failed"
+        except subprocess.TimeoutExpired:
+            _stop(p)
+            return "timeout"
+        except KeyboardInterrupt:  # the command got the same Ctrl-C: give it a moment to stop by itself
+            try:
+                p.wait(3)
+            except (subprocess.TimeoutExpired, KeyboardInterrupt):
+                _stop(p)
+            return "interrupted"
+    finally:
+        os.close(fd)
+
+
+# --------------------------------------------------------------------------- the apply steps and where they stand
+
+RUN_STATES = ("pending", "running", "done", "failed", "skipped")
+ALWAYS_RUN = ("doctor",)  # a resumed run checks the setup again, after the steps it finished
+
+
+class SetupRun:
+    """One setup's apply steps and where each stands, in ~/.local/state/devkit/setup-run.json (0600), written after
+    every change: the answers, whether packages were skipped, and per step its id, title, whether it is required,
+    its state (pending, running, done, failed, skipped), why it is not done, and the command that finishes it.
+    `dev setup --resume` reads it and runs every step that is not done, with the same answers."""
+
+    VERSION = 1
+
+    def __init__(self, data: dict):
+        self.data = data
+
+    @staticmethod
+    def path() -> Path:
+        return STATE / "setup-run.json"
+
+    @classmethod
+    def start(cls, answers, skip_packages=False) -> SetupRun:
+        now = round(time.time(), 3)
+        return cls({"version": cls.VERSION, "started": now, "updated": now, "answers": dict(answers),
+                    "skip_packages": bool(skip_packages), "steps": []})
+
+    @classmethod
+    def load(cls):
+        """The saved run, or None when there is none or it cannot be read."""
+        data = core.read_json(cls.path(), None)
+        if not isinstance(data, dict) or data.get("version") != cls.VERSION or not isinstance(data.get("answers"), dict) \
+                or not isinstance(data.get("steps"), list):
+            return None
+        return cls(data)
+
+    @property
+    def answers(self) -> dict:
+        return self.data["answers"]
+
+    @property
+    def steps(self) -> list:
+        return self.data["steps"]
+
+    def plan(self, specs):
+        """The steps of this apply, in order ([(id, title, required, fix)]), keeping what a saved run recorded."""
+        old = {s.get("id"): s for s in self.steps if isinstance(s, dict)}
+        self.data["steps"] = [dict(old.get(i) or {"state": "pending", "reason": "", "fix": ""}, id=i, title=t,
+                                   required=bool(r)) for i, t, r, _ in specs]
+        for s in self.steps:
+            if s.get("state") not in RUN_STATES or s["state"] == "running":
+                s["state"] = "pending"
+        self.save()
+
+    def step(self, sid: str) -> dict:
+        return next((s for s in self.steps if s["id"] == sid), {})
+
+    def state(self, sid: str) -> str:
+        return self.step(sid).get("state", "pending")
+
+    def set(self, sid: str, state: str, reason: str = "", fix: str = ""):
+        s = self.step(sid)
+        if s:
+            s.update(state=state, reason=reason, fix=fix)
+            self.save()
+
+    def unfinished(self) -> list:
+        return [s for s in self.steps if s.get("state") != "done"]
+
+    def save(self):
+        """Atomically, readable by this account only; a run that cannot be saved still runs."""
+        self.data["updated"] = round(time.time(), 3)
+        f = self.path()
+        try:
+            f.parent.mkdir(parents=True, exist_ok=True)
+            tmp = f.with_name(f".{f.name}.{os.getpid()}.tmp")
+            fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(json.dumps(self.data, indent=1, ensure_ascii=False) + "\n")
+            os.replace(tmp, f)
+        except OSError:
+            pass
 
 
 # --------------------------------------------------------------------------- interactive wizard: flow
@@ -773,6 +1136,7 @@ class _Wizard:
         self.term, self.skip = term, skip_packages
         self.screen = tui.Screen(term)
         self.d, self.a, self.saved_a, self.saved_file = None, None, None, False
+        self.run_state = None  # SetupRun: the apply steps and where they stand (dev setup --resume reads it)
         self._pk = {}
 
     # ---------------------------------------------------------------- entry
@@ -1196,42 +1560,118 @@ class _Wizard:
 
     # ---------------------------------------------------------------- apply
     def apply(self) -> int:
-        a, d, term = self.a, self.d, self.term
+        a, term = self.a, self.term
         width = term.size()[0]
         log = _Log()
         term.write(f"\n  {ui.logo_inline()}  {tui.dim('setup')}\n\n  {tui.bold('Applying your plan')}\n")
         for k, v in self.review_rows(a):
             term.write(tui.fit(f"  {tui.dim(tui.pad(k, 20))} {v}", width - 1) + "\n")
         term.write("\n")
-        steps = [("Save your choices", self._save)]
+        report = {}
+        steps = self._steps(log, report)
+        run = self.run_state or SetupRun.start(a, self.skip)
+        self.run_state = run
+        run.plan([(s[0], s[1], s[2], s[4]) for s in steps])
+        stopped = None
+        cl = None
+        try:
+            with term.quiet(), tui.Checklist(term, [s[1] for s in steps]) as cl:
+                for i, step in enumerate(steps):
+                    if run.state(step[0]) == "done" and step[0] not in ALWAYS_RUN:
+                        cl.start(i)
+                        cl.finish(i, "ok", "done in the earlier run")
+                        continue
+                    if self._run_step(cl, i, step, run) == "stop":
+                        stopped = step
+                        break
+        except (KeyboardInterrupt, tui.Cancelled):  # Ctrl-C between two steps
+            stopped = next((s for s in steps if run.state(s[0]) != "done"), None)
+            if stopped:
+                run.set(stopped[0], "failed" if stopped[2] else "skipped", "interrupted", stopped[4])
+        log.close()
+        if stopped:
+            return self._stopped(stopped, run)
+        return self._finish(cl, report, log)
+
+    def resume(self, run) -> int:
+        """`dev setup --resume`: the saved answers, and every step of the saved run that is not done."""
+        self.a, self.run_state = Answers(run.answers), run
+        if self.d is None:
+            self.term.write(f"\n  {tui.dim('Looking at this Mac: agents, GitHub, Docker …')}\n")
+            self.d = survey()
+        if not self.d["gh"].get("login"):
+            self.term.write(f"\n  {tui.bad('✗')} devkit needs your GitHub account, and you are not signed in. Run "
+                            f"{tui.bold(' '.join(GH_LOGIN))}, then {tui.bold('dev setup --resume')}.\n\n")
+            return 2
+        return self.apply()
+
+    def _steps(self, log, report) -> list:
+        """The apply steps: (id, title, required, run(cl, i) -> None when done or why not, command that finishes it).
+        Only saving the choices and configuring devkit are required; the others are skipped when they fail."""
+        a, d = self.a, self.d
+        steps = [("save", "Save your choices", True, self._save, "dev setup")]
         plan = None if self.skip else self._package_plan()
         if plan and plan["brew"]:
-            steps.append(("Install Homebrew packages", lambda cl, i: self._brew(cl, i, plan, log)))
+            steps.append(("brew", "Install Homebrew packages", False, lambda cl, i: self._brew(cl, i, plan, log),
+                          "dev install --only tools"))
         if plan and plan["npm"]:
-            steps.append(("Install npm packages", lambda cl, i: self._npm(cl, i, plan, log)))
+            steps.append(("npm", "Install npm packages", False, lambda cl, i: self._npm(cl, i, plan, log),
+                          "npm install -g " + " ".join(plan["npm"])))
         if plan and plan["claude"]:
-            steps.append(("Install Claude Code", lambda cl, i: self._claude(cl, i, log)))
-        steps.append(("Configure devkit", lambda cl, i: self._configure(cl, i, log)))
-        if a["use_claude"] or a["use_codex"]:
-            steps.append(("Check agent sign-in", self._sign_in))
+            steps.append(("claude", "Install Claude Code", False, lambda cl, i: self._claude(cl, i, log),
+                          CLAUDE_INSTALLER))
+        steps.append(("configure", "Configure devkit", True, lambda cl, i: self._configure(cl, i, log),
+                      "dev install"))
+        want = [k for k in ("claude", "codex") if a["use_" + k]]
+        if want:
+            steps.append(("sign-in", "Check agent sign-in", False, self._sign_in,
+                          "; ".join(" ".join(SIGN_IN[k]) for k in want)))
         if not d["docker"]["running"]:
-            steps.append(("Start Docker", lambda cl, i: self._docker(cl, i, log)))
+            steps.append(("docker", "Start Docker", False, lambda cl, i: self._docker(cl, i, log), "dev docker up"))
         if a["lock"]:
-            steps.append(("Lock Claude Code settings", self._lock))
-        report = {}
-        steps.append(("Check the setup", lambda cl, i: report.update(self._doctor(cl, i, log))))
+            steps.append(("lock", "Lock Claude Code settings", False, self._lock, "dev config lock"))
+        steps.append(("doctor", "Check the setup", False,
+                      lambda cl, i: self._doctor(cl, i, log, report), "dev doctor"))
+        return steps
+
+    def _run_step(self, cl, i, step, run) -> str:
+        """Run one step and record how it ended -> "stop" when a required step did not finish, else "next". Ctrl-C
+        stops only this step; an error in it is that step's failure, never the end of the setup."""
+        sid, _title, required, fn, fix = step
+        run.set(sid, "running")
         try:
-            with term.quiet(), tui.Checklist(term, [s[0] for s in steps]) as cl:
-                for i, (_, fn) in enumerate(steps):
-                    fn(cl, i)
+            why = fn(cl, i)
         except (KeyboardInterrupt, tui.Cancelled):
-            where = f"Your choices are saved in {core.tilde(CONFIG_FILE)}; run dev setup again to finish." \
-                if self.saved_file else "Nothing changed."
-            term.write(f"\n  {tui.warn('!')} Setup stopped. {where}\n\n")
-            log.close()
-            return 130
-        log.close()
-        return self._finish(cl, report, log)
+            if cl.paused:
+                cl.resume()
+            later = "dev setup --resume" if required else fix
+            cl.finish(i, "fail" if required else "skip", "interrupted",
+                      [f"{'Continue' if required else 'Later'}: {tui.bold(later)}"])
+            run.set(sid, "failed" if required else "skipped", "interrupted", fix)
+            return "stop" if required else "next"
+        except Exception as e:  # the step's own error: recorded and shown, and the setup goes on
+            if cl.paused:
+                cl.resume()
+            reason = f"{type(e).__name__}: {e}"
+            cl.finish(i, "fail", tui.clean(reason)[:100], [f"{'Fix' if required else 'Later'}: {tui.bold(fix)}"])
+            run.set(sid, "failed" if required else "skipped", reason, fix)
+            return "stop" if required else "next"
+        if why is None:
+            run.set(sid, "done")
+            return "next"
+        why, how = why if isinstance(why, tuple) else (why, fix)
+        run.set(sid, "failed" if required else "skipped", why, how)
+        return "stop" if required else "next"
+
+    def _stopped(self, step, run) -> int:
+        """A required step did not finish: say where and how to go on; the answers and the step states are saved."""
+        s = run.step(step[0])
+        interrupted = s.get("reason") == "interrupted"
+        self.term.write(f"\n  {tui.warn('!')} {tui.bold('Setup stopped at ' + step[1] + '.')} "
+                        f"{'You stopped it.' if interrupted else tui.clean(s.get('reason') or '')}\n"
+                        f"  Your choices and the steps done so far are saved. To go on, fix what is shown above "
+                        f"if anything is, then run {tui.bold('dev setup --resume')}.\n\n")
+        return 130 if interrupted else 1
 
     def _package_plan(self) -> dict:
         from . import toolchain
@@ -1274,120 +1714,168 @@ class _Wizard:
                 done[0] += 1
                 cl.update(f"{m.group(1)} · {done[0]} of {len(todo)}" if todo else m.group(1))
         with _brewfile(plan["brew"]) as bf:
-            rc = _exec(["brew", "bundle", f"--file={bf}", "--no-upgrade"], line, log)
+            rc = _exec(["brew", "bundle", f"--file={bf}", "--no-upgrade"], line, log, env=_child_env())
         notes = [tui.clean(x) for x in toolchain.postinstall(plan["post"])]
         if rc == 0:
             cl.finish(i, "ok", f"{len(todo)} installed" if todo else "all installed", notes)
-        else:
-            cl.finish(i, "fail", ("failed: " + ", ".join(failed)) if failed else f"brew bundle exited with {rc}",
-                      self._tail(tail) + notes + [f"Fix: run {tui.bold('dev install --only tools')} to try again."])
+            return None
+        why = ("failed: " + ", ".join(failed)) if failed else f"brew bundle: {_ended(rc)}"
+        cl.finish(i, "fail", why, self._dim(_reasons(rc, tail)) + notes
+                  + [f"Later: run {tui.bold('dev install --only tools')} to try again."])
+        return why
 
     def _npm(self, cl, i, plan, log):
         npm, tail = plan["npm"], deque(maxlen=20)
         cl.start(i, ", ".join(npm))
         rc = _exec(["npm", "install", "-g", "--no-fund", "--no-audit", *npm],
-                   lambda s: tail.append(tui.clean(s)) if tui.clean(s) else None, log)
+                   lambda s: tail.append(tui.clean(s)) if tui.clean(s) else None, log, env=_child_env())
         if "@playwright/cli" in npm and core.have("playwright-cli"):
             cl.update("Playwright CLI skill")
             install_playwright_skill()
         if rc == 0:
             cl.finish(i, "ok", f"{len(npm)} packages")
-        else:
-            cl.finish(i, "fail", f"npm exited with {rc}",
-                      self._tail(tail) + [f"Fix: {tui.bold('npm install -g ' + ' '.join(npm))}"])
+            return None
+        cl.finish(i, "fail", f"npm: {_ended(rc)}",
+                  self._dim(_reasons(rc, tail)) + [f"Later: {tui.bold('npm install -g ' + ' '.join(npm))}"])
+        return f"npm: {_ended(rc)}"
 
     def _claude(self, cl, i, log):
         tail = deque(maxlen=20)
         cl.start(i, "official installer")
-        rc = _exec(["/bin/bash", "-c", CLAUDE_INSTALLER], lambda s: tail.append(tui.clean(s)) if tui.clean(s) else None, log)
+        rc = _exec(["/bin/bash", "-c", CLAUDE_INSTALLER], lambda s: tail.append(tui.clean(s)) if tui.clean(s) else None,
+                   log, env=_child_env())
         if rc == 0:
             cl.finish(i, "ok", "installed")
-        else:
-            cl.finish(i, "fail", f"installer exited with {rc}",
-                      self._tail(tail) + [f"Fix: run {tui.bold(CLAUDE_INSTALLER)}"])
+            return None
+        cl.finish(i, "fail", f"installer: {_ended(rc)}",
+                  self._dim(_reasons(rc, tail)) + [f"Later: run {tui.bold(CLAUDE_INSTALLER)}"])
+        return f"installer: {_ended(rc)}"
+
+    @staticmethod
+    def _dim(lines) -> list:
+        return [tui.dim(x) for x in lines]
 
     def _configure(self, cl, i, log):
-        parts, fails, notes, tail = [], [], [], deque(maxlen=20)
+        """`dev install`. Its ✗ lines are problems in parts it went on from (dev doctor checks them again); an exit
+        code other than 0 means it stopped, and then the step says how and where, with the error lines."""
+        parts, fails, notes, after = [], [], [], deque(maxlen=20)
         cl.start(i, "dev install")
 
         def line(s):
             s = tui.clean(s)
             if not s:
                 return
-            tail.append(s)
             if s.startswith("▸ "):
                 parts.append(s[2:])
                 cl.update(s[2:])
-            elif s.startswith("✗ "):
+                return
+            if parts:  # what came after the first part's header: never the banner
+                after.append(s)
+            if s.startswith("✗ "):
                 fails.append(s[2:])
             elif s.startswith("! "):
                 notes.append(s[2:])
         rc = _exec(_dev("install", *_template_args(self.a)), line, log, env=_child_env())
-        if fails or rc not in (0, None):
-            cl.finish(i, "fail", f"{len(fails) or 1} problem{'s' if len(fails) > 1 else ''} in {len(parts)} parts",
-                      [tui.bad("✗ ") + f for f in fails[:6]] + ([] if fails else self._tail(tail))
-                      + [f"Fix: run {tui.bold('dev install')} again; {tui.bold('dev install --only <step>')} repeats "
-                         f"one step."])
+        fix = [f"Fix: run {tui.bold('dev install')} again; {tui.bold('dev install --only <step>')} repeats one step."]
+        problems = f"{len(fails)} problem{'s' if len(fails) != 1 else ''} in {len(parts)} parts"
+        if rc not in (0, None):
+            why = f"dev install: {_ended(rc)}"
+            cl.finish(i, "fail", why + (f" · {problems}" if fails else ""),
+                      [tui.bad("✗ ") + f for f in fails[:4]] + self._dim(_reasons(rc, after, parts[-1] if parts else ""))
+                      + fix)
+            return why
+        if fails:
+            cl.finish(i, "warn", problems, [tui.bad("✗ ") + f for f in fails[:6]] + fix)
         else:
             cl.finish(i, "ok", f"{len(parts)} parts" if parts else "done", [tui.warn("! ") + n for n in notes[:3]])
+        return None
 
     def _sign_in(self, cl, i):
+        """Each agent that is not signed in, on the terminal and with a time limit. Ctrl-C, a failure or the time limit
+        ends only that sign-in; Codex then offers a device code (`codex login --device-auth`)."""
         from . import providers
         want = [k for k in ("claude", "codex") if self.a["use_" + k]]
         cl.start(i, ", ".join(AGENT_NAMES[k] for k in want))
         st = providers.status(include_account=False)
         need = [k for k in want if (st.get(k) or {}).get("installed") and not (st.get(k) or {}).get("logged_in")]
+        ended = {}
         if need:
             cl.pause()
-            for k in need:
-                if tui.ask_inline(self.term, tui.Confirm(f"{AGENT_NAMES[k]} is not signed in. Sign in now? It opens "
-                                                         f"the browser.", True, back=False)):
+            try:
+                for k in need:
+                    if not tui.ask_inline(self.term, tui.Confirm(f"{AGENT_NAMES[k]} is not signed in. Sign in now? It "
+                                                                 f"opens the browser.", True, back=False)):
+                        ended[k] = "you chose later"
+                        continue
                     with self.term.suspended():
-                        subprocess.call(SIGN_IN[k])
-            cl.resume()
+                        got = _attached(SIGN_IN[k], SIGN_IN_TIMEOUT)
+                    if got != "ok" and k == "codex" and got != "no-terminal" and tui.ask_inline(
+                            self.term, tui.Confirm("The browser sign-in did not finish. Sign in with a code instead? "
+                                                   "It shows a code to enter on another device.", True, back=False)):
+                        with self.term.suspended():
+                            got = _attached(DEVICE_SIGN_IN, DEVICE_TIMEOUT)
+                    ended[k] = SIGN_IN_ENDED.get(got, got)
+            finally:
+                cl.resume()
             st = providers.status(include_account=False)
         still = [k for k in want if not ((st.get(k) or {}).get("installed") and (st.get(k) or {}).get("logged_in"))]
         if not still:
             cl.finish(i, "ok", "signed in: " + ", ".join(AGENT_NAMES[k] for k in want))
-        else:
-            cl.finish(i, "warn", "not signed in: " + ", ".join(AGENT_NAMES[k] for k in still),
-                      [f"Later: {tui.bold(' '.join(SIGN_IN[k]))}" for k in still])
+            return None
+        later = [" ".join(SIGN_IN[k]) for k in still]
+        why = "not signed in: " + ", ".join(AGENT_NAMES[k] + (f" ({ended[k]})" if ended.get(k) else "") for k in still)
+        cl.finish(i, "skip", why, [f"Later: {tui.bold(c)}" for c in later]
+                  + ([f"Or with a code: {tui.bold(' '.join(DEVICE_SIGN_IN))}"] if "codex" in still else []))
+        return why, "; ".join(later)
 
     def _docker(self, cl, i, log):
         cl.start(i, "Colima")
         dk = detect_docker()
         if dk["running"]:
-            return cl.finish(i, "ok", "Colima is already running")
+            cl.finish(i, "ok", "Colima is already running")
+            return None
         if not dk["colima"]:
-            return cl.finish(i, "skip", "Colima is not installed",
-                             [f"Later: {tui.bold('dev install --only tools')}, then {tui.bold('dev docker up')}"])
+            cl.finish(i, "skip", "Colima is not installed",
+                      [f"Later: {tui.bold('dev install --only tools')}, then {tui.bold('dev docker up')}"])
+            return "Colima is not installed", "dev install --only tools; dev docker up"
         cl.pause()
-        yes = tui.ask_inline(self.term, tui.Confirm("Start Docker (the Colima VM) now?", True, back=False))
-        cl.resume()
+        try:
+            yes = tui.ask_inline(self.term, tui.Confirm("Start Docker (the Colima VM) now?", True, back=False))
+        finally:
+            cl.resume()
         if not yes:
-            return cl.finish(i, "skip", "later: dev docker up")
+            cl.finish(i, "skip", "later: dev docker up")
+            return "you chose later"
         cl.start(i, f"{self.a['cpu']} CPUs · {self.a['mem']} GB")
         tail = deque(maxlen=20)
         rc = _exec(_dev("docker", "up"), lambda s: tail.append(tui.clean(s)) if tui.clean(s) else None, log,
-                   env=_child_env())
+                   env=_child_env(), timeout=DOCKER_TIMEOUT)
         if rc == 0:
             cl.finish(i, "ok", "Colima running")
-        else:
-            cl.finish(i, "fail", f"dev docker up exited with {rc}",
-                      self._tail(tail) + [f"Fix: {tui.bold('dev docker up')}; see docs/docker.md"])
+            return None
+        cl.finish(i, "fail", f"dev docker up: {_ended(rc)}",
+                  self._dim(_reasons(rc, tail)) + [f"Later: {tui.bold('dev docker up')}; see docs/docker.md"])
+        return f"dev docker up: {_ended(rc)}"
 
     def _lock(self, cl, i):
         cl.pause()
-        self.term.write(f"  {tui.accent('?')} devkit needs your admin password to write the managed-settings file.\n")
-        with self.term.suspended():
-            rc = subprocess.call(_dev("config", "lock"))
-        cl.resume()
+        try:
+            self.term.write(f"  {tui.accent('?')} devkit needs your admin password to write the managed-settings "
+                            f"file.\n")
+            with self.term.suspended():
+                got = _attached(_dev("config", "lock"), SIGN_IN_TIMEOUT)
+        finally:
+            cl.resume()
         cl.start(i)
-        cl.finish(i, "ok", "managed settings written") if rc == 0 else \
-            cl.finish(i, "fail", f"dev config lock exited with {rc}", [f"Fix: {tui.bold('dev config lock')}"])
+        if got == "ok":
+            cl.finish(i, "ok", "managed settings written")
+            return None
+        cl.finish(i, "fail", f"dev config lock: {SIGN_IN_ENDED.get(got, got)}", [f"Later: {tui.bold('dev config lock')}"])
+        return f"dev config lock: {SIGN_IN_ENDED.get(got, got)}"
 
-    def _doctor(self, cl, i, log) -> dict:
-        res = {"passed": None, "total": None, "fails": [], "rc": 1}
+    def _doctor(self, cl, i, log, report=None):
+        res = report if report is not None else {}
+        res.update({"passed": None, "total": None, "fails": [], "rc": 1})
         tail, group = deque(maxlen=20), [""]
         cl.start(i, "dev doctor")
 
@@ -1410,14 +1898,17 @@ class _Wizard:
             m = re.match(r"^\s{4,}→ (.*)$", raw)
             if m and res["fails"]:
                 res["fails"][-1][3] = m.group(1).strip()
-        res["rc"] = _exec(_dev("doctor"), line, log, env=_child_env())
+        rc = _exec(_dev("doctor"), line, log, env=_child_env())
+        res["rc"] = int(rc)
         if res["total"] is None:
-            cl.finish(i, "fail", "dev doctor did not finish", self._tail(tail) + [f"Fix: run {tui.bold('dev doctor')}"])
-        elif not res["fails"]:
+            cl.finish(i, "fail", f"dev doctor did not finish ({_ended(rc)})",
+                      self._dim(_reasons(rc, tail)) + [f"Later: run {tui.bold('dev doctor')}"])
+            return f"dev doctor did not finish ({_ended(rc)})"
+        if not res["fails"]:
             cl.finish(i, "ok", f"all {res['total']} checks pass" if res["total"] != 1 else "the check passes")
         else:
             cl.finish(i, "warn", f"{res['passed']} of {res['total']} checks pass")
-        return res
+        return None
 
     def _finish(self, cl, report, log) -> int:
         term, width = self.term, self.term.size()[0]
@@ -1432,10 +1923,11 @@ class _Wizard:
                     term.write(tui.fit(f"      {tui.dim('→')} {tui.clean(fix)}", width - 1) + "\n")
             if len(fails) > 8:
                 term.write(f"    {tui.dim(f'… and {len(fails) - 8} more; run dev doctor to see them all')}\n")
-        if not fails and not problems and report.get("total") is not None:
+        open_steps = self._summary(width)
+        if not fails and not problems and not open_steps and report.get("total") is not None:
             term.write(f"\n  {tui.ok('✓')} {tui.bold('devkit is ready.')}\n")
         else:
-            term.write(f"\n  {tui.bold('devkit is set up.')} {tui.dim('Fix the items above, then run dev doctor again.')}\n")
+            term.write(f"\n  {tui.bold('devkit is set up.')} {tui.dim('Finish the items above; dev doctor checks again.')}\n")
         agents = [k for k in ("claude", "codex") if self.a["use_" + k]]
         third = {2: "Start `claude` or `codex` in any project; `dev agents test` checks both.",
                  1: f"Start `{agents[0] if agents else ''}` in any project; `dev agents test` checks it.",
@@ -1447,3 +1939,26 @@ class _Wizard:
             term.write(tui.fit(f"  {tui.dim(f'{n}.')} {_code(s)}", width - 1) + "\n")
         term.write(f"\n  {tui.dim('The full output of this run is in ' + core.tilde(log.path))}\n\n")
         return report.get("rc", 1) if report.get("total") is not None else 1
+
+    def _summary(self, width) -> list:
+        """What the run did: the steps done, then each skipped or failed step with why and the command that finishes
+        it -> the steps that are not done."""
+        run, term = self.run_state, self.term
+        if not run:
+            return []
+        done = [s["title"] for s in run.steps if s.get("state") == "done"]
+        rest = run.unfinished()
+        term.write(f"\n  {tui.bold('This run')}\n")
+        if done:
+            term.write(tui.fit(f"  {tui.ok('✓')} Done: {', '.join(done)}", width - 1) + "\n")
+        for label, state in (("Skipped", "skipped"), ("Failed", "failed"), ("Not run", "pending")):
+            for s in (x for x in rest if x.get("state") == state):
+                why = f" — {tui.clean(s.get('reason'))}" if s.get("reason") else ""
+                term.write(tui.fit(f"  {tui.warn('!') if state == 'skipped' else tui.bad('✗')} {label}: {s['title']}{why}",
+                                   width - 1) + "\n")
+                if s.get("fix"):
+                    term.write(tui.fit(f"      {tui.dim('→')} {_code('`' + s['fix'] + '`')}", width - 1) + "\n")
+        if rest:
+            term.write(tui.fit(f"  {tui.dim('dev setup --resume runs what is not done, with the same answers.')}",
+                               width - 1) + "\n")
+        return rest

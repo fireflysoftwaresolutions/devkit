@@ -173,8 +173,26 @@ you choose **Apply** on the review screen.
 4. **Apply.** Each step shows a spinner while it runs and `✓`, `✗`, or `!` when it ends: save
    `~/.config/devkit/config.json`, install the Homebrew and npm packages, install Claude Code if it is missing, run
    `dev install` (which pins devkit first), check the agents' sign-in (and offer to sign you in), start Docker, lock
-   the settings if you chose to, and run `dev doctor`. A failed step shows the last lines of its output and the command that fixes it, and the
-   wizard goes on with the next step. It ends with the checks that need attention and three next steps.
+   the settings if you chose to, and run `dev doctor`. It ends with what this run did (the steps done, then each
+   step skipped or failed with the command that finishes it), the checks that need attention, and three next steps.
+
+#### When a step fails or you stop it
+
+Only two steps are required: saving your choices and configuring devkit (`dev install`). The others are optional.
+
+- **An optional step** that fails, reaches its time limit, or that you stop with `Ctrl-C` is skipped, and the wizard
+  goes on with the next step. The step shows why and the exact command that finishes it later, such as
+  `codex login` or `dev docker up`. `Ctrl-C` stops only the command that runs in that step.
+- **A required step** that fails or that you stop ends the run. The wizard says where it stopped and why: the exit
+  code, the signal that stopped it, or devkit's crash notice with its crash file, and the last error lines, never the
+  banner the command printed first.
+- **Continue where it stopped** with `dev setup --resume` (or `~/Development/fireflysoftwaresolutions/devkit/bin/dev
+  setup --resume` when the `dev` command is not set up yet). It runs every step that is not done, with the answers
+  you gave, and skips the steps that are done. The steps and their state are kept in
+  `~/.local/state/devkit/setup-run.json`, readable only by you.
+- **Sign-in** runs on your terminal, with a time limit: 10 minutes for the browser, 15 for a device code. When
+  Codex's browser sign-in does not finish, the wizard offers `codex login --device-auth`, which shows a code to enter
+  on another device. Without a terminal, or with `--yes`, nothing signs in: the summary gives the command to run later.
 
 | Section | What you choose |
 | --- | --- |

@@ -2686,6 +2686,7 @@ _dev__setup() {
     '--remove[with prompt, commit-template or shell]' \
     '(--yes -y)'{-y,--yes}'[accept every default]' \
     '--skip-packages[do not install Homebrew/npm packages]' \
+    '--resume[continue the last setup]' \
     '::what:(prompt commit-template shell)'
 }
 

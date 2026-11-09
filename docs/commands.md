@@ -1341,13 +1341,14 @@ write and push, settings repair, cleanup, and job run, with secrets redacted. Se
 
 ## Environment
 
-### `dev setup [-y] [--skip-packages]` · `dev setup prompt | commit-template | shell [--remove] [-y]`
+### `dev setup [-y] [--skip-packages] [--resume]` · `dev setup prompt | commit-template | shell [--remove] [-y]`
 
 The installation and configuration wizard. It detects the Mac, GitHub, and both agents. It asks for the development
 root, the handoff repository, which agents to configure and their permission modes, your stacks, your git hosts and
 the commit template, clouds, the Docker VM, automation, and the settings lock. It shows the plan and applies it only after you confirm:
 the packages for your stacks, hosts, and clouds, then `dev install`, the sign-ins, and `dev doctor`. Run it again to
-change your choices.
+change your choices. `--resume` continues the last setup where it stopped: it runs every step that is not done, with
+the answers you gave (see [When a step fails or you stop it](getting-started.md#when-a-step-fails-or-you-stop-it)).
 
 `dev setup prompt` sets up only the [prompt helper](getting-started.md#the-prompt-helper): it says what it changes,
 asks once, and then shows the helper in the prompt you use. With Starship it adds a marked block to

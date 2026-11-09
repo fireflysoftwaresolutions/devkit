@@ -32,6 +32,7 @@ def line_prompts(assume_yes=False, login="ada"):
     user = {"login": login, "name": "Ada", "id": 1} if login else {}
     with tempfile.TemporaryDirectory() as d:
         with mock.patch.object(wizard, "CONFIG_FILE", Path(d) / "config.json"), \
+                mock.patch.object(wizard, "STATE", Path(d)), mock.patch.object(wizard, "terminal_device", lambda: None), \
                 mock.patch.object(wizard, "_hw", lambda: (12, 36, "26.1", "arm64")), \
                 mock.patch.object(core, "gh_user", lambda: user), \
                 mock.patch.object(core, "have", lambda t: t in ("gh", "brew")), \
@@ -64,6 +65,23 @@ class FirstRunTests(unittest.TestCase):
         self.assertIn("in a private GitHub repository: your handoff repository.", text)
         w.d = fake_survey(saved={"dev_root": "~/Development"})
         self.assertNotIn("your handoff repository.", " ".join(tui.strip(ln) for ln in w.welcome()))
+
+
+class ResumeTests(unittest.TestCase):
+    """`dev setup --resume` continues the last setup where it stopped, or says there is nothing to continue."""
+
+    def test_dev_setup_resume_continues_the_saved_setup(self):
+        from devkit import cli
+        with mock.patch.object(wizard, "run", return_value=0) as run:
+            self.assertEqual(cli.main(["setup", "--resume"]), 0)
+        self.assertTrue(run.call_args.kwargs.get("resume"))
+
+    def test_without_a_saved_setup_resume_says_to_run_dev_setup(self):
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(wizard, "STATE", Path(d)), \
+                mock.patch("sys.stdout", io.StringIO()) as out:
+            rc = wizard.run(resume=True)
+        self.assertEqual(rc, 1)
+        self.assertIn("No setup to resume on this Mac: run dev setup.", ui.ANSI_RE.sub("", out.getvalue()))
 
 
 if __name__ == "__main__":

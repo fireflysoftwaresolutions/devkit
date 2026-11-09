@@ -418,7 +418,7 @@ _dev_spec() {
     'docs') o='-h --help --online --fix --no-prose' p='c:check *f' ;;
     'sec') o='-h --help --history --config -v --verbose' v='--config=n' p='c:scan l:projects:-::' ;;
     'diagram') o='-h --help' p='*l:-:-:render,check,new:f' ;;
-    'setup') o='-h --help --remove -y --yes --skip-packages' p='c:prompt,commit-template,shell' ;;
+    'setup') o='-h --help --remove -y --yes --skip-packages --resume' p='c:prompt,commit-template,shell' ;;
     'prompt') o='-h --help' p='c:refresh' ;;
     'update') o='-h --help --check --quiet --record --yes -y' ;;
     'docker') o='-h --help' p='c:up,down,status,trim,prune,autostart-on,autostart-off' ;;

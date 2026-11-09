@@ -3824,7 +3824,7 @@ def cmd_setup(a):
         from . import setup as setup_mod
         return setup_mod.setup_shell(assume_yes=a.yes, remove=a.remove)
     from . import wizard
-    return wizard.run(assume_yes=a.yes, skip_packages=a.skip_packages)
+    return wizard.run(assume_yes=a.yes, skip_packages=a.skip_packages, resume=bool(getattr(a, "resume", False)))
 
 
 def cmd_docs(a):
@@ -4413,6 +4413,8 @@ def build_parser():
     p.add_argument("--remove", action="store_true", help="with prompt, commit-template or shell: take it out again")
     p.add_argument("-y", "--yes", action="store_true", help="accept every default (non-interactive)")
     p.add_argument("--skip-packages", action="store_true", help="do not install Homebrew/npm packages")
+    p.add_argument("--resume", action="store_true",
+                   help="continue the last setup: run its steps that are not done, with the saved answers")
     add("prompt", cmd_prompt, "What devkit's prompt helper shows here; refresh writes it for this Mac").add_argument(
         "action", nargs="?", choices=["refresh"])
     p = add("update", cmd_update, "Update devkit: the newest release, or a pull of its branch; --check only tells")

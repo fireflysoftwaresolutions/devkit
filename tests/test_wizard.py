@@ -4,6 +4,7 @@
 `--yes` and the Playwright skill install. Nothing here installs packages or touches the real ~/.config, ~/.claude or
 ~/.codex: configs go to temporary folders, commands are stubbed, and the pseudo-terminal runs use a temporary HOME.
 """
+import contextlib
 import io
 import json
 import os
@@ -384,9 +385,11 @@ changes until you confirm.
      Apply this plan? → yes
 
   ✓ saved <CONFIG>
-     Codex is not signed in. Sign in now (opens the browser)? → yes
+  ! Check agent sign-in: not signed in: Codex (no terminal to sign in from). Later: codex login
 
   → Verifying …
+
+  ! Not done: Check agent sign-in (codex login). dev setup --resume runs them with the same answers.
 
   Next: open a new terminal (or `exec zsh`), then `dev` — and in any project, start Claude Code or Codex as \
 usual. `dev agents test` runs a live check of both agents.
@@ -394,28 +397,43 @@ usual. `dev agents test` runs a live check of both agents.
 """
 
 
-def line_mode(saved=None, yes=True, typed=None, clouds=("aws",), state=None):
+def line_mode(saved=None, yes=True, typed=None, clouds=("aws",), state=None, call=None, resume=False, device=None,
+              tools=("gh", "brew")):
     """Run `dev setup` through the line prompts with detection and commands stubbed: (rc, config, output, calls).
-    `clouds`: the cloud and infrastructure tools this Mac shows. `state`: devkit's state folder (default: a temp one)."""
+    `clouds`: the cloud and infrastructure tools this Mac shows. `state`: devkit's state folder (default: a temp one).
+    `call(argv)`: what a started command returns (default 0). `device`: the terminal a sign-in would get (none)."""
     seen = {"hosts": ["github", "gitlab"], "clouds": list(clouds), "evidence": {"gitlab": "x", "aws": "y"}}
     with tempfile.TemporaryDirectory() as d:
         cfgf = Path(d) / "config.json"
         if saved is not None:
             cfgf.write_text(json.dumps(saved))
-        calls, answers = [], iter(typed or [])
+        calls, answers = [], iter(typed or []) if not callable(typed) else None
+
+        def answer(prompt=""):
+            print(prompt, end="")
+            return typed(prompt) if answers is None else next(answers)
+
+        def fake_call(argv, **kw):
+            calls.append([str(a) for a in argv])
+            return call(argv) if call else 0
         with mock.patch.object(wizard, "CONFIG_FILE", cfgf), mock.patch.object(setup, "STATE", state or Path(d)), \
+                mock.patch.object(wizard, "STATE", state or Path(d)), \
+                mock.patch.object(wizard, "terminal_device", lambda: device), \
                 mock.patch.object(wizard, "_hw", lambda: (12, 36, "26.1", "arm64")), \
                 mock.patch.object(core, "gh_user", lambda: {"login": "ada", "name": "Ada Lovelace", "id": 1}), \
-                mock.patch.object(core, "have", lambda t: t in ("gh", "brew")), \
+                mock.patch.object(core, "have", lambda t: t in tools), \
                 mock.patch.object(providers, "status", lambda include_account=True: {
                     "claude": {"installed": True, "logged_in": True}, "codex": {"installed": True, "logged_in": False}}), \
                 mock.patch.object(toolchain, "detect", lambda: seen), \
-                mock.patch("subprocess.call", lambda argv, **kw: calls.append(list(argv)) or 0), \
-                mock.patch("builtins.input", lambda prompt="": (print(prompt, end=""), next(answers))[1]), \
+                mock.patch("subprocess.call", fake_call), mock.patch("builtins.input", answer), \
                 mock.patch("sys.stdin", _Stdin(not yes)), mock.patch("sys.stdout", io.StringIO()) as out:
             rc = wizard.run(assume_yes=yes, skip_packages=True)
+            if resume:
+                rc = wizard.run(assume_yes=yes, resume=True)
+            run = core.read_json((state or Path(d)) / "setup-run.json", None)
         text = ui.ANSI_RE.sub("", out.getvalue()).replace(str(cfgf), "<CONFIG>")
         text = re.sub(r"Good (morning|afternoon|evening)", "Good <time>", text)
+        line_mode.run = run
         return rc, (json.loads(cfgf.read_text()) if cfgf.exists() else None), text[text.index("Good <time>"):], calls
 
 
@@ -439,7 +457,8 @@ class LineModeTests(unittest.TestCase):
         typed = ["~/Code", "", "n", "y", "2", "1,3", "", "n", "", "8", "", "", "y", "n", "30", "y", "", "y"]
         with tempfile.TemporaryDirectory() as state:
             rc, cfg, out, calls = line_mode(yes=False, typed=typed, state=Path(state))
-            self.assertEqual(list(Path(state).iterdir()), [])  # the wizard itself writes no devkit state
+            # the wizard itself writes no devkit state but the record of its apply steps (dev setup --resume)
+            self.assertEqual([p.name for p in Path(state).iterdir()], ["setup-run.json"])
         self.assertEqual(dev_args(calls[0]), ["install", "--commit-template", "no"])  # `dev install` applies the answer
         self.assertEqual(rc, 0)
         self.assertEqual(cfg["dev_root"], "~/Code")
@@ -451,6 +470,41 @@ class LineModeTests(unittest.TestCase):
         self.assertEqual((cfg["gc"], cfg["sync"], cfg["lock"]), ({"auto": False}, {"interval_minutes": 30}, False))
         self.assertEqual(cfg["ai"], {"enabled": True, "asked": True})  # asked once, and answered yes
         self.assertIn("[Y/n]", out)
+
+    def test_without_a_terminal_a_sign_in_waits_with_the_command_for_later(self):
+        rc, _, out, calls = line_mode()
+        self.assertNotIn(["codex", "login"], calls)
+        self.assertIn("Check agent sign-in: not signed in: Codex (no terminal to sign in from). Later: codex login", out)
+        self.assertEqual({s["id"]: s["state"] for s in line_mode.run["steps"]}["sign-in"], "skipped")
+
+    def test_ctrl_c_in_an_optional_step_goes_on_with_the_rest(self):
+        def call(argv):
+            if dev_args(argv) == ["docker", "up"]:
+                raise KeyboardInterrupt
+            return 0
+        def typed(prompt):  # every default, and yes to starting Docker
+            return "y" if "Start Docker" in prompt else ""
+        with mock.patch.object(core, "sh", lambda args, **kw: (1, "", "stopped")):  # colima status: stopped
+            rc, _, out, calls = line_mode(yes=False, typed=typed, call=call, tools=("gh", "brew", "colima"))
+        self.assertIn(["docker", "up"], [dev_args(c) for c in calls])
+        self.assertEqual(dev_args(calls[-1]), ["doctor"])  # the step after it still ran
+        self.assertIn("Start Docker: interrupted. Later: dev docker up", out)
+        self.assertEqual({s["id"]: s["state"] for s in line_mode.run["steps"]}["docker"], "skipped")
+
+    def test_a_failed_install_stops_and_resume_runs_the_rest_with_the_saved_answers(self):
+        tries = []
+
+        def call(argv):
+            if dev_args(argv)[:1] == ["install"]:
+                tries.append(argv)
+                return 70 if len(tries) == 1 else 0
+            return 0
+        rc, _, out, calls = line_mode(call=call, resume=True)
+        self.assertIn("Setup stopped at Configure devkit: dev install: exit code 70", out)
+        self.assertIn("dev setup --resume", out)
+        self.assertEqual([dev_args(c) for c in calls], [["install", "--commit-template", "yes"],
+                                                        ["install", "--commit-template", "yes"], ["doctor"]])
+        self.assertEqual({s["id"]: s["state"] for s in line_mode.run["steps"]}["configure"], "done")
 
     def test_falls_back_to_line_prompts_without_a_terminal_or_with_yes(self):
         with mock.patch.object(wizard, "_run_lines", return_value=7) as lines, \
@@ -681,6 +735,13 @@ class DefaultsAndDetectionTests(unittest.TestCase):
         self.assertIn("one\n", Log.text)
         self.assertEqual(wizard._exec(["/nonexistent/devkit-test-binary"], lines.append), 127)
 
+    def test_exec_returns_when_the_command_exits_though_a_process_it_started_keeps_its_output_open(self):
+        code = "import subprocess, sys; subprocess.Popen(['sleep', '30']); print('started'); sys.exit(0)"
+        t0, lines = time.monotonic(), []
+        self.assertEqual(wizard._exec([sys.executable, "-u", "-c", code], lines.append), 0)
+        self.assertLess(time.monotonic() - t0, 15)
+        self.assertEqual(lines, ["started"])
+
     def test_validators(self):
         self.assertIsNone(wizard._int_in(1, 8)("8"))
         self.assertTrue(wizard._int_in(1, 8)("9"))
@@ -732,6 +793,320 @@ class PlaywrightSkillTests(unittest.TestCase):
         runs, tmp_root, share, files = self.run_install(rc=1)
         self.assertEqual(files, ["old.md"])
         self.assertFalse(Path(runs[0]).exists())
+
+
+class HomebrewAskTests(unittest.TestCase):
+    """Homebrew asks "Do you want to proceed with the installation? [y/n]" by default; HOMEBREW_NO_ASK, the switch it
+    documents, turns that off for every brew the setup runs."""
+
+    def test_the_packages_step_of_the_wizard_runs_brew_without_asking(self):
+        envs = {}
+
+        def fake_exec(argv, on_line=None, log=None, env=None, timeout=None):
+            envs[str(argv[0])] = env or {}
+            return 0
+        w = wizard._Wizard(FakeTerm())
+        w._pk = {(): []}
+        w.a = {"stacks": [], "hosts": [], "clouds": []}
+        with mock.patch.object(wizard, "_exec", fake_exec), mock.patch.object(toolchain, "postinstall", lambda k: []), \
+                tui.Checklist(w.term, ["Install Homebrew packages"], animate=False) as cl:
+            w._brew(cl, 0, {"brew": ['brew "jq"'], "post": []}, None)
+        self.assertEqual(envs["brew"].get("HOMEBREW_NO_ASK"), "1")
+
+    def test_dev_install_runs_brew_bundle_without_asking(self):
+        envs = []
+
+        def fake_call(argv, **kw):
+            if list(argv[:2]) == ["brew", "bundle"]:
+                envs.append(kw.get("env") or {})
+            return 0
+        with mock.patch("subprocess.call", fake_call), mock.patch.object(core, "have", lambda t: False), \
+                mock.patch.object(toolchain, "postinstall", lambda keys: []), mock.patch("sys.stdout", io.StringIO()):
+            wizard.install_packages([], with_claude=False)
+        self.assertEqual([e.get("HOMEBREW_NO_ASK") for e in envs], ["1"])
+
+
+# --------------------------------------------------------------------------- a failed step says why
+
+# Stand-ins for devkit's bin/dev, run by the wizard's Configure step as it runs `dev install`: with the interpreter
+# flags of bin/dev's shebang (-I -S), output captured, no terminal.
+BANNER = ('print("\\n  devkit\\n\\n  Your development kit\\n  v26.11.8 · install  ·  © 2026 Firefly Software Solutions '
+          'Inc.\\n")\nprint("▸ Pinned copy of devkit (what the hooks and the guard run)")\n')
+FAILS_ON_STDERR = "import sys\n" + BANNER + (
+    'sys.stderr.write("git archive 1a2b3c4 failed: fatal: not a tree object\\n")\nsys.exit(1)\n')
+CRASHES = "import os, sys\nsys.path.insert(0, os.environ['WIZ_LIB'])\nfrom devkit import bugs\n" + BANNER + (
+    'try:\n    {}["path"]\nexcept KeyError as e:\n    sys.exit(bugs.handle_crash(["install", "--as-pinned"], e))\n')
+KILLED = "import os, signal\n" + BANNER + (
+    'print("  ✓ running from ~/.local/share/devkit/releases/26.11.8-1a2b3c4")\n'
+    'print("▸ Codex (CLI + ChatGPT app): settings, hooks, plugins, MCP")\nos.kill(os.getpid(), signal.SIGKILL)\n')
+
+
+class FailedStepTests(unittest.TestCase):
+    """The Configure step runs `dev install` as a child. When it fails, the step says how it ended (exit code, crash
+    or signal), the part it was in, and the error lines, never the banner it printed first."""
+
+    def configure(self, script: str):
+        with tempfile.TemporaryDirectory() as tmp:
+            kit, home = Path(tmp) / "devkit", Path(tmp) / "home"
+            (kit / "bin").mkdir(parents=True)
+            home.mkdir()
+            (kit / "bin" / "dev").write_text(script)
+            w = wizard._Wizard(FakeTerm())
+            w.a = {"commit_template": True}
+            # the crash notice is written by devkit's own handler, whose files go to this temporary HOME
+            with mock.patch.object(wizard, "DEVKIT_HOME", kit), \
+                    mock.patch.dict(os.environ, {"HOME": str(home), "WIZ_LIB": LIB}), \
+                    tui.Checklist(w.term, ["Configure devkit"], animate=False) as cl:
+                w._configure(cl, 0, None)
+            it = cl.items[0]
+            crashes = sorted(p.name for p in (home / ".local" / "state" / "devkit" / "crashes").glob("*"))
+            return it.state, it.detail, [plain(n) for n in it.notes], crashes
+
+    def test_an_error_on_stderr_is_shown_with_the_exit_code_and_never_the_banner(self):
+        state, summary, notes, _ = self.configure(FAILS_ON_STDERR)
+        self.assertEqual(state, "fail")
+        self.assertIn("exit code 1", summary)
+        self.assertIn("git archive 1a2b3c4 failed: fatal: not a tree object", "\n".join(notes))
+        self.assertIn("in Pinned copy of devkit (what the hooks and the guard run)", "\n".join(notes))
+        for banner in ("Your development kit", "© 2026", "v26.11.8 · install"):
+            self.assertNotIn(banner, "\n".join(notes + [summary]))
+
+    def test_a_crash_shows_the_notice_and_the_crash_file(self):
+        state, summary, notes, crashes = self.configure(CRASHES)
+        self.assertEqual(state, "fail")
+        self.assertIn("devkit crashed (exit code 70)", summary)
+        text = "\n".join(notes)
+        self.assertRegex(text, r"devkit bug [0-9a-f]{12} in `dev install`: KeyError")
+        self.assertEqual(len(crashes), 1)
+        self.assertIn(f"~/.local/state/devkit/crashes/{crashes[0]}", text)
+
+    def test_the_lines_printed_before_a_signal_killed_it_are_kept(self):
+        state, summary, notes, _ = self.configure(KILLED)
+        self.assertEqual(state, "fail")
+        self.assertIn("stopped by SIGKILL", summary)
+        self.assertIn("in Codex (CLI + ChatGPT app): settings, hooks, plugins, MCP", "\n".join(notes))
+        self.assertIn("running from ~/.local/share/devkit/releases/26.11.8-1a2b3c4", "\n".join(notes))
+
+
+# --------------------------------------------------------------------------- interruptions, failures and resume
+
+class FakeChild:
+    """subprocess.Popen for an attached sign-in: wait() returns `rc`, or raises KeyboardInterrupt first (Ctrl-C)."""
+    runs = []
+
+    def __init__(self, argv, **kw):
+        FakeChild.runs.append([str(a) for a in argv])
+        self.script = list(FakeChild.plan.pop(0)) if FakeChild.plan else [0]
+        self.returncode = None
+
+    def wait(self, timeout=None):
+        step = self.script.pop(0) if self.script else -2
+        if step == "ctrl-c":
+            raise KeyboardInterrupt
+        self.returncode = step
+        return step
+
+    def poll(self):
+        return self.returncode if self.returncode is not None else -2
+
+    def terminate(self):
+        self.returncode = -15
+
+    kill = terminate
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class ApplyRunTests(unittest.TestCase):
+    """The apply steps: an optional step that fails or is interrupted is skipped with the command that finishes it,
+    and the rest still runs; a required one stops the run, which `dev setup --resume` continues with the same
+    answers. Each state is saved in setup-run.json."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        d = Path(self.tmp.name)
+        self.cfgf, self.state = d / "config.json", d / "state"
+        self.ran, self.signed_in = [], set()
+        FakeChild.runs, FakeChild.plan = [], []
+        self.fail_install = None
+
+    def fake_exec(self, argv, on_line=None, log=None, env=None, timeout=None):
+        self.ran.append(dev_args(argv) or [str(a) for a in argv])
+        if dev_args(argv)[:1] == ["install"] and self.fail_install:
+            raise self.fail_install
+        if dev_args(argv)[-1:] == ["doctor"] and on_line:
+            on_line("  ✓ 1/1 checks passed")
+        return 0
+
+    def status(self, include_account=True):
+        if getattr(self, "device_signs_in", False) and ["codex", "login", "--device-auth"] in FakeChild.runs:
+            self.signed_in.add("codex")
+        return {k: {"installed": True, "logged_in": k in self.signed_in} for k in ("claude", "codex")}
+
+    def wizard(self, keys: bytes):
+        d = fake_survey()
+        d["docker"] = {"colima": True, "running": False}
+        w = wizard._Wizard(FakeTerm(keys), skip_packages=True)
+        w.d, w.a = d, wizard.tui_defaults(d)
+        w.a["use_claude"], w.a["commit_template"] = False, False  # Codex only, to keep the keys short
+        return w
+
+    def patches(self):
+        return [mock.patch.object(wizard, "CONFIG_FILE", self.cfgf), mock.patch.object(wizard, "STATE", self.state),
+                mock.patch.object(setup, "STATE", self.state), mock.patch.object(wizard, "_exec", self.fake_exec),
+                mock.patch.object(wizard, "detect_docker", lambda: {"colima": True, "running": False}),
+                mock.patch.object(wizard, "terminal_device", lambda: os.devnull),
+                mock.patch.object(providers, "status", self.status), mock.patch("subprocess.Popen", FakeChild)]
+
+    def apply(self, w, resume=None):
+        with contextlib.ExitStack() as stack:
+            for p in self.patches():
+                stack.enter_context(p)
+            rc = w.resume(resume) if resume else w.apply()
+        saved = json.loads((self.state / "setup-run.json").read_text()) \
+            if (self.state / "setup-run.json").exists() else None
+        return rc, w.term.text, saved
+
+    @staticmethod
+    def states(saved) -> dict:
+        return {s["id"]: s["state"] for s in saved["steps"]}
+
+    def test_ctrl_c_in_an_optional_sign_in_skips_it_and_the_rest_still_runs(self):
+        FakeChild.plan = [["ctrl-c"]]  # codex login: the person presses Ctrl-C in the browser sign-in
+        rc, text, saved = self.apply(self.wizard(b"y" + b"n" + b"y"))  # sign in; no code instead; start Docker
+        self.assertNotEqual(rc, 130, text)
+        self.assertIn(["docker", "up"], self.ran)
+        self.assertIn(["doctor"], self.ran)
+        self.assertEqual(self.states(saved)["sign-in"], "skipped")
+        step = next(s for s in saved["steps"] if s["id"] == "sign-in")
+        self.assertIn("codex login", step["fix"])
+        skipped = text.split("Skipped")[1]  # the summary names it with the command that finishes it
+        self.assertIn("Check agent sign-in", skipped)
+        self.assertIn("codex login", skipped)
+
+    def test_codex_offers_a_device_code_when_the_browser_sign_in_does_not_finish(self):
+        FakeChild.plan = [[1], [0]]  # the browser flow fails, the device code works
+        self.device_signs_in = True
+        rc, text, saved = self.apply(self.wizard(b"y" + b"y" + b"n"))  # sign in; yes, with a code; no Docker now
+        self.assertEqual(FakeChild.runs, [["codex", "login"], ["codex", "login", "--device-auth"]])
+        self.assertEqual(self.states(saved)["sign-in"], "done")
+
+    def test_a_required_step_interrupted_stops_the_run_and_says_how_to_resume(self):
+        self.fail_install = KeyboardInterrupt()
+        rc, text, saved = self.apply(self.wizard(b""))
+        self.assertEqual(rc, 130)
+        self.assertEqual(self.states(saved), {"save": "done", "configure": "failed", "sign-in": "pending",
+                                              "docker": "pending", "doctor": "pending"})
+        self.assertIn("dev setup --resume", text)
+        self.assertNotIn(["doctor"], self.ran)
+
+    def test_resume_runs_what_is_not_done_with_the_saved_answers(self):
+        self.fail_install = KeyboardInterrupt()
+        self.apply(self.wizard(b""))
+        self.fail_install, self.ran = None, []
+        self.signed_in.add("codex")
+        with mock.patch.object(wizard, "STATE", self.state):
+            run = wizard.SetupRun.load()
+        w = wizard._Wizard(FakeTerm(b"n"), skip_packages=True)  # no Docker now
+        w.d = dict(fake_survey(), docker={"colima": True, "running": False})
+        rc, text, saved = self.apply(w, resume=run)
+        self.assertEqual(self.ran[0], ["install", "--commit-template", "no"])  # the saved answer, not the default
+        self.assertNotIn("save", [s["id"] for s in saved["steps"] if s["state"] != "done"])
+        self.assertEqual(self.states(saved)["configure"], "done")
+        self.assertIn(["doctor"], self.ran)
+
+    def test_a_resumed_run_checks_the_setup_again(self):
+        rc, text, saved = self.apply(self.wizard(b"n" + b"n"))  # sign in later; Docker later
+        self.assertEqual(self.states(saved)["doctor"], "done")
+        self.ran = []
+        self.signed_in.add("codex")
+        with mock.patch.object(wizard, "STATE", self.state):
+            run = wizard.SetupRun.load()
+        w = wizard._Wizard(FakeTerm(b"n"), skip_packages=True)
+        w.d = dict(fake_survey(), docker={"colima": True, "running": False})
+        rc, text, saved = self.apply(w, resume=run)
+        self.assertEqual(self.ran, [["doctor"]])  # configure was done; the check runs again after the sign-in
+        self.assertEqual(self.states(saved)["sign-in"], "done")
+
+    def test_a_sign_in_past_its_time_limit_is_stopped(self):
+        t0 = time.monotonic()
+        result = wizard._attached([sys.executable, "-c", "import time; time.sleep(30)"], timeout=0.5,
+                                  device=os.devnull)
+        self.assertEqual(result, "timeout")
+        self.assertLess(time.monotonic() - t0, 10)
+
+
+class SignInTerminalTests(unittest.TestCase):
+    """A sign-in gets this Mac's terminal by its own device. Claude Code's runtime watches its input with kqueue, which
+    macOS refuses on /dev/tty (EINVAL): the installer run through a pipe gave the wizard /dev/tty, and the sign-in
+    crashed with "EINVAL: invalid argument, kqueue". The stand-in for `claude` fails the same way."""
+
+    CLAUDE = textwrap.dedent('''
+        import select, sys
+        try:
+            select.kqueue().control([select.kevent(0, select.KQ_FILTER_READ, select.KQ_EV_ADD)], 0, 0)
+        except OSError as e:
+            sys.stderr.write("EINVAL: invalid argument, kqueue (%s)\\n" % e.strerror)
+            sys.exit(1)
+    ''')
+    DRIVER = textwrap.dedent('''
+        import os, sys
+        sys.path.insert(0, sys.argv[1])
+        if sys.argv[3] == "dev-tty":  # what the installer gave the wizard: the terminal opened as /dev/tty
+            os.dup2(os.open("/dev/tty", os.O_RDWR), 0)
+        from devkit import wizard
+        print("result:", wizard._attached([sys.executable, sys.argv[2]], timeout=30))
+    ''')
+
+    def run_driver(self, stdin: str, terminal=True) -> str:
+        with tempfile.TemporaryDirectory() as tmp:
+            claude, driver = Path(tmp) / "claude.py", Path(tmp) / "driver.py"
+            claude.write_text(self.CLAUDE)
+            driver.write_text(self.DRIVER)
+            argv = [sys.executable, str(driver), LIB, str(claude), stdin]
+            if not terminal:
+                p = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60,
+                                   start_new_session=True)
+                return p.stdout + p.stderr
+            import pty
+            master, slave = pty.openpty()
+            p = subprocess.Popen(argv, stdin=slave, stdout=slave, stderr=slave, start_new_session=True,
+                                 preexec_fn=_take_terminal)
+            os.close(slave)
+            out = b""
+            while True:
+                try:
+                    chunk = os.read(master, 4096)
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                out += chunk
+            p.wait(30)
+            os.close(master)
+            return out.decode("utf-8", "replace")
+
+    @unittest.skipUnless(sys.platform == "darwin", "kqueue and its refusal of /dev/tty are macOS's")
+    def test_a_sign_in_gets_the_terminal_device_kqueue_accepts_when_stdin_is_dev_tty(self):
+        out = self.run_driver("dev-tty")
+        self.assertIn("result: ok", out)
+        self.assertNotIn("EINVAL", out)
+
+    def test_without_a_terminal_nothing_is_started(self):
+        out = self.run_driver("as-is", terminal=False)
+        self.assertIn("result: no-terminal", out)
+
+
+def _take_terminal():
+    """In the child, after setsid: make the pseudo-terminal on stdin its controlling terminal."""
+    import fcntl
+    import termios
+    fcntl.ioctl(0, termios.TIOCSCTTY, 0)
 
 
 # --------------------------------------------------------------------------- the whole flow in a pseudo-terminal
