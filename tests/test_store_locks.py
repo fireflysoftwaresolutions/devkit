@@ -396,6 +396,10 @@ class SetAsideNoteTests(unittest.TestCase):
         for patch in (mock.patch.object(core, "STATE", state), mock.patch.object(registry, "STATE", state),
                       mock.patch.object(core, "HANDOFF", handoff), mock.patch.object(registry, "HANDOFF", handoff),
                       mock.patch.object(work, "HANDOFF", handoff), mock.patch.object(audit, "AUDIT", state / "audit"),
+                      # the notes the registry lists come from this folder too, not from the run's shared handoff
+                      mock.patch.object(core, "NOTES", handoff / "projects"),
+                      mock.patch.object(registry, "NOTES", handoff / "projects"),
+                      mock.patch.object(registry, "INITIATIVES", handoff / "initiatives"),
                       mock.patch.object(registry, "discover", side_effect=lambda: ([], [], [])),  # a new list each build
                       mock.patch.object(registry, "live_sessions", return_value=[]),
                       mock.patch.object(core, "github_user", return_value="ana"),
