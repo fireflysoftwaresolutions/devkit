@@ -198,7 +198,19 @@ class PlanWritesFromReadOnlyLanes(unittest.TestCase):
     def writes(self):
         return ('dev plan new "Checkout spec" --kind spec', "dev plan new Payment retries",
                 f"dev plan revise {self.spec} --why 'acceptance criteria'",
-                f"cd {self.plans} && dev plan revise 2026-11-09-checkout.md --why scope")
+                f"git status && dev plan revise {self.spec} --why scope")
+
+    def test_a_plan_write_after_a_change_of_folder_is_refused(self):
+        # the guard cannot follow `cd -`, popd, or a cd in a subshell, a pipe or a background job, so a plan write runs
+        # alone, from the folder the lane is in; the twin runs after a command that stays in it
+        o, s = self.other, self.shop
+        self.assertIsNone(verdict("git status && dev plan new x", "oracle", cwd=s))
+        for cmd in (f"cd {o} && cd {s} && cd - && dev plan new x", f"cd {o} && (cd {s}) && dev plan new x",
+                    f"pushd {o} && popd && dev plan new x", f"cd {o} | true && dev plan new x",
+                    f"cd {o} & dev plan new x", f"(cd {o}) ; dev plan new x", f"cd {s} && dev plan new x",
+                    f"cd {self.plans} && dev plan revise 2026-11-09-checkout.md --why scope"):
+            with self.subTest(cmd=cmd):
+                self.assertIn("read-only lane", verdict(cmd, "oracle", cwd=s) or "")
 
     def test_plan_writers_create_and_revise_their_projects_plans(self):
         for member in self.WRITERS:

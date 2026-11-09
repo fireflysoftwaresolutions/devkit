@@ -7401,6 +7401,28 @@ def _mask_substitutions(s: str):
     return "".join(out), inner
 
 
+PLAN_AFTER_CD = ("`dev plan new|revise` runs after a cd, pushd, popd or subshell in the same command, and the guard "
+                 "cannot be sure which folder it runs in (`cd -`, popd, or a cd in a subshell, a pipe or a background "
+                 "job). Run it as a command of its own, from the project's checkout, with the plan's full path for "
+                 "revise")
+_FOLDER_WORDS = frozenset({"cd", "pushd", "popd", "chdir"})
+_SHELL_KEYWORDS = frozenset({"{", "}", "if", "then", "else", "elif", "do", "while", "until", "!", "time"})
+
+
+def _changes_folder(argv0) -> bool:
+    """True when a command (its words, prefixes and shell keywords included) is cd, pushd or popd."""
+    words = list(itertools.dropwhile(lambda w: w in _SHELL_KEYWORDS, argv0))
+    argv = _unwrap(words) or words
+    return bool(argv) and os.path.basename(argv[0]) in _FOLDER_WORDS
+
+
+def _plan_write(argv0) -> bool:
+    """True for `dev plan new` or `dev plan revise`, prefixes included."""
+    dev = _dev_args(_unwrap(list(argv0)))
+    pos = _dev_words(dev) if dev is not None else []
+    return pos[:1] == ["plan"] and len(pos) > 1 and pos[1] in ("new", "revise")
+
+
 def readonly_refusal(cmd: str, cwd, member=None, depth: int = 0, plans=None) -> str | None:
     """Why a review or read-only lane may not run `cmd` (spec F7, consultation §4), or None when every segment is on
     the read-only allowlist: a command that parses, redirects only to /dev/null or a temp folder, and each program a
@@ -7428,7 +7450,13 @@ def readonly_refusal(cmd: str, cwd, member=None, depth: int = 0, plans=None) -> 
     if segs is None:
         return READONLY_REASON.format(what="the guard cannot parse this command, so it cannot tell what it writes")
     here = str(cwd or os.getcwd())
-    for argv0, redirs in segs:
+    osegs = split_commands(text, ops=True, stripped=True)
+    ops = [s[2] for s in osegs] if osegs is not None and len(osegs) == len(segs) else None
+    moved = False  # an earlier part of the command changes folder, or may: a plan write then needs a command of its own
+    for k, (argv0, redirs) in enumerate(segs):
+        if moved and _plan_write(argv0):
+            return READONLY_REASON.format(what=PLAN_AFTER_CD)
+        moved = moved or ops is None or any(c in ops[k] for c in "()") or _changes_folder(argv0)
         argv0, extra = list(argv0), []
         while any(t in (">|", ">>|") for t in argv0):  # `>|` reaches argv as a token; its target follows it
             k = next(j for j, t in enumerate(argv0) if t in (">|", ">>|"))
