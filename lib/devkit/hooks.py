@@ -1906,16 +1906,21 @@ def _codex_settle(agent: str, data: dict, loop: bool = True) -> str:
     their ledger line; a failure counts toward the patch-loop stop, whose root-cause paragraph comes back when it is
     due. `loop` False (Stop, which has no context to give): the ledger lines only, so the agent is not marked told
     and no lesson counts as shown; the next failure counts the streak from the ledger. One still missing after
-    CODEX_SETTLE_S leaves with no line and a hooks.log entry. -> the context to give."""
+    CODEX_SETTLE_S leaves with no line and a hooks.log entry. Only the calls of this hook's own agent settle here
+    (the same agent_id, or none for the main session): Codex members share the main session's session_id, and a
+    paragraph given in another agent's hook would reach the wrong agent. -> the context to give."""
     sid = str(data.get("session_id") or "")
     f = _codex_pending(sid) if sid else None
     if not f or not f.exists():
         return ""
-    settled, now = [], time.time()
+    settled, now, who = [], time.time(), str(data.get("agent_id") or "")
 
     def take(doc):
         keep = []
         for c in doc.get("calls") or []:
+            if str(c.get("agent_id") or "") != who:  # another agent's call: it waits for that agent's hooks
+                keep.append(c)
+                continue
             outcome = codex_outcome(codex_command_item(c.get("transcript_path"), str(c.get("tool_use_id") or "")))
             if outcome is None and now - (c.get("ts") or 0) < CODEX_SETTLE_S:
                 keep.append(c)

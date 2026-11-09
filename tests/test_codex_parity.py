@@ -121,24 +121,26 @@ class CodexFailedShellTests(BugState, HookCase):
         self.rollout.write_text(json.dumps({"type": "event_msg", "payload": {"type": "task_started",
                                                                               "turn_id": "t1"}}) + "\n")
 
-    def _record(self, n, status="failed", code=1):
+    def _record(self, n, status="failed", code=1, rollout=None):
         # the rollout's item for the command, as Codex 0.167.0 wrote it
         item = {"type": "CommandExecution", "id": f"exec-5f125236-dd03-45f9-8fd3-db673fc2b9b{n}", "process_id": "59976",
                 "command": ["/bin/zsh", "-lc", self.CMD], "cwd": "file:///repo",
                 "parsed_cmd": [{"type": "unknown", "cmd": self.CMD}], "source": "unified_exec_startup",
                 "status": status, "aggregated_output": self.OUTPUT, "exit_code": code,
                 "duration": {"secs": 0, "nanos": 3333}}
-        with self.rollout.open("a") as fh:
+        with (rollout or self.rollout).open("a") as fh:
             fh.write(json.dumps({"type": "event_msg", "payload": {"type": "item_completed", "turn_id": "t1",
                                                                  "item": item}}) + "\n")
 
-    def _post(self, n, output=None):
-        # the captured PostToolUse payload of that command
-        payload = {"cwd": str(self.root), "hook_event_name": "PostToolUse", "model": "gpt-6.1-sol",
-                   "permission_mode": "bypassPermissions", "session_id": "c1", "tool_input": {"command": self.CMD},
-                   "tool_name": "Bash", "tool_response": self.OUTPUT if output is None else output,
-                   "tool_use_id": f"exec-5f125236-dd03-45f9-8fd3-db673fc2b9b{n}",
-                   "transcript_path": str(self.rollout), "turn_id": "t1"}
+    def _post(self, n, output=None, **member):
+        # the captured PostToolUse payload of that command; `member`: a crew member's fields (agent_id, agent_type,
+        # its own transcript_path) beside the main session's session_id
+        payload = dict({"cwd": str(self.root), "hook_event_name": "PostToolUse", "model": "gpt-6.1-sol",
+                        "permission_mode": "bypassPermissions", "session_id": "c1",
+                        "tool_input": {"command": self.CMD}, "tool_name": "Bash",
+                        "tool_response": self.OUTPUT if output is None else output,
+                        "tool_use_id": f"exec-5f125236-dd03-45f9-8fd3-db673fc2b9b{n}",
+                        "transcript_path": str(self.rollout), "turn_id": "t1"}, **member)
         out = io.StringIO()
         with mock.patch("sys.stdin", io.StringIO(json.dumps(payload))), contextlib.redirect_stdout(out):
             hooks.run("post-tool", "codex")
@@ -193,6 +195,23 @@ class CodexFailedShellTests(BugState, HookCase):
         self._record(3)
         # the next identical failure counts the streak from the ledger, and the paragraph reaches the agent now
         self.assertIn(hooks.ROOT_CAUSE_STOP, self._post(3))
+
+    def test_a_members_hook_never_settles_the_main_sessions_command(self):
+        # a Codex member's calls carry the main session's session_id beside its own agent_id and rollout (captured):
+        # the main session's late record is not settled in the member's hook, so its paragraph never goes there
+        scout_rollout = self.root / "scout.jsonl"
+        scout = {"agent_id": "01a1c178-64c7-7ac1-81c6-ec8b852e1772", "agent_type": "scout", "model": "gpt-6-luna",
+                 "transcript_path": str(scout_rollout)}
+        self._record(1)
+        self._post(1)  # the main session's first failure
+        self._post(2)  # the same failure again, its record not on disk yet
+        self._record(2)
+        self._record(3, status="completed", code=0, rollout=scout_rollout)
+        self.assertNotIn(hooks.ROOT_CAUSE_STOP, self._post(3, **scout))
+        self.assertEqual(self._ledger_ok(), [False, True])  # the member's own line; the main session's still waits
+        self._record(4, status="completed", code=0)
+        self.assertIn(hooks.ROOT_CAUSE_STOP, self._post(4))  # the main session's next call settles it and is told
+        self.assertEqual(self._ledger_ok(), [False, True, False, True])
 
     def test_a_command_never_recorded_leaves_no_ledger_line_and_is_logged(self):
         self._post(1)
