@@ -692,26 +692,29 @@ class HandoffSyncTests(unittest.TestCase):
             self.assertFalse(work.push_failed_file().exists())
 
     def test_dev_sync_reports_a_conflict_it_cannot_settle_and_leaves_the_commits_as_they_were(self):
+        # A file that is neither an item nor a note (a plan edited on both Macs) stops the pull; notes are settled
+        # file by file (tests/test_sync.py).
         from devkit import cli
         with TwoMacs() as m:
-            note = m.here / "projects" / "acme" / "api.md"
-            note.parent.mkdir(parents=True)
-            note.write_text("# acme/api\n\nState: draft.\n")
-            work._commit([note], "note: acme/api", push=False)
+            rel = "plans/acme/api/2026-11-09-export.md"
+            plan = m.here / rel
+            plan.parent.mkdir(parents=True)
+            plan.write_text("# Export\n\nState: draft.\n")
+            work._commit([plan], "plan: export", push=False)
             _git(m.here, "push", "-q")
             _git(m.other, "pull", "-q")
-            (m.other / "projects" / "acme" / "api.md").write_text("# acme/api\n\nState: their words.\n")
-            _git(m.other, "commit", "-qam", "note: their words")
+            (m.other / rel).write_text("# Export\n\nState: their words.\n")
+            _git(m.other, "commit", "-qam", "plan: their words")
             _git(m.other, "push", "-q")
-            note.write_text("# acme/api\n\nState: our words.\n")
-            work._commit([note], "note: our words", push=False)
+            plan.write_text("# Export\n\nState: our words.\n")
+            work._commit([plan], "plan: our words", push=False)
             cli.commit_push(quiet=True)
             self.assertEqual(m.stopped(), [], m.problem())
             self.assertEqual(_git(m.here, "branch", "--show-current"), "main")
             self.assertEqual(_git(m.here, "rev-list", "--count", "@{u}..HEAD"), "1")
-            self.assertEqual(note.read_text(), "# acme/api\n\nState: our words.\n")
+            self.assertEqual(plan.read_text(), "# Export\n\nState: our words.\n")
             problem = json.loads(work.push_failed_file().read_text())["error"]
-            self.assertIn("conflict in projects/acme/api.md", problem)
+            self.assertIn(f"conflict in {rel}", problem)
 
 
 class ClaimReachesRemoteTests(unittest.TestCase):

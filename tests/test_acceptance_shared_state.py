@@ -416,7 +416,6 @@ class SessionLogs(Shared):
         self.assertEqual(git(self.ana.handoff, "status", "--porcelain", "--", "sessions"), "")
         self.assertEqual(git(self.ana.handoff, "show", f"HEAD:sessions/{WIDGET}/{time.strftime('%Y-%m')}.md"), text)
 
-    @unittest.expectedFailure  # open defect B-g3ds3cqof3a: the Stop hook rewrites the month's log unlocked
     def test_a_session_line_rewritten_at_stop_never_drops_another_sessions_line(self):
         # Session A's Stop hook rewrites its own line of the month's log on every turn (hooks.record_session) while
         # session B logs its lines (work.log_session, the path `dev handoff --log` takes): every line B wrote is kept.
@@ -452,7 +451,6 @@ class SessionLogs(Shared):
         self.assertEqual(kept, written, f"{written - kept} of session B's {written} lines were lost")
         self.assertEqual(len(self.lines_of(text, r"<!-- s:sA -->")), 1, text)
 
-    @unittest.expectedFailure  # open defect B-g3dse1rujb0: the second Mac's sync stops on a conflict in the note
     def test_two_macs_logging_sessions_reach_the_remote_without_a_stuck_sync(self):
         # Ana and Bob each log a session of acme/widget on their own Mac (Bob works on a branch of his own, so each
         # Mac's generated block of the note differs, as two Macs' always do) and both run `dev sync`, twice: the
@@ -501,7 +499,6 @@ class PresenceAndContext(Shared):
         self.assertNotRegex(team, rf"claude · {WIDGET}@")
         self.assertRegex(team, rf"codex · {GADGET}@main")
 
-    @unittest.expectedFailure  # open defect B-g3e6lyh6q38: collisions count (person, agent) pairs, not sessions
     def test_the_dashboard_flags_two_sessions_on_one_branch(self):
         # Two Claude Code sessions of Ana work on acme/widget@main at once, a third on acme/gadget: after `dev sync`
         # the dashboard's collisions name widget@main, with both sessions, and not gadget.

@@ -590,9 +590,10 @@ def now_warning(scope: str, items: list = None) -> str:
 # Every Mac pulls the handoff repository with a rebase. A rebase that stops (a conflict, a killed git) leaves the
 # repository on a detached HEAD: a commit made there is lost when the rebase ends, and every later pull and push
 # fails. So devkit's git writes to the repository run one at a time on a Mac (`_repo_lock`), a conflict in an item
-# is settled item by item (`merge_item`), any other conflict aborts the rebase, and a rebase found stopped is aborted
-# before the next pull or commit. Each abort is a sync problem: an audit record, kept at every audit level, and
-# handoff-push-failed.json, which `dev status` and the dashboard show until a push succeeds.
+# is settled item by item (`merge_item`), a conflict in a project's note or an initiative's README file by file
+# (`_settle_note`), any other conflict aborts the rebase, and a rebase found stopped is aborted before the next pull
+# or commit. Each abort is a sync problem: an audit record, kept at every audit level, and handoff-push-failed.json,
+# which `dev status` and the dashboard show until a push succeeds.
 
 _REBASE_DIRS = ("rebase-merge", "rebase-apply")
 _held = [0]
@@ -695,22 +696,131 @@ def _settle(rel: str, retake: bool):
     return merged if merged is not None else remote if retake else None
 
 
+# A project's note (projects/<id>.md) and an initiative's README hold blocks devkit writes again on every sync (the
+# auto block: this Mac's checkout, branches and PRs; the tasks block: the work items) around text people write. Two
+# Macs' blocks always differ, so a conflict in them is never merged line by line: the hand-written text is merged
+# (three-way, with the blocks emptied), the blocks are taken whole from this Mac, and after the pull the tasks block
+# is written again from the work items both Macs now have (`_rewrite_tasks`); the next `dev sync` writes the auto
+# block from this Mac's checkout. A conflict in the hand-written text keeps the remote's note, so the rest of the
+# pull goes on, and saves this Mac's version with the command that brings it back (`_save_note_conflict`).
+_NOTE_FILE = re.compile(r"^(projects/.+\.md|initiatives/[^/]+/README\.md)$")
+
+
+def _generated_blocks() -> tuple:
+    from .registry import AUTO_END, AUTO_START, TASKS_END, TASKS_START
+    return (AUTO_START, AUTO_END), (TASKS_START, TASKS_END)
+
+
+def _hollow(text: str) -> tuple:
+    """-> (the note with each generated block emptied to its two marker lines, {start marker: the whole block})."""
+    blocks = {}
+    for start, end in _generated_blocks():
+        i = text.find(start)
+        j = text.find(end, i + len(start)) if i != -1 else -1
+        if j == -1:
+            continue
+        blocks[start] = text[i:j + len(end)]
+        text = text[:i] + start + "\n" + end + text[j + len(end):]
+    return text, blocks
+
+
+def _merge_text(base: str, remote: str, mine: str):
+    """Three-way merge of two versions of a text with the one both started from (git merge-file). -> the merged text,
+    or None when both changed the same lines."""
+    import tempfile
+    with tempfile.TemporaryDirectory(prefix="devkit-merge-") as d:
+        paths = []
+        for name, text in (("remote", remote), ("base", base), ("mine", mine)):
+            p = Path(d) / name
+            p.write_text(text)
+            paths.append(str(p))
+        rc, out, _ = core.sh(["git", "merge-file", "-p", "-q", *paths])
+    return out + "\n" if rc == 0 else None
+
+
+def _settle_note(rel: str) -> tuple:
+    """A note in conflict during the rebase -> (the text to keep, the problem when this Mac's hand-written change
+    could not be merged and was saved aside, else ""). See _NOTE_FILE."""
+    base, remote, mine = _stage(rel, 1), _stage(rel, 2), _stage(rel, 3)  # in a rebase, 2 is the remote's side
+    if remote is None or mine is None:  # one side deleted the note: keep the text the other side has
+        return remote or mine or "", ""
+    (hb, _), (hr, remote_blocks), (hm, my_blocks) = _hollow(base or ""), _hollow(remote), _hollow(mine)
+    merged = _merge_text(hb, hr, hm)
+    if merged is None:
+        return remote, _save_note_conflict(rel, base or "", mine)
+    for start, end in _generated_blocks():
+        block = my_blocks.get(start) or remote_blocks.get(start)
+        if block:
+            merged = merged.replace(start + "\n" + end, block, 1)
+    return merged, ""
+
+
+def _save_note_conflict(rel: str, base: str, mine: str) -> str:
+    """Save this Mac's version of a note whose hand-written text conflicts, and the version both sides started from,
+    in STATE/handoff-conflicts/; record it (audit, kept at every level) and say how to bring it back. -> the problem."""
+    import shlex
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    saved = core.STATE / "handoff-conflicts" / f"{rel[:-len('.md')]}.{stamp}.mine.md"
+    started = saved.with_name(saved.name.replace(".mine.md", ".base.md"))
+    saved.parent.mkdir(parents=True, exist_ok=True)
+    core.replace_text(saved, mine)
+    core.replace_text(started, base)
+    cmd = " ".join(shlex.quote(str(w)) for w in ("git", "-C", HANDOFF, "merge-file", rel, started, saved))
+    problem = (f"{rel}: its hand-written text changed on this Mac and on another one at the same place, so devkit kept "
+               f"the remote's version and saved this Mac's at {saved}; to bring your changes back, run `{cmd}`, keep "
+               f"the lines both sides need between the conflict markers, then run `dev sync`")
+    from . import audit, ui
+    audit.record("handoff.note-conflict", rel, problem[:300], outcome="blocked")
+    ui.warn(f"handoff repository: {problem}")
+    return problem
+
+
+def _rewrite_tasks(rels) -> None:
+    """After a pull that settled the generated blocks of these notes, write each one's tasks block again from the work
+    items as they are now, and commit what changed: the note lists the items both Macs added."""
+    from .registry import TASKS_END, TASKS_START, render_tasks_block
+    changed = []
+    for rel in dict.fromkeys(rels):
+        f = HANDOFF / rel
+        try:
+            text = f.read_text()
+        except OSError:
+            continue
+        if TASKS_START not in text or TASKS_END not in text.split(TASKS_START, 1)[1]:
+            continue
+        scope = rel[len("projects/"):-len(".md")] if rel.startswith("projects/") else rel.rsplit("/", 1)[0]
+        pre, rest = text.split(TASKS_START, 1)
+        new = pre + render_tasks_block(scope) + rest.split(TASKS_END, 1)[1]
+        if new != text:
+            _replace(f, new)
+            changed.append(f)
+    if changed:
+        _commit(changed, f"sync: the tasks block of {len(changed)} note(s) again after the pull", push=False)
+
+
 def pull_rebase(retake=()) -> tuple:
     """Pull the handoff repository, rebasing this Mac's commits on the remote's. A conflict in an item is settled
-    (`_settle`); any other conflict aborts the rebase, leaves the commits as they were and records a sync problem.
-    `retake`: item paths (relative) whose change the caller applies again itself. Call it under `_repo_lock`.
+    (`_settle`), one in a note file by file (`_settle_note`: never a stop, so the other files still go through); any
+    other conflict aborts the rebase, leaves the commits as they were and records a sync problem. `retake`: item
+    paths (relative) whose change the caller applies again itself. Call it under `_repo_lock`.
     -> (ok, the problem when not ok)."""
     rc, out, err = core.git(HANDOFF, "pull", "-q", "--rebase", "--autostash", timeout=60)
     if rc == 0:
         return True, ""
     if not _stopped():  # the network or the remote: nothing changed here
         return False, (err or out).strip()[:300] or "git pull failed"
+    settled_notes = []
     for _ in range(200):  # one round per commit of this Mac that conflicts
         files = _conflicted()
         if not files:
             break
         for rel in files:
-            text = _settle(rel, rel in retake)
+            if _NOTE_FILE.match(rel):
+                text, problem = _settle_note(rel)
+                if not problem:
+                    settled_notes.append(rel)
+            else:
+                text = _settle(rel, rel in retake)
             if text is None:
                 problem = f"a pull of the handoff repository stopped on a conflict in {', '.join(files)} that devkit " \
                           f"cannot settle; it aborted the rebase and kept this Mac's commits unpushed"
@@ -721,6 +831,7 @@ def pull_rebase(retake=()) -> tuple:
         nothing = core.git(HANDOFF, "diff", "--cached", "--quiet")[0] == 0
         core.git(HANDOFF, "-c", "core.editor=true", "rebase", "--skip" if nothing else "--continue", timeout=60)
         if not _stopped():
+            _rewrite_tasks(settled_notes)
             return True, ""
     problem = "a pull of the handoff repository stopped and did not finish; devkit aborted the rebase"
     _abort(problem, _conflicted())
