@@ -349,6 +349,7 @@ class CodexStopGates(Sandbox):
                            'text(await tools.exec_command({cmd:"uv run pytest -q tests"}));\n'),
             self.command_record(1, read), self.command_record(2, "uv run pytest -q tests"))
         self.assertEqual(self.stop(), {})
+        self.assertEqual(self.errors(), [])  # nothing owed, not a Stop hook that failed open
         # a loaded skill counts for its own session only: another Codex session that runs the tests owes it
         self.sid = "01a1c178-2665-7ca1-9a5d-046a95cee8bd"
         self.start_codex_turn()
@@ -469,6 +470,7 @@ class GuardWorkingDay(Sandbox):
         verdicts = dict(zip(cmds, [decision(o) for o in outs]))
         self.assertEqual({c: v for c, v in verdicts.items() if c in EVERYDAY and v != "allow"}, {})
         self.assertEqual({c: v for c, v in verdicts.items() if c in SWITCHES and v != "deny"}, {})
+        self.assertEqual(self.errors(), [])  # each allow is the guard's verdict, not a guard that failed open
 
     def test_a_claude_code_day_runs_and_only_the_switches_are_refused(self):
         self.day("claude")
@@ -528,6 +530,7 @@ class GuardFileTools(Sandbox):
                                                           tool_use_id=f"toolu_{n}") for n, (_, t, i) in
                                               enumerate(calls)])
         self.assertEqual([decision(o) for o in outs], [want for want, _, _ in calls])
+        self.assertEqual(self.errors(), [])  # each allowed twin is the guard's verdict, not a guard that failed open
         self.assertEqual(self.settings.read_text(), self.SETTINGS)  # the guard judged; it wrote nothing
 
     def test_codex_patches_are_judged_by_the_settings_they_leave(self):
@@ -536,6 +539,7 @@ class GuardFileTools(Sandbox):
                                                         tool_input={"command": body}, tool_use_id=EXEC_ID.format(n))
                                              for n, (_, body) in enumerate(patches)])
         self.assertEqual([decision(o) for o in outs], [want for want, _ in patches])
+        self.assertEqual(self.errors(), [])  # each allowed twin is the guard's verdict, not a guard that failed open
 
 
 if __name__ == "__main__":

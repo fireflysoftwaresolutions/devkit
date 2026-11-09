@@ -13,8 +13,10 @@
 # An agent session is what its shells carry (DEVKIT_SESSION) and what the hooks record for each open shell call (the
 # call ledger, below devkit's state): the tests write both themselves, as the hooks would.
 #
-# The suite's temporary home (tests/_hermetic.py) keeps the developer's real devkit out of reach; each test gets a
-# second, empty home below it, so nothing one test writes reaches another.
+# The suite's temporary home (tests/_hermetic.py) keeps the developer's real devkit out of reach. Each test class
+# builds one sandbox, a second home below it, and every test starts from the snapshot taken once the class built it,
+# so nothing one test writes reaches another. The suite's net (tests/_sandbox.py) puts stand-ins for codex, claude,
+# brew and gh first on PATH, and devkit keeps them first, so no command reaches this Mac's real ones.
 #
 # Tests carry comments, not docstrings (`dev test prove` leaves out tests with one).
 # Run: python3 -m unittest tests.test_acceptance_management

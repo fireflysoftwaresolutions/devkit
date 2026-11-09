@@ -438,6 +438,7 @@ class TurningCodexOffTests(unittest.TestCase):
         self.assertNotIn("removed devkit's", out)
 
 
+@unittest.skipUnless(pinned._has_release("v26.11.8"), "needs this checkout's v26.11.8 tag (git fetch --tags)")
 class UpgradeFrom26118Tests(pinned.Sandbox):
     """A Mac that 26.11.8 set up (its pinned copy, its hooks, the person's own settings and saved choices) runs this
     release's install: the hooks move to the new copy, nothing of the person's is lost, and the wizard counts the Mac
@@ -466,6 +467,7 @@ class UpgradeFrom26118Tests(pinned.Sandbox):
     def hook_copies(self) -> set:
         s = self.settings()
         cmds = [h["command"] for groups in s["hooks"].values() for g in groups for h in g["hooks"]]
+        cmds.append(s["statusLine"]["command"])  # the status line runs a copy too
         return {c.split("/releases/")[1].split("/")[0] for c in cmds if "/releases/" in c}
 
     def test_this_release_moves_the_hooks_keeps_the_persons_settings_and_counts_the_mac_as_set_up(self):
