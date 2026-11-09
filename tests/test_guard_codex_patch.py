@@ -1,13 +1,15 @@
 # Copyright (c) 2026 Firefly Software Solutions Inc.
 # SPDX-License-Identifier: Apache-2.0
 # An agent settings file may not switch devkit off (guard.devkit_off), whichever tool writes it: Codex's apply_patch
-# is judged by the file's text after the patch, as Write is by its content. Each refused patch has a twin that
-# writes the same file without switching devkit off and stays allowed.
+# is judged by the file's text after the patch, as Write is by its content, and a shell write by the text the command
+# shows it writes (a write whose text it does not show is refused). Each refused write has a twin that writes the same
+# file without switching devkit off, or the same text to another file, and stays allowed.
 # Run: python3 -m unittest tests.test_guard_codex_patch -v
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tests"))
@@ -88,6 +90,113 @@ class ApplyPatchOnAgentSettings(unittest.TestCase):
                 self.assertEqual((v or ("allow",))[0], want)
                 body = patch(f"*** Add File: {cfg}", *("+" + ln for ln in text.split("\n")))
                 self.assertEqual(self.verdict(body), want)
+
+
+class ShellWritesOnAgentSettings(unittest.TestCase):
+    """A shell write to an agent settings file is judged by the text it writes, as Write is; a write whose text the
+    command does not show (a copy, sed -i, a variable) is refused. Each refused form has an allowed twin: the same form
+    with text that keeps devkit on, or the same text written to another file."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.cwd = guard.real(tmp.name)
+        root = Path(self.cwd)
+        for d in (".codex", ".claude", "staged"):
+            (root / d).mkdir()
+        (root / ".codex" / "config.toml").write_text('[features]\nmodel = "a"\n')
+        (root / ".claude" / "settings.json").write_text("{}\n")
+        (root / "staged" / "config.toml").write_text("[features]\nhooks = false\n")
+        (root / "false").write_text("")  # a file a glob can match
+
+    def verdicts(self, cmd):
+        return {(guard.check("Bash", {"command": cmd}, self.cwd, agent) or ("allow",))[0]
+                for agent in ("claude", "codex")}
+
+    def pairs(self, cases):
+        for refused, allowed in cases:
+            with self.subTest(refused=refused):
+                self.assertEqual(self.verdicts(allowed), {"allow"}, allowed)
+                self.assertEqual(self.verdicts(refused), {"deny"}, refused)
+
+    def test_a_redirect_is_judged_by_the_text_it_writes(self):
+        self.pairs([
+            ("printf '[features]\\nhooks = false\\n' > .codex/config.toml",
+             "printf '[features]\\nhooks = true\\n' > .codex/config.toml"),
+            ("printf 'codex_hooks = false\\n' >> .codex/config.toml", "printf 'effort = 1\\n' >> .codex/config.toml"),
+            ("echo '{\"disableAllHooks\": true}' > .claude/settings.local.json",
+             "echo '{\"model\": \"opus\"}' > .claude/settings.local.json"),
+            ("echo '{\"enabledPlugins\": {\"devkit@firefly-devkit\": false}}' > .claude/settings.json",
+             "echo '{\"disableAllHooks\": true}' > .claude/notes.json"),
+        ])
+
+    def test_escapes_the_shell_decodes_count_as_the_text_they_write(self):
+        self.pairs([
+            ("printf 'hooks = \\x66alse\\n' > .codex/config.toml", "printf 'hooks = \\x74rue\\n' > .codex/config.toml"),
+            ("echo 'hooks = \\0146alse' > .codex/config.toml", "echo 'hooks = \\0164rue' > .codex/config.toml"),
+            ("printf '%s = %s\\n' hooks false > .codex/config.toml",
+             "printf '%s = %s\\n' hooks true > .codex/config.toml"),
+        ])
+
+    def test_tee_and_a_heredoc_are_judged_by_their_input(self):
+        self.pairs([
+            ("printf '[features]\\nhooks = false\\n' | tee .codex/config.toml",
+             "printf '[features]\\nhooks = true\\n' | tee .codex/config.toml"),
+            ("tee -a .codex/config.toml <<< 'hooks = false'", "tee -a .codex/config.toml <<< 'effort = 1'"),
+            ("cat > .codex/config.toml <<'EOF'\n[features]\nhooks = false\nEOF",
+             "cat > .codex/config.toml <<'EOF'\n[features]\nmodel = \"$X\"\nEOF"),
+            ("cat <<EOF > .codex/config.toml\nhooks = $OFF\nEOF", "cat <<EOF > notes.toml\nhooks = $OFF\nEOF"),
+        ])
+
+    def test_a_write_whose_text_the_command_does_not_show_is_refused(self):
+        self.pairs([
+            ("cp staged/config.toml .codex/config.toml", "cp staged/config.toml app.toml"),
+            ("cp staged/config.toml .codex/", "cp staged/config.toml app/"),
+            ("mv staged/config.toml .codex/config.toml", "mv staged/config.toml app.toml"),
+            ("sed -i '' 's/true/false/' .codex/config.toml", "sed -i '' 's/true/false/' app.toml"),
+            ("dd if=staged/config.toml of=.codex/config.toml", "dd if=staged/config.toml of=app.toml"),
+            ("ln -sf ../staged/config.toml .codex/config.toml", "ln -sf staged/config.toml app.toml"),
+            ('echo "hooks = $OFF" > .codex/config.toml', 'echo "hooks = $OFF" > notes.toml'),
+            ("cat staged/config.toml > .codex/config.toml", "cat .codex/config.toml > notes.toml"),
+            ("echo hooks = [f]alse > .codex/config.toml", "echo 'hooks = [f]alse' > .codex/config.toml"),
+            ("python3 -c \"open('.codex/config.toml', 'w').write(open('staged/config.toml').read())\"",
+             "python3 -c \"print(open('.codex/config.toml').read())\""),
+            ("awk -i inplace '{print}' .codex/config.toml", "awk '{print}' .codex/config.toml"),
+            ("ed -s .codex/config.toml <<< w", "ed -s notes.txt <<< w"),
+            ("git checkout HEAD -- .codex/config.toml", "git diff .codex/config.toml"),
+        ])
+
+    def test_writes_that_spell_it_together_are_judged_together(self):
+        self.pairs([
+            ("echo -n 'hooks = fal' > .codex/config.toml; echo se >> .codex/config.toml",
+             "echo -n 'hoo' > .codex/config.toml; echo 'k = 1' >> .codex/config.toml"),
+        ])
+        # an append is judged with the text the file already holds
+        (Path(self.cwd) / ".codex" / "config.toml").write_text("hooks = fal")
+        self.pairs([("echo se >> .codex/config.toml", "echo 'model = 1' >> .codex/config.toml")])
+
+    def test_every_spelling_of_the_path_names_the_settings_file(self):
+        for path in (".CODEX/Config.TOML", "./.codex/../.codex/config.toml", "$HOME/.codex/config.toml",
+                     "~/.codex/config.toml", ".Claude/Settings.json"):
+            with self.subTest(path=path):
+                text = "{\"disableAllHooks\": true}" if "laude" in path else "hooks = false"
+                (Path(guard.real(str(Path.home()))) / ".codex").mkdir(exist_ok=True)
+                self.assertEqual(self.verdicts(f"echo '{text}' > staged/x"), {"allow"})
+                self.assertEqual(self.verdicts(f"echo '{text}' > {path}"), {"deny"})
+
+    def test_codex_home_set_elsewhere_holds_the_users_codex_config(self):
+        home = Path(self.cwd) / "codex-home"
+        home.mkdir()
+        with mock.patch.object(guard.core, "CODEX_HOME", home):
+            self.pairs([("echo 'hooks = false' > codex-home/config.toml", "echo 'hooks = false' > staged/config.toml")])
+
+    def test_reading_the_settings_files_stays_allowed(self):
+        for cmd in ("cat .codex/config.toml", "grep -n hooks .claude/settings.json", "sed -n 1p .codex/config.toml",
+                    "cat .codex/config.toml > /dev/null", "git log -p .claude/settings.json",
+                    "jq . .claude/settings.json", "touch .claude/settings.json"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.verdicts(cmd), {"allow"})
+        self.assertEqual(self.verdicts("sed -i '' 's/a/b/' .codex/config.toml"), {"deny"})
 
 
 if __name__ == "__main__":

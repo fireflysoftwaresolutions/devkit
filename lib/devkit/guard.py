@@ -1871,26 +1871,223 @@ def _toml_hooks_off(text: str) -> bool:
     return off(data)
 
 
+_AGENT_SETTINGS = {".claude": ("settings.json", "settings.local.json"), ".codex": ("config.toml", "hooks.json")}
+
+
+def agent_settings(path) -> bool:
+    """True for a file an agent reads its hooks from: a project's or the user's .claude/settings(.local).json and
+    .codex/config.toml or hooks.json, names compared without case (macOS reads .Codex/Config.toml as .codex/config.toml),
+    and the files in CODEX_HOME when it is set elsewhere."""
+    if not path or path == UNKNOWN:
+        return False
+    p = Path(str(path))
+    if p.name.casefold() in _AGENT_SETTINGS.get(p.parent.name.casefold(), ()):
+        return True
+    home = real(core.CODEX_HOME).casefold()
+    return p.name.casefold() in _AGENT_SETTINGS[".codex"] and real(p.parent).casefold() == home
+
+
+def settings_off(text: str, toml: bool) -> str | None:
+    """What `text`, written to an agent settings file, does to devkit (a DEVKIT_OFF pattern, or TOML that sets hooks or
+    codex_hooks to false in any table), else None."""
+    what = next((w for rx, w in DEVKIT_OFF if rx.search(text)), None)
+    return what or (DEVKIT_OFF[-1][1] if toml and _toml_hooks_off(text) else None)
+
+
+def devkit_off_reason(what: str, path) -> str:
+    return (f"This change {what} for {_code(core.tilde(str(path)))}. devkit must stay active in every Claude and Codex "
+            f"session. If it really should be off, change devkit's configuration (~/.config/devkit/config.json, "
+            f"`dev config`) — ask the developer.")
+
+
 def devkit_off(path: str, tool_input: dict):
     """Agent settings files (project or user) must not switch devkit off; that is a decision for devkit's config."""
-    if not path:
-        return None
-    p = Path(path)
-    folder, name = p.parent.name.casefold(), p.name.casefold()  # macOS: .Codex/Config.toml is .codex/config.toml
-    is_settings = (folder == ".claude" and name in ("settings.json", "settings.local.json")) or \
-        (folder == ".codex" and name in ("config.toml", "hooks.json"))
-    if not is_settings:
+    if not agent_settings(path):
         return None
     texts = [tool_input.get("content") or "", tool_input.get("new_string") or ""]
     texts += [e.get("new_string") or "" for e in tool_input.get("edits") or [] if isinstance(e, dict)]
     what = next((w for rx, w in DEVKIT_OFF if any(rx.search(x) for x in texts)), None)
-    if not what and name == "config.toml" and _toml_hooks_off(tool_input.get("content") or ""):
-        what = DEVKIT_OFF[-1][1]
-    if what:
-        return deny(f"This change {what} for {_code(core.tilde(path))}. devkit must stay active in every "
-                    f"Claude and Codex session. If it really should be off, change devkit's configuration "
-                    f"(~/.config/devkit/config.json, `dev config`) — ask the developer.")
+    if not what and Path(path).name.casefold().endswith(".toml"):
+        what = settings_off(tool_input.get("content") or "", True)
+    return deny(devkit_off_reason(what, path)) if what else None
+
+
+# ---- what a shell command writes, when the command shows it (agent settings files)
+#
+# A shell write to an agent settings file is judged by the text it writes, as Write is by its content. The guard
+# reads that text only where the command holds it whole: echo and printf with literal words, a heredoc or here-string
+# fed to cat, tee or dd, and a pipe from one of them. A word the shell expands ($, backticks, an unquoted glob, brace
+# or ~) hides it, and so does any other program, a copy, sed -i and an interpreter: those writes are refused.
+
+_HIDDEN = "\ue000"  # stands for a character the shell expands, so a word that holds one is not the text it passes
+_ECHO_ESC = {"a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b", "f": "\f", "n": "\n", "r": "\r", "t": "\t", "v": "\v",
+             "\\": "\\", '"': '"', "'": "'"}
+
+
+def mark_expansions(text: str) -> str:
+    """`text` (a command without its heredoc bodies) with each character the shell expands replaced by _HIDDEN: $ and
+    backticks outside single quotes, and *, ?, [, { and ~ outside any quotes. Quotes stay, so the tokenizer splits it
+    as it splits the command."""
+    out, q, i, n = [], None, 0, len(text)
+    while i < n:
+        c = text[i]
+        if c == "\\" and q != "'" and i + 1 < n:
+            out.append(text[i:i + 2])
+            i += 2
+            continue
+        if q == "'":
+            q = None if c == "'" else q
+        elif q == '"':
+            q = None if c == '"' else q
+            c = _HIDDEN if c in "$`" else c
+        elif c in "'\"":
+            q = c
+        elif c in "$`*?[{~":
+            c = _HIDDEN
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def shell_unescape(s: str, echo: bool) -> tuple:
+    """-> (text, stopped): the backslash escapes of `s` decoded as printf decodes its format (echo=False) or as echo -e,
+    zsh's echo and printf's %b do (echo=True: \\0NNN, and \\c ends all output, `stopped`). An unknown escape stays."""
+    out, i, n = [], 0, len(s)
+    while i < n:
+        c, d = s[i], s[i + 1] if i + 1 < n else ""
+        if c != "\\" or not d:
+            out.append(c)
+            i += 1
+            continue
+        if d in _ECHO_ESC:
+            out.append(_ECHO_ESC[d])
+            i += 2
+            continue
+        if d == "c" and echo:
+            return "".join(out), True
+        m = re.match({"x": r"[0-9A-Fa-f]{1,2}", "u": r"[0-9A-Fa-f]{1,4}", "U": r"[0-9A-Fa-f]{1,8}"}.get(d, r"(?!)"),
+                     s[i + 2:])
+        if m:
+            out.append(chr(min(int(m.group(), 16), 0x10FFFF)))
+            i += 2 + m.end()
+            continue
+        m = re.match(r"0[0-7]{0,3}" if echo else r"[0-7]{1,3}", s[i + 1:])
+        if m:
+            digits = m.group()[1:] if echo else m.group()
+            out.append(chr(int(digits or "0", 8) & 0xFF))
+            i += 1 + m.end()
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out), False
+
+
+def _echo_texts(args) -> list:
+    """What echo may print for `args`: as written, and with its escapes decoded as bash's echo -e and zsh's echo, or
+    as printf would (the guard does not know the shell, so every reading counts)."""
+    nl = "\n"
+    while args and re.fullmatch(r"-[neE]+", args[0]):
+        nl = "" if "n" in args[0] else nl
+        args = args[1:]
+    raw = " ".join(args)
+    outs = [raw + nl]
+    for echo in (True, False):
+        text, stopped = shell_unescape(raw, echo)
+        outs.append(text if stopped else text + nl)
+    return outs
+
+
+def _printf_text(args):
+    """What printf prints for `args`, or None when the guard cannot tell: an option (-v), or a directive other than
+    %s, %b and %% (a width or a number conversion can spell any text)."""
+    if args[:1] == ["--"]:
+        args = args[1:]
+    if not args or args[0].startswith("-"):
+        return None
+    parts = re.split(r"(%.?)", args[0])
+    if any(p.startswith("%") and p not in ("%%", "%s", "%b") for p in parts):
+        return None
+    rest, out, slots = list(args[1:]), [], sum(p in ("%s", "%b") for p in parts)
+    while True:
+        for p in parts:
+            if p in ("%s", "%b"):
+                a = rest.pop(0) if rest else ""
+                text, stopped = shell_unescape(a, True) if p == "%b" else (a, False)
+                out.append(text)
+                if stopped:
+                    return "".join(out)
+            else:
+                out.append("%" if p == "%%" else shell_unescape(p, False)[0])
+        if not rest or not slots:
+            return "".join(out)
+
+
+def command_output(argv, stdin):
+    """The texts a segment prints (every reading the guard cannot rule out), or None when the command does not show
+    them. `argv` comes from the marked command (mark_expansions); `stdin`: the texts its input carries, or None."""
+    argv, k = list(argv), 0
+    while k < len(argv):  # `>|` reaches argv as a token; the next token is its target
+        if argv[k] in (">|", ">>|"):
+            del argv[k:k + 2]
+            continue
+        k += 1
+    argv = _unwrap(argv)
+    if not argv or any(_HIDDEN in a for a in argv):  # a bare redirect: zsh runs cat on its input
+        return None
+    name, args = os.path.basename(argv[0]), argv[1:]
+    if name == "echo":
+        return _echo_texts(args)
+    if name == "printf":
+        text = _printf_text(args)
+        return None if text is None else [text]
+    if name in (":", "true"):
+        return [""]
+    if name == "cat":
+        return stdin if all(a == "-" for a in args) else None
+    if name == "tee":
+        return stdin if all(a in ("-a", "--append", "-i", "-p") or not a.startswith("-") for a in args) else None
     return None
+
+
+def segment_texts(cmd: str, count: int):
+    """-> ([what each segment prints], [what each segment reads from its input]) for the `count` segments of `cmd`,
+    each a list of texts or None when the command does not show it; all None when the segments cannot be matched."""
+    stripped, bodies = _split_heredocs(cmd)
+    ins, hds = [], []
+    segs = split_commands(mark_expansions(stripped), ops=True, stripped=True, inputs=ins, heredocs=hds)
+    if segs is None or len(segs) != count:
+        return [None] * count, [None] * count
+    docs = iter(bodies) if sum(hds) == len(bodies) else None  # one heredoc per segment that reads one, in order
+    outs, stdins = [], []
+    for k, (argv, _, _, here) in enumerate(segs):
+        sources = []
+        if hds[k]:
+            body, expands = next(docs) if docs else (None, True)
+            sources.append(None if body is None or (expands and re.search(r"[$`\\]", body)) else [body + "\n"])
+        sources += [None if _HIDDEN in h else [h + "\n"] for h in here]
+        sources += [None for _ in ins[k]]
+        if not sources and k and segs[k - 1][2] in ("|", "|&"):
+            sources.append(outs[k - 1])
+        stdin = sources[0] if len(sources) == 1 else None
+        stdins.append(stdin)
+        outs.append(command_output(argv, stdin))
+    return outs, stdins
+
+
+def _names_settings(t: str) -> bool:
+    """A write target the guard cannot resolve whose text names an agent settings file or its folder."""
+    s = str(t).casefold()
+    return bool(re.search(r"\.(?:codex|claude)(?:[/\\]|$)|codex_home|claude_config_dir", s)) or \
+        os.path.basename(s) in {n for names in _AGENT_SETTINGS.values() for n in names}
+
+
+_SETTINGS_TEXT = re.compile(r"(?i)\.(?:codex|claude)\b|codex_home|claude_config_dir")
+_SETTINGS_FILE_TEXT = re.compile(r"(?i)\b(?:config\.toml|hooks\.json|settings(?:\.local)?\.json)\b")
+SETTINGS_UNSEEN_REASON = ("This command writes {what}, an agent settings file, and the guard cannot see the text it "
+                          "writes there (a copy, a link, sed -i, a program, or a variable, a substitution or a glob in "
+                          "the text), so it cannot tell whether the write turns devkit's hooks off. Write the file "
+                          "with the Write or Edit tool (Codex: apply_patch), which the guard judges by the file's "
+                          "text, or write the text out in full in an echo, printf or quoted heredoc.")
 
 
 # --------------------------------------------------------------------------- protected state (spec C11, K1)
@@ -3362,8 +3559,12 @@ class _Shell:
         self.unresolved = []
         self.exported = set(exported)
         self.typed = True  # the command holds this text (D10 refuses it unread); False for a file read from disk
+        self.stdin = None  # what the segment being walked reads from its input, when the command shows it
+        self.written = {}  # agent settings file -> the texts this command has written to it so far
 
-    def target(self, t, cwd, verb="write", holds=False, track=True):
+    def target(self, t, cwd, verb="write", holds=False, track=True, text=None):
+        """A deny when writing `t` (`verb`) reaches what agents may not write. `text`: the texts the write puts in the
+        file, when the command shows them (None: it does not)."""
         lp = _lexical(t, cwd)
         if is_dev_command(lp) or (holds and holds_dev_command(lp)):
             return deny(dev_command_reason(lp, verb), key="dev-command")
@@ -3371,7 +3572,7 @@ class _Shell:
         if p == UNKNOWN:
             if track and t:
                 self.unresolved.append(t)
-            return None
+            return self.settings_write(t, cwd, text) if verb in ("write", "link") else None
         if is_protected(p) or (holds and holds_protected(p)):
             return deny(protected_reason(p, verb), key="protected")
         if handoff_record(p) or (holds and holds_handoff_record(p)):  # B2a
@@ -3384,13 +3585,43 @@ class _Shell:
             return deny(dev_command_reason(p, verb), key="dev-command-holder")
         if env_file_kind(p, lp) and self.keys:
             return deny(_settings_reason(p, self.keys), key="settings-env")
-        return None
+        return self.settings_write(t, cwd, text) if verb in ("write", "link") else None
 
-    def targets(self, ts, cwd, verb="write", holds=False, track=True):
+    def targets(self, ts, cwd, verb="write", holds=False, track=True, text=None):
         for t in ts:
-            v = self.target(t, cwd, verb, holds, track)
+            v = self.target(t, cwd, verb, holds, track, text)
             if v:
                 return v
+        return None
+
+    def settings_write(self, t, cwd, text):
+        """A write to an agent settings file (agent_settings: by the path as written, as the system resolves it, or
+        cleaned) is judged by the texts it writes, as Write is (settings_off), and, since an append keeps the file's
+        text, by the file's text with it; a write whose text the command does not show is refused. A target the guard
+        cannot resolve counts when its text names a settings file (or hides its name and writes devkit off)."""
+        paths = [q for q in (_lexical(t, cwd), resolve(t, cwd), _normal(t, cwd)) if q != UNKNOWN]
+        hit = next((q for q in paths if agent_settings(q)), None)
+        if hit is None:
+            named = not paths and _names_settings(t)
+            hidden = not paths and re.search(r"[$`]", os.path.basename(str(t)))
+            if not named and not (hidden and text):
+                return None
+        where = hit or t
+        if text is None:
+            return deny(SETTINGS_UNSEEN_REASON.format(what=_code(core.tilde(str(where)))), key="settings-unseen")
+        toml = hit is None or hit.name.casefold().endswith(".toml")
+        now = _read_small(hit, 1 << 20) if hit is not None else ""
+        # an earlier write of this command, then this one, can spell what neither does alone (`> f; >> f`)
+        before = self.written.get(str(where), [""])
+        texts = list(dict.fromkeys(b + w for b in before for w in text))
+        if len(texts) > 64:  # too many readings to judge: refused as unseen
+            return deny(SETTINGS_UNSEEN_REASON.format(what=_code(core.tilde(str(where)))), key="settings-readings")
+        for written in texts:
+            what = settings_off(written, toml) or (DEVKIT_OFF[-1][1] if toml and now and _toml_hooks_off(now + written)
+                                                   else None)
+            if what:
+                return deny(devkit_off_reason(what, where), key="settings-off")
+        self.written[str(where)] = texts
         return None
 
     def run(self):
@@ -3412,6 +3643,7 @@ class _Shell:
         ins = []  # what an interpreter reads as its program from `< f` or a pipe (`cat x.exp | expect`)
         osegs = split_commands(self.cmd, ops=True, inputs=ins)
         osegs = osegs if osegs is not None and len(osegs) == len(segs) else None
+        outs, stdins = segment_texts(self.cmd, len(segs))  # what each segment writes, for agent settings files
         for seg, (argv0, redirs) in enumerate(segs):
             argv0, clobber, k = list(argv0), [], 0
             while k < len(argv0):  # `>|` reaches argv as a token; the next token is its target
@@ -3420,9 +3652,10 @@ class _Shell:
                     del argv0[k:k + 2]
                     continue
                 k += 1
-            v = self.targets(list(redirs) + clobber, cwd)
+            v = self.targets(list(redirs) + clobber, cwd, text=outs[seg])
             if v:
                 return v
+            self.stdin = stdins[seg]
             prefix = argv0[:len(argv0) - len(_strip_prefix(argv0))]
             assigns = [a.split("=", 1)[1] for a in prefix if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", a)]
             names, argv = _env_split(argv0)
@@ -3598,12 +3831,18 @@ class _Shell:
             return self.interpreter(argv, assigns, cwd)
         if name in _COPIERS or name in _MOVERS:
             return self.copy(name, args, cwd)
-        if name in _CREATORS:
-            return self.targets(_candidates(args), cwd)
+        if name in _CREATORS:  # tee writes its input; touch, mkdir and mkfifo write no text; truncate cuts it
+            text = self.stdin if name == "tee" else None if name == "truncate" else [""]
+            return self.targets(_candidates(args), cwd, text=text)
+        if name in ("ln", "gln"):  # a link at a settings file, or to one, is a way to write it
+            v = self.targets(_candidates(args), cwd, "link", track=False)
+            if v:
+                return v
         if name in _CHANGERS:
             return self.targets(_candidates(args), cwd, "change or delete", holds=True)
-        if name == "dd":
-            return self.targets([a[3:] for a in args if a.startswith("of=")], cwd)
+        if name == "dd":  # its input, when no operand but bs= and status= changes what it writes
+            plain = all(a.startswith(("of=", "bs=", "status=")) for a in args)
+            return self.targets([a[3:] for a in args if a.startswith("of=")], cwd, text=self.stdin if plain else None)
         if name in ("sed", "yq"):
             inplace = any(a == "--in-place" or a.startswith(("--in-place=", "--inplace")) or
                           (a.startswith("-") and not a.startswith("--") and "i" in a[1:]) for a in args)
@@ -3620,9 +3859,11 @@ class _Shell:
             v = self.git_handoff(argv, cwd)
             if v:
                 return v
-        # anything else (editors, sqlite3, git, curl, tar, …) may write the paths it is given
+        # anything else (editors, sqlite3, git, curl, tar, …) may write the paths it is given; a git command that
+        # rewrites no work-tree file (diff, log, add, commit) writes no text into an agent settings file it names
         inside = is_protected(Path(cwd)) if cwd and str(cwd) != str(UNKNOWN) else False
-        return self.targets([c for c in _candidates(args) if inside or _pathlike(c)], cwd)
+        reads = name == "git" and _git_split(argv)[1] not in _GIT_TREE_WRITES
+        return self.targets([c for c in _candidates(args) if inside or _pathlike(c)], cwd, text=[""] if reads else None)
 
     def git_handoff(self, argv, cwd):
         """B2a: a git command that rewrites files in the handoff repository (a checkout, reset or merge can bring back
@@ -3722,6 +3963,7 @@ class _Shell:
         return None
 
     def xargs(self, args, cwd):
+        self.stdin = None  # the command reads what xargs leaves of the input, which the guard does not follow
         cmd = _xargs_command(args)
         if terminal_typing_refusal(_unwrap(cmd, more=True), more=True):  # the words it adds may type
             return deny(TERMINAL_TYPING_REASON, key="terminal-typing")
@@ -3737,6 +3979,7 @@ class _Shell:
         return self.segment(name, inner, [], cwd, names)
 
     def find(self, args, cwd):
+        self.stdin = None
         acts = {"-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf", "-fls"}
         if not any(a in acts for a in args):
             return None
@@ -3807,6 +4050,12 @@ class _Shell:
                         f"use the dev command that owns a record.", key="handoff-writes")
         if not code or not (_CODE_WRITES.search(code) or _ANY_WRITE.search(code)):  # a path from nested calls too
             return None
+        if (_SETTINGS_TEXT.search(code) and _SETTINGS_FILE_TEXT.search(code)) or \
+                any(agent_settings(q) for c in named for q in (_lexical(c, cwd), resolve(c, cwd))):
+            return deny(f"This {name} program writes files and names an agent settings file (.claude/settings.json, "
+                        f".codex/config.toml), and the guard cannot see the text it writes there, so it cannot tell "
+                        f"whether the write turns devkit's hooks off. Write the settings file with the Write or Edit "
+                        f"tool (Codex: apply_patch), which the guard judges by the file's text.", key="settings-program")
         if not cwd or str(cwd) == str(UNKNOWN):  # its relative paths land in a folder the guard cannot see
             self.unresolved.append(f"a path relative to the folder {name} runs in")
         hit = inside or _mark().search(code) or any(is_protected(resolve(c, cwd)) for c in named) or \
@@ -4832,6 +5081,10 @@ def _program(argv, cwd, bodies):
         a, nxt = args[i], args[i + 1] if i + 1 < len(args) else ""
         short = a.startswith("-") and not a.startswith("--") and len(a) > 1
         if fam in ("awk", "gawk", "mawk", "nawk"):
+            if a in ("-i", "--include") and nxt.startswith("inplace") or \
+                    re.fullmatch(r"(?:-i|--include=)inplace(?:\.awk)?", a):  # gawk rewrites its files in place
+                inplace, i = True, i + (2 if a in ("-i", "--include") else 1)
+                continue
             if a == "-f":
                 script, i = nxt, i + 2
                 continue
@@ -5996,7 +6249,7 @@ class _ScratchShell(_Shell):
         inner.exported = self.exported | set(names)  # what the parent or the program exports reaches the nested line
         return inner
 
-    def target(self, t, cwd, verb="write", holds=False, track=True):
+    def target(self, t, cwd, verb="write", holds=False, track=True, text=None):
         p = resolve(t, cwd)
         why = scratch_refusal(p, self.member, holds) if p != UNKNOWN else None
         return deny(why, key="scratch") if why else None
