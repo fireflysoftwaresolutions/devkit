@@ -32,6 +32,9 @@ agent's copy when it differs from the checkout.
 | `delivery` | Local-first GitOps: integration branch, one push, one CI run, CI failures, releases |
 | `release-policy` | The delivery policy: detect, recommend, and record versioning, bumps, the test gate, the changelog, and the release flow with `dev delivery`; release trains |
 | `learning-loop` | Learn from mistakes: record a blameless lesson after a fix, a revert, a repeated refusal, or a correction; recall the known pitfalls; count repeats; turn recurring lessons into automation (see [Lessons](lessons.md)) |
+| `root-cause` | Find and prove the root cause before any fix: reproduce, check the known lessons and devkit bugs, prove one cause with an experiment, fix it, verify, and record it (`dev commit --cause`); the 5-whys check, when to escalate, and when to bring in the Performance analyst or the Incident commander (see [The crew › How work flows](crew.md#how-work-flows)) |
+| `research` | Research a technology from version-matched sources: pin the version from the lockfile, primary sources first, a version, link, and date on every claim, and a spike note the next session finds; re-checked after 90 days or a new major version |
+| `functional-analysis` | The Business analyst's analysis: actors and goals, use cases, numbered business rules, the edge-case checklist, non-functional needs with numbers, Given/When/Then acceptance criteria with ids, and a test for each id |
 | `backend` | API contracts, layering, migrations, testing, resilience, security, operability |
 | `devsecops` | Threat modeling, secrets, dependencies and supply chain, SAST, CI hardening, containers and infrastructure, and `dev sec scan` |
 | `docs` | Documentation to the devkit standard: Diátaxis, Google style, American English, `dev docs check` |
@@ -85,6 +88,9 @@ one step: only Claude Code's subagent briefs get the required skills added by a 
 | `crew` | `crew`, `working-efficiently` | the same | `plan` work |
 | `communicating` | `communicating` | `communicating` | `dev task delegate`, `dev report`; `plan` and `scope` work |
 | `learning` | `learning-loop` | `learning-loop` | `dev lesson add`, `dev lesson recur`, `dev lesson prevent`, `git revert`; `incident` work |
+| `root-cause` | `root-cause` | the same | `debug` work |
+| `research` | `research` | the same | `research` and `architecture` work |
+| `functional-analysis` | `functional-analysis` | the same | `requirements` work |
 | `work-state` | `work-state` | `work-state` | `dev task reconcile`, `dev branch prune`, `dev crew withdraw`, `dev progress confirm`; `release` and `plan` work |
 
 A rule matches on what the work does, never on the words of your request, which can be in any language: globs on the

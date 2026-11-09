@@ -141,7 +141,7 @@ real time on independent work, and it is waste on small or coupled tasks. Follow
 
 ## Kinds of work and the RACI
 
-Every piece of work has a kind: one of the 34 ids in `config/crew.json`, such as `backend`, `ux`, `cicd`, or `docs`.
+Every piece of work has a kind: one of the 35 ids in `config/crew.json`, such as `backend`, `ux`, `debug`, or `docs`.
 For each kind, the crew's RACI names who does it (Responsible), who approves it (Accountable), who is consulted before
 or during it, and who is informed after it.
 
@@ -176,6 +176,48 @@ The kind of work decides three things:
 approves their own kind of work: when the Accountable member did the work, the Code reviewer (Seraph) approves code
 and configuration, and the tech lead the rest. In the team's RACI, compliance is approved by the Security engineer and
 incidents by the tech lead.
+
+### Root cause, research, and requirements
+
+Three kinds of work follow a devkit skill that sets their procedure, and the skill rules require that skill for them
+(see [Skills and plugins › The rules](skills-and-plugins.md#the-rules)):
+
+| Kind of work | Does it · approves it | Required skill | What the skill makes sure of |
+| --- | --- | --- | --- |
+| `debug`: debugging and root-cause analysis | Senior engineer (Neo) · Code reviewer (Seraph) | `root-cause` | Nothing is fixed before its cause is reproduced and proven by an experiment, and every `fix` or `revert` commit states the cause (`dev commit --cause`) |
+| `research`: technical research and spikes | Technical researcher (Roland) · Software architect (The Architect) | `research`, also required for `architecture` work | Every claim about a technology holds for the version the lockfile pins, carries its source and date, and lands in a spike note the next session finds |
+| `requirements`: requirements and acceptance criteria | Business analyst (The Oracle) · Product owner (Councillor Hamann) | `functional-analysis` | Business rules and acceptance criteria can be tested, each criterion has an id, and the test that proves it carries that id |
+
+`debug` work consults the QA engineer (Mouse) and the Performance analyst (The Merovingian) and informs the tech
+lead; `dev crew raci debug` shows it. The `root-cause` procedure is not only the Senior engineer's: every member whose
+work fails follows it first. When the same command fails twice with the same error in a session, devkit tells the
+agent to stop changing code and find the root cause, and lists the matching lessons and known devkit bugs.
+
+## How work flows
+
+Every request moves through the same stages, and the tech lead plans a step only for the stages that apply. Each
+stage hands an artifact to the next one, and the next member's brief carries its path. The `crew` skill has the same
+table for the tech lead to route by.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="images/diagrams/crew-flow-dark.svg">
+  <img src="images/diagrams/crew-flow-light.svg" alt="A request moves from the tech lead (Morpheus) through requirements, research, and architecture, each only when it applies, then build, review and security, and release. Each stage hands the next one an artifact: plan steps, a spec with criterion ids, a spike note, an ADR, commits with tests, an approval. A failure at any stage goes to debug, where the cause is proven before the fix returns with its regression test." width="100%">
+</picture>
+
+| Stage | Who | When | Hands over | Where it lives |
+| --- | --- | --- | --- | --- |
+| Request | Tech lead (Morpheus) | Always | The goal, and plan steps with their kinds of work | The run (`dev progress`) |
+| Requirements | Business analyst (The Oracle), with `functional-analysis` | A feature, or an unclear request | A spec with numbered rules and acceptance criteria with ids | `dev plan new --kind spec`, in the handoff plans folder |
+| Research | Technical researcher (Roland), with `research` | A technology choice, or behavior nobody verified at the pinned version | A spike note with the version, the date, the sources, and a recommendation | `dev plan new --kind spike` |
+| Architecture | Software architect (The Architect) | Two or more components change, or a contract does | An ADR and the contracts | `docs/adr/` when the repository keeps one, otherwise `dev plan new --kind adr` |
+| Build | The Responsible member of the step's kind of work, and the QA engineer (Mouse) for the test plan | Every change | Commits, with tests that carry the criterion ids | The branch |
+| Debug | Senior engineer (Neo), with `root-cause` | Whenever something fails, at any stage | The proven cause, the fix, and its regression test | The commit's `Root cause:` paragraph, and a lesson when the mistake can repeat |
+| Review and security | Code reviewer (Seraph); Security engineer (The Keymaker) for auth, data, money, files, or infrastructure | Before the pull request is ready | Findings, and the approval (a review step's Check ✓) | The review step's report |
+| Release | Release engineer (Link) | The local suite is green | The pull request, the tag, and the release notes | The pull request and `CHANGELOG.md` |
+
+A request that changes one file in a known way skips straight to build. A feature built on a new library goes through
+every stage. A failure at any stage goes to debug first: the member who hit it follows the `root-cause` skill, and
+after two failed attempts it asks the tech lead, who sends the problem to the Senior engineer.
 
 ## How devkit coordinates them
 

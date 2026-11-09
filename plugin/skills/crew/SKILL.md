@@ -85,7 +85,28 @@ Patterns that work:
   parallel; you weigh the findings.
 - **Spike, then build.** The Technical researcher proves the risky part first; the build starts only after it holds.
 
-## 3. Plan, assign, launch
+## 3. How work flows
+
+Every request moves through the same stages. Route by this table: plan a step only for the stages whose "when"
+holds, and give each step's brief the path of the artifact the stage before it handed over.
+
+| Stage | Who | When | Hands over | Where it lives |
+| --- | --- | --- | --- | --- |
+| Request | Tech lead (Morpheus); `plan` work, `crew` skill | Always | The goal, and plan steps with their kinds of work | The run (`dev progress`) |
+| Requirements | Business analyst (The Oracle); `requirements` work, `functional-analysis` skill | A feature, or the request is unclear | A spec: numbered rules, acceptance criteria with ids | `dev plan new --kind spec`, in the handoff plans folder |
+| Research | Technical researcher (Roland); `research` work and skill | A technology choice, or behavior nobody verified at the pinned version | A spike note: version, date, sources, recommendation | `dev plan new --kind spike` |
+| Architecture | Software architect (The Architect); `architecture` work | Two or more components change, or a contract does | An ADR and the contracts | `docs/adr/` when the repository keeps one, else `dev plan new --kind adr` |
+| Build | The Responsible member of the step's kind of work; the QA engineer (Mouse) for the test plan | Every change | Commits, with tests named after the criterion ids | The branch |
+| Debug | Senior engineer (Neo); `debug` work, `root-cause` skill | Whenever something fails, at any stage | The proven cause, the fix, and its regression test | The commit's `Root cause:` paragraph; a lesson when it can repeat |
+| Review and security | Code reviewer (Seraph), `review` work; Security engineer (The Keymaker), `security` work, for auth, data, money, files, or infrastructure | Before the PR is ready | Findings, and the approval (a review step's Check ✓) | The review step's report |
+| Release | Release engineer (Link); `release` work, `delivery` skill | The local suite is green | The PR, the tag, the release notes | The PR and `CHANGELOG.md` |
+
+- **Debug is not a stage after build only.** Any member whose work fails follows the `root-cause` skill first;
+  after two failed attempts it asks you, and you send the problem to the Senior engineer (Neo).
+- **Each artifact is the next brief's input:** the spec's path goes into the architect's and the QA engineer's
+  briefs, the spike note into the ADR, the criterion ids into the builders' tests.
+
+## 4. Plan, assign, launch
 
 ```bash
 dev progress start "Invoice export" --plan "requirements=20m [requirements]; \
@@ -131,7 +152,7 @@ A good brief (the `working-efficiently` skill has more): the goal and how to che
 not to change); the decisions already made and why; the skills to load; and what to return. Paths, not pasted
 files.
 
-## 4. Who does what
+## 5. Who does what
 
 - **The RACI decides.** For each kind of work, `dev crew raci <id>` names who does it (R), who approves it (A), and
   who is consulted (C) or informed (I). Without a declared kind of work, devkit takes the member's own Responsible
@@ -145,7 +166,7 @@ files.
 - When dependencies clear, you get "ready to launch" with the exact command. Launch ready members together, within
   the slots; `dev crew next` shows ready, queued, waiting, and busy.
 
-## 5. While the crew works
+## 6. While the crew works
 
 - **Progress per member:** each member records steps with `dev progress step "…"`. devkit sees the call comes from a
   subagent (`agent_id` in the hook input) and writes it to that member's lane, never to your plan. `dev progress`,
@@ -187,7 +208,7 @@ files.
 - **After a compaction,** devkit's continuity brief lists the members still running: never relaunch them, their
   results arrive as notifications.
 
-## 6. Guided or automatic
+## 7. Guided or automatic
 
 The run's mode says who takes the decisions that are the developer's (scope, behavior, cost, risk):
 
@@ -236,7 +257,7 @@ A decision belongs to its run, and only an open one needs the developer:
 `dev progress done` is refused while a decision still needs the developer (`dev crew decisions --pending` lists
 them).
 
-## 7. When a member finishes
+## 8. When a member finishes
 
 1. **devkit checks the report first.** The SubagentStop hook sends the member back once for each of these that
    fails, with the missing items and the commands that fix them:
@@ -272,7 +293,7 @@ them).
 6. **Close the loop:** an independent review (the Code reviewer) for substantial changes, a security review (the
    Security engineer) for auth, data, money, files, or infrastructure.
 
-## 8. Language and tone
+## 9. Language and tone
 
 Every member is professional, never theatrical. The names are identities, not role-play. Everyone writes to the
 developer in the developer's language (devkit config `language`, default American English); code, commits, PRs and

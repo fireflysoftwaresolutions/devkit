@@ -212,8 +212,8 @@ devkit is also a plugin for **Claude Code** and **Codex**, installed automatical
   `/devkit:progress` · `/devkit:crew-status` · `/devkit:test` · `/devkit:stubs` · `/devkit:ship` · `/devkit:ci` ·
   `/devkit:dashboard` · `/devkit:doctor` · `/devkit:reconcile` (skills of the same name in Codex).
 - **Skills:** `using-devkit`, `handoff`, `communicating`, `working-efficiently`, `crew`, `wait-and-wake`, `work-state`,
-  `workspace`, `delivery`, `release-policy`, `testing`, `cicd`, `learning-loop`, `backend`, `devsecops`, `docs`, and
-  `diagrams`, plus a curated, pinned set for architecture, Angular, React, Spring, testing, security, and
+  `workspace`, `delivery`, `release-policy`, `testing`, `cicd`, `learning-loop`, `root-cause`, `research`,
+  `functional-analysis`, `backend`, `devsecops`, `docs`, and `diagrams`, plus a curated, pinned set for architecture, Angular, React, Spring, testing, security, and
   observability. Required skills are enforced for each kind of work.
 - **Rules:** one set of global instructions for both agents: the status block on every turn, method, plain American
   English, progress and time, learning from mistakes, token use, files and disk, worktrees, branches, commits, delivery, backend practice, required

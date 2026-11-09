@@ -1,0 +1,123 @@
+{
+  "name": "crew-flow",
+  "kind": "flow",
+  "equal_widths": "all",
+  "title": "How work flows through the crew",
+  "desc": "A request moves from the tech lead (Morpheus) through requirements, research, and architecture, each only when it applies, then build, review and security, and release. Each stage hands the next one an artifact: plan steps, a spec with criterion ids, a spike note, an ADR, commits with tests, an approval. A failure at any stage goes to debug, where the cause is proven before the fix returns with its regression test.",
+  "nodes": [
+    {
+      "id": "request",
+      "label": "Request",
+      "sub": "Tech lead (Morpheus)",
+      "shape": "pill",
+      "col": 0,
+      "row": 0
+    },
+    {
+      "id": "req",
+      "label": "Requirements",
+      "sub": "Business analyst · if unclear",
+      "dashed": true,
+      "col": 0,
+      "row": 1
+    },
+    {
+      "id": "research",
+      "label": "Research",
+      "sub": "Technical researcher · if new",
+      "dashed": true,
+      "col": 0,
+      "row": 2
+    },
+    {
+      "id": "arch",
+      "label": "Architecture",
+      "sub": "Software architect · if 2+ parts",
+      "dashed": true,
+      "col": 0,
+      "row": 3
+    },
+    {
+      "id": "build",
+      "label": "Build",
+      "sub": "Responsible member · QA engineer",
+      "col": 0,
+      "row": 4
+    },
+    {
+      "id": "review",
+      "label": "Review and security",
+      "sub": "Code reviewer · Security engineer",
+      "col": 0,
+      "row": 5
+    },
+    {
+      "id": "release",
+      "label": "Release",
+      "sub": "Release engineer (Link)",
+      "col": 0,
+      "row": 6
+    },
+    {
+      "id": "debug",
+      "label": "Debug: root cause first",
+      "sub": "Senior engineer (Neo)",
+      "col": 1,
+      "row": 3.5,
+      "emphasis": true
+    }
+  ],
+  "groups": [
+    {
+      "id": "stages",
+      "title": "Stages",
+      "nodes": [
+        "req",
+        "research",
+        "arch",
+        "build",
+        "review",
+        "release"
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "from": "request",
+      "to": "req",
+      "label": "goal · plan steps"
+    },
+    {
+      "from": "req",
+      "to": "research",
+      "label": "spec · criterion ids"
+    },
+    {
+      "from": "research",
+      "to": "arch",
+      "label": "spike note"
+    },
+    {
+      "from": "arch",
+      "to": "build",
+      "label": "ADR · contracts"
+    },
+    {
+      "from": "build",
+      "to": "review",
+      "label": "commits · tests"
+    },
+    {
+      "from": "review",
+      "to": "release",
+      "label": "approval"
+    },
+    {
+      "from": "stages",
+      "to": "debug",
+      "label": "failure · proven fix",
+      "style": "dashed",
+      "both": true
+    }
+  ]
+}
