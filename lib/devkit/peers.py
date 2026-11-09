@@ -1504,7 +1504,7 @@ def release(sender: dict, resource: str, why="", force_evidence: dict | None = N
         _post(view, h["key"], "notice", f"your claim on {resource} was broken by {view.who(me.key)} with the "
                                         f"developer's grant" + (f": {why}" if why else ""), now, ref=resource)
         _audit("peer.break", resource, f"broke {h['key']}'s claim", resource=resource,
-               evidence={"source": str(evidence.get("source")), "id": str(evidence.get("id"))[:120]})
+               source=str(evidence.get("source")), grant=str(evidence.get("id"))[:120])
     elif st in ("released", "left the queue"):
         _audit("peer.release", resource, st, resource=resource, count=len(free))
     return {"resource": resource, "state": st, "freed_for": free}
