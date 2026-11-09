@@ -1812,10 +1812,73 @@ def _call_pitfalls(agent: str, data: dict, remember: bool = True, channel: str =
 
 
 def _output_text(data: dict) -> str:
-    r = data.get("tool_response")
+    r = _json_text(data.get("tool_response"))
     if isinstance(r, dict):
-        r = "\n".join(str(r.get(k) or "") for k in ("stdout", "stderr", "output", "error"))
+        r = "\n".join(str(r.get(k) or "") for k in ("stdout", "stderr", "output", "aggregated_output", "error"))
     return (str(r or "") + "\n" + str(data.get("error") or ""))[-50_000:]
+
+
+def _json_text(value):
+    """A tool result given as the JSON text of an object (Codex's exec_command result) -> that object; else as is."""
+    if isinstance(value, str) and value.lstrip().startswith("{"):
+        try:
+            parsed = json.loads(value)
+        except ValueError:
+            return value
+        return parsed if isinstance(parsed, dict) else value
+    return value
+
+
+# Codex has no PostToolUseFailure event: its failed shell call reaches devkit as PostToolUse, whose result shows the
+# exit code. The 0.167 hook schema leaves tool_response untyped, so the reader takes each name Codex gives the code:
+# exec_command's own result (exit_code, also as its JSON text), the command item and the app server (exitCode), and
+# the header older Codex shells print before the output.
+EXIT_CODE_KEYS = ("exit_code", "exitCode", "returncode", "return_code")
+_EXIT_HEADER_RE = re.compile(r"^(?:Exit code:|Process exited with code)\s*(-?\d+)\s*$", re.M)
+
+
+def tool_exit_code(response):
+    """The exit code a shell call's tool_response shows, or None when it shows none."""
+    r = _json_text(response)
+    if isinstance(r, dict):
+        for k in EXIT_CODE_KEYS:
+            v = r.get(k)
+            if isinstance(v, int) and not isinstance(v, bool):
+                return v
+            if isinstance(v, str) and re.fullmatch(r"\s*-?\d+\s*", v):
+                return int(v)
+        return None
+    if isinstance(r, str) and not r.lstrip().startswith("Output:"):
+        m = _EXIT_HEADER_RE.search(r.split("\nOutput:", 1)[0])  # the header only, never the command's own output
+        return int(m.group(1)) if m else None
+    return None
+
+
+def _codex_failed(agent: str, data: dict) -> bool:
+    """A Codex shell call whose result shows a non-zero exit code. A result that shows none counts as a success, and
+    its shape is logged once, so a Codex upgrade that renames the field is seen."""
+    if agent != "codex" or data.get("tool_name") not in SHELL_TOOLS:
+        return False
+    code = tool_exit_code(data.get("tool_response"))
+    if code is None:
+        _exit_shape_unknown(data.get("tool_response"))
+    return bool(code)
+
+
+def _exit_shape_unknown(response):
+    r = _json_text(response)
+    shape = f"{type(r).__name__}:{','.join(sorted(str(k) for k in r)[:20])}" if isinstance(r, dict) else \
+        type(r).__name__
+    f = STATE / "logs" / "codex-exit-shapes.json"  # the shapes already logged
+    try:
+        seen = core.read_json(f, []) or []
+        if shape in seen:
+            return
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(json.dumps((seen + [shape])[-50:]))
+    except (OSError, TypeError):
+        return
+    _log(f"post-tool codex: a shell call with no exit code in its tool_response ({shape}); it counts as a success")
 
 
 def _output_pitfalls(agent: str, data: dict, take: int = 0, taken: list = None) -> str:
@@ -2866,6 +2929,14 @@ def post_tool(agent: str):
     finished, and those that finished with background work still running (crew_notices)."""
     from . import progress
     data = _stdin_json()
+    try:
+        failed = _codex_failed(agent, data)
+    except Exception:
+        _log(f"post-tool exit code {agent}: {traceback.format_exc()[-300:]}")
+        failed = False
+    if failed:  # Codex has no PostToolUseFailure event: its failed shell call takes that path, under its own event
+        _tool_failed(agent, data, "PostToolUse")
+        return
     _check_writes(agent, data)
     _close_call(data)
     _reconcile(agent, data)
@@ -2935,8 +3006,13 @@ def post_tool_failure(agent: str):
     that failed or was interrupted has ended: it leaves the call ledger. The same failure twice in a row stops the
     agent with the root-cause paragraph (_patch_loop, _root_cause): it takes the best lessons of the output recall,
     after the recall resolved their earlier showings, and they count as shown on the output channel."""
+    _tool_failed(agent, _stdin_json(), "PostToolUseFailure")
+
+
+def _tool_failed(agent: str, data: dict, event: str):
+    """A tool call that failed: PostToolUseFailure, or a Codex shell call's PostToolUse whose result shows a non-zero
+    exit code (_codex_failed). `event`: the hook event the context goes back under."""
     from . import progress
-    data = _stdin_json()
     _check_writes(agent, data)  # a call that failed may have written too
     _close_call(data)
     if data.get("tool_name") in ("Agent", "Task", "spawn_agent"):
@@ -2955,8 +3031,7 @@ def post_tool_failure(agent: str):
             _shown(data, [x["meta"]["id"] for x in taken], "output")
         except Exception as e:
             _swallowed("post-tool-failure", e)
-    _context_out("PostToolUseFailure", "\n\n".join(x for x in (_root_cause(data, taken) if stop else "", pitfalls,
-                                                               bug_text) if x))
+    _context_out(event, "\n\n".join(x for x in (_root_cause(data, taken) if stop else "", pitfalls, bug_text) if x))
 
 
 def subagent_start(agent: str):
