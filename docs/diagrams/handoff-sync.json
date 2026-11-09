@@ -12,17 +12,17 @@
   ],
   "messages": [
     {"divider": "Claim"},
-    {"from": "maria", "to": "mclone", "label": "dev task start 2"},
+    {"from": "maria", "to": "mclone", "label": "dev task start T-fwk7a2q1x9m"},
     {"from": "mclone", "to": "github", "label": "pull, write lock, push at once", "style": "primary"},
     {"divider": "Every other machine"},
     {"from": "github", "to": "jclone", "label": "pull at session start and sync"},
     {"from": "jclone", "to": "jordan", "label": "context: claimed by maria", "style": "return"},
-    {"from": "jordan", "to": "jclone", "label": "dev task start 2"},
+    {"from": "jordan", "to": "jclone", "label": "dev task start T-fwk7a2q1x9m"},
     {"from": "jclone", "to": "jordan", "label": "refused: claimed until 18:40", "style": "return"},
     {"divider": "While Maria works"},
     {"from": "mclone", "to": "github", "label": "renew lock · presence · session line"},
     {"divider": "Finish"},
-    {"from": "maria", "to": "mclone", "label": "dev task done 2"},
+    {"from": "maria", "to": "mclone", "label": "dev task done T-fwk7a2q1x9m"},
     {"from": "mclone", "to": "github", "label": "release, push at once"},
     {"note": "No renewal for 8 h: the hourly sync on any machine releases the lock", "over": ["github", "jordan"]}
   ]
