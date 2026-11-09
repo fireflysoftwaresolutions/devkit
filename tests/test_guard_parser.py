@@ -61,5 +61,31 @@ class ZshPrecommands(Rulings):
                      "noglob git log -1", "echo ok && nocorrect ls"])
 
 
+class SubstitutionsInsideACommand(Rulings):
+    """An unquoted `$(…)`, `$((…))`, `<(…)`, `>(…)` or `${…$(…)}` is one word of the command around it: the words after
+    it belong to the same command (`rm $(true) -rf ~/Development` runs rm -rf), and a `$(…)` may also expand to
+    nothing. Each refused command has a twin with a substitution in the middle, refused too; commands that use
+    substitutions for normal work stay allowed."""
+
+    # (the words before the substitution, the words after it, whether one more word there keeps the command's meaning)
+    REFUSED = [("rm", "-rf ~/Development", True), ("git push", "--force origin feat/x", True),
+               ("dev", "install", False), ("unset", MARKER, True)]
+
+    def test_a_substitution_inside_a_refused_command_hides_none_of_its_words(self):
+        cmds = []
+        for head, rest, one_more_word in self.REFUSED:
+            cmds += [f"{head} {rest}", f"{head} $(true) {rest}", f"{head} `true` {rest}", f"{head} ${{X:-$(true)}} {rest}",
+                     f"echo a; {head} $(true) {rest}", f"sh -c '{head} $(true) {rest}'"]
+            if one_more_word:  # these always expand to one word: `git <(true) push` runs no push
+                cmds += [f"{head} <(true) {rest}", f"{head} $((1)) {rest}"]
+        # the twins: normal work with substitutions, and a heredoc body that only holds such a line, stay allowed
+        self.assert_rulings(refused=cmds, allowed=[
+            "echo $(date)", "cd $(git rev-parse --show-toplevel) && git status", "git log $(git merge-base HEAD main)",
+            "export PATH=$(pwd)/bin:$PATH", "diff <(ls lib) <(ls tests)", "echo $((1 + 2))", "ls $(dirname lib/x)",
+            "git diff --stat $(git merge-base HEAD origin/main)..HEAD", 'echo "$(git log -1 --format=%s)"',
+            "cat <<'EOF' > /tmp/devkit-parser-note.txt\nrm $(true) -rf ~/Development\nEOF",
+            "cat <<EOF\n$(date)\nEOF"])
+
+
 if __name__ == "__main__":
     unittest.main()

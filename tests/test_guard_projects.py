@@ -202,6 +202,16 @@ class OneProjectPerSession(unittest.TestCase):
         self.assert_rulings(refused=["dev handoff gdg --log x", "dev plan new x -p gadget", "dev handoff wid --log x"],
                             allowed=["dev handoff wdg --log x", "dev plan new x -p widget"])
 
+    def test_a_substitution_inside_the_command_hides_none_of_its_words(self):
+        # an unquoted $(…) is one word of the dev command: the options after it are still the command's own
+        self.assert_rulings(
+            refused=[f"dev handoff {OTHER} $(true) --log x", f"dev task add x $(true) -p {OTHER} --why y",
+                     f"dev plan new x $(true) -p {OTHER}", f"dev lesson recur L-1 $(true) -p {OTHER}",
+                     f"dev delivery apply $(true) -p {OTHER} --why w", f"dev handoff $(echo {OTHER}) --log x"],
+            allowed=[f"dev handoff {OWN} $(true) --log x", f"dev task add x $(true) -p {OWN} --why y",
+                     'dev plan new "Plan $(date +%F)"', 'dev handoff --log "$(git log -1 --format=%s)"',
+                     f"dev plan ls $(true) -p {OTHER}"])
+
     def test_a_portfolio_session_and_the_developers_hatch_may_write_any_project(self):
         cmds = [f"dev plan new x -p {OTHER}", f"dev handoff {OTHER} --log done", f"dev lesson recur L-1 -p {OTHER}",
                 f"env -C {self.other_top} dev handoff --log done"]

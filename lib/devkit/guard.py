@@ -588,10 +588,13 @@ def _braced_end(s: str, i: int) -> int:
     return min(j, n)
 
 
-def _split_heredocs(cmd: str):
+def _split_heredocs(cmd: str, mask: str | None = None):
     """-> (the command without its heredoc bodies and terminator lines, [(body, expands)]). A `<<WORD` counts only
     where the shell reads it: outside quotes and comments, and not `<<<` (a here-string), so a quoted "<<EOF" in a
-    commit message hides no line. `expands`: the delimiter is unquoted, so the shell runs `$(…)` in the body."""
+    commit message hides no line. `expands`: the delimiter is unquoted, so the shell runs `$(…)` in the body.
+    `mask` (for _substitution_readings): the command keeps its heredoc bodies as they are, and each `$(…)`, backtick
+    and `${…}` holding one outside quotes becomes `mask`, each `<(…)`, `>(…)` and `=(…)` _SUBST_WORD and each
+    `$((…))` 0, the one word the shell makes of it."""
     out, bodies, pending = [], [], []
     i, n, q, parens = 0, len(cmd), None, _Parens(cmd)
     while i < n:
@@ -618,7 +621,8 @@ def _split_heredocs(cmd: str):
             continue
         elif cmd.startswith("${", i) or cmd.startswith("$[", i):  # `${x/<<E/}`, `$[1<<E]`: no heredoc in either
             j = _braced_end(cmd, i)
-            out.append(cmd[i:j])
+            span = cmd[i:j]
+            out.append(mask if mask is not None and ("(" in span or "`" in span) else span)
             i = j
             continue
         elif cmd.startswith("$((", i) or cmd.startswith("((", i):  # arithmetic: `1<<x` is a shift (Seraph, M108)
@@ -630,8 +634,18 @@ def _split_heredocs(cmd: str):
                     break
             if depth == 0:
                 parens.close(j - 1, "w" if c == "$" else "o")
-            out.append(cmd[i:j])
+            out.append("0" if mask is not None and c == "$" else cmd[i:j])
             i = j
+            continue
+        elif mask is not None and (cmd.startswith("$(", i) or _proc_subst_at(cmd, i)) and \
+                (j := _close_paren(cmd, i + 2)) > 0:
+            out.append(mask if c == "$" else _SUBST_WORD)
+            parens.close(j - 1, "w")
+            i = j
+            continue
+        elif mask is not None and c == "`" and (j := cmd.find("`", i + 1)) > 0:
+            out.append(mask)
+            i = j + 1
             continue
         elif c == "(":
             parens.open(i)
@@ -648,6 +662,7 @@ def _split_heredocs(cmd: str):
         elif c == "\n" and pending:
             out.append(c)
             i += 1
+            begin = i
             for delim, expands, dash in pending:
                 body = []
                 while i < n:
@@ -661,6 +676,8 @@ def _split_heredocs(cmd: str):
                         break                       # (B-fy5f5i8c1hx)
                     body.append(ln.lstrip("\t") if dash else ln)  # `<<-`: bash and zsh drop each line's leading tabs
                 bodies.append(("\n".join(body), expands))
+            if mask is not None:
+                out.append(cmd[begin:i])
             pending = []
             continue
         out.append(c)
@@ -1810,17 +1827,36 @@ def _continued_readings(cmd: str) -> list:
     return list(dict.fromkeys(r for r in (joined, comments) if r != cmd))
 
 
+def _substitution_readings(cmd: str) -> list:
+    """The other readings of a command with an unquoted `$(…)`, `$((…))`, backtick, `<(…)`, `>(…)` or `${…$(…)}`: the
+    tokenizer cuts words at a parenthesis, so `rm $(true) -rf ~/x` would read as `rm $` and a command `-rf ~/x` of its
+    own. Each reading keeps every substitution as one word of the command around it (_split_heredocs with `mask`):
+    one with _SUBST_WORD for it, and one with a command substitution dropped, since its output can be empty and then
+    leaves no word (`dev $(true) install` runs `dev install`). The callers judge each reading as well as the command as
+    given, which still judges what the substitutions run, so a reading can only add a refusal. [] when no substitution
+    is there to cut it."""
+    if "(" not in cmd and "`" not in cmd:
+        return []
+    out = []
+    for word in (_SUBST_WORD, ""):
+        alt = _split_heredocs(cmd, mask=word)[0]
+        if alt != cmd and alt not in out:
+            out.append(alt)
+    return out
+
+
 def check_bash(cmd: str, cwd: str, agent: str):
     """The guard's verdict on a shell command, or None. A command with a backslash-newline is checked again in each
     of its other readings (_continued_readings): the first refusal stands, and the escape hatches each reading used
     are recorded. An ask (a write outside ~/Development) stands only when no reading refuses: approving the write
-    must not also run what another reading refuses."""
+    must not also run what another reading refuses. A command with a substitution inside it is checked in its
+    _substitution_readings as well."""
     v = _check_bash_reading(cmd, cwd, agent)
     if v and v[0] == "deny":
         return v
     first = v
     hatches = list(_BYPASSES)
-    for alt in _continued_readings(cmd or ""):
+    for alt in _continued_readings(cmd or "") + _substitution_readings(cmd or ""):
         w = _check_bash_reading(alt, cwd, agent)
         if w and w[0] == "deny":
             return w
@@ -2118,20 +2154,22 @@ def _check_segments(cmd: str, segs, ecwd: str, agent: str, depth: int = 0, outer
             return deny(NESTED_REASON, key="nested-depth")
         feeds = fed or _feeds_words(argv)
         for line in lines:
-            inner = split_commands(line)
-            res = _check_segments(line, inner, ecwd, agent, depth + 1, envs, feeds) if inner else None
-            if res:
-                return res
+            for alt in (line, *_substitution_readings(line)):  # `sh -c 'rm $(true) -rf ~/x'`
+                inner = split_commands(alt)
+                res = _check_segments(alt, inner, ecwd, agent, depth + 1, envs, feeds) if inner else None
+                if res:
+                    return res
     # what `<(…)`, `>(…)` and the `$(…)` and backticks inside a word run: the tokenizer leaves their words in the
     # command around them (it splits only a bare `$(…)`)
     subs = _process_substitutions(cmd) + _command_substitutions(cmd)
     if subs and depth >= 4:
         return deny(NESTED_REASON, key="substitution-depth")
     for line in subs:
-        inner = split_commands(line)
-        res = _check_segments(line, inner, ecwd, agent, depth + 1, outer_envs, fed) if inner else None
-        if res:
-            return res
+        for alt in (line, *_substitution_readings(line)):
+            inner = split_commands(alt)
+            res = _check_segments(alt, inner, ecwd, agent, depth + 1, outer_envs, fed) if inner else None
+            if res:
+                return res
     return None
 
 
@@ -4501,6 +4539,12 @@ class _Shell:
         self.unresolved += inner.unresolved
         if same_shell:  # source and eval run in this shell: what they export stays set
             self.exported |= inner.exported
+        for alt in () if v else _substitution_readings(text):  # `sh -c 'dev $(true) install'`: only adds a refusal
+            other = self.child(alt, cwd, names)
+            other.typed = typed
+            v = other.run()
+            if v:
+                break
         return v
 
     def devkit_call(self, name, argv, cwd):
