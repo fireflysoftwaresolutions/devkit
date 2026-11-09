@@ -650,6 +650,7 @@ def build(with_prs=True, refresh_prs=False, with_sizes=False, refresh_sizes=Fals
     if pf:
         issues.append(("handoff", f"the handoff repository could not be pushed since {fmt_ts(pf.get('ts'))}: "
                                   f"{(pf.get('error') or '')[:120]} → `dev sync`"))
+    issues += handoff_conflict_issues()
     for p in projects:
         if not p["canonical_ok"]:
             issues.append(("layout", f"{p['id']} lives at {tilde(p['path'])}; canonical is {tilde(p['canonical'])} "
@@ -680,6 +681,28 @@ def build(with_prs=True, refresh_prs=False, with_sizes=False, refresh_sizes=Fals
             "generated": int(time.time()), "projects": projects, "issues": issues,
             "sessions": live_sessions(), "providers": prov, "github_user": core.github_user(),
             "initiatives": inits, "team": _team()}
+
+
+def handoff_conflict_issues() -> list:
+    """The notes a sync set aside: when their hand-written text changed on this Mac and on another at the same place,
+    the pull kept the remote's note and saved this Mac's copy in STATE/handoff-conflicts/ (work._save_note_conflict).
+    -> one ("handoff", text) issue naming the notes, so the dashboard and each named project's `dev status` show it
+    until the copies are deleted; [] when none is saved."""
+    folder = STATE / "handoff-conflicts"
+    copies = sorted(folder.rglob("*.mine.md")) if folder.is_dir() else []
+    notes = []
+    for c in copies:
+        rel = re.sub(r"\.\d{8}-\d{6}\.mine\.md$", "", c.relative_to(folder).as_posix())
+        name = rel[len("projects/"):] if rel.startswith("projects/") else re.sub(r"/README$", "", rel)
+        if name not in notes:
+            notes.append(name)
+    if not notes:
+        return []
+    notes.sort()
+    shown = ", ".join(notes[:4]) + (f" +{len(notes) - 4} more" if len(notes) > 4 else "")
+    were = "handoff note was" if len(notes) == 1 else "handoff notes were"
+    return [("handoff", f"{len(notes)} {were} set aside after a sync conflict ({shown}): {tilde(folder)} "
+                        "(git merge-file brings your changes back; delete each copy once merged)")]
 
 
 def work_issues(pid: str, w: dict, now: float = None) -> list:

@@ -18,6 +18,7 @@ from pathlib import Path
 from textwrap import dedent
 
 TREE = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(TREE / "lib"))
 sys.path.insert(0, str(TREE / "tests"))
 import _sandbox  # noqa: E402
 
@@ -377,6 +378,50 @@ class BugStoreTests(StoreCase):
                          ("drop", BUGS, drop, {"item": item})])
         self.assertEqual(json.loads(out["sync"])["failed"], 1, "the send did not fail as GitHub did")
         self.assertFalse((self.state / "bugs" / "outbox" / f"{item}.json").exists(), "the dropped report came back")
+
+
+class SetAsideNoteTests(unittest.TestCase):
+    # The other side of the notes' merge: a pull that cannot merge a note's hand-written text keeps the remote's
+    # note and saves this Mac's copy in the state folder (work._save_note_conflict). The registry's issues say so,
+    # naming each note, so the dashboard and each named project's `dev status` show it until the copies are deleted.
+    # In this process: devkit's state and handoff repository in a temp folder, no project discovered, nothing
+    # reaches GitHub.
+    def setUp(self):
+        from unittest import mock
+        from devkit import audit, core, registry, work
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name).resolve()
+        state, handoff = root / "state", root / "handoff"
+        for patch in (mock.patch.object(core, "STATE", state), mock.patch.object(registry, "STATE", state),
+                      mock.patch.object(core, "HANDOFF", handoff), mock.patch.object(registry, "HANDOFF", handoff),
+                      mock.patch.object(work, "HANDOFF", handoff), mock.patch.object(audit, "AUDIT", state / "audit"),
+                      mock.patch.object(registry, "discover", side_effect=lambda: ([], [], [])),  # a new list each build
+                      mock.patch.object(registry, "live_sessions", return_value=[]),
+                      mock.patch.object(core, "github_user", return_value="ana"),
+                      mock.patch("devkit.providers.cached", return_value={}),
+                      mock.patch("devkit.ui.warn")):
+            patch.start()
+            self.addCleanup(patch.stop)
+        self.folder = state / "handoff-conflicts"
+
+    def handoff_issues(self) -> list:
+        from devkit import registry
+        return [i for i in registry.build(with_prs=False)["issues"] if i[0] == "handoff"]
+
+    def test_notes_set_aside_by_a_sync_are_named_until_their_copies_are_deleted(self):
+        from devkit import cli, core, work
+        self.assertEqual(self.handoff_issues(), [])
+        work._save_note_conflict("projects/acme/widget.md", "# widget\nbase\n", "# widget\nmine\n")
+        work._save_note_conflict("initiatives/payments/README.md", "# payments\nbase\n", "# payments\nmine\n")
+        want = ("2 handoff notes were set aside after a sync conflict (acme/widget, initiatives/payments): "
+                f"{core.tilde(self.folder)} (git merge-file brings your changes back; delete each copy once merged)")
+        self.assertEqual(self.handoff_issues(), [("handoff", want)])
+        status = cli._issue_needs({"issues": self.handoff_issues()}, {"id": "acme/widget"})
+        self.assertEqual([n["kind"] for n in status], ["handoff"], "the project's dev status does not show it")
+        for f in self.folder.rglob("*.md"):
+            f.unlink()
+        self.assertEqual(self.handoff_issues(), [])
 
 
 if __name__ == "__main__":
