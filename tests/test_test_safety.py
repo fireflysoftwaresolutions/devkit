@@ -31,6 +31,40 @@ from devkit import core  # noqa: E402
 
 FAKE_REAL = '#!/bin/sh\necho ran > "$(dirname "$0")/ran"\n'  # what a start of the "real" program leaves behind
 
+# A test module run on its own, in a process of its own: one test calls devkit code that starts a "real" codex, which
+# the net refuses and devkit's core.sh turns into exit code 127, so the test itself sees nothing wrong; the other
+# starts nothing of the four.
+ONE_MODULE = '''
+import os, sys, unittest
+from unittest import mock
+sys.path[:0] = [{tests!r}, {lib!r}]
+import _hermetic
+_hermetic.activate()
+import _sandbox
+from devkit import core
+
+
+class Tiny(unittest.TestCase):
+    def test_a_devkit_call_that_starts_the_real_codex(self):
+        allowed = tuple(os.environ["DEVKIT_TEST_PATH"].split(os.pathsep))
+        with mock.patch.object(_sandbox, "ALLOWED", allowed):
+            rc = core.sh(["codex", "login"], env=dict(os.environ, PATH={folder!r} + ":/usr/bin:/bin"))[0]
+        self.assertEqual(rc, 127)
+
+    def test_a_quiet_one(self):
+        self.assertEqual(core.sh(["true"])[0], 0)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
+'''
+
+
+def ignores_case() -> bool:
+    with tempfile.TemporaryDirectory() as d:
+        Path(d, "probe").touch()
+        return os.path.exists(os.path.join(d, "PROBE"))
+
 
 class Folders(unittest.TestCase):
     def setUp(self):
@@ -41,12 +75,20 @@ class Folders(unittest.TestCase):
         self.home.mkdir()
 
     def real_codex(self) -> Path:
-        # a "real" codex: outside the stand-in folders, and it leaves a file when it runs
+        return self.real("codex")
+
+    def real(self, tool) -> Path:
+        # a "real" tool: outside the stand-in folders, and it leaves a file when it runs
         folder = self.root / "opt-homebrew-bin"
         folder.mkdir(exist_ok=True)
-        (folder / "codex").write_text(FAKE_REAL)
-        (folder / "codex").chmod(0o755)
-        return folder / "codex"
+        (folder / tool).write_text(FAKE_REAL)
+        (folder / tool).chmod(0o755)
+        return folder / tool
+
+    def keep_violations(self):
+        # the refusals a test provokes on purpose are its own, not the run's
+        seen = list(_hermetic.state()["violations"])
+        self.addCleanup(lambda: _hermetic.state()["violations"].__setitem__(slice(None), seen))
 
 
 class SandboxPathTests(Folders):
@@ -119,8 +161,7 @@ class TripwireTests(Folders):
         narrow = mock.patch.object(_sandbox, "ALLOWED", (str(self.stubs),))
         narrow.start()
         self.addCleanup(narrow.stop)
-        seen = list(_hermetic.state()["violations"])
-        self.addCleanup(lambda: _hermetic.state()["violations"].__setitem__(slice(None), seen))  # deliberate trips
+        self.keep_violations()
 
     def refused(self, start):
         before = len(_hermetic.state()["violations"])
@@ -179,6 +220,112 @@ class TripwireTests(Folders):
         why = _sandbox.refusal("subprocess.Popen", ("codex", ["codex", "login"], None, {"PATH": "/opt/homebrew/bin"}),
                                allowed=_sandbox.TEMP_ROOTS)
         self.assertIn(os.path.realpath("/opt/homebrew/bin/codex"), why)
+
+
+class ShellLineTests(Folders):
+    # the tripwire reads which program each command of a shell line runs; it only resolves, it starts nothing
+    def setUp(self):
+        super().setUp()
+        self.stubs = _sandbox.stand_ins(self.root / "stubs")
+        self.codex, self.gh = self.real("codex"), self.real("gh")
+
+    def why(self, line):
+        env = {"PATH": f"{self.codex.parent}:/usr/bin:/bin"}
+        return _sandbox.refusal("subprocess.Popen", (None, ["/bin/sh", "-c", line], None, env),
+                                allowed=(str(self.stubs),))
+
+    def test_a_program_after_if_then_elif_or_else_is_seen(self):
+        for line in ("if codex login; then :; fi", "if false; then codex login; fi",
+                     "if false; then :; elif codex login; then :; fi", "if false; then :; else codex login; fi"):
+            with self.subTest(line):
+                self.assertIn(str(self.codex), self.why(line))
+
+    def test_a_program_after_a_negation_is_seen(self):
+        self.assertIn(str(self.gh), self.why("! gh auth status"))
+
+    def test_a_program_after_while_until_or_do_is_seen(self):
+        for line in ("while gh run list; do break; done", "until gh run list; do :; done",
+                     "while false; do codex login; done"):
+            with self.subTest(line):
+                self.assertIn(str(self.gh if "gh" in line else self.codex), self.why(line))
+
+    def test_a_program_in_a_command_substitution_of_an_assignment_is_seen(self):
+        for line in ("x=$(gh api user)", "x=`gh api user`", "A=1 x=$(gh api user) true"):
+            with self.subTest(line):
+                self.assertIn(str(self.gh), self.why(line))
+
+    @unittest.skipUnless(ignores_case(), "needs a file system that ignores case, as macOS's does")
+    def test_a_program_named_in_another_case_is_seen(self):
+        # macOS finds codex as Codex: the name is the same program
+        self.assertIn(str(self.codex.parent), self.why("Codex login"))
+        self.assertIn(str(self.gh.parent), self.why("GH auth status"))
+        start = ("CODEX", ["CODEX"], None, {"PATH": str(self.codex.parent)})
+        self.assertIn(str(self.codex.parent), _sandbox.refusal("subprocess.Popen", start, allowed=(str(self.stubs),)))
+
+    def test_a_keyword_or_a_tool_s_name_as_an_argument_is_not_a_program(self):
+        for line in ("echo if gh", "echo while codex", "grep -c gh /dev/null", "x=gh true", "ifgh=1 true"):
+            with self.subTest(line):
+                self.assertEqual("", self.why(line))
+
+
+class DevkitChildTests(Folders):
+    def setUp(self):
+        super().setUp()
+        self.keep_violations()
+
+    # a devkit child whose environment the test built from scratch would put Homebrew's folders first again: one
+    # without DEVKIT_TEST_PATH and with a temporary HOME is refused before it starts, by any way of starting devkit
+    def test_a_devkit_child_whose_environment_leaves_out_the_net_is_refused(self):
+        scratch = {"HOME": str(self.home), "PATH": "/usr/bin:/bin"}
+        code = f"import sys; sys.path.insert(0, {str(TREE / 'lib')!r}); from devkit import core"
+        starts = {"bin/dev": [str(TREE / "bin" / "dev"), "version"],
+                  "-m devkit": [sys.executable, "-I", "-m", "devkit.cli", "version"],
+                  "-c": [sys.executable, "-I", "-S", "-c", code]}
+        for name, argv in starts.items():
+            with self.subTest(name):
+                with self.assertRaises(PermissionError) as cm:
+                    subprocess.run(argv, env=scratch, capture_output=True, timeout=60, cwd=str(self.home))
+                self.assertIn("_sandbox.env()", str(cm.exception))
+        # the same child with the net's variables starts, and so does another program with the scratch environment
+        p = subprocess.run(starts["-c"], env=_sandbox.env(scratch), capture_output=True, text=True, timeout=60,
+                           cwd=str(self.home))
+        self.assertEqual(0, p.returncode, p.stderr)
+        self.assertEqual(0, subprocess.run(["/usr/bin/true"], env=scratch, cwd=str(self.home)).returncode)
+
+
+class OneModuleRunTests(Folders):
+    # a test whose devkit call starts a real program fails itself, in a run of its module alone (no test_zz there),
+    # though devkit turned the refusal into an exit code; the other test of the module passes
+    def test_a_devkit_call_that_trips_the_net_fails_its_own_test(self):
+        codex = self.real_codex()
+        module = self.root / "one" / "test_one.py"
+        module.parent.mkdir()
+        module.write_text(ONE_MODULE.format(tests=str(TREE / "tests"), lib=str(TREE / "lib"),
+                                            folder=str(codex.parent)))
+        p = subprocess.run([sys.executable, "-I", str(module)], env=_sandbox.env({"HOME": str(self.home),
+                                                                                    "PATH": "/usr/bin:/bin"}),
+                           capture_output=True, text=True, timeout=120, cwd=str(module.parent))
+        self.assertEqual(1, p.returncode, p.stderr)
+        self.assertIn("FAILED (failures=1)", p.stderr)
+        self.assertRegex(p.stderr, r"test_a_quiet_one \(.*\) \.\.\. ok")
+        failure = p.stderr.split("\nFAIL: ", 1)[-1]
+        self.assertTrue(failure.startswith("test_a_devkit_call_that_starts_the_real_codex"), p.stderr)
+        self.assertIn(str(codex), failure)
+        self.assertFalse((codex.parent / "ran").exists(), "the real codex ran")
+
+
+class OwnStandInsTests(unittest.TestCase):
+    # a process with no run's variable makes stand-ins of its own, and removes them when it exits
+    def test_the_stand_ins_a_process_makes_for_itself_are_removed_at_exit(self):
+        code = (f"import sys; sys.path.insert(0, {str(TREE / 'tests')!r}); import _sandbox; "
+                "print(_sandbox.run_folders()[0])")
+        env = {k: v for k, v in os.environ.items() if k != "DEVKIT_TEST_PATH"}
+        p = subprocess.run([sys.executable, "-I", "-S", "-c", code], env=env, capture_output=True, text=True,
+                           timeout=60)
+        self.assertEqual(0, p.returncode, p.stderr)
+        folder = p.stdout.strip()
+        self.assertIn("devkit-stand-ins-", folder)
+        self.assertFalse(os.path.exists(folder), f"{folder} is still there")
 
 
 class OlderCopyTests(Folders):

@@ -90,6 +90,13 @@ class IsolatedRun(unittest.TestCase):
                           "NEAR": real["state"] + "-other", "PLAIN": "/usr/bin", "DEVKIT_HOME": "/x"}, env)
         self.assertEqual(["CLAUDECODE", "DEVKIT_GUARD", "FPATH", "LAST_LOG", "_"], sorted(changed))
 
+    # the developer's tokens for GitHub, GitLab, Bitbucket and Azure DevOps never reach a test or what it starts
+    def test_the_scrub_removes_the_code_hosts_tokens(self):
+        tokens = ("GH_TOKEN", "GITHUB_TOKEN", "GITLAB_TOKEN", "BITBUCKET_TOKEN", "AZURE_DEVOPS_EXT_PAT")
+        env = dict({k: "secret" for k in tokens}, PLAIN="/usr/bin")
+        self.assertEqual(sorted(tokens), sorted(_hermetic.scrub(env)))
+        self.assertEqual({"PLAIN": "/usr/bin"}, env)
+
     # a process a test starts resolves the same temporary roots, through the environment it inherits
     def test_a_child_process_resolves_the_temporary_home(self):
         lib = str(Path(__file__).resolve().parents[1] / "lib")

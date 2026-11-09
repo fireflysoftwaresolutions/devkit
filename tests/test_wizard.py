@@ -19,6 +19,8 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _sandbox  # noqa: E402
 
 from devkit import core, providers, registry, setup, toolchain, tui, ui, wizard  # noqa: E402
 
@@ -1054,6 +1056,7 @@ class Pty:
         (dev / "pom.xml").write_text("<project/>")
         env = {"HOME": str(home), "PATH": "/usr/bin:/bin", "TERM": term, "LANG": "en_US.UTF-8", "WIZ_LIB": LIB,
                "WIZ_CALLS": str(home / "calls.jsonl"), "HOMEBREW_PREFIX": str(home / "brew")}
+        env = _sandbox.env(env)  # its devkit keeps the run's stand-ins first, never this Mac's real tools
         self.master, slave = pty.openpty()
         fcntl.ioctl(self.master, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
         self.proc = subprocess.Popen([sys.executable, str(home / "driver.py")], stdin=slave, stdout=slave,

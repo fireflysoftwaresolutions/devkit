@@ -24,6 +24,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from devkit import audit, core, hooks, progress as pg, state  # noqa: E402
+import _sandbox  # noqa: E402
 from test_progress import TempState, launch  # noqa: E402
 
 SETTINGS = Path(__file__).resolve().parents[1] / "config" / "claude" / "settings.json"
@@ -1386,7 +1387,7 @@ class AuditCheckTests(EvidenceCase):
         code = ("import json, sys; sys.path.insert(0, sys.argv[1]); from devkit import audit; "
                 "print(json.dumps(audit.verify_file(sys.argv[2])['checks']))")
         out = subprocess.run([sys.executable, "-I", "-c", code, str(Path(audit.__file__).parents[1]), str(month)],
-                             capture_output=True, text=True, env={"HOME": str(home), "PATH": os.environ["PATH"]},
+                             capture_output=True, text=True, env=_sandbox.env({"HOME": str(home), "PATH": os.environ["PATH"]}),
                              timeout=60)
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertIn("prompt-404", out.stdout)

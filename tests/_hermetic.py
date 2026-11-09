@@ -24,9 +24,12 @@ for a run of one of them alone). It:
    or an argument that names a real root, or in a real root;
 6. puts the run's stand-ins for codex, claude, brew and gh first on PATH and names them in DEVKIT_TEST_PATH, which
    devkit keeps first, adding none of Homebrew's folders, in this process and in every process that inherits the
-   variable; the audit hook refuses, and records, a start of one of the four from outside the temporary folders
-   (tests/_sandbox.py has the net and what a test that builds its own environment uses);
-7. removes the temporary home when the run ends.
+   variable; the audit hook refuses, and records, a start of one of the four from outside the temporary folders, and
+   a devkit child whose environment has a temporary HOME but no DEVKIT_TEST_PATH (tests/_sandbox.py has the net and
+   env(), what a test that builds its own environment uses);
+7. fails each test during which the hook or the launcher of an older copy refused something, in any run (one module
+   or the whole suite), though devkit turned the refusal into an exit code;
+8. removes the temporary home when the run ends.
 
 A second call (tests/__init__.py, then a guard module) changes nothing. When devkit was imported first, `activate()`
 does nothing either: its paths are already bound to the real home, so the run is not hermetic, and test_hermetic
@@ -72,7 +75,9 @@ SCRUB = ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ID", "CLAU
          # the locations devkit and the tools it runs take from the environment before HOME: without them every one
          # follows HOME, the run's or the one a test makes for itself
          "DEVKIT_CONFIG", "DEV_ROOT", "CODEX_HOME", "CLAUDE_CONFIG_DIR", "XDG_CONFIG_HOME", "XDG_STATE_HOME",
-         "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_RUNTIME_DIR", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM")
+         "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_RUNTIME_DIR", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM",
+         # the developer's tokens for the code hosts, which gh, glab and the host APIs read before any login
+         "GH_TOKEN", "GITHUB_TOKEN", "GITLAB_TOKEN", "BITBUCKET_TOKEN", "AZURE_DEVOPS_EXT_PAT")
 KEEP = {"DEVKIT_HOME": str(TREE), "DEVKIT_NO_NOTIFY": "1"}  # the DEVKIT_* the run sets itself
 # The net's variables (tests/_sandbox.py), which name folders and files below the run's own root only: its stand-ins,
 # and the log of what the launcher of older devkit copies refused.
@@ -387,6 +392,22 @@ def _test_frame() -> str:
     return ""
 
 
+def _without_net(event, args) -> str:
+    """The devkit process a start would run without the net, or '': the test gave it an environment of its own (not
+    this process's, which carries DEVKIT_TEST_PATH) with a temporary HOME and no DEVKIT_TEST_PATH, so the child's
+    devkit puts Homebrew's folders first on PATH again."""
+    env = args[3] if event == "subprocess.Popen" else None if event == "os.system" else args[2]
+    if not env:
+        return ""
+    get = (lambda k: env.get(k.encode()) or env.get(k)) if any(isinstance(k, bytes) for k in env) else env.get
+    home, net = get("HOME"), get("DEVKIT_TEST_PATH")
+    if net or not home:  # no HOME at all is _child's refusal
+        return ""
+    if not _sandbox._below(os.fsdecode(home), _sandbox.TEMP_ROOTS) or not _sandbox.runs_devkit(event, args):
+        return ""
+    return " ".join(_sandbox._words(args[1]))[:200]
+
+
 def _trip(why: str):
     """Refuse a start of this Mac's real codex, claude, brew or gh, and record it for test_zz."""
     where = _test_frame()
@@ -405,6 +426,13 @@ def _hook(event, args):
         why = _sandbox.refusal(event, args)
         if why:
             _trip(why)
+        child = _without_net(event, args)
+        if child:
+            where = _test_frame()
+            _S["violations"].append(f"devkit child without the net: {child}" + (f" (in {where})" if where else ""))
+            raise PermissionError(f"test safety: refused to start {child}: its environment has a temporary HOME and no "
+                                  "DEVKIT_TEST_PATH, so its devkit would put Homebrew's folders first on PATH again; "
+                                  "build the environment with _sandbox.env() (tests/_sandbox.py)")
     if event == "open":
         rel = isinstance(args[0], (str, bytes, os.PathLike)) and not os.path.isabs(os.fsdecode(os.fspath(args[0])))
         p = "" if rel and _in_fd_walk() else _protected(_path(args[0]))
@@ -509,7 +537,35 @@ def activate() -> dict:
     atexit.register(_cleanup, root, os.getpid())
     _S["active"] = True
     sys.addaudithook(_hook)
+    _fail_each_test_that_trips()
     return _S
+
+
+def _fail_each_test_that_trips():
+    """Make every test that the hook refused something during, or whose older devkit copy the launcher refused
+    something for, fail itself, in any run (one module, one test, the whole suite). Devkit turns a refusal into an exit
+    code (core.sh returns 127 for an OSError), so without this the test passes and only test_zz, which runs only in a
+    whole run, reports the hit. The check is the test's first cleanup, so it runs last: after the test's own cleanups,
+    which may take back the refusals the test provoked on purpose; and the runner reports it as that test's failure."""
+    import unittest
+    run = unittest.TestCase.run
+    if getattr(run, "_hermetic", False):
+        return
+
+    def run_and_check(self, result=None):
+        self.addCleanup(_check_test, self, len(_S["violations"]), len(_sandbox.trips()))
+        return run(self, result)
+
+    run_and_check._hermetic = True
+    unittest.TestCase.run = run_and_check
+
+
+def _check_test(test, seen: int, tripped: int):
+    hits = list(_S["violations"][seen:]) + [f"tripwire {t.get('why')} (older devkit {t.get('dev')})"
+                                            for t in _sandbox.trips()[tripped:]]
+    if hits:
+        raise test.failureException(f"{test.id()} started or reached what the run refuses (tests/_hermetic.py, "
+                                    "tests/_sandbox.py): " + "; ".join(hits))
 
 
 def watch_late():

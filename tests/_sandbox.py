@@ -14,7 +14,9 @@ The net has four parts:
    folders, which a real Mac's HOME never does. env() sets it, with PATH, for every process a test starts.
 3. The tripwire (refusal()): whether a process start would run one of the four from outside the allowed folders.
    tests/_hermetic.py's audit hook refuses such a start in the test process (subprocess, os.exec*, os.posix_spawn*,
-   os.system) and records it, so the run fails (test_zz) even where devkit turns the error into an exit code.
+   os.system) and records it, so the test fails even where devkit turns the error into an exit code (the hermetic
+   run fails each test that tripped it, in any run; test_zz reports it again in a whole run). The same hook refuses a
+   devkit child whose environment the test built without env(), which would put Homebrew's folders first again.
 4. The launcher (boot()): an older devkit copy, whose core.py predates DEVKIT_TEST_PATH, starts through this file. It
    puts the stand-ins first again once the copy's core.py is imported, refuses any start of the four from outside
    DEVKIT_TEST_PATH's folders and any devkit process the copy would start (that one would run without the net), and
@@ -26,9 +28,11 @@ program: `python3 -I -S tests/_sandbox.py <copy>/bin/dev <args>`.
 """
 from __future__ import annotations
 
+import atexit
 import json
 import os
 import re
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -43,12 +47,16 @@ EVENTS = ("subprocess.Popen", "os.exec", "os.posix_spawn", "os.system")
 _LAUNCHERS = {"env", "exec", "command", "nohup", "sudo", "xcrun", "time", "nice", "timeout"}
 _SHELLS = {"sh", "bash", "zsh", "dash", "ksh", "fish", "csh", "tcsh"}
 # The program of each command of a shell line: where a command starts (the line's start, or after ; & | ( ) { } ` or
-# a new line), past variable assignments and the launchers that run the next word.
+# a new line), past the keywords that run the next word (if, then, elif, else, do, while, until, !), variable
+# assignments (whose value ends where a command substitution, $( or `, starts its own command) and the launchers that
+# run the next word. Names in any case: macOS finds codex as Codex.
 _COMMAND = re.compile(
     r"(?:^|[;&|(){}`\n])\s*"
-    r"(?:(?:[A-Za-z_]\w*=\S*|(?:\S*/)?(?:env|exec|command|nohup|sudo|xcrun|time|nice|timeout)(?:\s+(?:-\S+|\d\S*))*)"
-    r"\s+)*[\"']?([^\s;&|(){}`\"']+)")
+    r"(?:(?:(?:if|then|elif|else|do|while|until|!)(?=\s)|[A-Za-z_]\w*=(?:[^\s$`]|\$(?!\())*"
+    r"|(?:\S*/)?(?:env|exec|command|nohup|sudo|xcrun|time|nice|timeout)(?:\s+(?:-\S+|\d\S*))*)"
+    r"\s+)*[\"']?([^\s;&|(){}`\"']+)", re.IGNORECASE)
 _DEVKIT = re.compile(r"/bin/dev(?=$|[\s'\"])")
+_IMPORTS_DEVKIT = re.compile(r"\bfrom\s+devkit\b|\bimport\s+(?:[\w.]+\s*,\s*)*devkit\b")
 _OWN: list = []  # this process's stand-in folder when no hermetic run made one
 
 
@@ -70,7 +78,13 @@ def run_folders(environ=None) -> list:
         return named
     if not _OWN:
         _OWN.append(str(stand_ins(tempfile.mkdtemp(prefix="devkit-stand-ins-"))))
+        atexit.register(_remove, _OWN[0], os.getpid())
     return list(_OWN)
+
+
+def _remove(folder: str, owner: int):
+    if os.getpid() == owner:  # a forked child exits with the folder its parent still uses
+        shutil.rmtree(folder, ignore_errors=True)
 
 
 def env(base=None, stubs=(), run=True, **extra) -> dict:
@@ -129,13 +143,13 @@ def _programs(event, args) -> list:
         program, words, cwd, env = args[0], _words(args[1]), None, args[2]
     out = [(os.fsdecode(program), env, cwd)] if isinstance(program, (str, bytes, os.PathLike)) else []
     i = 0
-    while i < len(words) and os.path.basename(words[i]) in _LAUNCHERS:  # env X=1 codex, nohup gh, xcrun …
+    while i < len(words) and os.path.basename(words[i]).lower() in _LAUNCHERS:  # env X=1 codex, nohup gh, xcrun …
         i += 1
         while i < len(words) and (words[i].startswith("-") or re.match(r"[A-Za-z_]\w*=", words[i])):
             i += 1
     if i < len(words):
         out.append((words[i], env, cwd))
-    if words and os.path.basename(words[0]) in _SHELLS:  # sh -c "<line>", bash -euc "<line>"
+    if words and os.path.basename(words[0]).lower() in _SHELLS:  # sh -c "<line>", bash -euc "<line>"
         flag = next((k for k, w in enumerate(words[1:], 1) if re.fullmatch(r"-[a-z]*c[a-z]*", w)), None)
         if flag is not None and flag + 1 < len(words):
             out += [(m.group(1), env, cwd) for m in _COMMAND.finditer(words[flag + 1])]
@@ -154,7 +168,7 @@ def refusal(event, args, allowed=None) -> str:
         return ""
     allowed = ALLOWED if allowed is None else allowed
     for word, env, cwd in _programs(event, args):
-        name = os.path.basename(word)
+        name = os.path.basename(word).lower()  # macOS file names ignore case: Codex is codex
         if name not in TOOLS:
             continue
         for path in _resolve(word, env, cwd, also_own_path=event == "os.posix_spawn"):
@@ -171,6 +185,22 @@ def starts_devkit(event, args) -> bool:
     if event not in EVENTS:
         return False
     return any(_DEVKIT.search(w) for w in _words(args[1]) + _words(args[0]))
+
+
+def runs_devkit(event, args) -> bool:
+    """Whether a process start runs devkit: a copy's bin/dev (starts_devkit), Python with `-m devkit[.<module>]`, or
+    Python with `-c` code that imports devkit."""
+    if starts_devkit(event, args):
+        return True
+    if event not in EVENTS or event == "os.system":
+        return False
+    words = _words(args[1])
+    for k, w in enumerate(words[:-1]):
+        if w == "-m" and words[k + 1].split(".")[0] == "devkit":
+            return True
+        if re.fullmatch(r"-[A-Za-z]*c", w) and _IMPORTS_DEVKIT.search(words[k + 1]):
+            return True
+    return False
 
 
 def trips(log=None) -> list:
