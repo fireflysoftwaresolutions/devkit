@@ -1914,14 +1914,19 @@ def _codex_pending(sid: str) -> Path:
     return STATE / "codex-pending" / f"{re.sub(r'[^A-Za-z0-9_.-]', '_', sid)[:80]}.json"
 
 
-def _codex_defer(data: dict):
-    """A Codex command whose CommandExecution item is not on disk yet: what its ledger line needs, kept for
-    _codex_settle."""
+def _codex_defer(agent: str, data: dict):
+    """A Codex command whose CommandExecution item is not on disk yet: what its ledger line and its root-cause
+    paragraph need, kept for _codex_settle. Its output stays out (it may hold secrets): only its error key
+    (_call_keys), devkit's own marker lines (the ledger's codes, the registry lines) and the ids of the lessons it
+    recalls; the command is kept with its secrets redacted, for the tech lead's notice."""
     sid = str(data.get("session_id") or "")
     if not sid:
         return
+    from . import audit, bugs
     keep = {k: data.get(k) for k in ("session_id", "tool_name", "tool_use_id", "agent_id", "cwd", "transcript_path")}
-    keep.update(tool_input={"command": _command_of(data)[:4000]}, tool_response=_output_text(data)[-8000:],
+    keep.update(tool_input={"command": audit.redact(_command_of(data))[:4000]},
+                tool_response="\n".join(m.group(0) for m in bugs.MARKER_RE.finditer(_output_text(data))),
+                keys=list(_call_keys(data, False)), lessons=[x["meta"]["id"] for x in _recall_quietly(agent, data)],
                 ts=time.time())
     state.update(_codex_pending(sid), lambda d: d.update(calls=(d.get("calls") or [])[-49:] + [keep]))
 
@@ -1967,10 +1972,11 @@ def _codex_settle(agent: str, data: dict, loop: bool = True, read: dict = None) 
             _log(f"post-tool {agent}: no CommandExecution record for {c.get('tool_use_id')} after {CODEX_SETTLE_S} s; "
                  f"the call leaves the ledger unsettled")
             continue
-        keys = _call_keys(c, outcome)
+        key, sig = c.get("keys") or _call_keys(c, False)  # computed when the call was deferred, from its output
+        keys = (key, "" if outcome else sig)
         _output_bugs(agent, c, outcome, keys)
         if loop and not outcome and _patch_loop(agent, c, keys):
-            found = _recall_quietly(agent, c)
+            found = _recalled(agent, c, c.get("lessons") or [])
             try:
                 _shown(c, [x["meta"]["id"] for x in found], "output")
             except Exception as e:
@@ -1980,8 +1986,8 @@ def _codex_settle(agent: str, data: dict, loop: bool = True, read: dict = None) 
 
 
 def _recall_quietly(agent: str, data: dict) -> list:
-    """The best LOOP_SHOW open lessons whose error signature a settled call's output shows, without counting a hit:
-    its PostToolUse counted them when the call ended."""
+    """The best LOOP_SHOW open lessons whose error signature a deferred call's output shows, without counting a hit:
+    the same PostToolUse counts them (_output_pitfalls)."""
     try:
         project = str(_session_record(agent, data).get("project") or "")
         from . import lessons
@@ -1989,6 +1995,20 @@ def _recall_quietly(agent: str, data: dict) -> list:
     except Exception:
         _log(f"settle recall {agent}: {traceback.format_exc()[-300:]}")
         return []
+
+
+def _recalled(agent: str, data: dict, ids: list) -> list:
+    """The lessons `ids` (a deferred call's recall, _codex_defer) as the recall pool has them now, in that order."""
+    if not ids:
+        return []
+    try:
+        project = str(_session_record(agent, data).get("project") or "")
+        from . import lessons
+        pool = {x["meta"]["id"]: x for x in lessons.recall_pool(project)} if project else {}
+    except Exception:
+        _log(f"settle lessons {agent}: {traceback.format_exc()[-300:]}")
+        return []
+    return [pool[i] for i in ids if i in pool]
 
 
 def _output_pitfalls(agent: str, data: dict, take: int = 0, taken: list = None) -> str:
@@ -3105,7 +3125,7 @@ def post_tool(agent: str):
     bug_text = _output_bugs(agent, data, True, ledger=outcome is not None)
     if outcome is None:  # a Codex command whose record is not on disk yet: its ledger line waits, never a success
         try:
-            _codex_defer(data)
+            _codex_defer(agent, data)
         except Exception as e:
             _swallowed("post-tool", e)
     _context_out("PostToolUse", "\n\n".join(x for x in (settled, carried, answered, background,

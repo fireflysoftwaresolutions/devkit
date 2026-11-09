@@ -51,6 +51,12 @@ def hygiene_plan(now: float = None) -> list:
         if f.stem < month_cut:
             plan.append(("timing", f, "timing records older than 3 months"))
     plan += [("pending", f, "unfinished tool timers older than a day") for f in _old_files(timing / "pending", "*.json", 1, now)]
+    codex = STATE / "codex-pending"  # Codex calls waiting for their rollout record (at most ten minutes each)
+    waiting = _old_files(codex, "*.json", 1, now)
+    plan += [("codex-pending", f, "Codex calls left waiting for their rollout record over a day") for f in waiting]
+    live = {f.stem for f in codex.glob("*.json")} - {f.stem for f in waiting} if codex.exists() else set()
+    plan += [("codex-pending", f, "locks of those records older than a day")
+             for f in _old_files(codex / "locks", "*.lock", 1, now) if f.stem[len("rec-"):] not in live]
     plan += [("run", f, "progress runs older than 14 days") for f in _old_files(STATE / "runs", "*.json", 14, now)]
     plan += [("session", f, "session records older than 30 days")
              for f in _old_files(STATE / "sessions", "*", 30, now)]

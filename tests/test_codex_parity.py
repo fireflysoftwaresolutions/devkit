@@ -238,6 +238,25 @@ class CodexFailedShellTests(BugState, HookCase):
         self.assertEqual(read.call_count, 1)  # the three settled calls and the new one share one read of the tail
         self.assertEqual(self._ledger_ok(), [False, False, False, False])
 
+    def test_a_waiting_call_keeps_neither_its_output_nor_a_secret_in_its_command(self):
+        # the pending record keeps what settling needs (the error key, devkit's marker lines, the lessons the output
+        # recalled), so the paragraph still names the lesson; the output and a token in the command stay out of it
+        hooks._session_file("codex", "c1").write_text(json.dumps({"project": "acme/api"}))
+        lid = self.lesson("Imported a module the environment lacks", errors=["No module named 'nosuchmod'"])
+        token = "ghp_" + "A1b2C3d4E5f6" * 3  # the shape of a GitHub token, built here so no literal looks like one
+        self.CMD = f"GH_TOKEN={token} python3 -c 'import nosuchmod'"
+        self._record(1)
+        self._post(1)
+        self._post(2)  # the same failure again, its record not written yet
+        kept = hooks._codex_pending("c1").read_text()
+        self.assertNotIn("ModuleNotFoundError", kept)
+        self.assertNotIn("A1b2C3d4", kept)
+        self._record(2)
+        self._record(3, status="completed", code=0)
+        ctx = json.loads(self._post(3))["hookSpecificOutput"]["additionalContext"]
+        self.assertIn(hooks.ROOT_CAUSE_STOP, ctx)
+        self.assertIn(f"- Lesson {lid} (recorded by", ctx.split(hooks.ROOT_CAUSE_STOP, 1)[1])
+
     def test_a_command_never_recorded_leaves_no_ledger_line_and_is_logged(self):
         self._post(1)
         self._record(2, status="completed", code=0)
