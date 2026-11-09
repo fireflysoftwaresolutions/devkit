@@ -14,8 +14,10 @@ prevention still exists.
                                           the like), a secret-like value, a URL, a pipe
                                           into a shell, download-and-run, a path in the agents' or devkit's
                                           configuration folders, or invisible characters, in any field; a command
-                                          substitution or a backtick command in the fields an agent acts on (the
-                                          title, Prevention, Fix), not in the ones that explain the mistake
+                                          substitution or a backtick command only beside a destructive command in
+                                          the same field (rm -rf, sudo, chmod -R 777, a forced git push, fetched
+                                          code a shell runs), and only in the fields an agent acts on (the title,
+                                          Prevention, Fix), not in the ones that explain the mistake
     lint(lessons, repo_root=None) -> [{id, kind, problem, fix}]
                                           recorded lessons that recall cannot use well: broad, missing and wrong
                                           anchors, file anchors that match no file, no root cause, held lessons
@@ -174,6 +176,70 @@ _PIPE_SHELL = re.compile(r"(?<!\|)\|(?!\|)\s*(?:(?:sudo|env|xargs|exec|command)\
                          + _SHELLS + r"\b", re.I)
 _SUBST = re.compile(r"\$\(")
 _BACKTICK = re.compile(r"`[^`]+`")
+# the commands that make a command substitution or a backtick command dangerous: rm with both recursive and force,
+# sudo, chmod -R 777, a forced git push (not --force-with-lease or --force-if-includes), and fetched code that a shell
+# runs (handed to eval, source, exec or a shell's -c, substituted where a command starts, or saved to a file that is
+# then run as ./file)
+_RM = re.compile(r"\brm((?:[ \t]+-[\w-]+)+)", re.I)
+_CHMOD = re.compile(r"\bchmod((?:[ \t]+[^\s;&|()`]+)+)", re.I)
+_PUSH = re.compile(r"\bgit\b[^\n;&|()`]{0,200}?\bpush\b([^\n;&|()`]*)", re.I)
+_SUDO = re.compile(r"\bsudo\b", re.I)
+_FETCH = r"(?:sudo\s+)?(?:curl|wget|fetch|iwr|irm|invoke-webrequest|invoke-restmethod)\b"
+_FETCH_RUN = re.compile(
+    r"(?:\beval|\bsource|\bexec|(?<![^\s;&|])\.|\b" + _SHELLS + r"(?:\s+-\w+)*\s+-\w*c)\s+[\"']?(?:\$\(|`)\s*" + _FETCH
+    + r"|(?:^|[;&|({]|\b(?:run|then|do)\b)\s*\$\(\s*" + _FETCH
+    + r"|\b(?:curl|wget)\b[^\n]{0,200}?(?:&&|;|\|\|)\s*(?:sudo\s+)?\./",
+    re.I | re.M)
+
+
+def _flags(args: str):
+    """The short option letters and the long options in a command's arguments."""
+    words = args.split()
+    return "".join(w[1:] for w in words if w.startswith("-") and not w.startswith("--")), set(words)
+
+
+def _rm_rf(text: str) -> bool:
+    for m in _RM.finditer(text):
+        short, words = _flags(m.group(1))
+        if ("r" in short.lower() or "--recursive" in words) and ("f" in short or "--force" in words):
+            return True
+    return False
+
+
+def _chmod_777(text: str) -> bool:
+    for m in _CHMOD.finditer(text):
+        short, words = _flags(m.group(1))
+        if ("R" in short or "--recursive" in words) and words & {"777", "0777"}:
+            return True
+    return False
+
+
+def _forced_push(text: str) -> bool:
+    for m in _PUSH.finditer(text):
+        short, words = _flags(m.group(1))
+        if "f" in short or "--force" in words:
+            return True
+    return False
+
+
+def _destructive(text: str) -> bool:
+    return bool(_SUDO.search(text) or _FETCH_RUN.search(text)) or _rm_rf(text) or _chmod_777(text) or \
+        _forced_push(text)
+
+
+def _dangerous(text: str) -> bool:
+    """Download-and-run, a pipe into a shell, or a destructive command (_destructive)."""
+    return bool(_DOWNLOAD_RUN.search(text) or _PIPE_SHELL.search(text)) or _destructive(text)
+
+
+def _dangerous_subst(text: str) -> bool:
+    return bool(_SUBST.search(text)) and _dangerous(text)
+
+
+def _dangerous_backtick(text: str) -> bool:
+    return bool(_BACKTICK.search(text)) and _dangerous(text)
+
+
 _URL = re.compile(r"\b[a-z][a-z0-9+.-]{1,15}://\S|\bwww\.[a-z0-9-]+\.[a-z]", re.I)
 _CONFIG = re.compile(r"(?:~|\$HOME|\$\{HOME\}|/Users/[^/\s]+|/home/[^/\s]+|/root)/(?:\.claude(?:\.json|/|\b)|\.codex\b"
                      r"|\.local/share/devkit\b|\.config/devkit\b)")
@@ -184,15 +250,16 @@ SCREENS = (
     ("tells agents to override the developer or the guard", _override),
     ("downloads and runs code", _DOWNLOAD_RUN.search),
     ("pipes into a shell", _PIPE_SHELL.search),
-    ("has a command substitution", _SUBST.search),
-    ("has a backtick command", _BACKTICK.search),
+    ("has a command substitution with a destructive command", _dangerous_subst),
+    ("has a backtick command with a destructive command", _dangerous_backtick),
     ("has a URL", _URL.search),
     ("names a path in the agents' or devkit's configuration folders", _CONFIG.search),
 )
-# the sections that explain a mistake rather than tell an agent what to do: a command substitution or a backtick
-# command there is the story of what ran, so those two screens skip them (every other screen still reads them)
+# the sections that explain a mistake rather than tell an agent what to do: a destructive command in a substitution or
+# a backtick command there is the story of what ran, so those two screens skip them (every other screen still reads
+# them, download-and-run and a pipe into a shell included)
 EXPLANATION = frozenset(("what happened", "root cause", "detection", "evidence"))
-_ACTING_ONLY = frozenset((_SUBST.search, _BACKTICK.search))
+_ACTING_ONLY = frozenset((_dangerous_subst, _dangerous_backtick))
 
 
 def _secret(text: str):
@@ -218,9 +285,11 @@ def _explains(key) -> bool:
 
 def screen(fields: dict) -> str:
     """Why a lesson must be held instead of recalled, as one line ("Prevention pipes into a shell"), or "". Every
-    string value is screened, whatever its key, and so are lists of strings, with one exception: a command
-    substitution or a backtick command holds the lesson only outside What happened, Root cause, Detection and
-    Evidence (in the title, Prevention, Fix and any other key), because those four explain what ran. Text is compared
+    string value is screened, whatever its key, and so are lists of strings. A command substitution or a backtick
+    command alone holds nothing: lessons name them to warn against them ("never use $(...) in a lane"). One holds the
+    lesson beside a destructive command in the same value (_destructive), and only outside What happened, Root cause,
+    Detection and Evidence (in the title, Prevention, Fix and any other key), because those four explain what ran;
+    download-and-run and a pipe into a shell hold in every field on their own. Text is compared
     after NFKC normalization (fullwidth letters become plain ones) with Unicode dashes read as "-". The reason never
     quotes the text it found, so a secret is never copied into the lesson's front matter."""
     texts = [(key, s) for key, value in (fields or {}).items() for s in _strings(value) if s]
