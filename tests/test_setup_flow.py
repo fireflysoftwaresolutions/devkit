@@ -1293,7 +1293,8 @@ class AgentOffTests(unittest.TestCase):
         with mock.patch.object(wizard, "installed_before", lambda: True, create=True):  # a rerun: devkit is installed
             r = run_wizard(mac, ENTER + b"2" + DOWN + ENTER + ENTER)
         last = " ".join(r.text.split("· Review")[-1].split())
-        self.assertIn("devkit removes its rules, hooks and skills from Codex. Codex and your own settings stay.",
+        self.assertIn("devkit removes its rules, hooks and skills from Codex, and the full-access modes it set (no "
+                      "approvals, no sandbox). Codex and your own settings stay.",
                       last)
         self.assertIn("To remove the app: brew uninstall --cask codex", last)
 
