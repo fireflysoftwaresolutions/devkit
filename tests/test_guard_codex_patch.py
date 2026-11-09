@@ -41,11 +41,15 @@ class ApplyPatchOnAgentSettings(unittest.TestCase):
     def test_an_add_that_turns_hooks_off_is_denied(self):
         cfg = Path(self.cwd) / "app" / ".codex" / "config.toml"
         self.assertEqual(self.verdict(patch(f"*** Add File: {cfg}", "+[features]", "+hooks = false")), "deny")
+        # the twin: the same text in a file Codex does not read as its settings
+        self.assertEqual(self.verdict(patch(f"*** Add File: {self.codex / 'notes.toml'}", "+hooks = false")), "allow")
 
     def test_an_update_that_adds_hooks_false_is_denied(self):
         cfg = self.codex / "config.toml"
         self.assertEqual(self.verdict(patch(f"*** Update File: {cfg}", "@@", ' model = "a"', "+hooks = false")), "deny")
         self.assertEqual(self.verdict(patch(f"*** Update File: {cfg}", "@@", ' model = "a"', '+effort = "high"')),
+                         "allow")
+        self.assertEqual(self.verdict(patch(f"*** Update File: {cfg}", "@@", ' model = "a"', "+hooks = true")),
                          "allow")
 
     def test_an_update_whose_hunk_does_not_apply_is_judged_by_the_lines_it_adds(self):
@@ -84,12 +88,6 @@ class ApplyPatchOnAgentSettings(unittest.TestCase):
                 self.assertEqual((v or ("allow",))[0], want)
                 body = patch(f"*** Add File: {cfg}", *("+" + ln for ln in text.split("\n")))
                 self.assertEqual(self.verdict(body), want)
-
-    def test_a_patch_that_keeps_devkit_on_is_allowed(self):
-        cfg = self.codex / "config.toml"
-        self.assertEqual(self.verdict(patch(f"*** Update File: {cfg}", "@@", ' model = "a"', "+hooks = true")),
-                         "allow")
-        self.assertEqual(self.verdict(patch(f"*** Add File: {self.codex / 'notes.toml'}", "+hooks = false")), "allow")
 
 
 if __name__ == "__main__":

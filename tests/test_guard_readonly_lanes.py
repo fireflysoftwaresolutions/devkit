@@ -158,8 +158,10 @@ class PortfolioReads(unittest.TestCase):
                 with self.subTest(level=level, cmd=cmd):
                     self.assertIsNone(verdict(cmd, "seraph", level))
 
-    def test_the_forms_that_write_stay_refused(self):
+    def test_the_forms_that_write_stay_refused_while_their_reads_run(self):
         for level in ("review", "read"):
+            self.assertIsNone(verdict("dev report --days 3", "oracle", level))
+            self.assertIsNone(verdict("dev initiative show payments", "oracle", level))
             for cmd in self.WRITES:
                 with self.subTest(level=level, cmd=cmd):
                     self.assertIn("read-only lane", verdict(cmd, "oracle", level) or "")
@@ -206,6 +208,7 @@ class PlanWritesFromReadOnlyLanes(unittest.TestCase):
 
     def test_a_plan_write_outside_the_projects_folder_is_refused(self):
         h = core.HANDOFF
+        self.assertIsNone(verdict(f"dev plan revise {self.spec} --why y", "oracle", cwd=self.shop))  # the twin
         for cmd in ("dev plan new x -p acme/other", "dev plan new x --project=acme/shop", "dev plan new x -i payments",
                     "dev plan -p acme/other new x", f"cd {self.other} && dev plan new x", f"cd {h} && dev plan new x",
                     f"dev plan revise {self.theirs} --why y", f"dev plan revise {self.plans}/../other/x.md --why y",
@@ -224,6 +227,7 @@ class PlanWritesFromReadOnlyLanes(unittest.TestCase):
                                      base=self.shop))
 
     def test_members_whose_work_produces_no_plans_and_read_lanes_are_refused(self):
+        self.assertIsNone(verdict("dev plan new x", "oracle", "review", cwd=self.shop))  # the twin: a plan writer
         for member, level in (("seraph", "review"), ("smith", "review"), ("tank", "review"), ("keymaker", "review"),
                               ("sparks", "read"), ("oracle", "read"), (None, "review")):
             for cmd in self.writes():
