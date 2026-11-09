@@ -607,12 +607,15 @@ class WorkflowFileTests(unittest.TestCase):
     def setUp(self):
         self.text = WORKFLOW.read_text(encoding="utf-8")
 
-    def test_no_expression_reads_event_text(self):
-        exprs = {e.strip() for e in re.findall(r"\$\{\{(.*?)\}\}", self.text)}
-        self.assertEqual(exprs, {"github.event.issue.number || github.event.release.id", "github.token",
-                                 "secrets.BUG_REGISTRY_KEY"})
-        event_lines = [ln.strip() for ln in self.text.splitlines() if "${{ github.event" in ln]
-        self.assertEqual(event_lines, ["group: bug-registry-${{ github.event.issue.number || github.event.release.id }}"])
+    def test_event_text_reaches_no_command(self):
+        exprs = sorted(" ".join(e.split()) for e in re.findall(r"\$\{\{(.*?)\}\}", self.text, re.S))
+        self.assertEqual(exprs, sorted([
+            "!github.event.issue.pull_request && (github.event_name == 'release' || (github.event_name == 'issues' && "
+            "contains(github.event.issue.body, '```json')) || (github.event_name == 'issue_comment' && "
+            "contains(github.event.comment.body, '```json')))",  # the job's condition: compared, never run
+            "github.event.issue.number || github.event.release.id",  # the concurrency group: numbers only
+            "github.token", "secrets.BUG_REGISTRY_KEY"]))
+        self.assertNotIn("github.event", self.text[self.text.index("\n    steps:"):])
 
     def test_only_the_allowed_permissions(self):
         lines = self.text.splitlines()

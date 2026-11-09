@@ -6,11 +6,11 @@
 name: bug registry
 
 on:
-  issues:
+  # Reports open issues and payloads arrive as comments, from any account: these triggers are the registry's input.
+  # The job checks out the default branch (never pull request code), passes the script only the runner's event file
+  # path and event name, writes nothing to GITHUB_ENV or GITHUB_OUTPUT, and holds issues: write and contents: read.
+  issues: # zizmor: ignore[dangerous-triggers] reviewed: the issue body is read as data by the script, never run
     types: [opened]
-  # Payloads arrive as comments from any account, so this trigger is the registry's input. The job checks out the
-  # default branch (never pull request code), passes the script only the runner's event file path and event name,
-  # writes nothing to GITHUB_ENV or GITHUB_OUTPUT, and holds issues: write and contents: read alone.
   issue_comment: # zizmor: ignore[dangerous-triggers] reviewed: comments are read as data by the script, never run
     types: [created]
   release:
@@ -21,6 +21,12 @@ permissions: {}
 jobs:
   fold:
     name: Fold registry payloads
+    # A pull request comment, or an issue or comment without a payload block, starts no job, so comment spam queues
+    # nothing. The condition only compares text; nothing from the event reaches a command.
+    if: >-
+      ${{ !github.event.issue.pull_request && (github.event_name == 'release'
+      || (github.event_name == 'issues' && contains(github.event.issue.body, '```json'))
+      || (github.event_name == 'issue_comment' && contains(github.event.comment.body, '```json'))) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
