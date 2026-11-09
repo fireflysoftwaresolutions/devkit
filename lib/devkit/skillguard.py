@@ -247,7 +247,8 @@ def read(agent: str, transcript: str, offset: int = 0):
     """-> (loaded skill names, changed file paths, shell commands, new offset) from the transcript since
     `offset`."""
     from .hooks import SHELL_TOOLS
-    loaded, files, commands = set(), [], []
+    from .scope import exec_calls, item_command
+    loaded, files, commands, parsed = set(), [], [], []  # parsed: exec-script commands no record matched yet
     try:
         p = Path(transcript)
         size = p.stat().st_size
@@ -283,7 +284,8 @@ def read(agent: str, transcript: str, offset: int = 0):
                     for m in SKILL_PATH_RE.finditer(inp.get("command") or ""):
                         loaded.add(m.group(1).lower())
         else:
-            if "function_call" not in ln and "custom_tool_call" not in ln and "exec_command" not in ln:
+            if "function_call" not in ln and "custom_tool_call" not in ln and "exec_command" not in ln and \
+                    "CommandExecution" not in ln:
                 continue
             for m in SKILL_PATH_RE.finditer(ln.replace("\\/", "/")):
                 loaded.add(m.group(1).lower())
@@ -294,10 +296,15 @@ def read(agent: str, transcript: str, offset: int = 0):
             except ValueError:
                 continue
             pl = rec.get("payload") if isinstance(rec, dict) else None
+            ran = item_command(rec, parsed) if isinstance(rec, dict) else None
+            if ran:  # a command the exec scripts read so far did not name (built at run time)
+                commands.append(ran[0])
+                continue
             if isinstance(pl, dict) and pl.get("type") in ("custom_tool_call", "function_call") and \
                     pl.get("name") == "exec" and isinstance(pl.get("input"), str):  # code mode: its nested calls
-                from .scope import exec_calls
-                commands.extend(_shell_command(inp) for name, inp in exec_calls(pl["input"]) if name in SHELL_TOOLS)
+                nested = [_shell_command(inp) for name, inp in exec_calls(pl["input"]) if name in SHELL_TOOLS]
+                parsed.extend(nested)
+                commands.extend(nested)
                 continue
             if isinstance(pl, dict) and pl.get("type") == "function_call" and pl.get("name") in SHELL_TOOLS:
                 args = pl.get("arguments")

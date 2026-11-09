@@ -1141,7 +1141,7 @@ def _shell_calls(path, now: float) -> tuple:
     command (alone()), the only way a background command or a Monitor wakes the agent when the wait ends."""
     from .gates import BG_LAUNCH_RE, DENIAL_RE, ENDED, STOP_TOOLS, _notifications, _records, _tag, _task_of, _text
     from .hooks import SHELL_TOOLS
-    from .scope import _is_prompt, exec_calls
+    from .scope import _is_prompt, exec_calls, item_command
 
     def call(cmd, cwd, ts):
         spec, everything = _wait_spec(cmd), global_wait(cmd)
@@ -1149,6 +1149,7 @@ def _shell_calls(path, now: float) -> tuple:
                 "alone": (spec is not None or everything) and alone(cmd), "task": "", "id": "", "monitor": False,
                 "limit": 0}
     calls, by_use, stops, gone, turn = [], {}, {}, set(), 0
+    parsed = []  # Codex: exec-script commands that no CommandExecution record has matched yet
     for rec in _records(path):
         if _is_prompt(rec):
             turn = len(calls)
@@ -1156,10 +1157,14 @@ def _shell_calls(path, now: float) -> tuple:
             if _tag(note, "status").lower() in ENDED or _tag(note, "status").lower() in GONE:
                 gone.update({_tag(note, "task-id"), _tag(note, "tool-use-id")} - {""})
         p = rec.get("payload") or {}
-        if p.get("type") in ("function_call", "custom_tool_call") and p.get("name") == "exec" and \
+        ran = item_command(rec, parsed)
+        if ran:  # Codex: a command its exec scripts did not name (built at run time), from its own record
+            calls.append(call(ran[0], ran[1], rec.get("timestamp")))
+        elif p.get("type") in ("function_call", "custom_tool_call") and p.get("name") == "exec" and \
                 isinstance(p.get("input"), str):  # Codex code mode: the shell calls of the model's exec script
-            calls.extend(call(args["cmd"], args.get("workdir") or "", rec.get("timestamp"))
-                         for name, args in exec_calls(p["input"]) if name in SHELL_TOOLS)
+            nested = [args for name, args in exec_calls(p["input"]) if name in SHELL_TOOLS]
+            parsed.extend(args["cmd"] for args in nested)
+            calls.extend(call(args["cmd"], args.get("workdir") or "", rec.get("timestamp")) for args in nested)
         elif p.get("type") in ("function_call", "custom_tool_call") and p.get("name") in SHELL_TOOLS:  # Codex
             args = p.get("arguments") if p.get("type") == "function_call" else p.get("input")
             if isinstance(args, str):

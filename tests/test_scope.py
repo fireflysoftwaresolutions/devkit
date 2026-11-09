@@ -113,6 +113,20 @@ class TurnActionTests(unittest.TestCase):
         self.assertEqual(acts["commands"], ["rg --files"])
         self.assertEqual(acts["edits"], [])
 
+    def test_codex_command_records_add_what_the_script_builds_at_run_time(self):
+        # each command an exec script runs leaves a CommandExecution item (captured with 0.167.0): a literal command
+        # counts once, and one whose text the script builds at run time comes from its item alone
+        def item(cmd, n):
+            return {"type": "event_msg", "payload": {"type": "item_completed", "turn_id": "t1", "item": {
+                "type": "CommandExecution", "id": f"exec-{n}", "command": ["/bin/zsh", "-lc", cmd],
+                "cwd": "file:///repo", "status": "completed", "exit_code": 0}}}
+        turn = _codex_turn("t1", "test and push", [
+            _codex_exec("call_1", "text(await tools.exec_command({cmd:\"make test\"}));\n"
+                                  "const remote = \"origin\";\n"
+                                  "text(await tools.exec_command({cmd: `git push ${remote} main`}));\n"),
+            item("make test", 1), item("git push origin main", 2)], "Pushed.")
+        self.assertEqual(scope.turn_actions(self._t(turn))["commands"], ["make test", "git push origin main"])
+
     def test_exec_calls_reads_each_literal_call_of_a_script(self):
         script = ("text(await tools.exec_command({cmd:\"dev crew raci\",max_output_tokens:2000}));\n"  # probe D
                   "text(await tools.exec_command({cmd:\"pwd && rg --files -g 'AGENTS.md' && git branch --show-current\","

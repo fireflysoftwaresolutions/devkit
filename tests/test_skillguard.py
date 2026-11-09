@@ -229,6 +229,19 @@ class CommandsAtStop(unittest.TestCase):
         self.assertIn("`delivery`", why or "")
         self.assertIn("git push", why or "")
 
+    # a push whose text the exec script builds at run time shows only in its CommandExecution item (0.167.0 capture)
+    def test_a_codex_push_built_at_run_time_owes_the_delivery_skill(self):
+        script = json.dumps({"type": "response_item", "payload": {
+            "type": "custom_tool_call", "status": "completed", "call_id": "call_1", "name": "exec",
+            "input": "const b = \"main\";\ntext(await tools.exec_command({cmd: `git push origin ${b}`}));\n"}})
+        item = json.dumps({"type": "event_msg", "payload": {"type": "item_completed", "turn_id": "t1", "item": {
+            "type": "CommandExecution", "id": "exec-5f125236-dd03-45f9-8fd3-db673fc2b9b0",
+            "command": ["/bin/zsh", "-lc", "git push origin main"], "cwd": "file:///repo", "status": "completed",
+            "exit_code": 0}}})
+        why = self.stop(script, item, agent="codex")
+        self.assertIn("`delivery`", why or "")
+        self.assertIn("git push", why or "")
+
     # text that only mentions a command, reading a CI run and listing lessons owe nothing; each skill is asked once
     def test_mentions_and_reads_owe_nothing_and_each_skill_is_asked_once(self):
         self.assertIsNone(self.stop(tool_use("Bash", command='echo "git push"'),

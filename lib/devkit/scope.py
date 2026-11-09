@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from urllib.parse import unquote
 
 from .canary import CODEX_TURN_START
 from .hooks import SHELL_TOOLS  # Bash, Monitor and Codex's shells
@@ -179,6 +180,27 @@ def exec_calls(script: str) -> list:
     return out
 
 
+def item_command(rec: dict, parsed: list):
+    """A Codex CommandExecution record (0.167 writes one for each command an exec script runs, with the command as
+    run): (its command, its folder) when the scripts read so far did not already name it, which is how a command the
+    script builds at run time is seen; None for a command already read from its script (`parsed`, the commands
+    exec_calls read, loses the one it matches) and for any other record."""
+    p = rec.get("payload") if isinstance(rec.get("payload"), dict) else {}
+    item = p.get("item") if rec.get("type") == "event_msg" and p.get("type") == "item_completed" else None
+    if not isinstance(item, dict) or item.get("type") != "CommandExecution":
+        return None
+    argv = item.get("command")
+    if isinstance(argv, list):
+        cmd = str(argv[-1]) if len(argv) >= 3 and argv[-2] in ("-c", "-lc") else " ".join(str(a) for a in argv)
+    else:
+        cmd = str(argv or "")
+    if cmd in parsed:
+        parsed.remove(cmd)
+        return None
+    cwd = str(item.get("cwd") or "")
+    return cmd, (unquote(cwd[len("file://"):]) if cwd.startswith("file://") else cwd)
+
+
 def turn_actions(transcript_path: str) -> dict:
     """What the last turn did: {"edits": [paths], "commands": [str], "skills": [names], "tools": {names}}."""
     out = {"edits": [], "commands": [], "skills": [], "tools": set()}
@@ -189,17 +211,23 @@ def turn_actions(transcript_path: str) -> dict:
         except ValueError:
             continue
     start = max((i for i, r in enumerate(recs) if _is_prompt(r)), default=-1)
+    parsed = []  # commands read from exec scripts that no CommandExecution record has matched yet
     for r in recs[start + 1:]:
         calls = []
         for c in ((r.get("message") or {}).get("content") or []) if r.get("type") == "assistant" else []:
             if isinstance(c, dict) and c.get("type") == "tool_use":
                 calls.append((c.get("name") or "", c.get("input") or {}))
         p = r.get("payload") or {}
+        ran = item_command(r, parsed)
+        if ran:
+            calls.append(("exec_command", {"cmd": ran[0]}))
         if p.get("type") in ("function_call", "custom_tool_call"):
             args = p.get("arguments") if p.get("type") == "function_call" else p.get("input")
             if p.get("name") == "exec" and isinstance(args, str):  # code mode: the script's nested calls
                 out["tools"].add("exec")
-                calls.extend(exec_calls(args))
+                nested = exec_calls(args)
+                parsed.extend(inp["cmd"] for name, inp in nested if name == "exec_command")
+                calls.extend(nested)
                 args = None
             elif isinstance(args, str):
                 try:
