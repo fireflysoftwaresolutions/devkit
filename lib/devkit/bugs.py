@@ -19,14 +19,10 @@ from __future__ import annotations
 
 import ast
 import functools
-import getpass
 import hashlib
 import json
 import os
-import platform
 import re
-import secrets
-import socket
 import string
 import sys
 import time
@@ -46,6 +42,23 @@ MATCH_WINDOW = 600  # seconds an occurrence code stays valid for a marker in too
 MARKER_RE = re.compile(r"^devkit-bug: ([0-9a-f]{12}) ([a-z0-9]{6})\r?$", re.M)
 _CODE_CHARS = string.ascii_lowercase + string.digits
 _TAIL_BYTES = 262144  # recent occurrences are at the end of the file; a marker check reads no more than this
+
+
+# Random values come from os.urandom directly: hooks import this module, and the `secrets` module costs them time.
+def _hex(nbytes: int) -> str:
+    return os.urandom(nbytes).hex()
+
+
+def _code() -> str:
+    """Six random lowercase letters or digits, without modulo bias."""
+    out = ""
+    while len(out) < 6:
+        out += "".join(_CODE_CHARS[b % 36] for b in os.urandom(8) if b < 252)
+    return out[:6]
+
+
+def _below(n: int) -> int:
+    return int.from_bytes(os.urandom(8), "big") % n
 
 
 # --------------------------------------------------------------------------- fingerprints and frames
@@ -129,7 +142,7 @@ def _write_json(path: Path, data, mode: int = 0o600) -> bool:
     """Write JSON atomically (a temporary file, then a rename), private to the owner. False when it cannot."""
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_name(f".{path.name}.{secrets.token_hex(4)}.tmp")
+        tmp = path.with_name(f".{path.name}.{_hex(4)}.tmp")
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
         with os.fdopen(fd, "w") as fh:
             json.dump(data, fh, separators=(",", ":"), sort_keys=True)
@@ -142,7 +155,7 @@ def _write_json(path: Path, data, mode: int = 0o600) -> bool:
 def _create(path: Path, text: str, mode: int = 0o600) -> bool:
     """Create `path` whole, or not at all: a temporary file linked into place. False when `path` already exists."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.{secrets.token_hex(4)}.tmp")
+    tmp = path.with_name(f".{path.name}.{_hex(4)}.tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
     try:
         with os.fdopen(fd, "w") as fh:
@@ -204,7 +217,7 @@ def install_id() -> str:
             return value
     except OSError:
         pass
-    value = secrets.token_hex(16)
+    value = _hex(16)
     if path.exists():  # unreadable or damaged: replace it whole
         _write_text(path, value + "\n")
         return value
@@ -214,7 +227,7 @@ def install_id() -> str:
 
 
 def _write_text(path: Path, text: str, mode: int = 0o600):
-    tmp = path.with_name(f".{path.name}.{secrets.token_hex(4)}.tmp")
+    tmp = path.with_name(f".{path.name}.{_hex(4)}.tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
     with os.fdopen(fd, "w") as fh:
         fh.write(text)
@@ -227,7 +240,7 @@ def record_occurrence(kind: str, fp: str, *, impact: str = "blocked", command: s
     """Record one hit of `fp` on this machine with a fresh one-time code, in BUGS/occurrences.jsonl. -> the record,
     with `saved` False when the state folder could not be written (the code then matches nothing)."""
     rec = {"ts": round(time.time(), 3), "kind": kind, "fingerprint": fp,
-           "code": "".join(secrets.choice(_CODE_CHARS) for _ in range(6)), "impact": impact, "session": session,
+           "code": _code(), "impact": impact, "session": session,
            "version": core.VERSION, "command": command, "event": event, "refusal_id": refusal_id, "word": word,
            "exc_class": exc_class, "frames": list(frames)}
     saved = _append_line(BUGS / "occurrences.jsonl", rec)
@@ -380,6 +393,7 @@ def _fits(value, pattern) -> str:
 def build_report(occ: dict) -> dict:
     """A report from an occurrence: only REPORT_KEYS, each value checked against its vocabulary or pattern. Nothing
     else in `occ` (a working folder, arguments, a message) is ever copied."""
+    import platform
     exit_code = occ.get("exit")
     mac = platform.mac_ver()[0].split(".")[0]
     return {
@@ -453,6 +467,8 @@ def deny_words() -> frozenset:
     their local branch names and remote URLs, the handoff repository's project ids and initiative slugs, the user and
     host names and the home folder. Words shorter than 3 characters, devkit's own repository, public hosts, default
     branches and branch type prefixes are left out."""
+    import getpass
+    import socket
     devkit_parts = set(core.DEVKIT_REPO.lower().split("/")) | {core.DEVKIT_REPO.lower()}
     words = set()
 
@@ -644,8 +660,9 @@ def render_step(step: dict) -> str:
 
 SCHEMA_VERSION = 1
 PAYLOAD_TYPES = ("report", "vote", "detour", "confirm", "failed")
-TOOL_NAMES = ("Bash", "Edit", "Write", "Read", "Grep", "Glob", "MultiEdit", "NotebookEdit", "WebFetch", "WebSearch",
-              "Agent", "Task", "Monitor", "exec_command", "shell", "apply_patch", "write_stdin")
+# the agent tools a detour's evidence may name: these, and the shell tools of hooks.SHELL_TOOLS (the one list of them)
+_OTHER_TOOLS = ("Edit", "Write", "Read", "Grep", "Glob", "MultiEdit", "NotebookEdit", "WebFetch", "WebSearch", "Agent",
+                "Task", "apply_patch", "write_stdin")
 EVIDENCE_COUNTS = ("successes", "failures", "attempts")
 _COMMON_FIELDS = {"devkit_bug", "type", "fingerprint", "version"}
 _FREE_FIELDS = ("title", "text", "template")
@@ -662,13 +679,20 @@ _WINDOW_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 _DETOUR_ID_RE = re.compile(r"d\d{1,3}")
 
 
+@functools.lru_cache(maxsize=1)
+def tool_names() -> frozenset:
+    """The agent tool names a detour's evidence may carry."""
+    from .hooks import SHELL_TOOLS
+    return frozenset(_OTHER_TOOLS) | frozenset(SHELL_TOOLS)
+
+
 def _evidence_problems(ev) -> list:
     if not isinstance(ev, dict) or not set(ev) <= set(EVIDENCE_COUNTS) | {"tools"}:
         return [f"evidence holds only {', '.join(EVIDENCE_COUNTS)} and tools"]
     out = [f"evidence {k} must be a count" for k in EVIDENCE_COUNTS
            if k in ev and (isinstance(ev[k], bool) or not isinstance(ev[k], int) or not 0 <= ev[k] <= 10000)]
     tools = ev.get("tools", [])
-    if not isinstance(tools, list) or len(tools) > 10 or any(t not in TOOL_NAMES for t in tools):
+    if not isinstance(tools, list) or len(tools) > 10 or any(t not in tool_names() for t in tools):
         out.append("evidence tools must be agent tool names")
     return out
 
@@ -943,8 +967,635 @@ def fold(rec: dict, payload: dict, *, author_hash: str, author_assoc: str, now: 
                 d["flagged"] = True  # a failure mark from outside the team only asks a maintainer to look
     for d in detours:
         d["trust"] = trust_of(d, d.get("confirmations"))
-    cut = now - WINDOW_DAYS * 86400
-    rec["impacts"] = {k: sum(1 for v in rec.get("voters", {}).values() if v.get("impact") == k and v.get("ts", 0) >= cut)
-                      for k in IMPACT}
+    recent = [v for v in rec.get("voters", {}).values() if v.get("ts", 0) >= now - WINDOW_DAYS * 86400]
+    rec["impacts"] = {k: sum(1 for v in recent if v.get("impact") == k) for k in IMPACT}
     rec["score"] = round(score(rec, now), 4)
     return rec
+
+
+# --------------------------------------------------------------------------- the cache: what this machine knows
+#
+# `dev bug sync` and the hourly sync read the issues labeled devkit-bug (open, and closed in the last 90 days) and,
+# for each, only the record comment written by the bot. Issue titles and bodies, and every other comment, are never
+# read. Hooks match failures against this cache and never call the network; a failed fetch keeps the old cache.
+
+LABEL = "devkit-bug"
+TITLE_PREFIX = "[bug] "
+CACHE_MAX = 500
+MAX_PER_OPENER = 25
+CLOSED_DAYS = 90
+RETRY_DAYS = 7
+SERVED = ("verified", "team")
+
+
+def load_cache() -> dict:
+    """The cached registry: {"ts", "etag", "bugs": {fingerprint: {number, state, updated_at, opener, record}}}."""
+    cache = core.read_json(BUGS / "cache.json", {})
+    if not isinstance(cache, dict) or not isinstance(cache.get("bugs"), dict):
+        return {"ts": 0, "etag": "", "bugs": {}}
+    return cache
+
+
+def _issue_number(fp: str, cache: dict = None):
+    entry = (cache or load_cache())["bugs"].get(fp)
+    if entry:
+        return entry.get("number")
+    return (core.read_json(BUGS / "created.json", {}) or {}).get(fp)
+
+
+def _in_range(detour: dict, version) -> bool:
+    since, until = core.version_key(detour.get("since")), core.version_key(detour.get("until"))
+    return (not since or since <= version) and (not until or version < until)
+
+
+def match(fp: str, version: str):
+    """The cached bug for `fp` -> {"bug": its record with its issue number and state, "detours": the detours served
+    to agents}, or None. Served: trust verified or team, `version` in the detour's range, and the bug not fixed at
+    or before `version` (unless it regressed)."""
+    entry = load_cache()["bugs"].get(fp)
+    if not isinstance(entry, dict) or not isinstance(entry.get("record"), dict):
+        return None
+    rec = entry["record"]
+    bug = {**rec, "number": entry.get("number"), "state": entry.get("state")}
+    v, fixed = core.version_key(version), core.version_key(rec.get("fixed_in"))
+    if not v or (fixed and v >= fixed and rec.get("status") != "regressed"):
+        return {"bug": bug, "detours": []}
+    served = [json.loads(json.dumps(d)) for d in rec.get("detours") or [] if isinstance(d, dict)
+              and trust_of(d, d.get("confirmations")) in SERVED and _in_range(d, v)]
+    return {"bug": bug, "detours": served}
+
+
+def _bot_record(comments: list):
+    for c in sorted((c for c in comments or [] if isinstance(c, dict)), key=lambda c: c.get("id") or 0):
+        user = c.get("user") or {}
+        if user.get("login") == BOT_LOGIN and user.get("type") == "Bot":
+            rec = parse_record(c.get("body"))
+            if rec is not None:
+                return rec
+    return None
+
+
+def _checked_detours(rec: dict) -> dict:
+    """The record with only the detours whose steps pass the validator, so a hook never has to run it."""
+    rec["detours"] = [d for d in rec.get("detours") or [] if isinstance(d, dict) and not validate_steps(d.get("steps"))]
+    return rec
+
+
+def _ts(iso) -> float:
+    try:
+        return time.mktime(time.strptime(str(iso), "%Y-%m-%dT%H:%M:%SZ")) - time.timezone
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _capped(entries: dict, now: float) -> dict:
+    """The CACHE_MAX highest-scored bugs, at most MAX_PER_OPENER opened by any one account."""
+    per, out = {}, {}
+    for e in sorted(entries.values(), key=lambda e: (-score(e["record"], now), e.get("number") or 0)):
+        who = str(e.get("opener") or "").lower()
+        if per.get(who, 0) >= MAX_PER_OPENER:
+            continue
+        per[who] = per.get(who, 0) + 1
+        out[e["record"]["fingerprint"]] = e
+        if len(out) >= CACHE_MAX:
+            break
+    return out
+
+
+def _iso(ts: float) -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts))
+
+
+def _fresh_records(client, since: str) -> dict:
+    """{issue number: record} from the bot comments changed since `since`, through the client's repository-wide
+    comment listing (one request, where reading each issue's comments would take one per issue)."""
+    found = {}
+    for c in sorted((c for c in client.updated_comments(since) if isinstance(c, dict)), key=lambda c: c.get("id") or 0):
+        m = re.search(r"/issues/(\d+)$", str(c.get("issue_url") or ""))
+        if m and int(m.group(1)) not in found:
+            rec = _bot_record([c])
+            if rec is not None:
+                found[int(m.group(1))] = rec
+    return found
+
+
+def fetch(client=None, now: float = None) -> dict:
+    """Refresh the cache from the registry. -> {"ok", "bugs", "changed"} or {"ok": False, "error"}; on any failure
+    the old cache stays as it was. Records changed since the last fetch come from one listing of the bot's changed
+    comments where the client has it; an issue's own comments are read only when its record is unknown (or, for a
+    client without that listing, when the issue changed)."""
+    now = time.time() if now is None else now
+    old = load_cache()
+    known = {e.get("number"): e for e in old["bugs"].values() if isinstance(e, dict)}
+    try:
+        client = client or default_client()
+        if hasattr(client, "etag"):
+            client.etag = old.get("etag") or ""
+        issues = client.issues(LABEL, _iso(now - CLOSED_DAYS * 86400))
+        if issues is None:  # the list did not change: its issues are the ones already known
+            issues = [{"number": n, "state": e.get("state"), "updated_at": e.get("updated_at"), "labels": [LABEL],
+                       "user": {"login": e.get("opener", "")}} for n, e in known.items()]
+        listing = getattr(client, "updated_comments", None)
+        fresh = _fresh_records(client, _iso(old["ts"] - 3600 if old["bugs"] else now - CLOSED_DAYS * 86400)) \
+            if listing else {}
+        entries = {}
+        for issue in sorted((i for i in issues if isinstance(i, dict)), key=lambda i: i.get("number") or 0):
+            labels = {lb.get("name") if isinstance(lb, dict) else lb for lb in issue.get("labels") or []}
+            closed_long_ago = issue.get("state") == "closed" and _ts(issue.get("closed_at")) < now - CLOSED_DAYS * 86400
+            if issue.get("pull_request") or LABEL not in labels or closed_long_ago:
+                continue
+            number, updated = issue.get("number"), issue.get("updated_at")
+            prev = known.get(number)
+            if number in fresh:
+                rec = fresh[number]
+            elif prev and (listing or prev.get("updated_at") == updated):
+                rec = prev["record"]
+            else:
+                rec = _bot_record(client.comments(number))
+            if rec is None or rec["fingerprint"] in entries:
+                continue  # no bot record yet, or a later duplicate of a bug already seen
+            entries[rec["fingerprint"]] = {"number": number, "state": issue.get("state"), "updated_at": updated,
+                                           "opener": (issue.get("user") or {}).get("login", ""),
+                                           "record": _checked_detours(rec)}
+    except Exception as e:  # offline, rate limited, logged out: the old cache keeps serving
+        return {"ok": False, "error": _short(e), "bugs": len(old["bugs"])}
+    entries = _capped(entries, now)
+    _write_json(BUGS / "cache.json", {"ts": now, "etag": getattr(client, "etag", "") or "", "bugs": entries})
+    return {"ok": True, "bugs": len(entries), "changed": True}
+
+
+def _short(e) -> str:
+    return (str(e).strip().splitlines() or [type(e).__name__])[0][:200]
+
+
+# --------------------------------------------------------------------------- the outbox and the sender
+#
+# Hooks and commands never post: they queue items, one file each, created whole with an atomic link. The sender
+# runs with `dev bug sync` and the hourly sync, under the developer's GitHub account, and re-checks every item as if
+# it came from a stranger: an edited or dropped-in file sends nothing it should not.
+
+def _outbox() -> Path:
+    return BUGS / "outbox"
+
+
+def _item_ids() -> list:
+    box = _outbox()
+    return sorted((int(f.stem) for f in box.glob("*.json") if f.stem.isdigit()), key=int) if box.is_dir() else []
+
+
+def _free_texts(p: dict) -> list:
+    out = [p[k] for k in _FREE_FIELDS if isinstance(p.get(k), str)]
+    return out + [s["text"] for s in p.get("steps") or [] if isinstance(s, dict) and isinstance(s.get("text"), str)]
+
+
+def _security(item: dict) -> bool:
+    p = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+    return bool(item.get("security")) or is_security(p, " ".join(_free_texts(p)))
+
+
+def queue(item: dict) -> str:
+    """Put an item ({"payload": …, "security": optional}) in the outbox -> its id. Free text and security items
+    are held for the developer; a vote waits a random delay of up to an hour."""
+    payload = item["payload"]
+    security = _security(item)
+    now = time.time()
+    record = {**item, "ts": now, "first_ts": now, "attempts": 0, "next_try": 0, "security": security,
+              "held": bool(item.get("held")) or security or bool(_free_texts(payload)),
+              "not_before": now + _below(3601) if payload.get("type") == "vote" else 0}
+    box = _outbox()
+    box.mkdir(parents=True, exist_ok=True)
+    seq = core.read_json(box / ".seq", 0)
+    n = max(_item_ids() + [seq if isinstance(seq, int) else 0]) + 1
+    while not _create(box / f"{n}.json", json.dumps({**record, "id": str(n)}, sort_keys=True)):
+        n += 1  # another writer took this id first
+    _write_json(box / ".seq", n)
+    return str(n)
+
+
+def _load_item(item_id: str):
+    try:
+        item = json.loads((_outbox() / f"{int(item_id)}.json").read_text())
+    except (OSError, ValueError, TypeError):
+        return None
+    return item if isinstance(item, dict) else None
+
+
+def _digest(payload) -> str:
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+                          .encode()).hexdigest()
+
+
+def pending() -> list:
+    """The items held for the developer's review, oldest first, each as it would be sent, with `approved` True
+    when the developer approved its exact payload."""
+    approvals = core.read_json(BUGS / "approvals.json", {}) or {}
+    return [{**it, "approved": approvals.get(str(it.get("id"))) == _digest(it.get("payload"))}
+            for it in map(_load_item, map(str, _item_ids())) if it and it.get("held")]
+
+
+def approve(item_id: str) -> None:
+    """Approve the exact payload of a held item: its sha256 is stored, so a change after approval sends nothing."""
+    item = _load_item(item_id)
+    if item is None:
+        raise KeyError(item_id)
+    approvals = core.read_json(BUGS / "approvals.json", {}) or {}
+    approvals[str(int(item_id))] = _digest(item.get("payload"))
+    _write_json(BUGS / "approvals.json", approvals)
+
+
+def drop(item_id: str) -> None:
+    """Remove an item from the outbox, and its approval."""
+    try:
+        (_outbox() / f"{int(item_id)}.json").unlink()
+    except (OSError, ValueError):
+        raise KeyError(item_id)
+    _forget_approval(str(int(item_id)))
+
+
+def _forget_approval(item_id: str):
+    approvals = core.read_json(BUGS / "approvals.json", {}) or {}
+    if approvals.pop(item_id, None) is not None:
+        _write_json(BUGS / "approvals.json", approvals)
+
+
+def consent() -> dict:
+    """{"login", "share", "ts"}: the GitHub login the developer consented to post as, and what to share (on,
+    reports, off, or None when never asked). The configuration's bugs.share set to off switches posting off."""
+    c = core.read_json(BUGS / "consent.json", {}) or {}
+    share = c.get("share") if c.get("share") in ("on", "reports", "off") else None
+    if (core.CFG.get("bugs") or {}).get("share") == "off":
+        share = "off"
+    return {"login": str(c.get("login") or ""), "share": share, "ts": c.get("ts") or 0}
+
+
+def set_consent(share: str, login: str) -> None:
+    """Record the developer's consent: `on` (reports, votes and detours), `reports` (no votes) or `off`."""
+    if share not in ("on", "reports", "off"):
+        raise ValueError("share must be on, reports or off")
+    if share != "off" and not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})", login or ""):
+        raise ValueError("a GitHub login is needed to share")
+    if not _write_json(BUGS / "consent.json", {"login": login or "", "share": share, "ts": time.time()}):
+        raise OSError(f"cannot write {BUGS / 'consent.json'}")
+
+
+def _recheck(item: dict, deny) -> str:
+    """'' when the item may go out as it is; else why not. The payload must pass the schema (allowlist, vocabulary,
+    detour validator), and each free text must come out of the scrubber unchanged."""
+    p = item.get("payload")
+    problems = validate_payload(p)
+    if problems:
+        return problems[0]
+    for k in _FREE_FIELDS:
+        if isinstance(p.get(k), str):
+            clean = template_message(p[k], deny=deny()) if k == "template" else scrub_text(p[k], deny())[0]
+            if clean != p[k]:
+                return f"{k} names something private or was changed outside devkit"
+    for s in p.get("steps") or []:
+        if "text" in s and scrub_text(s["text"], deny())[0] != s["text"]:
+            return "a detour step names something private or was changed outside devkit"
+    return ""
+
+
+def _save_item(item: dict):
+    _write_json(_outbox() / f"{int(item['id'])}.json", item)
+
+
+def _remove_item(item: dict):
+    try:
+        (_outbox() / f"{int(item['id'])}.json").unlink()
+    except OSError:
+        pass
+    _forget_approval(str(int(item["id"])))
+
+
+def _backoff(item: dict, now: float, e):
+    item["attempts"] = int(item.get("attempts") or 0) + 1
+    item["next_try"] = now + min(3600 * 2 ** (item["attempts"] - 1), 86400)
+    item["last_error"] = _short(e)
+    _save_item(item)
+
+
+def _day(now: float) -> str:
+    return time.strftime("%Y-%m-%d", time.gmtime(now))
+
+
+def flush(client=None, now: float = None) -> dict:
+    """Send what the outbox holds -> counts of items {"sent", "held", "failed", "skipped"} (and "error"). Nothing is
+    posted without consent for the active gh login. Each item is re-checked; a held item goes only with an approval
+    of its exact payload; security items go only to private vulnerability reporting, and stay held if that fails;
+    votes go out at most once per issue per day; a new bug is searched for before an issue is created."""
+    now = time.time() if now is None else now
+    counts = {"sent": 0, "held": 0, "failed": 0, "skipped": 0}
+    with core.Lock("bugs-flush", wait=30) as locked:
+        if not locked:
+            return {**counts, "error": "another dev bug sync is sending"}
+        items = [it for it in map(_load_item, map(str, _item_ids())) if it]
+        if not items:
+            return counts
+        c = consent()
+        if c["share"] not in ("on", "reports"):
+            return {**counts, "held": len(items), "error": "sharing is off: the items stay on this machine"}
+        try:
+            client = client or default_client()
+            active = client.login()
+        except Exception as e:  # cannot even ask GitHub who is logged in: nothing goes out
+            return {**counts, "held": len(items), "error": f"cannot reach GitHub: {_short(e)}"}
+        if not active or active.lower() != c["login"].lower():
+            return {**counts, "held": len(items), "error": f"sharing paused: consent was for `{c['login']}`, "
+                                                           f"gh is logged in as `{active or 'nobody'}`"}
+        deny = functools.lru_cache(maxsize=1)(deny_words)
+        approvals = core.read_json(BUGS / "approvals.json", {}) or {}
+        cache = load_cache()
+        votes = {}
+        for item in items:
+            p = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+            if not item.get("held") and now - float(item.get("first_ts") or now) > RETRY_DAYS * 86400:
+                _remove_item(item)  # retried for 7 days: given up
+                counts["failed"] += 1
+                continue
+            problem = _recheck(item, deny)
+            if problem:
+                if item.get("problem") != problem:
+                    item["problem"] = problem
+                    _save_item(item)
+                counts["skipped"] += 1
+                continue
+            security = _security(item)
+            if (item.get("held") or security) and approvals.get(str(int(item["id"]))) != _digest(p):
+                counts["held"] += 1
+                continue
+            if max(float(item.get("next_try") or 0), float(item.get("not_before") or 0)) > now:
+                counts["skipped"] += 1
+                continue
+            if security:
+                report = getattr(client, "private_report", None)
+                try:
+                    if report is None:
+                        raise RuntimeError("this client cannot send private vulnerability reports")
+                    title = title_for(p) if p.get("type") == "report" else f"{p['type']} for {p['fingerprint']}"
+                    report(TITLE_PREFIX + title, render_payload(p))
+                except Exception as e:  # never falls back to Issues: the item waits for the developer
+                    item["problem"] = f"private reporting failed: {_short(e)}"
+                    _save_item(item)
+                    counts["held"] += 1
+                    continue
+                _remove_item(item)
+                counts["sent"] += 1
+            elif p["type"] == "vote":
+                if c["share"] == "reports":
+                    counts["skipped"] += 1
+                else:
+                    votes.setdefault(p["fingerprint"], []).append(item)
+            else:
+                try:
+                    _send(client, p, cache)
+                except _NoIssue:
+                    counts["skipped"] += 1
+                    continue
+                except Exception as e:
+                    _backoff(item, now, e)
+                    counts["failed"] += 1
+                    continue
+                _remove_item(item)
+                counts["sent"] += 1
+        _send_votes(client, votes, cache, now, counts)
+    return counts
+
+
+class _NoIssue(Exception):
+    """No registry issue is known for this fingerprint yet."""
+
+
+def _send(client, p: dict, cache: dict):
+    """Post one payload: a comment on the bug's issue; a report for a bug nobody filed yet creates the issue."""
+    number = _issue_number(p["fingerprint"], cache)
+    if number is None and p["type"] == "report":
+        finder = getattr(client, "find", None)
+        found = finder(p["fingerprint"]) if finder else []
+        number = min(found) if found else None
+        if number is None:
+            number = client.create_issue(TITLE_PREFIX + title_for(p), render_payload(p))
+            created = core.read_json(BUGS / "created.json", {}) or {}
+            created[p["fingerprint"]] = number
+            _write_json(BUGS / "created.json", created)
+            return
+    if number is None:
+        raise _NoIssue(p["fingerprint"])
+    client.comment(number, render_payload(p))
+
+
+def _send_votes(client, votes: dict, cache: dict, now: float, counts: dict):
+    """One vote comment per issue per day: the newest version and the worst impact of this machine's votes."""
+    sent = {k: v for k, v in (core.read_json(BUGS / "votes-sent.json", {}) or {}).items()
+            if isinstance(v, (int, float)) and now - v < 2 * 86400}
+    for fp, group in votes.items():
+        key = f"{fp}|{_day(now)}"
+        if key in sent:
+            for item in group:
+                _remove_item(item)  # this machine already voted on this bug today
+            counts["skipped"] += len(group)
+            continue
+        number = _issue_number(fp, cache)
+        if number is None:
+            counts["skipped"] += len(group)
+            continue
+        newest = max(group, key=lambda it: core.version_key(it["payload"]["version"]) or (0,))["payload"]
+        worst = max((it["payload"]["impact"] for it in group), key=lambda i: IMPACT[i])
+        vote = {"devkit_bug": SCHEMA_VERSION, "type": "vote", "fingerprint": fp, "version": newest["version"],
+                "impact": worst, "window": _day(now)}
+        try:
+            client.comment(number, render_payload(vote))
+        except Exception as e:
+            for item in group:
+                _backoff(item, now, e)
+            counts["failed"] += len(group)
+            continue
+        sent[key] = now
+        for item in group:
+            _remove_item(item)
+        counts["sent"] += 1
+    _write_json(BUGS / "votes-sent.json", sent)
+
+
+def sync(client=None, now: float = None) -> dict:
+    """Refresh the cache, then flush the outbox -> {"fetch": …, "flush": …}."""
+    try:
+        client = client or default_client()
+    except Exception as e:
+        return {"fetch": {"ok": False, "error": _short(e)}, "flush": {"error": _short(e)}}
+    return {"fetch": fetch(client, now=now), "flush": flush(client, now=now)}
+
+
+def trim(now: float = None) -> dict:
+    """Forget what has done its job: occurrences after 90 days, session ledgers after 7, crash files after 30.
+    -> the counts removed."""
+    now = time.time() if now is None else now
+    removed = {"occurrences": _trim_occurrences(now - 90 * 86400), "ledgers": 0, "crashes": 0}
+    for key, folder, days in (("ledgers", BUGS / "ledger", 7), ("crashes", CRASHES, 30)):
+        for f in folder.iterdir() if folder.is_dir() else []:
+            try:
+                if f.is_file() and now - f.stat().st_mtime > days * 86400:
+                    f.unlink()
+                    removed[key] += 1
+            except OSError:
+                pass
+    return removed
+
+
+def _trim_occurrences(cut: float) -> int:
+    path = BUGS / "occurrences.jsonl"
+    try:
+        old = open(path, "rb")
+    except OSError:
+        return 0
+    with old:
+        keep, removed = [], 0
+        for ln in old.read().splitlines(keepends=True):
+            try:
+                ts = json.loads(ln).get("ts")
+            except (ValueError, AttributeError):
+                removed += 1  # a torn line
+                continue
+            if isinstance(ts, (int, float)) and ts < cut:
+                removed += 1
+            else:
+                keep.append(ln)
+        if not removed:
+            return 0
+        tmp = path.with_name(f".{path.name}.{_hex(4)}.tmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(b"".join(keep))
+        os.replace(tmp, path)
+        late = old.read()  # lines appended to the old file while it was being trimmed
+    if late:
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        try:
+            os.write(fd, late)
+        finally:
+            os.close(fd)
+    return removed
+
+
+# --------------------------------------------------------------------------- GitHub clients
+
+class GhClient:
+    """The registry through the gh CLI, as the GitHub account gh is logged in with."""
+
+    def __init__(self, repo: str = None):
+        self.repo = repo or core.DEVKIT_REPO
+
+    def _run(self, args, timeout=60) -> str:
+        from . import gitx
+        rc, out, err = gitx.GH(["api", *args], timeout=timeout)
+        if rc != 0:
+            raise RuntimeError(_short(err or out or f"gh exited with {rc}"))
+        return out
+
+    def _lines(self, args) -> list:
+        return [json.loads(ln) for ln in self._run([*args, "--paginate", "--jq", ".[]"]).splitlines() if ln.strip()]
+
+    def _json(self, args):
+        out = self._run(args)
+        return json.loads(out) if out.strip() else None
+
+    def login(self) -> str:
+        data = self._json(["user"])
+        return data.get("login", "") if isinstance(data, dict) else ""
+
+    def issues(self, label: str, since: str) -> list:
+        base = ["-X", "GET", f"repos/{self.repo}/issues", "-f", f"labels={label}", "-f", "per_page=100"]
+        return self._lines([*base, "-f", "state=open"]) + \
+            self._lines([*base, "-f", "state=closed", "-f", f"since={since}"])
+
+    def comments(self, number: int) -> list:
+        return self._lines(["-X", "GET", f"repos/{self.repo}/issues/{int(number)}/comments", "-f", "per_page=100"])
+
+    def updated_comments(self, since: str) -> list:
+        return self._lines(["-X", "GET", f"repos/{self.repo}/issues/comments", "-f", f"since={since}",
+                            "-f", "sort=updated", "-f", "direction=asc", "-f", "per_page=100"])
+
+    def find(self, fp: str) -> list:
+        data = self._json(["-X", "GET", "search/issues", "-f", f"q=repo:{self.repo} is:issue in:body {fp}"])
+        return [int(i["number"]) for i in (data or {}).get("items", []) if isinstance(i, dict) and "number" in i]
+
+    def create_issue(self, title: str, body: str) -> int:
+        return int(self._json(["-X", "POST", f"repos/{self.repo}/issues", "-f", f"title={title}",
+                               "-f", f"body={body}"])["number"])
+
+    def comment(self, number: int, body: str) -> None:
+        self._json(["-X", "POST", f"repos/{self.repo}/issues/{int(number)}/comments", "-f", f"body={body}"])
+
+    def private_report(self, title: str, body: str) -> None:
+        self._json(["-X", "POST", f"repos/{self.repo}/security-advisories/reports", "-f", f"summary={title}",
+                    "-f", f"description={body}"])
+
+
+class UrlClient:
+    """Anonymous reads over HTTPS (60 requests an hour), with conditional requests; it cannot post."""
+
+    API = "https://api.github.com"
+
+    def __init__(self, repo: str = None, timeout: float = 10):
+        self.repo, self.timeout, self.etag = repo or core.DEVKIT_REPO, timeout, {}
+
+    def _get(self, path: str, params: dict, etag: str = ""):
+        import urllib.error
+        import urllib.parse
+        import urllib.request
+        req = urllib.request.Request(f"{self.API}/{path}?{urllib.parse.urlencode(params)}", headers={
+            "Accept": "application/vnd.github+json", "User-Agent": "bug-registry-client",
+            "X-GitHub-Api-Version": "2022-11-28", **({"If-None-Match": etag} if etag else {})})
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as r:  # nosec B310: a fixed https URL
+                return json.loads(r.read().decode("utf-8")), r.headers.get("ETag", ""), r.headers.get("Link", "")
+        except urllib.error.HTTPError as e:
+            if e.code == 304:
+                return None, etag, ""
+            raise
+
+    def _list(self, path: str, params: dict, key: str = "") -> list:
+        etags = self.etag if isinstance(self.etag, dict) else {}
+        out, page, link = [], 1, 'rel="next"'
+        while 'rel="next"' in link and page <= 10:
+            data, tag, link = self._get(path, {**params, "per_page": 100, "page": page},
+                                        etags.get(key, "") if key and page == 1 else "")
+            if data is None:
+                return None
+            if key and page == 1:
+                self.etag = {**etags, key: tag}
+                etags = self.etag
+            out += data if isinstance(data, list) else []
+            page += 1
+        return out
+
+    def login(self) -> str:
+        return ""
+
+    def issues(self, label: str, since: str):
+        path = f"repos/{self.repo}/issues"
+        opened = self._list(path, {"labels": label, "state": "open"}, "open")
+        closed = self._list(path, {"labels": label, "state": "closed", "since": since}, "closed")
+        if opened is None and closed is None:
+            return None
+        return (opened if opened is not None else self._list(path, {"labels": label, "state": "open"})) + \
+            (closed if closed is not None else self._list(path, {"labels": label, "state": "closed", "since": since}))
+
+    def comments(self, number: int) -> list:
+        return self._list(f"repos/{self.repo}/issues/{int(number)}/comments", {})
+
+    def updated_comments(self, since: str) -> list:
+        return self._list(f"repos/{self.repo}/issues/comments", {"since": since, "sort": "updated",
+                                                                  "direction": "asc"})
+
+    def _cannot_post(self, *args):
+        raise RuntimeError("posting needs a GitHub login: run `gh auth login`")
+
+    create_issue = comment = private_report = _cannot_post
+
+
+def default_client():
+    """gh when it is logged in to github.com, else anonymous HTTPS reads."""
+    from . import gitx
+    rc, _, _ = gitx.GH(["auth", "status", "--hostname", "github.com"], timeout=15)
+    return GhClient() if rc == 0 else UrlClient()

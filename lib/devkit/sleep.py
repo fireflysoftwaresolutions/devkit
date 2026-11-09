@@ -86,8 +86,15 @@ def run(dry_run: bool = False, quiet: bool = False) -> dict:
     lessons.publish_usage()
     acts = lessons.consolidate(dry_run=dry_run, now=now)
     plan = hygiene_plan(now)
+    trimmed = {}
     if not dry_run:
         apply_hygiene(plan, now)
+        try:  # devkit's own bug records: occurrences, session ledgers and crash files past their retention
+            from . import bugs
+            trimmed = bugs.trim(now)
+        except Exception as e:  # never let the bug records break the night's consolidation
+            if not quiet:
+                print(ui.dim(f"  bug records: {e}"))
         LAST.parent.mkdir(parents=True, exist_ok=True)
         LAST.write_text(json.dumps({"ts": int(now), "lessons": acts and [list(a) for a in acts], "hygiene": len(plan)}))
         if acts or plan:
@@ -106,9 +113,11 @@ def run(dry_run: bool = False, quiet: bool = False) -> dict:
             by[why] += 1
         for why, n in by.items():
             print(f"  {ui.dim('tidy   ')} {n} × {why}")
+        if sum(trimmed.values()):
+            print(f"  {ui.dim('tidy   ')} {sum(trimmed.values())} × devkit bug records past their retention")
         if acts and not dry_run:
             print(ui.dim("\n  forgotten lessons are in lessons/archive/ — dev lesson restore <id> --why \"…\" brings one back"))
-    return {"lessons": acts, "hygiene": plan}
+    return {"lessons": acts, "hygiene": plan, "bugs": trimmed}
 
 
 def due(hours: float = 20) -> bool:

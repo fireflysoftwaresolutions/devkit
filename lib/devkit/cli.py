@@ -1408,6 +1408,13 @@ def cmd_sync(a):
             except Exception as e:  # never let a backup break the sync
                 if not a.quiet:
                     ui.warn(f"backup: {e}")
+        if a.scheduled and not a.offline and (CFG.get("bugs") or {}).get("sync", True):
+            try:  # devkit's bug registry: refresh the known bugs, send what the outbox holds
+                from . import bugs
+                bugs.sync()
+            except Exception as e:  # never let the registry break the sync
+                if not a.quiet:
+                    ui.warn(f"bug registry: {e}")
         if a.session and a.finish:  # the session ended: off the map and the team's presence before they are written
             agent, _, sid = a.session.partition(":")
             from . import state as _state

@@ -86,8 +86,9 @@ class StepTests(unittest.TestCase):
         self.assertEqual(bugs.validate_steps([{"dev": "sync --offline"}, {"text": "Ejecuta el paso desde la raíz."}]),
                          [])
         forms = ["https://evil.example/x", "http://a.b", "ftp://host/file", "www.example.com", "a | b", "a > b",
-                 "a < b", "a; b", "a && b", "$(id)", "`id`", "\x00", "\x07", "\x1b[31m", "\x7f", "‮", "‏",
-                 "⁧", "א", "ا", "​", "‌", "‍", "﻿", "⁠",
+                 "a < b", "a; b", "a && b", "$(id)", "`id`", "\x00", "\x07", "\x1b[31m", "\x7f",
+                 # right-to-left, then zero-width characters, written as code points so the file shows them
+                 *map(chr, (0x202E, 0x200F, 0x2067, 0x05D0, 0x0627, 0x200B, 0x200C, 0x200D, 0xFEFF, 0x2060)),
                  "~/.claude/settings.json", "~/.codex/config.toml", "~/.local/share/devkit/releases",
                  "~/.config/devkit/config.json", "/Users/ana/.claude.json"]
         rng = random.Random(11)
@@ -132,6 +133,8 @@ class PayloadTests(unittest.TestCase):
             self.assertEqual(bugs.validate_payload(_payload(kind)), [], kind)
         for kind in ("confirm", "failed"):
             self.assertEqual(bugs.validate_payload(_payload(kind, detour_id="d1")), [], kind)
+        evidence = {"successes": 2, "attempts": 3, "tools": ["Bash", "exec_command", "Edit"]}
+        self.assertEqual(bugs.validate_payload(_payload("detour", evidence=evidence)), [])
         bad = [_payload("vote", cwd="/Users/ana/acme"), _payload("spam"), _payload("vote", devkit_bug=2),
                _payload("vote", fingerprint="3F9A"), _payload("vote", impact="catastrophic"),
                _payload("vote", version="/Users/ana"), _payload("confirm"),
@@ -139,7 +142,8 @@ class PayloadTests(unittest.TestCase):
                _payload("detour", evidence={"successes": 1, "paths": ["/Users/ana"]}),
                _payload("detour", evidence={"tools": ["mcp__acme_payments__deploy"]}),
                _payload("report", command="deploy acme"), _payload("report", frames=["acme/x.py:3"]),
-               _payload("report", word="acme-cli"), _payload("report", title="t‮itle"), ["not", "an", "object"]]
+               _payload("report", word="acme-cli"), _payload("report", title="t" + chr(0x202E) + "itle"),
+               ["not", "an", "object"]]
         for p in bad:
             with self.subTest(payload=p):
                 self.assertNotEqual(bugs.validate_payload(p), [])

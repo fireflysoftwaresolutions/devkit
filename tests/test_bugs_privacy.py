@@ -136,9 +136,8 @@ class DenyListTests(unittest.TestCase):
                  "branches": [{"name": "feat/invoice-export"}, {"name": "main"}]},
                 {"id": "fireflysoftwaresolutions/devkit", "owner": "fireflysoftwaresolutions", "name": "devkit",
                  "remote": "https://github.com/fireflysoftwaresolutions/devkit.git", "branches": []}]}))
-            with mock.patch.object(core, "HANDOFF", h), \
-                    mock.patch.object(bugs.getpass, "getuser", lambda: "ana"), \
-                    mock.patch.object(bugs.socket, "gethostname", lambda: "mbp-ana.local"):
+            with mock.patch.object(core, "HANDOFF", h), mock.patch("getpass.getuser", lambda: "ana"), \
+                    mock.patch("socket.gethostname", lambda: "mbp-ana.local"):
                 deny = bugs.deny_words()
         for w in ("acme", "payments-core", "feat/invoice-export", "invoice-export", "ana", "mbp-ana",
                   "gitlab.zeta.io", "ops", "ledgerly", "billing-revamp", str(Path.home()).lower()):
