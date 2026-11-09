@@ -24,6 +24,7 @@ import re
 import string
 import sys
 import time
+import unicodedata
 from pathlib import Path
 
 from . import core
@@ -291,6 +292,23 @@ _RUN_TEXT = re.compile(r"[A-Za-z0-9_+/=-]{16,}")
 _HEX_RUN = re.compile(r"[0-9A-Fa-f]{16,}")
 _NUM_TEXT = re.compile(r"\d+")
 _TEMPLATE_MAX = 200
+# an exception class as a report names it: a Python name path (KeyError, json.decoder.JSONDecodeError)
+_EXC_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*")
+MAX_EXC = 80
+_TOKEN_RUN = re.compile(r"[A-Za-z0-9+/=_-]{24,}")  # a long run of token characters: a secret when it mixes in digits
+# Letters of other scripts that look Latin, as casefold leaves them: a private word spelled with them is still found
+_LOOK_ALIKES = str.maketrans({
+    "\u0430": "a", "\u0432": "b", "\u0435": "e", "\u043a": "k", "\u043c": "m", "\u043d": "h", "\u043e": "o",
+    "\u043f": "n", "\u0440": "p", "\u0441": "c", "\u0442": "t", "\u0443": "y", "\u0445": "x", "\u0455": "s",
+    "\u0456": "i", "\u0458": "j", "\u04bb": "h", "\u04af": "y", "\u04cf": "l", "\u0501": "d", "\u051b": "q",
+    "\u051d": "w",  # Cyrillic
+    "\u03b1": "a", "\u03b2": "b", "\u03b5": "e", "\u03b6": "z", "\u03b7": "n", "\u03b9": "i", "\u03ba": "k",
+    "\u03bc": "m", "\u03bd": "v", "\u03bf": "o", "\u03c1": "p", "\u03c4": "t", "\u03c5": "u", "\u03c7": "x",
+    "\u03f2": "c",  # Greek
+    "\u0570": "h", "\u0578": "n", "\u057d": "u", "\u0581": "g", "\u0585": "o",  # Armenian
+    "\u0131": "i", "\u0261": "g", "\u2019": "'", "\u2018": "'",  # dotless i, script g, curly apostrophes
+})
+_DROPPED_CATEGORIES = frozenset({"Mn", "Me", "Cf"})  # accents and other marks, zero-width and direction characters
 
 _PUBLIC_HOSTS = frozenset({"github.com", "gitlab.com", "bitbucket.org", "dev.azure.com", "ssh.dev.azure.com",
                            "vs-ssh.visualstudio.com"})
@@ -384,8 +402,84 @@ def _duration(value) -> str:
 
 
 def _frames(value) -> list:
+    """Each frame as a report may carry it: `<local>`, or `module.function` naming a function of this devkit."""
     frames = value if isinstance(value, (list, tuple)) else []
-    return [f if isinstance(f, str) and (f == LOCAL or _FRAME_RE.fullmatch(f)) else LOCAL for f in frames][:MAX_FRAMES]
+    return [f if isinstance(f, str) and (f == LOCAL or (_FRAME_RE.fullmatch(f) and _devkit_frame(f))) else LOCAL
+            for f in frames][:MAX_FRAMES]
+
+
+@functools.lru_cache(maxsize=64)
+def _module_functions(module: str):
+    """The function names devkit's module `module` (`hooks`, a dotted path for a package) defines in the copy that
+    runs, or None when it has no such module. The registry workflow runs the default branch's copy."""
+    import ast
+    base = Path(__file__).parent.joinpath(*module.split("."))
+    for path in (base.with_name(base.name + ".py"), base / "__init__.py"):
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except (OSError, SyntaxError, ValueError):
+            continue
+        return frozenset(n.name for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)))
+    return None
+
+
+def _devkit_frame(frame: str) -> bool:
+    """True when `frame` (`module.function`, `module.<lambda>`) names a function of a devkit module: a frame made up
+    to carry a project's names (acme_billing.charge_card) is no devkit frame."""
+    module, _, name = frame.rpartition(".")
+    names = _module_functions(module)
+    return names is not None and (name.startswith("<") or name in names)
+
+
+@functools.lru_cache(maxsize=1)
+def guard_refusal_ids() -> frozenset:
+    """Every refusal id the guard records: one per deny() call in guard.py, named as guard.deny names it at run time
+    (the innermost function, plus the call's literal key after a colon), and hooks:<rule> for each refusal the guard
+    hook makes itself (hooks.HOOK_REFUSALS). Read once per process from the copy that runs, so the registry workflow
+    takes no id a stranger made up."""
+    import ast
+    from .hooks import HOOK_REFUSALS
+    ids = {f"hooks:{rule}" for rule in HOOK_REFUSALS}
+    try:
+        tree = ast.parse(Path(__file__).with_name("guard.py").read_text(encoding="utf-8"))
+    except (OSError, SyntaxError, ValueError):
+        return frozenset(ids)  # an unreadable guard names no refusal: none of its ids is taken on trust
+    stack = [(tree, "")]
+    while stack:
+        node, fn = stack.pop()
+        for ch in ast.iter_child_nodes(node):
+            name = ch.name if isinstance(ch, (ast.FunctionDef, ast.AsyncFunctionDef)) else fn
+            if name and isinstance(ch, ast.Call) and isinstance(ch.func, ast.Name) and ch.func.id == "deny":
+                keys = [k.value for k in ch.keywords if k.arg == "key"] + ch.args[1:2]
+                if not keys:
+                    ids.add(name)
+                elif isinstance(keys[0], ast.Constant) and isinstance(keys[0].value, str):  # else no stable id
+                    ids.add(f"{name}:{keys[0].value}" if keys[0].value else name)
+            stack.append((ch, name))
+    return frozenset(ids)
+
+
+def _refusal_id(value) -> str:
+    """`value` when it is one of the guard's refusal ids (guard_refusal_ids), else ''."""
+    return value if _fits(value, _REFUSAL_RE) and value in guard_refusal_ids() else ""
+
+
+def _secret_like(value) -> bool:
+    """True when `value` holds something shaped like a secret: what the audit's redactor removes (token prefixes,
+    keys with their values, passwords in URLs, private keys), a hex run of 16 or more characters, or a run of 24 or
+    more token characters that mixes letters and digits. Over-matching only holds an item for the developer."""
+    from . import audit
+    s = value if isinstance(value, str) else ""
+    if audit.SECRET.search(s) or _HEX_RUN.search(s):
+        return True
+    return any(re.search(r"\d", m.group(0)) and re.search(r"[A-Za-z]", m.group(0)) for m in _TOKEN_RUN.finditer(s))
+
+
+def _exc_class(value) -> str:
+    """`value` when it is an exception class name a report may carry: a Python name path of at most MAX_EXC
+    characters with nothing shaped like a secret in it; else ''."""
+    ok = isinstance(value, str) and len(value) <= MAX_EXC and _EXC_RE.fullmatch(value) and not _secret_like(value)
+    return value if ok else ""
 
 
 def _fits(value, pattern) -> str:
@@ -406,9 +500,9 @@ def build_report(occ: dict) -> dict:
         "agent": occ.get("agent") if occ.get("agent") in AGENTS else "",
         "surface": occ.get("surface") if occ.get("surface") in _surfaces() else "",
         "command": _public_command(occ.get("command")),
-        "exc_class": _fits(occ.get("exc_class"), _IDENT_RE),
+        "exc_class": _exc_class(occ.get("exc_class")),
         "frames": _frames(occ.get("frames")),
-        "refusal_id": _fits(occ.get("refusal_id"), _REFUSAL_RE),
+        "refusal_id": _refusal_id(occ.get("refusal_id")),
         "word": public_word(occ.get("word") if isinstance(occ.get("word"), str) else ""),
         "event": occ.get("event") if occ.get("event") in _hook_events() else "",
         "exit": exit_code if isinstance(exit_code, int) and not isinstance(exit_code, bool) and 0 <= exit_code < 256
@@ -427,16 +521,69 @@ def _run_placeholder(m) -> str:
     return "<hex>"
 
 
+@functools.lru_cache(maxsize=4096)
+def _fold_char(c: str) -> str:
+    s = unicodedata.normalize("NFKD", unicodedata.normalize("NFKC", c).casefold())
+    return "".join(ch for ch in s if unicodedata.category(ch) not in _DROPPED_CATEGORIES).translate(_LOOK_ALIKES)
+
+
+def _fold(text: str) -> tuple:
+    """`text` as private words are matched in it -> (folded, where): compatibility forms (fullwidth, ligatures) as
+    their plain letters, case folded, accents, zero-width and direction characters dropped, and the look-alike
+    letters of other scripts as their Latin twins (_LOOK_ALIKES). where[i] is the index in `text` of the character
+    that folded character i comes from."""
+    out, where = [], []
+    for i, c in enumerate(text):
+        f = c.lower() if c.isascii() else _fold_char(c)
+        out.append(f)
+        where.extend([i] * len(f))
+    return "".join(out), where
+
+
 @functools.lru_cache(maxsize=8)
 def _deny_re(deny: frozenset):
-    words = sorted((w for w in deny if w), key=len, reverse=True)
-    return re.compile("|".join(re.escape(w) for w in words), re.I) if words else None
+    """One expression for the words of `deny`, folded as _fold folds text. Spaces, `_` and `-` are one kind of
+    separator: where a word has them, the text may have up to three of any of them, or none when every part of the
+    word has three characters or more (payments-core finds payments_core, Payments Core and PaymentsCore)."""
+    patterns = set()
+    for w in deny:
+        parts = [p for p in re.split(r"[\s_-]+", _fold(str(w or ""))[0]) if p]
+        if parts:
+            sep = r"[\s_-]{0,3}" if min(map(len, parts)) >= 3 else r"[\s_-]{1,3}"
+            patterns.add(sep.join(map(re.escape, parts)))
+    return re.compile("|".join(sorted(patterns, key=len, reverse=True))) if patterns else None
+
+
+def _deny_hit(text: str, deny) -> bool:
+    """True when `text` names a word of `deny`, however it is cased, spaced or spelled (_deny_re)."""
+    rx = _deny_re(frozenset(deny or ()))
+    return bool(text) and rx is not None and rx.search(_fold(text)[0]) is not None
+
+
+def _deny_sub(text: str, deny) -> str:
+    """`text` with each word of `deny` it names (_deny_hit) replaced by <private>, the characters that spelled it
+    whatever they were."""
+    rx = _deny_re(frozenset(deny or ()))
+    if not text or rx is None:
+        return text
+    folded, where = _fold(text)
+    spans = []
+    for m in rx.finditer(folded):
+        start, end = where[m.start()], where[m.end() - 1] + 1
+        if spans and start < spans[-1][1]:  # one character that folded into two letters ends one word, starts the next
+            spans[-1] = (spans[-1][0], end)
+        else:
+            spans.append((start, end))
+    for start, end in reversed(spans):
+        text = text[:start] + "<private>" + text[end:]
+    return text
 
 
 def template_message(msg: str, deny: frozenset = None) -> str:
     """An exception message with its values replaced, in this order: URLs, e-mail addresses, paths (anything with
     `/` or `\\`), quoted strings, hex or base64 runs of 16 or more characters, numbers. '' when a word of the deny
-    list (default: deny_words()) is still in it: the whole template is dropped, never patched."""
+    list (default: deny_words()) is still in it, however it is cased, spaced or spelled (_deny_hit): the whole
+    template is dropped, never patched."""
     s = _URL_TEXT.sub("<url>", str(msg or ""))
     s = _EMAIL_TEXT.sub("<email>", s)
     s = _PATH_TEXT.sub("<path>", s)
@@ -444,24 +591,20 @@ def template_message(msg: str, deny: frozenset = None) -> str:
     s = _RUN_TEXT.sub(_run_placeholder, s)
     s = _NUM_TEXT.sub("<num>", s)
     s = " ".join(s.split())[:_TEMPLATE_MAX]
-    rx = _deny_re(deny_words() if deny is None else frozenset(deny))
-    return "" if rx is not None and rx.search(s) else s
+    return "" if _deny_hit(s, deny_words() if deny is None else deny) else s
 
 
 def scrub_text(text: str, deny: frozenset) -> tuple:
-    """Free text with URLs, e-mail addresses, paths, tokens and this machine's private words replaced -> (scrubbed,
-    held). `held` is True for any non-empty text: free text always waits for the developer's review before its
-    first send."""
+    """Free text with URLs, e-mail addresses, paths, tokens and this machine's private words (however they are
+    cased, spaced or spelled: _deny_sub) replaced -> (scrubbed, held). `held` is True for any non-empty text: free
+    text always waits for the developer's review before its first send."""
     if not text or not str(text).strip():
         return "", False
     s = _URL_TEXT.sub("<url>", str(text).strip())
     s = _EMAIL_TEXT.sub("<email>", s)
     s = _PATH_TEXT.sub("<path>", s)
     s = _RUN_TEXT.sub(_run_placeholder, s)
-    rx = _deny_re(frozenset(deny or ()))
-    if rx is not None:
-        s = rx.sub("<private>", s)
-    return s, True
+    return _deny_sub(s, deny), True
 
 
 def _git_identity() -> tuple:
@@ -751,9 +894,9 @@ _REPORT_CHECKS = {
     "agent": lambda v: v in AGENTS or v == "",
     "surface": lambda v: v == "" or v in _surfaces(),
     "command": lambda v: v == "" or (isinstance(v, str) and _public_command(v) == v),
-    "exc_class": lambda v: v == "" or _fits(v, _IDENT_RE) == v,
+    "exc_class": lambda v: v == "" or _exc_class(v) == v,
     "frames": lambda v: isinstance(v, list) and len(v) <= MAX_FRAMES and _frames(v) == v,
-    "refusal_id": lambda v: v == "" or _fits(v, _REFUSAL_RE) == v,
+    "refusal_id": lambda v: v == "" or _refusal_id(v) == v,
     "word": lambda v: v in ("", "<path>", "<program>") or (isinstance(v, str) and public_word(v) == v),
     "event": lambda v: v == "" or v in _hook_events(),
     "exit": lambda v: v is None or (isinstance(v, int) and not isinstance(v, bool) and 0 <= v < 256),
@@ -1196,6 +1339,14 @@ def _security(item: dict) -> bool:
     return bool(item.get("security")) or is_security(p, " ".join(_free_texts(p)))
 
 
+def _needs_review(item: dict) -> bool:
+    """True when an item waits for the developer's approval, read from what it holds and never from its stored
+    `held` flag alone (an outbox file can be rewritten): held, a security item, free text in it, or a problem the
+    sender's re-check found."""
+    p = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+    return bool(item.get("held") or item.get("problem")) or _security(item) or bool(_free_texts(p))
+
+
 def queue(item: dict) -> str:
     """Put an item ({"payload": …, "security": optional}) in the outbox -> its id. Free text and security items
     are held for the developer; a vote waits a random delay of up to an hour."""
@@ -1230,11 +1381,11 @@ def _digest(payload) -> str:
 
 
 def pending() -> list:
-    """The items held for the developer's review, oldest first, each as it would be sent, with `approved` True
-    when the developer approved its exact payload."""
+    """The items held for the developer's review (_needs_review), oldest first, each as it would be sent, with
+    `approved` True when the developer approved its exact payload."""
     approvals = core.read_json(BUGS / "approvals.json", {}) or {}
     return [{**it, "approved": approvals.get(str(it.get("id"))) == _digest(it.get("payload"))}
-            for it in map(_load_item, map(str, _item_ids())) if it and it.get("held")]
+            for it in map(_load_item, map(str, _item_ids())) if it and _needs_review(it)]
 
 
 def approve(item_id: str) -> None:
@@ -1290,8 +1441,10 @@ def set_consent(share: str, login: str) -> None:
 
 
 def _recheck(item: dict, deny) -> str:
-    """'' when the item may go out as it is; else why not. The payload must pass the schema (allowlist, vocabulary,
-    detour validator), and each free text must come out of the scrubber unchanged."""
+    """'' when the item may go out as it is; else why not, naming the field and never its value. The payload must
+    pass the schema (allowlist, vocabulary, detour validator), each free text must come out of the scrubber
+    unchanged, and no string anywhere in it, a field of a fixed vocabulary included, may name a private word or hold
+    something shaped like a secret (_secret_like)."""
     p = item.get("payload")
     problems = validate_payload(p)
     if problems:
@@ -1304,7 +1457,24 @@ def _recheck(item: dict, deny) -> str:
     for s in p.get("steps") or []:
         if "text" in s and scrub_text(s["text"], deny())[0] != s["text"]:
             return "a detour step names something private or was changed outside devkit"
+    for field, value in _strings(p):
+        if _secret_like(value):
+            return f"{field} holds something shaped like a secret"
+        if _deny_hit(value, deny()):
+            return f"{field} names something private"
     return ""
+
+
+def _strings(value, field: str = ""):
+    """(field, string) for every string in a payload, nested ones included (`steps[0].text`, `frames[1]`)."""
+    if isinstance(value, str):
+        yield field, value
+    elif isinstance(value, dict):
+        for k, v in value.items():
+            yield from _strings(v, f"{field}.{k}" if field else str(k))
+    elif isinstance(value, list):
+        for i, v in enumerate(value):
+            yield from _strings(v, f"{field}[{i}]")
 
 
 def _save_item(item: dict):
@@ -1334,7 +1504,9 @@ def flush(client=None, now: float = None) -> dict:
     """Send what the outbox holds -> counts of items {"sent", "held", "failed", "skipped"} (and "error"). Nothing is
     posted without consent for the active gh login. Each item is re-checked; a held item goes only with an approval
     of its exact payload; security items go only to private vulnerability reporting, and stay held if that fails;
-    votes go out at most once per issue per day; a new bug is searched for before an issue is created."""
+    votes go out at most once per issue per day; a new bug is searched for before an issue is created. Whether an
+    item needs the approval is read from what it holds (_needs_review), and an item that fails the re-check is held
+    with its problem."""
     now = time.time() if now is None else now
     counts = {"sent": 0, "held": 0, "failed": 0, "skipped": 0}
     with core.Lock("bugs-flush", wait=30) as locked:
@@ -1365,14 +1537,14 @@ def flush(client=None, now: float = None) -> dict:
                 counts["failed"] += 1
                 continue
             problem = _recheck(item, deny)
-            if problem:
-                if item.get("problem") != problem:
-                    item["problem"] = problem
+            if problem:  # never sent: held, so `dev bug pending` shows it with its problem
+                if item.get("problem") != problem or not item.get("held"):
+                    item["problem"], item["held"] = problem, True
                     _save_item(item)
                 counts["skipped"] += 1
                 continue
             security = _security(item)
-            if (item.get("held") or security) and approvals.get(str(int(item["id"]))) != _digest(p):
+            if _needs_review(item) and approvals.get(str(int(item["id"]))) != _digest(p):
                 counts["held"] += 1
                 continue
             if max(float(item.get("next_try") or 0), float(item.get("not_before") or 0)) > now:
@@ -2151,10 +2323,11 @@ def file_detour(fp: str, steps: list, session: str) -> dict:
 def file_report(fp: str = "", *, title: str = "", refusal_id=None, security: bool = False, session: str = "",
                 agent: str = "") -> dict:
     """File a bug, or vote on a known one, with impact `blocked`. `fp`: a fingerprint this machine recorded;
-    `refusal_id`: a guard refusal ('' for the session's last one); `title`: a command that misbehaves without an
-    error (free text, held for review). A report of a security failure, or with `security`, waits for the developer
-    and goes only to private vulnerability reporting. -> {"id", "fingerprint", "type", "held", "security"};
-    ValueError says what to name instead."""
+    `refusal_id`: a refusal the guard made in this session and noted in its ledger, one of guard_refusal_ids ('' for
+    the session's last one); `title`: a command that misbehaves without an error (free text, held for review). A
+    report of a security failure, or with `security`, waits for the developer and goes only to private vulnerability
+    reporting. -> {"id", "fingerprint", "type", "held", "security"}; ValueError says what to name instead, and then
+    nothing is recorded or queued."""
     occ = None
     if refusal_id is not None:
         refusals = [r for r in ledger(session) if isinstance(r.get("refusal"), str)]
@@ -2162,8 +2335,13 @@ def file_report(fp: str = "", *, title: str = "", refusal_id=None, security: boo
             if not refusals:
                 raise ValueError("no refusal in this session: name it, `dev bug report --guard <refusal id>`")
             refusal_id = refusals[-1]["refusal"]
-        if not _fits(refusal_id, _REFUSAL_RE):
-            raise ValueError(f"`{refusal_id}` is not a refusal id")
+        if not _refusal_id(refusal_id):  # its text would be a public title: never echoed back
+            raise ValueError("that is not one of the guard's refusal ids: `dev bug report --guard` with no id reports "
+                             "this session's last refusal")
+        if not any(r["refusal"] == refusal_id for r in refusals):
+            raise ValueError(f"this session has no such refusal: the guard notes each refusal it makes, and "
+                             f"`{refusal_id}` is not among this session's. `dev bug report --guard` with no id reports "
+                             f"the last one")
         word = next((r.get("word") or "" for r in reversed(refusals) if r["refusal"] == refusal_id), "")
         fp = guard_fingerprint(refusal_id, word)
         occ = record_occurrence("guard", fp, refusal_id=refusal_id, word=public_word(word), session=session)

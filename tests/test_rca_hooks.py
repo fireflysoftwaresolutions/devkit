@@ -161,6 +161,18 @@ class LeadNoticeTests(PatchLoopCase):
         self.assertIn("`./mvnw -f /work/app-t3/pom.xml flyway:validate`", notices[0]["text"])
         self.assertIn('dev crew ask --to neo "…"', notices[0]["text"])
 
+    def test_the_notice_masks_a_secret_in_the_members_command(self):
+        # the member's command goes into the tech lead's context: a token in it is redacted as the audit redacts it
+        token = "ghp_" + "A1b2C3d4E5f6" * 3  # the shape of a GitHub token, built here so no literal looks like one
+        self.run_with_lane("a_neo", "Neo")
+        for tid in ("t1", "t2", "t3"):
+            self.failing(f"gh api -H 'Authorization: token {token}' repos/x/y", "error: HTTP 401: Bad credentials", tid,
+                         aid="a_neo")
+        notices = self.lead_notices()
+        self.assertEqual(len(notices), 1, notices)
+        self.assertNotIn("A1b2C3d4", notices[0]["text"])
+        self.assertIn("`gh api -H 'Authorization: token ghp_…[redacted]' repos/x/y`", notices[0]["text"])
+
     def test_only_a_crew_lane_failing_a_third_time_sends_a_notice(self):
         self.run_with_lane("a_neo", "Neo")
         for tid in ("t1", "t2", "t3"):

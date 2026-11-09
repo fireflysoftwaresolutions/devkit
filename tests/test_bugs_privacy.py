@@ -71,6 +71,81 @@ class ReportTests(unittest.TestCase):
                     self.assertEqual(bugs.public_word(word), "<program>")
 
 
+GUARD_REPORT = {"devkit_bug": 1, "type": "report", "fingerprint": "cccccccccccc", "version": "26.11.7",
+                "impact": "blocked", "kind": "guard", "word": ""}
+CRASH_REPORT = {"devkit_bug": 1, "type": "report", "fingerprint": "cccccccccccc", "version": "26.11.7",
+                "impact": "blocked", "kind": "crash", "command": "progress step", "exc_class": "KeyError",
+                "frames": ["work.actor_str"]}
+TOKEN = "ghp_" + "A1b2C3d4E5f6" * 3  # the shape of a GitHub token, built here so no literal looks like one
+
+
+def refused(payload, field):
+    return f"report field {field} has a value it does not allow" in bugs.validate_payload(payload)
+
+
+class FieldVocabularyTests(unittest.TestCase):
+    def test_a_refusal_id_is_one_the_guard_or_its_hook_makes(self):
+        ids = bugs.guard_refusal_ids()
+        for rid in ("check_git:force-push", "check_rm:git-dir", "steer_rm", "hooks:crew-scope", "hooks:irreversible"):
+            self.assertIn(rid, ids)
+        for rid in ("acme:payments-core", "_check_sed", "check_git", "hooks:anything", "sk_live_x:y"):
+            self.assertNotIn(rid, ids)
+
+    def test_the_schema_and_the_report_take_only_the_guards_refusal_ids(self):
+        # the workflow runs the same check, so an id a stranger made up never becomes an issue title
+        self.assertEqual(bugs.validate_payload({**GUARD_REPORT, "refusal_id": "check_git:force-push"}), [])
+        for rid in ("acme:ledgerly-export", "x:payments-core", "_check_sed"):
+            with self.subTest(rid=rid):
+                self.assertTrue(refused({**GUARD_REPORT, "refusal_id": rid}, "refusal_id"))
+                self.assertEqual(bugs.build_report({"kind": "guard", "refusal_id": rid})["refusal_id"], "")
+        self.assertEqual(bugs.build_report({"kind": "guard", "refusal_id": "check_rm:git-dir"})["refusal_id"],
+                         "check_rm:git-dir")
+
+    def test_every_refusal_the_guard_hook_names_is_listed(self):
+        # the hook names its own refusals hooks:<rule>: a literal id, a judge's name, or the rule of a lane refusal
+        import ast
+        from devkit import hooks
+        tree = ast.parse((Path(__file__).resolve().parents[1] / "lib" / "devkit" / "hooks.py").read_text())
+        named = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value.startswith("hooks:") \
+                    and node.value != "hooks:":  # the prefix of f"hooks:{…}" names no rule
+                named.add(node.value[len("hooks:"):])
+            if isinstance(node, ast.FunctionDef) and node.name == "_lane_rule":
+                named |= {r.value.value for r in ast.walk(node) if isinstance(r, ast.Return)
+                          and isinstance(r.value, ast.Constant)}
+            if isinstance(node, ast.FunctionDef) and node.name == "_guard":
+                for a in ast.walk(node):
+                    if isinstance(a, ast.Assign) and isinstance(a.targets[0], ast.Tuple) and \
+                            isinstance(a.value, ast.Tuple):
+                        named |= {v.value for t, v in zip(a.targets[0].elts, a.value.elts) if isinstance(t, ast.Name)
+                                  and t.id == "made" and isinstance(v, ast.Constant) and v.value}
+                    if isinstance(a, ast.For) and isinstance(a.iter, ast.Tuple):
+                        named |= {e.elts[0].value for e in a.iter.elts if isinstance(e, ast.Tuple)
+                                  and isinstance(e.elts[0], ast.Constant)}
+        self.assertGreaterEqual(len(named), 9)
+        self.assertEqual(named, set(hooks.HOOK_REFUSALS))
+
+    def test_an_exception_class_is_a_python_name_path_with_no_secret(self):
+        for name in ("KeyError", "json.decoder.JSONDecodeError", "Q" * 80):
+            with self.subTest(name=name):
+                self.assertEqual(bugs.validate_payload({**CRASH_REPORT, "exc_class": name}), [])
+        for name in ("Q" * 81, "Key Error", "acme/x.KeyError", ".KeyError", "a..b", "Err(x)", TOKEN,
+                     "sk_live_" + "A1b2C3d4E5f6A1b2", "deadbeefdeadbeef01Error"):
+            with self.subTest(name=name):
+                self.assertTrue(refused({**CRASH_REPORT, "exc_class": name}, "exc_class"))
+                self.assertEqual(bugs.build_report({"kind": "crash", "exc_class": name})["exc_class"], "")
+
+    def test_frames_name_functions_of_this_devkit(self):
+        self.assertEqual(bugs.validate_payload(
+            {**CRASH_REPORT, "frames": ["work.actor_str", "<local>", "hooks.<lambda>", "guard.check_git"]}), [])
+        for frames in (["acme_billing.charge_card"], ["work.no_such_function"], ["ledgerly_core.<lambda>"]):
+            with self.subTest(frames=frames):
+                self.assertTrue(refused({**CRASH_REPORT, "frames": frames}, "frames"))
+        self.assertEqual(bugs.build_report({"kind": "crash", "frames": ["acme_billing.charge_card", "work.actor_str"]})
+                         ["frames"], ["<local>", "work.actor_str"])
+
+
 class TemplateTests(unittest.TestCase):
     def test_template_message_removes_values(self):
         t = bugs.template_message("no such file: '/Users/ana/acme/payments-core/x.py' (line 42)", deny=frozenset())
@@ -127,6 +202,30 @@ class TemplateTests(unittest.TestCase):
                     for w in DENY:
                         self.assertNotIn(w, scrubbed.lower())
                         self.assertNotIn(w, template.lower())
+
+    def test_a_private_word_is_found_in_any_case_spacing_or_look_alike_letters(self):
+        # the red team's spellings: underscores, spaces and camelCase for hyphens, Cyrillic and fullwidth letters,
+        # an accent, a zero-width space
+        cases = (("cannot open project payments_core", "payments_core"),
+                 ("branch Invoice Export has no upstream", "Invoice Export"),
+                 ("PaymentsCore is not a scope", "PaymentsCore"),
+                 ("no such project \u0430cme", "\u0430cme"),
+                 ("project \uff21\uff23\uff2d\uff25 missing", "\uff21\uff23\uff2d\uff25"),
+                 ("lock held by LEDGERLY", "LEDGERLY"),
+                 ("branch zeta internal is gone", "zeta internal"),
+                 ("owner \u00e1na refused", "\u00e1na"),
+                 ("cannot read a\u200bcme now", "a\u200bcme"))
+        for msg, word in cases:
+            with self.subTest(msg=msg):
+                scrubbed, held = bugs.scrub_text(msg, DENY)
+                self.assertNotIn(word, scrubbed)
+                self.assertIn("<private>", scrubbed)
+                self.assertEqual(bugs.template_message(msg, deny=DENY), "")
+        self.assertEqual(bugs.scrub_text("cannot open project payments_core", DENY)[0],
+                         "cannot open project <private>")
+        for msg in ("the payment score is low", "payments are core to it"):  # no private word, only its letters
+            with self.subTest(msg=msg):
+                self.assertEqual(bugs.scrub_text(msg, DENY)[0], msg)
 
     def test_free_text_is_always_held(self):
         self.assertEqual(bugs.scrub_text("Run the step from the repository root.", DENY),

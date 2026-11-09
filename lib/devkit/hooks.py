@@ -1343,6 +1343,13 @@ def _lane_verdict(data: dict, agent: str, cmd: str, routed: bool = False):
     return v[1] if v else None
 
 
+# The refusals the guard hook makes itself, each recorded as hooks:<rule> (guard.py's deny() calls name the rest).
+# devkit's bug registry takes a guard refusal id only from these and guard.py (bugs.guard_refusal_ids): a new one
+# goes here, or its refusals cannot be reported.
+HOOK_REFUSALS = ("hook-forgery", "identity", "crew-limits", "stub-commit", "irreversible", "crew-scope", "readonly",
+                 "hatch", "crew-lane")
+
+
 def _lane_rule(why: str) -> str:
     """The rule a lane command's refusal is recorded under: readonly (the records the read-only allowlist grows
     from), hatch (an escape hatch a member used), else crew-lane."""
@@ -2769,10 +2776,12 @@ NOTICE_COMMAND_MAX = 80  # characters of a member's command the tech lead's cont
 
 
 def _inline(text, limit: int = NOTICE_COMMAND_MAX) -> str:
-    """Text a member wrote, as one inert code span of the tech lead's context: backticks dropped (it cannot close
-    its span), every run of whitespace, newlines and carriage returns included, one space, at most `limit`
+    """Text a member wrote, as one inert code span of the tech lead's context: secrets redacted as the audit redacts
+    them (audit.redact, before the cut, so a token the cut would halve is still found), backticks dropped (it cannot
+    close its span), every run of whitespace, newlines and carriage returns included, one space, at most `limit`
     characters with "…" at the cut. Then no part of it can start a line that reads as devkit's own."""
-    s = " ".join(str(text or "").replace("`", "").split())
+    from . import audit
+    s = " ".join(audit.redact(str(text or "")).replace("`", "").split())
     return s if len(s) <= limit else s[:limit - 1] + "…"
 
 

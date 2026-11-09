@@ -146,13 +146,42 @@ class ReportTests(BugCLI):
         self.assertEqual((p["type"], p["impact"]), ("vote", "blocked"))
 
     def test_report_guard_without_an_id_takes_the_sessions_last_refusal(self):
-        bugs.note_refusal("s1", "_check_git", "git")
-        bugs.note_refusal("s1", "_check_sed", "sed")
+        bugs.note_refusal("s1", "check_git:force-push", "git")
+        bugs.note_refusal("s1", "check_rm:git-dir", "rm")
         rc, out = self.dev("report", "--guard")
         self.assertEqual(rc, 0, out)
         p = self.outbox()[-1]["payload"]
         self.assertEqual((p["kind"], p["refusal_id"], p["word"], p["fingerprint"]),
-                         ("guard", "_check_sed", "sed", bugs.guard_fingerprint("_check_sed", "sed")))
+                         ("guard", "check_rm:git-dir", "rm", bugs.guard_fingerprint("check_rm:git-dir", "rm")))
+
+    def test_report_guard_takes_only_a_refusal_this_session_recorded(self):
+        # the guard notes each refusal it makes in the session ledger; another session's, or one never made, is no
+        # evidence, and is neither recorded nor queued
+        bugs.note_refusal("s1", "check_git:force-push", "git")
+        bugs.note_refusal("s2", "check_rm:git-dir", "rm")
+        for rid in ("check_rm:git-dir", "check_git:reset-hard"):
+            with self.subTest(rid=rid):
+                rc, out = self.dev("report", "--guard", rid)
+                self.assertEqual(rc, 1, out)
+                self.assertIn("this session has no such refusal", out)
+        rc, out = self.dev("report", "--guard", "check_git:force-push")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual([it["payload"]["refusal_id"] for it in self.outbox()], ["check_git:force-push"])
+        self.assertEqual([o["refusal_id"] for o in bugs.occurrences()], ["check_git:force-push"])
+
+    def test_report_guard_refuses_text_that_is_no_refusal_of_the_guard(self):
+        # an agent's own text as the id would become a public issue title under the developer's account, even when
+        # a line written by hand into the ledger names it
+        text = "sk_live_" + "AbCdEf0123456789" + ":ghp-SECRETVALUE42"  # built here so no literal looks like a key
+        for ledger in (False, True):
+            if ledger:
+                bugs.note_refusal("s1", text, "")
+            for rid in (text, ""):  # named, and as the session's last refusal
+                with self.subTest(ledger=ledger, rid=rid):
+                    with self.assertRaises(ValueError) as cm:
+                        bugs.file_report(refusal_id=rid, session="s1", agent="claude")
+                    self.assertNotIn("AbCdEf0123456789", str(cm.exception))
+        self.assertEqual((self.outbox(), bugs.occurrences()), ([], []))
 
     def test_report_needs_something_to_report(self):
         rc, out = self.dev("report")

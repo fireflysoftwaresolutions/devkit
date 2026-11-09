@@ -223,6 +223,36 @@ class OutboxTests(StateCase):
         self.assertEqual([(n, _sent(b)["steps"]) for n, b in client.posted],
                          [(42, [{"text": "Wait a minute, then run it again."}])])
 
+    def test_a_private_word_or_a_secret_in_any_field_holds_the_item(self):
+        # not only free text: a valid exception class made from a project's name, a project named like a devkit
+        # command, a token where a class name goes; each waits in `dev bug pending`, its problem naming the field
+        token = "ghp_" + "A1b2C3d4E5f6" * 3
+        made = (("aaaaaaaaaaaa", {"command": "", "exc_class": "PaymentsCoreError"}, "exc_class"),
+                ("bbbbbbbbbbbb", {"command": "progress step"}, "command"),
+                ("cccccccccccc", {"command": "", "exc_class": token}, "exc_class"))
+        items = {bugs.queue({"payload": _payload("report", fp=fp, **fields)}): field for fp, fields, field in made}
+        client = FakeClient()
+        with mock.patch.object(bugs, "deny_words", lambda: frozenset({"acme", "payments-core", "progress"})):
+            counts = bugs.flush(client, now=NOW + 60)
+        self.assertEqual((client.created, client.posted, counts["sent"]), ([], [], 0))
+        pending = {i["id"]: i.get("problem") or "" for i in bugs.pending()}
+        self.assertEqual(set(pending), set(items))
+        for item_id, field in items.items():
+            self.assertIn(field, pending[item_id])
+            self.assertNotIn("A1b2C3d4", pending[item_id])
+
+    def test_the_sender_reads_the_need_for_review_from_the_item_not_its_held_flag(self):
+        # an outbox file rewritten with held false: its free text still waits for the developer's approval
+        payload = {**_payload("report", fp=NEW_FP, title="dev status breaks in the billing monorepo"), "kind": "command"}
+        item = bugs.queue({"payload": payload})
+        self.edit_item(item, lambda it: it.update(held=False))
+        client = FakeClient()
+        counts = bugs.flush(client, now=NOW + 60)
+        self.assertEqual((client.created, client.posted, counts["held"]), ([], [], 1))
+        self.assertEqual([i["id"] for i in bugs.pending()], [item])
+        bugs.approve(item)
+        self.assertEqual(bugs.flush(client, now=NOW + 120)["sent"], 1)  # the developer's approval sends it
+
     def test_flush_refuses_another_login(self):
         self.cache_bug()
         bugs.queue({"payload": _payload("detour")})
@@ -240,7 +270,7 @@ class OutboxTests(StateCase):
         self.assertEqual(client.created, [])
 
     def test_security_items_never_reach_issues(self):
-        item = bugs.queue({"payload": _payload("report", fp=NEW_FP, frames=["guard._check_sed"])})
+        item = bugs.queue({"payload": _payload("report", fp=NEW_FP, frames=["guard.check_git"])})
         self.assertTrue(bugs.pending()[0]["security"])
         bugs.approve(item)
         failing = FakeClient(private_fails=True)
