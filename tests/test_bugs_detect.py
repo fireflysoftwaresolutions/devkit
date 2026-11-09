@@ -36,6 +36,8 @@ NEW_BUG = ("This is a devkit bug (`{fp}`), not your project's. Look for another 
 def _raise_from(source: str, path: Path, call: str):
     # run `call` from code compiled as if it lived at `path` -> the exception it raised
     ns = {}
+    # the test's own literal source, compiled at a path under lib/devkit so its traceback carries devkit frames
+    # nosemgrep: python.lang.security.audit.exec-detected.exec-detected
     exec(compile(source, str(path), "exec"), ns)
     try:
         ns[call]()

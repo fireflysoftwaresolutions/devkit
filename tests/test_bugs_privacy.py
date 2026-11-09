@@ -3,6 +3,7 @@
 """What a bug report may carry: an allowlist of devkit facts, never a copy of something with parts removed. Free
 text is templated or scrubbed against this machine's private words and always held for the developer's review, and
 anything that touches the guard goes to private reporting only."""
+import io
 import json
 import random
 import string
@@ -55,6 +56,19 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(bugs.public_word("~/bin/tool"), "<path>")
         self.assertEqual(bugs.public_word("/usr/bin/sed"), "<path>")
         self.assertEqual(bugs.public_word("acme-cli"), "<program>")
+
+    def test_public_word_comes_from_the_guards_own_list(self):
+        from devkit import guard
+        bugs._public_words.cache_clear()
+        self.addCleanup(bugs._public_words.cache_clear)
+        listed = frozenset({"zprog", "bad word", "-rf", "--force", "FOO=bar", "x=1"})
+        with mock.patch.object(guard, "COMMAND_WORDS", listed, create=True):
+            bugs._public_words.cache_clear()
+            self.assertEqual(bugs.public_word("zprog"), "zprog")
+            self.assertEqual(bugs.public_word("sed"), "<program>")  # not on the guard's list: not public
+            for word in ("bad word", "-rf", "--force", "FOO=bar", "x=1"):  # an option or assignment is no program
+                with self.subTest(word=word):
+                    self.assertEqual(bugs.public_word(word), "<program>")
 
 
 class TemplateTests(unittest.TestCase):
@@ -136,14 +150,23 @@ class DenyListTests(unittest.TestCase):
                  "branches": [{"name": "feat/invoice-export"}, {"name": "main"}]},
                 {"id": "fireflysoftwaresolutions/devkit", "owner": "fireflysoftwaresolutions", "name": "devkit",
                  "remote": "https://github.com/fireflysoftwaresolutions/devkit.git", "branches": []}]}))
+            reg = json.loads((h / "registry.json").read_text())
+            reg["projects"][0]["worktrees"] = [{"path": "/Users/ana/Development/.worktrees/acme/x/spike-quartz",
+                                                "branch": "spike/quartz"}]
+            (h / "registry.json").write_text(json.dumps(reg))
             with mock.patch.object(core, "HANDOFF", h), mock.patch("getpass.getuser", lambda: "ana"), \
-                    mock.patch("socket.gethostname", lambda: "mbp-ana.local"):
+                    mock.patch.object(bugs, "_host_names",
+                                      lambda: ["mbp-ana.corp.zeta.io", "Ana's MacBook Pro", "Anas-MacBook-Pro"]), \
+                    mock.patch.object(bugs, "_git_identity", lambda: ("Ana Pérez", "ana.perez@zeta.io")):
                 deny = bugs.deny_words()
+                self.assertEqual(bugs.private_words("Octo-Ana") - deny, {"octo-ana"})  # the login that posts
         for w in ("acme", "payments-core", "feat/invoice-export", "invoice-export", "ana", "mbp-ana",
-                  "gitlab.zeta.io", "ops", "ledgerly", "billing-revamp", str(Path.home()).lower()):
+                  "gitlab.zeta.io", "ops", "ledgerly", "billing-revamp", str(Path.home()).lower(), "spike-quartz",
+                  "spike/quartz", "ana pérez", "pérez", "ana.perez@zeta.io", "ana.perez", "zeta.io",
+                  "mbp-ana.corp.zeta.io", "corp", "ana's macbook pro", "anas-macbook-pro"):
             self.assertIn(w, deny)
         # public words are never private: devkit's own repository, the default branch, generic parts, short words
-        for w in ("devkit", "fireflysoftwaresolutions", "main", "feat", "local", "github.com", "x"):
+        for w in ("devkit", "fireflysoftwaresolutions", "main", "feat", "local", "github.com", "x", "macbook", "pro"):
             self.assertNotIn(w, deny)
         msg = "payments-core failed on feat/invoice-export for ana@acme.io (invoice-export, mbp-ana)"
         out, held = bugs.scrub_text(msg, deny)
@@ -166,9 +189,29 @@ class SecurityRoutingTests(unittest.TestCase):
         self.assertFalse(bugs.is_security({"kind": "guard", "outcome": "deny", "refusal_id": "_check_sed"}))
         self.assertTrue(bugs.is_security({**plain, "failopen": True}))
         self.assertTrue(bugs.is_security({**plain, "security": True}))
-        for text in ("Bypass the check", "an allowlist entry", "INJECTED", "the tokens", "secrets", "exploitable"):
+        for text in ("Bypass the check", "an allowlist entry", "INJECTED", "the tokens", "secrets", "exploitable",
+                     "a credential", "the Password", "it leaks", "exfiltration", "path traversal", "escalated",
+                     "privilege", "the sandbox", "a grant line"):
             with self.subTest(text=text):
                 self.assertTrue(bugs.is_security(plain, text))
+        # code whose failure can mean a bypass or a leak: lesson rules the guard runs, the grant code, the prompt
+        # handler that reads grant lines, and the report builder, scrubber and recheck themselves
+        for frame in ("lessonrules.check", "progress.use_grant", "progress._grant_lookup", "hooks.prompt",
+                      "bugs.build_report", "bugs.scrub_text", "bugs.template_message", "bugs._recheck"):
+            with self.subTest(frame=frame):
+                self.assertTrue(bugs.is_security({**plain, "frames": ["work.x", frame]}))
+        self.assertFalse(bugs.is_security({**plain, "frames": ["progress.step", "bugs.match"]}))
+
+    def test_a_crash_whose_raw_message_is_about_secrets_goes_private(self):
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(bugs, "BUGS", Path(d) / "bugs"), mock.patch.object(bugs, "CRASHES", Path(d) / "c"), \
+                mock.patch.object(bugs, "install_channel", lambda: "release"), \
+                mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+            bugs.handle_crash(["version"], KeyError("'api_password' is not in the map"))
+            self.assertIn("private vulnerability reporting", err.getvalue())
+            occ = bugs.occurrences()[-1]
+        self.assertTrue(occ["security"])  # the template drops the quoted name: the raw message decides
+        self.assertNotIn("password", json.dumps(occ))  # and the raw message is never kept in the occurrence
 
 
 if __name__ == "__main__":

@@ -235,14 +235,15 @@ def _write_text(path: Path, text: str, mode: int = 0o600):
 
 def record_occurrence(kind: str, fp: str, *, impact: str = "blocked", command: str = "", event: str = "",
                       refusal_id: str = "", word: str = "", exc_class: str = "", frames: tuple = (),
-                      session: str = "") -> dict:
-    """Record one hit of `fp` on this machine with a fresh one-time code, in BUGS/occurrences.jsonl. -> the record,
-    with `saved` False when the state folder could not be written (the code then matches nothing)."""
+                      session: str = "", text: str = "") -> dict:
+    """Record one hit of `fp` on this machine with a fresh one-time code, in BUGS/occurrences.jsonl. `text`: the raw
+    error message, read only to tell a security failure (is_security), never kept. -> the record, with `saved` False
+    when the state folder could not be written (the code then matches nothing)."""
     rec = {"ts": round(time.time(), 3), "kind": kind, "fingerprint": fp,
            "code": _code(), "impact": impact, "session": session,
            "version": core.VERSION, "command": command, "event": event, "refusal_id": refusal_id, "word": word,
            "exc_class": exc_class, "frames": list(frames)}
-    rec["security"] = is_security(rec)
+    rec["security"] = is_security(rec, text)
     saved = _append_line(BUGS / "occurrences.jsonl", rec)
     return {**rec, "saved": saved}
 
@@ -278,15 +279,6 @@ _REFUSAL_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}(?:[:.][A-Za-z0-9_-]{1,40}
 _FP_RE = re.compile(r"[0-9a-f]{12}")
 _DURATIONS = ((1, "<1s"), (10, "1-10s"), (60, "10-60s"), (600, "1-10m"))
 _WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9._+-]{0,30}")
-# the guard's sets of command words it reasons about by name; with the common tools below, the public vocabulary
-_GUARD_WORD_SETS = ("COMMAND_WORDS", "PREFIX_CMDS", "_FILTERS", "_CHECK_TOOLS", "_PATH_TAKERS", "_POSIX_SHELLS",
-                    "_READERS", "_CREATORS", "_CHANGERS", "_COPIERS", "_MOVERS", "_SHELLS", "_KNOWN_PROGRAMS",
-                    "_JS_RUNTIMES", "_AGENT_CLIS", "_EXPORTERS")
-_COMMON_WORDS = frozenset("""git gh dev sed awk gawk find xargs python python3 pip pip3 uv uvx node npm npx pnpm yarn
-    bun deno brew make docker colima kubectl terraform curl wget open osascript perl ruby php composer mvn mvnw gradle
-    gradlew java go cargo yq jq claude codex ssh scp rsync tar zip unzip gzip kill pkill launchctl defaults plutil
-    chmod rm mv cp ln mkdir touch cat head tail grep rg ls echo printf env sudo bash sh zsh pytest ruff mypy tsc
-    eslint""".split())
 
 _URL_TEXT = re.compile(r"\b[A-Za-z][A-Za-z0-9+.-]*://[^\s'\"<>`]+|\bwww\.[^\s'\"<>`]+")
 _EMAIL_TEXT = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+")
@@ -303,18 +295,23 @@ _GENERIC_WORDS = frozenset({"main", "master", "develop", "trunk", "gh-pages", "h
                             "localdomain", "lan", "home", "users", "development", "wip", "feat", "fix", "refactor",
                             "perf", "docs", "test", "build", "chore", "deps", "style", "revert", "hotfix", "release",
                             "integration"})
-_SECURITY_TEXT = re.compile(r"\b(bypass\w*|allow\w*|inject\w*|token\w*|secret\w*|exploit\w*)\b", re.I)
+# a word start is any non-letter, so `api_password` and `x-token` count
+_SECURITY_TEXT = re.compile(r"(?<![A-Za-z])(bypass|allow|inject|token|secret|exploit|credential|password|leak|"
+                            r"exfiltrat|traversal|escalat|privilege|sandbox|grant)", re.I)
+# code whose failure can mean a bypass or a leak, so its bugs are never described in public: the guard, the crew
+# scope and the lesson rules the guard runs (whole modules); the guard hook, the prompt handler that reads grant
+# lines, the grant code, and this module's own report builder, scrubber and recheck
+_SECURITY_MODULES = ("guard", "scope", "lessonrules")
+_SECURITY_FRAMES = ("hooks._guard", "hooks.guard", "hooks.prompt", "progress.use_grant", "progress._grant_lookup",
+                    "bugs.build_report", "bugs.scrub_text", "bugs.template_message", "bugs._recheck")
 
 
 @functools.lru_cache(maxsize=1)
 def _public_words() -> frozenset:
+    """The public command words: the programs the guard itself knows by name (guard.COMMAND_WORDS)."""
     from . import guard
-    words = set(_COMMON_WORDS)
-    for name in _GUARD_WORD_SETS:
-        value = getattr(guard, name, ())
-        if isinstance(value, (set, frozenset, tuple, list)):
-            words |= {w for w in value if isinstance(w, str)}
-    return frozenset(w for w in words if _WORD_RE.fullmatch(w))
+    words = getattr(guard, "COMMAND_WORDS", frozenset())
+    return frozenset(w for w in words if isinstance(w, str) and _WORD_RE.fullmatch(w))
 
 
 def public_word(word: str) -> str:
@@ -325,6 +322,8 @@ def public_word(word: str) -> str:
         return ""
     if "/" in w or "\\" in w or w.startswith((".", "~")):
         return "<path>"
+    if w.startswith("-") or "=" in w:
+        return "<program>"  # an option or an assignment, never a program's name
     return w if w in _public_words() else "<program>"
 
 
@@ -462,13 +461,39 @@ def scrub_text(text: str, deny: frozenset) -> tuple:
     return s, True
 
 
-def deny_words() -> frozenset:
-    """This machine's private words, in lower case: project ids, owners and repository names of the projects map,
-    their local branch names and remote URLs, the handoff repository's project ids and initiative slugs, the user and
-    host names and the home folder. Words shorter than 3 characters, devkit's own repository, public hosts, default
-    branches and branch type prefixes are left out."""
-    import getpass
+def _git_identity() -> tuple:
+    """(user.name, user.email) as git reads them for this user."""
+    home = Path.home()
+    return (core.gitout(home, "config", "--get", "user.name", timeout=10).strip(),
+            core.gitout(home, "config", "--get", "user.email", timeout=10).strip())
+
+
+def _host_names() -> list:
+    """This Mac's names: the host name (on macOS already the full one; never a DNS lookup, which can block), then
+    the computer name and the local host name people see on the network."""
     import socket
+    names = [socket.gethostname()]
+    if sys.platform == "darwin":
+        for key in ("ComputerName", "LocalHostName"):
+            rc, out, _ = core.sh(["scutil", "--get", key], timeout=5)
+            names += [out.strip()] if rc == 0 and out.strip() else []
+    return names
+
+
+def private_words(login: str) -> frozenset:
+    """deny_words, and the GitHub `login` that posts: the sender's list."""
+    login = str(login or "").strip().lower()
+    return deny_words() | ({login} if len(login) >= 3 else set())
+
+
+def deny_words() -> frozenset:
+    """This machine's private words, in lower case: project ids (whole and their parts), owners and repository
+    names of the projects map, their local branch names, worktree folder names and remote URLs, the handoff
+    repository's project ids and initiative slugs, git's user name and e-mail, the user and host names and the home
+    folder. Words shorter than 3 characters, devkit's own repository, public hosts,
+    default branches and branch type prefixes are left out. A backstop: what a report carries is decided by its
+    allowlist."""
+    import getpass
     devkit_parts = set(core.DEVKIT_REPO.lower().split("/")) | {core.DEVKIT_REPO.lower()}
     words = set()
 
@@ -499,9 +524,13 @@ def deny_words() -> frozenset:
         add(p.get("owner"), "/")
         add(p.get("name"))
         add_remote(p.get("remote"))
+        if p.get("path"):
+            add(Path(str(p["path"])).name)
         for b in (p.get("branches") or []) + (p.get("worktrees") or []):
             if isinstance(b, dict):
                 add(b.get("name") or b.get("branch"), "/")
+                if b.get("path"):
+                    add(Path(str(b["path"])).name)
     projects = core.HANDOFF / "projects"
     for f in projects.rglob("*.md") if projects.is_dir() else []:
         add(f.relative_to(projects).with_suffix("").as_posix(), "/")
@@ -513,7 +542,15 @@ def deny_words() -> frozenset:
         add(getpass.getuser())
     except Exception:  # getuser raises when no user name can be found: then there is none to deny
         pass
-    add(socket.gethostname(), ".")
+    name, email = _git_identity()
+    add(name, " ")
+    add(email)
+    if "@" in email:
+        local, _, domain = email.partition("@")
+        add(local, ".")
+        add(domain, ".")
+    for i, host in enumerate(_host_names()):
+        add(host, "." if i == 0 else "")  # the computer names stay whole: their parts are words like "pro"
     home = Path.home()
     add(str(home))
     add(home.name)
@@ -521,12 +558,14 @@ def deny_words() -> frozenset:
 
 
 def is_security(occ: dict, text: str = "") -> bool:
-    """True when a failure must go to private vulnerability reporting, never to Issues: frames in the guard or the
-    crew scope code or the guard hook, a guard bug that allowed something, a guard fail-open, a report filed as a
-    security report, or text about bypassing, allowing, injecting, tokens, secrets or exploits."""
+    """True when a failure must go to private vulnerability reporting, never to Issues: frames in code whose
+    failure can mean a bypass or a leak (_SECURITY_MODULES, _SECURITY_FRAMES), a guard bug that allowed something, a
+    guard fail-open, a report filed as a security report, or text (`text`, the raw message, and the item's own free
+    text) about bypassing, allowing, injecting, tokens, secrets, credentials, passwords, leaks, exfiltration,
+    traversal, escalation, privileges, the sandbox, grants or exploits. Over-matching only sends more to private
+    review, the safe direction."""
     for f in occ.get("frames") or ():
-        if isinstance(f, str) and (f.split(".", 1)[0] in ("guard", "scope") or f.startswith(("hooks._guard",
-                                                                                           "hooks.guard"))):
+        if isinstance(f, str) and (f.split(".", 1)[0] in _SECURITY_MODULES or f.startswith(_SECURITY_FRAMES)):
             return True
     if occ.get("kind") == "guard" and occ.get("outcome") == "allow":
         return True
@@ -1312,7 +1351,7 @@ def flush(client=None, now: float = None) -> dict:
         if not active or active.lower() != c["login"].lower():
             return {**counts, "held": len(items), "error": f"sharing paused: consent was for `{c['login']}`, "
                                                            f"gh is logged in as `{active or 'nobody'}`"}
-        deny = functools.lru_cache(maxsize=1)(deny_words)
+        deny = functools.lru_cache(maxsize=1)(lambda: private_words(active))
         approvals = core.read_json(BUGS / "approvals.json", {}) or {}
         cache = load_cache()
         votes = {}
@@ -1518,6 +1557,14 @@ def _session_id() -> str:
         return ""
 
 
+def _message(exc: BaseException) -> str:
+    """An exception's message, for the security check only; '' when it cannot be read."""
+    try:
+        return str(exc)[:2000]
+    except Exception:  # a broken __str__ is a message nobody can read: nothing to check
+        return ""
+
+
 def _crash_file(fp: str, command: str, exc: BaseException) -> Path:
     """The full traceback of a crash, private to the owner, in CRASHES/<timestamp>-<fingerprint>.txt. It is never
     sent: the notice names the file for the developer."""
@@ -1545,7 +1592,8 @@ def handle_crash(argv: list, exc: BaseException) -> int:
         fp = fingerprint("crash", exc_class=exc_class, frames=frames)
         session = _session_id()
         path = _crash_file(fp, command, exc)
-        occ = record_occurrence("crash", fp, command=command, exc_class=exc_class, frames=frames, session=session)
+        occ = record_occurrence("crash", fp, command=command, exc_class=exc_class, frames=frames, session=session,
+                                text=_message(exc))
         if not occ["saved"]:
             raise OSError("the occurrence could not be recorded")
         sys.stderr.write(notice({**occ, "crash_file": str(path)}, match(fp, core.VERSION)) + "\n")
@@ -1618,7 +1666,7 @@ def swallowed(component: str, exc: BaseException) -> None:
         exc_class = _fits(type(exc).__name__, _IDENT_RE) or "Exception"
         record_occurrence("hook", fingerprint("hook", exc_class=exc_class, frames=frames), impact="minor",
                           event=component if component in _hook_events() else "", exc_class=exc_class,
-                          frames=frames)
+                          frames=frames, text=_message(exc))
     except Exception:  # recording a swallowed error must never break the handler that swallowed it
         pass
 
@@ -1630,7 +1678,7 @@ def hook_error(event: str, exc: BaseException, session: str = "") -> dict:
     exc_class = _fits(type(exc).__name__, _IDENT_RE) or "Exception"
     return record_occurrence("hook", fingerprint("hook", exc_class=exc_class, frames=frames),
                              impact="blocked" if event == "guard" else "minor", event=event, exc_class=exc_class,
-                             frames=frames, session=session)
+                             frames=frames, session=session, text=_message(exc))
 
 
 @functools.lru_cache(maxsize=1)
@@ -2176,7 +2224,10 @@ class UrlClient:
             "Accept": "application/vnd.github+json", "User-Agent": "bug-registry-client",
             "X-GitHub-Api-Version": "2022-11-28", **({"If-None-Match": etag} if etag else {})})
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as r:  # nosec B310: a fixed https URL
+            # the URL always starts with the fixed https API host; only the repository constant, issue numbers and
+            # encoded query parameters follow it
+            # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
+            with urllib.request.urlopen(req, timeout=self.timeout) as r:  # nosec B310: a fixed https host
                 return json.loads(r.read().decode("utf-8")), r.headers.get("ETag", ""), r.headers.get("Link", "")
         except urllib.error.HTTPError as e:
             if e.code == 304:
