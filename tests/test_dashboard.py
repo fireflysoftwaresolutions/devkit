@@ -1557,14 +1557,23 @@ class PageBehaviorTests(unittest.TestCase):
         self.assertEqual((spec["home"], spec["group"]), ("acme/widget", "product"))
         self.assertFalse(any(p["path"].endswith(".py") for p in self.data["plans"]))
         out = self.probe("""const tp = $("#tabpanel"); out.tab = text($("#tab-plans"));
-            out.top = $$(".panel", tp).filter(s => !$(".ph", s)).map(s => $$(".pl-t", s).map(text));
-            out.groups = $$("section.panel", tp).map(s => [text($(".ph h2", s)), text($(".ph .count", s)), s.getAttribute("aria-label"), $$(".pl-t", s).map(text)]);
+            out.lists = $$(".panel", tp).map(s => [s.tagName.toLowerCase(), text($(".ph h2", s)), text($(".ph .count", s)), s.getAttribute("aria-label"), $$(".pl-t", s).map(text)]);
             out.text = text(tp);""", hash_="#/projects/acme/widget?tab=plans")
         self.assertEqual(out["tab"], "Plans 2")
-        self.assertEqual(out["top"], [["Export plan"]])                     # the project's own plans first, as before
-        self.assertEqual(out["groups"], [["product/", "1", "Plans in product/", ["Product spec"]]])
+        # the project's own plans first, under a heading and a label of their own, so heading navigation reaches them
+        # before the sub-folders instead of skipping to the first folder
+        self.assertEqual(out["lists"], [["section", "Plans", "1", "Plans in acme/widget", ["Export plan"]],
+                                        ["section", "product/", "1", "Plans in product/", ["Product spec"]]])
         self.assertNotIn("render.py", out["text"])
         self.assertNotIn("not a plan", out["text"])
+
+    def test_an_initiatives_own_plans_beside_a_sub_folder_are_labeled_with_the_initiatives_id(self):
+        def rooms(d):
+            train = next(p for p in d["plans"] if p["title"] == "Release train")
+            d["plans"].append(dict(train, id="", title="Rooms review", scope="initiatives/lending/rooms", group="rooms", path="plans/initiatives/lending/rooms/review.md"))
+        out = self.probe("""out.lists = $$("#tabpanel .panel").map(s => [text($(".ph h2", s)), s.getAttribute("aria-label"), $$(".pl-t", s).map(text)]);""",
+                         hash_="#/initiatives/lending?tab=plans", page=self.variant(rooms))
+        self.assertEqual(out["lists"], [["Plans", "Plans in lending", ["Release train"]], ["rooms/", "Plans in rooms/", ["Rooms review"]]])
 
     def test_navigation_never_scrolls_sideways_and_every_view_stays_reachable(self):
         views = ["now", "tasks", "background", "team", "projects", "initiatives", "activity", "explorer", "health"]
