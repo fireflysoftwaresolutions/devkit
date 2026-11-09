@@ -1357,12 +1357,13 @@ repository, the agents' permission modes, your stacks, your git hosts and the co
 you choose **Apply**: the packages for your stacks, hosts, and clouds, each chosen agent that is missing, `dev install`,
 Docker; then the sign-in panels, the settings lock, and `dev doctor`, and a summary with the command for each item
 left. Run it again to change your choices; turning an agent off removes what devkit wrote in it, but only in your own
-run in a terminal (an agent's run leaves it and says so).
+run in a terminal (a run that is not from your terminal leaves it, says so under **Set up devkit**, and `dev doctor`
+lists it). Agents may run only `dev setup --preview` and `--help`.
 
 | Option | Effect |
 | --- | --- |
-| `--resume` | Continue the last setup where it stopped: a quick check of the steps done, then every step that is not done, with the answers you gave. With nothing to continue, it says so and exits with `0`. Plain `dev setup` offers the same when a saved setup did not finish |
-| `--preview` | Draw every screen of the setup with fixed sample data, one after the other, as wide as the terminal, and change nothing; `COLUMNS=60 dev setup --preview` draws them 60 columns wide |
+| `--resume` | Continue the last setup where it stopped: a quick check of the steps done, then every step that is not done, with the answers you gave. It also continues saved choices whose install never finished, in the line prompts too. With nothing to continue, it says so and exits with `0`. Plain `dev setup` offers the same when a saved setup did not finish |
+| `--preview` | Draw every screen of the setup with fixed sample data, one after the other, as wide as the terminal, and change nothing; `COLUMNS=60 dev setup --preview` draws them 60 columns wide. The screens include **Pick up where you left off?** for a paused setup and for an unfinished install |
 | `-y`, `--yes` | Take every default without asking; in a terminal, the sign-ins still ask |
 | `--skip-packages` | Install no Homebrew or npm packages |
 
@@ -1404,7 +1405,9 @@ agent's call, neither `-y` nor a piped answer turns them on (exit code `2`), and
 Checks the toolchain, GitHub sign-in and git identity, the workspace (PATH, shell, config, handoff repository with its
 push state, layout), the generated instructions and skills, Claude Code (permission mode, attribution, hooks,
 plugins, MCP servers), Codex (approval and sandbox, hook trust, profile models, MCP servers, plugins), both agents'
-sign-in and quota, the devkit plugin (validators, and whether each agent's installed copy is current), whether every
+sign-in and quota, an agent turned off in `dev setup` that still holds devkit's rules, hooks, or skills (with the fix,
+`dev install --only <agent>`, to run in your terminal), the devkit plugin (validators, and whether each agent's
+installed copy is current), whether every
 required skill is installed for both agents, project settings that switch devkit off, sessions that ran with devkit
 in the last 7 days, each git host and cloud you chose (its CLI installed and signed in, checked locally), Docker,
 every enabled scheduled job (loaded, and its last run passed), the desktop apps (Claude Desktop's Code tab runs its

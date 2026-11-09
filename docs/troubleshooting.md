@@ -79,7 +79,8 @@ dev setup --resume
 ```
 
 The installer, run again, opens the same **Pick up where you left off?** screen. The whole output of the run is in
-`~/.local/state/devkit/logs/setup.log`.
+`~/.local/state/devkit/logs/setup.log`, which keeps every run: each starts under a line such as
+`──── dev setup · 2026-11-09 10:42:07 ────`, and the newest is at the end.
 
 ### A sign-in to Claude Code or Codex did not finish
 
@@ -138,7 +139,7 @@ In a terminal, `curl … | bash` is interactive: the installer reads the answers
 such as `/dev/ttys003`), not from the pipe, and every other command reads `/dev/null`, never the rest of the script.
 Homebrew installs with `HOMEBREW_NO_ASK=1`, so it never stops to ask "Do you want to proceed with the installation?";
 its output goes to `~/.local/state/devkit/logs/install.log` (the installer) or `~/.local/state/devkit/logs/setup.log`
-(the wizard), and the screen shows a line from it only when a step fails.
+(the wizard, which adds each run at the end), and the screen shows a line from it only when a step fails.
 
 ### `brew` is not found in a new terminal
 

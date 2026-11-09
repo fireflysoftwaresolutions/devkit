@@ -233,14 +233,20 @@ show `waits for <step>`; every other step still runs.
   nothing changed.
 - **A sign-in** runs on your terminal with a time limit: 10 minutes for the browser, 15 for a code. `Ctrl-C`, an
   error, or the time limit stops that sign-in only, and its panel comes back with the reason, **Try again**, the
-  other way to sign in, and **Skip for now**. `Esc` on the second agent's panel goes back to the first one's. In a
-  remote session (`SSH_CONNECTION` set), Codex's panel recommends the code.
+  other way to sign in, and **Skip for now**. A second `Ctrl-C` right after a stopped sign-in still counts as stopping
+  that sign-in. Any other `Ctrl-C` during the sign-ins pauses the setup: it says `Setup paused.`, names
+  `dev setup --resume`, and exits with code `130`. `Esc` on the second agent's panel goes back to the first one's. In
+  a remote session (`SSH_CONNECTION` set), Codex's panel recommends the code.
 - **Continue later.** Your answers and each step's state are saved after every step in
   `~/.local/state/devkit/setup-run.json`, readable only by you. `dev setup --resume`, plain `dev setup`, and the
   installer all open **Pick up where you left off?** with each step's state. **Continue** quickly checks the steps
   that are done (for packages, `brew bundle check`; for agents, that they are still installed or signed in), runs
-  again any that no longer hold, then runs the rest. `dev setup --resume` with nothing left says
-  `Nothing to continue` and exits with `0`.
+  again any that no longer hold, then runs the rest. Saved choices whose install never finished (an earlier install
+  failed after **Save your choices**) open the same screen, with `Your choices were saved on <date>, but the install
+  did not finish.`; `dev setup --resume` continues them too, in the line prompts as well. **Start over** asks the
+  questions again, starting with which agents to use. Answers you change on the review are saved,
+  and **Save your choices**, **Set up devkit**, **Lock Claude Code settings**, and **Check the setup** run again with
+  them. `dev setup --resume` with nothing left says `Nothing to continue` and exits with `0`.
 
 | Section | What you choose |
 | --- | --- |
@@ -264,18 +270,34 @@ show `waits for <step>`; every other step still runs.
 | `Esc` | Go back one question; on a section's first question, go to the previous section (or the review) |
 | `Ctrl-C` | During the questions, asks before it quits; during a step, stops that step and asks what to do next |
 
-Run `dev setup` again at any time. On a configured Mac it starts from your saved choices (adding the hosts and clouds
-it newly finds) and offers **Keep current setup**; the review marks each section that would change and shows its old
-value. Applying an unchanged plan runs `dev install` again, which repairs anything that drifted. Turning an agent off
-removes devkit's rules, hooks, skill links, MCP servers, and plugin from that agent, and keeps the agent and your own
-settings; the review says so before you apply, with the command that removes the app if you want that too.
+Run `dev setup` again at any time. On a Mac that is already set up, where a whole `dev install` finished (it wrote
+`~/.local/state/devkit/config-installed.json` and pinned a release that still holds up), it starts from your saved
+choices (adding the hosts and clouds it newly finds) and offers **Keep current setup**; the review marks each section
+that would change and shows its old value. `dev config repair`, which the hooks run, only updates that install record
+when it exists, so an install that stopped halfway never counts as set up. Applying an unchanged plan runs
+`dev install` again, which repairs anything that drifted.
 
-Only your own run in a terminal removes them, because taking devkit's hooks out also takes the guard out. When an
-agent turns an agent off (`dev config set agents.claude false`) and runs `dev setup -y` or `dev install`, or when the
-hooks repair the settings, devkit leaves everything in place and says that you run `dev setup` in your terminal to
-remove it. Each removal, done or refused, is in the audit trail (`dev audit --action agent.remove`).
+Turning an agent off removes devkit's rules, hooks, status line, skill links, MCP servers, and plugin from that agent,
+and for Codex its profiles and agent roles; it keeps the agent and your own settings. It also takes out the no-prompt
+modes devkit set, because they relied on the guard. These are Claude Code's `bypassPermissions` mode and its skipped
+warning, and Codex's `approval_policy = "never"`, `sandbox_mode = "danger-full-access"`, and the trust devkit gave
+to the dev root and the projects it found. Each goes only while it still holds devkit's value, so a mode or a trust you chose
+yourself stays, and the vendor's default returns. An MCP server goes only when it runs exactly what devkit's catalog
+writes under that name. A `config.toml` or `hooks.json` linked from a dotfiles folder stays a link, and the file it
+points to changes. Every file devkit deletes or rewrites is backed up first in `~/.local/state/devkit/backups`, a
+folder only you can open, each copy readable only by you. The review says all this before you apply, with the
+command that removes the app if you want that too.
 
-The full output of the steps is in `~/.local/state/devkit/logs/setup.log`, readable only by you.
+Only your own run in a terminal removes them, because taking devkit's hooks out also takes the guard out. Agents may
+not run `dev setup` or `dev install`, or set `agents.*` with `dev config set` (see
+[Guard rules](guard.md#devkits-own-state-configuration-and-install)). When a run that is not from your terminal finds
+devkit in an agent turned off, devkit leaves what it finds there in place. The **Set up devkit** step ends with a
+warning that shows the note, and `dev doctor` lists what stays, with its fix (`dev install --only <agent>`, in your
+terminal). When nothing of devkit's is in that agent, there is nothing to leave and no note. Each removal, done or
+refused, is in the audit trail (`dev audit --action install.remove-agent`).
+
+The full output of the steps is in `~/.local/state/devkit/logs/setup.log`, readable only by you. Each run adds its
+output at the end, under a line such as `──── dev setup · 2026-11-09 10:42:07 ────`, so the newest run is last.
 `dev setup --preview` draws every screen of the setup with sample data and changes nothing
 (`COLUMNS=60 dev setup --preview` draws them 60 columns wide).
 
@@ -288,6 +310,10 @@ every default without asking; in a terminal, the sign-ins still ask, one line ea
 is not a terminal), the line prompts say so at the start and take every default, as with `--yes`. To get the line prompts in a
 terminal, run `TERM=dumb dev setup`. With `--yes`, the stacks are your saved ones, else the ones found in your
 projects, and otherwise Python and Node.
+
+`Ctrl-D` at a line prompt is an answer, as `Ctrl-C` is at that prompt: at a sign-in or the settings lock it means
+**Skip for now**, and at the summary's menu it means **Finish**. During the questions, before anything is applied, it
+quits with `Nothing changed.` and exit code `1`.
 
 | Package group | Installed | Contents |
 | --- | --- | --- |
@@ -324,8 +350,8 @@ with `dev install --only <step>`, which re-applies it from the copy that is inst
 | `handoff` | Clones your handoff repository, or creates it as a private GitHub repository and pushes the first commit; writes the multi-machine merge rules |
 | `instructions` | Generates `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md` from `agents/AGENTS.md` (plus your personal rules), for each agent that is turned on. For an agent turned off in `dev setup`, your own run in a terminal removes the file devkit generated and keeps one you wrote yourself, and `dev config repair` no longer counts that agent's missing file as drift |
 | `skills` | Fetches third-party skills at pinned commits (your optional groups included) and links them into each agent that is turned on |
-| `claude` | Merges settings, hooks, plugins, and MCP servers into Claude Code; reinstalls the devkit plugin when the installed copy is stale. When Claude Code is turned off in `dev setup`, your own run in a terminal removes what devkit wrote there instead: its `CLAUDE.md`, hooks, status line, skill links, MCP servers, and plugin |
-| `codex` | Configures Codex through its own app-server API, writes and trusts the hooks, writes the profiles and the `scout` role, installs plugins and MCP servers, reinstalls a stale devkit plugin. When Codex is turned off in `dev setup`, your own run in a terminal removes what devkit wrote there instead: its `AGENTS.md`, hooks, skill links, MCP servers in `config.toml`, profiles, agent roles, and plugin; your own keys stay |
+| `claude` | Merges settings, hooks, plugins, and MCP servers into Claude Code; reinstalls the devkit plugin when the installed copy is stale. When Claude Code is turned off in `dev setup`, your own run in a terminal removes what devkit wrote there instead: its `CLAUDE.md`, hooks, status line, skill links, MCP servers, and plugin, and the `bypassPermissions` mode and skipped warning while they hold devkit's value |
+| `codex` | Configures Codex through its own app-server API, writes and trusts the hooks, writes the profiles and the `scout` role, installs plugins and MCP servers, reinstalls a stale devkit plugin. When Codex is turned off in `dev setup`, your own run in a terminal removes what devkit wrote there instead: its `AGENTS.md`, hooks, skill links, MCP servers in `config.toml`, profiles, agent roles, and plugin, and the no-approval and no-sandbox modes while they hold devkit's value; your own keys stay. Only the trust devkit gave (the dev root and the projects it found) goes; a trust you accepted in Codex for another folder stays. A `config.toml` or `hooks.json` linked from a dotfiles folder stays a link, and the file it points to changes |
 | `desktop` | When Claude Desktop is installed: builds the devkit extension for chat and Cowork and opens its installer when it is missing or out of date (choose **Install**); see [Claude Desktop chat and Cowork](tutorials/desktop-chat-and-cowork.md) |
 | `docker` | Adds the Compose and Buildx plugin folder and the keychain credential store to `~/.docker/config.json`; registers Colima at login if you chose that |
 | `docs` | Checks markdownlint, lychee, and Vale, and syncs the Google and write-good Vale styles |
