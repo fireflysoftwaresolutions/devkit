@@ -3055,10 +3055,73 @@ def _remote_ci(c, sha):
     return "passing", []
 
 
+RELEASE_CLAIM_MIN = 60  # minutes dev release holds release:<project> for its run
+
+
 def cmd_release(a) -> int:
     c = ctx()
     if c is None:
         return _need_repo(c)
+    held = _release_claim(c, a)
+    if isinstance(held, int):
+        return held
+    try:
+        return _release(a, c)
+    finally:
+        _give_back(held)
+
+
+def _release_claim(c, a):
+    """Hold release:<project> while this release runs (peers.claim, RELEASE_CLAIM_MIN minutes), so the guard refuses
+    another agent session's release, tag push or merge into the default branch meanwhile. The claim is the session's:
+    devkit takes it for whoever of the session runs `dev release`, its tech lead or a crew member. -> (sender, resource)
+    to give back, None when there is nothing to give back (a dry run, a project devkit cannot name, a claim the session
+    already held, which it keeps as it is, or the developer's own terminal, which is never refused and is told who
+    holds it), or the exit code 3 when another session holds it."""
+    from . import identity, peers
+    resource = f"release:{str(getattr(c, 'pid', '') or '').lower()}"
+    if not peers.RESOURCE.match(resource):
+        return None
+    try:
+        sp = identity.speaker(c.top)
+        other = None if sp.how == "human" else peers.holder(resource, me=sp.key())
+        if sp.how == "human" or a.dry_run:
+            h = peers.holder(resource) if sp.how == "human" else other
+            if h:
+                ui.warn(f"{resource} is claimed by session {h['agent']}:{h['prefix'].lstrip('@')} "
+                        f"({h.get('project') or '-'} · {h.get('branch') or '-'}): "
+                        + ("releasing from your own terminal anyway" if sp.how == "human" else
+                           "dev release refuses until it is free"))
+            return None
+        if other:
+            return refuse(peers.refusal(other), code=3)
+        if peers.holder(resource):
+            return None  # this session holds it already, and keeps it as it is
+        sender = dict(sp.as_dict(), lane="main")
+        peers.claim(sender, resource, "dev release runs", minutes=RELEASE_CLAIM_MIN)
+        return sender, resource
+    except peers.PeerError as e:
+        if e.code == 3:
+            return refuse(str(e), code=3)
+        info(f"{resource} not claimed for this release: {e}")
+    except Exception as e:  # the claim is a guard rail; its failure never stops a release
+        info(f"{resource} not claimed for this release ({type(e).__name__}: {e})")
+    return None
+
+
+def _give_back(held):
+    """Give the release claim back, whatever the release did; one that cannot be given back lapses when it expires."""
+    if not held:
+        return
+    from . import peers
+    sender, resource = held
+    try:
+        peers.release(sender, resource, why="dev release ended")
+    except Exception as e:
+        info(f"{resource} stays claimed until it expires ({type(e).__name__}: {e})")
+
+
+def _release(a, c) -> int:
     if not c.has_origin:
         return refuse("no `origin` remote to release to")
     fetched, err = _fetch(c, "--tags")

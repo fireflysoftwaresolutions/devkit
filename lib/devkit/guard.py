@@ -441,8 +441,9 @@ def check_write_path(path, cwd, agent):
         return None
     hroot = real(core.HANDOFF).rstrip(os.sep)
     if _under_ci(str(p), hroot):  # in any case: ~/development/.HANDOFF is the handoff repository on macOS
-        v = handoff_violation(str(p)[len(hroot):].lstrip(os.sep), cwd)
-        return deny(v, key="handoff") if v else None
+        rel = str(p)[len(hroot):].lstrip(os.sep)
+        v = handoff_violation(rel, cwd)
+        return deny(v, key="handoff") if v else note_claim_refusal(rel, cwd)
     if is_temp(p) or any(is_under(p, r) for r in CONFIG_ROOTS):
         return None
     if p.parent == Path(real(HOME)) and p.name.startswith("."):
@@ -1115,7 +1116,8 @@ def check_git(argv, cwd, full_segment, envs=frozenset(), pending=None):
                 v = branch_violation(d) if d else None
                 if v:
                     return deny(v.replace("Rename it:", "Rename it before pushing:"), key="push-branch")
-        return check_push_budget(gcwd, args, envs)
+        # another session's claim first: a refused push is no push the budget counts
+        return push_claim_refusal(gcwd, args) or check_push_budget(gcwd, args, envs)
     if sub == "clean" and any(re.match(r"^-[a-zA-Z]*f", a) or a == "--force" for a in args) and \
             not any(re.match(r"^-[a-zA-Z]*n", a) or a == "--dry-run" for a in args) and \
             gcwd and not is_temp(Path(gcwd)):
@@ -1236,7 +1238,282 @@ def check_push_budget(cwd, args, envs):
     return None
 
 
-PIPE_GATE = re.compile(r"\|(?!\|)[^|&;\n]*&&\s*(?:[A-Z_]+=\S*\s+)*(?:git\s+(?:-C\s+\S+\s+)?(?:commit|push|tag)\b|"
+# ---- claims another agent session holds (`dev session claim`, peers.claim)
+#
+# A main session may hold a shared resource for a while. The guard enforces three kinds, against the agents of every
+# other session only: release:<project> (`dev release`, a tag push, `dev pr merge`, a push to the default or a
+# permanent branch, and `gh pr merge` or `gh release create` with the raw-gh hatch), push:<project>@<branch>
+# (`git push`, `dev push`, `dev git push`) and handoff:<project> (the project's note through Write, Edit, MultiEdit or
+# apply_patch, `dev note set`, `dev handoff --edit`; a shell write to a note is refused for everyone by
+# handoff_record). The holder's own session and its crew go through, and the developer's own terminal is never refused:
+# the guard runs only in agents' hooks, and a `dev guard check` typed there names no session. An enforced claim lapses
+# when it expires (30 minutes by default, 4 hours at most), when its holder's session ends or the process that took it
+# dies (pid and start time; peers.holder decides), and when the developer types `grant claim-break <resource>` in the
+# refused session: that session's tech lead goes through, the claim breaks, and its holder hears of it. branch: and
+# custom: claims only warn (the overlap notices). A command that can touch no claimed resource costs nothing here; one
+# that can costs a folder listing (and a small read per claim file), and reads git only while a claim of its kind is
+# held.
+
+CLAIM_KINDS = ("release", "push", "handoff")
+CLAIM_MEMBER_TAIL = (" You are a crew member: tell the tech lead (`dev crew ask \"…\"`), who decides whether to wait, "
+                     "ask that session, or have the developer break the claim.")
+PEER_WRITES = frozenset({"tell", "ask", "answer", "claim", "release", "escalate"})  # `dev session` calls that act
+SESSION_MEMBER_REASON = ("Crew members do not talk to other agent sessions: {what} acts for the whole "
+                         "session (sends, claims or escalates), which only its tech lead does. Ask the tech lead with "
+                         "`dev crew ask \"…\"`, who decides what to relay. Reading is fine: `dev session ls`, `inbox`, "
+                         "`claims`, `escalations`.")
+SPEAKER_REASON = ("This command sets DEVKIT_SPEAKER, the stamp that tells devkit the tech lead's main session speaks. "
+                  "Only devkit's PreToolUse hook puts it on the main session's own `dev watch` and `dev session` "
+                  "calls; typed by hand, it would let a crew member or a program speak as the tech lead to other "
+                  "sessions. Run the command without it: devkit knows who calls.")
+_SESSION_IN_CODE = re.compile(r"(?<![\w.-])dev[\s'\",\[\]]{1,6}session[\s'\",\]]{1,6}(" + "|".join(sorted(PEER_WRITES)) +
+                              r")\b")
+# who makes the call check() judges (a _Caller); None while one of devkit's own commands runs a check itself (dev push
+# judges its git push, dev release its tag): the hook judged that command already, with the session that ran it
+_CALLER = contextvars.ContextVar("devkit_guard_caller", default=None)
+
+
+class _Caller:
+    """Who makes the call check() judges, worked out once and only when a rule asks: from the hook's own payload
+    (identity.from_hook: agent_id names a crew member's lane, its absence the main session), else identity.speaker()
+    for a `dev guard check` (`human` in the developer's own terminal)."""
+
+    def __init__(self, agent, cwd, payload):
+        self.agent, self.cwd, self.payload, self._sp = agent, cwd, payload, None
+
+    def _hooked(self) -> bool:
+        return isinstance(self.payload, dict) and bool(self.payload.get("session_id"))
+
+    def speaker(self):
+        if self._sp is None:
+            from . import identity
+            self._sp = identity.from_hook(self.agent, self.payload) if self._hooked() else identity.speaker(self.cwd)
+        return self._sp
+
+    def member(self) -> bool:
+        """A crew member's call: its payload carries agent_id, or devkit names a lane that is not the main one."""
+        if self._hooked():
+            return bool(self.payload.get("agent_id"))
+        sp = self.speaker()
+        return sp.how != "human" and sp.lane not in ("main", "")
+
+
+def _hook_payload(tool_input):
+    """The payload of the hook run that judges `tool_input` (hooks._PAYLOAD, which this hook process read), or None:
+    the payload of another call never counts."""
+    p = getattr(sys.modules.get("devkit.hooks"), "_PAYLOAD", None)
+    return p if isinstance(p, dict) and tool_input is not None and p.get("tool_input") is tool_input else None
+
+
+def _held_claims() -> dict:
+    """{resource: holder} of the claim files that name a holder whose time has not run out: a folder listing and one
+    small read per claim file (without following a link), so nothing else of the claim rules runs while no claim is
+    held. Whether the holder still lives is peers.holder's to judge."""
+    from . import peers
+    try:
+        with os.scandir(peers.PEERS / "claims") as it:
+            files = [e.path for e in it if e.name.endswith(".json")]
+    except OSError:
+        return {}
+    import time
+    now, out = time.time(), {}
+    for f in files:
+        try:
+            fd = os.open(f, os.O_RDONLY | os.O_NOFOLLOW)
+            with os.fdopen(fd, "rb") as fh:
+                doc = json.loads(fh.read(1 << 20) or b"{}")
+            if isinstance(doc, dict) and isinstance(doc.get("holder"), dict) and float(doc.get("until") or 0) > now:
+                out[str(doc.get("resource") or "")] = doc["holder"]
+        except (OSError, ValueError, TypeError):
+            continue
+    return out
+
+
+def _held_kinds(held) -> set:
+    return {r.split(":", 1)[0] for r in held}
+
+
+def claim_refusal(resources, cwd=None, held=None):
+    """("deny", why) when a session other than the caller's holds one of `resources` and its kind is enforced
+    (CLAIM_KINDS), else None. `held`: _held_claims(), when the caller read it already. Only for a call check() judges
+    (_CALLER), never for the developer's own terminal; the developer's typed `grant claim-break <resource>` lets the
+    caller's tech lead through (_break_with_grant). A failure lets the call run and is recorded as guard.failopen:
+    workspace rules fail open."""
+    caller = _CALLER.get()
+    if caller is None or not resources:
+        return None
+    try:
+        from . import peers
+        held = _held_claims() if held is None else held
+        for r in dict.fromkeys(resources):
+            if r not in held or r.split(":", 1)[0] not in CLAIM_KINDS or not peers.RESOURCE.match(r):
+                continue
+            sp = caller.speaker()
+            if sp.how == "human":
+                return None
+            if (held[r].get("agent"), held[r].get("session")) == (sp.agent, sp.session):
+                continue  # the caller's own session holds it, the tech lead or a crew member
+            h = peers.holder(r, me=sp.key())
+            if not h or _break_with_grant(sp, r):
+                continue
+            return deny(peers.refusal(h) + (CLAIM_MEMBER_TAIL if caller.member() else ""), key="claim")
+    except Exception as e:
+        failopen("claims", e)
+    return None
+
+
+def _break_with_grant(sp, resource) -> bool:
+    """The developer typed `grant claim-break <resource>` in the caller's session: the tech lead's call takes one use,
+    breaks the claim with it (peers.release; the holder hears of it) and goes through. A crew member never breaks one,
+    and any failure keeps the claim."""
+    if sp.lane != "main":
+        return False
+    from . import peers, progress
+    repo = peers.resource_project(resource) or ""
+    try:
+        seen = progress.use_grant(sp.agent, sp.session, action="claim-break", target=resource, repo=repo,
+                                  consume=False)
+        if not seen or seen.get("source") not in ("E2", "decision"):
+            return False
+        got = progress.use_grant(sp.agent, sp.session, action="claim-break", target=resource, repo=repo)
+        if not got:
+            return False
+        peers.release(sp.as_dict(), resource, why="the developer typed grant claim-break", force_evidence=got)
+        return True
+    except Exception as e:
+        failopen("claim-break", e)
+        return False
+
+
+def _claim_project(cwd) -> str:
+    return (current_project(cwd) or "").lower() if cwd and str(cwd) != str(UNKNOWN) else ""
+
+
+def push_claim_refusal(cwd, args):
+    """claim_refusal for `git push <args>` at `cwd`: push:<project>@<branch> for each branch it pushes, release:<project>
+    for a tag, all tags, or the default or a permanent branch (a release is cut from it), and for --all, --mirror,
+    --prune or a glob refspec every push claim of the project too. A dry run and a push to a local path push nothing.
+    It reads git only while a push or release claim is held."""
+    held = _held_claims() if _CALLER.get() is not None else {}
+    if not _held_kinds(held) & {"push", "release"}:
+        return None
+    folder = _work_folder(cwd)
+    pid = _claim_project(folder)
+    if not pid:
+        return None
+    found, default = [], None
+    for action, target in _push_actions(list(args), folder):
+        if target in ("mirror", "all-branches", "prune"):
+            found += [r for r in held if r.startswith(f"push:{pid}@")] + [f"release:{pid}"]
+        elif action == "release":
+            found.append(f"release:{pid}")
+        else:
+            found.append(f"push:{pid}@{target}")
+            if action == "push-destructive":  # how _push_actions marks the default or a permanent branch, or a tag
+                default = _default_branch(folder) if default is None else default
+                if _protected_branch(target, default) or _VERSION_LIKE.match(target):
+                    found.append(f"release:{pid}")
+    return claim_refusal(found, cwd, held)
+
+
+def _dev_claim_kind(words, dev) -> str:
+    """The kind of enforced claim a dev call can touch, '' for none. (Only parsing: nothing is read yet.)"""
+    if words[:1] == ["release"] or words[:2] == ["pr", "merge"]:
+        return "release"
+    if words[:1] == ["push"]:
+        return "push"
+    if words[:2] == ["note", "set"] or (words[:1] == ["handoff"] and "--edit" in _dev_opts(dev)):
+        return "handoff"
+    return ""
+
+
+def _dev_claims(dev, words, cwd) -> list:
+    """The enforced claims a dev call touches, as resources."""
+    kind = _dev_claim_kind(words, dev)
+    if kind == "release":
+        return [f"release:{_claim_project(cwd)}"]
+    if kind == "push":
+        return [f"push:{_claim_project(cwd)}@{_branch(cwd)}"]
+    if words[:2] == ["note", "set"]:
+        if _dev_values(dev, ("-i", "--initiative")):
+            return []  # an initiative's note
+        named = _dev_values(dev, ("-p", "--project"))
+        return [f"handoff:{(named[-1] if named else _claim_project(cwd)).lower()}"]
+    named = words[1] if len(words) > 1 and "/" in words[1] else ""  # dev handoff <project> --edit
+    return [f"handoff:{(named or _claim_project(cwd)).lower()}"]
+
+
+def segment_claim_refusal(argv, cwd):
+    """claim_refusal for one segment's dev or gh command; git's own push is judged in check_git. A dry run and help
+    touch nothing, and nothing is read while no claim of the kind the command can touch is held."""
+    if _CALLER.get() is None or not argv:
+        return None
+    dev, gh = _dev_args(argv), None
+    words = []
+    if dev is not None:
+        if _dev_skips(dev, "-h", "--help", "--dry-run"):
+            return None
+        words = _dev_words(dev)
+        rest = dev[1:]
+        rest = rest[1:] if rest[:1] == ["--"] else rest
+        if words[:1] == ["git"]:
+            cdir, sub, args = _git_split(["git", *rest])
+            return push_claim_refusal(str(resolve(cdir, cwd)) if cdir else cwd, args) if sub == "push" else None
+        if words[:1] == ["gh"]:
+            gh = rest
+        elif not _dev_claim_kind(words, dev):
+            return None
+    elif os.path.basename(argv[0]) == "gh":
+        gh = list(argv[1:])
+    else:
+        return None
+    if gh is not None and gh[:2] not in (["pr", "merge"], ["release", "create"]):
+        return None
+    held = _held_claims()
+    if ("release" if gh is not None else _dev_claim_kind(words, dev)) not in _held_kinds(held):
+        return None
+    if gh is not None:
+        repo = _opt_value(gh, ("-R", "--repo"))
+        return claim_refusal([f"release:{_slug(repo) if repo else _claim_project(cwd)}"], cwd, held)
+    return claim_refusal(_dev_claims(dev, words, cwd), cwd, held)
+
+
+def note_claim_refusal(rel, cwd):
+    """claim_refusal for a write to `rel` in the handoff repository: handoff:<project> when it is a project's note
+    (projects/<project>.md)."""
+    low = str(rel).replace(os.sep, "/")
+    if _CALLER.get() is None or not low.casefold().startswith("projects/") or not low.casefold().endswith(".md"):
+        return None
+    held = _held_claims()
+    if "handoff" not in _held_kinds(held):
+        return None
+    return claim_refusal([f"handoff:{low[len('projects/'):-len('.md')].lower()}"], cwd, held)
+
+
+def session_write_refusal(argv) -> str | None:
+    """SESSION_MEMBER_REASON when a crew member's segment runs `dev session tell|ask|answer|claim|release|escalate`
+    (its help only reads); None for the tech lead's own call and for every read."""
+    caller = _CALLER.get()
+    dev = _dev_args(argv) if caller is not None and argv else None
+    if not dev or _dev_skips(dev, "-h", "--help"):
+        return None
+    words = _dev_words(dev)
+    if words[:1] != ["session"] or len(words) < 2 or words[1] not in PEER_WRITES:
+        return None
+    return SESSION_MEMBER_REASON.format(what=_code(f"dev session {words[1]}")) if caller.member() else None
+
+
+def speaker_forgery(argv0) -> str | None:
+    """SPEAKER_REASON when a segment sets DEVKIT_SPEAKER, for the command it runs (`DEVKIT_SPEAKER=main …`,
+    `env DEVKIT_SPEAKER=…`) or in the shell (a bare assignment, export, declare, typeset, readonly, local), whatever
+    program follows: any agent, the main session too. Reading or unsetting it is fine."""
+    names, argv = _env_split(argv0)
+    if argv:
+        names = names | _exports(os.path.basename(str(argv[0])), [str(a) for a in argv[1:]])
+    return SPEAKER_REASON if "DEVKIT_SPEAKER" in names else None
+
+
+PIPE_GATE =re.compile(r"\|(?!\|)[^|&;\n]*&&\s*(?:[A-Z_]+=\S*\s+)*(?:git\s+(?:-C\s+\S+\s+)?(?:commit|push|tag)\b|"
                        r"dev\s+(?:commit|push|release)\b|gh\s+(?:pr\s+(?:create|merge)|release\s+create)\b)")
 PIPE_REASON = ("This commits, pushes or tags after a pipeline (`… | … && git commit`): the `&&` sees the exit code of "
                "the pipe's last command, so a failing check before the pipe still lets it run. Run the check without "
@@ -1432,8 +1709,10 @@ def identity_hiding(argv0) -> str | None:
     """IDENTITY_REASON for a segment (its words, prefixes included) that unsets or blanks an agent identity variable
     (core.AGENT_MARKERS): `unset NAME`, `env -u NAME …`, `env -i …`, an empty `NAME=` before a command, alone or
     after export. DEVKIT_FROM_AGENT, the lane marker a crew member's commands carry, is left to the caller-identity
-    rule, which refuses a member that changes it and lets the main session, which carries none, unset it."""
-    names = set(core.AGENT_MARKERS) - {"DEVKIT_FROM_AGENT"}
+    rule, which refuses a member that changes it and lets the main session, which carries none, unset it; and
+    DEVKIT_SPEAKER, the main session's stamp, to speaker_forgery, which refuses setting it (blank included) and lets
+    anyone drop it: without it devkit only knows less about who speaks."""
+    names = set(core.AGENT_MARKERS) - {"DEVKIT_FROM_AGENT", "DEVKIT_SPEAKER"}
     words = [str(w) for w in argv0]
     for k, w in enumerate(words):
         m = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)=", w)
@@ -1657,6 +1936,9 @@ def _check_segments(cmd: str, segs, ecwd: str, agent: str, depth: int = 0, outer
         why = identity_hiding(argv0)
         if why:
             return deny(why, key="identity-hiding")
+        why = speaker_forgery(argv0)
+        if why:
+            return deny(why, key="speaker-stamp")
         argv = _strip_prefix(argv0)
         while argv and argv[0] in _RESERVED:  # `if …; then rm -rf ~; fi` runs rm
             argv = _strip_prefix(argv[1:])
@@ -1766,6 +2048,9 @@ def _check_segments(cmd: str, segs, ecwd: str, agent: str, depth: int = 0, outer
                     res = deny(v, key="overwrite")
                 elif dest != UNKNOWN and not dest.is_dir() and BACKUP_RE.search(dest.name) and is_under(dest, DEV):
                     res = deny(f"Do not create backup copies ({dest.name}); git already keeps history.", key="backup-copy")
+        if not res:
+            why = session_write_refusal(argv)
+            res = deny(why, key="session-member") if why else segment_claim_refusal(argv, ecwd)
         if res:
             return res
         lines = _nested_lines(argv, ecwd)
@@ -2317,6 +2602,7 @@ _STATE_OWNERS = {
     "trash": ("Trash", "`dev rm --undo` to restore from it"),
     "trash.jsonl": ("Trash manifest", "`dev rm --undo` to restore from it"),
     "ci-pushes.json": ("push budget", "`dev push`, which counts pushes itself"),
+    "peers": ("session messages and claims", "`dev session` (tell, ask, answer, claim, release, escalate)"),
 }
 _TAIL = "Only the developer changes safeguards, in a terminal."
 
@@ -7807,6 +8093,14 @@ def crew_shell_verdict(cmd: str, cwd, scope=None, member=None, level=None, base=
             why = _impeccable_lane_write(impeccable_engine_words(dev[1:]), at, scope, base)
             if why:
                 return deny(why, key="impeccable-lane")
+        if lane or member:  # a program of a crew member that sends to other sessions (its typed form: check())
+            hit = _SESSION_IN_CODE.search(code) if code is not None and \
+                _code_spawns(code, re.sub(r"[0-9.]+$", "", os.path.basename(argv[0]).casefold())) else None
+            words = _dev_words(dev) if dev and not _dev_skips(dev, "-h", "--help") else []
+            sub = hit.group(1) if hit else words[1] if words[:1] == ["session"] and words[1:2] and \
+                words[1] in PEER_WRITES else ""
+            if sub:
+                return deny(SESSION_MEMBER_REASON.format(what=_code(f"dev session {sub}")), key="session-member")
         for kind, args in _dev_calls(argv, code):
             if kind == "lane" and not one_routed:
                 return deny(LANE_REASON, key="lane")
@@ -10836,20 +11130,25 @@ _SHELL = _Judged(None)  # the call is a shell command: check_bash judges it
 _TILDE_READINGS = (_EXPAND, _AS_IS)
 
 
-def check(tool: str, tool_input: dict, cwd: str, agent: str):
+def check(tool: str, tool_input: dict, cwd: str, agent: str, call: dict | None = None):
     """The guard's verdict on one tool call: ("deny", why), ("ask", why) or None. It begins a judgment: the refusal
-    ids of what it and the gates after it refuse are kept for refusal_of, and LAST_REFUSAL names its own refusal."""
+    ids of what it and the gates after it refuse are kept for refusal_of, and LAST_REFUSAL names its own refusal.
+    `call`: the hook's PreToolUse payload, whose session and agent_id say who calls (the claim and `dev session`
+    rules); without it, the payload this hook process read when it carries this very tool_input, else
+    identity.speaker() (a `dev guard check`)."""
     global LAST_REFUSAL, LAST_REFUSAL_WORD
     _REFUSALS.clear()
     LAST_REFUSAL, LAST_REFUSAL_WORD = "", ""
     LAST_LESSON_RULE.clear()
     token = _WORD.set("")
+    caller = _CALLER.set(_Caller(agent, cwd, call if call is not None else _hook_payload(tool_input)))
     try:
         verdict = _check(tool, tool_input, cwd, agent)
         if not verdict or verdict[0] == "ask":  # a lesson rule can only add a warning or refuse, never allow
             verdict = _lesson_rule_verdict(tool, tool_input, cwd, verdict)
         return _judged(verdict)
     finally:
+        _CALLER.reset(caller)
         _WORD.reset(token)
 
 
