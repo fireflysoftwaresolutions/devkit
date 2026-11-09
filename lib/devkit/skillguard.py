@@ -390,7 +390,8 @@ def on_agent_brief(agent: str, tool_input: dict, project: str = ""):
         if picked:
             extra += ("\n\n## devkit · known pitfalls\nLessons from earlier mistakes in this work; follow their "
                       "prevention. If one happens again, run `dev lesson recur <id> --evidence \"…\"`; a new mistake "
-                      "that could repeat gets `dev lesson add \"…\" --cause \"…\" --prevent \"…\"`.\n"
+                      "that could repeat gets `dev lesson add \"…\" --happened \"…\" --cause \"…\" "
+                      "--prevent \"…\" --file <glob> --command \"<command words>\" --error \"<output text>\"`.\n"
                       + "\n".join(lessons.pitfall_lines(picked)))
             lessons.track([x["meta"]["id"] for x in picked], "shown", "brief")  # the hook records them for the member
     if "Firefly> DevKit" not in brief:  # every crew member reports the same way (the SubagentStop hook checks it)
