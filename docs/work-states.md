@@ -46,7 +46,7 @@ it takes a lock: your name and an expiry time, pushed to the handoff repository 
 
 | Event | What changes |
 | --- | --- |
-| `dev task start <n>` (or `claim`) | todo becomes doing, with a lock for `work.lock_hours` (8). The command reports success only when the lock is on the remote. On a work branch, it links the item to that branch |
+| `dev task start <id>` (or `claim`) | todo becomes doing, with a lock for `work.lock_hours` (8). The command reports success only when the lock is on the remote. On a work branch, it links the item to that branch |
 | `dev branch new`, `dev wt new` | Link the one item you hold with no branch to the branch they create, and say so |
 | The Stop hook's background sync, at most every 2 minutes | Renews a lock once less than half its time is left, but only while one of your live sessions is on the item's branch |
 | The hourly `sync` job, on any machine | Releases each lock whose time ran out, in one commit: doing goes back to todo, and blocked stays blocked |
@@ -64,9 +64,48 @@ long as someone works on its branch.
 item: doing without a lock, open although its branch is merged, and two items with one title.
 
 **Repair.** `dev task reconcile` lists the stale items and changes nothing; `--apply` fixes the first two kinds.
-Cancel a duplicate with `dev task cancel <n> --why "duplicate of <id>"`, and reopen an item a merge closed too early
-with `dev task reopen <n> --why "<what is left>"`. [Teams and machines](teams.md#shipped-and-stale-items) has the
-details, including how devkit tells that a branch was merged.
+Cancel a duplicate with `dev task cancel <id> --why "duplicate of <other id>"`, and reopen an item a merge closed too
+early with `dev task reopen <id> --why "<what is left>"`. [Teams and machines](teams.md#shipped-and-stale-items) has
+the details, including how devkit tells that a branch was merged.
+
+### Numbers and ids
+
+Every verb of `dev task` takes an item's id (`T-…`, `F-…`, `B-…`, `S-…`, or a unique prefix of one). Ids never
+change, so agents and scripts use them. People at a terminal can also type the number that `dev task` shows in front
+of each open item, as in `dev task done 3`.
+
+A number means the item at that place in the list `dev task` last showed you, and only while that list still holds:
+
+- **Each reader has a list of its own.** devkit keeps the last list it showed to each agent session, each crew lane in
+  it, each Codex thread, and each terminal. Your number points into your own list, never into one someone else was
+  shown since.
+- **For 30 minutes.** After that, run `dev task` again to number the list again.
+- **Until the list changes.** Closing, adding, or moving an item renumbers every item after it. Once the open items
+  are no longer the list you were shown, devkit refuses the number, changes nothing, and names both ids: the item
+  the number had in your list and the item at that place now. Act by id, or run `dev task` again.
+- **Only when devkit can tell whose list it is.** When devkit cannot match a `dev task` to one caller (two open calls
+  of a session run the same command, or the command runs from a loop or a script), the list shows `·` instead of
+  numbers, and a number is refused.
+
+The list that a write prints keeps the numbers of the list shown before it while nothing moved. After a close, an
+add, or a move, it shows `·` instead and says `no numbers: this write changed the list`.
+
+A number that points at nothing is refused with the way forward:
+
+```text
+✗ no #999 in the list of fireflysoftwaresolutions/devkit shown at 10:46 (175 open items): run dev task to number the list again, or use an id
+```
+
+Every write prints what it did to which item, by id and title, so a wrong target shows at once:
+
+```text
+✓ done T-fy3k2m9q1ab “Fix the login timeout”
+```
+
+**More than five items in Now.** Now is for the work of this week. When a project's Now holds more than five open
+items, `dev task add --now` and `dev task move <id> --to now` print a warning that says how many are in Now, how many
+are being worked on, and how to move the rest to Next. Nothing is refused. `dev status` shows the same warning in its
+**Tasks** row until Now is down to five.
 
 ## Progress runs, steps, and crew lanes
 

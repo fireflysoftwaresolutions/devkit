@@ -26,14 +26,25 @@ event happens, and repair what drifted when the checks show it.
 | Install | the pinned release, or an older session | `dev install`, `dev update`, a restart |
 | Branch | open, merged, pruned | the merge test; `dev pr merge`, `dev release`, `dev branch prune` |
 
-**A work item lives on its branch.** `dev task start <n>` takes a lock for 8 hours (`work.lock_hours`) and links the
+**A work item lives on its branch.** `dev task start <id>` takes a lock for 8 hours (`work.lock_hours`) and links the
 item to the work branch you are on; `dev branch new` and `dev wt new` link the one item you hold without a branch. The
 lock renews only while one of your live sessions is on that branch. Work elsewhere and the lock runs out: the item goes
 back to todo, and someone else may take it.
 
+**Name an item by its id.** `<id>` is the item's id (`T-…`, `F-…`, `B-…`, `S-…`) or a unique prefix of it; ids never
+move. The number in front of an item in `dev task` is for people at a terminal: it counts only in the list `dev task`
+last showed that reader (your session, your crew lane, a Codex thread, or a terminal), for 30 minutes, and while the
+open items are still that list. After a close, an add, or a move, devkit refuses the number and names both ids, and a
+list it cannot tie to one caller has no numbers. Every write prints its item (`✓ done T-… “<title>”`): read it to
+confirm you changed the item you meant.
+
+**Now is for this week's work.** With more than five open items in a project's Now, `dev task add --now`,
+`dev task move <id> --to now`, and `dev status` warn with the count. Move what waits to Next with
+`dev task move <id> --to next --why "…"`.
+
 **A closed item keeps the state it was closed in.** `dev task start`, `release`, `done`, `move`, `block`, and `cancel`
 need an open item (todo, doing, or blocked) and refuse a done or cancelled one; `dev task unblock` takes only a blocked
-one. A done item with work left comes back with `dev task reopen <n> --why "<what is left>"`, then moves like any open
+one. A done item with work left comes back with `dev task reopen <id> --why "<what is left>"`, then moves like any open
 item.
 
 **A decision is open only while someone waits for it.** It is moot when the member that asked has ended and no step
@@ -63,7 +74,7 @@ while none is free it may read but not write.
 
 1. Close each step you finished with its evidence: `dev progress step "…" --check "…"`. A step still running gets a
    `dev progress note`, never a close.
-2. The item you worked on: `dev task done <n> --why "<evidence>"` once it is verified, or `dev task release <n>` if
+2. The item you worked on: `dev task done <id> --why "<evidence>"` once it is verified, or `dev task release <id>` if
    you stop. Never leave it doing on a branch no session is on.
 3. While events can still arrive (a member works, a launch is pending, a step waits for a slot, CI you sent runs),
    a wait that wakes you is armed: `dev watch --wait`, which covers CI too (the `wait-and-wake` skill has the
@@ -80,7 +91,7 @@ while none is free it may read but not write.
   `dev ci watch --wait --pr <n>`.
 - Merged somewhere else (GitHub's web page, another Mac)? Run `dev task reconcile` and `dev branch prune`, and apply
   what they report.
-- An item the merge closed too early: `dev task reopen <n> --why "<what is left>"`.
+- An item the merge closed too early: `dev task reopen <id> --why "<what is left>"`.
 
 ## Before a release
 
@@ -109,8 +120,8 @@ while none is free it may read but not write.
 | What you see | Check | Fix |
 | --- | --- | --- |
 | An item doing with no lock, or nobody on its branch | `dev task reconcile` | `dev task reconcile --apply` sends it back to todo |
-| An open item whose branch is merged | `dev task reconcile` | `--apply` marks it done with the merge commit; or `dev task reopen <n> --why "…"` if work is left |
-| Two items with one title | `dev task reconcile` | `dev task cancel <n> --why "duplicate of <id>"` |
+| An open item whose branch is merged | `dev task reconcile` | `--apply` marks it done with the merge commit; or `dev task reopen <id> --why "…"` if work is left |
+| Two items with one title | `dev task reconcile` | `dev task cancel <id> --why "duplicate of <other id>"` |
 | A run that stopped moving or began before the latest release | `dev progress` | in its session: `dev progress done "<outcome>"`, or `dev progress step`; after `/clear`: `dev session carry` |
 | A step flagged for a recheck after a reopen | read its work against the change | `dev progress confirm <step> --why "…"` when it still holds; otherwise `dev progress reopen <step> --why "…"` |
 | A member stopped or lost | `dev crew next` | relaunch it with `dev crew brief <member> "…" --step "<step>"`, or `dev progress skip "<step>" --why "…"` |

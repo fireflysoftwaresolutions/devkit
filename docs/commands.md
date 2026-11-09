@@ -101,7 +101,8 @@ The project you are in, or `<name>`, in the order of its questions:
    `M3@9448c4d0`; one of your own session's run keeps its bare id, `M3`. A run that ended lists none.
 2. **Right now:** the checks of the branch or its open PR, the crew members working now (role, name, and what their
    step does, never its code), and the plan's steps done and time left while a run works. A run works while it or one
-   of its crew reported in the last 30 minutes.
+   of its crew reported in the last 30 minutes. A **Tasks** row warns when the project's Now holds more than five open
+   items, with how many are being worked on.
 3. **Last update:** the latest status block, whole: who and when, its title, Done, Check, and Next. It names the
    worktree or copy it came from when that is not the one shown.
 4. **Branches:** where each branch lives, one row each (the first eight; `dev branch ls` has them all): local only
@@ -226,18 +227,21 @@ from `~/Development` or ask the developer.
 
 Work items of the project you are in, of another project with `-p`, or of an initiative with `-i`. Without a verb
 (or with `ls`) it lists the open items in board order (Now, then Next, then Later; high priority first; oldest first).
-The number in front of each item is what the other verbs accept. `--all` lists every done item instead of the last
-five.
+Each item shows its number and its id. `--all` lists every done item instead of the last five.
 
 `-p` and `-i` work before or after the verb. The examples put them after it:
 
 ```bash
-dev task done 3 -p acme/billing
+dev task done T-fy3k2m9q1ab -p acme/billing
 dev task add "Agree on the event schema" --now -i payments
 ```
 
-A `<selector>` is an id (`T-…`, `F-…`, `B-…`, `S-…`, or a unique prefix), the number from the list, or a unique part
-of the title. See [Teams and machines](teams.md) for locks, versions, and the changelog.
+A `<selector>` is an id (`T-…`, `F-…`, `B-…`, `S-…`, or a unique prefix), a number from the list, or a unique part
+of the title. Agents use ids. A number counts only in the list `dev task` last showed you, for 30 minutes, and while
+the open items are still that list. devkit refuses the number once an item was closed, added, or moved. The refusal
+names the id the number had and the one at its place now; see
+[Work states › Numbers and ids](work-states.md#numbers-and-ids). Every write prints its item, as
+`✓ done T-… “<title>”`. See [Teams and machines](teams.md) for locks, versions, and the changelog.
 
 | Verb | Effect |
 | --- | --- |
@@ -276,6 +280,9 @@ Options of `dev task add`:
 `--why` records the reason in the item's changelog and in its commit. `edit`, `move`, `block`, `cancel`, `reopen`,
 and `link` refuse to run without it. Changing an item that someone else holds an unexpired lock on
 is refused; coordinate with them or wait for the lock to expire.
+
+When a project's Now holds more than five open items, `add --now` and `move --to now` print a warning with how many
+are in Now and how many are being worked on. They refuse nothing.
 
 ### `dev note set <key=value> … [-p PROJECT | -i SLUG]`
 

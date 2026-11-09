@@ -8,16 +8,19 @@ It applies equally to one developer with a laptop and a desktop, and to a team t
 
 ## The rules in one minute
 
-- **Claim before you work.** `dev task start <n>` takes a lock on the item and pushes it at once. Other machines see
+- **Claim before you work.** `dev task start <id>` takes a lock on the item and pushes it at once. Other machines see
   it, and their agents are told not to work on it.
 - **Every change has a reason.** Changes of scope (`edit`, `move`, `block`, `cancel`, `link`) need `--why "…"`. Each change bumps the
   item's version, adds a changelog line (who, machine, agent, when, why), and makes one commit.
 - **Write through `dev`.** Work items, session logs, and presence are written only by `dev`; the guard blocks direct
   edits, so versions, locks, and history stay correct.
-- **Finish or give back.** `dev task done <n>` when the work is verified, `dev task release <n>` when you stop
+- **Finish or give back.** `dev task done <id>` when the work is verified, `dev task release <id>` when you stop
   without finishing. A lock is renewed only while a session works on the item's branch; otherwise it runs out after
   8 hours and the item goes back to todo. `dev pr merge` closes the items of the branch it merges.
 - **Look before you start.** `dev team` shows who is working on what, on every machine.
+- **Name an item by its id.** `<id>` on this page is the item's id, such as `T-fy3k2m9q1ab`, or a unique prefix of
+  it. At a terminal, the number `dev task` shows in front of an item works too, while that list is unchanged and for
+  30 minutes ([Work states › Numbers and ids](work-states.md#numbers-and-ids)).
 - **Changes travel in seconds.** Every commit, push, PR, release, and handoff change queues a sync that reaches
   GitHub within about 15 seconds; other machines get it at their next pull (see
   [Near-real-time sync](#near-real-time-sync)).
@@ -116,22 +119,22 @@ then swaps it in, so a reader never sees half a file.
 | Command | From | To | Lock |
 | --- | --- | --- | --- |
 | `dev task add "…"` | — | todo, in Next (or `--now`, `--later`) | none (`--claim` takes it at once) |
-| `dev task start <n>` · `claim <n>` | todo | doing, in Now | taken for `work.lock_hours` (8), pushed at once |
-| `dev task release <n>` | doing | todo | given back, pushed at once |
-| `dev task done <n>` | any open state | done | given back, pushed at once |
-| `dev task block <n> --why "…"` | todo or doing | blocked | unchanged |
-| `dev task unblock <n>` | blocked | doing while it is claimed, todo otherwise | unchanged |
-| `dev task cancel <n> --why "…"` | any open state | cancelled | cleared |
-| `dev task delegate <n> --to <login>` | any open state | todo when you held the lock | yours is given back; the teammate claims it |
-| `dev task link <n> --to <slug> --why "…"` | any state | unchanged; it now counts toward the initiative | unchanged |
+| `dev task start <id>` · `claim <id>` | todo | doing, in Now | taken for `work.lock_hours` (8), pushed at once |
+| `dev task release <id>` | doing | todo | given back, pushed at once |
+| `dev task done <id>` | any open state | done | given back, pushed at once |
+| `dev task block <id> --why "…"` | todo or doing | blocked | unchanged |
+| `dev task unblock <id>` | blocked | doing while it is claimed, todo otherwise | unchanged |
+| `dev task cancel <id> --why "…"` | any open state | cancelled | cleared |
+| `dev task delegate <id> --to <login>` | any open state | todo when you held the lock | yours is given back; the teammate claims it |
+| `dev task link <id> --to <slug> --why "…"` | any state | unchanged; it now counts toward the initiative | unchanged |
 | Lock not renewed for 8 hours | doing (blocked stays blocked) | todo | cleared by the hourly sync on any machine |
 | `dev pr merge` merges the item's branch | any open state | done; the changelog names the PR and its merge commit | cleared |
 | `dev task reconcile --apply` | doing without a lock · open on a merged branch | todo · done | cleared |
 
-Claiming a blocked item keeps it blocked; run `dev task unblock <n>` when the blocker is gone.
+Claiming a blocked item keeps it blocked; run `dev task unblock <id>` when the blocker is gone.
 
 A closed item keeps the state it was closed in. `dev task move`, `block`, and `cancel` refuse a done or cancelled
-item and name `dev task reopen <n> --why "<what is left>"`, and `dev task unblock` refuses any item that is not
+item and name `dev task reopen <id> --why "<what is left>"`, and `dev task unblock` refuses any item that is not
 blocked.
 
 ### Locks across machines
@@ -146,7 +149,7 @@ blocked.
    item first, devkit reads the item again as the remote has it and claims it again, so a lock taken there first
    refuses yours with the name of the holder. When the remote cannot be reached, the claim fails with "the lock did
    not reach the remote": the lock is committed on your Mac only, other machines do not see it, and the next
-   `dev sync` pushes it. Run `dev task start <n>` again to confirm it.
+   `dev sync` pushes it. Run `dev task start <id>` again to confirm it.
 2. **Respect.** Each session's context lists your claimed tasks and the tasks claimed by others with the line
    `Claimed by others — do NOT work on these`. It also names the people working on the same project right now.
    Changing an item that someone else holds is refused until the lock expires.
@@ -154,7 +157,7 @@ blocked.
    machine holds once less than half of the lock time is left, but only when one of your live sessions is on the
    item's branch: `dev task start` on a work branch links it (`branch:<name>`). When you claimed the item on the
    default branch, or before its branch existed, `dev branch new` and `dev wt new` link it to the branch they create
-   and say so, if it is the only item you hold with no branch; with more than one, they name them, and `dev task start <n>`
+   and say so, if it is the only item you hold with no branch; with more than one, they name them, and `dev task start <id>`
    on the branch links the one it is for. An item with no branch, or whose branch nobody works on, is not renewed.
 4. **Expire.** The hourly `sync` job on any machine releases locks whose time has run out, in one commit. A doing item
    goes back to todo, a blocked one stays blocked, and the changelog says whose lock expired and when.
@@ -188,12 +191,12 @@ moment the item was linked to the branch, so the merge of the name's earlier use
 To recover:
 
 - **An item went back to todo while you were still on it.** Your session was on another branch, or on the default
-  branch. Run `dev task start <n>` on the work branch: it takes the lock again and links the branch, so the lock is
+  branch. Run `dev task start <id>` on the work branch: it takes the lock again and links the branch, so the lock is
   renewed from then on.
-- **An item was closed by a merge but has work left.** Run `dev task reopen <n> --why "<what is left>"`.
-- **`dev release` refuses because of open items.** Close the shipped ones (`dev task done <n>`, or
+- **An item was closed by a merge but has work left.** Run `dev task reopen <id> --why "<what is left>"`.
+- **`dev release` refuses because of open items.** Close the shipped ones (`dev task done <id>`, or
   `dev task reconcile --apply`), or release anyway with `dev release --why "<reason>"`.
-- **Two items share a title.** Keep one and cancel the other: `dev task cancel <n> --why "duplicate of <id>"`.
+- **Two items share a title.** Keep one and cancel the other: `dev task cancel <id> --why "duplicate of <other id>"`.
 
 `dev doctor` and the dashboard's Health view report the same stale items, each with its fix.
 [Work states](work-states.md) explains how work items, runs, decisions, and the other records drift, and what moves
@@ -210,13 +213,13 @@ changelog line and the commit message, so `git log` in the handoff repository re
 676d924 F-fwmj1ge0dlf: create feature “Define the refund event schema” (maria@laptop (human)) — both services must agree
 ```
 
-`dev task show <n>` prints the fields, the description, and the history; `dev task history <n>` prints only the
+`dev task show <id>` prints the fields, the description, and the history; `dev task history <id>` prints only the
 history.
 
 ### Hand a task to a teammate
 
 ```bash
-dev task delegate 2 --to jordan --why "Jordan owns the event bus" --due 2026-11-20
+dev task delegate T-fy3k2m9q1ab --to jordan --why "Jordan owns the event bus" --due 2026-11-20
 ```
 
 devkit releases your lock if you held it, sets `assignee` and the due date, records the reason, and prints a short

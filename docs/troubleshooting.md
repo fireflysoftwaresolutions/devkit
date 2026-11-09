@@ -360,7 +360,7 @@ and the hourly sync on any machine releases it and sends the item back to todo; 
 lock that has not expired cannot be released by someone else.
 
 When your own item went back to todo while you were still working on it, your session was on another branch. Run
-`dev task start <n>` on the item's branch: it takes the lock again and links the branch, so the lock is renewed from
+`dev task start <id>` on the item's branch: it takes the lock again and links the branch, so the lock is renewed from
 then on.
 
 ### `dev doctor` reports the work state as stale

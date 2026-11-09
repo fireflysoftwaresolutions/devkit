@@ -25,7 +25,7 @@ A scope is a project id or `initiatives/<slug>`.
 
 ## Developers and machines
 
-- **Claim before you work.** `dev task start <n>` takes a lock on the item and pushes it at once. Other machines
+- **Claim before you work.** `dev task start <id>` takes a lock on the item and pushes it at once. Other machines
   see it, and their agents are told not to work on it. Locks renew while a session works and expire when it stops.
 - **Every change has a reason.** Changes of scope (edit, move, cancel) need `--why`, and every other change accepts
   one. Each change bumps the item's version, adds a changelog line (who, machine, agent, when, why), and makes one
@@ -64,8 +64,8 @@ dev overview                          # every initiative and project at a glance
 dev dashboard                         # the visual command center
 dev task                              # work items of the project you are in (-i <slug> for an initiative)
 dev task add "…" --type bug --why "…" --done "…" --now
-dev task start|done|release <n>       # claim, finish, give back
-dev task delegate <n> --to <login>    # hand it to a teammate, with the message to send
+dev task start|done|release <id>      # claim, finish, give back (the item's id, T-…)
+dev task delegate <id> --to <login>   # hand it to a teammate, with the message to send
 dev plan new "…" --kind spec          # plan | spec | spike | bugfix | adr;  dev plan revise <file> --why "…"
 dev note set status=blocked           # priority=high milestone="…" due=YYYY-MM-DD tags=a,b
 dev handoff --log "…"                 # a session line; dev handoff --edit opens the note

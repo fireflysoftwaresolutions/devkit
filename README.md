@@ -106,8 +106,8 @@ dev dashboard                the live command center; it opens on Now: does anyt
 dev overview                 every initiative and project: status, progress, Now tasks, latest status
 dcd billing                  jump into a project                     dwt feat/invoice-export   …or into a new worktree
 dev task                     the project's board                      dev task add "Export invoices as CSV" --type feature --now
-dev task start 2             claim it (locked on every machine)       dev task done 2      dev task release 2
-dev task delegate 3 --to jordan --why "Jordan owns the event bus"     hand it over, with the message to send
+dev task start <id>          claim it (locked on every machine)       dev task done <id>   dev task release <id>
+dev task delegate <id> --to jordan --why "Jordan owns the event bus"  hand it over, with the message to send
 dev plan new "Refund events" --kind spec                              a versioned spec; dev plan revise <file> --why "…"
 dev initiative show payments one initiative across its projects       dev task -i payments
 dev team                     who is working on what, on every machine

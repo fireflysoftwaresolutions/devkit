@@ -318,7 +318,7 @@ question: should cancelled invoices be exported too? The ticket doesn't say.
 
 ## 13. Handing work to a teammate
 
-When the developer wants someone else to take a task, run `dev task delegate <n> --to <github-login> --why "<why it
+When the developer wants someone else to take a task, run `dev task delegate <id> --to <github-login> --why "<why it
 matters>"`. It assigns the work item, records the reason, writes the message below and copies it to the clipboard,
 so the developer can paste it into Slack, Teams, or email. Review the text before it goes out; it should read like a
 person wrote it.

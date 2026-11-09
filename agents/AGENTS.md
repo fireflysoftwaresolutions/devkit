@@ -466,10 +466,10 @@ each) → tasks (Now / Next / Later / Done), plans, and sessions.** The devkit `
   contracts (APIs, events, versions) every member must respect. `dev initiative ls|show`, `dev task -i <slug>`.
 
 - **Team protocol (when developers, laptops, and agents share the handoff repo):** start the item you work on, on its
-  branch, before you work (`dev task start <n>`: the lock is pushed at once and linked to the branch, and renews only
+  branch, before you work (`dev task start <id>`: the lock is pushed at once and linked to the branch, and renews only
   while you are on it; elsewhere it expires and the item goes back to todo). Never work on a task claimed by someone
-  else (the session context lists them). Finish with `dev task done <n> --why "<evidence>"` once verified, or
-  `dev task release <n>`; nothing stays doing without a lock. Run `dev task reconcile` before a release and at
+  else (the session context lists them). Finish with `dev task done <id> --why "<evidence>"` once verified, or
+  `dev task release <id>`; nothing stays doing without a lock. Run `dev task reconcile` before a release and at
   handoff. Changes of scope (edit, move, cancel, block) need `--why "…"`: the reason is versioned in the item's
   changelog and its commit. After editing a plan or spec run `dev plan revise <file> --why "…"`. Work items, session
   logs and presence are written only through `dev`, never by hand. `dev team` shows who is working on what.
@@ -478,7 +478,7 @@ Use it, keep it current:
 
 - `dev overview`—every project: status, priority, Now tasks, latest status block, last session (`--json` for tools).
 - `dev status` / `dev task`—the current project and its work items; `dev task add "…" --now|--later
-  [--type feature|bug|spike] [--why "…"]`, `dev task start|done|release <n>`, `dev task show <n>` (with history);
+  [--type feature|bug|spike] [--why "…"]`, `dev task start|done|release <id>`, `dev task show <id>` (with history);
   `dev note set status=blocked priority=high milestone="…" due=YYYY-MM-DD`; `dev plan new|revise|approve`.
 - `dev standup`—what happened recently; `dev dashboard`—the visual command center (for the user).
 - Slash commands in Claude Code: `/devkit:status`, `/devkit:overview`, `/devkit:task`, `/devkit:handoff`,
