@@ -5,6 +5,9 @@ Ctrl+D at any point ends with a summary, a resumed setup keeps the earlier log, 
 finished is offered to continue it. The wizard runs in-process on the fake Mac of test_setup_flow (scripted keys,
 stubbed commands and sign-ins); every file goes to a temporary folder.
 """
+import argparse
+import contextlib
+import io
 import json
 import os
 import sys
@@ -225,6 +228,39 @@ class UnfinishedInstallTests(unittest.TestCase):
                 if recorded:
                     (Path(tmp) / "config-installed.json").write_text('{"version": "26.11.9"}')
                 self.assertIs(wizard.installed_before(), expected)
+
+    def test_a_settings_repair_after_a_crashed_install_is_no_finished_install(self):
+        """dev install crashed after it pinned a release and wrote Claude Code's hooks; the person opens Claude Code,
+        whose session-start hook runs dev config repair, and the repair restores a setting. It may update the record
+        of a finished install but never create one, and neither may a partial dev install --only claude: the next
+        dev setup still offers to continue. A whole dev install that exits 0 creates the record, and a later repair
+        moves it on."""
+        from devkit import cli, policy, setup
+        pin = {"version": "26.11.9", "path": Path("/x"), "name": "26.11.9-abc"}
+        desired = [{("cleanupPeriodDays",): 30}]
+        install = argparse.Namespace(why="", unverified=False, only=None, version=None, as_pinned=True)
+        with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as stack:
+            tmp = Path(tmp)
+            for p in (mock.patch.object(core, "STATE", tmp), mock.patch.object(wizard, "STATE", tmp),
+                      mock.patch.object(core, "CLAUDE_HOME", tmp / ".claude"),
+                      mock.patch.object(core, "CODEX_HOME", tmp / ".codex"),
+                      mock.patch.object(core, "pinned_release", lambda: dict(pin)),
+                      mock.patch.object(policy, "repair", lambda: [policy.Drift("claude", "hooks.Stop", policy.MISSING,
+                                                                                "dev hook stop")]),
+                      mock.patch.object(policy, "claude_desired", lambda: (desired[0], {})),
+                      mock.patch.object(setup, "run_install", lambda **kw: 0),
+                      mock.patch("sys.stdout", io.StringIO())):
+                stack.enter_context(p)
+            self.assertEqual(cli.cmd_config(argparse.Namespace(config_cmd="repair", quiet=True)), 0)
+            self.assertFalse(wizard.installed_before())
+            self.assertEqual(cli.cmd_install(argparse.Namespace(**dict(vars(install), only="claude"))), 0)
+            self.assertFalse(wizard.installed_before())
+            self.assertEqual(cli.cmd_install(install), 0)
+            self.assertTrue(wizard.installed_before())
+            desired[0] = {("cleanupPeriodDays",): 45}
+            self.assertEqual(cli.cmd_config(argparse.Namespace(config_cmd="repair", quiet=True)), 0)
+            record = json.loads((tmp / "config-installed.json").read_text())
+        self.assertEqual(record["claude"]["keys"]["cleanupPeriodDays"], 45)
 
     def test_a_saved_config_without_a_finished_install_is_offered_to_continue(self):
         for resume in (False, True):

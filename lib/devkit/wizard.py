@@ -221,9 +221,10 @@ def interactive(term, skip_packages=False, resume=False) -> int:
 
 
 def installed_before() -> bool:
-    """Whether a `dev install` finished on this Mac: it recorded what it installed (config-installed.json, which
-    `dev install` writes only when it exits 0) and pinned a release that holds up (install.json). Without both, a
-    saved config is an unfinished setup (an install that failed after Save your choices), never "already set up"."""
+    """Whether a `dev install` finished on this Mac: it recorded what it installed (config-installed.json, which only
+    a whole `dev install` that exits 0 creates; `dev config repair` and `dev install --only` update it only when it
+    is there) and pinned a release that holds up (install.json). Without both, a saved config is an unfinished setup
+    (an install that failed after Save your choices), never "already set up"."""
     if not (STATE / "config-installed.json").is_file():
         return False
     try:

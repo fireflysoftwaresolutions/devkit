@@ -1590,7 +1590,7 @@ def cmd_install(a):
                            assume_yes=bool(getattr(a, "yes", False)))
     if rc == 0 and (not only or "claude" in only):  # what was installed: `dev config` tells new from removed
         try:
-            write_install_record()
+            write_install_record(create=not only)  # only a whole install that finished creates it
         except Exception as e:
             ui.warn(f"could not record what was installed ({e}); dev config may show removed settings as new")
     return rc
@@ -3385,7 +3385,7 @@ def cmd_config(a):
         with setup.quiet_mode(True):
             fixed = policy.repair()
         if fixed:
-            write_install_record()
+            write_install_record(create=False)  # a repair after a crashed install is no finished install
         if not a.quiet:
             print(f"{ui.OK} restored {len(fixed)} setting(s)" if fixed else f"{ui.OK} nothing to repair")
             for d in fixed:
@@ -3470,10 +3470,14 @@ def _config_broken() -> str:
     return ""
 
 
-def write_install_record():
+def write_install_record(create: bool = True):
     """What `dev install` (or `dev config repair`) just installed, so `dev config` can tell a setting that is new in
-    this devkit version from one removed outside devkit."""
+    this devkit version from one removed outside devkit. The file also says that a whole `dev install` finished on
+    this Mac (wizard.installed_before), so only such an install creates it (`create`); a repair, which an agent's
+    session-start hook runs even after a crashed install, and `dev install --only` update it only when it exists."""
     from . import policy
+    if not create and not _install_record_file().is_file():
+        return
     rec = {"ts": round(time.time()), "version": core.VERSION}
     try:
         flat, hooks = policy.claude_desired()
