@@ -106,64 +106,95 @@ class CodexStopTests(unittest.TestCase):
 
 
 class CodexFailedShellTests(BugState, HookCase):
-    """Codex has no PostToolUseFailure event: a failed shell call reaches devkit only as PostToolUse."""
+    """Codex has no PostToolUseFailure event: a failed command reaches devkit only as PostToolUse, whose tool_response
+    is the command's output alone. Its exit code is in the rollout: the CommandExecution item whose id is the hook's
+    tool_use_id (captured with Codex 0.167.0 on 2026-11-09)."""
+
+    CMD = "python3 -c 'import nosuchmod'"
+    OUTPUT = ("Traceback (most recent call last):\n  File \"<string>\", line 1, in <module>\n    import nosuchmod\n"
+              "ModuleNotFoundError: No module named 'nosuchmod'\n")
 
     def setUp(self):
         super().setUp()
         self.bug_state()
+        self.rollout = self.root / "rollout.jsonl"
+        self.rollout.write_text(json.dumps({"type": "event_msg", "payload": {"type": "task_started",
+                                                                              "turn_id": "t1"}}) + "\n")
 
-    FAILED = {"exit_code": 1, "stdout": "", "stderr": "ModuleNotFoundError: No module named 'nosuchmodule_xyz'"}
+    def _record(self, n, status="failed", code=1):
+        # the rollout's item for the command, as Codex 0.167.0 wrote it
+        item = {"type": "CommandExecution", "id": f"exec-5f125236-dd03-45f9-8fd3-db673fc2b9b{n}", "process_id": "59976",
+                "command": ["/bin/zsh", "-lc", self.CMD], "cwd": "file:///repo",
+                "parsed_cmd": [{"type": "unknown", "cmd": self.CMD}], "source": "unified_exec_startup",
+                "status": status, "aggregated_output": self.OUTPUT, "exit_code": code,
+                "duration": {"secs": 0, "nanos": 3333}}
+        with self.rollout.open("a") as fh:
+            fh.write(json.dumps({"type": "event_msg", "payload": {"type": "item_completed", "turn_id": "t1",
+                                                                 "item": item}}) + "\n")
 
-    def _post(self, n, response=None):
-        # tool_response shape: not captured (the guard refuses DEVKIT_HOOK_CAPTURE for agents); the exit code and
-        # output fields follow Codex's own command item (exit_code, aggregated_output)
-        payload = {"session_id": "c1", "turn_id": "t1", "hook_event_name": "PostToolUse", "tool_name": "Bash",
-                   "tool_use_id": f"call_{n}", "cwd": str(self.root), "model": "gpt-6", "permission_mode": "bypass",
-                   "transcript_path": None, "tool_input": {"command": "python3 -c 'import nosuchmodule_xyz'"},
-                   "tool_response": self.FAILED if response is None else response}
+    def _post(self, n, output=None):
+        # the captured PostToolUse payload of that command
+        payload = {"cwd": str(self.root), "hook_event_name": "PostToolUse", "model": "gpt-6.1-sol",
+                   "permission_mode": "bypassPermissions", "session_id": "c1", "tool_input": {"command": self.CMD},
+                   "tool_name": "Bash", "tool_response": self.OUTPUT if output is None else output,
+                   "tool_use_id": f"exec-5f125236-dd03-45f9-8fd3-db673fc2b9b{n}",
+                   "transcript_path": str(self.rollout), "turn_id": "t1"}
         out = io.StringIO()
         with mock.patch("sys.stdin", io.StringIO(json.dumps(payload))), contextlib.redirect_stdout(out):
             hooks.run("post-tool", "codex")
         return out.getvalue()
 
     def _ledger_ok(self):
-        ledger = [json.loads(x) for x in (bugs.BUGS / "ledger" / "c1.jsonl").read_text().splitlines()]
+        f = bugs.BUGS / "ledger" / "c1.jsonl"
+        ledger = [json.loads(x) for x in f.read_text().splitlines()] if f.exists() else []
         return [x["ok"] for x in ledger if x.get("tool") == "Bash"]
 
-    def test_a_failed_codex_shell_call_is_a_failure_in_the_ledger(self):
+    def test_a_failed_codex_command_is_a_failure_in_the_ledger(self):
+        self._record(1)
         self._post(1)
         self.assertEqual(self._ledger_ok(), [False])
 
     def test_the_same_codex_failure_twice_stops_the_patch_loop(self):
+        self._record(1)
         self._post(1)
+        self._record(2)
         out = self._post(2)
         self.assertIn(hooks.ROOT_CAUSE_STOP, out)
         # Codex's PostToolUse output schema accepts only its own event name
         self.assertEqual(json.loads(out)["hookSpecificOutput"]["hookEventName"], "PostToolUse")
 
-    def test_a_successful_codex_shell_call_stays_a_success(self):
-        self._post(1, {"exit_code": 0, "stdout": "ok\n", "stderr": ""})
+    def test_a_successful_codex_command_is_a_success_whatever_its_output_says(self):
+        self._record(1, status="completed", code=0)
+        self._post(1, output="Exit code: 1\nTraceback (most recent call last):\nValueError: printed by the test\n")
         self.assertEqual(self._ledger_ok(), [True])
 
-    def test_the_exit_code_is_read_from_each_known_response_shape(self):
-        # exec_command's own result (the rollout's tool output, as an object or its JSON text), the command item and
-        # app-server names, and the plain-text headers older Codex shells print
-        for resp in ({"exit_code": 2}, {"exitCode": 2}, {"returncode": 2},
-                     json.dumps({"chunk_id": "1a305f", "wall_time_seconds": 0.1, "exit_code": 2, "output": "x"}),
-                     "Exit code: 2\nWall time: 0.5 seconds\nOutput:\nboom\n",
-                     "Chunk ID: 1a305f\nWall time: 0.5 seconds\nProcess exited with code 2\nOutput:\nboom\n"):
-            with self.subTest(resp=resp):
-                self.assertEqual(hooks.tool_exit_code(resp), 2)
-        for resp in ({"stdout": "Exit code: 2"}, "Output:\nExit code: 2\n", {"exit_code": True}, None):
-            with self.subTest(resp=resp):
-                self.assertIsNone(hooks.tool_exit_code(resp))
+    def test_a_command_whose_record_is_not_written_yet_is_settled_at_the_next_call(self):
+        self._post(1)  # its item is not on disk yet: unknown, never a success
+        self.assertEqual(self._ledger_ok(), [])
+        self._record(1)
+        self._record(2)
+        out = self._post(2)
+        self.assertEqual(self._ledger_ok(), [False, False])
+        self.assertIn(hooks.ROOT_CAUSE_STOP, out)  # the second identical failure, counted with the settled first
 
-    def test_an_unknown_response_shape_counts_as_success_and_is_logged_once(self):
-        self._post(1, {"stdout": "ok\n"})
-        self._post(2, {"stdout": "ok again\n"})
-        self.assertEqual(self._ledger_ok(), [True, True])
+    def test_a_command_whose_record_comes_late_is_settled_at_stop(self):
+        self._post(1)
+        self._record(1)
+        payload = {"cwd": str(self.root), "hook_event_name": "Stop", "model": "gpt-6.1-sol",
+                   "permission_mode": "bypassPermissions", "session_id": "c1", "stop_hook_active": False,
+                   "last_assistant_message": BLOCK, "transcript_path": str(self.rollout), "turn_id": "t1"}
+        with mock.patch("sys.stdin", io.StringIO(json.dumps(payload))), contextlib.redirect_stdout(io.StringIO()):
+            hooks.run("stop", "codex")
+        self.assertEqual(self._ledger_ok(), [False])
+
+    def test_a_command_never_recorded_leaves_no_ledger_line_and_is_logged(self):
+        self._post(1)
+        self._record(2, status="completed", code=0)
+        with mock.patch.object(hooks, "CODEX_SETTLE_S", 0):  # the first call's wait is over
+            self._post(2)
+        self.assertEqual(self._ledger_ok(), [True])  # the second call only
         log = (self.root / "logs" / "hooks.log").read_text()
-        self.assertEqual(log.count("no exit code in its tool_response"), 1, log)
+        self.assertIn("exec-5f125236-dd03-45f9-8fd3-db673fc2b9b1", log)
 
 
 class CodexHookIdentityTests(HookCase):

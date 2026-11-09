@@ -1035,6 +1035,11 @@ def turn_checklist(agent: str, data: dict, sess: dict) -> list:
 def stop(agent: str):
     data = _stdin_json()
     from . import canary
+    if agent == "codex":  # the turn's commands whose rollout record came after their PostToolUse get their ledger line
+        try:
+            _codex_settle(agent, data)
+        except Exception as e:
+            _swallowed("stop", e)
     sid = data.get("session_id") or "-"
     sf = _session_file(agent, sid)
     out = {}
@@ -1812,73 +1817,138 @@ def _call_pitfalls(agent: str, data: dict, remember: bool = True, channel: str =
 
 
 def _output_text(data: dict) -> str:
-    r = _json_text(data.get("tool_response"))
+    r = data.get("tool_response")
     if isinstance(r, dict):
-        r = "\n".join(str(r.get(k) or "") for k in ("stdout", "stderr", "output", "aggregated_output", "error"))
+        r = "\n".join(str(r.get(k) or "") for k in ("stdout", "stderr", "output", "error"))
     return (str(r or "") + "\n" + str(data.get("error") or ""))[-50_000:]
 
 
-def _json_text(value):
-    """A tool result given as the JSON text of an object (Codex's exec_command result) -> that object; else as is."""
-    if isinstance(value, str) and value.lstrip().startswith("{"):
-        try:
-            parsed = json.loads(value)
-        except ValueError:
-            return value
-        return parsed if isinstance(parsed, dict) else value
-    return value
+# Codex has no PostToolUseFailure event, and its PostToolUse result is the command's output alone (Codex 0.167): the
+# exit code is in the rollout, in the CommandExecution item whose id is the hook's tool_use_id. A call whose item is
+# not on disk yet is unknown, never a success: its ledger line waits until the session's next PostToolUse or Stop finds
+# the item (_codex_settle), or CODEX_SETTLE_S passes and the call leaves with no line.
+CODEX_SETTLE_S = 600
+CODEX_TAIL = 4_000_000  # bytes at the end of the rollout searched for an item
 
 
-# Codex has no PostToolUseFailure event: its failed shell call reaches devkit as PostToolUse, whose result shows the
-# exit code. The 0.167 hook schema leaves tool_response untyped, so the reader takes each name Codex gives the code:
-# exec_command's own result (exit_code, also as its JSON text), the command item and the app server (exitCode), and
-# the header older Codex shells print before the output.
-EXIT_CODE_KEYS = ("exit_code", "exitCode", "returncode", "return_code")
-_EXIT_HEADER_RE = re.compile(r"^(?:Exit code:|Process exited with code)\s*(-?\d+)\s*$", re.M)
-
-
-def tool_exit_code(response):
-    """The exit code a shell call's tool_response shows, or None when it shows none."""
-    r = _json_text(response)
-    if isinstance(r, dict):
-        for k in EXIT_CODE_KEYS:
-            v = r.get(k)
-            if isinstance(v, int) and not isinstance(v, bool):
-                return v
-            if isinstance(v, str) and re.fullmatch(r"\s*-?\d+\s*", v):
-                return int(v)
+def codex_command_item(transcript, call_id: str):
+    """The CommandExecution item of Codex call `call_id` in its rollout, or None when it is not there (yet)."""
+    if not transcript or not call_id:
         return None
-    if isinstance(r, str) and not r.lstrip().startswith("Output:"):
-        m = _EXIT_HEADER_RE.search(r.split("\nOutput:", 1)[0])  # the header only, never the command's own output
-        return int(m.group(1)) if m else None
+    needle = call_id.encode()
+    try:
+        with open(transcript, "rb") as fh:
+            size = fh.seek(0, 2)
+            fh.seek(max(0, size - CODEX_TAIL))
+            lines = fh.read().splitlines()
+    except (OSError, TypeError, ValueError):
+        return None
+    for ln in reversed(lines):
+        if needle not in ln:
+            continue
+        try:
+            rec = json.loads(ln)
+        except ValueError:
+            continue
+        p = rec.get("payload") if isinstance(rec, dict) and isinstance(rec.get("payload"), dict) else {}
+        item = p.get("item") if rec.get("type") == "event_msg" and p.get("type") == "item_completed" else None
+        if isinstance(item, dict) and item.get("type") == "CommandExecution" and item.get("id") == call_id:
+            return item
     return None
 
 
-def _codex_failed(agent: str, data: dict) -> bool:
-    """A Codex shell call whose result shows a non-zero exit code. A result that shows none counts as a success, and
-    its shape is logged once, so a Codex upgrade that renames the field is seen."""
-    if agent != "codex" or data.get("tool_name") not in SHELL_TOOLS:
+def codex_outcome(item):
+    """True when a CommandExecution item succeeded, False when it failed or was declined, None while unknown."""
+    if not isinstance(item, dict):
+        return None
+    code, status = item.get("exit_code"), item.get("status")
+    if status in ("failed", "declined") or (isinstance(code, int) and not isinstance(code, bool) and code != 0):
         return False
-    code = tool_exit_code(data.get("tool_response"))
-    if code is None:
-        _exit_shape_unknown(data.get("tool_response"))
-    return bool(code)
+    return True if status == "completed" or code == 0 else None
 
 
-def _exit_shape_unknown(response):
-    r = _json_text(response)
-    shape = f"{type(r).__name__}:{','.join(sorted(str(k) for k in r)[:20])}" if isinstance(r, dict) else \
-        type(r).__name__
-    f = STATE / "logs" / "codex-exit-shapes.json"  # the shapes already logged
+def _codex_call(agent: str, data: dict) -> tuple:
+    """(outcome, context) of a PostToolUse: for a Codex command, its outcome from the rollout (codex_outcome) and the
+    context of the session's earlier commands settled now (_codex_settle); (True, "") for any other call."""
+    if agent != "codex" or data.get("tool_name") not in SHELL_TOOLS:
+        return True, ""
     try:
-        seen = core.read_json(f, []) or []
-        if shape in seen:
-            return
-        f.parent.mkdir(parents=True, exist_ok=True)
-        f.write_text(json.dumps((seen + [shape])[-50:]))
-    except (OSError, TypeError):
+        settled = _codex_settle(agent, data)
+    except Exception:
+        _log(f"post-tool settle {agent}: {traceback.format_exc()[-300:]}")
+        settled = ""
+    try:
+        outcome = codex_outcome(codex_command_item(data.get("transcript_path"), str(data.get("tool_use_id") or "")))
+    except Exception:
+        _log(f"post-tool outcome {agent}: {traceback.format_exc()[-300:]}")
+        outcome = None
+    return outcome, settled
+
+
+def _codex_pending(sid: str) -> Path:
+    return STATE / "codex-pending" / f"{re.sub(r'[^A-Za-z0-9_.-]', '_', sid)[:80]}.json"
+
+
+def _codex_defer(data: dict):
+    """A Codex command whose CommandExecution item is not on disk yet: what its ledger line needs, kept for
+    _codex_settle."""
+    sid = str(data.get("session_id") or "")
+    if not sid:
         return
-    _log(f"post-tool codex: a shell call with no exit code in its tool_response ({shape}); it counts as a success")
+    keep = {k: data.get(k) for k in ("session_id", "tool_name", "tool_use_id", "agent_id", "cwd", "transcript_path")}
+    keep.update(tool_input={"command": _command_of(data)[:4000]}, tool_response=_output_text(data)[-8000:],
+                ts=time.time())
+    state.update(_codex_pending(sid), lambda d: d.update(calls=(d.get("calls") or [])[-49:] + [keep]))
+
+
+def _codex_settle(agent: str, data: dict) -> str:
+    """The session's deferred Codex commands (_codex_defer) whose CommandExecution item is in their rollout now get
+    their ledger line; a failure counts toward the patch-loop stop, whose root-cause paragraph comes back when it is
+    due. One still missing after CODEX_SETTLE_S leaves with no line and a hooks.log entry. -> the context to give."""
+    sid = str(data.get("session_id") or "")
+    f = _codex_pending(sid) if sid else None
+    if not f or not f.exists():
+        return ""
+    settled, now = [], time.time()
+
+    def take(doc):
+        keep = []
+        for c in doc.get("calls") or []:
+            outcome = codex_outcome(codex_command_item(c.get("transcript_path"), str(c.get("tool_use_id") or "")))
+            if outcome is None and now - (c.get("ts") or 0) < CODEX_SETTLE_S:
+                keep.append(c)
+            else:
+                settled.append((c, outcome))
+        doc["calls"] = keep
+    state.update(f, take, create=False)
+    out = []
+    for c, outcome in settled:
+        if outcome is None:
+            _log(f"post-tool {agent}: no CommandExecution record for {c.get('tool_use_id')} after {CODEX_SETTLE_S} s; "
+                 f"the call leaves the ledger unsettled")
+            continue
+        keys = _call_keys(c, outcome)
+        _output_bugs(agent, c, outcome, keys)
+        if not outcome and _patch_loop(agent, c, keys):
+            found = _recall_quietly(agent, c)
+            try:
+                _shown(c, [x["meta"]["id"] for x in found], "output")
+            except Exception as e:
+                _swallowed("post-tool", e)
+            out.append(_root_cause(c, found))
+    return "\n\n".join(out)
+
+
+def _recall_quietly(agent: str, data: dict) -> list:
+    """The best LOOP_SHOW open lessons whose error signature a settled call's output shows, without counting a hit:
+    its PostToolUse counted them when the call ended."""
+    try:
+        project = str(_session_record(agent, data).get("project") or "")
+        from . import lessons
+        return lessons.for_output(project, _output_text(data), limit=LOOP_SHOW) if project else []
+    except Exception:
+        _log(f"settle recall {agent}: {traceback.format_exc()[-300:]}")
+        return []
 
 
 def _output_pitfalls(agent: str, data: dict, take: int = 0, taken: list = None) -> str:
@@ -1955,11 +2025,12 @@ def _call_keys(data: dict, ok: bool) -> tuple:
     return key, bugs.error_signature(_output_text(data))
 
 
-def _output_bugs(agent: str, data: dict, ok: bool, keys=None) -> str:
+def _output_bugs(agent: str, data: dict, ok: bool, keys=None, ledger: bool = True) -> str:
     """PostToolUse (ok) and PostToolUseFailure: the call's line in the session ledger of devkit's bug registry, and,
     for a marker of devkit's own failure in the output, the known detour or the new-bug paragraph. Also outside
     projects; a marker that names no occurrence of this session does nothing. `keys`: the call's (command key,
-    error key) when the caller has them (_call_keys)."""
+    error key) when the caller has them (_call_keys); `ledger` False: no line yet (a Codex command whose outcome is
+    still unknown, _codex_defer)."""
     sid = str(data.get("session_id") or "")
     if not sid:
         return ""
@@ -1969,9 +2040,10 @@ def _output_bugs(agent: str, data: dict, ok: bool, keys=None) -> str:
         cmd = _command_of(data)
         codes = bugs.marker_codes(text)
         ok = ok and not _interrupted(data)
-        cmd_key, sig = keys if keys is not None else _call_keys(data, ok)
-        bugs.ledger_append(sid, data.get("tool_name") or "", ok, bugs.dev_words(command_words(cmd)), codes,
-                           cmd_key=cmd_key, sig=sig, who=_lesson_agent(data))
+        if ledger:
+            cmd_key, sig = keys if keys is not None else _call_keys(data, ok)
+            bugs.ledger_append(sid, data.get("tool_name") or "", ok, bugs.dev_words(command_words(cmd)), codes,
+                               cmd_key=cmd_key, sig=sig, who=_lesson_agent(data))
         return bugs.context_for_output(text, sid) if codes else ""
     except Exception:
         _log(f"bugs {agent}: {traceback.format_exc()[-300:]}")
@@ -2929,13 +3001,9 @@ def post_tool(agent: str):
     finished, and those that finished with background work still running (crew_notices)."""
     from . import progress
     data = _stdin_json()
-    try:
-        failed = _codex_failed(agent, data)
-    except Exception:
-        _log(f"post-tool exit code {agent}: {traceback.format_exc()[-300:]}")
-        failed = False
-    if failed:  # Codex has no PostToolUseFailure event: its failed shell call takes that path, under its own event
-        _tool_failed(agent, data, "PostToolUse")
+    outcome, settled = _codex_call(agent, data)
+    if outcome is False:  # Codex has no PostToolUseFailure event: its failed command takes that path, under its event
+        _tool_failed(agent, data, "PostToolUse", settled)
         return
     _check_writes(agent, data)
     _close_call(data)
@@ -2994,8 +3062,14 @@ def post_tool(agent: str):
     except Exception:
         _log(f"post-tool closing {agent}: {traceback.format_exc()[-300:]}")
     background = _background_told(agent, data)  # under the lock: told once, nothing while the record is busy
-    _context_out("PostToolUse", "\n\n".join(x for x in (carried, answered, background, _output_pitfalls(agent, data),
-                                                        _output_bugs(agent, data, True),
+    bug_text = _output_bugs(agent, data, True, ledger=outcome is not None)
+    if outcome is None:  # a Codex command whose record is not on disk yet: its ledger line waits, never a success
+        try:
+            _codex_defer(data)
+        except Exception as e:
+            _swallowed("post-tool", e)
+    _context_out("PostToolUse", "\n\n".join(x for x in (settled, carried, answered, background,
+                                                        _output_pitfalls(agent, data), bug_text,
                                                         _bulk_rewrite_note(data), closing,
                                                         progress.on_tool_done(agent, data)) if x))
 
@@ -3009,9 +3083,10 @@ def post_tool_failure(agent: str):
     _tool_failed(agent, _stdin_json(), "PostToolUseFailure")
 
 
-def _tool_failed(agent: str, data: dict, event: str):
-    """A tool call that failed: PostToolUseFailure, or a Codex shell call's PostToolUse whose result shows a non-zero
-    exit code (_codex_failed). `event`: the hook event the context goes back under."""
+def _tool_failed(agent: str, data: dict, event: str, before: str = ""):
+    """A tool call that failed: PostToolUseFailure, or the PostToolUse of a Codex command whose rollout record shows
+    it failed (_codex_call). `event`: the hook event the context goes back under; `before`: context that goes first
+    (earlier Codex commands settled in this hook)."""
     from . import progress
     _check_writes(agent, data)  # a call that failed may have written too
     _close_call(data)
@@ -3031,7 +3106,8 @@ def _tool_failed(agent: str, data: dict, event: str):
             _shown(data, [x["meta"]["id"] for x in taken], "output")
         except Exception as e:
             _swallowed("post-tool-failure", e)
-    _context_out(event, "\n\n".join(x for x in (_root_cause(data, taken) if stop else "", pitfalls, bug_text) if x))
+    _context_out(event, "\n\n".join(x for x in (before, _root_cause(data, taken) if stop else "", pitfalls, bug_text)
+                                    if x))
 
 
 def subagent_start(agent: str):
