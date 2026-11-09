@@ -265,14 +265,19 @@ devkit works per turn and per tool call. The consistency checks compare this tab
 [Developing devkit › Consistency checks](development.md#consistency-checks)).
 
 **How devkit reads a Codex turn.** Codex CLI 0.167 runs every shell command and patch inside one tool, `exec`, whose
-input is a short JavaScript program. devkit reads the calls that program's code makes with literal text (a call in a
-comment or a string does not count), and the commands Codex records as it runs them: its CommandExecution records in
-the rollout, which keep each command as it ran and its folder. The required-skill rules, the Stop hook's checks, and the CI-wait check therefore see each command
-once, also one the program builds as it runs. The Stop hook reads the turn's final message from its payload, so the
-status block check and every end-of-turn send-back apply to Codex turns as they do to Claude Code's. Each hook takes
-its agent from its own arguments and its session from its payload, so a Codex started from a Claude Code terminal or
-from a crew member's shell records its calls as its own, never as that session's or that lane's. A Codex subagent's
-rollout opens with a copy of its parent's history; the crew gates skip that copy and judge only what the subagent did.
+input is a short JavaScript program. devkit reads the calls that program's code makes with literal text, and the
+commands Codex records as it runs them: its CommandExecution records in the rollout, which keep each command as it ran
+and its folder. A call in a comment or a string does not count. A call inside a branch that never runs still counts,
+because a reading of the text cannot follow the program's control flow. A call whose command or folder the program
+builds as it runs (a variable, a concatenation, a template) is read only from its CommandExecution record. The
+required-skill rules, the Stop hook's checks, and the CI-wait check therefore see each command once. The Stop hook
+reads the turn's final message from its payload, so the status block check and every end-of-turn send-back apply to
+Codex turns as they do to Claude Code's. Each hook takes its agent from its own arguments and its session from its
+payload, so a Codex started from a Claude Code terminal or from a crew member's shell records its calls as its own,
+never as that session's or that lane's. A Codex subagent's rollout opens with a copy of its parent's history; devkit
+skips that copy and credits the subagent only with what it did. It reads the rollout from the subagent's first
+`task_started` record at or after the `subagent_history_start_ordinal` that its first record (`session_meta`) gives;
+a forked rollout without that field is read whole.
 
 **A failed Codex command.** Codex has no PostToolUseFailure, ConfigChange, or InstructionsLoaded event, so a failed
 Codex command reaches PostToolUse, whose result is the command's output alone. devkit reads the exit code from the
@@ -283,11 +288,14 @@ toward the [patch-loop stop](lessons.md#recall), and its root-cause paragraph co
 failure. A record still missing after 10 minutes leaves the call out of the ledger, with a line in `hooks.log`. While a
 call waits, devkit keeps only what it needs to settle it (the error's key, devkit's own marker lines, the lessons the
 output recalled, and the command with its secrets redacted), never the command's output, and `dev sleep` removes a
-wait older than a day. A Codex older than 0.167 writes no CommandExecution records, so devkit does not wait for one:
-its commands count as successes, as before.
+wait older than a day. devkit waits for a call's record only when the rollout's first record names Codex CLI 0.167 or
+later (`cli_version`), or when the rollout already holds a CommandExecution record, whatever version it names. In any
+other rollout, such as one from a Codex older than 0.167, which writes no such records, the commands count as
+successes, as before.
 
 **Codex crew launches** are not recorded yet: no PreToolUse fires for `spawn_agent`, so crew slots, the depth limit,
-and the binding of a launch to its step do not apply to a Codex launch.
+the binding of a launch to its step, and the checks of a member's report at SubagentStop do not apply to a Codex
+launch.
 
 ### The session context
 

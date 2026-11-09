@@ -469,8 +469,8 @@ is planned.
 follows that its member approves. The run cannot end while a step is unverified or an approval is owed.
 
 `dev canary` and `dev doctor` count the crew's reports apart from the main sessions' (`crew 12/13`), so you can always
-see that the kit's rules still hold inside every agent. On Codex these checks are not verified yet (see
-[Surfaces](surfaces.md#what-not-yet-means-for-codex)).
+see that the kit's rules still hold inside every agent. On Codex these checks do not run yet, because devkit records
+no Codex launch (see [Surfaces](surfaces.md#what-was-verified-on-codex)).
 
 ### CI failures go to the Release engineer
 
