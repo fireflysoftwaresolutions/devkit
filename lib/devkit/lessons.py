@@ -55,37 +55,42 @@ def _dir(scope: str) -> Path:
 
 
 def parse(text: str) -> dict:
-    meta, body = {}, text
-    if text.startswith("---\n"):
-        end = text.find("\n---\n", 4)
-        if end != -1:
-            for ln in text[4:end].splitlines():
-                k, _, v = ln.partition(":")
-                v = v.strip()
-                meta[k.strip()] = [x.strip() for x in v[1:-1].split(",") if x.strip()] \
-                    if v.startswith("[") and v.endswith("]") else v
-            body = text[end + 5:]
-    changelog = []
-    if "\n## Changelog" in body:
-        body, _, log = body.partition("\n## Changelog")
-        changelog = [ln[2:].strip() for ln in log.splitlines() if ln.startswith("- ")]
+    """A lesson file -> {meta, extra, sections, changelog}. Only the anchor and tag fields are lists (a title in
+    brackets stays text); the record's changelog is the last `## Changelog` outside fenced code (work.split_changelog),
+    and a `## ` line inside fenced code belongs to its section. `extra`: front-matter lines devkit does not know,
+    kept as they are."""
+    front, body = work.split_frontmatter(text)
+    meta, extra = work.read_frontmatter(front, FIELDS, LISTS)
+    body, changelog = work.split_changelog(body)
+    lines = body.split("\n")
+    fenced = work._fenced(lines)
     sections, cur = {}, None
-    for ln in body.splitlines():
-        if ln.startswith("## "):
+    for i, ln in enumerate(lines):
+        if ln.startswith("## ") and i not in fenced:
             cur = ln[3:].strip()
             sections[cur] = []
         elif cur:
             sections[cur].append(ln)
     meta["occurrences"] = int(meta.get("occurrences") or 1)
     meta["version"] = int(meta.get("version") or 1)
-    return {"meta": meta, "sections": {k: "\n".join(v).strip() for k, v in sections.items()}, "changelog": changelog}
+    return {"meta": meta, "extra": extra, "sections": {k: "\n".join(v).strip() for k, v in sections.items()},
+            "changelog": changelog}
+
+
+def _one_line(v) -> str:
+    return " ".join(str(v if v is not None else "").split("\n")).rstrip()
 
 
 def render(lesson: dict) -> str:
     m = lesson["meta"]
-    head = "".join(f"{k}: {'[' + ', '.join(m.get(k) or []) + ']' if k in LISTS else m.get(k, '')}".rstrip() + "\n"
-                   for k in FIELDS)
-    body = f"# {m['title']}\n\n" + "".join(f"## {s}\n\n{lesson['sections'].get(s) or '_—_'}\n\n" for s in SECTIONS)
+    head = ""
+    for k in FIELDS:
+        v = "[" + ", ".join(m.get(k) or []) + "]" if k in LISTS else _one_line(m.get(k, ""))
+        head += f"{k}: {v}".rstrip() + "\n"
+    head += "".join(ln + "\n" for ln in lesson.get("extra") or [])
+    others = [s for s in lesson["sections"] if s not in SECTIONS]  # a section written by hand stays
+    body = f"# {_one_line(m['title'])}\n\n" + "".join(f"## {s}\n\n{lesson['sections'].get(s) or '_—_'}\n\n"
+                                                    for s in list(SECTIONS) + others)
     return "---\n" + head + "---\n" + body + "## Changelog\n\n" + "".join(f"- {c}\n" for c in lesson["changelog"])
 
 
@@ -166,54 +171,90 @@ def add(scope: str, title: str, kind: str = "mistake", severity: str = "medium",
                          "happen again")
     a = a or work.actor()
     lid = "L-" + work.new_id("task")[2:]
-    now = work.now_iso()
+    now, day = work.now_iso(), today()
     les = {"meta": {"id": lid, "title": title.strip(), "scope": scope, "kind": kind, "severity": severity,
                     "status": "open", "occurrences": 1, "prevention": "rule", "prevention_ref": "",
                     "retire_when": retire_when.strip(),
-                    "tags": list(tags or []), **anchored, "first_seen": now[:10], "last_seen": now[:10], "version": 1,
+                    "tags": list(tags or []), **anchored, "first_seen": day, "last_seen": day, "version": 1,
                     "created_by": f"{a['user']}@{a['host']}", "updated": now, "updated_by": f"{a['user']}@{a['host']}"},
+           "extra": [],
            "sections": {"What happened": happened, "Root cause": cause, "Fix": fix, "Prevention": prevention,
                         "Detection": detection, "Evidence": "\n".join(f"- {e}" for e in evidence or [])},
            "changelog": [f"v1 · {now} · {work.actor_str(a)} · recorded" + (f" — why: {why}" if why else "")]}
     path = _dir(scope) / f"{lid}.md"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(render(les))
+    work.write_record(path, render(les))
     les["path"] = path
     work._commit([path], f"{lid}: lesson “{title[:60]}” ({scope}, {work.actor_str(a)})")
     return les
 
 
-def update(les: dict, op: str, why: str = "", a=None, **changes) -> dict:
+def today(ts: float = None) -> str:
+    """The local date, as the handoff repository writes dates."""
+    return time.strftime("%Y-%m-%d", time.localtime(time.time() if ts is None else ts))
+
+
+def _lock_of(lid: str) -> Path:
+    """The path whose lock (state.hold) serializes the writers of one lesson: STATE/lessons/locks/rec-<id>.lock."""
+    return _state_file("lessons") / f"{lid}.md"
+
+
+def update(les: dict, op, why: str = "", a=None, apply=None, **changes) -> dict:
+    """Change a lesson and record it, under the lesson's lock: re-read the file, apply the changes (and those
+    `apply(fresh lesson) -> dict` computes from what is on disk, so concurrent writers never undo each other), then
+    replace the file atomically, refusing to drop any line this change does not edit (work.write_record). `op` may
+    be a function of the fresh lesson. The commit to the handoff repository runs after the lock is released."""
     a = a or work.actor()
-    les = load(les["path"])
-    m = les["meta"]
-    for k, v in changes.items():
-        if k in les["sections"] or k in SECTIONS:
-            les["sections"][k] = v
-        else:
-            m[k] = v
-    m["version"] = int(m.get("version") or 1) + 1
-    _log(les, a, op, why)
-    les["path"].write_text(render(les))
-    work._commit([les["path"]], f"{m['id']}: {op} v{m['version']} ({work.actor_str(a)})" + (f" — {why}" if why else ""))
+    path = Path(les["path"])
+    with state.hold(_lock_of(les["meta"]["id"])):
+        les = load(path)
+        if apply:
+            changes = {**changes, **apply(les)}
+        if callable(op):
+            op = op(les)
+        m, edited = les["meta"], []
+        for k, v in changes.items():
+            if k in les["sections"] or k in SECTIONS:
+                old = les["sections"].get(k) or ""
+                if old != v:
+                    edited += old.splitlines()
+                les["sections"][k] = v
+            else:
+                if k == "title" and m.get("title") != v:
+                    edited.append(f"# {m.get('title')}")
+                m[k] = v
+        m["version"] = int(m.get("version") or 1) + 1
+        _log(les, a, op, why)
+        work.write_record(path, render(les), edited)
+    les["path"] = path
+    work._commit([path], f"{m['id']}: {op} v{m['version']} ({work.actor_str(a)})" + (f" — {why}" if why else ""))
     return les
 
 
 def recur(les: dict, evidence: str = "", why: str = "", a=None) -> dict:
-    """Count a repeat. A retired or prevented lesson that happens again is open again: its prevention did not hold,
-    and recall shows only open lessons. The changelog line says which prevention failed."""
-    m = les["meta"]
-    ev = les["sections"].get("Evidence") or ""
-    if evidence:
-        ev = (ev + "\n" if ev and ev != "_—_" else "") + f"- {work.now_iso()[:10]}: {evidence}"
-    op = f"happened again (#{m['occurrences'] + 1})"
-    if m.get("status") == "prevented":
-        ref = f" ({m['prevention_ref']})" if m.get("prevention_ref") else ""
-        op += f"; reopened: its prevention by {m.get('prevention') or 'rule'}{ref} did not hold"
-    elif m.get("status") == "retired":
-        op += "; reopened: it was retired"
-    return update(les, op, why or evidence, a, occurrences=m["occurrences"] + 1, last_seen=work.now_iso()[:10],
-                  Evidence=ev, status="open" if m.get("status") in ("retired", "prevented") else m.get("status"))
+    """Count a repeat, from the lesson as it is on disk (two agents recording the same repeat both count). A retired
+    or prevented lesson that happens again is open again: its prevention did not hold, and recall shows only open
+    lessons. The changelog line says which prevention failed."""
+    day = today()
+
+    def what(fresh):
+        m = fresh["meta"]
+        op = f"happened again (#{m['occurrences'] + 1})"
+        if m.get("status") == "prevented":
+            ref = f" ({m['prevention_ref']})" if m.get("prevention_ref") else ""
+            op += f"; reopened: its prevention by {m.get('prevention') or 'rule'}{ref} did not hold"
+        elif m.get("status") == "retired":
+            op += "; reopened: it was retired"
+        return op
+
+    def bump(fresh):
+        m = fresh["meta"]
+        ev = fresh["sections"].get("Evidence") or ""
+        if evidence:
+            ev = (ev + "\n" if ev and ev != "_—_" else "") + f"- {day}: {evidence}"
+        return {"occurrences": m["occurrences"] + 1, "last_seen": day, "Evidence": ev,
+                "status": "open" if m.get("status") in ("retired", "prevented") else m.get("status")}
+    return update(les, what, why or evidence, a, apply=bump)
 
 
 def prevent(les: dict, by: str, ref: str, why: str, a=None) -> dict:
@@ -251,23 +292,28 @@ HALF_LIFE_DAYS = 45.0
 
 
 def _usage_local() -> dict:
-    return core.read_json(USAGE_LOCAL, {}) or {}
+    return state.read(USAGE_LOCAL) or {}
 
 
-def track(ids, kind: str):
-    """Count a use of these lessons on this machine. kind: shown | applied | recur | lookup."""
+def track(ids, kind: str, channel: str = "") -> None:
+    """Count a use of these lessons on this machine: `kind` and `<kind>_last`, and `<kind>_<channel>` when a channel
+    is given. kind: shown | recur | lookup | applied | heeded | missed; channel: session | brief | call | output |
+    refusal. Written through state.update (the file's lock, then an atomic replace), so concurrent hooks all count;
+    a file that does not parse is never written over (the count is dropped, and state audits it)."""
     if not ids:
         return
-    u = _usage_local()
     now = int(time.time())
-    for lid in ids:
-        e = u.setdefault(lid, {})
-        e[kind] = int(e.get(kind) or 0) + 1
-        e[f"{kind}_last"] = now
+
+    def bump(u):
+        for lid in ids:
+            e = u.setdefault(lid, {})
+            e[kind] = int(e.get(kind) or 0) + 1
+            e[f"{kind}_last"] = now
+            if channel:
+                e[f"{kind}_{channel}"] = int(e.get(f"{kind}_{channel}") or 0) + 1
     try:
-        USAGE_LOCAL.parent.mkdir(parents=True, exist_ok=True)
-        USAGE_LOCAL.write_text(json.dumps(u, indent=1))
-    except OSError:
+        state.update(USAGE_LOCAL, bump, indent=1)
+    except (state.StateBusy, OSError):
         pass
 
 
