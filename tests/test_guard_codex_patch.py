@@ -184,6 +184,49 @@ class EditsOnAgentSettings(unittest.TestCase):
                          "allow")
 
 
+class JsonAsClaudeReadsIt(unittest.TestCase):
+    """A settings file's JSON counts as Claude Code parses it: a key spelled with a \\u escape turns hooks or the plugin
+    off as the plain key does, whichever tool writes it. The twins write the same keys with values that keep devkit
+    on, or the words inside a string."""
+
+    OFF = ('{"disabl\\u0065AllHooks": true}', '{"enabledPlugins": {"devkit\\u0040firefly-devkit": false}}',
+           '{"\\u0064isableAllHooks": false, "\\u0064isableAllHooks": true}')
+    ON = ('{"disabl\\u0065AllHooks": false}', '{"enabledPlugins": {"devkit\\u0040firefly-devkit": true}}',
+          '{"note": "disabl\\u0065AllHooks: true"}')
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.cwd = guard.real(tmp.name)
+        (Path(self.cwd) / ".claude").mkdir()
+        self.settings = Path(self.cwd) / ".claude" / "settings.json"
+        self.settings.write_text('{"model": "a"}\n')
+        self.user = Path(guard.real(str(Path.home()))) / ".claude"
+        self.user.mkdir(exist_ok=True)
+
+    def verdict(self, tool, tool_input, agent="claude"):
+        return (guard.check(tool, tool_input, self.cwd, agent) or ("allow",))[0]
+
+    def each(self, judge):
+        for text, want in [(t, "deny") for t in self.OFF] + [(t, "allow") for t in self.ON]:
+            with self.subTest(text=text):
+                self.assertEqual(judge(text), want)
+
+    def test_write(self):
+        self.each(lambda t: self.verdict("Write", {"file_path": "~/.claude/settings.json", "content": t}))
+
+    def test_edit(self):
+        self.each(lambda t: self.verdict("Edit", {"file_path": str(self.settings), "old_string": '{"model": "a"}',
+                                                  "new_string": t}))
+
+    def test_apply_patch(self):
+        self.each(lambda t: self.verdict("apply_patch", {"command": patch(f"*** Add File: {self.settings}",
+                                                                           "+" + t)}, "codex"))
+
+    def test_shell(self):
+        self.each(lambda t: self.verdict("Bash", {"command": f"cat > .claude/settings.json <<'EOF'\n{t}\nEOF"}))
+
+
 class ShellWritesOnAgentSettings(unittest.TestCase):
     """A shell write to an agent settings file is judged by the text it writes, as Write is; a write whose text the
     command does not show (a copy, sed -i, a variable) is refused. Each refused form has an allowed twin: the same form

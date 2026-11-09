@@ -1896,10 +1896,28 @@ def agent_settings(path) -> bool:
     return p.name.casefold() in _AGENT_SETTINGS[".codex"] and real(p.parent).casefold() == home
 
 
+def _json_off(text: str) -> str | None:
+    """What `text` does to devkit when it parses as JSON, read as Claude Code reads it (a key with a \\u escape, the
+    last of duplicate keys): disableAllHooks true, or the devkit plugin set to false in enabledPlugins; else None."""
+    try:
+        data = json.loads(text)
+    except (ValueError, RecursionError):  # not JSON (yet): the patterns judge it
+        return None
+    if not isinstance(data, dict):
+        return None
+    if data.get("disableAllHooks") is True:
+        return DEVKIT_OFF[0][1]
+    plugins = data.get("enabledPlugins")
+    if isinstance(plugins, dict) and plugins.get("devkit@firefly-devkit") is False:
+        return DEVKIT_OFF[1][1]
+    return None
+
+
 def settings_off(text: str, toml: bool) -> str | None:
-    """What `text`, written to an agent settings file, does to devkit (a DEVKIT_OFF pattern, or TOML that sets hooks or
-    codex_hooks to false in any table), else None."""
-    what = next((w for rx, w in DEVKIT_OFF if rx.search(text)), None)
+    """What `text`, written to an agent settings file, does to devkit (a DEVKIT_OFF pattern, JSON that sets
+    disableAllHooks or turns the devkit plugin off, or TOML that sets hooks or codex_hooks to false in any table), else
+    None."""
+    what = next((w for rx, w in DEVKIT_OFF if rx.search(text)), None) or _json_off(text)
     return what or (DEVKIT_OFF[-1][1] if toml and _toml_hooks_off(text) else None)
 
 
