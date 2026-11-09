@@ -16,8 +16,11 @@ prevention still exists.
                                           configuration folders, or invisible characters, in any field; a command
                                           substitution or a backtick command only beside a destructive command in
                                           the same field (rm -rf, sudo, chmod -R 777, a forced git push, fetched
-                                          code a shell runs), and only in the fields an agent acts on (the title,
-                                          Prevention, Fix), not in the ones that explain the mistake
+                                          code a shell runs), a substitution run as code (eval, source, ., exec, a
+                                          shell's -c or script, where a backtick command starts) or decoding inside
+                                          a substitution (base64 -d, xxd -r, printf escapes, openssl -d), and those
+                                          only in the fields an agent acts on (the title, Prevention, Fix), not in
+                                          the ones that explain the mistake
     lint(lessons, repo_root=None) -> [{id, kind, problem, fix}]
                                           recorded lessons that recall cannot use well: broad, missing and wrong
                                           anchors, file anchors that match no file, no root cause, held lessons
@@ -138,8 +141,20 @@ def check_shape(title: str, happened: str, evidence: list) -> list:
 # characters that hide or reorder text: zero-width, direction controls, the BOM, and Unicode tag characters
 _HIDDEN = re.compile("[\u00ad\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff\U000e0000-\U000e007f]")
 _DASHES = str.maketrans({c: "-" for c in "\u2010\u2011\u2012\u2013\u2014\u2015\u2212\ufe58\ufe63\uff0d"})
+# Cyrillic and Greek letters drawn like Latin ones, and the dotless i and j, read as those Latin letters
+_LOOKALIKES = str.maketrans(dict(zip(
+    "\u0430\u0441\u0435\u04bb\u0456\u0458\u04cf\u043e\u0440\u051b\u0455\u051d\u0445\u0443\u0501"
+    "\u0410\u0412\u0415\u04ba\u0406\u0408\u041a\u041c\u041d\u041e\u0420\u051a\u0405\u0422\u051c\u0425\u0423\u04c0"
+    "\u03b1\u03b5\u03b9\u03ba\u03bd\u03bf\u03c1\u03c4\u03c5\u03c7"
+    "\u0391\u0392\u0395\u0396\u0397\u0399\u039a\u039c\u039d\u039f\u03a1\u03a4\u03a5\u03a7"
+    "\u0131\u0237",
+    "acehijlopqswxyd" "ABEHIJKMHOPQSTWXYI" "aeikvoptux" "ABEZHIKMNOPTYX" "ij")))
 _OVERRIDE = re.compile(
-    r"\bignore\s+(?:all\s+|any\s+)?(?:the\s+|your\s+)?(?:previous|prior|above|earlier|preceding)\b"
+    r"\bignore\s+(?:all\s+|any\s+|every\s+)?(?:the\s+|your\s+)?(?:previous|prior|above|earlier|preceding)\b"
+    r"|\b(?:ignore|disregard|forget)\s+(?:(?:all|every|any)\s+(?:of\s+)?)?(?:the\s+|your\s+|my\s+|these\s+|those\s+)?"
+    r"(?:previous|prior|above|earlier|preceding)\s+(?:instructions?|rules?|guidance|guidelines?|directions?"
+    r"|directives?)\b"
+    r"|\byou\s+are\s+now\b|\bnew\s+instructions?\b"
     r"|\bdisregard\s+(?:all\s+|any\s+)?(?:the\s+|your\s+)?(?:previous|prior|above|instructions|rules|developer|user"
     r"|guard)\b"
     r"|\balways\s+allow\b"
@@ -165,8 +180,18 @@ def _hatch_set(text: str):
 
 
 def _override(text: str):
-    return _OVERRIDE.search(text) or _hatch_set(text)
-_SHELLS = r"(?:(?:ba|z|da|k|c|tc|fi)?sh|python[\d.]*|perl|ruby|node|php|pwsh|powershell|iex)"
+    """Override phrasing, read casefolded, or an escape hatch or identity set (case-sensitive, as a shell reads it)."""
+    return _OVERRIDE.search(text.casefold()) or _hatch_set(text)
+
+
+def _normal(text: str) -> str:
+    """Text as the screens read it: compatibility forms folded (NFKC: fullwidth letters become plain ones), combining
+    marks dropped, Unicode dashes read as "-", and Cyrillic and Greek look-alikes read as the Latin letters they copy."""
+    bare = "".join(c for c in unicodedata.normalize("NFKD", text) if not unicodedata.combining(c))
+    return unicodedata.normalize("NFKC", bare).translate(_DASHES).translate(_LOOKALIKES)
+
+
+_SHELLS =r"(?:(?:ba|z|da|k|c|tc|fi)?sh|python[\d.]*|perl|ruby|node|php|pwsh|powershell|iex)"
 _DOWNLOAD_RUN = re.compile(
     r"<\(\s*(?:curl|wget|fetch|iwr|irm)\b"
     r"|\b(?:curl|wget|fetch)\b[^\n]{0,200}?(?:&&|;|\|\|)\s*(?:sudo\s+)?(?:" + _SHELLS + r"|chmod\s+\+x|source|\.)\s"
@@ -240,6 +265,178 @@ def _dangerous_backtick(text: str) -> bool:
     return bool(_BACKTICK.search(text)) and _dangerous(text)
 
 
+# a substitution run as code, whatever is inside it: handed to eval, source, ., exec, a shell's or interpreter's code
+# or script, or placed where a backtick command starts; and decoding inside a substitution (base64 -d, xxd -r, printf
+# escapes, openssl -d and the like). A placeholder ($(...), $(…), <(...)) names the construct and runs nothing.
+_PLACEHOLDER = re.compile(r"[$<]\([ \t]*(?:\.{2,})?[ \t]*\)")
+_OPENS = re.compile(r"[$<]\(|`")
+_TICK_SUBST = re.compile(r"`[ \t]*[\"']?\$\((?![ \t]*(?:\.{2,})?[ \t]*\))")
+# "." runs a file only where a command starts, and never ends a sentence
+_RUNNER = re.compile(r"(?<![\w.-])(?:(?P<code>eval|exec|source|(?<![^\s;&|({`])\.(?![ \t]+(?-i:[A-Z])))|" + _SHELLS
+                     + r")(?=[ \t])", re.I)
+_CODE_OPTION = re.compile(r"-[A-Za-z]*[cer]")  # -c, -xc, -e, -le, -r: the code is the next word
+_VALUE_OPTIONS = frozenset(("-o", "+o", "-O", "+O", "-W", "-X", "--rcfile", "--init-file"))
+_REDIRECT = re.compile(r"\d*(?:<<?<?|>>?)&?")  # a redirection alone: its target is the next word
+_OPTION = re.compile(r"[-+]|\d*[<>]")
+_SENTENCE_END = re.compile(r"[.!?][ \t]+[A-Z]")
+_SUBST_OPEN = re.compile(r"[$<]\(|=`")
+_HEREDOC_OR_CASE = re.compile(r"(?<!<)<<(?!<)|\bcase\b")
+_ESCAPES = r"\\(?:x[0-9a-f]|[0-7]{3}|u[0-9a-f]{4}|U[0-9a-f]{8})"
+_DECODE = re.compile(
+    r"\b(?:base64|base32|basenc)\b[^\n]*?[ \t](?:-[a-z]*d[a-z]*|--decode)\b"
+    r"|\bopenssl\b[^\n]*?[ \t]-d\b"
+    r"|\bxxd\b[^\n]*?[ \t]-[a-z]*r"
+    r"|\buudecode\b"
+    r"|\b(?:printf|print|echo)\b[^\n]*?" + _ESCAPES
+    + r"|\$'[^'\n]*?" + _ESCAPES
+    + r"|\b(?:b(?:16|32|64|85)decode|a85decode|decodebytes|unhexlify|fromhex|frombase64string|atob)\b"
+    r"|\bbuffer\.from\b[^\n]*?\b(?:base64|hex)\b",
+    re.I)
+SCAN_MAX = 100_000  # characters the scans below read in one text; past it the text is held, never let through
+
+
+def _quote_end(text: str, j: int) -> int:
+    """The index after the quote that opens at text[j] ("…" and $'…' honor backslash escapes, '…' does not); the end of
+    the text when it never closes."""
+    q, n = text[j], len(text)
+    escapes = q == '"' or (j > 0 and text[j - 1] == "$")
+    j += 1
+    while j < n and text[j] != q:
+        j += 2 if escapes and text[j] == "\\" else 1
+    return min(j + 1, n)
+
+
+def _command_words(text: str, i: int):
+    """The words of the shell command that goes on at text[i], as written, each with the index after it, then (None,
+    the index where the reading stopped). Quotes, escapes and parentheses keep a word whole; outside them the command
+    ends at ;, &, |, a line break, an unmatched ), the end of a sentence (". " and a capital letter), or a backtick that
+    does not start the first word (it closes a backtick command). A backtick that starts the first word opens an
+    old-style substitution, read to the next backtick."""
+    n, j, start, depth = len(text), i, None, 0
+    first = True
+    while j < n:
+        c = text[j]
+        if not depth:
+            if c in " \t":
+                if start is not None:
+                    yield text[start:j], j
+                    start, first = None, False
+                j += 1
+                continue
+            if (c in ";&|\n)" or (c == "`" and not (first and start is None))
+                    or (c in ".!?" and _SENTENCE_END.match(text, j))):
+                break
+            if start is None:
+                start = j
+            if c == "`":
+                end = text.find("`", j + 1)
+                j = n if end < 0 else end + 1
+                continue
+        if c == "\\":
+            j += 2
+        elif c in "\"'":
+            j = _quote_end(text, j)
+        else:
+            if c == "(":
+                depth += 1
+            elif c == ")":
+                depth -= 1
+            j += 1
+    end = min(j, n)
+    if start is not None:
+        yield text[start:end], end
+    yield None, end
+
+
+def _has_subst(word: str) -> bool:
+    return bool(_OPENS.search(_PLACEHOLDER.sub("", word)))
+
+
+def _runs_substitution(text: str) -> bool:
+    """A substitution where a backtick command starts, or one a runner runs: any word of eval, source, . or exec, and
+    for a shell or interpreter its options, its input, its code (the word after -c, -e or -r) or its script (the first
+    word that is no option nor an option's value)."""
+    if _TICK_SUBST.search(text):
+        return True
+    budget = SCAN_MAX
+    for m in _RUNNER.finditer(text):
+        shell, expect, end = not m.group("code"), "", m.end()
+        for word, end in _command_words(text, m.end()):
+            if word is None:
+                break
+            if _has_subst(word):
+                return True
+            if not shell:
+                continue
+            if expect == "code":
+                break
+            if expect == "value":
+                expect = ""
+            elif _CODE_OPTION.fullmatch(word):
+                expect = "code"
+            elif word in _VALUE_OPTIONS or _REDIRECT.fullmatch(word):
+                expect = "value"
+            elif not _OPTION.match(word):
+                break  # the script, with no substitution in it
+        budget -= end - m.end()
+        if budget < 0:
+            return True
+    return False
+
+
+def _substitution_end(text: str, i: int) -> int:
+    """Where the substitution whose text starts at text[i] ends: the ) that closes it, read as a shell does (quotes,
+    escapes, nested substitutions and parentheses, backtick commands, # comments). The end of the text when it never
+    closes, or when it holds a here-document or a case pattern, whose ) a shell reads otherwise."""
+    stack, j, n = ["("], i, len(text)
+    while j < n:
+        c = text[j]
+        if c == "\\":
+            j += 2
+            continue
+        if c == "`":
+            end = text.find("`", j + 1)
+            j = n if end < 0 else end
+        elif stack[-1] == '"':
+            if c == '"':
+                stack.pop()
+            elif text.startswith("$(", j):
+                stack.append("(")
+                j += 1
+        elif c == '"':
+            stack.append('"')
+        elif c == "'":
+            j = _quote_end(text, j) - 1
+        elif c == "#" and (j == i or text[j - 1].isspace()):
+            end = text.find("\n", j)
+            j = n if end < 0 else end
+        elif c == "(":
+            stack.append("(")
+        elif c == ")":
+            stack.pop()
+            if not stack:
+                return n if _HEREDOC_OR_CASE.search(text, i, j) else j
+        j += 1
+    return n
+
+
+def _decodes_in_substitution(text: str) -> bool:
+    """A decoder inside a $( … ), a <( … ) or a backtick command assigned with =`…`."""
+    budget = SCAN_MAX
+    for m in _SUBST_OPEN.finditer(text):
+        if _PLACEHOLDER.match(text, m.start()):
+            continue
+        if m.group() == "=`":
+            end = text.find("`", m.end())
+            end = len(text) if end < 0 else end
+        else:
+            end = _substitution_end(text, m.end())
+        budget -= end - m.end()
+        if budget < 0 or _DECODE.search(text, m.end(), end):
+            return True
+    return False
+
+
 _URL = re.compile(r"\b[a-z][a-z0-9+.-]{1,15}://\S|\bwww\.[a-z0-9-]+\.[a-z]", re.I)
 _CONFIG = re.compile(r"(?:~|\$HOME|\$\{HOME\}|/Users/[^/\s]+|/home/[^/\s]+|/root)/(?:\.claude(?:\.json|/|\b)|\.codex\b"
                      r"|\.local/share/devkit\b|\.config/devkit\b)")
@@ -252,14 +449,16 @@ SCREENS = (
     ("pipes into a shell", _PIPE_SHELL.search),
     ("has a command substitution with a destructive command", _dangerous_subst),
     ("has a backtick command with a destructive command", _dangerous_backtick),
+    ("runs a command substitution as code", _runs_substitution),
+    ("decodes text in a command substitution", _decodes_in_substitution),
     ("has a URL", _URL.search),
     ("names a path in the agents' or devkit's configuration folders", _CONFIG.search),
 )
 # the sections that explain a mistake rather than tell an agent what to do: a destructive command in a substitution or
-# a backtick command there is the story of what ran, so those two screens skip them (every other screen still reads
-# them, download-and-run and a pipe into a shell included)
+# a backtick command there, a substitution run as code and decoding in a substitution are the story of what ran, so
+# those four screens skip them (every other screen still reads them, download-and-run and a pipe into a shell included)
 EXPLANATION = frozenset(("what happened", "root cause", "detection", "evidence"))
-_ACTING_ONLY = frozenset((_dangerous_subst, _dangerous_backtick))
+_ACTING_ONLY = frozenset((_dangerous_subst, _dangerous_backtick, _runs_substitution, _decodes_in_substitution))
 
 
 def _secret(text: str):
@@ -287,18 +486,19 @@ def screen(fields: dict) -> str:
     """Why a lesson must be held instead of recalled, as one line ("Prevention pipes into a shell"), or "". Every
     string value is screened, whatever its key, and so are lists of strings. A command substitution or a backtick
     command alone holds nothing: lessons name them to warn against them ("never use $(...) in a lane"). One holds the
-    lesson beside a destructive command in the same value (_destructive), and only outside What happened, Root cause,
-    Detection and Evidence (in the title, Prevention, Fix and any other key), because those four explain what ran;
-    download-and-run and a pipe into a shell hold in every field on their own. Text is compared
-    after NFKC normalization (fullwidth letters become plain ones) with Unicode dashes read as "-". The reason never
-    quotes the text it found, so a secret is never copied into the lesson's front matter."""
-    texts = [(key, s) for key, value in (fields or {}).items() for s in _strings(value) if s]
+    lesson beside a destructive command in the same value (_destructive), when it is run as code (handed to eval,
+    source, ., exec or a shell, or where a backtick command starts) or when it decodes text, and only outside What
+    happened, Root cause, Detection and Evidence (in the title, Prevention, Fix and any other key), because those four
+    explain what ran; download-and-run and a pipe into a shell hold in every field on their own. Text is compared as
+    _normal reads it (NFKC, combining marks dropped, Unicode dashes read as "-", Cyrillic and Greek look-alikes read as
+    Latin), and override phrasing casefolded. The reason never quotes the text it found, so a secret is never copied
+    into the lesson's front matter."""
+    texts = [(key, s, _normal(s)) for key, value in (fields or {}).items() for s in _strings(value) if s]
     for what, test in SCREENS:
-        for key, raw in texts:
+        for key, raw, normal in texts:
             if test in _ACTING_ONLY and _explains(key):
                 continue
-            text = raw if test is _HIDDEN.search else unicodedata.normalize("NFKC", raw).translate(_DASHES)
-            if (test or _secret)(text):
+            if (test or _secret)(raw if test is _HIDDEN.search else normal):
                 return f"{_field(key)} {what}"
     return ""
 
