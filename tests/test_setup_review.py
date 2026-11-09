@@ -211,5 +211,55 @@ class SetupLogTests(unittest.TestCase):
         self.assertEqual(mode, 0o600)
 
 
+class UnfinishedInstallTests(unittest.TestCase):
+    """A Mac whose earlier install failed after Save your choices: config.json is saved, but no dev install finished
+    (devkit records one in config-installed.json and install.json). It is an unfinished setup, never "already set
+    up"."""
+
+    def test_already_set_up_needs_a_finished_dev_install_and_its_pinned_release(self):
+        pin = {"version": "26.11.9", "path": Path("/x"), "name": "26.11.9-abc"}
+        for recorded, pinned, expected in ((True, pin, True), (False, pin, False), (True, {}, False)):
+            with self.subTest(recorded=recorded, pinned=bool(pinned)), tempfile.TemporaryDirectory() as tmp, \
+                    mock.patch.object(wizard, "STATE", Path(tmp)), \
+                    mock.patch.object(core, "pinned_release", lambda p=pinned: dict(p)):
+                if recorded:
+                    (Path(tmp) / "config-installed.json").write_text('{"version": "26.11.9"}')
+                self.assertIs(wizard.installed_before(), expected)
+
+    def test_a_saved_config_without_a_finished_install_is_offered_to_continue(self):
+        for resume in (False, True):
+            with self.subTest(resume=resume):
+                mac = flow.Mac(saved=BOTH)
+                r = flow.run_wizard(mac, ENTER, resume=resume)  # Continue
+                self.assertEqual(mac.titles()[0], "Pick up where you left off?")
+                self.assertEqual(mac.prompt("Pick up where you left off?")[1],
+                                 ["Continue", "Review my answers first", "Start over"])
+                self.assertRegex(r.text, r"Your choices were saved on \w+, \w+ \d+ at \d\d:\d\d, but the install did "
+                                         r"not finish\.")
+                self.assertRegex(r.text, r"✓ Save your choices +/\S+")  # where the choices are saved
+                self.assertNotIn("already set up", r.text)
+                self.assertEqual(execs(mac)[-2:], ["install", "doctor"])
+                self.assertEqual((r.state("configure"), r.rc), ("done", 0))
+
+    def test_the_preview_draws_the_unfinished_install_screen_uncut(self):
+        for width in (80, 60):
+            with self.subTest(width=width):
+                lines = wizard.preview(width=width, color=False)["W-17 unfinished install"].splitlines()
+                text = " ".join(" ".join(x.split()) for x in lines)
+                self.assertIn("Your choices were saved on Monday, November 9 at 10:42, but the install did not "
+                              "finish.", text)
+                self.assertIn("Runs the 9 steps left with your saved answers.", text)
+                self.assertEqual([x for x in lines if len(x) > width - 1 or x.endswith("…")], [])
+
+    def test_start_over_asks_which_agents_as_on_a_first_setup(self):
+        mac = flow.Mac(saved=BOTH)
+        r = flow.run_wizard(mac, DOWN + DOWN + ENTER + ENTER + DOWN + ENTER + ENTER)  # Start over, Claude Code only
+        self.assertIn("Let's set up devkit on this Mac.", r.text)
+        self.assertNotIn("already set up", r.text)
+        self.assertIn("Which coding agents do you want to use?", mac.titles())
+        self.assertEqual(r.cfg["agents"], {"claude": True, "codex": False})
+        self.assertEqual(r.rc, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

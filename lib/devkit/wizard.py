@@ -211,13 +211,31 @@ def run(assume_yes=False, skip_packages=False, resume=False) -> int:
 def interactive(term, skip_packages=False, resume=False) -> int:
     """The interactive front end on `term`: the resume screen when a saved setup is unfinished, else the questions."""
     run, old = SetupRun.saved()
-    if resume and (run is None or (not old and not run.unfinished_run())):
+    if resume and (run is None or (not old and not run.unfinished_run())) and not unfinished_config():
         term.write("\n" + "\n".join(nothing_to_continue(run, term.size()[0])) + "\n\n")
         return 0
     w = _Wizard(term, skip_packages if run is None else bool(run.data.get("skip_packages")) or skip_packages)
     if run is not None and (old or run.unfinished_run()):
         return w.run(saved_run=run, old=old)
     return w.run()
+
+
+def installed_before() -> bool:
+    """Whether a `dev install` finished on this Mac: it recorded what it installed (config-installed.json, which
+    `dev install` writes only when it exits 0) and pinned a release that holds up (install.json). Without both, a
+    saved config is an unfinished setup (an install that failed after Save your choices), never "already set up"."""
+    if not (STATE / "config-installed.json").is_file():
+        return False
+    try:
+        return bool(core.pinned_release())
+    except Exception:  # a record that cannot be read is no record
+        return False
+
+
+def unfinished_config() -> bool:
+    """Saved choices with no finished install and no setup run (the run, when there is one, says where the setup
+    stands): `dev setup` and `dev setup --resume` offer to continue them."""
+    return CONFIG_FILE.is_file() and SetupRun.saved()[0] is None and not installed_before()
 
 
 def nothing_to_continue(run, width=200) -> list:
@@ -1404,9 +1422,13 @@ class _Wizard:
                 subprocess.call(GH_LOGIN)
             self.screen.busy(self.intro, "Checking the GitHub sign-in …", self._refresh_github)
         self.saved_a = tui_defaults(self.d, detected=False) if self.d["config"] else None
+        unfinished = saved_run is None and self.saved_a is not None and not self.d.get("installed") \
+            and SetupRun.saved()[0] is None
+        if unfinished:  # choices saved by an install that did not finish: offer to continue it, or start over
+            saved_run = self._unfinished_run()
         if saved_run is not None:
             try:
-                pick = self.screen.ask(self.resume_prompt(saved_run, old), self.intro)
+                pick = self.screen.ask(self.resume_prompt(saved_run, old, unfinished), self.intro)
             except (tui.Cancelled, KeyboardInterrupt):
                 return "later"
             if pick in ("continue", "review"):
@@ -1429,6 +1451,26 @@ class _Wizard:
                 break
         self.baseline = self.saved_a or Answers(json.loads(json.dumps(self.a)))
         return self.review_loop()
+
+    def _unfinished_run(self) -> SetupRun:
+        """The run of saved choices whose install did not finish: the saved answers, Save your choices done and the
+        steps they need still to do, dated when the choices were saved. It is written only when it is applied."""
+        self.a = Answers(self.saved_a)
+        run = SetupRun.start(self.a, self.skip)
+        try:
+            run.data["started"] = run.data["updated"] = CONFIG_FILE.stat().st_mtime
+        except OSError:
+            pass
+        run.data["steps"] = [dict({"id": s.sid, "title": s.title, "required": s.required, "reason": "", "fix": "",
+                                   "state": "pending"},
+                                  **({"state": "done", "detail": str(core.tilde(CONFIG_FILE))} if s.sid == "save"
+                                     else {}))
+                             for s in self.plan_steps()]
+        return run
+
+    def set_up(self) -> bool:
+        """devkit is set up here: choices are saved and a dev install finished (installed_before)."""
+        return bool(self.d.get("config")) and bool(self.d.get("installed"))
 
     def _fill(self, answers) -> Answers:
         """Saved answers, with the answers a newer devkit asks filled in from today's defaults."""
@@ -1460,6 +1502,7 @@ class _Wizard:
 
     def _survey(self):
         self.d = survey()
+        self.d["installed"] = installed_before()
 
     def _refresh_github(self):
         try:
@@ -1469,9 +1512,9 @@ class _Wizard:
         self.d["gh"] = core.gh_user() if core.have("gh") else {}
 
     def recommended(self):
-        """The recommended path: the agent question on a first run, the stacks when none were found; Esc goes back
-        one question, and from the first to the welcome."""
-        path = (["agents"] if not self.d.get("config") else []) + (["stacks"] if self.first_stacks() else [])
+        """The recommended path: the agent question until devkit is set up, the stacks when none were found; Esc goes
+        back one question, and from the first to the welcome."""
+        path = (["agents"] if not self.set_up() else []) + (["stacks"] if self.first_stacks() else [])
         self.total = len(path) + 1
         i = 0
         while i < len(path):
@@ -1566,7 +1609,7 @@ class _Wizard:
 
     def welcome(self) -> list:
         d = self.d
-        first = not d["config"]
+        first = not self.set_up()
         width = self.term.size()[0]
         name = tui.clean(d["gh"].get("name") or "")
         lines = self.banner() + [""]
@@ -1587,7 +1630,7 @@ class _Wizard:
 
     def welcome_prompt(self, default="recommended"):
         time_line = ["", "  " + tui.dim("About 3 minutes of questions, then 10 to 20 minutes of installing on its own.")]
-        if self.d["config"]:
+        if self.set_up():
             opts = [tui.Option("recommended", "Keep current setup",
                                desc="Your saved choices, plus anything new found here; then the review."),
                     tui.Option("customize", "Customize", desc="Walk through the 7 sections, starting from your saved choices.")]
@@ -1624,13 +1667,18 @@ class _Wizard:
                           help="devkit gives each one the same rules, safety guard and skills.",
                           foot=_needs_lines, badge_right=True)
 
-    def resume_prompt(self, run, old=False):
-        """W-17: where the saved setup stopped, each step as it stands, and Continue, Review or Start over."""
+    def resume_prompt(self, run, old=False, unfinished=False):
+        """W-17: where the saved setup stopped, each step as it stands, and Continue, Review or Start over.
+        `unfinished`: choices saved by an install that did not finish, with no record of where it stopped."""
         left = [s for s in run.steps if s.get("state") != "done"]
         at = f", at \"{left[0]['title']}\"" if left else ""
-        body = [_row(_mark(s), s["title"], _why(s) if s.get("state") != "done" else s.get("detail") or "")
-                for s in run.steps] + ([""] if run.steps else [])
-        help_ = [f"The setup stopped on {_day(run.data.get('updated'))}{at}."]
+
+        def body(w) -> list:  # each step as the summary shows it: below 72 columns, its detail under its name
+            return [ln for s in run.steps for ln in _rows(
+                _mark(s), s["title"], _why(s) if s.get("state") != "done" else s.get("detail") or "", w + 1,
+                narrow=w + 1 < 72)] + ([""] if run.steps else [])
+        help_ = [f"Your choices were saved on {_day(run.data.get('updated'))}, but the install did not finish."
+                 if unfinished else f"The setup stopped on {_day(run.data.get('updated'))}{at}."]
         if old:
             help_.append("This setup was saved by an older devkit; check your answers, then apply.")
         opts = ([] if old else [tui.Option("continue", "Continue", desc=f"Runs the {len(left)} step"
@@ -3016,6 +3064,8 @@ def _preview(width) -> dict:
             screens["W-16 menu"] = block(tui.Select("What now?", [tui.Option(v, lb, desc=d) for v, lb, d in menu],
                                                     back=False))
     screens["W-17"] = page(w.intro, w.resume_prompt(paused))
+    saved_only = _preview_run(dict({k: "pending" for k in order}, save="done"), {"save": base["save"]})
+    screens["W-17 unfinished install"] = page(w.intro, w.resume_prompt(saved_only, unfinished=True))
     screens["W-18"] = nothing_to_continue(ready, width)
     plain = not tui.STYLE.color
     return {k: "\n".join((tui.strip(x) if plain else x).rstrip() for x in v).strip("\n") for k, v in screens.items()}

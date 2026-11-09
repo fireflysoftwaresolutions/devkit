@@ -567,7 +567,9 @@ class InteractiveTests(unittest.TestCase):
                     on_line("  ✓ 1/1 checks passed")
                 return 0
             term = FakeTerm(keys)
+            # a saved config here is a rerun: devkit was installed with it (an unfinished one is test_setup_review's)
             with mock.patch.object(wizard, "CONFIG_FILE", cfgf), mock.patch.object(wizard, "STATE", state), \
+                    mock.patch.object(wizard, "installed_before", lambda: saved is not None), \
                     mock.patch.object(setup, "STATE", state), \
                     mock.patch.object(wizard, "survey", lambda: fake_survey(saved, stacks, clouds)), \
                     mock.patch.object(wizard, "_exec", fake_exec), \
