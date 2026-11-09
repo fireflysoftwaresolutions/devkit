@@ -586,6 +586,8 @@ class InteractiveTests(unittest.TestCase):
     def test_recommended_setup_accepts_what_was_detected(self):
         rc, cfg, text, ran = self.run_wizard(ENTER + ENTER + ENTER)  # Recommended, both agents, Apply
         self.assertEqual(rc, 0)
+        self.assertIn("Step 1 of 2 · Agents", text)  # the recommended path asks which agents
+        self.assertEqual(cfg["agents"], {"claude": True, "codex": True})
         self.assertEqual(cfg["stacks"], ["java", "node"])  # from the repositories, not every stack
         self.assertEqual(cfg["hosts"], ["github", "gitlab"])
         self.assertEqual(cfg["docker"]["cpu"], 6)
@@ -628,6 +630,7 @@ class InteractiveTests(unittest.TestCase):
         rc, cfg, text, _ = self.run_wizard(DOWN + ENTER + ESC + UP + ENTER + ENTER + ENTER)  # focus back on Customize
         self.assertEqual(rc, 0)
         self.assertGreaterEqual(text.count("How do you want to set up devkit?"), 2)
+        self.assertIn("Which coding agents do you want to use?", text.split("How do you want to set up devkit?")[-1])
         self.assertEqual(cfg["stacks"], ["java", "node"])
 
     def test_quit_and_ctrl_c_change_nothing(self):
