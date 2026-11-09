@@ -815,7 +815,8 @@ def _headline(items, total_rows, runs, raw_runs, reg, next_up, escalations=()) -
     if esc or any(it["rank"] == 1 for it in top):
         text = f"{count} things need you" if count != 1 else "1 escalation waits for you" if esc else \
             "1 grant waits for you" if top[0]["kind"] == "grant" else "1 decision waits for you"
-        clauses = [f"Two sessions wait for your choice on {_line(e['id'], 20)}." for e in esc[:2]]
+        clauses = [f"{_plural(max(len(e.get('parties') or []), 2), 'session', 'sessions')} wait for your choice on "
+                   f"{_line(e['id'], 20)}." for e in esc[:2]]
         line = " ".join((clauses + [it["clause"] for it in top])[:2])
         return {"kind": "needs_you", "count": count, "text": text, "line": _line(line)}
     urgent = next((it for it in top if it["kind"] in URGENT), None)
