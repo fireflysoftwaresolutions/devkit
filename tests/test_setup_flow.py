@@ -19,7 +19,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
-from devkit import audit, core, providers, setup, toolchain, tui, wizard  # noqa: E402
+from devkit import audit, core, providers, setup, toolchain, tui, ui, wizard  # noqa: E402
 
 UP, DOWN, ENTER, ESC, CTRL_C = b"\x1b[A", b"\x1b[B", b"\r", b"\x1b", b"\x03"
 LIB = str(Path(__file__).resolve().parents[1] / "lib")
@@ -754,6 +754,31 @@ class SummaryTests(unittest.TestCase):
         self.assertIn("dev setup --resume", summary.split("To finish")[1])
         self.assertEqual((r.rc, r.state("configure")), (1, "failed"))
 
+    def test_devkit_left_in_a_turned_off_agent_shows_on_set_up_devkit_and_in_the_summary(self):
+        """`dev install` run with no terminal leaves devkit in Codex, which is turned off, and says so in a note (its
+        ! line) under that part. Set up devkit ends with a warning that shows the whole line, wrapped to the width, and the
+        summary's Set up devkit row names it, so "devkit is ready" never comes without it (dev doctor's row for the
+        turned-off agent then puts the check in Left for later). The install's other notes stay out of it."""
+        note = ("Codex is turned off, but this run is not from your terminal, so devkit's hooks, rules and skills "
+                "stay in ~/.codex. Run dev setup in your terminal to remove them.")
+
+        def install(on_line):  # as dev install prints its parts (step) and notes (note)
+            for line in ("▸ Tools for your stacks, git hosts and clouds", f"  {ui.WARN} missing: jq (packages.auto is off)",
+                         "▸ " + setup.AGENT_OFF_STEP.format("Codex"), f"  {ui.WARN} {note}", "▸ Docker",
+                         f"  {ui.OK} Colima is running"):
+                on_line(line)
+            return 0
+        mac = Mac()
+        mac.outcome["install"] = install
+        r = run_wizard(mac, RECOMMENDED, cols=80)
+        self.assertIn(" ".join(note.split()), " ".join(r.text.split()))
+        self.assertEqual([x for x in r.text.splitlines() if "terminal" in x and len(x) > 79], [])
+        self.assertRegex(r.text, r"! Set up devkit +devkit stays in Codex, which is turned off\n")
+        summary = r.text[r.text.rindex("devkit is ready"):]
+        self.assertRegex(summary, r"✓ Set up devkit +devkit stays in Codex, which is turned off\n")
+        self.assertNotIn("jq", r.text[r.text.rindex("! Set up devkit"):r.text.rindex("devkit is ready")])
+        self.assertEqual((r.rc, r.state("configure")), (0, "done"))
+
     def test_try_again_from_the_summary_runs_the_failed_step_and_redraws_it(self):
         """W-16: "Try Start Docker again" runs the failed step again (its output still goes to the setup log), and
         the summary drawn after it says devkit is ready."""
@@ -1006,6 +1031,67 @@ class AgentOffTests(unittest.TestCase):
                 self.assertEqual((claude / "skills" / "tdd").is_symlink(), not person)
                 self.assertEqual([a[0] for a in audits], ["install.remove-agent"])
                 self.assertEqual(audits[0][3] if len(audits[0]) > 3 else "ok", "ok" if person else "refused")
+
+    def test_a_run_not_from_the_terminal_refuses_only_when_devkit_is_in_the_turned_off_agent(self):
+        """A run that is not the developer's own refuses to take devkit out of a turned-off agent only when a dry run
+        finds something of devkit's there: any one of its rules, hooks, skill links, profile files or full-access
+        modes is enough, and the dry run changes no file. A fresh Mac, with only the person's own Codex, is no
+        refusal: no note that devkit stays, and the record says nothing was left, never refused."""
+        def files(root: Path) -> dict:
+            return {str(p): os.readlink(p) if p.is_symlink() else p.read_bytes()
+                    for p in sorted(root.rglob("*")) if p.is_symlink() or p.is_file()}
+        own = 'model = "gpt-6"\n'
+        leftovers = {
+            None: lambda codex, agents, share: None,
+            "rules": lambda codex, agents, share: (codex / "AGENTS.md").write_text(
+                setup.GENERATED_MARK + " 26.11.9 -->\n# rules\n"),
+            "hooks": lambda codex, agents, share: (codex / "hooks.json").write_text(
+                json.dumps({"hooks": {"Stop": [{"hooks": [DEVKIT_HOOK]}]}})),
+            "skill link": lambda codex, agents, share: (agents / "skills" / "tdd").symlink_to(share / "tdd"),
+            "profile": lambda codex, agents, share: (codex / "fast.config.toml").write_text(
+                "# Managed by devkit (config/codex/config.json → profiles).\n"),
+            "full access": lambda codex, agents, share: (codex / "config.toml").write_text(
+                own + 'approval_policy = "never"\n'),
+        }
+        for left, make in leftovers.items():
+            with self.subTest(left=left), tempfile.TemporaryDirectory() as tmp:
+                tmp = Path(tmp)
+                claude, codex, agents, share = tmp / ".claude", tmp / ".codex", tmp / ".agents", tmp / "share" / "skills"
+                for d in (codex, agents / "skills", share / "tdd"):
+                    d.mkdir(parents=True)
+                (codex / "config.toml").write_text(own)  # the person's own Codex
+                make(codex, agents, share)
+                before, audits = files(tmp), []
+                with self.patched(tmp, claude, codex, agents, share, person=False, audits=audits):
+                    if left:
+                        with self.assertRaises(setup.RemovalLeft):
+                            setup.remove_agent("codex")
+                    else:
+                        self.assertEqual(setup.remove_agent("codex"), [])
+                self.assertEqual(files(tmp), before)
+                self.assertEqual([a[3] if len(a) > 3 else "ok" for a in audits], ["refused" if left else "ok"])
+
+    def test_doctor_names_devkit_left_in_a_turned_off_agent(self):
+        """dev doctor checks a turned-off agent too: devkit's hooks still in ~/.codex fail the row, with the fix the
+        developer runs in a terminal; nothing of devkit's there passes it. The check changes no file."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            claude, codex, agents, share = self.homes(tmp)
+            before = (codex / "hooks.json").read_text()
+            with self.patched(tmp, claude, codex, agents, share), \
+                    mock.patch.dict(setup.CFG, {"agents": {"claude": True, "codex": False}}):
+                rows = setup.agent_off_checks()
+                checked = (codex / "hooks.json").read_text()
+                setup.remove_agent("codex")
+                after = setup.agent_off_checks()
+        self.assertEqual(checked, before)
+        self.assertEqual(len(rows), 1)
+        group, name, ok, detail, fix = rows[0]
+        self.assertEqual((group, name, ok), ("Codex", "turned off in dev setup", False))
+        self.assertIn("hooks", detail)
+        self.assertIn(str(core.tilde(codex)), detail)
+        self.assertEqual(fix, "dev install --only codex, in your terminal")
+        self.assertEqual([r[2] for r in after], [True])
 
     def test_an_agents_run_of_dev_install_leaves_devkit_in_a_turned_off_agent_and_says_why(self):
         """run_install with Claude Code off, run by an agent: a note says the hooks stay and who removes them; the

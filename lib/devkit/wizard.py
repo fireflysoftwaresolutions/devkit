@@ -2524,9 +2524,14 @@ class _Wizard:
         return _Fail(_reason(rc, tail, "Claude Code's installer" if k == "claude" else "brew install"))
 
     def _configure(self, cl, i, log=None):
-        """`dev install`. Its ✗ lines are problems in parts it went on from (dev doctor checks them again); an exit
-        code other than 0 means it stopped: the reason is its crash, its error line, or what it last wrote."""
-        parts, fails, after = [], [], deque(maxlen=20)
+        """`dev install`. Its ✗ lines are problems in parts it went on from (dev doctor checks them again); a note (!)
+        in the part of a turned-off agent says devkit stays in that agent (the run was not from a terminal), and is
+        shown whole with the step's warning; an exit code other than 0 means it stopped: the reason is its crash, its
+        error line, or what it last wrote."""
+        from .setup import AGENT_OFF_STEP
+        parts, fails, after, stays = [], [], deque(maxlen=20), []
+        off_head, off_tail = AGENT_OFF_STEP.split("{}")
+        note = tui.clean(ui.WARN) + " "  # how setup.note() starts a line
         cl.start(i, "dev install")
 
         def line(s):
@@ -2541,6 +2546,8 @@ class _Wizard:
                 after.append(s)
             if s.startswith("✗ "):
                 fails.append(s[2:])
+            elif s.startswith(note) and parts and parts[-1].startswith(off_head) and parts[-1].endswith(off_tail):
+                stays.append((parts[-1][len(off_head):len(parts[-1]) - len(off_tail)], s[len(note):]))
         rc = _exec(_dev("install", *_template_args(self.a)), line, log if log is not None else self.log,
                    env=_child_env())
         if rc not in (0, None):
@@ -2548,9 +2555,17 @@ class _Wizard:
                 reason, crash = _crash_reason(rc, parts[-1] if parts else "")
                 return _Fail(reason, crash=crash)
             return _Fail(_reason(rc, list(after), "dev install"))
-        if fails:
-            cl.finish(i, "warn", f"{len(fails)} problem{'s' if len(fails) != 1 else ''}; dev doctor checks them",
-                      [tui.bad("✗ ") + f for f in fails[:4]])
+        if fails or stays:
+            said = [f"{len(fails)} problem{'s' if len(fails) != 1 else ''}; dev doctor checks them"] if fails else []
+            names = list(dict.fromkeys(n for n, _ in stays))
+            if names:
+                said.append(f"devkit stays in {' and '.join(names)}, which {'are' if len(names) > 1 else 'is'} "
+                            f"turned off")  # the summary's row; dev doctor names it too, with the fix
+            notes = [tui.bad("✗ ") + f for f in fails[:4]]
+            for _, text in stays:  # whole: the fix is at its end
+                rows = tui.wrap(text, self.term.size()[0] - 9)
+                notes += [tui.warn("! ") + rows[0]] + ["  " + x for x in rows[1:]]
+            cl.finish(i, "warn", " · ".join(said), notes)
         else:
             cl.finish(i, "ok", "rules, guard, hooks and skills")
         return None
