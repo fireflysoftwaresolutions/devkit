@@ -290,6 +290,21 @@ class AuditTests(CliCase):
         line = audit.mask_command('dev session tell @0199a213 "Acme merger closes Friday"')
         self.assertEqual(line, "dev session tell @0199a213 [text not recorded: 25 characters]")
 
+    def test_a_codex_threads_records_name_codex_and_its_session(self):
+        # Codex exports no DEVKIT_SESSION or DEVKIT_AGENT to its shell commands: a dev command run there is recorded
+        # with the session identity finds (here by its checkout and last activity), never as the developer's own
+        self.session("codex", CODEX_A)
+        here = os.getcwd()
+        self.addCleanup(os.chdir, here)
+        os.chdir(self.repo)
+        audit.record("dev.session", ["claims"], "", "ok")
+        actor = audit.query(action="dev.session")[-1]["actor"]
+        self.assertEqual((actor["agent"], actor["session"]), ("codex", CODEX_A[:12]))
+        os.chdir(self.root)  # the developer's own terminal, outside any session's checkout
+        audit.record("dev.session", ["claims"], "", "ok")
+        actor = audit.query(action="dev.session")[-1]["actor"]
+        self.assertEqual((actor["agent"], actor["session"]), ("human", ""))
+
 
 if __name__ == "__main__":
     unittest.main()

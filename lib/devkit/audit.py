@@ -1732,11 +1732,43 @@ def _place(rec: dict, key: str, v, extra) -> None:
 
 
 def actor() -> dict:
+    """Who a record names: the session the hooks or the agent's shell say (DEVKIT_SESSION, DEVKIT_AGENT), else the
+    one identity finds for this process (_found_session: a Codex thread exports neither to its commands), else the
+    developer's own terminal."""
     sess = os.environ.get("DEVKIT_SESSION", "")
+    agent = os.environ.get("DEVKIT_AGENT") or ("claude" if os.environ.get("CLAUDECODE") else "")
+    if not sess:
+        agent, sess = _found_session() or (agent, "")
     return {"user": core.CFG.get("github_user") or os.environ.get("USER", "?"),
-            "host": socket.gethostname().split(".")[0].lower(),
-            "agent": os.environ.get("DEVKIT_AGENT") or ("claude" if os.environ.get("CLAUDECODE") else "human"),
+            "host": socket.gethostname().split(".")[0].lower(), "agent": agent or "human",
             "session": sess.split(":", 1)[-1][:12] if sess else ""}
+
+
+_FOUND = {}  # (pid, folder, sessions folder) -> the session identity found, once per process and folder
+_FINDING = []  # identity's own lookup may audit (an expired call): its records take the variables alone
+
+
+def _found_session():
+    """The agent session that runs this process when no variable names it: identity.speaker's agent and session
+    (its process, call ledger or checkout), or None for the developer's own terminal and on any error."""
+    if _FINDING:
+        return None
+    try:
+        from . import progress
+        k = (os.getpid(), os.getcwd(), str(progress.SESSIONS))
+    except Exception:
+        return None
+    if k not in _FOUND:
+        _FINDING.append(True)
+        try:
+            from . import identity
+            sp = identity.speaker()
+            _FOUND[k] = None if sp.how == "human" else (sp.agent, f"{sp.agent}:{sp.session}")
+        except Exception:
+            _FOUND[k] = None
+        finally:
+            _FINDING.pop()
+    return _FOUND[k]
 
 
 def _member(name: str):
