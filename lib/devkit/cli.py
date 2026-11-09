@@ -973,7 +973,7 @@ def cmd_status(a):
         return 0
     v = status_view(reg, p, w, caller=caller)
     from . import work
-    v["now_warning"] = work.now_warning(p["id"])
+    v["now_warning"] = work.now_warning(p["id"]) if p.get("id") else ""  # a folder with no project id has no tasks
     where = ((w or {}).get("path") or p.get("path")) if a.query else os.getcwd()
     v["needs_you"] += devkit_needs(where)  # the plugins of the project asked about, not of the folder it runs in
     _prompt_refresh(reg, where)
