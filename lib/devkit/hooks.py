@@ -3530,9 +3530,10 @@ def run(event: str, agent: str) -> int:
         return 0  # devkit's own headless call (ai.ask): no session, no progress, no gates; the guard still judges
     state.WAIT, state.SAY_BUSY = state.HOOK_WAIT, False  # a hook waits at most 2 s for a record, silently
     marked = _bug_marks_start(event)
-    saved = _own_identity(event, agent)
+    saved = {}  # the identity variables as they were: none changed until _own_identity runs
     try:
         (STATE / "logs").mkdir(parents=True, exist_ok=True)
+        saved = _own_identity(event, agent)  # inside the try: a hook with no stdin fails open like any other error
         fn(agent)
     except SystemExit:
         raise

@@ -304,5 +304,24 @@ class CodexHookIdentityTests(HookCase):
         self.assertEqual(denials[0]["crew"]["lane"], aid)  # its own lane, never the launcher's a_tank
 
 
+
+class HookFailOpenTests(BugState, HookCase):
+    def setUp(self):
+        super().setUp()
+        self.bug_state()
+
+    def test_a_hook_run_with_no_stdin_fails_open(self):
+        # a harness that closes the hook's stdin (sys.stdin is None): the hook logs the error and returns; it never
+        # crashes the agent's session, and the caller's variables are left as they were
+        before = dict(os.environ)
+        with mock.patch("sys.stdin", None):
+            try:
+                code = hooks.run("post-tool", "codex")
+            except Exception as e:
+                self.fail(f"the hook raised {e!r}")
+        self.assertEqual(code, 0)
+        self.assertIn("post-tool codex error", (self.root / "logs" / "hooks.log").read_text())
+        self.assertEqual(dict(os.environ), before)
+
 if __name__ == "__main__":
     unittest.main()
