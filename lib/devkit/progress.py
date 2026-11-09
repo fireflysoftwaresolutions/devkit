@@ -3002,7 +3002,8 @@ QUESTION_TOOLS = ("AskUserQuestion",)  # Codex's request_user_input joins when i
 GRANT_CLASSES = ("push", "pr", "push-destructive", "pr-write", "merge", "release", "publish", "deploy", "api-write",
                  "external-message", "delete-data", "migrate-production", "spend",
                  "unknown",  # C6's classes, IRREVERSIBLE, and a command known only when it runs (cmd-<hash>, RT1/RT2)
-                 "developer-only", "backup", "embargo")  # B2: the developer's own decisions (guard.DEVELOPER_GRANTS)
+                 "developer-only", "backup", "embargo",  # B2: the developer's own decisions (guard.DEVELOPER_GRANTS)
+                 "bug-send", "bug-drop", "bug-confirm", "bug-share", "lesson-release")
 HEADLESS_SURFACES = ("SDK", "claude -p", "codex exec")  # nobody at the keyboard: DEVKIT_PREAPPROVE only
 TRANSCRIPT_DAYS = 30  # Claude Code's default cleanupPeriodDays: older evidence may have lost its transcript
 # `approve D3`, or `approve D3@9448c4d0` as a decision listed outside its own session shows it (shown_id): groups are
