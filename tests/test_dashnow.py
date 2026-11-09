@@ -288,6 +288,22 @@ class HeadlineTests(unittest.TestCase):
                          {"kind": "needs_you", "count": 1, "text": "1 grant waits for you",
                           "line": "Statement import is paused until you answer D1@9c1d."})
 
+    # An escalation between two agent sessions waits for the developer like a decision: with nothing else waiting,
+    # the headline never says "Nothing needs you" (the Between sessions area shows it with the line to type)
+    def test_a_lone_escalation_between_sessions_needs_you(self):
+        kw = fx.empty()
+        kw["escalations"] = [{"id": "E-g3h1abc", "since": at(14, 0), "question": "Ship tonight?",
+                              "type": "settle E-g3h1abc: B"}]
+        self.assertEqual(self.headline(kw), {"kind": "needs_you", "count": 1, "text": "1 escalation waits for you",
+                                             "line": "Two sessions wait for your choice on E-g3h1abc."})
+
+    def test_an_escalation_counts_with_the_decisions_and_comes_first(self):
+        kw = fx.example()
+        kw["escalations"] = [{"id": "E-g3h1abc", "since": at(14, 0)}]
+        self.assertEqual(self.headline(kw), {
+            "kind": "needs_you", "count": 3, "text": "3 things need you",
+            "line": "Two sessions wait for your choice on E-g3h1abc. Invoice export is paused until you answer D1@7f3a."})
+
     def test_urgent_ci_failure_names_the_branch_and_the_first_error(self):
         kw = fx.example()
         kw["raw_runs"], kw["briefs"] = [], []

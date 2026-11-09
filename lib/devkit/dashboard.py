@@ -1564,9 +1564,10 @@ def collect(reg: dict, handoff: Path = None, now: float = None) -> dict:
     raw = _raw_runs()
     jobs, ci = jobs_summary(now), ci_watches()
     from . import dashnow  # Now's areas (contract P-fyli4qqn0y7): computed from what was read above, no other read
+    peer_view = peer_sessions(now)  # the agent sessions on this Mac; their open escalations count in the headline
     now_areas = dashnow.areas(reg, raw, _runs(now, host, raw), acts, ci, jobs, items,
                               since_yesterday(reg, cache, now, items, slog, me), team, now, host,
-                              roster=_roster(), prs_at=_prs_at())
+                              roster=_roster(), prs_at=_prs_at(), escalations=peer_view.get("escalations"))
     return {
         "v": 3,
         "version": core.VERSION,
@@ -1597,7 +1598,7 @@ def collect(reg: dict, handoff: Path = None, now: float = None) -> dict:
         "runs": now_areas["runs"],
         "merged": merged_prs(cache, now - 30 * 86400)[:200],
         "sessions": [_with_status(s) for s in reg.get("sessions") or []],
-        "peers": peer_sessions(now),   # the agent sessions on this Mac: what blocks, then the sessions by project
+        "peers": peer_view,   # the agent sessions on this Mac: what blocks, then the sessions by project
         "providers": reg.get("providers") or {},
         "issues": [{"kind": i[0], "text": i[1]} if isinstance(i, (list, tuple)) else {"kind": "info", "text": str(i)}
                    for i in reg.get("issues") or []],
