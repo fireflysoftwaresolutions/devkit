@@ -96,9 +96,11 @@ class HandoffStalenessTests(unittest.TestCase):
 
 
 class PlanReasonScopeTests(unittest.TestCase):
-    """A session answers for its own project's plans, not for a plan another session changed in another project."""
+    """A session answers only for the plans its own tool calls wrote, never for a plan another session changed, in
+    its project or another, even when the session works outside any project. The hooks that record what a call wrote
+    are tested end to end in tests/test_hooks_stop_plans.py."""
 
-    def test_only_this_projects_plans_are_checked(self):
+    def test_only_the_plans_this_session_wrote_are_checked(self):
         with tempfile.TemporaryDirectory() as d:
             handoff = Path(d)
             mine = handoff / "plans" / "acme" / "api" / "2026-11-06-export.md"
@@ -109,10 +111,9 @@ class PlanReasonScopeTests(unittest.TestCase):
             saved = hooks.HANDOFF
             hooks.HANDOFF = handoff
             try:
-                sess = {"started": T0}
-                self.assertEqual(hooks._plans_without_reason(sess, "acme/api"),
-                                 ["plans/acme/api/2026-11-06-export.md"])
-                self.assertEqual(len(hooks._plans_without_reason(sess, None)), 2)  # outside a project: all of them
+                sess = {"started": T0, "plans_written": {"plans/acme/api/2026-11-06-export.md": T0 + 60}}
+                self.assertEqual(hooks._plans_without_reason(sess), ["plans/acme/api/2026-11-06-export.md"])
+                self.assertEqual(hooks._plans_without_reason({"started": T0}), [])  # it wrote none: nothing to revise
             finally:
                 hooks.HANDOFF = saved
 

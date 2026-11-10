@@ -855,25 +855,83 @@ def _session_project(data: dict, sess: dict) -> str:
     return core.project_identity(main, core.gitout(main, "config", "--get", "remote.origin.url"))[0] or ""
 
 
-def _plans_without_reason(sess: dict, pid=None) -> list:
-    """Plan/spec files changed in this session whose version was not bumped (no `dev plan revise`). Only the plans of
-    the session's project (`pid`): another session may be changing another project's plans at the same time. Without
-    a project (a portfolio session), every plan."""
-    started = sess.get("started") or 0
-    pdir = HANDOFF / "plans" / pid if pid else HANDOFF / "plans"
-    if not pdir.exists():
-        return []
+PLAN_WRITES_KEPT = 200  # plan files a session record remembers writing, newest last
+PLAN_WRITE_SLACK = 1.0  # seconds a plan's change may precede its shell call's ledger entry (file time resolution)
+
+
+def _plans_without_reason(sess: dict) -> list:
+    """The plan and spec files this session's own tool calls wrote (its record's `plans_written`, _note_plan_writes)
+    whose version was not bumped (no `dev plan revise`). Each one counts in the project folder it is in, whatever
+    folder the session works in now. A plan another session changed, in this project or another, is never on the
+    list, even for a session outside any project: revising it would break the one-project rule and disturb the session
+    that works there."""
     from . import plans as plansmod
     out = []
+    for rel in sess.get("plans_written") or {}:
+        f = HANDOFF / rel
+        if f.is_file() and plansmod.needs_revision(f):
+            out.append(rel)
+    return sorted(out)
+
+
+def _plan_rel(path) -> str:
+    """A file's path in the handoff repository when it is a plan or spec (plans/<project>/…/<name>.md), else ""."""
+    try:
+        rel = Path(os.path.realpath(os.path.expanduser(str(path)))).relative_to(os.path.realpath(HANDOFF))
+    except (ValueError, OSError):
+        return ""
+    return rel.as_posix() if rel.parts[:1] == ("plans",) and rel.suffix == ".md" else ""
+
+
+def _plans_written_by(data: dict, failed: bool = False) -> list:
+    """The plan files a finished tool call wrote, as paths in the handoff repository. An edit call: the files it names
+    (progress._edit_paths), unless it failed. A shell call that may write (its call-ledger entry has no `reads`
+    verdict): each plan that changed between that entry and now and whose file name the command names. A plan that
+    changed during the call without being named was someone else's (another session, a pull of the handoff
+    repository). Read before the call leaves the ledger."""
+    from . import progress
+    if data.get("tool_name") not in SHELL_TOOLS:
+        return [] if failed else [r for r in map(_plan_rel, progress._edit_paths(data)) if r]
+    text = "\n".join(_shell_texts(data.get("tool_input")))  # quotes and heredocs kept: a plan's path is often quoted
+    pdir = HANDOFF / "plans"
+    if ".md" not in text or not pdir.is_dir():
+        return []
+    entry = progress.call_entry(data)
+    if not entry.get("ts") or entry.get("reads"):
+        return []
+    start, end = float(entry["ts"]) - PLAN_WRITE_SLACK, time.time() + PLAN_WRITE_SLACK
+    out = []
     for f in pdir.rglob("*.md"):
+        if not re.search(r"(?<![\w.-])" + re.escape(f.name) + r"(?![\w.-])", text):
+            continue
         try:
-            if f.stat().st_mtime <= started + 1:
-                continue
+            if start <= f.stat().st_mtime <= end:
+                out.append(f.relative_to(HANDOFF).as_posix())
         except OSError:
             continue
-        if plansmod.needs_revision(f):
-            out.append(str(f.relative_to(HANDOFF)))
     return out
+
+
+def _note_plan_writes(agent: str, data: dict, failed: bool = False):
+    """PostToolUse or PostToolUseFailure: the session record keeps the plan files this call wrote
+    (_plans_written_by), the only ones the plan check at the end of the turn answers for. Fails open: a busy record
+    drops this one note (state audits it)."""
+    try:
+        found = _plans_written_by(data, failed)
+        sf = _session_file(agent, data.get("session_id") or "-")
+        if not found or not sf.exists():
+            return
+        now = round(time.time(), 3)
+
+        def add(d):
+            kept = {k: v for k, v in (d.get("plans_written") or {}).items() if k not in found}
+            kept.update({rel: now for rel in found})
+            d["plans_written"] = dict(list(kept.items())[-PLAN_WRITES_KEPT:])
+        state.update(sf, add, create=False)
+    except state.StateBusy:
+        pass
+    except Exception:
+        _log(f"plan writes {agent}: {traceback.format_exc()[-300:]}")
 
 
 TEST_FILE_RE = re.compile(r"(^|/)(tests?|__tests__|spec)/|(^|/)test_[^/]+\.py$|_test\.(py|go)$|\.(spec|test)\.[jt]sx?$|"
@@ -1153,7 +1211,7 @@ def stop(agent: str):
             busy = _pg.crew_working(_pg.load_run(agent, sid) or {})
         except Exception:
             busy = []
-        plans = _plans_without_reason(sess, _session_project(data, sess)) if dev_turn and not busy else []
+        plans = _plans_without_reason(sess) if dev_turn and not busy else []
         if plans and not data.get("stop_hook_active"):
             reasons.append(("plans", "devkit: you changed plan(s) without recording why: " + ", ".join(plans[:4]) +
                             ". Run `dev plan revise <file> --why \"…\"` for each (it versions the plan and logs the "
@@ -3316,6 +3374,7 @@ def post_tool(agent: str):
         _tool_failed(agent, data, "PostToolUse", settled)
         return
     _check_writes(agent, data)
+    _note_plan_writes(agent, data)
     _close_call(data)
     _reconcile(agent, data)
     _prompt_refresh(data)
@@ -3402,6 +3461,7 @@ def _tool_failed(agent: str, data: dict, event: str, before: str = ""):
     (earlier Codex commands settled in this hook)."""
     from . import progress
     _check_writes(agent, data)  # a call that failed may have written too
+    _note_plan_writes(agent, data, failed=True)
     _close_call(data)
     if data.get("tool_name") in ("Agent", "Task", "spawn_agent"):
         progress.launch_failed(agent, data)
