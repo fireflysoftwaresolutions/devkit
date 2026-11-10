@@ -4562,7 +4562,7 @@ def build_parser():
                         "a crew member or Codex in the foreground")
     w.add_argument("--for", dest="for_", choices=("me",), help="me: the caller's own events (its crew lane, or the "
                                                                "main session): the default, and the only value")
-    w.add_argument("--only", help="comma list: question,decision,ready,member,ci,notice; take only these kinds")
+    w.add_argument("--only", help="comma list: question,decision,ready,member,ci,notice,peer; take only these kinds")
     w.add_argument("--timeout", type=float, help="minutes before it ends with the command to arm it again (default "
                                                  "240 for the main session on Claude Code, 10 on Codex, 9 for a crew "
                                                  "member)")

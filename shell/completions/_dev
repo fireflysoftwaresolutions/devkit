@@ -146,7 +146,7 @@ _dev() {
         'codex:Start codex in a project'
         'handoff-import:Adopt an old handoff repository'
         'handoff:Show or edit a handoff note'
-        'session:A session'\''s continuity'
+        'session:Agent sessions'
         'task:Work items of a project'
         'note:Project metadata in the handoff note'
         'plan:Versioned plans and specs'
@@ -415,8 +415,16 @@ _dev__session() {
     '--from=[carry: the cleared session]:from sid: ' \
     '--members[compactions: the members'\'' transcripts too]' \
     '--all[forget: every continuity record and clear link here]' \
-    ':session cmd:(brief carry compactions forget)' \
-    '::transcript:_files'
+    '--json[ls, tell, ask, answer, inbox, claim, release, claims, escalate…]' \
+    '--urgent[tell: wake a waiting session for this note]' \
+    '--why=[claim: why you hold it]:why: ' \
+    '--for=[claim: how long, 5m to 4h]:duration: ' \
+    '--queue[claim: when another session holds it, wait in its queue and hear when…]' \
+    '--options=[escalate: the choices, "A]:options: ' \
+    '--recommend=[escalate: the letter of the option you recommend]:recommend: ' \
+    ':session cmd:(brief carry compactions forget ls tell ask answer inbox claim release claims escalate escalations)' \
+    '::target: ' \
+    '*:text: '
 }
 
 _dev__task() {
@@ -1813,8 +1821,9 @@ _dev__watch() {
     '(- *)'{-h,--help}'[show this help message and exit]' \
     '--wait[block until an event arrives for you]' \
     '--for=[me: the caller'\''s own events]:for :(me)' \
-    '--only=[comma list: question,decision,ready,member,ci,notice]:only:_values -s , only question decision ready member ci notice' \
+    '--only=[comma list: question,decision,ready,member,ci,notice,peer]:only:_values -s , only question decision ready member ci notice peer' \
     '--timeout=[minutes before it ends with the command to arm it again]:timeout: ' \
+    '--standby[with --wait: wait for other agent sessions'\'' messages even when nothing…]' \
     '--json[the peek as JSON]'
 }
 

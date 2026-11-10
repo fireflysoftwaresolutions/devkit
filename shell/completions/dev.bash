@@ -224,7 +224,7 @@ _dev_spec() {
     'codex') o='-h --help -w --worktree' v='-w=l:worktrees:@1:: --worktree=l:worktrees:@1::' p='l:projects:-:: *n' ;;
     'handoff-import') o='-h --help --slug --dry-run' v='--slug=n' p='d' ;;
     'handoff') o='-h --help --edit --path --log --agent' v='--log=n --agent=n' p='l:projects:-::' ;;
-    'session') o='-h --help --session --latest -p --project --for-chat --provider --from --members --all' v='--session=n -p=l:projects:ids:: --project=l:projects:ids:: --provider=n --from=n' p='c:brief,carry,compactions,forget f' ;;
+    'session') o='-h --help --session --latest -p --project --for-chat --provider --from --members --all --json --urgent --why --for --queue --options --recommend' v='--session=n -p=l:projects:ids:: --project=l:projects:ids:: --provider=n --from=n --why=n --for=n --options=n --recommend=n' p='c:brief,carry,compactions,forget,ls,tell,ask,answer,inbox,claim,release,claims,escalate,escalations n *n' ;;
     'task') c='add start claim release done block unblock cancel reopen show history link delegate move edit reconcile ls' o='-h --help -p --project -i --initiative --all' v='-p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' ;;
     'task add') o='-h --help --now --next --later --type --priority --due --body --why --claim --done --no-template -p --project -i --initiative' v='--type=c:task,feature,bug,spike --priority=c:high,normal,low --due=n --body=n --why=n --done=n -p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' p='*n' ;;
     'task start') o='-h --help --why -p --project -i --initiative' v='--why=n -p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' p='*l:tasks:-::' ;;
@@ -342,7 +342,7 @@ _dev_spec() {
     'gc') o='-h --help --safe -y --yes --apply --auto-only -v --verbose' p='*n' ;;
     'canary') o='-h --help --days --limit' v='--days=n --limit=n' ;;
     'ci') o='-h --help -p --project --sha --wait --tag --pr --timeout --quiet --commands --runs --status --branch --all-branches --watch --limit --all-jobs --json --run --mark-passed --note --evidence --dry-run --keep-going --step-timeout --resume --provider --fix --strict --stack --force' v='-p=l:projects:-:: --project=l:projects:-:: --sha=n --tag=n --pr=n --timeout=n --branch=l:branches:-:: --limit=n --note=n --step-timeout=n --provider=c:github,gitlab,bitbucket,azure --stack=c:auto,python,node,java-maven,java-gradle,go,php,docker' p='l:projects:-:status,audit,init,watch,watches:' ;;
-    'watch') o='-h --help --wait --for --only --timeout --json' v='--for=c:me --only=m:question,decision,ready,member,ci,notice --timeout=n' ;;
+    'watch') o='-h --help --wait --for --only --timeout --standby --json' v='--for=c:me --only=m:question,decision,ready,member,ci,notice,peer --timeout=n' ;;
     'watches') o='-h --help --json' ;;
     'branch') c='new rename ls clean prune embargo' o='-h --help' ;;
     'branch new') o='-h --help --ticket --base' v='--ticket=n --base=l:branches:-::' p='n' ;;
