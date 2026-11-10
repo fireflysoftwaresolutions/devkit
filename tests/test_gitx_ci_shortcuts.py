@@ -1,6 +1,10 @@
-"""A change of CI host settings only (timeout-minutes, runs-on, concurrency, comments) keeps the local CI evidence
-of the tree before it, once actionlint and the devkit workflow audit pass: `dev push`, `dev ci --run --resume`.
-Anything a local run exercises still needs one.
+# Copyright (c) 2026 Firefly Software Solutions Inc.
+# SPDX-License-Identifier: Apache-2.0
+"""Two delivery waits devkit no longer imposes, and the cases where it still must.
+
+- A change of CI host settings only (timeout-minutes, runs-on, concurrency, comments) keeps the local CI evidence of
+  the tree before it, once actionlint and the devkit workflow audit pass: `dev push`, `dev ci --run --resume`.
+- `dev release` does not wait for main's CI to repeat a merge whose tree a passed pull request run already tested.
 
 Offline: the gitx Sandbox (real repositories, `gh` faked); the workflow checks are faked except in the test that runs
 the real actionlint. Run: python3 -m unittest tests.test_gitx_ci_shortcuts -v
@@ -271,6 +275,86 @@ class ResumeTests(unittest.TestCase):
             self.assertIn("actionlint: ci.yml:15: bad timeout", out)
             steps = {x["step"]: x["how"] for x in gitx.evidence(s.ctx())["steps"]}
             self.assertNotIn("kept", steps.values())
+
+
+# --------------------------------------------------------------------------- dev release
+
+
+def pr_ci(sha, conclusion="success", event="pull_request", workflow="ci"):
+    return {"status": "completed", "conclusion": conclusion, "workflowName": workflow, "event": event, "headSha": sha}
+
+
+def main_ci(sha, status="in_progress", conclusion="", workflow="ci"):
+    return {"status": status, "conclusion": conclusion, "workflowName": workflow, "event": "push", "headSha": sha}
+
+
+class ReleaseTests(unittest.TestCase):
+    def merged(self, s, squash=False, main_moved=False):
+        """main with fix/x merged by a PR, as on origin -> (HEAD, the PR's head)."""
+        s.branch("fix/x")
+        pr_head = s.commit("fix: x adds")
+        G.git(s.repo, "switch", "-q", "main")
+        if main_moved:
+            s.commit("docs: a change on main the PR never tested")
+        if squash:
+            G.git(s.repo, "merge", "-q", "--squash", "fix/x")
+            G.git(s.repo, "commit", "-q", "-m", "fix: x adds (#12)")
+        else:
+            G.git(s.repo, "merge", "-q", "--no-ff", "-m", "Merge pull request #12 from acme/fix/x", "fix/x")
+        G.git(s.repo, "push", "-q", "origin", "main")
+        G.dev("ci", "--mark-passed")
+        s.gh.on(["release", "create"], f"https://github.com/acme/widget/releases/tag/v{G.YY}.{G.MM}.0\n")
+        return s.head(), pr_head
+
+    def runs(self, s, by_sha):
+        for sha, runs in by_sha.items():
+            s.gh.on(["run", "list"], runs, when=lambda a, sha=sha: sha in a)
+
+    def test_release_does_not_wait_for_main_to_repeat_a_passed_pr_run_on_the_same_tree(self):
+        with G.Sandbox() as s:
+            head, pr_head = self.merged(s)
+            self.runs(s, {head: [main_ci(head)], pr_head: [pr_ci(pr_head)]})
+            rc, out, err = G.dev("release")
+            self.assertEqual(rc, 0, out + err)
+            self.assertEqual(s.head(f"v{G.YY}.{G.MM}.0^{{commit}}", repo=s.origin), head)
+            self.assertIn(f"CI still runs on {head[:7]} (ci), but its tree passed the pull request run on "
+                          f"{pr_head[:7]}: releasing without waiting", out)
+
+    def test_a_squash_merge_finds_the_pr_head_through_github(self):
+        with G.Sandbox() as s:
+            head, pr_head = self.merged(s, squash=True)
+            s.gh.on(["api", f"repos/acme/widget/commits/{head}/pulls"], [{"number": 12, "head": {"sha": pr_head}}])
+            self.runs(s, {head: [main_ci(head)], pr_head: [pr_ci(pr_head)]})
+            rc, out, err = G.dev("release", "--dry-run")
+            self.assertEqual(rc, 0, out + err)
+            self.assertIn(f"tree passed the pull request run on {pr_head[:7]} (PR #12)", out)
+
+    def test_release_still_waits_when_no_passed_pr_run_tested_this_tree(self):
+        cases = {
+            "main moved before the merge": (dict(main_moved=True), [pr_ci("x")]),
+            "the PR run is still going": ({}, [dict(pr_ci("x"), status="in_progress", conclusion="")]),
+            "the PR run only skipped its jobs (a draft)": ({}, [pr_ci("x", conclusion="skipped")]),
+            "only a branch push ran": ({}, [pr_ci("x", event="push")]),
+            "main runs a workflow the PR did not": ({}, [pr_ci("x", workflow="lint")]),
+        }
+        for name, (how, twin_runs) in cases.items():
+            with self.subTest(name), G.Sandbox() as s:
+                head, pr_head = self.merged(s, **how)
+                self.runs(s, {head: [main_ci(head)], pr_head: twin_runs})
+                rc, out, err = G.dev("release")
+                self.assertEqual(rc, 2, out + err)
+                self.assertIn(f"CI is still running on {head[:7]}", err)
+                self.assertFalse(s.gh.called("release", "create"))
+
+    def test_a_failed_run_on_head_still_refuses_even_when_the_pr_run_passed(self):
+        with G.Sandbox() as s:
+            head, pr_head = self.merged(s)
+            self.runs(s, {head: [main_ci(head), main_ci(head, "completed", "failure", workflow="lint")],
+                          pr_head: [pr_ci(pr_head), pr_ci(pr_head, workflow="lint")]})
+            rc, out, err = G.dev("release")
+            self.assertEqual(rc, 2, out + err)
+            self.assertIn(f"CI failed on {head[:7]}: lint", err)
+            self.assertFalse(s.gh.called("release", "create"))
 
 
 if __name__ == "__main__":
