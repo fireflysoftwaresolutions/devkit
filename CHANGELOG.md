@@ -10,8 +10,9 @@ same checks as Claude Code. The installer asks before it changes anything, the s
 you use and installs only those, a step that fails or that you stop no longer ends the setup, and
 `dev setup --resume` finishes what is left. Turning an agent off also takes out the no-prompt modes devkit set in it.
 Task numbers can no longer close the wrong item. On Codex, devkit now sees the commands inside its scripts, checks the
-end of every turn, and notices failed commands; Codex crew launches are not recorded yet, so crew slots and the
-crew's report checks do not apply there. The guard reads every way an agent can write an agent settings file, and
+end of every turn, and notices failed commands; it records Codex crew launches like Claude Code's, with their crew
+slots, step, required skills, and report checks; and a `grant`, `approve`, or `settle` line you type in Codex counts
+like one typed in Claude Code. The guard reads every way an agent can write an agent settings file, and
 leaves `dev setup` to you. [Getting started](docs/getting-started.md) walks through the new install.
 
 Agent sessions on one Mac, in Claude Code or Codex and in any project, can now see each other, send notes and
@@ -23,6 +24,14 @@ a number from `dev task` now counts only in the list you were shown.
 
 ### Added
 
+- **Codex crew launches work like Claude Code's.** Codex fires no hook before `spawn_agent`, so devkit now records a
+  Codex launch when its agent starts: the launch binds to the plan step its `task_name` names (`dev crew brief` prints
+  it), takes a crew slot, counts toward the depth limit, and the member gets its required skills, known pitfalls, and
+  report format as context. A launch over the crew's limits is marked, its step comes back to the tech lead, and the
+  member is told to stop. At its end, a Codex member's report gets the same checks as a Claude Code member's.
+- **Your typed lines count in Codex.** A `grant …`, an `approve D<n>`, or a `settle E-…` line you type in Codex now
+  counts, confirmed from the thread's own rollout, the record Codex writes of your prompt; an agent's text, a tool's
+  output, a subagent, or a `codex exec` run never counts. `dev audit verify` checks Codex evidence the same way.
 - **Agent sessions on one Mac talk to each other.** `dev session ls` lists the live Claude Code and Codex sessions on
   this Mac with their project, branch, run, crew, and state. The tech lead's session sends a note or a question with
   `dev session tell` or `dev session ask` to one session (`@<id prefix>`), a project, an initiative, the repository's
@@ -36,8 +45,7 @@ a number from `dev task` now counts only in the list you were shown.
   session's release, tag push, or merge into the default branch while `release:` is held, a push of a claimed branch,
   and a write to a claimed handoff note; the holder's own session and crew, and your own terminal, go through.
   `dev release` holds the release claim for 60 minutes while it runs and gives it back when it ends. You break another
-  session's claim by typing `grant claim-break <resource>` in the Claude Code session that needs it; a grant typed in
-  Codex does not break a claim yet.
+  session's claim by typing `grant claim-break <resource>` in the session that needs it, in Claude Code or Codex.
 - **Escalations you settle with one line.** When two sessions disagree on something that is yours to decide,
   `dev session escalate` sends you a desktop notification and shows the question and its options in each session's
   welcome, in `dev status` under **Needs you**, and on the dashboard, whose Now headline counts it as something that
@@ -131,6 +139,10 @@ a number from `dev task` now counts only in the list you were shown.
 
 ### Fixed
 
+- **Codex commands skipped some hook checks.** A Codex `exec_command` sends its command as `cmd` and its folder as
+  `workdir`; the hook-side rules read only `command`, so the irreversible-action gate and the crew lane checks let a
+  Codex `dev release` through. Every hook rule now reads both and judges the command in its folder, and so does the
+  guard.
 - **A crew member's wait could take the tech lead's events.** A member's `dev watch --wait` in a pipeline counted as
   the main session's: it replaced the tech lead's wait again and again (exit code `5`) and could take its events.
   devkit now works out who runs each wait from one definition (the hook's mark on the call, then the call ledger), so a
