@@ -442,8 +442,8 @@ runs, and gives it back when it ends, also after a failure; when another session
 needs the resource. Its tech lead's next refused action on it goes through and breaks the claim, or the tech lead runs
 `dev session release <resource>`. The grant works once, in the repository where you typed it, a crew member's call
 never uses it, and the holder gets a notice. A session with no project (started in `~/Development`) cannot break a
-claim. In 26.11.9, a grant typed in a Codex session does not break a claim, because devkit does not confirm typed
-grants from Codex transcripts yet: break it from a Claude Code session, or wait until the claim runs out.
+claim. In Codex, devkit confirms the grant from the thread's own rollout, where Codex writes your prompt after its
+prompt hook, so the grant works from the session's next tool call.
 
 ### Escalate a disagreement to you
 
@@ -476,8 +476,8 @@ lists the open ones, and `--all` the settled ones too; devkit keeps them 30 days
 | `dev session` commands | All of them | All of them |
 | Wait for other sessions | `dev watch --wait` with Bash `run_in_background`; it wakes the session within about 2 seconds | `dev watch --wait --timeout 10` in the foreground, again after each wake, or check at your next message |
 | A message while busy or idle | At the next tool call, or at the next prompt | The same |
-| `settle E-…: <choice>` | Yes | Yes |
-| `grant claim-break <resource>` | Yes | Not in 26.11.9: break the claim from a Claude Code session, or wait until it runs out (30 minutes by default, 4 hours at most) |
+| `settle E-…: <choice>` | Yes, at the session's next tool call or turn end | Yes, at the session's next tool call or turn end, once the thread's rollout shows the line typed |
+| `grant claim-break <resource>` | Yes | Yes, from the session's next tool call |
 | Who is live | Its process runs and it did something in the last 120 minutes | It did something in the last 120 minutes |
 
 `dev watch --wait --standby` waits for other sessions' messages alone, even when nothing else can arrive: use it in a
