@@ -51,7 +51,7 @@ class _Refused(ValueError):
 
 def run(a) -> int:
     """One `dev session <peer command>` -> its exit code; a refusal is one line on stderr, never a traceback."""
-    from . import identity, peers, ui
+    from . import identity, peers, state, ui
     try:
         return _COMMANDS[a.session_cmd](a)
     except peers.PeerError as e:
@@ -59,6 +59,10 @@ def run(a) -> int:
         return e.code if e.code in (2, 3, 4) else 2
     except (identity.IdentityError, _Refused) as e:
         ui.err(str(e))
+        return 2
+    except (state.StateBusy, OSError) as e:  # an unreadable or locked record, a full disk: one line, never a crash
+        ui.err(f"the sessions store could not be read or written ({type(e).__name__}: {e}); run the command again, "
+               f"and run `dev doctor` if it keeps failing")
         return 2
 
 

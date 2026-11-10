@@ -297,8 +297,8 @@ def _needs(me, runs, flags, layout=(), workspace: dict = None, project: str = No
             else f"Decision waits{where}: "
         q = _lower_first(clean(d.get("question"))) or "a decision for you"
         out.append(label + cut(q, LINE_MAX - 2 - width(label)))
-    if me[1]:
-        out += _peer_needs(me, project, now)
+    if me[1]:  # its own try: an unreadable sessions store hides only these lines, never the other needs
+        out += _try("peer needs", lambda: _peer_needs(me, project, now), []) or []
     accepted = len(ext.pending_acceptances())
     if accepted:
         out.append(f"{_count(accepted, 'extension')} accepted since your last check: dev ext ack")

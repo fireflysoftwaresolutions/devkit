@@ -69,6 +69,18 @@ class CliCase(PeerCase):
 
 
 class SendAndAnswerTests(CliCase):
+    def test_an_unreadable_store_is_one_plain_line_and_exit_2_never_a_crash(self):
+        # an unparseable mailbox (state.load refuses it every time) or a full disk: the command says so and exits 2,
+        # instead of a traceback, exit 70 and a devkit bug report
+        from devkit import state
+        self.sessions()
+        for error in (state.StateBusy("box.json is not valid JSON"), OSError(28, "No space left on device")):
+            with self.subTest(error=type(error).__name__), mock.patch.object(peers, "send", side_effect=error):
+                rc, out, err = self.dev("tell", "@0199a213", "rebased on main")
+                self.assertEqual(rc, 2, err)
+                self.assertIn("the sessions store could not be read or written", err)
+                self.assertNotIn("Traceback", err)
+
     def test_cli_tell_ask_answer_roundtrip(self):
         a, b, c = self.sessions()
         rc, out, err = self.dev("ask", "@0199a213", "Is the schema frozen?")
