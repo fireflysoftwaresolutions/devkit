@@ -680,6 +680,10 @@ def _workflow_checks(top, files):
 
 
 WORKFLOW_CHECKS = _workflow_checks  # tests replace it
+# What the workflow checks read from disk besides the workflows: actionlint's configuration
+# (.github/actionlint.yaml) and zizmor's (zizmor.yml or zizmor.yaml at the root or in .github), either of which can
+# turn findings off. An uncommitted change there keeps the host-only shortcut off.
+CHECKS_READ = (".github", "zizmor.yml", "zizmor.yaml")
 
 
 def _changed_workflows(changes) -> list:
@@ -702,9 +706,11 @@ def _carry_over(c, tree):
         if changes is None:
             first_why = first_why or why
             continue
-        if core.gitout(c.top, "status", "--porcelain", "--untracked-files=all", "--", ".github/workflows"):
-            _HOST_WHY[(c.top, tree)] = ("only CI host settings changed in HEAD, but the workflows have uncommitted "
-                                        "changes, so the workflow checks would not read HEAD's")
+        dirty = core.gitout(c.top, "status", "--porcelain", "--untracked-files=all", "--", *CHECKS_READ)
+        if dirty:
+            first = dirty.splitlines()[0].split(None, 1)[-1]
+            _HOST_WHY[(c.top, tree)] = (f"only CI host settings changed in HEAD, but {first} has uncommitted changes, "
+                                        "so the workflow checks would not read HEAD's files")
             return None
         passed, said = WORKFLOW_CHECKS(c.top, _changed_workflows(changes))
         if not passed:

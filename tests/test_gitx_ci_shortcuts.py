@@ -310,16 +310,25 @@ class PushTests(unittest.TestCase):
             self.assertIn(why, err)
             self.assertIsNone(gitx.evidence(s.ctx()))
 
-    def test_an_uncommitted_workflow_edit_keeps_the_shortcut_off(self):
-        # the checks read the files on disk: they must be the commit's, or they would vouch for other content
-        with G.Sandbox() as s, Checks(FakeChecks()) as checks:
-            evidenced_branch(s)
-            s.commit("ci: give the test job 60 minutes", {WF: WORKFLOW.replace(*LONGER_TIMEOUT)})
-            s.write(WF, WORKFLOW.replace(*LONGER_TIMEOUT).replace("run: test -f calc.py", "run: exit 0"))
-            rc, out, err = G.dev("push")
-            self.assertEqual(rc, 2, out + err)
-            self.assertIn("uncommitted", err)
-            self.assertEqual(checks.calls, [])
+    def test_an_uncommitted_file_the_checks_read_keeps_the_shortcut_off(self):
+        # the checks read the files on disk: they must be the commit's, or they would vouch for other content.
+        # actionlint and zizmor read their own configuration too, which can turn every finding off.
+        cases = {
+            "a workflow edit": (WF, WORKFLOW.replace(*LONGER_TIMEOUT).replace("run: test -f calc.py", "run: exit 0")),
+            "a new actionlint configuration": (".github/actionlint.yaml",
+                                               "paths:\n  .github/workflows/**/*.yml:\n    ignore: ['.*']\n"),
+            "a new zizmor configuration at the root": ("zizmor.yml", "rules:\n  unpinned-uses:\n    disable: true\n"),
+        }
+        for name, (rel, text) in cases.items():
+            with self.subTest(name), G.Sandbox() as s, Checks(FakeChecks()) as checks:
+                evidenced_branch(s)
+                s.commit("ci: give the test job 60 minutes", {WF: WORKFLOW.replace(*LONGER_TIMEOUT)})
+                s.write(rel, text)
+                rc, out, err = G.dev("push")
+                self.assertEqual(rc, 2, out + err)
+                self.assertIn(f"{rel} has uncommitted changes", err)
+                self.assertEqual(checks.calls, [])
+                self.assertEqual(G.git(s.origin, "branch", "--list", "fix/widget"), "")
 
 
 @unittest.skipUnless(shutil.which("actionlint"), "needs actionlint on PATH (brew install actionlint)")
