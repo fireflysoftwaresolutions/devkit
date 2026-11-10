@@ -134,9 +134,10 @@ instead of asking for a new one. The evidence carries over to HEAD when all of t
 
 - Every file changed since the tree with evidence is a GitHub workflow (`.github/workflows/*.yml`) that was edited,
   not added or deleted.
-- Each one differs only in `timeout-minutes`, `concurrency` (its `group` and `cancel-in-progress`), or comments: every
-  added or removed line is blank, a comment, or one of those settings.
-- No changed workflow uses YAML anchors, aliases, merge keys, or tags.
+- Each one differs only in `timeout-minutes`, `concurrency` (its `group` and `cancel-in-progress`), or comments. Two
+  checks must agree: devkit's reading of the workflow is the same once those settings are left out, and every added
+  or removed line is blank, a comment, or one of those settings.
+- No changed workflow uses YAML anchors, aliases, merge keys, tags, or directives.
 - The workflows have no uncommitted changes, and `actionlint` (`brew install actionlint`) and `dev ci audit` (no high
   or critical finding) pass on them.
 
@@ -301,12 +302,13 @@ Release by the recorded policy (see [The delivery policy](#the-delivery-policy))
    `dev calver` gives the next CalVer version.
 
    A failed run on the commit refuses the release. A run still in progress does not hold it when a pull request run
-   already passed the same tree: `dev release` looks for a commit with HEAD's tree whose pull request runs passed
-   every workflow still running on HEAD, first among HEAD's parents (a merge commit's second parent is the PR's head),
-   then among the PR heads GitHub links to HEAD (a squash or rebase merge). It names that commit (and the PR, when
-   GitHub linked it) and releases without waiting. A skipped, still running, or push-only run does not count. When
-   `main` moved on before the merge, or runs a workflow the PR did not, `dev release` still refuses until the run on
-   HEAD ends (`dev ci status --watch`).
+   already passed the same tree: `dev release` looks for a commit with HEAD's tree whose pull request run passed
+   every job still running or queued on HEAD (a job with the same workflow and name that succeeded, not skipped),
+   first among HEAD's parents (a merge commit's second parent is the PR's head), then among the PR heads GitHub links
+   to HEAD (a squash or rebase merge). It names that commit (and the PR, when GitHub linked it) and releases without
+   waiting. A skipped, still running, or push-only run does not count, and a job that runs only on push holds the
+   release until it passes on HEAD. When `main` moved on before the merge, `dev release` still refuses until the run
+   on HEAD ends (`dev ci status --watch`).
 4. Download or install the published artifact and smoke-test it.
 5. Update the handoff note (version, what shipped, follow-ups), and mark done with `dev task done <id>` any task that
    shipped without a branch of its own.
