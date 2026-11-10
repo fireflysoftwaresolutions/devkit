@@ -1213,7 +1213,7 @@ def _jvm_file(cls: str, base: str, top: str, ext_hint: str = "") -> str:
 
 # What XML allows before the root element besides a document type declaration: a byte order mark, then whitespace, the
 # XML declaration, processing instructions, and comments
-_XML_PROLOG = re.compile(r"﻿?(?:\s+|<\?.*?\?>|<!--.*?-->)*", re.S)
+_XML_PROLOG = re.compile(r"\ufeff?(?:\s+|<\?.*?\?>|<!--.*?-->)*", re.S)
 
 
 def _junit_root(text):
