@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import json
 import os
-import plistlib
 import re
 import subprocess
 import sys
@@ -121,6 +120,8 @@ def loaded(name: str) -> bool:
 
 def install(quiet: bool = False) -> list:
     """Write and (re)load the plists of enabled jobs, unload disabled ones, retire the legacy sync agent."""
+    import plistlib  # here, not when the module loads: plistlib needs pyexpat, which some Pythons cannot load, and
+    # `dev doctor` and `dev jobs` read the jobs without writing a plist
     AGENTS_DIR.mkdir(parents=True, exist_ok=True)
     LOGS.mkdir(parents=True, exist_ok=True)
     out = []
