@@ -2039,7 +2039,10 @@ def cmd_initiative(a):
         if not f.exists():
             ui.err(f"no initiative “{a.slug}”")
             return 2
-        with registry.notes_lock(wait=30):  # from the read to the write: another writer of the README waits
+        with registry.notes_lock(wait=30) as got:  # from the read to the write: another writer of the README waits
+            if not got:
+                ui.err("another devkit process is writing notes: run the command again in a moment")
+                return 1
             text = f.read_text()
             meta, _ = notes.split_frontmatter(text)
             cur = [p.lower() for p in (meta.get("projects") or [])]
@@ -3390,7 +3393,10 @@ def cmd_note(a):
             ui.err(f"unknown key “{k}” (keys: {', '.join(notes.META_KEYS)})")
             return 2
         kv[k] = v
-    with registry.notes_lock(wait=30):  # from the read to the write: another writer of the note waits
+    with registry.notes_lock(wait=30) as got:  # from the read to the write: another writer of the note waits
+        if not got:
+            ui.err("another devkit process is writing notes: run the command again in a moment")
+            return 1
         try:
             text = notes.set_meta(f.read_text(), **kv)
         except ValueError as e:
