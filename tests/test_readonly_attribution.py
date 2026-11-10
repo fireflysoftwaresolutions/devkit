@@ -123,11 +123,12 @@ class ClaudeShellOverlapTests(ShellOverlap, unittest.TestCase):
         self.assertEqual(self.scope_audit(), [("Seraph", "certain: api/x.py"), ("Seraph", "possible: docs/audit.md")])
 
 
-class CodexShellOverlapTests(ShellOverlap, unittest.TestCase):
+class CodexOverlap(ShellOverlap):
     # Codex: a member's tool calls come under the tech lead's thread with its agent_id; the shell call is
     # exec_command, whose command is `cmd`, and edits are apply_patch, whose files the patch names. The lanes come
     # from the launch records codexlaunch writes when the agent starts.
     agent, sid = "codex", "c1"
+    plan = "api=10m [backend]; review=10m [review] after api"
 
     def setUp(self):
         self.state = TempState().__enter__()
@@ -137,14 +138,16 @@ class CodexShellOverlapTests(ShellOverlap, unittest.TestCase):
         self.addCleanup(env.stop)
         (pg.SESSIONS / f"codex-{self.sid}.json").write_text(json.dumps({
             "agent": "codex", "session": self.sid, "started": time.time() - 600}))
-        pg.start("Work", plan="api=10m [backend]; review=10m [review] after api")
+        pg.start("Work", plan=self.plan)
         pg.assign("api", "Tank", scope="api/**", why="test")
         pg.assign("review", "Seraph")
         self.started(TANK, "tank", "api")
         self.started(REVIEWER, "seraph", "review")
         self.t0 = time.time()
-        self.call(REVIEWER, "exec-review", self.t0, cmd="python3 -m unittest tests.test_api", tool="exec_command",
-                  key="cmd")
+        self.review = self.exec(REVIEWER, "exec-review", self.t0, "python3 -m unittest tests.test_api")
+
+    def exec(self, aid, tid, at, cmd):
+        return self.call(aid, tid, at, cmd=cmd, tool="exec_command", key="cmd")
 
     def started(self, aid, member, task):
         # what codexlaunch.record writes at SubagentStart, then the start itself
@@ -157,6 +160,8 @@ class CodexShellOverlapTests(ShellOverlap, unittest.TestCase):
     def written(self, paths, reader=REVIEWER):
         return super().written(paths, reader)
 
+
+class CodexShellOverlapTests(CodexOverlap, unittest.TestCase):
     def test_a_codex_builders_exec_command_during_the_reviewers_call_makes_its_file_possible(self):
         self.ran(TANK, "exec-tank", self.t0 + 2, self.t0 + 6, tool="exec_command", key="cmd")
         flagged = self.written(["api/x.py"])
@@ -172,6 +177,60 @@ class CodexShellOverlapTests(ShellOverlap, unittest.TestCase):
                                       "tool_input": {"command": patch}})
         self.assertIsNone(self.written(["api/x.py"]))
         self.assertEqual(self.scope_audit(), [("Tank", "attributed: api/x.py")])
+
+
+class ReaderCallTests(CodexOverlap, unittest.TestCase):
+    """A shell call that cannot write files is nobody's alibi: a Codex tech lead waits for the crew in the foreground
+    with `dev watch --wait --timeout 10`, again and again, so one of its calls is open across nearly every review.
+    The call counts by what it runs, for the tech lead and the builders alike: devkit's own record commands and tools
+    that only read are no writers; a test run, a script or any other program that runs code is one."""
+
+    plan = "api=10m [backend]; review=10m [review]"  # the review runs beside the work it reads
+
+    def review_ends(self):
+        pg.on_subagent("codex", {"session_id": self.sid, "agent_id": REVIEWER, "agent_type": "seraph",
+                                 "last_assistant_message": REVIEW_REPORT}, False, now=self.t0 + 60)
+        return next(st for st in pg.load_run("codex", self.sid)["plan"] if st["name"] == "review")
+
+    def test_a_codex_tech_leads_open_dev_watch_is_no_alibi_for_the_reviewers_write(self):
+        self.exec("main", "exec-main-watch", self.t0 + 2, "dev watch --wait --timeout 10")
+        flagged = self.written(["lib/x.py"])
+        self.assertEqual((flagged["paths"], flagged["certainty"]), (["lib/x.py"], "certain"))
+        self.assertEqual(self.review_ends()["state"], "unverified")
+
+    def judged(self, caller, cmds, prefix, open_while_judged=False):
+        """The certainty of the reviewer's write of one file per command, each in a reviewer call of its own that
+        starts after every call of the commands before it; the caller's call opens 2 s into it and closes 2 s later,
+        or stays open until the write is judged."""
+        review, out = self.review, {}
+        for k, cmd in enumerate(cmds):
+            at, path = self.t0 + 100 * k, f"{prefix}{k}.py"
+            if k:
+                self.closed(review, at - 1)
+                review = self.exec(REVIEWER, f"exec-review-{k}", at, "python3 -m unittest tests.test_api")
+            call = self.exec(caller, f"exec-{k}", at + 2, cmd)
+            if not open_while_judged:
+                self.closed(call, at + 4)
+            flagged = pg.scope_written(self.agent, self.sid, REVIEWER, [path], now=at + 30)
+            self.closed(call, at + 40)
+            out[cmd] = "certain" if path in flagged["certain"] else "possible"
+        return out
+
+    def test_the_tech_leads_call_is_an_alibi_only_when_it_can_write(self):
+        rows = {"sed -i '' 's/a/b/' lib/x.py": "possible",
+                "python3 - <<'EOF'\nopen('lib/x.py', 'w').write('x')\nEOF": "possible",
+                "python3 -m unittest tests.test_api": "possible",  # a test run runs code that can write
+                "dev crew sync": "possible",  # it writes the generated agent files
+                "find . -name '*.pyc' -delete": "possible",
+                "cd /repo && dev watch --wait --timeout 10 2>&1 | tail -5": "certain",
+                "git diff --stat; dev session inbox": "certain",
+                "grep -rn call_reads lib | wc -l": "certain"}
+        self.assertEqual(self.judged("main", list(rows), "lib/x"), rows)
+
+    def test_a_builders_call_is_an_alibi_only_when_it_can_write(self):
+        # api/** is the Backend engineer's scope; its call is still open when the reviewer's write is judged
+        rows = {"python3 -m unittest tests.test_api": "possible", "git status --short": "certain"}
+        self.assertEqual(self.judged(TANK, list(rows), "api/x", open_while_judged=True), rows)
 
 
 class CodexReviewerHookTests(CodexCrew):

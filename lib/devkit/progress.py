@@ -313,9 +313,75 @@ def _write_private(path: Path, doc: dict):
         raise
 
 
+# What a shell call may run and still write no file (call_reads): devkit's own commands that change only devkit's
+# records (None: every subcommand; `dev crew sync` writes the generated agent files, so it never counts), and tools
+# that read and run no code. A test run, a build, a script, an interpreter or a package manager runs code that can
+# write: it is a writer, whatever the read-only lanes may run.
+DEVKIT_READS = {"watch": None, "progress": None, "crew": None, "status": None,
+                "session": ("ls", "inbox", "claims", "escalations")}
+PURE_READS = frozenset({"cd", "pushd", "ls", "cat", "head", "tail", "grep", "rg", "wc", "find", "git"})
+GIT_READS = frozenset({"status", "log", "diff", "show"})
+FIND_RUNS = frozenset({"-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fprint0", "-fprintf", "-fls"})
+_SUBSTITUTED = re.compile(r"[$<>]\(|`|\\\n")  # a substitution, or a continued line, runs what the words do not show
+
+
+def _devkit_read(argv) -> bool:
+    """True for one `dev` call of DEVKIT_READS, its prefixes included."""
+    from . import guard
+    dev = guard._dev_args(guard._unwrap(list(argv)))
+    pos = guard._dev_words(dev) if dev is not None else []
+    if not pos or pos[0] not in DEVKIT_READS or guard._crew_kind(dev) == "sync":
+        return False
+    subs = DEVKIT_READS[pos[0]]
+    return subs is None or (len(pos) > 1 and pos[1] in subs)
+
+
+def _pure_read(argv0, here) -> bool:
+    """True for one command of PURE_READS that runs no code: git only as status, log, diff or show, find without
+    FIND_RUNS, and each one as the read-only lanes' verdict lets it run (no `git -c`, `--output`, `rg --pre` or
+    environment that makes it run another program)."""
+    from . import guard
+    argv = guard._unwrap(list(argv0))
+    name = os.path.basename(argv[0]) if argv else ""
+    if name not in PURE_READS or (name == "find" and FIND_RUNS & set(argv)):
+        return False
+    if name == "git":
+        args, k = argv[1:], 0
+        while k < len(args) and args[k].startswith("-"):  # git's own options; these four take the next word
+            k += 2 if args[k] in ("-C", "-c", "--git-dir", "--work-tree") else 1
+        if (args[k] if k < len(args) else "") not in GIT_READS:
+            return False
+    return guard._ro_program(list(argv0), here) is None
+
+
+def call_reads(cmd: str, cwd) -> bool:
+    """True when a shell call writes no file, so it is nobody's alibi for a reading lane's write (scope_written):
+    each part of it is one of devkit's own record commands (DEVKIT_READS) or a tool that only reads (_pure_read),
+    with no redirect into a file, no substitution and no nested shell. False for anything else, and when the guard
+    cannot parse it: the call may write, as every call could before calls had a verdict."""
+    from . import guard
+    try:
+        segs = guard.split_commands(guard.strip_heredocs(cmd), stripped=True)
+        if not segs or _SUBSTITUTED.search(cmd):
+            return False
+        here = str(cwd or os.getcwd())
+        for argv0, redirs in segs:
+            if {">|", ">>|"} & set(argv0) or not all(guard._redirect_ok(r, here) for r in redirs):
+                return False
+            if not (_devkit_read(argv0) or _pure_read(argv0, here)):
+                return False
+            argv = guard._unwrap(list(argv0))
+            if os.path.basename(argv[0]) in ("cd", "pushd") and len(argv) > 1 and argv[1] != "-":
+                here = str(guard.resolve(argv[1], here))
+        return True
+    except Exception:
+        return False
+
+
 def call_opened(agent: str, data: dict, now: float | None = None):
     """PreToolUse of a shell call: its ledger entry {tool_use_id, session, agent, caller (agent_id or main), depth,
-    ts, ttl, cmd_sha256, cmd (redacted, at most CALL_TEXT), cut}."""
+    ts, ttl, cmd_sha256, cmd (redacted, at most CALL_TEXT), cut}, and reads: true when it writes no file
+    (call_reads)."""
     tid, sid = _safe_name(data.get("tool_use_id")), _safe_name(data.get("session_id"))
     inp = data.get("tool_input") or {}
     cmd = inp.get("command") or inp.get("cmd")  # Codex's exec_command sends its command as `cmd`
@@ -339,7 +405,7 @@ def call_opened(agent: str, data: dict, now: float | None = None):
     _write_private(CALLS / sid / f"{tid}.json", {
         "tool_use_id": tid, "session": sid, "agent": agent, "caller": aid or "main", "depth": depth,
         "ts": round(now, 3), "ttl": ttl, "cmd_sha256": hashlib.sha256(cmd.encode()).hexdigest(), "cmd": text,
-        "cut": cut})
+        "cut": cut, **({"reads": True} if call_reads(cmd, data.get("cwd")) else {})})
 
 
 def call_entry(data: dict) -> dict:
@@ -368,9 +434,10 @@ def _shells_path(sid: str) -> Path:
 
 def call_closed(data: dict):
     """PostToolUse or PostToolUseFailure of a shell call, or the hook refused it: its entry leaves the ledger. A call
-    that ran stays in the record of closed shell calls for SHELL_KEEP, {caller, opened, closed}, so write detection
-    knows who else had a shell call during a reading lane's call even when it closed first (scope_written). A call
-    refused at PreToolUse never ran and is not kept. Under the record's lock; a busy lock drops this one record."""
+    that ran stays in the record of closed shell calls for SHELL_KEEP, {caller, opened, closed, reads (when it
+    writes no file, call_reads)}, so write detection knows who else had a writing shell call during a reading lane's
+    call even when it closed first (scope_written). A call refused at PreToolUse never ran and is not kept. Under the
+    record's lock; a busy lock drops this one record."""
     tid, sid = _safe_name(data.get("tool_use_id")), _safe_name(data.get("session_id"))
     if not (tid and sid):
         return
@@ -387,7 +454,7 @@ def call_closed(data: dict):
     def add(doc):
         kept = [c for c in doc.get("calls") or [] if isinstance(c, dict) and now - (c.get("closed") or 0) <= SHELL_KEEP]
         doc["calls"] = (kept + [{"caller": str(e.get("caller") or "main")[:80], "opened": e["ts"],
-                                 "closed": round(now, 3)}])[-SHELL_MAX:]
+                                 "closed": round(now, 3), **({"reads": True} if e.get("reads") else {})}])[-SHELL_MAX:]
     try:
         state.update(_shells_path(sid), add)
     except state.StateBusy:
@@ -396,7 +463,7 @@ def call_closed(data: dict):
 
 def shells_since(sid: str, since: float, now: float | None = None) -> list:
     """The session's shell calls that closed at `since` or later and had opened by `now`: [{caller, opened,
-    closed}], the closed calls that overlap that window."""
+    closed, reads}], the closed calls that overlap that window."""
     now = now or time.time()
     doc = core.read_json(_shells_path(sid), {}) or {}
     return [c for c in doc.get("calls") or [] if isinstance(c, dict)
@@ -6491,9 +6558,11 @@ def _shown(paths: list) -> str:
     return ", ".join(paths[:5]) + (f" and {len(paths) - 5} more" if len(paths) > 5 else "")
 
 
-def _shell_writers(run: dict, callers: set, chain: set) -> set:
-    """Of the callers of shell calls, those whose shell may write files: main (the tech lead), and each lane outside
-    the reading lane's chain that works with build or all tools, a helper's call counting for the lanes above it."""
+def _shell_writers(run: dict, calls: list, chain: set) -> set:
+    """Of the callers of these shell calls (ledger entries or closed records), those whose shell may write files:
+    main (the tech lead), and each lane outside the reading lane's chain that works with build or all tools, a
+    helper's call counting for the lanes above it. A call that reads (call_reads) counts for nobody."""
+    callers = {str(e.get("caller") or "") for e in calls if not e.get("reads")}
     out = {"main"} if "main" in callers else set()
     for c in callers - {"main", ""}:
         out.update(k for k in lane_chain(run, c) if k not in chain and lane_tools(run, k) in ("build", "all"))
@@ -6522,7 +6591,8 @@ def scope_written(agent: str, sid: str, aid: str, paths: list, now: float | None
     nothing, since the edit record is exact. Every other file is held against the reading lane in `scope_writes`. It
     is "possible" when another writer had a shell call that overlapped the reading lane's call, still open or already
     closed (open_calls, shells_since): the tech lead, or a build lane, which for a file in a working build lane's
-    scope must be that lane. With no such writer it is "certain": a script of the reading lane can write into a
+    scope must be that lane. A call that writes no file (call_reads: `git status`, `dev watch --wait`) makes nobody a
+    writer. With no such writer it is "certain": a script of the reading lane can write into a
     working member's scope, so a scope alone is no alibi. Only a certain file makes the lane's report unverified
     (_end_member_step). An open step whose scope holds a held file keeps it (`other_writes`), which the review step
     after it lists; Morpheus gets one short crew notice naming the files and the possible writers; and the audit
@@ -6546,8 +6616,7 @@ def scope_written(agent: str, sid: str, aid: str, paths: list, now: float | None
         layers = {k: lane_scope(run, k) for k in builders}
         calls = open_calls(sid, now)
         start = min((e.get("ts") or now for e in calls if e.get("caller") == aid), default=now - CALL_TTL)
-        callers = {str(e.get("caller") or "") for e in calls + shells_since(sid, start, now)}
-        shells = _shell_writers(run, callers, chain)  # who else had a shell call during the reading lane's call
+        shells = _shell_writers(run, calls + shells_since(sid, start, now), chain)  # who else had a writing shell call
         edits = [e for e in edits_since(sid, start, now) if str(e.get("caller") or "") not in chain]
         owned, held, maybe_by = {}, {}, {}  # credited by edit; held against the reading lane; possible files by writers
         for p in paths:
