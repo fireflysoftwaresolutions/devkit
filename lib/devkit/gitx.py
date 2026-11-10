@@ -3400,8 +3400,19 @@ def changelog_section(top, version: str):
 def _ci_runs(c, sha):
     """The GitHub Actions runs of commit `sha` (as `gh run list --commit` lists them), or None when gh cannot say."""
     runs, _ = gh_json(["run", "list", "-R", c.slug, "--commit", sha, "--json",
-                       "status,conclusion,workflowName,event"], c)
+                       "databaseId,status,conclusion,workflowName,event"], c)
     return runs if isinstance(runs, list) else None
+
+
+def _run_jobs(c, run):
+    """The jobs of one GitHub Actions run (`gh run view --json jobs`: name, status, conclusion), or None when gh
+    cannot say."""
+    rid = run.get("databaseId") if isinstance(run, dict) else None
+    if not rid:
+        return None
+    data, _ = gh_json(["run", "view", str(rid), "-R", c.slug, "--json", "jobs"], c)
+    jobs = data.get("jobs") if isinstance(data, dict) else None
+    return jobs if isinstance(jobs, list) else None
 
 
 def _ci_state(runs):
@@ -3420,12 +3431,6 @@ def _ci_state(runs):
     return "passing", []
 
 
-def _remote_ci(c, sha):
-    """'passing' | 'failing' | 'pending' | 'none' | 'unknown' for the CI runs of `sha` (GitHub), with the workflows
-    that failed or are still running."""
-    return _ci_state(_ci_runs(c, sha))
-
-
 def _commit_tree(c, sha) -> str:
     tree = core.gitout(c.top, "rev-parse", "--verify", "-q", f"{sha}^{{tree}}")
     if tree:
@@ -3434,15 +3439,31 @@ def _commit_tree(c, sha) -> str:
     return str(((commit or {}).get("tree") or {}).get("sha") or "") if isinstance(commit, dict) else ""
 
 
-def _passed_twin(c, head, running):
-    """A commit with the tree of `head` whose pull request CI passed every workflow still running on `head`, as
+def _passed_twin(c, head, head_runs):
+    """A commit with the tree of `head` whose pull request CI passed every job still running on `head`, as
     (sha, PR number or None); else None. Main's run of a merge commit repeats what the PR run tested when the trees
     are the same. Candidates: the parents of `head` (a merge commit's second parent is the PR's head), then the heads
     of the pull requests GitHub links to `head` (a squash or rebase merge). A skipped or still running PR run, or one
-    that did not run a workflow `head` runs, does not count."""
+    that did not run a workflow `head` runs, does not count. Each job still running or queued on `head` needs a job
+    of the same workflow and name that succeeded in those PR runs: a job that runs only on push (a publish gated by
+    `if: github.event_name == 'push'`) was skipped there, so main must finish it. A job that already failed on
+    `head`, or a run whose jobs gh cannot list, keeps the wait."""
     tree = _commit_tree(c, head)
     if not tree:
         return None
+    running, needed = set(), set()
+    for run in head_runs or []:
+        if run.get("status") == "completed":
+            continue
+        running.add(run.get("workflowName"))
+        jobs = _run_jobs(c, run)
+        if not jobs:
+            return None
+        for j in jobs:
+            if j.get("status") != "completed":
+                needed.add((run.get("workflowName"), j.get("name")))
+            elif j.get("conclusion") not in ("success", "skipped", "neutral"):
+                return None
 
     def candidates():
         for parent in core.gitout(c.top, "rev-list", "--parents", "-n", "1", head).split()[1:]:
@@ -3461,9 +3482,13 @@ def _passed_twin(c, head, running):
         if _commit_tree(c, sha) != tree:
             continue
         runs = _ci_runs(c, sha)
-        passed = {r.get("workflowName") for r in runs or []
-                  if r.get("event") == "pull_request" and r.get("conclusion") == "success"}
-        if _ci_state(runs)[0] == "passing" and passed and set(running) <= passed:
+        prs = [r for r in runs or [] if r.get("event") == "pull_request" and r.get("conclusion") == "success"]
+        passed = {r.get("workflowName") for r in prs}
+        if _ci_state(runs)[0] != "passing" or not passed or not running <= passed:
+            continue
+        done = {(r.get("workflowName"), j.get("name")) for r in prs if r.get("workflowName") in running
+                for j in _run_jobs(c, r) or [] if j.get("status") == "completed" and j.get("conclusion") == "success"}
+        if needed <= done:
             return sha, pr
     return None
 
@@ -3584,12 +3609,13 @@ def _release(a, c) -> int:
     if not ev and not a.dry_run:
         return no_evidence(c, "release")
     head = _ref_sha(c.top, "HEAD")
-    remote_ci, names = (_remote_ci(c, head) if c.provider == "github" else ("unknown", []))
+    head_runs = _ci_runs(c, head) if c.provider == "github" else None
+    remote_ci, names = _ci_state(head_runs) if c.provider == "github" else ("unknown", [])
     if remote_ci == "failing":
         return refuse(f"CI failed on {head[:7]}: {', '.join(map(str, names))}",
                       "fix it on a branch first (dev run view --failed)")
     if remote_ci == "pending":
-        twin = _passed_twin(c, head, names)
+        twin = _passed_twin(c, head, head_runs)
         if not twin:
             return refuse(f"CI is still running on {head[:7]}", "dev ci status --watch, then release")
         sha, pr = twin

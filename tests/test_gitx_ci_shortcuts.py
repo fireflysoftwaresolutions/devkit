@@ -6,11 +6,13 @@
   before it, once actionlint and the devkit workflow audit pass: `dev push`, `dev ci --run --resume`. The runner
   (runs-on), a line of any other kind in the text diff, and YAML anchors, aliases, merge keys, tags or directives
   still need a local run.
-- `dev release` does not wait for main's CI to repeat a merge whose tree a passed pull request run already tested.
+- `dev release` does not wait for main's CI to repeat a merge whose tree a passed pull request run already tested,
+  job by job: a job still running on main that the PR run skipped (a push-only publish) or never ran keeps the wait.
 
 Offline: the gitx Sandbox (real repositories, `gh` faked); the workflow checks are faked except in the test that runs
 the real actionlint. Run: python3 -m unittest tests.test_gitx_ci_shortcuts -v
 """
+import itertools
 import shutil
 import sys
 import unittest
@@ -382,12 +384,22 @@ class ResumeTests(unittest.TestCase):
 # --------------------------------------------------------------------------- dev release
 
 
-def pr_ci(sha, conclusion="success", event="pull_request", workflow="ci"):
-    return {"status": "completed", "conclusion": conclusion, "workflowName": workflow, "event": event, "headSha": sha}
+RUN_IDS = itertools.count(9000)
 
 
-def main_ci(sha, status="in_progress", conclusion="", workflow="ci"):
-    return {"status": status, "conclusion": conclusion, "workflowName": workflow, "event": "push", "headSha": sha}
+def job(name="test", status="completed", conclusion="success"):
+    return {"name": name, "status": status, "conclusion": conclusion}
+
+
+def pr_ci(sha, conclusion="success", event="pull_request", workflow="ci", jobs=None):
+    return {"databaseId": next(RUN_IDS), "status": "completed", "conclusion": conclusion, "workflowName": workflow,
+            "event": event, "headSha": sha, "jobs": [job(conclusion=conclusion)] if jobs is None else jobs}
+
+
+def main_ci(sha, status="in_progress", conclusion="", workflow="ci", jobs=None):
+    running = job(status=status, conclusion=conclusion)
+    return {"databaseId": next(RUN_IDS), "status": status, "conclusion": conclusion, "workflowName": workflow,
+            "event": "push", "headSha": sha, "jobs": [running] if jobs is None else jobs}
 
 
 class ReleaseTests(unittest.TestCase):
@@ -409,8 +421,13 @@ class ReleaseTests(unittest.TestCase):
         return s.head(), pr_head
 
     def runs(self, s, by_sha):
+        """`gh run list --commit <sha>` lists the runs, and `gh run view <id> --json jobs` shows each one's jobs."""
         for sha, runs in by_sha.items():
-            s.gh.on(["run", "list"], runs, when=lambda a, sha=sha: sha in a)
+            s.gh.on(["run", "list"], [{k: v for k, v in r.items() if k != "jobs"} for r in runs],
+                    when=lambda a, sha=sha: sha in a)
+            for r in runs:
+                if r.get("jobs") is not None:
+                    s.gh.on(["run", "view", str(r["databaseId"])], {"jobs": r["jobs"]})
 
     def test_release_does_not_wait_for_main_to_repeat_a_passed_pr_run_on_the_same_tree(self):
         with G.Sandbox() as s:
@@ -443,6 +460,42 @@ class ReleaseTests(unittest.TestCase):
             with self.subTest(name), G.Sandbox() as s:
                 head, pr_head = self.merged(s, **how)
                 self.runs(s, {head: [main_ci(head)], pr_head: twin_runs})
+                rc, out, err = G.dev("release")
+                self.assertEqual(rc, 2, out + err)
+                self.assertIn(f"CI is still running on {head[:7]}", err)
+                self.assertFalse(s.gh.called("release", "create"))
+
+    def test_a_push_only_job_the_pr_run_skipped_must_finish_on_main(self):
+        # `publish` runs only on push (if: github.event_name == 'push'): the PR run skipped it, so it never passed
+        pr_jobs = [job("test"), job("publish", conclusion="skipped")]
+        cases = {
+            "it still runs on main": ([job("test", "in_progress", ""), job("publish", "queued", "")], 2),
+            "it already passed on main": ([job("test", "in_progress", ""), job("publish")], 0),
+        }
+        for name, (head_jobs, want) in cases.items():
+            with self.subTest(name), G.Sandbox() as s:
+                head, pr_head = self.merged(s)
+                self.runs(s, {head: [main_ci(head, jobs=head_jobs)], pr_head: [pr_ci(pr_head, jobs=pr_jobs)]})
+                rc, out, err = G.dev("release")
+                self.assertEqual(rc, want, out + err)
+                self.assertEqual(bool(s.gh.called("release", "create")), want == 0)
+                if want:
+                    self.assertIn(f"CI is still running on {head[:7]}", err)
+
+    def test_release_waits_unless_every_running_job_passed_in_the_pr_run(self):
+        running = job("test", "in_progress", "")
+        cases = {
+            "the PR run had no job of that name": ([running, job("integration", "in_progress", "")], [job("test")]),
+            "a job already failed on main": ([running, job("lint", conclusion="failure")], [job("test"), job("lint")]),
+            "main's run lists no jobs yet": ([], [job("test")]),
+            "gh cannot list main's jobs": (None, [job("test")]),
+        }
+        for name, (head_jobs, pr_jobs) in cases.items():
+            with self.subTest(name), G.Sandbox() as s:
+                head, pr_head = self.merged(s)
+                head_run = main_ci(head)
+                head_run["jobs"] = head_jobs
+                self.runs(s, {head: [head_run], pr_head: [pr_ci(pr_head, jobs=pr_jobs)]})
                 rc, out, err = G.dev("release")
                 self.assertEqual(rc, 2, out + err)
                 self.assertIn(f"CI is still running on {head[:7]}", err)
