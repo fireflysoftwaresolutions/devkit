@@ -1761,7 +1761,8 @@ class EvidenceReplayTests(TranscriptCase):
         self.assertEqual([r["detail"] for r in audit.records(1, "crew.decided")], ["B: reject"])
 
     def test_a_codex_entry_is_never_confirmed_by_the_hook_alone(self):
-        # The Keymaker: devkit reads no Codex transcript yet, so a Codex entry has nothing behind it but the hook event
+        # The Keymaker: a Codex entry needs its prompt's record in the thread's own rollout (tests/test_codex_grants.py);
+        # with no rollout it has nothing behind it but the hook event
         self.assertFalse(pg.confirmed({"agent": "codex", "channel": "E2", "transcript_uuid": "p-1", "covers": "D1"}))
 
 

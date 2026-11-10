@@ -26,6 +26,7 @@ import sys
 import tempfile
 import time
 import unittest
+import uuid
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -180,6 +181,31 @@ def line_of(text: str, mid: str) -> str:
     if len(found) != 1:
         raise AssertionError(f"expected one peer line for {mid}, got {len(found)} in:\n{text}")
     return found[0]
+
+
+def codex_types(s: Session, text: str) -> dict:
+    """The developer types `text` in Codex thread `s`, as Codex 0.167 does it: UserPromptSubmit with a turn id of its
+    own and no prompt id, then the prompt's records in the thread's rollout (the model's input item and the turn's
+    UserMessage item), which opens with the thread's session_meta. -> the prompt hook's output."""
+    def rec(kind, payload, n):
+        at = time.time()
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(at)) + f".{int(at * 1000) % 1000:03d}Z"
+        return json.dumps({"timestamp": stamp, "ordinal": n, "type": kind, "payload": payload}) + "\n"
+    have = s.transcript.read_text().splitlines() if s.transcript.exists() else []
+    if not have:
+        s.transcript.write_text(rec("session_meta", {"id": s.sid, "session_id": s.sid, "originator": "codex-tui",
+                                                     "source": "vscode", "cli_version": "0.167.0"}, 0))
+        have = [""]
+    turn = str(uuid.uuid4())
+    out = s.hook("prompt", s.payload("UserPromptSubmit", prompt=text, turn_id=turn))
+    with s.transcript.open("a") as fh:
+        fh.write(rec("response_item", {"type": "message", "role": "user",
+                                       "content": [{"type": "input_text", "text": text}]}, len(have)))
+        fh.write(rec("event_msg", {"type": "item_completed", "thread_id": s.sid, "turn_id": turn,
+                                   "item": {"type": "UserMessage", "id": str(uuid.uuid4()),
+                                            "content": [{"type": "text", "text": text, "text_elements": []}]}},
+                     len(have) + 1))
+    return out
 
 
 def span(line: str) -> str:
@@ -514,20 +540,23 @@ class Escalations(Coordination):
     def test_the_developers_line_in_the_claude_session_settles_and_both_sessions_hear(self):
         self.settle_and_hear(self.a, self.x, self.a)
 
-    def test_a_line_typed_in_the_codex_session_settles_nothing_and_the_claude_line_settles_its_escalation(self):
-        eid = self.escalate(self.x, self.a)  # devkit reads no Codex transcript yet, so no typed Codex line counts
-        echo = self.x.context(self.x.prompt(f"settle {eid}: B"))
-        self.assertNotIn("the developer settled", echo)
-        self.assertEqual(self.state_of(self.x, eid), "open")
+    def test_the_developers_line_in_the_codex_session_settles_and_both_sessions_hear(self):
+        eid = self.escalate(self.a, self.x)
+        self.assertIn(eid, self.x.ok("session", "inbox"))
         self.a.ok("session", "inbox")
-        waiting = self.wait_bg(self.x)
-        self.assertIn(f"the developer settled escalation {eid}", self.a.context(self.a.prompt(f"settle {eid}: B")))
+        waiting = self.wait_bg(self.a)  # the other party waits; the developer types in the Codex thread
+        echo = self.x.context(codex_types(self.x, f"settle {eid}: B"))
+        self.assertIn(f"devkit settles {eid} once", echo)  # Codex writes the prompt to its rollout after this hook
+        heard = self.hears(self.x)  # the thread's next tool call finds the prompt's record and settles it
+        self.assertIn(f"the developer settled escalation {eid} in their prompt (every party hears it): "
+                      f"{OPEN_Q}B: RFC 9457 problem details{CLOSE_Q}", heard)
         woke = self.done(waiting)
         self.assertEqual(woke["rc"], 0, woke)
         settled = [ln for ln in peer_lines(woke["out"]) if ln.startswith("devkit · peer settled ")]
         self.assertEqual(len(settled), 1, woke["out"])
         self.assertIn(f"{eid} (Which error format does the checkout API return?) settled by the developer: "
                       f"B: RFC 9457 problem details", settled[0])
+        self.assertEqual(self.state_of(self.a, eid), "settled")
 
     def test_a_line_typed_in_a_session_that_is_no_party_settles_too(self):
         self.settle_and_hear(self.a, self.x, self.k)  # the developer settles in any devkit session
@@ -711,7 +740,6 @@ class WaitCollision(Coordination):
     def test_claude_members_piped_waits_never_take_the_tech_leads_wait(self):
         self.collide(self.leads["claude"])
 
-    @unittest.expectedFailure  # open defect: a Codex tech lead's dev watch --wait ends at once with "no crew member works" while five launched Codex members wait for answers
     def test_codex_members_piped_waits_never_take_the_tech_leads_wait(self):
         self.collide(self.leads["codex"])
 
@@ -732,12 +760,18 @@ class ClaimBreak(Coordination):
         got = json.loads(self.a.ok("session", "claims", "--json"))
         return next((c["holder"]["key"] for c in got if c["resource"] == API_PUSH), "")
 
-    def test_a_grant_typed_in_a_codex_session_breaks_no_claim(self):
+    def test_a_grant_typed_in_a_codex_session_breaks_the_claim_once(self):
         self.a.ok("session", "claim", API_PUSH, "--why", "pushing the invoice export fix")
         self.addCleanup(lambda: self.a.dev("session", "release", API_PUSH))
-        self.y.prompt(f"grant claim-break {API_PUSH}")
         self.assertIn("is claimed by session claude:5e1f0a2b", self.push(self.y))
-        self.assertEqual(self.holder(), f"claude:{CLAUDE_ACME}")
+        codex_types(self.y, f"grant claim-break {API_PUSH}")
+        self.assertEqual(self.push(self.y), "")
+        self.assertEqual(self.holder(), "")
+        notice = [ln for ln in peer_lines(self.a.ok("session", "inbox")) if ln.startswith("devkit · peer notice ")
+                  and f"broken by session codex:{self.y.sid[:8]}" in ln]
+        self.assertEqual(len(notice), 1, notice)  # the holder hears the Codex session broke its claim
+        self.a.ok("session", "claim", API_PUSH, "--why", "pushing again")
+        self.assertIn("is claimed by session claude:5e1f0a2b", self.push(self.y))  # the grant counted once
 
     def test_a_grant_typed_in_a_claude_session_breaks_the_claim_once(self):
         self.a.ok("session", "claim", API_PUSH, "--why", "pushing the invoice export fix")

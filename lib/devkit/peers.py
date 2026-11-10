@@ -1674,22 +1674,17 @@ def _used_prompts() -> set:
 
 def settle_from_prompt(agent: str, sid: str, lines: list, prompt_uuid: str, now=None) -> list:
     """The developer's `settle E-<8>: <choice>` lines (case-insensitive), from the lines progress._own_lines gives for
-    a UserPromptSubmit prompt, in a Claude Code session with someone at the keyboard -> the escalations settled. A
-    line is the developer's only when the session's own transcript shows its prompt as typed by them
-    (progress.confirmed, the confirmation a typed grant needs). Claude Code writes the prompt there after this hook
-    runs, so the lines of an open escalation wait in the session record's `settle_waiting` list (`settling` names
-    them) until a later hook of the session settles them (the function settle_waiting). A Codex prompt settles
-    nothing while devkit reads no Codex transcript (the rule typed grants follow): the developer settles from a Claude
-    Code session. A prompt counts once: a prompt uuid that settled before settles nothing again. Every party gets
-    `settled`."""
+    a UserPromptSubmit prompt, in a Claude Code or Codex session with someone at the keyboard -> the escalations
+    settled. A line is the developer's only when the session's own transcript shows its prompt as typed by them
+    (progress.confirmed, the confirmation a typed grant needs). `prompt_uuid` is Claude Code's prompt id or Codex's
+    turn id. Both write the prompt there after this hook runs, so the lines of an open escalation wait in the session
+    record's `settle_waiting` list (`settling` names them) until a later hook of the session settles them (the
+    function settle_waiting). A prompt counts once: a prompt uuid that settled before settles nothing again. Every
+    party gets `settled`."""
     from . import progress
     now = _now(now)
     wanted = settle_lines(lines)
     if not wanted:
-        return []
-    if agent != "claude":
-        _audit("peer.refused", ", ".join(eid for eid, _, _ in wanted)[:80],
-               "settle: devkit reads no Codex transcript yet, so a Codex prompt settles nothing", "refused")
         return []
     rec = state.read(_session_path(agent, sid))
     if not isinstance(rec, dict) or progress.headless(rec):
@@ -1701,7 +1696,7 @@ def settle_from_prompt(agent: str, sid: str, lines: list, prompt_uuid: str, now=
     if uuid in _used_prompts():
         _audit("peer.refused", uuid[:80], "settle: a prompt that settled before counts once", "refused")
         return []
-    if all(_typed(sid, uuid, line) for _, _, line in wanted):
+    if all(_typed(agent, sid, uuid, line, now) for _, _, line in wanted):
         return _settle(agent, sid, rec, wanted, uuid, now)
     waiting = [ln for eid, _, ln in wanted if _open(eid)]
     if waiting:
@@ -1737,8 +1732,6 @@ def settle_waiting(agent: str, sid: str, now=None) -> list:
     record under its lock settles it, so two hooks never settle one prompt twice."""
     from . import progress
     now = _now(now)
-    if agent != "claude":
-        return []
     f = _session_path(agent, sid)
     rec = state.read(f)
     if not isinstance(rec, dict) or not rec.get("settle_waiting"):
@@ -1748,7 +1741,7 @@ def settle_waiting(agent: str, sid: str, now=None) -> list:
         if not isinstance(w, dict) or not w.get("prompt_uuid"):
             continue
         uuid, wanted = str(w["prompt_uuid"]), settle_lines(w.get("lines"))
-        if wanted and all(_typed(sid, uuid, line) for _, _, line in wanted):
+        if wanted and all(_typed(agent, sid, uuid, line, _num(w.get("ts"))) for _, _, line in wanted):
             ready.append((uuid, wanted))
         elif not wanted or now - _num(w.get("ts")) > SETTLE_WAIT:
             stale.append(uuid)
@@ -1792,11 +1785,12 @@ def settle_lines(lines) -> list:
     return out
 
 
-def _typed(sid: str, uuid: str, line: str) -> bool:
-    """Does the session's own transcript show prompt `uuid`, holding `line`, as typed by the developer?"""
+def _typed(agent: str, sid: str, uuid: str, line: str, ts: float) -> bool:
+    """Does the session's own transcript show prompt `uuid`, holding `line`, as typed by the developer? `ts`: when
+    the prompt hook saw it (a Codex prompt's record comes at or after it)."""
     from . import progress
-    return progress.confirmed({"agent": "claude", "channel": "E2", "transcript_uuid": uuid, "excerpt": line,
-                               "session": sid}, sid)
+    return progress.confirmed({"agent": agent, "channel": "E2", "transcript_uuid": uuid, "excerpt": line,
+                               "session": sid, "ts": ts}, sid)
 
 
 def _open(eid: str) -> bool:

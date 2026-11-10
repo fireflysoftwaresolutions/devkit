@@ -206,12 +206,12 @@ class SettleTests(PeerHookCase):
         line = next(ln for ln in ctx.splitlines() if eid in ln)
         self.assertIn("“B: kit-consulting first”", line)
         self.assertEqual([m["kind"] for m in peers.take("claude", CLAUDE_A)], ["settled"])
-        with self.subTest(agent="codex"):  # devkit reads no Codex transcript yet: the echo says where to settle it
+        with self.subTest(agent="codex"):  # Codex writes the prompt to its rollout after the hook: the line waits
             e2 = peers.escalate(sender(CLAUDE_A), "@0199a213", "Tag now or after the review?",
                                 ["A: now", "B: after the review"])["id"]
             ctx = self.prompt("codex", CODEX_A, f"settle {e2}: wait until Friday")
             self.assertIn(e2, [e["id"] for e in peers.escalations("open")])
-            self.assertIn(f"settle {e2} from a Claude Code session", ctx)
+            self.assertIn(f"devkit settles {e2} once the session's transcript shows this prompt", ctx)
         with self.subTest("an id that is not open says so"):
             ctx = self.prompt("claude", CLAUDE_B, f"settle {eid}: A")
             self.assertEqual(peers.escalations("settled", me=f"claude:{CLAUDE_A}")[0]["settled"]["choice"], "B")

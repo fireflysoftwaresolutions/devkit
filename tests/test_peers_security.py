@@ -5,10 +5,10 @@
 # defect is open, and the fix turns the test into an unexpected success, so the fix removes the marker in the same
 # change.
 #
-# - Only the developer settles an escalation: a line whose prompt the session's own transcript does not show as typed
-#   by the developer settles nothing, nor does a prompt of a nested agent session (`claude -p` or `codex exec` started
-#   by another session, whatever surface it inherited), nor a Codex prompt while devkit reads no Codex transcript (the
-#   rule typed grants already follow).
+# - Only the developer settles an escalation: a line whose prompt the session's own transcript (Claude Code's
+#   transcript, the Codex thread's rollout) does not show as typed by the developer settles nothing, nor does a prompt
+#   of a nested agent session (`claude -p` or `codex exec` started by another session, whatever surface it
+#   inherited): the rule typed grants follow.
 # - A session devkit only guessed by recency never speaks as its tech lead: not to other sessions, not for its wait.
 # - The hourly sweep never deletes a claim that another session took after the sweep looked at it.
 # - Another session's words reach this one with no invisible characters (Unicode tag characters, variation
@@ -19,15 +19,17 @@
 import os
 import random
 import sys
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from test_codex_grants import Rollout  # noqa: E402
 from test_hooks_peers import PeerHookCase  # noqa: E402
 from test_peers import CLAUDE_A, CLAUDE_B, CODEX_A, PeerCase, sender  # noqa: E402
 
-from devkit import identity, peers, watch  # noqa: E402
+from devkit import core, identity, peers, watch  # noqa: E402
 from devkit import progress as pg  # noqa: E402
 
 REL = "release:acme/api"
@@ -67,14 +69,32 @@ class SettleOnlyByTheDeveloperTests(PeerHookCase):
         self.assertEqual([e["id"] for e in peers.escalations("open")], [eid])
         self.assertEqual(peers.escalations("settled"), [])
 
-    # Settle follows the typed grants (the tech lead's rule): progress.confirmed never confirms a Codex entry, because
-    # devkit reads no Codex transcript yet, so a Codex prompt settles nothing from its hook payload alone; the
-    # developer settles from a Claude Code session meanwhile.
-    def test_codex_prompt_settles_nothing_until_codex_transcripts_are_read(self):
+    # Settle follows the typed grants (the tech lead's rule): a Codex line waits until the thread's own rollout shows
+    # its prompt as typed by the developer, which Codex writes after the prompt hook. The hook payload alone settles
+    # nothing; the session's next hook settles it once the record of its turn is there.
+    def test_a_codex_prompt_settles_once_its_rollout_shows_it_typed(self):
         eid = self.escalation()
-        ctx = self.prompt("codex", CODEX_A, f"settle {eid}: B")
-        self.assertEqual([e["id"] for e in peers.escalations("open")], [eid])
+        home = mock.patch.object(core, "CODEX_HOME", self.root / ".codex")
+        home.start()
+        self.addCleanup(home.stop)
+        rollout = Rollout(core.CODEX_HOME, CODEX_A, at=time.time() - 60)
+
+        def tool_done():  # a Bash call of the Codex thread ends
+            self.n += 1
+            self.hook("post-tool", "codex", self.codex("PostToolUse", CODEX_A, tool_name="Bash",
+                                                       tool_use_id=f"exec-{self.n}", tool_input={"command": "ls"},
+                                                       tool_response=""))
+        line = f"settle {eid}: B"
+        ctx = self.prompt("codex", CODEX_A, line)
+        turn = f"t-{self.n}"
         self.assertNotIn("the developer settled", ctx)
+        tool_done()
+        self.assertEqual([e["id"] for e in peers.escalations("open")], [eid])
+        rollout.typed(line, turn, time.time())
+        tool_done()
+        done = peers.escalations("settled")[0]["settled"]
+        self.assertEqual((done["choice"], done["session"]), ("B", f"codex:{CODEX_A}"))
+        self.assertEqual([m["kind"] for m in peers.take("claude", CLAUDE_A)], ["settled"])
 
     # A settle line counts only when the session's own transcript shows its prompt as the developer's (the
     # confirmation a typed grant needs, progress.confirmed), at the prompt hook or at a later hook of the session:
@@ -124,11 +144,11 @@ class SettleOnlyByTheDeveloperTests(PeerHookCase):
         self.typed(CLAUDE_B, line, f"p-{self.n}")
         typed, settle, raced, inner, calls = peers._typed, peers._settle, [], [], []
 
-        def racing(sid, uuid, ln):  # the other hook runs while this one reads the transcript
+        def racing(*a):  # the other hook runs while this one reads the transcript
             if not raced:
                 raced.append(True)
                 inner.extend(peers.settle_waiting("claude", CLAUDE_B))
-            return typed(sid, uuid, ln)
+            return typed(*a)
 
         def counted(*a, **k):
             calls.append(a[4])

@@ -3497,29 +3497,66 @@ _SESSION_ID = re.compile(r"[A-Za-z0-9_-]{1,80}")
 
 
 def harness_transcript(agent: str, sid: str) -> str:
-    """The session's own transcript, where the harness writes it (spec C5, release blocker B1): Claude Code's
-    ~/.claude/projects/<project folder>/<session id>.jsonl, found from the session id alone, never from a path a
-    hook event or a caller names. '' when there is none or more than one, or the id is not a plain session id."""
-    if agent != "claude" or not _SESSION_ID.fullmatch(str(sid or "")):
+    """The session's own transcript, where the harness writes it (spec C5, release blocker B1), found from the
+    session id alone, never from a path a hook event or a caller names: Claude Code's
+    ~/.claude/projects/<project folder>/<session id>.jsonl, or Codex's rollout of the thread,
+    ~/.codex/sessions/YYYY/MM/DD/rollout-<time>-<thread id>.jsonl (or archived_sessions/, where `codex archive`
+    moves it), when it opens with that thread's own session_meta (_codex_meta): a subagent's rollout, which copies its
+    parent's history, is never a session's. '' when there is none or more than one, or the id is not a plain id."""
+    sid = str(sid or "")
+    if agent not in ("claude", "codex") or not _SESSION_ID.fullmatch(sid):
         return ""
     try:
-        hits = sorted((core.CLAUDE_HOME / "projects").glob(f"*/{sid}.jsonl"))
+        if agent == "claude":
+            hits = sorted((core.CLAUDE_HOME / "projects").glob(f"*/{sid}.jsonl"))
+        else:
+            name = f"rollout-*-{sid}.jsonl"
+            hits = sorted([*(core.CODEX_HOME / "sessions").glob(f"*/*/*/{name}"),
+                           *(core.CODEX_HOME / "archived_sessions").glob(name),
+                           *(core.CODEX_HOME / "archived_sessions").glob(f"*/*/*/{name}")])
     except OSError:
         return ""
-    return str(hits[0]) if len(hits) == 1 else ""
+    if len(hits) != 1 or (agent == "codex" and _codex_meta(hits[0], sid) is None):
+        return ""
+    return str(hits[0])
+
+
+CODEX_META_MAX = 8 << 20  # bytes of a rollout's first line read for its session_meta (it holds the instructions)
+
+
+def _codex_meta(path, sid: str):
+    """The session_meta payload a Codex rollout opens with, when it is thread `sid`'s own and no subagent's (no
+    `source.subagent`, parent thread or copied history); None otherwise or when it cannot be read."""
+    try:
+        with open(path, "rb") as fh:
+            first = json.loads(fh.readline(CODEX_META_MAX) or b"null")
+    except (OSError, ValueError, RecursionError):
+        return None
+    p = first.get("payload") if isinstance(first, dict) and first.get("type") == "session_meta" else None
+    if not isinstance(p, dict) or p.get("id") != sid:
+        return None
+    src = p.get("source")
+    if (isinstance(src, dict) and "subagent" in src) or p.get("parent_thread_id") \
+            or p.get("subagent_history_start_ordinal") is not None:
+        return None
+    return p
 
 
 def _foreign_transcript(agent: str, sid: str, named) -> bool:
     """A hook event that names a transcript other than the session's own (a forged event or path, B1): its
     evidence is refused and recorded. An event that names none, or the session's own, is fine."""
-    if agent != "claude" or not named:
+    if agent not in ("claude", "codex") or not named:
         return False
     named = str(named)
     own = harness_transcript(agent, sid)
     if own:
         return os.path.realpath(named) != os.path.realpath(own)
     p = Path(named)  # not written yet (the first prompt): it must be where the harness will write it
-    return not (p.name == f"{sid}.jsonl" and p.parent.parent == core.CLAUDE_HOME / "projects")
+    if agent == "claude":
+        return not (p.name == f"{sid}.jsonl" and p.parent.parent == core.CLAUDE_HOME / "projects")
+    homes = (core.CODEX_HOME / "sessions", core.CODEX_HOME / "archived_sessions")
+    return not (p.name.startswith("rollout-") and p.name.endswith(f"-{sid}.jsonl")
+                and any(core.is_under(p, h) for h in homes))
 
 
 def _entry(agent, channel, covers, excerpt, uuid, transcript, run, now, **more) -> dict:
@@ -3552,7 +3589,9 @@ def on_human_prompt(agent: str, data: dict, now: float | None = None) -> list:
         return []
     run = load_run(agent, sid)
     live = run if run and run.get("goal") and run.get("state") != "done" else None
-    uuid, tp, new = data.get("prompt_id") or "", harness_transcript(agent, sid), []
+    # what binds the entry to the prompt's record: Claude Code's prompt id, Codex's turn id (it sends no prompt id)
+    uuid = str(data.get("turn_id" if agent == "codex" else "prompt_id") or "")
+    tp, new = harness_transcript(agent, sid), []
     if uuid and str(uuid) in _seen_ids(sess):  # the same prompt again (B3): `dev hook prompt` fed its event back
         _refuse_replay(agent, sid, str(uuid), "a prompt")
         return []
@@ -3743,27 +3782,132 @@ def _own_record(r, e: dict) -> bool:
 
 def confirmed(e: dict, sid: str = "") -> bool:
     """Does the session's own transcript (harness_transcript, from the session id: `sid` or the entry's) show this
-    entry as the developer's own act (_own_record)? An entry that carries another transcript's path is refused (B1).
-    Codex transcripts are not read yet (spec F0, S3), so a Codex entry has nothing but its hook event behind it and
-    is never confirmed (The Keymaker): it opens nothing."""
-    if e.get("agent") == "codex":
-        return False
-    uuid, path = str(e.get("transcript_uuid") or ""), harness_transcript("claude", sid or e.get("session") or "")
+    entry as the developer's own act? Claude Code: its record (_own_record). Codex: the turn's typed prompt in the
+    thread's rollout (_codex_holds), never in a `codex exec` run's. An entry that carries another transcript's path is
+    refused (B1)."""
+    sid = sid or e.get("session") or ""
+    agent = "codex" if e.get("agent") == "codex" else "claude"
+    uuid, path = str(e.get("transcript_uuid") or ""), harness_transcript(agent, sid)
     if not uuid or not path:
         return False
     if e.get("transcript") and os.path.realpath(str(e["transcript"])) != os.path.realpath(path):
         return False
+    if agent == "codex":
+        meta = _codex_meta(path, sid) or {}
+        if not meta or meta.get("originator") == "codex_exec" or meta.get("source") == "exec":
+            return False  # a `codex exec` run: nobody at the keyboard (HEADLESS_SURFACES), whatever its record says
     try:
         for ln in _lines_back(path, json.dumps(uuid).encode()):
             try:
                 r = json.loads(ln)
-            except ValueError:
+            except (ValueError, RecursionError):
                 continue
-            if _own_record(r, e):
+            if _codex_holds(r, e, sid) if agent == "codex" else _own_record(r, e):
                 return True
     except OSError:
         return False
     return False
+
+
+CODEX_PROMPT_GRACE = 5.0  # seconds a Codex prompt's record may come before its hook's time (clocks, write order)
+
+
+def _codex_prompt(r, sid: str):
+    """The text of Codex rollout record `r` when it is a prompt the developer typed in thread `sid`: an `event_msg`
+    `item_completed` whose item is a `UserMessage` of that thread, which Codex 0.167 writes for each typed prompt
+    after UserPromptSubmit. Agent messages, tool calls and their output, and what Codex or a hook adds to the context
+    (developer messages, the AGENTS.md block in the user's role) are other records. None for any other record."""
+    p = r.get("payload") if isinstance(r, dict) and r.get("type") == "event_msg" else None
+    item = p.get("item") if isinstance(p, dict) and p.get("type") == "item_completed" else None
+    if not isinstance(item, dict) or item.get("type") != "UserMessage" or p.get("thread_id") != sid:
+        return None
+    return "\n".join(b["text"] for b in item.get("content") or []
+                     if isinstance(b, dict) and b.get("type") == "text" and isinstance(b.get("text"), str))
+
+
+def _codex_holds(r, e: dict, sid: str) -> bool:
+    """Is rollout record `r` E2 entry `e`'s own prompt: thread `sid`'s typed prompt of e's turn (the turn id the
+    prompt hook got), written at or after the hook recorded e (CODEX_PROMPT_GRACE aside, so an older turn's prompt fed
+    as a new event confirms nothing), holding e's line as a line of its own (_own_lines: not quoted, fenced or
+    indented)? An excerpt _entry cut at 200 characters matches the start of its line."""
+    if e.get("channel") != "E2" or e.get("ts") is None:
+        return False
+    text = _codex_turn_prompt(r, sid, str(e.get("transcript_uuid") or ""), float(e["ts"]))
+    want, cut = _norm(e.get("excerpt")), len(str(e.get("excerpt") or "")) >= 200
+    return text is not None and bool(want) and \
+        any(_norm(ln) == want or (cut and _norm(ln).startswith(want)) for ln in _own_lines(text))
+
+
+def _codex_turn_prompt(r, sid: str, turn: str, since: float):
+    """The text of rollout record `r` when it is thread `sid`'s typed prompt of turn `turn` (_codex_prompt), written
+    at or after `since` (CODEX_PROMPT_GRACE aside); None otherwise."""
+    text = _codex_prompt(r, sid)
+    if text is None or not turn or str(r["payload"].get("turn_id") or "") != turn:
+        return None
+    import datetime as dt
+    try:
+        at = dt.datetime.fromisoformat(str(r.get("timestamp")).replace("Z", "+00:00")).timestamp()
+    except (TypeError, ValueError):
+        return None
+    return text if at >= since - CODEX_PROMPT_GRACE else None
+
+
+def _codex_backs(path, sid: str, turn: str, covers: str, since: float) -> bool:
+    """`dev audit verify` for a Codex E2 record: does thread `sid`'s typed prompt of `turn`, written at or after the
+    record's time (_codex_turn_prompt), hold a line of its own that covers what the record names (`covers`, its
+    target: `approve D<n>` for D<n>, `grant <action> <target>` for "<action> <target>"), or is it a plain "yes" for a
+    D<n>? Re-derived from the prompt, never from the record's detail, which the audit may have redacted. A
+    `codex exec` run's rollout backs nothing."""
+    meta = _codex_meta(path, sid) or {}
+    if not turn or not meta or meta.get("originator") == "codex_exec" or meta.get("source") == "exec":
+        return False
+    want = _norm(covers)
+    try:
+        for ln in _lines_back(path, json.dumps(turn).encode()):
+            try:
+                text = _codex_turn_prompt(json.loads(ln), sid, turn, since)
+            except (ValueError, RecursionError):
+                continue
+            if text is None:
+                continue
+            if re.fullmatch(r"d\d+", want) and _PLAIN_YES.match(text):
+                return True
+            for own in _own_lines(text):
+                mt = _APPROVE_LINE.match(own)
+                if mt and _norm(mt.group(1)) == want and (not mt.group(2) or _names_session(mt.group(2), sid)):
+                    return True
+                mt = _GRANT_LINE.match(own)
+                if mt and _norm(f"{mt.group(1)} {mt.group(2)}") == want:
+                    return True
+    except OSError:
+        return False
+    return False
+
+
+def _codex_said_later(path, e: dict, d: dict, sid: str) -> bool:
+    """_said_later for a Codex session: has the developer typed a word on irreversible decision `d` after entry `e`'s
+    own prompt record, a later prompt of the thread with an `approve D<n>` line for it (Codex has no question tool)?
+    True too when e's record is not there or the rollout cannot be read: then nothing tells what came after it."""
+    found = False
+    try:
+        with open(path, "rb") as fh:
+            for ln in fh:
+                if b"UserMessage" not in ln:
+                    continue
+                try:
+                    r = json.loads(ln)
+                except (ValueError, RecursionError):
+                    return True  # a prompt record still being written, or damaged, may be their word
+                if not found:
+                    found = _codex_holds(r, e, sid)
+                    continue
+                text = _codex_prompt(r, sid)
+                if text is not None and any(mt and mt.group(1).upper() == d["id"].upper()
+                                            for mt in map(_APPROVE_LINE.match, _own_lines(text))):
+                    return True
+    except (OSError, TypeError):
+        return True
+    return not found
 
 
 def _texts(*values) -> list:
@@ -4062,10 +4206,12 @@ def _decision_evidence(agent: str, sid: str, run: dict, d: dict, answer: str, no
         sess = state.read(session_path(agent, sid)) or {}
         mine = [] if headless(sess) else [x for x in sess.get("human") or [] if _live(x, now, run) and ours(x)]
         e = mine[-1] if mine else {}
+        own = sid or e.get("session") or ""
         if not e or e.get("void") or e.get("plain") or e.get("free") or (
                 e.get("channel") == "E1" and (e.get("match"), e.get("asked")) != ("exact", "exact")) \
-                or not confirmed(e, sid) or _said_later(harness_transcript("claude", sid or e.get("session") or ""),
-                                                        e, d):
+                or not confirmed(e, sid) or (_codex_said_later(harness_transcript("codex", own), e, d, own)
+                                             if e.get("agent") == "codex"
+                                             else _said_later(harness_transcript("claude", own), e, d)):
             return None
     else:
         found = evidence(agent, sid, ours, now, run)
@@ -4088,7 +4234,7 @@ def evidence_check(rec: dict, path, line):
         return None
     ev, ref = rec.get("evidence") or {}, rec.get("ref") or {}
     agent, _, sid = str(ref.get("session") or "").partition(":")
-    if ev.get("channel") not in ("E1", "E2") or agent != "claude":
+    if ev.get("channel") not in ("E1", "E2") or agent not in ("claude", "codex"):
         return None
     uuid = str(ev.get("transcript_uuid") or "")
     tp = harness_transcript(agent, sid)  # the harness's own file, never a path a record or an event names (B1)
@@ -4097,6 +4243,12 @@ def evidence_check(rec: dict, path, line):
         return None if old else (f"evidence {ev['channel']} {uuid or '-'} for {rec.get('target')}: the session's "
                                  f"transcript is gone, so no message of the developer backs it")
     e = {"agent": agent, "channel": ev["channel"], "transcript_uuid": uuid, "transcript": str(tp)}
+    if agent == "codex":  # a typed line only (no question tool): re-read from its prompt, never from the detail
+        if ev["channel"] == "E2" and _codex_backs(tp, sid, uuid, str(rec.get("target") or ""),
+                                                   float(rec.get("ts") or 0)):
+            return None
+        return (f"evidence {ev['channel']} {uuid or '-'} for {rec.get('target')}: no message of the developer in "
+                f"{core.tilde(tp)} backs it")
     if not confirmed(e, sid):
         return (f"evidence {ev['channel']} {uuid or '-'} for {rec.get('target')}: no message of the developer in "
                 f"{core.tilde(tp)} backs it")
@@ -4962,7 +5114,8 @@ def reconcile_hook(agent: str, data: dict, now: float | None = None) -> list:
     lane = (run.get("agents") or {}).get(aid) if aid else None
     seen = bool(lane) and now - float(lane.get("last_seen") or 0) >= LAST_SEEN_EVERY
     # the meta files beside the session's own transcript, never beside a path the event names (B1)
-    fx = approvals.facts(run, sess, now, meta=approvals.meta_reader(harness_transcript(agent, sid)))
+    fx = approvals.facts(run, sess, now, meta=approvals.meta_reader(  # Codex keeps no meta files by its rollout
+        harness_transcript(agent, sid) if agent == "claude" else ""))
     if aid in fx["lanes"]:
         fx["lanes"][aid]["last_seen"] = now
     lim = approvals.limits()

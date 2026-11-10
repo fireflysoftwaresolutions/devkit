@@ -2971,9 +2971,9 @@ def _peer_settle(agent: str, data: dict) -> str:
     """UserPromptSubmit: the developer's own `settle E-<8>: <choice>` lines settle those escalations (peers), from
     the lines they typed themselves (progress._own_lines: no code block, quote or indented line) and only once the
     session's transcript shows the prompt as theirs, never from a relayed comment, a notification or an event naming
-    another transcript. Claude Code writes the prompt to the transcript after this hook, so a line usually waits and
-    a later hook settles it (_peer_settle_waiting); a Codex prompt settles nothing while devkit reads no Codex
-    transcript. The prompt's id counts it once. -> the echo for the context, or ''."""
+    another transcript. Claude Code and Codex write the prompt to the transcript (Codex: the thread's rollout) after
+    this hook, so a line usually waits and a later hook settles it (_peer_settle_waiting). The prompt's id (Codex: its
+    turn id) counts it once. -> the echo for the context, or ''."""
     sid = str(data.get("session_id") or "")
     text = str(data.get("prompt") or "")
     if not sid or data.get("agent_id") or "settle" not in text.lower():
@@ -2989,15 +2989,12 @@ def _peer_settle(agent: str, data: dict) -> str:
                                     str(data.get("prompt_id") or data.get("turn_id") or ""))
     wanted = list(dict.fromkeys(eid for eid, _, _ in found))
     got = {d.get("id") for d in done}
-    waiting = set(peers.settling(agent, sid)) if agent == "claude" else set()
+    waiting = set(peers.settling(agent, sid))
     out = [_settled_echo(d, "in this prompt") for d in done]
     for eid in wanted:
         if eid in got:
             continue
-        if agent != "claude":
-            out.append(f"devkit settles nothing from a Codex prompt yet, because it reads no Codex transcript: "
-                       f"settle {eid} from a Claude Code session")
-        elif eid in waiting:
+        if eid in waiting:
             out.append(f"devkit settles {eid} once the session's transcript shows this prompt as the developer's "
                        f"(at the next tool call or the end of this turn)")
         else:
@@ -3010,7 +3007,7 @@ def _peer_settle_waiting(agent: str, data: dict) -> str:
     """A later hook of the main session (a tool call's, the turn's end, the next prompt): the settle lines that waited
     for their prompt's record in the transcript settle now (peers.settle_waiting). -> the echo, or ''."""
     sid = str(data.get("session_id") or "")
-    if agent != "claude" or not sid or data.get("agent_id"):
+    if not sid or data.get("agent_id"):
         return ""
     from . import peers
     done = peers.settle_waiting(agent, sid)
