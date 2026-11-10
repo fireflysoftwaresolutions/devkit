@@ -921,12 +921,13 @@ def recorded(e):
 
 class RunTests(unittest.TestCase):
     # a node option whose value is the next word reaches node whole, so the suite runs (node used to exit 9 with
-    # "requires an argument", and dev test reported zero tests)
+    # "requires an argument", and dev test reported zero tests). --test-name-pattern exists since Node 18.11, so the
+    # test runs alike on this Mac and on the CI runner's older Node (--test-coverage-include needs Node 22.5)
     @unittest.skipUnless(shutil.which("node"), "node is not installed, so the node runner cannot run here")
     def test_a_node_suite_with_an_option_value_as_the_next_word_runs(self):
         with Env() as e:
             r = e.repo({"package.json": json.dumps({"type": "module", "scripts": {
-                            "test": "node --test --test-coverage-include src test/"}}),
+                            "test": "node --test --test-name-pattern adds test/"}}),
                         "src/add.mjs": "export const add = (a, b) => a + b;\n",
                         "test/add.test.mjs": 'import assert from "node:assert/strict";\nimport { test } from '
                                              '"node:test";\nimport { add } from "../src/add.mjs";\n\n'
