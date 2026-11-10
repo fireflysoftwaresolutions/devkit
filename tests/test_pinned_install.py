@@ -352,6 +352,26 @@ class DevLinkTests(Sandbox):
         self.assertTrue(old.is_dir())
 
 
+class StrictRenameTests(Sandbox):
+    # a teammate's fresh `dev install` failed with Permission denied: their Mac refuses to rename a folder its owner
+    # cannot write, even within one parent folder, and the copy was made read-only before it was moved into place
+    def test_a_copy_is_moved_into_place_where_a_read_only_folder_cannot_be_renamed(self):
+        rename = os.rename
+
+        def strict(src, dst, *a, **k):
+            if os.path.isdir(src) and not os.stat(src).st_mode & stat.S_IWUSR:
+                raise PermissionError(13, "Permission denied", str(src), None, str(dst))
+            return rename(src, dst, *a, **k)
+        with mock.patch("os.rename", strict):
+            pin = self.install(why="a fresh install")
+            again = Path(setup.pin(self.src, unverified_why="the same commit, pinned again")["path"])
+        self.assertEqual(again, pin)
+        self.assertTrue((pin / "bin" / "dev").is_file())
+        self.assertEqual(stat.S_IMODE(pin.stat().st_mode), 0o555)  # read-only once in place
+        self.assertEqual(setup.verify_pin(pin), [])
+        self.assertEqual([d.name for d in core.pin_root().iterdir()], [pin.name])  # no leftover of either rename
+
+
 class DoctorTests(Sandbox):
     def test_doctor_fails_on_a_tampered_file_and_install_rebuilds_the_copy(self):
         pin = self.install()

@@ -321,10 +321,15 @@ def _build(source: Path, commit: str, tree: str, version: str, name: str, verifi
         (tmp / core.PIN_MANIFEST).write_text(json.dumps(man, indent=1, sort_keys=True) + "\n")
         _read_only(tmp)
         dest = root / name
+        # some Macs refuse to rename a folder its owner cannot write, even within one parent: each folder that moves
+        # is writable while it moves, and the copy is read-only again once it is in place
         if dest.exists():
             old = root / f".{name}.old-{os.getpid()}"
+            os.chmod(dest, 0o755)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions (the owner's write on a copy being replaced, only while it moves)
             os.rename(dest, old)
+        os.chmod(tmp, 0o755)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions (the owner's write on the new copy, only while it moves)
         os.rename(tmp, dest)
+        os.chmod(dest, 0o555)
     except BaseException:
         _remove_tree(tmp)
         raise
