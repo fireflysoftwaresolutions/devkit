@@ -70,15 +70,19 @@ without the role is sent back once (`canary.roles`). Commands and code keep the 
 | Surface | How members are launched | What devkit installs |
 | --- | --- | --- |
 | Claude Code (terminal) and Claude Desktop's Code tab | Agent tool, `subagent_type: devkit:<id>` | `plugin/agents/<id>.md` in the devkit plugin |
-| Codex CLI and the ChatGPT app | `spawn_agent` with agent type `<id>` | `~/.codex/agents/<id>.toml` |
+| Codex CLI and the ChatGPT app | `spawn_agent` with `agent_type: <id>` and the step's name as `task_name` | `~/.codex/agents/<id>.toml` |
 | Claude Desktop chat and Cowork | not launched there | the `devkit_crew` tool of the devkit extension shows the crew, the live lanes, and open questions |
 
 `dev crew sync` regenerates the Claude agents from `config/crew.json`, and `dev install --only codex` writes the Codex
 roles. Edit a member there, never in the generated files.
 
-devkit does not record a Codex launch yet, because Codex fires no PreToolUse hook for `spawn_agent`. On Codex, the
-crew slots, the depth limit, and the binding of a launch to its step therefore do not apply. `dev crew next` still
-shows the slots and the order to launch in; keep to them yourself (see [Agents › Hooks](agents.md#hooks)).
+Codex fires no PreToolUse hook for `spawn_agent`, so devkit records a Codex launch when its agent starts
+(SubagentStart). Pass the plan step's name as `task_name`, in lowercase with words joined by underscores, as
+`dev crew brief` prints it: the launch then binds to that step, takes a crew slot, and counts toward the depth limit
+like a Claude Code launch, and the member gets its required skills, known pitfalls, and report format as context.
+Codex cannot refuse a launch before its agent starts, so a launch over the crew's limits is marked instead: its step
+comes back to you with a notice, the member is told to stop and report, and it may read but not edit. Launch in the
+order `dev crew next` shows to avoid that (see [Agents › Hooks](agents.md#hooks)).
 
 ## Leading the crew
 

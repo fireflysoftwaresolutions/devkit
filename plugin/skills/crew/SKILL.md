@@ -8,10 +8,12 @@ description: How the main session leads devkit's crew of specialist agents (prof
 When the work needs more than one kind of expertise, the main session is the **tech lead (Morpheus)**, who is also
 the delivery manager: he plans, assigns, integrates, and speaks for the crew to the developer. Every other member is
 a subagent with one job. On Claude Code (terminal and Claude Desktop's Code tab) you launch them with the Agent tool
-as `devkit:<id>`; on Codex (CLI and the ChatGPT app) with `spawn_agent` and agent type `<id>`. `dev crew` lists them;
-`dev crew show <name>` has the details. devkit does not record a Codex launch yet (Codex fires no hook for
-`spawn_agent`), so on Codex nothing enforces the crew slots, the depth limit, or the binding of a launch to its step:
-keep to the slots and the order `dev crew next` shows.
+as `devkit:<id>`; on Codex (CLI and the ChatGPT app) with `spawn_agent`, `agent_type: <id>` and the step's name as
+`task_name` (lowercase, words joined by underscores; `dev crew brief` prints it). `dev crew` lists them;
+`dev crew show <name>` has the details. Codex fires no hook for `spawn_agent`, so devkit records a Codex launch when
+its agent starts: it binds to the step its `task_name` names and takes a crew slot, but one over the crew's limits
+cannot be refused, only marked (its step comes back to you and the member is told to stop), so keep to the slots and
+the order `dev crew next` shows.
 
 **Name them by role.** In every message, report, and brief, write a member as `<Role> (<Name>)`, such as Backend
 engineer (Tank), or by the role alone, in the developer's language; never by the Matrix name alone. The end-of-turn
