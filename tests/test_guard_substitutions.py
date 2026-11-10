@@ -78,6 +78,38 @@ class ProcessSubstitution(unittest.TestCase):
                 self.assertIsNone(member(cmd, level="review", who="seraph"))
 
 
+def payloads(cmd):
+    """The same command as each agent sends it: Claude Code's Bash, Codex's exec_command and its shell tool."""
+    return [("Bash", {"command": cmd}, "claude"), ("exec_command", {"cmd": cmd}, "codex"),
+            ("shell", {"command": ["bash", "-lc", cmd]}, "codex")]
+
+
+class APathBuiltOnASubstitution(unittest.TestCase):
+    """The reading that drops a `$(…)` (its output may be empty) keeps one that always prints a folder: `$(pwd)/out.txt`
+    writes below the shell's folder, never to `/out.txt`. A substitution that may print nothing is still dropped, so a
+    path written after it is judged as the absolute path it then is."""
+
+    def verdicts(self, cmd):
+        out = {}
+        for tool, inp, agent in payloads(cmd):
+            v = guard.check(tool, inp, CWD, agent)
+            out[tool] = v[0] if v else "allow"
+        return out
+
+    def test_a_path_below_pwd_is_not_read_as_one_at_the_root_and_one_after_an_empty_output_is(self):
+        for cmd in ("echo x > $(pwd)/out.txt", 'echo x > "$(pwd)"/x', "cp a $(pwd)/b", "echo x > `pwd`/out.txt",
+                    "echo x > $(pwd -P)/out.txt", "printf x >> $(pwd)/lib/out.txt", "touch $(pwd)/x"):
+            with self.subTest(allowed=cmd):
+                self.assertEqual(set(self.verdicts(cmd).values()), {"allow"}, self.verdicts(cmd))
+        # the twins: a substitution that may print nothing, and a pwd the command redefines, are still dropped
+        generated = core.HANDOFF / ("registry" + ".json")
+        for cmd in (f"printf x > $(true){generated}", f"printf x > `true`{generated}",
+                    f"pwd() {{ :; }}; printf x > $(pwd){generated}",
+                    "dev$(true) install", "$(true)dev install"):
+            with self.subTest(refused=cmd):
+                self.assertEqual(set(self.verdicts(cmd).values()), {"deny"}, self.verdicts(cmd))
+
+
 class SourceReadsItsInput(unittest.TestCase):
     """`source` and `.` run what they read from their input, a descriptor or a process substitution, as a shell does
     (`. /dev/stdin <<< '/bin/date +X'` printed the date in /bin/bash and /bin/zsh)."""

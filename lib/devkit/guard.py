@@ -344,6 +344,120 @@ def resolve(path, cwd) -> Path:
     return Path(real(p))
 
 
+# a `git rev-parse` whose output is a folder of the checkout the shell is in, as a whole word with an optional
+# `/…` after it: `$(git rev-parse --show-toplevel)/lib`, or in backticks
+_GIT_FOLDER = (r"(?:\$\([ \t]*git[ \t]+rev-parse[ \t]+(--show-toplevel|--show-cdup|--git-common-dir)[ \t]*\)"
+               r"|`[ \t]*git[ \t]+rev-parse[ \t]+(--show-toplevel|--show-cdup|--git-common-dir)[ \t]*`)")
+_GIT_FOLDER_WORD = re.compile(_GIT_FOLDER + r"(/[^$`\\]*)?")
+# what in a command changes which repository that git finds or which git runs: its environment, PATH, CDPATH (a
+# relative cd) and a function or alias in its place; the guard then does not work out the folder
+_GIT_STEERED = re.compile(r"\bGIT_|\bCDPATH\b|\bPATH\b|\bgit[ \t]*\([ \t]*\)|\bfunction[ \t]+git\b|\balias\b|"
+                          r"\bhash[ \t]+-p\b")
+_GIT_STEERING_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_CEILING_DIRECTORIES",
+                     "GIT_DISCOVERY_ACROSS_FILESYSTEM", "GIT_CONFIG", "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS",
+                     "CDPATH")
+# a repository config that moves the work tree (core.worktree), makes the repository bare, or includes other files
+_GIT_CONFIG_MOVES = re.compile(r"(?im)^[ \t]*(?:worktree[ \t]*=|bare[ \t]*=[ \t]*(?:true|yes|on|1)\b|\[[ \t]*include)")
+# the whole command check_bash judges, which _folder_word reads for what steers git
+_COMMAND_TEXT = contextvars.ContextVar("devkit_guard_command_text", default="")
+
+
+def _git_folder(cwd, option):
+    """The folder `git rev-parse <option>` prints in `cwd`, worked out without running git: the nearest folder up
+    from `cwd` that holds a .git folder or file, as git finds it (--show-toplevel and --show-cdup: that folder;
+    --git-common-dir: the repository folder its worktrees share). None when git would print nothing or find the folder
+    another way: no checkout, a folder inside .git, a .git file that names no repository, a checkout another user
+    owns, or a config with core.worktree, core.bare or an include, which the guard does not follow."""
+    p = Path(real(str(cwd)))
+    if ".git" in p.parts:
+        return None
+    for top in (p, *p.parents):
+        dot = top / ".git"
+        try:
+            if dot.is_dir():
+                gitdir = dot
+                if not (gitdir / "HEAD").is_file():
+                    continue  # not a repository: git looks further up
+            elif dot.is_file():
+                first = dot.read_text(errors="replace").split("\n", 1)[0]
+                if not first.startswith("gitdir:"):
+                    return None
+                gitdir = Path(os.path.join(str(top), first[len("gitdir:"):].strip()))
+                if not (gitdir / "HEAD").is_file():
+                    return None
+            else:
+                continue
+            shared = gitdir / "commondir"
+            common = Path(os.path.join(str(gitdir), shared.read_text().strip())) if shared.is_file() else gitdir
+            if os.stat(top).st_uid != os.getuid():
+                return None  # safe.directory: git refuses a checkout another user owns
+            for cfg in (common / "config", gitdir / "config.worktree"):
+                if cfg.is_file() and _GIT_CONFIG_MOVES.search(cfg.read_text(errors="replace")):
+                    return None
+        except (OSError, ValueError):
+            return None
+        return Path(real(str(common if option == "--git-common-dir" else top)))
+    return None
+
+
+def _folder_word(word, cwd, line="") -> Path:
+    """The folder a cd or pushd word names, as resolve() reads it, except that a `git rev-parse --show-toplevel`,
+    `--show-cdup` or `--git-common-dir` substitution (with an optional `/…` after it) is worked out from `cwd`
+    (_git_folder), since a cd to the checkout's own top folder is common. UNKNOWN when the command (`line`, and the
+    whole command check_bash judges) or the hook's environment changes which repository git finds or which git runs."""
+    m = _GIT_FOLDER_WORD.fullmatch(str(word))
+    if not m:
+        return resolve(word, cwd)
+    if not cwd or str(cwd) == str(UNKNOWN) or _GIT_STEERED.search(_COMMAND_TEXT.get() + "\n" + (line or "")) or \
+            any(os.environ.get(k) for k in _GIT_STEERING_ENV):
+        return UNKNOWN
+    base = _git_folder(cwd, m.group(1) or m.group(2))
+    if base is None or re.search(r"[\s*?\[]", str(base)):  # unquoted, the shell splits or globs such a folder
+        return UNKNOWN
+    return resolve(str(base) + (m.group(3) or ""), cwd)
+
+
+# a cd or pushd folder word starts here: the text before it ends with the command word, at a command's start
+_CD_BEFORE = re.compile(r"(?:^|[;&|({\n!]|\b(?:then|do|else|elif|if|while|until))[ \t]*(?:builtin[ \t]+|command[ \t]+)?"
+                        r"(?:cd|pushd)[ \t]+(?:-[LPe@]+[ \t]+|--[ \t]+)*$")
+_GIT_TOP_UNQUOTED = re.compile(r"\$\([ \t]*git[ \t]+rev-parse[ \t]+(?:--show-toplevel|--git-common-dir)[ \t]*\)|"
+                               r"`[ \t]*git[ \t]+rev-parse[ \t]+(?:--show-toplevel|--git-common-dir)[ \t]*`")
+
+
+def _quote_cd_git(cmd: str) -> str:
+    """`cmd` with each unquoted `$(git rev-parse --show-toplevel)` or `--git-common-dir` (or its backtick form) that
+    is a cd or pushd folder put in double quotes, which leaves what the shell runs as it is: in a checkout it prints
+    one folder, and outside one the quoted form leaves an empty word that _folder_word reads as unknown. The tokenizer
+    cuts an unquoted one at its parenthesis; quoted, it stays whole for _folder_word. `--show-cdup` prints nothing in
+    the top folder, where an unquoted cd goes home, so it stays as written."""
+    if "rev-parse" not in cmd:
+        return cmd
+    out, q, i, n = [], None, 0, len(cmd)
+    while i < n:
+        c = cmd[i]
+        if q == "'":
+            q = None if c == "'" else q
+        elif q == '"':
+            if c == "\\":
+                out.append(cmd[i:i + 2])
+                i += 2
+                continue
+            q = None if c == '"' else q
+        elif c == "\\":
+            out.append(cmd[i:i + 2])
+            i += 2
+            continue
+        elif c in "'\"":
+            q = c
+        elif c in "$`" and (m := _GIT_TOP_UNQUOTED.match(cmd, i)) and _CD_BEFORE.search("".join(out)):
+            out.append(f'"{m.group(0)}"')
+            i = m.end()
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
 def allowed_tops() -> set:
     tops = set(RESERVED_TOP) | core.owners()
     try:
@@ -588,15 +702,24 @@ def _braced_end(s: str, i: int) -> int:
     return min(j, n)
 
 
+# a substitution whose output is never empty: pwd prints the shell's folder, so the reading that drops a
+# substitution keeps it as _SUBST_WORD (`> $(pwd)/out.txt` writes below the folder, never to `/out.txt`)
+_PRINTS_A_FOLDER = re.compile(r"(?:\$\(|`)[ \t]*pwd(?:[ \t]+-[LP]+)*[ \t]*[)`]")
+_PWD_REDEFINED = re.compile(r"\bpwd[ \t]*\([ \t]*\)|\bfunction[ \t]+pwd\b|\balias\b")  # a pwd that may print nothing
+_NEVER = re.compile(r"(?!)")
+
+
 def _split_heredocs(cmd: str, mask: str | None = None):
     """-> (the command without its heredoc bodies and terminator lines, [(body, expands)]). A `<<WORD` counts only
     where the shell reads it: outside quotes and comments, and not `<<<` (a here-string), so a quoted "<<EOF" in a
     commit message hides no line. `expands`: the delimiter is unquoted, so the shell runs `$(…)` in the body.
     `mask` (for _substitution_readings): the command keeps its heredoc bodies as they are, and each `$(…)`, backtick
     and `${…}` holding one outside quotes becomes `mask`, each `<(…)`, `>(…)` and `=(…)` _SUBST_WORD and each
-    `$((…))` 0, the one word the shell makes of it."""
+    `$((…))` 0, the one word the shell makes of it. A `$(pwd)` always prints a folder: it is _SUBST_WORD in each
+    reading (_PRINTS_A_FOLDER)."""
     out, bodies, pending = [], [], []
     i, n, q, parens = 0, len(cmd), None, _Parens(cmd)
+    folder = _PRINTS_A_FOLDER if mask is not None and not _PWD_REDEFINED.search(cmd) else _NEVER
     while i < n:
         c = cmd[i]
         if q == "'":
@@ -639,12 +762,12 @@ def _split_heredocs(cmd: str, mask: str | None = None):
             continue
         elif mask is not None and (cmd.startswith("$(", i) or _proc_subst_at(cmd, i)) and \
                 (j := _close_paren(cmd, i + 2)) > 0:
-            out.append(mask if c == "$" else _SUBST_WORD)
+            out.append(_SUBST_WORD if c != "$" or folder.fullmatch(cmd, i, j) else mask)
             parens.close(j - 1, "w")
             i = j
             continue
         elif mask is not None and c == "`" and (j := cmd.find("`", i + 1)) > 0:
-            out.append(mask)
+            out.append(_SUBST_WORD if folder.fullmatch(cmd, i, j + 1) else mask)
             i = j + 1
             continue
         elif c == "(":
@@ -1851,19 +1974,24 @@ def check_bash(cmd: str, cwd: str, agent: str):
     are recorded. An ask (a write outside ~/Development) stands only when no reading refuses: approving the write
     must not also run what another reading refuses. A command with a substitution inside it is checked in its
     _substitution_readings as well."""
-    v = _check_bash_reading(cmd, cwd, agent)
-    if v and v[0] == "deny":
-        return v
-    first = v
-    hatches = list(_BYPASSES)
-    for alt in _continued_readings(cmd or "") + _substitution_readings(cmd or ""):
-        w = _check_bash_reading(alt, cwd, agent)
-        if w and w[0] == "deny":
-            return w
-        first = first or w
-        hatches += [b for b in _BYPASSES if b not in hatches]
-    _BYPASSES[:] = hatches
-    return first
+    token = _COMMAND_TEXT.set(cmd or "")
+    try:
+        cmd = _quote_cd_git(cmd or "")
+        v = _check_bash_reading(cmd, cwd, agent)
+        if v and v[0] == "deny":
+            return v
+        first = v
+        hatches = list(_BYPASSES)
+        for alt in _continued_readings(cmd) + _substitution_readings(cmd):
+            w = _check_bash_reading(alt, cwd, agent)
+            if w and w[0] == "deny":
+                return w
+            first = first or w
+            hatches += [b for b in _BYPASSES if b not in hatches]
+        _BYPASSES[:] = hatches
+        return first
+    finally:
+        _COMMAND_TEXT.reset(token)
 
 
 def _check_bash_reading(cmd: str, cwd: str, agent: str):
@@ -2014,6 +2142,26 @@ def _nested_lines(argv, cwd=None) -> list:
     return [shlex.join(x) for x in runs if x and os.path.basename(x[0]) not in _PATH_TAKERS]
 
 
+def _cd_folder(name, args, ecwd, line="") -> str:
+    """The folder a `cd` or `pushd` with operands `args` moves the shell to from `ecwd`. Their options (-L, -P, -e,
+    -@, `--`) name no folder; `pushd -n` moves none, and `pushd +N`/`-N` turns the stack to a folder the command does
+    not show. `cd` with no folder or `-` is left where it was, as before."""
+    rest = list(args)
+    while rest and rest[0].startswith("-") and rest[0] != "-":
+        flag = rest.pop(0)
+        if flag == "--":
+            break
+        if name == "pushd" and flag == "-n":
+            return ecwd
+        if name == "pushd" and flag[1:].isdigit():
+            return str(UNKNOWN)
+    if name == "pushd" and rest and rest[0][:1] == "+" and rest[0][1:].isdigit():
+        return str(UNKNOWN)
+    if not rest or rest[0] == "-":
+        return ecwd
+    return str(_folder_word(rest[0], ecwd, line))
+
+
 def _check_segments(cmd: str, segs, ecwd: str, agent: str, depth: int = 0, outer_envs=frozenset(), fed=False):
     """The rules on destructive commands for each segment of `cmd`, then for the lines it runs one level down
     (_nested_lines, to depth 4). `outer_envs`: the variables set for the shell that runs this line, which its
@@ -2052,12 +2200,8 @@ def _check_segments(cmd: str, segs, ecwd: str, agent: str, depth: int = 0, outer
         name = os.path.basename(argv[0])
         _WORD.set(name)
         seg_text = " ".join(argv)
-        if name == "cd":
-            if len(argv) > 1 and argv[1] != "-":
-                ecwd = str(resolve(argv[1], ecwd))
-            continue
-        if name == "pushd" and len(argv) > 1:
-            ecwd = str(resolve(argv[1], ecwd))
+        if name in ("cd", "pushd"):
+            ecwd = _cd_folder(name, argv[1:], ecwd, cmd)
             continue
         dev = _dev_args(argv)
         if dev and dev[:1] == ["impeccable"]:  # the engine writes where --target and --file point, from its folder
@@ -2153,7 +2297,7 @@ def _check_segments(cmd: str, segs, ecwd: str, agent: str, depth: int = 0, outer
         if lines and depth >= 4:  # too deep to read is no "nothing found": refused
             return deny(NESTED_REASON, key="nested-depth")
         feeds = fed or _feeds_words(argv)
-        for line in lines:
+        for line in map(_quote_cd_git, lines):
             for alt in (line, *_substitution_readings(line)):  # `sh -c 'rm $(true) -rf ~/x'`
                 inner = split_commands(alt)
                 res = _check_segments(alt, inner, ecwd, agent, depth + 1, envs, feeds) if inner else None
@@ -2164,7 +2308,7 @@ def _check_segments(cmd: str, segs, ecwd: str, agent: str, depth: int = 0, outer
     subs = _process_substitutions(cmd) + _command_substitutions(cmd)
     if subs and depth >= 4:
         return deny(NESTED_REASON, key="substitution-depth")
-    for line in subs:
+    for line in map(_quote_cd_git, subs):
         for alt in (line, *_substitution_readings(line)):
             inner = split_commands(alt)
             res = _check_segments(alt, inner, ecwd, agent, depth + 1, outer_envs, fed) if inner else None
@@ -2215,8 +2359,10 @@ OTHER_SESSION_HINT = ("Only do it if the user asked: the work belongs to a sessi
 def _names_own_project(value, pid, here=None) -> bool:
     """True when a project value of a dev command (-p, `dev handoff <project>`) names session project `pid` as dev
     reads it (registry.match): its id in any case; a folder (`.`, a path, read from `here`, the folder the dev command
-    runs in) of its checkout; or a name or alias that matches `pid` alone among the projects devkit knows. A value
-    the shell makes at run time names none."""
+    runs in) of its checkout; or the full name or an alias of `pid` alone among the projects devkit knows (the exact
+    levels of registry.match). A part of a name names none: dev matches it against the projects it finds when it
+    runs, and one cloned since registry.json was written may take it. A value the shell makes at run time names
+    none."""
     v = str(value).strip().rstrip("/")
     if v.casefold() == pid.casefold():
         return True
@@ -2226,8 +2372,23 @@ def _names_own_project(value, pid, here=None) -> bool:
         t = resolve(v, here)
         return t != UNKNOWN and (current_project(str(t)) or "").casefold() == pid.casefold()
     from . import registry
-    found = registry.match({"projects": _known_projects(pid)}, v)["projects"]
-    return len(found) == 1 and str(found[0].get("id") or "").casefold() == pid.casefold()
+    hit = registry.match({"projects": _known_projects(pid)}, v)
+    found = hit["projects"]
+    return bool(hit["exact"]) and len(found) == 1 and str(found[0].get("id") or "").casefold() == pid.casefold()
+
+
+def _partial_name_hint(value, pid) -> str:
+    """The sentence a refusal adds when `value` is a part of the name or alias of session project `pid`, which dev
+    matches against the projects it finds when it runs (_names_own_project), else ""."""
+    v = str(value).strip().rstrip("/")
+    if not v or _shell_made(v) or v.startswith(("/", "~", ".")):
+        return ""
+    from . import registry
+    hit = registry.match({"projects": _known_projects(pid)}, v)
+    if hit["exact"] or not any(str(p.get("id") or "").casefold() == pid.casefold() for p in hit["matches"]):
+        return ""
+    return (f"{_code(v)} is only a part of a project's name, which dev matches against the projects it finds when it "
+            f"runs: name this session's project as {_code(pid)}. ")
 
 
 def _known_projects(pid) -> list:
@@ -2264,7 +2425,8 @@ def _dev_cross_violation(args, cwd, fed=False):
     if words[:1] == ["handoff"] and len(words) > 1 and not _names_own_project(words[1], pid, cwd):
         return deny(f"This session works on {_code(pid)}; {_code(f'dev handoff {words[1]}')} with --log or --edit "
                     f"would write another project's session log or note. Log this session's work with "
-                    f"`dev handoff --log \"…\"`. " + OTHER_SESSION_HINT, key="other-project-log")
+                    f"`dev handoff --log \"…\"`. " + _partial_name_hint(words[1], pid) + OTHER_SESSION_HINT,
+                    key="other-project-log")
     if words[:1] == ["plan"] and len(words) > 2 and words[1] != "new":  # revise, approve, supersede: its folder decides
         why = _plan_path_violation(words[2], cwd, pid)
         if why:
@@ -2278,7 +2440,7 @@ def _dev_cross_violation(args, cwd, fed=False):
                     f"{tilde(core.DEV)} (a portfolio-level session).", key="initiative-membership")
     if proj is not None:
         return deny(f"This session works on {_code(pid)}; {_code(f'-p {proj}')} would edit another project's handoff. "
-                    + OTHER_SESSION_HINT, key="other-project")
+                    + _partial_name_hint(proj, pid) + OTHER_SESSION_HINT, key="other-project")
     if init and pid not in initiative_members(init):
         return deny(f"{_code(pid)} is not a member of initiative {_code(init)}.", key="not-member")
     named = projs or inits or (words[:1] == ["handoff"] and len(words) > 1)
@@ -7992,13 +8154,83 @@ def _version_only(name: str, args) -> bool:
     return list(args) == ["--version"] or (_family(name) in ("python", "pypy") and list(args) in (["-V"], ["-VV"]))
 
 
-_AWK_RUNS = re.compile(r"\bsystem\b|\bgetline\b|[|>]|@(?:load|include|namespace)\b|\bclose\b|\bfflush\b")
+_AWK_RUNS = re.compile(r"\bsystem\b|\bgetline\b|@(?:load|include|namespace)\b|\bclose\b|\bfflush\b")
+# what may come right before a `/` that starts a regex rather than a division: an operator, an opening bracket, a
+# statement's start, or a keyword that takes an expression (the cut awk's own grammar makes)
+_AWK_REGEX_AFTER = frozenset("(,~!{};&|=?:+-*%^<>\n")
+_AWK_REGEX_KEYWORDS = frozenset({"print", "printf", "return", "in", "case", "do", "else"})
+
+
+def _awk_writes(prog: str) -> bool:
+    """True when an awk program writes to a file or a command: a `|` that is no `||` (a pipe to a command, or one
+    getline reads), or a `>` at the top level of a print or printf statement (`print $1 > "f"`, `printf(...) >> f`),
+    where awk reads it as a redirection. A `>` anywhere else (`NR>=2050`, `print (a > b)`) compares. Strings, regex
+    literals and comments are skipped; a `/` starts a regex where awk's grammar reads one (after an operator, a
+    statement's start, a keyword that takes an expression, or the condition of if, while or for), else it divides. A
+    string or regex that does not end counts as a write, so a program the guard cannot read fails closed."""
+    i, n = 0, len(prog)
+    printing, at, prev, word, opened = False, 0, "\n", "", []  # opened: per open bracket, whether it is a condition
+    while i < n:
+        c = prog[i]
+        if c in "\"/" and (c == '"' or prev in _AWK_REGEX_AFTER or word in _AWK_REGEX_KEYWORDS):
+            j = i + 1
+            while j < n and prog[j] != c:
+                if prog[j] == "\n":
+                    return True
+                if c == "/" and prog[j] == "[":  # a bracket expression may hold a `/`: `/[/]/`
+                    k = j + (2 if prog.startswith("[^", j) else 1)
+                    k = prog.find("]", k + 1 if prog[k:k + 1] == "]" else k)
+                    if k < 0:
+                        return True
+                    j = k + 1
+                    continue
+                j += 2 if prog[j] == "\\" else 1
+            if j >= n:
+                return True
+            i, prev, word = j + 1, "x", ""
+            continue
+        if c.isalnum() or c == "_":
+            j = i
+            while j < n and (prog[j].isalnum() or prog[j] == "_"):
+                j += 1
+            word = prog[i:j]
+            if word in ("print", "printf"):
+                printing, at = True, len(opened)
+            i, prev = j, "x"
+            continue
+        if c == "#":  # a comment, to the end of its line
+            j = prog.find("\n", i)
+            i = n if j < 0 else j
+            continue
+        if prog.startswith(("++", "--"), i):  # `i++ / 2` divides: what follows ++ or -- is no regex
+            i, prev, word = i + 2, "x", ""
+            continue
+        if c == "|":
+            if prog.startswith("||", i):
+                i, prev, word = i + 2, "|", ""
+                continue
+            return True
+        if c == ">" and printing and len(opened) <= at:
+            return True
+        if c in "([":
+            opened.append(c == "(" and word in ("if", "while", "for"))
+        elif c in ")]":
+            condition = opened.pop() if opened else False
+            if condition:  # `if (a) /re/`: a statement starts after the condition
+                i, prev, word = i + 1, ";", ""
+                continue
+        elif c in ";\n{}":
+            printing = printing and c == ";" and len(opened) > at  # a `;` of a for header ends no statement
+        if not c.isspace() or c == "\n":
+            prev, word = c, ""
+        i += 1
+    return False
 
 
 def _ro_awk(args) -> str | None:
     """Why an awk call of a read-only lane is refused, or None: its program (inline, `-e` or `--source`) may only read
-    its input and print to standard output: no `>` or `|` (a file or a command it writes to, and comparisons with `>`,
-    which read the same), no system(), getline, @load or @include; no program file and no option that loads one."""
+    its input and print to standard output: no print to a file or a command (_awk_writes), no system(), getline,
+    @load or @include; no program file and no option that loads one. A comparison with `>` reads."""
     progs, i, inline = [], 0, True
     while i < len(args):
         a = args[i]
@@ -8024,9 +8256,9 @@ def _ro_awk(args) -> str | None:
             return "`awk` without a program"
         progs.append(args[i])
     for p in progs:
-        if _AWK_RUNS.search(p):
-            return ("the awk program writes to a file or a command, or runs one (`>`, `|`, system(), getline); "
-                    "print to standard output only, and compare with `<`")
+        if _AWK_RUNS.search(p) or _awk_writes(p):
+            return ("the awk program writes to a file or a command, or runs one (`print > file`, `|`, system(), "
+                    "getline); print to standard output only")
     return None
 
 

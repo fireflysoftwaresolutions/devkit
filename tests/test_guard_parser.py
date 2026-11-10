@@ -87,5 +87,34 @@ class SubstitutionsInsideACommand(Rulings):
             "cat <<EOF\n$(date)\nEOF"])
 
 
+class AwkComparisonsAndRedirections(unittest.TestCase):
+    """In a read-only lane an awk program may only print to standard output. awk reads a `>` as a redirection only
+    at the top level of a print or printf statement; anywhere else it compares (`NR>=2050`), so it reads."""
+
+    def lane(self, cmd, level):
+        v = guard.crew_shell_verdict(cmd, CWD, None, "seraph", level=level)
+        return v[1] if v else None
+
+    def test_a_comparison_reads_and_a_redirection_or_pipe_stays_refused(self):
+        reads = ["awk 'NR>=2050 && NR<=2100' lib/devkit/guard.py", "awk 'NR>2050' f", "awk '$3 > 500 {print $1}' f",
+                 "awk '{print (a > b)}' f", "awk '$1 ~ /a>b/ {print}' f", "awk '{ n = i++ / 2; print n }' f",
+                 "awk 'NR>1 || /x/' f", "awk '{print \"a>b|c\"}' f", "awk '# a > b\n{print}' f",
+                 "awk '{ for (i = 1; i <= NF; i++) if ($i > 0) print $i }' f", "awk '{ if (a) /x/; print }' f"]
+        writes = ["awk '{print > \"/tmp/out\"}' f", "awk '{print $1 >> \"f\"}' f", "awk '{printf(\"%d\", NR) > \"f\"}' f",
+                  "awk '{print | \"sh\"}' f", "awk '{ x = i++ / 2; print > \"f\"; y = 1/2 }' f",
+                  "awk '{ if (x) print; else print > \"f\" }' f", "awk '{ x = /\"/; print > \"f\" }' f",
+                  "awk '$0 ~ /[/]\"/ { print > \"f\" }' f", "awk '{print \"unterminated}' f",
+                  "awk '{ if (a) /\"/; print > \"f\"; if (b) /\"/ }' f",
+                  "awk '{ for (;;) /\"/; print > \"f\"; for (;;) /\"/ }' f",
+                  "awk 'NR>=2050 {print > \"out\"}' f"]
+        for level in ("review", "read"):
+            for cmd in reads:
+                with self.subTest(level=level, reads=cmd):
+                    self.assertIsNone(self.lane(cmd, level))
+            for cmd in writes:
+                with self.subTest(level=level, writes=cmd):
+                    self.assertIn("awk program writes", self.lane(cmd, level) or "")
+
+
 if __name__ == "__main__":
     unittest.main()

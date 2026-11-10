@@ -142,6 +142,55 @@ class OneProjectPerSession(unittest.TestCase):
                      f"cd ~ && echo x > {p['own'].parent}/z.md", "cd ../gadget && dev handoff",
                      "cd ../gadget && dev plan ls"])
 
+    def test_a_cd_to_the_checkouts_top_folder_found_by_git_keeps_the_sessions_project(self):
+        # git rev-parse prints the top folder of the checkout the shell is in: the guard finds it by walking up to
+        # the .git folder, as git does, without running anything; quoted and unquoted forms are read alike
+        sub = self.top / "lib" / "deep"
+        sub.mkdir(parents=True)
+        writes = ["dev task add x --why y", "dev task done T-1 --why y", "dev handoff --log x",
+                  "dev lesson add 'x' --cause c --prevent p", "dev plan new x"]
+        moves = ['cd "$(git rev-parse --show-toplevel)"', "cd $(git rev-parse --show-toplevel)",
+                 'cd "`git rev-parse --show-toplevel`"', 'cd "$(git rev-parse --show-cdup)"',
+                 'cd "$(git rev-parse --git-common-dir)/.."', 'pushd "$(git rev-parse --show-toplevel)"',
+                 'cd "$(git rev-parse --show-toplevel)/lib"']
+        allowed = [f"{m} && {w}" for m in moves for w in writes]
+        self.assert_rulings(refused=[], allowed=allowed)
+        self.assert_rulings(refused=[], allowed=allowed, cwd=sub)  # a session started below the top folder
+        # the twins: a substitution that lands in another project, one the guard cannot work out, and one whose git
+        # the command itself changes (its environment, PATH or a function) stay refused
+        self.assert_rulings(
+            refused=['cd ../gadget && cd "$(git rev-parse --show-toplevel)" && dev handoff --log x',
+                     'cd ../gadget && cd $(git rev-parse --show-toplevel) && dev task add x --why y',
+                     'cd "$(git -C ../gadget rev-parse --show-toplevel)" && dev handoff --log x',
+                     "cd $(git -C ../gadget rev-parse --show-toplevel) && dev handoff --log x",
+                     'cd "$(echo ../gadget)" && dev handoff --log x', 'cd "$D" && dev handoff --log x',
+                     'export GIT_WORK_TREE=../gadget; cd "$(git rev-parse --show-toplevel)" && dev handoff --log x',
+                     'GIT_DIR=../gadget/.git cd "$(git rev-parse --show-toplevel)" && dev handoff --log x',
+                     'git() { echo ../gadget; }; cd "$(git rev-parse --show-toplevel)" && dev handoff --log x',
+                     'PATH=/tmp/bin:$PATH; cd "$(git rev-parse --show-toplevel)" && dev handoff --log x',
+                     'cd "$(git rev-parse --show-toplevel)$X" && dev handoff --log x'],
+            allowed=['cd "$(git rev-parse --show-toplevel)" && dev handoff --log x', "cd ../gadget && dev handoff",
+                     'cd "$(echo ../gadget)" && dev plan ls'])
+
+    def test_a_cd_option_is_not_the_folder_it_moves_to(self):
+        # -L, -P, -e, -@ and `--` come before the folder; pushd -n moves none, and pushd +N turns to one not shown
+        self.assert_rulings(
+            refused=["cd -P ../gadget && dev handoff --log x", "cd -L ../gadget && dev task add x --why y",
+                     "cd -- ../gadget && dev handoff --log x", "cd -Pe ../gadget && dev plan new x",
+                     "pushd -- ../gadget && dev handoff --log x", "pushd +1 && dev handoff --log x",
+                     'cd -P "$(git -C ../gadget rev-parse --show-toplevel)" && dev handoff --log x'],
+            allowed=["cd -P . && dev handoff --log x", "cd -L ../widget && dev task add x --why y",
+                     "cd -- . && dev handoff --log x", "pushd -n ../gadget && dev handoff --log x",
+                     'cd -P "$(git rev-parse --show-toplevel)" && dev handoff --log x'])
+
+    def test_a_checkout_whose_git_config_moves_its_work_tree_is_not_worked_out(self):
+        # core.worktree points git's top folder elsewhere, and an included file may hold it: the guard does not
+        # follow either, so the folder stays unknown; the same checkout without it is worked out
+        cmd = 'cd "$(git rev-parse --show-toplevel)" && dev handoff --log x'
+        self.assert_rulings(refused=[], allowed=[cmd])
+        subprocess.run(["git", "-C", str(self.top), "config", "core.worktree", str(self.other_top)], check=True)
+        self.assert_rulings(refused=[cmd], allowed=[])
+
     def test_a_codex_workdir_is_where_the_command_runs_not_whose_session_it_is(self):
         o = str(self.other_top)
         for inp, want in (({"cmd": "dev handoff --log x", "workdir": o}, "deny"),
@@ -191,7 +240,17 @@ class OneProjectPerSession(unittest.TestCase):
             refused=["dev handoff gadget --log x", "dev plan new x -p gadget", "dev handoff ../gadget --log x",
                      f"dev plan new x -p {self.other_top}", "dev handoff wid* --log x"],
             allowed=["dev handoff widget --log x", "dev handoff . --log x", "dev plan new x -p widget",
-                     "dev plan new x -p WIDGET", f"dev plan new x -p {self.top}", "dev handoff wid --log x"])
+                     "dev plan new x -p WIDGET", f"dev plan new x -p {self.top}"])
+        # a part of a name: dev matches it against the projects it finds when it runs, which may hold one cloned
+        # since the guard's registry was written (a `wid` project would take the write), so it is never the own one
+        self.assert_rulings(
+            refused=["dev handoff wid --log x", "dev plan new x -p widg", "dev task add x -p WID --why y",
+                     "dev handoff idge --log x", "dev lesson recur L-1 -p dget"],
+            allowed=["dev handoff wid", "dev plan ls -p wid", f"dev handoff {OWN.upper()} --log x"])
+        for cmd in ("dev handoff wid --log x", "dev plan new x -p widg"):
+            with self.subTest(hint=cmd):
+                why = guard.check("Bash", {"command": cmd}, str(self.top), "claude")[1]
+                self.assertIn(f"name this session's project as `{OWN}`", why)
         # the team's aliases and the projects dev sync last recorded: each alias names its own project only
         aliases = {"wdg": {"project": OWN, "by": "t", "at": "2026-11-01"},
                    "gdg": {"project": OTHER, "by": "t", "at": "2026-11-02"}}
