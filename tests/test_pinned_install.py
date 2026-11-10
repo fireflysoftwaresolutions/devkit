@@ -307,6 +307,71 @@ class PruneTests(Sandbox):
         self.assertEqual(sorted(d.name for d in core.pin_root().iterdir()), sorted(names[:2] + names[3:]))
 
 
+class DevLinkTests(Sandbox):
+    # `dev update` took `dev` off the PATH: once an older copy was retired, ~/.local/bin/dev reached the new copy
+    # through that copy's bin/dev, so the install left the link naming the old copy, and the prune that removed the
+    # old copy three releases later left the link pointing at nothing
+    def update(self, version):
+        """What one `dev update` does to the copies and the link: pin, retire the others, link, prune."""
+        commit(self.src, version)
+        pin = self.install(why=f"update to {version}")
+        core.retire_other_pins()
+        setup.install_cli()
+        setup.prune_pins()
+        return pin
+
+    def test_every_update_keeps_dev_on_the_path_and_names_the_new_copy(self):
+        link = self.home / ".local" / "bin" / "dev"
+        self.update("26.11.4")
+        for version in ("26.11.5", "26.11.6", "26.11.7", "26.11.8", "26.11.9"):
+            pin = self.update(version)
+            self.assertTrue(os.path.exists(link), f"dev is gone after the update to {version}")
+            self.assertEqual(os.readlink(link), str(pin / "bin" / "dev"), version)
+
+    def test_the_prune_keeps_the_copy_the_link_names_though_it_reaches_another(self):
+        # how an older install left it: the link names a retired copy, whose bin/dev leads to the pinned one
+        old = self.update("26.11.4")
+        link = self.home / ".local" / "bin" / "dev"
+        for version in ("26.11.5", "26.11.6", "26.11.7"):
+            commit(self.src, version)
+            self.install(why=f"update to {version}")
+            core.retire_other_pins()
+        self.assertEqual(os.readlink(link), str(old / "bin" / "dev"))
+        setup.prune_pins()
+        self.assertTrue(os.path.exists(link))
+
+    def test_the_prune_keeps_the_copy_zshrc_sources(self):
+        old = self.update("26.11.4")
+        zshrc = (self.home / ".zshrc").read_text()
+        for version in ("26.11.5", "26.11.6", "26.11.7"):
+            commit(self.src, version)
+            self.install(why=f"update to {version}")
+        (self.home / ".local" / "bin" / "dev").unlink()  # only ~/.zshrc names the oldest copy now
+        self.assertIn(f'source "{old}/shell/devkit.zsh"', zshrc)
+        setup.prune_pins()
+        self.assertTrue(old.is_dir())
+
+
+class StrictRenameTests(Sandbox):
+    # a teammate's fresh `dev install` failed with Permission denied: their Mac refuses to rename a folder its owner
+    # cannot write, even within one parent folder, and the copy was made read-only before it was moved into place
+    def test_a_copy_is_moved_into_place_where_a_read_only_folder_cannot_be_renamed(self):
+        rename = os.rename
+
+        def strict(src, dst, *a, **k):
+            if os.path.isdir(src) and not os.stat(src).st_mode & stat.S_IWUSR:
+                raise PermissionError(13, "Permission denied", str(src), None, str(dst))
+            return rename(src, dst, *a, **k)
+        with mock.patch("os.rename", strict):
+            pin = self.install(why="a fresh install")
+            again = Path(setup.pin(self.src, unverified_why="the same commit, pinned again")["path"])
+        self.assertEqual(again, pin)
+        self.assertTrue((pin / "bin" / "dev").is_file())
+        self.assertEqual(stat.S_IMODE(pin.stat().st_mode), 0o555)  # read-only once in place
+        self.assertEqual(setup.verify_pin(pin), [])
+        self.assertEqual([d.name for d in core.pin_root().iterdir()], [pin.name])  # no leftover of either rename
+
+
 class DoctorTests(Sandbox):
     def test_doctor_fails_on_a_tampered_file_and_install_rebuilds_the_copy(self):
         pin = self.install()
