@@ -416,8 +416,9 @@ def pinned_copies() -> list:
 
 
 def pins_in_use() -> set:
-    """Real paths of the pinned copies something still runs: the installed one, this process, ~/.local/bin/dev, and
-    any copy that Claude's settings, Claude's managed settings, Codex's hooks or a launchd job names."""
+    """Real paths of the pinned copies something still runs: the installed one, this process, ~/.local/bin/dev (the
+    copy it names and the one it reaches), and any copy that Claude's settings, Claude's managed settings, Codex's
+    hooks, a launchd job or ~/.zshrc (which puts ~/.local/bin on the PATH) names."""
     from . import policy
     roots = {str(core.pin_root()), core.real(core.pin_root())}
     used = set()
@@ -434,7 +435,9 @@ def pins_in_use() -> set:
     link = core.HOME / ".local" / "bin" / "dev"
     if os.path.lexists(link):
         add(os.path.realpath(link))
-    texts = [CLAUDE_HOME / "settings.json", CODEX_HOME / "hooks.json", policy.MANAGED_FILE]
+    if os.path.islink(link):  # and the copy it names, though that copy's retired bin/dev leads on to another
+        add(Path(os.path.join(os.path.dirname(link), os.readlink(link))).parent.parent)
+    texts = [CLAUDE_HOME / "settings.json", CODEX_HOME / "hooks.json", policy.MANAGED_FILE, ZSHRC]
     texts += sorted((core.HOME / "Library" / "LaunchAgents").glob("com.devkit*.plist"))
     pat = re.compile("(" + "|".join(re.escape(r) for r in roots) + r")/([^/'\"\s<>]+)")
     for f in texts:
@@ -625,11 +628,19 @@ def install_cli():
     link = bindir / "dev"
     home = core.runtime_home()  # the pinned copy: `dev` typed in a shell runs what the hooks run
     target = home / "bin" / "dev"
-    if link.is_symlink() or link.exists():
-        if link.resolve() != target.resolve():
-            backup(link) if not link.is_symlink() else None
+    if link.is_symlink():
+        # the link itself must name this copy: one that reaches it only through a retired copy's bin/dev leaves
+        # `dev` pointing at nothing once that copy is pruned
+        if os.readlink(link) != str(target):
+            tmp = link.with_name(f".dev.{os.getpid()}.tmp")
+            if os.path.lexists(tmp):
+                tmp.unlink()
+            os.symlink(str(target), tmp)
+            os.replace(tmp, link)  # one rename: a shell that runs `dev` now finds one link or the other, never none
+    else:
+        if link.exists():
+            backup(link)
             link.unlink()
-    if not link.exists():
         link.symlink_to(target)
     done(f"{tilde(link)} → {tilde(target)}")
     block = f'{BLOCK_START}\n[ -f "{home}/shell/devkit.zsh" ] && source "{home}/shell/devkit.zsh"\n{BLOCK_END}\n'
