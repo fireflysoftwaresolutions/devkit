@@ -825,6 +825,28 @@ class ParseTests(unittest.TestCase):
                                  [("tests.test_calc.CalcTests.test_sub", "passed", "tests/test_calc.py")])
 
 
+class NodeJunitWithoutFileTests(unittest.TestCase):
+    # Node before 24 (22 is an LTS) writes no file attribute on a JUnit case; devkit runs node once per test file,
+    # so a case without one belongs to the file node ran
+    NODE22 = ('<?xml version="1.0" encoding="utf-8"?>\n<testsuites>\n'
+              '\t<testcase name="adds" time="0.000240" classname="test"/>\n\t<!-- tests 1 -->\n</testsuites>\n')
+
+    def test_a_case_without_a_file_belongs_to_the_one_file_node_ran(self):
+        with tempfile.TemporaryDirectory() as d:
+            top = os.path.realpath(d)
+            cases = testx.parse_node_junit(self.NODE22, top, top, os.path.join(top, "test", "add.test.mjs"))
+            self.assertEqual([(c["id"], c["file"], c["status"]) for c in cases],
+                             [("test/add.test.mjs::adds", "test/add.test.mjs", "passed")])
+
+    def test_a_node_command_for_one_file_names_it_and_for_several_names_none(self):
+        with tempfile.TemporaryDirectory() as d:
+            top = os.path.realpath(d)
+            runner = {"name": "node", "exec": ["node", "--test"], "root": ".", "suite": []}
+            one = testx.build_command(top, runner, ["test/a.test.mjs"], report="r.xml")
+            two = testx.build_command(top, runner, ["test/a.test.mjs", "test/b.test.mjs"], report="r.xml")
+            self.assertEqual((one["only"], two["only"]), (os.path.join(top, "test", "a.test.mjs"), ""))
+
+
 class JunitPrologTests(unittest.TestCase):
     """Both JUnit report readers and a document type declaration. A report never declares one, and its entities would
     expand while the report is read (external entities, billion laughs)."""
@@ -921,13 +943,14 @@ def recorded(e):
 
 class RunTests(unittest.TestCase):
     # a node option whose value is the next word reaches node whole, so the suite runs (node used to exit 9 with
-    # "requires an argument", and dev test reported zero tests). --test-name-pattern exists since Node 18.11, so the
-    # test runs alike on this Mac and on the CI runner's older Node (--test-coverage-include needs Node 22.5)
+    # "requires an argument", and dev test reported zero tests). The script names its test file: Node 22 reads each
+    # argument after --test as a file or a glob and fails on a folder ("Cannot find module …/test/"), while Node 20
+    # and 26 accept a folder; --test-name-pattern exists since Node 18.11
     @unittest.skipUnless(shutil.which("node"), "node is not installed, so the node runner cannot run here")
     def test_a_node_suite_with_an_option_value_as_the_next_word_runs(self):
         with Env() as e:
             r = e.repo({"package.json": json.dumps({"type": "module", "scripts": {
-                            "test": "node --test --test-name-pattern adds test/"}}),
+                            "test": "node --test --test-name-pattern adds test/add.test.mjs"}}),
                         "src/add.mjs": "export const add = (a, b) => a + b;\n",
                         "test/add.test.mjs": 'import assert from "node:assert/strict";\nimport { test } from '
                                              '"node:test";\nimport { add } from "../src/add.mjs";\n\n'

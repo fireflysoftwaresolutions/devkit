@@ -1065,7 +1065,7 @@ def build_command(top, runner, files=(), ids=(), report=None, related=(), all_=F
     name, ex = runner["name"], list(runner["exec"])
     files, ids, related = list(files), list(ids), list(related)
     rel = [_rel(top, runner, f) for f in files]
-    env, names = {}, []
+    env, names, only = {}, [], ""
     if name == "pytest":
         argv = ex + ["-q"] + ([f"--junitxml={report}"] if report else []) + \
             ([] if all_ else rel + [_id(i) for i in ids])
@@ -1094,8 +1094,10 @@ def build_command(top, runner, files=(), ids=(), report=None, related=(), all_=F
     elif name == "node":  # readable output on stdout, the JUnit report in a file; the whole suite is the script's
         out = ["--test-reporter=spec", "--test-reporter-destination=stdout", "--test-reporter=junit",
                f"--test-reporter-destination={report}"] if report else []
-        argv = ex + out + (list(runner.get("suite") or []) if all_ else
-                           rel + sorted({_rel(top, runner, _id(i).split("::")[0]) for i in ids} - set(rel)))
+        picked = [] if all_ else rel + sorted({_rel(top, runner, _id(i).split("::")[0]) for i in ids} - set(rel))
+        argv = ex + out + (list(runner.get("suite") or []) if all_ else picked)
+        if len(picked) == 1:  # Node before 24 names no file in its JUnit cases: the one file run is theirs
+            only = os.path.join(_rootdir(top, runner), picked[0])
     elif name == "maven":
         if runner.get("argv"):  # a CI step's own command: keep its goals and flags, add the selection
             ex = list(runner["argv"])
@@ -1156,7 +1158,7 @@ def build_command(top, runner, files=(), ids=(), report=None, related=(), all_=F
                 argv += ["--filter", "(" + "|".join(dict.fromkeys(pats)) + ")"]
     else:
         raise ValueError(f"unknown runner {name}")
-    return {"argv": argv, "cwd": _rootdir(top, runner), "env": env, "report": report, "names": names}
+    return {"argv": argv, "cwd": _rootdir(top, runner), "env": env, "report": report, "names": names, "only": only}
 
 
 # --------------------------------------------------------------------------- results
@@ -1273,17 +1275,18 @@ def parse_junit(text, top, base, runner) -> list:
     return out
 
 
-def parse_node_junit(text, top, base) -> list:
+def parse_node_junit(text, top, base, only="") -> list:
     """node --test --test-reporter=junit -> cases. A node:test case is `<file>::<title>`, inside its describe blocks
     joined by ' > '; a file that runs no node:test case (a plain script) is one case named by its path, which fails
-    when the script exits non-zero. `base` is the folder node ran in."""
+    when the script exits non-zero. `base` is the folder node ran in. Node before 24 writes no `file` on a case:
+    `only`, the absolute path of the one file node ran, stands in (run_tests runs node once per file for that)."""
     root = _junit_root(text)
     if root is None:
         return []
     out = []
 
     def case(tc, path):
-        name, fabs = tc.get("name") or "", tc.get("file") or ""
+        name, fabs = tc.get("name") or "", tc.get("file") or only or ""
         file = _relto(top, fabs)
         whole = bool(fabs) and not path and os.path.realpath(os.path.join(base, name)) == os.path.realpath(fabs)
         full = " > ".join(path + [name])
@@ -1534,7 +1537,8 @@ def _collect(top, runner, cmd, output, t0) -> list:
     if name in ("jest", "vitest"):
         return parse_jest_json(_read(report), top) if report and os.path.exists(report) else []
     if name == "node":
-        return parse_node_junit(_read(report), top, cmd["cwd"]) if report and os.path.exists(report) else []
+        return parse_node_junit(_read(report), top, cmd["cwd"], cmd.get("only") or "") \
+            if report and os.path.exists(report) else []
     if name == "unittest":
         return parse_unittest(output, top, runner, cmd.get("names") or ())
     if name == "go":
@@ -1562,6 +1566,18 @@ def run_tests(top, runner, files=(), ids=(), related=(), all_=False, env=None, s
         longer exist), log}"""
     top = str(top)
     files, ids, related = list(files), list(ids), list(related)
+    if runner["name"] == "node" and not all_:
+        # Node before 24 names no file in its JUnit cases, so a case of a run over several files belongs to none of
+        # them: run node once per test file, each case then belongs to its run's file
+        targets = list(dict.fromkeys(files + [_id(i).split("::")[0] for i in ids if _id(i).split("::")[0] not in files]))
+        if len(targets) > 1:
+            parts = []
+            for k, f in enumerate(targets):
+                part_log = f"{log}.{k}" if log else None
+                parts.append(run_tests(top, runner, [f] if f in files else [],
+                                       [i for i in ids if _id(i).split("::")[0] == f], env=env, stream=stream,
+                                       log=part_log, timeout=timeout))
+            return _merged_runs(parts, files, ids, log)
     tmpd = core.STATE / "tests" / "tmp"
     tmpd.mkdir(parents=True, exist_ok=True)
     work = Path(tempfile.mkdtemp(prefix="run-", dir=str(tmpd)))
@@ -1630,6 +1646,25 @@ def run_tests(top, runner, files=(), ids=(), related=(), all_=False, env=None, s
             "passed": sum(c["status"] == "passed" for c in cases), "failed": len(failures),
             "skipped": sum(c["status"] == "skipped" for c in cases), "failures": failures, "zero": zero,
             "crash": crash, "not_found": not_found, "log": str(log) if log.parent != work else ""}
+
+
+def _merged_runs(parts, files, ids, log) -> dict:
+    """The runs of one selection, one per node test file, as one run (run_tests' result)."""
+    if log:
+        with open(log, "w") as out:
+            for p in parts:
+                if p["log"] and os.path.exists(p["log"]):
+                    out.write(Path(p["log"]).read_text(errors="replace"))
+                    os.remove(p["log"])
+    cases = [c for p in parts for c in p["cases"]]
+    failures = [c for p in parts for c in p["failures"]]
+    return {**parts[0], "files": list(files), "ids": [_id(i) for i in ids],
+            "argv": [x for p in parts for x in p["argv"] + [";"]][:-1],
+            "rc": next((p["rc"] for p in parts if p["rc"]), 0), "secs": round(sum(p["secs"] for p in parts), 2),
+            "cases": cases, "count": len(cases), "passed": sum(p["passed"] for p in parts), "failed": len(failures),
+            "skipped": sum(p["skipped"] for p in parts), "failures": failures, "zero": all(p["zero"] for p in parts),
+            "crash": any(p["crash"] for p in parts), "not_found": [n for p in parts for n in p["not_found"]],
+            "log": str(log) if log else ""}
 
 
 # --------------------------------------------------------------------------- recording

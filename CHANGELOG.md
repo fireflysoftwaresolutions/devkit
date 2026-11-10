@@ -23,7 +23,9 @@ plans it wrote itself.
   `dev test prove` run its files with Node, a `node:test` case by its title and a plain test script as one test. A
   script that builds before its tests (a `pretest` script, `tsc && node --test dist/test/`), passes a Node option
   devkit does not know without `=`, or pipes or redirects its tests (`node --test | tee out.txt`), gets none: its
-  tests are listed as not proven instead of run on stale output or with a broken command line.
+  tests are listed as not proven instead of run on stale output or with a broken command line. Node before 24 (such
+  as Node 22) names no file in its JUnit report, so devkit runs node once per test file and each case belongs to its
+  file; it works on Node 20, 22, 24 and 26.
 - **Plain `dev test` started hours of tests on a long-lived branch.** A branch 1,388 files from `main` selected 205 test
   files, about 111 minutes. When a branch differs from its base in 100 or more files that reach 50 or more test files,
   `dev test` now starts none of them, names the tests of the files you touched now as `dev test run <files>`, and
