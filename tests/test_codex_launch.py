@@ -27,6 +27,7 @@ from test_acceptance_crew_sessions import Crew  # noqa: E402  (activates the her
 LEAD = "01a1c190-2665-7ca1-9a5d-046a95cee8bc"  # the Codex tech lead's thread (UUIDv7, like Codex's own)
 CLAUDE_LEAD = "7b2e0c4d-1a2b-4c3d-8e9f-0a1b2c3d4e5f"
 TANK = "01a1c190-64c7-7ac1-81c6-000000000001"
+TANK_2 = "01a1c190-64c7-7ac1-81c6-000000000005"  # a second Backend engineer, spawned in the same turn
 TRINITY = "01a1c190-64c7-7ac1-81c6-000000000002"
 HELPER = "01a1c190-64c7-7ac1-81c6-000000000003"
 REVIEWER = "01a1c190-64c7-7ac1-81c6-000000000004"
@@ -169,6 +170,35 @@ class CodexLaunchRecord(CodexCrew):
         self.assertEqual(self.launch_of(s, TANK)["key"], "call_tank_newest")
         self.assertEqual(self.launch_of(s, TRINITY)["key"], f"call_{TRINITY[-6:]}")  # untouched
 
+    def test_two_starts_at_once_with_two_spawns_of_their_type_waiting_take_neither_and_the_lead_is_told(self):
+        s = self.lead(plan="api=30m [backend]; db=30m [backend]")
+        s.ok("progress", "assign", "db", "--to", "Tank", "--scope", "db/**")
+        self.spawn_call(s, "tank", "api", "call_tank_api")  # Codex wrote both calls, no SubAgentActivity yet,
+        self.spawn_call(s, "tank", "db", "call_tank_db")  # and neither agent's session_meta
+        rids = []
+        for aid in (TANK, TANK_2):
+            self.rollout(aid).parent.mkdir(parents=True, exist_ok=True)
+            self.rollout(aid).write_text("")
+            rids.append(s.hook("subagent-start", s.payload("SubagentStart", agent_id=aid, agent_type="tank",
+                                                            model="gpt-6-luna", transcript_path=str(self.rollout(aid))),
+                               wait=False))
+        for rid in rids:
+            s._hook_result(rid)
+        self.assertEqual([self.launch_of(s, aid).get("key") for aid in (TANK, TANK_2)],
+                         [f"codex-{TANK}", f"codex-{TANK_2}"])  # neither guessed: one would take the other's task
+        self.assertEqual([self.step(s, name)["owner"] for name in ("api", "db")], ["main", "main"])
+        told = [m["text"] for m in s.messages() if m.get("to") == "main" and "could not tell which" in m["text"]]
+        self.assertEqual(sorted(aid for aid in (TANK, TANK_2) for t in told if aid in t), sorted([TANK, TANK_2]), told)
+        self.assertTrue(all("“api”" in t and "“db”" in t for t in told), told)
+
+    def test_of_two_spawns_of_its_type_waiting_a_start_takes_the_one_its_own_task_names(self):
+        s = self.lead(plan="api=30m [backend]; db=30m [backend]")
+        self.spawn_call(s, "tank", "api", "call_tank_api")
+        self.spawn_call(s, "tank", "db", "call_tank_db")
+        self.agent_rollout(s, TANK, "tank", "api")  # its session_meta names its task; no SubAgentActivity yet
+        self.subagent_start(s, TANK, "tank")
+        self.assertEqual(self.launch_of(s, TANK)["key"], "call_tank_api")
+
     def test_codex_own_helper_takes_no_launch_from_the_spawn_waiting_for_its_agent(self):
         s = self.lead()
         self.spawn_call(s, "", "list_files", "call_worker")  # a spawn of Codex's default role, its agent not started
@@ -206,6 +236,16 @@ class CodexLaunchLimits(CodexCrew):
         self.assertEqual(len(notice), 1, s.messages())
         self.assertIn("Frontend engineer (Trinity)", notice[0])
         self.assertEqual([r["target"] for r in self.audit("crew.over-limit")], ["Trinity"])
+
+    def test_the_notice_of_a_launch_out_of_order_says_why_in_whole_sentences(self):
+        s = self.lead(max_parallel=1)
+        s.prompt("Carry on with the plan")  # a later turn: the plan's steps are no longer this turn's request
+        self.spawn(s, TRINITY, "trinity", "ui")  # “api” comes first in the plan, and one slot is all there is
+        notice = [m["text"] for m in s.messages() if m.get("to") == "main" and "over the crew's limit" in m["text"]]
+        self.assertEqual(len(notice), 1, s.messages())
+        self.assertIn("which devkit cannot refuse for a Codex launch before its agent starts: “api” comes first",
+                      notice[0])
+        self.assertIn('--why "…". It was told to stop and report', notice[0])
 
     def test_an_over_limit_member_may_read_but_not_edit(self):
         s = self.lead(max_parallel=1)

@@ -26,15 +26,16 @@ import time
 from pathlib import Path
 
 SPAWN_TAIL = 4_000_000  # bytes of a spawning thread's rollout read for its spawn calls, from the end
-META_MAX = 4_000_000  # a session_meta record carries the base instructions: tens of kilobytes
 THREAD = re.compile(r"[A-Za-z0-9_-]{1,80}")
 
 
 def session_meta(path) -> dict:
-    """The payload of a Codex rollout's first record, its session_meta; {} when there is none (yet)."""
+    """The payload of a Codex rollout's first record, its session_meta; {} when there is none (yet). It reads as much
+    of the first line as progress does (progress.CODEX_META_MAX: the record carries the base instructions)."""
+    from .progress import CODEX_META_MAX
     try:
         with open(path, "rb") as fh:
-            line = fh.readline(META_MAX)
+            line = fh.readline(CODEX_META_MAX)
         rec = json.loads(line) if line.strip() else {}
     except (OSError, TypeError, ValueError):
         return {}
@@ -105,17 +106,16 @@ def rollout_of(near: Path, thread: str):
     return hit[-1] if hit else None
 
 
-def find(data: dict, launches: dict):
-    """What spawned this Codex agent -> {key (the spawn call's id, or codex-<agent id>), task, type, parent (an agent
-    id, or main)}, or None: Codex's own helper, or an agent no spawn names that runs no crew member. Read from the
-    agent's own session_meta, then the spawning thread's rollout: the call Codex recorded as starting this agent,
-    else the newest call of its agent type that started no other agent and no launch record holds."""
-    from . import crew
+def look(data: dict):
+    """What the rollouts say about this Codex agent's spawn, read before record takes the session's lock (no rollout
+    is read under it) -> {spawn: {task, type, parent (an agent id, or main)}, mine: whether its own session_meta was
+    read, sources: [(spawn calls, {call id: agent id started})] of the spawning thread}, or None: Codex's own helper.
+    The agent's own session_meta comes first; the spawning thread's rollout gives the calls."""
     aid, sid = str(data.get("agent_id") or ""), str(data.get("session_id") or "")
     kind = str(data.get("agent_type") or "")
     own = str(data.get("agent_transcript_path") or data.get("transcript_path") or "")
     meta = session_meta(own) if own else {}
-    spawn = {"key": "", "task": "", "type": kind, "parent": "main"}
+    spawn = {"task": "", "type": kind, "parent": "main"}
     mine = meta.get("id") == aid  # the agent's own rollout (SubagentStart, and SubagentStop's agent_transcript_path)
     if mine:
         source = thread_spawn(meta)
@@ -129,20 +129,37 @@ def find(data: dict, launches: dict):
     paths = [Path(own)] if own and not mine else []  # a payload that names the spawning thread's rollout itself
     found = rollout_of(Path(own), thread) if own else None
     paths += [found] if found and found not in paths else []
+    # another thread's rollout gives no calls: a spawned agent's opens with a copy of its parent's turns
+    sources = [spawn_calls(path) for path in paths if session_meta(path).get("id") in (None, "", thread)]
+    return {"spawn": spawn, "mine": mine, "sources": sources}
+
+
+def find(data: dict, seen: dict, launches: dict):
+    """Which spawn started this Codex agent -> {key (the spawn call's id, or codex-<agent id>), task, type, parent,
+    waiting: the task names of the spawns it could not choose between}, or None: an agent no spawn names that runs no
+    crew member. The call Codex recorded as starting this agent; else, of the calls of its agent type that started no
+    other agent and no launch record holds, the one its own task names, or the only one. When two or more remain and
+    nothing tells them apart, none: two agents of one type started at once would take the same call, or each other's
+    task. Run under the session's lock with the launch records read there, so a call another start just took is held."""
+    from . import crew
+    aid = str(data.get("agent_id") or "")
+    spawn = dict(seen["spawn"], key="", waiting=[])
     held = {k for k, v in (launches or {}).items() if isinstance(v, dict) and v.get("agent_id") not in (None, "", aid)}
-    for path in paths:
-        if session_meta(path).get("id") not in (None, "", thread):
-            continue  # another thread's rollout: a spawned agent's opens with a copy of its parent's turns
-        calls, started = spawn_calls(path)
-        call = next((c for c in calls if started.get(c["call_id"]) == aid), None) or next(
-            (c for c in reversed(calls) if c["call_id"] not in started and c["call_id"] not in held
-             and c["agent_type"] in ("", spawn["type"])), None)
+    for calls, started in seen["sources"]:
+        call = next((c for c in calls if started.get(c["call_id"]) == aid), None)
+        if not call:
+            free = [c for c in calls if c["call_id"] not in started and c["call_id"] not in held
+                    and c["agent_type"] in ("", spawn["type"])]
+            named = [c for c in free if spawn["task"] and c["task_name"] == spawn["task"]]
+            pick = named or free
+            call = pick[0] if len(pick) == 1 else None
+            spawn["waiting"] = [c["task_name"] or c["call_id"] for c in pick] if len(pick) > 1 else spawn["waiting"]
         if call:
             spawn.update(key=call["call_id"], task=spawn["task"] or call["task_name"],
-                         type=spawn["type"] or call["agent_type"])
+                         type=spawn["type"] or call["agent_type"], waiting=[])
             break
     member = crew.member(spawn["type"]) if spawn["type"] else None
-    if not (mine and spawn["task"]) and not spawn["key"] and not (member and not member.get("main")):
+    if not (seen["mine"] and spawn["task"]) and not spawn["key"] and not (member and not member.get("main")):
         return None  # nothing names a spawn, and no crew member runs it
     spawn["key"] = spawn["key"] or f"codex-{aid}"
     return spawn
@@ -163,36 +180,72 @@ def record(agent: str, data: dict, judge: bool = True):
     opens its lane and binds the step its task names. `judge`: first ask progress.launch_verdict whether a Claude
     Code launch would have been refused (crew slots, depth, order); False at a stop, where nothing is left to limit.
     -> {key, label, type, parent, why: the refusal, or ""}, or None: an agent recorded already (a new turn of a known
-    agent), Codex's own helper, or a session devkit has no record of."""
-    from . import core, progress
+    agent), Codex's own helper, or a session devkit has no record of. The rollouts are read first; the call is chosen,
+    judged, recorded and bound inside one hold of the session's lock, so two starts at once never take the same call
+    or the same free slot."""
+    from . import core, progress, state
+
+    def known(sess) -> bool:
+        ls = sess.get("launches") if isinstance(sess.get("launches"), dict) else {}
+        return any(isinstance(v, dict) and v.get("agent_id") == aid for v in ls.values())
+
     sid, aid = str(data.get("session_id") or ""), str(data.get("agent_id") or "")
     if not (sid and progress.AGENT_ID.fullmatch(aid)):
         return None
     sess = core.read_json(progress.session_path(agent, sid), {}) or {}
-    if not isinstance(sess, dict) or not sess:
+    if not isinstance(sess, dict) or not sess or known(sess):
         return None
-    launches = sess.get("launches") if isinstance(sess.get("launches"), dict) else {}
-    if any(isinstance(v, dict) and v.get("agent_id") == aid for v in launches.values()):
+    seen = look(data)
+    if not seen:
         return None
-    spawn = find(data, launches)
-    if not spawn:
-        return None
-    label = label_of(spawn)
-    call = {"session_id": sid, "tool_use_id": spawn["key"],
-            "tool_input": {"description": label, "agent_type": spawn["type"]}}
-    if spawn["parent"] != "main":
-        call["agent_id"] = spawn["parent"]
-    why = ""
-    if judge and spawn["key"] not in launches:  # one recorded at its own call was judged there
-        run = progress.load_run(agent, sid)
-        if run and run.get("state") != "done":
-            run = progress.normalize(run)
-            progress.expire_stale(run)
-            why = progress.launch_verdict(agent, call, run) or ""
-    progress.note_agent_launch(agent, call)
-    progress.launch_result(agent, {"session_id": sid, "tool_use_id": spawn["key"],
-                                   "tool_response": {"agentId": aid}})
+    with progress._tx(agent, sid):  # the session's one lock: its launch records and its run
+        sess = state.load(progress.session_path(agent, sid)) or {}
+        if not sess or known(sess):
+            return None
+        launches = sess.get("launches") if isinstance(sess.get("launches"), dict) else {}
+        spawn = find(data, seen, launches)
+        if not spawn:
+            return None
+        label = label_of(spawn)
+        call = {"session_id": sid, "tool_use_id": spawn["key"],
+                "tool_input": {"description": label, "agent_type": spawn["type"]}}
+        if spawn["parent"] != "main":
+            call["agent_id"] = spawn["parent"]
+        why = ""
+        if judge and spawn["key"] not in launches:  # one recorded at its own call was judged there
+            run = progress.load_run(agent, sid)
+            if run and run.get("state") != "done":
+                run = progress.normalize(run)
+                progress.expire_stale(run)
+                why = progress.launch_verdict(agent, call, run) or ""
+        progress.note_agent_launch(agent, call)
+        progress.launch_result(agent, {"session_id": sid, "tool_use_id": spawn["key"],
+                                       "tool_response": {"agentId": aid}})
+        if spawn["waiting"]:
+            _tell_unplaced(agent, sid, aid, spawn, label)
+    if spawn["waiting"]:
+        progress._audit("crew.launch-unplaced", label.split(":")[0].strip() or aid[:8],
+                        f"{len(spawn['waiting'])} spawns of {spawn['type']} waited for their agent: "
+                        f"{', '.join(spawn['waiting'])}"[:300], "unbound", project=sess.get("project") or "",
+                        agent_id=aid[:16])
     return {"key": spawn["key"], "label": label, "type": spawn["type"], "parent": spawn["parent"], "why": why}
+
+
+def _tell_unplaced(agent: str, sid: str, aid: str, spawn: dict, label: str):
+    """Tell the tech lead which launch devkit could not place: an agent started while two or more spawns of its type
+    waited for their agent and nothing said which one was its own. Under record's hold of the session's lock."""
+    from . import crew, progress
+    run = progress.load_run(agent, sid)
+    if not run or run.get("state") == "done":
+        return
+    run = progress.normalize(run)
+    who, kind, tasks = crew.who(label.split(":")[0].strip() or "a crew member"), spawn["type"], spawn["waiting"]
+    progress._post(run, "devkit", "main", f"devkit could not tell which of {len(tasks)} spawns of {kind} started "
+                   f"{who} (Codex agent {aid}): “{'”, “'.join(tasks)}” all waited for their agent, and Codex had not "
+                   f"yet recorded which one started it. It runs with none of their steps rather than a guess. Spawn "
+                   f"one {kind} at a time, or stop it and spawn that step again.", time.time(), from_name="devkit",
+                   kind="notice")
+    progress._save(run, touch_session=False)
 
 
 def mark_over_limit(agent: str, data: dict, launch: dict) -> str:
@@ -200,7 +253,8 @@ def mark_over_limit(agent: str, data: dict, launch: dict) -> str:
     it read but not edit), the steps it took go back to the tech lead, who is told once, and the audit trail records
     it. -> what the member is told: stop now and report."""
     from . import approvals, crew, progress
-    sid, aid, why = str(data.get("session_id") or ""), str(data.get("agent_id") or ""), launch["why"]
+    sid, aid, why = str(data.get("session_id") or ""), str(data.get("agent_id") or ""), launch["why"].strip()
+    why += "" if why.endswith((".", "!", "?")) else "."  # it is followed by the next sentence
     now, who, given = time.time(), crew.who(launch["label"].split(":")[0].strip() or "a crew member"), []
     with progress._tx(agent, sid):
         run = progress.load_run(agent, sid)
@@ -216,9 +270,9 @@ def mark_over_limit(agent: str, data: dict, launch: dict) -> str:
                                                             for s in mine], now)]
             back = f" “{'”, “'.join(given)}” went back to you: launch it when a slot frees (dev crew next)." \
                 if given else ""
-            progress._post(run, "devkit", "main", f"devkit: {who} started over the crew's limit, which a Codex launch "
-                           f"cannot be refused for before its agent starts: {why} It was told to stop and report, and "
-                           f"may read but not edit.{back}", now, from_name="devkit", kind="notice")
+            progress._post(run, "devkit", "main", f"devkit: {who} started over the crew's limit, which devkit cannot "
+                           f"refuse for a Codex launch before its agent starts: {why} It was told to stop and report, "
+                           f"and may read but not edit.{back}", now, from_name="devkit", kind="notice")
             progress._save(run, touch_session=False)
     progress._audit("crew.over-limit", launch["label"].split(":")[0].strip() or aid[:8], why[:300], "marked",
                     project=(run or {}).get("project") or "", agent_id=aid[:16])
