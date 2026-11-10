@@ -20,17 +20,19 @@ dev test run tests/test_parser.py   # these tests
 PHPUnit, or Pest), runs the selection with it, and prints a compact result: each failure with `file:line` and its first
 error line, and the path to the full log. The raw output streams only to a terminal, or with `-v`. A package gets the
 Node runner when its `package.json` test script runs `node --test`, or runs its test scripts with `node`, and `node`
-is on the `PATH`.
+is on the `PATH`. A path you name must be inside the repository: `dev test run ../other/a.test.js`, an absolute path
+outside it, or a symlink that leads out of it is refused with `no test runner for:` and runs nothing.
 
 devkit runs `node` itself, not `npm test`, so it gives no runner to a script it cannot reproduce exactly: one that
 builds before its tests (a `pretest` script, `tsc && node --test dist/test/`, `npm run build && node --test`), which
-would leave the tests to run on stale output, and one that passes a Node option devkit does not know without `=`
-(`--some-option value`), whose value could be the next word. Such a package's tests are never run wrongly: `dev test`
-names them in its `no runner here for:` warning, and `dev test prove` lists them as not proven with the reason. To get
-the runner back, test the sources without a build step (Node runs `.ts` test files directly through its type
-stripping, or through a loader: `node --import tsx --test test/`), and write an unusual option with `=`
-(`--some-option=value`); otherwise run `npm test` yourself. A step after the tests (`node --test && eslint .`) changes
-nothing.
+would leave the tests to run on stale output, one that passes a Node option devkit does not know without `=`
+(`--some-option value`), whose value could be the next word, and one that pipes or redirects its tests
+(`node --test | tee out.txt`, `node --test > out.txt`, `node --test < input.txt`). Such a package's tests are never
+run wrongly: `dev test` names them in its `no runner here for:` warning, and `dev test prove` lists them as not proven
+with the reason. To get the runner back, test the sources without a build step (Node runs `.ts` test files directly
+through its type stripping, or through a loader: `node --import tsx --test test/`), write an unusual option with `=`
+(`--some-option=value`), and drop the pipe or redirect (devkit keeps the full log of every run); otherwise run
+`npm test` yourself. A step after the tests (`node --test && eslint .`) changes nothing.
 
 ### The blast radius
 

@@ -272,6 +272,23 @@ class NodeScriptTests(unittest.TestCase):
         self.assertIsNone(self.node_runner({"pretest": "tsc", "test": "node --test dist/test/"}))
 
 
+class NodeScriptRedirectTests(unittest.TestCase):
+    # a pipe or a redirect on the tests' command sends node's output elsewhere or feeds it input, which devkit cannot
+    # reproduce when it runs node itself: no runner. The words after `|` or `>` used to become the suite, so node
+    # skipped its own discovery. A quoted `|` is a pattern, not a pipe, and a pipe in a step after the tests changes
+    # nothing they run
+    def test_a_pipe_or_redirect_on_the_node_tests_means_no_runner(self):
+        node_runner = NodeScriptTests.node_runner
+        for script in ("node --test | tee out.txt", "node --test > out.txt", "node --test test/ 2>&1 | tap-spec",
+                       "node --test < /dev/null", "node test/a.test.js | tap-spec"):
+            with self.subTest(script):
+                self.assertIsNone(node_runner(self, {"test": script}))
+        self.assertEqual(node_runner(self, {"test": 'node --test --test-name-pattern="a|b" test/'}),
+                         (["node", "--test-name-pattern=a|b", "--test"], ["test/"]))
+        self.assertEqual(node_runner(self, {"test": "node --test test/ && eslint . | tee lint.txt"}),
+                         (["node", "--test"], ["test/"]))
+
+
 # --------------------------------------------------------------------------- blast radius
 
 PY_PROJECT = {
@@ -808,6 +825,43 @@ class ParseTests(unittest.TestCase):
                                  [("tests.test_calc.CalcTests.test_sub", "passed", "tests/test_calc.py")])
 
 
+class JunitPrologTests(unittest.TestCase):
+    """Both JUnit report readers and a document type declaration. A report never declares one, and its entities would
+    expand while the report is read (external entities, billion laughs)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.top = str(Path(self.tmp.name).resolve())
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def read(self, text):
+        """(the JUnit reader's cases, the node:test JUnit reader's cases), each as [(name, status)]."""
+        return ([(c["name"], c["status"]) for c in testx.parse_junit(text, self.top, self.top, "pytest")],
+                [(c["name"], c["status"]) for c in testx.parse_node_junit(text, self.top, self.top)])
+
+    # the readers looked for a declaration in the first 4,096 characters only, so one after a longer comment expanded
+    # (a 5,386-character report gave a 1,000,004-character case name); the whole prolog decides now, a byte order
+    # mark, the XML declaration, processing instructions and comments included
+    def test_a_doctype_anywhere_in_the_prolog_refuses_the_report(self):
+        report = '<testsuites><testcase classname="tests.test_a" name="{}" file="test/a.test.mjs"/></testsuites>'
+        doctype = '<!DOCTYPE testsuites [<!ENTITY boom "expanded">]>'
+        for prolog in ('<?xml version="1.0"?><!--' + "c" * 5000 + "-->",
+                       '\ufeff<?xml version="1.0"?>\n<?xml-stylesheet href="r.xsl"?>\n<!-- one -->\n<!-- two -->\n'):
+            with self.subTest(prolog=prolog[:24]):
+                self.assertEqual(self.read(prolog + doctype + report.format("&boom;")), ([], []))
+                self.assertEqual(self.read(prolog + report.format("plain")),
+                                 ([("plain", "passed")], [("plain", "passed")]))
+
+    # a failure that quotes an HTML page (a web test's response body) carries `<!DOCTYPE html>` in its text, after the
+    # prolog: the report is read
+    def test_a_failure_that_quotes_an_html_page_is_read(self):
+        report = ('<?xml version="1.0"?><testsuites><testcase classname="tests.test_page" name="renders" '
+                  'file="test/page.test.mjs"><failure message="unexpected page"><![CDATA[<!DOCTYPE html><html>'
+                  '<body>Not found</body></html>]]></failure></testcase></testsuites>')
+        self.assertEqual(self.read(report), ([("renders", "failed")], [("renders", "failed")]))
+
 
 # --------------------------------------------------------------------------- running a real unittest project
 
@@ -1031,6 +1085,23 @@ class RunTests(unittest.TestCase):
             self.assertNotEqual(logs[0], logs[1])
             for log in logs:
                 self.assertIn("AssertionError: -1 != 3", Path(log).read_text())
+
+
+class OutsidePathTests(unittest.TestCase):
+    # `dev test run` runs this repository's tests: a path outside it, relative, absolute, or a symlink out of it, is
+    # refused before anything runs (`dev test run ../outside.test.js` built `node --test ../outside.test.js`)
+    def test_a_test_file_outside_the_repository_is_refused(self):
+        with Env() as e, mock.patch.object(testx.shutil, "which", lambda n: "/opt/bin/node" if n == "node" else None):
+            r = e.repo({"package.json": json.dumps({"scripts": {"test": "node --test"}}),
+                        "test/in.test.js": "require('node:test')('in', () => {});\n"})
+            outside = e.root / "outside.test.js"
+            outside.write_text("require('node:fs').writeFileSync(__filename + '.ran', '');\n")
+            (r / "test" / "link.test.js").symlink_to(outside)
+            for path in ("../outside.test.js", str(outside), "test/link.test.js"):
+                with self.subTest(path):
+                    rc, out, err = dev(r, "run", path)
+                    self.assertEqual((rc, f"no test runner for: {path}" in err), (2, True), out + err)
+            self.assertFalse(Path(f"{outside}.ran").exists(), "the file outside the repository ran")
 
 
 def seed(r, *fails):

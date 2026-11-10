@@ -392,14 +392,20 @@ def _node_args(args):
     return opts, args[i:]
 
 
+# A pipe or a redirect outside quotes and escapes (group 1): `node --test | tee out.txt`, `node --test > out.txt`
+_SHELL_IO = re.compile(r"""'[^']*'|"(?:\\.|[^"\\])*"|\\.|([|<>])""")
+
+
 def _node_suite(script: str):
     """A package test script that runs node -> (node's own flags, what it runs), or None. `node --test [flags]
     [paths or globs]` gives its flags and paths ([] for node's own discovery); plain `node <test script>` calls joined
     by `&&` give their scripts, which `node --test` runs as one test each (a script fails when it exits non-zero).
 
     None when devkit cannot run what the script runs: a step before the tests (a build such as `tsc`, or a node
-    script that is no test) would be skipped and leave the tests to run on stale output, and a node option devkit does
-    not know, written without `=`, leaves the paths unknown. A step after the tests changes nothing they run."""
+    script that is no test) would be skipped and leave the tests to run on stale output, a node option devkit does
+    not know, written without `=`, leaves the paths unknown, and a pipe or a redirect on the tests (`| tee out.txt`,
+    `> out.txt`, `< input`) sends their output elsewhere or feeds them input. A step after the tests changes nothing
+    they run."""
     flags, suite, tested, runs, before = [], [], False, False, False
     for part in re.split(r"&&|\|\||;", script or ""):
         try:
@@ -420,7 +426,7 @@ def _node_suite(script: str):
         if not (test or script_test):  # another command, or a script that is no test (a build, another framework)
             before = True
             continue
-        if before:
+        if before or any(m.group(1) for m in _SHELL_IO.finditer(part)):
             return None
         runs = True
         if script_test:  # a test script of its own; the words after it are its arguments
@@ -1205,14 +1211,28 @@ def _jvm_file(cls: str, base: str, top: str, ext_hint: str = "") -> str:
     return rel + ".java"
 
 
+# What XML allows before the root element besides a document type declaration: a byte order mark, then whitespace, the
+# XML declaration, processing instructions, and comments
+_XML_PROLOG = re.compile(r"﻿?(?:\s+|<\?.*?\?>|<!--.*?-->)*", re.S)
+
+
+def _junit_root(text):
+    """The root element of a JUnit XML report, or None. A report never declares a document type, and the entities of
+    one would expand while it is read (external entities, billion laughs): a declaration anywhere in the prolog, after
+    comments of any length, refuses the report. `<!DOCTYPE` in a failure's text, after the prolog, is only text."""
+    text = text.decode("utf-8", "replace") if isinstance(text, bytes) else (text or "")
+    if text.startswith("<!", _XML_PROLOG.match(text).end()):
+        return None
+    try:
+        return ET.fromstring(text)
+    except ET.ParseError:
+        return None
+
+
 def parse_junit(text, top, base, runner) -> list:
     """JUnit XML (pytest --junitxml, surefire/failsafe, gradle test-results, phpunit --log-junit) -> cases."""
-    text = text.decode("utf-8", "replace") if isinstance(text, bytes) else (text or "")
-    if re.search(r"<!(DOCTYPE|ENTITY)", text[:4096], re.I):  # reports never declare entities (XXE, billion laughs)
-        return []
-    try:
-        root = ET.fromstring(text)
-    except ET.ParseError:
+    root = _junit_root(text)
+    if root is None:
         return []
     out = []
     for tc in root.iter("testcase"):
@@ -1257,12 +1277,8 @@ def parse_node_junit(text, top, base) -> list:
     """node --test --test-reporter=junit -> cases. A node:test case is `<file>::<title>`, inside its describe blocks
     joined by ' > '; a file that runs no node:test case (a plain script) is one case named by its path, which fails
     when the script exits non-zero. `base` is the folder node ran in."""
-    text = text.decode("utf-8", "replace") if isinstance(text, bytes) else (text or "")
-    if re.search(r"<!(DOCTYPE|ENTITY)", text[:4096], re.I):  # reports never declare entities (XXE, billion laughs)
-        return []
-    try:
-        root = ET.fromstring(text)
-    except ET.ParseError:
+    root = _junit_root(text)
+    if root is None:
         return []
     out = []
 
@@ -2064,12 +2080,18 @@ def _verdict(results, json_out, kind, advised=False) -> int:
 
 
 def _explicit(top, runners, paths):
-    """Paths (files, dirs, ids) relative to the cwd -> runner groups, plus what no runner takes."""
+    """Paths (files, dirs, ids) relative to the cwd -> runner groups, plus what no runner takes: a path whose real path
+    is outside the repository (`../x.test.js`, an absolute path, a symlink out of it) is no test of it."""
     groups, bad = {}, []
     tests = _Repo(top).tests
+    real_top = os.path.realpath(top)
     for raw in paths:
         file_part, sep, rest = raw.partition("::")
         absf = os.path.abspath(file_part)
+        real = os.path.realpath(absf)
+        if real != real_top and not real.startswith(real_top.rstrip(os.sep) + os.sep):
+            bad.append(raw)
+            continue
         rel = os.path.relpath(absf, top).replace("\\", "/")
         if os.path.isdir(absf):
             picked = [t for t in tests if rel in (".", "") or t.startswith(rel.rstrip("/") + "/")]
@@ -2615,7 +2637,8 @@ def _audit(a) -> int:
 
 def _options(p, paths=False):
     if paths:
-        p.add_argument("paths", nargs="*", help="test files, directories or runner ids (default: failed, then affected)")
+        p.add_argument("paths", nargs="*", help="test files, directories or runner ids of this repository (default: "
+                                                "failed, then affected)")
     p.add_argument("--failed", action="store_true", help="only the tests that failed last time")
     p.add_argument("--affected", action="store_true", help="only the tests your changes can affect")
     p.add_argument("--all", action="store_true", help="the full suite (once, before the push)")
