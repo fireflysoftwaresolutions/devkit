@@ -1324,19 +1324,21 @@ def _unroutable_lane_command(data: dict, agent: str = "claude"):
         return None
     if _route_subagent_progress(data, agent):
         return None
-    cmd = (data.get("tool_input") or {}).get("command") or ""
-    cmd = " ".join(shlex.quote(str(c)) for c in cmd) if isinstance(cmd, list) else str(cmd)
     from . import guard
-    routed = isinstance((data.get("tool_input") or {}).get("command"), str) and \
-        guard.lane_route(cmd, data["agent_id"]) is not None
-    return _lane_verdict(data, agent, cmd, routed)
+    cmds = _shell_inputs(data)
+    for key, cmd in cmds or [("", "")]:  # each command the call carries (Bash's command, Codex's cmd)
+        routed = bool(key) and len(cmds) == 1 and guard.lane_route(cmd, data["agent_id"]) is not None
+        why = _lane_verdict(data, agent, cmd, routed)
+        if why:
+            return why
+    return None
 
 
 def _lane_verdict(data: dict, agent: str, cmd: str, routed: bool = False):
     """guard.crew_shell_verdict for a subagent's shell command, with its lane's scope, member, tool level and
     repository: the refusal, or None. `routed`: the lane router gives the command's lane calls to the lane."""
     from . import guard
-    aid, sid, cwd = data["agent_id"], data.get("session_id") or "-", data.get("cwd") or os.getcwd()
+    aid, sid, cwd = data["agent_id"], data.get("session_id") or "-", _shell_cwd(data)  # Codex's workdir, if any
     scope = member = level = base = None  # no lane names no member, so no member folder applies (M124)
     try:
         from . import progress
@@ -1529,13 +1531,13 @@ def _identity_verdict(data: dict):
     """Inside a subagent: ("deny", why) for a shell command that changes who calls devkit; None otherwise."""
     if not data.get("agent_id") or data.get("tool_name") not in SHELL_TOOLS:
         return None
-    cmd = (data.get("tool_input") or {}).get("command") or ""
-    cmd = " ".join(shlex.quote(str(c)) for c in cmd) if isinstance(cmd, list) else str(cmd)
-    try:
-        names = identity_change(cmd, data.get("cwd") or os.getcwd())
-    except Exception:
-        _log(f"identity check: {traceback.format_exc()[-300:]}")
-        names = ["DEVKIT_*"] if "DEVKIT_" in cmd else []  # a crew rule fails closed when the command names one
+    names = []
+    for _, cmd in _shell_inputs(data):  # each command the call carries (Bash's command, Codex's cmd)
+        try:
+            names += identity_change(cmd, _shell_cwd(data))
+        except Exception:
+            _log(f"identity check: {traceback.format_exc()[-300:]}")
+            names += ["DEVKIT_*"] if "DEVKIT_" in cmd else []  # a crew rule fails closed when the command names one
     if not names:
         return None
     return ("deny", f"This changes {', '.join(names[:4])}: devkit's DEVKIT_* variables say who calls devkit, and a "
@@ -1567,16 +1569,17 @@ def _route_subagent_progress(data: dict, agent: str = "claude"):
     calls."""
     aid = data.get("agent_id")
     inp = data.get("tool_input") or {}
-    cmd = inp.get("command")
-    if not aid or data.get("tool_name") not in SHELL_TOOLS or not isinstance(cmd, str):
+    cmds = _shell_inputs(data)  # Bash's command or Codex's cmd: one, held as text, which the rewrite replaces
+    if not aid or len(cmds) != 1 or not cmds[0][0]:
         return None
+    key, cmd = cmds[0]
     from . import guard
     new = guard.lane_route(cmd, str(aid)) or _watch_route(cmd, str(aid))
     if new is None:
         return None
     if not guard.runs_one_command(cmd) and _lane_verdict(data, agent, cmd, routed=True):
         return None  # _unroutable_lane_command gives the refusal
-    return {**inp, "command": new}
+    return {**inp, key: new}
 
 
 def _watch_route(cmd: str, aid: str):
@@ -1662,9 +1665,10 @@ def _speaker_route(data: dict, agent: str = "claude"):
     as it starts, so without the stamp devkit could not tell a wait's caller. Codex may not apply a rewrite; its open
     call in the ledger then names who calls. -> the new tool input, or None."""
     inp = data.get("tool_input") or {}
-    cmd = inp.get("command")
-    if data.get("tool_name") not in SHELL_TOOLS or not isinstance(cmd, str):
+    cmds = _shell_inputs(data)  # Bash's command or Codex's cmd: one, held as text, which the stamp goes on
+    if len(cmds) != 1 or not cmds[0][0]:
         return None
+    key, cmd = cmds[0]
     aid = str(data.get("agent_id") or "")
     if aid and not re.fullmatch(r"[A-Za-z0-9_.:-]{1,80}", aid):
         return None
@@ -1676,12 +1680,12 @@ def _speaker_route(data: dict, agent: str = "claude"):
     except ValueError:
         return None
     if len(argv) > 1 and os.path.basename(argv[0]) == "dev":  # one dev call, the whole command
-        return {**inp, "command": f"{var}={value} {cmd.strip()}"} if argv[1] in wanted else None
-    if not _stampable(cmd, data.get("cwd") or os.getcwd(), wanted):  # eval, sh -c, ( … ) and compound commands
+        return {**inp, key: f"{var}={value} {cmd.strip()}"} if argv[1] in wanted else None
+    if not _stampable(cmd, _shell_cwd(data), wanted):  # eval, sh -c, ( … ) and compound commands
         return None
     if aid and _lane_verdict(data, agent, cmd):
         return None  # the member's lane refuses part of it: _unroutable_lane_command says why
-    return {**inp, "command": f"export {var}={value}; {cmd}"}
+    return {**inp, key: f"export {var}={value}; {cmd}"}
 
 
 _HOOK_TEXT = re.compile(r"\bdevkit\.hooks\b|\bfrom\s+devkit\s+import\b[^\n]*\bhooks\b|(?:^|[\s;&|(`'\"])(?:\S*/)?dev\s+"
@@ -1892,8 +1896,7 @@ def _call_pitfalls(agent: str, data: dict, remember: bool = True, channel: str =
         from . import lessons
         _brief_shown(agent, data, sess)
         inp = data.get("tool_input") or {}
-        cmd = inp.get("command") or ""
-        cmd = " ".join(str(x) for x in cmd) if isinstance(cmd, list) else str(cmd)
+        cmd = _command_of(data)  # Bash's command or Codex's cmd
         files = [x for x in (inp.get("file_path"), inp.get("notebook_path")) if x]
         if not (cmd or files or refused):
             return ""
@@ -2160,9 +2163,46 @@ def _output_rules(data: dict, project: str, text: str, same_call=()) -> tuple:
     return "\n".join(lines + [lessons.ADVICE]), said
 
 
+def _shell_texts(inp) -> list:
+    """The shell commands a tool input carries as plain words, for the rules that read words (command_words): its
+    `command`, then the `cmd` Codex's exec_command sends instead, each once; a list joined word by word without
+    quotes, so the words of `["bash", "-lc", "dev push"]` stay readable. The guard's parsers take
+    guard.tool_commands (_shell_inputs) instead."""
+    out = []
+    for key in ("command", "cmd"):
+        v = inp.get(key) if isinstance(inp, dict) else None
+        v = " ".join(str(x) for x in v) if isinstance(v, list) else v
+        if isinstance(v, str) and v and v not in out:
+            out.append(v)
+    return out
+
+
 def _command_of(data: dict) -> str:
-    cmd = (data.get("tool_input") or {}).get("command") or ""
-    return " ".join(str(x) for x in cmd) if isinstance(cmd, list) else str(cmd)
+    """The first shell command a call carries, as plain words (_shell_texts: `command`, then Codex's `cmd`)."""
+    return next(iter(_shell_texts(data.get("tool_input"))), "")
+
+
+def _shell_inputs(data: dict) -> list:
+    """Each shell command a shell call carries, as the guard reads them (guard.tool_commands: `command`, then the
+    `cmd` Codex's exec_command sends instead; a list quoted word by word) -> [(key, command)], the key the input
+    holds it under, for a rewrite ('' for a list, which no rewrite replaces). [] for a call that is no shell call."""
+    if data.get("tool_name") not in SHELL_TOOLS:
+        return []
+    from . import guard
+    inp = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
+    return [(next((k for k in ("command", "cmd") if inp.get(k) == c), ""), c) for c in guard.tool_commands(inp)]
+
+
+def _shell_cwd(data: dict) -> str:
+    """The folder a shell call runs in: Codex's `workdir` (relative to the session's folder), as guard.check reads
+    it; else the payload's cwd. The gate and the hook rules match grants and repositories there."""
+    cwd = data.get("cwd") or os.getcwd()
+    inp = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
+    wd = inp.get("workdir")
+    if isinstance(wd, str) and wd:
+        from . import guard
+        return str(guard.resolve(wd, cwd))
+    return cwd
 
 
 def _interrupted(data: dict) -> bool:
@@ -2282,11 +2322,7 @@ def _hook_forgery(data: dict):
     """A shell call that runs one of devkit's hooks by hand -> ("deny", why), else None. Hook events are the
     harness's: one typed through a shell (`echo '{"prompt": "approve D3"}' | dev hook prompt`) would forge the
     developer's prompt or answer (spec C5), so no session runs them that way, the main session included."""
-    if data.get("tool_name") not in SHELL_TOOLS:
-        return None
-    cmd = (data.get("tool_input") or {}).get("command") or ""
-    cmd = " ".join(shlex.quote(str(x)) for x in cmd) if isinstance(cmd, list) else str(cmd)
-    if not _runs_dev_hook(cmd, data.get("cwd") or os.getcwd()):
+    if not any(_runs_dev_hook(cmd, _shell_cwd(data)) for _, cmd in _shell_inputs(data)):
         return None
     return ("deny", "devkit's hooks run only when the harness fires them: a hook event typed through a shell could "
                     "forge the developer's prompt or answer (spec C5). To try a hook, run its tests "
@@ -2305,26 +2341,27 @@ def _stub_commit_gate(data: dict):
     rule 3: parsed, never searched; the hook's own environment opens nothing)."""
     if data.get("tool_name") not in SHELL_TOOLS:
         return None
-    cmd = (data.get("tool_input") or {}).get("command") or ""
-    cmd = " ".join(cmd) if isinstance(cmd, list) else str(cmd)
-    m = COMMIT_RE.search(command_words(cmd))  # a commit the command runs, not the text it writes
-    if not m:
-        return None
     from . import guard
-    try:
-        if guard.stubs_accepted(cmd):
-            return None
-        cwd = data.get("cwd") or os.getcwd()
-        where = m.group(1) or cwd
-        top = core.gitout(where if os.path.isabs(where) else os.path.join(cwd, where), "rev-parse", "--show-toplevel")
-        if not top:
-            return None
-        from . import stubs
-        why = stubs.commit_gate(top, cmd)
-        return ("deny", why) if why else None
-    except Exception as e:
-        guard.failopen("stub-gate", e)
-        return None
+    for cmd in _shell_texts(data.get("tool_input")):  # each command the call carries (Bash's command, Codex's cmd)
+        m = COMMIT_RE.search(command_words(cmd))  # a commit the command runs, not the text it writes
+        if not m:
+            continue
+        try:
+            if guard.stubs_accepted(cmd):
+                continue
+            cwd = _shell_cwd(data)  # Codex's workdir, if any: the repository the commit runs in
+            where = m.group(1) or cwd
+            top = core.gitout(where if os.path.isabs(where) else os.path.join(cwd, where), "rev-parse",
+                              "--show-toplevel")
+            if not top:
+                continue
+            from . import stubs
+            why = stubs.commit_gate(top, cmd)
+            if why:
+                return ("deny", why)
+        except Exception as e:
+            guard.failopen("stub-gate", e)
+    return None
 
 
 def _crew_limits(agent: str, data: dict):
@@ -2505,10 +2542,9 @@ def _irreversible_main(agent: str, data: dict):
     from . import guard as g
     tool, inp = str(data.get("tool_name") or ""), data.get("tool_input") or {}
     cwd, sid = data.get("cwd") or os.getcwd(), data.get("session_id") or ""
-    if tool in SHELL_TOOLS:
-        cmd = inp.get("command") or ""
-        cmd = " ".join(shlex.quote(str(c)) for c in cmd) if isinstance(cmd, list) else str(cmd)
-        return g.irreversible_verdict(cmd, cwd, agent=agent, session=sid)
+    if tool in SHELL_TOOLS:  # each command the call carries (Bash's command, Codex's cmd), where it runs (workdir)
+        return next(filter(None, (g.irreversible_verdict(cmd, _shell_cwd(data), agent=agent, session=sid)
+                                  for _, cmd in _shell_inputs(data) or [("", "")])), None)
     if tool.startswith("mcp__"):
         return g.irreversible_tool_verdict(tool, inp, cwd, agent=agent, session=sid)
     return None
@@ -2522,8 +2558,7 @@ def _record_bypasses(agent: str, data: dict):
     if data.get("agent_id") or data.get("tool_name") not in SHELL_TOOLS or not uses:
         return
     sid = data.get("session_id") or "-"
-    cmd = (data.get("tool_input") or {}).get("command") or ""
-    cmd = " ".join(shlex.quote(str(c)) for c in cmd) if isinstance(cmd, list) else str(cmd)
+    cmd = "; ".join(c for _, c in _shell_inputs(data))  # Bash's command, Codex's cmd
     try:
         from . import progress
         mode = progress.mode_of(progress.load_run(agent, sid) or {})
@@ -2723,9 +2758,9 @@ def _guard(agent: str, data: dict, held: dict):
     _log(f"guard {agent} {decision}: {reason[:160]}")
     from . import audit
     tin = data.get("tool_input") or {}
-    audit.record(f"guard.{decision}", tin.get("command") or tin.get("file_path") or data.get("tool_name") or "",
-                 reason[:400], decision, tool=data.get("tool_name") or "", agent_id=data.get("agent_id") or "",
-                 refusal_id=rid)
+    audit.record(f"guard.{decision}", tin.get("command") or tin.get("cmd") or tin.get("file_path") or
+                 data.get("tool_name") or "", reason[:400], decision, tool=data.get("tool_name") or "",
+                 agent_id=data.get("agent_id") or "", refusal_id=rid)
     held["recorded"] = True
     print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": decision,
                                              "permissionDecisionReason": reason}}))
@@ -2751,7 +2786,7 @@ def _acts(data: dict) -> bool:
     guard.check reads as one, Monitor's included), a file write or patch, a WebFetch, an MCP tool."""
     tool, inp = str(data.get("tool_name") or ""), data.get("tool_input")
     return tool in SHELL_TOOLS or tool in _ACTING_TOOLS or tool.startswith("mcp__") or \
-        (isinstance(inp, dict) and isinstance(inp.get("command"), (str, list)))
+        (isinstance(inp, dict) and any(isinstance(inp.get(k), (str, list)) for k in ("command", "cmd")))
 
 
 def _guard_failed(agent: str, data: dict, held: dict, exc: BaseException) -> bool:
@@ -2777,7 +2812,7 @@ def _guard_failed(agent: str, data: dict, held: dict, exc: BaseException) -> boo
         from . import audit
         tin = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
         if not held.get("recorded"):
-            audit.record(f"guard.{decision}", str(tin.get("command") or tin.get("file_path") or
+            audit.record(f"guard.{decision}", str(tin.get("command") or tin.get("cmd") or tin.get("file_path") or
                                                   data.get("tool_name") or "")[:400],
                          detail[:400], decision, tool=data.get("tool_name") or "", agent_id=data.get("agent_id") or "",
                          **({"rule": rule} if rule else {}))
@@ -3088,12 +3123,8 @@ def _bulk_rewrite_note(data: dict) -> str:
     """A shell command that rewrote files with a regex (sed -i, perl -pi, a script with re.sub that writes files):
     the agent reads every changed line before it tests, syncs or commits. The guard judges what the shell runs, so a
     message that only mentions a rewrite gets no note (B-fxn17sez8cj)."""
-    if data.get("tool_name") not in SHELL_TOOLS:
-        return ""
-    cmd = (data.get("tool_input") or {}).get("command") or ""
-    cmd = " ".join(shlex.quote(str(c)) for c in cmd) if isinstance(cmd, list) else str(cmd)
     from . import guard
-    if not guard.bulk_rewrite(cmd, data.get("cwd") or os.getcwd()):
+    if not any(guard.bulk_rewrite(cmd, _shell_cwd(data)) for _, cmd in _shell_inputs(data)):
         return ""
     return ("A regex just rewrote files. Read every changed line (`git diff -U0 -- <files>`; for untracked files, "
             "compare with what they said before) before you test, sync or commit: a pattern cannot parse nested "
@@ -3115,10 +3146,10 @@ MILESTONE_CMD = re.compile(r"\bdev\s+(?:progress\s+done|task\s+done|push|pr\s+(?
 
 
 def _shell_words(data: dict) -> str:
-    if (data.get("tool_name") or "") not in SHELL_TOOLS:
+    """command_words of every shell command a call carries (Bash's command, Codex's cmd); '' for another tool."""
+    if data.get("tool_name") not in SHELL_TOOLS:
         return ""
-    cmd = (data.get("tool_input") or {}).get("command") or ""
-    return command_words(" ".join(cmd) if isinstance(cmd, list) else str(cmd))
+    return command_words("; ".join(_shell_texts(data.get("tool_input"))))
 
 
 def note_milestone(data: dict, sess: dict, now: float) -> bool:
@@ -3142,8 +3173,7 @@ def _turn_ending(data: dict) -> str:
     tin = data.get("tool_input") or {}
     if tin.get("run_in_background"):
         return "a background command"
-    cmd = tin.get("command") or ""
-    m = CLOSING_CMD.search(command_words(" ".join(cmd) if isinstance(cmd, list) else str(cmd)))
+    m = CLOSING_CMD.search(_shell_words(data))
     return f"`{' '.join(m.group(0).split())}`" if m else ""
 
 
@@ -3320,19 +3350,17 @@ def post_tool(agent: str):
         except Exception:
             _log(f"post-tool question {agent}: {traceback.format_exc()[-300:]}")
     try:
-        cmd = (data.get("tool_input") or {}).get("command") or ""
-        if isinstance(cmd, list):
-            cmd = " ".join(cmd)
-        words = command_words(cmd)
-        if data.get("tool_name") in SHELL_TOOLS and DELIVERY.search(words):
+        words = _shell_words(data)  # Bash's command, Codex's cmd
+        if DELIVERY.search(words):
             from . import work
             work.request_sync("delivery: " + DELIVERY.search(words).group(0))
-        if data.get("tool_name") in SHELL_TOOLS and CI_TRIGGER.search(words) and not data.get("agent_id"):
+        if CI_TRIGGER.search(words) and not data.get("agent_id"):
             from . import ciwatch  # a push or PR starts CI: watch it, and tell this session how it ended
             # what the command sent to the remote, in the repository it names: a pushed branch or tag, a merge
             # commit on the base branch, a release tag. A local branch or an unpushed commit starts no pipeline
-            raw = (data.get("tool_input") or {}).get("command") or ""  # a list stays a list: its shell's script
-            for top, ref, sha in ciwatch.targets(raw, data.get("cwd") or os.getcwd()):
+            tin = data.get("tool_input") or {}
+            raw = tin.get("command") or tin.get("cmd") or ""  # a list stays a list: its shell's script
+            for top, ref, sha in ciwatch.targets(raw, _shell_cwd(data)):
                 if not core.is_temp(top):
                     ciwatch.start_background(top, session=f"{agent}:{data.get('session_id') or ''}", branch=ref,
                                              sha=sha)
