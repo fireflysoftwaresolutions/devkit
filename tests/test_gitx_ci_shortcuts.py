@@ -7,7 +7,9 @@
   (runs-on), a line of any other kind in the text diff, and YAML anchors, aliases, merge keys, tags or directives
   still need a local run.
 - `dev release` does not wait for main's CI to repeat a merge whose tree a passed pull request run already tested,
-  job by job: a job still running on main that the PR run skipped (a push-only publish) or never ran keeps the wait.
+  job by job and workflow file by workflow file: a job still running on main that the PR run skipped (a push-only
+  publish) or never ran keeps the wait, and so does a job the PR run did not pass that main has not passed yet, even
+  one main does not list yet. A fork's pull request run never stands in.
 
 Offline: the gitx Sandbox (real repositories, `gh` faked); the workflow checks are faked except in the test that runs
 the real actionlint. Run: python3 -m unittest tests.test_gitx_ci_shortcuts -v
@@ -385,21 +387,27 @@ class ResumeTests(unittest.TestCase):
 
 
 RUN_IDS = itertools.count(9000)
+WORKFLOW_IDS = {"ci": 71, "lint": 72}  # the id of each workflow file (`gh run list --json workflowDatabaseId`)
+OWN_REPO, FORK = 501, 502  # repository ids: the project's own, and a contributor's fork
 
 
 def job(name="test", status="completed", conclusion="success"):
     return {"name": name, "status": status, "conclusion": conclusion}
 
 
-def pr_ci(sha, conclusion="success", event="pull_request", workflow="ci", jobs=None):
+def pr_ci(sha, conclusion="success", event="pull_request", workflow="ci", jobs=None, workflow_id=None,
+          head_repo=OWN_REPO):
+    """A pull request run; `head_repo` is the repository its head came from (None: gh cannot read the run)."""
     return {"databaseId": next(RUN_IDS), "status": "completed", "conclusion": conclusion, "workflowName": workflow,
-            "event": event, "headSha": sha, "jobs": [job(conclusion=conclusion)] if jobs is None else jobs}
+            "workflowDatabaseId": workflow_id or WORKFLOW_IDS[workflow], "event": event, "headSha": sha,
+            "head_repo": head_repo, "jobs": [job(conclusion=conclusion)] if jobs is None else jobs}
 
 
-def main_ci(sha, status="in_progress", conclusion="", workflow="ci", jobs=None):
+def main_ci(sha, status="in_progress", conclusion="", workflow="ci", jobs=None, workflow_id=None):
     running = job(status=status, conclusion=conclusion)
     return {"databaseId": next(RUN_IDS), "status": status, "conclusion": conclusion, "workflowName": workflow,
-            "event": "push", "headSha": sha, "jobs": [running] if jobs is None else jobs}
+            "workflowDatabaseId": workflow_id or WORKFLOW_IDS[workflow], "event": "push", "headSha": sha,
+            "head_repo": OWN_REPO, "jobs": [running] if jobs is None else jobs}
 
 
 class ReleaseTests(unittest.TestCase):
@@ -421,13 +429,18 @@ class ReleaseTests(unittest.TestCase):
         return s.head(), pr_head
 
     def runs(self, s, by_sha):
-        """`gh run list --commit <sha>` lists the runs, and `gh run view <id> --json jobs` shows each one's jobs."""
+        """`gh run list --commit <sha>` lists the runs, `gh run view <id> --json jobs` shows each one's jobs, and
+        `gh api repos/acme/widget/actions/runs/<id>` the repository its head came from."""
         for sha, runs in by_sha.items():
-            s.gh.on(["run", "list"], [{k: v for k, v in r.items() if k != "jobs"} for r in runs],
+            s.gh.on(["run", "list"], [{k: v for k, v in r.items() if k not in ("jobs", "head_repo")} for r in runs],
                     when=lambda a, sha=sha: sha in a)
             for r in runs:
                 if r.get("jobs") is not None:
                     s.gh.on(["run", "view", str(r["databaseId"])], {"jobs": r["jobs"]})
+                if r.get("head_repo"):
+                    s.gh.on(["api", f"repos/acme/widget/actions/runs/{r['databaseId']}"],
+                            {"id": r["databaseId"], "repository": {"id": OWN_REPO},
+                             "head_repository": {"id": r["head_repo"]}})
 
     def test_release_does_not_wait_for_main_to_repeat_a_passed_pr_run_on_the_same_tree(self):
         with G.Sandbox() as s:
@@ -466,10 +479,14 @@ class ReleaseTests(unittest.TestCase):
                 self.assertFalse(s.gh.called("release", "create"))
 
     def test_a_push_only_job_the_pr_run_skipped_must_finish_on_main(self):
-        # `publish` runs only on push (if: github.event_name == 'push'): the PR run skipped it, so it never passed
+        # `publish` runs only on push (if: github.event_name == 'push'): the PR run skipped it, so it never passed.
+        # GitHub lists some jobs only once they start (one that calls a reusable workflow, a dynamic matrix, one
+        # waiting on `needs:`), so main not listing it yet proves nothing.
         pr_jobs = [job("test"), job("publish", conclusion="skipped")]
         cases = {
             "it still runs on main": ([job("test", "in_progress", ""), job("publish", "queued", "")], 2),
+            "main does not list it yet": ([job("test", "in_progress", "")], 2),
+            "only a job of another name passed on main": ([job("test", "in_progress", ""), job("publish / build")], 2),
             "it already passed on main": ([job("test", "in_progress", ""), job("publish")], 0),
         }
         for name, (head_jobs, want) in cases.items():
@@ -500,6 +517,27 @@ class ReleaseTests(unittest.TestCase):
                 self.assertEqual(rc, 2, out + err)
                 self.assertIn(f"CI is still running on {head[:7]}", err)
                 self.assertFalse(s.gh.called("release", "create"))
+
+    def test_a_pr_run_from_a_fork_or_one_gh_cannot_read_does_not_stand_in(self):
+        # a fork's pull request run had no secrets: a job that skips its secret-backed steps still reports success
+        for name, head_repo in {"from a fork": FORK, "gh cannot read the run": None}.items():
+            with self.subTest(name), G.Sandbox() as s:
+                head, pr_head = self.merged(s)
+                self.runs(s, {head: [main_ci(head)], pr_head: [pr_ci(pr_head, head_repo=head_repo)]})
+                rc, out, err = G.dev("release")
+                self.assertEqual(rc, 2, out + err)
+                self.assertIn(f"CI is still running on {head[:7]}", err)
+                self.assertFalse(s.gh.called("release", "create"))
+
+    def test_two_workflows_of_one_name_are_told_apart_by_their_file(self):
+        # ci.yml runs on pull requests, deploy.yml only on push, and both say `name: ci`: the PR never ran deploy.yml
+        with G.Sandbox() as s:
+            head, pr_head = self.merged(s)
+            self.runs(s, {head: [main_ci(head, workflow_id=73)], pr_head: [pr_ci(pr_head)]})
+            rc, out, err = G.dev("release")
+            self.assertEqual(rc, 2, out + err)
+            self.assertIn(f"CI is still running on {head[:7]}", err)
+            self.assertFalse(s.gh.called("release", "create"))
 
     def test_a_failed_run_on_head_still_refuses_even_when_the_pr_run_passed(self):
         with G.Sandbox() as s:
