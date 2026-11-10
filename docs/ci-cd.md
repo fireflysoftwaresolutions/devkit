@@ -397,9 +397,9 @@ counts as none, so nothing that stopped early is ever reported as passed:
 | `none` | `4` | no run, or only `skipped`, `neutral`, or `stale` | Nothing verified the commit: the branch has no CI, its workflows skipped it, or origin is no CI host devkit reads |
 
 `dev release` reads the runs of the commit it tags. It refuses when a run failed. While a run is still going, it
-refuses too, unless a commit with the same tree passed, in its pull request run, every job still running: then it
-names that commit and releases without waiting for `main` to repeat the run; a job that runs only on push still holds
-it (see
+refuses too, unless a commit with the same tree passed, in its pull request run from this repository, every job
+still running in the same workflow file: then it names that commit and releases without waiting for `main` to repeat
+the run; a job the pull request run did not pass still holds it, even before `main` lists it (see
 [Delivery › Release](delivery.md#6-release)).
 
 For each failed run, devkit finds the failed jobs and steps and reads the failed log from its **first** error, because

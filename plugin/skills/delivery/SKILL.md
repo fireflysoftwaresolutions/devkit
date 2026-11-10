@@ -149,9 +149,10 @@ signal to stop and reproduce locally.
    CHANGELOG: `dev release` does all three (the guard refuses a raw `gh release create`), and once the release is out
    (not a `--draft`) deletes the branches it merged. Arm a watch on the tag (`dev ci watch --wait --tag v<version>`).
    While `main`'s CI still runs on the merge commit, `dev release` does not wait when a commit with HEAD's tree (a
-   parent of HEAD, or the PR head GitHub links to it) passed, in its pull request run, every job still running on HEAD:
-   it names that commit and releases. A skipped, running or push-only run does not count, a job that runs only on push
-   holds the release until it passes, and a failed run on HEAD still refuses.
+   parent of HEAD, or the PR head GitHub links to it) passed, in its pull request run from this repository (not a
+   fork), every job still running on HEAD in the same workflow file: it names that commit and releases. A skipped,
+   running or push-only run does not count, a job the PR run did not pass holds the release until it passes on HEAD
+   (even before HEAD lists it), and a failed run on HEAD still refuses.
 4. Verify the published artefact: download/install it from the release and smoke-test it.
 5. Update the handoff note: version, what shipped, follow-ups. `dev branch prune` shows no merged branch left.
 
