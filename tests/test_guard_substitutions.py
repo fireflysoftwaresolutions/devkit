@@ -125,12 +125,22 @@ class APathBuiltOnASubstitution(unittest.TestCase):
                    f"cd {h} && printf x > $(pwd -P)/{name}", f"cd {h.parent} && printf x > $(pwd)/{h.name}/{name}",
                    f"cd {h.parent} && printf x > `pwd`/{h.name}/{name}", f"cd / && printf x > $(pwd){str(h)[1:]}/{name}",
                    'rm -rf "$(pwd)"/..', "rm -rf $(pwd)/..", 'cd ~ && rm -rf "$(pwd)"/Development',
-                   "cd ~ && rm -rf $(pwd)/Development", """sh -c 'rm -rf "$(pwd)"/..'"""]
+                   "cd ~ && rm -rf $(pwd)/Development", """sh -c 'rm -rf "$(pwd)"/..'""",
+                   # a command before the pwd may change the folder, so a quoted pwd after it is masked as well
+                   'true && rm -rf "$(pwd)"/..', 'git status && rm -rf "$(pwd)/.."',
+                   'cd ~ && true && rm -rf "$(pwd)"/Development',
+                   # a cd that fails leaves the folder as it was; only `&&` skips what follows it
+                   f"cd {self.here}/missing; rm -rf $(pwd)/..", f'cd {self.here}/missing; rm -rf "$(pwd)"/..',
+                   f"cd {self.here}/missing\nrm -rf $(pwd)/..", f'cd {self.here}/missing\nrm -rf "$(pwd)"/..']
         for cmd in refused:
             with self.subTest(refused=cmd):
                 self.assertEqual(set(self.verdicts(cmd).values()), {"deny"}, self.verdicts(cmd))
+        # a write to a folder the guard cannot place: asked in Claude Code, refused where nobody can be asked
+        for cmd in (f"cd {h} && true && printf x > $(pwd)/{name}", f'cd {h} && true && printf x > "$(pwd)"/{name}'):
+            with self.subTest(placed_nowhere=cmd):
+                self.assertNotIn("allow", self.verdicts(cmd).values(), self.verdicts(cmd))
         for cmd in ('echo x > "$(pwd)/x y"', 'rm -rf "$(pwd)"/build', "echo x > $(pwd)x.txt",
-                    f"cd {self.here} && rm -rf $(pwd)/build"):
+                    f"cd {self.here} && rm -rf $(pwd)/build", f'cd {self.here}/missing && rm -rf "$(pwd)"/build'):
             with self.subTest(allowed=cmd):
                 self.assertEqual(set(self.verdicts(cmd).values()), {"allow"}, self.verdicts(cmd))
         # each one gets the verdict of the command that names the folder itself
@@ -148,10 +158,15 @@ class APathBuiltOnASubstitution(unittest.TestCase):
         target = core.HANDOFF / ("registry" + ".json")
         for cmd in (f"'pwd'() {{ :; }}; printf x > $(pwd){target}", f"functions[pwd]=:; printf x > $(pwd){target}",
                     f'"pwd"() {{ :; }}; printf x > `pwd`{target}', f"function pwd {{ :; }}; printf x > $(pwd){target}",
-                    f". ./env.sh; printf x > $(pwd){target}"):
+                    f". ./env.sh; printf x > $(pwd){target}", "alias pwd='echo /tmp' && rm -rf $(pwd)/..",
+                    "alias pwd='echo /tmp'\neval 'rm -rf \"$(pwd)\"/..'"):
             with self.subTest(refused=cmd):
                 self.assertEqual(set(self.verdicts(cmd).values()), {"deny"}, self.verdicts(cmd))
-        self.assertEqual(set(self.verdicts("echo x > $(pwd)/out.txt").values()), {"allow"})
+        # the words function and alias replace nothing inside an argument or a comment
+        for cmd in ("echo x > $(pwd)/out.txt", 'echo "add functions" > $(pwd)/out.txt',
+                    "echo x > $(pwd)/out.txt # an alias"):
+            with self.subTest(allowed=cmd):
+                self.assertEqual(set(self.verdicts(cmd).values()), {"allow"}, self.verdicts(cmd))
 
 
 class SourceReadsItsInput(unittest.TestCase):

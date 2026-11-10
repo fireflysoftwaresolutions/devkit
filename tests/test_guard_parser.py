@@ -110,7 +110,8 @@ class AwkComparisonsAndRedirections(unittest.TestCase):
                   "awk 'NR>=2050 {print > \"out\"}' f",
                   # awk reads a print on past a newline after `,`, `&&` or `||` (each wrote its file in /usr/bin/awk)
                   "awk '{ print $1,\n$2 > \"f\" }' f", "awk '{ printf \"%s\",\n$1 > \"f\" }' f",
-                  "awk '{ print 1 ||\n0 > \"f\" }' f", "awk '{ print 1 &&\n1 > \"f\" }' f"]
+                  "awk '{ print 1 ||\n0 > \"f\" }' f", "awk '{ print 1 &&\n1 > \"f\" }' f",
+                  "awk '{ print $1,\n\n$2 > \"f\" }' f", "awk '{ print 1 &&\n\n1 > \"f\" }' f"]
         for level in ("review", "read"):
             for cmd in reads:
                 with self.subTest(level=level, reads=cmd):

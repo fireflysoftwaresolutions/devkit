@@ -720,14 +720,14 @@ _PWD_FORM = r"(?:\$\([ \t]*pwd(?:[ \t]+-[LP]+)*[ \t]*\)|`[ \t]*pwd(?:[ \t]+-[LP]
 _PRINTS_A_FOLDER = re.compile(_PWD_FORM)
 # what may replace pwd, in any quoting: a function (`pwd() {…}`, zsh `'pwd'() {…}`, `function pwd`, zsh
 # `functions[pwd]=…`) or an alias
-_PWD_REDEFINED = re.compile(r"p['\"\\]*w['\"\\]*d['\"\\]*[ \t]*\(|\bfunctions?\b|\balias\b")
+_PWD_REDEFINED = re.compile(r"p['\"\\]*w['\"\\]*d['\"\\]*[ \t]*\(|(?:^|[;&|(){}\n])[ \t]*(?:functions?|alias)\b")
 # what a line may hold before a pwd whose folder the guard knows: cds to a folder it reads, each ending its own
 # command, then the words of the pwd's own command (no other substitution, group, pipe or separator)
 _PWD_CD_WORD = (r"(?:[^\s;&|()<>{}`$'\"\\+-][^\s;&|()<>{}`$'\"\\]*|\"[^\"`$\\]*\"|'[^']*'|"
                 r"\"\$\([ \t]*git[ \t]+rev-parse[ \t]+(?:--show-toplevel|--show-cdup|--git-common-dir)[ \t]*\)"
                 r"(?:/[^\"`$\\]*)?\")")
 _PWD_CONTEXT = re.compile(r"[ \t\n]*(?:(?:cd|pushd)(?:[ \t]+(?:-[LP]+|--))*[ \t]+" + _PWD_CD_WORD +
-                          r"[ \t]*(?:&&|;|\n)[ \t\n]*)*(?:[^;&|(){}\n`$\\]|" + _PWD_FORM + r")*")
+                          r"[ \t]*&&[ \t\n]*)*(?:[^;&|(){}\n`$\\]|" + _PWD_FORM + r")*")
 _PWD_WORD_END = frozenset(" \t\n;&|)<>/")
 
 
@@ -768,10 +768,10 @@ def _split_heredocs(cmd: str, mask: str | None = None, top: bool = False):
                 out.append(cmd[i:i + 2])
                 i += 2
                 continue
-            if here and c in "$`" and (j := (_close_paren(cmd, i + 2) if cmd.startswith("$(", i) else
-                                             cmd.find("`", i + 1) + 1 if c == "`" else 0)) > 0 and \
-                    _pwd_is_here(cmd, i, j, True):
-                out.append(".")
+            if mask is not None and c in "$`" and (j := (_close_paren(cmd, i + 2) if cmd.startswith("$(", i) else
+                                                         cmd.find("`", i + 1) + 1 if c == "`" else 0)) > 0 and \
+                    _PRINTS_A_FOLDER.fullmatch(cmd, i, j):
+                out.append("." if here and _pwd_is_here(cmd, i, j, True) else mask)  # any other quoted pwd: masked
                 i = j
                 continue
             q = None if c == '"' else q
@@ -8277,7 +8277,7 @@ def _awk_writes(prog: str) -> bool:
                 continue
         elif c in ";\n{}":  # a `;` of a for header ends no statement, nor does a newline after `,`, `&&`, `||` or `\\`
             printing = printing and (len(opened) > at if c == ";" else c == "\n" and prev in ",&|\\")
-        if not c.isspace() or c == "\n":
+        if not c.isspace() or (c == "\n" and not printing):  # `print a,` and blank lines: still continuing
             prev, word = c, ""
         i += 1
     return False
