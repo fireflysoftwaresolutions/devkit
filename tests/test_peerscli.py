@@ -126,6 +126,13 @@ class SendAndAnswerTests(CliCase):
         rc, out, _ = self.dev("tell", "project", "The API contract changed again")
         self.assertIn("skipped: claude @7be0a41d (ended)", out)
 
+    def test_tell_says_which_sessions_are_not_waiting_and_read_it_later(self):
+        # a sender could not tell that its note would sit unread until the other session's next prompt
+        self.sessions()
+        rc, out, err = self.dev("tell", "@0199a213", "The doctor report is in the scratch folder")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("not waiting: codex @0199a213 (acme/api · main) reads it at its next prompt", out)
+
 
 class WhoMaySendTests(CliCase):
     def test_member_cannot_send(self):

@@ -196,6 +196,8 @@ def _send(a, kind: str) -> int:
           + (", ".join(_label(k, rows) for k in res["to"]) or "nobody"))
     if res.get("skipped"):
         print("  skipped: " + ", ".join(f"{_label(s['key'], {})} ({s['why']})" for s in res["skipped"]))
+    for k in res.get("unarmed") or []:  # nothing wakes it: say so, so the sender never takes delivery for a reading
+        print(f"  not waiting: {_label(k, rows)} reads it at its next prompt")
     if res.get("notified"):
         print("  the developer got a desktop notification for " + ", ".join(_label(k, rows) for k in res["notified"])
               + " (no wait is armed there)")
