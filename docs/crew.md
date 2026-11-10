@@ -81,7 +81,8 @@ Codex fires no PreToolUse hook for `spawn_agent`, so devkit records a Codex laun
 `dev crew brief` prints it: the launch then binds to that step, takes a crew slot, and counts toward the depth limit
 like a Claude Code launch, and the member gets its required skills, known pitfalls, and report format as context.
 Codex cannot refuse a launch before its agent starts, so a launch over the crew's limits is marked instead: its step
-comes back to you with a notice, the member is told to stop and report, and it may read but not edit. Launch in the
+comes back to you with a notice, the member is told to stop and report, and it may read but not edit. Two spawns of
+one member at once, before Codex records which agent each started, take no step, and you are told. Launch in the
 order `dev crew next` shows to avoid that (see [Agents › Hooks](agents.md#hooks)).
 
 ## Leading the crew

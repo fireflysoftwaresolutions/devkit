@@ -303,7 +303,9 @@ is encrypted, so the member's required skills, known pitfalls, and report format
 Codex cannot refuse a launch before its agent starts, so a launch over the crew slots, the depth limit, or the launch
 order is recorded and its lane marked over the limit: its step goes back to the tech lead with a notice, the member is
 told to stop and report, and the guard lets it read but not edit. At SubagentStop, a Codex member's report gets the
-same checks as a Claude Code member's. Codex's own helpers, such as a review or a compaction, get no launch record.
+same checks as a Claude Code member's. Two spawns of one member at once, before Codex records which agent each
+started, take no step, and the tech lead is told. Codex's own helpers, such as a review or a compaction, get no launch
+record.
 
 ### The session context
 
