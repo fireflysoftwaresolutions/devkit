@@ -727,5 +727,25 @@ class StoreSafetyTests(PeerCase):
         self.assertEqual([m["text"] for m in peers.take("codex", CODEX_A)], ["hello"])
 
 
+class PsFailureTests(unittest.TestCase):
+    # The real liveness path (the other tests stub it): a `ps` that fails or is blocked lists no process, and that
+    # must never make a live process read as dead, which would clear its claims and skip its mail
+    def setUp(self):
+        peers._PS.clear()
+        self.addCleanup(peers._PS.clear)
+
+    def test_a_ps_that_lists_nothing_never_makes_a_live_process_dead(self):
+        empty = subprocess.CompletedProcess(["/bin/ps"], 1, stdout="", stderr="ps: not permitted")
+        with mock.patch.object(peers.subprocess, "run", return_value=empty):
+            self.assertIsNot(peers._pid_alive(os.getpid()), False)
+
+    def test_a_process_that_has_ended_still_reads_as_dead(self):
+        child = subprocess.Popen([sys.executable, "-c", "pass"])
+        child.wait()
+        empty = subprocess.CompletedProcess(["/bin/ps"], 1, stdout="", stderr="")
+        with mock.patch.object(peers.subprocess, "run", return_value=empty):
+            self.assertIs(peers._pid_alive(child.pid), False)
+
+
 if __name__ == "__main__":
     unittest.main()

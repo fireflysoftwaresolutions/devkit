@@ -309,7 +309,17 @@ def _prime(pids) -> None:
             seen[int(parts[0])] = " ".join(parts[1].split()) if len(parts) > 1 else ""
     t = time.monotonic()
     for p in want:
-        _PS[p] = (t, seen.get(p))
+        if p in seen:
+            _PS[p] = (t, seen[p])
+            continue
+        # not listed: dead only when the system says so. A `ps` that failed or was blocked lists nothing, and taking
+        # every live process for dead would clear live claims and skip live sessions' mail
+        try:
+            os.kill(p, 0)
+        except ProcessLookupError:
+            _PS[p] = (t, None)
+        except OSError:
+            pass  # cannot tell: _pid_alive asks approvals.pid_alive
 
 
 def _pid_alive(pid, start=None):
