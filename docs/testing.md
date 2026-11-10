@@ -16,9 +16,11 @@ dev test run --all        # the full suite
 dev test run tests/test_parser.py   # these tests
 ```
 
-`dev test` finds the project's test runner (pytest, unittest, Jest, Vitest, Maven, Gradle, Go, PHPUnit, or Pest),
-runs the selection with it, and prints a compact result: each failure with `file:line` and its first error line, and
-the path to the full log. The raw output streams only to a terminal, or with `-v`.
+`dev test` finds the project's test runner (pytest, unittest, Jest, Vitest, Node's `node --test`, Maven, Gradle, Go,
+PHPUnit, or Pest), runs the selection with it, and prints a compact result: each failure with `file:line` and its first
+error line, and the path to the full log. The raw output streams only to a terminal, or with `-v`. A package gets the
+Node runner when its `package.json` test script runs `node --test`, or runs its test scripts with `node`, and `node`
+is on the `PATH`.
 
 ### The blast radius
 
@@ -40,6 +42,20 @@ devkit maps the files you changed to the tests that can see them:
 
 When the radius is everything, devkit runs the part it selected, names the file that caused it, and gives the time a
 full run takes, instead of starting hours of tests on its own. Run the full suite once, before the push: `dev ci --run`.
+
+A branch far from its base, such as a long-lived integration branch, reaches much of the suite the same way. When the
+branch differs from its base in 100 or more files and they reach 50 or more test files, plain `dev test` does not start
+them. It says how many test files and how long they take, names the tests of the files you touched now (your
+uncommitted changes), and exits with code `2`:
+
+```text
+! not started: this branch differs from origin/main in 1,388 file(s), which reach 205 test file(s) (~111m00s)
+  → the tests of the files you touched now: dev test run tests/test_parser.py
+  → or compare with the commit your work started from: dev test --since <ref> · all 205 of them: dev test --affected
+```
+
+Run the command it names, compare with the commit your work started from (`dev test --since <ref>`), or run the whole
+selection with `dev test --affected`.
 
 Mapping is fast: under half a second on repositories of a few thousand files.
 
@@ -124,6 +140,17 @@ never touched):
 The copy carries a clone of the checkout's git repository that shares its objects, so a test that runs git on its
 checkout works there. The dependency folders (`node_modules`, `.venv`, `vendor`) are linked into the copy, not
 copied. The command exits with `1` unless every test proves the change.
+
+- **Each case on its own.** A parametrized test is reported case by case, by its id (`test_label[None]`,
+  `test_label[a]`), each with its own result with and without the change.
+- **Node tests.** Tests that `node --test` runs are proven with Node: a `node:test` case by its title, and a plain test
+  script (one that exits non-zero when a check fails) as one test. In a `test` folder, a script that another file of
+  that folder imports or names in quotes is a helper (a harness, a fake), so it counts as part of the change. Name it
+  to prove it as a test: `dev test prove test/protocol.mjs`.
+- **What cannot run here is listed, not fatal.** A changed test that no runner here can run (no runner for its
+  language, `node` missing, or left out by `--runner`) and a named file that is no test are listed under "not proven"
+  with the reason; the other tests are proven. When nothing is left to prove, the command exits with `2` and lists
+  them.
 
 ## TDD with devkit
 
