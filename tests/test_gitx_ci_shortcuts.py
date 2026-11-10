@@ -2,8 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """Two delivery waits devkit no longer imposes, and the cases where it still must.
 
-- A change of CI host settings only (timeout-minutes, runs-on, concurrency, comments) keeps the local CI evidence of
-  the tree before it, once actionlint and the devkit workflow audit pass: `dev push`, `dev ci --run --resume`.
+- A change of CI host settings only (timeout-minutes, concurrency, comments) keeps the local CI evidence of the tree
+  before it, once actionlint and the devkit workflow audit pass: `dev push`, `dev ci --run --resume`. The runner
+  (runs-on), a line of any other kind in the text diff, and YAML anchors, aliases, merge keys, tags or directives
+  still need a local run.
 - `dev release` does not wait for main's CI to repeat a merge whose tree a passed pull request run already tested.
 
 Offline: the gitx Sandbox (real repositories, `gh` faked); the workflow checks are faked except in the test that runs
@@ -93,6 +95,11 @@ def tree_of(s, files):
     return tree
 
 
+def host_change(s, old, new):
+    """host_only_change between two versions of the workflow (neither committed)."""
+    return gitx.host_only_change(str(s.repo), tree_of(s, {WF: old}), tree_of(s, {WF: new}))
+
+
 def evidenced_branch(s):
     """A branch whose tree passed `dev ci --run` (the marker it records), as cb301e0 was before the timeout change."""
     s.branch("fix/widget")
@@ -110,8 +117,9 @@ class HostSettingsRuleTests(unittest.TestCase):
             "the job timeout and its comment": ([LONGER_TIMEOUT], ["jobs.test.timeout-minutes"]),
             "a step timeout": ([("        timeout-minutes: 20", "        timeout-minutes: 25")],
                                ["jobs.test.steps[2].timeout-minutes"]),
-            "the runner": ([("runs-on: ubuntu-24.04", "runs-on: macos-latest")], ["jobs.test.runs-on"]),
             "cancel-in-progress": ([("cancel-in-progress: true", "cancel-in-progress: false")], ["concurrency"]),
+            "the concurrency group": ([("group: ci-${{ github.ref }}", "group: ci-${{ github.workflow }}-${{ github.ref }}")],
+                                      ["concurrency"]),
             "a job concurrency group": ([("    runs-on: ubuntu-24.04\n",
                                           "    runs-on: ubuntu-24.04\n    concurrency: tests\n")],
                                         ["jobs.test.concurrency"]),
@@ -142,6 +150,12 @@ class HostSettingsRuleTests(unittest.TestCase):
             "a job condition": ({WF: WORKFLOW.replace("    runs-on: ubuntu-24.04\n",
                                                       "    runs-on: ubuntu-24.04\n    if: github.event_name == 'push'\n")},
                                 "jobs.test.if"),
+            # another machine, such as a self-hosted runner, runs the job: a local run must show it still passes
+            "the runner": ({WF: WORKFLOW.replace("runs-on: ubuntu-24.04", "runs-on: [self-hosted, linux]")},
+                           "jobs.test.runs-on"),
+            # YAML reads a carriage return as a line break: the timeout line hides a job condition
+            "a key behind a carriage return": ({WF: WORKFLOW.replace(LONGER_TIMEOUT[0], "timeout-minutes: 60\r    if: false")},
+                                               "jobs.test.if"),
             "another file too": ({WF: WORKFLOW.replace(*LONGER_TIMEOUT), "calc.py": "def add(a, b):\n    return b + a\n"},
                                  "calc.py"),
             "a new workflow": ({".github/workflows/lint.yml": WORKFLOW}, ".github/workflows/lint.yml"),
@@ -157,6 +171,82 @@ class HostSettingsRuleTests(unittest.TestCase):
                     changes, why = gitx.host_only_change(str(s.repo), base, tree_of(s, files))
                     self.assertIsNone(changes)
                     self.assertIn(named, why)
+
+    def test_host_setting_lines_that_change_something_else_need_a_local_run(self):
+        # every line the text diff shows is a host-setting line, but the parse sees what the line belongs to
+        steps = "      - uses: actions/checkout@v4\n"
+        cases = {
+            "a runner group": (WORKFLOW.replace("runs-on: ubuntu-24.04", "runs-on:\n      group: small-runners"),
+                               ("group: small-runners", "group: large-runners"), "jobs.test.runs-on"),
+            "an action input named timeout-minutes": (
+                WORKFLOW.replace(steps, steps + "        with:\n          timeout-minutes: 5\n"),
+                ("timeout-minutes: 5", "timeout-minutes: 10"), "jobs.test.steps[0].with.timeout-minutes"),
+            "a comment line in a run script": (WORKFLOW.replace("run: test -f calc.py", "run: |\n          test -f calc.py"),
+                                               ("run: |\n", "run: |\n          # lint\n"), "jobs.test.steps[1].run"),
+        }
+        with G.Sandbox() as s:
+            evidenced_branch(s)
+            for name, (old, edit, named) in cases.items():
+                with self.subTest(name):
+                    self.assertIn(edit[0], old)
+                    changes, why = host_change(s, old, old.replace(*edit))
+                    self.assertIsNone(changes)
+                    self.assertIn(named, why)
+
+    def test_a_line_devkit_reads_the_same_but_of_another_kind_needs_a_local_run(self):
+        # GitHub's YAML parser is not devkit's: the text diff, not the parse, says which lines changed
+        cases = {
+            "a quoted value": (("name: ci", 'name: "ci"'), 'line 2 of the earlier version (name: ci)'),
+            "a reflowed list": (("    branches: [main]", "    branches:\n      - main"),
+                                "line 6 of the earlier version (branches: [main])"),
+            "a comment after another key": (("- uses: actions/checkout@v4", "- uses: actions/checkout@v4 # v4.2.2"),
+                                            "line 17 of the earlier version (- uses: actions/checkout@v4)"),
+            "a document start": (("# CI for the widget\n", "---\n# CI for the widget\n"), "line 1 (---)"),
+        }
+        with G.Sandbox() as s:
+            evidenced_branch(s)
+            for name, (edit, named) in cases.items():
+                with self.subTest(name):
+                    changes, why = host_change(s, WORKFLOW, WORKFLOW.replace(*edit))
+                    self.assertIsNone(changes)
+                    self.assertIn(f"{WF} changed {named}", why)
+
+    def test_yaml_anchors_aliases_merge_keys_tags_and_directives_need_a_local_run(self):
+        longer = WORKFLOW.replace(*LONGER_TIMEOUT)
+        env = ("    steps:\n", "    env:\n      <<: {MODE: fast}\n    steps:\n")
+        cases = {
+            "an anchor in the earlier version": (WORKFLOW.replace("timeout-minutes: 30", "timeout-minutes: &job 30"),
+                                                 longer, "an anchor (&name) on line 15 of the earlier version"),
+            "an alias in the new version": (WORKFLOW, longer.replace("timeout-minutes: 20", "timeout-minutes: *job"),
+                                            "an alias (*name) on line 21 of the new version"),
+            "a merge key": (WORKFLOW.replace(*env), longer.replace(*env),
+                            "a merge key (<<:) on line 17 of the earlier version"),
+            "a tag": (WORKFLOW.replace("name: ci", "name: !!str ci"), longer.replace("name: ci", "name: !!str ci"),
+                      "a tag (!) on line 2 of the earlier version"),
+            "a directive": ("%YAML 1.1\n---\n" + WORKFLOW, "%YAML 1.1\n---\n" + longer,
+                            "a directive (%) on line 1 of the earlier version"),
+        }
+        with G.Sandbox() as s:
+            evidenced_branch(s)
+            for name, (old, new, named) in cases.items():
+                with self.subTest(name):
+                    changes, why = host_change(s, old, new)
+                    self.assertIsNone(changes)
+                    self.assertIn(f"{WF} uses {named}", why)
+
+    def test_shell_and_expression_syntax_is_not_a_yaml_anchor_alias_or_tag(self):
+        # &&, !=, ${{ !x }}, globs and [ ... ] in run scripts are everyday workflow text, not YAML properties
+        busy = WORKFLOW.replace("branches: [main]", "branches: [main, 'release/**']") + (
+            "      - name: Report\n"
+            "        if: ${{ !cancelled() && github.event_name != 'schedule' }}\n"
+            "        run: |\n"
+            "          test -n \"$GITHUB_SHA\" && ls *.py 2>&1\n"
+            "          [ \"$RUNNER_OS\" != Windows ] || echo \"skipped: *nix only\"\n")
+        with G.Sandbox() as s:
+            evidenced_branch(s)
+            changes, why = host_change(s, busy, busy.replace(*LONGER_TIMEOUT))
+            self.assertEqual(why, "")
+            self.assertEqual(changes, [f"{WF}: jobs.test.timeout-minutes"])
 
 
 # --------------------------------------------------------------------------- dev push
@@ -190,6 +280,18 @@ class PushTests(unittest.TestCase):
             self.assertEqual(rc, 2, out + err)
             self.assertIn("no local CI evidence", err)
             self.assertIn("jobs.test.steps[1].run", err)
+            self.assertEqual(checks.calls, [])
+            self.assertEqual(G.git(s.origin, "branch", "--list", "fix/widget"), "")
+
+    def test_push_still_needs_a_local_run_when_the_runner_changed(self):
+        with G.Sandbox() as s, Checks(FakeChecks()) as checks:
+            evidenced_branch(s)
+            s.commit("ci: run the tests on our own runner", {WF: WORKFLOW.replace("runs-on: ubuntu-24.04",
+                                                                                  "runs-on: [self-hosted, linux]")})
+            rc, out, err = G.dev("push")
+            self.assertEqual(rc, 2, out + err)
+            self.assertIn("no local CI evidence", err)
+            self.assertIn("jobs.test.runs-on", err)
             self.assertEqual(checks.calls, [])
             self.assertEqual(G.git(s.origin, "branch", "--list", "fix/widget"), "")
 

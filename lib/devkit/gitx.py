@@ -405,22 +405,142 @@ def evidence(c, rev="HEAD", host_only=False):
 
 # --------------------------------------------------------------------------- CI host settings
 #
-# A local run cannot exercise what only the CI host acts on: how long a job may run, which runner it gets, and which
-# runs cancel each other. When every file changed since a tree with local evidence is a GitHub workflow that differs
-# only in those keys or in comments, the evidence of that tree holds for the new one, once actionlint and the devkit
-# workflow audit pass on the new workflows. A change to anything else (a run command, a step, a trigger, the
-# permissions, the matrix, any other file) still needs a local run.
+# A local run cannot exercise what only the CI host acts on: how long a job may run and which runs cancel each other.
+# When every file changed since a tree with local evidence is a GitHub workflow that differs only in those keys or in
+# comments, the evidence of that tree holds for the new one, once actionlint and the devkit workflow audit pass on the
+# new workflows. The runner is not one of them: another machine (a self-hosted runner) runs the job differently.
+# GitHub reads workflows with another YAML parser than devkit's, so three conditions must all hold, and two of them
+# read the text alone: devkit's parse is the same once the host keys are left out; every line `git diff` shows is
+# blank, a comment or a host-setting line; and neither version uses YAML anchors, aliases, merge keys, tags or
+# directives, where two parsers are most likely to disagree. A change to anything else (a run command, a step, a
+# trigger, the permissions, the runner, the matrix, any other file) still needs a local run.
 
-HOST_KEYS = {"workflow": ("concurrency",), "job": ("concurrency", "runs-on", "timeout-minutes"),
-             "step": ("timeout-minutes",)}
-HOST_RULE = ("When the only change since a tree with local CI evidence is a CI host setting, that evidence carries "
-             "over: every changed file is a GitHub workflow (.github/workflows/*.yml) that differs only in "
-             "timeout-minutes, runs-on, concurrency (cancel-in-progress) or comments, and actionlint and the devkit "
-             "workflow audit (dev ci audit) pass on it. Any other change (a run command, a step, a trigger, the "
-             "permissions, the matrix, another file) needs a local run.")
+HOST_KEYS = {"workflow": ("concurrency",), "job": ("concurrency", "timeout-minutes"), "step": ("timeout-minutes",)}
+HOST_RULE = ("When only CI host settings changed since a tree with local CI evidence, that evidence carries over. "
+             "Every changed file must be a GitHub workflow (.github/workflows/*.yml) that reads the same once "
+             "timeout-minutes (job and step) and concurrency (group, cancel-in-progress) are left out; every line its "
+             "text diff adds or removes must be blank, a comment, or a timeout-minutes, concurrency, group or "
+             "cancel-in-progress line; neither version may use YAML anchors, aliases, merge keys, tags or "
+             "directives; and actionlint and the devkit workflow audit (dev ci audit) must pass on it. Any other "
+             "change (a run command, a step, a trigger, the permissions, the runner (runs-on), the matrix, another "
+             "file) needs a local run.")
 _WORKFLOW_PATH = re.compile(r"\.github/workflows/[^/]+\.ya?ml")
 _HOST_WHY = {}  # (top, tree) -> why the evidence of an earlier tree did not carry over to `tree`, for no_evidence
 _ABSENT = object()
+# A changed line that may carry over: blank, a comment, or a host-setting key with an optional value and comment. Only
+# spaces indent it, and none of its characters is a line break or a control character in any YAML version (a CRLF
+# ending aside), so it is one line to every parser.
+_LINE_CHAR = r"[^\x00-\x1f\x7f\x85  ]"
+_HOST_LINE = re.compile(rf" *(?:#{_LINE_CHAR}*|(?:timeout-minutes|concurrency|group|cancel-in-progress):"
+                        rf"(?: {_LINE_CHAR}*)?)?\r?")
+_YAML_PROPS = {"&": "an anchor (&name)", "*": "an alias (*name)", "!": "a tag (!)"}
+_MERGE_KEY = re.compile(r"""(?:<<|'<<'|"<<")[ \t]*:""")
+_BLOCK_HEADER = re.compile(r"[|>][+-]?(?:[ \t]+#.*)?[ \t]*")  # no indentation digit: with one, the scan reads on
+_SPACE = ("", " ", "\t")
+
+
+def _quote_end(line, i):
+    """The index of the quote that closes the quoted scalar opening at line[i], or -1 when it does not close here."""
+    q, j = line[i], i + 1
+    while j < len(line):
+        c = line[j]
+        if (q == '"' and c == "\\") or (q == "'" and c == "'" and line[j + 1:j + 2] == "'"):
+            j += 2  # an escaped character, or '' inside single quotes
+        elif c == q:
+            return j
+        else:
+            j += 1
+    return -1
+
+
+def _yaml_feature(text):
+    """-> (line, what) of the first YAML anchor, alias, merge key, tag or directive in `text`, or None. It reads the
+    text alone, not devkit's parser, and errs toward finding one: &, * or ! counts wherever a node can start, in a
+    comment too, and only the content of a plain block scalar (`run: |`) is passed over. Inside a flow collection
+    whose quoted string spans lines it loses track, and from there on checks after every [ { , : and ?."""
+    flow, lost, block = 0, False, None  # block: [the owner's column, the content's indentation once known]
+    for no, line in enumerate(text.splitlines(), 1):
+        if block:
+            lead = len(line) - len(line.lstrip(" "))
+            if not line.strip(" "):
+                continue
+            if block[1] is None and lead > block[0]:
+                block[1] = lead
+            if block[1] is not None and lead >= block[1]:
+                continue
+            block = None
+        if line.startswith("%"):
+            return no, "a directive (%)"
+        i, start, owner = 0, True, None
+        if line.startswith(("---", "...")) and line[3:4] in _SPACE:
+            i = 3
+        while i < len(line):
+            ch, nxt, inflow = line[i], line[i + 1:i + 2], flow > 0 or lost
+            if start:
+                if ch in " \t" or (ch in "-?:" and nxt in _SPACE):
+                    i += 1
+                    continue
+                if ch in _YAML_PROPS:
+                    return no, _YAML_PROPS[ch]
+                if _MERGE_KEY.match(line, i):
+                    return no, "a merge key (<<:)"
+                owner = i if owner is None else owner
+                if ch in "[{":
+                    flow, i = flow + 1, i + 1
+                    continue
+                if ch in "'\"":
+                    end = _quote_end(line, i)
+                    if end < 0:
+                        lost = True
+                        break
+                    i, start = end + 1, False
+                    continue
+                if not inflow and ch in "|>" and _BLOCK_HEADER.fullmatch(line, i):
+                    block = [owner, None]
+                    break
+                start = False
+            if ch == ":" and (inflow or nxt in _SPACE):
+                start = True
+            elif inflow and ch in ",[{?":
+                start, flow = True, flow + (ch in "[{")
+            elif ch in "]}" and flow and not lost:
+                flow -= 1
+            i += 1
+    return None
+
+
+def _diff_rows(top, blob_a, blob_b):
+    """The lines `git diff` removes from blob_a and adds in blob_b -> [(removed, line number, text)], or None when git
+    cannot show them. Read as bytes and split on newlines only, so a carriage return stays inside its line."""
+    try:
+        p = subprocess.run(["git", "-C", top, "diff", "--no-ext-diff", "--no-textconv", "--no-color", "--text",
+                            "--unified=0", "--inter-hunk-context=0", blob_a, blob_b],
+                           capture_output=True, env=core.GIT_ENV, timeout=60)
+        out = p.stdout.decode("utf-8")
+    except (OSError, subprocess.TimeoutExpired, UnicodeDecodeError):
+        return None
+    if p.returncode != 0:
+        return None
+    rows, old_no, new_no, hunk = [], 0, 0, False
+    for ln in out.split("\n"):
+        if ln.startswith("@@"):
+            m = re.match(r"@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@", ln)
+            if not m:
+                return None
+            old_no, new_no, hunk = int(m[1]), int(m[2]), True
+        elif not hunk or not ln or ln.startswith("\\"):
+            continue
+        elif ln[0] == "-":
+            rows.append((True, old_no, ln[1:]))
+            old_no += 1
+        elif ln[0] == "+":
+            rows.append((False, new_no, ln[1:]))
+            new_no += 1
+        elif ln[0] == " ":
+            old_no, new_no = old_no + 1, new_no + 1
+        else:
+            return None
+    return rows
 
 
 def _host_split(doc):
@@ -476,7 +596,9 @@ def _first_diff(a, b, path=""):
 
 def host_only_change(top, old, new):
     """-> (["<workflow>: <host keys changed, or 'comments'>", …], "") when trees `old` and `new` differ only in CI host
-    settings (HOST_RULE), else (None, why). It reads the two trees from git, nothing on disk."""
+    settings (HOST_RULE), else (None, why). It reads the two trees from git, nothing on disk. Three checks must all
+    pass for each workflow: the text has no YAML anchor, alias, merge key, tag or directive; devkit's parse is the
+    same without the host keys; and every line of the text diff is blank, a comment or a host-setting line."""
     from . import pipelines
     if old == new:
         return None, "nothing changed"
@@ -500,11 +622,19 @@ def host_only_change(top, old, new):
             return None, f"{path} is not a regular file"
     changes = []
     for path, _, _, blob_a, blob_b, _ in entries:
-        docs = []
+        texts = []
         for blob in (blob_a, blob_b):
             rc, text, _ = core.sh(["git", "-C", top, "cat-file", "blob", blob], timeout=60, env=core.GIT_ENV)
             if rc != 0:
                 return None, f"git cannot read {path}"
+            texts.append(text)
+        for which, text in zip(("the earlier version", "the new version"), texts):
+            found = _yaml_feature(text)
+            if found:
+                return None, (f"{path} uses {found[1]} on line {found[0]} of {which}, which GitHub's YAML parser "
+                              "may read differently from devkit's")
+        docs = []
+        for text in texts:
             try:
                 docs.append([pipelines.plain(d) for d in pipelines.load_yaml_all(text)])
             except pipelines.YamlError as e:
@@ -514,6 +644,15 @@ def host_only_change(top, old, new):
         (rest_a, host_a), (rest_b, host_b) = _host_split(docs[0][0]), _host_split(docs[1][0])
         if rest_a != rest_b:
             return None, f"{path} changed {_first_diff(rest_a, rest_b)}, which a local run exercises"
+        rows = _diff_rows(top, blob_a, blob_b)
+        if rows is None:
+            return None, f"git cannot show the text diff of {path}"
+        for removed, no, line in rows:
+            if not _HOST_LINE.fullmatch(line):
+                shown = "".join(ch if ch.isprintable() else repr(ch)[1:-1] for ch in line.strip(" "))[:80]
+                where = f"line {no} of the earlier version" if removed else f"line {no}"
+                return None, (f"{path} changed {where} ({shown}): only blank, comment, timeout-minutes, concurrency, "
+                              "group and cancel-in-progress lines may change without a local run")
         keys = [k for k in list(host_a) + [k for k in host_b if k not in host_a]
                 if host_a.get(k, _ABSENT) != host_b.get(k, _ABSENT)]
         changes.append(f"{path}: {', '.join(keys) or 'comments'}")
