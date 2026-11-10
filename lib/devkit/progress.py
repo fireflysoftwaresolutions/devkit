@@ -318,7 +318,7 @@ def call_opened(agent: str, data: dict, now: float | None = None):
     ts, ttl, cmd_sha256, cmd (redacted, at most CALL_TEXT), cut}."""
     tid, sid = _safe_name(data.get("tool_use_id")), _safe_name(data.get("session_id"))
     inp = data.get("tool_input") or {}
-    cmd = inp.get("command")
+    cmd = inp.get("command") or inp.get("cmd")  # Codex's exec_command sends its command as `cmd`
     if isinstance(cmd, list):
         cmd = " ".join(shlex.quote(str(c)) for c in cmd)
     if not tid or not sid or not isinstance(cmd, str) or not cmd.strip():
@@ -357,14 +357,50 @@ def call_note(data: dict, **fields):
                        {**e, **fields})
 
 
+SHELL_KEEP = 2 * CALL_TTL  # seconds the record of closed shell calls keeps one: past the longest call it can overlap
+SHELL_MAX = 500  # closed shell calls the record keeps at most, newest last
+
+
+def _shells_path(sid: str) -> Path:
+    """The session's recently closed shell calls, beside its open ones (a dot-file: the ledger's readers skip it)."""
+    return CALLS / _safe_name(sid) / ".shells.json"
+
+
 def call_closed(data: dict):
-    """PostToolUse or PostToolUseFailure of a shell call, or the hook refused it: its entry leaves the ledger."""
+    """PostToolUse or PostToolUseFailure of a shell call, or the hook refused it: its entry leaves the ledger. A call
+    that ran stays in the record of closed shell calls for SHELL_KEEP, {caller, opened, closed}, so write detection
+    knows who else had a shell call during a reading lane's call even when it closed first (scope_written). A call
+    refused at PreToolUse never ran and is not kept. Under the record's lock; a busy lock drops this one record."""
     tid, sid = _safe_name(data.get("tool_use_id")), _safe_name(data.get("session_id"))
-    if tid and sid:
-        try:
-            (CALLS / sid / f"{tid}.json").unlink()
-        except OSError:
-            pass
+    if not (tid and sid):
+        return
+    entry = CALLS / sid / f"{tid}.json"
+    e = core.read_json(entry, None) if data.get("hook_event_name") != "PreToolUse" else None
+    try:
+        entry.unlink()
+    except OSError:
+        pass
+    if not isinstance(e, dict) or not e.get("ts"):
+        return
+    now = time.time()
+
+    def add(doc):
+        kept = [c for c in doc.get("calls") or [] if isinstance(c, dict) and now - (c.get("closed") or 0) <= SHELL_KEEP]
+        doc["calls"] = (kept + [{"caller": str(e.get("caller") or "main")[:80], "opened": e["ts"],
+                                 "closed": round(now, 3)}])[-SHELL_MAX:]
+    try:
+        state.update(_shells_path(sid), add)
+    except state.StateBusy:
+        pass
+
+
+def shells_since(sid: str, since: float, now: float | None = None) -> list:
+    """The session's shell calls that closed at `since` or later and had opened by `now`: [{caller, opened,
+    closed}], the closed calls that overlap that window."""
+    now = now or time.time()
+    doc = core.read_json(_shells_path(sid), {}) or {}
+    return [c for c in doc.get("calls") or [] if isinstance(c, dict)
+            and (c.get("closed") or 0) >= since and (c.get("opened") or 0) <= now]
 
 
 EDIT_TOOLS = ("Write", "Edit", "MultiEdit")  # the tools that name the one file they change (tool_input.file_path)
@@ -378,22 +414,39 @@ def _edits_path(sid: str) -> Path:
     return CALLS / _safe_name(sid) / ".edits.json"
 
 
+PATCH_FILE = re.compile(r"^\*\*\* (?:(?:Add|Update|Delete) File|Move to): (.+?)\s*$", re.M)  # Codex apply_patch
+
+
+def _edit_paths(data: dict) -> list:
+    """The files an edit call changed: a Write, Edit or MultiEdit's file_path, or each file a Codex apply_patch names
+    (its Add, Update, Delete and Move lines), a relative one under the folder the patch ran in. [] for other calls."""
+    inp, tool = data.get("tool_input") or {}, data.get("tool_name")
+    if tool in EDIT_TOOLS:
+        path = inp.get("file_path")
+        return [path] if isinstance(path, str) and path.strip() else []
+    if tool != "apply_patch":
+        return []
+    body = inp.get("input") or inp.get("patch") or inp.get("command") or ""
+    if isinstance(body, list):
+        body = "\n".join(str(x) for x in body)
+    base = str(inp.get("workdir") or data.get("cwd") or "")
+    return [p if os.path.isabs(p) or not base else os.path.join(base, p) for p in PATCH_FILE.findall(str(body))]
+
+
 def note_edit(agent: str, data: dict, now: float | None = None):
-    """PostToolUse of a Write, Edit or MultiEdit: the file it changed, who changed it (the agent_id, or main) and when,
-    kept for EDIT_KEEP, so write detection credits a file to whoever really edited it (scope_written) and the crew
-    gates credit a member only with what it wrote (gates.crew_gates). Under the record's lock; a busy lock drops this
-    one record (state audits it)."""
-    if data.get("tool_name") not in EDIT_TOOLS:
-        return
-    path, sid = (data.get("tool_input") or {}).get("file_path"), _safe_name(data.get("session_id"))
-    if not sid or not isinstance(path, str) or not path.strip():
+    """PostToolUse of a Write, Edit or MultiEdit, or of a Codex apply_patch: each file it changed, who changed it (the
+    agent_id, or main) and when, kept for EDIT_KEEP, so write detection credits a file to whoever really edited it
+    (scope_written) and the crew gates credit a member only with what it wrote (gates.crew_gates). Under the record's
+    lock; a busy lock drops this one record (state audits it)."""
+    paths, sid = _edit_paths(data), _safe_name(data.get("session_id"))
+    if not sid or not paths:
         return
     now = now or time.time()
     who = str(data.get("agent_id") or "main")[:80]
 
     def add(doc):
         kept = [e for e in doc.get("edits") or [] if isinstance(e, dict) and now - (e.get("ts") or 0) <= EDIT_KEEP]
-        doc["edits"] = (kept + [{"ts": round(now, 3), "caller": who, "path": path[:1024]}])[-EDIT_MAX:]
+        doc["edits"] = (kept + [{"ts": round(now, 3), "caller": who, "path": p[:1024]} for p in paths])[-EDIT_MAX:]
     try:
         state.update(_edits_path(sid), add)
     except state.StateBusy:
@@ -6438,18 +6491,43 @@ def _shown(paths: list) -> str:
     return ", ".join(paths[:5]) + (f" and {len(paths) - 5} more" if len(paths) > 5 else "")
 
 
+def _shell_writers(run: dict, callers: set, chain: set) -> set:
+    """Of the callers of shell calls, those whose shell may write files: main (the tech lead), and each lane outside
+    the reading lane's chain that works with build or all tools, a helper's call counting for the lanes above it."""
+    out = {"main"} if "main" in callers else set()
+    for c in callers - {"main", ""}:
+        out.update(k for k in lane_chain(run, c) if k not in chain and lane_tools(run, k) in ("build", "all"))
+    return out
+
+
+def _certain_writes(writes: dict) -> list:
+    """The files of a lane's scope_writes that nobody else could have written (a record from before the certain list
+    names its paths when its certainty is certain)."""
+    if "certain" in writes:
+        return list(writes.get("certain") or [])
+    return list(writes.get("paths") or []) if writes.get("certainty") == "certain" else []
+
+
+def _or_names(run: dict, writers: list) -> str:
+    """'Backend engineer (Tank) or Tech lead (Morpheus)': up to three writers, by role and name."""
+    from . import crew
+    names = [crew.who(_name_of(run, k)) for k in writers[:3]] + ([f"{len(writers) - 3} more"] if len(writers) > 3 else [])
+    return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " or " + names[-1]
+
+
 def scope_written(agent: str, sid: str, aid: str, paths: list, now: float | None = None) -> dict | None:
     """A review or read-only lane's shell call wrote these files (write detection). A file is credited to whoever's
-    own Write, Edit or MultiEdit call touched that path during the call (note_edit: a build lane, its helper or the
-    tech lead, never the reading lane itself): devkit audits it as attributed and flags nothing, since an edit opens
-    no shell call and the edit record is exact. Every other file is held against the reading lane in
-    `scope_writes`, so its report is unverified and its step cannot end done on its word: a script of the reading
-    lane can write into a working member's scope, so a scope is no alibi. A held file is "possible" when a build lane
-    that works now and whose scope holds it, or any working build lane for a file outside every scope, had a shell
-    call open (its shell may have written it), else "certain". An open step whose scope holds a held file keeps it
-    (`other_writes`), which the review step after it lists; Morpheus gets one crew notice naming the files; and the
-    audit trail a scope.write record per certainty. -> the lane's scope_writes, or None without a lane or when it
-    has none."""
+    own edit call (Write, Edit, MultiEdit, Codex apply_patch) touched that path during the call (note_edit: a build
+    lane, its helper or the tech lead, never the reading lane itself): devkit audits it as attributed and flags
+    nothing, since the edit record is exact. Every other file is held against the reading lane in `scope_writes`. It
+    is "possible" when another writer had a shell call that overlapped the reading lane's call, still open or already
+    closed (open_calls, shells_since): the tech lead, or a build lane, which for a file in a working build lane's
+    scope must be that lane. With no such writer it is "certain": a script of the reading lane can write into a
+    working member's scope, so a scope alone is no alibi. Only a certain file makes the lane's report unverified
+    (_end_member_step). An open step whose scope holds a held file keeps it (`other_writes`), which the review step
+    after it lists; Morpheus gets one short crew notice naming the files and the possible writers; and the audit
+    trail a scope.write record per certainty. -> the lane's scope_writes, or None without a lane or when it has
+    none."""
     from . import crew
     now = now or time.time()
     paths = sorted({str(p) for p in paths or [] if p})
@@ -6467,46 +6545,45 @@ def scope_written(agent: str, sid: str, aid: str, paths: list, now: float | None
                     and lane_tools(run, k) in ("build", "all")]
         layers = {k: lane_scope(run, k) for k in builders}
         calls = open_calls(sid, now)
-        calling = {str(e.get("caller") or "") for e in calls} - {"main", ""}
-        busy = {k for k in builders if any(k in lane_chain(run, c) for c in calling)}
         start = min((e.get("ts") or now for e in calls if e.get("caller") == aid), default=now - CALL_TTL)
+        callers = {str(e.get("caller") or "") for e in calls + shells_since(sid, start, now)}
+        shells = _shell_writers(run, callers, chain)  # who else had a shell call during the reading lane's call
         edits = [e for e in edits_since(sid, start, now) if str(e.get("caller") or "") not in chain]
-        owned, held = {}, {}  # credited to the caller whose edit touched it; held against the reading lane, by certainty
+        owned, held, maybe_by = {}, {}, {}  # credited by edit; held against the reading lane; possible files by writers
         for p in paths:
             by = next((str(e.get("caller")) for e in edits if _edited(e.get("path"), p)), None)
             if by:
                 owned.setdefault(by, []).append(p)
                 continue
-            holders = [k for k in builders if layers[k] and in_scope(p, layers[k])]
-            maybe = (set(holders) & busy) if holders else busy
-            held.setdefault("possible" if maybe else "certain", []).append(p)
+            holders = {k for k in builders if layers[k] and in_scope(p, layers[k])}
+            writers = sorted((shells & holders) if holders else shells - {"main"}) + sorted(shells & {"main"})
+            held.setdefault("possible" if writers else "certain", []).append(p)
+            if writers:
+                maybe_by.setdefault(tuple(writers), []).append(p)
         who = lane.get("persona") or lane.get("label") or aid
         name = crew.who(who)
         loose = sorted(p for files in held.values() for p in files)
         if loose:
             had = lane.get("scope_writes") or {}
-            sure = "certain" in held or had.get("certainty") == "certain"
+            sure = sorted(set(_certain_writes(had)) | set(held.get("certain") or []))
             lane["scope_writes"] = {"ts": round(now), "paths": sorted(set(had.get("paths") or []) | set(loose))[:20],
-                                    "certainty": "certain" if sure else "possible"}
+                                    "certainty": "certain" if sure else "possible", "certain": sure[:20]}
             marked = []
             for c, files in held.items():
                 marked += [n for n in _mark_other_writes(run, files, chain, aid, name, c, now) if n not in marked]
-            parts = []
+            level = "review-only" if lane_tools(run, aid) == "review" else "read-only"
+            maybe = [f"{_shown(files)} (possibly the shell call of {_or_names(run, list(ks))})"
+                     for ks, files in maybe_by.items()]
             if held.get("certain"):
-                parts.append(f"its shell call wrote {_shown(held['certain'])}, which nobody else edited meanwhile")
-            if held.get("possible"):
-                shells = ", ".join(crew.who(_name_of(run, k)) for k in sorted(busy)[:3])
-                parts.append(f"its shell call wrote {_shown(held['possible'])} (possibly the shell call of {shells}, "
-                             f"open at the time)")
-            for k, files in owned.items():
-                parts.append(f"{_shown(files)} changed during it, edited by {crew.who(_name_of(run, k))} with its own "
-                             f"edit tool, so devkit credits {'them' if len(files) > 1 else 'it'} to them")
+                text = (f"devkit: {name} works {level}, and its shell call wrote {_shown(held['certain'])} while no "
+                        "other writer was at work. Its report counts as unverified: check the change (git diff), keep "
+                        "or revert it, then close its step with evidence." +
+                        (f" Also changed during it: {'; '.join(maybe)}." if maybe else ""))
+            else:
+                text = (f"devkit: during a shell call of {name}, which works {level}, {' and '.join(maybe)} changed; "
+                        "this does not unverify its report.")
             listed = f" The review after {', '.join(marked)} lists these files." if marked else ""
-            level = lane_tools(run, aid)
-            _post(run, aid, "main", f"devkit: {name} works {'review-only' if level == 'review' else 'read-only'}, "
-                  "and " + "; and ".join(parts) + "." + listed + " Its report counts as unverified: check the change "
-                  "(git diff), keep or revert it, then close its step with evidence.", now, from_name="devkit",
-                  kind="notice")
+            _post(run, aid, "main", text + listed, now, from_name="devkit", kind="notice")
             _save(run)
         writes = dict(lane.get("scope_writes") or {}) or None
     for k, mine in owned.items():
@@ -6514,9 +6591,10 @@ def scope_written(agent: str, sid: str, aid: str, paths: list, now: float | None
                lane=k[:16], paths=mine[:20], count=len(mine), project=run.get("project") or "",
                why=f"edited by {_name_of(run, k)} with its own edit tool during {who}'s shell call")
     for c, files in held.items():
+        extra = {"severity": "warning"} if c == "certain" else \
+            {"writers": sorted({_name_of(run, k) for ks in maybe_by for k in ks})}
         _audit("scope.write", who, f"{c}: {', '.join(files[:20])}"[:600], "detected", lane=aid[:16],
-               paths=files[:20], certainty=c, count=len(files), project=run.get("project") or "",
-               **({"severity": "warning"} if c == "certain" else {}))
+               paths=files[:20], certainty=c, count=len(files), project=run.get("project") or "", **extra)
     return writes
 
 
@@ -6624,13 +6702,14 @@ def _end_member_step(run: dict, st: dict, lane: dict, aid: str, report: str, now
     `dev progress step --check` (approvals.ending), and a review step's Check is its verdict on the work it follows
     (approvals.from_review), whose ✓ also ends done the unverified work it approves (_verified_by_review);
     otherwise unverified, for Morpheus to close with evidence or reopen. A review or read-only lane whose shell wrote
-    files (scope_writes) ends unverified whatever it reports."""
+    files nobody else could have written (scope_writes, certain) ends unverified whatever it reports; a possible
+    write leaves its ending to its report."""
     from . import approvals
     old = st.get("state")
     state_, why, check = approvals.ending(lane, report)
-    writes = lane.get("scope_writes") or {}
-    if state_ == "done" and writes.get("paths"):
-        state_, why = "unverified", f"its shell call wrote {', '.join(writes['paths'][:3])} ({writes.get('certainty')})"
+    sure = _certain_writes(lane.get("scope_writes") or {})
+    if state_ == "done" and sure:
+        state_, why = "unverified", f"its shell call wrote {', '.join(sure[:3])} while no other writer was at work"
     who = lane.get("persona") or "subagent"
     if state_ != "done":
         st["state"] = "unverified"
