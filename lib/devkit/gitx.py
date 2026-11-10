@@ -387,21 +387,228 @@ def _markers(c) -> list:
     return sorted(out, key=lambda x: -(x.get("ts") or 0))
 
 
-def evidence(c, rev="HEAD"):
-    """The newest local-CI marker whose tree is the tree of `rev`, or None."""
+def evidence(c, rev="HEAD", host_only=False):
+    """The newest local-CI marker whose tree is the tree of `rev`, or None. `host_only`: when `rev` is HEAD and no
+    marker has its tree, the evidence of an earlier tree carries over if only CI host settings changed since
+    (HOST_RULE); it is recorded as a `host-only` marker that names its base and what was checked."""
     sha, tree = _head(c.top, rev)
     if not sha:
         return None
     exact = core.read_json(_ci_dir() / f"{_key(c)}@{sha}.json")
     if isinstance(exact, dict) and exact.get("tree") == tree:
         return exact
-    return next((m for m in _markers(c) if m.get("tree") == tree), None)
+    found = next((m for m in _markers(c) if m.get("tree") == tree), None)
+    if found or not host_only or sha != _ref_sha(c.top, "HEAD"):
+        return found
+    return _carry_over(c, tree)
+
+
+# --------------------------------------------------------------------------- CI host settings
+#
+# A local run cannot exercise what only the CI host acts on: how long a job may run, which runner it gets, and which
+# runs cancel each other. When every file changed since a tree with local evidence is a GitHub workflow that differs
+# only in those keys or in comments, the evidence of that tree holds for the new one, once actionlint and the devkit
+# workflow audit pass on the new workflows. A change to anything else (a run command, a step, a trigger, the
+# permissions, the matrix, any other file) still needs a local run.
+
+HOST_KEYS = {"workflow": ("concurrency",), "job": ("concurrency", "runs-on", "timeout-minutes"),
+             "step": ("timeout-minutes",)}
+HOST_RULE = ("When the only change since a tree with local CI evidence is a CI host setting, that evidence carries "
+             "over: every changed file is a GitHub workflow (.github/workflows/*.yml) that differs only in "
+             "timeout-minutes, runs-on, concurrency (cancel-in-progress) or comments, and actionlint and the devkit "
+             "workflow audit (dev ci audit) pass on it. Any other change (a run command, a step, a trigger, the "
+             "permissions, the matrix, another file) needs a local run.")
+_WORKFLOW_PATH = re.compile(r"\.github/workflows/[^/]+\.ya?ml")
+_HOST_WHY = {}  # (top, tree) -> why the evidence of an earlier tree did not carry over to `tree`, for no_evidence
+_ABSENT = object()
+
+
+def _host_split(doc):
+    """A parsed workflow (plain dicts and lists) -> (the workflow without its host keys, {path: value} of them)."""
+    host = {}
+    if not isinstance(doc, dict):
+        return doc, host
+    rest = {}
+    for k, v in doc.items():
+        if k in HOST_KEYS["workflow"]:
+            host[str(k)] = v
+        else:
+            rest[k] = v
+    if not isinstance(rest.get("jobs"), dict):
+        return rest, host
+    jobs = {}
+    for jid, job in rest["jobs"].items():
+        if isinstance(job, dict):
+            job = dict(job)
+            for k in HOST_KEYS["job"]:
+                if k in job:
+                    host[f"jobs.{jid}.{k}"] = job.pop(k)
+            if isinstance(job.get("steps"), list):
+                steps = []
+                for i, st in enumerate(job["steps"]):
+                    if isinstance(st, dict):
+                        st = dict(st)
+                        for k in HOST_KEYS["step"]:
+                            if k in st:
+                                host[f"jobs.{jid}.steps[{i}].{k}"] = st.pop(k)
+                    steps.append(st)
+                job["steps"] = steps
+        jobs[jid] = job
+    rest["jobs"] = jobs
+    return rest, host
+
+
+def _first_diff(a, b, path=""):
+    """The path of the first difference between two parsed documents, such as `jobs.test.steps[1].run`."""
+    if isinstance(a, dict) and isinstance(b, dict):
+        for k in list(a) + [k for k in b if k not in a]:
+            sub = f"{path}.{k}" if path else str(k)
+            if k not in a or k not in b:
+                return sub
+            if a[k] != b[k]:
+                return _first_diff(a[k], b[k], sub)
+    elif isinstance(a, list) and isinstance(b, list) and len(a) == len(b):
+        for i, (x, y) in enumerate(zip(a, b)):
+            if x != y:
+                return _first_diff(x, y, f"{path}[{i}]")
+    return path or "the whole file"
+
+
+def host_only_change(top, old, new):
+    """-> (["<workflow>: <host keys changed, or 'comments'>", …], "") when trees `old` and `new` differ only in CI host
+    settings (HOST_RULE), else (None, why). It reads the two trees from git, nothing on disk."""
+    from . import pipelines
+    if old == new:
+        return None, "nothing changed"
+    rc, out, _ = core.sh(["git", "-C", top, "diff-tree", "-r", "--no-renames", "-z", old, new], timeout=120,
+                         env=core.GIT_ENV)
+    if rc != 0:
+        return None, "the tree of the last local run is gone"
+    parts, entries = out.split("\0"), []
+    for meta, path in zip(parts[0::2], parts[1::2]):
+        fields = meta.lstrip(":").split()
+        if len(fields) == 5:
+            entries.append((path, *fields))
+    if not entries:
+        return None, "nothing changed"
+    for path, mode_a, mode_b, _, _, status in entries:
+        if not _WORKFLOW_PATH.fullmatch(path):
+            return None, f"{path} changed, and it is not a GitHub workflow"
+        if status != "M":
+            return None, f"{path} was {'added' if status == 'A' else 'deleted' if status == 'D' else 'replaced'}"
+        if {mode_a, mode_b} - {"100644", "100755"}:
+            return None, f"{path} is not a regular file"
+    changes = []
+    for path, _, _, blob_a, blob_b, _ in entries:
+        docs = []
+        for blob in (blob_a, blob_b):
+            rc, text, _ = core.sh(["git", "-C", top, "cat-file", "blob", blob], timeout=60, env=core.GIT_ENV)
+            if rc != 0:
+                return None, f"git cannot read {path}"
+            try:
+                docs.append([pipelines.plain(d) for d in pipelines.load_yaml_all(text)])
+            except pipelines.YamlError as e:
+                return None, f"devkit cannot read {path}: {e}"
+        if len(docs[0]) != 1 or len(docs[1]) != 1:
+            return None, f"{path} is not one YAML document"
+        (rest_a, host_a), (rest_b, host_b) = _host_split(docs[0][0]), _host_split(docs[1][0])
+        if rest_a != rest_b:
+            return None, f"{path} changed {_first_diff(rest_a, rest_b)}, which a local run exercises"
+        keys = [k for k in list(host_a) + [k for k in host_b if k not in host_a]
+                if host_a.get(k, _ABSENT) != host_b.get(k, _ABSENT)]
+        changes.append(f"{path}: {', '.join(keys) or 'comments'}")
+    return changes, ""
+
+
+def _workflow_checks(top, files):
+    """actionlint on the changed workflows, then the devkit workflow audit as `dev ci audit` runs it (zizmor too when
+    it is installed), on the files on disk -> (passed, what was checked or why it failed)."""
+    from . import pipelines
+    if not shutil.which("actionlint"):
+        return False, "actionlint is not installed (brew install actionlint), so nothing checked the workflows"
+    rc, out, err = core.sh(["actionlint", "-no-color", "-oneline", *files], cwd=top, timeout=120)
+    if rc != 0:
+        first = next((ln.strip() for ln in (out + "\n" + err).splitlines() if ln.strip()), f"exit {rc}")
+        return False, f"actionlint: {first[:240]}"
+    root = Path(top)
+    rep = pipelines.audit(root, policy=pipelines._policy(root), visibility=lambda: pipelines._visibility(root))
+    if pipelines.exit_code(rep):
+        bad = [f for f in rep["findings"] if pipelines.RANK.get(f["severity"], 9) <= pipelines.RANK["high"]]
+        f = bad[0]
+        return False, (f"dev ci audit: {len(bad)} high or critical finding(s), first {f['id']} at "
+                       f"{f['file']}:{f['line']}: {f['message'][:160]}")
+    return True, "actionlint: no findings · dev ci audit: no high or critical finding"
+
+
+WORKFLOW_CHECKS = _workflow_checks  # tests replace it
+
+
+def _changed_workflows(changes) -> list:
+    return sorted({x.split(": ", 1)[0] for x in changes})
+
+
+_EVIDENCE_LABEL = {"run": "`dev ci --run`", "resumed": "`dev ci --run --resume`", "marked": "`dev ci --mark-passed`",
+                   "attested": "an attested local run (--ci-passed)"}
+
+
+def _carry_over(c, tree):
+    """The evidence of an earlier tree, recorded for HEAD's `tree` as a `host-only` marker, when only CI host settings
+    changed since (HOST_RULE) and the workflow checks pass; else None, with the reason in _HOST_WHY."""
+    first_why = ""
+    for m in [m for m in _markers(c) if m.get("how") != "host-only" and m.get("tree") != tree][:10]:
+        names = _tree_diff(c.top, m["tree"], tree)
+        if not names or not all(_WORKFLOW_PATH.fullmatch(n) for n in names):
+            continue  # code changed too: the usual "changed since" says enough
+        changes, why = host_only_change(c.top, m["tree"], tree)
+        if changes is None:
+            first_why = first_why or why
+            continue
+        if core.gitout(c.top, "status", "--porcelain", "--untracked-files=all", "--", ".github/workflows"):
+            _HOST_WHY[(c.top, tree)] = ("only CI host settings changed in HEAD, but the workflows have uncommitted "
+                                        "changes, so the workflow checks would not read HEAD's")
+            return None
+        passed, said = WORKFLOW_CHECKS(c.top, _changed_workflows(changes))
+        if not passed:
+            _HOST_WHY[(c.top, tree)] = f"only CI host settings changed, but {said}"
+            return None
+        base = {"sha": m.get("sha"), "tree": m.get("tree"), "how": m.get("how"), "ts": m.get("ts")}
+        since = "; ".join(changes)
+        note = (f"{_EVIDENCE_LABEL.get(base['how'], base['how'])} passed on {(base['sha'] or '')[:7]}; since then "
+                f"only CI host settings changed ({since}), checked: {said}")
+        ev = record_evidence(c, "host-only", tree, base=base, changes=changes, checked=said, note=note)
+        msg = (f"local CI evidence carried over: only CI host settings changed since the local run on "
+               f"{(base['sha'] or '')[:7]} ({since}), which a local run cannot exercise · {said}")
+        print(f"  {ui.dim(msg)}", file=sys.stderr)
+        return ev
+    if first_why:
+        _HOST_WHY[(c.top, tree)] = first_why
+    return None
+
+
+def _resume_host(c, old, new, changed, cache) -> str:
+    """Why a passed step needs no re-run on `new` (only CI host settings changed since its run on `old`, and the
+    workflow checks pass), or '' when it may need one. Checked once per recorded tree."""
+    key = ("host", old)
+    if key not in cache:
+        said = ""
+        if changed and all(_WORKFLOW_PATH.fullmatch(f) for f in changed):
+            changes, why = host_only_change(c.top, old, new)
+            if changes is None:
+                info(f"not only CI host settings since {old[:7]}: {why}")
+            else:
+                passed, checked = WORKFLOW_CHECKS(c.top, _changed_workflows(changes))
+                if passed:
+                    said = f"only CI host settings changed since ({'; '.join(changes)}) · {checked}"
+                else:
+                    info(f"only CI host settings changed since {old[:7]}, but {checked}: the steps run again")
+        cache[key] = said
+    return cache[key]
 
 
 def _evidence_or_attest(c, ci_passed: bool, action: str):
     """-> (marker or None). `--ci-passed` records an attestation for HEAD. dev never takes it from its own
     environment (spec F8, rule 4): a variable there may have been set by anything that started dev."""
-    ev = evidence(c)
+    ev = evidence(c, host_only=True)
     if ev or not ci_passed:
         return ev
     _, tree = _head(c.top)
@@ -419,6 +626,8 @@ def no_evidence(c, action: str, rev="HEAD", draft_ci: str = "") -> int:
             more = f" (+{len(names) - 4} more)" if len(names) > 4 else ""
             detail = (f"; the last local run ({last.get('how')}, {_age(last.get('ts'))}) verified a different tree, "
                       f"changed since: {', '.join(names[:4])}{more}")
+    if _HOST_WHY.get((c.top, tree)):
+        detail += f"; {_HOST_WHY[(c.top, tree)]}"
     if draft_ci:
         detail += f"; a draft is no exception here: {draft_ci}"
     return refuse(f"no local CI evidence for {sha[:7] or 'HEAD'}{detail}",
@@ -447,6 +656,11 @@ def describe_evidence(ev) -> str:
         return "none"
     how = {"run": "dev ci --run", "attested": "attested", "marked": "dev ci --mark-passed",
            "resumed": "dev ci --run --resume"}.get(ev.get("how"), ev.get("how"))
+    if ev.get("how") == "host-only":
+        base = ev.get("base") or {}
+        return (f"{(_EVIDENCE_LABEL.get(base.get('how'), base.get('how') or '?')).strip('`')} on "
+                f"{(base.get('sha') or '')[:7]}, then CI host settings only ({'; '.join(ev.get('changes') or [])}), "
+                f"{_age(ev.get('ts'))}")
     steps = f", {len(ev.get('steps') or [])} steps" if ev.get("steps") else ""
     if ev.get("how") == "resumed":
         st = ev.get("steps") or []
@@ -1261,7 +1475,7 @@ def push_branch(c, lease=False, ci_passed=False, dry_run=False, allow_behind=Fal
     if behind and not remote and not allow_behind:
         return refuse(f"`{b}` is {behind} commit(s) behind {base}: rebase before review",
                       "dev rebase, re-run the local suite, then dev push (or --allow-behind)")
-    ev = evidence(c) if dry_run else _evidence_or_attest(c, ci_passed, "push")
+    ev = evidence(c, host_only=True) if dry_run else _evidence_or_attest(c, ci_passed, "push")
     if not ev and not (dry_run and ci_passed):
         return no_evidence(c, "push")
     envs = frozenset({"DEVKIT_LOCAL_CI_PASSED"} if ev and ev.get("how") == "run" else ())  # only a real run lifts it
@@ -1541,7 +1755,7 @@ def plan(root) -> list:
 
 def add_ci_arguments(p):
     """Extra `dev ci` options (call from cli.py's parser for `ci`)."""
-    g = p.add_argument_group("local CI evidence (checked by dev push, dev pr create and dev release)")
+    g = p.add_argument_group("local CI evidence (checked by dev push, dev pr create and dev release)", HOST_RULE)
     g.add_argument("--run", action="store_true",
                    help="run the workflow `run:` steps locally, in order, and record the evidence when all pass")
     g.add_argument("--mark-passed", action="store_true",
@@ -1553,7 +1767,9 @@ def add_ci_arguments(p):
     g.add_argument("--step-timeout", type=int, default=30, metavar="MIN", help="with --run: minutes per step")
     g.add_argument("--resume", action="store_true",
                    help="with --run: re-run failed and never-run steps, and passed steps the changes since can affect; "
-                        "a test step re-runs only its failed and affected tests (whole when the change is global)")
+                        "a test step re-runs only its failed and affected tests (whole when the change is global); "
+                        "a passed step is kept when only CI host settings changed since its run (see above), "
+                        "except a scanner that reads every file")
     return p
 
 
@@ -1566,7 +1782,7 @@ def ci_command(a, top):
     if c is None:
         return _need_repo(c)
     if a.evidence:
-        ev = evidence(c)
+        ev = evidence(c, host_only=True)
         if getattr(a, "json", False):
             return emit({"head": _head(c.top)[0], "evidence": ev})
         if ev:
@@ -1653,6 +1869,9 @@ def _resume_plan(c, s, rec, tree, cache):
         return "full", "failed last time"
     if not changed:
         return "kept", "same tree"
+    host = _resume_host(c, rec["tree"], tree, changed, cache)
+    if host and not _reads_every_file(s["run"]):  # a scanner reads the workflow too: a comment can leak a key
+        return "kept", host
     if runner:
         return "partial", {"runner": runner, "failed": [], "changed": changed}
     key = ("radius", rec["tree"])
@@ -2014,7 +2233,7 @@ def _verify_line(ev, T) -> str:
         more = f" +{len(ev['steps']) - 4}" if len(ev.get("steps") or []) > 4 else ""
         return f"- {T['local_ci']}: `dev ci --run` → {T['passed']} ({len(ev.get('steps') or [])} {T['steps']}: " \
                f"{names}{more}) @ {sha}"
-    if ev.get("note") and not ev["note"].startswith("dev "):
+    if ev.get("note") and (ev.get("how") == "host-only" or not ev["note"].startswith("dev ")):
         return f"- {T['local_ci']}: {ev['note']} @ {sha}"
     return f"- {T['local_ci']}: {T['attested']} @ {sha}"
 
@@ -2190,7 +2409,7 @@ def _pr_create(c, a) -> int:
     if existing and not a.dry_run:
         ok(f"PR #{existing[0]['number']} is already open for {b} · {existing[0]['url']}")
         return 0
-    ev = evidence(c) if a.dry_run else _evidence_or_attest(c, a.ci_passed, "pr create")
+    ev = evidence(c, host_only=True) if a.dry_run else _evidence_or_attest(c, a.ci_passed, "pr create")
     if not ev and not a.dry_run:
         why = draft_ci(c, b, head) if draft else ""
         if not draft or why:
@@ -3167,7 +3386,7 @@ def _release(a, c) -> int:
                       f"{current or 'the first commit'}:{listing}",
                       "close the shipped ones (dev task done <id>, or dev task reconcile --apply), or release anyway: "
                       "dev release --why \"<reason>\"")
-    ev = evidence(c) if a.dry_run else _evidence_or_attest(c, a.ci_passed, "release")
+    ev = evidence(c, host_only=True) if a.dry_run else _evidence_or_attest(c, a.ci_passed, "release")
     if not ev and not a.dry_run:
         return no_evidence(c, "release")
     head = _ref_sha(c.top, "HEAD")
@@ -3643,6 +3862,7 @@ def register(add):
     p.add_argument("--skip", action="store_true")
 
     p = add("push", cmd_push, "Push the current branch once: naming, WIP, freshness, local-CI evidence, push budget")
+    p.epilog = "Local CI evidence: `dev ci --run` records it for a tree. " + HOST_RULE
     p.add_argument("--force-with-lease", action="store_true", help="after a rebase or amend, on your own branch")
     p.add_argument("--ci-passed", action="store_true", help="attest that the full local suite passed on this tree")
     p.add_argument("--allow-behind", action="store_true", help="first push although origin/<default> moved on")
