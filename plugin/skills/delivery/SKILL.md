@@ -59,6 +59,15 @@ dev pr ready             # once, when the local suite is green: starts the one C
 4. `dev ci --run` (local CI evidence), then `dev push` once, `dev pr create` (or `dev pr ready` on your draft), and
    arm a watch that wakes you (see [After a push, merge or release](#after-a-push-merge-or-release)).
 
+**Only a CI host setting changed since the local run?** Then the evidence carries over, and you need no new run:
+every changed file is a committed GitHub workflow edit whose added or removed lines are blank, comments, or
+`timeout-minutes` and `concurrency` (`group`, `cancel-in-progress`) settings, with no YAML anchors, aliases, merge keys
+or tags, and `actionlint` and `dev ci audit` pass on it. `dev push`, `dev pr create`, `dev pr ready`, `dev release`
+and `dev ci --evidence` record a host-only marker and say what they checked. Any other change (a run command, a step,
+a trigger, the permissions, the matrix, `runs-on`, another file) needs `dev ci --run`, and the refusal names the
+first difference. `dev ci --run --resume` keeps the passed steps after a host-only change, except scanners that read
+every file.
+
 ## 3. Branches or PRs that must land together
 
 ```bash
@@ -139,6 +148,10 @@ signal to stop and reproduce locally.
    `vYY.MM.PATCH` (`git tag -s` if the project signs tags), push the tag, create the GitHub release with notes from the
    CHANGELOG: `dev release` does all three (the guard refuses a raw `gh release create`), and once the release is out
    (not a `--draft`) deletes the branches it merged. Arm a watch on the tag (`dev ci watch --wait --tag v<version>`).
+   While `main`'s CI still runs on the merge commit, `dev release` does not wait when a commit with HEAD's tree (a
+   parent of HEAD, or the PR head GitHub links to it) passed, in its pull request runs, every workflow still running:
+   it names that commit and releases. A skipped, running or push-only run does not count, and a failed run on HEAD
+   still refuses.
 4. Verify the published artefact: download/install it from the release and smoke-test it.
 5. Update the handoff note: version, what shipped, follow-ups. `dev branch prune` shows no merged branch left.
 

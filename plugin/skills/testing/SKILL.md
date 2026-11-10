@@ -81,7 +81,10 @@ dev ci --run --resume    # after a fix: only the failed steps and what the fix a
 changed source file selects the tests that import it (directly or through other modules); docs select nothing; and a
 change to build files, lockfiles, test configuration or shared fixtures (`conftest.py`, `jest.config.*`, `pom.xml`,
 `package.json`, `go.mod`, …) selects everything, because everything can break. When the radius is everything, devkit
-says which file caused it and how long the full run takes, instead of starting hours of tests silently.
+says which file caused it and how long the full run takes, instead of starting hours of tests silently. On a branch
+100 or more files from its base whose changes reach 50 or more test files, plain `dev test` starts none of them: it
+gives the count and the estimate, names the tests of your uncommitted changes as `dev test run <files>`, and exits 2.
+Run that command, or `dev test --affected` for the whole selection.
 
 The loop:
 

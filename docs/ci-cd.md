@@ -271,6 +271,13 @@ dev delivery apply --set job_timeout_minutes=45 --why "integration tests take 35
 job keeps its own limit (15 minutes for lint, 20 for builds, 30 for tests and integration tests); the security and
 release jobs keep 20 and 30.
 
+Changing a timeout needs no new local run. When every file changed since the last local run is a GitHub workflow that
+differs only in `timeout-minutes`, `concurrency` (`group`, `cancel-in-progress`), or comments, `dev push`,
+`dev pr create`, `dev pr ready`, and `dev release` keep that run's evidence once `actionlint` and `dev ci audit` pass
+on the workflows, and say what they checked. A changed runner (`runs-on`), changed `permissions`, or a newly pinned
+action changes what a local run exercises, so it needs one. The full rule is in
+[Delivery › When only a CI host setting changed](delivery.md#when-only-a-ci-host-setting-changed).
+
 ## Set up a pipeline
 
 `dev ci init` writes a pipeline for the detected stack and host. It reads the host from the `origin` remote (GitHub
@@ -388,6 +395,11 @@ counts as none, so nothing that stopped early is ever reported as passed:
 | `failed` | `1` | `failure`, `cancelled`, `timed_out`, `startup_failure`, `action_required`, or a word devkit does not know | A run failed or stopped early; the result carries the diagnosis |
 | `timeout` | `3` | still `queued` or `running` | The watch ended first, after `--timeout` minutes (default 90); follow it with `dev ci status --watch`, or re-arm a wait |
 | `none` | `4` | no run, or only `skipped`, `neutral`, or `stale` | Nothing verified the commit: the branch has no CI, its workflows skipped it, or origin is no CI host devkit reads |
+
+`dev release` reads the runs of the commit it tags. It refuses when a run failed. While a run is still going, it
+refuses too, unless a commit with the same tree passed, in its pull request runs, every workflow still running: then it
+names that commit and releases without waiting for `main` to repeat the run (see
+[Delivery › Release](delivery.md#6-release)).
 
 For each failed run, devkit finds the failed jobs and steps and reads the failed log from its **first** error, because
 the errors after it follow from it (`gh run view --log-failed` on GitHub, `glab ci trace` on GitLab; Bitbucket and
