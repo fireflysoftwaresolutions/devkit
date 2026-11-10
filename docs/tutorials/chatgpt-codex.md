@@ -9,11 +9,11 @@ The ChatGPT app for Mac includes Codex, OpenAI's coding agent. When you work in 
 copy of Codex with the same `~/.codex` configuration as Codex in Terminal: devkit's rules, hooks, guard, skills, and
 crew roles.
 
-> **Not verified live yet.** devkit's live test of Codex waits for the Codex usage quota of the test account to reset
-> on 2026-11-09. This page follows devkit's code, its tests, the Codex configuration that `dev doctor` checks, and
-> OpenAI's documentation of the app, not a recorded session in the app. The names of buttons can differ in your
-> version of the app. If devkit behaves differently there, `dev doctor` and `dev canary` show it; see
-> [When something goes wrong](#when-something-goes-wrong).
+> **Partly verified in the app.** Sessions observed on November 10, 2026 confirmed instruction loading, crew
+> registration, and guard refusals. They also exposed missing project identity and canary scores when a chat
+> started outside a repository. The corrections have contract tests; the corrected installation still needs a
+> fresh-session check. This tutorial's complete build flow and button names have not been verified in
+> every app version. See the [surface evidence matrix](../surfaces.md#evidence-matrix) for the limits.
 
 ## What you need
 
@@ -44,6 +44,18 @@ It creates `~/Development/_local/reading-list` and prints that path. For a proje
 
 Work in the folder on your Mac. A Codex cloud environment runs on OpenAI's computers, without devkit.
 
+If you started a chat without a project, check `dev session ls --json` from that chat. The corrected hooks bind the
+registered main session to its managed checkout after an executed repository call or a progress run. This covers
+short tasks and commands that execute but fail. The hooks retain the app's original working directory. A rejected call
+or another session cannot supply that binding. With the older 26.11.10 hooks, the record can remain empty: start a
+new chat in the repository, or install the verified correction through the
+[supported developer workflow](../development.md#trying-a-change-in-your-own-sessions) and start a fresh session.
+A correctly named progress run alone is not proof that the session is bound.
+
+The main session uses its own `work/` for scratch and `outputs/` for deliverables. Each crew member gets only its own
+`work/scratchpad/<member>/`; a reviewer can run probes there without writing into the lead's outputs. See
+[Codex scratch folders](../guard.md#codex-scratch-folders).
+
 ## Step 3: check that devkit is active
 
 Type this and press Return:
@@ -61,11 +73,13 @@ The reply starts with a bold line that begins with `[Firefly> DevKit]`, followed
 - **Next:** tell me what to build; I plan it and bring in the crew.
 ```
 
-That block is the **status block**. Every development reply starts with it, so it also proves that Codex loaded
-devkit's rules. If the reply has no such line, go to [When something goes wrong](#when-something-goes-wrong).
+That block is the **status block**. Every development reply should start with it. It shows that the reply follows
+the visible format; it does not prove that the guard or Stop checks ran. Use `dev canary` to inspect recorded
+scores. An empty report is not a passing result. If the reply has no such line, go to
+[When something goes wrong](#when-something-goes-wrong).
 
-With its first reply, Codex also shows devkit's welcome, the message of devkit's session-start hook. For this new
-project it reads:
+At the first prompt, devkit sends its welcome through the session-start hook. Its placement in the app is not yet
+verified. For this new project the message reads:
 
 ```text
 devkit · reading-list · new project
@@ -89,12 +103,17 @@ What happens, and what you see:
 
 1. **devkit routes the request.** Along with your request, devkit tells Codex which kind of work this is and who on the
    crew does it: front-end work, done by the Frontend engineer (Trinity) and approved by the Code reviewer (Seraph).
-2. **Codex answers as Morpheus, the tech lead.** He posts a plan and an estimate. Work under ten minutes he does
+2. **Codex answers as the tech lead (Morpheus).** He posts a plan and an estimate. Work under ten minutes he does
    himself; this request gets steps for the crew.
-3. **The crew starts.** Morpheus launches each member as a Codex agent role, for example `trinity`. At most four run at
-   once.
+3. **The crew starts.** The tech lead launches each member as a Codex agent role, for example `trinity`, in the order
+   and slots shown by `dev crew next`. Codex records the launch at the member's start; a launch over devkit's limit
+   is restricted then, because this host has no pre-launch hook.
 4. **Progress updates arrive** after each finished step, and every ten minutes or so while a long step runs.
 5. **The final report** closes the run: what changed, the evidence, what is not done, and the next step.
+
+You can add a request while the crew works. Corrected Codex hooks keep human requests from this chat's validated
+rollout in the continuity brief; recovering a request never grants permission or records approval. This behavior
+has contract coverage, but still needs verification after installation in a fresh app session.
 
 ## Step 5: read what devkit shows you
 
@@ -124,8 +143,9 @@ macOS shows a notification when a run finishes or gets blocked.
 ### When devkit waits for you
 
 - **A decision that is yours.** A crew member reaches a choice, for example whether finished books move to the bottom
-  of the list. The member stops, and Codex asks you and gives the options and a recommendation. Answer in the
-  chat; Morpheus records it and the member goes on.
+  of the list. The member stops, and Codex asks you and gives the options and a recommendation. For a recorded
+  devkit decision, type the `approve D<n>: <letter>` line it asks for; the tech lead records it and resumes the
+  member. A native app question dialog is not evidence that devkit recorded your answer.
 - **An action that cannot be undone or leaves your Mac**, such as a push to GitHub, a pull request, a merge, a release,
   or deleting data. It waits for your OK, unless you approved it in advance.
 
@@ -140,7 +160,7 @@ In Terminal, run:
 dev crew graph --latest
 ```
 
-It draws the newest run on this Mac, with Morpheus, every step with its state and owner, what each step waits for, and the
+It draws the newest run on this Mac, with the tech lead, every step with its state and owner, what each step waits for, and the
 decisions waiting for you. The [Claude Code tutorial](claude-code.md#the-crew-graph) shows a full example and explains
 the symbols.
 
@@ -163,10 +183,13 @@ this one stopped.
 | What you see | What to do |
 | --- | --- |
 | The reply has no `[Firefly> DevKit]` line | Check that the chat works in the folder on your Mac, not in a cloud environment. Quit the app, open it again, and start a new chat in the folder. Still missing: run `dev doctor` in Terminal and follow the fix it prints |
+| The progress run names the project, but `dev session ls --json` shows no project or branch | Check whether the chat started outside the repository. Open a new chat in the repository and check its session record; a tool's `workdir` alone did not update session identity in the observed 26.11.10 sessions |
+| `dev canary` has no scored turns | Do not read this as a pass. Check the session directory and the [surface evidence matrix](../surfaces.md#evidence-matrix); projectless app sessions exposed a scoring gap |
 | `dev doctor` shows `devkit hooks trusted` failing | Codex skips hooks until they are trusted. Run `dev install --only codex`, or review the hooks in the app's settings, then quit and reopen the app |
 | `dev doctor` says the ChatGPT app does not see the devkit plugin | Run `dev install --only codex`, then quit and reopen the app |
 | A commit or pull request says it was made with Codex | That is an account setting at OpenAI. `dev doctor` fails while it is on; turn it off in your Codex settings |
 | The work seems stuck | Run `dev crew graph --latest` in Terminal: a step that says `waiting for decision D1` waits for your answer |
+| The app shows no artifact or refuses to attach a devkit worktree | The app and devkit have separate registries. Check the crew graph and launch records; an empty artifact list does not prove no agents ran. Do not edit the registries to force attachment |
 | Codex says you reached a usage limit | `dev agents` shows how much of your plan's usage is left and when it resets |
 
 [Troubleshooting](../troubleshooting.md) has more problems and their fixes.

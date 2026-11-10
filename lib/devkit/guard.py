@@ -578,6 +578,15 @@ def handoff_violation(rel: str, cwd, envs=frozenset()):
 def check_write_path(path, cwd, agent):
     if not path:
         return None
+    cli_refusal = _cli_scratch_refusal(os.path.abspath(os.path.join(str(cwd), os.path.expanduser(str(path)))))
+    if cli_refusal:
+        return deny(cli_refusal, key="codex-cli-scratch")
+    app = _APP_SCRATCH.get()
+    if app:
+        lexical = os.path.abspath(os.path.join(str(cwd), os.path.expanduser(str(path))))
+        if (lexical == app[0] or lexical.startswith(app[0] + os.sep)) and not is_under(lexical, app[0]):
+            return deny("A link inside this Codex chat points outside its registered folder. Use a path inside your "
+                        "own work folder without an escaping link.", key="codex-scratch-link")
     p = resolve(path, cwd)
     if p == UNKNOWN or str(p).startswith("/dev/"):
         return None
@@ -586,7 +595,7 @@ def check_write_path(path, cwd, agent):
         rel = str(p)[len(hroot):].lstrip(os.sep)
         v = handoff_violation(rel, cwd)
         return deny(v, key="handoff") if v else note_claim_refusal(rel, cwd)
-    if is_temp(p) or any(is_under(p, r) for r in CONFIG_ROOTS):
+    if _app_scratch_allows(p) or is_temp(p) or any(is_under(p, r) for r in CONFIG_ROOTS):
         return None
     if p.parent == Path(real(HOME)) and p.name.startswith("."):
         return None  # dotfiles such as ~/.zshrc
@@ -7280,6 +7289,100 @@ def _sync_verdict(argv, cwd, scope, base=None):
 # session scratchpad have no owner.
 _SCRATCHPAD = re.compile(r"^(.*?/claude-\d+/[^/]+/[0-9A-Fa-f-]{36}/scratchpad)(?:/([^/]+))?(/.*)?$")
 _SCRATCH_TREE = re.compile(r"/claude-\d+(?:/[^/]+(?:/[0-9A-Fa-f-]{36})?)?/?$")
+_APP_SCRATCH = contextvars.ContextVar("devkit_codex_scratch", default=None)
+_CODEX_SCRATCH_EVENT = contextvars.ContextVar("devkit_codex_scratch_event", default=False)
+
+
+def _codex_scratch_registration(agent, data):
+    """Authorize a registered Codex session's folders for this hook event, never from tool workdir.
+
+    This context spans both workspace and crew checks. Invalid or absent identity grants no exception;
+    Claude and commands outside a hook keep their existing behavior. No path becomes a global temp root.
+    """
+    value = None
+    if agent == "codex" and isinstance(data, dict) and isinstance(data.get("session_id"), str):
+        from . import progress
+        sid = data["session_id"]
+        if not sid or any(char in sid for char in ("/", "\\", "\0")):
+            return None
+        rec = core.read_json(progress.session_path(agent, sid), {})
+        if isinstance(rec, dict) and rec.get("agent") == agent and rec.get("session") == sid:
+            root = rec.get("cwd")
+            if isinstance(root, str) and os.path.isabs(root) and root == os.path.normpath(root) == real(root) and \
+                    data.get("cwd") == root:
+                app = is_under(root, core.HOME / "Documents" / "Codex") and \
+                    root != real(core.HOME / "Documents" / "Codex")
+                if not app:
+                    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", sid):
+                        return None
+                    from .registry import main_of
+                    top = core.gitout(root, "rev-parse", "--show-toplevel")
+                    pid = current_project(root)
+                    main = main_of(Path(top)) if top else None
+                    if not pid or not top or real(main or top) != str(core.canonical_path(pid)) or \
+                            not (top == str(core.canonical_path(pid)) or is_under(top, core.WT_ROOT)):
+                        return None
+                aid, member = data.get("agent_id"), ""
+                if aid:
+                    from . import hooks
+                    run, lane = progress.lane_of(agent, sid, aid) if isinstance(aid, str) else (None, None)
+                    if lane:
+                        member = hooks._member_folder(run, aid)
+                    if not app and (not run or run.get("agent") != agent or run.get("session") != sid):
+                        return None
+                    if not re.fullmatch(r"[A-Za-z0-9_-]+", member):
+                        member = ""
+                if not aid or member:
+                    if app:
+                        folders = (str(Path(root) / "work" / "scratchpad" / member),) if member else \
+                            (str(Path(root) / "work"), str(Path(root) / "outputs"))
+                    else:
+                        root = str(core.TMP_ROOT / "codex")
+                        folder = str(Path(root) / sid / "scratchpad" / (member or "main"))
+                        if root != real(root) or folder != real(folder):
+                            return None
+                        folders = (folder,)
+                    value = (root, folders, member)
+    return value
+
+
+@contextlib.contextmanager
+def codex_scratch_context(agent, data):
+    """Keep trusted Codex scratch identity through all checks of one event; malformed records grant nothing."""
+    try:
+        value = _codex_scratch_registration(agent, data)
+    except (OSError, ValueError, TypeError, AttributeError):
+        value = None
+    token = _APP_SCRATCH.set(value)
+    event_token = _CODEX_SCRATCH_EVENT.set(agent == "codex")
+    try:
+        yield
+    finally:
+        _APP_SCRATCH.reset(token)
+        _CODEX_SCRATCH_EVENT.reset(event_token)
+
+
+def _cli_scratch_refusal(path, member=None, holds=False):
+    """Reserve the CLI namespace only during Codex hooks; generic temp policy stays unchanged elsewhere."""
+    if not _CODEX_SCRATCH_EVENT.get():
+        return None
+    root = str(core.TMP_ROOT / "codex")
+    lexical = os.path.abspath(str(path))
+    if not (lexical == root or lexical.startswith(root + os.sep) or is_under(path, root) or
+            holds and is_under(root, path)):
+        return None
+    if _app_scratch_allows(path, member) or lexical == real(path) and _in_checkout(path):
+        return None
+    ctx = _APP_SCRATCH.get()
+    recovery = f"Use {_code(ctx[1][0])}." if ctx else "Restart from your registered managed checkout."
+    return "This Codex CLI scratch path is outside your registered session and member folder. " + recovery
+
+
+def _app_scratch_allows(path, member=None):
+    ctx = _APP_SCRATCH.get()
+    if not ctx or member is not None and member != ctx[2]:
+        return False
+    return any(folder == real(folder) and is_under(path, folder) for folder in ctx[1]) and not _in_checkout(path)
 
 
 def scratch_refusal(path, member, holds=False):
@@ -7288,7 +7391,16 @@ def scratch_refusal(path, member, holds=False):
     `path`, as rm -r does); None otherwise."""
     if not member or not path:
         return None
+    cli_refusal = _cli_scratch_refusal(path, member, holds)
+    if cli_refusal:
+        return cli_refusal
     p = real(str(path))
+    ctx = _APP_SCRATCH.get()
+    if ctx and (is_under(p, ctx[0]) or holds and is_under(ctx[0], p)):
+        if _app_scratch_allows(p, member):
+            return None
+        return (f"{_code(tilde(p))} is outside your registered Codex scratch folder. Write only in "
+                f"{_code(ctx[1][0])}; ask the tech lead about other files.")
     m = _SCRATCHPAD.match(p)
     if m and m.group(2) and (m.group(2) == member or m.group(2).startswith(member + "-")):  # <member>/, <member>-<task>/
         return None
@@ -8143,7 +8255,7 @@ def _own_scratch_script(argv, cwd, member) -> bool:
             continue
         p = resolve(a, cwd)
         m = _SCRATCHPAD.match(str(p)) if p != UNKNOWN else None
-        return bool(member and m and m.group(2) and not scratch_refusal(p, member))
+        return bool(member and (_app_scratch_allows(p, member) or m and m.group(2) and not scratch_refusal(p, member)))
     return False
 
 
@@ -8326,7 +8438,7 @@ def _ro_mkdir(args, cwd, member) -> str | None:
     for a in paths:
         p = resolve(a, cwd)
         m = _SCRATCHPAD.match(str(real(str(p)))) if p != UNKNOWN else None
-        if not m or not m.group(2) or scratch_refusal(p, member):
+        if not _app_scratch_allows(p, member) and (not m or not m.group(2) or scratch_refusal(p, member)):
             return f"{_code(f'mkdir {a}')} is outside your scratch folder, scratchpad/{member}/"
     return None
 
@@ -8376,7 +8488,7 @@ def _redirect_ok(target, cwd) -> bool:
     if target in ("/dev/null", "/dev/stdout", "/dev/stderr", "-"):
         return True
     p = resolve(target, cwd)
-    return p != UNKNOWN and is_temp(p)
+    return p != UNKNOWN and (_app_scratch_allows(p) or is_temp(p))
 
 
 _SUBST_WORD = "/dev/fd/63"  # what a substitution stands for while the command around it is read
@@ -11623,6 +11735,10 @@ def member_write_exempt(path, cwd, scope=None, member=None, base=None) -> bool:
     if not path:
         return False
     ap = os.path.normpath(os.path.join(str(cwd), str(path)))
+    if _cli_scratch_refusal(ap, member):
+        return False
+    if _app_scratch_allows(ap, member):
+        return True
     if _SCRATCHPAD.match(real(ap)):  # the session scratchpad: the member's own folder
         return not scratch_refusal(ap, member)
     top = str(base) if base else (core.gitout(cwd, "rev-parse", "--show-toplevel") or str(cwd))
@@ -11676,7 +11792,8 @@ def check(tool: str, tool_input: dict, cwd: str, agent: str, call: dict | None =
     caller = _CALLER.set(_Caller(agent, cwd, call if call is not None else _hook_payload(tool_input)))
     session_dir = _SESSION_DIR.set(cwd or "")
     try:
-        verdict = _check(tool, tool_input, cwd, agent)
+        with codex_scratch_context(agent, _CALLER.get().payload):
+            verdict = _check(tool, tool_input, cwd, agent)
         if not verdict or verdict[0] == "ask":  # a lesson rule can only add a warning or refuse, never allow
             verdict = _lesson_rule_verdict(tool, tool_input, cwd, verdict)
         return _judged(verdict)

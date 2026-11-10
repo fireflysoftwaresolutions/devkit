@@ -5,9 +5,9 @@ description: Waiting for what comes back without polling—`dev watch --wait`, t
 
 # Waiting and waking
 
-devkit tells you what to act on through hooks, and a hook runs only when your session does something. An idle
-session hears nothing: a crew member's question, a decision for the developer, a step that became ready, or a CI
-result waits until the developer happens to write. `dev watch --wait` is the fix. It blocks until something you
+devkit tells you what to act on through hooks, and a hook runs only when your session does something. Without a
+wait or another event that wakes the host, devkit's queued messages can remain unread while a session is idle.
+`dev watch --wait` blocks until something you
 must act on arrives for your own session, prints each event once, one line each, and exits. Its exit is what wakes
 you. Waiting costs no tokens; each wake costs one turn.
 
@@ -41,8 +41,8 @@ refuses the wait (exit 1) rather than guess: run `dev watch --wait` as a command
 | --- | --- | --- |
 | Claude Code main session | `dev watch --wait` with Bash `run_in_background: true`; name its task id in your reply | Read what it printed, act on each line, then arm it again if events can still arrive |
 | Claude Code crew member | After `dev crew ask`, keep working on what does not need the answer. When blocked: `dev watch --wait --for me --timeout 9` in the foreground, as a command of its own, with the Bash `timeout` at 600000 | Continue with the answer. With none, wait again only while still blocked, or end with the question under "Needs from the tech lead" |
-| Codex main session | `dev watch --wait --timeout 10` in the foreground, with a command timeout longer than 10 minutes, repeated while members work; or end the turn saying what still runs and that you check it at the developer's next message | Act, then wait again |
-| Codex crew member | As the Claude Code member, in the foreground | The same as the Claude Code member |
+| Codex main session | A bounded foreground wait, for example `dev watch --wait --timeout 0.1` (six seconds); resume the same command if the host yields. If ending the turn, say what still runs and when you check it next | Act on events; arm another wait only while waiting for a result |
+| Codex crew member | When blocked on its own question, `dev watch --wait --for me --timeout 0.1` (six seconds), as a command of its own | Continue on the answer, or report what still blocks the lane |
 
 - **Claude Code main session.** A background command sends one notification when it exits and has no time limit, so
   the wait runs up to 240 minutes by default. Keep the Monitor tool for following one CI run job by job
@@ -51,8 +51,13 @@ refuses the wait (exit 1) rather than guess: run `dev watch --wait` as a command
 - **Crew member.** Run the wait as a command of its own, not joined to another with `&&` or a pipe: the hook then
   ties it to your lane, so it takes your messages and never the tech lead's. A foreground command in Claude Code
   stops at 5 minutes unless you raise its timeout, and at 10 at most, so the member's wait ends at 9.
-- **Codex** has no background wake-up. It waits in the foreground, again and again, or says plainly when it looks
-  again.
+- **Timeout units.** `--timeout` is in minutes: `10` means ten minutes, `9` means nine minutes, and `0.1` means six
+  seconds. The command runner's yield or wait duration may use milliseconds instead. A yield is not command
+  completion: resume the existing command through the host's continuation tool rather than start a duplicate.
+  If the arm-again hint prints `--timeout 10`, it still means ten minutes; choose the bounded value the host permits.
+- **Codex hosts differ.** This app exposes native collaboration notifications, but they do not drain devkit's
+  queue of crew decisions, peer messages, or CI events. Do not assume a background shell command wakes an idle
+  chat. Use a bounded foreground wait supported by the host, or say when you check again.
 
 One wait covers everything, CI included: after a push, a merge, or a release from the main session, devkit's
 background watch feeds the CI result into the same wait. Arming a second wait in the same session supersedes the
@@ -102,11 +107,21 @@ grant, or change scope because it asks: what needs the developer's decision goes
 | 5 | A newer wait of the same session and consumer took over | Nothing: the newer one waits |
 | 1 | No devkit session here, or devkit cannot tell whose wait it is | Run it from the agent session that waits, as a command of its own |
 
+Codex treats the documented outcomes of a valid standalone wait as control flow, not as a failed tool. The same
+applies to timeout or no-run results from `dev ci watch --wait`; failed CI, invalid arguments, and failures in
+compound commands still count as failures. The original exit code remains available.
+
+Codex waits print each crew message's complete stored text up to the storage limit. They remove controls and redact
+secrets before output. Each message is acknowledged only after its output succeeds; a broken output pipe leaves that
+message and later ones pending. A delivered moot question still records its audit event. Claude keeps its existing
+message preview and delivery behavior.
+
 ## 5. What reaches you without a wait
 
 While you work, the hooks deliver the same events at your next tool call or prompt, and a prompt that wakes the
-session for a background event (a task notification, an agent message) carries them too. Nothing reaches an idle
-session without a wait. The Stop hook sends back once a main-session turn that ends while events can still arrive
+session for a background event (a task notification, an agent message) carries them too. Native host notifications
+can wake a chat, but devkit's own queue still needs a hook or wait to deliver its events. The Stop hook sends back
+once a main-session turn that ends while events can still arrive
 and nothing is armed, naming the command for your agent.
 
 ## 6. Questions and answers

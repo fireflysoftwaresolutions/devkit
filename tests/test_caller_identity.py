@@ -454,8 +454,8 @@ class CallerShapeTests(CallerCase):
 class CodexThreadSessionTests(CallerCase):
     # The Codex app runs several threads in one process: their records hold the same pid, and each thread's ledger
     # may hold an open call that typed the same command (two foreground waits at once). The pid cannot tell them
-    # apart: CODEX_THREAD_ID, which Codex gives every command it runs, names the thread; without it, the thread whose
-    # repository the command runs in does.
+    # apart: CODEX_THREAD_ID names the thread. Without explicit identity, duplicate calls are ambiguous even when
+    # their working directories differ: any thread can change directories.
     def setUp(self):
         super().setUp()
         self.repos = {}
@@ -480,13 +480,15 @@ class CodexThreadSessionTests(CallerCase):
         self.assertEqual(self.resolve("x1", thread="x1"), ("codex", "x1", "ancestry"))
         self.assertEqual(self.resolve("x1", thread="x2"), ("codex", "x2", "ancestry"))  # a thread may cd elsewhere
 
-    def test_without_a_thread_id_the_threads_repository_decides(self):
-        self.assertEqual(self.resolve("x1"), ("codex", "x1", "ancestry"))
-        self.assertEqual(self.resolve("x2"), ("codex", "x2", "ancestry"))
+    def test_without_a_thread_id_duplicate_calls_refuse_even_in_different_repositories(self):
+        for sid in ("x1", "x2"):
+            with self.subTest(sid=sid), self.assertRaises(pg.StepError):
+                self.resolve(sid)
 
     def test_a_thread_id_of_no_session_here_narrows_nothing(self):
-        # a spawned agent's own thread id, or one this process does not run: the ledger and the repository decide
-        self.assertEqual(self.resolve("x1", thread="01a1d000-64c7-7ac1-81c6-ec8b852e1772"), ("codex", "x1", "ancestry"))
+        # An unrecognized thread id cannot distinguish two identical calls in this process.
+        with self.assertRaises(pg.StepError):
+            self.resolve("x1", thread="01a1d000-64c7-7ac1-81c6-ec8b852e1772")
 
 
 class RewriteTests(CallerCase):

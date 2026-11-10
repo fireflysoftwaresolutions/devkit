@@ -386,7 +386,18 @@ def check(agent: str, data: dict):
         return None
     cwd = data.get("cwd") or os.getcwd()
     if not core.is_under(cwd, DEV):
-        return None
+        if agent != "codex":
+            return None
+        # A projectless app chat keeps its host cwd after its own repository work binds its session.
+        # Only that session's registered checkout extends scoring; another session or a non-development turn
+        # must not make an unrelated chat subject to the canary.
+        from . import progress, scope
+        sid = data.get("session_id") or ""
+        sess = core.read_json(progress.session_path(agent, sid), {}) if sid else {}
+        top = sess.get("top") if isinstance(sess, dict) else None
+        if not isinstance(top, str) or not top or not core.is_under(top, DEV) or not scope.decide(data, dict(sess)):
+            return None
+        cwd = top
     text = data.get("last_assistant_message")
     if not text:
         text = last_assistant_text(data.get("transcript_path"))
