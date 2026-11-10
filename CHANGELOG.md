@@ -3,6 +3,21 @@
 All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH restarts at 0 each month); tags are
 `vYY.MM.PATCH`. Sections follow [Keep a Changelog](https://keepachangelog.com/).
 
+## [26.11.11] - 2026-11-10
+
+This release keeps `dev` working through updates and installs. An update could leave `dev` off the PATH, and a fresh
+install could stop with "Permission denied" before anything was installed.
+
+### Fixed
+
+- **`dev update` could take `dev` off the PATH.** Once an update retired an older copy, `~/.local/bin/dev` reached the
+  new copy through that copy's `bin/dev`, so later installs left the link naming the older copy; three releases later
+  the cleanup of old copies removed it, and the link pointed at nothing. Every install now points the link at the
+  copy it installs, in one rename, and the cleanup keeps the copy the link names and the one `~/.zshrc` sources.
+- **A fresh `dev install` could stop with "Permission denied" moving the new copy into place.** Some Macs refuse to
+  rename a folder its owner cannot write, and the copy was made read-only before it moved. It now moves while
+  writable and is read-only again once in place.
+
 ## [26.11.10] - 2026-11-10
 
 This release fixes what agents hit while shipping 26.11.9. `dev test prove` reports each case of a parametrized test
