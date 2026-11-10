@@ -28,7 +28,8 @@ for a run of one of them alone). It:
    a devkit child whose environment has a temporary HOME but no DEVKIT_TEST_PATH (tests/_sandbox.py has the net and
    env(), what a test that builds its own environment uses);
 7. fails each test during which the hook or the launcher of an older copy refused something, in any run (one module
-   or the whole suite), though devkit turned the refusal into an exit code;
+   or the whole suite), though devkit turned the refusal into an exit code; a hit outside any test (a module's
+   import, a class or module fixture) fails the next test that ends, or the run itself when no test is left;
 8. removes the temporary home when the run ends.
 
 A second call (tests/__init__.py, then a guard module) changes nothing. When devkit was imported first, `activate()`
@@ -79,6 +80,8 @@ SCRUB = ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ID", "CLAU
          # the developer's tokens for the code hosts, which gh, glab and the host APIs read before any login
          "GH_TOKEN", "GITHUB_TOKEN", "GITLAB_TOKEN", "BITBUCKET_TOKEN", "AZURE_DEVOPS_EXT_PAT")
 KEEP = {"DEVKIT_HOME": str(TREE), "DEVKIT_NO_NOTIFY": "1"}  # the DEVKIT_* the run sets itself
+# Any other token, access token, API key or secret, by the end of its name, whatever the service (any case).
+SECRET_ENDINGS = ("_TOKEN", "_PAT", "_API_KEY", "_SECRET")
 # The net's variables (tests/_sandbox.py), which name folders and files below the run's own root only: its stand-ins,
 # and the log of what the launcher of older devkit copies refused.
 NET = ("DEVKIT_TEST_PATH", "DEVKIT_TEST_TRIPWIRE")
@@ -99,7 +102,7 @@ LIVE_WRITERS = {
 }
 
 _S = {"active": False, "late": False, "owner": None, "root": None, "home": None, "real": {}, "snapshot": {},
-      "violations": [], "allow": 0, "scrubbed": [], "prefixes": [], "named": None, "homes": set(), "own": set()}
+      "violations": [], "checked": (0, 0), "depth": 0, "allow": 0, "scrubbed": [], "prefixes": [], "named": None, "homes": set(), "own": set()}
 
 
 # --------------------------------------------------------------------------- the developer's real devkit
@@ -393,19 +396,19 @@ def _test_frame() -> str:
 
 
 def _without_net(event, args) -> str:
-    """The devkit process a start would run without the net, or '': the test gave it an environment of its own (not
-    this process's, which carries DEVKIT_TEST_PATH) with a temporary HOME and no DEVKIT_TEST_PATH, so the child's
-    devkit puts Homebrew's folders first on PATH again."""
-    env = args[3] if event == "subprocess.Popen" else None if event == "os.system" else args[2]
-    if not env:
+    """The devkit process a start would run without the net, or '': its environment has no DEVKIT_TEST_PATH, so the
+    child's devkit puts Homebrew's folders first on PATH again. That is an environment the test gave the start (not
+    this process's, which carries the variable) with a temporary HOME, or one an env launcher built without this
+    process's (env -i, env -u DEVKIT_TEST_PATH), whatever its HOME (_sandbox.devkit_starts)."""
+    if event not in _sandbox.EVENTS:
         return ""
-    get = (lambda k: env.get(k.encode()) or env.get(k)) if any(isinstance(k, bytes) for k in env) else env.get
-    home, net = get("HOME"), get("DEVKIT_TEST_PATH")
-    if net or not home:  # no HOME at all is _child's refusal
-        return ""
-    if not _sandbox._below(os.fsdecode(home), _sandbox.TEMP_ROOTS) or not _sandbox.runs_devkit(event, args):
-        return ""
-    return " ".join(_sandbox._words(args[1]))[:200]
+    for env, built in _sandbox.devkit_starts(event, args):
+        if env is None or env.get("DEVKIT_TEST_PATH"):
+            continue
+        home = env.get("HOME")
+        if built or (home and _sandbox._below(home, _sandbox.TEMP_ROOTS)):  # no HOME in a given one is _child's
+            return os.fsdecode(args[0] if event == "os.system" else " ".join(_sandbox._words(args[1])))[:200]
+    return ""
 
 
 def _trip(why: str):
@@ -430,9 +433,10 @@ def _hook(event, args):
         if child:
             where = _test_frame()
             _S["violations"].append(f"devkit child without the net: {child}" + (f" (in {where})" if where else ""))
-            raise PermissionError(f"test safety: refused to start {child}: its environment has a temporary HOME and no "
-                                  "DEVKIT_TEST_PATH, so its devkit would put Homebrew's folders first on PATH again; "
-                                  "build the environment with _sandbox.env() (tests/_sandbox.py)")
+            raise PermissionError(f"test safety: refused to start {child}: its environment has no DEVKIT_TEST_PATH "
+                                  "(a temporary HOME without it, or one env -i or env -u built), so its devkit would "
+                                  "put Homebrew's folders first on PATH again; build the environment with "
+                                  "_sandbox.env() (tests/_sandbox.py)")
     if event == "open":
         rel = isinstance(args[0], (str, bytes, os.PathLike)) and not os.path.isabs(os.fsdecode(os.fspath(args[0])))
         p = "" if rel and _in_fd_walk() else _protected(_path(args[0]))
@@ -494,7 +498,7 @@ def scrub(environ) -> list:
     FPATH can list a devkit release's completions) and a list of names never keeps up with them."""
     changed = []
     for k in list(environ):
-        if k in SCRUB or (k.startswith("DEVKIT_") and k not in KEEP):
+        if k in SCRUB or (k not in KEEP and (k.startswith("DEVKIT_") or k.upper().endswith(SECRET_ENDINGS))):
             changed.append(k)
             del environ[k]
             continue
@@ -546,7 +550,12 @@ def _fail_each_test_that_trips():
     something for, fail itself, in any run (one module, one test, the whole suite). Devkit turns a refusal into an exit
     code (core.sh returns 127 for an OSError), so without this the test passes and only test_zz, which runs only in a
     whole run, reports the hit. The check is the test's first cleanup, so it runs last: after the test's own cleanups,
-    which may take back the refusals the test provoked on purpose; and the runner reports it as that test's failure."""
+    which may take back the refusals the test provoked on purpose; and the runner reports it as that test's failure.
+
+    A hit outside any test (a module's import, setUpModule, setUpClass, tearDownClass, tearDownModule) belongs to no
+    test, so the check reports every hit since the last check, not only those during its test: the next test that ends
+    reports it as one from before it started. One that no test is left to report (the last class's tearDownClass,
+    tearDownModule) fails the run itself, when it stops (TestResult.stopTestRun)."""
     import unittest
     run = unittest.TestCase.run
     if getattr(run, "_hermetic", False):
@@ -554,18 +563,55 @@ def _fail_each_test_that_trips():
 
     def run_and_check(self, result=None):
         self.addCleanup(_check_test, self, len(_S["violations"]), len(_sandbox.trips()))
-        return run(self, result)
+        _S["depth"] += 1  # a test can run other tests (tests/test_state.py runs whole suites into a result of its own)
+        try:
+            return run(self, result)
+        finally:
+            _S["depth"] -= 1
+
+    stop = unittest.TestResult.stopTestRun
+
+    def stop_and_check(self):
+        if not _S["depth"]:  # the run's own result, not that of a run inside a test
+            trips = _sandbox.trips()
+            hits = _hits(_S["checked"], (len(_S["violations"]), len(trips)), trips)
+            _S["checked"] = (len(_S["violations"]), len(trips))
+            if hits:
+                try:
+                    raise AssertionError("hits after the last test, in a class or module fixture, that the run "
+                                         "refuses (tests/_hermetic.py, tests/_sandbox.py): " + "; ".join(hits))
+                except AssertionError:
+                    self.addError(unittest.suite._ErrorHolder("hits after the last test (tests/_hermetic.py)"),
+                                  sys.exc_info())
+        return stop(self)
 
     run_and_check._hermetic = True
     unittest.TestCase.run = run_and_check
+    unittest.TestResult.stopTestRun = stop_and_check
+
+
+def _hits(start, end, trips) -> list:
+    """The hook's refusals and the launcher's trips (`trips`) from `start` to `end`, each a (refusals, trips) count;
+    a count past the end of its list (a test took back refusals it provoked) counts as that end."""
+    v = _S["violations"]
+    (a, b), (c, d) = ((min(i, len(v)), min(j, len(trips))) for i, j in (start, end))
+    return list(v[a:max(a, c)]) + [f"tripwire {t.get('why')} (older devkit {t.get('dev')})" for t in trips[b:max(b, d)]]
 
 
 def _check_test(test, seen: int, tripped: int):
-    hits = list(_S["violations"][seen:]) + [f"tripwire {t.get('why')} (older devkit {t.get('dev')})"
-                                            for t in _sandbox.trips()[tripped:]]
-    if hits:
+    trips = _sandbox.trips()
+    now = (len(_S["violations"]), len(trips))
+    during = _hits((seen, tripped), now, trips)
+    # only the outermost test claims what came before it: a test run inside another one reports to a result that the
+    # outer test may never look at
+    before = _hits(_S["checked"], (seen, tripped), trips) if _S["depth"] == 1 else []
+    if _S["depth"] == 1:
+        _S["checked"] = now
+    if before or during:
+        parts = ([f"before it started (a module's import, or a module or class fixture): {'; '.join(before)}"]
+                 if before else []) + ([f"during it: {'; '.join(during)}"] if during else [])
         raise test.failureException(f"{test.id()} started or reached what the run refuses (tests/_hermetic.py, "
-                                    "tests/_sandbox.py): " + "; ".join(hits))
+                                    "tests/_sandbox.py), " + " · ".join(parts))
 
 
 def watch_late():

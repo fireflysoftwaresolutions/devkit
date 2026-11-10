@@ -97,6 +97,17 @@ class IsolatedRun(unittest.TestCase):
         self.assertEqual(sorted(tokens), sorted(_hermetic.scrub(env)))
         self.assertEqual({"PLAIN": "/usr/bin"}, env)
 
+    # any other token, access token, API key or secret goes by its name, whatever the service; a name that only
+    # contains one of those words, or ends in it without the underscore, stays
+    def test_the_scrub_removes_any_token_key_or_secret_by_its_name(self):
+        secrets = ("NPM_TOKEN", "HOMEBREW_GITHUB_API_TOKEN", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "JIRA_PAT",
+                   "AWS_SECRET", "npm_token")
+        kept = {"PLAIN": "/usr/bin", "TOKENIZERS_PARALLELISM": "false", "COMPAT": "1", "SECRET_FILE": "/x",
+                "MYTOKEN": "1", "API_KEY_FILE": "/y", "DEVKIT_NO_NOTIFY": "1"}
+        env = dict({k: "secret" for k in secrets}, **kept)
+        self.assertEqual(sorted(secrets), sorted(_hermetic.scrub(env)))
+        self.assertEqual(kept, env)
+
     # a process a test starts resolves the same temporary roots, through the environment it inherits
     def test_a_child_process_resolves_the_temporary_home(self):
         lib = str(Path(__file__).resolve().parents[1] / "lib")

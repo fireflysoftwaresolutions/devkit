@@ -16,7 +16,9 @@ The net has four parts:
    tests/_hermetic.py's audit hook refuses such a start in the test process (subprocess, os.exec*, os.posix_spawn*,
    os.system) and records it, so the test fails even where devkit turns the error into an exit code (the hermetic
    run fails each test that tripped it, in any run; test_zz reports it again in a whole run). The same hook refuses a
-   devkit child whose environment the test built without env(), which would put Homebrew's folders first again.
+   devkit child whose environment the test built without env(), which would put Homebrew's folders first again: a
+   bin/dev, a `dev` command or Python running devkit (-m, -c, a script that imports it), as the program, through a
+   launcher or in a shell line, with an environment that has no DEVKIT_TEST_PATH (devkit_starts).
 4. The launcher (boot()): an older devkit copy, whose core.py predates DEVKIT_TEST_PATH, starts through this file. It
    puts the stand-ins first again once the copy's core.py is imported, refuses any start of the four from outside
    DEVKIT_TEST_PATH's folders and any devkit process the copy would start (that one would run without the net), and
@@ -32,6 +34,7 @@ import atexit
 import json
 import os
 import re
+import shlex
 import shutil
 import sys
 import tempfile
@@ -55,8 +58,10 @@ _COMMAND = re.compile(
     r"(?:(?:(?:if|then|elif|else|do|while|until|!)(?=\s)|[A-Za-z_]\w*=(?:[^\s$`]|\$(?!\())*"
     r"|(?:\S*/)?(?:env|exec|command|nohup|sudo|xcrun|time|nice|timeout)(?:\s+(?:-\S+|\d\S*))*)"
     r"\s+)*[\"']?([^\s;&|(){}`\"']+)", re.IGNORECASE)
+_KEYWORDS = {"if", "then", "elif", "else", "do", "while", "until", "!", "{", "}"}  # run the next word
 _DEVKIT = re.compile(r"/bin/dev(?=$|[\s'\"])")
-_IMPORTS_DEVKIT = re.compile(r"\bfrom\s+devkit\b|\bimport\s+(?:[\w.]+\s*,\s*)*devkit\b")
+_IMPORTS_DEVKIT = re.compile(r"\bfrom\s+devkit\b|\bimport\s+(?:[\w.]+\s*,\s*)*devkit\b"
+                             r"|(?:\bimport_module|\b__import__)\(\s*['\"]devkit\b")
 _OWN: list = []  # this process's stand-in folder when no hermetic run made one
 
 
@@ -187,20 +192,153 @@ def starts_devkit(event, args) -> bool:
     return any(_DEVKIT.search(w) for w in _words(args[1]) + _words(args[0]))
 
 
-def runs_devkit(event, args) -> bool:
-    """Whether a process start runs devkit: a copy's bin/dev (starts_devkit), Python with `-m devkit[.<module>]`, or
-    Python with `-c` code that imports devkit."""
-    if starts_devkit(event, args):
-        return True
-    if event not in EVENTS or event == "os.system":
+def _shell_commands(line: str) -> list:
+    """The words of each command of a shell line (split at ; & | ( ) and new lines, quotes removed), past the keywords
+    that run the next word; the line split on blanks when it does not parse (an open quote)."""
+    try:
+        lex = shlex.shlex(line, posix=True, punctuation_chars=";&|()`\n")
+        lex.whitespace = " \t\r"
+        lex.whitespace_split = True
+        tokens = list(lex)
+    except ValueError:
+        tokens = line.split()
+    commands, words = [], []
+    for t in tokens + [";"]:
+        if t and all(c in ";&|()`\n" for c in t):
+            while words and words[0] in _KEYWORDS:
+                words.pop(0)
+            if words:
+                commands.append(words)
+            words = []
+        else:
+            words.append(t)
+    return commands
+
+
+def _launched(words: list, env):
+    """(the words of the program a command runs, past its variable assignments and launchers; the environment it runs
+    with, or None for the starting process's own; whether an env launcher built that environment without the
+    starting process's: env -i, env - or env -u <name>). `env` is the start's environment (None: this process's)."""
+    changed, built, i = {}, False, 0
+    base = None if env is None else {os.fsdecode(k): os.fsdecode(v) for k, v in env.items()}
+    while i < len(words):
+        w = words[i]
+        name = os.path.basename(w).lower()
+        if re.match(r"[A-Za-z_]\w*=", w):
+            k, v = w.split("=", 1)
+            changed[k] = v
+            i += 1
+        elif name == "env":
+            i += 1
+            while i < len(words) and words[i].startswith("-"):
+                o, gone = words[i], None
+                if o in ("-", "--ignore-environment") or re.fullmatch(r"-[0v]*i[0iv]*", o):
+                    base, changed, built = {}, {}, True
+                elif o in ("-u", "--unset"):
+                    i += 1
+                    gone = words[i] if i < len(words) else ""
+                elif o.startswith("--unset="):
+                    gone = o[len("--unset="):]
+                elif o.startswith("-u"):
+                    gone = o[2:]
+                elif o in ("-P", "-C", "-S"):  # their value is the next word
+                    i += 1
+                if gone is not None:
+                    base = {k: v for k, v in (os.environ if base is None else base).items() if k != gone}
+                    changed.pop(gone, None)
+                    built = True
+                i += 1
+        elif name in _LAUNCHERS:
+            i += 1
+            while i < len(words) and words[i].startswith("-"):
+                i += 1
+        else:
+            break
+    if changed:
+        base = dict(os.environ if base is None else base, **changed)
+    return words[i:], base, built
+
+
+def _python_runs_devkit(words: list, cwd) -> bool:
+    """Whether `words` (a program and its arguments) is Python running devkit: `-m devkit[.<module>]`, `-c` code or a
+    script whose text imports devkit."""
+    if not words or not re.fullmatch(r"python[\d.]*", os.path.basename(words[0]).lower()):
         return False
-    words = _words(args[1])
-    for k, w in enumerate(words[:-1]):
-        if w == "-m" and words[k + 1].split(".")[0] == "devkit":
-            return True
-        if re.fullmatch(r"-[A-Za-z]*c", w) and _IMPORTS_DEVKIT.search(words[k + 1]):
-            return True
+    k = 1
+    while k < len(words):
+        w = words[k]
+        if w == "--check-hash-based-pycs":
+            k += 2
+            continue
+        if w.startswith("-") and w != "-":  # -I, -IS, -X utf8, -Xutf8, -Ic <code>, -m <module>, -mdevkit
+            for j, flag in enumerate(w[1:], 2):
+                if flag in "cmWX":
+                    value = w[j:] or (words[k + 1] if k + 1 < len(words) else "")
+                    if flag == "c":
+                        return bool(_IMPORTS_DEVKIT.search(value))
+                    if flag == "m":
+                        return value.split(".")[0] == "devkit"
+                    k += 0 if w[j:] else 1
+                    break
+            k += 1
+            continue
+        path = w if os.path.isabs(w) else os.path.join(os.fsdecode(cwd) if cwd else os.getcwd(), w)
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                return bool(_IMPORTS_DEVKIT.search(f.read(1 << 20)))
+        except OSError:
+            return False
     return False
+
+
+def _imports_devkit(path: str) -> bool:
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            return bool(_IMPORTS_DEVKIT.search(f.read(1 << 20)))
+    except OSError:
+        return False
+
+
+def _is_devkit_dev(word: str, env, cwd) -> bool:
+    """Whether a `dev` command runs devkit: it resolves, on the PATH it runs with, to a file that imports devkit (a
+    copy's bin/dev), not to a test's own stand-in of the command."""
+    if os.path.basename(word) != "dev":
+        return False
+    return any(_imports_devkit(p) for p in _resolve(word, os.environ if env is None else env, cwd))
+
+
+def devkit_starts(event, args) -> list:
+    """(the environment, whether an env launcher built it) of each devkit process a start runs: a copy's bin/dev, a
+    `dev` command, or Python running devkit (as its program, through launchers, or in a shell line). The environment is
+    None when the process inherits this one's unchanged."""
+    if event not in EVENTS:
+        return []
+    if event == "os.system":
+        env, cwd, commands = None, None, _shell_commands(os.fsdecode(args[0] or ""))
+    else:
+        words = _words(args[1])
+        env, cwd = (args[3], args[2]) if event == "subprocess.Popen" else (args[2], None)
+        commands = [words]
+        if words and os.path.basename(words[0]).lower() in _SHELLS:
+            flag = next((k for k, w in enumerate(words[1:], 1) if re.fullmatch(r"-[a-z]*c[a-z]*", w)), None)
+            if flag is not None and flag + 1 < len(words):
+                commands += _shell_commands(words[flag + 1])
+    out = []
+    for command in commands:
+        program, child, built = _launched(command, env)
+        if not program:
+            continue
+        if any(_DEVKIT.search(w) for w in program) or _is_devkit_dev(program[0], child, cwd) \
+                or _python_runs_devkit(program, cwd):
+            out.append((child, built))
+    if not out and event != "os.system" and starts_devkit(event, args):  # bin/dev anywhere else in the start
+        out.append((_launched(_words(args[1]), env)[1], False))
+    return out
+
+
+def runs_devkit(event, args) -> bool:
+    """Whether a process start runs devkit (devkit_starts)."""
+    return bool(devkit_starts(event, args))
 
 
 def trips(log=None) -> list:

@@ -60,6 +60,31 @@ if __name__ == "__main__":
 '''
 
 
+# The same, with the devkit call that trips the net at another place of the module: its import, a module or class
+# fixture. `trip()` is that call; BODY is replaced by the module's tests and fixtures.
+FIXTURE_MODULE = '''
+import os, sys, unittest
+from unittest import mock
+sys.path[:0] = [TESTS, LIB]
+import _hermetic
+_hermetic.activate()
+import _sandbox
+from devkit import core
+
+
+def trip():
+    allowed = tuple(os.environ["DEVKIT_TEST_PATH"].split(os.pathsep))
+    with mock.patch.object(_sandbox, "ALLOWED", allowed):
+        core.sh(["codex", "login"], env=dict(os.environ, PATH=FOLDER + ":/usr/bin:/bin"))
+
+BODY
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
+'''
+QUIET = "class A(unittest.TestCase):\n    def test_quiet(self):\n        pass\n"
+
+
 def ignores_case() -> bool:
     with tempfile.TemporaryDirectory() as d:
         Path(d, "probe").touch()
@@ -292,6 +317,67 @@ class DevkitChildTests(Folders):
         self.assertEqual(0, p.returncode, p.stderr)
         self.assertEqual(0, subprocess.run(["/usr/bin/true"], env=scratch, cwd=str(self.home)).returncode)
 
+    # the starts below use -I, so a child the net let through could not import devkit and would do nothing
+    def refused(self, start):
+        with self.assertRaises(PermissionError) as cm:
+            start()
+        self.assertIn("_sandbox.env()", str(cm.exception))
+
+    def test_a_python_program_whose_code_imports_devkit_is_a_devkit_child(self):
+        scratch = {"HOME": str(self.home), "PATH": "/usr/bin:/bin"}
+        script = self.home / "driver.py"
+        script.write_text("import sys\nfrom devkit import wizard\n")
+        other = self.home / "other.py"
+        other.write_text("import json\nprint('devkit')\n")
+        py = sys.executable
+        for argv in ([py, "-I", str(script)], [py, "-I", "-X", "utf8", "driver.py"],
+                     [py, "-I", "-c", "import importlib; importlib.import_module('devkit.core')"],
+                     [py, "-I", "-c", "__import__('devkit.cli')"]):
+            with self.subTest(argv[-1]):
+                self.refused(lambda: subprocess.run(argv, env=scratch, capture_output=True, timeout=60,
+                                                    cwd=str(self.home)))
+        p = subprocess.run([py, "-I", str(other)], env=scratch, capture_output=True, text=True, timeout=60,
+                           cwd=str(self.home))
+        self.assertEqual(0, p.returncode, p.stderr)
+
+    def test_a_shell_line_that_runs_devkit_is_a_devkit_child(self):
+        scratch = {"HOME": str(self.home), "PATH": f"{TREE / 'bin'}:/usr/bin:/bin"}  # dev: this tree's bin/dev
+        py = sys.executable
+        for line in (f"'{py}' -I -m devkit.cli version", "cd / && dev version", "x=1; nohup dev version"):
+            with self.subTest(line):
+                self.refused(lambda: subprocess.run(["/bin/sh", "-c", line], env=scratch, capture_output=True,
+                                                    timeout=60, cwd=str(self.home)))
+                # nosemgrep: subprocess-shell-true -- a constant line of this test, which the net must refuse unrun
+                self.refused(lambda: subprocess.run(line, shell=True, env=scratch, capture_output=True,
+                                                    timeout=60, cwd=str(self.home)))
+        p = subprocess.run(["/bin/sh", "-c", "echo dev; echo -m devkit"], env=scratch, capture_output=True, text=True,
+                           timeout=60, cwd=str(self.home))
+        self.assertEqual(["dev", "-m devkit"], p.stdout.split("\n")[:2], p.stderr)
+        # a `dev` of the test's own (a shell stand-in, as the completion tests use) is not devkit
+        own = self.home / "own-bin"
+        own.mkdir()
+        (own / "dev").write_text("#!/bin/sh\necho stand-in dev\n")
+        (own / "dev").chmod(0o755)
+        p = subprocess.run(["/bin/sh", "-c", "COMP_WORDS=(dev task); dev"], env=dict(scratch, PATH=f"{own}:/usr/bin"),
+                           capture_output=True, text=True, timeout=60, cwd=str(self.home))
+        self.assertEqual("stand-in dev\n", p.stdout, p.stderr)
+
+    def test_env_that_clears_the_environment_or_drops_the_net_starts_devkit_without_it(self):
+        py = sys.executable
+        for argv in (["env", "-i", f"HOME={self.home}", py, "-I", "-m", "devkit.cli", "version"],
+                     ["/usr/bin/env", "-u", "DEVKIT_TEST_PATH", py, "-I", "-m", "devkit.cli", "version"],
+                     ["nohup", "env", "-", "PATH=/usr/bin:/bin", py, "-I", "-m", "devkit.cli", "version"]):
+            with self.subTest(argv[:3]):
+                self.refused(lambda: subprocess.run(argv, capture_output=True, timeout=60, cwd=str(self.home)))
+        self.refused(lambda: os.system(f"env -i HOME='{self.home}' '{py}' -I -m devkit.cli version >/dev/null 2>&1"))
+        # env that keeps the net, or names it again in the environment it builds, is no such start
+        for argv in (["env", "-u", "FOO", py, "-I", "-m", "devkit.cli", "version"],
+                     ["env", "-i", f"HOME={self.home}", f"DEVKIT_TEST_PATH={os.environ['DEVKIT_TEST_PATH']}", py,
+                      "-I", "-m", "devkit.cli", "version"]):
+            with self.subTest(argv[:3]):
+                p = subprocess.run(argv, capture_output=True, text=True, timeout=60, cwd=str(self.home))
+                self.assertIn("No module named 'devkit'", p.stderr)  # it started; -I keeps devkit out of its reach
+
 
 class OneModuleRunTests(Folders):
     # a test whose devkit call starts a real program fails itself, in a run of its module alone (no test_zz there),
@@ -312,6 +398,62 @@ class OneModuleRunTests(Folders):
         self.assertTrue(failure.startswith("test_a_devkit_call_that_starts_the_real_codex"), p.stderr)
         self.assertIn(str(codex), failure)
         self.assertFalse((codex.parent / "ran").exists(), "the real codex ran")
+
+
+class FixtureHitTests(Folders):
+    # a devkit call that trips the net outside a test method (the module's import, setUpModule, setUpClass,
+    # tearDownClass, tearDownModule) still fails a run of the module alone: the next test that ends reports it, and the
+    # run itself fails for a hit no test was left to report
+    def run_module(self, body):
+        base = Path(tempfile.mkdtemp(dir=str(self.root)))  # one per run: a "real" codex and the module
+        codex = base / "bin" / "codex"
+        codex.parent.mkdir()
+        codex.write_text(FAKE_REAL)
+        codex.chmod(0o755)
+        module = base / "one" / "test_one.py"
+        module.parent.mkdir()
+        source = FIXTURE_MODULE.replace("TESTS", repr(str(TREE / "tests"))).replace("LIB", repr(str(TREE / "lib")))
+        module.write_text(source.replace("FOLDER", repr(str(codex.parent))).replace("BODY", body))
+        p = subprocess.run([sys.executable, "-I", str(module)], env=_sandbox.env({"HOME": str(self.home),
+                                                                                    "PATH": "/usr/bin:/bin"}),
+                           capture_output=True, text=True, timeout=120, cwd=str(module.parent))
+        self.assertFalse((codex.parent / "ran").exists(), "the real codex ran")
+        return p, codex
+
+    def test_a_hit_before_a_test_starts_fails_the_next_test_that_ends(self):
+        bodies = {
+            "the module's import": "trip()\n\n" + QUIET,
+            "setUpModule": "def setUpModule():\n    trip()\n\n" + QUIET,
+            "setUpClass": QUIET + "\n    @classmethod\n    def setUpClass(cls):\n        trip()\n",
+            "tearDownClass of an earlier class": (
+                "class A(unittest.TestCase):\n    def test_first(self):\n        pass\n\n"
+                "    @classmethod\n    def tearDownClass(cls):\n        trip()\n\n\n"
+                "class B(unittest.TestCase):\n    def test_quiet(self):\n        pass\n"),
+        }
+        for where, body in bodies.items():
+            with self.subTest(where):
+                p, codex = self.run_module(body)
+                self.assertEqual(1, p.returncode, p.stderr)
+                self.assertIn("FAILED (failures=1)", p.stderr)
+                failure = p.stderr.split("\nFAIL: ", 1)[-1]
+                self.assertTrue(failure.startswith("test_quiet"), p.stderr)
+                self.assertIn("before it started", failure)
+                self.assertIn(str(codex), failure)
+
+    def test_a_hit_after_the_last_test_fails_the_run(self):
+        bodies = {
+            "tearDownClass of the last class": QUIET + "\n    @classmethod\n    def tearDownClass(cls):\n        trip()\n",
+            "tearDownModule": QUIET + "\n\ndef tearDownModule():\n    trip()\n",
+        }
+        for where, body in bodies.items():
+            with self.subTest(where):
+                p, codex = self.run_module(body)
+                self.assertEqual(1, p.returncode, p.stderr)
+                self.assertRegex(p.stderr, r"test_quiet \(.*\) \.\.\. ok")
+                self.assertIn("FAILED (errors=1)", p.stderr)
+                error = p.stderr.split("\nERROR: ", 1)[-1]
+                self.assertIn("after the last test", error.splitlines()[0])
+                self.assertIn(str(codex), error)
 
 
 class OwnStandInsTests(unittest.TestCase):
