@@ -228,6 +228,50 @@ class DetectTests(unittest.TestCase):
             self.assertEqual(sorted(self.detect(files)), [("jest", "web")])
 
 
+# a package.json test script read word by word: what devkit runs must be what the script runs, or there is no runner
+class NodeScriptTests(unittest.TestCase):
+    def node_runner(self, scripts):
+        """(exec, suite) of the node runner of a package with these package.json scripts, or None."""
+        with Env() as e, mock.patch.object(testx.shutil, "which", lambda n: "/opt/bin/node" if n == "node" else None):
+            r = e.repo({"package.json": json.dumps({"scripts": scripts})}, branch=None)
+            rn = {(x["name"], x["root"]): x for x in testx.detect(str(r))}.get(("node", "."))
+        return rn and (rn["exec"], rn["suite"])
+
+    # node takes an option's value as the next word too: it stays with its option, never joins the suite
+    def test_a_node_option_keeps_a_value_written_as_the_next_word(self):
+        self.assertEqual(self.node_runner({"test": "node --test --test-coverage-include src -r ./setup.cjs "
+                                                   "--import tsx test/"}),
+                         (["node", "--test-coverage-include", "src", "-r", "./setup.cjs", "--import", "tsx", "--test"],
+                          ["test/"]))
+
+    # devkit sets its own reporters and never watches: those options go, with their values, in either spelling
+    def test_node_reporter_and_watch_options_go_with_their_values(self):
+        self.assertEqual(self.node_runner({"test": "node --test --test-reporter spec --test_reporter_destination "
+                                                   "out.txt --watch-path src test/"}),
+                         (["node", "--test"], ["test/"]))
+
+    # an option devkit does not know may take the next word as its value, so the paths are unknown: no runner (the
+    # tests are listed as not proven, never run wrongly); written with `=`, or a known switch, it is passed on
+    def test_an_unknown_node_option_without_equals_means_no_runner(self):
+        self.assertIsNone(self.node_runner({"test": "node --test --future-option value test/"}))
+        self.assertEqual(self.node_runner({"test": "node --test --future-option=value --experimental-test-coverage "
+                                                   "--no-warnings test/"}),
+                         (["node", "--future-option=value", "--experimental-test-coverage", "--no-warnings", "--test"],
+                          ["test/"]))
+
+    # devkit runs node itself, so a step before the tests (a build, a node script that is no test) would be skipped
+    # and the tests would run against stale output: no runner. A step after the tests is fine
+    def test_a_step_before_the_node_tests_means_no_runner(self):
+        self.assertIsNone(self.node_runner({"test": "tsc && node --test dist/test/"}))
+        self.assertIsNone(self.node_runner({"test": "npm run build && node --test"}))
+        self.assertIsNone(self.node_runner({"test": "node scripts/build.mjs && node --test dist/"}))
+        self.assertEqual(self.node_runner({"test": "node --test test/ && eslint ."}), (["node", "--test"], ["test/"]))
+
+    # npm runs a pretest script before the test script; devkit would not
+    def test_a_pretest_script_means_no_node_runner(self):
+        self.assertIsNone(self.node_runner({"pretest": "tsc", "test": "node --test dist/test/"}))
+
+
 # --------------------------------------------------------------------------- blast radius
 
 PY_PROJECT = {
@@ -822,6 +866,21 @@ def recorded(e):
 
 
 class RunTests(unittest.TestCase):
+    # a node option whose value is the next word reaches node whole, so the suite runs (node used to exit 9 with
+    # "requires an argument", and dev test reported zero tests)
+    @unittest.skipUnless(shutil.which("node"), "node is not installed, so the node runner cannot run here")
+    def test_a_node_suite_with_an_option_value_as_the_next_word_runs(self):
+        with Env() as e:
+            r = e.repo({"package.json": json.dumps({"type": "module", "scripts": {
+                            "test": "node --test --test-coverage-include src test/"}}),
+                        "src/add.mjs": "export const add = (a, b) => a + b;\n",
+                        "test/add.test.mjs": 'import assert from "node:assert/strict";\nimport { test } from '
+                                             '"node:test";\nimport { add } from "../src/add.mjs";\n\n'
+                                             'test("adds", () => assert.equal(add(1, 2), 3));\n'})
+            rc, out, err = dev(r, "run", "--all", "--json")
+            run = json.loads(out)["steps"][0]["runs"][0]
+            self.assertEqual((rc, run["count"], run["failed"]), (0, 1, 0), out + err)
+
     def test_failure_is_compact_with_file_line_and_recorded(self):
         with Env() as e:
             r = e.repo(CALC)
@@ -1151,6 +1210,18 @@ class WideBranchTests(unittest.TestCase):
             rc, out, err = dev(r, "--affected")
             self.assertEqual(rc, 0, out + err)
             self.assertIn("110 test(s) passed", out)
+
+    # the hold is for plain `dev test` only: `dev test run`, even with no paths, starts what it selects
+    def test_dev_test_run_without_paths_starts_a_wide_branchs_selection(self):
+        with Env() as e, mock.patch.object(testx, "WIDE_CHANGES", 3), mock.patch.object(testx, "WIDE_TESTS", 3):
+            r = e.repo(numbered(4))
+            write(r, {f"src_{i:03d}.py": f"N = {i + 1000}\n" for i in range(4)})
+            git(r, "add", "-A")
+            git(r, "commit", "-q", "-m", "feat: renumber")
+            self.assertEqual(dev(r)[0], 2)
+            rc, out, err = dev(r, "run")
+            self.assertEqual(rc, 0, out + err)
+            self.assertIn("4 test(s) passed", out)
 
 
 class AuditTests(unittest.TestCase):

@@ -5,7 +5,8 @@
   dev test                       1) the last failures (stop if one still fails)  2) the blast radius of the changes;
                                  a branch WIDE_CHANGES files from its base that reaches WIDE_TESTS test files is not
                                  started: it names the tests of the files touched now (--affected runs them all)
-  dev test run [paths…]          --failed · --affected · --all · --since REF · --runner NAME · --json
+  dev test run [paths…]          --failed · --affected · --all · --since REF · --runner NAME · --json; with none of
+                                 them, what plain `dev test` runs, started on a wide branch too
   dev test plan [--all]          what would run, why (changed file → tests), the estimate; runs nothing
   dev test prove [tests…]        each new or changed test (each case of a parametrized one) passes N times with the
                                  change and fails without it; tests no runner here can run are listed, not fatal
@@ -18,8 +19,9 @@ Java/Kotlin/PHP class-name references, Go package imports), plus the name conven
 nothing maps to widens to the tests of its directory or package, up to "all"; it never selects nothing.
 
 Runners: pytest, unittest, jest, vitest, node (`node --test`, for a package.json test script that runs node, when node
-is on the PATH; a plain test script counts as one test, which fails when it exits non-zero), maven, gradle, go,
-phpunit, pest.
+is on the PATH; a plain test script counts as one test, which fails when it exits non-zero; none for a script with a
+build step before its tests or a node option devkit does not know written without `=`), maven, gradle, go, phpunit,
+pest.
 
 Results: JUnit XML (pytest, node, maven, gradle, phpunit/pest), `go test -json`, jest/vitest JSON and unittest's own
 output.
@@ -345,16 +347,60 @@ def _venv_python(top, root):
     return None
 
 
-_NODE_VALUE = {"--import", "--require", "-r", "--loader", "--experimental-loader", "--conditions", "-C",
-               "--env-file", "--test-name-pattern", "--test-skip-pattern", "--test-concurrency", "--test-timeout",
-               "--test-shard"}
+# node's options that take a value, written `--opt value` or `--opt=value`, and its switches, which take none (any
+# `--no-…` is a switch too). An option in neither set, written without `=`, may own the next word: see _node_args.
+_NODE_VALUE = {"--import", "--require", "-r", "--loader", "--experimental-loader", "--conditions", "-C", "--env-file",
+               "--env-file-if-exists", "--input-type", "--experimental-default-type", "--disable-warning",
+               "--unhandled-rejections", "--title", "--max-old-space-size", "--stack-size", "--test-name-pattern",
+               "--test-skip-pattern", "--test-concurrency", "--test-timeout", "--test-shard", "--test-reporter",
+               "--test-reporter-destination", "--test-coverage-include", "--test-coverage-exclude",
+               "--test-coverage-lines", "--test-coverage-branches", "--test-coverage-functions", "--test-isolation",
+               "--experimental-test-isolation", "--test-global-setup", "--watch-path", "--watch-kill-signal"}
+_NODE_SWITCH = {"--test", "--test-only", "--test-force-exit", "--test-update-snapshots", "--experimental-test-coverage",
+                "--experimental-test-module-mocks", "--experimental-test-snapshots", "--watch",
+                "--watch-preserve-output", "--enable-source-maps", "--experimental-strip-types",
+                "--experimental-transform-types", "--experimental-vm-modules", "--experimental-require-module",
+                "--experimental-detect-module", "--experimental-sqlite", "--experimental-websocket",
+                "--experimental-global-navigator", "--preserve-symlinks", "--preserve-symlinks-main", "--expose-gc",
+                "--trace-warnings", "--trace-deprecation", "--trace-uncaught", "--throw-deprecation",
+                "--pending-deprecation", "--abort-on-uncaught-exception", "--inspect", "--inspect-brk"}
+
+
+def _node_args(args):
+    """node's arguments -> ([(option, its words)], the words after the options), or None when an option devkit does
+    not know is written without `=`: its value may be the next word, so what the call runs is unknown. Options end at
+    the first other word (`--` ends them too): after it, `node --test` takes paths and globs, and a script its own
+    arguments. node reads `_` in an option's name as `-`."""
+    opts, i = [], 0
+    while i < len(args):
+        x = args[i]
+        if x == "--":
+            i += 1
+            break
+        if x == "-" or not x.startswith("-"):
+            break
+        name = x.split("=", 1)[0]
+        name = name[:2] + name[2:].replace("_", "-")
+        if name in _NODE_VALUE and "=" not in x:
+            opts.append((name, args[i:i + 2]))
+            i += 2
+            continue
+        if "=" not in x and name not in _NODE_SWITCH and not name.startswith("--no-"):
+            return None
+        opts.append((name, [x]))
+        i += 1
+    return opts, args[i:]
 
 
 def _node_suite(script: str):
     """A package test script that runs node -> (node's own flags, what it runs), or None. `node --test [flags]
     [paths or globs]` gives its flags and paths ([] for node's own discovery); plain `node <test script>` calls joined
-    by `&&` give their scripts, which `node --test` runs as one test each (a script fails when it exits non-zero)."""
-    flags, suite, tested, runs = [], [], False, False
+    by `&&` give their scripts, which `node --test` runs as one test each (a script fails when it exits non-zero).
+
+    None when devkit cannot run what the script runs: a step before the tests (a build such as `tsc`, or a node
+    script that is no test) would be skipped and leave the tests to run on stale output, and a node option devkit does
+    not know, written without `=`, leaves the paths unknown. A step after the tests changes nothing they run."""
+    flags, suite, tested, runs, before = [], [], False, False, False
     for part in re.split(r"&&|\|\||;", script or ""):
         try:
             words = shlex.split(part)
@@ -362,25 +408,29 @@ def _node_suite(script: str):
             return None
         while words and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", words[0]):  # FOO=1 node …
             words.pop(0)
-        if not words or os.path.basename(words[0]) not in ("node", "node.exe"):
+        if not words:
             continue
-        args = words[1:]
-        pos = _positionals(args, _NODE_VALUE)
-        if "--test" not in args:  # a test script of its own; a script that starts another framework is not one
-            if pos and _lang(pos[0]) == "js" and is_test_file(pos[0]):
-                runs = True
-                suite.append(pos[0])
+        node = os.path.basename(words[0]) in ("node", "node.exe")
+        parsed = _node_args(words[1:]) if node else ([], [])
+        if parsed is None:
+            return None
+        opts, rest = parsed
+        test = any(n == "--test" for n, _ in opts)
+        script_test = node and not test and bool(rest) and _lang(rest[0]) == "js" and is_test_file(rest[0])
+        if not (test or script_test):  # another command, or a script that is no test (a build, another framework)
+            before = True
             continue
+        if before:
+            return None
         runs = True
-        suite += pos
+        if script_test:  # a test script of its own; the words after it are its arguments
+            suite.append(rest[0])
+            continue
+        suite += [x for x in rest if not x.startswith("-")]
         if not tested:  # the flags of the first `node --test` call (a loader, an env file); never a watch or reporter
-            tested, i = True, 0
-            while i < len(args):
-                x = args[i]
-                val = args[i + 1:i + 2] if x in _NODE_VALUE else []
-                if x.startswith("-") and x != "--test" and not x.startswith(("--test-reporter", "--watch")):
-                    flags += [x] + val
-                i += 1 + len(val)
+            tested = True
+            flags += [w for n, ws in opts if n != "--test" and not n.startswith(("--test-reporter", "--watch"))
+                      for w in ws]
     return (flags, suite) if runs else None
 
 
@@ -439,7 +489,8 @@ def detect(top, repo=None) -> list:
     for d in sorted(d for d in by_dir if has(d, "package.json")):
         pkg = core.read_json(os.path.join(absd(d), "package.json"), {}) or {}
         deps = {**(pkg.get("dependencies") or {}), **(pkg.get("devDependencies") or {})}
-        script = str((pkg.get("scripts") or {}).get("test") or "")
+        scripts = pkg.get("scripts") or {}
+        script = str(scripts.get("test") or "")
         names = by_dir.get(d, set())
         tool = None
         if re.search(r"\bvitest\b", script):
@@ -450,7 +501,8 @@ def detect(top, repo=None) -> list:
             tool = "vitest"
         elif "jest" in deps or any(n.startswith("jest.config") for n in names) or "jest" in pkg:
             tool = "jest"
-        node = None if tool or not shutil.which("node") else _node_suite(script)
+        # npm runs a pretest script (a build) before the test script; devkit runs node itself and would skip it
+        node = None if tool or scripts.get("pretest") or not shutil.which("node") else _node_suite(script)
         if tool:
             found.append({"name": tool, "root": rel(d), "lang": "js", "exec": _pm_exec(top, d, tool)})
         elif node:
@@ -1970,7 +2022,8 @@ def _flow(a, top, runners):
         return finish(code)
     groups, orphans = _group_tests(top, runners, radius["tests"], changed)
     reach = [t for t in radius["tests"] if t not in set(orphans)]
-    if groups and not (a.affected or a.since) and len(changed) >= WIDE_CHANGES and len(reach) >= WIDE_TESTS:
+    plain = getattr(a, "test_cmd", None) is None and not (a.affected or a.since)  # `dev test run` starts what it selects
+    if groups and plain and len(changed) >= WIDE_CHANGES and len(reach) >= WIDE_TESTS:
         data["advice"] = _wide(top, st, runners, changed, reach, json_out)
         return finish(2)
     if orphans and not json_out:
@@ -2366,7 +2419,9 @@ def _no_runner(a, f) -> str:
         return f"--runner {a.runner} leaves it out"
     if _lang(f) == "js":
         return "no runner here takes it: node is not on the PATH" if not shutil.which("node") else \
-            "no runner here takes it: a package.json test script that runs jest, vitest or node --test makes one"
+            "no runner here takes it: a package.json test script that runs jest, vitest or node --test makes one, " \
+            "unless it builds first (a pretest script, tsc && node --test) or passes a node option devkit does not " \
+            "know without `=`"
     return "no runner here takes it (dev test plan lists the runners found)"
 
 

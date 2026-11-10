@@ -22,6 +22,16 @@ error line, and the path to the full log. The raw output streams only to a termi
 Node runner when its `package.json` test script runs `node --test`, or runs its test scripts with `node`, and `node`
 is on the `PATH`.
 
+devkit runs `node` itself, not `npm test`, so it gives no runner to a script it cannot reproduce exactly: one that
+builds before its tests (a `pretest` script, `tsc && node --test dist/test/`, `npm run build && node --test`), which
+would leave the tests to run on stale output, and one that passes a Node option devkit does not know without `=`
+(`--some-option value`), whose value could be the next word. Such a package's tests are never run wrongly: `dev test`
+names them in its `no runner here for:` warning, and `dev test prove` lists them as not proven with the reason. To get
+the runner back, test the sources without a build step (Node runs `.ts` test files directly through its type
+stripping, or through a loader: `node --import tsx --test test/`), and write an unusual option with `=`
+(`--some-option=value`); otherwise run `npm test` yourself. A step after the tests (`node --test && eslint .`) changes
+nothing.
+
 ### The blast radius
 
 devkit maps the files you changed to the tests that can see them:
@@ -55,7 +65,8 @@ uncommitted changes), and exits with code `2`:
 ```
 
 Run the command it names, compare with the commit your work started from (`dev test --since <ref>`), or run the whole
-selection with `dev test --affected`.
+selection with `dev test --affected`. Only plain `dev test` holds back: `dev test run`, with or without paths, starts
+what it selects.
 
 Mapping is fast: under half a second on repositories of a few thousand files.
 
