@@ -99,14 +99,18 @@ class AwkComparisonsAndRedirections(unittest.TestCase):
         reads = ["awk 'NR>=2050 && NR<=2100' lib/devkit/guard.py", "awk 'NR>2050' f", "awk '$3 > 500 {print $1}' f",
                  "awk '{print (a > b)}' f", "awk '$1 ~ /a>b/ {print}' f", "awk '{ n = i++ / 2; print n }' f",
                  "awk 'NR>1 || /x/' f", "awk '{print \"a>b|c\"}' f", "awk '# a > b\n{print}' f",
-                 "awk '{ for (i = 1; i <= NF; i++) if ($i > 0) print $i }' f", "awk '{ if (a) /x/; print }' f"]
+                 "awk '{ for (i = 1; i <= NF; i++) if ($i > 0) print $i }' f", "awk '{ if (a) /x/; print }' f",
+                 "awk '{ print $1,\n$2 }' f", "awk '{ print $1\n$2 > 0 }' f"]
         writes = ["awk '{print > \"/tmp/out\"}' f", "awk '{print $1 >> \"f\"}' f", "awk '{printf(\"%d\", NR) > \"f\"}' f",
                   "awk '{print | \"sh\"}' f", "awk '{ x = i++ / 2; print > \"f\"; y = 1/2 }' f",
                   "awk '{ if (x) print; else print > \"f\" }' f", "awk '{ x = /\"/; print > \"f\" }' f",
                   "awk '$0 ~ /[/]\"/ { print > \"f\" }' f", "awk '{print \"unterminated}' f",
                   "awk '{ if (a) /\"/; print > \"f\"; if (b) /\"/ }' f",
                   "awk '{ for (;;) /\"/; print > \"f\"; for (;;) /\"/ }' f",
-                  "awk 'NR>=2050 {print > \"out\"}' f"]
+                  "awk 'NR>=2050 {print > \"out\"}' f",
+                  # awk reads a print on past a newline after `,`, `&&` or `||` (each wrote its file in /usr/bin/awk)
+                  "awk '{ print $1,\n$2 > \"f\" }' f", "awk '{ printf \"%s\",\n$1 > \"f\" }' f",
+                  "awk '{ print 1 ||\n0 > \"f\" }' f", "awk '{ print 1 &&\n1 > \"f\" }' f"]
         for level in ("review", "read"):
             for cmd in reads:
                 with self.subTest(level=level, reads=cmd):

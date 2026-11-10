@@ -360,6 +360,8 @@ _GIT_STEERING_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_CEILING_
 _GIT_CONFIG_MOVES = re.compile(r"(?im)^[ \t]*(?:worktree[ \t]*=|bare[ \t]*=[ \t]*(?:true|yes|on|1)\b|\[[ \t]*include)")
 # the whole command check_bash judges, which _folder_word reads for what steers git
 _COMMAND_TEXT = contextvars.ContextVar("devkit_guard_command_text", default="")
+# the command as typed starts with a cd or pushd: nothing before it can replace git or move the shell
+_STARTS_WITH_CD = re.compile(r"[ \t]*(?:cd|pushd)[ \t]")
 
 
 def _git_folder(cwd, option):
@@ -400,21 +402,31 @@ def _git_folder(cwd, option):
     return None
 
 
-def _folder_word(word, cwd, line="") -> Path:
+def _folder_word(word, cwd, line="", first=False) -> Path:
     """The folder a cd or pushd word names, as resolve() reads it, except that a `git rev-parse --show-toplevel`,
     `--show-cdup` or `--git-common-dir` substitution (with an optional `/…` after it) is worked out from `cwd`
-    (_git_folder), since a cd to the checkout's own top folder is common. UNKNOWN when the command (`line`, and the
-    whole command check_bash judges) or the hook's environment changes which repository git finds or which git runs."""
+    (_git_folder), since a cd to the checkout's own top folder is common. That holds only for the cd that starts the
+    command (`first`): anything before it may replace git (a zsh `'git'() {…}` or `functions[git]=…`, a sourced file
+    that exports GIT_DIR), so a later one is UNKNOWN. UNKNOWN too when the command (`line`, and the whole command
+    check_bash judges) or the hook's environment changes which repository git finds or which git runs.
+    `--show-cdup` prints the way up from `cwd` with a `/` after it, and nothing at the top, where a `/abs` after it
+    is the absolute folder the shell then goes to."""
     m = _GIT_FOLDER_WORD.fullmatch(str(word))
     if not m:
         return resolve(word, cwd)
-    if not cwd or str(cwd) == str(UNKNOWN) or _GIT_STEERED.search(_COMMAND_TEXT.get() + "\n" + (line or "")) or \
+    if not first or not cwd or str(cwd) == str(UNKNOWN) or \
+            _GIT_STEERED.search(_COMMAND_TEXT.get() + "\n" + (line or "")) or \
             any(os.environ.get(k) for k in _GIT_STEERING_ENV):
         return UNKNOWN
-    base = _git_folder(cwd, m.group(1) or m.group(2))
+    option = m.group(1) or m.group(2)
+    base = _git_folder(cwd, option)
     if base is None or re.search(r"[\s*?\[]", str(base)):  # unquoted, the shell splits or globs such a folder
         return UNKNOWN
-    return resolve(str(base) + (m.group(3) or ""), cwd)
+    if option != "--show-cdup":
+        return resolve(str(base) + (m.group(3) or ""), cwd)
+    here = real(str(cwd))
+    path = ("" if str(base) == here else os.path.relpath(str(base), here) + "/") + (m.group(3) or "")
+    return Path(here) if not path else resolve(path, here)  # `cd ""` stays where it is
 
 
 # a cd or pushd folder word starts here: the text before it ends with the command word, at a command's start
@@ -702,24 +714,51 @@ def _braced_end(s: str, i: int) -> int:
     return min(j, n)
 
 
-# a substitution whose output is never empty: pwd prints the shell's folder, so the reading that drops a
-# substitution keeps it as _SUBST_WORD (`> $(pwd)/out.txt` writes below the folder, never to `/out.txt`)
-_PRINTS_A_FOLDER = re.compile(r"(?:\$\(|`)[ \t]*pwd(?:[ \t]+-[LP]+)*[ \t]*[)`]")
-_PWD_REDEFINED = re.compile(r"\bpwd[ \t]*\([ \t]*\)|\bfunction[ \t]+pwd\b|\balias\b")  # a pwd that may print nothing
-_NEVER = re.compile(r"(?!)")
+# a substitution that prints the shell's folder: a `$(pwd)/x` the reading of a command reads as `./x`, below the
+# folder the command runs in (_pwd_is_here)
+_PWD_FORM = r"(?:\$\([ \t]*pwd(?:[ \t]+-[LP]+)*[ \t]*\)|`[ \t]*pwd(?:[ \t]+-[LP]+)*[ \t]*`)"
+_PRINTS_A_FOLDER = re.compile(_PWD_FORM)
+# what may replace pwd, in any quoting: a function (`pwd() {…}`, zsh `'pwd'() {…}`, `function pwd`, zsh
+# `functions[pwd]=…`) or an alias
+_PWD_REDEFINED = re.compile(r"p['\"\\]*w['\"\\]*d['\"\\]*[ \t]*\(|\bfunctions?\b|\balias\b")
+# what a line may hold before a pwd whose folder the guard knows: cds to a folder it reads, each ending its own
+# command, then the words of the pwd's own command (no other substitution, group, pipe or separator)
+_PWD_CD_WORD = (r"(?:[^\s;&|()<>{}`$'\"\\+-][^\s;&|()<>{}`$'\"\\]*|\"[^\"`$\\]*\"|'[^']*'|"
+                r"\"\$\([ \t]*git[ \t]+rev-parse[ \t]+(?:--show-toplevel|--show-cdup|--git-common-dir)[ \t]*\)"
+                r"(?:/[^\"`$\\]*)?\")")
+_PWD_CONTEXT = re.compile(r"[ \t\n]*(?:(?:cd|pushd)(?:[ \t]+(?:-[LP]+|--))*[ \t]+" + _PWD_CD_WORD +
+                          r"[ \t]*(?:&&|;|\n)[ \t\n]*)*(?:[^;&|(){}\n`$\\]|" + _PWD_FORM + r")*")
+_PWD_WORD_END = frozenset(" \t\n;&|)<>/")
 
 
-def _split_heredocs(cmd: str, mask: str | None = None):
+def _pwd_is_here(cmd: str, i: int, j: int, quoted: bool) -> bool:
+    """True when the `$(pwd)`, `$(pwd -P)` or `` `pwd` `` at cmd[i:j] prints the folder the guard tracks for its
+    command, so a reading may put `.` in its place: a `/`, a space or the end of the word follows it (a glued
+    `$(pwd)x` is `<folder>x`), and only cds the guard reads come before its command (_PWD_CONTEXT). The caller has
+    checked that nothing in the command replaces pwd."""
+    if not _PRINTS_A_FOLDER.fullmatch(cmd, i, j):
+        return False
+    nxt = cmd[j:j + 1]
+    if quoted and nxt == '"':
+        nxt = cmd[j + 1:j + 2]
+    elif quoted and nxt != "/":
+        return False
+    return (not nxt or nxt in _PWD_WORD_END) and _PWD_CONTEXT.fullmatch(cmd, 0, i) is not None
+
+
+def _split_heredocs(cmd: str, mask: str | None = None, top: bool = False):
     """-> (the command without its heredoc bodies and terminator lines, [(body, expands)]). A `<<WORD` counts only
     where the shell reads it: outside quotes and comments, and not `<<<` (a here-string), so a quoted "<<EOF" in a
     commit message hides no line. `expands`: the delimiter is unquoted, so the shell runs `$(…)` in the body.
     `mask` (for _substitution_readings): the command keeps its heredoc bodies as they are, and each `$(…)`, backtick
     and `${…}` holding one outside quotes becomes `mask`, each `<(…)`, `>(…)` and `=(…)` _SUBST_WORD and each
-    `$((…))` 0, the one word the shell makes of it. A `$(pwd)` always prints a folder: it is _SUBST_WORD in each
-    reading (_PRINTS_A_FOLDER)."""
+    `$((…))` 0, the one word the shell makes of it. `top`: `cmd` is the command, or the line of a shell that starts
+    it; then a `$(pwd)` that prints the folder the command runs in (_pwd_is_here), quoted or not, is `.` in each
+    reading, unless the command replaces pwd (_PWD_REDEFINED); any other `$(pwd)` is masked like any substitution."""
     out, bodies, pending = [], [], []
     i, n, q, parens = 0, len(cmd), None, _Parens(cmd)
-    folder = _PRINTS_A_FOLDER if mask is not None and not _PWD_REDEFINED.search(cmd) else _NEVER
+    here = mask is not None and top and "pwd" in cmd and \
+        not _PWD_REDEFINED.search(cmd) and not _PWD_REDEFINED.search(_COMMAND_TEXT.get())
     while i < n:
         c = cmd[i]
         if q == "'":
@@ -728,6 +767,12 @@ def _split_heredocs(cmd: str, mask: str | None = None):
             if c == "\\" and i + 1 < n:
                 out.append(cmd[i:i + 2])
                 i += 2
+                continue
+            if here and c in "$`" and (j := (_close_paren(cmd, i + 2) if cmd.startswith("$(", i) else
+                                             cmd.find("`", i + 1) + 1 if c == "`" else 0)) > 0 and \
+                    _pwd_is_here(cmd, i, j, True):
+                out.append(".")
+                i = j
                 continue
             q = None if c == '"' else q
         elif c == "\\" and i + 1 < n:
@@ -762,12 +807,12 @@ def _split_heredocs(cmd: str, mask: str | None = None):
             continue
         elif mask is not None and (cmd.startswith("$(", i) or _proc_subst_at(cmd, i)) and \
                 (j := _close_paren(cmd, i + 2)) > 0:
-            out.append(_SUBST_WORD if c != "$" or folder.fullmatch(cmd, i, j) else mask)
+            out.append(_SUBST_WORD if c != "$" else "." if here and _pwd_is_here(cmd, i, j, False) else mask)
             parens.close(j - 1, "w")
             i = j
             continue
         elif mask is not None and c == "`" and (j := cmd.find("`", i + 1)) > 0:
-            out.append(_SUBST_WORD if folder.fullmatch(cmd, i, j + 1) else mask)
+            out.append("." if here and _pwd_is_here(cmd, i, j + 1, False) else mask)
             i = j + 1
             continue
         elif c == "(":
@@ -1950,19 +1995,20 @@ def _continued_readings(cmd: str) -> list:
     return list(dict.fromkeys(r for r in (joined, comments) if r != cmd))
 
 
-def _substitution_readings(cmd: str) -> list:
+def _substitution_readings(cmd: str, top: bool = False) -> list:
     """The other readings of a command with an unquoted `$(…)`, `$((…))`, backtick, `<(…)`, `>(…)` or `${…$(…)}`: the
     tokenizer cuts words at a parenthesis, so `rm $(true) -rf ~/x` would read as `rm $` and a command `-rf ~/x` of its
     own. Each reading keeps every substitution as one word of the command around it (_split_heredocs with `mask`):
     one with _SUBST_WORD for it, and one with a command substitution dropped, since its output can be empty and then
     leaves no word (`dev $(true) install` runs `dev install`). The callers judge each reading as well as the command as
-    given, which still judges what the substitutions run, so a reading can only add a refusal. [] when no substitution
-    is there to cut it."""
+    given, which still judges what the substitutions run, so a reading can only add a refusal. `top`: `cmd` starts
+    the command, so a `$(pwd)/…` is read below its folder (_split_heredocs). [] when no substitution is there to cut
+    it."""
     if "(" not in cmd and "`" not in cmd:
         return []
     out = []
     for word in (_SUBST_WORD, ""):
-        alt = _split_heredocs(cmd, mask=word)[0]
+        alt = _split_heredocs(cmd, mask=word, top=top)[0]
         if alt != cmd and alt not in out:
             out.append(alt)
     return out
@@ -1982,7 +2028,7 @@ def check_bash(cmd: str, cwd: str, agent: str):
             return v
         first = v
         hatches = list(_BYPASSES)
-        for alt in _continued_readings(cmd) + _substitution_readings(cmd):
+        for alt in _continued_readings(cmd) + _substitution_readings(cmd, top=True):
             w = _check_bash_reading(alt, cwd, agent)
             if w and w[0] == "deny":
                 return w
@@ -2016,7 +2062,7 @@ def _check_bash_reading(cmd: str, cwd: str, agent: str):
     segs = split_commands(cmd)
     if segs is None:  # D10: protected_bash's walker refuses it first; this keeps check_bash closed on its own
         return deny(UNREADABLE_REASON, key="unreadable")
-    return _check_segments(cmd, segs, cwd or os.getcwd(), agent)
+    return _check_segments(cmd, segs, cwd or os.getcwd(), agent, lead=_COMMAND_TEXT.get())
 
 
 # N2: what a segment runs one level down, which the rules on destructive commands read as they read the top level: a
@@ -2142,10 +2188,11 @@ def _nested_lines(argv, cwd=None) -> list:
     return [shlex.join(x) for x in runs if x and os.path.basename(x[0]) not in _PATH_TAKERS]
 
 
-def _cd_folder(name, args, ecwd, line="") -> str:
+def _cd_folder(name, args, ecwd, line="", first=False) -> str:
     """The folder a `cd` or `pushd` with operands `args` moves the shell to from `ecwd`. Their options (-L, -P, -e,
     -@, `--`) name no folder; `pushd -n` moves none, and `pushd +N`/`-N` turns the stack to a folder the command does
-    not show. `cd` with no folder or `-` is left where it was, as before."""
+    not show. `cd` with no folder or `-` is left where it was, as before. `first`: this cd starts the command
+    (_folder_word)."""
     rest = list(args)
     while rest and rest[0].startswith("-") and rest[0] != "-":
         flag = rest.pop(0)
@@ -2159,14 +2206,17 @@ def _cd_folder(name, args, ecwd, line="") -> str:
         return str(UNKNOWN)
     if not rest or rest[0] == "-":
         return ecwd
-    return str(_folder_word(rest[0], ecwd, line))
+    return str(_folder_word(rest[0], ecwd, line, first))
 
 
-def _check_segments(cmd: str, segs, ecwd: str, agent: str, depth: int = 0, outer_envs=frozenset(), fed=False):
+def _check_segments(cmd: str, segs, ecwd: str, agent: str, depth: int = 0, outer_envs=frozenset(), fed=False,
+                    lead=None):
     """The rules on destructive commands for each segment of `cmd`, then for the lines it runs one level down
     (_nested_lines, to depth 4). `outer_envs`: the variables set for the shell that runs this line, which its
     commands inherit (an escape hatch on `sh -c` reaches the line). `fed`: this line is run by xargs, find -exec or
-    GNU parallel, which add words the line does not show (_feeds_words)."""
+    GNU parallel, which add words the line does not show (_feeds_words). `lead`: the text of this line as typed
+    when nothing runs before it: the whole command, or the line of a shell that starts it (Codex's shell tool sends
+    `bash -lc '<command>'`); None otherwise."""
     raw_segments = re.split(r"&&|\|\||;|\n|\|", cmd)
     pending_adds = []
     for idx, (argv0, redirs) in enumerate(segs):
@@ -2201,7 +2251,8 @@ def _check_segments(cmd: str, segs, ecwd: str, agent: str, depth: int = 0, outer
         _WORD.set(name)
         seg_text = " ".join(argv)
         if name in ("cd", "pushd"):
-            ecwd = _cd_folder(name, argv[1:], ecwd, cmd)
+            first = lead is not None and idx == 0 and argv0[:1] == [name] and _STARTS_WITH_CD.match(lead)
+            ecwd = _cd_folder(name, argv[1:], ecwd, cmd, bool(first))
             continue
         dev = _dev_args(argv)
         if dev and dev[:1] == ["impeccable"]:  # the engine writes where --target and --file point, from its folder
@@ -2297,10 +2348,14 @@ def _check_segments(cmd: str, segs, ecwd: str, agent: str, depth: int = 0, outer
         if lines and depth >= 4:  # too deep to read is no "nothing found": refused
             return deny(NESTED_REASON, key="nested-depth")
         feeds = fed or _feeds_words(argv)
+        # the one line of a shell that starts the command, with nothing before it, starts what that shell runs
+        starts = lead is not None and idx == 0 and argv0 == argv and len(lines) == 1 and name in _SHELLS and \
+            re.match(r"[ \t]*" + re.escape(argv[0]) + r"[ \t]", lead)
         for line in map(_quote_cd_git, lines):
-            for alt in (line, *_substitution_readings(line)):  # `sh -c 'rm $(true) -rf ~/x'`
+            for alt in (line, *_substitution_readings(line, top=bool(starts))):  # `sh -c 'rm $(true) -rf ~/x'`
                 inner = split_commands(alt)
-                res = _check_segments(alt, inner, ecwd, agent, depth + 1, envs, feeds) if inner else None
+                res = _check_segments(alt, inner, ecwd, agent, depth + 1, envs, feeds,
+                                      line if starts else None) if inner else None
                 if res:
                     return res
     # what `<(…)`, `>(…)` and the `$(…)` and backticks inside a word run: the tokenizer leaves their words in the
@@ -8164,7 +8219,8 @@ _AWK_REGEX_KEYWORDS = frozenset({"print", "printf", "return", "in", "case", "do"
 def _awk_writes(prog: str) -> bool:
     """True when an awk program writes to a file or a command: a `|` that is no `||` (a pipe to a command, or one
     getline reads), or a `>` at the top level of a print or printf statement (`print $1 > "f"`, `printf(...) >> f`),
-    where awk reads it as a redirection. A `>` anywhere else (`NR>=2050`, `print (a > b)`) compares. Strings, regex
+    where awk reads it as a redirection; awk reads the statement on past a newline after `,`, `&&`, `||` or a
+    backslash. A `>` anywhere else (`NR>=2050`, `print (a > b)`) compares. Strings, regex
     literals and comments are skipped; a `/` starts a regex where awk's grammar reads one (after an operator, a
     statement's start, a keyword that takes an expression, or the condition of if, while or for), else it divides. A
     string or regex that does not end counts as a write, so a program the guard cannot read fails closed."""
@@ -8219,8 +8275,8 @@ def _awk_writes(prog: str) -> bool:
             if condition:  # `if (a) /re/`: a statement starts after the condition
                 i, prev, word = i + 1, ";", ""
                 continue
-        elif c in ";\n{}":
-            printing = printing and c == ";" and len(opened) > at  # a `;` of a for header ends no statement
+        elif c in ";\n{}":  # a `;` of a for header ends no statement, nor does a newline after `,`, `&&`, `||` or `\\`
+            printing = printing and (len(opened) > at if c == ";" else c == "\n" and prev in ",&|\\")
         if not c.isspace() or c == "\n":
             prev, word = c, ""
         i += 1

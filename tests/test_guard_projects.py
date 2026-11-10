@@ -172,6 +172,33 @@ class OneProjectPerSession(unittest.TestCase):
             allowed=['cd "$(git rev-parse --show-toplevel)" && dev handoff --log x', "cd ../gadget && dev handoff",
                      'cd "$(echo ../gadget)" && dev plan ls'])
 
+    def test_show_cdup_is_read_as_the_shell_builds_the_word(self):
+        # at the top folder git prints nothing for --show-cdup, so "$(…)/abs" is the absolute folder /abs (bash and
+        # zsh went to /tmp from `cd "$(git rev-parse --show-cdup)/tmp"`); below it git prints `../../`, and the same
+        # word is a folder below the top
+        sub = self.top / "lib" / "deep"
+        sub.mkdir(parents=True)
+        at_other, at_own = f'cd "$(git rev-parse --show-cdup){self.other_top}"', \
+            f'cd "$(git rev-parse --show-cdup){self.top}"'
+        lib = 'cd "$(git rev-parse --show-cdup)/lib" && dev task add x --why y'  # /lib at the top: no project
+        self.assert_rulings(refused=[f"{at_other} && dev handoff --log x", f"{at_other} && dev task add x --why y"],
+                            allowed=[f"{at_own} && dev handoff --log x", f"{at_other} && dev handoff", lib])
+        self.assert_rulings(refused=[], allowed=[f"{at_other} && dev handoff --log x", lib], cwd=sub)
+
+    def test_a_git_folder_is_worked_out_only_for_the_cd_that_starts_the_command(self):
+        # whatever runs before the cd may replace git: zsh runs a function named 'git' or one set in
+        # functions[git] (both printed FAKE for `git rev-parse --show-toplevel`), and a sourced file may export
+        # GIT_DIR, so the folder stays unknown and a write is refused
+        top = 'cd "$(git rev-parse --show-toplevel)"'
+        self.assert_rulings(
+            refused=[f"'git'() {{ echo ../gadget; }}; {top} && dev handoff --log x",
+                     f"functions[git]='echo ../gadget'; {top} && dev handoff --log x",
+                     f". ./env.sh; {top} && dev handoff --log x", f"source ./env.sh && {top} && dev task add x --why y",
+                     f"ls; {top} && dev handoff --log x", f"X=1 {top} && dev handoff --log x",
+                     f"cd . && {top} && dev handoff --log x"],
+            allowed=[f"{top} && dev handoff --log x", f"  {top} && dev task add x --why y",
+                     f"{top} && cd lib && dev handoff --log x", f"ls; {top} && dev handoff"])
+
     def test_a_cd_option_is_not_the_folder_it_moves_to(self):
         # -L, -P, -e, -@ and `--` come before the folder; pushd -n moves none, and pushd +N turns to one not shown
         self.assert_rulings(

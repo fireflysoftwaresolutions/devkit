@@ -4,7 +4,9 @@
 # `>(…)`), which run as `$(…)` does. Each refused form ran its twin in /bin/bash and /bin/zsh
 # (`cat <(/bin/date +X)` prints the date); each twin keeps passing.
 # Run: python3 -m unittest tests.test_guard_substitutions -v
+import shutil
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -85,14 +87,19 @@ def payloads(cmd):
 
 
 class APathBuiltOnASubstitution(unittest.TestCase):
-    """The reading that drops a `$(…)` (its output may be empty) keeps one that always prints a folder: `$(pwd)/out.txt`
-    writes below the shell's folder, never to `/out.txt`. A substitution that may print nothing is still dropped, so a
-    path written after it is judged as the absolute path it then is."""
+    """A `$(pwd)/…` is a path below the folder the command runs in, after the cds before it: the guard reads it as
+    `./…`, the verdict its plain twin gets, never as `/…` or as a word it cannot place. A substitution that may print
+    nothing is still dropped, so a path written after it is judged as the absolute path it then is; so is a glued
+    `$(pwd)x` and a pwd the command may replace."""
+
+    def setUp(self):
+        self.here = tempfile.mkdtemp(dir=str(core.DEV))  # a folder below ~/Development, where a plain write runs
+        self.addCleanup(shutil.rmtree, self.here, True)
 
     def verdicts(self, cmd):
         out = {}
         for tool, inp, agent in payloads(cmd):
-            v = guard.check(tool, inp, CWD, agent)
+            v = guard.check(tool, inp, self.here, agent)
             out[tool] = v[0] if v else "allow"
         return out
 
@@ -108,6 +115,43 @@ class APathBuiltOnASubstitution(unittest.TestCase):
                     "dev$(true) install", "$(true)dev install"):
             with self.subTest(refused=cmd):
                 self.assertEqual(set(self.verdicts(cmd).values()), {"deny"}, self.verdicts(cmd))
+
+    def test_a_pwd_path_after_a_cd_is_judged_where_the_cd_went(self):
+        # the folder a pwd prints is the one the cds before it chose, quoted or not: bash and zsh printed
+        # `/tmp/y` for `cd /tmp && echo "$(pwd)"/y`, and `/Users` for `cd / && echo $(pwd)Users`
+        h, name = core.HANDOFF, "registry" + ".json"
+        refused = [f"cd {h} && printf x > $(pwd)/{name}", f"cd {h} && printf x > `pwd`/{name}",
+                   f'cd {h} && printf x > "$(pwd)"/{name}', f'cd {h} && printf x > "$(pwd)/{name}"',
+                   f"cd {h} && printf x > $(pwd -P)/{name}", f"cd {h.parent} && printf x > $(pwd)/{h.name}/{name}",
+                   f"cd {h.parent} && printf x > `pwd`/{h.name}/{name}", f"cd / && printf x > $(pwd){str(h)[1:]}/{name}",
+                   'rm -rf "$(pwd)"/..', "rm -rf $(pwd)/..", 'cd ~ && rm -rf "$(pwd)"/Development',
+                   "cd ~ && rm -rf $(pwd)/Development", """sh -c 'rm -rf "$(pwd)"/..'"""]
+        for cmd in refused:
+            with self.subTest(refused=cmd):
+                self.assertEqual(set(self.verdicts(cmd).values()), {"deny"}, self.verdicts(cmd))
+        for cmd in ('echo x > "$(pwd)/x y"', 'rm -rf "$(pwd)"/build', "echo x > $(pwd)x.txt",
+                    f"cd {self.here} && rm -rf $(pwd)/build"):
+            with self.subTest(allowed=cmd):
+                self.assertEqual(set(self.verdicts(cmd).values()), {"allow"}, self.verdicts(cmd))
+        # each one gets the verdict of the command that names the folder itself
+        for cmd, plain in ((f"cd {h} && printf x > $(pwd)/{name}", f"cd {h} && printf x > {name}"),
+                           ('rm -rf "$(pwd)"/..', "rm -rf .."),
+                           ("cd ~ && echo k >> $(pwd)/.ssh/authorized_keys", "cd ~ && echo k >> .ssh/authorized_keys"),
+                           ("cd ~ && echo k >> $(pwd)/notes.txt", "cd ~ && echo k >> notes.txt"),
+                           (f'cd {self.here} && echo x > "$(pwd)"/out.txt', f"cd {self.here} && echo x > out.txt")):
+            with self.subTest(twin=cmd):
+                self.assertEqual(self.verdicts(cmd), self.verdicts(plain))
+
+    def test_a_pwd_the_command_may_replace_is_not_read_as_the_folder(self):
+        # zsh runs a function named 'pwd' or one set in functions[pwd]; anything else before the pwd's command
+        # (here a source) may define one too, so the reading that drops the substitution stands
+        target = core.HANDOFF / ("registry" + ".json")
+        for cmd in (f"'pwd'() {{ :; }}; printf x > $(pwd){target}", f"functions[pwd]=:; printf x > $(pwd){target}",
+                    f'"pwd"() {{ :; }}; printf x > `pwd`{target}', f"function pwd {{ :; }}; printf x > $(pwd){target}",
+                    f". ./env.sh; printf x > $(pwd){target}"):
+            with self.subTest(refused=cmd):
+                self.assertEqual(set(self.verdicts(cmd).values()), {"deny"}, self.verdicts(cmd))
+        self.assertEqual(set(self.verdicts("echo x > $(pwd)/out.txt").values()), {"allow"})
 
 
 class SourceReadsItsInput(unittest.TestCase):
