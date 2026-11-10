@@ -57,13 +57,19 @@ class IsolatedRun(unittest.TestCase):
                 self.assertTrue(below(getattr(core, name), self.home), f"core.{name} = {getattr(core, name)}")
 
     # nothing in the environment names the developer's live session, moves a root away from HOME, or names one of
-    # their real devkit roots
+    # their real devkit roots; the net's variables name only the run's own temporary folder
     def test_no_variable_names_the_live_session_or_a_real_root(self):
-        names = [k for k in os.environ if k in _hermetic.SCRUB or
-                 (k.startswith("DEVKIT_") and k not in _hermetic.KEEP and k != _hermetic.MARK)]
+        names = [k for k in os.environ if k in _hermetic.SCRUB or (k.startswith("DEVKIT_") and k not in _hermetic.KEEP
+                                                                   and k not in _hermetic.NET and k != _hermetic.MARK)]
         self.assertEqual([], names)
         self.assertEqual({"DEVKIT_HOME": str(Path(__file__).resolve().parents[1]), "DEVKIT_NO_NOTIFY": "1"},
                          {k: os.environ.get(k) for k in _hermetic.KEEP})
+        temp = [os.path.realpath(r) for r in _hermetic._sandbox.TEMP_ROOTS]
+        for k in _hermetic.NET:
+            for p in os.environ[k].split(os.pathsep):
+                with self.subTest(variable=k, path=p):
+                    self.assertTrue(below(p, _hermetic.state()["root"]), f"{k} names {p}, outside the run's root")
+                    self.assertTrue(any(below(p, r) for r in temp), f"{k} names {p}, outside the temporary folders")
         real = [k for k, v in os.environ.items() if any(below(p, r) for p in v.split(os.pathsep) if p.startswith("/")
                                                         for r in _hermetic.state()["real"].values())]
         self.assertEqual([], real)
@@ -83,6 +89,24 @@ class IsolatedRun(unittest.TestCase):
         self.assertEqual({"FPATH": "/usr/share/zsh/functions" + os.pathsep + "/opt/zsh/site",
                           "NEAR": real["state"] + "-other", "PLAIN": "/usr/bin", "DEVKIT_HOME": "/x"}, env)
         self.assertEqual(["CLAUDECODE", "DEVKIT_GUARD", "FPATH", "LAST_LOG", "_"], sorted(changed))
+
+    # the developer's tokens for GitHub, GitLab, Bitbucket and Azure DevOps never reach a test or what it starts
+    def test_the_scrub_removes_the_code_hosts_tokens(self):
+        tokens = ("GH_TOKEN", "GITHUB_TOKEN", "GITLAB_TOKEN", "BITBUCKET_TOKEN", "AZURE_DEVOPS_EXT_PAT")
+        env = dict({k: "secret" for k in tokens}, PLAIN="/usr/bin")
+        self.assertEqual(sorted(tokens), sorted(_hermetic.scrub(env)))
+        self.assertEqual({"PLAIN": "/usr/bin"}, env)
+
+    # any other token, access token, API key or secret goes by its name, whatever the service; a name that only
+    # contains one of those words, or ends in it without the underscore, stays
+    def test_the_scrub_removes_any_token_key_or_secret_by_its_name(self):
+        secrets = ("NPM_TOKEN", "HOMEBREW_GITHUB_API_TOKEN", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "JIRA_PAT",
+                   "AWS_SECRET", "npm_token")
+        kept = {"PLAIN": "/usr/bin", "TOKENIZERS_PARALLELISM": "false", "COMPAT": "1", "SECRET_FILE": "/x",
+                "MYTOKEN": "1", "API_KEY_FILE": "/y", "DEVKIT_NO_NOTIFY": "1"}
+        env = dict({k: "secret" for k in secrets}, **kept)
+        self.assertEqual(sorted(secrets), sorted(_hermetic.scrub(env)))
+        self.assertEqual(kept, env)
 
     # a process a test starts resolves the same temporary roots, through the environment it inherits
     def test_a_child_process_resolves_the_temporary_home(self):

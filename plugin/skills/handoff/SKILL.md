@@ -30,9 +30,9 @@ Every project has one note: `~/Development/.handoff/projects/<owner>/<repo>.md` 
    and `dev branch ls`: a branch whose work exists only on this Mac gets `dev backup`, or an embargo with its reason
    (`dev branch embargo <branch> --why "…"`), or a line in Current state that says why it stays local.
 3. Make the Tasks block true before you write around it: close each item you verified
-   (`dev task done <n> --why "<evidence>"`), release the ones you stop (`dev task release <n>`), then run
+   (`dev task done <id> --why "<evidence>"`), release the ones you stop (`dev task release <id>`), then run
    `dev task reconcile` and apply what it lists (`--apply` for lockless doing items and items of merged branches;
-   `dev task cancel <n> --why "duplicate of <id>"` for a duplicate). The `work-state` skill has the rest.
+   `dev task cancel <id> --why "duplicate of <other id>"` for a duplicate). The `work-state` skill has the rest.
 4. Edit Current state and Decisions and gotchas in place. Short sentences, concrete file paths and commands, no
    filler.
 5. Add your one-line summary: `dev handoff --log "<outcome; what is next>" --agent <claude|codex>` (it goes to the

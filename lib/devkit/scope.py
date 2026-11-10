@@ -23,7 +23,9 @@ from __future__ import annotations
 import json
 import os
 import re
+from urllib.parse import unquote
 
+from .canary import CODEX_TURN_START
 from .hooks import SHELL_TOOLS  # Bash, Monitor and Codex's shells
 
 CONSULTING_SKILL_RE = re.compile(r"\bfirefly-(consult|deck|document|pitch|cobrand|review|event|storytelling|proposal|"
@@ -57,7 +59,8 @@ def _tail_lines(path: str, max_bytes: int = 3_000_000) -> list:
 
 
 def _is_prompt(rec: dict) -> bool:
-    """A real user prompt (not a tool result) in a Claude or Codex transcript."""
+    """The start of a turn: a real user prompt (not a tool result) in a Claude transcript, or the event a Codex
+    rollout opens each turn with (canary.CODEX_TURN_START)."""
     if rec.get("type") == "user":
         msg = rec.get("message") or {}
         content = msg.get("content")
@@ -66,7 +69,185 @@ def _is_prompt(rec: dict) -> bool:
         if isinstance(content, list):
             return not any(isinstance(c, dict) and c.get("type") == "tool_result" for c in content)
     p = rec.get("payload") or {}
-    return p.get("type") == "user_message"
+    return rec.get("type") == "event_msg" and p.get("type") in CODEX_TURN_START
+
+
+# Codex code mode (on by default since 0.167): the model calls one tool, `exec`, whose input is JavaScript that awaits
+# nested tools, `text(await tools.exec_command({cmd: "git push"}))` and `tools.apply_patch("*** Begin Patch ...")`.
+# One walk of the script: a comment or a string literal is skipped whole (a call inside one never runs), and the walk
+# goes on after each call's argument, so the script is read once whatever it holds.
+_JS_SCAN_RE = re.compile(r"//|/\*|['\"`]|\btools\s*\.\s*(exec_command|apply_patch)\s*\(\s*")
+_JS_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "b": "\b", "f": "\f", "v": "\v", "0": "\0", "\n": ""}
+_JS_IDENT_RE = re.compile(r"[A-Za-z_$][\w$]*")
+
+
+def _js_string(src: str, i: int):
+    """(value, end) of the JavaScript string literal at src[i]; (None, i) when there is none (or it never ends), and
+    (None, end) for a template literal with a ${...} substitution, whose value exists only at run time."""
+    q = src[i:i + 1]
+    if q not in ("'", '"', "`"):
+        return None, i
+    out, j, built = [], i + 1, False
+    while j < len(src):
+        c = src[j]
+        if c == q:
+            if built:
+                return None, j + 1
+            return "".join(out).encode("utf-16", "surrogatepass").decode("utf-16", "replace"), j + 1
+        if c == "\\" and j + 1 < len(src):
+            n = src[j + 1]
+            hexits = {"u": 4, "x": 2}.get(n, 0)
+            if hexits and re.fullmatch(r"[0-9a-fA-F]+", src[j + 2:j + 2 + hexits] or "-"):
+                out.append(chr(int(src[j + 2:j + 2 + hexits], 16)))
+                j += 2 + hexits
+                continue
+            out.append(_JS_ESCAPES.get(n, n))
+            j += 2
+            continue
+        if q == "`" and src.startswith("${", j):  # skip the substitution, braces balanced
+            built, j, depth = True, j + 2, 1
+            while j < len(src) and depth:
+                depth += {"{": 1, "}": -1}.get(src[j], 0)
+                j += 1
+            continue
+        out.append(c)
+        j += 1
+    return None, i
+
+
+def _js_skip(src: str, j: int) -> int:
+    """The index after the whitespace and comments at src[j]."""
+    n = len(src)
+    while j < n:
+        if src[j].isspace():
+            j += 1
+        elif src.startswith("//", j):
+            nl = src.find("\n", j)
+            j = n if nl < 0 else nl + 1
+        elif src.startswith("/*", j):
+            close = src.find("*/", j + 2)
+            j = n if close < 0 else close + 2
+        else:
+            break
+    return j
+
+
+def _js_value_end(src: str, j: int) -> int:
+    """The index of the "," or closing bracket that ends the expression at src[j], strings, comments and nested
+    brackets skipped; len(src) when nothing ends it."""
+    n, depth = len(src), 0
+    while j < n:
+        c = src[j]
+        if c in "'\"`":
+            _, end = _js_string(src, j)
+            if end <= j:
+                return n  # a string that never ends: neither does the expression
+            j = end
+            continue
+        if src.startswith("//", j) or src.startswith("/*", j):
+            j = _js_skip(src, j)
+            continue
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            if depth == 0:
+                return j
+            depth -= 1
+        elif c == "," and depth == 0:
+            return j
+        j += 1
+    return n
+
+
+def _js_object(src: str, i: int) -> tuple:
+    """(fields, end) of the object literal at src[i] ("{"): fields maps each key to its string value, or to None when
+    the value is not a lone literal string (a variable, a concatenation, a template built at run time); end is the
+    index after the closing brace. fields is None when there is no object, it never closes, or a property hides what
+    the call gets (a shorthand, spread or computed one)."""
+    n = len(src)
+    if src[i:i + 1] != "{":
+        return None, i
+    fields, readable, j = {}, True, i + 1
+    while True:
+        j = _js_skip(src, j)
+        if j >= n:
+            return None, n
+        c = src[j]
+        if c == "}":
+            return (fields if readable else None), j + 1
+        if c == ",":
+            j += 1
+            continue
+        if c in ")]":
+            return None, j
+        key, end = _js_string(src, j)
+        if key is None:
+            m = _JS_IDENT_RE.match(src, j)
+            key, end = (m.group(0), m.end()) if m else (None, j)
+        colon = _js_skip(src, end) if key is not None else j
+        if key is None or src[colon:colon + 1] != ":":  # its value is not in the text
+            readable = False
+            j = max(_js_value_end(src, j), j + 1)
+            continue
+        at = _js_skip(src, colon + 1)
+        value, end = _js_string(src, at)
+        after = _js_skip(src, end) if value is not None else at
+        if value is not None and src[after:after + 1] in (",", "}"):
+            fields[key], j = value, after
+        else:
+            fields[key], j = None, _js_value_end(src, at)  # at its "," or bracket, which the loop reads next
+
+
+def exec_calls(script: str) -> list:
+    """The nested shell and patch calls of a Codex code-mode `exec` script, in order: [("exec_command", {"cmd": …,
+    "workdir": … when given}), ("apply_patch", {"input": patch})]. Only calls in the script's code count: one in a
+    comment or a string literal (a patch that adds one) never runs. A call whose command or folder is not a lone
+    literal string (a variable, a concatenation, a template built at run time) is left out: its text is not in the
+    transcript, and the command's own record (item_command) names it."""
+    src, out, i, n = script or "", [], 0, len(script or "")
+    while i < n:
+        m = _JS_SCAN_RE.search(src, i)
+        if not m:
+            break
+        tok = m.group(0)
+        if tok in ("//", "/*"):
+            i = _js_skip(src, m.start())
+        elif tok in ("'", '"', "`"):
+            _, end = _js_string(src, m.start())
+            i = end if end > m.start() else n  # a string that never ends holds the rest of the script
+        elif m.group(1) == "apply_patch":
+            patch, end = _js_string(src, m.end())
+            if patch is not None:
+                out.append(("apply_patch", {"input": patch}))
+            i = max(end, m.end())
+        else:
+            fields, end = _js_object(src, m.end())
+            cmd, workdir = (fields or {}).get("cmd"), (fields or {}).get("workdir")
+            if cmd is not None and (workdir is not None or "workdir" not in fields):
+                out.append(("exec_command", dict({"cmd": cmd}, **({"workdir": workdir} if workdir else {}))))
+            i = max(end, m.end())
+    return out
+
+
+def item_command(rec: dict, parsed: list):
+    """A Codex CommandExecution record (0.167 writes one for each command an exec script runs, with the command as
+    run): (its command, its folder) when the scripts read so far did not already name it, which is how a command the
+    script builds at run time is seen; None for a command already read from its script (`parsed`, the commands
+    exec_calls read, loses the one it matches) and for any other record."""
+    p = rec.get("payload") if isinstance(rec.get("payload"), dict) else {}
+    item = p.get("item") if rec.get("type") == "event_msg" and p.get("type") == "item_completed" else None
+    if not isinstance(item, dict) or item.get("type") != "CommandExecution":
+        return None
+    argv = item.get("command")
+    if isinstance(argv, list):
+        cmd = str(argv[-1]) if len(argv) >= 3 and argv[-2] in ("-c", "-lc") else " ".join(str(a) for a in argv)
+    else:
+        cmd = str(argv or "")
+    if cmd in parsed:
+        parsed.remove(cmd)
+        return None
+    cwd = str(item.get("cwd") or "")
+    return cmd, (unquote(cwd[len("file://"):]) if cwd.startswith("file://") else cwd)
 
 
 def turn_actions(transcript_path: str) -> dict:
@@ -79,20 +260,31 @@ def turn_actions(transcript_path: str) -> dict:
         except ValueError:
             continue
     start = max((i for i, r in enumerate(recs) if _is_prompt(r)), default=-1)
+    parsed = []  # commands read from exec scripts that no CommandExecution record has matched yet
     for r in recs[start + 1:]:
         calls = []
         for c in ((r.get("message") or {}).get("content") or []) if r.get("type") == "assistant" else []:
             if isinstance(c, dict) and c.get("type") == "tool_use":
                 calls.append((c.get("name") or "", c.get("input") or {}))
         p = r.get("payload") or {}
+        ran = item_command(r, parsed)
+        if ran:
+            calls.append(("exec_command", {"cmd": ran[0]}))
         if p.get("type") in ("function_call", "custom_tool_call"):
             args = p.get("arguments") if p.get("type") == "function_call" else p.get("input")
-            if isinstance(args, str):
+            if p.get("name") == "exec" and isinstance(args, str):  # code mode: the script's nested calls
+                out["tools"].add("exec")
+                nested = exec_calls(args)
+                parsed.extend(inp["cmd"] for name, inp in nested if name == "exec_command")
+                calls.extend(nested)
+                args = None
+            elif isinstance(args, str):
                 try:
                     args = json.loads(args)
                 except ValueError:
                     args = {"input": args}
-            calls.append((p.get("name") or "", args or {}))
+            if args is not None:
+                calls.append((p.get("name") or "", args or {}))
         for name, inp in calls:
             out["tools"].add(name)
             if name in EDIT_TOOLS:
@@ -145,9 +337,10 @@ def decide(data: dict, sess: dict) -> bool:
     if os.environ.get("DEVKIT_SCOPE") == "all":
         return True
     path = data.get("transcript_path")
-    try:
+    try:  # the payload's final message first (Codex sends it, and Claude Code does too), else the transcript's
         from . import canary
-        declared = canary.has_marker(canary.last_assistant_text(path) or "") if path else False
+        text = data.get("last_assistant_message") or (canary.last_assistant_text(path) if path else "")
+        declared = canary.has_marker(text or "")
     except Exception:
         declared = False
     last = sess.get("scope_last")

@@ -154,13 +154,89 @@ The same isolation applies to `dev` commands run from a project session:
 ### Agent settings that switch devkit off
 
 A write to `.claude/settings.json`, `.claude/settings.local.json`, `.codex/config.toml`, or `.codex/hooks.json` (in any
-project or in your home folder) is denied when it contains:
+project, in your home folder, or in `CODEX_HOME` when it is set elsewhere) is denied when it contains:
 
 | Content | Why |
 | --- | --- |
 | `"disableAllHooks": true` | It disables every hook, including devkit's context, guard, and canary |
 | `"devkit@firefly-devkit": false` | It disables the devkit plugin |
 | `hooks = false` or `codex_hooks = false` | It turns Codex hooks off |
+
+Write, Edit, `apply_patch`, and shell commands follow this one rule. The guard finds the file however a call names it:
+
+- **Any spelling of the path.** Folder and file names count in any case, because macOS reads `.Codex/Config.toml` as
+  `.codex/config.toml`. Any path that resolves there counts too: `~`, `$HOME`, `../`, a linked folder, or a `cd`
+  earlier in the same command.
+- **Every TOML form.** A bare, quoted, or dotted key, an inline table, or a key spelled with a `\u` escape
+  (`"codex_hoo\u006bs"`) counts, on every Python devkit runs on: where Python has no TOML reader (Python 3.9, the one
+  in `/usr/bin/python3`), the guard reads the keys itself. A `config.toml` that parses as TOML is denied when any of
+  its tables sets `hooks` or `codex_hooks` to `false`. A quoted key with an escape that TOML does not have, set to
+  `false`, is denied too.
+- **Every JSON form.** A `settings.json` or `settings.local.json` that parses as JSON is denied when it sets
+  `disableAllHooks` to `true` or `devkit@firefly-devkit` to `false`, also when a key is spelled with an escape
+  (`disabl\u0065AllHooks`). When a key appears twice, the last one counts, as Claude Code reads it.
+- **A byte-order mark.** One byte-order mark at the start of the text, as the character U+FEFF or as its three UTF-8
+  bytes written through `printf` or `echo` escapes, is dropped before the guard judges the text, as Claude Code drops
+  it before it parses the file. A mark before the first key no longer hides it.
+
+It judges the text each kind of call writes:
+
+- **Write:** the file's text after the write.
+- **Edit and MultiEdit:** the guard applies the edits to the file as it is now, as the tools do (in order;
+  `replace_all` for every match, otherwise the first), and judges the whole result. An edit whose `old_string` is not
+  in the settings file is denied.
+- **A Codex patch** (`apply_patch`): each file it adds, updates, or moves, by the file's text after the patch and by
+  the lines it adds, at the path the patch names and at its real path. A move onto a settings file brings the text of
+  the file it moves. When a hunk does not apply, or only adds lines, its added lines are also parsed as TOML alone and
+  after the file's current text.
+- **A shell command whose text is visible:** `>`, `>>`, and `<>` with `echo` or `printf` (with their escapes decoded
+  as bash, zsh, and `printf` decode them), `tee` and `tee -a`, a heredoc or here-string into `cat` or `tee`, and
+  `dd of=` fed from one of these. How the command opens the file decides what is judged: `>` and `tee` replace the
+  file and are judged by what they write; `>>`, `tee -a`, and `<>` keep the file's text and are judged together with
+  what it already holds, in JSON files as in TOML files. Text split across two commands therefore counts as one:
+  `printf '{"disableAllHooks": ' > f`, then `printf 'true}' >> f`, is denied. Two or more writes to the file in one
+  command are judged together. Such a write is denied only when the result turns hooks off, and allowed otherwise.
+- **A settings file the guard cannot read in full** (over 1 MiB): `>>`, `tee -a`, or `<>` to it, and a patch that
+  updates it or moves a file onto it, are denied, because the part the guard cannot read could finish what the write
+  adds. `>`, Write, and a patch that adds the file whole are still judged by the whole text they write.
+- **A shell command that hides its text** is denied for these files, whatever it writes: `cp`, `mv`, `install`, `ln`,
+  `sed -i`, `perl -pi`, `awk -i inplace`, `ed`, `truncate`, `dd` with other options, a variable, `$(…)`, backticks,
+  `$'…'`, or an unquoted glob in the text, `exec 3>`, and interpreter code that names a settings file. Among git
+  commands: `git checkout`; `git restore` without `--staged` (`-S`), or with an option other than `--staged`,
+  `--source` (`-s`), and `--quiet` (`-q`); `git rm` without `--cached`, or with an option other than `--cached`, `-r`,
+  `-f`, `-q`, `-n`, their long forms, `--ignore-unmatch`, and `--sparse`; every git command outside the readers (`git archive`, `git bundle`, `git mergetool`, `git config --file`, an alias);
+  and a reader that writes a file, such as `git diff --output`, `git log --output`, or `git grep -O`. The guard reads
+  git's options as git parses them: an abbreviation (`--wor` for `--worktree`), a value attached to a short option
+  (`-sS1`), and a negation (`--no-cached`) count. A program with `--check` that is not one of the formatters below is
+  read as a write too. Write the file with the Write or Edit tool (on Codex, `apply_patch`), or write the text out in
+  full in an `echo`, a `printf`, or a quoted heredoc.
+
+These stay allowed:
+
+- reading these files (`cat`, `grep`, `jq`, `sed -n`, and git's readers, such as `git diff` and `git log`), `git add`,
+  `touch`, `mkdir .claude/agents`, and writes to other files;
+- `git restore --staged` and `git rm --cached`, which change only git's index;
+- a known formatter or linter run with `--check` or `--list-different` and no option that writes: `prettier`,
+  `black`, `ruff`, `isort`, `taplo`, `biome`, `dprint`, `shfmt`, `rustfmt`, `eslint`, `stylelint`, and `djlint`. A long
+  option that starts with or abbreviates a write option (`--write`, `--fix`, `--wr`), and a short option cluster with
+  `w`, `i`, or `o` in any case (`-w`, `-O`), count as a write. The formatter counts only by its bare name, which the
+  session's `PATH` finds: one named by a path (`./prettier`, `npx ./prettier`, `scratch/black`), or run by a command
+  that sets or exports `PATH`, is a local program that only shares the name and may write anything, so its check run
+  counts as a write;
+- words that are messages, not files: a `dev` command's arguments (except the file of `-o` or `--out`), `gh`'s words
+  (except the file of `-O` or `--output`), and another program's word that holds a space and names a folder that does
+  not exist, such as `git commit -m "docs: explain ~/.claude/settings.json"`.
+
+Agents may not run `dev setup` (except `dev setup --preview` and `--help`) or `dev install`: the developer runs them in
+a terminal, where they write these files in their own process (see
+[devkit's own state, configuration, and install](#devkits-own-state-configuration-and-install)).
+
+**Not covered yet.** The rule judges what a write adds, not what it takes away: deleting a settings file, or writing
+one without devkit's hooks in it, is allowed. A path the guard cannot resolve counts as a settings file only when it
+names `.codex`, `.claude`, `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, or a settings filename (`config.toml`, `hooks.json`,
+`settings.json`, `settings.local.json`), or when its filename is hidden (`"$F"`) and the text turns hooks off. It
+counts by the name it holds only when it is a word without a space, and never for `gh` or `dev`. When both the
+filename and the text are hidden, as in `echo "$X" > "$F"`, the guard cannot tell, and the write is allowed.
 
 If devkit really should be off somewhere, change devkit's own configuration (see [Configuration](configuration.md)).
 `dev doctor` reports such settings that already exist under `~/Development`.
@@ -277,9 +353,10 @@ three folders readable and writable by your account only (`0700`) every time it 
 | --- | --- |
 | A file write (Write, Edit, `apply_patch`) in those three folders, or in a subagent's meta file | deny, with the `dev` command that owns the record |
 | A shell write there: a redirect, `tee`, `cp`, `mv`, `ln`, `rm`, `dev rm`, `sed -i`, an interpreter that writes files, also inside `sh -c`, `eval`, `xargs`, or `find -exec` | deny |
-| `dev config set safeguards.*`, `audit.*`, or `bugs.share`, or `dev config edit`, or a `DEVKIT_*` or `DEV_ROOT` value added to the `env` block of an agent settings file or to a shell startup file such as `~/.zshrc` | deny: `bugs.share` decides whether devkit posts under your GitHub account, so only you set it, with `dev bug share` in a terminal |
+| `dev config set safeguards.*`, `audit.*`, `bugs.share`, or `agents.*`, also spelled with leading or doubled dots (`.agents.codex`, `bugs..share`), which `dev config set` reads as the same key; `dev config edit`; or a `DEVKIT_*` or `DEV_ROOT` value added to the `env` block of an agent settings file or to a shell startup file such as `~/.zshrc` | deny: `bugs.share` decides whether devkit posts under your GitHub account, so only you set it, with `dev bug share` in a terminal. `agents.*` turns devkit on or off for an agent, and the next `dev install` or `dev setup` takes devkit's hooks and rules out of an agent turned off, so only you set it, in your terminal |
+| `dev setup`, except `dev setup --preview` and `dev setup --help` | deny: it decides which agents devkit sets up and rewrites their settings, hooks, and instructions, so you run it in your own terminal. `--preview` only draws the setup's screens with sample data and changes nothing |
 | Replacing, writing, or deleting a `dev` that a shell finds: `~/.local/bin/dev` (the link itself) or another `dev` earlier on `PATH` | deny → the developer runs `dev install --only cli` |
-| Unsetting or blanking a variable that tells a program an agent runs it (`CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_PID`, `CODEX_SANDBOX`, `CODEX_THREAD_ID`, `DEVKIT_SESSION`, `DEVKIT_AGENT`, `DEVKIT_FROM_AGENT`): `unset`, `env -u`, `env -i`, or an empty assignment before a command or after `export`, also inside `sh -c` | deny: a project's own tools read them to act differently for agents, and an agent must not hide from them |
+| Unsetting or blanking a variable that tells a program an agent runs it (`CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_PID`, `CODEX_SANDBOX`, `CODEX_THREAD_ID`, `DEVKIT_SESSION`, `DEVKIT_AGENT`): `unset`, `env -u`, `env -i`, or an empty assignment before a command or after `export`, also inside `sh -c` | deny: a project's own tools read them to act differently for agents, and an agent must not hide from them. `DEVKIT_FROM_AGENT`, a crew member's lane mark, follows the caller-identity rule instead: a member that changes or drops it is refused, and the main session, which carries none, may unset it |
 | `HOME`, `DEVKIT_CONFIG`, `DEV_ROOT`, or another `DEVKIT_*` variable set for `dev`, `python -m devkit`, a program that imports devkit, or a nested `claude` or `codex` session; `launchctl setenv` of one of them | deny; the one-command [escape hatches](#escape-hatches) still work |
 | `PYTHONPATH`, `PYTHONSTARTUP`, `PYTHONHOME`, `PYTHONUSERBASE`, `PYTHONPLATLIBDIR`, `PYTHONEXECUTABLE`, or `PYTHONBREAKPOINT` set for the same commands | deny: they load other code into devkit's own process. `bin/dev` runs `python3 -I -S`, which ignores them, the current folder, and the user and site-packages folders (and their `.pth` files); the rule also covers `python3 bin/dev`. A repository's own tests may still set `PYTHONPATH` |
 | A shell command that names a devkit copy in `~/.local/share/devkit/releases` other than the pinned release, or the releases folder itself (a `cd`, a glob, or a `find` there chooses a copy), however the path is written | deny → run `dev` from the PATH, and read a copy's files with a file tool; `dev doctor` lists the copies. An older copy may lack newer safeguards, and its repair writes its own hooks, guard, and instructions back for every session |
@@ -648,10 +725,67 @@ checks. These run as well:
 - A shell variable set on its own, when its name is lowercase or one capital letter (`S=/path; ls $S`). `PATH`,
   `PAGER`, `IFS`, and zsh's tied names (`path`, `fpath`, …) stay refused.
 - `dev guard check`, and `dev lesson show` and `dev lesson ls`.
+- The reads of work state: `dev overview`, `dev standup`, `dev team`, `dev initiative`, `dev initiative ls`,
+  `dev initiative show`, `dev report`, `dev plan`, and `dev plan ls`. They change no record and
+  refresh only devkit's own caches of pull requests and agent providers, as `dev status` does. `dev report -o` (or
+  `--out`), which writes a file, `dev initiative new`, `add`, and `rm`, and `dev plan approve` and `supersede` stay
+  refused.
+- `dev plan new` and `dev plan revise`, for a member whose kinds of work produce plans: one the team's RACI makes
+  Responsible for requirements, architecture, research, UX, or docs, in a review lane. They write only below
+  `plans/<the run's project>/` of the handoff repository. `dev plan new` runs from that project's checkout, without
+  `-p` or `-i`; `dev plan revise` takes the full path of one Markdown file whose real path lies in that folder, with
+  links and `..` resolved. Either one runs only as a command of its own: with a `cd`, `pushd`, `popd`, or subshell
+  earlier in the same command (`cd ../other && dev plan new x`), the guard cannot be sure which folder it runs in, and
+  refuses it. When devkit cannot look up the member's kinds of work or the project, it refuses.
 - A command continued with a backslash-newline, read as the shell joins it.
 
 A script from the member's own scratch folder (`python3 scratchpad/<member id>/probe.py`) already ran before this
 change, and still does; a script in another member's folder does not.
+
+### Who runs a `dev` call: the session marks
+
+`dev watch` and `dev session` act for one consumer: the tech lead's main session or one crew member. Guessing wrong
+would let a member's wait take the tech lead's events, or let a member speak to other sessions as the tech lead. The
+PreToolUse hook therefore marks who runs these calls, on Claude Code and Codex:
+
+| Caller | Calls it marks | Mark |
+| --- | --- | --- |
+| The tech lead's main session | `dev watch`, `dev session`, `dev crew`, `dev progress` | `DEVKIT_SPEAKER=main` |
+| A crew member | `dev watch`, `dev session` | `DEVKIT_FROM_AGENT=<its agent id>` |
+
+A call that is the whole command gets the mark in front of it. A compound command (a pipeline, a list, `eval`,
+`sh -c`, a subshell) gets the mark exported for the whole command only when nothing but `cd`, reads (`cat`, `head`,
+`tail`, `grep`, `rg`, `wc`, `jq`, `sort`, `uniq`, `cut`, `tr`, `echo`, `printf`), and those wrappers run around the
+`dev` call, nothing is redirected into a file, and, for a member, its lane allows the rest. Any other command runs
+unmarked, and devkit reads the call ledger instead: an open call that typed exactly this `dev` command names its
+caller. Codex may not apply the hook's rewrite of a command; its call ledger then names who calls. When devkit still
+cannot tell, a command that needs to know refuses (see [Commands › dev watch](commands.md#dev-watch---wait---for-me---only-kinds---timeout-min---standby---json)).
+
+A member's mark wins over the main mark, so a member can never become the tech lead by a variable. Every hook drops
+both marks before it acts, so a hook never takes a mark it inherited for its own. A process that carries
+`DEVKIT_SPEAKER` counts as an agent's, never as your own terminal, when devkit decides who set `DEVKIT_CONFIG` or
+`DEV_ROOT`.
+
+### Other agent sessions on this Mac
+
+Sessions on one Mac talk and hold shared resources through `dev session` ([Teams and machines › Sessions on one
+Mac](teams.md#sessions-on-one-mac)). The guard keeps that channel the tech lead's and keeps claims real:
+
+| Action of an agent | Decision |
+| --- | --- |
+| `dev release`, a tag push, `dev pr merge`, a push to the default or a permanent branch, or `gh pr merge` or `gh release create`, while another session holds `release:<project>` | deny, with who holds it, until when, and why, and the three ways forward: queue for it, ask that session, or have you type `grant claim-break <resource>` |
+| `git push`, `dev push`, or `dev git push` of a branch while another session holds `push:<project>@<branch>` | deny, the same way |
+| Write, Edit, MultiEdit, `apply_patch`, `dev note set`, or `dev handoff --edit` on a project's handoff note while another session holds `handoff:<project>` | deny, the same way. A shell write to a note is refused for everyone (see [The handoff repository](#the-handoff-repository)) |
+| One of these actions after you typed `grant claim-break <resource>` in the session, by its tech lead | allow once: the claim breaks and its holder hears of it. A crew member's call never uses the grant |
+| A crew member runs `dev session tell`, `ask`, `answer`, `claim`, `release`, or `escalate` (also from a program) | deny: only the tech lead acts for the session, and the member asks with `dev crew ask`. `dev session ls`, `inbox`, `claims`, and `escalations` stay open to read |
+| Setting `DEVKIT_SPEAKER` (the main session's mark) for a command or in the shell | deny, for every agent and the main session too: only the hook sets it. Reading or unsetting it is fine |
+| A crew member sets `CODEX_THREAD_ID` | deny: devkit tells Codex threads of one process apart by it, so another thread's id would make the member speak as that thread's session |
+| A write to devkit's peers state (`~/.local/state/devkit/peers/`) | deny, naming its owner, `dev session` |
+
+The holder's own session and its crew go through a claim, and your own terminal is never refused, because the guard
+runs only in agents' hooks. `branch:` and `custom:` claims are not enforced; they show as overlaps. A command that
+cannot act on a claimed resource costs nothing extra, and the guard reads git only while a claim of the matching kind
+is held. When a claim check itself fails, the action runs and the failure is recorded as `guard.failopen`.
 
 ## Example messages
 

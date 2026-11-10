@@ -93,9 +93,10 @@ class ItemTests(unittest.TestCase):
             self.assertEqual(len(work.expire_locks()), 0)
 
     def test_find_and_summary(self):
-        with TempHandoff():
+        with TempHandoff(), tempfile.TemporaryDirectory() as state, mock.patch.object(core, "STATE", Path(state)):
             work.create("acme/api", "Later thing", bucket="later", a=A)
             now = work.create("acme/api", "Now thing", bucket="now", priority="high", a=A)
+            work.show("acme/api")  # numbers point into the list `dev task` showed (tests/test_task_numbers.py)
             self.assertEqual(work.find("1", "acme/api")["meta"]["id"], now["meta"]["id"])
             self.assertEqual(work.find(now["meta"]["id"], "acme/api")["meta"]["id"], now["meta"]["id"])
             self.assertEqual(work.find("later", "acme/api")["meta"]["title"], "Later thing")
@@ -129,6 +130,31 @@ class ItemTests(unittest.TestCase):
             work.log_session("acme/api", "first")
             work.log_session("acme/api", "second")
             self.assertEqual(work.recent_sessions("acme/api")[:2], ["second", "first"])
+
+
+class NowLimitTests(unittest.TestCase):
+    """More than five open items in a project's Now gets a one-line warning; nothing is refused."""
+
+    def test_more_than_five_in_now_warns_with_how_many_and_how_many_are_being_worked_on(self):
+        with TempHandoff():
+            items = [work.create("acme/api", f"Now item {n}", bucket="now", a=A) for n in range(6)]
+            work.claim(items[0], a=A)
+            work.claim(items[1], a=B)
+            self.assertEqual(work.now_warning("acme/api"),
+                             "6 items in Now in acme/api, 2 being worked on: more than 5 hides what comes first; "
+                             "move what waits with dev task move <id> --to next --why \"…\"")
+
+    def test_five_open_items_in_now_and_closed_or_other_buckets_do_not_warn(self):
+        with TempHandoff():
+            for n in range(5):
+                work.create("acme/api", f"Now item {n}", bucket="now", a=A)
+            work.create("acme/api", "Next item", bucket="next", a=A)
+            work.create("acme/other", "Another project's Now item", bucket="now", a=A)
+            shipped = work.create("acme/api", "Shipped item", bucket="now", a=A)
+            work.release(shipped, a=A, status="done")
+            self.assertEqual(work.now_warning("acme/api"), "")
+            work.create("acme/api", "Sixth open item", bucket="now", a=A)
+            self.assertTrue(work.now_warning("acme/api").startswith("6 items in Now in acme/api, 0 being worked on"))
 
 
 class IsoTimeTests(unittest.TestCase):
@@ -498,6 +524,39 @@ class PresenceTests(unittest.TestCase):
                              [("codex", "feat/b")])
             self.assertFalse((state / "sessions" / "claude-ended1.json").exists())
 
+    def test_presence_publishes_a_summary_of_each_run_and_not_its_plan(self):
+        # Presence carried each session's whole run, every plan step and crew lane: 49 KB for one Mac, changed on most
+        # handoff commits, and above 256 KB the dashboard hides that Mac. A session in a run of 60 steps (40 done,
+        # 2 skipped, 2 running, 1 blocked) with 6 lanes (4 working) publishes the goal, the step counts, the steps
+        # running now, the crew at work and the ETA, and another Mac's dashboard still shows the run.
+        import time as _time
+        from devkit import dashnow
+        states = ["done"] * 40 + ["skipped"] * 2 + ["running", "running", "blocked"] + ["pending"] * 15
+        plan = [{"name": f"{i + 1}. step {i + 1}: what this step builds, checks and hands over to the next one",
+                 "state": st, "est": 30, "min": 12.5, "owner": "main" if i % 2 else "Backend engineer (Tank)"}
+                for i, st in enumerate(states)]
+        lanes = [{"label": f"Backend engineer (Tank) · lane {i}", "state": "running" if i < 4 else "done", "min": 9.5,
+                  "live": "working", "why": "reported 2 min ago"} for i in range(6)]
+        now = _time.time()
+        brief = {"goal": "Hotfix 26.11.9", "state": "running", "step": 41, "steps": 60, "estimate": 120,
+                 "started": round(now - 18000), "eta_min": 40, "eta_lo": 30, "eta_hi": 60, "active_min": 291.0,
+                 "wall_min": 305.0, "pace": 1.1, "plan": plan, "agents": lanes, "headline": "41 of 58 steps",
+                 "last": "Lane tests green", "next": "three commits", "updated": round(now - 60)}
+        with TempHandoff():
+            work.write_presence([dict(agent="claude", session="s1", project="acme/api", branch="main", active=True,
+                                      started=round(now - 18000), progress=brief)], a=A)
+            f = work.PRESENCE / "ana@mbp1.json"
+            p = json.loads(f.read_text())["sessions"][0]["progress"]
+            self.assertEqual((p["goal"], p["steps_done"], p["steps_total"], p["steps_skipped"], p["crew"]),
+                             ("Hotfix 26.11.9", 40, 58, 2, 4))
+            self.assertEqual((p["eta_min"], p["eta_lo"], p["eta_hi"]), (40, 30, 60))
+            self.assertEqual([c.split(":")[0] for c in p["current"]], ["43. step 43", "44. step 44", "45. step 45"])
+            self.assertNotIn("agents", p)
+            self.assertEqual([s["state"] for s in p["plan"]], ["running", "running", "blocked"])
+            self.assertLess(f.stat().st_size, 2500)
+            run = dashnow._remote_run(json.loads(f.read_text())["sessions"][0], "mbp1", "ana", int(now), now)
+            self.assertEqual((run["goal"], len(run["plan"])), ("Hotfix 26.11.9", 3))
+
 
 class ReusedBranchTests(unittest.TestCase):
     # Branch names come back (fix/login-timeout): a merge of the name's earlier use closed a new item linked to it.
@@ -666,26 +725,32 @@ class HandoffSyncTests(unittest.TestCase):
             self.assertFalse(work.push_failed_file().exists())
 
     def test_dev_sync_reports_a_conflict_it_cannot_settle_and_leaves_the_commits_as_they_were(self):
+        # A file that is neither an item nor a note (a plan edited on both Macs) stops the pull; notes are settled
+        # file by file (tests/test_sync.py).
         from devkit import cli
         with TwoMacs() as m:
-            note = m.here / "projects" / "acme" / "api.md"
-            note.parent.mkdir(parents=True)
-            note.write_text("# acme/api\n\nState: draft.\n")
-            work._commit([note], "note: acme/api", push=False)
+            rel = "plans/acme/api/2026-11-09-export.md"
+            plan = m.here / rel
+            plan.parent.mkdir(parents=True)
+            plan.write_text("# Export\n\nState: draft.\n")
+            work._commit([plan], "plan: export", push=False)
             _git(m.here, "push", "-q")
             _git(m.other, "pull", "-q")
-            (m.other / "projects" / "acme" / "api.md").write_text("# acme/api\n\nState: their words.\n")
-            _git(m.other, "commit", "-qam", "note: their words")
+            (m.other / rel).write_text("# Export\n\nState: their words.\n")
+            _git(m.other, "commit", "-qam", "plan: their words")
             _git(m.other, "push", "-q")
-            note.write_text("# acme/api\n\nState: our words.\n")
-            work._commit([note], "note: our words", push=False)
-            cli.commit_push(quiet=True)
+            plan.write_text("# Export\n\nState: our words.\n")
+            work._commit([plan], "plan: our words", push=False)
+            warned = io.StringIO()
+            with contextlib.redirect_stderr(warned):
+                cli.commit_push(quiet=True)
+            self.assertIn(f"stopped on a conflict in {rel}", warned.getvalue())
             self.assertEqual(m.stopped(), [], m.problem())
             self.assertEqual(_git(m.here, "branch", "--show-current"), "main")
             self.assertEqual(_git(m.here, "rev-list", "--count", "@{u}..HEAD"), "1")
-            self.assertEqual(note.read_text(), "# acme/api\n\nState: our words.\n")
+            self.assertEqual(plan.read_text(), "# Export\n\nState: our words.\n")
             problem = json.loads(work.push_failed_file().read_text())["error"]
-            self.assertIn("conflict in projects/acme/api.md", problem)
+            self.assertIn(f"conflict in {rel}", problem)
 
 
 class ClaimReachesRemoteTests(unittest.TestCase):
@@ -742,6 +807,49 @@ class PlanTests(unittest.TestCase):
             meta = plans.revise(raw, "written by brainstorming", a=A)
             self.assertEqual((meta["status"], int(meta["version"])), ("draft", 1))
             self.assertFalse(plans.needs_revision(raw))
+
+    def test_a_revision_that_follows_at_once_is_committed_after_the_first_with_its_own_text(self):
+        # Another session revises the plan just as this revision commits: it waits for that commit, so the history
+        # holds this revision's version under this revision's message, then the other's under its own.
+        import fcntl
+        import threading
+        with TwoMacs():
+            path = plans.new("acme/api", "Invoice export", a=A)
+            rel = str(path.relative_to(work.HANDOFF))
+            settled = threading.Event()
+            real_flock, real_commit = core._flock_within, work._commit
+
+            def other_session():
+                try:
+                    plans.revise(path, "second", a=B)
+                finally:
+                    settled.set()
+
+            other = threading.Thread(target=other_session)
+
+            def flock_within(fd, wait):  # the other session asks for the plan's lock
+                if threading.current_thread() is other:
+                    try:
+                        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        return True
+                    except BlockingIOError:
+                        settled.set()  # it waits for this revision
+                return real_flock(fd, wait)
+
+            def commit(paths, message, **kw):
+                if threading.current_thread() is threading.main_thread() and message.endswith("— first"):
+                    other.start()
+                    settled.wait(10)  # the other session waits for the plan's lock, or has revised and committed
+                return real_commit(paths, message, **kw)
+
+            with mock.patch.object(core, "_flock_within", flock_within), mock.patch.object(work, "_commit", commit):
+                plans.revise(path, "first", a=A)
+                other.join(30)
+            subjects = _git(work.HANDOFF, "log", "-2", "--format=%s").splitlines()
+            self.assertEqual([(re.findall(r" v(\d+) ", s), s.rsplit(" — ", 1)[-1]) for s in subjects],
+                             [(["3"], "second"), (["2"], "first")])
+            self.assertIn("\nversion: 2\n", _git(work.HANDOFF, "show", f"HEAD~1:{rel}"))
+            self.assertIn("\nversion: 3\n", _git(work.HANDOFF, "show", f"HEAD:{rel}"))
 
 
 class TemplateTests(unittest.TestCase):

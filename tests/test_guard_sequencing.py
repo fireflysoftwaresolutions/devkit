@@ -79,6 +79,28 @@ class AgentIdentityStays(unittest.TestCase):
                 with self.subTest(cmd=cmd, agent=agent):
                     self.assertIn("an agent runs it", check(cmd, agent) or "")
 
+    def test_a_programs_argument_that_names_an_identity_variable_sets_nothing(self):
+        # only the words before the command, env's own and unset's or export's operands change the environment: a
+        # search pattern is text. Each allowed search has a refused twin that does blank or unset the variable.
+        pairs = (('grep -rn "CODEX_THREAD_ID=" tests/', "CODEX_THREAD_ID= make check"),
+                 ("rg -n 'DEVKIT_SESSION=' lib", "env -u CODEX_THREAD_ID make check"),
+                 ("grep -n 'env -u CLAUDECODE' docs/guard.md", "timeout 5 env -u CLAUDECODE make"),
+                 ("grep -rn 'unset DEVKIT_SESSION' tests", "find . -exec env -u CLAUDECODE true {} \\;"),
+                 ("echo CLAUDECODE= | wc -c", "nice -n 5 env CLAUDECODE= make"),
+                 ("git log --grep 'DEVKIT_AGENT='", "export -n CLAUDECODE"))
+        for allowed, refused in pairs:
+            for agent, tool, key in (("claude", "Bash", "command"), ("codex", "exec_command", "cmd")):
+                with self.subTest(allowed=allowed, agent=agent):
+                    self.assertIsNone(guard.check(tool, {key: allowed}, CWD, agent))
+                with self.subTest(refused=refused, agent=agent):
+                    v = guard.check(tool, {key: refused}, CWD, agent)
+                    self.assertIn("an agent runs it", v[1] if v and v[0] == "deny" else "")
+        # aimed at devkit, the rule on devkit's own variables may refuse first: refused either way
+        for cmd in ("CODEX_THREAD_ID= dev status", "env -u CODEX_THREAD_ID dev status"):
+            for agent, tool, key in (("claude", "Bash", "command"), ("codex", "exec_command", "cmd")):
+                with self.subTest(refused=cmd, agent=agent):
+                    self.assertEqual((guard.check(tool, {key: cmd}, CWD, agent) or ("allow",))[0], "deny")
+
     def test_other_variables_and_reading_them_stay_open(self):
         for cmd in ("unset FOO", "env -u FOO npm test", "FOO= npm test", "echo $CLAUDECODE", "unset -f CLAUDECODE",
                     "printenv CLAUDECODE"):

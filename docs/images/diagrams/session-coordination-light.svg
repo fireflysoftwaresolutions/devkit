@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="928" height="864" viewBox="0 0 928 864" role="img" aria-labelledby="dk-title dk-desc">
+<title id="dk-title">Sessions on one Mac</title>
+<desc id="dk-desc">Session A asks session B a question through devkit, which wakes B's wait; B's answer wakes A's wait. When they disagree, A escalates, devkit notifies the developer, and the developer's typed settle line reaches both sessions.</desc>
+<rect width="928" height="864" fill="#F3F1EB"/>
+<g font-family="Manrope, 'Manrope Variable', system-ui, -apple-system, 'Segoe UI', Arial, sans-serif">
+<circle cx="68" cy="74" r="4" fill="#FFB34A"/>
+<text x="80" y="78.5" font-size="12" font-weight="600" fill="#62645B" letter-spacing="0.48">SESSIONS ON ONE MAC</text>
+<g transform="translate(156.0,104.0)">
+<line x1="0.0" y1="80.0" x2="0.0" y2="744.0" stroke="#D8D4CA" stroke-width="1.5" stroke-dasharray="4 4"/>
+<line x1="224.0" y1="80.0" x2="224.0" y2="744.0" stroke="#D8D4CA" stroke-width="1.5" stroke-dasharray="4 4"/>
+<line x1="456.0" y1="80.0" x2="456.0" y2="744.0" stroke="#D8D4CA" stroke-width="1.5" stroke-dasharray="4 4"/>
+<line x1="640.0" y1="80.0" x2="640.0" y2="744.0" stroke="#D8D4CA" stroke-width="1.5" stroke-dasharray="4 4"/>
+<line x1="-92.0" y1="128.0" x2="708.0" y2="128.0" stroke="#D8D4CA" stroke-width="1"/>
+<line x1="-92.0" y1="408.0" x2="708.0" y2="408.0" stroke="#D8D4CA" stroke-width="1"/>
+<rect x="-92.0" y="117.0" width="142.4" height="22.0" rx="11" fill="#EAE7DF"/>
+<text x="-82.0" y="132.5" font-size="12" font-weight="600" fill="#62645B" text-anchor="start" letter-spacing="0.48">ASK AND ANSWER</text>
+<path d="M0.0,192.0 L216.5,192.0" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="224.0,192.0 216.0,196.0 216.0,188.0" fill="#62645B"/>
+<rect x="43.2" y="162.0" width="137.7" height="22.0" rx="9" fill="#F3F1EB"/>
+<text x="112.0" y="177.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">dev session ask @b</text>
+<path d="M224.0,248.0 L448.5,248.0" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-dasharray="6 5" stroke-linecap="butt"/><polygon points="456.0,248.0 448.0,252.0 448.0,244.0" fill="#62645B"/>
+<rect x="247.0" y="218.0" width="186.1" height="22.0" rx="9" fill="#F3F1EB"/>
+<text x="340.0" y="233.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">peer question wakes its wait</text>
+<path d="M456.0,304.0 L231.5,304.0" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="224.0,304.0 232.0,300.0 232.0,308.0" fill="#62645B"/>
+<rect x="256.9" y="274.0" width="166.2" height="22.0" rx="9" fill="#F3F1EB"/>
+<text x="340.0" y="289.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">dev session answer S-…</text>
+<path d="M224.0,360.0 L7.5,360.0" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-dasharray="6 5" stroke-linecap="butt"/><polygon points="0.0,360.0 8.0,356.0 8.0,364.0" fill="#62645B"/>
+<rect x="22.8" y="330.0" width="178.4" height="22.0" rx="9" fill="#F3F1EB"/>
+<text x="112.0" y="345.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">peer answer wakes its wait</text>
+<rect x="-92.0" y="397.0" width="91.1" height="22.0" rx="11" fill="#EAE7DF"/>
+<text x="-82.0" y="412.5" font-size="12" font-weight="600" fill="#62645B" text-anchor="start" letter-spacing="0.48">ESCALATE</text>
+<path d="M0.0,472.0 L216.5,472.0" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="224.0,472.0 216.0,476.0 216.0,468.0" fill="#62645B"/>
+<rect x="25.5" y="442.0" width="173.0" height="22.0" rx="9" fill="#F3F1EB"/>
+<text x="112.0" y="457.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">dev session escalate S-…</text>
+<path d="M224.0,528.0 L632.5,528.0" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-dasharray="6 5" stroke-linecap="butt"/><polygon points="640.0,528.0 632.0,532.0 632.0,524.0" fill="#62645B"/>
+<rect x="365.8" y="498.0" width="132.5" height="22.0" rx="9" fill="#F3F1EB"/>
+<text x="432.0" y="513.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">desktop notification</text>
+<path d="M640.0,584.0 L233.5,584.0" fill="none" stroke="#9D671F" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="224.0,584.0 234.0,579.0 234.0,589.0" fill="#9D671F"/>
+<rect x="365.9" y="554.0" width="132.3" height="22.0" rx="9" fill="#F3F1EB"/>
+<text x="432.0" y="569.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">types settle E-…: A</text>
+<path d="M224.0,640.0 L0.0,640.0" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-dasharray="6 5" stroke-linecap="butt"/><polyline points="8.0,636.0 0.0,640.0 8.0,644.0" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+<rect x="84.0" y="610.0" width="56.1" height="22.0" rx="9" fill="#F3F1EB"/>
+<text x="112.0" y="625.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">settled</text>
+<path d="M224.0,696.0 L456.0,696.0" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-dasharray="6 5" stroke-linecap="butt"/><polyline points="448.0,700.0 456.0,696.0 448.0,692.0" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+<rect x="312.0" y="666.0" width="56.1" height="22.0" rx="9" fill="#F3F1EB"/>
+<text x="340.0" y="681.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">settled</text>
+<rect x="-92.0" y="0.0" width="184.0" height="80.0" rx="6.0" fill="#FFFFFF" stroke="#BFB8AB" stroke-width="1.5"/>
+<text x="0.0" y="34.0" font-size="16" font-weight="600" fill="#272820" text-anchor="middle">Session A</text>
+<text x="0.0" y="56.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">tech lead, Claude Code</text>
+<rect x="140.0" y="0.0" width="168.0" height="80.0" rx="6.0" fill="#FFF0D8" stroke="#F0A33C" stroke-width="1.5"/>
+<text x="224.0" y="34.0" font-size="16" font-weight="600" fill="#272820" text-anchor="middle">devkit</text>
+<text x="224.0" y="56.0" font-size="13" font-weight="400" fill="#855414" text-anchor="middle">peers store, this Mac</text>
+<rect x="384.0" y="0.0" width="144.0" height="80.0" rx="6.0" fill="#FFFFFF" stroke="#BFB8AB" stroke-width="1.5"/>
+<text x="456.0" y="34.0" font-size="16" font-weight="600" fill="#272820" text-anchor="middle">Session B</text>
+<text x="456.0" y="56.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">tech lead, Codex</text>
+<rect x="572.0" y="0.0" width="136.0" height="80.0" rx="6.0" fill="#E6E8E6" stroke="#8D9391" stroke-width="1.5"/>
+<text x="640.0" y="34.0" font-size="16" font-weight="600" fill="#272820" text-anchor="middle">Developer</text>
+<text x="640.0" y="56.0" font-size="13" font-weight="400" fill="#596060" text-anchor="middle">at the keyboard</text>
+</g>
+</g>
+</svg>

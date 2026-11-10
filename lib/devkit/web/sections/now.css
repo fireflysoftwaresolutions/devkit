@@ -88,6 +88,32 @@
 .now-more{display:inline-block;margin-top:var(--s3);font-size:var(--fs-body)}
 .now-team{margin:var(--s4) 0 0;font-size:var(--fs-body);color:var(--ink-2)}
 
+/* between sessions (what blocks, above the grid: escalations in amber, claims and overlaps in ink) and the sessions on this
+   Mac (after the runs, by project): rows on hairlines like the queue; another session's words sit between quotes */
+.now-peers{margin:0 0 40px;max-width:calc(100% * 7 / 12 + var(--s5) * 5 / 12)}
+.now-res{font-size:var(--fs-1);font-weight:400;overflow-wrap:anywhere}
+.now-said-by{color:var(--ink);overflow-wrap:anywhere}
+.now-sessions{margin-top:40px}
+.now-sgroup{padding-top:var(--s4)}
+.now-gh{margin:0;padding-bottom:var(--s2);font-size:var(--fs-body);font-weight:600;line-height:1.45;color:var(--ink-strong);overflow-wrap:anywhere}
+.now-slist{list-style:none;margin:0;padding:0;border-top:1px solid var(--line-soft)}
+.now-srow{display:grid;grid-template-columns:minmax(12rem,15rem) minmax(8rem,13rem) minmax(0,1fr) minmax(7rem,9rem);column-gap:var(--s4);row-gap:var(--s1);align-items:baseline;padding:var(--s3) 0;border-bottom:1px solid var(--line-soft);font-size:var(--fs-body);line-height:1.5}
+.now-srow p{margin:0;min-width:0}
+.now-who{display:flex;align-items:baseline;flex-wrap:wrap;gap:0 var(--s2);color:var(--ink-strong)}
+.now-who strong{font-weight:600}
+.now-who code,.now-branch{font-size:var(--fs-1);color:var(--ink)}
+.now-sg{flex:none;width:16px;align-self:center;line-height:0}
+.now-where{overflow-wrap:anywhere}
+.now-what{display:grid;gap:2px;min-width:0}
+.now-sl{color:var(--ink-2);overflow-wrap:anywhere}
+.now-sgoal{color:var(--ink)}
+.now-sgoal a{color:var(--ink-strong);font-weight:600}
+.now-shl{color:var(--ink-2)}
+.now-msg .now-said-by{color:var(--ink)}
+.now-state{text-align:right;white-space:nowrap}
+.now-sw{color:var(--ink-strong);font-weight:600}
+.now-srow.away .now-who,.now-srow.away .now-sw,.now-srow.away .now-sgoal,.now-srow.away code{color:var(--ink-2)}   /* idle for hours: quiet ink */
+
 /* next up and the first steps */
 .now-nx{display:flex;align-items:center;flex-wrap:wrap;gap:var(--s2) var(--s4);padding:var(--s3) 0;border-bottom:1px solid var(--line-soft)}
 .now-nx .now-body{flex:1 1 16rem}
@@ -109,11 +135,17 @@
 
 @media (max-width:900px){
   .now-grid>.now-queue,.now-grid>.now-runs{grid-column:1/-1}
+  .now-peers{max-width:none}
+  .now-srow{grid-template-columns:minmax(0,1fr) auto}
+  .now-srow .now-who{grid-column:1;grid-row:1}
+  .now-srow .now-state{grid-column:2;grid-row:1}
+  .now-srow .now-where,.now-srow .now-what{grid-column:1/-1}
 }
 @media (max-width:600px){
   .now-head{padding-bottom:var(--s5)}
   .now-date{display:none}
   .now-open{margin-left:0}
+  .now-strip{flex-wrap:wrap;row-gap:var(--s1)}   /* a long plan's strip and its landing bracket share no phone line */
 }
 @media (pointer:coarse){
   .now-cmd,.now-open,.now-all{min-height:44px;display:inline-flex;align-items:center}

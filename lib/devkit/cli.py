@@ -180,8 +180,9 @@ def _state(co):
 
 def commit_push(push=True, quiet=False):
     """Commit what changed in the handoff repository and push it. A rebase left stopped is aborted first, a pull
-    settles conflicts in items and stops cleanly on any other (work.pull_rebase), and every failure is recorded in
-    handoff-push-failed.json, which `dev status` shows until a push succeeds."""
+    settles conflicts in items and stops cleanly on any other (work.rebase_fetched), and every failure is recorded in
+    handoff-push-failed.json, which `dev status` shows until a push succeeds. The commit, the fetch and the push hold
+    work._repo_lock; the rebase holds the notes lock first, so it runs after that lock is released."""
     from . import audit, work
     root = work.HANDOFF  # the repository work.pull_rebase works on, read now (tests point it elsewhere)
     if not (root / ".git").exists():
@@ -201,33 +202,30 @@ def commit_push(push=True, quiet=False):
         if not push or not core.gitout(root, "remote"):
             return
         core.git(root, "fetch", "-q", "origin", timeout=60)
-        ok, err = True, ""
-        if core.gitout(root, "rev-list", "--count", "HEAD..@{u}") not in ("", "0"):
+    ok, err = work.rebase_fetched()
+    ahead = core.gitout(root, "rev-list", "--count", "@{u}..HEAD")
+    if ok and ahead not in ("", "0"):
+        ok, err = work.push_handoff(timeout=120)
+        if not ok:  # someone pushed in between: rebase on it and try once more
             ok, err = work.pull_rebase()
-        ahead = core.gitout(root, "rev-list", "--count", "@{u}..HEAD")
-        if ok and ahead not in ("", "0"):
-            rc, _, err = core.git(root, "push", "-q", timeout=120)
-            if rc != 0:  # someone pushed in between: rebase on it and try once more
-                ok, err = work.pull_rebase()
-                rc, _, err = core.git(root, "push", "-q", timeout=120) if ok else (1, "", err)
-            ok = rc == 0
-            if ok:
-                audit.record("handoff.push", core.handoff_repo(), f"{ahead} commit(s)")
-                if failed.exists():
-                    failed.unlink()
-            else:
-                audit.record("handoff.push", core.handoff_repo(), err[:300], "failed")
-                failed.write_text(json.dumps({"ts": int(time.time()), "error": err[:300]}))
-                try:  # each live session hears of it once, with its next wake or hook
-                    from . import watch
-                    watch.notice_all("notice", f"push:{int(time.time())}",
-                                     f"the handoff push failed at {time.strftime('%H:%M')}: "
-                                     f"{' '.join(err.split())[:200] or 'no reason given'}. dev status shows it; "
-                                     "the next dev sync tries again")
-                except Exception:
-                    pass
-        if not ok and not quiet:
-            ui.warn(f"handoff push failed: {err}")
+            ok, err = work.push_handoff(timeout=120) if ok else (False, err)
+        if ok:
+            audit.record("handoff.push", core.handoff_repo(), f"{ahead} commit(s)")
+            if failed.exists():
+                failed.unlink()
+        else:
+            audit.record("handoff.push", core.handoff_repo(), err[:300], "failed")
+            failed.write_text(json.dumps({"ts": int(time.time()), "error": err[:300]}))
+            try:  # each live session hears of it once, with its next wake or hook
+                from . import watch
+                watch.notice_all("notice", f"push:{int(time.time())}",
+                                 f"the handoff push failed at {time.strftime('%H:%M')}: "
+                                 f"{' '.join(err.split())[:200] or 'no reason given'}. dev status shows it; "
+                                 "the next dev sync tries again")
+            except Exception:
+                pass
+    if not ok and not quiet:
+        ui.warn(f"handoff push failed: {err}")
 
 
 # --------------------------------------------------------------------------- dashboard & help
@@ -758,6 +756,26 @@ def _issue_needs(reg: dict, p: dict) -> list:
     return out
 
 
+def _status_for(sl: dict, caller) -> dict:
+    """The saved status to show: this session's own latest when the record keeps one per session (`sessions`, keyed
+    "<agent>:<session id>"), else the project's latest."""
+    own = (sl.get("sessions") or {}).get(f"{caller[0]}:{caller[1]}") if caller and isinstance(sl.get("sessions"),
+                                                                                                dict) else None
+    return own if isinstance(own, dict) and own.get("line") else sl
+
+
+def _status_who(sl: dict, caller) -> dict:
+    """Who saved a status that names its session: {"who": "this session"} for the caller's own, else {"who": "Codex
+    session @0199a213", "by": "Codex @0199a213"}; {} for a record without a session (an older devkit's)."""
+    sid, agent = str(sl.get("session") or ""), str(sl.get("agent") or "")
+    if not sid:
+        return {}
+    if caller and (agent, sid) == (str(caller[0]), str(caller[1])):
+        return {"who": "this session", "by": ""}
+    name = AGENT_NAMES.get(agent, agent or "agent")
+    return {"who": f"{name} session @{sid[:8]}", "by": f"{name} @{sid[:8]}"}
+
+
 def status_view(reg: dict, p: dict, w: dict = None, runs=None, ci=None, roster=None, now=None, caller=None) -> dict:
     """Everything `dev status` shows for one project, in Sati's order: what needs you, what happens now (checks, the
     crew, the plan), the last update, then the details. `--json` prints this. `caller`: the (agent, session id) that
@@ -778,7 +796,7 @@ def status_view(reg: dict, p: dict, w: dict = None, runs=None, ci=None, roster=N
              for d in pg.pending_decisions(r)]
     needs += [_message_need(m, roster, pg.shown_id(r, m.get("id"), caller)) for r in mine
               for m in pg.waiting_messages(r)]
-    sl = p.get("status_line") or registry.status_line(p["id"]) or {}
+    sl = _status_for(p.get("status_line") or registry.status_line(p["id"]) or {}, caller)
     parsed = canary.parse_line(sl.get("line") or "") if sl.get("line") else {}
     if local and not p.get("canonical_ok", True):
         needs.append(_layout_need(p, alias, True))
@@ -788,7 +806,7 @@ def status_view(reg: dict, p: dict, w: dict = None, runs=None, ci=None, roster=N
     crew_now = _crew_now(mine, roster, now)
     last = None
     if sl.get("line"):
-        last = {"agent": (sl.get("agent") or "").capitalize() or "an agent", "ts": sl.get("ts"),
+        last = {"agent": (sl.get("agent") or "").capitalize() or "an agent", **_status_who(sl, caller), "ts": sl.get("ts"),
                 "when": ui.rel_time(sl.get("ts"), now), "title": parsed.get("task") or "",
                 "done": parsed.get("done") if parsed else sl["line"], "check": parsed.get("check", ""),
                 "next": parsed.get("next", ""), "where": _where_from(p, co, sl, parsed) if parsed and local else ""}
@@ -803,6 +821,156 @@ def status_view(reg: dict, p: dict, w: dict = None, runs=None, ci=None, roster=N
             "checks": checks, "crew": crew_now, "last_update": last,
             "branches": branchmap.ordered(p.get("branches")) if local else [], "details": details,
             "tasks": ((p.get("note_summary") or {}).get("tasks") or {}), "plans": p.get("plans") or []}
+
+
+AGENT_NAMES = {"claude": "Claude Code", "codex": "Codex"}
+
+
+def peer_name(agent, prefix) -> str:
+    """Another agent session as every surface names it: "Codex @0199a213"."""
+    p = str(prefix or "")
+    return f"{AGENT_NAMES.get(str(agent or ''), str(agent or 'agent'))} {p if p.startswith('@') else '@' + p[:8]}"
+
+
+def quoted(text, limit: int = 300) -> str:
+    """Another session's words as one inert quoted span (watch.clean: no line break, backtick, escape sequence,
+    direction mark or quote mark of its own), cut at `limit` characters."""
+    from . import watch
+    return f"“{watch.clean(text, limit)}”"
+
+
+def _split_key(k) -> tuple:
+    agent, _, sid = str(k or "").partition(":")
+    return agent, sid
+
+
+def _escalation_view(e: dict, names: dict, limit: int = 300) -> dict:
+    agent, sid = _split_key(e.get("from"))
+    return {"id": e.get("id"), "ts": e.get("ts"), "question": quoted(e.get("question"), limit),
+            "options": [quoted(o, limit)[1:-1] for o in e.get("options") or []], "recommend": e.get("recommend") or "",
+            "from": names.get(e.get("from")) or peer_name(agent, sid[:8]),
+            "parties": [names.get(p) or peer_name(*_split_key(p)) for p in e.get("parties") or []]}
+
+
+def sessions_view(project, caller=None, now=None) -> dict:
+    """The Sessions block of `dev status`: the live agent sessions of `project` (every one with None), a count of the
+    others on this Mac, this session's overlaps, the claims on the project, this session's questions that wait for
+    an answer, its unread messages, and the open escalations this project's sessions are party to. Another session's
+    words appear only quoted and cleaned (a claim's reason, an escalation's question and options), never a message's
+    text. It never raises: {"error": …} says what could not be read."""
+    from . import peers
+    now = now or time.time()
+    try:
+        me = peers.key(*caller) if caller and caller[0] and caller[1] else None
+        rows = peers.directory(now=now, me=me, include_idle=True)
+        names = {r["key"]: peer_name(r["agent"], r["prefix"]) for r in rows}
+        pl = (project or "").lower()
+        live = [r for r in rows if r["live"]]
+        here = [r for r in live if not pl or r["project"].lower() == pl]
+        mine = {r["key"] for r in rows if r.get("me")} | ({me} if me else set())
+        out = {"project": project, "here": [], "others": len(live) - len(here), "overlaps": [], "claims": [],
+               "asked": [], "inbox": None, "escalations": [], "error": ""}
+        for r in here:
+            run = r.get("run") or {}
+            state = {"working": "working", "waiting": "waiting", "idle": "idle"}.get(r["state"], r["state"])
+            text = f"{names[r['key']]} on {r['branch'] or 'no branch'}, {state}"
+            if run.get("goal"):
+                head = f" ({run['headline']})" if run.get("headline") else ""
+                text += f": {quoted(run['goal'], 120)[1:-1]}{head}"
+            if r.get("crew"):
+                text += f", {len(r['crew'])} crew"
+            text += " · this session" if r.get("me") else f" · {ui.rel_time(r['last'], now)}"
+            out["here"].append({k: r.get(k) for k in ("key", "agent", "prefix", "project", "branch", "state", "last",
+                                                      "me", "run", "crew", "claims", "initiatives")} | {"text": text})
+        n, me_here = len(here), any(r.get("me") for r in here)
+        if project:
+            word = "none here" if not n else "only this one here" if n == 1 and me_here else f"{n} here"
+            out["summary"] = word + (f", {out['others']} more on this Mac" if out["others"] else "")
+        else:
+            out["summary"] = f"{n} live on this Mac" if n else "none live on this Mac"
+        if me:
+            agent, sid = caller[0], caller[1]
+            for o in peers.overlaps(agent, sid, now=now):
+                if o["kind"] == "claim":
+                    continue  # the claims below say it, with the holder's reason
+                ot = o["other"]
+                who = f"{peer_name(ot['agent'], ot['prefix'])} ({ot['project'] or '-'} · {ot['branch'] or '-'})"
+                text = {"checkout": f"{who} works in this same checkout",
+                        "branch": f"{who} is on this branch in another checkout ({tilde(ot['worktree'])})",
+                        "repo": f"{who} works in another worktree of this repository ({tilde(ot['worktree'])})",
+                        "item": f"{who} works on a branch linked to your work item {o['key'].rsplit(':', 1)[-1]}"
+                        }.get(o["kind"], o.get("detail") or "")
+                out["overlaps"].append({"kind": o["kind"], "level": o["level"], "other": ot, "text": text})
+            for q in peers.open_questions(agent, sid, now=now):
+                to = q.get("to") or []
+                who = names.get(to[0]) or peer_name(*_split_key(to[0])) if len(to) == 1 else f"{len(to)} sessions"
+                out["asked"].append({"id": q["id"], "to": to, "text": f"{q['id']} to {who} waits for an answer"})
+            unread = peers.inbox(agent, sid)
+            if unread:
+                senders = list(dict.fromkeys(
+                    peer_name((m.get("from") or {}).get("agent") or "devkit", ((m.get("from") or {}).get("session")
+                                                                               or "")[:8])
+                    if (m.get("from") or {}).get("session") else "devkit" for m in unread))
+                joined = senders[0] if len(senders) == 1 else ", ".join(senders[:-1]) + " and " + senders[-1]
+                out["inbox"] = {"unread": len(unread), "from": senders,
+                                "text": f"{len(unread)} unread from {joined}: dev session inbox"}
+        for c in peers.claims(now=now, project=project or None):
+            h = c["holder"]
+            who = "this session" if h["key"] in mine else names.get(h["key"]) or peer_name(h["agent"], h["prefix"])
+            queue = len(c.get("queue") or [])
+            text = (f"{c['resource']} held by {who} until {time.strftime('%H:%M', time.localtime(c['until']))}: "
+                    f"{quoted(c['why'], 200)}" + (f" · {queue} waiting for it" if queue else ""))
+            out["claims"].append({"resource": c["resource"], "holder": h["key"], "mine": h["key"] in mine,
+                                  "until": c["until"], "why": quoted(c["why"], 200), "queue": queue, "text": text})
+        projects = {r["key"]: r["project"].lower() for r in rows}
+        for e in peers.escalations("open"):
+            keys = [e.get("from")] + list(e.get("parties") or [])
+            if not pl or mine & set(keys) or any(projects.get(k) == pl for k in keys):
+                out["escalations"].append(_escalation_view(e, names))
+        return out
+    except Exception as e:  # a store that cannot be read says so; dev status still shows the rest
+        return {"project": project, "here": [], "others": 0, "overlaps": [], "claims": [], "asked": [], "inbox": None,
+                "escalations": [], "summary": "could not be read", "error": f"{type(e).__name__}: {e}"[:200]}
+
+
+def _escalation_need(e: dict) -> dict:
+    """An open escalation needs the developer: settled only by a line they type in any agent session."""
+    rec = f" {e['from']} recommends {e['recommend']}." if e.get("recommend") else ""
+    letters = [o.split(":", 1)[0] for o in e.get("options") or [] if ":" in o]
+    choice = e.get("recommend") or ("<" + " or ".join(letters) + ", or your words>" if letters else "<your choice>")
+    return {"kind": "escalation", "id": e["id"], "ts": e.get("ts"),
+            "text": f"Sessions ask you to settle: {e['question']} Options: {'; '.join(e.get('options') or [])}.{rec} "
+                    f"Type it in any agent session:", "command": f"settle {e['id']}: {choice}"}
+
+
+def add_sessions(v: dict, project, caller=None, now=None) -> dict:
+    """`dev status` gains its Sessions block (v["sessions"]) and the open escalations among what needs you."""
+    s = sessions_view(project, caller, now)
+    v["sessions"] = s
+    v["needs_you"] = list(v.get("needs_you") or []) + [_escalation_need(e) for e in s["escalations"]]
+    return v
+
+
+def render_sessions(s: dict, cols: int) -> list:
+    """The Sessions block: the summary, this project's sessions, then overlaps, claims, questions asked, unread."""
+    if not s:
+        return []
+    out = ["", "  " + ui.bold(f"Sessions · {s.get('summary') or ''}".rstrip(" ·"))]
+    if s.get("error"):
+        return out + ui.row("", f"{ui.glyph('none')} {s['error']}", cols)
+    for i, r in enumerate(s["here"]):
+        out += ui.row("Here" if i == 0 else "", r["text"], cols)
+    for o in s["overlaps"]:
+        warn = o.get("level") == "warn"
+        out += ui.row("Overlap", (f"{ui.glyph('needs')} " if warn else "") + o["text"], cols,
+                      style=ui.amber if warn else None)
+    for i, c in enumerate(s["claims"]):
+        out += ui.row("Claims" if i == 0 else "", c["text"], cols)
+    for i, q in enumerate(s["asked"]):
+        out += ui.row("Asked" if i == 0 else "", q["text"], cols)
+    if s.get("inbox"):
+        out += ui.row("Inbox", s["inbox"]["text"], cols)
+    return out
 
 
 def _render_needs(needs: list, cols: int, title: str = "Needs you") -> list:
@@ -848,9 +1016,13 @@ def render_status(v: dict, cols: int = None) -> list:
         pl = cr["plan"]
         left = f", about {ui.duration(pl['left_min'] * 60)} left" if pl.get("left_min") else ""
         out += ui.row("Plan", f"{pl['done']} of {pl['total']} steps done{left}", cols)
+    if v.get("now_warning"):
+        out += ui.row("Tasks", f"{ui.glyph('needs')} {v['now_warning']}", cols, style=ui.amber)
+    out += render_sessions(v.get("sessions"), cols)
     last = v.get("last_update")
     if last:
-        head = f"Last update from {last['agent']}, {last['when']}" + (f", {last['where']}" if last.get("where") else "")
+        head = f"Last update from {last.get('who') or last['agent']}, {last['when']}" + \
+            (f", {last['where']}" if last.get("where") else "")
         head += f": {last['title']}" if last.get("title") else ""
         out += [""] + ["  " + ui.bold(x) for x in ui.wrap(head, W - 3)]
         if last.get("done"):
@@ -934,6 +1106,7 @@ def render_home(v: dict, cols: int = None) -> list:
     out = ["", ui.rule_title(head, cols)]
     out += ui.para(f"{v['greeting']} You are not inside a project; dev status <name> shows one from here.", cols)
     out += _render_needs(v["needs_you"], cols)
+    out += render_sessions(v.get("sessions"), cols)
     if v["projects"]:
         out += ["", "  " + ui.bold("Projects")] + _project_table(v["projects"], cols)
     else:
@@ -963,6 +1136,7 @@ def cmd_status(a):
     if not p:
         v = home_view(reg, offline=False, caller=caller)
         v["needs_you"] += _bug_needs()
+        add_sessions(v, None, caller)
         _prompt_refresh(reg)
         if getattr(a, "json", False):
             print(json.dumps(v, indent=2, ensure_ascii=False, default=str))
@@ -970,8 +1144,11 @@ def cmd_status(a):
         print("\n".join(render_home(v)))
         return 0
     v = status_view(reg, p, w, caller=caller)
+    from . import work
+    v["now_warning"] = work.now_warning(p["id"]) if p.get("id") else ""  # a folder with no project id has no tasks
     where = ((w or {}).get("path") or p.get("path")) if a.query else os.getcwd()
     v["needs_you"] += devkit_needs(where)  # the plugins of the project asked about, not of the folder it runs in
+    add_sessions(v, p.get("id"), caller)
     _prompt_refresh(reg, where)
     v["show_all"] = bool(getattr(a, "all", False))
     if getattr(a, "json", False):
@@ -1371,7 +1548,7 @@ def cmd_sync(a):
         except OSError:
             pass
     if a.session:
-        with core.Lock("notes", wait=60):
+        with registry.notes_lock(wait=60):  # reentrant: the note writes inside take it again
             hooks.record_session(a.session)
     with core.Lock("sync", wait=300 if (a.session or a.scheduled) else 10) as ok:
         if not ok:
@@ -1403,6 +1580,11 @@ def cmd_sync(a):
             try:
                 from . import approvals
                 approvals.sweep()
+            except Exception:
+                pass
+            try:  # other sessions' store: told messages, ended sessions' boxes, void claims, old escalations
+                from . import peers
+                peers.sweep()
             except Exception:
                 pass
         try:
@@ -1447,7 +1629,7 @@ def cmd_sync(a):
         except Exception as e:
             if not a.quiet:
                 ui.warn(f"work items: {e}")
-        with core.Lock("notes", wait=60):
+        with registry.notes_lock(wait=60):  # reentrant: write_outputs and update_note take it again
             changed = registry.write_outputs(reg)
         try:
             from . import dashboard
@@ -1586,7 +1768,7 @@ def cmd_install(a):
                            assume_yes=bool(getattr(a, "yes", False)))
     if rc == 0 and (not only or "claude" in only):  # what was installed: `dev config` tells new from removed
         try:
-            write_install_record()
+            write_install_record(create=not only)  # only a whole install that finished creates it
         except Exception as e:
             ui.warn(f"could not record what was installed ({e}); dev config may show removed settings as new")
     return rc
@@ -1857,15 +2039,19 @@ def cmd_initiative(a):
         if not f.exists():
             ui.err(f"no initiative “{a.slug}”")
             return 2
-        text = f.read_text()
-        meta, _ = notes.split_frontmatter(text)
-        cur = [p.lower() for p in (meta.get("projects") or [])]
-        pid = a.project.lower()
-        cur = sorted(set(cur) | {pid}) if act == "add" else [p for p in cur if p != pid]
-        text = notes.set_meta(text, projects=cur)
-        if act == "add" and f"### {pid}" not in text:
-            text = text.replace("## Tasks\n", f"### {pid}\n_Role in the initiative, state, next step._\n\n## Tasks\n", 1)
-        with core.Lock("notes", wait=30):
+        with registry.notes_lock(wait=30) as got:  # from the read to the write: another writer of the README waits
+            if not got:
+                ui.err("another devkit process is writing notes: run the command again in a moment")
+                return 1
+            text = f.read_text()
+            meta, _ = notes.split_frontmatter(text)
+            cur = [p.lower() for p in (meta.get("projects") or [])]
+            pid = a.project.lower()
+            cur = sorted(set(cur) | {pid}) if act == "add" else [p for p in cur if p != pid]
+            text = notes.set_meta(text, projects=cur)
+            if act == "add" and f"### {pid}" not in text:
+                text = text.replace("## Tasks\n", f"### {pid}\n_Role in the initiative, state, next step._\n\n## Tasks\n",
+                                    1)
             core.write_if_changed(f, text)
         print(f"{ui.OK} {a.slug}: projects = {', '.join(cur) or '-'}")
         return 0
@@ -1912,10 +2098,13 @@ def _scope(a):
     return p["id"], p["id"]
 
 
-def _print_items(scope, label, show_all=False):
+def _print_items(scope, label, show_all=False, rebind=True):
+    """The open items, numbered for `dev task <verb> <n>`. rebind: `dev task` itself, whose numbers the next verbs use;
+    the list printed after a write keeps the numbers of the list shown before and is numbered only while it is that
+    list (work.show)."""
     from . import work
     items = work.all_items(scope)
-    ordered = work.ordered_open(items)
+    ordered, numbered = work.show(scope, items, rebind=rebind)
     print(ui.section(f"{label} · tasks"))
     if not items:
         hint = 'no tasks yet — dev task add "…" --now'
@@ -1930,7 +2119,11 @@ def _print_items(scope, label, show_all=False):
             lock = ui.green(" 🔒 you") if holder.startswith(me) else ui.yellow(f" 🔒 {holder.split(' ')[0]}")
         st = {"doing": ui.cyan("doing"), "blocked": ui.red("blocked")}.get(m.get("status"), ui.dim(m.get("bucket", "")))
         pr = ui.yellow(" !") if m.get("priority") == "high" else ""
-        print(f"  {ui.cyan(str(n).rjust(2))} {ui.dim(m['id'])} {st:<8} {m['title']}{pr}{lock} {ui.dim('v' + str(m['version']))}")
+        num = str(n).rjust(2) if numbered else " ·"
+        print(f"  {ui.cyan(num)} {ui.dim(m['id'])} {st:<8} {m['title']}{pr}{lock} {ui.dim('v' + str(m['version']))}")
+    if ordered and not numbered:
+        why = "this write changed the list" if not rebind else "devkit could not record the list"
+        print(f"  {ui.dim(f'no numbers: {why}; dev task numbers it again, and ids always work')}")
     done = sorted([i for i in items if i["meta"].get("status") == "done"], key=lambda i: i["meta"].get("updated", ""),
                   reverse=True)
     for it in (done if show_all else done[:5]):
@@ -2061,33 +2254,35 @@ def cmd_task(a):
             body = a.body or ("" if a.no_template else work.task_body(a.type, a.why or "", a.done))
             it = work.create(scope, " ".join(a.text), kind=a.type, bucket=bucket, priority=a.priority,
                              body=body, why=a.why or "", due=a.due or "")
-            print(f"{ui.OK} {it['meta']['id']} added to {bucket} · {label}")
+            print(f"{ui.OK} {work.acted('added', it)} to {bucket} · {label}")
             if "_" in body and not a.body:
                 print(ui.dim(f"  fill in the description: dev task edit {it['meta']['id']} --body-file <file> --why \"…\""))
             if a.claim:
                 work.claim(it, why=a.why or "", branch=_task_branch(scope))
                 print(f"{ui.OK} claimed by you")
+            if bucket == "now" and work.now_warning(scope):
+                ui.warn(work.now_warning(scope))
         elif act in ("start", "claim"):
             it = work.claim(work.find(" ".join(a.selector), scope), why=a.why or "", branch=_task_branch(scope))
-            print(f"{ui.OK} {it['meta']['id']} claimed until {it['meta']['lock_expires']} — others see it as yours")
+            print(f"{ui.OK} {work.acted('claimed', it)} until {it['meta']['lock_expires']} — others see it as yours")
         elif act == "release":
             it = work.release(work.find(" ".join(a.selector), scope), why=a.why or "", status="todo")
-            print(f"{ui.OK} {it['meta']['id']} released")
+            print(f"{ui.OK} {work.acted('released', it)}")
         elif act == "done":
             it = work.find(" ".join(a.selector), scope)
             it = work.release(it, why=a.why or "", status="done")
-            print(f"{ui.OK} {it['meta']['id']} done")
+            print(f"{ui.OK} {work.acted('done', it)}")
         elif act == "reopen":
             it = work.reopen(work.find(" ".join(a.selector), scope), why=a.why or "")
-            print(f"{ui.OK} {it['meta']['id']} reopened (todo) · why: {a.why}")
+            print(f"{ui.OK} {work.acted('reopened', it)} (todo) · why: {a.why}")
         elif act == "block":
             it = work.update(work.find(" ".join(a.selector), scope), "block", why=a.why or "", status="blocked")
-            print(f"{ui.OK} {it['meta']['id']} blocked")
+            print(f"{ui.OK} {work.acted('blocked', it)}")
         elif act == "unblock":
             it = work.find(" ".join(a.selector), scope)
             holder, expired = work.lock_holder(it)
             it = work.update(it, "unblock", why=a.why or "", status="doing" if holder and not expired else "todo")
-            print(f"{ui.OK} {it['meta']['id']} unblocked ({it['meta']['status']})")
+            print(f"{ui.OK} {work.acted('unblocked', it)} ({it['meta']['status']})")
         elif act == "link":
             it = work.find(" ".join(a.selector), scope)
             tag = f"initiative:{a.to}"
@@ -2096,15 +2291,17 @@ def cmd_task(a):
                 return 2
             links = list(dict.fromkeys((it["meta"].get("links") or []) + [tag]))
             it = work.update(it, "link", why=a.why or "", links=links)
-            print(f"{ui.OK} {it['meta']['id']} counts toward initiative {a.to}")
+            print(f"{ui.OK} {work.acted('linked', it)}: counts toward initiative {a.to}")
         elif act == "cancel":
             it = work.find(" ".join(a.selector), scope)
             it = work.update(it, "cancel", why=a.why or "", status="cancelled", claimed_by="", claimed_at="",
                              lock_expires="")
-            print(f"{ui.OK} {it['meta']['id']} cancelled")
+            print(f"{ui.OK} {work.acted('cancelled', it)}")
         elif act == "move":
             it = work.update(work.find(" ".join(a.selector), scope), "move", why=a.why or "", bucket=a.to)
-            print(f"{ui.OK} {it['meta']['id']} → {a.to}")
+            print(f"{ui.OK} {work.acted('moved', it)} → {a.to}")
+            if a.to == "now" and work.now_warning(scope):
+                ui.warn(work.now_warning(scope))
         elif act == "edit":
             changes = {}
             if a.title:
@@ -2119,7 +2316,7 @@ def cmd_task(a):
                 ui.err("nothing to change: --title, --body-file, --priority or --due")
                 return 2
             it = work.update(work.find(" ".join(a.selector), scope), "edit", why=a.why or "", **changes)
-            print(f"{ui.OK} {it['meta']['id']} v{it['meta']['version']}")
+            print(f"{ui.OK} {work.acted('edited', it)} v{it['meta']['version']}")
         elif act == "delegate":
             it = work.find(" ".join(a.selector), scope)
             who = a.to.lstrip("@")
@@ -2155,7 +2352,7 @@ def cmd_task(a):
     except ValueError as e:
         ui.err(str(e))
         return 2
-    _print_items(scope, label, getattr(a, "all", False))
+    _print_items(scope, label, getattr(a, "all", False), rebind=act == "ls")
     return 0
 
 
@@ -2170,6 +2367,9 @@ def cmd_plan(a):
             return 0
         if act in ("revise", "approve", "supersede"):
             path = Path(os.path.expanduser(a.path)).resolve()
+            if not path.is_file():
+                ui.err(f"no plan at {a.path}: check the path; `dev plan ls` lists the plans")
+                return 2
             status = {"approve": "approved", "supersede": "superseded"}.get(act)
             meta = plans.revise(path, a.why or ("approved" if act == "approve" else ""), status=status)
             print(f"{ui.OK} {meta['id']} v{meta['version']} · {meta['status']}")
@@ -2781,7 +2981,8 @@ def cmd_lesson(a):
     items = [x for x in items if a.all or x["meta"].get("status") != "retired"]
     print(ui.section(f"Lessons · {len(items)}"))
     if not items:
-        print("  none yet — record one after a fix, a revert or a repeated mistake: dev lesson add \"…\" --cause … --prevent …")
+        print("  none yet — record one after a fix, a revert or a repeated mistake: dev lesson add \"…\" --happened \"…\" "
+              "--cause \"…\" --prevent \"…\" --file <glob> --command \"<command words>\" --error \"<output text>\"")
     for x in sorted(items, key=lessons._score, reverse=True):
         m = x["meta"]
         st = {"open": ui.yellow("open"), "prevented": ui.green(f"prevented·{m.get('prevention')}"),
@@ -3192,12 +3393,15 @@ def cmd_note(a):
             ui.err(f"unknown key “{k}” (keys: {', '.join(notes.META_KEYS)})")
             return 2
         kv[k] = v
-    try:
-        text = notes.set_meta(f.read_text(), **kv)
-    except ValueError as e:
-        ui.err(str(e))
-        return 2
-    with core.Lock("notes", wait=30):
+    with registry.notes_lock(wait=30) as got:  # from the read to the write: another writer of the note waits
+        if not got:
+            ui.err("another devkit process is writing notes: run the command again in a moment")
+            return 1
+        try:
+            text = notes.set_meta(f.read_text(), **kv)
+        except ValueError as e:
+            ui.err(str(e))
+            return 2
         core.write_if_changed(f, text)
     meta, _ = notes.split_frontmatter(text)
     print(f"{ui.OK} {p['id']}: " + " · ".join(f"{k} {v}" for k, v in meta.items() if v))
@@ -3370,7 +3574,7 @@ def cmd_config(a):
         with setup.quiet_mode(True):
             fixed = policy.repair()
         if fixed:
-            write_install_record()
+            write_install_record(create=False)  # a repair after a crashed install is no finished install
         if not a.quiet:
             print(f"{ui.OK} restored {len(fixed)} setting(s)" if fixed else f"{ui.OK} nothing to repair")
             for d in fixed:
@@ -3455,10 +3659,14 @@ def _config_broken() -> str:
     return ""
 
 
-def write_install_record():
+def write_install_record(create: bool = True):
     """What `dev install` (or `dev config repair`) just installed, so `dev config` can tell a setting that is new in
-    this devkit version from one removed outside devkit."""
+    this devkit version from one removed outside devkit. The file also says that a whole `dev install` finished on
+    this Mac (wizard.installed_before), so only such an install creates it (`create`); a repair, which an agent's
+    session-start hook runs even after a crashed install, and `dev install --only` update it only when it exists."""
     from . import policy
+    if not create and not _install_record_file().is_file():
+        return
     rec = {"ts": round(time.time()), "version": core.VERSION}
     try:
         flat, hooks = policy.claude_desired()
@@ -3824,7 +4032,9 @@ def cmd_setup(a):
         from . import setup as setup_mod
         return setup_mod.setup_shell(assume_yes=a.yes, remove=a.remove)
     from . import wizard
-    return wizard.run(assume_yes=a.yes, skip_packages=a.skip_packages)
+    if getattr(a, "preview", False):
+        return wizard.print_preview()
+    return wizard.run(assume_yes=a.yes, skip_packages=a.skip_packages, resume=bool(getattr(a, "resume", False)))
 
 
 def cmd_docs(a):
@@ -3951,8 +4161,9 @@ def build_parser():
     p.add_argument("--log", metavar="TEXT", help="append a line to the session log")
     p.add_argument("--agent", default="human", help="who is logging (human, claude, codex)")
     from . import continuity
-    continuity.add_arguments(add("session", continuity.cmd_session, "A session's continuity: what devkit kept "
-                                                                    "through compaction, /clear and resume"))
+    continuity.add_arguments(add("session", continuity.cmd_session, "Agent sessions: continuity through compaction, "
+                                                                    "/clear and resume; talk, claim and escalate "
+                                                                    "between sessions on this Mac"))
     p = add("task", cmd_task, "Work items of a project (or of an initiative with -i): add, claim, done, history")
     p.add_argument("-p", "--project", help="project (default: the one you are in)")
     p.add_argument("-i", "--initiative", help="an initiative instead of a project")
@@ -4351,10 +4562,13 @@ def build_parser():
                         "a crew member or Codex in the foreground")
     w.add_argument("--for", dest="for_", choices=("me",), help="me: the caller's own events (its crew lane, or the "
                                                                "main session): the default, and the only value")
-    w.add_argument("--only", help="comma list: question,decision,ready,member,ci,notice; take only these kinds")
+    w.add_argument("--only", help="comma list: question,decision,ready,member,ci,notice,peer; take only these kinds")
     w.add_argument("--timeout", type=float, help="minutes before it ends with the command to arm it again (default "
                                                  "240 for the main session on Claude Code, 10 on Codex, 9 for a crew "
                                                  "member)")
+    w.add_argument("--standby", action="store_true",
+                   help="with --wait: wait for other agent sessions' messages even when nothing else can arrive (a "
+                        "session that coordinates others; never required)")
     w.add_argument("--json", action="store_true", help="the peek as JSON (for tools)")
     w = add("watches", watch.cmd_watches, "Every wait (dev watch --wait) and CI watch: live, expired or superseded, "
                                           "with the command to arm it again, and what can still arrive")
@@ -4413,6 +4627,11 @@ def build_parser():
     p.add_argument("--remove", action="store_true", help="with prompt, commit-template or shell: take it out again")
     p.add_argument("-y", "--yes", action="store_true", help="accept every default (non-interactive)")
     p.add_argument("--skip-packages", action="store_true", help="do not install Homebrew/npm packages")
+    p.add_argument("--resume", action="store_true",
+                   help="continue the last setup: run its steps that are not done, with the saved answers")
+    p.add_argument("--preview", action="store_true",
+                   help="draw every screen of the setup with sample data, as wide as the terminal (COLUMNS=60 for "
+                        "narrow); changes nothing")
     add("prompt", cmd_prompt, "What devkit's prompt helper shows here; refresh writes it for this Mac").add_argument(
         "action", nargs="?", choices=["refresh"])
     p = add("update", cmd_update, "Update devkit: the newest release, or a pull of its branch; --check only tells")

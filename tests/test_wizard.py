@@ -19,6 +19,8 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _sandbox  # noqa: E402
 
 from devkit import core, providers, registry, setup, toolchain, tui, ui, wizard  # noqa: E402
 
@@ -289,9 +291,11 @@ class DriverTests(unittest.TestCase):
 # --------------------------------------------------------------------------- the wizard
 
 
+# The config --yes writes on a first run where Claude Code is signed in and Codex is not: the agents signed in are the
+# default answer (INSTALL-AC-2), so Codex is off.
 SNAPSHOT_FIRST = {
     "dev_root": "~/Development", "github_user": "ada", "handoff_repo": "ada/handoff",
-    "agents": {"claude": True, "codex": True}, "claude": {"default_mode": "bypassPermissions"},
+    "agents": {"claude": True, "codex": False}, "claude": {"default_mode": "bypassPermissions"},
     "codex": {"mode": "full", "approval_policy": "never", "sandbox_mode": "danger-full-access"},
     "stacks": ["python", "node"], "lock": False, "hosts": ["github", "gitlab"], "clouds": ["aws"],
     "docker": {"cpu": 6, "memory": 12, "disk": 80, "autostart": False}, "gc": {"auto": True},
@@ -301,11 +305,11 @@ SAVED ={"stacks": ["python"], "hosts": ["bitbucket"], "clouds": [], "docker": {"
 SNAPSHOT_RERUN = {
     "stacks": ["python"], "hosts": ["github", "bitbucket", "gitlab"], "clouds": ["aws"],
     "docker": {"cpu": 4, "memory": 8, "disk": 80, "autostart": False}, "editor": "zed",
-    "agents": {"claude": True, "codex": True}, "lock": True, "dev_root": "~/Development", "github_user": "ada",
+    "agents": {"claude": True, "codex": False}, "lock": True, "dev_root": "~/Development", "github_user": "ada",
     "handoff_repo": "ada/handoff", "claude": {"default_mode": "bypassPermissions"},
     "codex": {"mode": "full", "approval_policy": "never", "sandbox_mode": "danger-full-access"},
     "gc": {"auto": True}, "sync": {"interval_minutes": 60}, "ai": {"enabled": False, "asked": True}}
-# The line prompts' output with --yes, as `dev setup` printed it before the interactive wizard existed.
+# The line prompts' questions and answers with --yes, as `dev setup` prints them for installs without a terminal.
 GOLDEN_YES = """\
 Good <time>, Ada. This wizard sets up devkit on this Mac. Press Enter to keep the value in [brackets]; nothing \
 changes until you confirm.
@@ -321,15 +325,14 @@ changes until you confirm.
      Private handoff repository → ada/handoff
 
    3 Agents
-     Configure Claude Code (CLI + Desktop)? → yes
-     Configure Codex (CLI + ChatGPT app)? → yes
+       1. both — Claude Code and Codex
+     › 2. claude — Claude Code only
+       3. codex — Codex only
+     Which coding agents do you want to use? → claude
      › 1. bypassPermissions — no prompts; the devkit guard protects the workspace (recommended)
        2. acceptEdits — edits without prompts, commands ask
        3. default — ask before every tool
      Claude Code permission mode → bypassPermissions
-     › 1. full — no prompts, full access; the devkit guard protects (recommended)
-       2. workspace — sandboxed to the project; asks when it needs more
-     Codex autonomy → full
 
    4 Stacks (toolchains, language servers, skills)
      □ 1. java — Java / Spring (JDK, Maven, Gradle, jdtls)
@@ -361,6 +364,7 @@ changes until you confirm.
      VM memory (GB) → 12
      VM disk, grows as needed (GB) → 80
      Start Colima at login? → no
+     Start Docker when the setup ends? → yes
 
    8 Automation
      Reclaim disk automatically (merged worktrees, idle build output, stale temp)? → yes
@@ -373,7 +377,7 @@ changes until you confirm.
      root         ~/Development
      handoff      ada/handoff → ~/Development/.handoff
      Claude Code  bypassPermissions
-     Codex        full (never / danger-full-access)
+     Codex        skip
      stacks       python, node
      git hosts    github, gitlab · commit template on
      clouds       aws
@@ -383,44 +387,58 @@ changes until you confirm.
      lock         off (drift is still blocked and repaired)
      Apply this plan? → yes
 
-  ✓ saved <CONFIG>
-     Codex is not signed in. Sign in now (opens the browser)? → yes
-
-  → Verifying …
-
-  Next: open a new terminal (or `exec zsh`), then `dev` — and in any project, start Claude Code or Codex as \
-usual. `dev agents test` runs a live check of both agents.
-
 """
 
 
-def line_mode(saved=None, yes=True, typed=None, clouds=("aws",), state=None):
+def line_mode(saved=None, yes=True, typed=None, clouds=("aws",), state=None, call=None, resume=False, device=None,
+              tools=("gh", "brew", "claude", "codex"), first=True):
     """Run `dev setup` through the line prompts with detection and commands stubbed: (rc, config, output, calls).
-    `clouds`: the cloud and infrastructure tools this Mac shows. `state`: devkit's state folder (default: a temp one)."""
+    `clouds`: the cloud and infrastructure tools this Mac shows. `state`: devkit's state folder (default: a temp one).
+    `call(argv)`: what a started command returns (default 0). `device`: the terminal a sign-in would get (none).
+    `resume`: then `dev setup --resume`; `first`: run plain `dev setup` before it (else only the resume runs)."""
     seen = {"hosts": ["github", "gitlab"], "clouds": list(clouds), "evidence": {"gitlab": "x", "aws": "y"}}
     with tempfile.TemporaryDirectory() as d:
         cfgf = Path(d) / "config.json"
         if saved is not None:
             cfgf.write_text(json.dumps(saved))
-        calls, answers = [], iter(typed or [])
+        calls, answers = [], iter(typed or []) if not callable(typed) else None
+
+        def answer(prompt=""):
+            print(prompt, end="")
+            return typed(prompt) if answers is None else next(answers)
+
+        def fake_exec(argv, on_line=None, log=None, env=None, timeout=None):
+            calls.append([str(a) for a in argv])
+            rc = call(argv) if call else 0
+            if rc == 0 and dev_args(argv)[-1:] == ["doctor"] and on_line:
+                on_line("  ✓ 1/1 checks passed")
+            return wizard._Exit(rc)
         with mock.patch.object(wizard, "CONFIG_FILE", cfgf), mock.patch.object(setup, "STATE", state or Path(d)), \
+                mock.patch.object(wizard, "STATE", state or Path(d)), \
+                mock.patch.object(wizard, "terminal_device", lambda: device), \
                 mock.patch.object(wizard, "_hw", lambda: (12, 36, "26.1", "arm64")), \
                 mock.patch.object(core, "gh_user", lambda: {"login": "ada", "name": "Ada Lovelace", "id": 1}), \
-                mock.patch.object(core, "have", lambda t: t in ("gh", "brew")), \
+                mock.patch.object(core, "have", lambda t: t in tools), \
                 mock.patch.object(providers, "status", lambda include_account=True: {
                     "claude": {"installed": True, "logged_in": True}, "codex": {"installed": True, "logged_in": False}}), \
-                mock.patch.object(toolchain, "detect", lambda: seen), \
-                mock.patch("subprocess.call", lambda argv, **kw: calls.append(list(argv)) or 0), \
-                mock.patch("builtins.input", lambda prompt="": (print(prompt, end=""), next(answers))[1]), \
+                mock.patch.object(toolchain, "detect", lambda: seen), mock.patch.object(wizard, "_exec", fake_exec), \
+                mock.patch("subprocess.call", side_effect=AssertionError("every command goes through _exec")), \
+                mock.patch("subprocess.Popen", side_effect=AssertionError("no command may really run here")), \
+                mock.patch("builtins.input", answer), \
                 mock.patch("sys.stdin", _Stdin(not yes)), mock.patch("sys.stdout", io.StringIO()) as out:
-            rc = wizard.run(assume_yes=yes, skip_packages=True)
+            rc = wizard.run(assume_yes=yes, skip_packages=True) if first else None
+            if resume:
+                rc = wizard.run(assume_yes=yes, resume=True)
+            run = core.read_json((state or Path(d)) / "setup-run.json", None)
         text = ui.ANSI_RE.sub("", out.getvalue()).replace(str(cfgf), "<CONFIG>")
         text = re.sub(r"Good (morning|afternoon|evening)", "Good <time>", text)
-        return rc, (json.loads(cfgf.read_text()) if cfgf.exists() else None), text[text.index("Good <time>"):], calls
+        line_mode.run = run
+        return rc, (json.loads(cfgf.read_text()) if cfgf.exists() else None), text[max(text.find("Good <time>"), 0):], \
+            calls
 
 
 class LineModeTests(unittest.TestCase):
-    def test_yes_writes_the_same_config_as_before(self):
+    def test_yes_writes_the_defaults_with_the_signed_in_agent(self):
         rc, cfg, out, calls = line_mode()
         self.assertEqual(rc, 0)
         self.assertEqual(cfg, SNAPSHOT_FIRST)
@@ -433,13 +451,19 @@ class LineModeTests(unittest.TestCase):
         self.assertEqual(cfg, SNAPSHOT_RERUN)
 
     def test_yes_prints_the_line_prompts_unchanged(self):
-        self.assertEqual(line_mode()[2], GOLDEN_YES)
+        out = line_mode()[2]
+        self.assertEqual(out[:out.index("  Applying your plan")], GOLDEN_YES)
+        self.assertIn("✓ devkit is ready.", out)
 
     def test_typed_answers_in_the_line_prompts(self):
-        typed = ["~/Code", "", "n", "y", "2", "1,3", "", "n", "", "8", "", "", "y", "n", "30", "y", "", "y"]
+        # root, handoff, Codex only, its autonomy, stacks, hosts, no template, clouds, Docker (CPUs 8, start at login,
+        # do not start it at the end), automation (no cleanup, 30 min, AI yes), then Apply
+        typed = ["~/Code", "", "3", "2", "1,3", "", "n", "", "8", "", "", "y", "n", "n", "30", "y", ""]
         with tempfile.TemporaryDirectory() as state:
             rc, cfg, out, calls = line_mode(yes=False, typed=typed, state=Path(state))
-            self.assertEqual(list(Path(state).iterdir()), [])  # the wizard itself writes no devkit state
+            # the wizard itself writes no devkit state but the record of its apply steps (dev setup --resume) and the
+            # log of its commands' output
+            self.assertEqual(sorted(p.name for p in Path(state).iterdir()), ["logs", "setup-run.json"])
         self.assertEqual(dev_args(calls[0]), ["install", "--commit-template", "no"])  # `dev install` applies the answer
         self.assertEqual(rc, 0)
         self.assertEqual(cfg["dev_root"], "~/Code")
@@ -451,6 +475,51 @@ class LineModeTests(unittest.TestCase):
         self.assertEqual((cfg["gc"], cfg["sync"], cfg["lock"]), ({"auto": False}, {"interval_minutes": 30}, False))
         self.assertEqual(cfg["ai"], {"enabled": True, "asked": True})  # asked once, and answered yes
         self.assertIn("[Y/n]", out)
+
+    def test_ctrl_c_in_an_optional_step_goes_on_with_the_rest(self):
+        def call(argv):
+            if dev_args(argv) == ["docker", "up"]:
+                raise KeyboardInterrupt
+            return 0
+        def typed(prompt):  # every default, and yes to starting Docker
+            return "y" if "Start Docker" in prompt else ""
+        with mock.patch.object(core, "sh", lambda args, **kw: (1, "", "stopped")):  # colima status: stopped
+            rc, _, out, calls = line_mode(yes=False, typed=typed, call=call,
+                                          tools=("gh", "brew", "colima", "claude", "codex"))
+        self.assertIn(["docker", "up"], [dev_args(c) for c in calls])
+        self.assertEqual(dev_args(calls[-1]), ["doctor"])  # the step after it still ran
+        self.assertRegex(out, r"– Start Docker +skipped by you")
+        self.assertIn("dev docker up", out.split("To finish")[1])
+        self.assertEqual({s["id"]: s["state"] for s in line_mode.run["steps"]}["docker"], "skipped")
+        self.assertEqual(rc, 0)
+
+    def test_a_failed_install_is_not_ready_and_resume_runs_it_again_with_the_saved_answers(self):
+        tries = []
+
+        def call(argv):
+            if dev_args(argv)[:1] == ["install"]:
+                tries.append(argv)
+                return 70 if len(tries) == 1 else 0
+            return 0
+        rc, _, out, calls = line_mode(call=call, resume=True)
+        self.assertIn("devkit is not ready yet. 1 step failed.", out)
+        self.assertIn("Reason: dev install stopped with exit code 70 and gave no reason.", out)
+        self.assertIn("dev setup --resume", out.split("To finish")[1])
+        self.assertEqual([dev_args(c) for c in calls], [["install", "--commit-template", "yes"], ["doctor"],
+                                                        ["install", "--commit-template", "yes"], ["doctor"]])
+        self.assertEqual({s["id"]: s["state"] for s in line_mode.run["steps"]}["configure"], "done")
+        self.assertEqual(rc, 0)  # the resumed run finished
+
+    def test_resume_continues_saved_choices_whose_install_never_finished(self):
+        """dev setup --resume in the line prompts on a Mac with saved choices but no finished install and no setup run
+        (an install that failed right after Save your choices): it continues the setup with the saved choices, as
+        plain dev setup and the full-screen wizard do, never "no setup is saved"."""
+        rc, cfg, out, calls = line_mode(saved=SAVED, resume=True, first=False)
+        self.assertNotIn("Nothing to continue", out)
+        self.assertEqual([dev_args(c)[0] for c in calls if dev_args(c)], ["install", "doctor"])
+        self.assertEqual(cfg, SNAPSHOT_RERUN)
+        self.assertIn("✓ devkit is ready.", out)
+        self.assertEqual(rc, 0)
 
     def test_falls_back_to_line_prompts_without_a_terminal_or_with_yes(self):
         with mock.patch.object(wizard, "_run_lines", return_value=7) as lines, \
@@ -507,13 +576,15 @@ class InteractiveTests(unittest.TestCase):
                 cfgf.write_text(json.dumps(saved))
             ran = []
 
-            def fake_exec(argv, on_line=None, log=None, env=None):
+            def fake_exec(argv, on_line=None, log=None, env=None, timeout=None):
                 ran.append([str(a) for a in argv])
                 if argv[-1] == "doctor" and on_line:
                     on_line("  ✓ 1/1 checks passed")
                 return 0
             term = FakeTerm(keys)
+            # a saved config here is a rerun: devkit was installed with it (an unfinished one is test_setup_review's)
             with mock.patch.object(wizard, "CONFIG_FILE", cfgf), mock.patch.object(wizard, "STATE", state), \
+                    mock.patch.object(wizard, "installed_before", lambda: saved is not None), \
                     mock.patch.object(setup, "STATE", state), \
                     mock.patch.object(wizard, "survey", lambda: fake_survey(saved, stacks, clouds)), \
                     mock.patch.object(wizard, "_exec", fake_exec), \
@@ -530,8 +601,10 @@ class InteractiveTests(unittest.TestCase):
             return rc, cfg, term.text, ran
 
     def test_recommended_setup_accepts_what_was_detected(self):
-        rc, cfg, text, ran = self.run_wizard(ENTER + ENTER)
+        rc, cfg, text, ran = self.run_wizard(ENTER + ENTER + ENTER)  # Recommended, both agents, Apply
         self.assertEqual(rc, 0)
+        self.assertIn("Step 1 of 2 · Agents", text)  # the recommended path asks which agents
+        self.assertEqual(cfg["agents"], {"claude": True, "codex": True})
         self.assertEqual(cfg["stacks"], ["java", "node"])  # from the repositories, not every stack
         self.assertEqual(cfg["hosts"], ["github", "gitlab"])
         self.assertEqual(cfg["docker"]["cpu"], 6)
@@ -542,15 +615,15 @@ class InteractiveTests(unittest.TestCase):
         self.assertNotIn("[31m", text)  # the escape sequence in the GitHub name was removed
 
     def test_a_first_run_with_no_repositories_asks_the_stacks_with_python_and_node_preselected(self):
-        rc, cfg, text, ran = self.run_wizard(ENTER + ENTER + ENTER, stacks={})
+        rc, cfg, text, ran = self.run_wizard(ENTER + ENTER + ENTER + ENTER, stacks={})  # … agents, stacks, Apply
         self.assertEqual(rc, 0)
-        self.assertIn("Stacks", text)  # asked even on the recommended path
+        self.assertIn("Step 2 of 3 · Stacks", text)  # asked even on the recommended path
         self.assertEqual(cfg["stacks"], ["python", "node"])  # Return keeps the light preselection
 
     def test_customize_then_change_a_section_from_the_review(self):
         keys = (DOWN + ENTER                      # Customize
                 + ENTER + b"\x15team/handoff" + ENTER  # workspace
-                + DOWN + SPACE + ENTER + ENTER    # agents: Codex off, Claude Code mode kept
+                + DOWN + ENTER + ENTER            # agents: Claude Code only, its mode kept
                 + b"a" + ENTER                    # stacks: all
                 + ENTER + b"n" + ENTER            # hosts, no commit template, clouds
                 + b"99" + ENTER + BS + BS + b"4" + ENTER + ENTER + ENTER + b"n"  # docker, with a fixed typo
@@ -571,18 +644,20 @@ class InteractiveTests(unittest.TestCase):
         self.assertIn("commit template off", text)  # the review says it
 
     def test_esc_on_the_first_question_returns_to_the_welcome(self):
-        rc, cfg, text, _ = self.run_wizard(DOWN + ENTER + ESC + UP + ENTER + ENTER)  # focus comes back on Customize
+        rc, cfg, text, _ = self.run_wizard(DOWN + ENTER + ESC + UP + ENTER + ENTER + ENTER)  # focus back on Customize
         self.assertEqual(rc, 0)
         self.assertGreaterEqual(text.count("How do you want to set up devkit?"), 2)
+        self.assertIn("Which coding agents do you want to use?", text.split("How do you want to set up devkit?")[-1])
         self.assertEqual(cfg["stacks"], ["java", "node"])
 
     def test_quit_and_ctrl_c_change_nothing(self):
-        rc, cfg, text, ran = self.run_wizard(ENTER + DOWN + DOWN + ENTER)
+        rc, cfg, text, ran = self.run_wizard(ENTER + ENTER + DOWN + DOWN + ENTER)
         self.assertEqual((rc, cfg, ran), (1, None, []))
         self.assertIn("Nothing changed.", text)
-        rc, cfg, text, ran = self.run_wizard(DOWN + ENTER + CTRL_C)
-        self.assertEqual((rc, cfg, ran), (130, None, []))
-        self.assertIn("Setup cancelled. Nothing changed.", text)
+        rc, cfg, text, ran = self.run_wizard(DOWN + ENTER + CTRL_C + CTRL_C)  # Ctrl-C asks first; a second one quits
+        self.assertEqual((rc, cfg, ran), (1, None, []))
+        self.assertIn("Quit the setup?", text)
+        self.assertIn("Nothing changed. Run dev setup when you are ready.", text)
 
     def test_a_rerun_starts_from_the_saved_config_and_shows_the_changes(self):
         saved = dict(SNAPSHOT_FIRST, hosts=["github"], clouds=[], stacks=["php"])
@@ -602,7 +677,7 @@ class InteractiveTests(unittest.TestCase):
 
     def test_terraform_found_gets_its_skill_group_offered_in_the_clouds_section(self):
         # Recommended: what was found, the offer accepted, and the review says so
-        rc, cfg, text, _ = self.run_wizard(ENTER + ENTER, clouds=("terraform",))
+        rc, cfg, text, _ = self.run_wizard(ENTER + ENTER + ENTER, clouds=("terraform",))
         self.assertEqual(cfg["skills"]["groups"], core.DEFAULTS["skills"]["groups"] + ["iac"])
         self.assertIn("OpenTofu / Terraform · agent skills: iac", text)
         # Customize: the question follows the clouds, and No keeps the default groups
@@ -620,7 +695,8 @@ class DoctorToolsTests(unittest.TestCase):
         # `dev doctor` requires a group's tools only when that group is installed, and names the package as the fix:
         # both are wrong when the tool table drifts from the Brewfile or npm-globals.txt, or misses a stack.
         repo = Path(__file__).resolve().parents[1]
-        self.assertEqual(set(wizard.DOCTOR_TOOLS) - set(wizard.BASE_GROUPS), set(wizard.STACKS))
+        self.assertEqual(set(wizard.DOCTOR_TOOLS) - set(wizard.BASE_GROUPS),
+                         set(wizard.STACKS) | set(wizard.agent_groups({})))
         for group, tools in wizard.DOCTOR_TOOLS.items():
             listed = {m.groups() for m in map(wizard._BREW_RE.match, wizard.filtered(repo / "Brewfile", {group})) if m}
             listed |= {("npm", n) for n in wizard.filtered(repo / "config" / "npm-globals.txt", {group})}
@@ -662,10 +738,10 @@ class DefaultsAndDetectionTests(unittest.TestCase):
                 p.mkdir(parents=True)
             with mock.patch.dict(os.environ, {"HOMEBREW_PREFIX": str(prefix)}), \
                     mock.patch.object(wizard, "_NPM_ROOT", [npm]):
-                status = dict(wizard.package_status(["core", "agents", "python"]))
+                status = dict(wizard.package_status(["core", "codex", "python"]))
         self.assertIn(("python", "brew", True), status["core"])
         self.assertIn(("git", "brew", False), status["core"])
-        self.assertEqual(status["agents"], [("codex", "cask", True)])
+        self.assertEqual(status["codex"], [("codex", "cask", True)])
         self.assertEqual(status["python"], [("uv", "brew", True), ("pyright", "npm", True)])
 
     def test_exec_streams_lines_to_the_log_and_returns_the_exit_code(self):
@@ -680,6 +756,13 @@ class DefaultsAndDetectionTests(unittest.TestCase):
         self.assertEqual(lines, ["one", "100%", "�"])
         self.assertIn("one\n", Log.text)
         self.assertEqual(wizard._exec(["/nonexistent/devkit-test-binary"], lines.append), 127)
+
+    def test_exec_returns_when_the_command_exits_though_a_process_it_started_keeps_its_output_open(self):
+        code = "import subprocess, sys; subprocess.Popen(['sleep', '30']); print('started'); sys.exit(0)"
+        t0, lines = time.monotonic(), []
+        self.assertEqual(wizard._exec([sys.executable, "-u", "-c", code], lines.append), 0)
+        self.assertLess(time.monotonic() - t0, 15)
+        self.assertEqual(lines, ["started"])
 
     def test_validators(self):
         self.assertIsNone(wizard._int_in(1, 8)("8"))
@@ -734,6 +817,188 @@ class PlaywrightSkillTests(unittest.TestCase):
         self.assertFalse(Path(runs[0]).exists())
 
 
+class HomebrewAskTests(unittest.TestCase):
+    """Homebrew asks "Do you want to proceed with the installation? [y/n]" by default; HOMEBREW_NO_ASK, the switch it
+    documents, turns that off for every brew the setup runs."""
+
+    def test_the_packages_step_of_the_wizard_runs_brew_without_asking(self):
+        envs = {}
+
+        def fake_exec(argv, on_line=None, log=None, env=None, timeout=None):
+            envs[str(argv[0])] = env or {}
+            return 0
+        w = wizard._Wizard(FakeTerm())
+        w._pk = {(): []}
+        w.a = {"stacks": [], "hosts": [], "clouds": []}
+        with mock.patch.object(wizard, "_exec", fake_exec), mock.patch.object(toolchain, "postinstall", lambda k: []), \
+                tui.Checklist(w.term, ["Install Homebrew packages"], animate=False) as cl:
+            w._brew(cl, 0, {"brew": ['brew "jq"'], "post": []})
+        self.assertEqual(envs["brew"].get("HOMEBREW_NO_ASK"), "1")
+
+    def test_dev_install_runs_brew_bundle_without_asking(self):
+        envs = []
+
+        def fake_call(argv, **kw):
+            if list(argv[:2]) == ["brew", "bundle"]:
+                envs.append(kw.get("env") or {})
+            return 0
+        with mock.patch("subprocess.call", fake_call), mock.patch.object(core, "have", lambda t: False), \
+                mock.patch.object(toolchain, "postinstall", lambda keys: []), mock.patch("sys.stdout", io.StringIO()):
+            wizard.install_packages([], with_claude=False)
+        self.assertEqual([e.get("HOMEBREW_NO_ASK") for e in envs], ["1"])
+
+
+# --------------------------------------------------------------------------- a failed step says why
+
+# Stand-ins for devkit's bin/dev, run by the wizard's Configure step as it runs `dev install`: with the interpreter
+# flags of bin/dev's shebang (-I -S), output captured, no terminal.
+BANNER = ('print("\\n  devkit\\n\\n  Your development kit\\n  v26.11.8 · install  ·  © 2026 Firefly Software Solutions '
+          'Inc.\\n")\nprint("▸ Pinned copy of devkit (what the hooks and the guard run)")\n')
+FAILS_ON_STDERR = "import sys\n" + BANNER + (
+    'sys.stderr.write("git archive 1a2b3c4 failed: fatal: not a tree object\\n")\nsys.exit(1)\n')
+CRASHES = "import os, sys\nsys.path.insert(0, os.environ['WIZ_LIB'])\nfrom devkit import bugs\n" + BANNER + (
+    'try:\n    {}["path"]\nexcept KeyError as e:\n    sys.exit(bugs.handle_crash(["install", "--as-pinned"], e))\n')
+KILLED = "import os, signal\n" + BANNER + (
+    'print("  ✓ running from ~/.local/share/devkit/releases/26.11.8-1a2b3c4")\n'
+    'print("▸ Codex (CLI + ChatGPT app): settings, hooks, plugins, MCP")\nos.kill(os.getpid(), signal.SIGKILL)\n')
+
+
+class FailedStepTests(unittest.TestCase):
+    """The Set up devkit step runs `dev install` as a child. When it fails, the step says why in one line (its error
+    line, its crash, or the signal that stopped it), never the banner it printed first, and the log keeps every line
+    it printed."""
+
+    def configure(self, script: str):
+        class Log:
+            text = ""
+
+            def write(self, s):
+                self.text += s
+        with tempfile.TemporaryDirectory() as tmp:
+            kit, home = Path(tmp) / "devkit", Path(tmp) / "home"
+            (kit / "bin").mkdir(parents=True)
+            home.mkdir()
+            (kit / "bin" / "dev").write_text(script)
+            w = wizard._Wizard(FakeTerm())
+            w.a, w.log = {"commit_template": True}, Log()
+            st = wizard._Step("configure", "Set up devkit", True, w._configure, "dev setup --resume", "",
+                              "devkit's rules are not set up yet.")
+            # the crash notice is written by devkit's own handler, whose files go to this temporary HOME
+            with mock.patch.object(wizard, "DEVKIT_HOME", kit), mock.patch.object(wizard, "STATE", Path(tmp)), \
+                    mock.patch.dict(os.environ, {"HOME": str(home), "WIZ_LIB": LIB}), \
+                    tui.Checklist(w.term, ["Set up devkit"], animate=False) as cl:
+                run = wizard.SetupRun.start(w.a)
+                run.plan([(st.sid, st.title, True, st.fix)])
+                w._attempt(cl, 0, st, run)
+            it = cl.items[0]
+            crashes = sorted(p.name for p in (home / ".local" / "state" / "devkit" / "crashes").glob("*"))
+            notes = [plain(n) for n in it.notes]
+            reason = next((n for n in notes if n.startswith("Reason: ")), "")
+            return it.state, reason, notes, crashes, w.log.text
+
+    def test_an_error_on_stderr_is_the_reason_and_never_the_banner(self):
+        state, reason, notes, _, _ = self.configure(FAILS_ON_STDERR)
+        self.assertEqual(state, "fail")
+        self.assertEqual(reason, "Reason: git archive 1a2b3c4 failed: fatal: not a tree object")
+        for banner in ("Your development kit", "© 2026", "v26.11.8 · install"):
+            self.assertNotIn(banner, "\n".join(notes))
+
+    def test_a_crash_names_the_exception_and_the_crash_file(self):
+        state, reason, notes, crashes, _ = self.configure(CRASHES)
+        self.assertEqual(state, "fail")
+        self.assertEqual(reason, "Reason: devkit hit a bug while pinning its copy: KeyError: 'path'")
+        self.assertEqual(len(crashes), 1)
+        self.assertIn(f"Bug report saved: ~/.local/state/devkit/crashes/{crashes[0]}", "\n".join(notes))
+
+    def test_a_signal_is_the_reason_and_the_lines_printed_before_it_are_kept_in_the_log(self):
+        state, reason, notes, _, log = self.configure(KILLED)
+        self.assertEqual(state, "fail")
+        self.assertEqual(reason, "Reason: dev install was stopped by SIGKILL and gave no reason.")
+        self.assertIn("running from ~/.local/share/devkit/releases/26.11.8-1a2b3c4", log)
+        self.assertIn("▸ Codex (CLI + ChatGPT app): settings, hooks, plugins, MCP", log)
+
+
+# --------------------------------------------------------------------------- interruptions, failures and resume
+
+class SignInLimitTests(unittest.TestCase):
+    """The sign-in screens, Ctrl-C and resume are in test_setup_flow.py; this one runs a real command."""
+
+    def test_a_sign_in_past_its_time_limit_is_stopped(self):
+        t0 = time.monotonic()
+        result = wizard._attached([sys.executable, "-c", "import time; time.sleep(30)"], timeout=0.5,
+                                  device=os.devnull)
+        self.assertEqual(result, "timeout")
+        self.assertLess(time.monotonic() - t0, 10)
+
+
+class SignInTerminalTests(unittest.TestCase):
+    """A sign-in gets this Mac's terminal by its own device. Claude Code's runtime watches its input with kqueue, which
+    macOS refuses on /dev/tty (EINVAL): the installer run through a pipe gave the wizard /dev/tty, and the sign-in
+    crashed with "EINVAL: invalid argument, kqueue". The stand-in for `claude` fails the same way."""
+
+    CLAUDE = textwrap.dedent('''
+        import select, sys
+        try:
+            select.kqueue().control([select.kevent(0, select.KQ_FILTER_READ, select.KQ_EV_ADD)], 0, 0)
+        except OSError as e:
+            sys.stderr.write("EINVAL: invalid argument, kqueue (%s)\\n" % e.strerror)
+            sys.exit(1)
+    ''')
+    DRIVER = textwrap.dedent('''
+        import os, sys
+        sys.path.insert(0, sys.argv[1])
+        if sys.argv[3] == "dev-tty":  # what the installer gave the wizard: the terminal opened as /dev/tty
+            os.dup2(os.open("/dev/tty", os.O_RDWR), 0)
+        from devkit import wizard
+        print("result:", wizard._attached([sys.executable, sys.argv[2]], timeout=30))
+    ''')
+
+    def run_driver(self, stdin: str, terminal=True) -> str:
+        with tempfile.TemporaryDirectory() as tmp:
+            claude, driver = Path(tmp) / "claude.py", Path(tmp) / "driver.py"
+            claude.write_text(self.CLAUDE)
+            driver.write_text(self.DRIVER)
+            argv = [sys.executable, str(driver), LIB, str(claude), stdin]
+            if not terminal:
+                p = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60,
+                                   start_new_session=True)
+                return p.stdout + p.stderr
+            import pty
+            master, slave = pty.openpty()
+            p = subprocess.Popen(argv, stdin=slave, stdout=slave, stderr=slave, start_new_session=True,
+                                 preexec_fn=_take_terminal)
+            os.close(slave)
+            out = b""
+            while True:
+                try:
+                    chunk = os.read(master, 4096)
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                out += chunk
+            p.wait(30)
+            os.close(master)
+            return out.decode("utf-8", "replace")
+
+    @unittest.skipUnless(sys.platform == "darwin", "kqueue and its refusal of /dev/tty are macOS's")
+    def test_a_sign_in_gets_the_terminal_device_kqueue_accepts_when_stdin_is_dev_tty(self):
+        out = self.run_driver("dev-tty")
+        self.assertIn("result: ok", out)
+        self.assertNotIn("EINVAL", out)
+
+    def test_without_a_terminal_nothing_is_started(self):
+        out = self.run_driver("as-is", terminal=False)
+        self.assertIn("result: no-terminal", out)
+
+
+def _take_terminal():
+    """In the child, after setsid: make the pseudo-terminal on stdin its controlling terminal."""
+    import fcntl
+    import termios
+    fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+
+
 # --------------------------------------------------------------------------- the whole flow in a pseudo-terminal
 
 DRIVER = textwrap.dedent('''
@@ -756,7 +1021,7 @@ DRIVER = textwrap.dedent('''
     wizard._NPM_ROOT[:] = [None]
     core.sh = lambda args, **kw: (1, "", "stubbed")
 
-    def fake_exec(argv, on_line=None, log=None, env=None):
+    def fake_exec(argv, on_line=None, log=None, env=None, timeout=None):
         record("exec", argv)
         if str(argv[-1]) == "doctor" and on_line:
             on_line("  ✓ 1/1 checks passed")
@@ -791,6 +1056,7 @@ class Pty:
         (dev / "pom.xml").write_text("<project/>")
         env = {"HOME": str(home), "PATH": "/usr/bin:/bin", "TERM": term, "LANG": "en_US.UTF-8", "WIZ_LIB": LIB,
                "WIZ_CALLS": str(home / "calls.jsonl"), "HOMEBREW_PREFIX": str(home / "brew")}
+        env = _sandbox.env(env)  # its devkit keeps the run's stand-ins first, never this Mac's real tools
         self.master, slave = pty.openpty()
         fcntl.ioctl(self.master, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
         self.proc = subprocess.Popen([sys.executable, str(home / "driver.py")], stdin=slave, stdout=slave,
@@ -860,8 +1126,8 @@ class PseudoTerminalTests(unittest.TestCase):
         t.send(ENTER)
         t.expect("Handoff repository")
         t.send(b"\x15team/handoff" + ENTER)
-        t.expect("Agents to configure")
-        t.send(DOWN + SPACE + ENTER)
+        t.expect("Which coding agents do you want to use?")
+        t.send(DOWN + ENTER)
         t.expect("Claude Code permissions")
         t.send(DOWN + ENTER)
         t.expect("Stacks you work in")
@@ -914,14 +1180,16 @@ class PseudoTerminalTests(unittest.TestCase):
         self.assertIn("\x1b[?1049h", raw)
         self.assertLess(raw.rindex("\x1b[?1049l"), raw.index("Applying your plan"))
 
-    def test_ctrl_c_restores_the_terminal_and_changes_nothing(self):
+    def test_ctrl_c_asks_then_restores_the_terminal_and_changes_nothing(self):
         t = Pty(self.home)
         t.expect("How do you want to set up devkit?")
         t.send(CTRL_C)
-        self.assertEqual(t.wait(), 130)
+        t.expect("Quit the setup?")
+        t.send(CTRL_C)
+        self.assertEqual(t.wait(), 1)
         raw = t.out.decode("utf-8", "replace")
-        self.assertIn("Setup cancelled. Nothing changed.", plain(raw))
-        self.assertTrue(raw.rindex("\x1b[?1049l") < raw.rindex("Setup cancelled"))
+        self.assertIn("Nothing changed. Run dev setup when you are ready.", plain(raw))
+        self.assertTrue(raw.rindex("\x1b[?1049l") < raw.rindex("Nothing changed"))
         self.assertIn("\x1b[?25h", raw)
         self.assertIsNone(t.config())
         self.assertEqual(t.calls(), [])
@@ -930,7 +1198,7 @@ class PseudoTerminalTests(unittest.TestCase):
         t = Pty(self.home, term="dumb")
         t.expect("Development root")
         t.send(b"\n" * 24)
-        t.expect("Verifying")
+        t.expect("devkit is ready.")
         self.assertEqual(t.wait(), 0)
         raw = t.out.decode("utf-8", "replace")
         self.assertNotIn("\x1b[?1049h", raw)

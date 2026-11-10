@@ -140,8 +140,8 @@ def install(quiet: bool = False) -> list:
             continue
         data = plistlib.dumps(plist_for(name, j))
         changed = not path.exists() or path.read_bytes() != data
-        if changed:
-            path.write_bytes(data)
+        if changed:  # replaced whole: launchd never reads a half-written plist
+            core.replace_text(path, data.decode("utf-8"))
         if changed or not loaded(name):
             core.sh(["launchctl", "bootout", f"{_target()}/{LABEL.format(name)}"], timeout=10)
             rc, _, err = core.sh(["launchctl", "bootstrap", _target(), str(path)], timeout=15)
@@ -230,12 +230,38 @@ def _last_lines(path: Path, n: int) -> list:
     return [ln for ln in lines if ln and not ln.startswith("===")][-n:]
 
 
+CONFIG_WAIT = 30.0  # seconds a change waits for another process changing the devkit config
+
+
 def set_schedule(name: str, every: str = None, at: str = None, weekly: str = None, enabled: bool = None,
                  why: str = "") -> dict:
-    """Change a job in the devkit config (~/.config/devkit/config.json) and reinstall it."""
+    """Change a job in the devkit config (~/.config/devkit/config.json) and reinstall it. The read and the write hold
+    the config's lock (core.file_lock), so changes made at the same moment are all kept; a config that does not
+    parse is never written over."""
     if name not in jobs():
         raise ValueError(f"no job “{name}”")
-    conf = core.read_json(core.CONFIG_FILE, {}) or {}
+    with core.file_lock(core.CONFIG_FILE, CONFIG_WAIT) as got:
+        if not got:
+            raise ValueError(f"another devkit process kept {core.tilde(core.CONFIG_FILE)} locked for "
+                             f"{CONFIG_WAIT:.0f} s; nothing changed, run the command again")
+        j = _set_schedule(name, every, at, weekly, enabled)
+    CFG.setdefault("jobs", {})[name] = j
+    audit.record("jobs.set", name, json.dumps(j), why=why)
+    install(quiet=True)
+    return jobs()[name]
+
+
+def _set_schedule(name: str, every, at, weekly, enabled) -> dict:
+    """The config change of set_schedule, for a caller that holds the config's lock. -> the job's new settings."""
+    try:
+        conf = json.loads(core.CONFIG_FILE.read_text())
+    except FileNotFoundError:
+        conf = {}
+    except (OSError, ValueError):
+        raise ValueError(f"{core.tilde(core.CONFIG_FILE)} does not parse; devkit does not write over it. "
+                         "Fix the file, then run the command again")
+    if not isinstance(conf, dict):
+        raise ValueError(f"{core.tilde(core.CONFIG_FILE)} is not a JSON object; devkit does not write over it")
     j = conf.setdefault("jobs", {}).setdefault(name, {})
     if every:
         m = re.fullmatch(r"(\d+)\s*(m|min|h)?", every.strip())
@@ -259,11 +285,8 @@ def set_schedule(name: str, every: str = None, at: str = None, weekly: str = Non
     j = {k: v for k, v in j.items() if v is not None}
     conf["jobs"][name] = j
     core.CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
-    core.CONFIG_FILE.write_text(json.dumps(conf, indent=2, ensure_ascii=False) + "\n")
-    CFG.setdefault("jobs", {})[name] = j
-    audit.record("jobs.set", name, json.dumps(j), why=why)
-    install(quiet=True)
-    return jobs()[name]
+    core.replace_text(core.CONFIG_FILE, json.dumps(conf, indent=2, ensure_ascii=False) + "\n")
+    return j
 
 
 def next_run(j: dict, now: float = None):

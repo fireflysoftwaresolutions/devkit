@@ -856,9 +856,11 @@ class OlderCopyTests(unittest.TestCase):
                 self.assertEqual(self.config_change(), 2)  # the DEVKIT_* variable is refused
                 after = self.files()
                 self.assertNotIn("DEVKIT_GUARD", (json.loads(after["settings"]).get("env") or {}))
-                for name in ("CLAUDE.md", "AGENTS.md"):
-                    self.assertNotEqual(after[name], before[name], name)
-                    self.assertIn(setup.GENERATED_MARK, after[name][:200], name)
+                self.assertNotEqual(after["CLAUDE.md"], before["CLAUDE.md"], "CLAUDE.md")
+                self.assertIn(setup.GENERATED_MARK, after["CLAUDE.md"][:200], "CLAUDE.md")
+                # Codex is off here: devkit's rules stay out of AGENTS.md, and the text the person wrote there stays
+                self.assertNotIn(setup.GENERATED_MARK, after["AGENTS.md"], "AGENTS.md")
+                self.assertEqual(after["AGENTS.md"], before["AGENTS.md"], "AGENTS.md")
                 self.assertNotEqual(after["excludesFile"], before["excludesFile"])
                 self.assertTrue(after["excludesFile"].endswith("/config/git/ignore"), after["excludesFile"])
 

@@ -132,7 +132,16 @@ def _released_functions(rel: str):
         except SyntaxError:
             return None
         files[rel] = sorted({n.name for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))})
-    _write_json(cache_file, cache)
+    try:  # added to the cache as it is now, under its lock: entries other processes added meanwhile stay
+        with core.file_lock(cache_file, LOCK_WAIT) as got:
+            if got:
+                fresh = core.read_json(cache_file, {}) or {}
+                if fresh.get("tag") == tag and isinstance(fresh.get("files"), dict):
+                    fresh["files"][rel] = files[rel]
+                    cache = fresh
+                _write_json(cache_file, cache)
+    except OSError:
+        pass  # a cache: the next crash in this file reads the release again
     return None if files[rel] is None else set(files[rel])
 
 
@@ -166,6 +175,20 @@ def _create(path: Path, text: str, mode: int = 0o600) -> bool:
         return False
     finally:
         os.unlink(tmp)
+
+
+LOCK_WAIT = 2.0  # seconds a hook or a command waits for another process's write of the same bug file
+
+
+def _append_locked(path: Path, obj) -> bool:
+    """_append_line under the file's lock (core.file_lock), for a log that a trim rewrites under the same lock: a
+    line is never written into a copy the trim is about to replace. False when the lock stays busy for LOCK_WAIT
+    seconds or the write fails."""
+    try:
+        with core.file_lock(path, LOCK_WAIT) as got:
+            return got and _append_line(path, obj)
+    except OSError:
+        return False
 
 
 def _append_line(path: Path, obj) -> bool:
@@ -248,7 +271,7 @@ def record_occurrence(kind: str, fp: str, *, impact: str = "blocked", command: s
            "version": core.VERSION, "command": command, "event": event, "refusal_id": refusal_id, "word": word,
            "exc_class": exc_class, "frames": list(frames)}
     rec["security"] = is_security(rec, text)
-    saved = _append_line(BUGS / "occurrences.jsonl", rec)
+    saved = _append_locked(BUGS / "occurrences.jsonl", rec)  # trim rewrites the log under the same lock
     return {**rec, "saved": saved}
 
 
@@ -1492,11 +1515,13 @@ def queue(item: dict) -> str:
               "not_before": now + _below(3601) if payload.get("type") == "vote" else 0}
     box = _outbox()
     box.mkdir(parents=True, exist_ok=True)
-    seq = core.read_json(box / ".seq", 0)
-    n = max(_item_ids() + [seq if isinstance(seq, int) else 0]) + 1
-    while not _create(box / f"{n}.json", json.dumps({**record, "id": str(n)}, sort_keys=True)):
-        n += 1  # another writer took this id first
-    _write_json(box / ".seq", n)
+    with core.file_lock(box / ".seq", LOCK_WAIT) as got:  # busy: _create still keeps every id unique
+        seq = core.read_json(box / ".seq", 0)
+        n = max(_item_ids() + [seq if isinstance(seq, int) else 0]) + 1
+        while not _create(box / f"{n}.json", json.dumps({**record, "id": str(n)}, sort_keys=True)):
+            n += 1  # another writer took this id first
+        if got:  # never moves back: an id is not given again after its item was sent
+            _write_json(box / ".seq", n)
     return str(n)
 
 
@@ -1522,29 +1547,55 @@ def pending() -> list:
             for it in map(_load_item, map(str, _item_ids())) if it and _needs_review(it)]
 
 
+COMMAND_WAIT = 10.0  # seconds `dev bug approve|drop` waits for another process changing the same file
+
+
+def _busy(path: Path) -> ValueError:
+    return ValueError(f"another devkit process kept {core.tilde(path)} locked for {COMMAND_WAIT:.0f} s; nothing "
+                      "changed, run the command again")
+
+
 def approve(item_id: str) -> None:
-    """Approve the exact payload of a held item: its sha256 is stored, so a change after approval sends nothing."""
+    """Approve the exact payload of a held item: its sha256 is stored, so a change after approval sends nothing. The
+    approvals are read and written under their lock, so approvals given at the same moment are all kept."""
     item = _load_item(item_id)
     if item is None:
         raise KeyError(item_id)
-    approvals = core.read_json(BUGS / "approvals.json", {}) or {}
-    approvals[str(int(item_id))] = _digest(item.get("payload"))
-    _write_json(BUGS / "approvals.json", approvals)
+    path = BUGS / "approvals.json"
+    with core.file_lock(path, COMMAND_WAIT) as got:
+        if not got:
+            raise _busy(path)
+        approvals = core.read_json(path, {}) or {}
+        approvals[str(int(item_id))] = _digest(item.get("payload"))
+        _write_json(path, approvals)
 
 
 def drop(item_id: str) -> None:
-    """Remove an item from the outbox, and its approval."""
+    """Remove an item from the outbox, and its approval. Under the item's lock, which a send that writes the item
+    back takes too (_save_item), so a dropped item never comes back."""
     try:
-        (_outbox() / f"{int(item_id)}.json").unlink()
-    except (OSError, ValueError):
+        path = _outbox() / f"{int(item_id)}.json"
+    except (ValueError, TypeError):
         raise KeyError(item_id)
+    with core.file_lock(path, COMMAND_WAIT) as got:
+        if not got:
+            raise _busy(path)
+        try:
+            path.unlink()
+        except OSError:
+            raise KeyError(item_id)
     _forget_approval(str(int(item_id)))
 
 
 def _forget_approval(item_id: str):
-    approvals = core.read_json(BUGS / "approvals.json", {}) or {}
-    if approvals.pop(item_id, None) is not None:
-        _write_json(BUGS / "approvals.json", approvals)
+    """Remove an item's approval, under the approvals' lock; busy, it stays (it matches no other payload)."""
+    path = BUGS / "approvals.json"
+    with core.file_lock(path, LOCK_WAIT) as got:
+        if not got:
+            return
+        approvals = core.read_json(path, {}) or {}
+        if approvals.pop(item_id, None) is not None:
+            _write_json(path, approvals)
 
 
 def consent() -> dict:
@@ -1612,7 +1663,13 @@ def _strings(value, field: str = ""):
 
 
 def _save_item(item: dict):
-    _write_json(_outbox() / f"{int(item['id'])}.json", item)
+    """Write an outbox item back (its next try, its problem) unless it left the outbox meanwhile: the existence check
+    and the write hold the item's lock, which drop takes too, so an item the developer dropped during a send stays
+    dropped. Busy, the item keeps what it had."""
+    path = _outbox() / f"{int(item['id'])}.json"
+    with core.file_lock(path, LOCK_WAIT) as got:
+        if got and path.exists():
+            _write_json(path, item)
 
 
 def _remove_item(item: dict):
@@ -1811,15 +1868,23 @@ def trim(now: float = None) -> dict:
     return removed
 
 
+TRIM_WAIT = 30.0  # seconds `dev sleep` waits to trim a bug log; then it waits for the next night
+
+
 def _trim_occurrences(cut: float) -> int:
+    """Remove the occurrences older than `cut` (and torn lines). The read and the rewrite hold the log's lock, which
+    every append takes too (_append_locked), so an occurrence recorded meanwhile is never left in the replaced copy;
+    the log is replaced whole. -> how many lines left it (0 when another process kept the lock)."""
     path = BUGS / "occurrences.jsonl"
-    try:
-        old = open(path, "rb")
-    except OSError:
-        return 0
-    with old:
+    with core.file_lock(path, TRIM_WAIT) as got:
+        if not got:
+            return 0
+        try:
+            data = path.read_bytes()
+        except OSError:
+            return 0
         keep, removed = [], 0
-        for ln in old.read().splitlines(keepends=True):
+        for ln in data.splitlines(keepends=True):
             try:
                 ts = json.loads(ln).get("ts")
             except (ValueError, AttributeError):
@@ -1833,16 +1898,16 @@ def _trim_occurrences(cut: float) -> int:
             return 0
         tmp = path.with_name(f".{path.name}.{_hex(4)}.tmp")
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, "wb") as fh:
-            fh.write(b"".join(keep))
-        os.replace(tmp, path)
-        late = old.read()  # lines appended to the old file while it was being trimmed
-    if late:
-        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
         try:
-            os.write(fd, late)
-        finally:
-            os.close(fd)
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(b"".join(keep))
+            os.replace(tmp, path)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
     return removed
 
 
@@ -1978,11 +2043,14 @@ def swallowed(component: str, exc: BaseException) -> None:
     try:
         now = time.time()
         path = BUGS / "swallowed.json"
-        seen = core.read_json(path, {})
-        seen = {k: v for k, v in (seen if isinstance(seen, dict) else {}).items()
-                if isinstance(v, (int, float)) and now - v < SWALLOW_EVERY}
-        if component in seen or not _write_json(path, {**seen, component: now}):
-            return
+        with core.file_lock(path, LOCK_WAIT) as got:  # the check and the mark at once: one occurrence an hour
+            if not got:
+                return
+            seen = core.read_json(path, {})
+            seen = {k: v for k, v in (seen if isinstance(seen, dict) else {}).items()
+                    if isinstance(v, (int, float)) and now - v < SWALLOW_EVERY}
+            if component in seen or not _write_json(path, {**seen, component: now}):
+                return
         frames = devkit_frames(exc.__traceback__)
         exc_class = _fits(type(exc).__name__, _IDENT_RE) or "Exception"
         record_occurrence("hook", fingerprint("hook", exc_class=exc_class, frames=frames), impact="minor",

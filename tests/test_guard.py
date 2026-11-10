@@ -190,5 +190,48 @@ class ToolDispatch(unittest.TestCase):
                     guard.check("Write", {"file_path": "/tmp/x", "content": ""}, str(core.HOME), "claude")
 
 
+class DevelopersSetup(unittest.TestCase):
+    # `dev setup` and `dev config set agents.*` decide which agents devkit sets up and rewrite their settings: the
+    # developer runs them in a terminal of their own. `dev setup --preview` only draws the screens with sample data.
+
+    def verdict(self, cmd):
+        out = set()
+        for agent in ("claude", "codex"):
+            v = guard.check("Bash", {"command": cmd}, str(core.HOME), agent)
+            out.add(v[1] if v else "allow")
+        return out
+
+    def test_the_setup_runs_only_as_a_preview_for_agents(self):
+        for cmd in ("dev setup --preview", "COLUMNS=80 dev setup --preview", "dev setup --help"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.verdict(cmd), {"allow"})
+        for cmd in ("dev setup", "dev setup -y", "dev setup --resume", "dev setup prompt --preview",
+                    "dev setup --preview --resume", "dev setup commit-template", "COLUMNS=80 dev setup -y"):
+            with self.subTest(cmd=cmd):
+                (why,) = self.verdict(cmd)
+                self.assertIn("own terminal", why)
+
+    def test_agents_may_not_choose_which_agents_devkit_sets_up(self):
+        for cmd in ("dev config set progress.max_parallel 6", "dev config set language en-US"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.verdict(cmd), {"allow"})
+        for cmd in ("dev config set agents.codex false", "dev config set AGENTS.claude false",
+                    "dev config set agents '{\"codex\": false}'", "dev config set agents.codex=false"):
+            with self.subTest(cmd=cmd):
+                (why,) = self.verdict(cmd)
+                self.assertIn("own terminal", why)
+
+    def test_a_key_with_extra_dots_names_the_same_setting(self):
+        # dev config set drops empty key parts, so .agents.codex and bugs..share are agents.codex and bugs.share
+        self.assertEqual(self.verdict("dev config set .progress..max_parallel 6"), {"allow"})
+        for cmd, said in (("dev config set .agents.codex false", "own terminal"),
+                          ("dev config set ..safeguards.irreversible_main false", "safeguards"),
+                          ("dev config set .audit.enabled false", "audit"),
+                          ("dev config set bugs..share on", "bugs.share")):
+            with self.subTest(cmd=cmd):
+                (why,) = self.verdict(cmd)
+                self.assertIn(said, why)
+
+
 if __name__ == "__main__":
     unittest.main()

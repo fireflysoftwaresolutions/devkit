@@ -1761,7 +1761,8 @@ class EvidenceReplayTests(TranscriptCase):
         self.assertEqual([r["detail"] for r in audit.records(1, "crew.decided")], ["B: reject"])
 
     def test_a_codex_entry_is_never_confirmed_by_the_hook_alone(self):
-        # The Keymaker: devkit reads no Codex transcript yet, so a Codex entry has nothing behind it but the hook event
+        # The Keymaker: a Codex entry needs its prompt's record in the thread's own rollout (tests/test_codex_grants.py);
+        # with no rollout it has nothing behind it but the hook event
         self.assertFalse(pg.confirmed({"agent": "codex", "channel": "E2", "transcript_uuid": "p-1", "covers": "D1"}))
 
 
@@ -1780,6 +1781,14 @@ class QualifiedApproveTests(TranscriptCase):
         self.assertEqual([(e["covers"], e["answer"]) for e in self.typed("approve D1@s1: A", "p-2")], [("D1", "A")])
         d = pg.crew_decide("D1", "A: skip")
         self.assertEqual((d["by"], d["verified"], d["answer"]), ("developer", True, "A: skip"))
+
+    def test_a_final_message_shows_a_qualified_decision_only_in_the_run_it_names(self):
+        pg.crew_decision("Skip empty lines or reject the file?", options="A: skip | B: reject", recommend="A")
+        pg.on_final_message("claude", "s1", "**[Firefly> DevKit]** … answer D1@5e1f0a2b in that session's chat.")
+        self.assertIsNone(pg.load_run("claude", "s1")["decisions"][0].get("shown"))  # another run's D1, named here
+        self.assertEqual(self.typed("yes", "p-1"), [])  # nothing was shown, so a plain yes covers nothing
+        pg.on_final_message("claude", "s1", "**[Firefly> DevKit]** … D1@s1 waits for you: skip empty lines?")
+        self.assertIsNotNone(pg.load_run("claude", "s1")["decisions"][0].get("shown"))
 
 
 class UnknownCommandGrantTests(TranscriptCase):

@@ -25,7 +25,9 @@ from unittest import mock
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "lib"))
+sys.path.insert(0, str(REPO / "tests"))
 
+import _sandbox  # noqa: E402
 from devkit import cli, completion, core, guard, setup  # noqa: E402
 
 ZSH = shutil.which("zsh")
@@ -164,8 +166,10 @@ class Fixture:
         path.write_text(text)
 
     def env(self, **extra):
-        return {"HOME": str(self.home), "PATH": f"{self.bin}:/usr/bin:/bin:/usr/sbin:/sbin", "TERM": "xterm-256color",
-                "LANG": "en_US.UTF-8", "DEVKIT_NO_NOTIFY": "1", **extra}
+        # the test sandbox's environment: its stand-ins first on PATH and named, so a devkit child keeps the net
+        return _sandbox.env(base={"HOME": str(self.home), "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+                                  "TERM": "xterm-256color", "LANG": "en_US.UTF-8", "DEVKIT_NO_NOTIFY": "1"},
+                            stubs=(self.bin,), **extra)
 
     def dev(self, *args, cwd=None):
         return subprocess.run([str(self.bin / "dev"), *args], capture_output=True, text=True, timeout=60,

@@ -243,11 +243,43 @@ def _shell_command(inp) -> str:
     return " ".join(map(str, cmd)) if isinstance(cmd, list) else str(cmd)
 
 
+def fork_start(lines: list) -> int:
+    """The index of a Codex rollout's first line of its own. A spawned agent's rollout opens with a copy of its
+    parent's history (its session_meta names forked_from_id), whose commands, skills and edits are the parent's: the
+    agent's own records start at its first task_started at or after the subagent_history_start_ordinal its
+    session_meta gives (Codex 0.167), past the end of the rollout when it has not started yet. 0 for a rollout that
+    is not forked or gives no start."""
+    try:
+        first = json.loads(lines[0]) if lines else {}
+    except ValueError:
+        return 0
+    meta = first.get("payload") if isinstance(first, dict) and first.get("type") == "session_meta" else None
+    start = meta.get("subagent_history_start_ordinal") if isinstance(meta, dict) and meta.get("forked_from_id") \
+        else None
+    if not isinstance(start, int) or isinstance(start, bool):
+        return 0
+    for i, ln in enumerate(lines):
+        if '"task_started"' not in ln:
+            continue
+        try:
+            rec = json.loads(ln)
+        except ValueError:
+            continue
+        p = rec.get("payload") if isinstance(rec, dict) and rec.get("type") == "event_msg" else None
+        if not isinstance(p, dict) or p.get("type") != "task_started":
+            continue
+        ordinal = rec.get("ordinal")
+        if (ordinal if isinstance(ordinal, int) and not isinstance(ordinal, bool) else i) >= start:
+            return i
+    return len(lines)
+
+
 def read(agent: str, transcript: str, offset: int = 0):
     """-> (loaded skill names, changed file paths, shell commands, new offset) from the transcript since
     `offset`."""
     from .hooks import SHELL_TOOLS
-    loaded, files, commands = set(), [], []
+    from .scope import exec_calls, item_command
+    loaded, files, commands, parsed = set(), [], [], []  # parsed: exec-script commands no record matched yet
     try:
         p = Path(transcript)
         size = p.stat().st_size
@@ -258,7 +290,10 @@ def read(agent: str, transcript: str, offset: int = 0):
             data = fh.read().decode("utf-8", "ignore")
     except (OSError, TypeError):
         return loaded, files, commands, offset
-    for ln in data.splitlines():
+    lines = data.splitlines()
+    if agent != "claude" and offset == 0:  # a spawned Codex agent's rollout: from its own first record
+        lines = lines[fork_start(lines):]
+    for ln in lines:
         if agent == "claude":
             if '"tool_use"' not in ln:
                 continue
@@ -283,7 +318,8 @@ def read(agent: str, transcript: str, offset: int = 0):
                     for m in SKILL_PATH_RE.finditer(inp.get("command") or ""):
                         loaded.add(m.group(1).lower())
         else:
-            if "function_call" not in ln and "custom_tool_call" not in ln and "exec_command" not in ln:
+            if "function_call" not in ln and "custom_tool_call" not in ln and "exec_command" not in ln and \
+                    "CommandExecution" not in ln:
                 continue
             for m in SKILL_PATH_RE.finditer(ln.replace("\\/", "/")):
                 loaded.add(m.group(1).lower())
@@ -294,6 +330,16 @@ def read(agent: str, transcript: str, offset: int = 0):
             except ValueError:
                 continue
             pl = rec.get("payload") if isinstance(rec, dict) else None
+            ran = item_command(rec, parsed) if isinstance(rec, dict) else None
+            if ran:  # a command the exec scripts read so far did not name (built at run time)
+                commands.append(ran[0])
+                continue
+            if isinstance(pl, dict) and pl.get("type") in ("custom_tool_call", "function_call") and \
+                    pl.get("name") == "exec" and isinstance(pl.get("input"), str):  # code mode: its nested calls
+                nested = [_shell_command(inp) for name, inp in exec_calls(pl["input"]) if name in SHELL_TOOLS]
+                parsed.extend(nested)
+                commands.extend(nested)
+                continue
             if isinstance(pl, dict) and pl.get("type") == "function_call" and pl.get("name") in SHELL_TOOLS:
                 args = pl.get("arguments")
                 try:
@@ -306,45 +352,51 @@ def read(agent: str, transcript: str, offset: int = 0):
 
 # --------------------------------------------------------------------------- hook entry points
 
-def on_agent_brief(agent: str, tool_input: dict, project: str = ""):
-    """Claude Agent/Task: the brief gets the skills its work requires and the known pitfalls (lessons) for its task.
-    -> updated tool input, or None."""
-    if not enabled() or agent != "claude":
+def on_agent_brief(agent: str, tool_input: dict, project: str = "", activity: str = "", files=None):
+    """A crew brief gets the skills its work requires and the known pitfalls (lessons) for its task: Claude's
+    Agent/Task call, and a Codex spawn at its SubagentStart (codexlaunch), whose brief is encrypted, so its kind of
+    work (`activity`) and its files (`files`) come from the plan step its launch bound to. -> updated tool input, or
+    None."""
+    if not enabled() or agent not in ("claude", "codex"):
         return None
     brief = tool_input.get("prompt") or ""
     if "devkit · required skills" in brief:
         return None
-    have = installed("claude")
+    have = installed(agent)
     need = []
     try:  # the brief's kind of work: declared, or its member's (the crew's RACI), never its words
         from . import raci
-        act = brief_activity(brief, tool_input.get("description") or "")
+        act = (raci.activity(activity) if activity else None) or \
+            brief_activity(brief, tool_input.get("description") or "")
     except Exception:
         act = None
     if act:
         cands = [(short(sk), f"what devkit knows about {raci._lower(act['name'])}")
                  for sk in (act.get("knowledge") or {}).get("skills") or []]
-        cands += [(s, r["why"]) for r in rules_for_activity(act["id"]) for s in required(r, "claude")]
+        cands += [(s, r["why"]) for r in rules_for_activity(act["id"]) for s in required(r, agent)]
         for s, why in cands:
             if s in have and not re.search(rf"\b{re.escape(s)}\b", brief, re.I) and s not in [x for x, _ in need]:
                 need.append((s, why))
     extra = ""
     if need:
         seen = dict.fromkeys(need)
-        extra = "\n\n## devkit · required skills\nBefore you start, load each of these with the Skill tool and follow " \
-                "it (if the Skill tool is not available, read its SKILL.md under ~/.claude):\n" + \
+        load = "with the Skill tool and follow it (if the Skill tool is not available, read its SKILL.md under " \
+               "~/.claude)" if agent == "claude" else f"{how_to_load(agent)} and follow it"
+        extra = f"\n\n## devkit · required skills\nBefore you start, load each of these {load}:\n" + \
                 "\n".join(f"- `{s}` — {why}" for s, why in seen) + \
                 "\nSay in your report which ones you loaded and how you applied them."
     if project and "devkit · known pitfalls" not in brief and "## Known pitfalls" not in brief:
         try:
             from . import lessons
-            picked = lessons.for_task(project, activity=(act or {}).get("id"), files=owned_files(brief))
+            picked = lessons.for_task(project, activity=(act or {}).get("id"),
+                                      files=owned_files(brief) if files is None else list(files))
         except Exception:
             picked = []
         if picked:
             extra += ("\n\n## devkit · known pitfalls\nLessons from earlier mistakes in this work; follow their "
                       "prevention. If one happens again, run `dev lesson recur <id> --evidence \"…\"`; a new mistake "
-                      "that could repeat gets `dev lesson add \"…\" --cause \"…\" --prevent \"…\"`.\n"
+                      "that could repeat gets `dev lesson add \"…\" --happened \"…\" --cause \"…\" "
+                      "--prevent \"…\" --file <glob> --command \"<command words>\" --error \"<output text>\"`.\n"
                       + "\n".join(lessons.pitfall_lines(picked)))
             lessons.track([x["meta"]["id"] for x in picked], "shown", "brief")  # the hook records them for the member
     if "Firefly> DevKit" not in brief:  # every crew member reports the same way (the SubagentStop hook checks it)

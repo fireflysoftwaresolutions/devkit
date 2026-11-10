@@ -367,9 +367,11 @@ the repository. GitLab publishes to its generic package registry and creates the
 
 `dev ci watch` follows the CI/CD runs of one commit until they finish, on all four hosts. You rarely run it yourself:
 after a `git push`, `dev push`, `gh pr create`, `dev pr create`, `gh pr ready`, `dev pr ready`, `gh pr merge`,
-`dev pr merge`, or `dev release` in a main session, devkit starts it in the background (one watcher per repository,
-branch, and commit), and the result comes back to that session at its next hook. Each result is reported once,
-whichever watch of the commit ends first.
+`dev pr merge`, or `dev release` in a main session, devkit starts it in the background: one watcher per repository,
+branch, and commit, where the repository is origin's `owner/repo`, so a fork and its upstream each get their own. A
+session that sends a commit devkit already watches joins that watcher. The result reaches every session that sent the
+commit, each once, at its next hook or in its `dev watch --wait`. Each result is recorded once, whichever watch of
+the commit ends first.
 
 ```bash
 dev ci watch                         # the current branch at HEAD
@@ -442,7 +444,7 @@ How each agent waits:
 | Codex | Nothing in the background | `dev ci watch --wait … --timeout 28` in the foreground, with a command timeout longer than 28 minutes; if the run is still going, say plainly that you check it again at the next turn |
 
 A session that waits on its own run gets the result from its watch only: the background watch sends it no second
-message.
+message. Another session that sent the same commit still gets it from the background watch.
 
 ### List the watches
 
@@ -473,7 +475,8 @@ end, or a remote that is no CI host devkit reads, needs no watch.
 
 ### How a failure reaches Link
 
-The session that pushed gets the result. When it has a progress run, the result arrives as a crew message from CI
+Every session that sent the commit gets the result: the one whose push started the background watch, and each one
+that joined it. When a session has a progress run, the result arrives as a crew message from CI
 watch to Morpheus, the main session, with its next action; otherwise it appears with the session's next tool call or
 prompt. A
 failure's message names the run, the failed job and step, the class, the next action, and the log link, followed by

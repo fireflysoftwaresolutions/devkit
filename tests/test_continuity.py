@@ -25,7 +25,7 @@ TESTS = Path(__file__).resolve().parent
 LIB = TESTS.parent / "lib"
 sys.path.insert(0, str(LIB))
 
-from devkit import audit, core, crew, hooks, state, ui, work  # noqa: E402
+from devkit import audit, core, crew, hooks, notes, state, ui, work  # noqa: E402
 from devkit import continuity as ct  # noqa: E402
 from devkit import progress as pg  # noqa: E402
 
@@ -596,8 +596,55 @@ class ClearTests(Base):
         self.assertEqual(ct.on_session_start("claude", self.payload("SessionStart.clear", sid="late"), now=T0 + 700),
                          "")
 
+    def cleared(self, **kv):
+        # the session NEW in acme/api, which /clear started in the conversation of SID (its continuity record links it)
+        self.session(NEW, **kv)
+        state.replace(ct.record_path("claude", NEW), {"agent": "claude", "session": NEW, "cleared_from": SID})
+
+    def dead_pid(self) -> int:
+        p = subprocess.Popen(["/usr/bin/true"])
+        p.wait()
+        return p.pid
+
+    def test_carry_takes_a_run_only_from_a_session_that_ended_or_that_this_conversation_continues(self):
+        # SID's process still runs, and neither /clear nor a compaction links it to NEW: its owner works on that run
+        self.make_run(lanes=())
+        self.session(SID, pid=os.getpid())
+        self.session(NEW)
+        with self.assertRaisesRegex(ValueError, rf"claude:{SID[:12]} is still live.*dev session tell @{SID[:8]} "):
+            ct.carry("claude", SID, NEW, now=T0)
+        self.assertEqual((pg.run_path("claude", SID).exists(), pg.run_path("claude", NEW).exists()), (True, False))
+        for how, source, link in (("its process is gone", {"pid": self.dead_pid()}, False),
+                                  ("/clear", {"pid": os.getpid()}, True),
+                                  ("a compaction", {"pid_superseded": os.getpid(), "superseded_by": NEW}, False)):
+            with self.subTest(how=how):
+                for f in (pg.run_path("claude", NEW), ct.record_path("claude", NEW)):
+                    if f.exists():
+                        f.unlink()
+                self.make_run(lanes=())
+                self.session(SID, **source)
+                self.cleared() if link else self.session(NEW)
+                self.assertEqual(ct.carry("claude", SID, NEW, now=T0)["to"], NEW)
+
+    def test_carry_moves_a_run_only_within_its_project_or_an_initiative_both_share(self):
+        handoff = self.root / "handoff"
+        handoff.mkdir()
+        self.make_run(lanes=())
+        self.session(SID, pid=self.dead_pid())
+        self.session(NEW, project="firefly/kit-consulting")
+        with mock.patch.object(core, "HANDOFF", handoff):
+            with self.assertRaisesRegex(ValueError, "belongs to acme/api, and this session works in "
+                                                    "firefly/kit-consulting"):
+                ct.carry("claude", SID, NEW, now=T0)
+            self.assertTrue(pg.run_path("claude", SID).exists())
+            readme = handoff / "initiatives" / "billing" / "README.md"
+            readme.parent.mkdir(parents=True)
+            readme.write_text(notes.new_initiative("Billing", projects=["acme/api", "firefly/kit-consulting"]))
+            self.assertEqual(ct.carry("claude", SID, NEW, now=T0)["to"], NEW)
+
     def test_carry_moves_the_run_and_is_refused_while_a_lane_runs(self):
         self.make_run()
+        self.cleared()
         with self.assertRaisesRegex(ValueError, "Tank.*still running"):
             ct.carry("claude", SID, NEW, now=T0)
         run = state.read(pg.run_path("claude", SID))
@@ -621,6 +668,7 @@ class ClearTests(Base):
             lane["state"] = "done"
         run.update(state="orphaned", orphaned={"ts": round(T0 - 60), "why": "its session ended (clear)"})
         state.replace(pg.run_path("claude", SID), run)
+        self.cleared()
         ct.carry("claude", SID, NEW, now=T0)
         moved = state.read(pg.run_path("claude", NEW))
         self.assertEqual((moved["state"], "orphaned" in moved), ("running", False))

@@ -151,10 +151,15 @@ def diff_codex(rpc=None):
 
 
 def diff_instructions():
+    """The generated rules files that differ from what devkit writes now, for the agents turned on in `dev setup`: a
+    turned-off agent gets none of devkit's rules, so its file is no drift."""
     from .setup import render_instructions
     want = render_instructions()
+    agents = core.CFG.get("agents") or {}
     out = []
-    for f in (CLAUDE_HOME / "CLAUDE.md", CODEX_HOME / "AGENTS.md"):
+    for agent, f in (("claude", CLAUDE_HOME / "CLAUDE.md"), ("codex", CODEX_HOME / "AGENTS.md")):
+        if not agents.get(agent, True):
+            continue
         cur = f.read_text() if f.exists() else MISSING
         if cur != want:
             out.append(Drift("instructions", tilde(f), "edited" if cur is not MISSING else MISSING, "devkit-generated"))

@@ -77,8 +77,14 @@ def resolve_session(cwd: str | None = None, argv=None):
               repository that no live process holds does: Claude Code gave the running conversation a new session id
               (a compaction), and the older record still holds the process until the new one registers it
     env       DEVKIT_SESSION, which Claude Code exports to the session's shells (no parent matched)
-    recency   the most recently active devkit session in the same repository (Codex without a recorded pid)
-    shell     none of these: a shell of the developer's, with a session of its own
+    recency   the most recently active devkit session in the same repository, for a process that carries an agent's
+              marker (core.AGENT_MARKERS) or whose parents devkit could not read (a detached command, whose parent is
+              launchd): a Codex thread whose process devkit never recorded, a detached command of a session. A guess:
+              it never makes the caller the tech lead (identity._find)
+    shell     none of these, or a process whose parents devkit read, none of them a session's process, with no
+              agent's marker in its environment (Claude Code and Codex mark every command they run): the developer's
+              own terminal, a shell of the developer's with a session of its own, however recently an agent session
+              worked in this repository
     `argv`: the command's arguments, default sys.argv[1:] (the ledger's match, as caller reads it)."""
     env = os.environ.get("DEVKIT_SESSION", "")
     args = [str(a) for a in (sys.argv[1:] if argv is None else argv)]
@@ -89,12 +95,21 @@ def resolve_session(cwd: str | None = None, argv=None):
         if isinstance(s.get("pid"), int) and s["pid"] in pids and s.get("agent") and s.get("session"):
             held.setdefault(s["pid"], []).append((s.get("started") or 0, s["agent"], s["session"]))
     mine = next((held[pid] for pid in pids if pid in held), None)
+    cwd = cwd or os.getcwd()
     if mine:
+        # the Codex app runs several threads in one process, so the pid names them all: the thread Codex names to
+        # the command (CODEX_THREAD_ID) is the one, when this process runs it
+        thread = os.environ.get("CODEX_THREAD_ID", "")
+        named = [c for c in mine if c[1] == "codex" and c[2] == thread] if thread else []
+        if named:
+            return named[0][1], named[0][2], "ancestry"
         typed = [c for c in mine if _ledger_holds(c[2], args)]
+        if len(typed) > 1:
+            here = _same_repo_sessions(typed, cwd)
+            typed = here or typed
         if typed:
             _, agent, sid = max(typed)
             return agent, sid, "ancestry"
-    cwd = cwd or os.getcwd()
     found = _pidless_typed(args, {c[2] for c in mine or []}, pids, cwd)
     if found:
         return found[0], found[1], "ledger"
@@ -105,6 +120,8 @@ def resolve_session(cwd: str | None = None, argv=None):
     if ":" in env:
         agent, sid = env.split(":", 1)
         return agent, sid, "env"
+    if pids and not any(os.environ.get(k) for k in core.AGENT_MARKERS):  # the developer's own terminal
+        return "human", f"shell-{os.getppid()}", "shell"
     top = core.gitout(cwd, "rev-parse", "--show-toplevel") or cwd
     best = None
     for f in SESSIONS.glob("*.json") if SESSIONS.exists() else []:
@@ -114,6 +131,18 @@ def resolve_session(cwd: str | None = None, argv=None):
     if best and time.time() - best[0] < 12 * 3600:
         return best[1], best[2], "recency"
     return os.environ.get("DEVKIT_AGENT") or "human", f"shell-{os.getppid()}", "shell"
+
+
+def _same_repo_sessions(cands: list, cwd: str) -> list:
+    """Of several sessions (started, agent, session id) one process runs, those of the repository the command runs in
+    (their record's top, or cwd): two threads of one Codex process that typed the same command at once."""
+    top = core.gitout(cwd, "rev-parse", "--show-toplevel") or cwd
+    out = []
+    for c in cands:
+        rec = core.read_json(session_path(c[1], c[2]), {}) or {}
+        if (rec.get("top") or rec.get("cwd")) == top:
+            out.append(c)
+    return out
 
 
 def _ledger_holds(sid: str, args: list) -> bool:
@@ -188,7 +217,7 @@ def _ps() -> dict:
     return procs
 
 
-_ANCESTRY: dict = {}
+_ANCESTRY: dict = {}  # {this process's pid: {"chain": its parents' pids, "args": {parent pid: command line}}}
 
 
 def _ancestor_pids() -> list:
@@ -198,8 +227,47 @@ def _ancestor_pids() -> list:
         while pid > 1 and pid not in chain and len(chain) < 64:
             chain.append(pid)
             pid = procs.get(pid, (0, ""))[0]
-        _ANCESTRY[os.getpid()] = chain
-    return _ANCESTRY[os.getpid()]
+        _ANCESTRY[os.getpid()] = {"chain": chain, "args": {p: procs[p][1] for p in chain if p in procs}}
+    return _ANCESTRY[os.getpid()]["chain"]
+
+
+def _parents_of(pid: int):
+    """-> (the parents of process `pid`, nearest first, up to launchd; {parent pid: command line} of those whose
+    command line devkit read). From this process's own parents when `pid` is one of them, else from `ps` while `pid`
+    still runs (a process that ended has no parents left to read)."""
+    chain = _ancestor_pids()
+    if pid in chain:
+        return chain[chain.index(pid) + 1:], (_ANCESTRY.get(os.getpid()) or {}).get("args") or {}
+    if not _pid_running(pid):
+        return [], {}
+    procs, above, p = _ps(), [], pid
+    while p in procs and len(above) < 64:
+        p = procs[p][0]
+        if p <= 1 or p in above:
+            break
+        above.append(p)
+    return above, {p: procs[p][1] for p in above if p in procs}
+
+
+def nested(sess: dict) -> bool:
+    """Does this session's agent process run below another agent session's process? Then another session started it
+    (`claude -p`, `codex exec`, or any entrypoint set on a command line), whatever surface it recorded, and its
+    prompts are that session's text. A parent counts when another session's record holds its pid and it is an agent
+    process (core.is_agent_process), or devkit could not read its command line: a pid an ended session left behind
+    that now names a shell or a terminal is no session. Codex threads of one process share its pid, never a parent."""
+    pid = (sess or {}).get("pid")
+    if not isinstance(pid, int) or pid <= 1:
+        return False
+    above, args = _parents_of(pid)
+    cands = {p for p in above if p > 1 and (p not in args or core.is_agent_process(args[p]))}
+    if not cands:
+        return False
+    me = ((sess or {}).get("agent"), (sess or {}).get("session"))
+    for f in SESSIONS.glob("*.json") if SESSIONS.exists() else []:
+        s = core.read_json(f, {}) or {}
+        if isinstance(s, dict) and s.get("pid") in cands and (s.get("agent"), s.get("session")) != me:
+            return True
+    return False
 
 
 def agent_pid(procs: dict | None = None):
@@ -245,12 +313,78 @@ def _write_private(path: Path, doc: dict):
         raise
 
 
+# What a shell call may run and still write no file (call_reads): devkit's own commands that change only devkit's
+# records (None: every subcommand; `dev crew sync` writes the generated agent files, so it never counts), and tools
+# that read and run no code. A test run, a build, a script, an interpreter or a package manager runs code that can
+# write: it is a writer, whatever the read-only lanes may run.
+DEVKIT_READS = {"watch": None, "progress": None, "crew": None, "status": None,
+                "session": ("ls", "inbox", "claims", "escalations")}
+PURE_READS = frozenset({"cd", "pushd", "ls", "cat", "head", "tail", "grep", "rg", "wc", "find", "git"})
+GIT_READS = frozenset({"status", "log", "diff", "show"})
+FIND_RUNS = frozenset({"-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fprint0", "-fprintf", "-fls"})
+_SUBSTITUTED = re.compile(r"[$<>]\(|`|\\\n")  # a substitution, or a continued line, runs what the words do not show
+
+
+def _devkit_read(argv) -> bool:
+    """True for one `dev` call of DEVKIT_READS, its prefixes included."""
+    from . import guard
+    dev = guard._dev_args(guard._unwrap(list(argv)))
+    pos = guard._dev_words(dev) if dev is not None else []
+    if not pos or pos[0] not in DEVKIT_READS or guard._crew_kind(dev) == "sync":
+        return False
+    subs = DEVKIT_READS[pos[0]]
+    return subs is None or (len(pos) > 1 and pos[1] in subs)
+
+
+def _pure_read(argv0, here) -> bool:
+    """True for one command of PURE_READS that runs no code: git only as status, log, diff or show, find without
+    FIND_RUNS, and each one as the read-only lanes' verdict lets it run (no `git -c`, `--output`, `rg --pre` or
+    environment that makes it run another program)."""
+    from . import guard
+    argv = guard._unwrap(list(argv0))
+    name = os.path.basename(argv[0]) if argv else ""
+    if name not in PURE_READS or (name == "find" and FIND_RUNS & set(argv)):
+        return False
+    if name == "git":
+        args, k = argv[1:], 0
+        while k < len(args) and args[k].startswith("-"):  # git's own options; these four take the next word
+            k += 2 if args[k] in ("-C", "-c", "--git-dir", "--work-tree") else 1
+        if (args[k] if k < len(args) else "") not in GIT_READS:
+            return False
+    return guard._ro_program(list(argv0), here) is None
+
+
+def call_reads(cmd: str, cwd) -> bool:
+    """True when a shell call writes no file, so it is nobody's alibi for a reading lane's write (scope_written):
+    each part of it is one of devkit's own record commands (DEVKIT_READS) or a tool that only reads (_pure_read),
+    with no redirect into a file, no substitution and no nested shell. False for anything else, and when the guard
+    cannot parse it: the call may write, as every call could before calls had a verdict."""
+    from . import guard
+    try:
+        segs = guard.split_commands(guard.strip_heredocs(cmd), stripped=True)
+        if not segs or _SUBSTITUTED.search(cmd):
+            return False
+        here = str(cwd or os.getcwd())
+        for argv0, redirs in segs:
+            if {">|", ">>|"} & set(argv0) or not all(guard._redirect_ok(r, here) for r in redirs):
+                return False
+            if not (_devkit_read(argv0) or _pure_read(argv0, here)):
+                return False
+            argv = guard._unwrap(list(argv0))
+            if os.path.basename(argv[0]) in ("cd", "pushd") and len(argv) > 1 and argv[1] != "-":
+                here = str(guard.resolve(argv[1], here))
+        return True
+    except Exception:
+        return False
+
+
 def call_opened(agent: str, data: dict, now: float | None = None):
     """PreToolUse of a shell call: its ledger entry {tool_use_id, session, agent, caller (agent_id or main), depth,
-    ts, ttl, cmd_sha256, cmd (redacted, at most CALL_TEXT), cut}."""
+    ts, ttl, cmd_sha256, cmd (redacted, at most CALL_TEXT), cut}, and reads: true when it writes no file
+    (call_reads)."""
     tid, sid = _safe_name(data.get("tool_use_id")), _safe_name(data.get("session_id"))
     inp = data.get("tool_input") or {}
-    cmd = inp.get("command")
+    cmd = inp.get("command") or inp.get("cmd")  # Codex's exec_command sends its command as `cmd`
     if isinstance(cmd, list):
         cmd = " ".join(shlex.quote(str(c)) for c in cmd)
     if not tid or not sid or not isinstance(cmd, str) or not cmd.strip():
@@ -271,7 +405,7 @@ def call_opened(agent: str, data: dict, now: float | None = None):
     _write_private(CALLS / sid / f"{tid}.json", {
         "tool_use_id": tid, "session": sid, "agent": agent, "caller": aid or "main", "depth": depth,
         "ts": round(now, 3), "ttl": ttl, "cmd_sha256": hashlib.sha256(cmd.encode()).hexdigest(), "cmd": text,
-        "cut": cut})
+        "cut": cut, **({"reads": True} if call_reads(cmd, data.get("cwd")) else {})})
 
 
 def call_entry(data: dict) -> dict:
@@ -289,14 +423,51 @@ def call_note(data: dict, **fields):
                        {**e, **fields})
 
 
+SHELL_KEEP = 2 * CALL_TTL  # seconds the record of closed shell calls keeps one: past the longest call it can overlap
+SHELL_MAX = 500  # closed shell calls the record keeps at most, newest last
+
+
+def _shells_path(sid: str) -> Path:
+    """The session's recently closed shell calls, beside its open ones (a dot-file: the ledger's readers skip it)."""
+    return CALLS / _safe_name(sid) / ".shells.json"
+
+
 def call_closed(data: dict):
-    """PostToolUse or PostToolUseFailure of a shell call, or the hook refused it: its entry leaves the ledger."""
+    """PostToolUse or PostToolUseFailure of a shell call, or the hook refused it: its entry leaves the ledger. A call
+    that ran stays in the record of closed shell calls for SHELL_KEEP, {caller, opened, closed, reads (when it
+    writes no file, call_reads)}, so write detection knows who else had a writing shell call during a reading lane's
+    call even when it closed first (scope_written). A call refused at PreToolUse never ran and is not kept. Under the
+    record's lock; a busy lock drops this one record."""
     tid, sid = _safe_name(data.get("tool_use_id")), _safe_name(data.get("session_id"))
-    if tid and sid:
-        try:
-            (CALLS / sid / f"{tid}.json").unlink()
-        except OSError:
-            pass
+    if not (tid and sid):
+        return
+    entry = CALLS / sid / f"{tid}.json"
+    e = core.read_json(entry, None) if data.get("hook_event_name") != "PreToolUse" else None
+    try:
+        entry.unlink()
+    except OSError:
+        pass
+    if not isinstance(e, dict) or not e.get("ts"):
+        return
+    now = time.time()
+
+    def add(doc):
+        kept = [c for c in doc.get("calls") or [] if isinstance(c, dict) and now - (c.get("closed") or 0) <= SHELL_KEEP]
+        doc["calls"] = (kept + [{"caller": str(e.get("caller") or "main")[:80], "opened": e["ts"],
+                                 "closed": round(now, 3), **({"reads": True} if e.get("reads") else {})}])[-SHELL_MAX:]
+    try:
+        state.update(_shells_path(sid), add)
+    except state.StateBusy:
+        pass
+
+
+def shells_since(sid: str, since: float, now: float | None = None) -> list:
+    """The session's shell calls that closed at `since` or later and had opened by `now`: [{caller, opened,
+    closed, reads}], the closed calls that overlap that window."""
+    now = now or time.time()
+    doc = core.read_json(_shells_path(sid), {}) or {}
+    return [c for c in doc.get("calls") or [] if isinstance(c, dict)
+            and (c.get("closed") or 0) >= since and (c.get("opened") or 0) <= now]
 
 
 EDIT_TOOLS = ("Write", "Edit", "MultiEdit")  # the tools that name the one file they change (tool_input.file_path)
@@ -310,22 +481,39 @@ def _edits_path(sid: str) -> Path:
     return CALLS / _safe_name(sid) / ".edits.json"
 
 
+PATCH_FILE = re.compile(r"^\*\*\* (?:(?:Add|Update|Delete) File|Move to): (.+?)\s*$", re.M)  # Codex apply_patch
+
+
+def _edit_paths(data: dict) -> list:
+    """The files an edit call changed: a Write, Edit or MultiEdit's file_path, or each file a Codex apply_patch names
+    (its Add, Update, Delete and Move lines), a relative one under the folder the patch ran in. [] for other calls."""
+    inp, tool = data.get("tool_input") or {}, data.get("tool_name")
+    if tool in EDIT_TOOLS:
+        path = inp.get("file_path")
+        return [path] if isinstance(path, str) and path.strip() else []
+    if tool != "apply_patch":
+        return []
+    body = inp.get("input") or inp.get("patch") or inp.get("command") or ""
+    if isinstance(body, list):
+        body = "\n".join(str(x) for x in body)
+    base = str(inp.get("workdir") or data.get("cwd") or "")
+    return [p if os.path.isabs(p) or not base else os.path.join(base, p) for p in PATCH_FILE.findall(str(body))]
+
+
 def note_edit(agent: str, data: dict, now: float | None = None):
-    """PostToolUse of a Write, Edit or MultiEdit: the file it changed, who changed it (the agent_id, or main) and when,
-    kept for EDIT_KEEP, so write detection credits a file to whoever really edited it (scope_written) and the crew
-    gates credit a member only with what it wrote (gates.crew_gates). Under the record's lock; a busy lock drops this
-    one record (state audits it)."""
-    if data.get("tool_name") not in EDIT_TOOLS:
-        return
-    path, sid = (data.get("tool_input") or {}).get("file_path"), _safe_name(data.get("session_id"))
-    if not sid or not isinstance(path, str) or not path.strip():
+    """PostToolUse of a Write, Edit or MultiEdit, or of a Codex apply_patch: each file it changed, who changed it (the
+    agent_id, or main) and when, kept for EDIT_KEEP, so write detection credits a file to whoever really edited it
+    (scope_written) and the crew gates credit a member only with what it wrote (gates.crew_gates). Under the record's
+    lock; a busy lock drops this one record (state audits it)."""
+    paths, sid = _edit_paths(data), _safe_name(data.get("session_id"))
+    if not sid or not paths:
         return
     now = now or time.time()
     who = str(data.get("agent_id") or "main")[:80]
 
     def add(doc):
         kept = [e for e in doc.get("edits") or [] if isinstance(e, dict) and now - (e.get("ts") or 0) <= EDIT_KEEP]
-        doc["edits"] = (kept + [{"ts": round(now, 3), "caller": who, "path": path[:1024]}])[-EDIT_MAX:]
+        doc["edits"] = (kept + [{"ts": round(now, 3), "caller": who, "path": p[:1024]} for p in paths])[-EDIT_MAX:]
     try:
         state.update(_edits_path(sid), add)
     except state.StateBusy:
@@ -399,36 +587,37 @@ def _names_args(entry: dict, args: list) -> bool:
 
 
 def caller(cwd: str | None = None, argv=None, now: float | None = None) -> dict:
-    """Who runs this `dev` command -> {agent, session, how, caller, calls}. caller: main, a member's agent_id (the
-    most restrictive when several match), unknown (no open call holds the command, or the session was only
-    guessed by recency), unverified (Codex, until its spawned agents' hooks carry agent_id: S3), or human (a
-    developer's shell with no agent session). `argv`: the command's arguments, default sys.argv[1:]."""
-    args = [str(a) for a in (sys.argv[1:] if argv is None else argv)]
-    agent, sid, how = resolve_session(cwd, args)
-    out = {"agent": agent, "session": sid, "how": how, "caller": "unknown", "calls": []}
-    if how == "shell":
+    """Who runs this `dev` command, as the commands only the tech lead may run read it (identity.speaker, the one
+    definition) -> {agent, session, how, caller, calls}. caller: main (an open call of main's typed it, in a session
+    not guessed by recency: a lane variable, the tech lead's stamp, a parent process or recency never make it main),
+    a member's agent_id (its lane mark, else the most restrictive member whose open call typed it), unknown,
+    unverified (Codex, whose main thread's hooks carry no mark), or human (a developer's shell with no agent session).
+    how: how the session was found (resolve_session). `argv`: the command's arguments, default sys.argv[1:]."""
+    from . import identity
+    found = identity._find(cwd, argv, now, settle=False)
+    sp = found.speaker
+    out = {"agent": found.agent, "session": sp.session, "how": found.session_how, "caller": "unknown", "calls": []}
+    if sp.how == "human":
         return dict(out, caller="human")
-    if agent == "codex":
+    if found.agent == "codex":
         return dict(out, caller="unverified")
-    hits = [c for c in open_calls(sid, now) if _names_args(c, args)]
-    out["calls"] = [c.get("tool_use_id") for c in hits]
-    members = sorted({str(c.get("caller")) for c in hits if c.get("caller") != "main"})
-    if members:
-        run = load_run(agent, sid) or {}
-        out["caller"] = max(members, key=lambda m: (TOOL_LEVELS.index(lane_tools(run, m) or "read"),
-                                                    ((run.get("agents") or {}).get(m) or {}).get("depth") or 0))
-    elif hits and how != "recency":
-        out["caller"] = "main"
+    out["calls"] = list(found.calls)
+    if sp.how == "stamped" and sp.lane != "main":
+        out["caller"] = sp.lane
+    elif found.ledger:
+        out["caller"] = found.ledger
     return out
 
 
 def _as_lane(from_agent, cwd: str | None = None):
-    """The lane a command acts as: DEVKIT_FROM_AGENT when the hooks set it, else the member the call ledger names.
-    Variables only narrow (spec C4): an empty or missing one grants nothing. None for Morpheus."""
+    """The lane a command acts as: `from_agent` (DEVKIT_FROM_AGENT, as the command passes it), else the crew member
+    identity.speaker names: its lane mark, or its open call in the ledger (Claude Code and Codex alike). Variables
+    only narrow (spec C4): an empty or missing one grants nothing. None for Morpheus."""
     if from_agent:
         return from_agent
-    who = caller(cwd).get("caller")
-    return who if who and who not in NOT_A_LANE else None
+    from . import identity
+    lane = identity._find(cwd, None, None, settle=False).speaker.lane
+    return lane if lane and lane not in NOT_A_LANE else None
 
 
 def run_path(agent: str, sid: str) -> Path:
@@ -3003,7 +3192,8 @@ GRANT_CLASSES = ("push", "pr", "push-destructive", "pr-write", "merge", "release
                  "external-message", "delete-data", "migrate-production", "spend",
                  "unknown",  # C6's classes, IRREVERSIBLE, and a command known only when it runs (cmd-<hash>, RT1/RT2)
                  "developer-only", "backup", "embargo",  # B2: the developer's own decisions (guard.DEVELOPER_GRANTS)
-                 "bug-send", "bug-drop", "bug-confirm", "bug-share", "lesson-release", "lesson-block")
+                 "bug-send", "bug-drop", "bug-confirm", "bug-share", "lesson-release", "lesson-block",
+                 "claim-break")  # another session's claim on a resource (peers.release with this grant's evidence)
 HEADLESS_SURFACES = ("SDK", "claude -p", "codex exec")  # nobody at the keyboard: DEVKIT_PREAPPROVE only
 TRANSCRIPT_DAYS = 30  # Claude Code's default cleanupPeriodDays: older evidence may have lost its transcript
 # `approve D3`, or `approve D3@9448c4d0` as a decision listed outside its own session shows it (shown_id): groups are
@@ -3020,7 +3210,19 @@ _PLAIN_YES = re.compile(r"(?i)^\s*yes\s*[.!]?\s*$")
 _RELAYED = re.compile(r"^\s*(?:\[[^\]\n]{0,120}\bsent to (?:Claude|Codex)\b[^\]\n]*\]|\[SYSTEM NOTIFICATION|"
                       r"<task-notification|<system-reminder|<agent-message|<command-name>|<local-command)",
                       re.IGNORECASE | re.MULTILINE)
-_DECISION_REF = re.compile(r"\bD(\d+)\b")
+# D3, or D3@9448c4d0 as a decision listed outside its own session shows it (shown_id): the number and the prefix
+_DECISION_REF = re.compile(r"\bD(\d+)(?![0-9A-Za-z_])(?:@([0-9A-Za-z][0-9A-Za-z._-]*))?")
+
+
+def decisions_named(run, text) -> set:
+    """The ids of `run`'s decisions that `text`, written in the run's own session, names: a bare D3 is the run's
+    own, and a qualified D3@9448c4d0 is the run's only when it names the run's session (_names_session), so another
+    session's D3 never stands for this run's."""
+    sid = (run or {}).get("session") or ""
+    return {f"D{n}" for n, prefix in _DECISION_REF.findall(str(text or ""))
+            if not prefix or _names_session(prefix.rstrip("._-"), sid)}
+
+
 _RECOMMENDED = re.compile(r"\s*\(recommended\)\s*$", re.IGNORECASE)
 _ASKED_ID = re.compile(r"\s*(D\d+)\s*[·:]", re.IGNORECASE)  # a question that opens with "D4 ·" or "D4:"
 _HEADER_ID = re.compile(r"D\d+", re.IGNORECASE)  # a question whose header is "D4"
@@ -3330,8 +3532,12 @@ def _audit_refused(run, action: str, target: str, covers, session: str):
 
 
 def headless(sess: dict) -> bool:
-    """A session with nobody at the keyboard (`claude -p`, the SDK, `codex exec`, devkit's own headless calls)."""
-    return str((sess or {}).get("surface") or "") in HEADLESS_SURFACES or os.environ.get("DEVKIT_HEADLESS") == "1"
+    """A session with nobody at the keyboard (`claude -p`, the SDK, `codex exec`, devkit's own headless calls), or a
+    session another agent session started (nested), whatever surface it inherited: Claude Code rewrites an inherited
+    `cli` entrypoint to `sdk-cli` for `-p`, but keeps an inherited `claude-desktop` or `claude-vscode` and any value
+    set on the command line. None of its prompts, typed grants or answers is the developer's."""
+    return str((sess or {}).get("surface") or "") in HEADLESS_SURFACES or os.environ.get("DEVKIT_HEADLESS") == "1" \
+        or nested(sess)
 
 
 def preapproved(cls: str, target: str) -> bool:
@@ -3411,29 +3617,66 @@ _SESSION_ID = re.compile(r"[A-Za-z0-9_-]{1,80}")
 
 
 def harness_transcript(agent: str, sid: str) -> str:
-    """The session's own transcript, where the harness writes it (spec C5, release blocker B1): Claude Code's
-    ~/.claude/projects/<project folder>/<session id>.jsonl, found from the session id alone, never from a path a
-    hook event or a caller names. '' when there is none or more than one, or the id is not a plain session id."""
-    if agent != "claude" or not _SESSION_ID.fullmatch(str(sid or "")):
+    """The session's own transcript, where the harness writes it (spec C5, release blocker B1), found from the
+    session id alone, never from a path a hook event or a caller names: Claude Code's
+    ~/.claude/projects/<project folder>/<session id>.jsonl, or Codex's rollout of the thread,
+    ~/.codex/sessions/YYYY/MM/DD/rollout-<time>-<thread id>.jsonl (or archived_sessions/, where `codex archive`
+    moves it), when it opens with that thread's own session_meta (_codex_meta): a subagent's rollout, which copies its
+    parent's history, is never a session's. '' when there is none or more than one, or the id is not a plain id."""
+    sid = str(sid or "")
+    if agent not in ("claude", "codex") or not _SESSION_ID.fullmatch(sid):
         return ""
     try:
-        hits = sorted((core.CLAUDE_HOME / "projects").glob(f"*/{sid}.jsonl"))
+        if agent == "claude":
+            hits = sorted((core.CLAUDE_HOME / "projects").glob(f"*/{sid}.jsonl"))
+        else:
+            name = f"rollout-*-{sid}.jsonl"
+            hits = sorted([*(core.CODEX_HOME / "sessions").glob(f"*/*/*/{name}"),
+                           *(core.CODEX_HOME / "archived_sessions").glob(name),
+                           *(core.CODEX_HOME / "archived_sessions").glob(f"*/*/*/{name}")])
     except OSError:
         return ""
-    return str(hits[0]) if len(hits) == 1 else ""
+    if len(hits) != 1 or (agent == "codex" and _codex_meta(hits[0], sid) is None):
+        return ""
+    return str(hits[0])
+
+
+CODEX_META_MAX = 8 << 20  # bytes of a rollout's first line read for its session_meta (it holds the instructions)
+
+
+def _codex_meta(path, sid: str):
+    """The session_meta payload a Codex rollout opens with, when it is thread `sid`'s own and no subagent's (no
+    `source.subagent`, parent thread or copied history); None otherwise or when it cannot be read."""
+    try:
+        with open(path, "rb") as fh:
+            first = json.loads(fh.readline(CODEX_META_MAX) or b"null")
+    except (OSError, ValueError, RecursionError):
+        return None
+    p = first.get("payload") if isinstance(first, dict) and first.get("type") == "session_meta" else None
+    if not isinstance(p, dict) or p.get("id") != sid:
+        return None
+    src = p.get("source")
+    if (isinstance(src, dict) and "subagent" in src) or p.get("parent_thread_id") \
+            or p.get("subagent_history_start_ordinal") is not None:
+        return None
+    return p
 
 
 def _foreign_transcript(agent: str, sid: str, named) -> bool:
     """A hook event that names a transcript other than the session's own (a forged event or path, B1): its
     evidence is refused and recorded. An event that names none, or the session's own, is fine."""
-    if agent != "claude" or not named:
+    if agent not in ("claude", "codex") or not named:
         return False
     named = str(named)
     own = harness_transcript(agent, sid)
     if own:
         return os.path.realpath(named) != os.path.realpath(own)
     p = Path(named)  # not written yet (the first prompt): it must be where the harness will write it
-    return not (p.name == f"{sid}.jsonl" and p.parent.parent == core.CLAUDE_HOME / "projects")
+    if agent == "claude":
+        return not (p.name == f"{sid}.jsonl" and p.parent.parent == core.CLAUDE_HOME / "projects")
+    homes = (core.CODEX_HOME / "sessions", core.CODEX_HOME / "archived_sessions")
+    return not (p.name.startswith("rollout-") and p.name.endswith(f"-{sid}.jsonl")
+                and any(core.is_under(p, h) for h in homes))
 
 
 def _entry(agent, channel, covers, excerpt, uuid, transcript, run, now, **more) -> dict:
@@ -3466,7 +3709,9 @@ def on_human_prompt(agent: str, data: dict, now: float | None = None) -> list:
         return []
     run = load_run(agent, sid)
     live = run if run and run.get("goal") and run.get("state") != "done" else None
-    uuid, tp, new = data.get("prompt_id") or "", harness_transcript(agent, sid), []
+    # what binds the entry to the prompt's record: Claude Code's prompt id, Codex's turn id (it sends no prompt id)
+    uuid = str(data.get("turn_id" if agent == "codex" else "prompt_id") or "")
+    tp, new = harness_transcript(agent, sid), []
     if uuid and str(uuid) in _seen_ids(sess):  # the same prompt again (B3): `dev hook prompt` fed its event back
         _refuse_replay(agent, sid, str(uuid), "a prompt")
         return []
@@ -3531,7 +3776,7 @@ def on_question(agent: str, data: dict, now: float | None = None) -> list:
     shown, new, refused, voided = set(), [], {}, set()
     for q, did in ([] if member else zip(qs, ids)):
         qt = str(q.get("question") or "")
-        shown.update(x for x in [f"D{n}" for n in _DECISION_REF.findall(qt)] + [did] if x in pending)
+        shown.update(x for x in [*decisions_named(run, qt), did] if x in pending)
         d, label = _decision(run, did) if did else None, answers.get(qt)
         if not d or not isinstance(label, str) or not label.strip():
             continue
@@ -3594,8 +3839,8 @@ def on_final_message(agent: str, sid: str, text: str, now: float | None = None):
     f = session_path(agent, sid)
     if not f.exists():
         return
-    ids = {f"D{n}" for n in _DECISION_REF.findall(str(text or ""))}
     run = load_run(agent, sid)
+    ids = decisions_named(run, text)
     named = sorted((d["id"] for d in _awaiting(run) if d["id"] in ids), key=lambda x: int(x[1:]))
     if named:
         _mark_shown(agent, sid, set(named), now)
@@ -3657,27 +3902,132 @@ def _own_record(r, e: dict) -> bool:
 
 def confirmed(e: dict, sid: str = "") -> bool:
     """Does the session's own transcript (harness_transcript, from the session id: `sid` or the entry's) show this
-    entry as the developer's own act (_own_record)? An entry that carries another transcript's path is refused (B1).
-    Codex transcripts are not read yet (spec F0, S3), so a Codex entry has nothing but its hook event behind it and
-    is never confirmed (The Keymaker): it opens nothing."""
-    if e.get("agent") == "codex":
-        return False
-    uuid, path = str(e.get("transcript_uuid") or ""), harness_transcript("claude", sid or e.get("session") or "")
+    entry as the developer's own act? Claude Code: its record (_own_record). Codex: the turn's typed prompt in the
+    thread's rollout (_codex_holds), never in a `codex exec` run's. An entry that carries another transcript's path is
+    refused (B1)."""
+    sid = sid or e.get("session") or ""
+    agent = "codex" if e.get("agent") == "codex" else "claude"
+    uuid, path = str(e.get("transcript_uuid") or ""), harness_transcript(agent, sid)
     if not uuid or not path:
         return False
     if e.get("transcript") and os.path.realpath(str(e["transcript"])) != os.path.realpath(path):
         return False
+    if agent == "codex":
+        meta = _codex_meta(path, sid) or {}
+        if not meta or meta.get("originator") == "codex_exec" or meta.get("source") == "exec":
+            return False  # a `codex exec` run: nobody at the keyboard (HEADLESS_SURFACES), whatever its record says
     try:
         for ln in _lines_back(path, json.dumps(uuid).encode()):
             try:
                 r = json.loads(ln)
-            except ValueError:
+            except (ValueError, RecursionError):
                 continue
-            if _own_record(r, e):
+            if _codex_holds(r, e, sid) if agent == "codex" else _own_record(r, e):
                 return True
     except OSError:
         return False
     return False
+
+
+CODEX_PROMPT_GRACE = 5.0  # seconds a Codex prompt's record may come before its hook's time (clocks, write order)
+
+
+def _codex_prompt(r, sid: str):
+    """The text of Codex rollout record `r` when it is a prompt the developer typed in thread `sid`: an `event_msg`
+    `item_completed` whose item is a `UserMessage` of that thread, which Codex 0.167 writes for each typed prompt
+    after UserPromptSubmit. Agent messages, tool calls and their output, and what Codex or a hook adds to the context
+    (developer messages, the AGENTS.md block in the user's role) are other records. None for any other record."""
+    p = r.get("payload") if isinstance(r, dict) and r.get("type") == "event_msg" else None
+    item = p.get("item") if isinstance(p, dict) and p.get("type") == "item_completed" else None
+    if not isinstance(item, dict) or item.get("type") != "UserMessage" or p.get("thread_id") != sid:
+        return None
+    return "\n".join(b["text"] for b in item.get("content") or []
+                     if isinstance(b, dict) and b.get("type") == "text" and isinstance(b.get("text"), str))
+
+
+def _codex_holds(r, e: dict, sid: str) -> bool:
+    """Is rollout record `r` E2 entry `e`'s own prompt: thread `sid`'s typed prompt of e's turn (the turn id the
+    prompt hook got), written at or after the hook recorded e (CODEX_PROMPT_GRACE aside, so an older turn's prompt fed
+    as a new event confirms nothing), holding e's line as a line of its own (_own_lines: not quoted, fenced or
+    indented)? An excerpt _entry cut at 200 characters matches the start of its line."""
+    if e.get("channel") != "E2" or e.get("ts") is None:
+        return False
+    text = _codex_turn_prompt(r, sid, str(e.get("transcript_uuid") or ""), float(e["ts"]))
+    want, cut = _norm(e.get("excerpt")), len(str(e.get("excerpt") or "")) >= 200
+    return text is not None and bool(want) and \
+        any(_norm(ln) == want or (cut and _norm(ln).startswith(want)) for ln in _own_lines(text))
+
+
+def _codex_turn_prompt(r, sid: str, turn: str, since: float):
+    """The text of rollout record `r` when it is thread `sid`'s typed prompt of turn `turn` (_codex_prompt), written
+    at or after `since` (CODEX_PROMPT_GRACE aside); None otherwise."""
+    text = _codex_prompt(r, sid)
+    if text is None or not turn or str(r["payload"].get("turn_id") or "") != turn:
+        return None
+    import datetime as dt
+    try:
+        at = dt.datetime.fromisoformat(str(r.get("timestamp")).replace("Z", "+00:00")).timestamp()
+    except (TypeError, ValueError):
+        return None
+    return text if at >= since - CODEX_PROMPT_GRACE else None
+
+
+def _codex_backs(path, sid: str, turn: str, covers: str, since: float) -> bool:
+    """`dev audit verify` for a Codex E2 record: does thread `sid`'s typed prompt of `turn`, written at or after the
+    record's time (_codex_turn_prompt), hold a line of its own that covers what the record names (`covers`, its
+    target: `approve D<n>` for D<n>, `grant <action> <target>` for "<action> <target>"), or is it a plain "yes" for a
+    D<n>? Re-derived from the prompt, never from the record's detail, which the audit may have redacted. A
+    `codex exec` run's rollout backs nothing."""
+    meta = _codex_meta(path, sid) or {}
+    if not turn or not meta or meta.get("originator") == "codex_exec" or meta.get("source") == "exec":
+        return False
+    want = _norm(covers)
+    try:
+        for ln in _lines_back(path, json.dumps(turn).encode()):
+            try:
+                text = _codex_turn_prompt(json.loads(ln), sid, turn, since)
+            except (ValueError, RecursionError):
+                continue
+            if text is None:
+                continue
+            if re.fullmatch(r"d\d+", want) and _PLAIN_YES.match(text):
+                return True
+            for own in _own_lines(text):
+                mt = _APPROVE_LINE.match(own)
+                if mt and _norm(mt.group(1)) == want and (not mt.group(2) or _names_session(mt.group(2), sid)):
+                    return True
+                mt = _GRANT_LINE.match(own)
+                if mt and _norm(f"{mt.group(1)} {mt.group(2)}") == want:
+                    return True
+    except OSError:
+        return False
+    return False
+
+
+def _codex_said_later(path, e: dict, d: dict, sid: str) -> bool:
+    """_said_later for a Codex session: has the developer typed a word on irreversible decision `d` after entry `e`'s
+    own prompt record, a later prompt of the thread with an `approve D<n>` line for it (Codex has no question tool)?
+    True too when e's record is not there or the rollout cannot be read: then nothing tells what came after it."""
+    found = False
+    try:
+        with open(path, "rb") as fh:
+            for ln in fh:
+                if b"UserMessage" not in ln:
+                    continue
+                try:
+                    r = json.loads(ln)
+                except (ValueError, RecursionError):
+                    return True  # a prompt record still being written, or damaged, may be their word
+                if not found:
+                    found = _codex_holds(r, e, sid)
+                    continue
+                text = _codex_prompt(r, sid)
+                if text is not None and any(mt and mt.group(1).upper() == d["id"].upper()
+                                            for mt in map(_APPROVE_LINE.match, _own_lines(text))):
+                    return True
+    except (OSError, TypeError):
+        return True
+    return not found
 
 
 def _texts(*values) -> list:
@@ -3976,10 +4326,12 @@ def _decision_evidence(agent: str, sid: str, run: dict, d: dict, answer: str, no
         sess = state.read(session_path(agent, sid)) or {}
         mine = [] if headless(sess) else [x for x in sess.get("human") or [] if _live(x, now, run) and ours(x)]
         e = mine[-1] if mine else {}
+        own = sid or e.get("session") or ""
         if not e or e.get("void") or e.get("plain") or e.get("free") or (
                 e.get("channel") == "E1" and (e.get("match"), e.get("asked")) != ("exact", "exact")) \
-                or not confirmed(e, sid) or _said_later(harness_transcript("claude", sid or e.get("session") or ""),
-                                                        e, d):
+                or not confirmed(e, sid) or (_codex_said_later(harness_transcript("codex", own), e, d, own)
+                                             if e.get("agent") == "codex"
+                                             else _said_later(harness_transcript("claude", own), e, d)):
             return None
     else:
         found = evidence(agent, sid, ours, now, run)
@@ -4002,7 +4354,7 @@ def evidence_check(rec: dict, path, line):
         return None
     ev, ref = rec.get("evidence") or {}, rec.get("ref") or {}
     agent, _, sid = str(ref.get("session") or "").partition(":")
-    if ev.get("channel") not in ("E1", "E2") or agent != "claude":
+    if ev.get("channel") not in ("E1", "E2") or agent not in ("claude", "codex"):
         return None
     uuid = str(ev.get("transcript_uuid") or "")
     tp = harness_transcript(agent, sid)  # the harness's own file, never a path a record or an event names (B1)
@@ -4011,6 +4363,12 @@ def evidence_check(rec: dict, path, line):
         return None if old else (f"evidence {ev['channel']} {uuid or '-'} for {rec.get('target')}: the session's "
                                  f"transcript is gone, so no message of the developer backs it")
     e = {"agent": agent, "channel": ev["channel"], "transcript_uuid": uuid, "transcript": str(tp)}
+    if agent == "codex":  # a typed line only (no question tool): re-read from its prompt, never from the detail
+        if ev["channel"] == "E2" and _codex_backs(tp, sid, uuid, str(rec.get("target") or ""),
+                                                   float(rec.get("ts") or 0)):
+            return None
+        return (f"evidence {ev['channel']} {uuid or '-'} for {rec.get('target')}: no message of the developer in "
+                f"{core.tilde(tp)} backs it")
     if not confirmed(e, sid):
         return (f"evidence {ev['channel']} {uuid or '-'} for {rec.get('target')}: no message of the developer in "
                 f"{core.tilde(tp)} backs it")
@@ -4876,7 +5234,8 @@ def reconcile_hook(agent: str, data: dict, now: float | None = None) -> list:
     lane = (run.get("agents") or {}).get(aid) if aid else None
     seen = bool(lane) and now - float(lane.get("last_seen") or 0) >= LAST_SEEN_EVERY
     # the meta files beside the session's own transcript, never beside a path the event names (B1)
-    fx = approvals.facts(run, sess, now, meta=approvals.meta_reader(harness_transcript(agent, sid)))
+    fx = approvals.facts(run, sess, now, meta=approvals.meta_reader(  # Codex keeps no meta files by its rollout
+        harness_transcript(agent, sid) if agent == "claude" else ""))
     if aid in fx["lanes"]:
         fx["lanes"][aid]["last_seen"] = now
     lim = approvals.limits()
@@ -6199,18 +6558,46 @@ def _shown(paths: list) -> str:
     return ", ".join(paths[:5]) + (f" and {len(paths) - 5} more" if len(paths) > 5 else "")
 
 
+def _shell_writers(run: dict, calls: list, chain: set) -> set:
+    """Of the callers of these shell calls (ledger entries or closed records), those whose shell may write files:
+    main (the tech lead), and each lane outside the reading lane's chain that works with build or all tools, a
+    helper's call counting for the lanes above it. A call that reads (call_reads) counts for nobody."""
+    callers = {str(e.get("caller") or "") for e in calls if not e.get("reads")}
+    out = {"main"} if "main" in callers else set()
+    for c in callers - {"main", ""}:
+        out.update(k for k in lane_chain(run, c) if k not in chain and lane_tools(run, k) in ("build", "all"))
+    return out
+
+
+def _certain_writes(writes: dict) -> list:
+    """The files of a lane's scope_writes that nobody else could have written (a record from before the certain list
+    names its paths when its certainty is certain)."""
+    if "certain" in writes:
+        return list(writes.get("certain") or [])
+    return list(writes.get("paths") or []) if writes.get("certainty") == "certain" else []
+
+
+def _or_names(run: dict, writers: list) -> str:
+    """'Backend engineer (Tank) or Tech lead (Morpheus)': up to three writers, by role and name."""
+    from . import crew
+    names = [crew.who(_name_of(run, k)) for k in writers[:3]] + ([f"{len(writers) - 3} more"] if len(writers) > 3 else [])
+    return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " or " + names[-1]
+
+
 def scope_written(agent: str, sid: str, aid: str, paths: list, now: float | None = None) -> dict | None:
     """A review or read-only lane's shell call wrote these files (write detection). A file is credited to whoever's
-    own Write, Edit or MultiEdit call touched that path during the call (note_edit: a build lane, its helper or the
-    tech lead, never the reading lane itself): devkit audits it as attributed and flags nothing, since an edit opens
-    no shell call and the edit record is exact. Every other file is held against the reading lane in
-    `scope_writes`, so its report is unverified and its step cannot end done on its word: a script of the reading
-    lane can write into a working member's scope, so a scope is no alibi. A held file is "possible" when a build lane
-    that works now and whose scope holds it, or any working build lane for a file outside every scope, had a shell
-    call open (its shell may have written it), else "certain". An open step whose scope holds a held file keeps it
-    (`other_writes`), which the review step after it lists; Morpheus gets one crew notice naming the files; and the
-    audit trail a scope.write record per certainty. -> the lane's scope_writes, or None without a lane or when it
-    has none."""
+    own edit call (Write, Edit, MultiEdit, Codex apply_patch) touched that path during the call (note_edit: a build
+    lane, its helper or the tech lead, never the reading lane itself): devkit audits it as attributed and flags
+    nothing, since the edit record is exact. Every other file is held against the reading lane in `scope_writes`. It
+    is "possible" when another writer had a shell call that overlapped the reading lane's call, still open or already
+    closed (open_calls, shells_since): the tech lead, or a build lane, which for a file in a working build lane's
+    scope must be that lane. A call that writes no file (call_reads: `git status`, `dev watch --wait`) makes nobody a
+    writer. With no such writer it is "certain": a script of the reading lane can write into a
+    working member's scope, so a scope alone is no alibi. Only a certain file makes the lane's report unverified
+    (_end_member_step). An open step whose scope holds a held file keeps it (`other_writes`), which the review step
+    after it lists; Morpheus gets one short crew notice naming the files and the possible writers; and the audit
+    trail a scope.write record per certainty. -> the lane's scope_writes, or None without a lane or when it has
+    none."""
     from . import crew
     now = now or time.time()
     paths = sorted({str(p) for p in paths or [] if p})
@@ -6228,46 +6615,44 @@ def scope_written(agent: str, sid: str, aid: str, paths: list, now: float | None
                     and lane_tools(run, k) in ("build", "all")]
         layers = {k: lane_scope(run, k) for k in builders}
         calls = open_calls(sid, now)
-        calling = {str(e.get("caller") or "") for e in calls} - {"main", ""}
-        busy = {k for k in builders if any(k in lane_chain(run, c) for c in calling)}
         start = min((e.get("ts") or now for e in calls if e.get("caller") == aid), default=now - CALL_TTL)
+        shells = _shell_writers(run, calls + shells_since(sid, start, now), chain)  # who else had a writing shell call
         edits = [e for e in edits_since(sid, start, now) if str(e.get("caller") or "") not in chain]
-        owned, held = {}, {}  # credited to the caller whose edit touched it; held against the reading lane, by certainty
+        owned, held, maybe_by = {}, {}, {}  # credited by edit; held against the reading lane; possible files by writers
         for p in paths:
             by = next((str(e.get("caller")) for e in edits if _edited(e.get("path"), p)), None)
             if by:
                 owned.setdefault(by, []).append(p)
                 continue
-            holders = [k for k in builders if layers[k] and in_scope(p, layers[k])]
-            maybe = (set(holders) & busy) if holders else busy
-            held.setdefault("possible" if maybe else "certain", []).append(p)
+            holders = {k for k in builders if layers[k] and in_scope(p, layers[k])}
+            writers = sorted((shells & holders) if holders else shells - {"main"}) + sorted(shells & {"main"})
+            held.setdefault("possible" if writers else "certain", []).append(p)
+            if writers:
+                maybe_by.setdefault(tuple(writers), []).append(p)
         who = lane.get("persona") or lane.get("label") or aid
         name = crew.who(who)
         loose = sorted(p for files in held.values() for p in files)
         if loose:
             had = lane.get("scope_writes") or {}
-            sure = "certain" in held or had.get("certainty") == "certain"
+            sure = sorted(set(_certain_writes(had)) | set(held.get("certain") or []))
             lane["scope_writes"] = {"ts": round(now), "paths": sorted(set(had.get("paths") or []) | set(loose))[:20],
-                                    "certainty": "certain" if sure else "possible"}
+                                    "certainty": "certain" if sure else "possible", "certain": sure[:20]}
             marked = []
             for c, files in held.items():
                 marked += [n for n in _mark_other_writes(run, files, chain, aid, name, c, now) if n not in marked]
-            parts = []
+            level = "review-only" if lane_tools(run, aid) == "review" else "read-only"
+            maybe = [f"{_shown(files)} (possibly the shell call of {_or_names(run, list(ks))})"
+                     for ks, files in maybe_by.items()]
             if held.get("certain"):
-                parts.append(f"its shell call wrote {_shown(held['certain'])}, which nobody else edited meanwhile")
-            if held.get("possible"):
-                shells = ", ".join(crew.who(_name_of(run, k)) for k in sorted(busy)[:3])
-                parts.append(f"its shell call wrote {_shown(held['possible'])} (possibly the shell call of {shells}, "
-                             f"open at the time)")
-            for k, files in owned.items():
-                parts.append(f"{_shown(files)} changed during it, edited by {crew.who(_name_of(run, k))} with its own "
-                             f"edit tool, so devkit credits {'them' if len(files) > 1 else 'it'} to them")
+                text = (f"devkit: {name} works {level}, and its shell call wrote {_shown(held['certain'])} while no "
+                        "other writer was at work. Its report counts as unverified: check the change (git diff), keep "
+                        "or revert it, then close its step with evidence." +
+                        (f" Also changed during it: {'; '.join(maybe)}." if maybe else ""))
+            else:
+                text = (f"devkit: during a shell call of {name}, which works {level}, {' and '.join(maybe)} changed; "
+                        "this does not unverify its report.")
             listed = f" The review after {', '.join(marked)} lists these files." if marked else ""
-            level = lane_tools(run, aid)
-            _post(run, aid, "main", f"devkit: {name} works {'review-only' if level == 'review' else 'read-only'}, "
-                  "and " + "; and ".join(parts) + "." + listed + " Its report counts as unverified: check the change "
-                  "(git diff), keep or revert it, then close its step with evidence.", now, from_name="devkit",
-                  kind="notice")
+            _post(run, aid, "main", text + listed, now, from_name="devkit", kind="notice")
             _save(run)
         writes = dict(lane.get("scope_writes") or {}) or None
     for k, mine in owned.items():
@@ -6275,9 +6660,10 @@ def scope_written(agent: str, sid: str, aid: str, paths: list, now: float | None
                lane=k[:16], paths=mine[:20], count=len(mine), project=run.get("project") or "",
                why=f"edited by {_name_of(run, k)} with its own edit tool during {who}'s shell call")
     for c, files in held.items():
+        extra = {"severity": "warning"} if c == "certain" else \
+            {"writers": sorted({_name_of(run, k) for ks in maybe_by for k in ks})}
         _audit("scope.write", who, f"{c}: {', '.join(files[:20])}"[:600], "detected", lane=aid[:16],
-               paths=files[:20], certainty=c, count=len(files), project=run.get("project") or "",
-               **({"severity": "warning"} if c == "certain" else {}))
+               paths=files[:20], certainty=c, count=len(files), project=run.get("project") or "", **extra)
     return writes
 
 
@@ -6385,13 +6771,14 @@ def _end_member_step(run: dict, st: dict, lane: dict, aid: str, report: str, now
     `dev progress step --check` (approvals.ending), and a review step's Check is its verdict on the work it follows
     (approvals.from_review), whose ✓ also ends done the unverified work it approves (_verified_by_review);
     otherwise unverified, for Morpheus to close with evidence or reopen. A review or read-only lane whose shell wrote
-    files (scope_writes) ends unverified whatever it reports."""
+    files nobody else could have written (scope_writes, certain) ends unverified whatever it reports; a possible
+    write leaves its ending to its report."""
     from . import approvals
     old = st.get("state")
     state_, why, check = approvals.ending(lane, report)
-    writes = lane.get("scope_writes") or {}
-    if state_ == "done" and writes.get("paths"):
-        state_, why = "unverified", f"its shell call wrote {', '.join(writes['paths'][:3])} ({writes.get('certainty')})"
+    sure = _certain_writes(lane.get("scope_writes") or {})
+    if state_ == "done" and sure:
+        state_, why = "unverified", f"its shell call wrote {', '.join(sure[:3])} while no other writer was at work"
     who = lane.get("persona") or "subagent"
     if state_ != "done":
         st["state"] = "unverified"

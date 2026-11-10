@@ -762,6 +762,29 @@ class TeamWorkTests(unittest.TestCase):
         self.assertEqual(len(ps["Release train"]["changelog"]), 2)
         self.assertEqual((ps["Export plan"]["status"], ps["Export plan"]["needs_revision"]), ("unversioned", True))
 
+    # A plan in a sub-folder of a project's plans folder (plans/<project>/product/spec.md) belongs to that project's
+    # page, grouped by the folder; a script beside it is not a plan, and a sibling project whose id starts the same
+    # (acme/widgets) keeps its own plans
+    def test_a_plan_in_a_sub_folder_belongs_to_the_page_whose_folder_holds_it(self):
+        with tempfile.TemporaryDirectory() as t:
+            h = Path(t)
+            make_handoff(h)
+            for d in ("plans/acme/widget/product", "plans/acme/widgets", "plans/initiatives/lending/rooms/old"):
+                (h / d).mkdir(parents=True)
+            body = "# Product spec\n\nWhat we build."
+            (h / "plans/acme/widget/product/spec.md").write_text(plans._render(
+                {"id": "P-2", "title": "Product spec", "scope": "acme/widget/product", "status": "draft", "version": 1, "body_sha": plans._sha(body)}, body, []))
+            (h / "plans/acme/widget/product/render.py").write_text("print('not a plan')\n")
+            (h / "plans/acme/widgets/other.md").write_text("# Other project's plan\n")
+            (h / "plans/initiatives/lending/rooms/old/review.md").write_text("# Rooms review\n")
+            ps = {p["title"]: p for p in dashboard.read_plans(h, ["acme/widget", "initiatives/lending"])}
+        where = {title: (p["home"], p["group"]) for title, p in ps.items()}
+        self.assertEqual(where, {"Export plan": ("acme/widget", ""), "Product spec": ("acme/widget", "product"),
+                                 "Other project's plan": ("acme/widgets", ""), "Release train": ("initiatives/lending", ""),
+                                 "Rooms review": ("initiatives/lending", "rooms/old")})
+        self.assertEqual(ps["Product spec"]["path"], "plans/acme/widget/product/spec.md")
+        self.assertNotIn("body", ps["Product spec"])                         # list metadata only: the page opens a body on demand
+
     def test_since_yesterday_uses_logs_and_items(self):
         s = dashboard.since_yesterday(registry(), {}, NOW, self.items, self.slog)
         self.assertIn({"project": "acme/widget", "text": "Old expired but done", "id": "T-a4", "who": "me@testmac"}, s["done"])
@@ -1367,6 +1390,9 @@ def fixture_data(root: Path, now: float) -> dict:
     make_handoff(root)
     (root / "projects/acme/old.md").write_text("# acme/old\n\n| Workstream | Owner | Milestone | Status | Next step | Notes |\n|---|---|---|---|---|---|\n"
                                                "| Underwriting | Platform | Pilot readiness | Running | Integration tests | Waiting on the bank |\n")
+    (root / "plans/acme/widget/product").mkdir()
+    (root / "plans/acme/widget/product/spec.md").write_text("# Product spec\n\nWhat we build.\n")   # a plan in a sub-folder of the project's plans
+    (root / "plans/acme/widget/product/render.py").write_text("print('not a plan')\n")
     reg = registry()
     reg["projects"].append({"id": "acme/old", "owner": "acme", "name": "old", "path": "/Users/t/Development/acme/old", "local": True, "github": "acme/old",
                             "main": {"branch": "main"}, "worktrees": [], "prs_open": [], "prs_known": True, "last_activity": int(NOW - 30 * 86400),
@@ -1525,6 +1551,29 @@ class PageBehaviorTests(unittest.TestCase):
         self.assertIn("Mondays at 09:00", jobs[0])
         self.assertEqual([j.split(" ")[0] for j in jobs[1:]], ["Not", "Overdue", "OK", "No", "Off"])
         self.assertIn("by ", jobs[2])                                                            # an interval's next run is an upper bound
+
+    def test_a_projects_plans_tab_lists_its_sub_folder_plans_under_the_folder(self):
+        spec = next(p for p in self.data["plans"] if p["title"] == "Product spec")
+        self.assertEqual((spec["home"], spec["group"]), ("acme/widget", "product"))
+        self.assertFalse(any(p["path"].endswith(".py") for p in self.data["plans"]))
+        out = self.probe("""const tp = $("#tabpanel"); out.tab = text($("#tab-plans"));
+            out.lists = $$(".panel", tp).map(s => [s.tagName.toLowerCase(), text($(".ph h2", s)), text($(".ph .count", s)), s.getAttribute("aria-label"), $$(".pl-t", s).map(text)]);
+            out.text = text(tp);""", hash_="#/projects/acme/widget?tab=plans")
+        self.assertEqual(out["tab"], "Plans 2")
+        # the project's own plans first, under a heading and a label of their own, so heading navigation reaches them
+        # before the sub-folders instead of skipping to the first folder
+        self.assertEqual(out["lists"], [["section", "Plans", "1", "Plans in acme/widget", ["Export plan"]],
+                                        ["section", "product/", "1", "Plans in product/", ["Product spec"]]])
+        self.assertNotIn("render.py", out["text"])
+        self.assertNotIn("not a plan", out["text"])
+
+    def test_an_initiatives_own_plans_beside_a_sub_folder_are_labeled_with_the_initiatives_id(self):
+        def rooms(d):
+            train = next(p for p in d["plans"] if p["title"] == "Release train")
+            d["plans"].append(dict(train, id="", title="Rooms review", scope="initiatives/lending/rooms", group="rooms", path="plans/initiatives/lending/rooms/review.md"))
+        out = self.probe("""out.lists = $$("#tabpanel .panel").map(s => [text($(".ph h2", s)), s.getAttribute("aria-label"), $$(".pl-t", s).map(text)]);""",
+                         hash_="#/initiatives/lending?tab=plans", page=self.variant(rooms))
+        self.assertEqual(out["lists"], [["Plans", "Plans in lending", ["Release train"]], ["rooms/", "Plans in rooms/", ["Rooms review"]]])
 
     def test_navigation_never_scrolls_sideways_and_every_view_stays_reachable(self):
         views = ["now", "tasks", "background", "team", "projects", "initiatives", "activity", "explorer", "health"]

@@ -79,14 +79,31 @@ def load_conf(name: str):
 
 
 def backup(path: Path, keep: int = 10):
-    """Timestamped copy in ~/.local/state/devkit/backups; keeps the newest `keep` per file."""
-    if path.exists():
-        d = STATE / "backups"
-        d.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(path, d / f"{path.name}.{time.strftime('%Y%m%d-%H%M%S')}")
-        olds = sorted(d.glob(f"{path.name}.*"))
-        for o in olds[:-keep]:
-            o.unlink()
+    """Timestamped copy in ~/.local/state/devkit/backups; keeps the newest `keep` per file. A copy can hold MCP tokens
+    (config.toml) or account state (~/.claude.json), so the folder is the owner's alone (0700) and each copy is
+    created 0600, never through a link already there; a second copy in the same second is named `-1`, `-2`, so it
+    never replaces the first. -> the copy, or None when there is no file."""
+    if not path.exists():
+        return None
+    d = STATE / "backups"
+    d.mkdir(parents=True, exist_ok=True)
+    os.chmod(d, 0o700)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions (0700 is owner-only: this tightens the backups folder)
+    stamp = time.strftime('%Y%m%d-%H%M%S')
+    for n in range(1000):
+        dest = d / f"{path.name}.{stamp}{f'-{n}' if n else ''}"
+        try:
+            fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        except FileExistsError:
+            continue
+        with os.fdopen(fd, "wb") as out, open(path, "rb") as src:
+            shutil.copyfileobj(src, out)
+        break
+    else:
+        raise OSError(f"no free backup name for {path.name} in {d}")
+    olds = sorted(d.glob(f"{path.name}.*"))
+    for o in olds[:-keep]:
+        o.unlink()
+    return dest
 
 
 _QUIET = [False]
@@ -900,7 +917,13 @@ def write_agent_instructions(quiet=False):
         step("Global agent instructions (Claude CLAUDE.md, Codex AGENTS.md)")
         text = render_instructions()
         personal_f = CONFIG_FILE.parent / "AGENTS.personal.md"
-        for target in (CLAUDE_HOME / "CLAUDE.md", CODEX_HOME / "AGENTS.md"):
+        for agent, target in (("claude", CLAUDE_HOME / "CLAUDE.md"), ("codex", CODEX_HOME / "AGENTS.md")):
+            if not agent_on(agent):  # a turned-off agent gets no rules: devkit's come out, the person's own stay
+                # only in the developer's own run: the repair a hook runs for an agent leaves them (remove_agent)
+                if core.set_by_developer() and remove_generated_rules(target):
+                    done(f"{tilde(target)} removed: {'Claude Code' if agent == 'claude' else 'Codex'} is turned off "
+                         f"(a copy is in {tilde(STATE / 'backups')})")
+                continue
             target.parent.mkdir(parents=True, exist_ok=True)
             if target.is_symlink():
                 target.unlink()
@@ -1306,6 +1329,8 @@ def _install_skills():
     managed_f = STATE / "skills-managed.json"
     previous = set(read_json(managed_f, []) or [])  # a list, or {name: [agents]} since 26.11.0
     for agent, home in (("claude", CLAUDE_HOME / "skills"), ("codex", AGENTS_HOME / "skills")):
+        if not agent_on(agent):  # a turned-off agent gets no skill links (remove_agent takes devkit's out)
+            continue
         home.mkdir(parents=True, exist_ok=True)
         mine = {n: tg for n, tg in wanted.items() if agent in only.get(n, {"claude", "codex"})}
         for name in previous - set(mine):
@@ -1445,11 +1470,7 @@ def write_codex_config(quiet=False):
             backup(hooks_f)
             hooks_f.write_text(json.dumps(merged, indent=2) + "\n")
         done(f"{tilde(hooks_f)}: " + " / ".join(ours))
-        projects = {str(DEV): {"trust_level": "trusted"}}
-        from . import registry
-        mains, _, _ = registry.discover()
-        for m in mains:
-            projects[str(m)] = {"trust_level": "trusted"}
+        projects = {p: {"trust_level": "trusted"} for p in codex_trusted_roots()}  # what the removal takes back
         try:
             with CodexRPC() as rpc:
                 edits = [(k, v, "replace") for k, v in conf["settings"].items()]
@@ -1753,6 +1774,305 @@ def _extensions(agent: str):
         fail(f"extensions: {e}")
 
 
+def agent_on(agent: str) -> bool:
+    """Whether this agent is turned on in `dev setup` (config `agents`; on unless false)."""
+    return bool((CFG.get("agents") or {}).get(agent, True))
+
+
+def remove_generated_rules(target: Path, dry: bool = False) -> bool:
+    """Remove an agent's rules file when devkit generated it (its mark on top); a hand-written one stays. A copy goes
+    to devkit's backups first, so lines the person added under devkit's mark are kept there. `dry`: change nothing.
+    -> removed (or, dry, would be)."""
+    try:
+        if target.is_file() and not target.is_symlink() and GENERATED_MARK in target.read_text()[:200]:
+            if not dry:
+                backup(target)
+                target.unlink()
+            return True
+    except OSError as e:
+        fail(f"{tilde(target)}: {e}")
+    return False
+
+
+def _devkit_skill_links(folder: Path) -> list:
+    """The links devkit made in an agent's skills folder: those that point into devkit's shared skills."""
+    if not folder.is_dir():
+        return []
+    share = str(SKILLS_SHARE)
+    return [p for p in sorted(folder.iterdir()) if p.is_symlink() and str(os.readlink(p)).startswith(share)]
+
+
+def _without_toml_tables(text: str, tables) -> str:
+    """TOML text without the tables `tables` names ("mcp_servers.x") and their sub-tables; every other line kept."""
+    out, skip = [], False
+    for line in text.splitlines(keepends=True):
+        m = re.match(r"\s*\[\[?\s*([^\]]+?)\s*\]\]?\s*(#.*)?$", line)
+        if m:
+            name = re.sub(r"""["'\s]""", "", m.group(1))
+            skip = any(name == t or name.startswith(t + ".") for t in tables)
+        if not skip:
+            out.append(line)
+    return re.sub(r"\n{3,}", "\n\n", "".join(out))
+
+
+def _replace_text(f: Path, text: str):
+    """Write `text` over `f` whole: a temporary file in the same folder with f's own mode (0600 for a new file), then
+    a rename, so Ctrl+C or a crash leaves the old file or the new one, never half of one, and no temporary file. A
+    link (a dotfiles setup) stays a link: the file it points to is the one written, in its own folder."""
+    import tempfile
+    f = f.resolve() if f.is_symlink() else f
+    mode = (os.stat(f).st_mode & 0o7777) if f.exists() else 0o600
+    fd, tmp = tempfile.mkstemp(dir=f.parent, prefix=f".{f.name}.", suffix=".devkit-tmp")
+    try:
+        with os.fdopen(fd, "w") as out:
+            out.write(text)
+        os.chmod(tmp, mode)
+        os.replace(tmp, f)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+_TOML_HEADER = re.compile(r"\s*\[\[?\s*([^\]]+?)\s*\]\]?\s*(#.*)?$")
+CODEX_FULL_ACCESS = {"approval_policy": "never", "sandbox_mode": "danger-full-access"}  # config/codex/config.json
+
+
+def codex_trusted_roots() -> list:
+    """The project folders write_codex_config trusts in Codex: the dev root and each main checkout
+    registry.discover() finds in it, as the paths it writes them."""
+    from . import registry
+    mains, _, _ = registry.discover()
+    return list(dict.fromkeys([str(DEV)] + [str(m) for m in mains]))
+
+
+def _without_devkit_modes(text: str, trusted) -> tuple:
+    """Codex's config.toml without what devkit set on the premise that its guard runs: approval_policy "never" and
+    sandbox_mode "danger-full-access" at the top level, and the project roots it trusts (a [projects."<path>"] table
+    for a folder of `trusted`, codex_trusted_roots(), whose only key is trust_level = "trusted"). A value the person
+    chose, a table in a profile, a trust the person accepted in Codex for any other folder, and a project table with
+    keys of the person's own stay. -> (text, [what went, in words])"""
+    blocks = [[None, []]]
+    for line in text.splitlines(keepends=True):
+        m = _TOML_HEADER.match(line)
+        if m:
+            blocks.append([m.group(1), [line]])
+        else:
+            blocks[-1][1].append(line)
+    out, modes, roots, ours = [], [], 0, {str(t).rstrip("/") for t in trusted}
+    for name, lines in blocks:
+        if name is None:
+            for line in lines:
+                kv = re.match(r"""\s*(approval_policy|sandbox_mode)\s*=\s*(["'])([^"']*)\2\s*(#.*)?$""", line)
+                if kv and CODEX_FULL_ACCESS[kv.group(1)] == kv.group(3):
+                    modes.append(f"{kv.group(1)} {kv.group(3)}")
+                    continue
+                out.append(line)
+            continue
+        p = re.fullmatch(r"""projects\s*\.\s*(?:"([^"\\]+)"|'([^']+)')""", name)
+        path = p and (p.group(1) or p.group(2))
+        body = [s for s in (ln.strip() for ln in lines[1:]) if s and not s.startswith("#")]
+        if path and path.rstrip("/") in ours and len(body) == 1 and \
+                re.fullmatch(r"""trust_level\s*=\s*(["'])trusted\1""", body[0]):
+            roots += 1
+            continue
+        out.extend(lines)
+    if roots:
+        modes.append(f"{roots} trusted project root{'s' if roots != 1 else ''}")
+    return re.sub(r"\n{3,}", "\n\n", "".join(out)), modes
+
+
+def _own_plugin_ids(agent: str) -> list:
+    """The ids of devkit's own plugin for this agent: those of the marketplace devkit builds from its checkout."""
+    from . import ext
+    raw = read_json(CONF / agent / "plugins.json", {}) or {}  # unrendered: {{DEVKIT}} names devkit's own marketplace
+    markets = [m for m, src in (raw.get("marketplaces") or {}).items() if src == "{{DEVKIT}}"]
+    return [p for p in ext.effective_plugin_ids(agent) if any(p.endswith("@" + m) for m in markets)] or \
+        [f"devkit@{m}" for m in markets]
+
+
+class RemovalLeft(Exception):
+    """remove_agent() left devkit in a turned-off agent: the run is not the developer's own, in a terminal."""
+
+
+AGENT_OFF_STEP = "{}: turned off in `dev setup`"  # dev install's part for a turned-off agent; the wizard reads it
+
+
+def agent_off_checks() -> list:
+    """`dev doctor` rows for the agents turned off in `dev setup`: devkit's rules, hooks or skills still in one (a run
+    that was not the developer's own left them there) -> [(group, name, ok, detail, fix)]. A dry run: it changes
+    nothing."""
+    rows = []
+    for agent, name, home in (("claude", "Claude Code", CLAUDE_HOME), ("codex", "Codex", CODEX_HOME)):
+        if agent_on(agent):
+            continue
+        fix = f"dev install --only {agent}, in your terminal"
+        try:
+            left = _remove_agent(agent, home, dry=True)
+        except Exception as e:  # a file that cannot be read: say so, never stop dev doctor
+            rows.append((name, "turned off in dev setup", False, f"cannot read {tilde(home)}: {e}", fix))
+            continue
+        rows.append((name, "turned off in dev setup", not left,
+                     f"devkit's {', '.join(left)} stay in {tilde(home)}" if left else "nothing of devkit's is left",
+                     fix))
+    return rows
+
+
+def remove_agent(agent: str) -> list:
+    """An agent turned off in `dev setup`: remove what devkit wrote for it, never the agent itself or the person's own
+    settings -> what was removed, in words. The rules file devkit generated, devkit's hooks and status line, its
+    skill links, its MCP servers, its plugin, and for Codex its profiles and agent roles. Each file is backed up
+    before it changes. Safe to run again: what is gone stays gone.
+
+    Taking devkit's hooks out takes the guard out, so only the developer's own run does it: an agent can turn an
+    agent off (`dev config set agents.claude false`) and run `dev setup -y`, and when a dry run finds something of
+    devkit's in the agent, that run raises RemovalLeft and changes nothing. With nothing of devkit's there (a fresh
+    Mac), there is nothing to refuse. Every outcome leaves an `install.remove-agent` audit record (the registered
+    install family)."""
+    name = "Claude Code" if agent == "claude" else "Codex"
+    home = CLAUDE_HOME if agent == "claude" else CODEX_HOME
+    if core.older_copy_skip(f"devkit's entries in {tilde(home)}"):
+        return []
+    if not core.set_by_developer():
+        if not _remove_agent(agent, home, dry=True):
+            _audit("install.remove-agent", tilde(home), "nothing of devkit's was left")
+            return []
+        _audit("install.remove-agent", tilde(home),
+               f"{name} is turned off; not the developer's terminal, so nothing removed", "refused")
+        raise RemovalLeft(f"{name} is turned off, but this run is not from your terminal, so devkit's hooks, rules "
+                          f"and skills stay in {tilde(home)}. Run dev setup in your terminal to remove them.")
+    gone = _remove_agent(agent, home)
+    _audit("install.remove-agent", tilde(home),
+           ("removed: " + "; ".join(gone)) if gone else "nothing of devkit's was left")
+    return gone
+
+
+def _mcp_shape(spec) -> tuple:
+    """What an MCP server runs, as the agents store it: (command, args, url, env). Claude Code adds `type` and an
+    empty `env`, so neither counts."""
+    spec = spec if isinstance(spec, dict) else {}
+    env = spec.get("env") if isinstance(spec.get("env"), dict) else {}
+    args = spec.get("args") if isinstance(spec.get("args"), list) else []
+    return (str(spec.get("command") or ""), [str(a) for a in args], str(spec.get("url") or ""),
+            {str(k): str(v) for k, v in env.items()})
+
+
+def _devkit_mcp(catalog: dict, installed: dict) -> list:
+    """The names in `installed` ({name: spec}) that are devkit's: the server devkit's catalog writes under that name,
+    the same command, arguments, URL and environment. A name alone proves nothing: angular-cli or chrome-devtools
+    may be the person's own, set up as the vendor's docs show, and that one stays."""
+    return [n for n, spec in catalog.items() if n in installed and _mcp_shape(installed[n]) == _mcp_shape(spec)]
+
+
+def _remove_agent(agent: str, home: Path, dry: bool = False) -> list:
+    """What remove_agent() takes out, in words. `dry`: change no file and start no agent CLI, only say what would go.
+    A plugin, which only the agent's own CLI lists, is not counted then; Claude Code's MCP servers count when its CLI
+    is installed, as the real run removes them only then."""
+    from . import ext
+    gone, catalog, own = [], ext.effective_mcp(agent), _own_plugin_ids(agent)
+    rules = home / ("CLAUDE.md" if agent == "claude" else "AGENTS.md")
+    if remove_generated_rules(rules, dry=dry):
+        gone.append(f"rules ({tilde(rules)}" + ("" if dry else f"; a copy is in {tilde(STATE / 'backups')}") + ")")
+    links = _devkit_skill_links((CLAUDE_HOME if agent == "claude" else AGENTS_HOME) / "skills")
+    for p in links if not dry else ():
+        p.unlink()
+    if links:
+        gone.append(f"{len(links)} skill link{'s' if len(links) != 1 else ''}")
+    if agent == "claude":
+        f = CLAUDE_HOME / "settings.json"
+        cur = read_json(f, None)
+        if isinstance(cur, dict):
+            new = dict(cur)
+            hooks = merge_hooks(cur.get("hooks") or {}, {})
+            new.pop("hooks", None)
+            if hooks:
+                new["hooks"] = hooks
+            if "hook statusline" in str((cur.get("statusLine") or {}).get("command") or ""):
+                new.pop("statusLine", None)
+            if isinstance(cur.get("enabledPlugins"), dict):
+                new["enabledPlugins"] = {k: v for k, v in cur["enabledPlugins"].items() if k not in own}
+            # devkit set no prompts on the premise that its guard runs: without the guard, its values go and the
+            # vendor default returns; a mode the person chose stays
+            modes, perms = [], cur.get("permissions")
+            if isinstance(perms, dict) and perms.get("defaultMode") == "bypassPermissions":
+                kept_perms = {k: v for k, v in perms.items() if k != "defaultMode"}
+                new.pop("permissions")
+                if kept_perms:
+                    new["permissions"] = kept_perms
+                modes.append("bypassPermissions")
+            if cur.get("skipDangerousModePermissionPrompt") is True:
+                new.pop("skipDangerousModePermissionPrompt")
+                modes.append("the skipped bypass warning")
+            if new != cur:
+                if not dry:
+                    backup(f)
+                    _replace_text(f, json.dumps(new, indent=2, ensure_ascii=False) + "\n")
+                if {k: v for k, v in new.items() if k not in ("permissions", "skipDangerousModePermissionPrompt")} != \
+                        {k: v for k, v in cur.items() if k not in ("permissions", "skipDangerousModePermissionPrompt")}:
+                    gone.append("hooks, status line and plugin entry in settings.json")
+                if modes:
+                    gone.append(f"the permission mode devkit set ({' and '.join(modes)}) in settings.json")
+        if core.have("claude"):
+            claude_json = HOME / ".claude.json"  # Claude Code's user-scope MCP servers, beside its account state
+            servers = (read_json(claude_json, {}) or {}).get("mcpServers") if claude_json.is_file() else None
+            mcp = _devkit_mcp(catalog, servers if isinstance(servers, dict) else {})
+            if mcp and not dry:
+                backup(claude_json)
+            removed = mcp if dry else \
+                [m for m in mcp if sh(["claude", "mcp", "remove", "-s", "user", m], timeout=30)[0] == 0]
+            removed_plugins = [] if dry else \
+                [p for p in own if sh(["claude", "plugin", "uninstall", p], timeout=120)[0] == 0]
+            if removed:
+                gone.append(f"MCP servers ({', '.join(removed)})")
+            if removed_plugins:
+                gone.append(f"the {', '.join(removed_plugins)} plugin")
+        return gone
+    f = CODEX_HOME / "hooks.json"
+    doc = read_json(f, None) if f.is_file() else None
+    cur = doc.get("hooks") if isinstance(doc, dict) else None
+    if isinstance(cur, dict):
+        kept = merge_hooks(cur, {})
+        if kept != cur and not dry:
+            backup(f)
+            rest = {k: v for k, v in doc.items() if k != "hooks"}  # keys of the file other than hooks stay
+            if kept or rest or f.is_symlink():  # a linked file is emptied: its dotfiles copy loses the hooks too
+                _replace_text(f, json.dumps({**rest, **({"hooks": kept} if kept else {})}, indent=2) + "\n")
+            else:
+                f.unlink()
+        if kept != cur:
+            gone.append(f"hooks ({tilde(f)})")
+    toml = CODEX_HOME / "config.toml"
+    if toml.is_file():
+        text = toml.read_text()
+        servers, _ = ext.codex_mcp_servers(text)  # a server with lines the reader cannot read is never devkit's
+        mcp = _devkit_mcp(catalog, {n: e["table"] for n, e in servers.items() if not e["unread"]})
+        new = _without_toml_tables(text, [f"mcp_servers.{m}" for m in mcp]) if mcp else text
+        new, modes = _without_devkit_modes(new, codex_trusted_roots())
+        if new != text:
+            if not dry:
+                backup(toml)
+                _replace_text(toml, new)
+            if mcp:
+                gone.append(f"MCP servers in config.toml ({', '.join(mcp)})")
+            if modes:
+                gone.append(f"{', '.join(modes[:-1]) + ' and ' if len(modes) > 1 else ''}{modes[-1]} in config.toml")
+    owned = [p for p in sorted(CODEX_HOME.glob("*.config.toml")) if p.read_text()[:30].startswith("# Managed by devkit")]
+    owned += [p for p in sorted((CODEX_HOME / "agents").glob("*.toml"))
+              if p.read_text()[:len(CODEX_ROLE_MARK)] == CODEX_ROLE_MARK]
+    for p in owned if not dry else ():
+        backup(p)
+        p.unlink()
+    if owned:
+        gone.append(f"{len(owned)} profile and agent role file{'s' if len(owned) != 1 else ''}")
+    if core.have("codex") and not dry:
+        removed_plugins = [p for p in own if sh(["codex", "plugin", "remove", p], timeout=120)[0] == 0]
+        if removed_plugins:
+            gone.append(f"the {', '.join(removed_plugins)} plugin")
+    return gone
+
+
 def setup_tools():
     """Homebrew packages for the configured stacks, git hosts and clouds (only what is missing)."""
     step("Tools for your stacks, git hosts and clouds")
@@ -1760,7 +2080,8 @@ def setup_tools():
     if not core.have("brew"):
         fail("Homebrew not found — run install.sh")
         return
-    groups = set(wizard.BASE_GROUPS) | set(CFG.get("stacks") or []) | set(toolchain.groups())
+    agents = [g for g in wizard.agent_groups(CFG.get("agents")) if g == "codex"]  # Claude Code is not a package
+    groups = set(wizard.BASE_GROUPS) | set(CFG.get("stacks") or []) | set(toolchain.groups()) | set(agents)
     missing = wizard.missing_packages(groups)
     if not missing:
         done(f"all installed · {', '.join(sorted(groups))}")
@@ -1769,7 +2090,7 @@ def setup_tools():
         return
     else:
         rc = wizard.install_packages(CFG.get("stacks") or [], CFG.get("agents", {}).get("claude", True),
-                                     extra=toolchain.groups())
+                                     extra=toolchain.groups(), with_codex="codex" in agents)
         done("installed what was missing") if rc == 0 else fail("some packages failed — `brew bundle` output above")
     for line in toolchain.postinstall(toolchain.selected()):
         done(line)
@@ -2148,6 +2469,18 @@ def install_shell():
         note("not set up yet: dev setup shell turns on the fzf pickers")
 
 
+def _line_buffered():
+    """Write each line of `dev install` as it is printed, also into a pipe (the setup wizard reads one). bin/dev runs
+    with -I, which ignores PYTHONUNBUFFERED, so a pipe got its output in blocks of 8 KB: when the second half (the
+    pinned copy, started with os.execv) was killed, every line it had printed was lost, and the wizard could show only
+    the first half's banner."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(line_buffering=True)
+        except (AttributeError, ValueError, OSError):  # not a text stream (tests), or already closed
+            pass
+
+
 def run_install(only=None, unverified_why=None, version=None, as_pinned=False, commit_template=None,
                 assume_yes=False) -> int:
     """`dev install`. From a checkout it pins the checkout (or switches to `version`), then starts itself again from
@@ -2155,6 +2488,7 @@ def run_install(only=None, unverified_why=None, version=None, as_pinned=False, c
     some steps from the installed copy without pinning. Before it changes anything it names the running sessions that
     use devkit, which must be restarted (hooks.confirm_restart; `assume_yes`: go on without asking). -> exit code (1
     when the copy was refused or the developer stopped it)."""
+    _line_buffered()
     if not as_pinned:
         print(ui.banner("install"))
         from . import hooks
@@ -2188,8 +2522,19 @@ def run_install(only=None, unverified_why=None, version=None, as_pinned=False, c
     for name, fn in steps:
         if only and name not in only:
             continue
-        if name in ("claude", "codex") and not CFG.get("agents", {}).get(name, True):
-            step(f"{'Claude Code' if name == 'claude' else 'Codex'}: skipped (disabled in `dev setup`)")
+        if name in ("claude", "codex") and not agent_on(name):
+            label = "Claude Code" if name == "claude" else "Codex"
+            step(AGENT_OFF_STEP.format(label))
+            try:
+                gone = remove_agent(name)
+            except RemovalLeft as e:
+                note(str(e))
+                continue
+            except Exception as e:  # keep going; doctor reports what is left
+                fail(f"{name}: {e}")
+                continue
+            done(f"removed devkit's {', '.join(gone)}; {label} and your own settings stay" if gone else
+                 f"nothing of devkit's is left in {label}; {label} and your own settings stay")
             continue
         try:
             fn()
@@ -2282,8 +2627,9 @@ def tools_check(stacks, have=None) -> tuple:
     from . import wizard
     have = have or core.have
     off = [a for a in wizard.AGENT_NAMES if not CFG.get("agents", {}).get(a, True)]
-    tools = {t: how for g, group in wizard.DOCTOR_TOOLS.items() if g in wizard.BASE_GROUPS or g in stacks
-             for t, how in group.items() if not (g == "agents" and t in off)}  # the agents group's tools are the agents
+    on = wizard.agent_groups(CFG.get("agents"))  # each agent's group holds that agent alone
+    tools = {t: how for g, group in wizard.DOCTOR_TOOLS.items() if g in wizard.BASE_GROUPS or g in stacks or g in on
+             for t, how in group.items()}
     missing = [t for t in tools if not have(t)]
     skipped = [wizard.STACK_UI[s][0] for s in wizard.STACKS if s not in stacks]
     detail = f"{len(tools) - len(missing)}/{len(tools)} present"
@@ -2395,21 +2741,26 @@ def doctor() -> int:
     for row in selfcheck.work_state_checks():  # the project you are in: stale work items and runs, each with its fix
         check(*row)
 
-    for target in (CLAUDE_HOME / "CLAUDE.md", CODEX_HOME / "AGENTS.md"):
+    for agent, target in (("claude", CLAUDE_HOME / "CLAUDE.md"), ("codex", CODEX_HOME / "AGENTS.md")):
+        if not agent_on(agent):  # turned off: devkit took its rules out
+            continue
         state = instructions_state(target)
         check("Agents", f"{tilde(target)}", state == "current",
               {"current": f"current: devkit {core.VERSION}'s rules", "outdated": "out of date: an older devkit wrote it",
                "hand-written": "hand-written, not devkit's", "missing": "missing"}[state],
               "dev install --only instructions")
+    for row in agent_off_checks():  # turned off: devkit's hooks may still be there, left by a run not from a terminal
+        check(*row)
     try:
         from . import crew
         stale = crew.sync(check=True)
         check("Agents", "crew agents", not stale, f"{len(crew.load()['members']) - 1} members generated from "
               f"config/crew.json" if not stale else f"out of date: {', '.join(map(str, stale[:4]))}", "dev crew sync")
         roles = crew.codex_roles()
-        stale = stale_codex_roles(CODEX_HOME / "agents", roles)
-        check("Codex", "crew roles", not stale, f"{len(roles)} roles in ~/.codex/agents, current" if not stale else
-              f"missing or out of date: {', '.join(stale[:5])}", "dev install --only codex")
+        stale = stale_codex_roles(CODEX_HOME / "agents", roles) if agent_on("codex") else []
+        if agent_on("codex"):
+            check("Codex", "crew roles", not stale, f"{len(roles)} roles in ~/.codex/agents, current" if not stale
+                  else f"missing or out of date: {', '.join(stale[:5])}", "dev install --only codex")
     except Exception as e:
         check("Agents", "crew agents", False, f"crew: {e}", "dev crew sync")
     for row in crew_skill_checks([a for a in ("claude", "codex") if CFG.get("agents", {}).get(a, True)]) + \
@@ -2419,6 +2770,8 @@ def doctor() -> int:
     if not isinstance(managed, dict):  # before 26.11.0: every skill went to both agents
         managed = {n: ["claude", "codex"] for n in managed}
     for agent, home in (("claude", CLAUDE_HOME / "skills"), ("codex", AGENTS_HOME / "skills")):
+        if not agent_on(agent):  # turned off: devkit took its skill links out
+            continue
         mine = [n for n, agents in managed.items() if agent in agents]
         broken = [n for n in mine if not (home / n / "SKILL.md").exists()]
         check("Agents", f"skills in {tilde(home)}", bool(mine) and not broken, f"{len(mine) - len(broken)}/{len(mine)} linked"

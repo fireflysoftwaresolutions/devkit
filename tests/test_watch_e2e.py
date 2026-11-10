@@ -134,7 +134,10 @@ class WakeEveryEventTests(HookSandbox):
         box = {}
 
         def run():
-            box["rc"], box["out"], box["err"] = dev("watch", "--wait", "--timeout", "240")
+            # the tech lead's background wait, as the PreToolUse hook stamps it: its own call leaves the ledger as
+            # soon as it starts, and members work
+            with mock.patch.dict(os.environ, {"DEVKIT_SPEAKER": "main"}):
+                box["rc"], box["out"], box["err"] = dev("watch", "--wait", "--timeout", "240")
         t = threading.Thread(target=run)
         t.start()
         return t, box

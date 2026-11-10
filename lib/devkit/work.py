@@ -17,12 +17,11 @@ from __future__ import annotations
 
 import calendar
 import contextlib
+import hashlib
 import json
 import os
 import re
-import secrets
 import socket
-import stat
 import time
 from collections import Counter
 from pathlib import Path
@@ -233,40 +232,50 @@ def lost_lines(before: str, after: str, edited=()) -> list:
 
 
 def _replace(path: Path, text: str) -> None:
-    """Write `text` to a new file in the same folder, then swap it in (os.replace): a reader sees the old record or
-    the new one, never part of one. The temporary name ends in `.tmp`, which the handoff repository ignores."""
-    tmp = path.with_name(f".{path.name}.{secrets.token_hex(4)}.tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)  # the umask applies, as to a plain write
-    try:
-        with os.fdopen(fd, "w") as fh:
-            fh.write(text)
-            fh.flush()
-            os.fsync(fh.fileno())
-        try:
-            os.chmod(tmp, stat.S_IMODE(path.stat().st_mode))  # keep the record's own permissions
-        except FileNotFoundError:
-            pass
-        os.replace(tmp, path)
-    except BaseException:
-        try:
-            tmp.unlink()
-        except OSError:
-            pass
-        raise
+    """Write `text` to a new file in the same folder, then swap it in (core.replace_text): a reader sees the old
+    record or the new one, never part of one."""
+    core.replace_text(path, text)
+
+
+RECORD_WAIT = 30  # seconds a write waits for another process's write of the same file on this Mac
+
+
+class RecordBusyError(RecordLossError):
+    """Another devkit process held the record's lock for RECORD_WAIT seconds: nothing was written."""
+
+    def __init__(self, path, wait):
+        self.path, self.lost = Path(path), []
+        ValueError.__init__(self, f"refused to write {path}: another devkit process on this Mac kept it locked for "
+                                  f"{wait:.0f} s. Nothing was written; run the command again.")
+
+
+@contextlib.contextmanager
+def record_lock(path, wait: float = RECORD_WAIT):
+    """Hold this Mac's lock on a shared file (a record, the month's session log) across a read-modify-write: another
+    devkit process that writes the same file waits, then reads what this one wrote. Reentrant; write_record and the
+    session log writers take it themselves. Raises RecordBusyError after `wait` seconds."""
+    with core.file_lock(path, wait) as got:
+        if not got:
+            raise RecordBusyError(path, wait)
+        yield
 
 
 def write_record(path: Path, text: str, edited=()) -> None:
     """Write a record file, but refuse (RecordLossError, the file unchanged) when the text would drop lines of the
-    version on disk that this change does not edit: a misread record must stop the command, never shrink."""
+    version on disk that this change does not edit: a misread record must stop the command, never shrink. The read,
+    the check and the rename hold the record's lock (record_lock), so a write that another process made after this
+    one's caller read the record is seen by the check and refused, never overwritten: a caller is never told a write
+    succeeded that the record then lost. A caller that holds record_lock from its own read takes turns instead."""
     path = Path(path)
-    try:
-        before = path.read_text()
-    except FileNotFoundError:
-        before = ""
-    lost = lost_lines(before, text, edited)
-    if lost:
-        raise RecordLossError(path, lost)
-    _replace(path, text)
+    with record_lock(path):
+        try:
+            before = path.read_text()
+        except FileNotFoundError:
+            before = ""
+        lost = lost_lines(before, text, edited)
+        if lost:
+            raise RecordLossError(path, lost)
+        _replace(path, text)
 
 
 def parse(text: str) -> dict:
@@ -375,7 +384,8 @@ def all_items(scope: str = None) -> list:
 
 
 def find(selector: str, scope: str = None) -> dict:
-    """By id (exact or unique prefix), by number in `dev task` order, or by a unique part of the title."""
+    """By id (exact or unique prefix), by number in the list `dev task` showed (`by_number`), or by a unique part of
+    the title."""
     items = [i for i in all_items(scope) if i["meta"].get("status") not in ("done", "cancelled")] if not \
         selector.upper().startswith(("T-", "F-", "B-", "S-")) else all_items(scope)
     sel = selector.strip()
@@ -388,11 +398,7 @@ def find(selector: str, scope: str = None) -> dict:
             return by_id[0]
         raise ValueError(f"“{sel}” matches {len(by_id)} items")
     if sel.isdigit():
-        ordered = ordered_open(items)
-        n = int(sel)
-        if 1 <= n <= len(ordered):
-            return ordered[n - 1]
-        raise ValueError(f"no open item #{n}")
+        return by_number(int(sel), scope, items)
     hits = [i for i in items if sel.lower() in i["meta"].get("title", "").lower()]
     if len(hits) == 1:
         return hits[0]
@@ -407,15 +413,193 @@ def ordered_open(items: list) -> list:
                                         i["meta"].get("created", "")))
 
 
+# --------------------------------------------------------------------------- numbers and the Now limit
+# `dev task` numbers the open items, and `dev task <verb> <n>` takes such a number. The list moves under it: a close,
+# an add or a move renumbers every item after it, so `done 9` and then `done 40` once closed the item that had moved up
+# to #40. A number therefore means the item at that place in the list `dev task` last showed this viewer (_viewer: the
+# Codex thread, else the agent session and the crew lane in it, else the shell that ran `dev`; a command the call
+# ledger cannot tie to one caller gets no numbers), and it is refused once the open items are no longer that list in
+# that order, or the list is more than LIST_TTL old. The refusal names the id #n had, and has now, so the caller acts
+# by id. Ids always work. Each viewer's lists live in STATE/task-lists/<viewer>-<hash>.json (_lists_file): {viewer,
+# lists: {scope: {ids, shown_at}}}, on this Mac only.
+
+LIST_TTL = 30 * 60  # seconds a shown list numbers items
+NOW_LIMIT = 5  # open items in a project's Now above which devkit warns
+
+
+def _viewer() -> tuple:
+    """Who reads the numbers -> (the key of their record, '') or ('', why the command has none):
+    codex:<thread>             a Codex thread (CODEX_THREAD_ID), also one started from a Claude Code shell, whose
+                               DEVKIT_SESSION it inherits
+    <agent>:<session>[:<lane>] the agent session that runs the command (progress.resolve_session) and who runs it:
+                               the crew lane DEVKIT_FROM_AGENT names, else the caller whose open call the ledger
+                               matches to this command (no lane: the tech lead). Every shell of a Claude Code
+                               session, its lanes' too, has one DEVKIT_SESSION, so only the ledger tells them apart.
+    shell-<parent pid>         no session of its own: a developer's shell (a recent session of the folder is a guess)
+    no key                     the ledger cannot say whose command this is: more than one open call of the session
+                               names it, or none does (a loop over a variable, a script, a call open past its time
+                               limit, a lost ledger write, the developer's own `! dev task`). Taking the tech lead's
+                               list then would let a lane close the item at the tech lead's #n, so: no numbers"""
+    from . import progress
+    thread = os.environ.get("CODEX_THREAD_ID", "")
+    if thread:
+        return f"codex:{thread}", ""
+    lane = os.environ.get("DEVKIT_FROM_AGENT") or ""
+    if lane:
+        agent, sid, how = progress.resolve_session()
+        calls, unmatched = [], False
+    else:
+        who = progress.caller()
+        agent, sid, how, calls = who["agent"], who["session"], who["how"], who["calls"]
+        unmatched = who["caller"] == "unknown"
+        lane = "" if who["caller"] in progress.NOT_A_LANE else who["caller"]
+    if how in ("recency", "shell"):
+        return f"shell-{os.getppid()}", ""
+    if len(calls) > 1:
+        return "", "another open call of this session runs the same command"
+    if unmatched:
+        return "", ("no open call of this session holds this command as typed (a loop over a variable, a script, a "
+                    "call open past its time limit)")
+    return f"{agent}:{sid}" + (f":{lane}" if lane else ""), ""
+
+
+def _lists_file(viewer: str) -> Path:
+    """The record of `viewer`'s lists: the key written for a file name and cut to 63 characters, then a hash of the
+    whole key, so two viewers never share one, also when their keys differ only in characters a name cannot hold
+    (`a:b` and `a_b` both read a_b). A record named before every name had the hash (claude_<session>.json) is not
+    read: the first `dev task` after the update records the list afresh, and _record_shown removes the old file once
+    it is a day old."""
+    name = re.sub(r"[^A-Za-z0-9._-]+", "_", viewer).strip("._")[:63] or "shell"
+    return core.STATE / "task-lists" / f"{name}-{hashlib.sha256(viewer.encode()).hexdigest()[:16]}.json"
+
+
+def _fresh(shown_at: float, now: float) -> bool:
+    """A list shown less than LIST_TTL ago numbers items. One shown at a time still to come (this Mac's clock was set
+    back, or the record was edited) does not: it would never expire."""
+    return 0 <= now - shown_at < LIST_TTL
+
+
+def _when(shown_at: float) -> str:
+    """When a list was shown, by this Mac's clock: the time, with the day when that was not today."""
+    at = time.localtime(shown_at)
+    same_day = time.strftime("%Y-%m-%d", at) == time.strftime("%Y-%m-%d", time.localtime(time.time()))
+    return time.strftime("%H:%M" if same_day else "%Y-%m-%d %H:%M", at)
+
+
+def _shown_lists(viewer: str) -> dict:
+    try:
+        data = json.loads(_lists_file(viewer).read_text())
+    except (OSError, ValueError):
+        return {}
+    lists = data.get("lists") if isinstance(data, dict) else None
+    return lists if isinstance(lists, dict) else {}
+
+
+def _record_shown(viewer: str, scope: str, ids: list, now: float) -> bool:
+    """Record `ids` as the list of `scope` this viewer was shown; drop the viewer's expired lists and the files of
+    viewers gone for a day. -> whether it was recorded (unrecorded numbers are refused, so print none)."""
+    if not viewer:
+        return False
+    f = _lists_file(viewer)
+    lists = {s: x for s, x in _shown_lists(viewer).items()
+             if isinstance(x, dict) and _fresh(parse_iso(x.get("shown_at", "")), now)}
+    lists[scope or ""] = {"ids": ids, "shown_at": now_iso(now)}
+    try:
+        f.parent.mkdir(parents=True, exist_ok=True)
+        _replace(f, json.dumps({"viewer": viewer, "lists": lists}, indent=1, ensure_ascii=False) + "\n")
+    except OSError:
+        return False
+    for old in f.parent.glob("*.json"):
+        with contextlib.suppress(OSError):
+            if old != f and now - old.stat().st_mtime > 86400:
+                old.unlink()
+    return True
+
+
+def show(scope: str, items: list = None, rebind: bool = True) -> tuple:
+    """-> (the open items of `scope` in `dev task` order, whether to print their numbers). rebind (the `dev task`
+    list): this list is the one this viewer's numbers point into from now on. rebind=False (the list printed after a
+    write): numbers keep pointing into the list shown before, so this one is numbered only while it is still that list
+    (which then counts as shown again); after a close, an add or a move it is printed without numbers."""
+    ordered = ordered_open(all_items(scope) if items is None else items)
+    ids = [i["meta"]["id"] for i in ordered]
+    now, (viewer, _) = time.time(), _viewer()
+    if not rebind:
+        shown = _shown_lists(viewer).get(scope or "") if viewer else None
+        if not isinstance(shown, dict) or shown.get("ids") != ids or \
+                not _fresh(parse_iso(shown.get("shown_at", "")), now):
+            return ordered, False
+    return ordered, _record_shown(viewer, scope, ids, now)
+
+
+def by_number(n: int, scope: str, items: list = None) -> dict:
+    """The open item at #n of the list `dev task` showed this viewer, while the open items are still that list in that
+    order and it was shown less than LIST_TTL ago. Otherwise a ValueError that names the id #n had, and has now."""
+    current = ordered_open(all_items(scope) if items is None else items)
+    ids = [i["meta"]["id"] for i in current]
+    where = scope or "all projects"
+    viewer, why = _viewer()
+    if not viewer:
+        raise ValueError(f"#{n}: {why}, so devkit cannot tell whose list the number points into: use the item's id "
+                         f"(T-…, F-…, B-…, S-…)")
+    shown = _shown_lists(viewer).get(scope or "")
+    then = shown.get("ids") if isinstance(shown, dict) else None
+    if not isinstance(then, list) or not all(isinstance(x, str) for x in then):  # none, or a damaged record
+        raise ValueError(f"#{n}: no list of {where} was shown here, so the number points at nothing: run dev task and "
+                         f"use its numbers, or use the item's id (T-…, F-…, B-…, S-…)")
+    shown_at, now = parse_iso(shown.get("shown_at", "")), time.time()
+    at = _when(shown_at)
+    if not 1 <= n <= len(then):
+        raise ValueError(f"no #{n} in the list of {where} shown at {at} ({len(then)} open items): run dev task to "
+                         f"number the list again, or use an id")
+    was = then[n - 1]
+    if _fresh(shown_at, now) and then == ids:
+        return current[n - 1]
+    titles = {i["meta"]["id"]: i["meta"].get("title", "") for i in all_items(scope)}
+    name = lambda iid: f"{iid} “{titles.get(iid, '')}”"  # noqa: E731
+    if not _fresh(shown_at, now):
+        age = f"more than {LIST_TTL // 60} minutes ago" if now >= shown_at else "a time the clock has not reached"
+        raise ValueError(f"#{n} was {name(was)} in the list of {where} shown at {at}, {age}: use its id, or run "
+                         f"dev task to number the list again")
+    closed, added = len(set(then) - set(ids)), len(set(ids) - set(then))
+    change = ", ".join(x for x in (f"{closed} closed" if closed else "", f"{added} added" if added else "") if x) \
+        or "the order changed"
+    now_is = "" if n > len(ids) else " and still is" if ids[n - 1] == was else f" and is {name(ids[n - 1])} now"
+    raise ValueError(f"the open items of {where} changed since the list was shown at {at} ({change}): #{n} was "
+                     f"{name(was)} then{now_is}. Use the id you mean, or run dev task to number the list again")
+
+
+def acted(verb: str, it: dict) -> str:
+    """The line a write prints: what it did to which item, by id and title (`done B-… “Fix login”`)."""
+    return f"{verb} {it['meta']['id']} “{it['meta'].get('title', '')}”"
+
+
+def now_warning(scope: str, items: list = None) -> str:
+    """'' while the open items in `scope`'s Now are at most NOW_LIMIT, otherwise one line that says how many and how
+    many are being worked on. Only a warning: nothing is refused for it."""
+    items = all_items(scope) if items is None else items
+    now = [i for i in items if i["meta"].get("bucket") == "now" and i["meta"].get("status") in OPEN]
+    if len(now) <= NOW_LIMIT:
+        return ""
+    doing = sum(1 for i in now if i["meta"].get("status") == "doing")
+    return (f"{len(now)} items in Now in {scope}, {doing} being worked on: more than {NOW_LIMIT} hides what comes "
+            f"first; move what waits with dev task move <id> --to next --why \"…\"")
+
+
 # --------------------------------------------------------------------------- git (audit trail)
 # Every Mac pulls the handoff repository with a rebase. A rebase that stops (a conflict, a killed git) leaves the
 # repository on a detached HEAD: a commit made there is lost when the rebase ends, and every later pull and push
 # fails. So devkit's git writes to the repository run one at a time on a Mac (`_repo_lock`), a conflict in an item
-# is settled item by item (`merge_item`), any other conflict aborts the rebase, and a rebase found stopped is aborted
-# before the next pull or commit. Each abort is a sync problem: an audit record, kept at every audit level, and
-# handoff-push-failed.json, which `dev status` and the dashboard show until a push succeeds.
+# is settled item by item (`merge_item`), a conflict in a project's note or an initiative's README file by file
+# (`_settle_note`), any other conflict aborts the rebase, and a rebase found stopped is aborted before the next pull
+# or commit. Each abort is a sync problem: an audit record, kept at every audit level, and handoff-push-failed.json,
+# which `dev status` and the dashboard show until a push succeeds. A rebase rewrites notes in the working tree, so it
+# also holds the notes lock that every note writer takes, before _repo_lock as every process takes them
+# (`_rebase_locks`); the fetch and the push, which can take a minute, hold _repo_lock alone, so a note writer never
+# waits for the network.
 
 _REBASE_DIRS = ("rebase-merge", "rebase-apply")
+_BUSY = "another devkit process kept the handoff repository busy"
 _held = [0]
 
 
@@ -436,6 +620,22 @@ def _repo_lock(wait: float = 90):
             yield got
         finally:
             _held[0] -= 1 if got else 0
+
+
+@contextlib.contextmanager
+def _rebase_locks(wait: float = 90):
+    """The locks a rebase of the handoff repository holds: the notes lock (registry.notes_lock), then _repo_lock, the
+    order every devkit process takes them in. While git and the settling of conflicts rewrite notes, some with
+    conflict markers, a note writer (dev note set, an embargo, dev sync's own) waits: it never reads a note mid-rebase,
+    nor writes one between the settling and its `git add`. Only local git work runs under them. Never enter it while
+    holding _repo_lock. -> whether both are held."""
+    from . import registry
+    with registry.notes_lock(wait) as notes:
+        if not notes:
+            yield False
+            return
+        with _repo_lock(wait) as got:
+            yield got
 
 
 def push_failed_file() -> Path:
@@ -516,22 +716,178 @@ def _settle(rel: str, retake: bool):
     return merged if merged is not None else remote if retake else None
 
 
-def pull_rebase(retake=()) -> tuple:
-    """Pull the handoff repository, rebasing this Mac's commits on the remote's. A conflict in an item is settled
-    (`_settle`); any other conflict aborts the rebase, leaves the commits as they were and records a sync problem.
-    `retake`: item paths (relative) whose change the caller applies again itself. Call it under `_repo_lock`.
+# A project's note (projects/<id>.md) and an initiative's README hold blocks devkit writes again on every sync (the
+# auto block: this Mac's checkout, branches and PRs; the tasks block: the work items) around text people write. Two
+# Macs' blocks always differ, so a conflict in them is never merged line by line: the hand-written text is merged
+# (three-way, with the blocks emptied), the blocks are taken whole from this Mac, and after the pull the tasks block
+# is written again from the work items both Macs now have (`_rewrite_tasks`); the next `dev sync` writes the auto
+# block from this Mac's checkout. A conflict in the hand-written text keeps the remote's note, so the rest of the
+# pull goes on, and saves this Mac's version with the command that brings it back (`_save_note_conflict`).
+_NOTE_FILE = re.compile(r"^(projects/.+\.md|initiatives/[^/]+/README\.md)$")
+
+
+def _generated_blocks() -> tuple:
+    from .registry import AUTO_END, AUTO_START, TASKS_END, TASKS_START
+    return (AUTO_START, AUTO_END), (TASKS_START, TASKS_END)
+
+
+def _hollow(text: str) -> tuple:
+    """-> (the note with each generated block emptied to its two marker lines, {start marker: the whole block})."""
+    blocks = {}
+    for start, end in _generated_blocks():
+        i = text.find(start)
+        j = text.find(end, i + len(start)) if i != -1 else -1
+        if j == -1:
+            continue
+        blocks[start] = text[i:j + len(end)]
+        text = text[:i] + start + "\n" + end + text[j + len(end):]
+    return text, blocks
+
+
+def _merge_text(base: str, remote: str, mine: str):
+    """Three-way merge of two versions of a text with the one both started from (git merge-file). -> the merged text,
+    or None when both changed the same lines."""
+    import tempfile
+    with tempfile.TemporaryDirectory(prefix="devkit-merge-") as d:
+        paths = []
+        for name, text in (("remote", remote), ("base", base), ("mine", mine)):
+            p = Path(d) / name
+            p.write_text(text)
+            paths.append(str(p))
+        rc, out, _ = core.sh(["git", "merge-file", "-p", "-q", *paths])
+    return out + "\n" if rc == 0 else None
+
+
+def _settle_note(rel: str, set_aside: dict = None) -> tuple:
+    """A note in conflict during the rebase -> (the text to keep, the problem when this Mac's hand-written change
+    could not be merged and was saved aside, else ""). See _NOTE_FILE; `set_aside`: see _save_note_conflict."""
+    base, remote, mine = _stage(rel, 1), _stage(rel, 2), _stage(rel, 3)  # in a rebase, 2 is the remote's side
+    if remote is None or mine is None:  # one side deleted the note: keep the text the other side has
+        return remote or mine or "", ""
+    (hb, _), (hr, remote_blocks), (hm, my_blocks) = _hollow(base or ""), _hollow(remote), _hollow(mine)
+    merged = _merge_text(hb, hr, hm)
+    if merged is None:
+        return remote, _save_note_conflict(rel, base or "", mine, set_aside)
+    for start, end in _generated_blocks():
+        block = my_blocks.get(start) or remote_blocks.get(start)
+        if block:
+            merged = merged.replace(start + "\n" + end, block, 1)
+    return merged, ""
+
+
+def _save_note_conflict(rel: str, base: str, mine: str, set_aside: dict = None) -> str:
+    """Save this Mac's version of a note whose hand-written text conflicts, and the version both sides started from,
+    in STATE/handoff-conflicts/; record it (audit, kept at every level) and say how to bring it back. -> the problem.
+    `set_aside`: the notes this pull saved already ({rel: (the saved copy, the problem)}). When a later commit of this
+    Mac conflicts on the same note in the same pull, only the saved copy changes, to this Mac's latest version: the
+    copy then holds every local commit's change against the version the first one started from, so the command the
+    first warning printed brings them all back. A copy never replaces another pull's: a second one saved in the same
+    second takes a counter after the time."""
+    import shlex
+    set_aside = {} if set_aside is None else set_aside
+    if rel in set_aside:
+        saved, problem = set_aside[rel]
+        core.replace_text(saved, mine)
+        return problem
+    stem = f"{rel[:-len('.md')]}.{time.strftime('%Y%m%d-%H%M%S')}"
+    saved, n = core.STATE / "handoff-conflicts" / f"{stem}.mine.md", 1
+    while saved.exists():
+        n += 1
+        saved = saved.with_name(f"{Path(stem).name}-{n}.mine.md")
+    started = saved.with_name(saved.name[:-len(".mine.md")] + ".base.md")
+    saved.parent.mkdir(parents=True, exist_ok=True)
+    core.replace_text(saved, mine)
+    core.replace_text(started, base)
+    cmd = " ".join(shlex.quote(str(w)) for w in ("git", "-C", HANDOFF, "merge-file", rel, started, saved))
+    problem = (f"{rel}: its hand-written text changed on this Mac and on another one at the same place, so devkit kept "
+               f"the remote's version and saved this Mac's at {saved}; to bring your changes back, run `{cmd}`, keep "
+               f"the lines both sides need between the conflict markers, then run `dev sync`")
+    from . import audit, ui
+    audit.record("handoff.note-conflict", rel, problem[:300], outcome="blocked")
+    ui.warn(f"handoff repository: {problem}")
+    set_aside[rel] = (saved, problem)
+    return problem
+
+
+def _rewrite_tasks(rels) -> None:
+    """After a pull that settled the generated blocks of these notes, write each one's tasks block again from the work
+    items as they are now, and commit what changed: the note lists the items both Macs added. It runs within the
+    rebase, under the notes lock that every note writer takes (_rebase_locks), so no writer changes a note between
+    this read and this write."""
+    if not rels:
+        return
+    from .registry import TASKS_END, TASKS_START, render_tasks_block
+    changed = []
+    for rel in dict.fromkeys(rels):
+        f = HANDOFF / rel
+        try:
+            text = f.read_text()
+        except OSError:
+            continue
+        if TASKS_START not in text or TASKS_END not in text.split(TASKS_START, 1)[1]:
+            continue
+        scope = rel[len("projects/"):-len(".md")] if rel.startswith("projects/") else rel.rsplit("/", 1)[0]
+        pre, rest = text.split(TASKS_START, 1)
+        new = pre + render_tasks_block(scope) + rest.split(TASKS_END, 1)[1]
+        if new != text:
+            _replace(f, new)
+            changed.append(f)
+    if changed:
+        _commit(changed, f"sync: the tasks block of {len(changed)} note(s) again after the pull", push=False)
+
+
+def fetch_handoff() -> tuple:
+    """Fetch the remote's commits of the handoff repository (the network), under _repo_lock alone.
     -> (ok, the problem when not ok)."""
-    rc, out, err = core.git(HANDOFF, "pull", "-q", "--rebase", "--autostash", timeout=60)
+    with _repo_lock() as got:
+        if not got:
+            return False, _BUSY
+        rc, out, err = core.git(HANDOFF, "fetch", "-q", timeout=60)
+        return rc == 0, ("" if rc == 0 else (err or out).strip()[:300] or "git fetch failed")
+
+
+def pull_rebase(retake=()) -> tuple:
+    """Pull the handoff repository: fetch, then rebase this Mac's commits on the remote's (rebase_fetched). Never call
+    it while holding _repo_lock (the rebase takes the notes lock first). -> (ok, the problem when not ok)."""
+    ok, problem = fetch_handoff()
+    return rebase_fetched(retake) if ok else (False, problem)
+
+
+def rebase_fetched(retake=()) -> tuple:
+    """Rebase this Mac's commits on the remote's as last fetched: local git work only, under _rebase_locks, and nothing
+    to do (no lock taken) when the remote has no new commit or the branch follows none. A conflict in an item is
+    settled (`_settle`), one in a note file by file (`_settle_note`: never a stop, so the other files still go
+    through); any other conflict aborts the rebase, leaves the commits as they were and records a sync problem.
+    `retake`: item paths (relative) whose change the caller applies again itself. Never call it while holding
+    _repo_lock. -> (ok, the problem when not ok)."""
+    if core.gitout(HANDOFF, "rev-list", "--count", "HEAD..@{u}") in ("", "0"):
+        return True, ""
+    with _rebase_locks() as got:
+        if not got:
+            return False, "another devkit process kept the handoff notes or repository busy"
+        recover_rebase("a pull")
+        return _rebase(retake)
+
+
+def _rebase(retake) -> tuple:
+    """rebase_fetched's work, under _rebase_locks."""
+    rc, out, err = core.git(HANDOFF, "rebase", "-q", "--autostash", timeout=60)
     if rc == 0:
         return True, ""
-    if not _stopped():  # the network or the remote: nothing changed here
-        return False, (err or out).strip()[:300] or "git pull failed"
+    if not _stopped():  # git refused to start it: nothing changed here
+        return False, (err or out).strip()[:300] or "git rebase failed"
+    settled_notes, set_aside = [], {}
     for _ in range(200):  # one round per commit of this Mac that conflicts
         files = _conflicted()
         if not files:
             break
         for rel in files:
-            text = _settle(rel, rel in retake)
+            if _NOTE_FILE.match(rel):
+                text, problem = _settle_note(rel, set_aside)
+                if not problem:
+                    settled_notes.append(rel)
+            else:
+                text = _settle(rel, rel in retake)
             if text is None:
                 problem = f"a pull of the handoff repository stopped on a conflict in {', '.join(files)} that devkit " \
                           f"cannot settle; it aborted the rebase and kept this Mac's commits unpushed"
@@ -542,6 +898,7 @@ def pull_rebase(retake=()) -> tuple:
         nothing = core.git(HANDOFF, "diff", "--cached", "--quiet")[0] == 0
         core.git(HANDOFF, "-c", "core.editor=true", "rebase", "--skip" if nothing else "--continue", timeout=60)
         if not _stopped():
+            _rewrite_tasks(settled_notes)
             return True, ""
     problem = "a pull of the handoff repository stopped and did not finish; devkit aborted the rebase"
     _abort(problem, _conflicted())
@@ -555,15 +912,22 @@ def _pushes() -> bool:
 
 
 def push_now(retake=()) -> tuple:
-    """Pull (rebase), then push, now. -> (ok, the problem when not ok)."""
+    """Pull (rebase), then push, now: the fetch and the push under _repo_lock alone, the rebase under the notes lock
+    too (pull_rebase). -> (ok, the problem when not ok)."""
     with _repo_lock() as got:
         if not got:
-            return False, "another devkit process kept the handoff repository busy"
+            return False, _BUSY
         recover_rebase("a push")
-        ok, problem = pull_rebase(retake)
-        if not ok:
-            return False, problem
-        rc, _, err = core.git(HANDOFF, "push", "-q", timeout=60)
+    ok, problem = pull_rebase(retake)
+    return push_handoff() if ok else (False, problem)
+
+
+def push_handoff(timeout: int = 60) -> tuple:
+    """Push the handoff repository's commits (the network), under _repo_lock alone. -> (ok, the problem when not ok)."""
+    with _repo_lock() as got:
+        if not got:
+            return False, _BUSY
+        rc, _, err = core.git(HANDOFF, "push", "-q", timeout=timeout)
         return rc == 0, (err.strip()[:300] if rc else "")
 
 
@@ -636,7 +1000,7 @@ def pull(retake=()) -> bool:
         recover_rebase("a pull")
         if not core.gitout(HANDOFF, "remote"):
             return True
-        return pull_rebase(retake)[0]
+    return pull_rebase(retake)[0]  # after _repo_lock is released: the rebase takes the notes lock first
 
 
 # --------------------------------------------------------------------------- operations
@@ -744,7 +1108,9 @@ def _push_change(path: Path, change, what: str, must_reach: bool) -> dict:
     """Apply `change` to the item at `path`, commit it and push it now. `change(item)` checks the item as it is and
     changes it (ValueError when it may not) -> the commit message. When another Mac pushed a change to the item
     first and the two cannot be merged, the item is read again as the remote has it and `change` applied again, so
-    its checks run on the remote's version: a lock taken there first refuses this one. `must_reach`: raise when the
+    its checks run on the remote's version: a lock taken there first refuses this one. On this Mac the read, the
+    change and the commit hold the item's lock (record_lock), so two sessions changing it at once take turns and the
+    second one's checks see the first one's change. `must_reach`: raise when the
     change is not on the remote after three tries (it stays committed here, and `dev sync` pushes it later); without
     a remote the commit is the whole change. -> the item."""
     remote, rel = _pushes(), str(Path(path).relative_to(HANDOFF))
@@ -752,12 +1118,13 @@ def _push_change(path: Path, change, what: str, must_reach: bool) -> dict:
     for attempt in range(3):
         if remote and attempt == 0:
             pull(retake=[rel])
-        it = load(path)
-        if entry is None or not _has_entry(it, entry):
-            message = change(it)
-            entry = it["changelog"][0]
-            write_record(path, render(it))
-            _commit([path], message, push=False)
+        with record_lock(path):  # another session of this Mac changing the item waits, then checks this change
+            it = load(path)
+            if entry is None or not _has_entry(it, entry):
+                message = change(it)
+                entry = it["changelog"][0]
+                write_record(path, render(it))
+                _commit([path], message, push=False)
         if not remote:
             return it
         ok, problem = push_now(retake=[rel])
@@ -1080,14 +1447,42 @@ def reconcile(scope: str, merged: dict, apply: bool = False, a=None) -> dict:
 
 # --------------------------------------------------------------------------- sessions log and presence
 
-def log_session(scope: str, line: str):
-    """Append-only, one file per scope and month (merge=union): concurrent machines never conflict."""
-    f = SESSIONS / scope / f"{time.strftime('%Y-%m')}.md"
-    f.parent.mkdir(parents=True, exist_ok=True)
+def _append_session(f: Path, scope: str, month: str, line: str) -> None:
+    """Append one line to the month's log, starting the file with its heading; the caller holds its record_lock."""
     if not f.exists():
-        f.write_text(f"# Sessions · {scope} · {time.strftime('%Y-%m')}\n\n")
+        core.replace_text(f, f"# Sessions · {scope} · {month}\n\n")
     with f.open("a") as fh:
         fh.write(f"- {line}\n")
+
+
+def log_session(scope: str, line: str):
+    """Append-only, one file per scope and month (merge=union): concurrent machines never conflict. On this Mac the
+    append holds the month file's lock (record_lock), so a session that rewrites its own line at the same moment
+    (replace_session_line) never writes over this one. -> the month's file."""
+    month = time.strftime("%Y-%m")
+    f = SESSIONS / scope / f"{month}.md"
+    f.parent.mkdir(parents=True, exist_ok=True)
+    with record_lock(f):
+        _append_session(f, scope, month, line)
+    return f
+
+
+def replace_session_line(scope: str, key: str, line: str):
+    """One session's line in the month's log, which the Stop hook rewrites on every turn: the lines that carry `key`
+    (the session's marker, such as `<!-- s:<id> -->`) become `- <line>`, in place; with none, the line is appended
+    (log_session). The read and the rewrite hold the same lock as log_session's appends, and the rewrite replaces the
+    file in one step, so lines other sessions append meanwhile are never lost. -> the month's file."""
+    month = time.strftime("%Y-%m")
+    f = SESSIONS / scope / f"{month}.md"
+    f.parent.mkdir(parents=True, exist_ok=True)
+    with record_lock(f):
+        text = f.read_text() if f.exists() else ""
+        if key not in text:
+            _append_session(f, scope, month, line)
+            return f
+        new = "\n".join(f"- {line}" if key in ln else ln for ln in text.splitlines()) + "\n"
+        if new != text:
+            core.replace_text(f, new)
     return f
 
 
@@ -1103,17 +1498,47 @@ def recent_sessions(scope: str, limit: int = 12) -> list:
     return out[:limit]
 
 
+RUN_TEXT = ("goal", "state", "headline", "last", "next")  # what run_summary keeps of a run brief, as it is
+RUN_NUMBERS = ("step", "steps", "estimate", "started", "updated", "eta_min", "eta_lo", "eta_hi", "active_min",
+               "wall_min", "pace")
+CURRENT_SHOWN = 3  # steps running now that presence names
+
+
+def run_summary(brief):
+    """What presence publishes of a session's run (progress.brief): its goal and state, the step counts (done, that
+    count, skipped), the steps running or blocked now (at most CURRENT_SHOWN, by name; `current_more` counts the
+    rest), how many crew lanes work (`crew`), and the ETA. Never the whole plan or the lanes: a run of 60 steps made
+    one Mac's presence 49 KB, and above 256 KB another Mac's dashboard hides it. `plan` keeps only the current steps,
+    in the shape older dashboards read. None when the session has no run."""
+    if not isinstance(brief, dict):
+        return None
+    plan = [s for s in brief.get("plan") or [] if isinstance(s, dict)]
+    states = Counter(s.get("state") for s in plan)
+    now = [s for s in plan if s.get("state") in ("running", "blocked")]
+    out = {k: brief[k][:200] if isinstance(brief[k], str) else brief[k] for k in RUN_TEXT if k in brief}
+    out.update({k: brief[k] for k in RUN_NUMBERS if k in brief})
+    out.update(steps_done=states["done"], steps_total=len(plan) - states["skipped"], steps_skipped=states["skipped"],
+               current=[str(s.get("name") or "")[:120] for s in now[:CURRENT_SHOWN]],
+               current_more=max(0, len(now) - CURRENT_SHOWN),
+               crew=sum(1 for g in brief.get("agents") or [] if isinstance(g, dict) and g.get("state") == "running"),
+               plan=[dict({k: s.get(k) for k in ("state", "est", "min", "owner")}, name=str(s.get("name") or "")[:120])
+                     for s in now[:CURRENT_SHOWN]])
+    return out
+
+
 def write_presence(sessions: list, a=None):
     """presence/<user>@<host>.json: this machine's tracked sessions, each with its `active` flag (a session still
-    tracked a while after its agent stopped is not active), and held locks (written only by this machine)."""
+    tracked a while after its agent stopped is not active) and a summary of its run (run_summary), and held locks
+    (written only by this machine)."""
     a = a or actor("human")
     me = f"{a['user']}@{a['host']}"
     held = [{"id": i["meta"]["id"], "title": i["meta"]["title"], "scope": i["scope"],
              "until": i["meta"]["lock_expires"]} for i in all_items()
             if (i["meta"].get("claimed_by") or "").startswith(me) and not lock_holder(i)[1]]
     data = {"user": a["user"], "host": a["host"], "updated": now_iso(),
-            "sessions": [{k: s.get(k) for k in ("agent", "project", "branch", "started", "status", "last_seen",
-                                                "progress", "subagents", "turn_started", "active")}
+            "sessions": [dict({k: s.get(k) for k in ("agent", "project", "branch", "started", "status", "last_seen",
+                                                     "subagents", "turn_started", "active")},
+                              progress=run_summary(s.get("progress")))
                          for s in sessions], "locks": held}
     f = PRESENCE / f"{me}.json"
     f.parent.mkdir(parents=True, exist_ok=True)

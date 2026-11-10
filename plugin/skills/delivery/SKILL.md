@@ -50,7 +50,7 @@ dev pr ready             # once, when the local suite is green: starts the one C
 
 ## 2. Single change
 
-1. Start the work item, then branch from an up-to-date default: `dev task start <n>`, `dev branch new feat/x` (it
+1. Start the work item, then branch from an up-to-date default: `dev task start <id>`, `dev branch new feat/x` (it
    links the item to the branch, and the item's lock renews while you work there).
 2. Work in small verified steps (targeted tests while iterating), committing with `dev commit --why … --verified …`;
    back up as you go (`dev backup`).

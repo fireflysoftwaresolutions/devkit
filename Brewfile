@@ -31,7 +31,7 @@ brew "docker"
 brew "docker-compose"
 brew "docker-buildx"
 brew "docker-credential-helper"
-# @agents
+# @codex   (installed only when Codex is chosen in dev setup)
 cask "codex"
 # @docs
 brew "vale"

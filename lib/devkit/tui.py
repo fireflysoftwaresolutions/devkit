@@ -303,11 +303,16 @@ class Option:
 
 
 class Prompt:
-    """Base: a title, a help line, Esc to go back (when `back`), Ctrl-C to cancel."""
+    """Base: a title, a help line, Esc to go back (when `back`), Ctrl-C to cancel.
+
+    `help` is a paragraph or a list of them (each wrapped, dim); `mark` goes before the title (a state such as "!"),
+    `corner` at the right end of the title line ("2 of 2"); `back_hint` names where Esc goes ("esc back to Codex")."""
     hint = ""
 
-    def __init__(self, title: str, help: str = "", back: bool = True):
+    def __init__(self, title: str, help="", back: bool = True, mark: str = "", corner: str = "",
+                 back_hint: str = "esc back"):
         self.title, self.help, self.back = title, help, back
+        self.mark, self.corner, self.back_hint = mark, corner, back_hint
         self.finished, self.result, self.error = False, None, ""
 
     def _finish(self, value):
@@ -326,14 +331,19 @@ class Prompt:
         raise NotImplementedError
 
     def head(self, width: int) -> list:
-        out = ["  " + bold(self.title)]
-        if self.help:
-            out += ["  " + dim(ln) for ln in wrap(self.help, width - 4)]
+        title = "  " + (self.mark + " " if self.mark else "") + bold(self.title)
+        if self.corner:
+            gap = width - vlen(title) - vlen(self.corner)
+            title += " " * max(2, gap) + dim(self.corner)
+        out = [title]
+        for para in ([self.help] if isinstance(self.help, str) else list(self.help)):
+            if para:
+                out += ["  " + dim(ln) for ln in wrap(para, width - 4)]
         return out + [""]
 
     def keys_line(self, parts, width: int = 80) -> list:
         """The key hints, wrapped (not cut) on a narrow terminal."""
-        parts, lines, cur = list(parts) + (["esc back"] if self.back else []), [], ""
+        parts, lines, cur = list(parts) + ([self.back_hint] if self.back else []), [], ""
         for part in parts:
             nxt = f"{cur} · {part}" if cur else part
             if cur and vlen(nxt) > width - 3:
@@ -348,14 +358,20 @@ class Prompt:
 
 
 class Select(Prompt):
-    """One choice from a list: ↑↓ (or j/k, 1–9) move, Enter chooses."""
+    """One choice from a list: ↑↓ (or j/k, 1–9) move, Enter chooses.
 
-    def __init__(self, title, options, default=None, help="", back=True, enter="choose"):
-        super().__init__(title, help, back)
+    `body`: lines between the title and the options; `foot`: lines after them (a list, or a function of the width);
+    `hints`: the key hints instead of "↑↓ move · enter choose"; `digits`: {key: result} that finish at once (the
+    review's 1–7), instead of moving the pointer; `badge_right`: badges at the right edge, not after the label."""
+
+    def __init__(self, title, options, default=None, help="", back=True, enter="choose", body=(), foot=(),
+                 hints=None, digits=None, badge_right=False, **kw):
+        super().__init__(title, help, back, **kw)
         self.options = [o if isinstance(o, Option) else Option(o) for o in options]
         values = [o.value for o in self.options]
         self.i = values.index(default) if default in values else 0
-        self.enter = enter
+        self.enter, self.body, self.foot, self.hints = enter, body, foot, hints
+        self.digits, self.badge_right = dict(digits or {}), badge_right
 
     @property
     def value(self):
@@ -378,11 +394,16 @@ class Select(Prompt):
         return True
 
     def _key(self, key):
-        if not self._move(key) and key == "enter":
+        if key in self.digits:
+            self._finish(self.digits[key])
+        elif not self._move(key) and key == "enter":
             self._finish(self.value)
 
     def _mark(self, o) -> str:
         return ""
+
+    def _lines(self, part, width: int) -> list:
+        return list(part(width) if callable(part) else part)
 
     def rows(self, width: int) -> list:
         marks = [self._mark(o) for o in self.options]
@@ -400,15 +421,20 @@ class Select(Prompt):
             row = f"  {pointer} " + (marks[idx] + " " if mw else "") + pad(label, lw)
             if show_note:
                 row += "  " + dim(pad(o.note, nw))
-            if o.badge:
+            if o.badge and self.badge_right:
+                row = pad(row.rstrip(), width - vlen(strip(badge(o.badge))) - 1) + " " + badge(o.badge)
+            elif o.badge:
                 row += "  " + badge(o.badge)
             out.append(row.rstrip())
             if focus and o.desc:
-                out.append(" " * lead + dim(o.desc))
+                out += [" " * (lead + 2) + dim(ln) for ln in wrap(o.desc, width - lead - 2)]
         return out
 
     def lines(self, width: int) -> list:
-        return self.head(width) + self.rows(width) + [""] + self.keys_line(["↑↓ move", f"enter {self.enter}"], width)
+        keys = self.keys_line(self.hints or ["↑↓ move", f"enter {self.enter}"], width)
+        body = self._lines(self.body, width)
+        foot = self._lines(self.foot, width)
+        return self.head(width) + body + self.rows(width) + (foot if foot else [""]) + keys
 
 
 class MultiSelect(Select):
@@ -467,14 +493,14 @@ class MultiSelect(Select):
 class Confirm(Prompt):
     """Yes or no: y/n answer at once, ←→ or Tab switch, Enter accepts the highlighted one (the default first)."""
 
-    def __init__(self, title, default=True, help="", back=True, yes="Yes", no="No"):
-        super().__init__(title, help, back)
-        self.value, self.yes, self.no = bool(default), yes, no
+    def __init__(self, title, default=True, help="", back=True, yes="Yes", no="No", hints=None, **kw):
+        super().__init__(title, help, back, **kw)
+        self.value, self.yes, self.no, self.hints = bool(default), yes, no, hints
 
     def _key(self, key):
-        if key in ("y", "Y"):
+        if key in ("y", "Y") and self.hints is None:
             self._finish(True)
-        elif key in ("n", "N"):
+        elif key in ("n", "N") and self.hints is None:
             self._finish(False)
         elif key in ("left", "right", "tab", "shift-tab", "h", "l", "up", "down"):
             self.value = not self.value
@@ -488,7 +514,7 @@ class Confirm(Prompt):
 
     def lines(self, width: int) -> list:
         return self.head(width) + ["  " + self.choices(), ""] + \
-            self.keys_line(["y yes", "n no", "←→ switch", "enter confirm"], width)
+            self.keys_line(self.hints or ["y yes", "n no", "←→ switch", "enter confirm"], width)
 
     def inline(self, width: int) -> str:
         if self.finished:
@@ -847,6 +873,29 @@ def ask_inline(term: Terminal, prompt: Confirm):
                 prompt.handle(key)
 
 
+def ask_block(term: Terminal, prompt: Prompt, above=()):
+    """A prompt of several lines in the normal screen, under what is already there (a checklist, a summary): drawn in
+    place and redrawn on every key, then erased, so the caller writes what was chosen. `above`: lines shown over it
+    (the step that stopped). Ctrl-C raises Cancelled; Esc returns BACK when the prompt allows it."""
+    drawn = 0
+    with term.raw():
+        term.write("\x1b[?25l")
+        try:
+            while True:
+                width = term.size()[0]
+                lines = [fit(ln, width - 1) for ln in list(above) + prompt.lines(width - 1)]
+                up = f"\x1b[{drawn}A\r" if drawn else "\r"
+                term.write(up + "".join(ln + "\x1b[0m\x1b[K\n" for ln in lines) + "\x1b[J")
+                drawn = len(lines)
+                if prompt.finished:
+                    return prompt.result
+                key = term.key()
+                if key != "resize":
+                    prompt.handle(key)
+        finally:
+            term.write((f"\x1b[{drawn}A\r" if drawn else "\r") + "\x1b[J")
+
+
 def elapsed(seconds: float) -> str:
     s = int(seconds)
     return f"{s}s" if s < 60 else f"{s // 60}m {s % 60:02d}s"
@@ -868,10 +917,10 @@ class Checklist:
     MARKS = {"ok": lambda: ok("✓"), "fail": lambda: bad("✗"), "warn": lambda: warn("!"), "skip": lambda: dim("–"),
              "pending": lambda: dim("○")}
 
-    def __init__(self, term: Terminal, labels, animate=True):
+    def __init__(self, term: Terminal, labels, animate=True, footer=()):
         self.term, self.items = term, [_Item(lb) for lb in labels]
         self.base, self.drawn, self.frame, self.current = 0, 0, 0, None
-        self.animate, self.paused = animate, False
+        self.animate, self.paused, self.footer = animate, False, list(footer)
         self._stop, self._thread = threading.Event(), None
 
     def __enter__(self):
@@ -951,10 +1000,18 @@ class Checklist:
             line = pad(line, room) + "  " + dim(t)
         return [line] + [fit("      " + n, width - 1) for n in it.notes]
 
+    def label_width(self) -> int:
+        return min(31, max((vlen(it.label) for it in self.items), default=0))
+
+    def render(self, width: int) -> list:
+        """Every step as it stands now, without moving the cursor (`dev setup --preview`)."""
+        lw = self.label_width()
+        return [ln for it in self.items for ln in self._line(it, lw, width)] + self.footer
+
     def draw(self, final=False, pending=True):
         width = self.term.size()[0]
         items = self.items[self.base:]
-        lw = min(34, max((vlen(it.label) for it in self.items), default=0))
+        lw = self.label_width()
         out, committed, still = [], 0, False
         for it in items:
             if not pending and it.state not in self.FINISHED:
@@ -966,6 +1023,45 @@ class Checklist:
                 self.base += 1
             else:
                 still = True
+        if pending and not final and self.footer and still:
+            out += [fit(ln, width - 1) for ln in self.footer]
         up = f"\x1b[{self.drawn}A\r" if self.drawn else "\r"
         self.term.write(up + "".join(ln + "\x1b[0m\x1b[K\n" for ln in out) + "\x1b[J")
         self.drawn = 0 if (final or not pending) else len(out) - committed
+
+
+class LineChecklist(Checklist):
+    """The checklist of the line front end (no terminal, TERM=dumb, --yes): one line per step when it ends, with its
+    notes, and no cursor movement, so a log or a pipe reads it as plain lines."""
+
+    def __init__(self, term: Terminal, labels, animate=False, footer=()):
+        super().__init__(term, labels, animate=False)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def start(self, i: int, detail: str = ""):
+        it = self.items[i]
+        it.state, it.detail, it.t0 = "running", detail, time.time()
+        self.current = i
+
+    def finish(self, i: int, state: str = "ok", detail: str = "", notes=()):
+        it = self.items[i]
+        it.state, it.detail, it.notes, it.t1 = state, detail, list(notes), time.time()
+        if it.t0 is None:
+            it.t0 = it.t1
+        if self.current == i:
+            self.current = None
+        self.term.write("".join(ln + "\n" for ln in self._line(it, self.label_width(), self.term.size()[0])))
+
+    def pause(self):
+        pass
+
+    def resume(self):
+        pass
+
+    def draw(self, final=False, pending=True):
+        pass

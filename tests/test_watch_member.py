@@ -11,7 +11,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from devkit import progress as pg, watch  # noqa: E402
+from devkit import identity, progress as pg, watch  # noqa: E402
 from test_progress import launch  # noqa: E402
 from test_state_e2e import dev  # noqa: E402
 from test_watch import WatchCase  # noqa: E402
@@ -52,27 +52,31 @@ class MemberView(WatchCase):
 
 
 class WhoseWait(unittest.TestCase):
-    # a member blocked on `dev watch --wait --for me` keeps an open call in the ledger; the tech lead's own
-    # `dev watch --wait` then matched it and became the member's wait, so nothing woke the tech lead any more
-    def consumer(self, for_=None, env=None, ledger="a_tank"):
+    # whose wait `dev watch --wait` is: the speaker identity resolves (tests/test_identity.py has every rule). A
+    # member's wait in a pipeline carries no lane mark; it was taken for the main session's, superseded the tech
+    # lead's wait and took its events (B-g3di13i0nfx). Now the member's own open call makes it the member's, the
+    # tech lead's stamp makes it the main session's, and a wait devkit cannot place is refused.
+    def consumer(self, lane, how, for_=None):
         args = type("Args", (), {"for_": for_})()
-        with mock.patch.dict(os.environ, env or {}, clear=False), \
-                mock.patch.object(pg, "caller", return_value={"caller": ledger}):
-            if not env:
-                os.environ.pop("DEVKIT_FROM_AGENT", None)
+        found = identity._Found(identity.Speaker("claude", "s1", lane, how, True), "claude", "env", (),
+                                lane if how == "ledger" else "")
+        with mock.patch.object(identity, "_find", lambda *a, **k: found):
             return watch._consumer(args)
 
-    def test_a_wait_without_for_me_is_the_main_sessions_whatever_the_ledger_says(self):
-        self.assertEqual(self.consumer(), "main")
+    def test_a_wait_whose_open_call_is_a_members_is_the_members(self):
+        self.assertEqual(self.consumer("a_tank", "ledger"), "a_tank")
+        self.assertEqual(self.consumer("a_tank", "ledger", for_="me"), "a_tank")
 
     def test_a_routed_member_call_is_the_members_with_or_without_for_me(self):
-        self.assertEqual(self.consumer(env={"DEVKIT_FROM_AGENT": "a_ghost"}), "a_ghost")
-        self.assertEqual(self.consumer(for_="me", env={"DEVKIT_FROM_AGENT": "a_ghost"}), "a_ghost")
+        self.assertEqual(self.consumer("a_ghost", "stamped"), "a_ghost")
+        self.assertEqual(self.consumer("a_ghost", "stamped", for_="me"), "a_ghost")
 
-    def test_for_me_falls_back_to_the_ledger_and_refuses_when_it_names_no_member(self):
-        self.assertEqual(self.consumer(for_="me"), "a_tank")
-        with self.assertRaises(ValueError):
-            self.consumer(for_="me", ledger="main")
+    def test_for_me_never_resolves_to_the_main_session_and_no_wait_is_a_guess(self):
+        self.assertEqual(self.consumer("main", "stamped"), "main")
+        for lane, how, for_ in (("main", "stamped", "me"), ("", "unknown", "me"), ("", "unknown", None),
+                                ("main", "stamped", "you")):
+            with self.subTest(how=how, for_=for_), self.assertRaises(ValueError):
+                self.consumer(lane, how, for_)
 
 
 if __name__ == "__main__":

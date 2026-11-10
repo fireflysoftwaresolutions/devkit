@@ -3,6 +3,276 @@
 All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH restarts at 0 each month); tags are
 `vYY.MM.PATCH`. Sections follow [Keep a Changelog](https://keepachangelog.com/).
 
+## [26.11.9] - 2026-11-09
+
+This release makes the first install work for someone who has never used a terminal, and gives Codex sessions the
+same checks as Claude Code. The installer asks before it changes anything, the setup wizard asks which coding agents
+you use and installs only those, a step that fails or that you stop no longer ends the setup, and
+`dev setup --resume` finishes what is left. Turning an agent off also takes out the no-prompt modes devkit set in it.
+Task numbers can no longer close the wrong item. On Codex, devkit now sees the commands inside its scripts, checks the
+end of every turn, and notices failed commands; it records Codex crew launches like Claude Code's, with their crew
+slots, step, required skills, and report checks; and a `grant`, `approve`, or `settle` line you type in Codex counts
+like one typed in Claude Code. The guard reads every way an agent can write an agent settings file, and
+leaves `dev setup` to you. [Getting started](docs/getting-started.md) walks through the new install.
+
+Agent sessions on one Mac, in Claude Code or Codex and in any project, can now see each other, send notes and
+questions, claim a release or a push for a while, and escalate a disagreement for you to settle with one typed line.
+[Teams and machines › Sessions on one Mac](docs/teams.md#sessions-on-one-mac) shows how.
+
+After `dev update`: restart your open Claude Code and Codex sessions. Name work items by id in agents and scripts;
+a number from `dev task` now counts only in the list you were shown.
+
+### Added
+
+- **Codex crew launches work like Claude Code's.** Codex fires no hook before `spawn_agent`, so devkit now records a
+  Codex launch when its agent starts: the launch binds to the plan step its `task_name` names (`dev crew brief` prints
+  it), takes a crew slot, counts toward the depth limit, and the member gets its required skills, known pitfalls, and
+  report format as context. A launch over the crew's limits is marked, its step comes back to the tech lead, and the
+  member is told to stop. At its end, a Codex member's report gets the same checks as a Claude Code member's.
+- **Your typed lines count in Codex.** A `grant …`, an `approve D<n>`, or a `settle E-…` line you type in Codex now
+  counts, confirmed from the thread's own rollout, the record Codex writes of your prompt; an agent's text, a tool's
+  output, a subagent, or a `codex exec` run never counts. `dev audit verify` checks Codex evidence the same way.
+- **Agent sessions on one Mac talk to each other.** `dev session ls` lists the live Claude Code and Codex sessions on
+  this Mac with their project, branch, run, crew, and state. The tech lead's session sends a note or a question with
+  `dev session tell` or `dev session ask` to one session (`@<id prefix>`), a project, an initiative, the repository's
+  worktrees, or all, answers with `dev session answer`, and reads its messages whole with `dev session inbox`.
+  Another session's words arrive as one quoted line under a header that says they are data, never the developer's
+  instructions. A crew member asks its tech lead instead, and nothing leaves this Mac.
+- **Claims on shared resources.** `dev session claim release:<project> --why "…" --for 45m` tells the other sessions
+  that this one holds the project's release, a branch's pushes, the handoff note, a branch, or a named resource, for 5
+  minutes to 4 hours. A second session is told who holds it, until when, and why (exit code `3`); with `--queue` it
+  hears when the claim frees. A claim ends with its time, its session, or its process. The guard refuses another
+  session's release, tag push, or merge into the default branch while `release:` is held, a push of a claimed branch,
+  and a write to a claimed handoff note; the holder's own session and crew, and your own terminal, go through.
+  `dev release` holds the release claim for 60 minutes while it runs and gives it back when it ends. You break another
+  session's claim by typing `grant claim-break <resource>` in the session that needs it, in Claude Code or Codex.
+- **Escalations you settle with one line.** When two sessions disagree on something that is yours to decide,
+  `dev session escalate` sends you a desktop notification and shows the question and its options in each session's
+  welcome, in `dev status` under **Needs you**, and on the dashboard, whose Now headline counts it as something that
+  needs you. You settle it by typing `settle E-…: <choice>` in any agent session, and every party hears your choice.
+  Only a line you type counts.
+- **Other sessions' messages in the one wait.** `dev watch --wait` wakes for another session's question, answer,
+  escalation, settling, freed claim, or urgent note (`--only peer` takes these alone), and the end-of-turn check keeps
+  a wait armed while your question to another session waits for an answer, you queue for a claim, or an escalation
+  waits for you. `dev watch --wait --standby` waits for other sessions alone, for a session that coordinates others.
+- **Sessions in `dev status`, the welcome, and the dashboard.** `dev status` has a **Sessions** block with this
+  project's live sessions, overlaps, claims, your questions that wait, and your unread messages. The welcome names a
+  session in the same checkout or on the same branch, another session's question, a claim on the project, and an
+  `Also live:` line. The dashboard's Now view shows **Between sessions** (escalations in amber with the line to type,
+  then claims and overlaps) and **Sessions on this Mac**, by project. Each session is told once at its next prompt when
+  another one works in its checkout, on its branch, in another worktree of its repository, or on the branch of a work
+  item it holds.
+- **Choose your coding agents.** `dev setup` asks on every first run whether you use Claude Code and Codex, Claude
+  Code only, or Codex only, with the account each one needs, and installs, sets up, and signs in only those. Codex
+  has its own install step and is no longer installed on every Mac. Turning an agent off removes devkit's rules,
+  hooks, status line, skill links, MCP servers, plugin, and, for Codex, profiles and agent roles, with a private
+  backup of every file it deletes or rewrites; it keeps the agent and your own settings, and the review says so
+  before you apply. Only your own run in a terminal removes them: a run that is not from your terminal leaves devkit,
+  and with it the guard, in place, and says so in the setup and in `dev doctor`.
+- **Finish a setup later.** The setup saves your answers and each step's state, readable only by you.
+  `dev setup --resume`, plain `dev setup`, and the installer open **Pick up where you left off?**, check the steps
+  already done, and run the rest. Saved choices whose install never finished open the same screen.
+- **Sign-in panels you can retry.** Each agent that is not signed in gets a panel with named ways to sign in and
+  **Skip for now**. When a sign-in fails, runs past its time limit (10 minutes, 15 with a code), or you press Ctrl-C,
+  the panel comes back with the reason, **Try again**, and the other way to sign in.
+- **A summary that says what is left.** The setup ends with `✓ devkit is ready.` and the first three things to do,
+  with the items left for later and the command that finishes each, or with `✗ devkit is not ready yet.` and the
+  step that needs attention. Its **What now?** menu signs you in or tries a failed step again right away.
+- **The installer's welcome.** In a terminal, the installer lists its five steps, says that nothing has changed yet,
+  and waits for Return; Ctrl-C there stops it with nothing changed. Each step shows `N of 5` and its name.
+- **`dev setup --preview`** draws every screen of the setup with sample data and changes nothing.
+  `COLUMNS=60 dev setup --preview` draws them 60 columns wide.
+- **A warning when Now holds more than five items.** `dev task add --now`, `dev task move <id> --to now`, and a new
+  **Tasks** row in `dev status` say how many items are in Now and how many are being worked on. Nothing is refused.
+- **Plans in sub-folders on the dashboard.** A project's or initiative's Plans tab lists the plans kept in
+  sub-folders of its plans folder, such as `product/`, each folder in a titled panel after the page's own plans.
+- **`dev doctor` shows devkit left in an agent you turned off,** with the command to run in your terminal.
+- **End-to-end tests for this release.** The installer runs in a pseudo-terminal against a stand-in Mac; every hook
+  event and the guard run through `dev hook` with Claude Code's and Codex CLI 0.167's payloads; and task numbers, the
+  Now warning, and plan folders run through `bin/dev`. Each test fails without the change it covers, and none can
+  start this Mac's real `claude`, `codex`, `brew`, or `gh`: a test that tries fails with `test safety: refused to
+  start …` (see [Contributing](CONTRIBUTING.md)).
+
+### Changed
+
+- **Task numbers mean the list you were shown.** A number in `dev task <verb> <n>` points into the last `dev task`
+  list shown to you (your session, your crew lane, a Codex thread, or your terminal) for 30 minutes. Once an item was
+  closed, added, or moved, devkit refuses the number and names the id it had and the item at its place now. Ids
+  always work, and agents use them. Every write prints its item, as `✓ done T-… “<title>”`. See
+  [Work states › Numbers and ids](docs/work-states.md#numbers-and-ids).
+- **The install steps ask nothing.** Whether to start Docker is now a question in the Docker section, so you can
+  leave the Mac during the 10 to 20 minutes of installing.
+- **One failed step no longer ends the setup.** Saving your choices, setting up devkit, and installing each chosen
+  agent are required. Any other step that fails, runs past its time limit, or is stopped is skipped with the
+  command that finishes it, and the rest runs; a step that needs it shows `waits for <step>`. Ctrl-C during a step
+  offers **Skip it and go on**, **Try it again**, or **Stop the setup here**.
+- **Each failed step says why,** in three lines: `Reason:` (the command's error line, or how it ended; for a devkit
+  bug, the error and its crash file), `This means:`, and `Fix:`. A banner is never shown as the reason.
+- **Exit codes.** `dev setup` exits with `0` when devkit is ready, `1` when a required step is not done or you quit
+  before applying, `2` without GitHub, and `130` when paused. The installer exits with the wizard's code and prints
+  nothing after the wizard's summary.
+- **The installer keeps tool output in a log.** git's and Homebrew's output goes to
+  `~/.local/state/devkit/logs/install.log`, and the screen shows a line from it only when a step fails. When the
+  GitHub sign-in fails, is stopped, or runs past 10 minutes, the installer says why and offers to try again or quit.
+- **Read-only crew members can read work state.** Review and read-only lanes may run `dev overview`, `dev standup`,
+  `dev team`, `dev initiative ls|show`, `dev report` without `-o`, and `dev plan ls`. A member Responsible for
+  requirements, architecture, research, UX, or docs records its plan with `dev plan new` and `dev plan revise`, in
+  its run's project only, as a command of its own (no `cd`, `pushd`, `popd`, or subshell before it).
+- **`setup.log` keeps every run.** Each run of the setup adds its output at the end of
+  `~/.local/state/devkit/logs/setup.log`, under a dated line, so resuming a setup no longer erases the log an earlier
+  summary pointed to.
+- **"Already set up" means a finished `dev install`.** The setup counts a Mac as set up only when a whole
+  `dev install` recorded what it installed and pinned a release; `dev config repair`, which the hooks run, only
+  updates that record when it exists.
+- **`dev status` shows this session's own last update.** devkit keeps the latest status of each of a project's 8 most
+  recent sessions, so a second session no longer shows the first one's as its own; another session's is labeled with
+  its agent and short id, such as `Last update from Codex session @0199a213`.
+- **Crew slots are per session, and the docs say so.** Each Claude Code or Codex session has its own
+  `progress.max_parallel` slots and reserve, and how many sessions you run at once, and so how much quota they spend,
+  is your choice. Only the lowering by your account's 5-hour and weekly usage applies to every session. The crew guide,
+  the configuration reference, the agents' instructions, and the `crew` skill now say this instead of implying one
+  shared pool.
+- **The dashboard counts collisions by session.** Two sessions of one person and one agent on one branch now count as
+  a collision on the Team view.
+- **The surfaces page says what was verified on Codex.** [Surfaces](docs/surfaces.md#what-was-verified-on-codex)
+  lists what works on Codex CLI 0.167.0, the known gaps, and what was not run yet.
+
+### Fixed
+
+- **Codex commands skipped some hook checks.** A Codex `exec_command` sends its command as `cmd` and its folder as
+  `workdir`; the hook-side rules read only `command`, so the irreversible-action gate and the crew lane checks let a
+  Codex `dev release` through. Every hook rule now reads both and judges the command in its folder, and so does the
+  guard.
+- **A crew member's wait could take the tech lead's events.** A member's `dev watch --wait` in a pipeline counted as
+  the main session's: it replaced the tech lead's wait again and again (exit code `5`) and could take its events.
+  devkit now works out who runs each wait from one definition (the hook's mark on the call, then the call ledger), so a
+  member's wait is the member's, the tech lead's is the main session's, and a wait devkit cannot place is refused
+  instead of guessed.
+- **Waits that nobody heard kept running.** Two threads of one Codex process took each other's waits, two waits that
+  started at once both stayed live, a wait whose output reader was stopped kept taking events, and a wait armed before
+  a compaction stayed live under the old session id for up to 4 hours. Each wait now stays with its own Codex thread,
+  only the newest of a session's waits lives, and a wait ends with exit code `3` and the command to arm it again when
+  its output is closed, on SIGTERM, or when its conversation moves to a new session id.
+- **A Codex thread's `dev` commands were recorded as yours.** Codex passes no devkit variable to its commands, so the
+  audit trail named the developer, with no session. They are now recorded under Codex and the thread's own session.
+- **A second session showed the first one's status as its own,** and the nightly cleanup of the canary result log
+  could drop a result written while it ran. Each session's status is kept apart, and the cleanup and every new result
+  share the log's lock.
+- **Shared notes lost writes when sessions wrote at once.** Two processes that regenerated one handoff note renamed
+  each other's temporary file away, so about 1 in 6 concurrent `dev task` or `dev handoff` commands crashed with exit
+  code `70`; four sessions that revised one plan at once were all told they succeeded while the plan kept two
+  revisions; and a session's line in the month's session log could erase other sessions' lines. Each writer now has
+  its own temporary file, a record's lock is held from the check for lost lines to the rename, and the session log is
+  rewritten under its lock.
+- **A note changed on two Macs stopped every later sync.** Two Macs that regenerated one project's note made its
+  generated blocks differ, so the second Mac's `dev sync` stopped on the conflict, and its work items and session logs
+  never reached the remote. A conflict in a project's note or an initiative's README is now settled during the pull;
+  when the hand-written text itself conflicts, devkit keeps the remote's note, saves this Mac's version in
+  `~/.local/state/devkit/handoff-conflicts/`, and names the `git merge-file` command that brings it back.
+- **Presence grew with every run's plan.** Each Mac published every session's whole plan and crew lanes, about 49 KB
+  for one Mac, and another Mac's dashboard hides a Mac whose presence passes 256 KB. Presence now carries a summary of
+  each run, about 1 KB for a 60-step run with six lanes.
+- **Only the first session heard a CI result.** A second session that pushed a commit devkit already watched joined
+  the same watcher but never heard how it ended, although its end-of-turn check had let it rely on that wait. Every
+  joined session now hears the result once, Claude Code and Codex alike, also when the watcher stops before the run
+  ends.
+- **`dev plan revise`, `approve`, and `supersede` on a path that does not exist** reported a devkit bug. They now say
+  `no plan at <path>` and exit with `2`.
+- **With no lessons yet, `dev lesson` taught a `dev lesson add` its check refuses.** It now shows the full command,
+  with `--happened`.
+- **Closing tasks by number one after another closed the wrong ones.** After `dev task done 9`, the next number
+  pointed at the item that had moved up into that place. A number now means the item you were shown there, or
+  nothing.
+- **Claude Code's sign-in crashed** with `EINVAL: invalid argument, kqueue` when the installer ran through
+  `curl … | bash`. Sign-ins now get the terminal's own device instead of `/dev/tty`, and every other command reads
+  `/dev/null`, never the rest of the piped script.
+- **The installer's noise on steps that worked.** git no longer warns that the release tag "is not a commit," and
+  Homebrew no longer stops to ask before it installs. A "run it again" line names the local `install.sh`, never a URL
+  that a private repository refuses.
+- **A setup step that failed showed only a banner.** When `dev install` died partway, the wizard saw none of its
+  lines; its output is now written line by line, so the reason reaches the screen.
+- **Codex turns skipped every end-of-turn check.** On Codex CLI 0.167, devkit read no turn as development work, so
+  the status block check and every Stop send-back (skills, unfinished work, test audit, handoff note, CI wait) were
+  off. devkit now reads the turn's final message from the Stop payload.
+- **devkit saw no commands in a Codex turn.** Codex 0.167 runs every shell command and patch inside one `exec` tool.
+  devkit now reads the calls in that script's code and the commands Codex records as it runs them, so the
+  required-skill rules, the CI-wait check, and a foreground `dev watch --wait` work on Codex. A call that only
+  appears in a comment or a string does not count.
+- **A failed Codex command counted as a success.** devkit now reads its exit code from the Codex rollout, so the bug
+  ledger, lesson outcomes, and the patch-loop stop see Codex failures. devkit waits for that record only when the
+  rollout names Codex 0.167 or later or already holds one; in any other rollout, the commands count as successes, as
+  before.
+- **A Codex hook recorded its calls under another session.** A Codex started from a Claude Code terminal or a crew
+  member's shell inherited that session's identity; each hook now takes its agent and session from its own call. A
+  Codex subagent is judged without the copy of its parent's history its rollout opens with.
+- **A Mac whose install failed was greeted as already set up.** Saved choices without a finished `dev install` were
+  taken as a finished setup, so the setup skipped the agent question, and opening Claude Code after a half-done
+  install had the same effect. Such choices now open **Pick up where you left off?**, and `dev setup --resume`
+  continues them, in the line prompts too.
+- **Answers changed on the review of a saved setup were not applied.** The setup kept the earlier steps done and
+  said devkit was ready with the old agents. A changed answer now runs **Save your choices**, **Set up devkit**,
+  **Lock Claude Code settings**, and **Check the setup** again, so the settings lock takes the new Claude Code mode.
+- **Ctrl-D at a line prompt crashed the setup** with exit code `70`. It now counts as an answer there. At a sign-in
+  or the lock it means **Skip for now**, at the summary **Finish**, and before anything is applied it quits with
+  `Nothing changed.` and exit code `1`.
+- **A second Ctrl-C right after a stopped sign-in ended the setup silently.** It now counts as stopping that
+  sign-in; any other Ctrl-C during the sign-ins pauses the setup with `Setup paused.` and `dev setup --resume`.
+- **The review and the banner wrapped early** at 80 and 60 columns; the banner cut its copyright line. Rows now wrap
+  only when they do not fit, and the copyright moves under the version.
+- **Turning an agent off removed more than devkit's own.** It removed every MCP server whose name devkit's catalog
+  uses, also one you set up yourself, and every Codex project trust under the dev root, also one you accepted in
+  Codex; it replaced a `config.toml` or `hooks.json` linked from a dotfiles folder with a plain file; it rewrote files
+  in place, so an interrupt could leave a cut-off config, and it dropped `hooks.json`'s other keys. It now removes
+  only the servers that run what devkit's catalog writes and only the trust devkit gave, keeps links, and replaces
+  each file whole with its own mode. The rules, profiles, and roles it deletes, and `~/.claude.json`, are backed up
+  first.
+- **A removal note was hidden without a terminal.** With no terminal, the setup hid that devkit stayed in a
+  turned-off agent and said devkit was ready; and every such run recorded a refused removal, even on a Mac where
+  devkit had never written to that agent. The setup now shows the note, and a removal is refused only when something
+  of devkit's is there. Removals are audited as `install.remove-agent`.
+- **Commit messages and pull request text that named an agent settings file were refused** as writes to it, as
+  were `git restore --staged`, `git rm --cached`, `prettier --check`, and a `>` that rewrites a config to repair it.
+  The guard reads a `dev` command's words, `gh`'s words, and another program's word with a space as text, and judges
+  a write by how it opens the file.
+- **Agent profiles taught a `dev lesson add` that the lesson check refuses.** They now include `--happened`.
+
+### Security
+
+- **Codex patches and shell writes could turn agent hooks off.** The guard refused `hooks = false` in
+  `.codex/config.toml` through Write and Edit only, so `apply_patch` or a plain `printf … > .codex/config.toml` went
+  through. Write, Edit, `apply_patch`, and shell writes now follow one rule for the four agent settings files: names
+  in any case, every TOML form, judged by the text after the write. A shell write whose text the guard cannot see,
+  such as a copy, `sed -i`, or a variable, is refused for these files. [Guard rules › Agent settings that switch
+  devkit off](docs/guard.md#agent-settings-that-switch-devkit-off) lists the forms and what is not covered yet.
+- **More ways to turn hooks off are refused.** Edit and MultiEdit are judged by the whole file they leave, so a
+  change of `true` to `false` no longer passes. An append, `tee -a`, or `<>` is judged with what the file already
+  holds, so JSON split across two commands counts as one. A key spelled with a `\u` escape counts in JSON and in
+  TOML, also on Python 3.9, which has no TOML reader. A patch hunk that does not apply is read as TOML. An append or
+  patch update to a settings file too large to read in full (over 1 MiB) is refused.
+- **Writes hidden behind check flags and git options are refused.** Only known formatters (`prettier`, `black`,
+  `ruff`, and nine more) run with `--check` or `--list-different` count as writing nothing; any other program with
+  `--check` counts as a write. git options are read as git parses them (abbreviations, attached values, negations),
+  only git's readers count as writing no text, and `--output` or `git grep -O` counts as a write.
+- **Turning an agent off left it with no prompts and no guard.** devkit sets Claude Code to `bypassPermissions` and
+  Codex to no approvals and no sandbox on the premise that its guard runs; removing devkit took the guard out and
+  left those modes. Each now goes too, while it still holds devkit's value, after a backup.
+- **Backups are private.** devkit's backups, which now include `~/.claude.json` and Codex's `config.toml`, are kept
+  in a folder only you can open, each copy readable only by you, and a second copy in the same second no longer
+  replaces the first.
+- **Agents may not run `dev setup` or set `agents.*`.** Both decide which agents devkit sets up and rewrite their
+  settings, hooks, and instructions, so the guard refuses them from an agent. A key with leading or doubled dots
+  (`.agents.codex`), which `dev config set` reads as the same key, is refused too. `dev setup --preview` stays open.
+- **A byte-order mark hid hooks-off settings from the guard.** JSON and TOML readers reject a leading byte-order mark,
+  while Claude Code drops it before it parses, so a settings file that opened with one could turn hooks off unseen.
+  The guard now drops one leading mark, as a character or as its three bytes written through `printf` or `echo`
+  escapes, before it judges the text.
+- **A local program that shared a formatter's name could write a settings file.** `./prettier --check`,
+  `npx ./prettier --check`, or a check run under a `PATH` the command sets ran a local file, not the formatter. A
+  check run now counts as writing nothing only for a formatter named by its bare name, found on the session's own
+  `PATH`.
+- **A read-only crew member could write another project's plan** by changing folder first
+  (`cd ../other && dev plan new x`). Plan writes now run only as a command of their own.
+
 ## [26.11.8] - 2026-11-09
 
 This release teaches devkit to learn from its own failures and from yours. When devkit itself fails, it now says so
@@ -114,7 +384,7 @@ managed setting a running session does not reload. `dev update` lists the sessio
   background; a crew member waits for its answer in the foreground with `--for me --timeout 9`; Codex, which has no
   background wake-up, waits in the foreground with `--timeout 10`. It calls no model while it waits. `dev watch`
   shows what waits and whether a wait is armed, and `dev watches` lists every wait with the command to arm it again.
-  See [Commands › dev watch](docs/commands.md#dev-watch---wait---for-me---only-kinds---timeout-min---json).
+  See [Commands › dev watch](docs/commands.md#dev-watch---wait---for-me---only-kinds---timeout-min---standby---json).
 - **The Stop hook sends back a turn that leaves nothing to wake it.** A main-session turn that ends while a crew member
   works, a launch is pending, a step waits for a crew slot, or CI it sent still runs, with no live wait, goes back
   once with the command for that agent. A live `dev watch --wait` also counts as the watch on a pushed commit's CI

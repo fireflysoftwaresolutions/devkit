@@ -102,7 +102,7 @@ def needs(agent: str, cwd: str, *, data: dict = None, repo: dict = None, runs: l
         return None
     mine = [r for r in runs if isinstance(r, dict) and r.get("project") == repo.get("id")]
     return _try("needs", lambda: _needs(me, mine, {"older": older, "ext_changed": ext_changed, "ext_ack": ext_ack},
-                                        layout=[repo]))
+                                        layout=[repo], project=repo.get("id"), now=now or time.time()))
 
 
 def wanted(agent: str, data: dict, top: str) -> bool:
@@ -276,9 +276,10 @@ def _lines(agent, kind, cwd, data, repo, top, reg, runs, roster, flags, mode, no
     return _project(kind, me, cwd, repo, reg, runs, roster, flags, mode, now)
 
 
-def _needs(me, runs, flags, layout=(), workspace: dict = None) -> list:
+def _needs(me, runs, flags, layout=(), workspace: dict = None, project: str = None, now: float = None) -> list:
     """The need lines (without the rail mark); raises when a source cannot be read. `workspace`: outside a project,
-    {project id: alias}; each project's line then starts with its alias."""
+    {project id: alias}; each project's line then starts with its alias. `project`: the project's id, whose other
+    agent sessions' escalations, questions, overlaps and claims become need lines (_peer_needs)."""
     from . import ext, progress, registry
     out = []
     if os.environ.get("DEVKIT_GUARD", "").lower() == "off":
@@ -296,6 +297,8 @@ def _needs(me, runs, flags, layout=(), workspace: dict = None) -> list:
             else f"Decision waits{where}: "
         q = _lower_first(clean(d.get("question"))) or "a decision for you"
         out.append(label + cut(q, LINE_MAX - 2 - width(label)))
+    if me[1]:  # its own try: an unreadable sessions store hides only these lines, never the other needs
+        out += _try("peer needs", lambda: _peer_needs(me, project, now), []) or []
     accepted = len(ext.pending_acceptances())
     if accepted:
         out.append(f"{_count(accepted, 'extension')} accepted since your last check: dev ext ack")
@@ -308,6 +311,96 @@ def _needs(me, runs, flags, layout=(), workspace: dict = None) -> list:
             out.append(f"{_alias(workspace, p['id'])} · {LAYOUT}" if workspace is not None
                        else f"This project is {LAYOUT}")
     return out
+
+
+AGENT_NAMES = {"claude": "Claude Code", "codex": "Codex"}
+CLAIMED = {"release": "the release of this project", "handoff": "the handoff note of this project"}
+
+
+def _agent(agent) -> str:
+    return AGENT_NAMES.get(str(agent or ""), clean(agent) or "Another agent")
+
+
+def _quote(text, room: int) -> str:
+    """Another session's words in at most `room` columns, as one quoted span that keeps its closing quote."""
+    from .watch import clean as inert
+    return "“" + cut(clean(inert(text, 400)), max(1, room - 2)) + "”"
+
+
+def _claimed(resource: str) -> str:
+    kind, _, rest = str(resource or "").partition(":")
+    where = rest.partition("@")[2]
+    if kind in CLAIMED:
+        return CLAIMED[kind]
+    return f"pushes to {where}" if kind == "push" else f"branch {where}" if kind == "branch" else clean(rest)
+
+
+def _peer_needs(me, project, now) -> list:
+    """What other agent sessions on this Mac need from the developer or this session, as need lines: an open
+    escalation (this session or a session of `project` is a party; every one outside a project), a question another
+    session asked this one, a session in this same checkout or on this branch (warn-level overlaps), and a claim
+    another session holds on this project. Another session's words never reach these lines, except an escalation's
+    question, quoted, because the developer settles it."""
+    from . import peers
+    agent, sid = me
+    k = peers.key(agent, sid)
+    rows = peers.directory(now=now, me=k, include_idle=True)
+    projects = {r["key"]: r["project"].lower() for r in rows}
+    mine = {r["key"] for r in rows if r.get("me")} | {k}
+    pl = (project or "").lower()
+    out = []
+    for e in peers.escalations("open"):
+        keys = [e.get("from")] + list(e.get("parties") or [])
+        if not pl or mine & set(keys) or any(projects.get(x) == pl for x in keys):
+            label = "Escalation waits: "
+            out.append(label + _quote(e.get("question"), LINE_MAX - 2 - width(label)))
+    asked = [m for m in peers.inbox(agent, sid, all_=True) if m.get("kind") == "question" and not m.get("answered")]
+    if len(asked) == 1:
+        frm = asked[0].get("from") or {}
+        out.append(f"Question from {_agent(frm.get('agent'))} ({cut_id(clean(frm.get('project')) or '-', NAME_MAX)}) "
+                   "waits: dev session inbox")
+    elif asked:
+        out.append(f"{len(asked)} questions from other sessions wait: dev session inbox")
+    for o in peers.overlaps(agent, sid, now=now):
+        who = _agent(o["other"].get("agent"))
+        if o["level"] != "warn" or o["kind"] == "claim":
+            continue
+        out.append({"checkout": f"{who} works in this same checkout",
+                    "branch": f"{who} is on this branch in another checkout",
+                    "item": f"{who} works on a branch linked to your work item"}.get(o["kind"], ""))
+    for c in peers.claims(now=now, project=project) if project else []:
+        h = c["holder"]
+        if h["key"] not in mine:
+            out.append(f"{_agent(h['agent'])} holds {_claimed(c['resource'])} until "
+                       f"{time.strftime('%H:%M', time.localtime(float(c['until'])))}")
+    return [x for x in out if x]
+
+
+def _also_live(me, project: str, projects: list, now: float) -> str:
+    """The other live agent sessions that matter to this one, in one running line: this project's ("Codex on
+    fix/login") and those of a project that shares an initiative with it ("Claude Code in web"). A session already
+    named by a need line (the same checkout or branch) is left out."""
+    from . import peers, registry
+    k = peers.key(*me)
+    rows = peers.directory(now=now, me=k)
+    pl = project.lower()
+    inis = {i for r in rows if r.get("me") or r["project"].lower() == pl for i in r.get("initiatives") or []}
+    named = {o["other"]["key"] for o in peers.overlaps(me[0], me[1], now=now) if o["kind"] in ("checkout", "branch")}
+    alias = _try("alias", lambda: registry.alias_map(projects), {}) or {}
+    here, near = [], []  # this project's first, then the initiative's; each most recently active first
+    for r in rows:
+        if r.get("me") or r["key"] in named:
+            continue
+        if r["project"].lower() == pl:
+            here.append(f"{_agent(r['agent'])} on {cut_middle(clean(r['branch']) or 'no branch', BRANCH_MIN)}")
+        elif inis & set(r.get("initiatives") or []):
+            near.append(f"{_agent(r['agent'])} in {_alias(alias, r['project'])}")
+    items = here + near
+    shown, room = list(items), LINE_MAX - 2
+    while len(shown) > 1 and width("Also live: " + " · ".join(shown) + f" · {len(items) - len(shown) + 1} more") > room:
+        shown.pop()
+    more = len(items) - len(shown)
+    return ("Also live: " + " · ".join(shown) + (f" · {more} more" if more else "")) if items else ""
 
 
 def _alias(aliases: dict, pid, room: int = None) -> str:
@@ -500,7 +593,8 @@ def _project(kind, me, cwd, repo, reg, runs, roster, flags, mode, now) -> list:
         str(repo.get("id") or "").rsplit("/", 1)[-1]
     runs = _try("runs", progress.active_runs) if runs is None else runs
     mine = [r for r in runs or [] if isinstance(r, dict) and r.get("project") == repo.get("id")]
-    found = _try("needs", lambda: _needs(me, mine, flags, layout=[repo])) if runs is not None else None
+    found = _try("needs", lambda: _needs(me, mine, flags, layout=[repo], project=repo.get("id"), now=now)) \
+        if runs is not None else None
     wt_co = _try("checkout", lambda: _checkout(repo, cwd))
     wt, co = wt_co if wt_co else (None, None)
     view = _try("status", lambda: cli.status_view({"projects": projects, "issues": []}, repo, wt, runs=mine,
@@ -524,13 +618,15 @@ def _project(kind, me, cwd, repo, reg, runs, roster, flags, mode, now) -> list:
     last_line = ""
     if last.get("done") and last.get("ts"):
         when = ago(last["ts"], now)
-        last_line = f"Last: {cut(clean(last['done']), LINE_MAX - 2 - width('Last: ') - width(' · ' + when))} · {when}"
+        label = f"Last from {clean(last['by'])}: " if last.get("by") else "Last: "  # another session's status says whose
+        last_line = f"{label}{cut(clean(last['done']), LINE_MAX - 2 - width(label) - width(' · ' + when))} · {when}"
     nxt = _lower_first(_try("next", lambda: _next_step(run, last, repo), "")) if not new else ""
     nxt = NEW_PROJECT if new else f"Next: {nxt}" if nxt else ""
     footer = _try("footer", lambda: _footer(repo, co, now), "") if co else ""
     update, mark = _try("update", lambda: _update(now), ("", None))
+    also = _try("also live", lambda: _also_live(me, repo["id"], projects, now), "") if me[1] else ""
     lines = _assemble(head, found, [("▸", run_line), ("·", footer)],
-                      [("✓", last_line), ("›", nxt), ("+", update)],
+                      [("▸", also), ("✓", last_line), ("›", nxt), ("+", update)],
                       BUDGET["startup"], mode)
     if mark and lines[-1].startswith("+ "):
         _try("update mark", mark)
@@ -545,7 +641,7 @@ def _workspace(kind, me, reg, runs, roster, flags, mode, now) -> list:
     alias = _try("alias", lambda: registry.alias_map(projects), {}) or {}
     runs = _try("runs", progress.active_runs) if runs is None else runs
     found = _try("needs", lambda: _needs(me, [r for r in runs if isinstance(r, dict)], flags, layout=here,
-                                         workspace=alias)) if runs is not None else None
+                                         workspace=alias, now=now)) if runs is not None else None
     run = _try("run", lambda: _working_run([r for r in runs or [] if isinstance(r, dict)], now))
     run_line = ""
     if run:

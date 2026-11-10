@@ -114,6 +114,12 @@ class WelcomeHook(unittest.TestCase):
                                   "started": now - 900, "updates": [{"ts": now - 60, "text": "working"}]}}}))
 
 
+    def end(self, agent: str, sid: str):
+        """The session ended, as the SessionEnd hook records it."""
+        f = progress.session_path(agent, sid)
+        f.write_text(json.dumps(dict(json.loads(f.read_text()), ended={"ts": time.time(), "reason": "exit"})))
+
+
 class Wiring(WelcomeHook):
     # one inspection of the repository, and the same welcome for both agents
     def test_claude_and_codex_get_the_same_welcome_from_one_inspection(self):
@@ -121,6 +127,7 @@ class Wiring(WelcomeHook):
         with mock.patch.object(registry, "inspect_repo", wraps=registry.inspect_repo) as inspect:
             claude = self.start("claude", "c1")
         self.assertEqual(inspect.call_count, 1)
+        self.end("claude", "c1")  # one session at a time: a live one in the same checkout is an overlap (below)
         codex = self.start("codex", "x1")
         self.assertEqual(claude["systemMessage"], codex["systemMessage"])
         lines = claude["systemMessage"].splitlines()
@@ -129,6 +136,13 @@ class Wiring(WelcomeHook):
                                      "! Decision waits in another session: export cancelled invoices too?"])
         self.assertTrue(lines[2].startswith("▸ Invoice export · step 3 of 7 · ~"), lines[2])
         self.assertTrue(lines[-1].startswith("· main · "), lines[-1])
+
+    # A Codex session that starts while a Claude Code session is live in the same checkout hears it as a need line
+    def test_a_second_live_session_in_the_same_checkout_is_named(self):
+        self.start("claude", "c1")
+        lines = self.start("codex", "x1")["systemMessage"].splitlines()
+        self.assertEqual(lines[0], "devkit · billing · 1 thing needs you")
+        self.assertIn("! Claude Code works in this same checkout", lines)
 
     # the model reads first, once, that the developer saw the welcome, before any devkit notice
     def test_the_model_reads_first_that_the_developer_saw_the_welcome(self):

@@ -272,7 +272,7 @@ Release by the recorded policy (see [The delivery policy](#the-delivery-policy))
    previous tag are still open: close the shipped ones (`dev task reconcile --apply`), or give `--why "<reason>"`.
    `dev calver` gives the next CalVer version.
 4. Download or install the published artifact and smoke-test it.
-5. Update the handoff note (version, what shipped, follow-ups), and mark done with `dev task done <n>` any task that
+5. Update the handoff note (version, what shipped, follow-ups), and mark done with `dev task done <id>` any task that
    shipped without a branch of its own.
 
 ## 7. GitOps rules

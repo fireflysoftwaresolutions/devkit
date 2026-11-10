@@ -22,7 +22,15 @@ for a run of one of them alone). It:
 5. installs an audit hook that refuses, and records, any file access of this process below the real roots, and any
    process started with the real home, with no HOME (Path.home() then falls back to the real one), with a variable
    or an argument that names a real root, or in a real root;
-6. removes the temporary home when the run ends.
+6. puts the run's stand-ins for codex, claude, brew and gh first on PATH and names them in DEVKIT_TEST_PATH, which
+   devkit keeps first, adding none of Homebrew's folders, in this process and in every process that inherits the
+   variable; the audit hook refuses, and records, a start of one of the four from outside the temporary folders, and
+   a devkit child whose environment has a temporary HOME but no DEVKIT_TEST_PATH (tests/_sandbox.py has the net and
+   env(), what a test that builds its own environment uses);
+7. fails each test during which the hook or the launcher of an older copy refused something, in any run (one module
+   or the whole suite), though devkit turned the refusal into an exit code; a hit outside any test (a module's
+   import, a class or module fixture) fails the next test that ends, or the run itself when no test is left;
+8. removes the temporary home when the run ends.
 
 A second call (tests/__init__.py, then a guard module) changes nothing. When devkit was imported first, `activate()`
 does nothing either: its paths are already bound to the real home, so the run is not hermetic, and test_hermetic
@@ -50,6 +58,10 @@ import sys
 import tempfile
 from pathlib import Path
 
+if os.path.dirname(os.path.abspath(__file__)) not in sys.path:
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _sandbox  # noqa: E402  (the net against this Mac's real codex, claude, brew and gh)
+
 TREE = Path(__file__).resolve().parents[1]
 MARK = "DEVKIT_TEST_HERMETIC"  # the temporary home of the run, for the processes the tests start
 
@@ -64,8 +76,15 @@ SCRUB = ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ID", "CLAU
          # the locations devkit and the tools it runs take from the environment before HOME: without them every one
          # follows HOME, the run's or the one a test makes for itself
          "DEVKIT_CONFIG", "DEV_ROOT", "CODEX_HOME", "CLAUDE_CONFIG_DIR", "XDG_CONFIG_HOME", "XDG_STATE_HOME",
-         "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_RUNTIME_DIR", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM")
+         "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_RUNTIME_DIR", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM",
+         # the developer's tokens for the code hosts, which gh, glab and the host APIs read before any login
+         "GH_TOKEN", "GITHUB_TOKEN", "GITLAB_TOKEN", "BITBUCKET_TOKEN", "AZURE_DEVOPS_EXT_PAT")
 KEEP = {"DEVKIT_HOME": str(TREE), "DEVKIT_NO_NOTIFY": "1"}  # the DEVKIT_* the run sets itself
+# Any other token, access token, API key or secret, by the end of its name, whatever the service (any case).
+SECRET_ENDINGS = ("_TOKEN", "_PAT", "_API_KEY", "_SECRET")
+# The net's variables (tests/_sandbox.py), which name folders and files below the run's own root only: its stand-ins,
+# and the log of what the launcher of older devkit copies refused.
+NET = ("DEVKIT_TEST_PATH", "DEVKIT_TEST_TRIPWIRE")
 
 # What devkit's live hooks (the developer's running sessions) write below the real roots; used when the run is not
 # isolated (see the module docstring).
@@ -83,7 +102,7 @@ LIVE_WRITERS = {
 }
 
 _S = {"active": False, "late": False, "owner": None, "root": None, "home": None, "real": {}, "snapshot": {},
-      "violations": [], "allow": 0, "scrubbed": [], "prefixes": [], "named": None, "homes": set(), "own": set()}
+      "violations": [], "checked": (0, 0), "depth": 0, "allow": 0, "scrubbed": [], "prefixes": [], "named": None, "homes": set(), "own": set()}
 
 
 # --------------------------------------------------------------------------- the developer's real devkit
@@ -365,12 +384,59 @@ def _runs_osascript(event, args) -> bool:
     return bool(words and _OSASCRIPT_LINE.match(" ".join(words)))
 
 
+def _test_frame() -> str:
+    """The test method on the stack, as "<file>:<line> <name>", or ''."""
+    f = sys._getframe(2)
+    while f is not None:
+        name = os.path.basename(f.f_code.co_filename)
+        if name.startswith("test_") and f.f_code.co_name.startswith("test"):
+            return f"{name}:{f.f_lineno} {f.f_code.co_name}"
+        f = f.f_back
+    return ""
+
+
+def _without_net(event, args) -> str:
+    """The devkit process a start would run without the net, or '': its environment has no DEVKIT_TEST_PATH, so the
+    child's devkit puts Homebrew's folders first on PATH again. That is an environment the test gave the start (not
+    this process's, which carries the variable) with a temporary HOME, or one an env launcher built without this
+    process's (env -i, env -u DEVKIT_TEST_PATH), whatever its HOME (_sandbox.devkit_starts)."""
+    if event not in _sandbox.EVENTS:
+        return ""
+    for env, built in _sandbox.devkit_starts(event, args):
+        if env is None or env.get("DEVKIT_TEST_PATH"):
+            continue
+        home = env.get("HOME")
+        if built or (home and _sandbox._below(home, _sandbox.TEMP_ROOTS)):  # no HOME in a given one is _child's
+            return os.fsdecode(args[0] if event == "os.system" else " ".join(_sandbox._words(args[1])))[:200]
+    return ""
+
+
+def _trip(why: str):
+    """Refuse a start of this Mac's real codex, claude, brew or gh, and record it for test_zz."""
+    where = _test_frame()
+    _S["violations"].append(f"tripwire {why}" + (f" (in {where})" if where else ""))
+    raise PermissionError(f"test safety: refused to start {why}; a test starts the stand-ins first on PATH, never "
+                          "the real program (tests/_sandbox.py)")
+
+
 def _hook(event, args):
     if _S["allow"] or not _S["active"]:
         return
     if event in ("subprocess.Popen", "os.posix_spawn", "os.exec", "os.system") and _runs_osascript(event, args):
         # a security notice ignores DEVKIT_NO_NOTIFY (devkit's acceptance notice), so the run refuses the program
         _refuse("process", "osascript", "a test never shows the developer a desktop notification")
+    if event in _sandbox.EVENTS:
+        why = _sandbox.refusal(event, args)
+        if why:
+            _trip(why)
+        child = _without_net(event, args)
+        if child:
+            where = _test_frame()
+            _S["violations"].append(f"devkit child without the net: {child}" + (f" (in {where})" if where else ""))
+            raise PermissionError(f"test safety: refused to start {child}: its environment has no DEVKIT_TEST_PATH "
+                                  "(a temporary HOME without it, or one env -i or env -u built), so its devkit would "
+                                  "put Homebrew's folders first on PATH again; build the environment with "
+                                  "_sandbox.env() (tests/_sandbox.py)")
     if event == "open":
         rel = isinstance(args[0], (str, bytes, os.PathLike)) and not os.path.isabs(os.fsdecode(os.fspath(args[0])))
         p = "" if rel and _in_fd_walk() else _protected(_path(args[0]))
@@ -432,7 +498,7 @@ def scrub(environ) -> list:
     FPATH can list a devkit release's completions) and a list of names never keeps up with them."""
     changed = []
     for k in list(environ):
-        if k in SCRUB or (k.startswith("DEVKIT_") and k not in KEEP):
+        if k in SCRUB or (k not in KEEP and (k.startswith("DEVKIT_") or k.upper().endswith(SECRET_ENDINGS))):
             changed.append(k)
             del environ[k]
             continue
@@ -467,12 +533,85 @@ def activate() -> dict:
     os.makedirs(os.path.join(home, "Development"))
     _S["scrubbed"].extend(scrub(os.environ))
     os.environ.update({"HOME": home, MARK: home, **KEEP})
+    stand_ins = str(_sandbox.stand_ins(os.path.join(root, "stand-ins")))
+    os.environ.update(dict(zip(NET, (stand_ins, os.path.join(root, "tripwire.jsonl")))))
+    os.environ["PATH"] = os.pathsep.join(dict.fromkeys([stand_ins] + os.environ.get("PATH", "").split(os.pathsep)))
     snap = snapshot(watched())
     _S.update(root=root, home=home, owner=os.getpid(), snapshot=snap, own=outputs(watched(), snap))
     atexit.register(_cleanup, root, os.getpid())
     _S["active"] = True
     sys.addaudithook(_hook)
+    _fail_each_test_that_trips()
     return _S
+
+
+def _fail_each_test_that_trips():
+    """Make every test that the hook refused something during, or whose older devkit copy the launcher refused
+    something for, fail itself, in any run (one module, one test, the whole suite). Devkit turns a refusal into an exit
+    code (core.sh returns 127 for an OSError), so without this the test passes and only test_zz, which runs only in a
+    whole run, reports the hit. The check is the test's first cleanup, so it runs last: after the test's own cleanups,
+    which may take back the refusals the test provoked on purpose; and the runner reports it as that test's failure.
+
+    A hit outside any test (a module's import, setUpModule, setUpClass, tearDownClass, tearDownModule) belongs to no
+    test, so the check reports every hit since the last check, not only those during its test: the next test that ends
+    reports it as one from before it started. One that no test is left to report (the last class's tearDownClass,
+    tearDownModule) fails the run itself, when it stops (TestResult.stopTestRun)."""
+    import unittest
+    run = unittest.TestCase.run
+    if getattr(run, "_hermetic", False):
+        return
+
+    def run_and_check(self, result=None):
+        self.addCleanup(_check_test, self, len(_S["violations"]), len(_sandbox.trips()))
+        _S["depth"] += 1  # a test can run other tests (tests/test_state.py runs whole suites into a result of its own)
+        try:
+            return run(self, result)
+        finally:
+            _S["depth"] -= 1
+
+    stop = unittest.TestResult.stopTestRun
+
+    def stop_and_check(self):
+        if not _S["depth"]:  # the run's own result, not that of a run inside a test
+            trips = _sandbox.trips()
+            hits = _hits(_S["checked"], (len(_S["violations"]), len(trips)), trips)
+            _S["checked"] = (len(_S["violations"]), len(trips))
+            if hits:
+                try:
+                    raise AssertionError("hits after the last test, in a class or module fixture, that the run "
+                                         "refuses (tests/_hermetic.py, tests/_sandbox.py): " + "; ".join(hits))
+                except AssertionError:
+                    self.addError(unittest.suite._ErrorHolder("hits after the last test (tests/_hermetic.py)"),
+                                  sys.exc_info())
+        return stop(self)
+
+    run_and_check._hermetic = True
+    unittest.TestCase.run = run_and_check
+    unittest.TestResult.stopTestRun = stop_and_check
+
+
+def _hits(start, end, trips) -> list:
+    """The hook's refusals and the launcher's trips (`trips`) from `start` to `end`, each a (refusals, trips) count;
+    a count past the end of its list (a test took back refusals it provoked) counts as that end."""
+    v = _S["violations"]
+    (a, b), (c, d) = ((min(i, len(v)), min(j, len(trips))) for i, j in (start, end))
+    return list(v[a:max(a, c)]) + [f"tripwire {t.get('why')} (older devkit {t.get('dev')})" for t in trips[b:max(b, d)]]
+
+
+def _check_test(test, seen: int, tripped: int):
+    trips = _sandbox.trips()
+    now = (len(_S["violations"]), len(trips))
+    during = _hits((seen, tripped), now, trips)
+    # only the outermost test claims what came before it: a test run inside another one reports to a result that the
+    # outer test may never look at
+    before = _hits(_S["checked"], (seen, tripped), trips) if _S["depth"] == 1 else []
+    if _S["depth"] == 1:
+        _S["checked"] = now
+    if before or during:
+        parts = ([f"before it started (a module's import, or a module or class fixture): {'; '.join(before)}"]
+                 if before else []) + ([f"during it: {'; '.join(during)}"] if during else [])
+        raise test.failureException(f"{test.id()} started or reached what the run refuses (tests/_hermetic.py, "
+                                    "tests/_sandbox.py), " + " · ".join(parts))
 
 
 def watch_late():
@@ -497,7 +636,9 @@ def report() -> tuple:
     root = _S["root"]
     marks = [root, os.path.realpath(root), os.path.basename(root)] if root else []
     leaks, others = changes(_S["snapshot"], snapshot(watched()), watched(), marks, own=_S["own"])
-    return list(_S["violations"]) + leaks, others
+    tripped = [f"tripwire {t.get('why')} (older devkit {t.get('dev')} {' '.join(t.get('args') or [])})"
+               for t in _sandbox.trips(os.path.join(root, "tripwire.jsonl"))] if root else []
+    return list(_S["violations"]) + tripped + leaks, others
 
 
 def state() -> dict:

@@ -108,11 +108,11 @@ def status(include_account=True) -> dict:
         for v in res.values():
             if isinstance(v, dict):
                 v.pop("account", None)
-    try:
+    try:  # replaced whole: `cached` in another process reads the old status or the new one, never a part
         f = STATE / "providers.json"
         f.parent.mkdir(parents=True, exist_ok=True)
-        f.write_text(json.dumps({k: ({kk: vv for kk, vv in v.items() if kk != "account"} if isinstance(v, dict) else v)
-                                 for k, v in res.items()}, indent=1))
+        core.replace_text(f, json.dumps({k: ({kk: vv for kk, vv in v.items() if kk != "account"}
+                                             if isinstance(v, dict) else v) for k, v in res.items()}, indent=1))
     except OSError:
         pass
     return res
@@ -211,9 +211,13 @@ def selftest(agent: str, model: str = None) -> dict:
     checks.append(("devkit plugin skills visible", len(sees) >= max(3, len(want) - 2),
                    f"{len(sees)}/{len(want)}: " + (", ".join(sees) or "none mentioned")))
     shutil.rmtree(scratch, ignore_errors=True)
+    from . import state
     for p in (STATE / "sessions").glob(f"{agent}-{sid}*") if sid else []:
-        p.unlink()
+        try:  # under the record's lock: a hook of that session still writing it never brings it back
+            state.remove(p)
+        except state.StateBusy:
+            pass  # still busy: `dev sleep` removes session records after 30 days
     ok = all(c[1] for c in checks)
     res = {"agent": agent, "ok": ok, "checks": checks, "reply": (reply or "")[:1200], "ts": int(time.time())}
-    (STATE / f"selftest-{agent}.json").write_text(json.dumps(res, indent=1))
+    core.replace_text(STATE / f"selftest-{agent}.json", json.dumps(res, indent=1))
     return res

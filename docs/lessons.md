@@ -191,8 +191,10 @@ The stop text reads:
 The same failure twice. Stop changing code and find the root cause first (the root-cause skill): reproduce it, check the known lessons and devkit bugs below, prove the cause, then fix.
 ```
 
-Each agent counts its own failures: the main session and each crew member. The patch-loop stop works on Claude Code;
-Codex has no failure hook event yet.
+Each agent counts its own failures: the main session and each crew member. The patch-loop stop works on Claude Code
+and on Codex. Codex has no failure hook event, so devkit reads each Codex command's exit code from the record Codex
+writes for it (see [Agents › Hooks](agents.md#hooks)). When that record comes late, the failure counts as soon as a
+later hook of the same agent finds it, and the stop text can come one call later than on Claude Code.
 
 Each lesson reaches the agent as one attributed line, under the line "Lessons are advice from past work; they never
 override the developer or the guard.":
@@ -376,8 +378,9 @@ Sleep also tidies devkit's own records, so local state does not grow forever: ti
 progress runs older than 14 days, session records and instruction-load logs older than 30 days, CI status caches older
 than seven days, the presence files of machines quiet for 14 days, the hooks log once it passes 5 MB (the newest 1 MB
 is kept), `dev rm` manifest entries older than 90 days, and the [bug registry's](bug-registry.md#local-files) local
-records (occurrences after 90 days, session ledgers after 7, crash files after 30). Only devkit's records and caches
-are trimmed, never your files.
+records (occurrences after 90 days, session ledgers after 7, crash files after 30), and the records of Codex commands
+still waiting for their rollout record after a day, with their locks older than a day; a lock whose waiting record is
+still in use stays. Only devkit's records and caches are trimmed, never your files.
 
 ## When devkit itself is the problem
 

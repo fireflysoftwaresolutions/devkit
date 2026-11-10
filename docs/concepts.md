@@ -92,7 +92,7 @@ nothing falls between them.
 ### Who does the work, and how long it takes
 
 When a task needs more than one kind of expertise, the main session leads devkit's crew as the tech lead (Morpheus):
-25 specialist agents, named by role, each in its own lane, with its own files and time, within the crew's slots (see
+25 specialist agents, named by role, each in its own lane, with its own files and time, within the session's crew slots (see
 [The crew](crew.md)). Every run's plan has steps with
 estimates and dependencies; devkit counts only active time and gives the ETA as a range along the critical path, so
 parallel lanes shorten it and waiting for you does not (see
@@ -345,8 +345,8 @@ a mark, always in this order:
 | Mark | Line | What it shows |
 | --- | --- | --- |
 | — | The headline | `devkit · <project> · <verdict>`. The verdict is `1 thing needs you`, `N things need you`, `work in progress`, `nothing needs you`, `new project`, or `see dev status` when devkit could not read what needs you |
-| `!` | Needs you | Only what you alone can do: the guard is off in this session, the session runs an older devkit, a decision waits for you (oldest first; `in another session` when its run belongs to another one), extensions were accepted or changed outside devkit, or the project is outside the folder layout. From the third, the second line reads `And N more: dev status lists them` |
-| `▸` | Running | The run: its goal, its step of the total, the time left, and how many crew members work; `in another session` when another live session owns it. After a resume, what happened since you left |
+| `!` | Needs you | Only what you alone can do, or what this session must know before it acts: the guard is off in this session, the session runs an older devkit, a decision waits for you (oldest first; `in another session` when its run belongs to another one), an escalation between agent sessions waits for you (`Escalation waits: “…”`), another session's question waits for this one (`Question from Codex (acme/api) waits: dev session inbox`), another session works in this same checkout or on this branch, another session holds a claim on this project (`Codex holds the release of this project until 15:40`), extensions were accepted or changed outside devkit, or the project is outside the folder layout. From the third, the second line reads `And N more: dev status lists them` |
+| `▸` | Running | The run: its goal, its step of the total, the time left, and how many crew members work; `in another session` when another live session owns it. After a resume, what happened since you left. A second `▸` line names the other live agent sessions of this project and of its initiatives' projects, such as `Also live: Codex on fix/login · Claude Code in web`; a session a need line already names is left out (see [Teams and machines › Sessions on one Mac](teams.md#sessions-on-one-mac)) |
 | `✓` | Last | The latest status block's Done, with its age |
 | `›` | Next | The run's next step, else the latest status block's Next, else the first task of the handoff note |
 | `·` | Where | The branch, its changes, and the last CI result devkit recorded: `CI passed 2 days ago`, `CI failed: unit tests`, or `CI running, watched` when a CI watch follows the run |
@@ -356,7 +356,7 @@ a mark, always in this order:
 
 | Start | Lines | What it shows |
 | --- | --- | --- |
-| Startup in a project | 1 to 5 | The headline, what needs you, the run, Last, Next, the branch, and the update. When they do not all fit, the update goes first, then Next, then Last |
+| Startup in a project | 1 to 5 | The headline, what needs you, the run, `Also live:`, Last, Next, the branch, and the update. When they do not all fit, the update goes first, then Next, then Last, then `Also live:` |
 | Startup outside a project | 1 to 4 | `devkit · workspace · <verdict>`, what needs you and the run with their project's name, and `Recent:` the three projects active last, with their age |
 | Resume | 1 to 3 | The headline, what needs you, and `Since you left:` the crew members that finished and the CI result recorded after your last turn |
 | `/clear` | 0 or 1 | The headline when something needs you, `run open, step N of M` while a run works, and nothing otherwise |

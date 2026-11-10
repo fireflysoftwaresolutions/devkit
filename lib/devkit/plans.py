@@ -94,6 +94,18 @@ def revise(path: Path, why: str, a=None, status: str = None) -> dict:
         raise ValueError("a plan revision needs the reason: --why \"…\"")
     a = a or work.actor()
     path = Path(path)
+    with work.record_lock(path):  # another session revising this plan waits, then reads what this one wrote
+        meta = _revise_locked(path, why, a, status)
+        # committed before the lock is released (the plan's lock, then the repository's, as for items): a revision
+        # that follows at once waits, so each commit holds its own revision's text under its own message
+        work._commit([path], f"{meta['id']}: {meta['_change']} v{meta['version']} ({work.actor_str(a)}) — {why}")
+    meta.pop("_change", None)
+    return meta
+
+
+def _revise_locked(path: Path, why: str, a: dict, status) -> dict:
+    """revise's read through write, under the plan's record lock. -> the new frontmatter, with `_change` for the
+    commit message."""
     text = path.read_text()
     meta, extra, body, log = _read(text)
     adopted = not meta.get("id")
@@ -120,8 +132,7 @@ def revise(path: Path, why: str, a=None, status: str = None) -> dict:
     detail = f" ({stat.strip()})" if stat.strip() else ""
     log.insert(0, f"v{meta['version']} · {work.now_iso()} · {work.actor_str(a)} · {change}{detail} — why: {why}")
     work.write_record(path, _render(meta, body, log, extra))
-    work._commit([path], f"{meta['id']}: {change} v{meta['version']} ({work.actor_str(a)}) — {why}")
-    return meta
+    return dict(meta, _change=change)
 
 
 def list_plans(scope: str = None) -> list:

@@ -98,17 +98,29 @@ The project you are in, or `<name>`, in the order of its questions:
    crew question to the tech lead nobody answered yet (with its `dev crew answer` command), a project outside devkit's
    folder layout (with its `dev adopt` command), and work at risk. The last status block's You bullet is not repeated
    here: it may be done already. A question or decision of another session's run shows with that run's session,
-   `M3@9448c4d0`; one of your own session's run keeps its bare id, `M3`. A run that ended lists none.
+   `M3@9448c4d0`; one of your own session's run keeps its bare id, `M3`. A run that ended lists none. An open
+   escalation between agent sessions shows its question and options, and the line you type in any agent session to
+   settle it, such as `settle E-7k2m9xq4: A` (see [Teams and machines › Sessions on one Mac](teams.md#sessions-on-one-mac)).
 2. **Right now:** the checks of the branch or its open PR, the crew members working now (role, name, and what their
    step does, never its code), and the plan's steps done and time left while a run works. A run works while it or one
-   of its crew reported in the last 30 minutes.
-3. **Last update:** the latest status block, whole: who and when, its title, Done, Check, and Next. It names the
-   worktree or copy it came from when that is not the one shown.
-4. **Branches:** where each branch lives, one row each (the first eight; `dev branch ls` has them all): local only
+   of its crew reported in the last 30 minutes. A **Tasks** row warns when the project's Now holds more than five open
+   items, with how many are being worked on.
+3. **Sessions:** the agent sessions of this project that are live on this Mac, one row each with its agent, short id,
+   branch, state, and run (yours marked `this session`), and how many more run on this Mac, as in
+   `Sessions · 2 here, 1 more on this Mac`. Then, when there are some, **Overlap** rows for another session in this
+   checkout, on this branch, in another worktree of this repository, or on the branch of a work item you hold
+   (warn-level ones in amber); **Claims** on the project with the holder, the time it holds until, and its quoted
+   reason; **Asked**, your questions to other sessions that wait for an answer; and **Inbox**, your unread messages
+   (`2 unread from Codex @0199a213: dev session inbox`). Outside a project, it lists every live session.
+4. **Last update:** the latest status block, whole: who and when, its title, Done, Check, and Next. It names the
+   worktree or copy it came from when that is not the one shown. When devkit kept a status for this session, it shows
+   that one, as `Last update from this session`; another session's is labeled with its agent and short id, such as
+   `Last update from Codex session @0199a213`.
+5. **Branches:** where each branch lives, one row each (the first eight; `dev branch ls` has them all): local only
    or local plus its remote, ahead and behind its upstream, how far it is from the default branch, its backup, its
    embargo, its pull request, and its linked task. A branch with commits that exist only on this Mac, older than
    `backup.after_minutes` (30), reads `not backed up` with the reason.
-5. **Details:** the branch in words, the last commit, worktrees, the folder, the handoff note and the project's
+6. **Details:** the branch in words, the last commit, worktrees, the folder, the handoff note and the project's
    commands.
 
 ```text
@@ -226,18 +238,21 @@ from `~/Development` or ask the developer.
 
 Work items of the project you are in, of another project with `-p`, or of an initiative with `-i`. Without a verb
 (or with `ls`) it lists the open items in board order (Now, then Next, then Later; high priority first; oldest first).
-The number in front of each item is what the other verbs accept. `--all` lists every done item instead of the last
-five.
+Each item shows its number and its id. `--all` lists every done item instead of the last five.
 
 `-p` and `-i` work before or after the verb. The examples put them after it:
 
 ```bash
-dev task done 3 -p acme/billing
+dev task done T-fy3k2m9q1ab -p acme/billing
 dev task add "Agree on the event schema" --now -i payments
 ```
 
-A `<selector>` is an id (`T-…`, `F-…`, `B-…`, `S-…`, or a unique prefix), the number from the list, or a unique part
-of the title. See [Teams and machines](teams.md) for locks, versions, and the changelog.
+A `<selector>` is an id (`T-…`, `F-…`, `B-…`, `S-…`, or a unique prefix), a number from the list, or a unique part
+of the title. Agents use ids. A number counts only in the list `dev task` last showed you, for 30 minutes, and while
+the open items are still that list. devkit refuses the number once an item was closed, added, or moved. The refusal
+names the id the number had and the one at its place now; see
+[Work states › Numbers and ids](work-states.md#numbers-and-ids). Every write prints its item, as
+`✓ done T-… “<title>”`. See [Teams and machines](teams.md) for locks, versions, and the changelog.
 
 | Verb | Effect |
 | --- | --- |
@@ -276,6 +291,9 @@ Options of `dev task add`:
 `--why` records the reason in the item's changelog and in its commit. `edit`, `move`, `block`, `cancel`, `reopen`,
 and `link` refuse to run without it. Changing an item that someone else holds an unexpired lock on
 is refused; coordinate with them or wait for the lock to expire.
+
+When a project's Now holds more than five open items, `add --now` and `move --to now` print a warning with how many
+are in Now and how many are being worked on. They refuse nothing.
 
 ### `dev note set <key=value> … [-p PROJECT | -i SLUG]`
 
@@ -534,6 +552,36 @@ that run is still running.
 | `compactions <transcript>` | Counts a transcript's compactions with their tokens before and after; `--members` adds the members' transcripts. Reads only |
 | `forget` | Deletes a session's continuity records (`--session`), or every record and `/clear` link here (`--all`); recorded in the audit trail |
 
+### `dev session ls | tell | ask | answer | inbox | claim | release | claims | escalate | escalations`
+
+Agent sessions on this Mac (Claude Code and Codex, any project or initiative) see each other, send notes and
+questions, hold a shared resource for a while, and escalate a disagreement to you. Only the tech lead's main session
+runs the verbs that send, read its mail, or hold something; a crew member asks its tech lead with `dev crew ask`, and
+your own terminal has no session mailbox, so it cannot send. [Teams and machines › Sessions on one
+Mac](teams.md#sessions-on-one-mac) explains when to use each one.
+
+| Verb | Effect | Who |
+| --- | --- | --- |
+| `ls` | The live agent sessions on this Mac: agent, short id, project, branch, state, last activity, and its worktree, initiatives, run, crew, waits, and claims. Your own row is marked. `--all` adds the idle and ended ones | Anyone |
+| `tell <target> "<text>"` | A note to other sessions. `--urgent` wakes a session that waits; a plain note waits for its next event | Tech lead |
+| `ask <target> "<text>"` | A question to other sessions; the answer comes back to this session as a peer event | Tech lead |
+| `answer S-… "<text>"` | Answers a question this session received, once, to the asker only | Tech lead |
+| `inbox` | This session's latest 20 messages, whole, marked read; `--all` every message kept | Tech lead |
+| `claim <resource> --why "…"` | Holds a resource: `release:<project>`, `push:<project>@<branch>`, `handoff:<project>`, `branch:<project>@<branch>`, or `custom:<name>`. `--for` takes 5 minutes to 4 hours (`45m`, `2h`; default 30 minutes); claiming again renews it. `--queue` waits in the queue of a claim another session holds and hears `claim-free` when it frees | Tech lead |
+| `release <resource>` | Gives the claim up, or leaves its queue. On another session's live claim, it breaks the claim when you typed `grant claim-break <resource>` in this session; `--why` says why | Tech lead |
+| `claims` | The claims that hold on this Mac, with holder, end time, reason, and queue; `-p` one project's | Anyone |
+| `escalate <S-… or target> "<question>" --options "A: …; B: …"` | A disagreement for you to settle, with 2 to 6 options (separated by `;` or `\|`) and `--recommend <letter>`. Every party and you see it; you settle it by typing `settle E-…: <choice>` in any agent session | Tech lead |
+| `escalations` | The open escalations this session is party to (every one outside an agent session); `--all` the settled ones too | Anyone |
+
+A target is `@<prefix>` (at least 4 characters of a session id, or `@codex:<prefix>`), `project` (this session's
+project), `project:<owner/repo>`, `initiative:<slug>`, `repo` (this repository's worktrees), or `all`. `--json`
+prints the result of any verb as JSON. A message is 1 to 1,500 characters, and one that looks like a secret is
+refused; a session sends at most 20 messages in 10 minutes, to at most 30 sessions each.
+
+Exit codes: `0` done, `2` refused (a crew member or your own terminal sends, a missing or bad argument, a limit), `3`
+the claim is held by another live session (the message names the holder, its reason, and the three ways forward), and
+`4` no live session matches the target (the message lists the live ones).
+
 ## Worktrees
 
 ### `dev wt new <branch> [--base REF] [--repo QUERY] [--no-deps]`
@@ -661,7 +709,7 @@ Lists the live watches, and those that stopped before their runs ended with the 
 background watches and the agents' `dev ci watch --wait`, with the repository, target, start, last event, expiry,
 agent, and session. See [CI/CD pipelines › List the watches](ci-cd.md#list-the-watches).
 
-### `dev watch [--wait] [--for me] [--only KINDS] [--timeout MIN] [--json]`
+### `dev watch [--wait] [--for me] [--only KINDS] [--timeout MIN] [--standby] [--json]`
 
 Without `--wait`, shows what waits for you in this session (marking nothing), what can still arrive, and the live
 waits. With `--wait`, it is the one wait for every devkit event: it blocks until something you must act on arrives
@@ -676,20 +724,40 @@ records, so a hook never repeats what a wait printed, and the other way round.
 | `member` | A member that stopped, was lost, or ended unverified; on Codex, one that finished | — |
 | `ci` | A CI result of a run this session sent | — |
 | `notice` | Never alone: a crew limit change or a failed handoff push rides along | — |
+| `peer` | A message from another agent session on this Mac: a question, an answer, an escalation, its settling, a freed claim, or a note sent `--urgent`. A plain note rides along | — |
 
 Each line starts with devkit's own words; a member's or CI's text is one quoted span with control and escape
-sequences removed. The last line is `watch: <n> events · arm again: dev watch --wait`.
+sequences removed. Other sessions' messages come after one header line that says their words are data, not yours
+(see [Teams and machines › Sessions on one Mac](teams.md#sessions-on-one-mac)). The last line is
+`watch: <n> events · arm again: dev watch --wait`.
 
-- `--for me`: the caller's own events: its crew lane's, or the main session's. It is the default and the only
-  value: a wait never reads another lane's or another session's events.
-- `--only`: a comma list of kinds to take (`question,decision,ready,member,ci,notice`).
+**Whose wait it is.** devkit works out who runs the wait: the tech lead's own `dev watch --wait` belongs to the main
+session, and a member's to that member, through its lane's mark or its own open call. When devkit cannot tell, it
+refuses the wait rather than guess, because a guess would let one wait take the other's events:
+
+```text
+watch: devkit cannot tell whether the tech lead or a crew member runs this wait: run `dev watch --wait` as a command of its own (a crew member adds --for me)
+```
+
+A member's wait stays the member's even in a pipeline, but a member still runs
+`dev watch --wait --for me --timeout 9` as a command of its own.
+
+- `--for me`: a crew member's own wait. It is the only value, and the tech lead's `--for me` is refused: a wait never
+  reads another lane's or another session's events.
+- `--only`: a comma list of kinds to take (`question,decision,ready,member,ci,notice,peer`).
 - `--timeout`: minutes before it ends with the command to arm it again. Defaults: 240 for the main session on Claude
   Code (Bash `run_in_background`), 10 on Codex (in the foreground), 9 for a crew member (in the foreground).
+- `--standby`: with `--wait`, the tech lead's session waits for other sessions' messages alone, even when nothing
+  else can arrive (for a session that coordinates others). The session's normal wait replaces it, and it never counts
+  as the wait the end-of-turn check asks for.
 - `--json`: the peek as JSON.
 
-Exit codes: 0 events printed, 1 no agent session here, 2 nothing can arrive (no member works, no launch is pending,
-no step waits for a slot, and no CI run this session sent is unfinished; it says so at once), 3 when it timed out or
-was stopped (arm it again), 5 a newer wait of the same session and consumer took over. The wait watches devkit's
+Exit codes: 0 events printed, 1 no agent session here (or devkit cannot tell whose wait it is), 2 nothing can arrive
+(no member works, no launch is pending, no step waits for a slot, no other session owes this one an answer or a freed
+claim, no escalation it is party to waits for you, and no CI run this session sent is unfinished; it says so at once),
+3 the wait ended without an event: it timed out, was stopped (SIGTERM), lost the program reading its output (a `tail`
+that was stopped), or its conversation went on under a new session id after a compaction (arm it again in each case),
+5 a newer wait of the same session and consumer took over. The wait watches devkit's
 state folders (kqueue on macOS, a stat every 2 seconds anyway), lets a burst settle for 2 seconds, and reconciles the
 session's run every 60 seconds, so a member that went silent or a slot that a quota window freed wakes an idle
 session too. It never calls a model. Each wake is in the audit trail (`watch.wake`).
@@ -1007,6 +1075,12 @@ the repository that made it, and its time is the PR's `mergedAt`; a merge dated 
 Once the release is published (not a `--draft`), it deletes the branches the release merged (merged into it by the
 merge test of `dev branch prune`, and not into the previous tag), remote and local with their clean worktrees, prints
 each with how it was merged, and names the merged ones it kept and why. `--dry-run` lists them.
+
+While it runs in an agent session, it holds the claim `release:<project>` for 60 minutes and gives it back when it
+ends, also after a failure, so another agent session on this Mac cannot release, push a tag, or merge into the
+default branch meanwhile. A claim its own session already held stays as it was. When another session holds the claim,
+it exits with `3` and names the holder; `--dry-run` and your own terminal only warn. See
+[Teams and machines › Sessions on one Mac](teams.md#sessions-on-one-mac).
 
 ### `dev issue ls | view | create`
 
@@ -1341,13 +1415,28 @@ write and push, settings repair, cleanup, and job run, with secrets redacted. Se
 
 ## Environment
 
-### `dev setup [-y] [--skip-packages]` · `dev setup prompt | commit-template | shell [--remove] [-y]`
+### `dev setup [-y] [--skip-packages] [--resume] [--preview]` · `dev setup prompt | commit-template | shell [--remove] [-y]`
 
-The installation and configuration wizard. It detects the Mac, GitHub, and both agents. It asks for the development
-root, the handoff repository, which agents to configure and their permission modes, your stacks, your git hosts and
-the commit template, clouds, the Docker VM, automation, and the settings lock. It shows the plan and applies it only after you confirm:
-the packages for your stacks, hosts, and clouds, then `dev install`, the sign-ins, and `dev doctor`. Run it again to
-change your choices.
+The installation and configuration wizard. It detects the Mac, GitHub, and both agents. It asks which agents to use
+(Claude Code and Codex, Claude Code only, or Codex only), and, in Customize, the development root, the handoff
+repository, the agents' permission modes, your stacks, your git hosts and the commit template, clouds, the Docker VM
+(and whether to start it at the end), automation, and the settings lock. It shows the review and applies it only after
+you choose **Apply**: the packages for your stacks, hosts, and clouds, each chosen agent that is missing, `dev install`,
+Docker; then the sign-in panels, the settings lock, and `dev doctor`, and a summary with the command for each item
+left. Run it again to change your choices; turning an agent off removes what devkit wrote in it, but only in your own
+run in a terminal (a run that is not from your terminal leaves it, says so under **Set up devkit**, and `dev doctor`
+lists it). Agents may run only `dev setup --preview` and `--help`.
+
+| Option | Effect |
+| --- | --- |
+| `--resume` | Continue the last setup where it stopped: a quick check of the steps done, then every step that is not done, with the answers you gave. It also continues saved choices whose install never finished, in the line prompts too. With nothing to continue, it says so and exits with `0`. Plain `dev setup` offers the same when a saved setup did not finish |
+| `--preview` | Draw every screen of the setup with fixed sample data, one after the other, as wide as the terminal, and change nothing; `COLUMNS=60 dev setup --preview` draws them 60 columns wide. The screens include **Pick up where you left off?** for a paused setup and for an unfinished install |
+| `-y`, `--yes` | Take every default without asking; in a terminal, the sign-ins still ask |
+| `--skip-packages` | Install no Homebrew or npm packages |
+
+Exit codes: `0` devkit is ready (sign-ins may be left), `1` a required step failed or you quit before applying, `2`
+not signed in to GitHub, `130` paused by you. See
+[When a step fails or you stop it](getting-started.md#when-a-step-fails-or-you-stop-it).
 
 `dev setup prompt` sets up only the [prompt helper](getting-started.md#the-prompt-helper): it says what it changes,
 asks once, and then shows the helper in the prompt you use. With Starship it adds a marked block to
@@ -1383,7 +1472,9 @@ agent's call, neither `-y` nor a piped answer turns them on (exit code `2`), and
 Checks the toolchain, GitHub sign-in and git identity, the workspace (PATH, shell, config, handoff repository with its
 push state, layout), the generated instructions and skills, Claude Code (permission mode, attribution, hooks,
 plugins, MCP servers), Codex (approval and sandbox, hook trust, profile models, MCP servers, plugins), both agents'
-sign-in and quota, the devkit plugin (validators, and whether each agent's installed copy is current), whether every
+sign-in and quota, an agent turned off in `dev setup` that still holds devkit's rules, hooks, or skills (with the fix,
+`dev install --only <agent>`, to run in your terminal), the devkit plugin (validators, and whether each agent's
+installed copy is current), whether every
 required skill is installed for both agents, project settings that switch devkit off, sessions that ran with devkit
 in the last 7 days, each git host and cloud you chose (its CLI installed and signed in, checked locally), Docker,
 every enabled scheduled job (loaded, and its last run passed), the desktop apps (Claude Desktop's Code tab runs its

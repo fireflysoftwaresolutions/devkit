@@ -441,6 +441,8 @@ def reconcile(run: dict, facts: dict, now: float, lim: dict | None = None) -> li
         mine = [s for s in plan if s.get("owner") == aid and s.get("state") == "running"]
         lost = [s for s in plan if s.get("lost_from") == aid and s.get("state") == "pending"  # and not reassigned
                 and (s.get("owner") or "main") == "main" and (not s.get("label") or _label_matches(s["label"], lane))]
+        if lane.get("over_limit"):  # a Codex launch over the crew's limits gave its step back: it never takes it again
+            lost = []
         if st == "running":
             mf = f.get("meta_finished")
             silent = now - _last_activity(lane, f)

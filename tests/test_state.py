@@ -374,9 +374,23 @@ def direct_writes(path: Path) -> list:
     text = path.read_text()
     bare = path.name == "progress.py"
     out = []
+    lines = text.splitlines(keepends=True)  # split once: ast.get_source_segment re-splits the file per call
+
+    def segment(node) -> str:
+        # the node's source text from the lines split once (columns are UTF-8 byte offsets, as in the ast)
+        end = getattr(node, "end_lineno", None)
+        if end is None:
+            return ""
+        first, last = node.lineno - 1, end - 1
+        if first == last:
+            return lines[first].encode()[node.col_offset:node.end_col_offset].decode(errors="replace")
+        part = [lines[first].encode()[node.col_offset:].decode(errors="replace")]
+        part += lines[first + 1:last]
+        part.append(lines[last].encode()[:node.end_col_offset].decode(errors="replace"))
+        return "".join(part)
 
     def record_path(node, names) -> bool:
-        src = ast.get_source_segment(text, node) or ""
+        src = segment(node)
         if RECORD.search(src) or (bare and BARE.search(src)):
             return True
         if isinstance(node, ast.Name):

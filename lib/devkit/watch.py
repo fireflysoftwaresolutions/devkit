@@ -17,16 +17,20 @@ and the wait both take through `mail`, so an event is reported once, whichever r
   ci        CI results of a session without a run (ciwatch.take_events: `delivered`); with a run they are messages
   member    a member that stopped, was lost or ended unverified (a notice approvals writes); one that finished
   notice    the crew limit changed, the handoff push failed (`notices` in the session record: `told`)
+  peer      messages from other agent sessions on this Mac, for the main session only (peers.take: `told`)
 
-The consumer is the main session ("main") or one crew lane (its agent id). Waking events end a wait; notices ride
-along with the next delivery and never end one alone: a member's normal finish on Claude Code, whose harness already
-wakes the main session, is one, and so are devkit's own notices.
+The consumer is the main session ("main") or one crew lane (its agent id), as identity.consumer decides. Waking
+events end a wait; notices ride along with the next delivery and never end one alone: a member's normal finish on
+Claude Code, whose harness already wakes the main session, is one, and so are devkit's own notices and another
+session's plain note.
 
-Member and CI text reaches the agent as one quoted span per line, control and escape sequences stripped: every line
-the wait prints starts with devkit's own words, so none reads as a grant or an approval. The wait never calls a
-model: it watches the state folders (kqueue where the system has it, a stat every two seconds anyway), batches a
-burst for two seconds, and every 60 seconds reconciles the session's run, so a member that went silent or a crew
-slot a quota window freed turns into an event while the session is idle.
+Member, CI and other sessions' text reaches the agent as one quoted span per line (clean): escape sequences, control,
+bidi and zero-width characters dropped, and no quote that closes devkit's. Every line the wait prints starts with
+devkit's own words, so none reads as a grant or an approval; other sessions' lines come after the frame's header,
+which says their words are data. The wait never calls a model: it watches the state folders (kqueue where the system
+has it, a stat every two seconds anyway), batches a burst for two seconds, and every 60 seconds reconciles the
+session's run, so a member that went silent or a crew slot a quota window freed turns into an event while the
+session is idle. `--standby` waits for other sessions' messages alone, even when nothing else can arrive.
 """
 from __future__ import annotations
 
@@ -37,6 +41,7 @@ import select
 import signal
 import sys
 import time
+import unicodedata
 from pathlib import Path
 
 from . import core, state
@@ -44,7 +49,8 @@ from .core import STATE
 
 LIVE = STATE / "watch" / "live"  # one record per `dev watch --wait`: `dev watches`
 LIVE_DAYS = 3
-KINDS = ("question", "decision", "ready", "member", "ci", "notice")
+KINDS = ("question", "decision", "ready", "member", "ci", "notice", "peer")
+PEER_REASONS_MAX = 5  # reasons of each kind can_arrive lists from other sessions
 EXIT = {"events": 0, "error": 1, "nothing": 2, "timeout": 3, "superseded": 5}
 BACKGROUND_MIN = 240  # a Claude Code background command: one notification when it exits, no 30-minute limit
 MONITOR_MIN = 28  # under a Claude Code Monitor, which ends after 30 minutes
@@ -53,18 +59,43 @@ CODEX_MIN = 10  # Codex has no background wake-up: the main session waits in the
 BATCH = 2.0  # seconds a burst of writes settles before the wait reads it
 POLL = 2.0  # seconds between two stats of the watched files, with kqueue or without
 HEARTBEAT = 60.0  # seconds between two reconciles of the session's run while it waits
+REGISTER_WAIT = 30.0  # seconds a new wait waits for another registration to finish (it lists, supersedes, writes)
 MAX_EVENTS = 20  # events one wake takes and prints; the rest waits for the next
 NOTICES_MAX = 20  # notices kept in a session record
 LINE_MAX = 300  # characters of a member's or CI's text in one line
-_ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?|\x1b[@-Z\\-_]")
+# escape sequences (ECMA-48): CSI, 7-bit or 8-bit; OSC, ended by BEL or ST; and every other ESC sequence (ESC c
+# resets the terminal, ESC 7 and ESC 8 save and restore the cursor, ESC ( B picks a character set)
+_ANSI = re.compile(r"(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]|(?:\x1b\]|\x9d)[^\x07\x1b\x9c]*(?:\x07|\x1b\\|\x9c)?|"
+                   r"\x1b[ -/]*[0-~]")
 _CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028\u2029\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]")
+_QUOTES = {0x201c: '"', 0x201d: '"', 0x201e: '"', 0x201f: '"'}  # devkit's own quotes, which open and close a span
+# characters a model reads and a person never sees, besides the format characters (category Cf): the whole tag block
+# (its unassigned code points too) and the variation selectors, the Mongolian free ones included
+_HIDDEN_RANGES = ((0xE0000, 0xE007F), (0xFE00, 0xFE0F), (0xE0100, 0xE01EF), (0x180B, 0x180F))
+
+
+def _hidden(c: str) -> bool:
+    o = ord(c)
+    return unicodedata.category(c) == "Cf" or any(lo <= o <= hi for lo, hi in _HIDDEN_RANGES)
+
+
+def visible(text: str) -> str:
+    """`text` without the characters a model reads and a person never sees: every format character (Unicode category
+    Cf: zero-width and direction marks, tag characters, the soft hyphen, ...), the rest of the tag block and every
+    variation selector. Text spelled in tag characters renders as nothing in the terminal, the dashboard and
+    `dev session inbox`, yet reaches the model whole."""
+    return text if text.isascii() else "".join(c for c in text if not _hidden(c))
 
 
 def clean(text, limit: int = LINE_MAX) -> str:
-    """Text someone else wrote (a member, CI) as one inert span of a line: escape and control sequences dropped, then
-    hooks._inline (no backticks, whitespace as one space, at most `limit` characters)."""
+    """Text someone else wrote (a member, CI, another session) as one inert span of a line: escape sequences, C0 and
+    C1 controls, and every invisible character (`visible`) dropped (a line break, a tab or another control that
+    separates words becomes a space); devkit's curly quotes become plain ones, so the text cannot close the span it is
+    quoted in and write words of devkit's after it; then hooks._inline (secrets redacted, no backticks, whitespace as
+    one space, at most `limit` characters)."""
     from .hooks import _inline
-    return _inline(_CONTROL.sub(" ", _ANSI.sub("", str(text or ""))), limit)
+    s = _CONTROL.sub(lambda m: " " if m.group().isspace() else "", _ANSI.sub("", str(text or "")))
+    return _inline(visible(s).translate(_QUOTES), limit)
 
 
 def _ev(kind: str, ident: str, wakes: bool, line: str, ts=None) -> dict:
@@ -248,6 +279,62 @@ def _session_items(agent, sid, mark, want):
     return [ev for ev, _ in taken], "\n".join(t for _, t in taken if t)
 
 
+def _peers():
+    """The store of messages between agent sessions on this Mac (lib/devkit/peers.py), or None without one."""
+    try:
+        from . import peers
+    except ImportError:
+        return None
+    return peers
+
+
+def _peer_header() -> str:
+    """The frame's header, which opens other sessions' lines: their words are data, not the developer's."""
+    return str(getattr(_peers(), "FRAME_HEADER", "") or "")
+
+
+def _peer_box(agent: str, sid: str):
+    """The session's mailbox file, which every delivery to it rewrites (so the wait watches it), or None."""
+    try:
+        return _peers().box_path(agent, sid)
+    except Exception:
+        return None
+
+
+def _peer_event(peers, m: dict) -> dict:
+    return _ev("peer", m.get("id"), peers.wakes(m), peers.frame(m), m.get("ts"))
+
+
+def _peer_mail(agent, sid, mark, want, limit):
+    """Messages from other agent sessions (peers.take), for the main session: one event each, its line the frame's.
+    The store takes them in order and marks them told together, so a plain note goes along with the message that
+    wakes; nothing is taken unless one of them is wanted. The hook text opens with the frame's header. A store that
+    fails tells nothing this time and never stops the crew's events (the failure is audited)."""
+    peers = _peers()
+    if peers is None or limit <= 0:
+        return [], ""
+    try:
+        if not peers.has_new(agent, sid):
+            return [], ""  # the usual case: one stat
+        evs = [_peer_event(peers, m) for m in peers.take(agent, sid, mark=False, limit=limit)]
+        if not any(want(ev) for ev in evs):
+            return [], ""
+        if mark:
+            evs = [_peer_event(peers, m) for m in peers.take(agent, sid, mark=True, limit=limit)]
+    except state.StateBusy:
+        raise
+    except Exception as e:
+        try:
+            from . import audit
+            audit.record("watch.peer-failed", f"{agent}:{sid[:12]}", f"{type(e).__name__}: {str(e)[:200]}", "error")
+        except Exception:
+            pass
+        return [], ""
+    if not evs:
+        return [], ""
+    return evs, "\n".join([h for h in (getattr(peers, "FRAME_HEADER", ""),) if h] + [ev["line"] for ev in evs])
+
+
 def _sources(agent, sid, me, mark, want, limit) -> list:
     """[(events, hook text)] of every source of the consumer, in delivery order, each taken (`mark`) or peeked."""
     if me != "main":
@@ -255,7 +342,7 @@ def _sources(agent, sid, me, mark, want, limit) -> list:
     out = []
     for take in (lambda n: _messages(agent, sid, me, mark, want, n), lambda n: _decisions(agent, sid, mark, want),
                  lambda n: _ready(agent, sid, mark, want), lambda n: _ci(agent, sid, mark, want),
-                 lambda n: _session_items(agent, sid, mark, want)):
+                 lambda n: _session_items(agent, sid, mark, want), lambda n: _peer_mail(agent, sid, mark, want, n)):
         left = limit - sum(len(e) for e, _ in out)
         if left <= 0:
             break
@@ -301,10 +388,44 @@ def pending(agent: str, sid: str, me: str = "main") -> list:
 
 # --------------------------------------------------------------------------- what may still arrive
 
+def _session_words(key) -> str:
+    """Another session as the reasons name it: "session claude:4d1cffc7"."""
+    agent, _, sid = str(key or "").partition(":")
+    return f"session {clean(agent, 20)}:{clean(sid, 80)[:8]}" if sid else clean(key or "another session", 60)
+
+
+def _peer_reasons(agent: str, sid: str, now) -> list:
+    """What other sessions may still send the main session: an answer to its own open question, the claim it queues
+    for, the developer's settling of an escalation it is party to. [] without a store, or when the store fails."""
+    peers = _peers()
+    if peers is None:
+        return []
+    out = []
+    try:
+        for q in (peers.open_questions(agent, sid, now) or [])[:PEER_REASONS_MAX]:
+            to = [k for k in q.get("to") or [] if k]
+            who = clean(q["who"], 160) if q.get("who") else _session_words(to[0]) if len(to) == 1 else \
+                f"{len(to)} sessions"  # the store names the recipient with its project and branch
+            out.append(f"your question {clean(q.get('id'), 20)} to {who} waits for an answer")
+        for c in (peers.queued(agent, sid, now) or [])[:PEER_REASONS_MAX]:
+            h = c.get("holder") or {}
+            holder = _session_words(f"{h.get('agent') or '?'}:{h.get('session') or '?'}")
+            where = " · ".join(clean(x, 80) for x in (h.get("project"), h.get("branch")) if x)
+            out.append(f"you queue for {clean(c.get('resource'), 120)}, held by {holder}"
+                       + (f" ({where})" if where else ""))
+        for e in (peers.escalations(state="open", me=f"{agent}:{sid}") or [])[:PEER_REASONS_MAX]:
+            out.append(f"escalation {clean(e.get('id'), 20)} waits for the developer")
+    except Exception:
+        return out  # what was read; the store tells the rest at the next look
+    return out
+
+
 def can_arrive(agent: str, sid: str, now=None, me: str = "main") -> list:
     """Why events may still come for `me` -> [reason], [] when none can. The main session: a member that works, a
-    launch whose agent has not started, a step queued for a crew slot, a CI run this session sent whose devkit watch
-    still runs. A member: its own question that waits for an answer, while its session lives."""
+    launch whose agent has not started, a step queued for a crew slot, its own question to another session that waits
+    for an answer, a claim it queues for, an escalation it is party to that waits for the developer, a CI run this
+    session sent whose devkit watch still runs. A member: its own question that waits for an answer, while its
+    session lives."""
     from . import progress
     now = now or time.time()
     sess = state.read(progress.session_path(agent, sid)) or {}
@@ -339,6 +460,7 @@ def can_arrive(agent: str, sid: str, now=None, me: str = "main") -> list:
         if queued and not busy:
             out.append(f"{len(queued)} step{'s wait' if len(queued) > 1 else ' waits'} for a crew slot "
                        f"({', '.join(s['name'] for s in queued[:3])})")
+    out += _peer_reasons(agent, sid, now)
     try:
         from . import ciwatch
         ci = [w for w in ciwatch.watches(now) if w.get("by") == "devkit" and w.get("status") == "live"
@@ -389,21 +511,33 @@ def _stale(rec: dict, now: float) -> bool:
     return True
 
 
-def register(agent: str, sid: str, me: str, pid, timeout_min: float, now=None) -> str:
+def register(agent: str, sid: str, me: str, pid, timeout_min: float, now=None, standby: bool = False) -> str:
     """Record a wait, and mark every older live wait of the same session and consumer superseded: one live wait per
-    consumer, so the older one ends with one line (exit 5). -> its id, "" when it cannot be written."""
+    consumer, so the older one ends with one line (exit 5). A standby wait (other sessions' messages only) supersedes
+    an older standby wait only, never the consumer's own wait, which supersedes both. -> its id, "" when it cannot be
+    written."""
     now = now or time.time()
     rid = re.sub(r"[^A-Za-z0-9_.-]+", "_", f"global-{agent}-{sid[:16]}-{me[:24]}-{pid}-{int(now)}-"
                                            f"{os.urandom(3).hex()}")[:200]
+    try:  # one registration at a time: two waits of one consumer that start together would each miss the other
+        with state.hold(LIVE / "register.json", wait=REGISTER_WAIT):
+            return _register(rid, agent, sid, me, pid, timeout_min, now, standby)
+    except state.StateBusy:
+        return _register(rid, agent, sid, me, pid, timeout_min, now, standby)  # audited by state; a wait never fails
+
+
+def _register(rid, agent, sid, me, pid, timeout_min, now, standby) -> str:
     for rec in _records():
         if _stale(rec, now):
             continue
         if (rec.get("agent"), rec.get("session"), rec.get("consumer")) == (agent, sid, me) and \
-                rec.get("state") == "live":
+                rec.get("state") == "live" and (not standby or rec.get("standby")):
             _update(rec["id"], state="superseded", superseded_by=rid, ended=round(now))
     rec = {"id": rid, "by": "agent", "kind": "global", "agent": agent, "session": sid, "consumer": me, "pid": pid,
            "started": round(now), "expires": round(now + timeout_min * 60), "timeout_min": timeout_min,
            "state": "live", "last_event": "", "last_ts": None}
+    if standby:
+        rec["standby"] = True
     try:
         LIVE.mkdir(parents=True, exist_ok=True)
         state.update(LIVE / f"{rid}.json", lambda doc: rec)
@@ -431,10 +565,11 @@ def armed(agent: str, sid: str, me: str = "main", transcript=None, now=None) -> 
     """The live waits of this consumer -> [{"id", "how"}]: a recorded `dev watch --wait` whose process runs; with the
     session's transcript, the main session's background command or Monitor running one, as the whole command
     (ciwatch.alone), that no notification or stop has ended (Claude Code), or one run in the foreground in this turn
-    (Codex, which has no background wake-up)."""
+    (Codex, which has no background wake-up). A standby wait is none of these: crew events and CI never wake it."""
     now = now or time.time()
     out = [{"id": r["id"], "how": "record"} for r in _records()
-           if (r.get("agent"), r.get("session"), r.get("consumer")) == (agent, sid, me) and _is_live(r, now)]
+           if (r.get("agent"), r.get("session"), r.get("consumer")) == (agent, sid, me) and _is_live(r, now)
+           and not r.get("standby")]
     if transcript and me == "main":
         try:
             from .ciwatch import _shell_calls
@@ -470,11 +605,12 @@ def default_timeout(agent: str, me: str) -> float:
     return CODEX_MIN if agent == "codex" else BACKGROUND_MIN
 
 
-def again(agent: str, me: str) -> str:
+def again(agent: str, me: str, standby: bool = False) -> str:
     """The command that arms this consumer's wait again."""
     if me != "main":
         return f"dev watch --wait --for me --timeout {FOREGROUND_MIN}"
-    return f"dev watch --wait --timeout {CODEX_MIN}" if agent == "codex" else "dev watch --wait"
+    return (f"dev watch --wait --timeout {CODEX_MIN}" if agent == "codex" else "dev watch --wait") + \
+        (" --standby" if standby else "")
 
 
 # --------------------------------------------------------------------------- the wait
@@ -482,8 +618,9 @@ def again(agent: str, me: str) -> str:
 class Changes:
     """The wait's default file-change function: changes(seconds) blocks up to `seconds` and says whether one of
     `files` changed (inode, size or modification time). A state write replaces its file by a rename, so the folders
-    are watched (kqueue where the system has it); the files are statted every `poll` seconds in any case. After a
-    change, `batch` seconds more let a burst of writes land as one."""
+    that exist are watched (kqueue where the system has it); the files are statted every `poll` seconds in any case,
+    which also sees a file whose folder did not exist yet (the wait never creates a folder: a store such as the
+    peers' makes its own, owner-only). After a change, `batch` seconds more let a burst of writes land as one."""
 
     def __init__(self, files, use_kqueue=None, batch: float = BATCH, poll: float = POLL):
         self.files = [Path(f) for f in files]
@@ -494,7 +631,8 @@ class Changes:
                 self.kq = select.kqueue()
                 events = []
                 for d in sorted({str(f.parent) for f in self.files}):
-                    Path(d).mkdir(parents=True, exist_ok=True)
+                    if not os.path.isdir(d):
+                        continue
                     fd = os.open(d, os.O_RDONLY)
                     self.fds.append(fd)
                     events.append(select.kevent(fd, filter=select.KQ_FILTER_VNODE,
@@ -576,24 +714,47 @@ def _ended(agent: str, sid: str) -> bool:
     return not s or bool(s.get("ended"))
 
 
-def wait(agent: str, sid: str, me: str, timeout_min: float, only=None, out=None, clock=None, changes=None) -> int:
+def _moved(agent: str, sid: str) -> str:
+    """The session id this conversation goes on under, when a compaction gave it a new one (its run moved there, or
+    the new record took its process), else "": a wait of the old id would wake nobody."""
+    from . import progress
+    s = state.read(progress.session_path(agent, sid)) or {}
+    return str(s.get("run_moved_to") or s.get("superseded_by") or "")
+
+
+def wait(agent: str, sid: str, me: str, timeout_min: float, only=None, out=None, clock=None, changes=None,
+         standby: bool = False) -> int:
     """`dev watch --wait`: block until at least one event `me` must act on arrives for this session, print each once
     (one line, at most MAX_EVENTS, then the notices that ride along) and exit 0. -> 0 events printed, 2 nothing can
     arrive (said at once), 3 the timeout or a kill (arm it again), 5 a newer wait of the same consumer took over, 1
-    no session. The wait is recorded (`dev watches`) and each wake audited (watch.wake)."""
+    no session. The wait is recorded (`dev watches`) and each wake audited (watch.wake). `standby` (the main session
+    only): wait for other sessions' messages alone, even when nothing else can arrive; the session's own wait
+    supersedes it."""
     from . import progress
     out = out or sys.stdout
     clock = clock or time.time
+    rid = ""
 
     def emit(line):
-        out.write(line + "\n")
-        out.flush()
+        try:
+            out.write(line + "\n")
+            out.flush()
+        except OSError:  # the reader of its output is gone (a pipe whose tail was stopped): nobody hears it any more
+            _update(rid, state="expired", ended=round(clock()), last_event="its output was closed")
+            if out is sys.stdout:
+                try:  # nothing more reaches the closed pipe, not even the interpreter's last flush
+                    os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+                except (OSError, ValueError):
+                    pass
+            raise SystemExit(EXIT["timeout"])  # not an OSError: no caller may take it for a passing failure
     if not progress.session_path(agent, sid).exists():
         emit(f"watch: no devkit session {agent}:{sid[:12]} on this Mac: run it from the agent session that waits")
         return EXIT["error"]
+    if standby:
+        only = ["peer"]
     start = clock()
-    rid = register(agent, sid, me, os.getpid(), timeout_min, now=start)
-    arm = again(agent, me)
+    rid = register(agent, sid, me, os.getpid(), timeout_min, now=start, standby=standby)
+    arm = again(agent, me, standby)
 
     def finish(state_, line, code):
         _update(rid, state=state_, ended=round(clock()), last_event=line[:300], last_ts=round(clock()))
@@ -601,8 +762,10 @@ def wait(agent: str, sid: str, me: str, timeout_min: float, only=None, out=None,
         return code
 
     def killed(signum, frame):
-        finish("expired", f"watch: stopped before anything arrived · arm again: {arm}", 0)
-        raise SystemExit(EXIT["timeout"])
+        try:
+            finish("expired", f"watch: stopped before anything arrived · arm again: {arm}", 0)
+        finally:  # the wait ends, whatever its last line met
+            raise SystemExit(EXIT["timeout"])
     saved = {}
     for sig in (signal.SIGTERM, signal.SIGHUP):
         try:
@@ -614,15 +777,17 @@ def wait(agent: str, sid: str, me: str, timeout_min: float, only=None, out=None,
         delivered = _deliver(agent, sid, me, only, emit, rid, arm, start, clock)
         if delivered is not None:
             return delivered
-        why = can_arrive(agent, sid, clock(), me)
+        why = standby or can_arrive(agent, sid, clock(), me)
         if not why:
             return finish("ended", ("watch: nothing can arrive for you: none of your questions waits for an answer."
                                     if me != "main" else
                                     "watch: nothing can arrive for this session: no crew member works, no launch is "
-                                    "pending, no step waits for a slot and no CI run is unfinished.")
+                                    "pending, no step waits for a slot, no other session owes it an answer and no CI "
+                                    "run is unfinished.")
                           + " End the turn without a wait.", EXIT["nothing"])
-        progress_files = [progress.run_path(agent, sid), progress.session_path(agent, sid), LIVE / f"{rid}.json"]
-        watcher = changes or Changes(progress_files)
+        files = [progress.run_path(agent, sid), progress.session_path(agent, sid), LIVE / f"{rid}.json"]
+        box = _peer_box(agent, sid) if me == "main" else None
+        watcher = changes or Changes(files + ([box] if box else []))
         deadline, beat = start + timeout_min * 60, clock()
         while True:
             rec = state.read(LIVE / f"{rid}.json") or {}
@@ -631,6 +796,10 @@ def wait(agent: str, sid: str, me: str, timeout_min: float, only=None, out=None,
                 return EXIT["superseded"]
             if _ended(agent, sid):
                 return finish("ended", "watch: the session ended", EXIT["nothing"])
+            moved = _moved(agent, sid)
+            if moved:
+                return finish("expired", f"watch: this conversation goes on under session {agent}:{clean(moved, 12)} "
+                                         f"(a compaction gave it a new id) · arm again: {arm}", EXIT["timeout"])
             now = clock()
             if now >= deadline:
                 return finish("expired", f"watch: nothing arrived in {timeout_min:g} min · arm again: {arm}",
@@ -651,13 +820,23 @@ def wait(agent: str, sid: str, me: str, timeout_min: float, only=None, out=None,
             signal.signal(sig, handler)
 
 
+def _emit_lines(evs: list, emit, prefix: str = "", tail=None):
+    """Each event's line; other sessions' lines after the frame's header, once."""
+    header = _peer_header()
+    told = False
+    for ev in evs:
+        if ev["kind"] == "peer" and header and not told:
+            emit(prefix + header)
+            told = True
+        emit(prefix + ev["line"] + (tail(ev) if tail else ""))
+
+
 def _deliver(agent, sid, me, only, emit, rid, arm, start, clock):
     """Take what wakes this consumer, with what rides along, and print it -> 0, or None when nothing woke it."""
     taken = [ev for evs, _ in _collect(agent, sid, me, True, only, wakes_only=True) for ev in evs if ev["line"]]
     if not taken:
         return None
-    for ev in taken:
-        emit(ev["line"])
+    _emit_lines(taken, emit)
     more = [ev for ev in pending(agent, sid, me) if not only or ev["kind"] in only]
     if more:
         emit(f"more: {len(more)} event{'s' if len(more) > 1 else ''} wait · dev watch shows them; the next wait takes "
@@ -778,25 +957,16 @@ def stop_gate(agent: str, data: dict, now=None, ci_apart: bool = False) -> str |
 # --------------------------------------------------------------------------- dev watch, dev watches
 
 def _consumer(a) -> str:
-    """The caller's own consumer. A call the hooks routed to a crew lane (DEVKIT_FROM_AGENT) is that member's. Else
-    `--for me` is the member the call ledger names, refused when it names none; and a wait without it is always the
-    main session's: a member's open `dev watch --wait` in the ledger must never turn the tech lead's wait into the
-    member's, which would take the member's answers and leave the tech lead's events waking nobody."""
-    from . import progress
+    """The caller's own consumer, as identity.consumer decides it: a member's lane mark or its own open call makes
+    the wait the member's, the tech lead's stamp or own call the main session's. A wait devkit cannot place is
+    refused (IdentityError, a ValueError): taken for the main session, a member's wait superseded the tech lead's and
+    took its events; taken for a member, the tech lead's wait left its own events waking nobody."""
+    from . import identity
     for_ = getattr(a, "for_", None)
     if for_ not in (None, "me"):
         raise ValueError("--for takes `me`: a wait is always for its caller (the main session, or the member's own "
                          "lane)")
-    routed = os.environ.get("DEVKIT_FROM_AGENT") or None
-    if routed:
-        return routed
-    if for_ == "me":
-        lane = progress._as_lane(None)
-        if not lane:
-            raise ValueError("--for me is for a crew member's own wait, and devkit cannot tell which member calls: "
-                             "run it as a command of its own from the member's lane")
-        return lane
-    return "main"
+    return identity.consumer(for_ == "me")
 
 
 def _only(a) -> list:
@@ -814,14 +984,22 @@ def cmd_watch(a) -> int:
     if how == "shell":
         print("watch: no agent session here: dev watch runs in the agent session that waits (Claude Code, Codex)")
         return EXIT["error"]
+    standby = bool(getattr(a, "standby", False))
+    if standby and not getattr(a, "wait", False):
+        print("watch: --standby goes with --wait: dev watch --wait --standby")
+        return EXIT["error"]
     try:
         me, only = _consumer(a), _only(a)
     except ValueError as e:
         print(f"watch: {e}")
         return EXIT["error"]
+    if standby and me != "main":
+        print("watch: --standby is for the tech lead's session, which hears other sessions; a crew member waits for "
+              f"its own answers: {again(agent, me)}")
+        return EXIT["error"]
     if getattr(a, "wait", False):
         timeout = float(a.timeout) if getattr(a, "timeout", None) else default_timeout(agent, me)
-        return wait(agent, sid, me, timeout, only=only)
+        return wait(agent, sid, me, timeout, only=only, standby=standby)
     now = time.time()
     evs = [ev for ev in pending(agent, sid, me) if not only or ev["kind"] in only]
     run = progress.normalize(progress.load_run(agent, sid) or {})
@@ -834,7 +1012,9 @@ def cmd_watch(a) -> int:
                                                   for m in moot]}, ensure_ascii=False))
         return 0
     print(f"watch · {agent}:{sid[:12]} · for {_consumer_name(agent, sid, me)}")
-    print("\n".join(f"  {ev['line']}" + ("" if ev["wakes"] else "  (rides along)") for ev in evs) or "  nothing new")
+    _emit_lines(evs, print, "  ", lambda ev: "" if ev["wakes"] else "  (rides along)")
+    if not evs:
+        print("  nothing new")
     seen = {ev["id"] for ev in evs}
     for m in moot:  # told already, and still unanswered: nobody waits on it any more
         if m.get("id") not in seen:
@@ -865,11 +1045,13 @@ def cmd_watches(a, out=None) -> int:
     lines = ["Waits: dev watch --wait (live, expired before anything arrived, superseded by a newer one)"]
     for w in ws:
         who = _consumer_name(w.get("agent") or "", w.get("session") or "", w.get("consumer") or "main")
-        lines.append(f"  {w['status']:<10} {w.get('agent')} session {(w.get('session') or '-')[:8]} · for {who} · "
-                     f"started {at(w.get('started'))}" + (f" · expires {at(w.get('expires'))}"
-                                                          if w["status"] == "live" else ""))
+        lines.append(f"  {w['status']:<10} {w.get('agent')} session {(w.get('session') or '-')[:8]} · for {who}"
+                     + (" · standby (other sessions only)" if w.get("standby") else "")
+                     + f" · started {at(w.get('started'))}" + (f" · expires {at(w.get('expires'))}"
+                                                               if w["status"] == "live" else ""))
         if w["status"] in ("expired", "superseded"):
-            lines.append(f"             arm again: {again(w.get('agent') or '', w.get('consumer') or 'main')}")
+            arm = again(w.get("agent") or "", w.get("consumer") or "main", bool(w.get("standby")))
+            lines.append(f"             arm again: {arm}")
     if not ws:
         lines.append("  none")
     lines.append("CI watches: dev ci watches")

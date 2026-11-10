@@ -48,7 +48,10 @@ class SkillRuleTests(unittest.TestCase):
         self.assertIn("**[Firefly> DevKit · Frontend engineer (Trinity)]**", named["prompt"])
         self.assertIsNone(sg.on_agent_brief("claude", {"prompt": "Use frontend-design and impeccable to rework the "
                                                                  "layout. End with **[Firefly> DevKit · Trinity]**"}))
-        self.assertIsNone(sg.on_agent_brief("codex", {"prompt": "Rework the dashboard layout"}))
+        codex = sg.on_agent_brief("codex", {"prompt": "", "description": "Trinity: rework the layout"},
+                                  activity="frontend")["prompt"]  # a Codex member gets it at SubagentStart
+        self.assertIn("**[Firefly> DevKit · Frontend engineer (Trinity)]**", codex)
+        self.assertNotIn("Skill tool", codex)  # Codex loads a skill by reading its SKILL.md
 
     def test_rules_for_files_by_path_and_content(self):
         with tempfile.TemporaryDirectory() as d:

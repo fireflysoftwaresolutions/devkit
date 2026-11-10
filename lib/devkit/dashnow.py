@@ -806,13 +806,18 @@ URGENT = {"ci_failed": lambda it: f"CI failed on {it['id'].split(':', 2)[2]}",
           "run_stale": lambda it: it["title"], "run_blocked": lambda it: it["title"]}
 
 
-def _headline(items, total_rows, runs, raw_runs, reg, next_up) -> dict:
+def _headline(items, total_rows, runs, raw_runs, reg, next_up, escalations=()) -> dict:
+    """`escalations`: the open escalations between agent sessions (dashboard.peer_sessions), which the Between
+    sessions area lists: each waits for the developer like a decision, so the headline counts them first."""
     top = [it for it in items if it["rank"] <= 4]
-    count = sum(1 for it in total_rows if it["rank"] <= 4)
-    if any(it["rank"] == 1 for it in top):
-        text = f"{count} things need you" if count != 1 else \
+    esc = [e for e in escalations or [] if isinstance(e, dict) and e.get("id")]
+    count = sum(1 for it in total_rows if it["rank"] <= 4) + len(esc)
+    if esc or any(it["rank"] == 1 for it in top):
+        text = f"{count} things need you" if count != 1 else "1 escalation waits for you" if esc else \
             "1 grant waits for you" if top[0]["kind"] == "grant" else "1 decision waits for you"
-        line = " ".join(it["clause"] for it in top[:2])
+        clauses = [f"{_plural(max(len(e.get('parties') or []), 2), 'session', 'sessions')} wait for your choice on "
+                   f"{_line(e['id'], 20)}." for e in esc[:2]]
+        line = " ".join((clauses + [it["clause"] for it in top])[:2])
         return {"kind": "needs_you", "count": count, "text": text, "line": _line(line)}
     urgent = next((it for it in top if it["kind"] in URGENT), None)
     if urgent:
@@ -856,14 +861,14 @@ def _degraded(reg, ci, now) -> list:
     return out[:10]
 
 
-def _attention(reg, raw_runs, actions, ci, jobs, items, runs, now, roster) -> dict:
+def _attention(reg, raw_runs, actions, ci, jobs, items, runs, now, roster, escalations=None) -> dict:
     ci_rows = _ci_items(reg, ci, now)
     rows = (_run_items(raw_runs, now, roster) + ci_rows + _job_items(jobs) + _backup_items(reg, now)
             + _action_items(reg, actions, ci_rows))
     rows.sort(key=_order)
     shown = rows[:ITEMS_CAP]
     next_up = _next_up(reg, items)
-    head = _headline(shown, rows, runs, raw_runs, reg, next_up)
+    head = _headline(shown, rows, runs, raw_runs, reg, next_up, escalations)
     return {"headline": head, "items": shown, "total": len(rows),
             "next_up": next_up if head["kind"] == "clear_idle" else [],
             "setup": _setup(reg) if head["kind"] == "welcome" else [], "degraded": _degraded(reg, ci, now)}
@@ -912,15 +917,15 @@ def _guarded(name: str, build):
 
 
 def areas(reg, raw_runs, briefs, actions, ci, jobs, items, since, team, now, host, memo=LANDING, *, roster=None,
-          prs_at=None) -> dict:
+          prs_at=None, escalations=None) -> dict:
     """The five Now areas. `raw_runs`: this Mac's progress runs; `briefs`: today's run fields for them
     (dashboard._runs); `actions`: dashboard.build_actions; `ci`: dashboard.ci_watches; `jobs`:
     dashboard.jobs_summary; `items`: dashboard.read_items; `since`: dashboard.since_yesterday; `team`: presence
     (dashboard.read_presence); `roster`: crew.load(), for names as `<Role> (<Name>)`; `prs_at`: the PR cache's last
-    read."""
+    read; `escalations`: the open escalations between agent sessions (dashboard.peer_sessions)."""
     runs = _guarded("runs", lambda: _runs(raw_runs, briefs, now, host, team, memo, roster))
     return {"attention": _guarded("attention", lambda: _attention(reg, raw_runs, actions, ci, jobs, items, runs, now,
-                                                                  roster)),
+                                                                  roster, escalations)),
             "runs": runs,
             "safety": _guarded("safety", lambda: _safety(reg)),
             "since": _guarded("since", lambda: _since(since, raw_runs)),

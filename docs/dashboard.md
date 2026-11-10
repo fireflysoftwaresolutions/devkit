@@ -70,8 +70,10 @@ receives, and never sorts it again. From top to bottom:
 | Part | What it shows |
 | --- | --- |
 | **The answer** | One sentence, with one line under it that names the cause, and today's date and time on the right (table below) |
+| **Between sessions** | Shown first, before Needs you, only when agent sessions on this Mac need it: each open escalation in amber, with its question, its options (the recommended one marked), who asks, and the line to type in any agent session (`settle E-…: <choice>`, shown as keys to type and never with a copy button); then the claims, with the resource, the holder, the time it holds until, its quoted reason, and how many sessions wait for it; then the overlaps (two sessions in one checkout, one branch in two checkouts, a work item on another session's branch). The nav dot counts escalations as things that need you |
 | **Needs you** | Up to five rows in the server's order, then **All N** for the rest. A row that waits for your answer has an amber bar and glyph; a broken one has a red ✗. Each row shows its age, its details, the command to copy when there is one, and one link (**Open the run**, **Open the log**, **Open the job**, **Open the pull request**, or **Branches**). Housekeeping is one quiet row with its count. [The action list](#the-action-list) says what enters and in what order |
 | **Running** | One block per run that is running, blocked, waiting for you, or stopped reporting, at most four, then _N more runs_ (Background work). Each block shows the goal and project; the branch, mode, and agent; the landing strip; how far it is (_3 of 6 steps · paused on you 9 min_, or _2 of 4 steps · 48 min of about 1 h 30_); and the landing line. A decision whose asking crew member ended and that no step waits on is moot: one quiet line under its run (_D2 · List the CSV columns in the release notes? Moot: Technical writer (Ghost) ended, and no step waits on D2._), never a row of Needs you. A run on this Mac opens its drawer. A run on another Mac says where it runs and when it last reported (_on studio · last update 2 min ago_). Runs that finished in the last hour take one line each (_Docs refresh · finished 14:20 in 35 min_). Under the runs, the people on other machines and their projects (_bob@studio works on lending-rules_) |
+| **Sessions on this Mac** | Every live and idle agent session on this Mac, grouped by project (the project of what blocks first), each labeled Claude Code or Codex with its short id: its branch, its run (a link to the run's drawer), its crew, the claims it holds, the messages from other sessions that wait for it (quoted, at most 120 characters), and its state (working, waiting until a time, or idle) with its last activity. _No agent session runs on this Mac._ when there is none. See [Teams and machines › Sessions on one Mac](teams.md#sessions-on-one-mac) |
 | **Safety** | One line: the branches that exist only on this Mac, with the age of the oldest commit and a **Branches** link, or _Every branch is on the remote._ |
 | **Since yesterday** | Tasks done, PRs merged, and runs finished, each a link, or _nothing finished_. It is open on the day's first visit and before noon; at other times it folds into a disclosure |
 
@@ -79,7 +81,7 @@ The first rule that matches writes the answer:
 
 | When | Headline | The line under it |
 | --- | --- | --- |
-| A decision or a grant waits for you | _2 things need you_, or _1 decision waits for you_ (or _1 grant waits for you_) when it is the only item | The first two rows, a clause each, such as _Invoice export is paused until you answer D1. CI failed on feat/rules-engine._ |
+| A decision, a grant, or an escalation between agent sessions waits for you | _2 things need you_, or _1 decision waits for you_ (or _1 grant waits for you_, _1 escalation waits for you_) when it is the only item. Escalations count first | The first two, a clause each, such as _2 sessions wait for your choice on E-7k2m9xq4. Invoice export is paused until you answer D1._ |
 | CI failed, a scheduled job failed, or a run is blocked or stopped reporting | _CI failed on feat/rules-engine_, _The doctor job failed_, or _Invoice export stopped reporting_ | The first error, or the reason |
 | Nothing else but a branch kept on this Mac for more than 4 hours, or an agent that is not signed in | _Nothing urgent. 2 things to look at._ | The first item |
 | Nothing needs you, and runs are going | _Nothing needs you_ | _2 runs are going. The first lands about 15:40._ |
@@ -177,6 +179,7 @@ On a phone the figures sit two by two and the runs stack:
   when a lock has expired), and one bar per running session (project, steps, progress; red when blocked). A person
   opens their drawer (sessions, claimed tasks with a countdown ring per lock, recent sessions); a session bar opens
   that session. **Collisions**, such as two sessions on the same branch, are listed first, each with its command.
+  devkit counts sessions, not people: two sessions of one person and one agent on one branch are a collision too.
 - **Crew** (`#/team?tab=crew`, `g c`) starts with **Working now**, the crew members on a run, with their step, run,
   and state (working, waiting for you, done). A member that ended is not listed, and one that went stale shows as
   Stopped reporting, as `dev status` marks it. **The crew** lists every member role first, for example
@@ -211,7 +214,7 @@ sparkline, and the people on it. The tabs follow.
 | Overview | **Doing or blocked** (with who holds each lock); **Off-track projects** as tiles; goal, scope, and current state; who is on it; risks and decisions; links |
 | Projects | The member projects in collapsible groups, searchable (name, status, workstream, task in progress, people). Group by family, status, owner, workstream, or none. Each row has its status, progress, what is in progress or the latest status, who is on it and `dev clone <id>` when not cloned here. A 77-repository platform is a few groups, not a wall of chips |
 | Tasks | The initiative's own items **plus member-project items linked to it** (`links: initiative:<slug>`, the same rule as `dev task -i`). Filter by status (open, doing, blocked, to do, closed) and source (initiative, from projects), grouped Now · Next · Later · Closed |
-| Plans | Versioned plans and specs from `plans/initiatives/<slug>/`: status (draft, approved, superseded), version, last change and who made it, the full history, and _edited · needs a revision_ with the `dev plan revise … --why` command when the body changed without one |
+| Plans | Versioned plans and specs from `plans/initiatives/<slug>/` and its sub-folders: status (draft, approved, superseded), version, last change and who made it, the full history, and _edited · needs a revision_ with the `dev plan revise … --why` command when the body changed without one. Plans in a sub-folder sit in a titled panel per folder, after the initiative's own |
 | Sessions | The session log of the initiative and its member projects, by day, with who, agent, and branch |
 | Docs & source | The source archives and the documents under `initiatives/<slug>/docs/` |
 
@@ -233,6 +236,10 @@ blocked and up next; purpose and current state; the latest status; repository fa
 long work takes here), **Tasks**, **Pull requests** (CI, review, merge state, size, a command each), **Branches**
 (below), **Worktrees** (`dev wt rm`), **Plans**, **Sessions**, and **Handoff note** (the full note, rendered). The
 repository facts on the Overview count the branches and those not backed up, and link to the Branches tab.
+
+**Plans** lists every plan and spec in the project's folder of the handoff repository, `plans/<project id>/`,
+sub-folders included. When some sit in sub-folders, such as `product/` or `history/`, the project's own plans come
+first in a panel titled **Plans**, then one titled panel per sub-folder, in name order, each with its count.
 
 **Branches** is the branch map (the same rows as `dev branch ls`): one row per local branch, work at risk first.
 Each row leads with whether the work is safe off this Mac, as _Backed up 6 min ago_, _On the remote_, _Backup waits_
@@ -502,7 +509,7 @@ view opens Now. Links from earlier versions still resolve: `#/overview` opens No
 | Live page | Served by the dashboard server (`dev dashboard`), which keeps a snapshot of the data, rebuilds it when the files behind it change, and sends open pages the areas that changed. Details (a whole task, run, job, or CI result) come from its read-only API under `/api/v1`; `/api/v1/branches/<project id>` reads one project's branch map from git when its Branches tab opens (a `502` problem quotes git's message when it cannot; the server reads a project's map at most once every 5 seconds and at most two maps at once, and one more gets a `429` problem with `Retry-After`) |
 | Static copy | `~/.local/state/devkit/dashboard/index.html` (or the file you name with `--export`): one self-contained HTML file (inline CSS, JS and SVG), written after every `dev sync` (session ends, debounced turn ends), by the hourly background job, and by `--path` |
 | Refresh | the live page updates in place; a static copy reloads every 2 minutes while visible (not while a drawer is open), keeping its view, filters, and scroll position |
-| Data | The registry (projects, git state, worktrees, PRs, initiatives, live sessions with progress, providers, drift). From the handoff repo: **work items** (`items/<scope>/<id>.md`, with lock and changelog), **presence** (`presence/<user>@<host>.json`), **session logs** (`sessions/<scope>/<YYYY-MM>.md`), **versioned plans** (`plans/<scope>/*.md`), notes, and initiative READMEs. Also the PR cache, the instruction canary, guard decisions, the operations log, **timing records**, and **active runs** |
+| Data | The registry (projects, git state, worktrees, PRs, initiatives, live sessions with progress, providers, drift). From the handoff repo: **work items** (`items/<scope>/<id>.md`, with lock and changelog), **presence** (`presence/<user>@<host>.json`), **session logs** (`sessions/<scope>/<YYYY-MM>.md`), **versioned plans** (`plans/<scope>/**/*.md`, sub-folders included), notes, and initiative READMEs. Also the PR cache, the instruction canary, guard decisions, the operations log, **timing records**, and **active runs** |
 
 The decisions are computed in Python and unit-tested:
 

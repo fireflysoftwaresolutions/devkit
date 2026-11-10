@@ -7,7 +7,9 @@ virtualenv (Homebrew python3 or the system /usr/bin/python3).
 """
 from __future__ import annotations
 
+import contextlib
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -15,6 +17,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -37,7 +40,29 @@ def brew_prefix() -> str:
         if Path(p, "bin", "brew").exists():
             return p
     return "/opt/homebrew"
-os.environ["PATH"] = ":".join(dict.fromkeys(_EXTRA_PATH + os.environ.get("PATH", "").split(":")))
+
+
+# devkit's own tests only: DEVKIT_TEST_PATH names folders of stand-ins for codex, claude, brew and gh
+# (tests/_sandbox.py). In a test sandbox they go first and the caller's PATH follows as given, without _EXTRA_PATH,
+# so neither a stand-in nor a tool the test left out is replaced by this Mac's real one. Honored only when the real
+# paths of HOME and of every folder named lie below the system's temporary folders, which a real Mac's HOME never
+# does; there PATH stays as devkit always set it.
+_TEMP_ROOTS = ("/tmp", "/private/tmp", "/var/tmp", "/private/var/tmp", "/var/folders", "/private/var/folders")
+
+
+def sandbox_path(environ=None) -> list:
+    """The folders DEVKIT_TEST_PATH names when devkit runs in a test sandbox (a temporary HOME), else []."""
+    env = os.environ if environ is None else environ
+    folders = [p for p in (env.get("DEVKIT_TEST_PATH") or "").split(os.pathsep) if p]
+
+    def temporary(p):
+        real = os.path.realpath(p)
+        return os.path.isabs(p) and any(real.startswith(root + "/") for root in _TEMP_ROOTS)
+    home = env.get("HOME") or ""
+    return folders if folders and home and temporary(home) and all(temporary(p) for p in folders) else []
+
+
+os.environ["PATH"] = ":".join(dict.fromkeys((sandbox_path() or _EXTRA_PATH) + os.environ.get("PATH", "").split(":")))
 
 # --------------------------------------------------------------------------- config
 
@@ -398,7 +423,7 @@ def expand(p) -> Path:
 # refuses the same assignments in an agent's command text; this check covers what the text does not show.
 
 AGENT_MARKERS = ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_PID", "CODEX_SANDBOX", "CODEX_THREAD_ID",
-                 "DEVKIT_SESSION", "DEVKIT_AGENT", "DEVKIT_FROM_AGENT")
+                 "DEVKIT_SESSION", "DEVKIT_AGENT", "DEVKIT_FROM_AGENT", "DEVKIT_SPEAKER")
 _LOOKUP = object()
 
 
@@ -781,15 +806,129 @@ def read_json(path, default=None):
         return default
 
 
+def replace_text(path, text: str) -> None:
+    """Write `text` to `path` in one step: a temporary file of this writer's own in the same folder (mkstemp, so two
+    processes writing the same file never share one), flushed to disk, then renamed over `path`. A reader sees the
+    old text or the new one, never part of either. The file keeps its permissions; a new one gets what a plain write
+    gives it (the umask applies). The temporary name ends in `.tmp`, which the handoff repository ignores."""
+    path = Path(path)
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        try:
+            mode = stat.S_IMODE(path.stat().st_mode)
+        except FileNotFoundError:
+            mask = os.umask(0)
+            os.umask(mask)
+            mode = 0o666 & ~mask
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def write_if_changed(path: Path, text: str) -> bool:
+    """Write `text` to `path` unless it already holds it (replace_text). -> whether it wrote. Safe while other
+    processes write the same file: the last rename wins whole. A caller that builds `text` from what it read (a
+    read-modify-write) holds the file's lock around both (file_lock, or the lock its writers share)."""
     path = Path(path)
     if path.exists() and path.read_text() == text:
         return False
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(text)
-    os.replace(tmp, path)
+    replace_text(path, text)
     return True
+
+
+_FILE_LOCKS = threading.local()  # per thread: {real path: depth} of the file locks it holds
+
+
+class _LockWait(Exception):
+    """The timer of _flock_within ran out."""
+
+
+def _flock_within(fd: int, wait: float) -> bool:
+    """Take an exclusive flock on `fd` within `wait` seconds. -> whether it is held. On the main thread it waits in
+    the kernel (a blocking flock, ended by a SIGALRM timer), where a waiter gets the lock when it is released, even
+    from a process that takes it again at once; polling would rarely catch that moment. Other threads, which cannot
+    take signals, poll."""
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except BlockingIOError:
+        pass
+    if threading.current_thread() is not threading.main_thread() or wait <= 0:
+        deadline = time.monotonic() + wait
+        while time.monotonic() < deadline:
+            time.sleep(0.002)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return True
+            except BlockingIOError:
+                pass
+        return False
+    import signal
+
+    def ran_out(signum, frame):
+        raise _LockWait()
+
+    before = signal.signal(signal.SIGALRM, ran_out)
+    started = time.monotonic()
+    pending = signal.setitimer(signal.ITIMER_REAL, wait)[0]  # a timer the caller had set: restored below
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        return True
+    except _LockWait:
+        return False
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, before)
+        if pending:
+            signal.setitimer(signal.ITIMER_REAL, max(pending - (time.monotonic() - started), 0.001))
+
+
+@contextlib.contextmanager
+def file_lock(path, wait: float = 30.0):
+    """This Mac's lock on one file, held across a read-modify-write so that another devkit process changing the same
+    file waits for it instead of writing over it. An advisory lock (flock) on STATE/locks/files/<hash of the path>,
+    released by the system if the process dies; reentrant within a thread. -> whether it is held: False when another
+    process kept it for `wait` seconds. On macOS the path's letter case is ignored, as the volume ignores it by
+    default: Plan.md and plan.md are one file, so they take one lock (two files that differ only in case on a
+    case-sensitive volume then share one, which costs a wait; two locks on one file would lose a write)."""
+    key = os.path.realpath(str(path))
+    if sys.platform == "darwin":
+        key = key.lower()
+    held = getattr(_FILE_LOCKS, "held", None)
+    if held is None:
+        held = _FILE_LOCKS.held = {}
+    if held.get(key):
+        held[key] += 1
+        try:
+            yield True
+        finally:
+            held[key] -= 1
+        return
+    lock = STATE / "locks" / "files" / f"{hashlib.sha256(key.encode()).hexdigest()[:24]}.lock"
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(lock), os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        if not _flock_within(fd, wait):
+            yield False
+            return
+        held[key] = 1
+        try:
+            yield True
+        finally:
+            held.pop(key, None)
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
 
 
 # --------------------------------------------------------------------------- the pinned install (spec C10)

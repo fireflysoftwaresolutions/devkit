@@ -117,5 +117,20 @@ class SleepTests(unittest.TestCase):
         self.assertTrue(new_run.exists())
 
 
+    def test_hygiene_removes_the_codex_calls_left_waiting_for_a_day(self):
+        # a Codex command waits for its rollout record at most ten minutes; a session that ended leaves its record
+        # of waiting calls and that record's lock behind
+        pend = self.root / "state" / "codex-pending"
+        (pend / "locks").mkdir(parents=True)
+        old, new = pend / "c-old.json", pend / "c-new.json"
+        old_lock, new_lock = pend / "locks" / "rec-c-old.lock", pend / "locks" / "rec-c-new.lock"
+        for f in (old, new, old_lock, new_lock):
+            f.write_text("{}")
+        for f in (old, old_lock):
+            os.utime(f, (time.time() - 2 * DAY, time.time() - 2 * DAY))
+        os.utime(new_lock, (time.time() - 2 * DAY, time.time() - 2 * DAY))  # the lock of a record still in use
+        sleep.apply_hygiene(sleep.hygiene_plan())
+        self.assertEqual(sorted(f.name for f in pend.rglob("*") if f.is_file()), ["c-new.json", "rec-c-new.lock"])
+
 if __name__ == "__main__":
     unittest.main()

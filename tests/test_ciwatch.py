@@ -462,8 +462,8 @@ class RegistryTests(WaitCase):
     def test_an_expired_watch_whose_run_was_reported_since_is_not_listed(self):
         ciwatch.register(self.TARGET, by="agent", agent="claude", sid="s1", pid=dead_pid(), timeout_min=28)
         ciwatch.WATCH.mkdir(parents=True, exist_ok=True)
-        (ciwatch.WATCH / "acme_api-feat_x.json").write_text(json.dumps(
-            {"branch": "feat/x", "sha": "abc1234", "state": "passed"}))
+        (ciwatch.WATCH / "acme_api-feat_x.json").write_text(json.dumps(  # the result of the watch's own repository
+            {"repo_id": ciwatch.repo_id("/repo"), "branch": "feat/x", "sha": "abc1234", "state": "passed"}))
         self.assertEqual(ciwatch.watches(), [])
 
     def test_the_background_watch_devkit_starts_is_listed(self):

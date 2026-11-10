@@ -68,13 +68,25 @@ def used(now: float | None = None) -> int:
     return int((core.read_json(USAGE, {}) or {}).get(_day(now or time.time())) or 0)
 
 
-def _count(now: float):
+USAGE_WAIT = 10.0  # seconds a call waits for another process's count; then it is not made
+
+
+def _reserve(now: float, limit: int) -> bool:
+    """Count one call today unless `limit` calls already are. -> whether it was counted (the call may run). The
+    check and the count hold the usage record's lock (core.file_lock), so background jobs asking at the same moment
+    never overrun the budget or lose a count; a lock still busy after USAGE_WAIT seconds counts nothing."""
     day = _day(now)
-    u = core.read_json(USAGE, {}) or {}
-    u = {k: v for k, v in u.items() if k >= _day(now - 30 * 86400)}  # a month of history is enough
-    u[day] = int(u.get(day) or 0) + 1
-    USAGE.parent.mkdir(parents=True, exist_ok=True)
-    USAGE.write_text(json.dumps(u, indent=2) + "\n")
+    with core.file_lock(USAGE, USAGE_WAIT) as got:
+        if not got:
+            return False
+        u = core.read_json(USAGE, {}) or {}
+        if int(u.get(day) or 0) >= limit:
+            return False
+        u = {k: v for k, v in u.items() if k >= _day(now - 30 * 86400)}  # a month of history is enough
+        u[day] = int(u.get(day) or 0) + 1
+        USAGE.parent.mkdir(parents=True, exist_ok=True)
+        core.replace_text(USAGE, json.dumps(u, indent=2) + "\n")
+        return True
 
 
 def ask(prompt: str, purpose: str, now: float | None = None):
@@ -84,9 +96,8 @@ def ask(prompt: str, purpose: str, now: float | None = None):
     if not cfg.get("enabled"):
         return None
     who = agent()
-    if not who or used(now) >= int(cfg.get("daily_calls") or 0):
+    if not who or not _reserve(now, int(cfg.get("daily_calls") or 0)):  # a call that fails still costs: count it first
         return None
-    _count(now)  # a call that fails still costs: count it before it runs
     model = str((cfg.get("model") or {}).get(who) or DEFAULTS["model"][who])
     env = dict(os.environ, DEVKIT_HEADLESS="1")
     with tempfile.TemporaryDirectory(prefix="devkit-ai-") as cwd:

@@ -260,7 +260,7 @@ class RenderTests(unittest.TestCase):
     # without a shell names them for Morpheus
     def test_the_learn_text_asks_for_the_lessons_anchors(self):
         shell = crew.body(member(), roster())
-        for needle in ('dev lesson add "…" --cause "…" --prevent "…" --file', "--command", "--error",
+        for needle in ('dev lesson add "…" --happened "…" --cause "…" --prevent "…" --file', "--command", "--error",
                        'dev lesson anchor <id>'):
             self.assertIn(needle, shell)
         read = crew.body(member(tools="read", skills=[]), roster())
@@ -430,7 +430,7 @@ class BriefTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:  # not a git repository: project and branch stay placeholders
             text = ui.ANSI_RE.sub("", crew.brief_text(neo, "Build the CSV parser.", "lib/parser/**, tests/test_parser.py",
                                                       "2", cwd=d))
-        for needle in ("subagent_type: devkit:neo", "agent type: neo", 'description: "Neo: ',
+        for needle in ("subagent_type: devkit:neo", "agent_type: neo", 'description: "Neo: ',
                        "You own only these files: `lib/parser/**`, `tests/test_parser.py`", "## Task\n\nBuild the CSV parser.",
                        "**[Firefly> DevKit · Senior engineer (Neo)]** <project> · `<branch>` · <the task, in a few words>",
                        "- **Check:** <✓ | ⚠ | ✗>", '`Needs from the tech lead:`', _sentence(neo["returns"]),
@@ -443,6 +443,20 @@ class BriefTests(unittest.TestCase):
         argv = shlex.split(assign.split("Link the lane ", 1)[1].split("   (")[0])[1:]
         a = cli.build_parser().parse_args(argv)  # the printed command is one the progress CLI accepts
         self.assertEqual((a.progress_cmd, a.which, a.to, a.scope), ("assign", "2", ["Neo"], "lib/parser/**,tests/test_parser.py"))
+
+    def test_a_briefs_codex_line_names_the_task_name_that_binds_its_step(self):
+        # Codex binds a spawn to its plan step by task_name (lowercase letters, digits and underscores), so the line
+        # says exactly what the tech lead passes to spawn_agent; Claude Code's line is unchanged
+        neo = crew.member("neo")
+        with tempfile.TemporaryDirectory() as d:
+            lines = [ln.strip() for ln in ui.ANSI_RE.sub("", crew.brief_text(
+                neo, "Build the graph.", "", "Session graph (v2)", cwd=d)).splitlines()]
+            plain = [ln.strip() for ln in ui.ANSI_RE.sub("", crew.brief_text(neo, "Build it.", cwd=d)).splitlines()]
+        self.assertIn("Codex        spawn_agent · agent_type: neo · task_name: session_graph_v2", lines)
+        self.assertIn("Codex        spawn_agent · agent_type: neo · task_name: <the step's name in lowercase, "
+                      "words joined by underscores>", plain)
+        self.assertIn('Claude Code  Agent tool · subagent_type: devkit:neo · description: "Neo: <the task in 3-5 '
+                      'words>"', lines)
 
     def test_a_brief_marks_the_skills_the_crew_gates_check_apart_from_its_roles_list(self):
         # this run's briefs listed every skill alike, and some called a gated one optional; the gates check the

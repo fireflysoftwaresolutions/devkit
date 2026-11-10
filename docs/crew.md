@@ -4,7 +4,7 @@ devkit gives Claude Code and Codex a crew of 25 specialist agents, each with a p
 Matrix, plus the tech lead (Morpheus), the role the main session takes when it leads them. Each member has one role,
 a short personality, the skills it loads, the files it may change, and what it returns. One file,
 `config/crew.json`, defines them for every surface, and devkit coordinates them: plan steps with dependencies, a
-RACI per kind of work, the crew's slots, one progress lane per member with its own time, file scopes the guard
+RACI per kind of work, each session's crew slots, one progress lane per member with its own time, file scopes the guard
 enforces, messages between members, and checks every member's report must pass.
 
 <picture>
@@ -70,11 +70,20 @@ without the role is sent back once (`canary.roles`). Commands and code keep the 
 | Surface | How members are launched | What devkit installs |
 | --- | --- | --- |
 | Claude Code (terminal) and Claude Desktop's Code tab | Agent tool, `subagent_type: devkit:<id>` | `plugin/agents/<id>.md` in the devkit plugin |
-| Codex CLI and the ChatGPT app | `spawn_agent` with agent type `<id>` | `~/.codex/agents/<id>.toml` |
+| Codex CLI and the ChatGPT app | `spawn_agent` with `agent_type: <id>` and the step's name as `task_name` | `~/.codex/agents/<id>.toml` |
 | Claude Desktop chat and Cowork | not launched there | the `devkit_crew` tool of the devkit extension shows the crew, the live lanes, and open questions |
 
 `dev crew sync` regenerates the Claude agents from `config/crew.json`, and `dev install --only codex` writes the Codex
 roles. Edit a member there, never in the generated files.
+
+Codex fires no PreToolUse hook for `spawn_agent`, so devkit records a Codex launch when its agent starts
+(SubagentStart). Pass the plan step's name as `task_name`, in lowercase with words joined by underscores, as
+`dev crew brief` prints it: the launch then binds to that step, takes a crew slot, and counts toward the depth limit
+like a Claude Code launch, and the member gets its required skills, known pitfalls, and report format as context.
+Codex cannot refuse a launch before its agent starts, so a launch over the crew's limits is marked instead: its step
+comes back to you with a notice, the member is told to stop and report, and it may read but not edit. Two spawns of
+one member at once, before Codex records which agent each started, take no step, and you are told. Launch in the
+order `dev crew next` shows to avoid that (see [Agents › Hooks](agents.md#hooks)).
 
 ## Leading the crew
 
@@ -262,12 +271,16 @@ that launch alone, so two members launched together never swap lanes:
 
 ### Slots
 
-The crew shares a number of slots, and a launch that does not fit is refused with who is working:
+Each session's crew has a number of slots, and a launch that does not fit is refused with who is working:
 
+- **Per session.** Slots are counted per session: each Claude Code or Codex session has its own `max_parallel`
+  slots and its own reserve, and counts only its own crew. Two sessions on this Mac can each run four members. How
+  many sessions run at once, and so how much of your quota they spend, is your choice. Only the usage lowering below
+  applies to every session, because it reads your account's usage.
 - **The limit.** `progress.max_parallel` (4 by default), which a team's `policy/progress.json` can cap. Your
-  recorded usage lowers it: `progress.quota_steps` keeps a share of the slots from 50, 70, and 85 % usage, the 5-hour
-  and the weekly windows both count and the lower limit wins, and from `progress.quota_percent` (90 %) one member
-  works at a time until the window resets.
+  account's recorded usage lowers it in every session: `progress.quota_steps` keeps a share of the slots from 50, 70,
+  and 85 % usage, the 5-hour and the weekly windows both count and the lower limit wins, and from
+  `progress.quota_percent` (90 %) one member works at a time in each session until the window resets.
 - **The cost of a launch.** A builder costs one slot, a review-only or read-only member half a slot, and the
   Lookup scout (Sparks) nothing (`progress.slot_weights`). Members' helpers count, and so does a member that works
   again after its lane ended: over the limit, it reads only until a slot frees.
@@ -465,8 +478,8 @@ is planned.
 follows that its member approves. The run cannot end while a step is unverified or an approval is owed.
 
 `dev canary` and `dev doctor` count the crew's reports apart from the main sessions' (`crew 12/13`), so you can always
-see that the kit's rules still hold inside every agent. On Codex these checks are not verified yet (see
-[Surfaces](surfaces.md#what-not-yet-means-for-codex)).
+see that the kit's rules still hold inside every agent. On Codex these checks do not run yet, because devkit records
+no Codex launch (see [Surfaces](surfaces.md#what-was-verified-on-codex)).
 
 ### CI failures go to the Release engineer
 
@@ -637,7 +650,7 @@ Each guardrail cites the rule of `dev crew rules` that enforces it. A rule marke
 
 | Guardrail | What happens |
 | --- | --- |
-| Limited parallel members | a launch that does not fit the crew's [slots](#slots) is refused with who is working: `progress.max_parallel` (4 by default), lowered by your usage, a slot kept for your own request, review and read-only members at half a slot, and resumed agents and helpers counted (`E-parallel`, `E-resumed`) |
+| Limited parallel members | a launch that does not fit its session's crew [slots](#slots) is refused with who is working: `progress.max_parallel` (4 by default) per session, lowered by your account's usage in every session, a slot kept for your own request, review and read-only members at half a slot, and resumed agents and helpers counted (`E-parallel`, `E-resumed`) |
 | Separate files for parallel members | `assign` refuses a scope that overlaps a working member's scope (`E-separate-files`) |
 | A member stays in its scope | the guard refuses its edits outside the files it was assigned (`E-scope`); a review-only or read-only member's shell runs only the read-only allowlist and its writes are detected, while a builder's shell is not checked against its scope (`E-shell-scope`) |
 | The main session respects a member's files | the guard refuses the main session's edits inside a working member's scope; `DEVKIT_SCOPE_OVERRIDE=1` for an emergency (`E-main-scope`) |
