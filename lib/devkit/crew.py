@@ -904,10 +904,36 @@ def run_text(view: dict) -> str:
     return "\n".join(out)
 
 
-def _spawn_lines(m: dict) -> list:
+def _spawn_lines(m: dict, task_name: str = "") -> list:
+    """How to launch the member: Claude Code's Agent call, and Codex's spawn_agent with the task_name that binds the
+    launch to its plan step (codexlaunch), the step's name when the brief has one."""
     return [f"Claude Code  Agent tool · subagent_type: devkit:{m['id']} · description: \"{m['name']}: <the task in "
             "3-5 words>\"",
-            f"Codex        spawn_agent · agent type: {m['id']}"]
+            f"Codex        spawn_agent · agent_type: {m['id']} · task_name: "
+            + (task_name or "<the step's name in lowercase, words joined by underscores>")]
+
+
+def codex_task_name(step_name: str) -> str:
+    """The spawn_agent task_name that names a plan step, in the letters Codex accepts (lowercase letters, digits and
+    underscores): "Session graph (v2)" -> "session_graph_v2"."""
+    import unicodedata
+    flat = unicodedata.normalize("NFKD", step_name or "").encode("ascii", "ignore").decode("ascii").lower()
+    return re.sub(r"[^a-z0-9]+", "_", flat).strip("_")
+
+
+def _step_name(step) -> str:
+    """The name of the plan step a brief links (by number or by name), from the current session's run; the text as
+    given when the run does not name it by its number either; '' without a step."""
+    w = str(step if step is not None else "").strip()
+    try:
+        from . import progress
+        run = progress.normalize(progress.load_run(*progress.current_session()) or {})
+        s = progress._find_step(run, w) if w else None
+        if s:
+            return s["name"]
+    except Exception:
+        pass
+    return "" if w.isdigit() else w
 
 
 def show_text(m: dict, roster=None) -> str:
@@ -1036,7 +1062,7 @@ def brief_text(m: dict, task: str, scope: str = "", step=None, roster=None, cwd=
         pid = core.project_identity(main_, core.gitout(main_, "config", "--get", "remote.origin.url"))[0] or ""
     branch = (core.gitout(cwd, "rev-parse", "--abbrev-ref", "HEAD") if top else "") or "<branch>"
     globs = [g.strip() for g in (scope or "").split(",") if g.strip()]
-    head = [ui.section(f"Brief for {who(m)}")] + [f"  {ln}" for ln in _spawn_lines(m)]
+    head = [ui.section(f"Brief for {who(m)}")] + [f"  {ln}" for ln in _spawn_lines(m, codex_task_name(_step_name(step)))]
     if step is not None and str(step).strip():
         w = str(step).strip()
         head.append(f"  Link the lane dev progress assign {w if w.isdigit() else _dq(w)} --to {_dq(m['name'])}"
@@ -2187,7 +2213,8 @@ def cmd_crew(a) -> int:
     for w in shown_warnings(roster):
         ui.warn(w)
     print(ui.dim('\n  dev crew route "<task>" · dev crew next · dev crew show <name> · dev crew brief <name> "<task>" '
-                 "--scope \"<globs>\" --step <n>\n  spawn as devkit:<id> (Claude Code) or agent type <id> (Codex)"))
+                 "--scope \"<globs>\" --step <n>\n  spawn as devkit:<id> (Claude Code) or agent_type <id> with the "
+                 "step's name as task_name (Codex)"))
     return 0
 
 

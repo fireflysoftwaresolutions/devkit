@@ -352,39 +352,44 @@ def read(agent: str, transcript: str, offset: int = 0):
 
 # --------------------------------------------------------------------------- hook entry points
 
-def on_agent_brief(agent: str, tool_input: dict, project: str = ""):
-    """Claude Agent/Task: the brief gets the skills its work requires and the known pitfalls (lessons) for its task.
-    -> updated tool input, or None."""
-    if not enabled() or agent != "claude":
+def on_agent_brief(agent: str, tool_input: dict, project: str = "", activity: str = "", files=None):
+    """A crew brief gets the skills its work requires and the known pitfalls (lessons) for its task: Claude's
+    Agent/Task call, and a Codex spawn at its SubagentStart (codexlaunch), whose brief is encrypted, so its kind of
+    work (`activity`) and its files (`files`) come from the plan step its launch bound to. -> updated tool input, or
+    None."""
+    if not enabled() or agent not in ("claude", "codex"):
         return None
     brief = tool_input.get("prompt") or ""
     if "devkit · required skills" in brief:
         return None
-    have = installed("claude")
+    have = installed(agent)
     need = []
     try:  # the brief's kind of work: declared, or its member's (the crew's RACI), never its words
         from . import raci
-        act = brief_activity(brief, tool_input.get("description") or "")
+        act = (raci.activity(activity) if activity else None) or \
+            brief_activity(brief, tool_input.get("description") or "")
     except Exception:
         act = None
     if act:
         cands = [(short(sk), f"what devkit knows about {raci._lower(act['name'])}")
                  for sk in (act.get("knowledge") or {}).get("skills") or []]
-        cands += [(s, r["why"]) for r in rules_for_activity(act["id"]) for s in required(r, "claude")]
+        cands += [(s, r["why"]) for r in rules_for_activity(act["id"]) for s in required(r, agent)]
         for s, why in cands:
             if s in have and not re.search(rf"\b{re.escape(s)}\b", brief, re.I) and s not in [x for x, _ in need]:
                 need.append((s, why))
     extra = ""
     if need:
         seen = dict.fromkeys(need)
-        extra = "\n\n## devkit · required skills\nBefore you start, load each of these with the Skill tool and follow " \
-                "it (if the Skill tool is not available, read its SKILL.md under ~/.claude):\n" + \
+        load = "with the Skill tool and follow it (if the Skill tool is not available, read its SKILL.md under " \
+               "~/.claude)" if agent == "claude" else f"{how_to_load(agent)} and follow it"
+        extra = f"\n\n## devkit · required skills\nBefore you start, load each of these {load}:\n" + \
                 "\n".join(f"- `{s}` — {why}" for s, why in seen) + \
                 "\nSay in your report which ones you loaded and how you applied them."
     if project and "devkit · known pitfalls" not in brief and "## Known pitfalls" not in brief:
         try:
             from . import lessons
-            picked = lessons.for_task(project, activity=(act or {}).get("id"), files=owned_files(brief))
+            picked = lessons.for_task(project, activity=(act or {}).get("id"),
+                                      files=owned_files(brief) if files is None else list(files))
         except Exception:
             picked = []
         if picked:

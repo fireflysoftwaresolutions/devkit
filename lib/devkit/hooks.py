@@ -2405,6 +2405,12 @@ def _scope_violation(agent: str, data: dict):
         if lane:
             level, layers, member = progress.lane_tools(run, aid), progress.lane_scope(run, aid), \
                 _member_folder(run, aid)
+        if lane and lane.get("over_limit"):  # a Codex launch over the crew's limits, told to stop (codexlaunch)
+            if tool in EDIT_TOOLS:
+                return ("devkit recorded this launch over the crew's limit (Codex cannot refuse it before it starts), "
+                        "so this agent may read but not edit: stop now and report, and the tech lead decides who does "
+                        "this work and when.")
+            level = "read"
         if tool != "apply_patch":
             v = guard.member_tool_verdict(tool, inp, cwd, level=level, member=member, scope=layers, base=top)
             if v:
@@ -3395,9 +3401,42 @@ def _tool_failed(agent: str, data: dict, event: str, before: str = ""):
 def subagent_start(agent: str):
     from . import progress
     data = _stdin_json()
+    launch = _codex_launch(agent, data) if agent == "codex" else None  # what its spawn_agent call never got
     progress.on_subagent(agent, data, True)
     _make_scratch_folder(agent, data)
+    told = _codex_member_context(agent, data, launch) if launch else ""
     _prompt_refresh(data, force=True)  # a lane opened: the prompt's crew count follows
+    if told:  # Codex's subagent-start output: hookSpecificOutput, and nothing beside it
+        print(json.dumps({"hookSpecificOutput": {"hookEventName": "SubagentStart", "additionalContext": told}}))
+
+
+def _codex_launch(agent: str, data: dict, judge: bool = True):
+    """A Codex agent's launch record, made at its start or, when that hook left none, at its stop (codexlaunch.record:
+    Codex fires no PreToolUse for spawn_agent). None for its own helpers, a known agent, or a failure (logged)."""
+    try:
+        from . import codexlaunch
+        return codexlaunch.record(agent, data, judge=judge)
+    except Exception:
+        _log(f"codex launch {agent}: {traceback.format_exc()[-300:]}")
+        return None
+
+
+def _codex_member_context(agent: str, data: dict, launch: dict) -> str:
+    """What a Codex member is told as it starts: stop and report when its launch broke the crew's limits, else what a
+    Claude Code member finds appended to its brief (required skills, known pitfalls, report format), whose lessons
+    count as shown to it at its first call, as a Claude brief's do (_stash_brief)."""
+    try:
+        from . import codexlaunch
+        if launch.get("why"):
+            return _fit(codexlaunch.mark_over_limit(agent, data, launch))
+        sf = _session_file(agent, data.get("session_id") or "-")
+        sess = (core.read_json(sf, {}) or {}) if sf.exists() else {}
+        text = codexlaunch.brief_context(agent, data, launch, _session_project(data, sess))
+        _stash_brief(agent, {"session_id": data.get("session_id"), "tool_use_id": launch["key"]}, text)
+        return _fit(text)
+    except Exception:
+        _log(f"codex member context {agent}: {traceback.format_exc()[-300:]}")
+        return ""
 
 
 def _claude_tmp() -> Path:
@@ -3516,6 +3555,8 @@ def subagent_stop(agent: str):
     try:
         sid = data.get("session_id") or "-"
         aid = data.get("agent_id") or ""
+        if aid and agent == "codex":  # a Codex launch its start left unrecorded (a busy session): its report is owed
+            _codex_launch(agent, data, judge=False)
         if aid:  # an agent that used only tools without hooks binds now, before its report is checked
             try:
                 progress.bind(agent, data, resume=False)  # a stop never resumes a finished lane
@@ -3531,6 +3572,7 @@ def subagent_stop(agent: str):
             by_main = _launched_by_main(sess, lane, meta, aid)  # read before a pending lane is dropped
             if lane and lane.get("binding") == "pending":
                 lane = None  # never bound to a launch: a helper owes no report
+            stopped = bool((lane or {}).get("over_limit"))  # told to stop at its start: it owes its status block only
             label = (lane or {}).get("label") or meta.get("description") or ""
             name = (lane or {}).get("persona") or progress.persona(data.get("agent_type") or "", label) \
                 or label.split(":")[0].strip() or "Agent"
@@ -3561,7 +3603,7 @@ def subagent_stop(agent: str):
                        f"<project> · `<branch>` · <task>, then - **Done:**, - **Check:** (✓/⚠/✗ + evidence) and "
                        f"- **Next:**; then what you deliver and \"Needs from the tech lead:\" (or nothing). Nothing "
                        f"above the block.{also}"}
-            elif run and lane and aid not in sess.setdefault("crew_comms", {}) and \
+            elif not stopped and run and lane and aid not in sess.setdefault("crew_comms", {}) and \
                     progress.lane_unreported(run, aid) and core.CFG.get("canary", {}).get("enforce", True):
                 from . import audit  # the crew talks through devkit: the step's evidence goes in the run, live
                 audit.record("crew.unreported", pid or "", f"{name} stopped without dev progress step", "miss")
@@ -3579,7 +3621,7 @@ def subagent_stop(agent: str):
                 _patch_quietly(sf, before, sess)
                 out = {"decision": "block", "reason": f"devkit · {_who(name)}, your report {canary.roles_reason(roles)} "
                                                       f"Then end with the same report, fixed."}
-            if out is None and (lane or meta):  # the crew gates: proofs, skills, stubs, tests, lessons; once
+            if out is None and (lane or meta) and not stopped:  # the crew gates: proofs, skills, stubs, tests, lessons; once
                 from . import gates
                 ref = copy.deepcopy(sess)
                 out = gates.check(name, data, sess, pid,
