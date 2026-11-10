@@ -47,6 +47,11 @@ change: `dev branch new ci/<topic>`, `dev commit`, `dev ci --run`, `dev push`, `
 - `dev ci audit --strict` fails on medium findings too (default: high and critical). The delivery policy's
   `job_timeout_minutes` (default 30) is the timeout that `--fix` writes and `init` generates, and the policy's test
   gate is what a generated test job runs.
+- **A timeout or concurrency change needs no new local run.** When every file changed since the last local run is a
+  GitHub workflow that differs only in `timeout-minutes`, `concurrency` (`group`, `cancel-in-progress`) or comments,
+  with no YAML anchors, aliases, merge keys or tags, the evidence carries over once `actionlint` and `dev ci audit`
+  pass (`delivery` skill, section 2). `runs-on`, `permissions` and pinned actions change what a local run exercises,
+  so they need `dev ci --run`.
 
 ## 3. Fast pipelines
 
@@ -147,7 +152,8 @@ Rules that hold for every failure:
 
 Slow pipelines: `dev ci audit` (speed findings) and the durations per job in `dev ci status`; fix the biggest first
 (cache, cancel superseded runs, split slow tests, shard), measure before and after, and revert a change that moved no
-number. Do not re-test a merged tree that already passed as a PR on the same tree.
+number. Do not re-test a merged tree that already passed as a PR on the same tree: `dev release` does not wait for
+`main` to repeat such a run, and names the commit whose pull request runs it relied on.
 
 ## 7. Taking over an old or external project
 

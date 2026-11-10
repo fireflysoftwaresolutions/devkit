@@ -126,6 +126,35 @@ description](templates.md#pull-request-description): what and why, changes, how 
 risk and rollback, links. `dev pr create` fills the changes, the local CI result, and the links, and refuses a PR
 whose "What and why" or "How to verify" is still empty. The title is a Conventional Commit.
 
+### When only a CI host setting changed
+
+A local run cannot test how long a job may run or which runs cancel each other. When a commit changes only those
+settings after a local run, such as a longer `timeout-minutes` for a slow test job, devkit keeps that run's evidence
+instead of asking for a new one. The evidence carries over to HEAD when all of these hold:
+
+- Every file changed since the tree with evidence is a GitHub workflow (`.github/workflows/*.yml`) that was edited,
+  not added or deleted.
+- Each one differs only in `timeout-minutes`, `concurrency` (its `group` and `cancel-in-progress`), or comments. Two
+  checks must agree: devkit's reading of the workflow is the same once those settings are left out, and every added
+  or removed line is blank, a comment, or one of those settings.
+- No changed workflow uses YAML anchors, aliases, merge keys, tags, or directives.
+- Nothing under `.github`, and no `zizmor.yml` or `zizmor.yaml` at the root, has uncommitted changes, and
+  `actionlint` (`brew install actionlint`) and `dev ci audit` (no high or critical finding) pass on the workflows.
+
+`dev push`, `dev pr create`, `dev pr ready`, `dev release`, and `dev ci --evidence` then record a host-only marker for
+HEAD that names the run it rests on and what was checked, and say so:
+
+```text
+  local CI evidence carried over: only CI host settings changed since the local run on c6fedeb (.github/workflows/ci.yml: jobs.test.timeout-minutes), which a local run cannot exercise · actionlint: no findings · dev ci audit: no high or critical finding
+✓ local CI evidence for 23899fb: dev ci --mark-passed on c6fedeb, then CI host settings only (.github/workflows/ci.yml: jobs.test.timeout-minutes), just now
+```
+
+Any other change needs a local run: a run command, a step, a trigger, the permissions, the matrix, the runner
+(`runs-on`), or another file. The refusal names the first difference, such as
+`.github/workflows/ci.yml changed jobs.test.steps[1].run, which a local run exercises`. `dev ci --run --resume` keeps a
+passed step after a host-only change, except a scanner that reads every file (such as gitleaks, semgrep, trivy, Vale,
+or `dev sec scan`), which runs again because it reads the workflow too.
+
 ### Back up early, CI once
 
 "Push once" protects CI time, not your work: a commit that exists only on this Mac is lost with the disk. Back up
@@ -271,6 +300,16 @@ Release by the recorded policy (see [The delivery policy](#the-delivery-policy))
    CI evidence, and the CI of the commit. It also refuses while work items linked to branches merged since the
    previous tag are still open: close the shipped ones (`dev task reconcile --apply`), or give `--why "<reason>"`.
    `dev calver` gives the next CalVer version.
+
+   A failed run on the commit refuses the release. A run still in progress does not hold it when a pull request run
+   already passed the same tree: `dev release` looks for a commit with HEAD's tree whose pull request run, from this
+   repository and not a fork, passed every job still running or queued on HEAD (a job with the same name, in the
+   same workflow file, that succeeded, not skipped), first among HEAD's parents (a merge commit's second parent is the
+   PR's head), then among the PR heads GitHub links to HEAD (a squash or rebase merge). It names that commit (and the
+   PR, when GitHub linked it) and releases without waiting. A skipped, still running, or push-only run does not count,
+   and a job the PR run did not pass holds the release until it passes on HEAD, even before HEAD lists it. When
+   `main` moved on before the merge, `dev release` still refuses until the run on HEAD ends
+   (`dev ci status --watch`).
 4. Download or install the published artifact and smoke-test it.
 5. Update the handoff note (version, what shipped, follow-ups), and mark done with `dev task done <id>` any task that
    shipped without a branch of its own.

@@ -2,10 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 """`dev test`: the tests that failed last time, then the tests a change can affect, and proof that new tests test it.
 
-  dev test                       1) the last failures (stop if one still fails)  2) the blast radius of the changes
-  dev test run [paths…]          --failed · --affected · --all · --since REF · --runner NAME · --json
+  dev test                       1) the last failures (stop if one still fails)  2) the blast radius of the changes;
+                                 a branch WIDE_CHANGES files from its base that reaches WIDE_TESTS test files is not
+                                 started: it names the tests of the files touched now (--affected runs them all)
+  dev test run [paths…]          --failed · --affected · --all · --since REF · --runner NAME · --json; with none of
+                                 them, what plain `dev test` runs, started on a wide branch too
   dev test plan [--all]          what would run, why (changed file → tests), the estimate; runs nothing
-  dev test prove [tests…]        each new or changed test passes N times with the change and fails without it
+  dev test prove [tests…]        each new or changed test (each case of a parametrized one) passes N times with the
+                                 change and fails without it; tests no runner here can run are listed, not fatal
   dev test audit …               tests that cannot fail (testaudit.py)
 
 Blast radius (`blast_radius`): build, dependency, lock, test-config, shared-fixture and CI files mean "all"; docs mean
@@ -14,7 +18,13 @@ Blast radius (`blast_radius`): build, dependency, lock, test-config, shared-fixt
 Java/Kotlin/PHP class-name references, Go package imports), plus the name convention (foo.py ↔ test_foo.py). A file
 nothing maps to widens to the tests of its directory or package, up to "all"; it never selects nothing.
 
-Results: JUnit XML (pytest, maven, gradle, phpunit/pest), `go test -json`, jest/vitest JSON and unittest's own output.
+Runners: pytest, unittest, jest, vitest, node (`node --test`, for a package.json test script that runs node, when node
+is on the PATH; a plain test script counts as one test, which fails when it exits non-zero; none for a script with a
+build step before its tests or a node option devkit does not know written without `=`), maven, gradle, go, phpunit,
+pest.
+
+Results: JUnit XML (pytest, node, maven, gradle, phpunit/pest), `go test -json`, jest/vitest JSON and unittest's own
+output.
 A selection that runs zero tests is a selection problem (exit 2), never a pass.
 
 Recorded per project in STATE/tests/<project>.json: the last failures, durations per test file or class, the last
@@ -44,14 +54,16 @@ from . import core, ui
 TMP_ROOT = None          # parent of `dev test prove` copies; None means core.TMP_ROOT (tests redirect it)
 AUDIT_MODULE = "testaudit"
 RUNS = 5                 # `dev test prove`: green runs a new test needs with the change present
+WIDE_CHANGES = 100       # plain `dev test` does not start the blast radius of a branch with this many changed files…
+WIDE_TESTS = 50          # …when it reaches this many test files; it names the tests of the files touched now instead
 
 PY_EXT = {".py"}
 JS_EXT = {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".mts", ".cts", ".vue", ".svelte"}
 JVM_EXT = {".java", ".kt", ".groovy", ".scala"}
 LANGS = {**{e: "py" for e in PY_EXT}, **{e: "js" for e in JS_EXT}, **{e: "jvm" for e in JVM_EXT},
          ".go": "go", ".php": "php"}
-RUNNER_LANG = {"pytest": "py", "unittest": "py", "jest": "js", "vitest": "js", "maven": "jvm", "gradle": "jvm",
-               "go": "go", "phpunit": "php", "pest": "php"}
+RUNNER_LANG = {"pytest": "py", "unittest": "py", "jest": "js", "vitest": "js", "node": "js", "maven": "jvm",
+               "gradle": "jvm", "go": "go", "phpunit": "php", "pest": "php"}
 SKIP_SEGMENTS = {"node_modules", "vendor", ".venv", "venv", "site-packages", ".git"}
 DEP_DIRS = ("node_modules", ".venv", "venv", "vendor")
 
@@ -335,6 +347,99 @@ def _venv_python(top, root):
     return None
 
 
+# node's options that take a value, written `--opt value` or `--opt=value`, and its switches, which take none (any
+# `--no-…` is a switch too). An option in neither set, written without `=`, may own the next word: see _node_args.
+_NODE_VALUE = {"--import", "--require", "-r", "--loader", "--experimental-loader", "--conditions", "-C", "--env-file",
+               "--env-file-if-exists", "--input-type", "--experimental-default-type", "--disable-warning",
+               "--unhandled-rejections", "--title", "--max-old-space-size", "--stack-size", "--test-name-pattern",
+               "--test-skip-pattern", "--test-concurrency", "--test-timeout", "--test-shard", "--test-reporter",
+               "--test-reporter-destination", "--test-coverage-include", "--test-coverage-exclude",
+               "--test-coverage-lines", "--test-coverage-branches", "--test-coverage-functions", "--test-isolation",
+               "--experimental-test-isolation", "--test-global-setup", "--watch-path", "--watch-kill-signal"}
+_NODE_SWITCH = {"--test", "--test-only", "--test-force-exit", "--test-update-snapshots", "--experimental-test-coverage",
+                "--experimental-test-module-mocks", "--experimental-test-snapshots", "--watch",
+                "--watch-preserve-output", "--enable-source-maps", "--experimental-strip-types",
+                "--experimental-transform-types", "--experimental-vm-modules", "--experimental-require-module",
+                "--experimental-detect-module", "--experimental-sqlite", "--experimental-websocket",
+                "--experimental-global-navigator", "--preserve-symlinks", "--preserve-symlinks-main", "--expose-gc",
+                "--trace-warnings", "--trace-deprecation", "--trace-uncaught", "--throw-deprecation",
+                "--pending-deprecation", "--abort-on-uncaught-exception", "--inspect", "--inspect-brk"}
+
+
+def _node_args(args):
+    """node's arguments -> ([(option, its words)], the words after the options), or None when an option devkit does
+    not know is written without `=`: its value may be the next word, so what the call runs is unknown. Options end at
+    the first other word (`--` ends them too): after it, `node --test` takes paths and globs, and a script its own
+    arguments. node reads `_` in an option's name as `-`."""
+    opts, i = [], 0
+    while i < len(args):
+        x = args[i]
+        if x == "--":
+            i += 1
+            break
+        if x == "-" or not x.startswith("-"):
+            break
+        name = x.split("=", 1)[0]
+        name = name[:2] + name[2:].replace("_", "-")
+        if name in _NODE_VALUE and "=" not in x:
+            opts.append((name, args[i:i + 2]))
+            i += 2
+            continue
+        if "=" not in x and name not in _NODE_SWITCH and not name.startswith("--no-"):
+            return None
+        opts.append((name, [x]))
+        i += 1
+    return opts, args[i:]
+
+
+# A pipe or a redirect outside quotes and escapes (group 1): `node --test | tee out.txt`, `node --test > out.txt`
+_SHELL_IO = re.compile(r"""'[^']*'|"(?:\\.|[^"\\])*"|\\.|([|<>])""")
+
+
+def _node_suite(script: str):
+    """A package test script that runs node -> (node's own flags, what it runs), or None. `node --test [flags]
+    [paths or globs]` gives its flags and paths ([] for node's own discovery); plain `node <test script>` calls joined
+    by `&&` give their scripts, which `node --test` runs as one test each (a script fails when it exits non-zero).
+
+    None when devkit cannot run what the script runs: a step before the tests (a build such as `tsc`, or a node
+    script that is no test) would be skipped and leave the tests to run on stale output, a node option devkit does
+    not know, written without `=`, leaves the paths unknown, and a pipe or a redirect on the tests (`| tee out.txt`,
+    `> out.txt`, `< input`) sends their output elsewhere or feeds them input. A step after the tests changes nothing
+    they run."""
+    flags, suite, tested, runs, before = [], [], False, False, False
+    for part in re.split(r"&&|\|\||;", script or ""):
+        try:
+            words = shlex.split(part)
+        except ValueError:
+            return None
+        while words and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", words[0]):  # FOO=1 node …
+            words.pop(0)
+        if not words:
+            continue
+        node = os.path.basename(words[0]) in ("node", "node.exe")
+        parsed = _node_args(words[1:]) if node else ([], [])
+        if parsed is None:
+            return None
+        opts, rest = parsed
+        test = any(n == "--test" for n, _ in opts)
+        script_test = node and not test and bool(rest) and _lang(rest[0]) == "js" and is_test_file(rest[0])
+        if not (test or script_test):  # another command, or a script that is no test (a build, another framework)
+            before = True
+            continue
+        if before or any(m.group(1) for m in _SHELL_IO.finditer(part)):
+            return None
+        runs = True
+        if script_test:  # a test script of its own; the words after it are its arguments
+            suite.append(rest[0])
+            continue
+        suite += [x for x in rest if not x.startswith("-")]
+        if not tested:  # the flags of the first `node --test` call (a loader, an env file); never a watch or reporter
+            tested = True
+            flags += [w for n, ws in opts if n != "--test" and not n.startswith(("--test-reporter", "--watch"))
+                      for w in ws]
+    return (flags, suite) if runs else None
+
+
 def _outermost(dirs) -> list:
     """Directories not nested inside another one of the set ('' is the top)."""
     out = []
@@ -390,7 +495,8 @@ def detect(top, repo=None) -> list:
     for d in sorted(d for d in by_dir if has(d, "package.json")):
         pkg = core.read_json(os.path.join(absd(d), "package.json"), {}) or {}
         deps = {**(pkg.get("dependencies") or {}), **(pkg.get("devDependencies") or {})}
-        script = str((pkg.get("scripts") or {}).get("test") or "")
+        scripts = pkg.get("scripts") or {}
+        script = str(scripts.get("test") or "")
         names = by_dir.get(d, set())
         tool = None
         if re.search(r"\bvitest\b", script):
@@ -401,8 +507,13 @@ def detect(top, repo=None) -> list:
             tool = "vitest"
         elif "jest" in deps or any(n.startswith("jest.config") for n in names) or "jest" in pkg:
             tool = "jest"
+        # npm runs a pretest script (a build) before the test script; devkit runs node itself and would skip it
+        node = None if tool or scripts.get("pretest") or not shutil.which("node") else _node_suite(script)
         if tool:
             found.append({"name": tool, "root": rel(d), "lang": "js", "exec": _pm_exec(top, d, tool)})
+        elif node:
+            found.append({"name": "node", "root": rel(d), "lang": "js", "exec": ["node"] + node[0] + ["--test"],
+                          "suite": node[1]})
 
     # Maven and Gradle: the outermost build of each tree
     for d in _outermost([d for d in by_dir if has(d, "pom.xml")]):
@@ -954,7 +1065,7 @@ def build_command(top, runner, files=(), ids=(), report=None, related=(), all_=F
     name, ex = runner["name"], list(runner["exec"])
     files, ids, related = list(files), list(ids), list(related)
     rel = [_rel(top, runner, f) for f in files]
-    env, names = {}, []
+    env, names, only = {}, [], ""
     if name == "pytest":
         argv = ex + ["-q"] + ([f"--junitxml={report}"] if report else []) + \
             ([] if all_ else rel + [_id(i) for i in ids])
@@ -980,6 +1091,13 @@ def build_command(top, runner, files=(), ids=(), report=None, related=(), all_=F
         else:
             argv = ex + ["run"] + out + ([] if all_ else rel + sorted({_rel(top, runner, _id(i).split("::")[0])
                                                                         for i in ids}))
+    elif name == "node":  # readable output on stdout, the JUnit report in a file; the whole suite is the script's
+        out = ["--test-reporter=spec", "--test-reporter-destination=stdout", "--test-reporter=junit",
+               f"--test-reporter-destination={report}"] if report else []
+        picked = [] if all_ else rel + sorted({_rel(top, runner, _id(i).split("::")[0]) for i in ids} - set(rel))
+        argv = ex + out + (list(runner.get("suite") or []) if all_ else picked)
+        if len(picked) == 1:  # Node before 24 names no file in its JUnit cases: the one file run is theirs
+            only = os.path.join(_rootdir(top, runner), picked[0])
     elif name == "maven":
         if runner.get("argv"):  # a CI step's own command: keep its goals and flags, add the selection
             ex = list(runner["argv"])
@@ -1040,7 +1158,7 @@ def build_command(top, runner, files=(), ids=(), report=None, related=(), all_=F
                 argv += ["--filter", "(" + "|".join(dict.fromkeys(pats)) + ")"]
     else:
         raise ValueError(f"unknown runner {name}")
-    return {"argv": argv, "cwd": _rootdir(top, runner), "env": env, "report": report, "names": names}
+    return {"argv": argv, "cwd": _rootdir(top, runner), "env": env, "report": report, "names": names, "only": only}
 
 
 # --------------------------------------------------------------------------- results
@@ -1095,14 +1213,28 @@ def _jvm_file(cls: str, base: str, top: str, ext_hint: str = "") -> str:
     return rel + ".java"
 
 
+# What XML allows before the root element besides a document type declaration: a byte order mark, then whitespace, the
+# XML declaration, processing instructions, and comments
+_XML_PROLOG = re.compile(r"\ufeff?(?:\s+|<\?.*?\?>|<!--.*?-->)*", re.S)
+
+
+def _junit_root(text):
+    """The root element of a JUnit XML report, or None. A report never declares a document type, and the entities of
+    one would expand while it is read (external entities, billion laughs): a declaration anywhere in the prolog, after
+    comments of any length, refuses the report. `<!DOCTYPE` in a failure's text, after the prolog, is only text."""
+    text = text.decode("utf-8", "replace") if isinstance(text, bytes) else (text or "")
+    if text.startswith("<!", _XML_PROLOG.match(text).end()):
+        return None
+    try:
+        return ET.fromstring(text)
+    except ET.ParseError:
+        return None
+
+
 def parse_junit(text, top, base, runner) -> list:
     """JUnit XML (pytest --junitxml, surefire/failsafe, gradle test-results, phpunit --log-junit) -> cases."""
-    text = text.decode("utf-8", "replace") if isinstance(text, bytes) else (text or "")
-    if re.search(r"<!(DOCTYPE|ENTITY)", text[:4096], re.I):  # reports never declare entities (XXE, billion laughs)
-        return []
-    try:
-        root = ET.fromstring(text)
-    except ET.ParseError:
+    root = _junit_root(text)
+    if root is None:
         return []
     out = []
     for tc in root.iter("testcase"):
@@ -1140,6 +1272,48 @@ def parse_junit(text, top, base, runner) -> list:
         if bad is not None and not msg:
             msg = _first_line(body)
         out.append(_case(id_, file, line, status, msg, tc.get("time") or 0, name))
+    return out
+
+
+def parse_node_junit(text, top, base, only="") -> list:
+    """node --test --test-reporter=junit -> cases. A node:test case is `<file>::<title>`, inside its describe blocks
+    joined by ' > '; a file that runs no node:test case (a plain script) is one case named by its path, which fails
+    when the script exits non-zero. `base` is the folder node ran in. Node before 24 writes no `file` on a case:
+    `only`, the absolute path of the one file node ran, stands in (run_tests runs node once per file for that)."""
+    root = _junit_root(text)
+    if root is None:
+        return []
+    out = []
+
+    def case(tc, path):
+        name, fabs = tc.get("name") or "", tc.get("file") or only or ""
+        file = _relto(top, fabs)
+        whole = bool(fabs) and not path and os.path.realpath(os.path.join(base, name)) == os.path.realpath(fabs)
+        full = " > ".join(path + [name])
+        bad = tc.find("failure")
+        bad = bad if bad is not None else tc.find("error")
+        status = "failed" if bad is not None else "skipped" if tc.find("skipped") is not None else "passed"
+        msg, line = "", None
+        if bad is not None:  # node ends an assertion's first line in ':' and gives the values (or a diff) after it
+            lines = [ln.strip() for ln in (bad.get("message") or bad.text or "").splitlines() if ln.strip()]
+            vals = [ln for ln in lines[1:] if ln != "+ actual - expected"][:2] if lines[:1] and \
+                lines[0].endswith(":") else []
+            msg = " ".join(lines[:1] + vals)
+            code = re.search(r"\bexitCode: (\d+)", bad.text or "") if whole else None
+            msg = f"the script exited {code.group(1)}" if code else msg
+            m = re.search(re.escape(fabs) + r":(\d+):\d+", bad.text or "") if fabs else None
+            line = int(m.group(1)) if m else None
+        out.append(_case(file if whole else f"{file}::{full}", file, line, status, msg, tc.get("time") or 0,
+                         file if whole else full))
+
+    def walk(el, path):
+        for ch in el:
+            if ch.tag == "testsuite":
+                walk(ch, path + [ch.get("name") or ""])
+            elif ch.tag == "testcase":
+                case(ch, path)
+
+    walk(root, [] if root.tag == "testsuites" else [root.get("name") or ""])
     return out
 
 
@@ -1362,6 +1536,9 @@ def _collect(top, runner, cmd, output, t0) -> list:
         return parse_junit(_read(report), top, cmd["cwd"], name) if report and os.path.exists(report) else []
     if name in ("jest", "vitest"):
         return parse_jest_json(_read(report), top) if report and os.path.exists(report) else []
+    if name == "node":
+        return parse_node_junit(_read(report), top, cmd["cwd"], cmd.get("only") or "") \
+            if report and os.path.exists(report) else []
     if name == "unittest":
         return parse_unittest(output, top, runner, cmd.get("names") or ())
     if name == "go":
@@ -1389,11 +1566,23 @@ def run_tests(top, runner, files=(), ids=(), related=(), all_=False, env=None, s
         longer exist), log}"""
     top = str(top)
     files, ids, related = list(files), list(ids), list(related)
+    if runner["name"] == "node" and not all_:
+        # Node before 24 names no file in its JUnit cases, so a case of a run over several files belongs to none of
+        # them: run node once per test file, each case then belongs to its run's file
+        targets = list(dict.fromkeys(files + [_id(i).split("::")[0] for i in ids if _id(i).split("::")[0] not in files]))
+        if len(targets) > 1:
+            parts = []
+            for k, f in enumerate(targets):
+                part_log = f"{log}.{k}" if log else None
+                parts.append(run_tests(top, runner, [f] if f in files else [],
+                                       [i for i in ids if _id(i).split("::")[0] == f], env=env, stream=stream,
+                                       log=part_log, timeout=timeout))
+            return _merged_runs(parts, files, ids, log)
     tmpd = core.STATE / "tests" / "tmp"
     tmpd.mkdir(parents=True, exist_ok=True)
     work = Path(tempfile.mkdtemp(prefix="run-", dir=str(tmpd)))
     report = None
-    if runner["name"] in ("pytest", "phpunit", "pest"):
+    if runner["name"] in ("pytest", "phpunit", "pest", "node"):
         report = str(work / "junit.xml")
     elif runner["name"] in ("jest", "vitest"):
         report = str(work / "report.json")
@@ -1457,6 +1646,25 @@ def run_tests(top, runner, files=(), ids=(), related=(), all_=False, env=None, s
             "passed": sum(c["status"] == "passed" for c in cases), "failed": len(failures),
             "skipped": sum(c["status"] == "skipped" for c in cases), "failures": failures, "zero": zero,
             "crash": crash, "not_found": not_found, "log": str(log) if log.parent != work else ""}
+
+
+def _merged_runs(parts, files, ids, log) -> dict:
+    """The runs of one selection, one per node test file, as one run (run_tests' result)."""
+    if log:
+        with open(log, "w") as out:
+            for p in parts:
+                if p["log"] and os.path.exists(p["log"]):
+                    out.write(Path(p["log"]).read_text(errors="replace"))
+                    os.remove(p["log"])
+    cases = [c for p in parts for c in p["cases"]]
+    failures = [c for p in parts for c in p["failures"]]
+    return {**parts[0], "files": list(files), "ids": [_id(i) for i in ids],
+            "argv": [x for p in parts for x in p["argv"] + [";"]][:-1],
+            "rc": next((p["rc"] for p in parts if p["rc"]), 0), "secs": round(sum(p["secs"] for p in parts), 2),
+            "cases": cases, "count": len(cases), "passed": sum(p["passed"] for p in parts), "failed": len(failures),
+            "skipped": sum(p["skipped"] for p in parts), "failures": failures, "zero": all(p["zero"] for p in parts),
+            "crash": any(p["crash"] for p in parts), "not_found": [n for p in parts for n in p["not_found"]],
+            "log": str(log) if log else ""}
 
 
 # --------------------------------------------------------------------------- recording
@@ -1673,7 +1881,9 @@ def _group_tests(top, runners, tests, changed=()):
         if o is not None:
             every.setdefault(id(o), set()).add(t)
     for r, files in groups.values():
-        if set(files) >= every.get(id(r), {None}):  # the selection is the whole suite: run it as one (timed)
+        # the selection is the whole suite: run it as one (timed); node's suite is what its test script names, which
+        # need not be the files devkit sees, so node always runs the files selected
+        if set(files) >= every.get(id(r), {None}) and r["name"] != "node":
             out.append((r, {"all": True, "files": [], "related": []}))
             continue
         rel = []
@@ -1760,6 +1970,35 @@ def _advice(st, radius, runners, json_out, top, ran=()):
     return text
 
 
+def _wide(top, st, runners, changed, reach, json_out) -> str:
+    """The branch differs from its base in so many files that they reach a large part of the suite (`reach`, the test
+    files a runner here takes): say so with the estimate, and name the tests of the files touched now (the uncommitted
+    changes) to run instead."""
+    _, label = base_ref(top)
+    repo = _Repo(top)
+    secs = []
+    for r in runners:
+        mine = [t for t in reach if owner(runners, t) is r]
+        if mine:
+            secs.append(estimate(st, r, mine, n_files=sum(1 for t in repo.tests if owner(runners, t) is r)))
+    took = "" if not secs or None in secs else f" (~{_fmt(sum(secs))})"
+    now = changed_files(top, "HEAD")
+    near = [t for t in (blast_radius(top, now)["tests"] if now else []) if owner(runners, t)]
+    n = len(reach)
+    if near and len(near) <= 8:
+        mine = f"the tests of the files you touched now: dev test run {' '.join(near)}"
+    elif near:
+        mine = f"the {len(near)} test file(s) your uncommitted changes reach: dev test --since HEAD"
+    else:
+        mine = "the tests of the files you touched: dev test run <test files>"
+    text = (f"not started: this branch differs from {label} in {len(changed):,} file(s), which reach {n} test "
+            f"file(s){took}\n  {ui.ARROW} {mine}\n  {ui.ARROW} or compare with the commit your work started from: "
+            f"dev test --since <ref> · all {n} of them: dev test --affected")
+    if not json_out:
+        print(f"{ui.WARN} {text}", file=sys.stderr)
+    return text
+
+
 def _flow(a, top, runners):
     """dev test / dev test run: failures first, then the affected tests; explicit paths; --all."""
     json_out, stream = a.json, (a.verbose or sys.stdout.isatty()) and not a.json
@@ -1833,6 +2072,11 @@ def _flow(a, top, runners):
             print(f"{ui.OK} nothing to run for the changes: {why}")
         return finish(code)
     groups, orphans = _group_tests(top, runners, radius["tests"], changed)
+    reach = [t for t in radius["tests"] if t not in set(orphans)]
+    plain = getattr(a, "test_cmd", None) is None and not (a.affected or a.since)  # `dev test run` starts what it selects
+    if groups and plain and len(changed) >= WIDE_CHANGES and len(reach) >= WIDE_TESTS:
+        data["advice"] = _wide(top, st, runners, changed, reach, json_out)
+        return finish(2)
     if orphans and not json_out:
         print(f"{ui.WARN} no runner here for: {', '.join(orphans[:5])}", file=sys.stderr)
     results = []
@@ -1871,12 +2115,18 @@ def _verdict(results, json_out, kind, advised=False) -> int:
 
 
 def _explicit(top, runners, paths):
-    """Paths (files, dirs, ids) relative to the cwd -> runner groups, plus what no runner takes."""
+    """Paths (files, dirs, ids) relative to the cwd -> runner groups, plus what no runner takes: a path whose real path
+    is outside the repository (`../x.test.js`, an absolute path, a symlink out of it) is no test of it."""
     groups, bad = {}, []
     tests = _Repo(top).tests
+    real_top = os.path.realpath(top)
     for raw in paths:
         file_part, sep, rest = raw.partition("::")
         absf = os.path.abspath(file_part)
+        real = os.path.realpath(absf)
+        if real != real_top and not real.startswith(real_top.rstrip(os.sep) + os.sep):
+            bad.append(raw)
+            continue
         rel = os.path.relpath(absf, top).replace("\\", "/")
         if os.path.isdir(absf):
             picked = [t for t in tests if rel in (".", "") or t.startswith(rel.rstrip("/") + "/")]
@@ -1980,6 +2230,10 @@ def _plan(a, top, runners) -> int:
         print(ui.dim(f"    $ {core.tilde(' '.join(shlex.quote(y) for y in x['argv']))}"))
     if orphans:
         print(f"  {ui.WARN} no runner for: {', '.join(orphans[:5])}")
+    reach = [t for t in radius["tests"] if t not in set(orphans)]
+    if runs and not a.since and len(changed) >= WIDE_CHANGES and len(reach) >= WIDE_TESTS:
+        print(f"  {ui.WARN} {len(changed):,} changed files reach {len(reach)} test files: plain `dev test` does not "
+              f"start them, and names the tests of the files you touched now · all of them: dev test --affected")
     if radius["mode"] == "all":
         print(f"  {ui.WARN} the changes can affect every test (see above); `dev test` runs the selection above "
               f"and says so · full suite ~{_fmt(full_total)}: dev test --all, or dev ci --run before the push")
@@ -2191,6 +2445,43 @@ def _carry_git(top, dest) -> str:
     return ""
 
 
+_NODE_NAMED = re.compile(r"^test-|[-_]test$|^test$")
+
+
+def _node_script(repo, runners, f, named=False) -> bool:
+    """Does the node runner take `f` as a test although its name has no .test or .spec? node --test runs test-*,
+    *-test, *_test and test.* scripts and every script in a test folder. A script there that another file of its
+    folder imports or names in quotes is a helper (a harness, a fake binary), unless it is `named` on the command
+    line."""
+    r = owner(runners, f)
+    p, name, stem, ext = _split(f)
+    if r is None or r["name"] != "node" or ext not in (".js", ".mjs", ".cjs"):
+        return False
+    if _NODE_NAMED.search(stem):
+        return True
+    dirs = set(p.split("/")[:-1])
+    if not dirs & {"test", "tests"} or dirs & (_SUPPORT_DIRS | {"fixtures", "__fixtures__", "testdata"}):
+        return False
+    if named:
+        return True
+    folder = p.rpartition("/")[0]
+    named_by = re.compile(r"[\"'`/]" + re.escape(name) + r"[\"'`]")
+    return not any(named_by.search(repo.text(g)) for g in repo.existing
+                   if g != p and g.rpartition("/")[0] == folder and _lang(g) == "js")
+
+
+def _no_runner(a, f) -> str:
+    """Why no runner here takes test file `f`, and what would."""
+    if getattr(a, "runner", None):
+        return f"--runner {a.runner} leaves it out"
+    if _lang(f) == "js":
+        return "no runner here takes it: node is not on the PATH" if not shutil.which("node") else \
+            "no runner here takes it: a package.json test script that runs jest, vitest or node --test makes one, " \
+            "unless it builds first (a pretest script, tsc && node --test) or passes a node option devkit does not " \
+            "know without `=`"
+    return "no runner here takes it (dev test plan lists the runners found)"
+
+
 def _prove(a, top, runners) -> int:
     base, label = base_ref(top, a.since)
     if not base:
@@ -2198,30 +2489,39 @@ def _prove(a, top, runners) -> int:
     changed = changed_files(top, a.since)
     repo = _Repo(top)
     prod = [f for f in changed if not is_test_file(f)]
-    helpers = [f for f in changed if is_test_file(f) and not _runnable(f)]  # test helpers, conftest.py, fixtures
+    every = repo.runners()  # a script is a test by the runners found here, whatever --runner leaves out
+    scripts = {f for f in changed if f in repo.ex and not _runnable(f) and _node_script(repo, every, f)}
+    skipped = []  # (file, why): files named that are no test, and tests no runner here can run
     if a.tests:
         tests = []
         for t in a.tests:
             rel = os.path.relpath(os.path.abspath(t), top).replace("\\", "/")
-            if rel not in repo.ex or not _runnable(rel):
-                return _refuse(f"not a test file here: {t}")
-            tests.append(rel)
+            if rel in repo.ex and (_runnable(rel) or _node_script(repo, every, rel, named=True)):
+                tests.append(rel)
+            else:
+                skipped.append((rel, "not a test file here"))
     else:
-        tests = [f for f in changed if _runnable(f) and f in repo.ex]
+        tests = [f for f in changed if f in repo.ex and (_runnable(f) or f in scripts)]
+    # test helpers, conftest.py, fixtures: part of the change, restored with it
+    helpers = [f for f in changed if is_test_file(f) and not _runnable(f) and f not in scripts and f not in tests]
     if not prod and not helpers:
         return _refuse(f"no production change to prove against: only test modules changed since {label}",
                        "prove checks that each new test fails without your change (code outside the tests, a test "
                        "helper or a fixture); compare with --since <ref>")
-    if not tests:
+    if not tests and not skipped:
         return _refuse(f"no new or changed tests since {label}",
                        "write the test first, or name it: dev test prove <test file>")
     plan = []
     for f in tests:
         r = owner(runners, f)
         if r is None:
-            return _refuse(f"no test runner for {f}", "dev test plan shows the runners found here")
+            skipped.append((f, _no_runner(a, f)))
+            continue
         units = _changed_units(top, base, f)  # a named file too: its new or changed tests (all, when none changed)
         plan.append((r, f, units, _unit_ids(top, r, f, units) if units else None))
+    if not plan:
+        return _refuse("nothing to prove here: " + "; ".join(f"{f} ({why})" for f, why in skipped),
+                       "dev test plan shows the runners found here")
     groups = {}
     for r, f, units, ids in plan:
         g = groups.setdefault(id(r), (r, {"files": [], "ids": []}, []))
@@ -2253,23 +2553,30 @@ def _prove(a, top, runners) -> int:
     try:
         _copy_worktree(top, dest)
         gitless = _carry_git(top, dest)
+        answered, first = set(), {}  # selected names some case answered to; each runner's first result
         for n in range(runs):
             for r, sel, members in groups.values():
                 res = run_tests(dest, r, files=sel["files"], ids=sel["ids"], env=env)
                 if res["zero"]:
                     problem = res
                     break
+                first.setdefault(id(r), res)
                 for key, c in place(res, members):
                     rec = found.setdefault(key, {"file": key[0], "id": key[1], "passes": 0, "message": ""})
                     rec["passes"] += c["status"] == "passed"
                     rec["message"] = rec["message"] or c["message"]
-                for f, units, ids in members:
-                    for i in ids or ():
-                        found.setdefault((f, _id(i)), {"file": f, "id": _id(i), "passes": 0,
-                                                       "message": res["failures"][0]["message"]
-                                                       if res["failures"] else "did not run"})
+                # a parametrized test answers by its cases (test_x[a], test_x[b]), never by its bare name
+                answered |= {(f, _id(i)) for c in res["cases"] for f, units, ids in members for i in ids or ()
+                             if _member(c, f, units, [i])}
             if problem:
                 break
+        for r, sel, members in groups.values():  # a selected name no case answered to did not run
+            res = first.get(id(r))
+            for f, units, ids in members:
+                for i in [i for i in ids or () if res and (f, _id(i)) not in answered]:
+                    mine = [c for c in res["failures"] if c["file"] in (f, "")]
+                    found.setdefault((f, _id(i)), {"file": f, "id": _id(i), "passes": 0,
+                                                   "message": mine[0]["message"] if mine else "did not run"})
         without = {}
         if not problem:
             _restore_base(top, base, dest, prod + helpers)
@@ -2298,7 +2605,7 @@ def _prove(a, top, runners) -> int:
     if a.json:
         print(json.dumps({"base": label, "production": prod, "helpers": helpers,
                           "git": f"none: {gitless}" if gitless else "carried", "runs": runs, "tests": rows,
-                          "exit": rc}, indent=1))
+                          "skipped": [{"file": f, "why": why} for f, why in skipped], "exit": rc}, indent=1))
         return rc
     change = prod + helpers
     print(ui.section(f"Prove · {len(rows)} new or changed test(s) · change: "
@@ -2309,6 +2616,10 @@ def _prove(a, top, runners) -> int:
     green = sum(1 for x in rows if x["with_change"] == f"{runs}/{runs}")
     print(f"  {ui.OK if green == len(rows) else ui.FAIL} with the change: {green} of {len(rows)} test(s) passed "
           f"{runs} of {runs} runs")
+    if skipped:
+        print(f"{ui.WARN} not proven, left out because they cannot run here:")
+        for f, why in skipped:
+            print(f"    {f}  · {why}")
     sections = (("does not test the change", ui.FAIL, "these tests do not test your change (they pass without it):"),
                 ("flaky", ui.FAIL, f"flaky with the change (not {runs} of {runs} green):"),
                 ("fails with the change", ui.FAIL, "fail with your change present (fix them first):"),
@@ -2322,7 +2633,7 @@ def _prove(a, top, runners) -> int:
         for x in mine:
             extra = f"  passed {x['with_change'].replace('/', ' of ')} runs" if verdict == "flaky" else \
                 f"  · {x['message'][:120]}" if x["message"] and verdict != "does not test the change" else ""
-            print(f"    {x['file']}  {x['id']}{extra}")
+            print(f"    {x['file']}{'' if x['id'] == x['file'] else '  ' + x['id']}{extra}")
     return rc
 
 
@@ -2361,7 +2672,8 @@ def _audit(a) -> int:
 
 def _options(p, paths=False):
     if paths:
-        p.add_argument("paths", nargs="*", help="test files, directories or runner ids (default: failed, then affected)")
+        p.add_argument("paths", nargs="*", help="test files, directories or runner ids of this repository (default: "
+                                                "failed, then affected)")
     p.add_argument("--failed", action="store_true", help="only the tests that failed last time")
     p.add_argument("--affected", action="store_true", help="only the tests your changes can affect")
     p.add_argument("--all", action="store_true", help="the full suite (once, before the push)")
@@ -2418,7 +2730,7 @@ def cmd_test(a) -> int:
     runners = _runners(top, a)
     if not runners:
         return _refuse("no test runner found here" + (f" for {a.runner}" if getattr(a, "runner", None) else ""),
-                       "supported: pytest, unittest, jest, vitest, maven, gradle, go, phpunit, pest")
+                       "supported: " + ", ".join(RUNNER_LANG) + " (node --test, from a package.json test script)")
     if sub == "plan":
         return _plan(a, top, runners)
     if sub == "prove":

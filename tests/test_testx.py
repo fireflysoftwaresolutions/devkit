@@ -12,6 +12,7 @@ import contextlib
 import io
 import json
 import os
+import shutil
 import sys
 import tempfile
 import textwrap
@@ -209,6 +210,83 @@ class DetectTests(unittest.TestCase):
                              "composer.json": json.dumps({"require-dev": {"pestphp/pest": "^2"}})})
         self.assertEqual(found[("maven", ".")]["exec"], ["mvn"])
         self.assertEqual(found[("pest", ".")]["exec"], ["vendor/bin/pest"])
+
+    # a package whose test script runs node (node --test, or node on its test scripts) has the node runner, whose
+    # whole suite is what that script runs; without node on the PATH there is no runner to offer
+    def test_a_node_test_script_is_the_node_runner_when_node_is_installed(self):
+        files = {"package.json": json.dumps({"type": "module", "scripts": {"test": "node --test scripts/test/*.test.mjs"}}),
+                 "mcp/package.json": json.dumps({"scripts": {"test": "node test/protocol.mjs && node test/flow.mjs"}}),
+                 "web/package.json": json.dumps({"scripts": {"test": "jest"}, "devDependencies": {"jest": "^29"}}),
+                 # a script that starts another test framework (mocha here) is no test node can run
+                 "cli/package.json": json.dumps({"scripts": {"test": "node scripts/run-mocha.js"}})}
+        with mock.patch.object(testx.shutil, "which", lambda n: "/opt/bin/node" if n == "node" else None):
+            found = self.detect(files)
+        self.assertEqual(sorted(found), [("jest", "web"), ("node", "."), ("node", "mcp")])
+        self.assertEqual(found[("node", ".")]["suite"], ["scripts/test/*.test.mjs"])
+        self.assertEqual(found[("node", "mcp")]["suite"], ["test/protocol.mjs", "test/flow.mjs"])
+        with mock.patch.object(testx.shutil, "which", lambda n: None):
+            self.assertEqual(sorted(self.detect(files)), [("jest", "web")])
+
+
+# a package.json test script read word by word: what devkit runs must be what the script runs, or there is no runner
+class NodeScriptTests(unittest.TestCase):
+    def node_runner(self, scripts):
+        """(exec, suite) of the node runner of a package with these package.json scripts, or None."""
+        with Env() as e, mock.patch.object(testx.shutil, "which", lambda n: "/opt/bin/node" if n == "node" else None):
+            r = e.repo({"package.json": json.dumps({"scripts": scripts})}, branch=None)
+            rn = {(x["name"], x["root"]): x for x in testx.detect(str(r))}.get(("node", "."))
+        return rn and (rn["exec"], rn["suite"])
+
+    # node takes an option's value as the next word too: it stays with its option, never joins the suite
+    def test_a_node_option_keeps_a_value_written_as_the_next_word(self):
+        self.assertEqual(self.node_runner({"test": "node --test --test-coverage-include src -r ./setup.cjs "
+                                                   "--import tsx test/"}),
+                         (["node", "--test-coverage-include", "src", "-r", "./setup.cjs", "--import", "tsx", "--test"],
+                          ["test/"]))
+
+    # devkit sets its own reporters and never watches: those options go, with their values, in either spelling
+    def test_node_reporter_and_watch_options_go_with_their_values(self):
+        self.assertEqual(self.node_runner({"test": "node --test --test-reporter spec --test_reporter_destination "
+                                                   "out.txt --watch-path src test/"}),
+                         (["node", "--test"], ["test/"]))
+
+    # an option devkit does not know may take the next word as its value, so the paths are unknown: no runner (the
+    # tests are listed as not proven, never run wrongly); written with `=`, or a known switch, it is passed on
+    def test_an_unknown_node_option_without_equals_means_no_runner(self):
+        self.assertIsNone(self.node_runner({"test": "node --test --future-option value test/"}))
+        self.assertEqual(self.node_runner({"test": "node --test --future-option=value --experimental-test-coverage "
+                                                   "--no-warnings test/"}),
+                         (["node", "--future-option=value", "--experimental-test-coverage", "--no-warnings", "--test"],
+                          ["test/"]))
+
+    # devkit runs node itself, so a step before the tests (a build, a node script that is no test) would be skipped
+    # and the tests would run against stale output: no runner. A step after the tests is fine
+    def test_a_step_before_the_node_tests_means_no_runner(self):
+        self.assertIsNone(self.node_runner({"test": "tsc && node --test dist/test/"}))
+        self.assertIsNone(self.node_runner({"test": "npm run build && node --test"}))
+        self.assertIsNone(self.node_runner({"test": "node scripts/build.mjs && node --test dist/"}))
+        self.assertEqual(self.node_runner({"test": "node --test test/ && eslint ."}), (["node", "--test"], ["test/"]))
+
+    # npm runs a pretest script before the test script; devkit would not
+    def test_a_pretest_script_means_no_node_runner(self):
+        self.assertIsNone(self.node_runner({"pretest": "tsc", "test": "node --test dist/test/"}))
+
+
+class NodeScriptRedirectTests(unittest.TestCase):
+    # a pipe or a redirect on the tests' command sends node's output elsewhere or feeds it input, which devkit cannot
+    # reproduce when it runs node itself: no runner. The words after `|` or `>` used to become the suite, so node
+    # skipped its own discovery. A quoted `|` is a pattern, not a pipe, and a pipe in a step after the tests changes
+    # nothing they run
+    def test_a_pipe_or_redirect_on_the_node_tests_means_no_runner(self):
+        node_runner = NodeScriptTests.node_runner
+        for script in ("node --test | tee out.txt", "node --test > out.txt", "node --test test/ 2>&1 | tap-spec",
+                       "node --test < /dev/null", "node test/a.test.js | tap-spec"):
+            with self.subTest(script):
+                self.assertIsNone(node_runner(self, {"test": script}))
+        self.assertEqual(node_runner(self, {"test": 'node --test --test-name-pattern="a|b" test/'}),
+                         (["node", "--test-name-pattern=a|b", "--test"], ["test/"]))
+        self.assertEqual(node_runner(self, {"test": "node --test test/ && eslint . | tee lint.txt"}),
+                         (["node", "--test"], ["test/"]))
 
 
 # --------------------------------------------------------------------------- blast radius
@@ -441,6 +519,17 @@ class CommandTests(unittest.TestCase):
                                        "./internal/calc"])
         self.assertEqual(testx.build_command(top, rn, all_=True)["argv"], ["go", "test", "-json", "./..."])
 
+    # node --test writes its JUnit report next to the readable output; its whole suite is what the test script runs
+    def test_node_files_and_its_own_suite(self):
+        with mock.patch.object(testx.shutil, "which", lambda n: "/opt/bin/node" if n == "node" else None):
+            top, rn = self.runner({"mcp/package.json": json.dumps({"scripts": {"test": "node --test test/"}})},
+                                  "node", "mcp")
+        cmd = testx.build_command(top, rn, files=["mcp/test/flow.mjs"], report="R")
+        self.assertEqual(cmd["argv"], ["node", "--test", "--test-reporter=spec", "--test-reporter-destination=stdout",
+                                       "--test-reporter=junit", "--test-reporter-destination=R", "test/flow.mjs"])
+        self.assertEqual(cmd["cwd"], str(Path(top) / "mcp"))
+        self.assertEqual(testx.build_command(top, rn, all_=True)["argv"], ["node", "--test", "test/"])
+
     def test_phpunit_one_file_or_a_filter(self):
         top, rn = self.runner({"composer.json": "{}", "phpunit.xml": "<phpunit/>"}, "phpunit")
         cmd = testx.build_command(top, rn, files=["tests/MailerTest.php"], report="R")
@@ -588,6 +677,42 @@ UNITTEST_NOT_LOADED_39 = UNITTEST_NOT_LOADED.replace("_FailedTest.test_gone_away
     "_FailedTest.test_renamed)", "_FailedTest)")
 
 
+# node --test --test-reporter=junit (node 26): a node:test file with a describe block, a plain script that exits 1
+NODE_XML = """<?xml version="1.0" encoding="utf-8"?>
+<testsuites>
+\t<testcase name="adds" time="0.000371" classname="test" file="ROOT/test/a.test.mjs"/>
+\t<testcase name="breaks" time="0.000445" classname="test" file="ROOT/test/a.test.mjs" failure="Expected values to be strictly equal:&#10;&#10;2 !== 3&#10;">
+\t\t<failure type="testCodeFailure" message="Expected values to be strictly equal:&#10;&#10;2 !== 3">
+[Error [ERR_TEST_FAILURE]: Expected values to be strictly equal:
+
+2 !== 3
+] {
+  code: 'ERR_TEST_FAILURE',
+  cause: AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+      at TestContext.&lt;anonymous> (file://ROOT/test/a.test.mjs:4:31)
+      at Test.runInAsyncScope (node:async_hooks:226:14)
+}
+\t\t</failure>
+\t</testcase>
+\t<testsuite name="group" time="0.000781" disabled="0" errors="0" tests="2" failures="1" skipped="0">
+\t\t<testcase name="inner" time="0.000602" classname="group" file="ROOT/test/a.test.mjs"/>
+\t\t<testcase name="slug" time="0.000500" classname="group" file="ROOT/test/a.test.mjs">
+\t\t\t<failure type="testCodeFailure" message="Expected values to be strictly equal:&#10;+ actual - expected&#10;&#10;+ ' big news '&#10;- 'big-news'">
+      at TestContext.&lt;anonymous> (file://ROOT/test/a.test.mjs:9:20)
+\t\t\t</failure>
+\t\t</testcase>
+\t</testsuite>
+\t<testcase name="test/bad.mjs" time="0.112125" classname="test" file="ROOT/test/bad.mjs" failure="test failed">
+\t\t<failure type="testCodeFailure" message="test failed">
+[Error: test failed] { code: 'ERR_TEST_FAILURE', failureType: 'testCodeFailure', cause: 'test failed', exitCode: 1 }
+\t\t</failure>
+\t</testcase>
+\t<testcase name="test/plain.mjs" time="0.110449" classname="test" file="ROOT/test/plain.mjs"/>
+\t<!-- tests 5 -->
+</testsuites>
+"""
+
+
 def failures(cases):
     return [(c["id"], c["file"], c["line"], c["message"]) for c in cases if c["status"] == "failed"]
 
@@ -632,6 +757,19 @@ class ParseTests(unittest.TestCase):
                                            ("internal/calc:TestAdd", "internal/calc/calc_test.go", 9,
                                             "got 3, want 4")])
         self.assertEqual(len(cases), 3)
+
+    # node --test: a node:test case by its title (in its describe blocks), a plain script as one case named by its path
+    def test_node_test_junit(self):
+        cases = testx.parse_node_junit(NODE_XML.replace("ROOT", str(self.top)), str(self.top), str(self.top))
+        self.assertEqual(failures(cases), [
+            ("test/a.test.mjs::breaks", "test/a.test.mjs", 4, "Expected values to be strictly equal: 2 !== 3"),
+            ("test/a.test.mjs::group > slug", "test/a.test.mjs", 9,
+             "Expected values to be strictly equal: + ' big news ' - 'big-news'"),
+            ("test/bad.mjs", "test/bad.mjs", None, "the script exited 1")])
+        self.assertEqual({c["id"]: c["status"] for c in cases},
+                         {"test/a.test.mjs::adds": "passed", "test/a.test.mjs::breaks": "failed",
+                          "test/a.test.mjs::group > inner": "passed", "test/a.test.mjs::group > slug": "failed",
+                          "test/bad.mjs": "failed", "test/plain.mjs": "passed"})
 
     def test_jest_and_vitest_json(self):
         text = json.dumps(JEST_JSON).replace("ROOT", str(self.top))
@@ -686,6 +824,65 @@ class ParseTests(unittest.TestCase):
                 self.assertEqual([(c["id"], c["status"], c["file"]) for c in cases],
                                  [("tests.test_calc.CalcTests.test_sub", "passed", "tests/test_calc.py")])
 
+
+class NodeJunitWithoutFileTests(unittest.TestCase):
+    # Node before 24 (22 is an LTS) writes no file attribute on a JUnit case; devkit runs node once per test file,
+    # so a case without one belongs to the file node ran
+    NODE22 = ('<?xml version="1.0" encoding="utf-8"?>\n<testsuites>\n'
+              '\t<testcase name="adds" time="0.000240" classname="test"/>\n\t<!-- tests 1 -->\n</testsuites>\n')
+
+    def test_a_case_without_a_file_belongs_to_the_one_file_node_ran(self):
+        with tempfile.TemporaryDirectory() as d:
+            top = os.path.realpath(d)
+            cases = testx.parse_node_junit(self.NODE22, top, top, os.path.join(top, "test", "add.test.mjs"))
+            self.assertEqual([(c["id"], c["file"], c["status"]) for c in cases],
+                             [("test/add.test.mjs::adds", "test/add.test.mjs", "passed")])
+
+    def test_a_node_command_for_one_file_names_it_and_for_several_names_none(self):
+        with tempfile.TemporaryDirectory() as d:
+            top = os.path.realpath(d)
+            runner = {"name": "node", "exec": ["node", "--test"], "root": ".", "suite": []}
+            one = testx.build_command(top, runner, ["test/a.test.mjs"], report="r.xml")
+            two = testx.build_command(top, runner, ["test/a.test.mjs", "test/b.test.mjs"], report="r.xml")
+            self.assertEqual((one["only"], two["only"]), (os.path.join(top, "test", "a.test.mjs"), ""))
+
+
+class JunitPrologTests(unittest.TestCase):
+    """Both JUnit report readers and a document type declaration. A report never declares one, and its entities would
+    expand while the report is read (external entities, billion laughs)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.top = str(Path(self.tmp.name).resolve())
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def read(self, text):
+        """(the JUnit reader's cases, the node:test JUnit reader's cases), each as [(name, status)]."""
+        return ([(c["name"], c["status"]) for c in testx.parse_junit(text, self.top, self.top, "pytest")],
+                [(c["name"], c["status"]) for c in testx.parse_node_junit(text, self.top, self.top)])
+
+    # the readers looked for a declaration in the first 4,096 characters only, so one after a longer comment expanded
+    # (a 5,386-character report gave a 1,000,004-character case name); the whole prolog decides now, a byte order
+    # mark, the XML declaration, processing instructions and comments included
+    def test_a_doctype_anywhere_in_the_prolog_refuses_the_report(self):
+        report = '<testsuites><testcase classname="tests.test_a" name="{}" file="test/a.test.mjs"/></testsuites>'
+        doctype = '<!DOCTYPE testsuites [<!ENTITY boom "expanded">]>'
+        for prolog in ('<?xml version="1.0"?><!--' + "c" * 5000 + "-->",
+                       '\ufeff<?xml version="1.0"?>\n<?xml-stylesheet href="r.xsl"?>\n<!-- one -->\n<!-- two -->\n'):
+            with self.subTest(prolog=prolog[:24]):
+                self.assertEqual(self.read(prolog + doctype + report.format("&boom;")), ([], []))
+                self.assertEqual(self.read(prolog + report.format("plain")),
+                                 ([("plain", "passed")], [("plain", "passed")]))
+
+    # a failure that quotes an HTML page (a web test's response body) carries `<!DOCTYPE html>` in its text, after the
+    # prolog: the report is read
+    def test_a_failure_that_quotes_an_html_page_is_read(self):
+        report = ('<?xml version="1.0"?><testsuites><testcase classname="tests.test_page" name="renders" '
+                  'file="test/page.test.mjs"><failure message="unexpected page"><![CDATA[<!DOCTYPE html><html>'
+                  '<body>Not found</body></html>]]></failure></testcase></testsuites>')
+        self.assertEqual(self.read(report), ([("renders", "failed")], [("renders", "failed")]))
 
 
 # --------------------------------------------------------------------------- running a real unittest project
@@ -745,6 +942,23 @@ def recorded(e):
 
 
 class RunTests(unittest.TestCase):
+    # a node option whose value is the next word reaches node whole, so the suite runs (node used to exit 9 with
+    # "requires an argument", and dev test reported zero tests). The script names its test file: Node 22 reads each
+    # argument after --test as a file or a glob and fails on a folder ("Cannot find module …/test/"), while Node 20
+    # and 26 accept a folder; --test-name-pattern exists since Node 18.11
+    @unittest.skipUnless(shutil.which("node"), "node is not installed, so the node runner cannot run here")
+    def test_a_node_suite_with_an_option_value_as_the_next_word_runs(self):
+        with Env() as e:
+            r = e.repo({"package.json": json.dumps({"type": "module", "scripts": {
+                            "test": "node --test --test-name-pattern adds test/add.test.mjs"}}),
+                        "src/add.mjs": "export const add = (a, b) => a + b;\n",
+                        "test/add.test.mjs": 'import assert from "node:assert/strict";\nimport { test } from '
+                                             '"node:test";\nimport { add } from "../src/add.mjs";\n\n'
+                                             'test("adds", () => assert.equal(add(1, 2), 3));\n'})
+            rc, out, err = dev(r, "run", "--all", "--json")
+            run = json.loads(out)["steps"][0]["runs"][0]
+            self.assertEqual((rc, run["count"], run["failed"]), (0, 1, 0), out + err)
+
     def test_failure_is_compact_with_file_line_and_recorded(self):
         with Env() as e:
             r = e.repo(CALC)
@@ -897,6 +1111,23 @@ class RunTests(unittest.TestCase):
                 self.assertIn("AssertionError: -1 != 3", Path(log).read_text())
 
 
+class OutsidePathTests(unittest.TestCase):
+    # `dev test run` runs this repository's tests: a path outside it, relative, absolute, or a symlink out of it, is
+    # refused before anything runs (`dev test run ../outside.test.js` built `node --test ../outside.test.js`)
+    def test_a_test_file_outside_the_repository_is_refused(self):
+        with Env() as e, mock.patch.object(testx.shutil, "which", lambda n: "/opt/bin/node" if n == "node" else None):
+            r = e.repo({"package.json": json.dumps({"scripts": {"test": "node --test"}}),
+                        "test/in.test.js": "require('node:test')('in', () => {});\n"})
+            outside = e.root / "outside.test.js"
+            outside.write_text("require('node:fs').writeFileSync(__filename + '.ran', '');\n")
+            (r / "test" / "link.test.js").symlink_to(outside)
+            for path in ("../outside.test.js", str(outside), "test/link.test.js"):
+                with self.subTest(path):
+                    rc, out, err = dev(r, "run", path)
+                    self.assertEqual((rc, f"no test runner for: {path}" in err), (2, True), out + err)
+            self.assertFalse(Path(f"{outside}.ran").exists(), "the file outside the repository ran")
+
+
 def seed(r, *fails):
     """The record an earlier run left: failures as (id, file)."""
     p = testx.state_path(r)
@@ -1031,6 +1262,63 @@ class PlanTests(unittest.TestCase):
             self.assertIn("2 test file(s)", out)
 
 
+def numbered(n):
+    """n source modules, each with its own unittest module that reads it."""
+    files = {".gitignore": "__pycache__/\n"}
+    for i in range(n):
+        files[f"src_{i:03d}.py"] = f"N = {i}\n"
+        files[f"tests/test_src_{i:03d}.py"] = f"""
+            import sys
+            import unittest
+            from pathlib import Path
+
+            sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+            import src_{i:03d}  # noqa: E402
+
+
+            class SrcTests(unittest.TestCase):
+                def test_keeps_its_number(self):
+                    self.assertEqual(src_{i:03d}.N % 1000, {i})
+            """
+    return files
+
+
+class WideBranchTests(unittest.TestCase):
+    # a branch far from its base (a long-lived integration branch) reaches a large part of the suite: plain
+    # `dev test` says so before it starts, and names the tests of the files touched now; --affected runs them all
+    def test_plain_dev_test_does_not_start_a_wide_branchs_selection(self):
+        with Env() as e:
+            r = e.repo(numbered(110))
+            write(r, {f"src_{i:03d}.py": f"N = {i + 1000}\n" for i in range(110)})
+            write(r, {f"web/w{i}.test.mjs": "" for i in range(5)})  # tests no runner here takes: not counted
+            git(r, "add", "-A")
+            git(r, "commit", "-q", "-m", "feat: renumber")
+            write(r, {"src_007.py": "N = 2007\n"})
+            rc, out, err = dev(r)
+            self.assertEqual(rc, 2, out + err)
+            self.assertIn("110 test file(s)", out + err)
+            self.assertIn("dev test run tests/test_src_007.py", out + err)
+            self.assertEqual(state(e), {})  # nothing ran, nothing recorded
+            rc, out, _ = dev(r, "plan")  # the plan says so too
+            self.assertEqual(rc, 0)
+            self.assertIn("plain `dev test` does not start them", out)
+            rc, out, err = dev(r, "--affected")
+            self.assertEqual(rc, 0, out + err)
+            self.assertIn("110 test(s) passed", out)
+
+    # the hold is for plain `dev test` only: `dev test run`, even with no paths, starts what it selects
+    def test_dev_test_run_without_paths_starts_a_wide_branchs_selection(self):
+        with Env() as e, mock.patch.object(testx, "WIDE_CHANGES", 3), mock.patch.object(testx, "WIDE_TESTS", 3):
+            r = e.repo(numbered(4))
+            write(r, {f"src_{i:03d}.py": f"N = {i + 1000}\n" for i in range(4)})
+            git(r, "add", "-A")
+            git(r, "commit", "-q", "-m", "feat: renumber")
+            self.assertEqual(dev(r)[0], 2)
+            rc, out, err = dev(r, "run")
+            self.assertEqual(rc, 0, out + err)
+            self.assertIn("4 test(s) passed", out)
+
+
 class AuditTests(unittest.TestCase):
     def test_missing_module_is_a_clear_message(self):
         with Env() as e:
@@ -1087,6 +1375,111 @@ TEST_ADD_AGAIN = """
 
 def with_tests(*extra):
     return textwrap.dedent(PROVE_BASE["tests/test_calc.py"]).lstrip("\n") + "".join(extra)
+
+
+# A stand-in for pytest, so a parametrized test runs where pytest is not installed. `python -m pytest [-q]
+# [--junitxml=R] <file>[::<test>]…` runs the test functions, one case per @pytest.mark.parametrize value, named
+# name[value] as pytest names them, and writes pytest's JUnit report (classname and name, as pytest's xunit2 does).
+STANDIN_PYTEST = '''
+import importlib.util
+import sys
+import xml.etree.ElementTree as ET
+
+
+class _Mark:
+    @staticmethod
+    def parametrize(argname, values):
+        def deco(fn):
+            fn.cases = [(f"{fn.__name__}[{v}]", {argname: v}) for v in values]
+            return fn
+        return deco
+
+
+mark = _Mark()
+
+
+def _cases(target):
+    path, _, name = target.partition("::")
+    spec = importlib.util.spec_from_file_location(path[:-3].replace("/", "."), path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    for n in [name] if name else [n for n in vars(mod) if n.startswith("test")]:
+        fn = getattr(mod, n)
+        for case, kw in getattr(fn, "cases", [(n, {})]):
+            yield path[:-3].replace("/", "."), case, fn, kw
+
+
+def main(argv):
+    suite = ET.Element("testsuite", name="pytest")
+    ran = failed = 0
+    for target in [a for a in argv if not a.startswith("-")]:
+        for cls, case, fn, kw in _cases(target):
+            ran += 1
+            tc = ET.SubElement(suite, "testcase", classname=cls, name=case, time="0.001")
+            try:
+                fn(**kw)
+            except Exception as e:
+                failed += 1
+                ET.SubElement(tc, "failure", message=f"{type(e).__name__}: {e}").text = repr(e)
+    report = next((a.split("=", 1)[1] for a in argv if a.startswith("--junitxml=")), None)
+    if report:
+        root = ET.Element("testsuites")
+        root.append(suite)
+        ET.ElementTree(root).write(report, encoding="utf-8", xml_declaration=True)
+    return 1 if failed else 0 if ran else 5
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
+'''
+HOSTS_BASE = {
+    "pytest.ini": "[pytest]\n",
+    "pytest.py": STANDIN_PYTEST,
+    "hosts.py": "def label(host):\n    return host\n",
+    "tests/test_hosts.py": """
+        import sys
+        from pathlib import Path
+
+        import pytest
+
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        import hosts  # noqa: E402
+
+
+        def test_label_keeps_a_name():
+            assert hosts.label("a") == "a"
+        """,
+    ".gitignore": "__pycache__/\n",
+}
+HOSTS_CHANGE = "def label(host):\n    return host or 'localhost'\n\n\ndef count(names):\n    return len([n for n in names if n])\n"
+HOSTS_TESTS = """
+
+@pytest.mark.parametrize("host", [None, "a", "b"])
+def test_label_is_never_empty(host):
+    assert hosts.label(host)
+
+
+def test_count_skips_empty_hosts():
+    assert hosts.count([None, "a"]) == 1
+"""
+
+# a package whose tests run with node --test: a node:test file and a plain script with its own checks (it sets a
+# failing exit code), next to a harness the scripts import
+NODE_BASE = {
+    "package.json": json.dumps({"name": "proj", "type": "module", "scripts": {"test": "node --test"}}),
+    "lib/slug.mjs": "export const slug = (s) => s.toLowerCase();\n",
+    "test/harness.mjs": "export function check(ok, what) {\n  if (!ok) {\n    console.error(`FAIL: ${what}`);\n"
+                        "    process.exitCode = 1;\n  }\n}\n",
+}
+NODE_CHANGE = {
+    "lib/slug.mjs": 'export const slug = (s) => s.trim().toLowerCase().replace(/\\s+/g, "-");\n',
+    "test/harness.mjs": NODE_BASE["test/harness.mjs"].replace("FAIL: ", "failed: "),
+    "test/slug.test.mjs": 'import assert from "node:assert/strict";\nimport { test } from "node:test";\n'
+                          'import { slug } from "../lib/slug.mjs";\n\ntest("joins words with dashes", () => {\n'
+                          '  assert.equal(slug(" Big News "), "big-news");\n});\n',
+    "test/page.mjs": 'import { check } from "./harness.mjs";\nimport { slug } from "../lib/slug.mjs";\n\n'
+                     'check(slug("Two Words") === "two-words", "the page slug joins its words");\n',
+}
 
 
 class ProveTests(unittest.TestCase):
@@ -1209,6 +1602,75 @@ class ProveTests(unittest.TestCase):
             rc, _, err = dev(r, "prove")
             self.assertEqual(rc, 2)
             self.assertIn("no new or changed tests", err)
+
+    # a parametrized test runs as one case per value: each case is reported by its id with its own result, and the
+    # function's bare name, which never runs as such, is no row of its own
+    def test_each_case_of_a_parametrized_test_has_its_own_result(self):
+        with Env() as e:
+            r = e.repo(HOSTS_BASE)
+            write(r, {"hosts.py": HOSTS_CHANGE})
+            with open(r / "tests" / "test_hosts.py", "a") as fh:
+                fh.write(HOSTS_TESTS)
+            rc, out, err = dev(r, "prove", "--since", "HEAD", "--json", "--runs", "2")
+            self.assertEqual(rc, 1, out + err)  # the "a" and "b" cases pass without the change
+            rows = {t["id"]: t for t in json.loads(out)["tests"]}
+            name = "tests/test_hosts.py::test_label_is_never_empty"
+            self.assertEqual({i: (t["with_change"], t["without_change"], t["verdict"]) for i, t in rows.items()}, {
+                "tests/test_hosts.py::test_count_skips_empty_hosts": ("2/2", "failed", "proves the change"),
+                f"{name}[None]": ("2/2", "failed", "proves the change"),
+                f"{name}[a]": ("2/2", "passed", "does not test the change"),
+                f"{name}[b]": ("2/2", "passed", "does not test the change")})
+            self.assertIn("has no attribute 'count'", rows["tests/test_hosts.py::test_count_skips_empty_hosts"]["message"])
+            self.assertNotIn("count", rows[f"{name}[None]"]["message"])
+
+    # a changed test no runner here can run (a node test file in a project without a node runner) is listed and
+    # left out; the other tests are proven, whether the files are found or named
+    def test_a_test_no_runner_here_can_run_is_listed_and_the_rest_is_proven(self):
+        with Env() as e:
+            r = e.repo(PROVE_BASE)
+            write(r, {"scripts/test/docs.test.mjs": 'import { test } from "node:test";\ntest("reads", () => {});\n'})
+            (r / "tests" / "test_calc.py").write_text(with_tests(TEST_MUL))
+            (r / "calc.py").write_text(MUL)
+            rc, out, err = dev(r, "prove", "--json", "--runs", "1")
+            self.assertEqual(rc, 0, out + err)
+            data = json.loads(out)
+            self.assertEqual([t["id"] for t in data["tests"]], ["test_calc.CalcTests.test_mul"])
+            self.assertEqual([s["file"] for s in data["skipped"]], ["scripts/test/docs.test.mjs"])
+            rc, out, err = dev(r, "prove", "--runs", "1", "scripts/test/docs.test.mjs", "tests/test_calc.py")
+            self.assertEqual(rc, 0, out + err)
+            listed = out.split("not proven")[1].split("fail without the change")[0] if "not proven" in out else ""
+            self.assertIn("scripts/test/docs.test.mjs", listed, out + err)
+            self.assertIn("test_calc.CalcTests.test_mul", out.split("fail without the change")[-1])
+            rc, _, err = dev(r, "prove", "scripts/test/docs.test.mjs")
+            self.assertEqual(rc, 2)
+            self.assertIn("scripts/test/docs.test.mjs", err)
+
+    # node --test files are proven with node: a node:test case by its title, a plain test script as a whole; a
+    # script the other tests import is a helper, part of the change, and restored with it
+    @unittest.skipUnless(shutil.which("node"), "node is not installed, so the node runner cannot run here")
+    def test_node_test_files_are_proven_with_node(self):
+        with Env() as e:
+            r = e.repo({**PROVE_BASE, **NODE_BASE})
+            write(r, NODE_CHANGE)
+            (r / "tests" / "test_calc.py").write_text(with_tests(TEST_MUL))
+            (r / "calc.py").write_text(MUL)
+            rc, out, err = dev(r, "prove", "--json", "--runs", "2")
+            self.assertEqual(rc, 0, out + err)
+            data = json.loads(out)
+            self.assertEqual(data["helpers"], ["test/harness.mjs"])
+            self.assertEqual([(t["id"], t["with_change"], t["without_change"]) for t in data["tests"]], [
+                ("test/page.mjs", "2/2", "failed"),
+                ("test/slug.test.mjs::joins words with dashes", "2/2", "failed"),
+                ("test_calc.CalcTests.test_mul", "2/2", "failed")])
+            rc, out, err = dev(r, "prove", "--json", "--runs", "1", "test/page.mjs")
+            self.assertEqual(rc, 0, out + err)
+            self.assertEqual([t["id"] for t in json.loads(out)["tests"]], ["test/page.mjs"])
+            # --runner leaves the node tests out: they are listed, and the plain script is no helper for that
+            rc, out, err = dev(r, "prove", "--json", "--runs", "1", "--runner", "unittest")
+            self.assertEqual(rc, 0, out + err)
+            data = json.loads(out)
+            self.assertEqual(data["helpers"], ["test/harness.mjs"])
+            self.assertEqual([s["file"] for s in data["skipped"]], ["test/page.mjs", "test/slug.test.mjs"])
 
 
 

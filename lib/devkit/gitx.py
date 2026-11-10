@@ -387,21 +387,373 @@ def _markers(c) -> list:
     return sorted(out, key=lambda x: -(x.get("ts") or 0))
 
 
-def evidence(c, rev="HEAD"):
-    """The newest local-CI marker whose tree is the tree of `rev`, or None."""
+def evidence(c, rev="HEAD", host_only=False):
+    """The newest local-CI marker whose tree is the tree of `rev`, or None. `host_only`: when `rev` is HEAD and no
+    marker has its tree, the evidence of an earlier tree carries over if only CI host settings changed since
+    (HOST_RULE); it is recorded as a `host-only` marker that names its base and what was checked."""
     sha, tree = _head(c.top, rev)
     if not sha:
         return None
     exact = core.read_json(_ci_dir() / f"{_key(c)}@{sha}.json")
     if isinstance(exact, dict) and exact.get("tree") == tree:
         return exact
-    return next((m for m in _markers(c) if m.get("tree") == tree), None)
+    found = next((m for m in _markers(c) if m.get("tree") == tree), None)
+    if found or not host_only or sha != _ref_sha(c.top, "HEAD"):
+        return found
+    return _carry_over(c, tree)
+
+
+# --------------------------------------------------------------------------- CI host settings
+#
+# A local run cannot exercise what only the CI host acts on: how long a job may run and which runs cancel each other.
+# When every file changed since a tree with local evidence is a GitHub workflow that differs only in those keys or in
+# comments, the evidence of that tree holds for the new one, once actionlint and the devkit workflow audit pass on the
+# new workflows. The runner is not one of them: another machine (a self-hosted runner) runs the job differently.
+# GitHub reads workflows with another YAML parser than devkit's, so three conditions must all hold, and two of them
+# read the text alone: devkit's parse is the same once the host keys are left out; every line `git diff` shows is
+# blank, a comment or a host-setting line; and neither version uses YAML anchors, aliases, merge keys, tags or
+# directives, where two parsers are most likely to disagree. A change to anything else (a run command, a step, a
+# trigger, the permissions, the runner, the matrix, any other file) still needs a local run.
+
+HOST_KEYS = {"workflow": ("concurrency",), "job": ("concurrency", "timeout-minutes"), "step": ("timeout-minutes",)}
+HOST_RULE = ("When only CI host settings changed since a tree with local CI evidence, that evidence carries over. "
+             "Every changed file must be a GitHub workflow (.github/workflows/*.yml) that reads the same once "
+             "timeout-minutes (job and step) and concurrency (group, cancel-in-progress) are left out; every line its "
+             "text diff adds or removes must be blank, a comment, or a timeout-minutes, concurrency, group or "
+             "cancel-in-progress line; neither version may use YAML anchors, aliases, merge keys, tags or "
+             "directives; and actionlint and the devkit workflow audit (dev ci audit) must pass on it. Any other "
+             "change (a run command, a step, a trigger, the permissions, the runner (runs-on), the matrix, another "
+             "file) needs a local run.")
+_WORKFLOW_PATH = re.compile(r"\.github/workflows/[^/]+\.ya?ml")
+_HOST_WHY = {}  # (top, tree) -> why the evidence of an earlier tree did not carry over to `tree`, for no_evidence
+_ABSENT = object()
+# A changed line that may carry over: blank, a comment, or a host-setting key with an optional value and comment. Only
+# spaces indent it, and none of its characters is a line break or a control character in any YAML version (a CRLF
+# ending aside), so it is one line to every parser.
+_LINE_CHAR = r"[^\x00-\x1f\x7f\x85  ]"
+_HOST_LINE = re.compile(rf" *(?:#{_LINE_CHAR}*|(?:timeout-minutes|concurrency|group|cancel-in-progress):"
+                        rf"(?: {_LINE_CHAR}*)?)?\r?")
+_YAML_PROPS = {"&": "an anchor (&name)", "*": "an alias (*name)", "!": "a tag (!)"}
+_MERGE_KEY = re.compile(r"""(?:<<|'<<'|"<<")[ \t]*:""")
+_BLOCK_HEADER = re.compile(r"[|>][+-]?(?:[ \t]+#.*)?[ \t]*")  # no indentation digit: with one, the scan reads on
+_SPACE = ("", " ", "\t")
+
+
+def _quote_end(line, i):
+    """The index of the quote that closes the quoted scalar opening at line[i], or -1 when it does not close here."""
+    q, j = line[i], i + 1
+    while j < len(line):
+        c = line[j]
+        if (q == '"' and c == "\\") or (q == "'" and c == "'" and line[j + 1:j + 2] == "'"):
+            j += 2  # an escaped character, or '' inside single quotes
+        elif c == q:
+            return j
+        else:
+            j += 1
+    return -1
+
+
+def _yaml_feature(text):
+    """-> (line, what) of the first YAML anchor, alias, merge key, tag or directive in `text`, or None. It reads the
+    text alone, not devkit's parser, and errs toward finding one: &, * or ! counts wherever a node can start, in a
+    comment too, and only the content of a plain block scalar (`run: |`) is passed over. Inside a flow collection
+    whose quoted string spans lines it loses track, and from there on checks after every [ { , : and ?."""
+    flow, lost, block = 0, False, None  # block: [the owner's column, the content's indentation once known]
+    for no, line in enumerate(text.splitlines(), 1):
+        if block:
+            lead = len(line) - len(line.lstrip(" "))
+            if not line.strip(" "):
+                continue
+            if block[1] is None and lead > block[0]:
+                block[1] = lead
+            if block[1] is not None and lead >= block[1]:
+                continue
+            block = None
+        if line.startswith("%"):
+            return no, "a directive (%)"
+        i, start, owner = 0, True, None
+        if line.startswith(("---", "...")) and line[3:4] in _SPACE:
+            i = 3
+        while i < len(line):
+            ch, nxt, inflow = line[i], line[i + 1:i + 2], flow > 0 or lost
+            if start:
+                if ch in " \t" or (ch in "-?:" and nxt in _SPACE):
+                    i += 1
+                    continue
+                if ch in _YAML_PROPS:
+                    return no, _YAML_PROPS[ch]
+                if _MERGE_KEY.match(line, i):
+                    return no, "a merge key (<<:)"
+                owner = i if owner is None else owner
+                if ch in "[{":
+                    flow, i = flow + 1, i + 1
+                    continue
+                if ch in "'\"":
+                    end = _quote_end(line, i)
+                    if end < 0:
+                        lost = True
+                        break
+                    i, start = end + 1, False
+                    continue
+                if not inflow and ch in "|>" and _BLOCK_HEADER.fullmatch(line, i):
+                    block = [owner, None]
+                    break
+                start = False
+            if ch == ":" and (inflow or nxt in _SPACE):
+                start = True
+            elif inflow and ch in ",[{?":
+                start, flow = True, flow + (ch in "[{")
+            elif ch in "]}" and flow and not lost:
+                flow -= 1
+            i += 1
+    return None
+
+
+def _diff_rows(top, blob_a, blob_b):
+    """The lines `git diff` removes from blob_a and adds in blob_b -> [(removed, line number, text)], or None when git
+    cannot show them. Read as bytes and split on newlines only, so a carriage return stays inside its line."""
+    try:
+        p = subprocess.run(["git", "-C", top, "diff", "--no-ext-diff", "--no-textconv", "--no-color", "--text",
+                            "--unified=0", "--inter-hunk-context=0", blob_a, blob_b],
+                           capture_output=True, env=core.GIT_ENV, timeout=60)
+        out = p.stdout.decode("utf-8")
+    except (OSError, subprocess.TimeoutExpired, UnicodeDecodeError):
+        return None
+    if p.returncode != 0:
+        return None
+    rows, old_no, new_no, hunk = [], 0, 0, False
+    for ln in out.split("\n"):
+        if ln.startswith("@@"):
+            m = re.match(r"@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@", ln)
+            if not m:
+                return None
+            old_no, new_no, hunk = int(m[1]), int(m[2]), True
+        elif not hunk or not ln or ln.startswith("\\"):
+            continue
+        elif ln[0] == "-":
+            rows.append((True, old_no, ln[1:]))
+            old_no += 1
+        elif ln[0] == "+":
+            rows.append((False, new_no, ln[1:]))
+            new_no += 1
+        elif ln[0] == " ":
+            old_no, new_no = old_no + 1, new_no + 1
+        else:
+            return None
+    return rows
+
+
+def _host_split(doc):
+    """A parsed workflow (plain dicts and lists) -> (the workflow without its host keys, {path: value} of them)."""
+    host = {}
+    if not isinstance(doc, dict):
+        return doc, host
+    rest = {}
+    for k, v in doc.items():
+        if k in HOST_KEYS["workflow"]:
+            host[str(k)] = v
+        else:
+            rest[k] = v
+    if not isinstance(rest.get("jobs"), dict):
+        return rest, host
+    jobs = {}
+    for jid, job in rest["jobs"].items():
+        if isinstance(job, dict):
+            job = dict(job)
+            for k in HOST_KEYS["job"]:
+                if k in job:
+                    host[f"jobs.{jid}.{k}"] = job.pop(k)
+            if isinstance(job.get("steps"), list):
+                steps = []
+                for i, st in enumerate(job["steps"]):
+                    if isinstance(st, dict):
+                        st = dict(st)
+                        for k in HOST_KEYS["step"]:
+                            if k in st:
+                                host[f"jobs.{jid}.steps[{i}].{k}"] = st.pop(k)
+                    steps.append(st)
+                job["steps"] = steps
+        jobs[jid] = job
+    rest["jobs"] = jobs
+    return rest, host
+
+
+def _first_diff(a, b, path=""):
+    """The path of the first difference between two parsed documents, such as `jobs.test.steps[1].run`."""
+    if isinstance(a, dict) and isinstance(b, dict):
+        for k in list(a) + [k for k in b if k not in a]:
+            sub = f"{path}.{k}" if path else str(k)
+            if k not in a or k not in b:
+                return sub
+            if a[k] != b[k]:
+                return _first_diff(a[k], b[k], sub)
+    elif isinstance(a, list) and isinstance(b, list) and len(a) == len(b):
+        for i, (x, y) in enumerate(zip(a, b)):
+            if x != y:
+                return _first_diff(x, y, f"{path}[{i}]")
+    return path or "the whole file"
+
+
+def host_only_change(top, old, new):
+    """-> (["<workflow>: <host keys changed, or 'comments'>", …], "") when trees `old` and `new` differ only in CI host
+    settings (HOST_RULE), else (None, why). It reads the two trees from git, nothing on disk. Three checks must all
+    pass for each workflow: the text has no YAML anchor, alias, merge key, tag or directive; devkit's parse is the
+    same without the host keys; and every line of the text diff is blank, a comment or a host-setting line."""
+    from . import pipelines
+    if old == new:
+        return None, "nothing changed"
+    rc, out, _ = core.sh(["git", "-C", top, "diff-tree", "-r", "--no-renames", "-z", old, new], timeout=120,
+                         env=core.GIT_ENV)
+    if rc != 0:
+        return None, "the tree of the last local run is gone"
+    parts, entries = out.split("\0"), []
+    for meta, path in zip(parts[0::2], parts[1::2]):
+        fields = meta.lstrip(":").split()
+        if len(fields) == 5:
+            entries.append((path, *fields))
+    if not entries:
+        return None, "nothing changed"
+    for path, mode_a, mode_b, _, _, status in entries:
+        if not _WORKFLOW_PATH.fullmatch(path):
+            return None, f"{path} changed, and it is not a GitHub workflow"
+        if status != "M":
+            return None, f"{path} was {'added' if status == 'A' else 'deleted' if status == 'D' else 'replaced'}"
+        if {mode_a, mode_b} - {"100644", "100755"}:
+            return None, f"{path} is not a regular file"
+    changes = []
+    for path, _, _, blob_a, blob_b, _ in entries:
+        texts = []
+        for blob in (blob_a, blob_b):
+            rc, text, _ = core.sh(["git", "-C", top, "cat-file", "blob", blob], timeout=60, env=core.GIT_ENV)
+            if rc != 0:
+                return None, f"git cannot read {path}"
+            texts.append(text)
+        for which, text in zip(("the earlier version", "the new version"), texts):
+            found = _yaml_feature(text)
+            if found:
+                return None, (f"{path} uses {found[1]} on line {found[0]} of {which}, which GitHub's YAML parser "
+                              "may read differently from devkit's")
+        docs = []
+        for text in texts:
+            try:
+                docs.append([pipelines.plain(d) for d in pipelines.load_yaml_all(text)])
+            except pipelines.YamlError as e:
+                return None, f"devkit cannot read {path}: {e}"
+        if len(docs[0]) != 1 or len(docs[1]) != 1:
+            return None, f"{path} is not one YAML document"
+        (rest_a, host_a), (rest_b, host_b) = _host_split(docs[0][0]), _host_split(docs[1][0])
+        if rest_a != rest_b:
+            return None, f"{path} changed {_first_diff(rest_a, rest_b)}, which a local run exercises"
+        rows = _diff_rows(top, blob_a, blob_b)
+        if rows is None:
+            return None, f"git cannot show the text diff of {path}"
+        for removed, no, line in rows:
+            if not _HOST_LINE.fullmatch(line):
+                shown = "".join(ch if ch.isprintable() else repr(ch)[1:-1] for ch in line.strip(" "))[:80]
+                where = f"line {no} of the earlier version" if removed else f"line {no}"
+                return None, (f"{path} changed {where} ({shown}): only blank, comment, timeout-minutes, concurrency, "
+                              "group and cancel-in-progress lines may change without a local run")
+        keys = [k for k in list(host_a) + [k for k in host_b if k not in host_a]
+                if host_a.get(k, _ABSENT) != host_b.get(k, _ABSENT)]
+        changes.append(f"{path}: {', '.join(keys) or 'comments'}")
+    return changes, ""
+
+
+def _workflow_checks(top, files):
+    """actionlint on the changed workflows, then the devkit workflow audit as `dev ci audit` runs it (zizmor too when
+    it is installed), on the files on disk -> (passed, what was checked or why it failed)."""
+    from . import pipelines
+    if not shutil.which("actionlint"):
+        return False, "actionlint is not installed (brew install actionlint), so nothing checked the workflows"
+    rc, out, err = core.sh(["actionlint", "-no-color", "-oneline", *files], cwd=top, timeout=120)
+    if rc != 0:
+        first = next((ln.strip() for ln in (out + "\n" + err).splitlines() if ln.strip()), f"exit {rc}")
+        return False, f"actionlint: {first[:240]}"
+    root = Path(top)
+    rep = pipelines.audit(root, policy=pipelines._policy(root), visibility=lambda: pipelines._visibility(root))
+    if pipelines.exit_code(rep):
+        bad = [f for f in rep["findings"] if pipelines.RANK.get(f["severity"], 9) <= pipelines.RANK["high"]]
+        f = bad[0]
+        return False, (f"dev ci audit: {len(bad)} high or critical finding(s), first {f['id']} at "
+                       f"{f['file']}:{f['line']}: {f['message'][:160]}")
+    return True, "actionlint: no findings · dev ci audit: no high or critical finding"
+
+
+WORKFLOW_CHECKS = _workflow_checks  # tests replace it
+# What the workflow checks read from disk besides the workflows: actionlint's configuration
+# (.github/actionlint.yaml) and zizmor's (zizmor.yml or zizmor.yaml at the root or in .github), either of which can
+# turn findings off. An uncommitted change there keeps the host-only shortcut off.
+CHECKS_READ = (".github", "zizmor.yml", "zizmor.yaml")
+
+
+def _changed_workflows(changes) -> list:
+    return sorted({x.split(": ", 1)[0] for x in changes})
+
+
+_EVIDENCE_LABEL = {"run": "`dev ci --run`", "resumed": "`dev ci --run --resume`", "marked": "`dev ci --mark-passed`",
+                   "attested": "an attested local run (--ci-passed)"}
+
+
+def _carry_over(c, tree):
+    """The evidence of an earlier tree, recorded for HEAD's `tree` as a `host-only` marker, when only CI host settings
+    changed since (HOST_RULE) and the workflow checks pass; else None, with the reason in _HOST_WHY."""
+    first_why = ""
+    for m in [m for m in _markers(c) if m.get("how") != "host-only" and m.get("tree") != tree][:10]:
+        names = _tree_diff(c.top, m["tree"], tree)
+        if not names or not all(_WORKFLOW_PATH.fullmatch(n) for n in names):
+            continue  # code changed too: the usual "changed since" says enough
+        changes, why = host_only_change(c.top, m["tree"], tree)
+        if changes is None:
+            first_why = first_why or why
+            continue
+        dirty = core.gitout(c.top, "status", "--porcelain", "--untracked-files=all", "--", *CHECKS_READ)
+        if dirty:
+            first = dirty.splitlines()[0].split(None, 1)[-1]
+            _HOST_WHY[(c.top, tree)] = (f"only CI host settings changed in HEAD, but {first} has uncommitted changes, "
+                                        "so the workflow checks would not read HEAD's files")
+            return None
+        passed, said = WORKFLOW_CHECKS(c.top, _changed_workflows(changes))
+        if not passed:
+            _HOST_WHY[(c.top, tree)] = f"only CI host settings changed, but {said}"
+            return None
+        base = {"sha": m.get("sha"), "tree": m.get("tree"), "how": m.get("how"), "ts": m.get("ts")}
+        since = "; ".join(changes)
+        note = (f"{_EVIDENCE_LABEL.get(base['how'], base['how'])} passed on {(base['sha'] or '')[:7]}; since then "
+                f"only CI host settings changed ({since}), checked: {said}")
+        ev = record_evidence(c, "host-only", tree, base=base, changes=changes, checked=said, note=note)
+        msg = (f"local CI evidence carried over: only CI host settings changed since the local run on "
+               f"{(base['sha'] or '')[:7]} ({since}), which a local run cannot exercise · {said}")
+        print(f"  {ui.dim(msg)}", file=sys.stderr)
+        return ev
+    if first_why:
+        _HOST_WHY[(c.top, tree)] = first_why
+    return None
+
+
+def _resume_host(c, old, new, changed, cache) -> str:
+    """Why a passed step needs no re-run on `new` (only CI host settings changed since its run on `old`, and the
+    workflow checks pass), or '' when it may need one. Checked once per recorded tree."""
+    key = ("host", old)
+    if key not in cache:
+        said = ""
+        if changed and all(_WORKFLOW_PATH.fullmatch(f) for f in changed):
+            changes, why = host_only_change(c.top, old, new)
+            if changes is None:
+                info(f"not only CI host settings since {old[:7]}: {why}")
+            else:
+                passed, checked = WORKFLOW_CHECKS(c.top, _changed_workflows(changes))
+                if passed:
+                    said = f"only CI host settings changed since ({'; '.join(changes)}) · {checked}"
+                else:
+                    info(f"only CI host settings changed since {old[:7]}, but {checked}: the steps run again")
+        cache[key] = said
+    return cache[key]
 
 
 def _evidence_or_attest(c, ci_passed: bool, action: str):
     """-> (marker or None). `--ci-passed` records an attestation for HEAD. dev never takes it from its own
     environment (spec F8, rule 4): a variable there may have been set by anything that started dev."""
-    ev = evidence(c)
+    ev = evidence(c, host_only=True)
     if ev or not ci_passed:
         return ev
     _, tree = _head(c.top)
@@ -419,6 +771,8 @@ def no_evidence(c, action: str, rev="HEAD", draft_ci: str = "") -> int:
             more = f" (+{len(names) - 4} more)" if len(names) > 4 else ""
             detail = (f"; the last local run ({last.get('how')}, {_age(last.get('ts'))}) verified a different tree, "
                       f"changed since: {', '.join(names[:4])}{more}")
+    if _HOST_WHY.get((c.top, tree)):
+        detail += f"; {_HOST_WHY[(c.top, tree)]}"
     if draft_ci:
         detail += f"; a draft is no exception here: {draft_ci}"
     return refuse(f"no local CI evidence for {sha[:7] or 'HEAD'}{detail}",
@@ -447,6 +801,11 @@ def describe_evidence(ev) -> str:
         return "none"
     how = {"run": "dev ci --run", "attested": "attested", "marked": "dev ci --mark-passed",
            "resumed": "dev ci --run --resume"}.get(ev.get("how"), ev.get("how"))
+    if ev.get("how") == "host-only":
+        base = ev.get("base") or {}
+        return (f"{(_EVIDENCE_LABEL.get(base.get('how'), base.get('how') or '?')).strip('`')} on "
+                f"{(base.get('sha') or '')[:7]}, then CI host settings only ({'; '.join(ev.get('changes') or [])}), "
+                f"{_age(ev.get('ts'))}")
     steps = f", {len(ev.get('steps') or [])} steps" if ev.get("steps") else ""
     if ev.get("how") == "resumed":
         st = ev.get("steps") or []
@@ -1261,7 +1620,7 @@ def push_branch(c, lease=False, ci_passed=False, dry_run=False, allow_behind=Fal
     if behind and not remote and not allow_behind:
         return refuse(f"`{b}` is {behind} commit(s) behind {base}: rebase before review",
                       "dev rebase, re-run the local suite, then dev push (or --allow-behind)")
-    ev = evidence(c) if dry_run else _evidence_or_attest(c, ci_passed, "push")
+    ev = evidence(c, host_only=True) if dry_run else _evidence_or_attest(c, ci_passed, "push")
     if not ev and not (dry_run and ci_passed):
         return no_evidence(c, "push")
     envs = frozenset({"DEVKIT_LOCAL_CI_PASSED"} if ev and ev.get("how") == "run" else ())  # only a real run lifts it
@@ -1541,7 +1900,7 @@ def plan(root) -> list:
 
 def add_ci_arguments(p):
     """Extra `dev ci` options (call from cli.py's parser for `ci`)."""
-    g = p.add_argument_group("local CI evidence (checked by dev push, dev pr create and dev release)")
+    g = p.add_argument_group("local CI evidence (checked by dev push, dev pr create and dev release)", HOST_RULE)
     g.add_argument("--run", action="store_true",
                    help="run the workflow `run:` steps locally, in order, and record the evidence when all pass")
     g.add_argument("--mark-passed", action="store_true",
@@ -1553,7 +1912,9 @@ def add_ci_arguments(p):
     g.add_argument("--step-timeout", type=int, default=30, metavar="MIN", help="with --run: minutes per step")
     g.add_argument("--resume", action="store_true",
                    help="with --run: re-run failed and never-run steps, and passed steps the changes since can affect; "
-                        "a test step re-runs only its failed and affected tests (whole when the change is global)")
+                        "a test step re-runs only its failed and affected tests (whole when the change is global); "
+                        "a passed step is kept when only CI host settings changed since its run (see above), "
+                        "except a scanner that reads every file")
     return p
 
 
@@ -1566,7 +1927,7 @@ def ci_command(a, top):
     if c is None:
         return _need_repo(c)
     if a.evidence:
-        ev = evidence(c)
+        ev = evidence(c, host_only=True)
         if getattr(a, "json", False):
             return emit({"head": _head(c.top)[0], "evidence": ev})
         if ev:
@@ -1653,6 +2014,9 @@ def _resume_plan(c, s, rec, tree, cache):
         return "full", "failed last time"
     if not changed:
         return "kept", "same tree"
+    host = _resume_host(c, rec["tree"], tree, changed, cache)
+    if host and not _reads_every_file(s["run"]):  # a scanner reads the workflow too: a comment can leak a key
+        return "kept", host
     if runner:
         return "partial", {"runner": runner, "failed": [], "changed": changed}
     key = ("radius", rec["tree"])
@@ -2014,7 +2378,7 @@ def _verify_line(ev, T) -> str:
         more = f" +{len(ev['steps']) - 4}" if len(ev.get("steps") or []) > 4 else ""
         return f"- {T['local_ci']}: `dev ci --run` → {T['passed']} ({len(ev.get('steps') or [])} {T['steps']}: " \
                f"{names}{more}) @ {sha}"
-    if ev.get("note") and not ev["note"].startswith("dev "):
+    if ev.get("note") and (ev.get("how") == "host-only" or not ev["note"].startswith("dev ")):
         return f"- {T['local_ci']}: {ev['note']} @ {sha}"
     return f"- {T['local_ci']}: {T['attested']} @ {sha}"
 
@@ -2190,7 +2554,7 @@ def _pr_create(c, a) -> int:
     if existing and not a.dry_run:
         ok(f"PR #{existing[0]['number']} is already open for {b} · {existing[0]['url']}")
         return 0
-    ev = evidence(c) if a.dry_run else _evidence_or_attest(c, a.ci_passed, "pr create")
+    ev = evidence(c, host_only=True) if a.dry_run else _evidence_or_attest(c, a.ci_passed, "pr create")
     if not ev and not a.dry_run:
         why = draft_ci(c, b, head) if draft else ""
         if not draft or why:
@@ -3039,9 +3403,26 @@ def changelog_section(top, version: str):
     return None
 
 
-def _remote_ci(c, sha):
-    """'passing' | 'failing' | 'pending' | 'none' | 'unknown' for the CI runs of `sha` (GitHub)."""
-    runs, _ = gh_json(["run", "list", "-R", c.slug, "--commit", sha, "--json", "status,conclusion,workflowName"], c)
+def _ci_runs(c, sha):
+    """The GitHub Actions runs of commit `sha` (as `gh run list --commit` lists them), or None when gh cannot say."""
+    runs, _ = gh_json(["run", "list", "-R", c.slug, "--commit", sha, "--json",
+                       "databaseId,status,conclusion,workflowName,workflowDatabaseId,event"], c)
+    return runs if isinstance(runs, list) else None
+
+
+def _run_jobs(c, run):
+    """The jobs of one GitHub Actions run (`gh run view --json jobs`: name, status, conclusion), or None when gh
+    cannot say."""
+    rid = run.get("databaseId") if isinstance(run, dict) else None
+    if not rid:
+        return None
+    data, _ = gh_json(["run", "view", str(rid), "-R", c.slug, "--json", "jobs"], c)
+    jobs = data.get("jobs") if isinstance(data, dict) else None
+    return jobs if isinstance(jobs, list) else None
+
+
+def _ci_state(runs):
+    """'passing' | 'failing' | 'pending' | 'none' | 'unknown', with the workflows that failed or are still running."""
     if runs is None:
         return "unknown", []
     if not runs:
@@ -3050,9 +3431,109 @@ def _remote_ci(c, sha):
            r.get("conclusion") not in ("success", "skipped", "neutral")]
     if bad:
         return "failing", bad
-    if any(r.get("status") != "completed" for r in runs):
-        return "pending", []
+    running = [r.get("workflowName") for r in runs if r.get("status") != "completed"]
+    if running:
+        return "pending", running
     return "passing", []
+
+
+def _commit_tree(c, sha) -> str:
+    tree = core.gitout(c.top, "rev-parse", "--verify", "-q", f"{sha}^{{tree}}")
+    if tree:
+        return tree
+    commit, _ = gh_json(["api", f"repos/{c.slug}/git/commits/{sha}"], c)
+    return str(((commit or {}).get("tree") or {}).get("sha") or "") if isinstance(commit, dict) else ""
+
+
+def _own_repo_run(c, run) -> bool:
+    """Whether a run's head came from this repository, not a fork (`gh api repos/{slug}/actions/runs/{id}`: its
+    head_repository is its repository). A fork's pull request run had no secrets, so a job that skips its
+    secret-backed steps still reports success. False when gh cannot say."""
+    rid = run.get("databaseId") if isinstance(run, dict) else None
+    if not rid:
+        return False
+    data, _ = gh_json(["api", f"repos/{c.slug}/actions/runs/{rid}"], c)
+    if not isinstance(data, dict):
+        return False
+    came, repo = data.get("head_repository"), data.get("repository")
+    came_id = came.get("id") if isinstance(came, dict) else None
+    return came_id is not None and came_id == (repo.get("id") if isinstance(repo, dict) else None)
+
+
+def _passed_twin(c, head, head_runs):
+    """A commit with the tree of `head` whose pull request CI vouches for every workflow still running on `head`, as
+    (sha, PR number or None); else None. Main's run of a merge commit repeats what the PR run tested when the trees
+    are the same. Candidates: the parents of `head` (a merge commit's second parent is the PR's head), then the heads
+    of the pull requests GitHub links to `head` (a squash or rebase merge). Workflows are matched by their file
+    (workflowDatabaseId), since two files can share one name. Each workflow still running on `head` needs a passed
+    pull request run of the same file whose head came from this repository (a fork's run had no secrets), in which:
+
+    - every job still running or queued on `head` succeeded, by name;
+    - every job that did not succeed, skipped included, has already succeeded on `head`. GitHub lists some jobs only
+      once they start (one that calls a reusable workflow, a dynamic matrix, one waiting on `needs:`), so a job that
+      runs only on push (a publish gated by `if: github.event_name == 'push'`) holds the release until main shows it
+      passed, even when main does not list it yet. A job of another name (`publish / build` for `publish`) does not
+      stand in.
+
+    A skipped or still running PR run does not count. A job that already failed on `head`, a run whose jobs or whose
+    origin gh cannot read, or a running run without a workflow id keeps the wait."""
+    tree = _commit_tree(c, head)
+    if not tree:
+        return None
+    running, needed, passed_here = set(), set(), set()
+    for run in head_runs or []:
+        if run.get("status") == "completed":
+            continue
+        wf = run.get("workflowDatabaseId")
+        jobs = _run_jobs(c, run)
+        if not wf or not jobs:
+            return None
+        running.add(wf)
+        for j in jobs:
+            key = (wf, j.get("name"))
+            if j.get("status") != "completed":
+                needed.add(key)
+            elif j.get("conclusion") == "success":
+                passed_here.add(key)
+            elif j.get("conclusion") not in ("skipped", "neutral"):
+                return None
+
+    def candidates():
+        for parent in core.gitout(c.top, "rev-list", "--parents", "-n", "1", head).split()[1:]:
+            yield parent, None
+        prs, _ = gh_json(["api", f"repos/{c.slug}/commits/{head}/pulls"], c)
+        for pr in prs if isinstance(prs, list) else []:
+            sha = ((pr or {}).get("head") or {}).get("sha") if isinstance(pr, dict) else None
+            if sha:
+                yield sha, pr.get("number")
+
+    def vouches(runs):
+        """Whether the pull request runs among `runs` (a twin's) cover every workflow and job still open on `head`."""
+        own = [r for r in runs if r.get("event") == "pull_request" and r.get("conclusion") == "success"
+               and r.get("workflowDatabaseId") in running and _own_repo_run(c, r)]
+        if {r.get("workflowDatabaseId") for r in own} != running:
+            return False
+        done, not_done = set(), set()
+        for r in own:
+            jobs = _run_jobs(c, r)
+            if not jobs:
+                return False
+            for j in jobs:
+                passed = j.get("status") == "completed" and j.get("conclusion") == "success"
+                (done if passed else not_done).add((r.get("workflowDatabaseId"), j.get("name")))
+        return needed <= done and not_done <= passed_here
+
+    seen = {head}
+    for sha, pr in candidates():
+        if sha in seen:
+            continue
+        seen.add(sha)
+        if _commit_tree(c, sha) != tree:
+            continue
+        runs = _ci_runs(c, sha)
+        if _ci_state(runs)[0] == "passing" and vouches(runs):
+            return sha, pr
+    return None
 
 
 RELEASE_CLAIM_MIN = 60  # minutes dev release holds release:<project> for its run
@@ -3167,15 +3648,23 @@ def _release(a, c) -> int:
                       f"{current or 'the first commit'}:{listing}",
                       "close the shipped ones (dev task done <id>, or dev task reconcile --apply), or release anyway: "
                       "dev release --why \"<reason>\"")
-    ev = evidence(c) if a.dry_run else _evidence_or_attest(c, a.ci_passed, "release")
+    ev = evidence(c, host_only=True) if a.dry_run else _evidence_or_attest(c, a.ci_passed, "release")
     if not ev and not a.dry_run:
         return no_evidence(c, "release")
     head = _ref_sha(c.top, "HEAD")
-    remote_ci, bad = (_remote_ci(c, head) if c.provider == "github" else ("unknown", []))
+    head_runs = _ci_runs(c, head) if c.provider == "github" else None
+    remote_ci, names = _ci_state(head_runs) if c.provider == "github" else ("unknown", [])
     if remote_ci == "failing":
-        return refuse(f"CI failed on {head[:7]}: {', '.join(bad)}", "fix it on a branch first (dev run view --failed)")
+        return refuse(f"CI failed on {head[:7]}: {', '.join(map(str, names))}",
+                      "fix it on a branch first (dev run view --failed)")
     if remote_ci == "pending":
-        return refuse(f"CI is still running on {head[:7]}", "dev ci status --watch, then release")
+        twin = _passed_twin(c, head, head_runs)
+        if not twin:
+            return refuse(f"CI is still running on {head[:7]}", "dev ci status --watch, then release")
+        sha, pr = twin
+        info(f"CI still runs on {head[:7]} ({', '.join(sorted(set(map(str, names))))}), but its tree passed the pull "
+             f"request run on {sha[:7]}" + (f" (PR #{pr})" if pr else "") + ": releasing without waiting")
+        remote_ci = f"pending, its tree passed on {sha[:7]}"
     notes = None
     if a.notes_file:
         try:
@@ -3643,6 +4132,7 @@ def register(add):
     p.add_argument("--skip", action="store_true")
 
     p = add("push", cmd_push, "Push the current branch once: naming, WIP, freshness, local-CI evidence, push budget")
+    p.epilog = "Local CI evidence: `dev ci --run` records it for a tree. " + HOST_RULE
     p.add_argument("--force-with-lease", action="store_true", help="after a rebase or amend, on your own branch")
     p.add_argument("--ci-passed", action="store_true", help="attest that the full local suite passed on this tree")
     p.add_argument("--allow-behind", action="store_true", help="first push although origin/<default> moved on")

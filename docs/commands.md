@@ -1104,22 +1104,22 @@ Tests and unfinished work. See [Testing](testing.md).
 ### `dev test [run | plan | prove | audit] [-p PROJECT]`
 
 Runs only what a change can break: the tests that failed last time first, and when they pass, the tests that the
-changed files can affect (the blast radius). It finds the project's runner (pytest, unittest, Jest, Vitest, Maven,
-Gradle, Go, PHPUnit, or Pest) and prints a compact result: each failure with `file:line` and its first error line, and
-the path to the full log.
+changed files can affect (the blast radius). It finds the project's runner (pytest, unittest, Jest, Vitest, Node's
+`node --test`, Maven, Gradle, Go, PHPUnit, or Pest) and prints a compact result: each failure with `file:line` and its
+first error line, and the path to the full log.
 
 | Command | Effect |
 | --- | --- |
-| `dev test` | Last failures first; if they pass, the affected tests |
-| `dev test run [<paths>…] [--failed \| --affected \| --all]` | These test files, directories, or runner ids; or only the last failures, only the affected tests, or the full suite |
+| `dev test` | Last failures first; if they pass, the affected tests. On a branch 100 or more files from its base whose changes reach 50 or more test files, it starts none of them and names the tests of the files you touched now (`dev test --affected` runs them all) |
+| `dev test run [<paths>…] [--failed \| --affected \| --all]` | These test files, directories, or runner ids; or only the last failures, only the affected tests, or the full suite. With none of them, what `dev test` runs, and it starts a wide branch's selection too |
 | `dev test plan [--all]` | What would run and why (changed file → tests), with the time estimate; runs nothing. `--all`: the whole suite, its full-run time, and the slowest files |
-| `dev test prove [<tests>…] [--runs N]` | For each new or changed test, in a temporary copy: it passes `N` times with your change (default 5) and fails with the production files, and the changed test helpers and fixtures, restored from the base. Verdicts: proves the change, does not test the change, flaky, fails with the change, did not run without the change |
+| `dev test prove [<tests>…] [--runs N]` | For each new or changed test, in a temporary copy: it passes `N` times with your change (default 5) and fails with the production files, and the changed test helpers and fixtures, restored from the base. Each case of a parametrized test has its own row. Verdicts: proves the change, does not test the change, flaky, fails with the change, did not run without the change. A test no runner here can run, or a named file that is no test, is listed as not proven with the reason |
 | `dev test audit [<paths>…] [--changed] [--min-severity low\|medium\|high] [--rule RULE]` | Tests that cannot fail: no or trivial assertions, empty bodies, swallowed failures, skips without a reason, sleeps, and more. `--changed`: only test files changed on this branch, staged, unstaged, or untracked. Default severity shown: medium and up. `--rule` repeats |
 
 | Option | Effect |
 | --- | --- |
 | `--since REF` | Compare with `REF` instead of the merge-base with `origin/<default>` (`run`, `plan`, `prove`, `audit`) |
-| `--runner NAME` | Only this runner: `pytest`, `unittest`, `jest`, `vitest`, `maven`, `gradle`, `go`, `phpunit`, `pest` |
+| `--runner NAME` | Only this runner: `pytest`, `unittest`, `jest`, `vitest`, `node`, `maven`, `gradle`, `go`, `phpunit`, `pest` |
 | `-v`, `--verbose` | Stream the runner's full output (it streams to a terminal anyway) |
 | `--json` | The result as JSON |
 | `-p PROJECT` | Another project; put it before the subcommand: `dev test -p acme/billing plan` |
@@ -1135,8 +1135,9 @@ the path to the full log.
 ```
 
 Exit codes: `0` when the tests pass or nothing needs to run, `1` when a test fails, and `2` when a selection ran no
-test at all (a mistyped path, a filter that matches nothing) or no runner fits. `dev test prove` exits `1` unless every
-test proves the change; `dev test audit` exits `1` on a high finding.
+test at all (a mistyped path, a filter that matches nothing), no runner fits, or plain `dev test` did not start a wide
+branch's selection. `dev test prove` exits `1` unless every test it ran proves the change, and `2` when no test is left
+that a runner here can run; `dev test audit` exits `1` on a high finding.
 
 ### `dev stubs [<paths>…] [--staged | --since REF | --all] [--json] [-p PROJECT]`
 

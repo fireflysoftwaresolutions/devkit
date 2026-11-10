@@ -3,6 +3,65 @@
 All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH restarts at 0 each month); tags are
 `vYY.MM.PATCH`. Sections follow [Keep a Changelog](https://keepachangelog.com/).
 
+## [26.11.10] - 2026-11-10
+
+This release fixes what agents hit while shipping 26.11.9. `dev test prove` reports each case of a parametrized test
+and proves `node --test` files instead of stopping at them, and plain `dev test` no longer starts hours of tests on a
+long-lived branch. A release no longer waits for main to repeat a pull request run that already passed on the same
+tree, and a change of CI host settings alone keeps its local CI evidence. The Stop hook asks a session only about the
+plans it wrote itself.
+
+### Fixed
+
+- **`dev test prove` reported a parametrized test by its bare name.** A pytest test with `@pytest.mark.parametrize`
+  showed its function name under "fail with your change present" with another test's error, although every case
+  passed. Each case is now reported by its id (`test_label[None]`, `test_label[a]`) with its own result.
+- **`dev test prove` stopped at the first test it could not run.** On a branch that also changed `node --test` files
+  (`test/*.mjs`), it answered "not a test file here" or "no test runner" and proved nothing. It now lists those files
+  under "not proven" with the reason and proves the rest. A package whose `package.json` test script runs
+  `node --test`, or runs its test scripts with `node`, gets a `node` runner: `dev test`, `dev test run`, and
+  `dev test prove` run its files with Node, a `node:test` case by its title and a plain test script as one test. A
+  script that builds before its tests (a `pretest` script, `tsc && node --test dist/test/`), passes a Node option
+  devkit does not know without `=`, or pipes or redirects its tests (`node --test | tee out.txt`), gets none: its
+  tests are listed as not proven instead of run on stale output or with a broken command line. Node before 24 (such
+  as Node 22) names no file in its JUnit report, so devkit runs node once per test file and each case belongs to its
+  file; it works on Node 20, 22, 24 and 26.
+- **Plain `dev test` started hours of tests on a long-lived branch.** A branch 1,388 files from `main` selected 205 test
+  files, about 111 minutes. When a branch differs from its base in 100 or more files that reach 50 or more test files,
+  `dev test` now starts none of them, names the tests of the files you touched now as `dev test run <files>`, and
+  exits `2`; `dev test --affected` runs the whole selection. `dev test run`, with or without paths, starts what it
+  selects.
+- **A change of CI host settings alone asked for a new local run.** A commit that changed only `timeout-minutes` in
+  `ci.yml` made `dev push` refuse for lack of local CI evidence, and `dev ci --run --resume` re-ran the whole test
+  step, though a local run cannot exercise a job timeout, a runner, or a concurrency group. When every file changed
+  since a tree with local evidence is a GitHub workflow that differs only in `timeout-minutes`, `concurrency`
+  (`group`, `cancel-in-progress`), or comments, that evidence now carries over once actionlint and `dev ci audit`
+  pass, and devkit says what it checked. An uncommitted change under `.github`, or to a `zizmor.yml` at the root,
+  keeps it off, since the checks read the files on disk. A change to a run command, a step, a trigger, the
+  permissions, the runner
+  (`runs-on`), or any other file still needs a local run, and so does a workflow that uses YAML anchors, aliases, merge
+  keys, tags, or directives.
+- **`dev release` waited for main to repeat a passed pull request run.** It refused with "CI is still running" while
+  main's CI ran again on a merge commit whose tree the pull request run had already tested; the 26.11.9 release
+  waited about 35 minutes, twice. When HEAD's tree is the tree of a commit whose pull request run, from this
+  repository and not a fork, passed every job still running on HEAD in the same workflow file, it now releases
+  without waiting and names that commit. A job the pull request run did not pass, skipped ones included, holds the
+  release until it passes on HEAD, even before main lists it, and so does a job that already failed on HEAD.
+- **The Stop hook asked a session to revise another session's plans.** It counts only the plans this session's own
+  tool calls wrote: an Edit or Write of the plan, or a shell command that names the plan and ran while it changed. A
+  session that moved its working folder to another checkout is again reminded about the plans it wrote; each plan is
+  judged by the project folder it is in.
+
+### Security
+
+- **A JUnit report could declare entities after a long comment.** `dev test` looked for a document type declaration
+  only in a report's first 4,096 characters, so a 5,333-character report expanded to a 1,000,000-character test name.
+  A declaration anywhere before the root element now refuses the report, and a failure that quotes an HTML page is
+  read again.
+- **`dev test run` accepted a test file outside the repository.** `dev test run ../outside.test.js` ran it with the
+  repository's runner. A path whose real path is outside the repository, relative, absolute, or through a symlink, is
+  now refused with `no test runner for:` before anything runs.
+
 ## [26.11.9] - 2026-11-09
 
 This release makes the first install work for someone who has never used a terminal, and gives Codex sessions the
