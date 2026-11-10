@@ -20,7 +20,13 @@ limited to Codex; paired provider tests preserve Claude's behavior. It builds on
   readmission removes the old refusal; an unresolved depth or ordering restriction still blocks the member.
 - Codex commands and members sharing a host process keep their own registered session identity in nested and
   background shells. Command redaction or a closed call no longer redirects a message to the newest chat.
-  Unknown, contradictory, or ambiguous ownership is refused; Claude's selection behavior is unchanged.
+  Unknown, contradictory, or ambiguous ownership is refused with guidance instead of an internal-error report;
+  Claude's selection behavior is unchanged.
+- Codex command audit records use the native thread identity and its own run context instead of inherited Claude
+  metadata. A registered Claude process keeps its identity, and a Codex child retains its parent only when process
+  ancestry, the root stamp, and recorded ownership agree. Explicit hook payloads keep precedence; audit labels
+  never authorize commands. Backup and embargo restrictions retain their existing caller context; native
+  enrichment applies only when constructing audit records.
 - A registered Codex app chat can use its own `work/` and `outputs/` folders. Crew launches create and name each
   member's exact `work/scratchpad/<member>` folder. The guard rejects foreign members, malformed identity and
   escaping links, and a repository inside scratch still follows its project scope.

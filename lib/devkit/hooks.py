@@ -4102,22 +4102,24 @@ def run(event: str, agent: str) -> int:
     state.WAIT, state.SAY_BUSY = state.HOOK_WAIT, False  # a hook waits at most 2 s for a record, silently
     marked = _bug_marks_start(event)
     saved = {}  # the identity variables as they were: none changed until _own_identity runs
-    try:
-        (STATE / "logs").mkdir(parents=True, exist_ok=True)
-        saved = _own_identity(event, agent)  # inside the try: a hook with no stdin fails open like any other error
-        fn(agent)
-    except SystemExit:
-        raise
-    except Exception as e:  # fail open: never break the agent session (guard() already refused, in _guard_failed,
-        _log(f"{event} {agent} error:\n{traceback.format_exc()}")  # a call that acts and was not judged in full)
-        if event == "guard":  # the guard failed open: recorded, so a rule that never runs is seen (spec G12)
-            from . import guard as g
-            g.failopen("guard-hook", e)
-        _bug_hook_error(event, e)
-    finally:
-        _restore_identity(saved)
-        if marked:
-            _bug_marks_end(event)
+    from . import audit
+    with audit.hook_identity():
+        try:
+            (STATE / "logs").mkdir(parents=True, exist_ok=True)
+            saved = _own_identity(event, agent)  # inside the try: a hook with no stdin fails open like any other error
+            fn(agent)
+        except SystemExit:
+            raise
+        except Exception as e:  # fail open: never break the agent session (guard() already refused, in _guard_failed,
+            _log(f"{event} {agent} error:\n{traceback.format_exc()}")  # a call that acts and was not judged in full)
+            if event == "guard":  # the guard failed open: recorded, so a rule that never runs is seen (spec G12)
+                from . import guard as g
+                g.failopen("guard-hook", e)
+            _bug_hook_error(event, e)
+        finally:
+            _restore_identity(saved)
+            if marked:
+                _bug_marks_end(event)
     return 0
 
 

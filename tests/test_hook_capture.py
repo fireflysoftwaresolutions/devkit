@@ -147,6 +147,9 @@ CONTRACT = {
     "SessionEnd": ((hooks.session_end,), ("SessionEnd",)),
 }
 CODEX_NAMES = {"subagent_id", "subagent_type"}  # read only when Claude's agent_id / agent_type are missing
+# _codex_call derives this marker from the rollout before post_tool reads it on the Codex path; neither host
+# sends it. Keep the exclusion tied to that reader so other payload reads still need captured evidence.
+DERIVED_FIELDS = {hooks.post_tool: {"_codex_command_executed"}}
 # Fields devkit reads that Claude Code does not send. Each one is a known bug with the fix that removes the read.
 KNOWN_GAPS = {}  # F2 removed the last one: the read of agent_transcript_path at SubagentStart
 
@@ -164,7 +167,8 @@ def strings(v):
 
 def missing(event: str) -> set:
     fns, names = CONTRACT[event]
-    read = set().union(*(FIELD_READ.findall(inspect.getsource(fn)) for fn in fns))
+    read = set().union(*(set(FIELD_READ.findall(inspect.getsource(fn))) - DERIVED_FIELDS.get(fn, set())
+                         for fn in fns))
     sent = set().union(*(fixture(n).keys() for n in names))  # agent_id: only the in-subagent payloads carry it
     return read - sent - CODEX_NAMES
 

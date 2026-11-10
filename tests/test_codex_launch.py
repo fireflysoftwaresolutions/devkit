@@ -214,8 +214,14 @@ class CodexLaunchRecord(CodexCrew):
     def test_a_second_start_of_the_same_agent_records_no_second_launch(self):
         s = self.lead()
         self.spawn(s, TANK, "tank", "api")
+        launch = self.launch_of(s, TANK)
+        owner = self.step(s, "api")["owner"]
         again = self.subagent_start(s, TANK, "tank")  # the tech lead sent it a follow-up: a new turn starts
-        self.assertEqual(again, {})
+        scratch = self.home / "Development/.tmp/codex" / LEAD / "scratchpad/tank"
+        self.assertTrue(scratch.is_dir())
+        self.assertIn(str(scratch), self.context(again))
+        self.assertEqual(self.launch_of(s, TANK)["key"], launch["key"])
+        self.assertEqual(self.step(s, "api")["owner"], owner)
         self.assertEqual(sum(1 for v in self.session_doc(s)["launches"].values() if v.get("agent_id") == TANK), 1)
 
 

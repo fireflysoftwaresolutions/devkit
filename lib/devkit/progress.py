@@ -144,17 +144,17 @@ def _codex_process_session(mine: list, env: str, args: list, cwd: str) -> str:
     named = env.removeprefix("codex:") if env.startswith("codex:") else ""
     thread = os.environ.get("CODEX_THREAD_ID", "")
     if env and (not named or named not in roots):
-        raise StepError("the Codex session stamp does not name a session of this process; no run was selected")
+        raise CodexSessionError("the Codex session stamp does not name a session of this process; no run was selected")
     if named and thread in roots and named != thread:
-        raise StepError("the Codex session stamp and thread identify different sessions; no run was selected")
+        raise CodexSessionError("the Codex session stamp and thread identify different sessions; no run was selected")
     named = named or (thread if thread in roots else "")
     lane = (os.environ.get("DEVKIT_FROM_AGENT") or "").strip()[:80]
     if lane:
         owners = [sid for sid in roots if lane in ((load_run("codex", sid) or {}).get("agents") or {})
                   or any(e.get("caller") == lane for e in open_calls(sid))]
         if len(owners) != 1 or (named and owners[0] != named):
-            raise StepError("cannot identify this Codex crew member's parent session uniquely: its lane must "
-                            "belong to exactly one session and agree with its root stamp; no run was selected")
+            raise CodexSessionError("cannot identify this Codex crew member's parent session uniquely: its lane must "
+                                    "belong to exactly one session and agree with its root stamp; no run was selected")
         return owners[0]
     if named:
         return named
@@ -163,8 +163,8 @@ def _codex_process_session(mine: list, env: str, args: list, cwd: str) -> str:
         return typed[0]
     if not typed and len(roots) == 1:
         return next(iter(roots))  # one registered thread: the process itself is unambiguous
-    raise StepError("cannot identify this Codex session uniquely: run the command with its hook's session stamp; "
-                    "several threads share this process and no unique exact call identifies it")
+    raise CodexSessionError("cannot identify this Codex session uniquely: run the command with its hook's session stamp; "
+                            "several threads share this process and no unique exact call identifies it")
 
 
 def _codex_call_holds(sid: str, args: list, cwd: str) -> bool:
@@ -4581,6 +4581,10 @@ def begin(which, cwd: str | None = None, now: float | None = None, from_agent: s
 
 class StepError(ValueError):
     """A step change devkit refuses, with what to do instead."""
+
+
+class CodexSessionError(StepError):
+    """A Codex command has no consistent session owner; report a refusal rather than a crash."""
 
 
 STOP_WORDS = set("a an the and or of to in on for with by from at as is are was were be been it its this that these "

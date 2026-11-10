@@ -4686,6 +4686,7 @@ def main(argv=None) -> int:
         a.args = a.args[1:]
     from . import audit
     track = audit.audited(argv)
+    from .progress import CodexSessionError
     start = time.time()
     rc = 1
     try:
@@ -4694,6 +4695,10 @@ def main(argv=None) -> int:
     except KeyboardInterrupt:
         rc = 130
         return 130
+    except CodexSessionError as e:
+        print(f"{a.cmd}: {e}")
+        rc = 2
+        return rc
     except Exception as e:  # devkit's own bug: a notice with its marker and exit 70, never a traceback
         rc = _crashed(argv, e)
         return rc
