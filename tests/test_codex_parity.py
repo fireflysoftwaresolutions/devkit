@@ -18,6 +18,7 @@ import io
 import json
 import os
 import re
+import select
 import subprocess
 import sys
 import tempfile
@@ -787,7 +788,41 @@ WAIT_HOW = {"claude": "Before you end the turn, run `dev watch --wait` with Bash
 class WaitParity(Parity):
     # A turn that ends while a crew member works must leave a wait that wakes the session (watch.stop_gate). The
     # documented difference: Claude Code needs `dev watch --wait` running in the background; Codex, which has no
-    # background wake-up, runs it in the foreground in the same turn.
+    # background wake-up, needs a registered foreground wait whose process is still running.
+
+    @contextlib.contextmanager
+    def live_wait(self, s):
+        # Run the real wait in the sandbox. The pipe signals when it has registered and reached its file-change
+        # wait, so the Stop assertion never races process startup or depends on a sleep.
+        script = (
+            "import select, sys\n"
+            "sys.path.insert(0, sys.argv[1])\n"
+            "from devkit import watch\n"
+            "def changes(seconds):\n"
+            "    print('waiting', flush=True)\n"
+            "    select.select([sys.stdin], [], [], seconds)\n"
+            "    return False\n"
+            "sys.exit(watch.wait('codex', sys.argv[2], 'main', 1, out=sys.stderr, changes=changes))\n"
+        )
+        with subprocess.Popen([sys.executable, "-I", "-S", "-c", script, str(REPO / "lib"), s.sid],
+                              cwd=s.repo, env=self.env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, text=True) as proc:
+            try:
+                ready, _, _ = select.select([proc.stdout], [], [], 10)
+                self.assertTrue(ready, "the real wait never reached its file-change wait")
+                self.assertEqual(proc.stdout.readline().strip(), "waiting")
+                self.assertIsNone(proc.poll(), "the registered wait ended before Stop")
+                yield
+            finally:
+                if proc.poll() is None:
+                    proc.terminate()
+                try:
+                    _, err = proc.communicate(timeout=10)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.communicate(timeout=10)
+                    raise
+            self.assertEqual(proc.returncode, 3, err)
 
     def turn(self, s, text: str):
         # the developer's next prompt starts a turn: Claude Code's prompt record; Codex's task_started event, then
@@ -842,7 +877,15 @@ class WaitParity(Parity):
                 self.assertIn(WAIT_HOW[agent], self.ends(s))
                 self.turn(s, "go on")
                 self.waits(s, background=agent == "claude")  # the wait each agent can run
-                self.assertNotIn(WAIT_ASKED, self.ends(s))
+                if agent == "claude":
+                    self.assertNotIn(WAIT_ASKED, self.ends(s))
+                else:
+                    self.assertIn(WAIT_ASKED, self.ends(s))  # command text alone is not an active process
+                    self.turn(s, "keep watching")
+                    with self.live_wait(s):
+                        self.assertNotIn(WAIT_ASKED, self.ends(s))
+                    self.turn(s, "the wait ended")
+                    self.assertIn(WAIT_ASKED, self.ends(s))
 
 
 S3 = "9448c4d0-aaaa-4bbb-8ccc-0123456789ab"  # a Claude Code conversation in kit-consulting, another project
