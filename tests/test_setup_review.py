@@ -149,7 +149,7 @@ class ScreenWidthTests(unittest.TestCase):
 
     def test_every_review_row_fits_on_one_line_at_80_columns(self):
         text = wizard.preview(width=80, color=False)["W-7"]
-        self.assertIn("  6  Docker               3 CPUs · 4 GB memory · 80 GB disk · starts at the end\n", text)
+        self.assertIn("  7  Docker               3 CPUs · 4 GB memory · 80 GB disk · starts at the end\n", text)
         rows = text.split("  1  ")[1].split("Packages")[0]
         self.assertEqual([x for x in rows.splitlines() if x.startswith(" " * 26)], [])
 

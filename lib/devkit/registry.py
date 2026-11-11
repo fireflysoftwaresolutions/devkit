@@ -243,6 +243,15 @@ def detect_stack(root: Path) -> list:
             found.append("java/maven")
         if f("build.gradle") or f("build.gradle.kts"):
             found.append("java/gradle")
+        for manifest in ("pom.xml", "build.gradle", "build.gradle.kts"):
+            try:
+                with (d / manifest).open("rb") as stream:
+                    spring = b"org.springframework" in stream.read(262144)
+            except OSError:
+                continue
+            if spring:
+                found.append("spring")
+                break
         if f("pyproject.toml") or f("requirements.txt") or f("setup.py"):
             found.append("python")
         if f("composer.json"):

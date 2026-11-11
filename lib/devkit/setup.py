@@ -1003,7 +1003,7 @@ def app_checks(codex_plugins=None) -> list:
     """The desktop apps run their own copies of the agents on the same configuration as the terminal:
     Claude Desktop's Code tab reads ~/.claude, the ChatGPT app's Codex reads ~/.codex. Proof, not assumption."""
     res = []
-    if CLAUDE_APP.exists():
+    if agent_on("claude") and CLAUDE_APP.exists():
         bundled = sorted((Path.home() / "Library/Application Support/Claude/claude-code").glob("[0-9]*"))
         ver = bundled[-1].name if bundled else "?"
         recs = _surface_sessions("claude", "Claude Desktop")
@@ -1041,7 +1041,7 @@ def app_checks(codex_plugins=None) -> list:
                             "" if ok_b else f"Claude Desktop → {desktop.BYPASS_SWITCH}"))
         except Exception:
             pass
-    if CHATGPT_APP.exists() and CHATGPT_CODEX.exists():
+    if agent_on("codex") and CHATGPT_APP.exists() and CHATGPT_CODEX.exists():
         _, v, _ = sh([str(CHATGPT_CODEX), "--version"], timeout=30)
         _, listed, _ = sh([str(CHATGPT_CODEX), "plugin", "list"], timeout=120)
         want = codex_plugins or []
@@ -1427,6 +1427,7 @@ def setup_claude():
     if not core.have("claude"):
         fail("claude CLI not found — install Claude Code, then re-run `dev install`")
         return
+    remove_unselected_mcp("claude")
     for name, src in plugins.get("marketplaces", {}).items():
         rc, out, _ = sh(["claude", "plugin", "marketplace", "list"], timeout=60)
         block = next((b for b in re.split(r"\n\s*(?=❯ )", out) if b.strip().lstrip("❯ ").startswith(name + "\n")
@@ -1711,6 +1712,7 @@ def setup_codex():
     if not core.have("codex"):
         fail("codex CLI not found — `brew install --cask codex`, then re-run `dev install`")
         return
+    remove_unselected_mcp("codex")
     write_codex_config()
     write_codex_profiles(load_conf("codex/config.json"))
     write_codex_agents(load_conf("codex/config.json"))
@@ -1819,16 +1821,41 @@ def _devkit_skill_links(folder: Path) -> list:
 
 
 def _without_toml_tables(text: str, tables) -> str:
-    """TOML text without the tables `tables` names ("mcp_servers.x") and their sub-tables; every other line kept."""
-    out, skip = [], False
+    """Remove named tables and descendants, preserving every other byte.
+
+    Keys are components, not textual prefixes: a quoted dot belongs to its key.
+    Ambiguous multiline values leave the whole file untouched.
+    """
+    from . import ext
+    paths = [ext._toml_parts(t) if isinstance(t, str) else tuple(t) for t in tables]
+    out, skip, inside = [], False, None
     for line in text.splitlines(keepends=True):
-        m = re.match(r"\s*\[\[?\s*([^\]]+?)\s*\]\]?\s*(#.*)?$", line)
-        if m:
-            name = re.sub(r"""["'\s]""", "", m.group(1))
-            skip = any(name == t or name.startswith(t + ".") for t in tables)
+        s = line.strip()
+        if inside:
+            end = ext._string_end(s, inside, 0)
+            if end >= 0:
+                inside = None
+                if not ext._TOML_TAIL.match(s[end:]):
+                    return text
+        elif s and not s.startswith("#"):
+            if any(d in s for d in ext._DELIMS):
+                pair = ext._TOML_PAIR.match(s)
+                value = pair.group(2) if pair else ""
+                delim = next((d for d in ext._DELIMS if value.startswith(d)), None)
+                if delim is None:
+                    return text
+                end = ext._string_end(value, delim, 3)
+                if end < 0:
+                    inside = delim
+                elif not ext._TOML_TAIL.match(value[end:]):
+                    return text
+            elif s.startswith("["):
+                header = ext._TOML_HEADER.match(s)
+                path = ext._toml_parts(header.group(2)) if header and len(header.group(1)) == len(header.group(3)) else ()
+                skip = any(path[:len(t)] == t for t in paths if t)
         if not skip:
             out.append(line)
-    return re.sub(r"\n{3,}", "\n\n", "".join(out))
+    return text if inside else "".join(out)
 
 
 def _replace_text(f: Path, text: str):
@@ -1979,7 +2006,57 @@ def _devkit_mcp(catalog: dict, installed: dict) -> list:
     """The names in `installed` ({name: spec}) that are devkit's: the server devkit's catalog writes under that name,
     the same command, arguments, URL and environment. A name alone proves nothing: angular-cli or chrome-devtools
     may be the person's own, set up as the vendor's docs show, and that one stays."""
-    return [n for n, spec in catalog.items() if n in installed and _mcp_shape(installed[n]) == _mcp_shape(spec)]
+    return [n for n, specs in catalog.items() if n in installed
+            and any(_mcp_shape(installed[n]) == _mcp_shape(spec) for spec in specs)]
+
+
+def remove_unselected_mcp(agent: str, dry: bool = False) -> list:
+    """Remove only exact managed MCP specifications omitted from this installation profile.
+
+    A different same-name server stays. Unknown TOML forms stay. Global tools stay.
+    Dry mode is for doctor: a failed removal must remain visible rather than appear healthy.
+    """
+    from . import ext
+    wanted = ext.effective_mcp(agent)
+    omitted = {n: s for n, s in ext.mcp_inventory(agent).items() if n not in wanted}
+    if not omitted:
+        return []
+    path = HOME / ".claude.json" if agent == "claude" else CODEX_HOME / "config.toml"
+    if not path.is_file():
+        return []
+    text = path.read_text()
+    if agent == "claude":
+        doc = read_json(path, {}) or {}
+        servers = doc.get("mcpServers")
+        installed = servers if isinstance(servers, dict) else {}
+    else:
+        servers, loose = ext.codex_mcp_servers(text)
+        installed = {n: e["table"] for n, e in servers.items() if not loose and not e["unread"]}
+    owned = _devkit_mcp(omitted, installed)
+    if not owned or dry:
+        return owned
+    if core.older_copy_skip(tilde(path)):
+        return []
+    backup(path)
+    if agent == "claude":
+        removed = []
+        for name in owned:
+            rc, out, err = sh(["claude", "mcp", "remove", "-s", "user", name], timeout=30)
+            _audit("install.profile-mcp", f"{agent}:{name}", "remove unselected managed MCP",
+                   "ok" if rc == 0 else f"exit {rc}")
+            if rc == 0:
+                removed.append(name)
+            else:
+                fail(f"MCP {name} remains installed: {(err or out).strip()}; run dev install --only claude")
+        return removed
+    new = _without_toml_tables(text, [("mcp_servers", name) for name in owned])
+    if new == text:
+        fail("MCP cleanup left config.toml unchanged: its TOML form needs manual review")
+        return []
+    _replace_text(path, new)
+    for name in owned:
+        _audit("install.profile-mcp", f"{agent}:{name}", "remove unselected managed MCP")
+    return owned
 
 
 def _remove_agent(agent: str, home: Path, dry: bool = False) -> list:
@@ -1987,7 +2064,7 @@ def _remove_agent(agent: str, home: Path, dry: bool = False) -> list:
     A plugin, which only the agent's own CLI lists, is not counted then; Claude Code's MCP servers count when its CLI
     is installed, as the real run removes them only then."""
     from . import ext
-    gone, catalog, own = [], ext.effective_mcp(agent), _own_plugin_ids(agent)
+    gone, catalog, own = [], ext.mcp_inventory(agent), _own_plugin_ids(agent)
     rules = home / ("CLAUDE.md" if agent == "claude" else "AGENTS.md")
     if remove_generated_rules(rules, dry=dry):
         gone.append(f"rules ({tilde(rules)}" + ("" if dry else f"; a copy is in {tilde(STATE / 'backups')}") + ")")
@@ -2062,9 +2139,9 @@ def _remove_agent(agent: str, home: Path, dry: bool = False) -> list:
     toml = CODEX_HOME / "config.toml"
     if toml.is_file():
         text = toml.read_text()
-        servers, _ = ext.codex_mcp_servers(text)  # a server with lines the reader cannot read is never devkit's
-        mcp = _devkit_mcp(catalog, {n: e["table"] for n, e in servers.items() if not e["unread"]})
-        new = _without_toml_tables(text, [f"mcp_servers.{m}" for m in mcp]) if mcp else text
+        servers, loose = ext.codex_mcp_servers(text)  # unread lines cannot prove ownership
+        mcp = _devkit_mcp(catalog, {n: e["table"] for n, e in servers.items() if not loose and not e["unread"]})
+        new = _without_toml_tables(text, [("mcp_servers", m) for m in mcp]) if mcp else text
         new, modes = _without_devkit_modes(new, codex_trusted_roots())
         if new != text:
             if not dry:
@@ -2092,24 +2169,26 @@ def _remove_agent(agent: str, home: Path, dry: bool = False) -> list:
 def setup_tools():
     """Homebrew packages for the configured stacks, git hosts and clouds (only what is missing)."""
     step("Tools for your stacks, git hosts and clouds")
-    from . import toolchain, wizard
+    from . import profiles, toolchain, wizard
+    profile = profiles.resolve(CFG)
     if not core.have("brew"):
         fail("Homebrew not found — run install.sh")
         return
     agents = [g for g in wizard.agent_groups(CFG.get("agents")) if g == "codex"]  # Claude Code is not a package
-    groups = set(wizard.BASE_GROUPS) | set(CFG.get("stacks") or []) | set(toolchain.groups()) | set(agents)
-    missing = wizard.missing_packages(groups)
+    groups = set(wizard.BASE_GROUPS) | set(profile["package_groups"]) | set(toolchain.groups()) | set(agents)
+    missing = wizard.missing_packages(groups) + wizard.missing_npm_packages(groups)
     if not missing:
         done(f"all installed · {', '.join(sorted(groups))}")
     elif not (CFG.get("packages") or {}).get("auto", True):
         note(f"missing: {', '.join(missing[:8])} (packages.auto is off) — dev install --only tools with it on")
         return
     else:
-        rc = wizard.install_packages(CFG.get("stacks") or [], CFG.get("agents", {}).get("claude", True),
+        rc = wizard.install_packages(profile["package_groups"], CFG.get("agents", {}).get("claude", True),
                                      extra=toolchain.groups(), with_codex="codex" in agents)
         done("installed what was missing") if rc == 0 else fail("some packages failed — `brew bundle` output above")
-    for line in toolchain.postinstall(toolchain.selected()):
-        done(line)
+    if (CFG.get("packages") or {}).get("auto", True):
+        for line in toolchain.postinstall(toolchain.selected()):
+            done(line)
 
 
 def setup_docker():
@@ -2195,6 +2274,9 @@ def setup_desktop():
     """Claude Desktop: build devkit's extension (.mcpb) and open its installer when it is missing or outdated.
     The Code tab needs nothing here: it runs Claude Code on ~/.claude, set up by the claude step."""
     step("Claude Desktop: the devkit extension")
+    if not agent_on("claude"):
+        note("Claude is turned off in devkit — skipped")
+        return
     if not CLAUDE_APP.exists():
         note("Claude Desktop is not installed — skipped")
         return
@@ -2498,13 +2580,19 @@ def _line_buffered():
 
 
 def run_install(only=None, unverified_why=None, version=None, as_pinned=False, commit_template=None,
-                assume_yes=False) -> int:
+                assume_yes=False, skip_packages=False) -> int:
     """`dev install`. From a checkout it pins the checkout (or switches to `version`), then starts itself again from
     that pinned copy (`--as-pinned`), which runs the steps, so every path they write names the copy; `only` re-applies
     some steps from the installed copy without pinning. Before it changes anything it names the running sessions that
     use devkit, which must be restarted (hooks.confirm_restart; `assume_yes`: go on without asking). -> exit code (1
     when the copy was refused or the developer stopped it)."""
     _line_buffered()
+    from . import profiles
+    try:
+        profiles.resolve(CFG)
+    except ValueError as e:
+        fail(str(e))
+        return 2
     if not as_pinned:
         print(ui.banner("install"))
         from . import hooks
@@ -2521,6 +2609,7 @@ def run_install(only=None, unverified_why=None, version=None, as_pinned=False, c
         argv = [sys.executable, "-I", "-S", str(target / "bin" / "dev"), "install", "--as-pinned"]  # as its shebang
         argv += ["--only", ",".join(sorted(only))] if only else []
         argv += ["--commit-template", commit_template] if commit_template else []
+        argv += ["--skip-packages"] if skip_packages else []
         sys.stdout.flush()
         sys.stderr.flush()
         os.execv(sys.executable, argv)
@@ -2537,6 +2626,9 @@ def run_install(only=None, unverified_why=None, version=None, as_pinned=False, c
              ("launchd", setup_launchd), ("prompt", install_prompt), ("shell", install_shell)]
     for name, fn in steps:
         if only and name not in only:
+            continue
+        if name == "tools" and skip_packages:
+            note("package installation skipped for this run; saved tool selections stay unchanged")
             continue
         if name in ("claude", "codex") and not agent_on(name):
             label = "Claude Code" if name == "claude" else "Codex"
@@ -2569,17 +2661,17 @@ def run_install(only=None, unverified_why=None, version=None, as_pinned=False, c
 
 def crew_skill_checks(agents, roster=None, homes=None, groups=None) -> list:
     """selfcheck D8 for `dev doctor`: per agent, the skills the crew names (the team's crew) that it has not
-    installed, with the lines that install them. -> [(group, name, ok, detail, fix)]. A skill of an opt-in group
-    (not one of devkit's default `skills.groups`) that the developer has not turned on only informs: the row passes
+    installed, with the lines that install them. -> [(group, name, ok, detail, fix)]. A skill of an optional group
+    that the developer has not turned on only informs: the row passes
     and says who names it and the line that turns the group on (Morpheus, M199); every other missing skill fails.
     `homes`: {agent: (agent home, skills folder)}; `groups`: the groups turned on (default: the configuration)."""
-    from . import selfcheck
+    from . import ext, selfcheck
     on = set((CFG.get("skills") or {}).get("groups") or [] if groups is None else groups)
-    defaults = set(core.DEFAULTS["skills"]["groups"])
     rows = []
     for agent in agents:
         home, sdir = (homes or {}).get(agent, (None, None))
         try:
+            applicability = ext.skill_applicability(agent, on)
             named = selfcheck.crew_skills(selfcheck._roster(roster, team=True))
             missing = selfcheck.d8_uninstalled_skills(agent, roster=roster, agent_home=home, skills_dir=sdir)
         except Exception as e:  # a broken roster is the crew check's to report
@@ -2589,16 +2681,18 @@ def crew_skill_checks(agents, roster=None, homes=None, groups=None) -> list:
         def group(f):
             return f.evidence.split("(group ", 1)[1].split(")")[0]
 
-        off = [f for f in missing if group(f) not in defaults | on | {"core", "unknown"}
-               and not group(f).startswith("plugin ")]
+        off = [f for f in missing if not applicability.get(f.item.split(': ', 1)[1], True)
+               or ("all" not in on and group(f) not in on | {"core", "unknown"}
+                   and not group(f).startswith("plugin "))]
         owed = [f for f in missing if f not in off]
         parts = []
         if owed:
             parts.append(f"{len(owed)} of {len(named)} not installed: " + ", ".join(
                 f"{f.item.split(': ', 1)[1]} ({group(f)})" for f in owed[:5]) + (" …" if len(owed) > 5 else ""))
         for f in off[:3]:
+            fix = "select the capability in dev setup" if group(f) == "core" else f.fix
             parts.append(f"info: {f.item.split(': ', 1)[1]} ({group(f)}, off) {f.evidence.split('; ', 1)[1]}; "
-                         f"to use it: {f.fix}")
+                         f"to use it: {fix}")
         rows.append(("Agents", f"crew skills ({agent})", not owed,
                      " · ".join(parts) or f"all {len(named)} skills the crew names are installed",
                      " · ".join(dict.fromkeys(f.fix for f in owed))))
@@ -2664,17 +2758,24 @@ def tools_check(stacks, have=None) -> tuple:
     `codex` only when that agent is on in config `agents`, which `dev install` reads the same way (on unless false).
     A stack not chosen or an agent turned off is no failure: the row names it, and `dev setup` changes it. The fix is
     the exact command that installs what is missing. `have` stands in for the PATH lookup (the tests)."""
-    from . import wizard
+    from . import profiles, wizard
+    try:
+        profile = profiles.resolve({**CFG, "stacks": stacks})
+    except ValueError as e:
+        return "Toolchain", "required tools", False, str(e), "dev setup"
     have = have or core.have
     off = [a for a in wizard.AGENT_NAMES if not CFG.get("agents", {}).get(a, True)]
     on = wizard.agent_groups(CFG.get("agents"))  # each agent's group holds that agent alone
-    tools = {t: how for g, group in wizard.DOCTOR_TOOLS.items() if g in wizard.BASE_GROUPS or g in stacks or g in on
+    tools = {t: how for g, group in wizard.DOCTOR_TOOLS.items()
+             if g in wizard.BASE_GROUPS or g in profile["package_groups"] or g in on
              for t, how in group.items()}
     missing = [t for t in tools if not have(t)]
-    skipped = [wizard.STACK_UI[s][0] for s in wizard.STACKS if s not in stacks]
+    skipped = [wizard.STACK_UI[s][0] for s in wizard.STACKS if s not in profile["stacks"]]
     detail = f"{len(tools) - len(missing)}/{len(tools)} present"
     if missing:
         detail += f"; missing: {', '.join(missing)}"
+    if profile["implied_stacks"]:
+        detail += "; required by frameworks: " + ", ".join(profile["implied_stacks"])
     if skipped:
         detail += f" · not chosen: {', '.join(skipped)} (dev setup adds a stack)"
     if off:
@@ -2735,6 +2836,12 @@ def _github_projects(mains) -> list:
 
 def doctor() -> int:
     print(ui.banner("doctor"))
+    from . import profiles
+    try:
+        profiles.resolve(CFG)
+    except ValueError as e:
+        fail(str(e))
+        return 2
     results = []
 
     def check(group, name, ok, detail="", fix=""):
@@ -2826,22 +2933,25 @@ def doctor() -> int:
     for row in selfcheck.old_copy_checks(CLAUDE_HOME, CODEX_HOME):  # what an older session wrote back, and its copy
         check(*row)
 
-    s = read_json(CLAUDE_HOME / "settings.json", {}) or {}
-    check("Claude", "bypassPermissions default", (s.get("permissions") or {}).get("defaultMode") == "bypassPermissions",
-          (s.get("permissions") or {}).get("defaultMode", "unset"), "dev install --only claude")
-    att = s.get("attribution") or {}
-    check("Claude", "no attribution", att.get("commit") == "" and att.get("pr") == "" and att.get("sessionUrl") is False,
-          json.dumps(att), "dev install --only claude")
-    events = {e for e, gs in (s.get("hooks") or {}).items() for g in gs for h in g.get("hooks", []) if is_devkit_hook(h)}
-    check("Claude", "devkit hooks", {"SessionStart", "SessionEnd", "PreToolUse", "Stop", "UserPromptSubmit",
-                                     "PostToolUse"} <= events, ", ".join(sorted(events)),
-          "dev install --only claude")
-    _, listed, _ = sh(["claude", "plugin", "list"], timeout=60) if core.have("claude") else (1, "", "")
-    check(*claude_plugin_check(listed))
-    _, mcp_out, _ = sh(["claude", "mcp", "list"], timeout=90) if core.have("claude") else (1, "", "")
-    check(*claude_mcp_check(mcp_out))
+    if agent_on("claude"):
+        s = read_json(CLAUDE_HOME / "settings.json", {}) or {}
+        mode = load_conf("claude/settings.json")["permissions"]["defaultMode"]
+        actual_mode = (s.get("permissions") or {}).get("defaultMode", "unset")
+        check("Claude", "default permission mode", actual_mode == mode,
+              f"{actual_mode} (configured: {mode})", "dev install --only claude")
+        att = s.get("attribution") or {}
+        check("Claude", "no attribution", att.get("commit") == "" and att.get("pr") == "" and att.get("sessionUrl") is False,
+              json.dumps(att), "dev install --only claude")
+        events = {e for e, gs in (s.get("hooks") or {}).items() for g in gs for h in g.get("hooks", []) if is_devkit_hook(h)}
+        check("Claude", "devkit hooks", {"SessionStart", "SessionEnd", "PreToolUse", "Stop", "UserPromptSubmit",
+                                         "PostToolUse"} <= events, ", ".join(sorted(events)),
+              "dev install --only claude")
+        _, listed, _ = sh(["claude", "plugin", "list"], timeout=60) if core.have("claude") else (1, "", "")
+        check(*claude_plugin_check(listed))
+        _, mcp_out, _ = sh(["claude", "mcp", "list"], timeout=90) if core.have("claude") else (1, "", "")
+        check(*claude_mcp_check(mcp_out))
 
-    if core.have("codex"):
+    if agent_on("codex") and core.have("codex"):
         from .codexrpc import CodexError, CodexRPC
         cw = load_conf("codex/config.json")
         try:
@@ -2874,9 +2984,20 @@ def doctor() -> int:
         _, listed, _ = sh(["codex", "plugin", "list"], timeout=120)
         check(*codex_plugin_check(listed))
         check(*impeccable_codex_check(listed))
-        from . import ext
-        for group, name, ok, detail, fix in app_checks(ext.effective_plugin_ids("codex")):
-            check(group, name, ok, detail, fix)
+
+    from . import ext
+    for row in app_checks(ext.effective_plugin_ids("codex") if agent_on("codex") else []):
+        check(*row)
+    for agent in ("claude", "codex"):
+        if not agent_on(agent):
+            continue
+        try:
+            remaining = remove_unselected_mcp(agent, dry=True)
+            check("Extensions", f"unselected managed MCP ({agent})", not remaining,
+                  ", ".join(remaining) + " remain installed" if remaining else "none remain",
+                  f"dev install --only {agent}")
+        except (OSError, ValueError) as e:
+            check("Extensions", f"unselected managed MCP ({agent})", False, str(e), f"dev install --only {agent}")
 
     from . import providers
     pst = providers.status(include_account=False)
@@ -2896,7 +3017,7 @@ def doctor() -> int:
     for row in ext.doctor_checks():  # third-party extensions: required ones on, the lock, pins, retired, project
         check(*row)
     from .cli import plugin_checks
-    for name, ok, detail in plugin_checks():
+    for name, ok, detail in plugin_checks(agents=[a for a in ("claude", "codex") if agent_on(a)]):
         check("Plugin", name, ok, detail if isinstance(detail, str) else " ".join(detail), "dev plugin validate")
     rc, out, _ = sh(["colima", "status"], timeout=20)
     check("Docker", "colima VM", rc == 0, "running" if rc == 0 else "stopped", "dev docker up")
@@ -2928,6 +3049,8 @@ def doctor() -> int:
     st = os.statvfs(str(HOME))
     free_gb = st.f_bavail * st.f_frsize / 1024 ** 3
     for agent_name, home in (("Claude", CLAUDE_HOME), ("Codex", CODEX_HOME)):
+        if not agent_on(agent_name.lower()):
+            continue
         src_ = (build_codex_plugin() / "plugin") if agent_name == "Codex" else None
         stale = plugin_copy_stale(home / "plugins" / "cache" / "firefly-devkit" / "devkit", src_)
         check(agent_name, "devkit plugin copy is current", not stale,
@@ -2943,6 +3066,8 @@ def doctor() -> int:
         check(group, f"{label}", r["installed"] and r["signed_in"], r["detail"], r["fix"])
     from . import skillguard
     for agent_name in ("claude", "codex"):
+        if not agent_on(agent_name):
+            continue
         gaps = skillguard.coverage(agent_name)
         check("Agents", f"skills for every rule ({agent_name})", not gaps,
               "all required skills installed" if not gaps else "; ".join(f"{r}: {', '.join(m)}" for r, m in gaps),

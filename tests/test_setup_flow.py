@@ -312,6 +312,7 @@ class ChoicesTests(unittest.TestCase):
                 + ENTER * 2                     # workspace
                 + ENTER * 3                     # agents: both, and each one's permissions
                 + ENTER                         # stacks
+                + ENTER                         # frameworks
                 + ENTER * 2                     # hosts, commit template
                 + ENTER                         # clouds
                 + ENTER * 4 + b"n"              # docker: CPUs, memory, disk, start at login, start at the end: no
@@ -999,7 +1000,7 @@ class AgentOffTests(unittest.TestCase):
                   mock.patch.object(core, "older_copy", lambda: None), mock.patch.object(core, "have", lambda t: False),
                   mock.patch.object(core, "set_by_developer", lambda *a, **k: person),
                   mock.patch.object(setup, "_audit", lambda *a, **k: (audits if audits is not None else []).append(a)),
-                  mock.patch("devkit.ext.effective_mcp", lambda a: dict(CATALOG_MCP)),
+                  mock.patch("devkit.ext.mcp_inventory", lambda a: {n: [s] for n, s in CATALOG_MCP.items()}),
                   mock.patch("devkit.registry.discover", lambda: ([Path(m) for m in mains], [], []))):
             stack.enter_context(p)
         return stack
@@ -1639,7 +1640,7 @@ class PreviewTests(unittest.TestCase):
         for width in (80, 60):
             text = wizard.preview(width=width, color=False)["W-7"]
             self.assertFalse([x for x in text.splitlines() if x.rstrip().endswith("…")], text)
-        self.assertIn("7  Automation           sync every 60 min · disk cleanup on · AI off\n",
+        self.assertIn("8  Automation           sync every 60 min · disk cleanup on · AI off\n",
                       wizard.preview(width=80, color=False)["W-7"])
 
     def test_golden_agent_question(self):

@@ -320,6 +320,53 @@ def catalog(t: dict, user: dict = None, groups=None) -> list:
 
 # --------------------------------------------------------------------------- what is installed
 
+def profile_catalog(t: dict, user: dict = None, groups=None) -> list:
+    """Validated inventory with installation choices applied, retaining deselected entries."""
+    from . import profiles
+    user = user_layer() if user is None else user
+    entries = catalog(t, user, groups)
+    try:
+        profiles.resolve(core.CFG)
+    except ValueError as e:
+        raise ExtError(str(e)) from e
+    enabled = set(user.get("enable") or [])
+    return [Ext(**{**asdict(e), "enabled": e.enabled and profiles.extension_selected(
+        core.CFG, e.kind, e.name, e.agent, explicit=e.layer == "user" or e.id in enabled,
+        required=e.required)}) for e in entries]
+
+
+def mcp_inventory(agent: str, t: dict = None, user: dict = None) -> dict:
+    """Validated ownership candidates by name, including removed or replaced specifications."""
+    t = team() if t is None else t
+    user = user_layer() if user is None else user
+    entries = catalog(t, {}, None)
+    try:
+        entries += catalog(t, {**user, "remove": []}, None)
+    except ExtError:
+        pass  # an invalid overlay never establishes ownership
+    candidates = {}
+    for e in entries:
+        if e.agent == agent and e.kind == "mcp":
+            specs = candidates.setdefault(e.name, [])
+            if e.spec not in specs:
+                specs.append(dict(e.spec))
+    return candidates
+
+
+def skill_applicability(agent: str, groups=None) -> dict:
+    """Known skill names mapped to their installation applicability; unknown task skills remain required."""
+    t, user = team(), user_layer()
+    base = catalog(t, {}, None)
+    try:
+        inventory = catalog(t, user, None)
+        chosen = profile_catalog(t, user, skill_groups() if groups is None else groups)
+    except ExtError:
+        inventory = base
+        chosen = profile_catalog(t, {}, skill_groups() if groups is None else groups)
+    known = {e.name for e in base + inventory if e.agent == agent and e.kind == "skill"}
+    on = {e.name for e in chosen if e.agent == agent and e.kind == "skill" and e.enabled}
+    return {name: name in on for name in known}
+
 def _read_json(path: Path):
     try:
         return json.loads(path.read_text())
@@ -1293,8 +1340,13 @@ def report_drift(rows: list, audit=None, seen: Path = None) -> list:
 
 def current_rows(cwd: str = None, h: Homes = None) -> list:
     t = team()
-    return status(catalog(t, user_layer(), skill_groups()), observe(h), read_lock(), project_plugins(cwd),
+    return status(profile_catalog(t, user_layer(), skill_groups()), observe(h), read_lock(), project_plugins(cwd),
                   retired_ids(t), managed_plugins())
+
+
+def _selected_agent_rows(rows: list) -> list:
+    agents = core.CFG.get("agents") or {}
+    return [r for r in rows if agents.get(r["agent"], True)]
 
 
 def drift_text(rows: list, limit: int = 4) -> str:
@@ -1310,7 +1362,7 @@ def session_line(cwd: str = None, h: Homes = None):
     """The session start's line about extensions that changed outside devkit, or None. Files only: no process, no
     network. Writes each new drift's `ext.drift` record."""
     try:
-        rows = current_rows(cwd, h)
+        rows = _selected_agent_rows(current_rows(cwd, h))
     except ExtError as e:
         return f"devkit · the extension catalog is invalid: {e}. The developer fixes ~/.config/devkit/config.json (ext)."
     report_drift(rows)
@@ -1329,7 +1381,7 @@ def status_needs(cwd: str = None) -> list:
     out = [{"kind": "devkit", "text": f"Extensions accepted since your last session: {accepted_text(items, 3)}.",
             "command": "dev ext ack"}] if items else []
     try:
-        rows = current_rows(cwd)
+        rows = _selected_agent_rows(current_rows(cwd))
     except ExtError as e:
         return out + [{"kind": "devkit", "text": f"the extension catalog is invalid: {e}", "command": "dev ext ls"}]
     report_drift(rows)
@@ -1343,7 +1395,7 @@ def doctor_checks(cwd: str = None) -> list:
     """`dev doctor`'s Extensions group: (group, name, ok, detail, fix)."""
     g = "Extensions"
     try:
-        rows = current_rows(cwd)
+        rows = _selected_agent_rows(current_rows(cwd))
     except ExtError as e:
         return [(g, "catalog", False, str(e), "fix ext in ~/.config/devkit/config.json (dev config edit)")]
     report_drift(rows)
@@ -1857,9 +1909,9 @@ def effective_claude_plugins(t: dict, user: dict = None) -> tuple:
     """(enabled, disabled) `name@marketplace` keys for Claude Code after the team and user layers (spec R8): what
     `enabledPlugins`, `dev config repair` and the managed lock write. An invalid overlay falls back to the team's."""
     try:
-        cat = catalog(t, user, None)
+        cat = profile_catalog(t, user, None)
     except ExtError:
-        cat = catalog(t, {}, None)
+        cat = profile_catalog(t, {}, None)
     plugins = [e for e in cat if e.kind == "plugin" and e.agent == "claude"]
     return ({e.spec["id"] for e in plugins if e.enabled}, {e.spec["id"] for e in plugins if not e.enabled})
 
@@ -1868,9 +1920,9 @@ def effective(agent: str, kind: str, t: dict = None, user: dict = None, groups=N
     """This agent's enabled entries of one kind after layering: what `dev install` installs."""
     t = team() if t is None else t
     try:
-        cat = catalog(t, user_layer() if user is None else user, skill_groups() if groups is None else groups)
+        cat = profile_catalog(t, user_layer() if user is None else user, skill_groups() if groups is None else groups)
     except ExtError:
-        cat = catalog(t, {}, skill_groups() if groups is None else groups)
+        cat = profile_catalog(t, {}, skill_groups() if groups is None else groups)
     return [e for e in cat if e.agent == agent and e.kind == kind and e.enabled]
 
 
@@ -1953,9 +2005,9 @@ def effective_skill_sources(t: dict = None, user: dict = None) -> list:
     t = team() if t is None else t
     user = user_layer() if user is None else user
     try:
-        cat = catalog(t, user, None)
+        cat = profile_catalog(t, user, None)
     except ExtError:
-        cat, user = catalog(t, {}, None), {}
+        cat, user = profile_catalog(t, {}, None), {}
     on = {e.id for e in cat if e.kind == "skill" and e.enabled}
     out = []
     for src in (t.get("skills") or {}).get("sources") or []:

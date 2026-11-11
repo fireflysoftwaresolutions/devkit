@@ -10,7 +10,8 @@ the IDEs. For the app with buttons and menus, follow [Claude Desktop's Code tab]
 
 ## What you need
 
-- devkit installed on your Mac, with every line of `dev doctor` showing `✓`. If you have not installed it yet, follow
+- devkit installed on your Mac, with Claude Code chosen in the setup wizard and every line of `dev doctor` showing
+  `✓`. If you have not installed it yet, follow
   [Your first install, step by step](../getting-started.md#your-first-install-step-by-step).
 - A Claude account with Claude Code, signed in. The setup wizard offers the sign-in; if you skipped it, run `claude`
   once and sign in through the browser window that opens.

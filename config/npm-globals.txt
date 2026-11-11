@@ -4,8 +4,9 @@ pyright
 # @node
 typescript
 typescript-language-server
-@angular/cli
 @playwright/cli
+# @angular
+@angular/cli
 # @php
 intelephense
 # @docs

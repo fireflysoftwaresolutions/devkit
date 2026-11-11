@@ -5,6 +5,38 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
 
 ## [Unreleased]
 
+## [26.11.15] - 2026-11-11
+
+### Added
+
+- Framework choices for Angular, React, Next.js, NestJS, Spring Boot, Laravel, and Symfony, separate from language
+  stacks. Each adds its runtime and existing tools and guidance; project dependencies stay in the project.
+- A Frameworks section in setup. New installations save detected choices or none; existing installations without
+  a framework setting keep their previous defaults until customized.
+
+### Fixed
+
+- Framework choices align package selection, language-server plugins, MCP servers, skills, and installation
+  checks. Per-skill filtering preserves documentation/security skills that share a source with framework skills.
+- One-run package skipping survives setup, CLI dispatch, and repinning without changing saved requirements.
+- Missing npm tools are repaired even when Homebrew packages are complete. Disabling automatic packages also
+  prevents installation of the Azure DevOps CLI extension.
+- Invalid framework choices stop updates before the checkout changes.
+- MCP cleanup preserves quoted sibling tables and multiline strings, and retains exact ownership candidates
+  after catalog removal or replacement. Personal servers with different environments remain untouched.
+- Text prompts accept `none` to clear saved selections instead of silently restoring them.
+- Installation health checks follow the saved Claude and Codex selection, including plugins, skills, MCP servers,
+  desktop integrations, and extensions. An unselected agent's installed CLI or app no longer makes it required;
+  selected components and remaining managed files still receive their checks.
+- Claude's permission check accepts the configured mode, including `acceptEdits` and `default`.
+- Optional skill groups respect explicit selections, including an empty list. Installation checks do not restore
+  default groups that were removed; task rules still require the skills needed for the work.
+- Setup keeps saved empty stack, host, and cloud choices. Detection supplies initial defaults without adding
+  intentionally removed integrations back during setup or updates.
+- Kubernetes checks require Helm as well as kubectl, and Azure DevOps checks require its Azure CLI extension.
+- Installation, update, and troubleshooting documentation distinguish selected integrations from base tools and
+  explain which choices control package installation, optional skills, and Docker startup.
+
 ## [26.11.14] - 2026-11-10
 
 This release repairs Codex crew coordination and verification evidence. Native interruptions, resumed work, and

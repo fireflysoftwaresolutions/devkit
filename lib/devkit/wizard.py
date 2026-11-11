@@ -33,11 +33,12 @@ from collections import deque
 from contextlib import contextmanager
 from pathlib import Path
 
-from . import core, tui, ui
+from . import core, profiles, tui, ui
 from .core import CONFIG_FILE, DEVKIT_HOME, STATE
 
-STACKS = {"java": "Java / Spring (JDK, Maven, Gradle, jdtls)", "python": "Python (uv, pyright)",
-          "php": "PHP (php, Composer, intelephense)", "node": "Node / TypeScript / Angular / React (pnpm, tsc, ng)"}
+STACKS = {"java": "Java (JDK, Maven, Gradle, jdtls)", "python": "Python (uv, pyright)",
+          "php": "PHP (php, Composer, intelephense)", "node": "Node / TypeScript (pnpm, tsc)"}
+FRAMEWORKS = {k: v["label"] for k, v in profiles.catalog()["frameworks"].items()}
 # The package groups every Mac gets. Each agent is installed only when it is chosen, in its own step (Claude Code
 # from its installer, Codex as the `codex` group's cask), never by the groups everyone gets.
 BASE_GROUPS = ("core", "docker", "docs", "security")
@@ -62,7 +63,8 @@ DOCTOR_TOOLS = {
     "python": {"uv": ("brew", "uv"), "pyright": ("npm", "pyright")},
     "php": {"php": ("brew", "php"), "composer": ("brew", "composer"), "intelephense": ("npm", "intelephense")},
     "node": {"pnpm": ("brew", "pnpm"), "typescript-language-server": ("npm", "typescript-language-server"),
-             "ng": ("npm", "@angular/cli")},
+             "tsc": ("npm", "typescript")},
+    "angular": {"ng": ("npm", "@angular/cli")},
 }
 # HTTPS with the browser: no questions about protocols or tokens, and git signs in through gh.
 GH_LOGIN = ["gh", "auth", "login", "-h", "github.com", "-p", "https", "-w", "-s", "repo,read:org,workflow,gist"]
@@ -70,6 +72,36 @@ GH_LOGIN = ["gh", "auth", "login", "-h", "github.com", "-p", "https", "-w", "-s"
 
 class Answers(dict):
     pass
+
+
+def answer_profile(a) -> dict:
+    """Resolve wizard answers; None is its internal marker for the absent legacy key."""
+    return profiles.resolve({"stacks": a["stacks"],
+                             **({"frameworks": a["frameworks"]} if a.get("frameworks") is not None else {})})
+
+
+def framework_defaults(d, detected=True):
+    saved = d.get("config") or {}
+    profiles.resolve(saved)  # invalid saved values must not become a new default
+    if "frameworks" in saved:
+        return list(saved["frameworks"])
+    if saved or not detected:
+        return None
+    return profiles.suggested_frameworks((d.get("stacks_found") or {}).get("frameworks") or [])
+
+
+def framework_summary(a) -> str:
+    if a.get("frameworks") is None:
+        return "legacy defaults (customize to choose frameworks)"
+    return ", ".join(FRAMEWORKS[f] for f in a["frameworks"]) or "none"
+
+
+def stack_summary(a) -> str:
+    p = answer_profile(a)
+    text = ", ".join(_label(k) for k in p["stacks"]) or "none"
+    if p["implied_stacks"]:
+        text += " · required by frameworks: " + ", ".join(_label(k) for k in p["implied_stacks"])
+    return text
 
 
 def agent_groups(agents) -> list:
@@ -174,11 +206,13 @@ class Prompter:
         for i, k in enumerate(keys, 1):
             print(f"     {ui.green('■') if k in defaults else ui.dim('□')} {i}. {ui.bold(k)} {ui.dim('— ' + options[k])}")
         if self.yes:
-            print(f"     {q} {ui.dim('→')} {', '.join(defaults)}")
+            print(f"     {q} {ui.dim('→')} {', '.join(defaults) or 'none'}")
             return defaults
         a = self.read(f"     {q} {ui.dim('[' + ','.join(str(keys.index(d) + 1) for d in defaults) + ']')} ").strip()
         if not a:
             return defaults
+        if a.lower() == "none":
+            return []
         picked = [keys[int(x) - 1] for x in a.replace(" ", "").split(",") if x.isdigit() and 1 <= int(x) <= len(keys)]
         return picked or defaults
 
@@ -325,7 +359,7 @@ def build_config(saved, a, login) -> dict:
     """The config to save: the saved one with the answers applied (the keys `dev setup` has always written, and
     skills.groups when an optional skill group was offered)."""
     groups = _skill_groups(saved, a)
-    return core.deep_merge(saved or {}, {
+    result = core.deep_merge(saved or {}, {
         "dev_root": a["root"], "github_user": login, "handoff_repo": a["handoff"],
         "agents": {"claude": a["use_claude"], "codex": a["use_codex"]},
         "claude": {"default_mode": a["claude_mode"]},
@@ -336,7 +370,10 @@ def build_config(saved, a, login) -> dict:
         "gc": {"auto": a["gc_auto"]}, "sync": {"interval_minutes": a["interval"]},
         "ai": {"enabled": bool(a.get("ai")), "asked": True},
         **({"skills": {"groups": groups}} if groups is not None else {}),
+        **({"frameworks": a["frameworks"]} if a.get("frameworks") is not None else {}),
     })
+    profiles.resolve(result)
+    return result
 
 
 AI_QUESTION = ("Let background jobs ask a small model (Claude Haiku or Codex's gpt-6-luna, at most 20 calls a day), "
@@ -361,7 +398,7 @@ def plan_rows(a, skip_packages, saved=None) -> list:
             ("handoff", f"{a['handoff']} → {a['root']}/.handoff"),
             ("Claude Code", f"{a['claude_mode']}" if a["use_claude"] else "skip"),
             ("Codex", f"{cm} ({CODEX_MODES[cm][0]} / {CODEX_MODES[cm][1]})" if a["use_codex"] else "skip"),
-            ("stacks", ", ".join(a["stacks"])),
+            ("stacks", stack_summary(a)), ("frameworks", framework_summary(a)),
             ("git hosts", ", ".join(a["hosts"]) + f" · commit template {'on' if a.get('commit_template', True) else 'off'}"),
             ("clouds", (", ".join(a["clouds"]) or "none") + (f" · agent skills: {', '.join(skills)}" if skills
                                                              else "")),
@@ -432,8 +469,15 @@ def _run_lines(assume_yes=False, skip_packages=False, resume=False) -> int:
 
     p.section("Stacks (toolchains, language servers, skills)")
     found = [k for k in STACKS if ((d.get("stacks_found") or {}).get("counts") or {}).get(k)]
+    saved = d["config"] or {}
     a["stacks"] = p.multi("Stacks you develop in (comma-separated numbers)", STACKS,
-                          (d["config"] or {}).get("stacks") or found or list(FIRST_STACKS))
+                          list(saved["stacks"] or []) if "stacks" in saved else found or list(FIRST_STACKS))
+
+    a["frameworks"] = framework_defaults(d)
+    if not assume_yes or a["frameworks"] is not None:
+        p.section("Frameworks (skills, integrations, required runtimes)")
+        a["frameworks"] = p.multi("Frameworks you develop in (numbers, or none)", FRAMEWORKS,
+                                  a["frameworks"] or [])
 
     from . import toolchain
     seen = toolchain.detect()
@@ -442,14 +486,14 @@ def _run_lines(assume_yes=False, skip_packages=False, resume=False) -> int:
         print("     " + ui.dim("found on this Mac: " + "; ".join(f"{k} ({v})" for k, v in seen["evidence"].items())))
     hosts = p.multi("Where your repositories and pipelines live (comma-separated numbers)",
                     {k: v[0] for k, v in toolchain.HOSTS.items()},
-                    list(dict.fromkeys((cfg.get("hosts") or []) + seen["hosts"])) or ["github"])
+                    list(saved["hosts"] or []) if "hosts" in saved else seen["hosts"] or ["github"])
     a["hosts"] = list(dict.fromkeys(["github"] + hosts))
     from . import setup as setup_mod
     a["commit_template"] = p.yesno(setup_mod.COMMIT_TEMPLATE_QUESTION, setup_mod.commit_template_answer() != "no")
     p.section("Cloud and infrastructure (CLIs and sign-in checks)")
-    a["clouds"] = p.multi("Clouds and infrastructure tools you use (numbers, or empty for none)",
+    a["clouds"] = p.multi("Clouds and infrastructure tools you use (numbers, or none)",
                           {k: v[0] for k, v in toolchain.CLOUDS.items()},
-                          list(dict.fromkeys((cfg.get("clouds") or []) + seen["clouds"])))
+                          list(saved["clouds"] or []) if "clouds" in saved else seen["clouds"])
     a["skill_groups"] = saved_group_answers(d["config"])
     for g in offered_groups(a["clouds"], d["config"]):  # optional skill groups, for the tools just picked
         a["skill_groups"][g] = p.yesno(skill_question(g, a["clouds"], d["config"]), a["skill_groups"].get(g, True))
@@ -610,12 +654,32 @@ def _npm_globals(groups) -> list:
     return filtered(DEVKIT_HOME / "config" / "npm-globals.txt", groups)
 
 
-def package_groups(stacks, hosts=(), clouds=()) -> list:
+_NPM_COMMANDS = {"pyright": "pyright", "typescript": "tsc", "typescript-language-server": "typescript-language-server",
+                 "@playwright/cli": "playwright-cli", "@angular/cli": "ng", "intelephense": "intelephense",
+                 "markdownlint-cli2": "markdownlint-cli2"}
+
+
+def _missing_npm(names) -> list:
+    """Packages whose CLI is unavailable; unknown packages use npm's global directory."""
+    missing = []
+    for name in names:
+        command = _NPM_COMMANDS.get(name)
+        installed = core.have(command) if command else bool(_npm_root() and (_npm_root() / name).exists())
+        if not installed:
+            missing.append(name)
+    return missing
+
+
+def missing_npm_packages(groups) -> list:
+    return _missing_npm(_npm_globals(groups))
+
+
+def package_groups(stacks, hosts=(), clouds=(), frameworks=None) -> list:
     """The package groups these choices install, in install order."""
     from . import toolchain
     extra = toolchain.groups({"hosts": list(hosts), "clouds": list(clouds)})
-    return list(dict.fromkeys(list(BASE_GROUPS) + [s for s in STACKS if s in stacks]
-                              + [s for s in stacks if s not in STACKS] + extra))
+    selected = answer_profile({"stacks": stacks, "frameworks": frameworks})["package_groups"]
+    return list(dict.fromkeys(list(BASE_GROUPS) + selected + extra))
 
 
 def package_status(groups) -> list:
@@ -646,7 +710,7 @@ def package_status(groups) -> list:
 # --------------------------------------------------------------------------- detection for the interactive wizard
 
 # registry.detect_stack ids → the wizard's stacks
-_STACK_OF = {"java": "java", "python": "python", "php": "php", "laravel": "php", "symfony": "php",
+_STACK_OF = {"java": "java", "spring": "java", "python": "python", "php": "php", "laravel": "php", "symfony": "php",
              "angular": "node", "nextjs": "node", "react": "node", "nestjs": "node", "typescript": "node", "node": "node"}
 
 
@@ -657,15 +721,18 @@ def detect_stacks() -> dict:
         mains, plain, _ = registry.discover()
     except Exception:
         return {"counts": {}, "repos": 0}
-    counts = {}
+    counts, frameworks = {}, {}
     for root in list(mains) + list(plain):
         try:
-            kinds = {_STACK_OF.get(s.split("/")[0]) for s in registry.detect_stack(Path(root))} - {None}
+            detected = registry.detect_stack(Path(root))
+            kinds = {_STACK_OF.get(s.split("/")[0]) for s in detected} - {None}
         except OSError:
             continue
         for k in kinds:
             counts[k] = counts.get(k, 0) + 1
-    return {"counts": counts, "repos": len(mains) + len(plain)}
+        for k in profiles.suggested_frameworks(detected):
+            frameworks[k] = frameworks.get(k, 0) + 1
+    return {"counts": counts, "frameworks": frameworks, "repos": len(mains) + len(plain)}
 
 
 def detect_docker() -> dict:
@@ -734,8 +801,11 @@ def tui_defaults(d, detected=True) -> Answers:
         use_claude=use_claude, use_codex=use_codex,
         claude_mode=claude_mode if claude_mode in CLAUDE_MODES else "bypassPermissions",
         codex_mode=codex_mode if codex_mode in CODEX_MODES else "full", stacks=stacks,
-        hosts=list(dict.fromkeys(["github"] + list(cfg.get("hosts") or []) + (seen["hosts"] if detected else []))),
-        clouds=list(dict.fromkeys(list(cfg.get("clouds") or []) + (seen["clouds"] if detected else []))),
+        frameworks=framework_defaults(d, detected),
+        hosts=list(dict.fromkeys(["github"] + (list(cfg.get("hosts") or [])
+                   if "hosts" in saved or not detected else seen["hosts"]))),
+        clouds=list(dict.fromkeys(list(cfg.get("clouds") or [])
+                    if "clouds" in saved or not detected else seen["clouds"])),
         cpu=min(int(dk.get("cpu") or max(2, min(8, cpus // 3))), cpus),
         mem=min(int(dk.get("memory") or max(4, min(16, ram // 5))), ram),
         disk=int(dk.get("disk") or 80), autostart=bool(dk.get("autostart")),
@@ -747,13 +817,14 @@ def tui_defaults(d, detected=True) -> Answers:
 
 # --------------------------------------------------------------------------- interactive wizard: words
 
-SECTIONS = [("workspace", "Workspace"), ("agents", "Agents"), ("stacks", "Stacks"), ("hosts", "Git hosts and CI/CD"),
+SECTIONS = [("workspace", "Workspace"), ("agents", "Agents"), ("stacks", "Stacks"), ("frameworks", "Frameworks"),
+            ("hosts", "Git hosts and CI/CD"),
             ("clouds", "Clouds"), ("docker", "Docker"), ("automation", "Automation")]
 STEPS = len(SECTIONS) + 1  # the sections, then the review
-STACK_UI = {"java": ("Java / Spring", "", "JDK, Maven, Gradle and the jdtls language server"),
+STACK_UI = {"java": ("Java", "", "JDK, Maven, Gradle and the jdtls language server"),
             "python": ("Python", "", "uv and the pyright language server"),
             "php": ("PHP", "", "PHP, Composer and the Intelephense language server"),
-            "node": ("Node / TypeScript", "Angular, React", "pnpm, TypeScript, the Angular CLI and the Playwright CLI")}
+            "node": ("Node / TypeScript", "", "pnpm, TypeScript, its language server and the Playwright CLI")}
 CLAUDE_UI = {"bypassPermissions": ("No prompts", "Works without asking; the devkit guard blocks unsafe commands."),
              "acceptEdits": ("Ask before commands", "Edits files without asking; asks before it runs a command."),
              "default": ("Ask for everything", "Asks before every tool it uses.")}
@@ -1499,7 +1570,7 @@ class _Wizard:
 
     def first_stacks(self) -> bool:
         """A first run with no repositories to learn from: the recommended setup still asks for the toolchains."""
-        return not (self.d.get("config") or {}).get("stacks") and \
+        return "stacks" not in (self.d.get("config") or {}) and \
             not ((self.d.get("stacks_found") or {}).get("counts") or {})
 
     def _survey(self):
@@ -1723,7 +1794,7 @@ class _Wizard:
             ]
         if key == "stacks":
             counts = d["stacks_found"]["counts"]
-            preselected = counts and not (d["config"] or {}).get("stacks")
+            preselected = counts and "stacks" not in (d["config"] or {})
             return [_Q("stacks", "Stacks", lambda: tui.MultiSelect(
                 "Stacks you work in", [tui.Option(k, STACK_UI[k][0], note=STACK_UI[k][1], desc=STACK_UI[k][2],
                                                   badge=(f"found in {counts[k]} repo{'s' if counts[k] != 1 else ''}", "ok")
@@ -1731,6 +1802,14 @@ class _Wizard:
                 a["stacks"], help="Each stack adds its toolchain, language server and agent skills."
                 + (" The stacks found in your repositories are selected." if preselected else "")),
                 show=lambda: ", ".join(_label(k) for k in a["stacks"]) or "none")]
+        if key == "frameworks":
+            return [_Q("frameworks", "Frameworks", lambda: tui.MultiSelect(
+                "Frameworks you work in", [tui.Option(k, label,
+                    desc="Requires " + STACK_UI[profiles.catalog()["frameworks"][k]["stack"]][0])
+                    for k, label in FRAMEWORKS.items()], a.get("frameworks") or [],
+                help="Choose framework skills and integrations. Required runtimes are included. "
+                     "Confirming replaces legacy defaults; project libraries stay in your projects."),
+                show=lambda: framework_summary(a))]
         if key == "hosts":
             from . import toolchain
             return [_Q("hosts", "Git hosts", lambda: tui.MultiSelect(
@@ -1869,7 +1948,7 @@ class _Wizard:
 
     # ---------------------------------------------------------------- review
     def review_loop(self):
-        """The review until Apply or Quit: 1 to 7 (or Change a section) open a section and come back here."""
+        """The review until Apply or Quit: numbered shortcuts open a section and come back here."""
         while True:
             act = self.ask(self.review_prompt(), self.review)
             if isinstance(act, int):
@@ -1891,7 +1970,7 @@ class _Wizard:
         return [
             ("Workspace", f"{a['root']} · handoff {a['handoff']}"),
             ("Agents", ", ".join(agents)),
-            ("Stacks", ", ".join(_label(k) for k in a["stacks"]) or "none"),
+            ("Stacks", stack_summary(a)), ("Frameworks", framework_summary(a)),
             ("Git hosts and CI/CD", ", ".join(_label(k) for k in a["hosts"])
              + f" · commit template {'on' if a['commit_template'] else 'off'}"),
             ("Clouds", (", ".join(_label(k) for k in a["clouds"]) or "none")
@@ -1917,9 +1996,10 @@ class _Wizard:
 
     def packages(self):
         a = self.a
-        k = (tuple(a["stacks"]), tuple(a["hosts"]), tuple(a["clouds"]))
+        k = (tuple(a["stacks"]), tuple(a["hosts"]), tuple(a["clouds"]),
+             tuple(a["frameworks"]) if a.get("frameworks") is not None else None)
         if k not in self._pk:
-            self._pk = {k: package_status(package_groups(a["stacks"], a["hosts"], a["clouds"]))}
+            self._pk = {k: package_status(package_groups(a["stacks"], a["hosts"], a["clouds"], a.get("frameworks")))}
         return self._pk[k]
 
     def package_counts(self) -> tuple:
@@ -1989,10 +2069,10 @@ class _Wizard:
     def review_prompt(self):
         return tui.Select("Apply this plan?", [
             tui.Option("apply", "Apply", desc="Save your choices, install what is missing, set up the agents, sign in."),
-            tui.Option("change", "Change a section", desc="Or press 1 to 7 to open that section. You come back here "
+            tui.Option("change", "Change a section", desc="Or press 1 to 8 to open that section. You come back here "
                                                           "after it."),
             tui.Option("quit", "Quit without changes", desc="Nothing on this Mac changes.")], back=False,
-            hints=["1–7 change a section", "↑↓ move", "enter choose"], digits={str(n): n - 1 for n in range(1, 8)})
+            hints=["1–8 change a section", "↑↓ move", "enter choose"], digits={str(n): n - 1 for n in range(1, 9)})
 
     # ---------------------------------------------------------------- apply
     def apply(self) -> int:
@@ -2448,7 +2528,7 @@ class _Wizard:
     def _package_plan(self) -> dict:
         from . import toolchain
         a = self.a
-        groups = set(BASE_GROUPS) | set(a["stacks"]) | set(toolchain.groups({"hosts": a["hosts"], "clouds": a["clouds"]}))
+        groups = set(package_groups(a["stacks"], a["hosts"], a["clouds"], a.get("frameworks")))
         return {"groups": groups, "brew": filtered(DEVKIT_HOME / "Brewfile", groups), "npm": _npm_globals(groups),
                 "post": [k for k, v in toolchain.ALL.items() if v[4] in groups]}
 
@@ -2460,8 +2540,7 @@ class _Wizard:
 
     @staticmethod
     def _npm_ok(plan) -> bool:
-        root = _npm_root()
-        return root is None or all((root / n).exists() for n in plan["npm"])
+        return not _missing_npm(plan["npm"])
 
     def _save(self, cl, i):
         cl.start(i)
@@ -2550,7 +2629,8 @@ class _Wizard:
                 fails.append(s[2:])
             elif s.startswith(note) and parts and parts[-1].startswith(off_head) and parts[-1].endswith(off_tail):
                 stays.append((parts[-1][len(off_head):len(parts[-1]) - len(off_tail)], s[len(note):]))
-        rc = _exec(_dev("install", *_template_args(self.a)), line, log if log is not None else self.log,
+        args = ["--skip-packages"] if self.skip else []
+        rc = _exec(_dev("install", *_template_args(self.a), *args), line, log if log is not None else self.log,
                    env=_child_env())
         if rc not in (0, None):
             if int(rc) == CRASH_EXIT and getattr(rc, "crash", None):
@@ -2984,8 +3064,8 @@ def _preview(width) -> dict:
     w.a = Answers(root="~/Development", handoff="ana-dev/handoff", use_claude=True, use_codex=True,
                   claude_mode="bypassPermissions", codex_mode="full", stacks=["python", "node"], hosts=["github"],
                   clouds=[], cpu=3, mem=4, disk=80, autostart=False, gc_auto=True, interval=60, lock=False, ai=False,
-                  skill_groups={}, commit_template=True, start_docker=True)
-    w._pk = {(tuple(w.a["stacks"]), tuple(w.a["hosts"]), tuple(w.a["clouds"])):
+                  skill_groups={}, commit_template=True, start_docker=True, frameworks=[])
+    w._pk = {(tuple(w.a["stacks"]), tuple(w.a["hosts"]), tuple(w.a["clouds"]), ()):
              [("core", [(f"tool{i}", "brew", False) for i in range(36)] + [(f"have{i}", "brew", True) for i in range(4)])]}
     w._agents_to_install = lambda: ["claude", "codex"]
     w.total, w.baseline = 3, Answers(w.a)

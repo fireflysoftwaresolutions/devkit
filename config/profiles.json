@@ -1,0 +1,29 @@
+{
+  "stacks": {
+    "java": {"label": "Java", "extensions": {"plugin": ["jdtls-lsp"], "skill": ["java-junit"]}},
+    "python": {"label": "Python", "extensions": {"plugin": ["pyright-lsp"]}},
+    "php": {"label": "PHP", "extensions": {"plugin": ["php-lsp"]}},
+    "node": {"label": "Node / TypeScript", "extensions": {"plugin": ["typescript-lsp"]}}
+  },
+  "frameworks": {
+    "angular": {
+      "label": "Angular", "stack": "node", "package_groups": ["angular"],
+      "extensions": {"skill": ["angular-developer", "angular-new-app"], "mcp": ["angular-cli"]}
+    },
+    "react": {
+      "label": "React", "stack": "node",
+      "extensions": {"skill": ["react-best-practices", "composition-patterns"]}
+    },
+    "nextjs": {
+      "label": "Next.js", "stack": "node",
+      "extensions": {"skill": ["react-best-practices", "composition-patterns"]}
+    },
+    "nestjs": {"label": "NestJS", "stack": "node"},
+    "spring": {
+      "label": "Spring Boot", "stack": "java",
+      "extensions": {"skill": ["java-springboot", "spring-boot-testing", "spring-security", "spring-observability"]}
+    },
+    "laravel": {"label": "Laravel", "stack": "php"},
+    "symfony": {"label": "Symfony", "stack": "php"}
+  }
+}

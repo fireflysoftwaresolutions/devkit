@@ -65,12 +65,12 @@ class CrewSkillCheckTests(unittest.TestCase):
         self.assertIn('add "iac" to skills.groups', detail)
         self.assertEqual(fix, "")
 
-    def test_a_missing_skill_of_a_default_group_fails_even_when_the_group_is_off(self):
+    def test_a_missing_skill_of_a_default_group_only_informs_when_deselected(self):
         roster = {"members": [{"id": "dozer", "skills": ["supabase-postgres-best-practices"]}], "activities": []}
         homes = {"claude": self.agent("claude")}
         [(_, _, ok, detail, _)] = setup.crew_skill_checks(["claude"], roster=roster, homes=homes, groups=[])
-        self.assertFalse(ok)
-        self.assertIn("supabase-postgres-best-practices (postgres)", detail)
+        self.assertTrue(ok)
+        self.assertIn("supabase-postgres-best-practices (postgres, off)", detail)
 
     def test_every_crew_skill_installed_passes_for_each_agent(self):
         everything = ("testing", "terraform-style-guide", "superpowers:brainstorming")
@@ -103,8 +103,8 @@ class RequiredToolsTests(unittest.TestCase):
         # the Recommended setup: 24 tools before, 7 of them for the Java and PHP stacks nobody chose
         group, name, ok, detail, fix = setup.tools_check(["python", "node"], have=lambda t: t not in self.JAVA_PHP)
         self.assertEqual((group, name, ok), ("Toolchain", "required tools", True))
-        self.assertIn("17/17 present", detail)
-        self.assertIn("not chosen: Java / Spring, PHP", detail)
+        self.assertIn("18/18 present", detail)
+        self.assertIn("not chosen: Java, PHP", detail)
         self.assertIn("dev setup", detail)
         self.assertEqual(fix, "")
 

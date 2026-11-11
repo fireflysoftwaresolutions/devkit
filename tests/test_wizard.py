@@ -299,11 +299,11 @@ SNAPSHOT_FIRST = {
     "codex": {"mode": "full", "approval_policy": "never", "sandbox_mode": "danger-full-access"},
     "stacks": ["python", "node"], "lock": False, "hosts": ["github", "gitlab"], "clouds": ["aws"],
     "docker": {"cpu": 6, "memory": 12, "disk": 80, "autostart": False}, "gc": {"auto": True},
-    "sync": {"interval_minutes": 60}, "ai": {"enabled": False, "asked": True}}
+    "sync": {"interval_minutes": 60}, "ai": {"enabled": False, "asked": True}, "frameworks": []}
 SAVED ={"stacks": ["python"], "hosts": ["bitbucket"], "clouds": [], "docker": {"cpu": 4, "memory": 8},
          "editor": "zed", "agents": {"claude": True, "codex": False}, "lock": True}
 SNAPSHOT_RERUN = {
-    "stacks": ["python"], "hosts": ["github", "bitbucket", "gitlab"], "clouds": ["aws"],
+    "stacks": ["python"], "hosts": ["github", "bitbucket"], "clouds": [],
     "docker": {"cpu": 4, "memory": 8, "disk": 80, "autostart": False}, "editor": "zed",
     "agents": {"claude": True, "codex": False}, "lock": True, "dev_root": "~/Development", "github_user": "ada",
     "handoff_repo": "ada/handoff", "claude": {"default_mode": "bypassPermissions"},
@@ -335,13 +335,23 @@ changes until you confirm.
      Claude Code permission mode → bypassPermissions
 
    4 Stacks (toolchains, language servers, skills)
-     □ 1. java — Java / Spring (JDK, Maven, Gradle, jdtls)
+     □ 1. java — Java (JDK, Maven, Gradle, jdtls)
      ■ 2. python — Python (uv, pyright)
      □ 3. php — PHP (php, Composer, intelephense)
-     ■ 4. node — Node / TypeScript / Angular / React (pnpm, tsc, ng)
+     ■ 4. node — Node / TypeScript (pnpm, tsc)
      Stacks you develop in (comma-separated numbers) → python, node
 
-   5 Git hosts and CI/CD (CLIs, sign-in checks, `dev ci status`)
+   5 Frameworks (skills, integrations, required runtimes)
+     □ 1. angular — Angular
+     □ 2. react — React
+     □ 3. nextjs — Next.js
+     □ 4. nestjs — NestJS
+     □ 5. spring — Spring Boot
+     □ 6. laravel — Laravel
+     □ 7. symfony — Symfony
+     Frameworks you develop in (numbers, or none) → none
+
+   6 Git hosts and CI/CD (CLIs, sign-in checks, `dev ci status`)
      found on this Mac: gitlab (x); aws (y)
      ■ 1. github — GitHub · Actions
      ■ 2. gitlab — GitLab · GitLab CI
@@ -350,35 +360,36 @@ changes until you confirm.
      Where your repositories and pipelines live (comma-separated numbers) → github, gitlab
      Open new commit messages with devkit's template (commit.template in each repository that has none)? → yes
 
-   6 Cloud and infrastructure (CLIs and sign-in checks)
+   7 Cloud and infrastructure (CLIs and sign-in checks)
      ■ 1. aws — AWS
      □ 2. azure — Microsoft Azure
      □ 3. gcp — Google Cloud
      □ 4. digitalocean — DigitalOcean
      □ 5. kubernetes — Kubernetes · Helm
      □ 6. terraform — OpenTofu / Terraform
-     Clouds and infrastructure tools you use (numbers, or empty for none) → aws
+     Clouds and infrastructure tools you use (numbers, or none) → aws
 
-   7 Docker on Colima
+   8 Docker on Colima
      VM CPUs → 6
      VM memory (GB) → 12
      VM disk, grows as needed (GB) → 80
      Start Colima at login? → no
      Start Docker when the setup ends? → yes
 
-   8 Automation
+   9 Automation
      Reclaim disk automatically (merged worktrees, idle build output, stale temp)? → yes
      Background sync interval (minutes) → 60
      Let background jobs ask a small model (Claude Haiku or Codex's gpt-6-luna, at most 20 calls a day), for example to merge duplicate lessons written in different languages? → no
      Lock Claude Code settings with a managed-settings file (needs your admin password)? → no
 
-   9 Plan
+  10 Plan
      config       <CONFIG>
      root         ~/Development
      handoff      ada/handoff → ~/Development/.handoff
      Claude Code  bypassPermissions
      Codex        skip
-     stacks       python, node
+     stacks       Python, Node / TypeScript
+     frameworks   none
      git hosts    github, gitlab · commit template on
      clouds       aws
      packages     skip
@@ -444,7 +455,7 @@ class LineModeTests(unittest.TestCase):
         self.assertEqual(cfg, SNAPSHOT_FIRST)
         self.assertEqual(list(cfg), list(SNAPSHOT_FIRST))  # same key order in the file
         self.assertEqual([dev_args(c)[0] for c in calls], ["install", "doctor"])
-        self.assertEqual(dev_args(calls[0])[1:], ["--commit-template", "yes"])  # the default, applied by `dev install`
+        self.assertEqual(dev_args(calls[0])[1:], ["--commit-template", "yes", "--skip-packages"])
 
     def test_yes_on_a_configured_mac_keeps_the_saved_values(self):
         rc, cfg, _, _ = line_mode(saved=SAVED)
@@ -458,13 +469,13 @@ class LineModeTests(unittest.TestCase):
     def test_typed_answers_in_the_line_prompts(self):
         # root, handoff, Codex only, its autonomy, stacks, hosts, no template, clouds, Docker (CPUs 8, start at login,
         # do not start it at the end), automation (no cleanup, 30 min, AI yes), then Apply
-        typed = ["~/Code", "", "3", "2", "1,3", "", "n", "", "8", "", "", "y", "n", "n", "30", "y", ""]
+        typed = ["~/Code", "", "3", "2", "1,3", "", "", "n", "", "8", "", "", "y", "n", "n", "30", "y", ""]
         with tempfile.TemporaryDirectory() as state:
             rc, cfg, out, calls = line_mode(yes=False, typed=typed, state=Path(state))
             # the wizard itself writes no devkit state but the record of its apply steps (dev setup --resume) and the
             # log of its commands' output
             self.assertEqual(sorted(p.name for p in Path(state).iterdir()), ["logs", "setup-run.json"])
-        self.assertEqual(dev_args(calls[0]), ["install", "--commit-template", "no"])  # `dev install` applies the answer
+        self.assertEqual(dev_args(calls[0]), ["install", "--commit-template", "no", "--skip-packages"])
         self.assertEqual(rc, 0)
         self.assertEqual(cfg["dev_root"], "~/Code")
         self.assertEqual(cfg["agents"], {"claude": False, "codex": True})
@@ -505,8 +516,8 @@ class LineModeTests(unittest.TestCase):
         self.assertIn("devkit is not ready yet. 1 step failed.", out)
         self.assertIn("Reason: dev install stopped with exit code 70 and gave no reason.", out)
         self.assertIn("dev setup --resume", out.split("To finish")[1])
-        self.assertEqual([dev_args(c) for c in calls], [["install", "--commit-template", "yes"], ["doctor"],
-                                                        ["install", "--commit-template", "yes"], ["doctor"]])
+        self.assertEqual([dev_args(c) for c in calls], [["install", "--commit-template", "yes", "--skip-packages"], ["doctor"],
+                                                        ["install", "--commit-template", "yes", "--skip-packages"], ["doctor"]])
         self.assertEqual({s["id"]: s["state"] for s in line_mode.run["steps"]}["configure"], "done")
         self.assertEqual(rc, 0)  # the resumed run finished
 
@@ -625,10 +636,11 @@ class InteractiveTests(unittest.TestCase):
                 + ENTER + b"\x15team/handoff" + ENTER  # workspace
                 + DOWN + ENTER + ENTER            # agents: Claude Code only, its mode kept
                 + b"a" + ENTER                    # stacks: all
+                + ENTER                           # frameworks: none
                 + ENTER + b"n" + ENTER            # hosts, no commit template, clouds
                 + b"99" + ENTER + BS + BS + b"4" + ENTER + ENTER + ENTER + b"n"  # docker, with a fixed typo
                 + b"n" + b"30" + ENTER + ENTER + ENTER  # automation: background AI stays off
-                + DOWN + ENTER + b"6" + ENTER     # review → change a section → Docker
+                + DOWN + ENTER + b"7" + ENTER     # review → change a section → Docker
                 + ENTER + ENTER + ENTER + b"y"    # … start at login after all
                 + ENTER)                          # apply
         rc, cfg, text, _ = self.run_wizard(keys)
@@ -639,7 +651,7 @@ class InteractiveTests(unittest.TestCase):
         self.assertEqual(cfg["docker"], {"cpu": 4, "memory": 12, "disk": 80, "autostart": True})
         self.assertEqual((cfg["gc"], cfg["sync"], cfg["lock"]), ({"auto": False}, {"interval_minutes": 30}, False))
         self.assertIn("Enter a whole number from 1 to 8.", text)
-        self.assertIn("Step 6 of 8 · Docker", text)
+        self.assertIn("Step 7 of 9 · Docker", text)
         self.assertEqual(self.template_answer, "no")
         self.assertIn("commit template off", text)  # the review says it
 
@@ -659,15 +671,14 @@ class InteractiveTests(unittest.TestCase):
         self.assertIn("Quit the setup?", text)
         self.assertIn("Nothing changed. Run dev setup when you are ready.", text)
 
-    def test_a_rerun_starts_from_the_saved_config_and_shows_the_changes(self):
+    def test_a_rerun_keeps_saved_selections_despite_detected_tools(self):
         saved = dict(SNAPSHOT_FIRST, hosts=["github"], clouds=[], stacks=["php"])
         rc, cfg, text, _ = self.run_wizard(ENTER + ENTER, saved=saved)
         self.assertIn("devkit is already set up here.", text)
         self.assertIn("Keep current setup", text)
-        self.assertIn("1 change from your saved setup", text)
-        self.assertIn("was GitHub", text)
+        self.assertIn("No changes from your saved setup", text)
         self.assertEqual(cfg["stacks"], ["php"])  # saved stacks win over detection
-        self.assertEqual(cfg["hosts"], ["github", "gitlab"])
+        self.assertEqual(cfg["hosts"], ["github"])
 
     def test_a_rerun_without_changes_says_so(self):
         saved = dict(SNAPSHOT_FIRST, hosts=["github", "gitlab"], clouds=[], stacks=["java"])
@@ -681,7 +692,7 @@ class InteractiveTests(unittest.TestCase):
         self.assertEqual(cfg["skills"]["groups"], core.DEFAULTS["skills"]["groups"] + ["iac"])
         self.assertIn("OpenTofu / Terraform · agent skills: iac", text)
         # Customize: the question follows the clouds, and No keeps the default groups
-        keys = (DOWN + ENTER + ENTER * 2 + ENTER * 3 + ENTER + ENTER * 2 + ENTER  # to the clouds, terraform kept
+        keys = (DOWN + ENTER + ENTER * 2 + ENTER * 3 + ENTER * 2 + ENTER * 2 + ENTER  # to clouds, frameworks kept
                 + b"n" + ENTER * 3 + b"n" + b"n" + ENTER + ENTER + b"n"   # no skills; docker; automation
                 + ENTER)                                                  # apply
         rc, cfg, text, _ = self.run_wizard(keys, clouds=("terraform",))
@@ -696,7 +707,7 @@ class DoctorToolsTests(unittest.TestCase):
         # both are wrong when the tool table drifts from the Brewfile or npm-globals.txt, or misses a stack.
         repo = Path(__file__).resolve().parents[1]
         self.assertEqual(set(wizard.DOCTOR_TOOLS) - set(wizard.BASE_GROUPS),
-                         set(wizard.STACKS) | set(wizard.agent_groups({})))
+                         set(wizard.STACKS) | set(wizard.agent_groups({})) | {"angular"})
         for group, tools in wizard.DOCTOR_TOOLS.items():
             listed = {m.groups() for m in map(wizard._BREW_RE.match, wizard.filtered(repo / "Brewfile", {group})) if m}
             listed |= {("npm", n) for n in wizard.filtered(repo / "config" / "npm-globals.txt", {group})}
@@ -729,7 +740,8 @@ class DefaultsAndDetectionTests(unittest.TestCase):
             with mock.patch.object(registry, "DEV", dev), mock.patch.object(registry, "LOCAL", dev / "_local"), \
                     mock.patch.object(registry, "WT_ROOT", dev / ".worktrees"):
                 found = wizard.detect_stacks()
-        self.assertEqual(found, {"counts": {"java": 1, "node": 2, "php": 1, "python": 1}, "repos": 4})
+        self.assertEqual(found, {"counts": {"java": 1, "node": 2, "php": 1, "python": 1},
+                                 "frameworks": {"laravel": 1}, "repos": 4})
 
     def test_package_status_marks_what_is_installed(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1132,6 +1144,8 @@ class PseudoTerminalTests(unittest.TestCase):
         t.send(DOWN + ENTER)
         t.expect("Stacks you work in")
         t.send(b"a" + ENTER)
+        t.expect("Frameworks you work in")
+        t.send(ENTER)
         t.expect("Where your code and pipelines live")
         t.send(ENTER)
         t.expect("Open new commit messages with devkit's template?")
@@ -1170,7 +1184,7 @@ class PseudoTerminalTests(unittest.TestCase):
             "codex": {"mode": "full", "approval_policy": "never", "sandbox_mode": "danger-full-access"},
             "stacks": ["java", "python", "php", "node"], "lock": False, "hosts": ["github"], "clouds": [],
             "docker": {"cpu": 4, "memory": 6, "disk": 80, "autostart": True}, "gc": {"auto": False},
-            "sync": {"interval_minutes": 30}, "ai": {"enabled": False, "asked": True}})
+            "sync": {"interval_minutes": 30}, "ai": {"enabled": False, "asked": True}, "frameworks": []})
         ran = [c["argv"][0] if c["argv"][0] in ("brew", "npm") else dev_args(c["argv"])[0] for c in t.calls()]
         self.assertEqual(ran, ["brew", "npm", "install", "doctor"])
         self.assertIn(["install", "--commit-template", "yes"], [dev_args(c["argv"]) for c in t.calls()])

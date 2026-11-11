@@ -44,7 +44,7 @@ def rules() -> list:
         if r.get("id"):
             by_id[r["id"]] = {**by_id.get(r["id"], {}), **r}
     groups = set((CFG.get("skills") or {}).get("groups") or [])
-    return [r for r in by_id.values() if not r.get("group") or r["group"] in groups]
+    return [r for r in by_id.values() if not r.get("group") or r["group"] in groups or "all" in groups]
 
 
 def short(name: str) -> str:
@@ -450,11 +450,25 @@ def on_stop(agent: str, data: dict, sess: dict):
 
 
 def coverage(agent: str) -> list:
-    """Rules whose required skills are not installed for this agent: [(rule id, [missing])]."""
+    """Missing rule skills in the selected installation: [(rule id, [missing])].
+
+    An omitted optional group is not an installation failure. Task-specific rules and their required skills stay
+    unchanged, so selecting work that needs that capability still names the skill.
+    """
+    from . import ext, selfcheck
     have = installed(agent)
+    groups = set((CFG.get("skills") or {}).get("groups") or [])
+    applicability = ext.skill_applicability(agent)
+
+    def selected(skill):
+        if skill in applicability:
+            return applicability[skill]
+        group = selfcheck.skill_group(skill)
+        return "all" in groups or group in groups | {"core", "unknown"} or group.startswith("plugin ")
+
     out = []
     for r in rules():
-        miss = [s for s in required(r, agent) if s not in have]
+        miss = [s for s in required(r, agent) if s not in have and selected(s)]
         if miss:
             out.append((r["id"], miss))
     return out

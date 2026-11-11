@@ -1433,7 +1433,7 @@ lists it). Agents may run only `dev setup --preview` and `--help`.
 | `--resume` | Continue the last setup where it stopped: a quick check of the steps done, then every step that is not done, with the answers you gave. It also continues saved choices whose install never finished, in the line prompts too. With nothing to continue, it says so and exits with `0`. Plain `dev setup` offers the same when a saved setup did not finish |
 | `--preview` | Draw every screen of the setup with fixed sample data, one after the other, as wide as the terminal, and change nothing; `COLUMNS=60 dev setup --preview` draws them 60 columns wide. The screens include **Pick up where you left off?** for a paused setup and for an unfinished install |
 | `-y`, `--yes` | Take every default without asking; in a terminal, the sign-ins still ask |
-| `--skip-packages` | Install no Homebrew or npm packages |
+| `--skip-packages` | Skip toolchain packages for this run; bootstrap prerequisites and selected-agent installers still apply |
 
 Exit codes: `0` devkit is ready (sign-ins may be left), `1` a required step failed or you quit before applying, `2`
 not signed in to GitHub, `130` paused by you. See
@@ -1462,7 +1462,7 @@ agent's call, neither `-y` nor a piped answer turns them on (exit code `2`), and
 | Option | Effect |
 | --- | --- |
 | `-y`, `--yes` | Accept every default, without questions |
-| `--skip-packages` | Do not install Homebrew or npm packages |
+| `--skip-packages` | Skip toolchain packages and the installer's tools step for this run; keep saved requirements |
 | `prompt` | Only the prompt helper |
 | `commit-template` | Only the commit template |
 | `shell` | Only the zsh helpers |
@@ -1470,18 +1470,29 @@ agent's call, neither `-y` nor a piped answer turns them on (exit code `2`), and
 
 ### `dev doctor`
 
+Checks the installation against your saved choices in `~/.config/devkit/config.json`. Selected agents, stacks,
+frameworks, hosts, clouds, and optional skill groups determine requirements. The base package groups and GitHub
+remain required. An installed
+CLI or app does not select an integration. Missing or broken selected components still fail; use `dev config show`
+to inspect the choices and `dev setup` in your own terminal to change them.
+
+A framework adds its runtime even when absent from `stacks`. An absent `frameworks` key keeps legacy defaults;
+`[]` selects none. See [Configuration › Frameworks](configuration.md#frameworks). Installation health is separate
+from the skills a particular task requires.
+
 Checks the toolchain, GitHub sign-in and git identity, the workspace (PATH, shell, config, handoff repository with its
 push state, layout), the generated instructions and skills, Claude Code (permission mode, attribution, hooks,
-plugins, MCP servers), Codex (approval and sandbox, hook trust, profile models, MCP servers, plugins), both agents'
-sign-in and quota, an agent turned off in `dev setup` that still holds devkit's rules, hooks, or skills (with the fix,
+plugins, MCP servers), Codex (approval and sandbox, hook trust, profile models, MCP servers, plugins), and sign-in
+and quota for each selected agent. Claude's permission check uses `claude.default_mode`. It also checks an agent
+turned off in `dev setup` that still holds devkit's rules, hooks, or skills (with the fix,
 `dev install --only <agent>`, to run in your terminal), the devkit plugin (validators, and whether each agent's
 installed copy is current), whether every
-required skill is installed for both agents, project settings that switch devkit off, sessions that ran with devkit
+required installation skill is installed for each selected agent, project settings that switch devkit off, sessions that ran with devkit
 in the last 7 days, each git host and cloud you chose (its CLI installed and signed in, checked locally), Docker,
-every enabled scheduled job (loaded, and its last run passed), the desktop apps (Claude Desktop's Code tab runs its
+every enabled scheduled job (loaded, and its last run passed), the selected agents' desktop apps (Claude Desktop's Code tab runs its
 bundled Claude Code on the same `~/.claude` settings, hooks, plugin, and skills; the ChatGPT app's bundled Codex sees
 the same `~/.codex` configuration and has the same plugins enabled), the instruction canary (fails below 90% over 7
-days, per surface, with corrected misses counted apart), the third-party extensions (required ones on, vendor plugins
+days, per surface, with corrected misses counted apart), the selected agents' third-party extensions (required ones on, vendor plugins
 as `dev install` recorded them, skills and MCP servers at their pins, retired ones removed, no project plugin outside
 devkit's catalog; see `dev ext ls`), and free disk. Each failure prints its fix. Exits with `1` if any check fails.
 
@@ -1685,18 +1696,23 @@ installed release, so a session that started before the install runs it too. Run
 | Option | Effect |
 | --- | --- |
 | `--only STEPS` | Re-applies only these steps from the installed copy, without pinning. `STEPS` is a comma-separated list of `config,tools,cli,git,handoff,instructions,skills,claude,codex,desktop,docker,docs,launchd,prompt,shell` |
+| `--skip-packages` | Skips the `tools` step for this invocation, including after repinning. Leaves saved choices unchanged; doctor still requires selected tools, and a later install or update can install them |
 | `--version VERSION` | Switches to a copy pinned by an earlier install, for a rollback: `26.11.2`, or `26.11.2-<commit>`. It checks the copy against its checksums first, and gives a copy that a newer install retired its own `bin/dev` back |
 | `--unverified --why "…"` | Pins the checkout's commit although it is neither a release nor tested; the reason is recorded in the audit trail |
 | `--commit-template yes\|no` | The answer `dev setup` gives for the [commit template](git-and-github.md#the-template-in-your-editor): the git step records it, and `yes` sets `commit.template` in each repository that has none |
 | `--yes`, `-y` | Goes on without asking when Claude Code or Codex sessions that use devkit are still running. Without it, `dev install` lists those sessions first and asks once in a terminal; each must be restarted to load the new hooks, because a running session keeps the hooks of the release it started with |
 
 The `tools` step installs only the Homebrew and npm packages that are missing for your stacks, git hosts, and clouds
-(and the Azure DevOps CLI extension), unless `packages.auto` is off. The `desktop` step builds the Claude Desktop
-extension and opens its installer when it is missing or out of date. The `launchd` step installs the
+(and the Azure DevOps CLI extension), unless `packages.auto` is off. Turning automatic installation off leaves those
+requirements selected. The `desktop` step builds the Claude Desktop extension and opens its installer when Claude
+is selected, Claude Desktop is installed, and the extension is missing or out of date. The `launchd` step installs the
 [scheduled jobs](jobs-and-audit.md). See
 [Getting started › What dev install configures](getting-started.md#what-dev-install-configures).
 
 ### `dev update [--yes | --check [--quiet] [--record]]`
+
+Updates keep your saved installation choices. They reapply the selected integrations and extension overlay rather
+than enabling every supported agent, cloud, or optional skill group.
 
 `dev update --check` tells you, without changing anything, whether a newer devkit release is out and what changes in
 it. Agents may run it.

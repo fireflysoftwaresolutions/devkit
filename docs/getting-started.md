@@ -48,7 +48,7 @@ command and a few presses of Return. Have your Mac's login password and your Git
    selected: press Return. It then asks **Which coding agents do you want to use?** The answers are Claude Code and
    Codex, Claude Code only, or Codex only, with the account each one needs. On a Mac with no projects yet, it then asks **Stacks you
    work in**, with Python and Node / TypeScript already selected. The review shows every answer: press a number from
-   1 to 7 to change a section, or Return to **Apply**.
+   1 to 8 to change a section, or Return to **Apply**.
 7. **Installing on its own.** Each install step shows a spinner while it runs and `✓` when it is done, for 10 to 20
    minutes. These steps ask nothing, so you can leave the Mac. `Ctrl-C` stops the step in front of you and asks
    whether to skip it, try it again, or stop the setup.
@@ -150,7 +150,7 @@ curl -fsSL https://raw.githubusercontent.com/fireflysoftwaresolutions/devkit/mai
 | Option or variable | Effect |
 | --- | --- |
 | `-y`, `--yes` | Start without waiting at the welcome, and accept every default in the setup wizard (the sign-in panels still ask) |
-| `--skip-packages` | Configure only; do not install the toolchain packages for your stacks (Homebrew, git, Python, and the GitHub CLI are still checked) |
+| `--skip-packages` | Skip toolchain package installation for this run, including the installer's `tools` step. Bootstrap prerequisites and the chosen agents' own installers still run; saved requirements and doctor checks stay the same |
 | `--no-setup` | Get devkit and its prerequisites, but do not sign in or run the wizard; run `install.sh` from the checkout later to finish |
 | `-h`, `--help` | Print the usage, the options, and the variables |
 | Any other option | Passed to `dev setup` |
@@ -187,15 +187,16 @@ sign-ins at the end.
    sign-in; whether Claude Code and Codex are installed and signed in; the stacks used by the repositories in
    `~/Development`; the git hosts and clouds this Mac already shows; and Docker (Colima). Then choose **Recommended
    setup**, which asks which agents (and, when no stacks were found, which stacks) and goes to the review, or
-   **Customize**, which walks through all seven sections. If GitHub is not signed in, the wizard offers to run
+   **Customize**, which walks through all eight sections. If GitHub is not signed in, the wizard offers to run
    `gh auth login` first.
 2. **Which agents.** Claude Code and Codex, Claude Code only, or Codex only, with the account each one needs. The
    answer starts at the agents already signed in on this Mac, else both. Only the agents you choose are installed,
-   set up, and signed in: with Claude Code only, Codex is not installed.
+   set up, and signed in. Claude Code only does not require Codex; Codex only does not require Claude Code or its
+   Desktop extension. `dev doctor` uses the same selection, even if the other app or CLI is already on this Mac.
 3. **Sections.** Each question shows a progress bar (`Step 2 of 3 · Stacks`). Every answer starts at the recommended
    or detected value, and the focused option shows what it means under it.
 4. **Review.** Each section on a numbered row, the packages to install, and how long installing takes (20 seconds a
-   package, rounded up to 5 minutes). Press `1` to `7` to open that section; you come back to the review after it,
+   package, rounded up to 5 minutes). Press `1` to `8` to open that section; you come back to the review after it,
    and a changed row shows in yellow with what it was. Choose **Apply**, **Change a section**, or
    **Quit without changes**.
 5. **Applying your plan.** These steps ask nothing: save `~/.config/devkit/config.json`, install the Homebrew and
@@ -252,16 +253,17 @@ show `waits for <step>`; every other step still runs.
 | --- | --- |
 | Workspace | The development folder; the private handoff repository (`<you>/handoff`, or a shared one) |
 | Agents | Claude Code and Codex, Claude Code only, or Codex only; Claude Code's permissions (no prompts, the recommended `bypassPermissions`; `acceptEdits`; `default`); Codex's autonomy (`full`, recommended, or `workspace`, sandboxed) |
-| Stacks | Java and Spring, Python, PHP, Node and TypeScript (Angular, React); on a first run, the stacks found in your repositories are preselected |
-| Git hosts and CI/CD | GitHub (always), GitLab, Bitbucket, Azure DevOps; the ones this Mac already shows are preselected |
-| Clouds | AWS, Microsoft Azure, Google Cloud, DigitalOcean, Kubernetes and Helm, OpenTofu or Terraform; preselected from the config folders and CLIs it finds |
+| Stacks | Java, Python, PHP, Node and TypeScript; on a first run, the stacks found in your repositories are preselected |
+| Frameworks | Angular, React, Next.js, NestJS, Spring Boot, Laravel, Symfony; the review shows the required runtimes |
+| Git hosts and CI/CD | GitHub (always), GitLab, Bitbucket, Azure DevOps; on a first run, the ones this Mac already shows are preselected |
+| Clouds | Providers include AWS, Microsoft Azure, Google Cloud, and DigitalOcean. Infrastructure choices include Kubernetes with Helm and OpenTofu or Terraform. Initial choices come from detected config folders and CLIs |
 | Docker | VM CPUs, memory, and disk (checked against this Mac); start Colima at login? Start Docker when the setup ends? |
 | Automation | Reclaim disk space automatically? Background sync interval; lock Claude Code settings with a managed-settings file? |
 
 | Key | Action |
 | --- | --- |
 | `↑` `↓` (or `j` `k`, `Tab`) | Move between options |
-| `1`–`9` | Jump to an option; on the review, `1`–`7` open that section |
+| `1`–`9` | Jump to an option; on the review, `1`–`8` open that section |
 | `Enter` | Choose, confirm, or keep the value shown |
 | `Space` | Select or clear an option in a list with checkboxes |
 | `a` | Select all options, or none, in a list with checkboxes |
@@ -272,7 +274,8 @@ show `waits for <step>`; every other step still runs.
 
 Run `dev setup` again at any time. On a Mac that is already set up, where a whole `dev install` finished (it wrote
 `~/.local/state/devkit/config-installed.json` and pinned a release that still holds up), it starts from your saved
-choices (adding the hosts and clouds it newly finds) and offers **Keep current setup**; the review marks each section
+choices, including empty selections, and offers **Keep current setup**. Discovery supplies defaults only when a
+choice has not been saved; it does not add a detected host or cloud back after you removed it. The review marks each section
 that would change and shows its old value. `dev config repair`, which the hooks run, only updates that install record
 when it exists, so an install that stopped halfway never counts as set up. Applying an unchanged plan runs
 `dev install` again, which repairs anything that drifted.
@@ -324,7 +327,8 @@ quits with `Nothing changed.` and exit code `1`.
 | docs | always | Vale, lychee, markdownlint-cli2, the Manrope font |
 | security | always | gitleaks, osv-scanner, Trivy, zizmor, Semgrep, Syft, cosign |
 | python | with the Python stack | uv, pyright |
-| node | with the Node stack | pnpm, TypeScript, typescript-language-server, the Angular CLI, the Playwright CLI (with its skills) |
+| node | with the Node stack | pnpm, TypeScript, typescript-language-server, the Playwright CLI (with its skills) |
+| angular | with Angular selected; also with Node in a legacy setup | the Angular CLI |
 | java | with the Java stack | OpenJDK, Maven, Gradle, jdtls |
 | php | with the PHP stack | PHP, Composer, Intelephense |
 | gitlab | with GitLab | glab |
@@ -334,6 +338,23 @@ quits with `Nothing changed.` and exit code `1`.
 
 The groups are marked `# @group` in the [Brewfile](../Brewfile) and in
 [`config/npm-globals.txt`](../config/npm-globals.txt).
+
+Frameworks are separate from language stacks. New setup saves detected frameworks or none. Existing installations
+without a framework setting keep their previous defaults until you customize Frameworks. A saved empty selection
+stays empty despite detection. Angular, React, Next.js, and NestJS require Node; Spring Boot requires Java; Laravel
+and Symfony require PHP. The review shows these requirements even when the runtime was not selected separately.
+Project framework libraries stay in the project. See [Configuration › Frameworks](configuration.md#frameworks).
+
+`dev doctor` requires the base tools and the capabilities you selected. A missing selected tool is a failure; an
+unselected stack, cloud, or agent is not. Selecting Kubernetes requires both kubectl and Helm, plus a configured
+kubectl context. Optional skill groups follow [`skills.groups`](configuration.md#skills). Turning off automatic
+package installation with `packages.auto: false` does not deselect tools: install the selected requirements
+yourself. Docker's start-now and start-at-login choices control when the VM runs, not whether its base packages are
+required.
+
+Skipping packages once with `--skip-packages` also leaves selected requirements unchanged. The skip is not saved,
+so a later ordinary install or update can install missing packages. In the text prompts, press Enter to keep a
+selection or type `none` to clear it; the review shows the resulting choices before applying them.
 
 ### What `dev install` configures
 
@@ -352,7 +373,7 @@ with `dev install --only <step>`, which re-applies it from the copy that is inst
 | `skills` | Fetches third-party skills at pinned commits (your optional groups included) and links them into each agent that is turned on |
 | `claude` | Merges settings, hooks, plugins, and MCP servers into Claude Code; reinstalls the devkit plugin when the installed copy is stale. When Claude Code is turned off in `dev setup`, your own run in a terminal removes what devkit wrote there instead: its `CLAUDE.md`, hooks, status line, skill links, MCP servers, and plugin, and the `bypassPermissions` mode and skipped warning while they hold devkit's value |
 | `codex` | Configures Codex through its own app-server API, writes and trusts the hooks, writes the profiles and the `scout` role, installs plugins and MCP servers, reinstalls a stale devkit plugin. When Codex is turned off in `dev setup`, your own run in a terminal removes what devkit wrote there instead: its `AGENTS.md`, hooks, skill links, MCP servers in `config.toml`, profiles, agent roles, and plugin, and the no-approval and no-sandbox modes while they hold devkit's value; your own keys stay. Only the trust devkit gave (the dev root and the projects it found) goes; a trust you accepted in Codex for another folder stays. A `config.toml` or `hooks.json` linked from a dotfiles folder stays a link, and the file it points to changes |
-| `desktop` | When Claude Desktop is installed: builds the devkit extension for chat and Cowork and opens its installer when it is missing or out of date (choose **Install**); see [Claude Desktop chat and Cowork](tutorials/desktop-chat-and-cowork.md) |
+| `desktop` | When Claude is selected and Claude Desktop is installed: builds the devkit extension for chat and Cowork and opens its installer when it is missing or out of date (choose **Install**); see [Claude Desktop chat and Cowork](tutorials/desktop-chat-and-cowork.md) |
 | `docker` | Adds the Compose and Buildx plugin folder and the keychain credential store to `~/.docker/config.json`; registers Colima at login if you chose that |
 | `docs` | Checks markdownlint, lychee, and Vale, and syncs the Google and write-good Vale styles |
 | `launchd` | Loads devkit's seven scheduled jobs, `com.devkit.job.<name>`: sync (hourly by default), sleep, gc, repair, audit, doctor and lessons ([jobs and audit](jobs-and-audit.md)) |
@@ -588,7 +609,9 @@ newest release when it is newer, then runs `dev install`, which pins that releas
 release already, it says so and changes nothing. A checkout on a branch, which is how you work on devkit itself, gets
 `git pull --ff-only` instead, and `dev install` pins the new commit only after `bin/dev ci --run` passes for it.
 `dev update` refuses to start while tracked files have local changes. Running the installer again also moves a release
-checkout to the newest release.
+checkout to the newest release. Updating reapplies your saved agents, stacks, frameworks, hosts, clouds, optional skill groups,
+and extension choices; it does not turn an omitted integration back on. To change those choices, run `dev setup`
+yourself in Terminal, review the plan, and apply it.
 
 If a new release misbehaves, `dev install --version <previous version>` switches the hooks back to the copy pinned
 before it.
