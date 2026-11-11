@@ -330,20 +330,70 @@ def merge_item(base: str, remote: str, mine: str):
     from the base's, or when the result would drop a line either side added (`lost_lines`)."""
     b, r, m = parse(base), parse(remote), parse(mine)
     out = parse(remote)
-    for k in FIELDS:
-        if k in _BY_RULE:
+    if not _merge_fields(b, r, m, out, FIELDS, LIST_FIELDS, _BY_RULE):
+        return None
+    for part in ("body", "extra"):
+        ok, out[part] = _either(b[part], r[part], m[part])
+        if not ok:
+            return None
+    added = _merge_history(b, r, m, out)
+    return None if added is None else _kept(base, remote, mine, render(out), added)
+
+
+def merge_lesson(base: str, remote: str, mine: str):
+    """This Mac's change to a lesson applied again to the remote's version, for a pull whose rebase stopped on the
+    lesson (the arguments as for merge_item). Two Macs that each recorded a repeat (`dev lesson recur`) both count:
+    the occurrences add up, the Evidence keeps both sides' lines (the remote's first), `last_seen` is the later day,
+    and the changelog and version merge as merge_item's do. Any other field, section, list or front-matter line takes
+    the side that changed it, as in merge_item. -> the lesson's text, or None when both sides changed the same thing
+    differently (the status, a section other than Evidence), when the changelogs do not both start from the base's,
+    or when the result would drop a line either side added."""
+    from . import lessons  # it imports this module
+    b, r, m = lessons.parse(base), lessons.parse(remote), lessons.parse(mine)
+    out = lessons.parse(remote)
+    if not _merge_fields(b, r, m, out, lessons.FIELDS, lessons.LISTS, _BY_RULE + ("occurrences", "last_seen")):
+        return None
+    ok, out["extra"] = _either(b["extra"], r["extra"], m["extra"])
+    if not ok:
+        return None
+    for s in dict.fromkeys([*r["sections"], *m["sections"]]):
+        texts = [x["sections"].get(s, "") for x in (b, r, m)]
+        if s == "Evidence":
+            merged = _merge_text(*(t + "\n" if t else "" for t in texts), union=True)
+            if merged is None:
+                return None
+            out["sections"][s] = merged.strip()
             continue
-        if k in LIST_FIELDS:
+        ok, out["sections"][s] = _either(*texts)
+        if not ok:
+            return None
+    out["meta"]["occurrences"] = r["meta"]["occurrences"] + m["meta"]["occurrences"] - b["meta"]["occurrences"]
+    out["meta"]["last_seen"] = max(r["meta"].get("last_seen") or "", m["meta"].get("last_seen") or "")
+    added = _merge_history(b, r, m, out)
+    return None if added is None else _kept(base, remote, mine, lessons.render(out), added)
+
+
+def _merge_fields(b, r, m, out, fields, lists, by_rule) -> bool:
+    """A record's front-matter fields merged into `out` (the remote's): a list keeps what either side added and loses
+    what either removed; any other field takes the side that changed it. The caller sets the fields in `by_rule`.
+    -> False when both sides changed one field differently."""
+    for k in fields:
+        if k in by_rule:
+            continue
+        if k in lists:
             bl, rl, ml = (_as_list(x["meta"].get(k)) for x in (b, r, m))
             out["meta"][k] = [x for x in rl if x in ml or x not in bl] + [x for x in ml if x not in bl + rl]
             continue
         ok, out["meta"][k] = _either(*(x["meta"].get(k, "") for x in (b, r, m)))
         if not ok:
-            return None
-    for part in ("body", "extra"):
-        ok, out[part] = _either(b[part], r[part], m[part])
-        if not ok:
-            return None
+            return False
+    return True
+
+
+def _merge_history(b, r, m, out):
+    """A record's changelog in `out`: this Mac's entries on top of the remote's, numbered after them, and a version
+    that counts both; `updated` and `updated_by` from the side changed last. -> this Mac's added entries as it wrote
+    them, or None when the changelogs do not both start from the base's."""
     n = len(b["changelog"])
     if any(x["changelog"][len(x["changelog"]) - n:] != b["changelog"] for x in (r, m) if n):
         return None
@@ -353,7 +403,12 @@ def merge_item(base: str, remote: str, mine: str):
     out["meta"]["version"] = version
     later = max((r, m), key=lambda x: x["meta"].get("updated") or "")
     out["meta"]["updated"], out["meta"]["updated_by"] = later["meta"].get("updated", ""), later["meta"].get("updated_by", "")
-    text = render(out)
+    return added
+
+
+def _kept(base: str, remote: str, mine: str, text: str, added) -> str | None:
+    """`text`, or None when it would drop a line either side added (`lost_lines`); this Mac's `added` changelog
+    entries may change, since they are numbered again."""
     renumbered = [ln for e in added for ln in f"- {e}".split("\n")]
     if lost_lines(remote, text, base.splitlines()) or lost_lines(mine, text, base.splitlines() + renumbered):
         return None
@@ -710,16 +765,19 @@ def _stage(rel: str, n: int):
 # that rule only from the commit it rebases onto: a Mac whose own unpushed commit brings the rule would stop on every
 # pull until another Mac pushed it.
 _APPEND_ONLY = re.compile(r"^(log/[^/]+\.md|sessions/.+)$")
+_LESSON_FILE = re.compile(r"^lessons/(.+/)?L-[^/]+\.md$")  # active and archived lessons
 
 
 def _settle(rel: str, retake: bool):
     """The text of a file in conflict during the rebase, or None when devkit cannot settle it. An append-only log: both
-    sides' lines, the remote's first. An item: the remote's version with this Mac's change applied again
-    (`merge_item`); when both changed the same thing, the remote's version if `retake` (the caller applies its change
-    again), else None."""
+    sides' lines, the remote's first. A lesson: both sides' changes (`merge_lesson`), or None. An item: the remote's
+    version with this Mac's change applied again (`merge_item`); when both changed the same thing, the remote's
+    version if `retake` (the caller applies its change again), else None."""
     base, remote, mine = _stage(rel, 1), _stage(rel, 2), _stage(rel, 3)  # in a rebase, 2 is the remote's side
     if _APPEND_ONLY.match(rel):  # a side that deleted the log loses to the one that added lines
         return _merge_text(base or "", remote, mine, union=True) if remote and mine else remote or mine
+    if _LESSON_FILE.match(rel):
+        return merge_lesson(base, remote, mine) if base and remote and mine else None
     if not (rel.startswith("items/") and remote and mine):
         return None
     merged = merge_item(base, remote, mine) if base else None
@@ -865,8 +923,8 @@ def pull_rebase(retake=()) -> tuple:
 
 def rebase_fetched(retake=()) -> tuple:
     """Rebase this Mac's commits on the remote's as last fetched: local git work only, under _rebase_locks, and nothing
-    to do (no lock taken) when the remote has no new commit or the branch follows none. A conflict in an item or an
-    append-only log is settled (`_settle`), one in a note file by file (`_settle_note`: never a stop, so the other
+    to do (no lock taken) when the remote has no new commit or the branch follows none. A conflict in an item, a lesson
+    or an append-only log is settled (`_settle`), one in a note file by file (`_settle_note`: never a stop, so the other
     files still go through); any other conflict aborts the rebase, leaves the commits as they were and records a sync
     problem.
     `retake`: item paths (relative) whose change the caller applies again itself. Never call it while holding

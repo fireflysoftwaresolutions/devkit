@@ -22,7 +22,7 @@ TREE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TREE / "lib"))
 sys.path.insert(0, str(TREE / "tests"))
 
-from devkit import audit, cli, notes, registry, setup, work  # noqa: E402
+from devkit import audit, cli, core, lessons, notes, registry, setup, work  # noqa: E402
 from test_work import A, B, TwoMacs, _git  # noqa: E402
 
 PID = "acme/api"
@@ -303,6 +303,43 @@ class AppendOnlyLogTests(unittest.TestCase):
             for rel, heading in logs.items():
                 self.assertEqual(_git(m.here, "show", f"origin/main:{rel}").splitlines(),
                                  [heading, "", "- from the other Mac", "- from this Mac"], rel)
+
+
+@contextlib.contextmanager
+def lessons_of(root: Path):
+    # The lessons of one Mac's handoff repository (TwoMacs points the rest of devkit at it)
+    with mock.patch.object(lessons, "LESSONS", root / "lessons"), mock.patch.object(lessons, "HANDOFF", root):
+        yield
+
+
+class LessonConflictTests(unittest.TestCase):
+    def test_two_macs_recording_a_repeat_of_the_same_lesson_both_count_after_the_sync(self):
+        # Each Mac recorded a repeat of the same lesson since the last pull (`dev lesson recur`), as two Macs did on
+        # the live handoff repository: both changed its occurrences, Evidence, changelog and version. This Mac's sync
+        # finishes and pushes a lesson that counts both repeats, keeps both evidence lines, and lists both changelog
+        # entries, this Mac's on top, numbered after the other Mac's.
+        with TwoMacs() as m, lessons_of(m.here), mock.patch.object(lessons, "STATE", m.base / "state"), \
+                mock.patch.object(lessons, "USAGE_LOCAL", m.base / "state" / "lessons-usage.json"), \
+                mock.patch.dict(core.CFG, {"ai": {"enabled": False}}):
+            lid = lessons.add("global", "Migration ran twice", files=["db/**"], happened="it ran twice in CI",
+                              cause="the job retried a step", prevention="make the migration idempotent",
+                              a=A)["meta"]["id"]
+            _git(m.here, "push", "-q")
+            _git(m.other, "pull", "-q")
+            with m.on_other(), lessons_of(m.other):
+                lessons.recur(lessons.find(lid), "CI run 8 on the other Mac", a=B)
+                _git(m.other, "push", "-q")
+            lessons.recur(lessons.find(lid), "CI run 7 on this Mac", a=A)
+            warned = sync()
+            self.assertEqual(m.stopped(), [], m.problem())
+            self.assertEqual(_git(m.here, "rev-list", "--count", "@{u}..HEAD"), "0", m.problem() + warned)
+            pushed = lessons.parse(_git(m.here, "show", f"origin/main:lessons/global/{lid}.md") + "\n")
+        self.assertEqual((pushed["meta"]["occurrences"], pushed["meta"]["version"]), (3, 3))
+        evidence = [ln.split(": ", 1)[1] for ln in pushed["sections"]["Evidence"].splitlines() if ln.startswith("- ")]
+        self.assertEqual(evidence, ["CI run 8 on the other Mac", "CI run 7 on this Mac"])
+        self.assertEqual([(e.split(" · ")[0], e.split("why: ")[-1]) for e in pushed["changelog"]][:2],
+                         [("v3", "CI run 7 on this Mac"), ("v2", "CI run 8 on the other Mac")])
+        self.assertEqual(len(pushed["changelog"]), 3)
 
 
 if __name__ == "__main__":
