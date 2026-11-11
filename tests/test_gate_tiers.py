@@ -662,6 +662,25 @@ class UnknownProgramTests(GateCase):
                 self.assertEqual(self.acts(cmd), [])
         self.assertEqual(self.acts("a=($(gh pr merge 12))"), [("merge", 2, "12")])  # what it runs still counts
 
+    def test_a_case_statements_word_and_patterns_are_no_program(self):
+        # the tokenizer splits `case "$x" in a) …` at `)`, which left `case $x in a` as a segment and `$x` as its
+        # program; a later arm's pattern (`*.md)`, `$y)`) became a segment too. The shell only matches them.
+        for cmd in ('case "$x" in a) echo a;; esac',
+                    'case "$f" in *.py) echo p;; *.md|$y) echo m;; esac',
+                    'for f in a b; do case "$f" in a) echo a;; esac; done',
+                    'case $x in\n  (a) echo a ;;\n  b|c) echo b ;;\nesac',
+                    'case $(git rev-parse --abbrev-ref HEAD) in main) echo m;; esac'):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.acts(cmd), [])
+                self.assertIsNone(self.member(cmd))
+        # what an arm runs still counts, and so do a program an arm names at run time and the word's substitution
+        self.assertEqual(self.acts('case "$x" in a) echo a;; b) gh pr merge 12;; esac'), [("merge", 2, "12")])
+        self.assertEqual([a for a, _, _ in self.acts('case "$x" in a) $y pr merge 12;; esac')], ["unknown"])
+        self.assertEqual(self.acts('case "$(gh pr merge 12)" in a) echo a;; esac'), [("merge", 2, "12")])
+        force = 'case "$x" in a) git push --force;; esac'
+        self.assertIn("push-destructive", [a for a, _, _ in self.acts(force)])
+        self.assertIn("git push --force", self.member(force) or "")
+
     def test_the_main_session_is_told_how_to_clear_it_and_a_grant_of_that_command_opens_it(self):
         target = self.acts("$X pr merge 12")[0][2]
         why = self.main("$X pr merge 12")

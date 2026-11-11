@@ -5147,6 +5147,26 @@ class _Shell:
 _FIND_RUNS = frozenset({"-exec", "-execdir", "-ok", "-okdir"})  # find's primaries that run a command
 
 
+def _case_head(argv) -> bool:
+    """True when a segment's words are the head of a case statement: `case WORD in` with the first pattern when the
+    tokenizer ended the segment at its `)` or `|` (`case "$x" in a) …`), or `case WORD` before a newline (`case
+    $(…)` too, cut at its `(`). The shell matches WORD and runs nothing there; a substitution in WORD is read as one
+    (_expansions)."""
+    return argv[:1] == ["case"] and (len(argv) == 2 or (len(argv) in (3, 4) and argv[2] == "in"))
+
+
+def _case_pattern(segs, k) -> bool:
+    """True when segment k of split_commands(ops=True) is a pattern of a case arm, which the shell matches and never
+    runs: one word that ends at `)` or `|`, right after the statement's head, an arm's end (`;;`, `;&`, `;;&`) or
+    another pattern (`b|$y)`, `*.md)`). A segment of more words is never a pattern, so no command is read as one."""
+    if not k or len(segs[k][0]) != 1 or not (segs[k][2] == "|" or segs[k][2].startswith(")")):
+        return False
+    prev, op = segs[k - 1][0], segs[k - 1][2]
+    head = "case" in prev and not _unwrap(prev)
+    return ";;" in op or ";&" in op or (op == "|" and (head or _case_pattern(segs, k - 1))) or \
+        (head and op in ("(", ";") and prev[-1] == "in")
+
+
 def _unwrap(argv, more: bool = False, stop=()):
     """The command a segment really runs: without env/sudo/nohup prefixes, shell keywords (`then`, `do`, `{`, `!`),
     `timeout N`, `uv run`, the package runners (npx, npm exec|x, bun x, yarn exec, `pnpm|yarn <claude|codex>`: F3 of
@@ -5163,6 +5183,8 @@ def _unwrap(argv, more: bool = False, stop=()):
             argv = argv[3:]
         elif argv[0] == "function" and len(argv) > 2:  # `function f { gh …; }`: the body's first command
             argv = argv[2:]
+        elif _case_head(argv):  # `case "$x" in a)`: the shell matches the word, it runs no program
+            return []
         elif argv[0] in _RESERVED:
             argv = argv[1:]
         elif n in ("timeout", "gtimeout"):
@@ -11176,6 +11198,8 @@ def _text_actions(text, cwd, depth=0, from_code=False, expand=True):
     for k, (argv0, _, op, herestrs) in enumerate(segs):
         if k and segs[k - 1][2] == "(" and segs[k - 1][0] and _ARRAY_OPEN.match(segs[k - 1][0][-1]):
             continue  # the elements of `arr=( … )` or `arr+=( … )` are words, not a command
+        if _case_pattern(segs, k):
+            continue  # `*.md)`, `a|$y)`: a case arm's pattern is matched, not run
         argv = _unwrap(argv0)
         # a program the shell names only when it runs (RT1): `env -S '…'` splits a string into a command, `$(…)` or
         # backticks in the command word print its name, a variable or a glob expands to it
