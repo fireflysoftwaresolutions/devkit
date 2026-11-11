@@ -2932,12 +2932,16 @@ def _guard_in_context(agent: str, data: dict, held: dict):
             held["verdict"], held["rule"] = ("deny", why), _lane_rule(why)
             _close_call(data)
             from . import audit
-            rid = f"hooks:{held['rule']}"
+            # a lane refusal is named by the guard site that made it and its command word (a team change, a program
+            # named at run time, a lane call in a chain), so each has a bug fingerprint of its own; the hook's rule
+            # names one only when no site did (the check itself failed)
+            rid, word = g.refusal_of(("deny", why)) if held["rule"] == "crew-lane" else ("", "")
+            rid = rid or f"hooks:{held['rule']}"
             audit.record("guard.deny", (data.get("tool_input") or {}).get("command", "")[:200], why, "deny",
                          tool=data.get("tool_name") or "", rule=held["rule"], agent_id=data.get("agent_id") or "",
                          refusal_id=rid)
             held["recorded"] = True
-            told = _with_pitfalls(agent, data, _refusal_with_bug(rid, "", why, data), why, skip)
+            told = _with_pitfalls(agent, data, _refusal_with_bug(rid, word, why, data), why, skip)
             print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
                                                      "permissionDecisionReason": told}}))
             return

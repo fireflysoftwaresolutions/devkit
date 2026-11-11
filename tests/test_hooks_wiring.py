@@ -215,6 +215,23 @@ class RefusalIdTests(WiringCase):
         self.assertEqual([(v["type"], v["fingerprint"], v["impact"]) for v in votes], [("vote", fp, "detoured")])
         self.assertEqual(self.refusal_ids(), [self.rid])
 
+    def test_a_members_lane_refusal_is_named_by_its_guard_site_and_command_word(self):
+        # every lane refusal was recorded as hooks:crew-lane with no command word, so refusals as different as a team
+        # change, a program named at run time and a lane call in a chain shared one bug fingerprint (#20)
+        pg.start("Work", plan=["parser"])
+        launch("a_tank", "devkit:tank", "Tank: parser")
+        cases = (("dev crew brief tank --step api", "crew_shell_verdict:team", "dev"),
+                 ("$X pr merge 12", "crew_shell_verdict:member-gate", "$X"),
+                 ("dev crew inbox; ruff check lib", "crew_shell_verdict:lane", "ruff"))
+        for cmd, _, _ in cases:
+            with self.subTest(cmd=cmd):
+                self.assertIsNotNone(self.deny(self.hook("guard", self.bash(cmd, aid="a_tank"), real_guard=True)))
+        self.assertEqual(self.refusal_ids(), [rid for _, rid, _ in cases])
+        self.assertEqual([(x["refusal"], x["word"]) for x in bugs.ledger("s1") if "refusal" in x],
+                         [(rid, bugs.public_word(word)) for _, rid, word in cases])
+        self.assertEqual([bugs._refusal_id(rid) for _, rid, _ in cases], [rid for _, rid, _ in cases])  # reportable
+        self.assertEqual({r["evidence"].get("rule") for r in self.records("guard.deny")}, {"crew-lane"})
+
     def test_a_refusal_the_hook_makes_is_named_by_the_hook(self):
         forged = self.bash("echo '{}' | dev hook prompt --agent claude")
         self.assertIsNotNone(self.deny(self.hook("guard", forged, real_guard=True)))
