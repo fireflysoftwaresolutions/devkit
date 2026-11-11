@@ -5,6 +5,12 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
 
 ## [Unreleased]
 
+## [26.11.14] - 2026-11-10
+
+This release repairs Codex crew coordination and verification evidence. Native interruptions, resumed work, and
+late answers retain their original ownership. A bounded foreground wait still requires an active host turn;
+installed-host acceptance remains a separate check.
+
 ### Fixed
 
 - Codex crew state reads native interruption events so a stopped member can release its lane. When child work
@@ -28,6 +34,9 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
 - `dev canary` displays recorded Codex crew results separately when no main-session replies have been scored.
 - Late answers to a stopped Codex child retain its identity instead of reaching another active task with the same
   crew role. The original child receives its answer when it resumes.
+- Distinct Codex grant messages in the same host turn keep separate evidence, verified against each complete
+  message in the session's own transcript. A corrected grant is no longer discarded as a repeated turn; identical
+  text and older turn-only evidence remain protected against reuse. Claude prompt identity is unchanged.
 
 ## [26.11.13] - 2026-11-10
 
