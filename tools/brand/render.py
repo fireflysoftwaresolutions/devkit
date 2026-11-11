@@ -7,11 +7,22 @@ Built from the Firefly brand's own elements (brand-kit: palette, Manrope, the sp
 it never redraws or types the Firefly logo. Requires rsvg-convert (brew librsvg), cwebp (brew webp) and the Manrope
 font (brew install --cask font-manrope). Run from anywhere:  python3 tools/brand/render.py
 Outputs: assets/src/*.svg (sources), plugin/assets/{icon,logo}.png, docs/images/hero-{dark,light}.{svg,webp}
+
+Text is set through fontconfig, with the font folders named by absolute path (font_env), so the banners come out in
+Manrope whatever HOME and Pango backend the shell has. The render stops before drawing anything when fontconfig cannot
+find a brand font, with the folders it searched (check_fonts): install the font there and run again.
 """
+import atexit
+import os
+import pwd
+import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+BRAND_FONTS = ("Manrope",)
+INSTALL = "brew install --cask font-manrope"
 CHARCOAL, PAPER, AMBER, INK, MUTED, GOLD, STONE, GRAPHITE, LINE = (
     "#10110F", "#F3F1EB", "#FFB34A", "#272820", "#62645B", "#855414", "#BFB8AB", "#474A42", "#D8D4CA")
 
@@ -120,11 +131,61 @@ def lockup_svg(theme="dark"):
 </svg>"""
 
 
+def font_dirs() -> list:
+    """The font folders, by absolute path: the system's, and the user's of this account and of $HOME. fontconfig's
+    own configuration names the user's as ~/Library/Fonts, which a temporary HOME (an agent sandbox, the test suite)
+    leaves empty, and Pango's CoreText backend lists no user font in some agent sessions."""
+    homes = [Path.home()]
+    try:
+        homes.insert(0, Path(pwd.getpwuid(os.getuid()).pw_dir))
+    except (KeyError, OSError):
+        pass
+    dirs = [Path("/System/Library/Fonts"), Path("/Library/Fonts")] + [h / "Library" / "Fonts" for h in homes]
+    return [d for d in dict.fromkeys(dirs) if d.is_dir()]
+
+
+_FONT_ENV = {}
+
+
+def font_env() -> dict:
+    """The environment rsvg-convert and fc-match run in: Pango on fontconfig (PANGOCAIRO_BACKEND=fc) with a
+    configuration (FONTCONFIG_FILE) that adds font_dirs() to the system's, the fonts.conf of rsvg-convert's prefix."""
+    if not _FONT_ENV:
+        tool = shutil.which("rsvg-convert")
+        prefixes = ([Path(tool).parent.parent] if tool else []) + [Path("/opt/homebrew"), Path("/usr/local")]
+        system = next((p / "etc" / "fonts" / "fonts.conf" for p in prefixes if (p / "etc" / "fonts" / "fonts.conf").is_file()), None)
+        folder = Path(tempfile.mkdtemp(prefix="devkit-brand-fonts-"))
+        atexit.register(shutil.rmtree, folder, True)
+        conf = folder / "fonts.conf"
+        conf.write_text('<?xml version="1.0"?>\n<!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">\n<fontconfig>\n'
+                        + (f'  <include ignore_missing="yes">{system}</include>\n' if system else "")
+                        + "".join(f"  <dir>{d}</dir>\n" for d in font_dirs())
+                        + f"  <cachedir>{folder / 'cache'}</cachedir>\n</fontconfig>\n")
+        _FONT_ENV.update(os.environ, PANGOCAIRO_BACKEND="fc", FONTCONFIG_FILE=str(conf))
+    return dict(_FONT_ENV)
+
+
+def check_fonts(families=BRAND_FONTS):
+    """Stop before anything is drawn when fontconfig resolves a brand family to another one (rsvg-convert would set
+    the text in that fallback without a word)."""
+    if not shutil.which("fc-match"):
+        raise SystemExit("render: needs fontconfig's fc-match to check the brand fonts (brew install fontconfig)")
+    for family in families:
+        res = subprocess.run(["fc-match", "-f", "%{family}", family], capture_output=True, text=True, env=font_env())
+        names = [n.strip() for n in res.stdout.split(",") if n.strip()]
+        if family.lower() not in (n.lower() for n in names):
+            raise SystemExit(f"render: fontconfig finds no {family} font, so the text would be set in "
+                             f"{names[0] if names else 'a fallback'}. Searched: {', '.join(map(str, font_dirs()))}. "
+                             f"Install it in one of them ({INSTALL}) and run again.")
+
+
 def run(*args):
-    subprocess.run([str(a) for a in args], check=True)
+    """A tool of the render (rsvg-convert, cwebp) in font_env(), so text is set in the fonts check_fonts found."""
+    subprocess.run([str(a) for a in args], check=True, env=font_env())
 
 
 def main():
+    check_fonts()
     src = ROOT / "assets" / "src"
     imgs = ROOT / "docs" / "images"
     passets = ROOT / "plugin" / "assets"
