@@ -2634,6 +2634,30 @@ def install_commands(packages) -> str:
     return " · ".join(cmds + [n for k, n in pk if k == "script"])
 
 
+# The native modules devkit loads: XML and launchd plists (pyexpat), HTTPS (ssl), SQLite, gzip (zlib), and ctypes.
+PY_NATIVE = ("pyexpat", "ssl", "sqlite3", "zlib", "ctypes")
+PY_FIX = ("use a Python whose native modules load, ahead of this one on the PATH: `uv python install 3.13 --default` "
+          "puts one in ~/.local/bin; then open a new terminal and run dev doctor again")
+
+
+def python_runtime_check(modules=PY_NATIVE) -> tuple:
+    """`dev doctor`'s row for the Python that runs devkit: each native module devkit loads, imported in a process of
+    the same interpreter, so one that cannot load is named with its error instead of crashing the command that needs
+    it. A Homebrew Python built against a newer macOS SDK than the system's can fail this way: its pyexpat needs a
+    newer /usr/lib/libexpat than the Mac has."""
+    code = ("import importlib, sys\n"
+            "for m in sys.argv[1:]:\n"
+            "    try:\n"
+            "        importlib.import_module(m)\n"
+            "    except Exception as e:\n"
+            "        print(m + ': ' + (str(e).splitlines() or [type(e).__name__])[0][:160])\n")
+    rc, out, err = sh([sys.executable, "-I", "-S", "-c", code, *modules], timeout=60)
+    broken = [ln for ln in out.splitlines() if ln.strip()] if rc == 0 else [f"the check did not run: {err[:160]}"]
+    where = f"{tilde(sys.executable)} {sys.version.split()[0]}"
+    detail = f"{where} · cannot load {'; '.join(broken)}" if broken else f"{where} · {', '.join(modules)} load"
+    return "Workspace", "Python runtime", not broken, detail, PY_FIX
+
+
 def tools_check(stacks, have=None) -> tuple:
     """doctor's required-tools row: the base groups' tools on every Mac, and a stack's tools (its language server
     included) only when the developer chose the stack (config `stacks`, which the wizard records). `claude` and
@@ -2716,6 +2740,7 @@ def doctor() -> int:
     def check(group, name, ok, detail="", fix=""):
         results.append((group, name, ok, detail, fix))
 
+    check(*python_runtime_check())
     check(*tools_check(CFG.get("stacks") or []))
     rc, out, err = sh(["gh", "auth", "status"], timeout=20)
     gh_ok = rc == 0
@@ -2878,15 +2903,19 @@ def doctor() -> int:
     rc, out, _ = sh(["docker", "compose", "version", "--short"], timeout=20)
     check("Docker", "compose plugin", rc == 0, out or "not found", "dev install --only docker")
 
-    from . import jobs as _jobs
-    for jname, jj in _jobs.jobs().items():
-        if not jj.get("enabled"):
-            continue
-        lr = _jobs.last_run(jname) or {}
-        okj = _jobs.loaded(jname) and lr.get("rc") in (0, None)
-        check("Automation", f"job {jname}", okj, f"{_jobs.schedule_text(jj)} · last " +
-              (core.ago(lr["start"]) + (" ok" if lr.get("rc") == 0 else f" exit {lr.get('rc')}") if lr else "never"),
-              f"dev jobs show {jname}")
+    try:  # a job's state that cannot be read is a failed row, never a crash of the whole doctor
+        from . import jobs as _jobs
+        for jname, jj in _jobs.jobs().items():
+            if not jj.get("enabled"):
+                continue
+            lr = _jobs.last_run(jname) or {}
+            okj = _jobs.loaded(jname) and lr.get("rc") in (0, None)
+            check("Automation", f"job {jname}", okj, f"{_jobs.schedule_text(jj)} · last " +
+                  (core.ago(lr["start"]) + (" ok" if lr.get("rc") == 0 else f" exit {lr.get('rc')}") if lr else "never"),
+                  f"dev jobs show {jname}")
+    except Exception as e:
+        check("Automation", "scheduled jobs", False, f"could not be read: {type(e).__name__}: {str(e)[:160]}",
+              "see the Python runtime row above; then dev jobs")
     from . import audit
     for row in audit.publish_checks():
         check(*row)

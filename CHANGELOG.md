@@ -3,6 +3,23 @@
 All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH restarts at 0 each month); tags are
 `vYY.MM.PATCH`. Sections follow [Keep a Changelog](https://keepachangelog.com/).
 
+## [26.11.13] - 2026-11-10
+
+This release keeps `dev doctor` working on a Python that cannot load one of its native modules, and makes sure a
+note from another agent session reaches a session that is idle.
+
+### Fixed
+
+- **`dev doctor` crashed on a Python whose XML module does not load.** A teammate's Homebrew Python 3.15.2 could not
+  load `pyexpat` (built against a newer macOS SDK than the Mac's own `libexpat`), and the jobs module needed it as it
+  loaded. The jobs module now loads without it, the doctor's first row checks that the Python running devkit can load
+  `pyexpat`, `ssl`, `sqlite3`, `zlib`, and `ctypes`, and names each one that fails with the fix, and a jobs check that
+  fails is a failed row instead of a crash.
+- **A note from another session waited unread in an idle session.** A plain note to a session with no wait armed
+  notified nobody, so it was read only at the developer's next message. It now sends a desktop notification (at most
+  one every ten minutes for each session), `dev session tell` says which sessions are not waiting, and a Claude Code
+  session's end-of-turn checklist asks for `dev watch --wait --standby` while other sessions run on this Mac.
+
 ## [26.11.12] - 2026-11-10
 
 This release repairs Codex session context, crew isolation, message delivery, and continuity. Runtime changes are

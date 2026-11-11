@@ -885,7 +885,9 @@ def _fan_out(view: _View, me: _Me, keys: list, msg: dict, notify_ok) -> tuple:
 
 def send(sender: dict, target: str, text: str, kind="note", urgent=False, now=None) -> dict:
     """A note or a question to the sessions a target names -> {"id", "to": [key], "skipped": [{"key", "why"}],
-    "notified": [key]}. The sender (identity.speaker().as_dict()) must be a main session."""
+    "notified": [key], "unarmed": [key]}. A recipient with no wait armed ("unarmed") reads it only at its next
+    prompt, so the developer gets a desktop notification for it, at most once per NOTIFY_EVERY per recipient. The
+    sender (identity.speaker().as_dict()) must be a main session."""
     view = _View(now)
     now = view.now
     me = _sender(sender, view)
@@ -902,7 +904,7 @@ def send(sender: dict, target: str, text: str, kind="note", urgent=False, now=No
         raise
     mid = _reserve(me, now)
     msg = _message(mid, kind, me.frm(), str(target).strip(), body, now, urgent=urgent)
-    to, skipped, notified = _fan_out(view, me, keys, msg, kind == "question" or urgent)
+    to, skipped, notified = _fan_out(view, me, keys, msg, True)  # a note too: nothing else tells an idle session
     skipped = gone + skipped
     _record_sent(me, {"id": mid, "ts": now, "kind": kind, "target": msg["target"], "to": to, "skipped": skipped,
                       "answered_by": [], "closed": False})
@@ -914,7 +916,23 @@ def send(sender: dict, target: str, text: str, kind="note", urgent=False, now=No
                 f"{view.git(k).get('branch') or rec.get('branch') or '-'}: {_one_line(body)}")
     _audit("peer.send", mid, f"{kind} to {len(to)} session(s), {len(skipped)} skipped", kind=kind, count=len(to),
            recipients=to)
-    return {"id": mid, "to": to, "skipped": skipped, "notified": notified}
+    return {"id": mid, "to": to, "skipped": skipped, "notified": notified,
+            "unarmed": [k for k in to if not view.waiting(k)]}
+
+
+def standby_hint(agent: str, sid: str, now=None) -> str:
+    """The end of a main-session turn while other agent sessions run on this Mac and nothing waits here: a note one
+    of them sends reaches this session only at the developer's next message, unless a standby wait wakes it. -> the
+    reminder, or "" when no other session is live or a wait of this session is."""
+    view = _View(now)
+    me = view.current(key(agent, sid))
+    others = [k for k in view.keys() if view.current(k) == k and k != me and view.reach(k) == "live"]
+    if not others or view.waits().get(_split(me)):
+        return ""
+    n = len(others)
+    return (f"{n} other agent session{'s run' if n > 1 else ' runs'} on this Mac and nothing waits here, so a note "
+            f"from {'them' if n > 1 else 'it'} reaches you only at the developer's next message: before you end the "
+            f"turn, run `dev watch --wait --standby` with Bash run_in_background")
 
 
 def _boxes(view: _View, k: str, strict: bool = False) -> list:

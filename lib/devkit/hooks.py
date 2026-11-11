@@ -1098,6 +1098,14 @@ def turn_checklist(agent: str, data: dict, sess: dict) -> list:
             items.append((rule, msg))
     for rule, why in _watch_reasons(agent, dict(data, stop_hook_active=False)):  # after a push, members at work
         items.append((rule, why.replace("devkit: ", "", 1)))
+    if agent == "claude" and not data.get("agent_id") and not any(rule in ("watch", "wait") for rule, _ in items):
+        try:  # other sessions on this Mac and nothing armed: a note from one would wait for the developer's next message
+            from . import peers
+            hint = peers.standby_hint(agent, data.get("session_id") or "")
+            if hint:
+                items.append(("standby", hint))
+        except Exception:
+            _log(f"checklist standby: {traceback.format_exc()[-300:]}")
     return items
 
 

@@ -297,5 +297,33 @@ class BranchCleanupCheckTests(unittest.TestCase):
         self.assertIn("off in other/lib, which you do not administer", rows[0][3])
 
 
+LIB = Path(__file__).resolve().parents[1] / "lib"
+
+
+class BrokenPythonTests(unittest.TestCase):
+    # a teammate's `dev doctor` crashed: their Homebrew Python could not load pyexpat (a build against a newer macOS
+    # SDK than their system libexpat), and jobs.py imported plistlib, which needs it, as the module loaded
+
+    def without_pyexpat(self, code):
+        """Run `code` in a Python whose pyexpat cannot load, with devkit's lib on its path."""
+        return subprocess.run([sys.executable, "-I", "-S", "-c", "import sys\nsys.modules['pyexpat'] = None\n"
+                               f"sys.path.insert(0, {str(LIB)!r})\n" + code], capture_output=True, text=True,
+                              timeout=60)
+
+    def test_the_jobs_module_loads_where_pyexpat_does_not(self):
+        p = self.without_pyexpat("from devkit import jobs\nprint(sorted(jobs.jobs())[:1])")
+        self.assertEqual(p.returncode, 0, p.stderr[-400:])
+
+    def test_doctor_names_each_native_module_that_does_not_load_with_the_fix(self):
+        group, name, ok, detail, fix = setup.python_runtime_check(modules=("zlib", "devkit_no_such_native_module"))
+        self.assertFalse(ok)
+        self.assertIn("devkit_no_such_native_module", detail)
+        self.assertNotIn("zlib:", detail)
+        self.assertIn("uv python install", fix)
+
+    def test_doctor_passes_a_python_whose_native_modules_load(self):
+        self.assertTrue(setup.python_runtime_check(modules=("zlib", "json"))[2])
+
+
 if __name__ == "__main__":
     unittest.main()

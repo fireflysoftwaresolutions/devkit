@@ -329,8 +329,7 @@ class SendTests(PeerCase):
         self.assertEqual(len(self.notified), 1)
         self.assertIn("acme/api asks session acme/api · main: May I rebase main now?", self.notified[0][1])
         peers.send(sender(CLAUDE_A), "@0199a213-81", "And the tag?", kind="question", now=self.now + 60)
-        peers.send(sender(CLAUDE_A), "@0199a213-81", "a plain note", now=self.now + 700)
-        self.assertEqual(len(self.notified), 1)
+        self.assertEqual(len(self.notified), 1)  # once per ten minutes for one recipient
         r = peers.send(sender(CLAUDE_A), "@0199a213-81", "Urgent: stop pushing", urgent=True, now=self.now + 700)
         self.assertEqual(r["notified"], [b])
         watch.LIVE.mkdir(parents=True)
@@ -340,6 +339,34 @@ class SendTests(PeerCase):
         r = peers.send(sender(CLAUDE_A), "@7be0a41d", "Which port?", kind="question", now=self.now + 800)
         self.assertEqual(r["notified"], [])  # its wait wakes it: no notification
         self.assertEqual(len(self.notified), 2)
+
+
+    def arm(self, sid, wid="w1", standby=False):
+        watch.LIVE.mkdir(parents=True, exist_ok=True)
+        (watch.LIVE / f"{wid}.json").write_text(json.dumps({
+            "id": wid, "agent": "claude", "session": sid, "consumer": "main", "pid": os.getpid(), "state": "live",
+            "started": self.now, "expires": self.now + 3600, **({"standby": True} if standby else {})}))
+
+    def test_a_note_to_a_session_with_no_wait_notifies_the_developer_and_tells_the_sender(self):
+        # the kit-consulting session's note reached an idle devkit session only when the developer wrote: a plain
+        # note notified nobody, and its sender could not tell that nothing would wake the other session
+        a, b, c = self.three_sessions()
+        r = peers.send(sender(CLAUDE_A), "@0199a213-81", "doctor crashes on a teammate's Python", now=self.now)
+        self.assertEqual((r["notified"], r["unarmed"]), ([b], [b]))
+        self.assertIn("doctor crashes on a teammate's Python", self.notified[0][1])
+        self.arm(CLAUDE_B)
+        r = peers.send(sender(CLAUDE_A), "@7be0a41d", "the report is in the scratch folder", now=self.now + 800)
+        self.assertEqual((r["notified"], r["unarmed"]), ([], []))  # its wait wakes it
+
+    def test_the_turn_end_asks_for_a_standby_wait_while_other_sessions_run(self):
+        self.three_sessions()
+        self.assertIn("dev watch --wait --standby", peers.standby_hint("claude", CLAUDE_A, now=self.now))
+        self.arm(CLAUDE_A, standby=True)
+        self.assertEqual(peers.standby_hint("claude", CLAUDE_A, now=self.now), "")
+
+    def test_no_standby_wait_is_asked_of_the_only_session(self):
+        self.session("claude", CLAUDE_A, pid=101)
+        self.assertEqual(peers.standby_hint("claude", CLAUDE_A, now=self.now), "")
 
 
 class AnswerTests(PeerCase):

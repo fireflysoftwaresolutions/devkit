@@ -1,6 +1,6 @@
 {
   "name": "devkit",
-  "version": "26.11.12",
+  "version": "26.11.13",
   "description": "Every repo in its place, every agent on the same page: project context and handoff notes, tasks, a portfolio overview, local-first delivery (one push, one CI run), backend methodology, managed worktrees and a guard.",
   "author": {
     "name": "Firefly Software Solutions Inc.",
