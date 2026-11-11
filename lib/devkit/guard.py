@@ -7293,6 +7293,24 @@ _APP_SCRATCH = contextvars.ContextVar("devkit_codex_scratch", default=None)
 _CODEX_SCRATCH_EVENT = contextvars.ContextVar("devkit_codex_scratch_event", default=False)
 
 
+def _codex_registered_checkout(rec, cwd):
+    """Accept an app event's checkout only from independently registered, canonical repository facts."""
+    from .registry import main_of
+    top, pid = rec.get("top"), rec.get("project")
+    if not isinstance(pid, str) or not pid:
+        return False
+    for path in (top, cwd):
+        if not isinstance(path, str) or not os.path.isabs(path) or \
+                path != os.path.normpath(path) or path != real(path) or not Path(path).is_dir():
+            return False
+    if not is_under(cwd, top) or core.gitout(cwd, "rev-parse", "--show-toplevel") != top:
+        return False
+    main = main_of(Path(top))
+    canonical = str(core.canonical_path(pid))
+    return bool(main and real(main) == canonical and current_project(top) == pid and
+                (top == canonical or is_under(top, core.WT_ROOT)))
+
+
 def _codex_scratch_registration(agent, data):
     """Authorize a registered Codex session's folders for this hook event, never from tool workdir.
 
@@ -7308,10 +7326,12 @@ def _codex_scratch_registration(agent, data):
         rec = core.read_json(progress.session_path(agent, sid), {})
         if isinstance(rec, dict) and rec.get("agent") == agent and rec.get("session") == sid:
             root = rec.get("cwd")
-            if isinstance(root, str) and os.path.isabs(root) and root == os.path.normpath(root) == real(root) and \
-                    data.get("cwd") == root:
+            if isinstance(root, str) and os.path.isabs(root) and root == os.path.normpath(root) == real(root):
                 app = is_under(root, core.HOME / "Documents" / "Codex") and \
                     root != real(core.HOME / "Documents" / "Codex")
+                bound_checkout = data.get("cwd") != root
+                if bound_checkout and (not app or not _codex_registered_checkout(rec, data.get("cwd"))):
+                    return None
                 if not app:
                     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", sid):
                         return None
@@ -7323,12 +7343,17 @@ def _codex_scratch_registration(agent, data):
                             not (top == str(core.canonical_path(pid)) or is_under(top, core.WT_ROOT)):
                         return None
                 aid, member = data.get("agent_id"), ""
+                if bound_checkout and aid is not None and not isinstance(aid, str):
+                    return None
                 if aid:
                     from . import hooks
                     run, lane = progress.lane_of(agent, sid, aid) if isinstance(aid, str) else (None, None)
                     if lane:
                         member = hooks._member_folder(run, aid)
-                    if not app and (not run or run.get("agent") != agent or run.get("session") != sid):
+                    if (not app or bound_checkout) and \
+                            (not run or run.get("agent") != agent or run.get("session") != sid):
+                        return None
+                    if bound_checkout and run.get("project") != rec.get("project"):
                         return None
                     if not re.fullmatch(r"[A-Za-z0-9_-]+", member):
                         member = ""

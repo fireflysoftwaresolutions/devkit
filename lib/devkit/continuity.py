@@ -886,7 +886,10 @@ def brief(agent: str, sid: str, reason: str = "manual", chat: bool = False, now=
     rec = read(agent, sid) or {}
     cp = rec.get("checkpoint") or {}
     run = _live_run(agent, sid)
-    itself = provider is None and not chat
+    # The Codex CLI supplies its provider even when reading its own session.
+    # Keep pending requests local: a provider match alone also includes peers.
+    itself = not chat and (provider is None or (
+        agent == "codex" and caller == (agent, sid) and _prov(provider) == _prov(agent)))
     prompts = [p for p in _fresh(cp.get("prompts"), now) if itself or not p.get("pending")]
     if not run and not cp.get("run") and not prompts:
         return ""

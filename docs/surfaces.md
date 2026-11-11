@@ -89,6 +89,53 @@ session run during this app investigation.
 | Permissions and approvals | Typed decisions and grants authorize their named actions | The [Codex grant contracts](../tests/test_codex_grants.py) reject copied, replayed, and wrong-session evidence. The app's complete approval flow remains unverified. No grants were issued to test it |
 | Extensions and installation | Managed changes use the developer's authorized installation mechanism | Live: extension drift and acceptance notices appeared. No extension acceptance, permission change, or global installation was performed. A checkout fix does not change the pinned hooks of a running session |
 
+### Installed app recheck on 26.11.12
+
+A fresh audit on November 10 used the installed 26.11.12 hooks and native collaboration tools. The checkout
+already included 26.11.13; changing that checkout did not update the installed hooks.
+
+| Check | Observed result |
+| --- | --- |
+| Project binding | Starting a new progress run bound the project and branch. Earlier completed repository commands had left them empty; that command-completion path still needs live verification |
+| Native crew launch and scratch | The assigned QA step bound to its real child. Creating and reading a file in the host-assigned member scratch folder worked |
+| Scratch shell redirection | Redirecting a member's command output into that same scratch folder was denied. A source regression reproduces the denial when the event names the registered checkout. The historical hook envelope was not retained, so that exact incident payload remains unverified |
+| Questions and answers | A real question and its answer reached the correct agents through hooks while the root turn was active |
+| Native interruption | Codex reported the child interrupted, but devkit still counted its running lane and occupied slot |
+| Native continuation and completion | A follow-up resumed the same child. Normal completion released its lane and slot; this did not prove admission after an interruption because the slot had never been released |
+| Skills and lessons | Required skill context and matching lesson reminders arrived. Successful skill reads alone did not prove every gate recognized them |
+| Canary | The installed CLI showed only headings, but the actual log contained 87 successful crew reports at the recheck. Main-session scoring remained unverified. The source correction displays Codex crew counts separately |
+| Mid-turn requests and compaction | Actual human requests were retained as pending records and appeared in the compaction context. The own-session CLI brief filtered those records out; the source correction has a regression test |
+| Other surfaces and events | No new CLI session, genuine approval, or welcome-display acceptance was performed |
+
+An expired foreground wait is not a persistent wake source. While the root turn remains active, continue through
+the host's wait and continuation tools and handle delivered questions. If the turn ends, state when you check
+the work again; do not promise that a completed shell wait can reactivate it. A desktop notification to the
+developer also does not prove that the host schedules an idle agent turn.
+
+The source regressions cover [native interruption and continuation](../tests/test_codex_lifecycle.py),
+[questions attached to unfinished work](../tests/test_watch_message_lifecycle.py), and
+[expired wait records](../tests/test_watch_stop.py). Those tests are contract evidence, not a successful installed
+retest. `dev crew inbox` delivers unseen messages; a question already delivered can still require an answer.
+New Codex questions retain their originating steps across reassignment. Historical questions without that
+provenance use the remaining ownership record; the patch cannot reconstruct an origin that was never recorded.
+Replies to a stopped Codex child retain that child's identity. Another active task with the same crew role does
+not receive the answer; resuming the original child keeps its pending reply available.
+
+The continuity recheck distinguishes capture from display: the pending human requests were on disk, but
+`dev session brief` hid them when it supplied the caller's provider. The source fix includes pending requests
+only for the same Codex session. It does not expose another session's pending requests.
+
+The source gate checks also recognize completed native Codex file changes from the member's own thread after
+its fork boundary. Added lines feed the unfinished-code and test audits; inherited history, another thread's
+events and incomplete changes do not. A diagnostic Python file outside every repository does not require a
+mutation proof. Delivered repository changes, including repositories nested in scratch and links into them,
+still require one. These corrections leave Claude's existing checks unchanged.
+
+Codex test-run logs use a separate `codex/` folder beneath the existing project and worktree log directory.
+Each running command holds a file lock; pruning skips active writers and retains ten completed logs per runner.
+An allocation lock and unique filenames protect concurrent starts. Completed logs remain subject to retention;
+they are not permanent archives. Claude keeps its existing log folder and retention policy.
+
 After installing a verified correction through the supported developer workflow, start a new session and check
 project identity, a recorded development-turn score, crew binding, and gate evidence again. Until then, keep source
 test results separate from live verification of the installed version. See

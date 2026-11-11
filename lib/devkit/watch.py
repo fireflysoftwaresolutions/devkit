@@ -588,8 +588,8 @@ def records(now=None) -> list:
 def armed(agent: str, sid: str, me: str = "main", transcript=None, now=None) -> list:
     """The live waits of this consumer -> [{"id", "how"}]: a recorded `dev watch --wait` whose process runs; with the
     session's transcript, the main session's background command or Monitor running one, as the whole command
-    (ciwatch.alone), that no notification or stop has ended (Claude Code), or one run in the foreground in this turn
-    (Codex, which has no background wake-up). A standby wait is none of these: crew events and CI never wake it."""
+    (ciwatch.alone), that no notification or stop has ended (Claude Code). Codex foreground command text is no
+    proof of an active wait: its registered process must still be live. A standby wait never covers crew or CI."""
     now = now or time.time()
     out = [{"id": r["id"], "how": "record"} for r in _records()
            if (r.get("agent"), r.get("session"), r.get("consumer")) == (agent, sid, me) and _is_live(r, now)
@@ -597,16 +597,14 @@ def armed(agent: str, sid: str, me: str = "main", transcript=None, now=None) -> 
     if transcript and me == "main":
         try:
             from .ciwatch import _shell_calls
-            calls, turn = _shell_calls(transcript, now)
+            calls, _turn = _shell_calls(transcript, now)
         except Exception:
-            calls, turn = [], 0
-        for i, c in enumerate(calls):
+            calls = []
+        for c in calls:
             if not c.get("global"):
                 continue
             if c["wake"] != "foreground" and c["live"] and c.get("alone"):
                 out.append({"id": c.get("task") or c.get("id") or "", "how": c["wake"]})
-            elif c["wake"] == "foreground" and agent == "codex" and i >= turn:
-                out.append({"id": c.get("id") or "", "how": "foreground"})
     return out
 
 
@@ -957,8 +955,8 @@ def stop_gate(agent: str, data: dict, now=None, ci_apart: bool = False) -> str |
     """The Stop hook, for the main session, once per turn. A turn that ends while events can still arrive (a member
     works, a launch is pending, a step waits for a slot, CI this session sent has not finished) must leave a wait
     that wakes the session: on Claude Code a live `dev watch --wait` (its record, or a background command or Monitor
-    of the transcript); on Codex one run in the foreground in this turn. -> the message that sends the turn back
-    once, or None. With `ci_apart` the CI rule names its own watch, so this one does not claim to cover CI."""
+    of the transcript); on Codex a registered foreground wait whose process is still active. -> the message that
+    sends the turn back once, or None. With `ci_apart` the CI rule names its own watch, so this one does not cover CI."""
     if data.get("stop_hook_active") or data.get("agent_id"):
         return None
     now = now or time.time()

@@ -2143,7 +2143,10 @@ def _reply_to(run, aid: str, now: float | None = None, own: bool = True) -> str:
     member works, as `dev crew owner` reads it (lane_gone over lane_states of `run`, the caller's own unless `own` is
     False; a lane the run does not know counts as working); else the member's name, which crew_ask addresses (_addr)
     to their working lane or to their next launch, telling the sender (_waits_notice). A lane with no name to address
-    keeps its id."""
+    keeps its id. Codex keeps the original child id even after it stops: another concurrent task may use the
+    same role, and a native follow-up resumes the original child."""
+    if run.get("agent") == "codex":
+        return aid
     lane = (run.get("agents") or {}).get(aid)
     if not isinstance(lane, dict) or not (lane.get("persona") or lane.get("label")):
         return aid
@@ -2213,6 +2216,10 @@ def _post(run, frm: str, to: str, text: str, now: float, from_name: str = "", ki
     m = {"id": _next_id(msgs, "M"), "ts": round(now), "from": frm, "to": to, "text": text.strip()[:MESSAGE_MAX],
          "delivered": False, "kind": kind or ("notice" if frm in NOTICE_SENDERS else "question")}
     m["from_name"], m["to_name"] = from_name or _name_of(run, frm), _name_of(run, to)
+    if run.get("agent") == "codex" and to == "main" and frm not in ("", "main") and m["kind"] == "question":
+        # Steps are identified by their unique names within this run, as dependencies and transitions are.
+        m["steps"] = [s["name"] for s in run.get("plan") or [] if isinstance(s, dict) and s.get("name")
+                      and s.get("owner") == frm and s.get("state") not in DONE]
     msgs.append(m)
     run["messages"] = msgs[-200:]
     return m
@@ -2240,16 +2247,19 @@ def _open_questions(run) -> list:
 
 def is_moot_message(run, m: dict) -> bool:
     """A question to the tech lead that nobody waits on any more: the lane that asked it has ended (done, stopped,
-    lost, or closed unverified) and owns no running or blocked step. Not answered and not closed, it is moot: never
-    waiting, never waking, shown as moot. A question of the tech lead's, or of a lane the run does not know, never
-    is."""
+    lost, or closed unverified) and owns no running or blocked step. Codex also keeps questions for pending or
+    unverified work actionable, including its recorded originating steps after reassignment. A moot question
+    never waits or wakes and is shown as moot. A question of the tech lead's, or of an unknown lane, never is."""
     if not isinstance(m, dict) or m.get("to") != "main" or not _asks(m) or m.get("answered") or m.get("closed"):
         return False
     lane = ((run or {}).get("agents") or {}).get(m.get("from") or "")
     if m.get("from") in (None, "", "main") or not isinstance(lane, dict) or \
             lane.get("state") not in ENDED_LANE + ("unverified",):
         return False
-    return not any(isinstance(s, dict) and s.get("owner") == m.get("from") and s.get("state") in ("running", "blocked")
+    codex = (run or {}).get("agent") == "codex"
+    steps = m.get("steps") if codex and isinstance(m.get("steps"), list) else []
+    return not any(isinstance(s, dict) and (s.get("owner") == m.get("from") or s.get("name") in steps)
+                   and (s.get("state") not in DONE if codex else s.get("state") in ("running", "blocked"))
                    for s in (run or {}).get("plan") or [])
 
 
@@ -5318,6 +5328,12 @@ def reconcile_hook(agent: str, data: dict, now: float | None = None) -> list:
     if not isinstance(run, dict) or run.get("state") not in approvals.LIVE:
         return stopped
     sess = state.read(session_path(agent, sid))
+    if agent == "codex":
+        from . import codexlaunch
+        stopped += codexlaunch.reconcile_lifecycle(run, sess, now)
+        if stopped:
+            run = load_run(agent, sid)
+            sess = state.read(session_path(agent, sid))
     aid = str(data.get("agent_id") or "")
     lane = (run.get("agents") or {}).get(aid) if aid else None
     seen = bool(lane) and now - float(lane.get("last_seen") or 0) >= LAST_SEEN_EVERY
@@ -5329,7 +5345,7 @@ def reconcile_hook(agent: str, data: dict, now: float | None = None) -> list:
     lim = approvals.limits()
     moves = approvals.reconcile(run, fx, now, lim)
     if not (seen or moves):
-        return []
+        return stopped if agent == "codex" else []
     made = []
     with _tx(agent, sid):
         doc = load_run(agent, sid)

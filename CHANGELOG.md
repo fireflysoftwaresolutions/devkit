@@ -3,6 +3,32 @@
 All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH restarts at 0 each month); tags are
 `vYY.MM.PATCH`. Sections follow [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Fixed
+
+- Codex crew state reads native interruption events so a stopped member can release its lane. When child work
+  resumes, the existing tool hook checks admission again; a continuation message alone grants no admission.
+- Unanswered Codex questions remain actionable while the member still owns unfinished work. New questions also
+  record their originating steps, preserving that obligation when interruption returns work to the lead.
+- A completed Codex foreground wait no longer counts as an armed wake source. The wait check distinguishes a
+  live process from an expired wait and explains the limits of ending the turn.
+- Native Codex interruptions compare precise admission timestamps, so rounded activity displays cannot hide a
+  stop. A genuinely newer admission still protects resumed work from an older event.
+- `dev session brief` shows its own Codex session's pending human requests when the CLI supplies a provider.
+  Other sessions and chat providers retain their existing visibility restrictions.
+- Codex app scratch remains available when a hook names its independently registered checkout. Canonical project,
+  worktree and actor checks preserve the original host scratch boundary; a tool's `workdir` grants no access.
+- Codex crew gates recognize completed native file changes for unfinished-code and test audits. External scratch
+  diagnostics alone no longer require mutation proof; delivered repository changes still do.
+- Native Codex file attribution retains validated session identity when a large transcript requires a bounded
+  tail read. Codex proof checks also recognize supported `uv run` wrappers without counting quoted commands.
+- Codex test logs retain their paths while commands run. Separate storage and file locks protect them from
+  concurrent cleanup; completed logs keep the existing count of ten per runner. Claude's log policy is unchanged.
+- `dev canary` displays recorded Codex crew results separately when no main-session replies have been scored.
+- Late answers to a stopped Codex child retain its identity instead of reaching another active task with the same
+  crew role. The original child receives its answer when it resumes.
+
 ## [26.11.13] - 2026-11-10
 
 This release keeps `dev doctor` working on a Python that cannot load one of its native modules, and makes sure a

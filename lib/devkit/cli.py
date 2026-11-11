@@ -1984,13 +1984,21 @@ def cmd_canary(a):
         print("  no tracked replies yet (replies in sessions under ~/Development are checked after every turn)")
         return 0
     surf = canary.by_surface(a.days)
-    for agent, (ok, tot) in sorted(canary.summary(a.days).items()):
+    main_scores = canary.summary(a.days)
+    for agent, (ok, tot) in sorted(main_scores.items()):
         pct = 100 * ok // tot
         mark = ui.OK if pct >= 95 else ui.WARN if pct >= 80 else ui.FAIL
         print(f"  {mark} {agent.capitalize():<8} {ok}/{tot} replies carried the marker ({pct}%)")
         for (ag, where), (sok, stot) in sorted(surf.items()):
             if ag == agent and len([k for k in surf if k[0] == agent]) > 1:
                 print(f"      {ui.dim(where.ljust(16))} {sok}/{stot} ({100 * sok // stot}%)")
+    codex_crew = [r for r in rs if r.get("agent") == "codex" and r.get("kind") == "crew"
+                  and not r.get("corrected") and not r.get("internal")]
+    if codex_crew:
+        good, total = sum(bool(r.get("ok")) for r in codex_crew), len(codex_crew)
+        print(f"  Codex crew {good}/{total} reports carried the marker ({100 * good // total}%)")
+        if "codex" not in main_scores:
+            print("  Codex main: no tracked replies yet")
     fixed = canary.corrected(a.days)
     if fixed:
         print(f"  {ui.dim(f'{fixed} miss(es) corrected after the Stop hook reminder (not counted above)')}")

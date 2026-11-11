@@ -95,6 +95,27 @@ class StopRuleCase(WiringCase):
 
 
 class WaitRuleTests(StopRuleCase):
+    def test_codex_expired_foreground_wait_is_not_a_persistent_wake(self):
+        self.member_works("codex")
+        self.records += [{"type": "event_msg", "timestamp": iso(self.now - 20),
+                          "payload": {"type": "task_started", "turn_id": "t2"}},
+                         {"type": "response_item", "timestamp": iso(self.now - 10),
+                          "payload": {"type": "function_call", "name": "exec_command", "call_id": "wait1",
+                                      "arguments": json.dumps({"cmd": "dev watch --wait --timeout 0.1"})}},
+                         {"type": "response_item", "timestamp": iso(self.now - 4),
+                          "payload": {"type": "function_call_output", "call_id": "wait1",
+                                      "output": "Process exited with code 3: watch: nothing arrived in 0.1 min"}}]
+        self.write()
+        rid = watch.register("codex", "s1", "main", os.getpid(), 0.1, now=self.now - 10)
+        watch._update(rid, state="expired", ended=self.now - 4)
+        self.assertEqual(watch.armed("codex", "s1", "main", str(self.transcript), now=self.now), [])
+        out = self.stop("codex")
+        self.assertEqual(out.get("decision"), "block", out)
+        self.assertIn("developer's next message", out["reason"])
+        # A still-running registered wait is different from a command that already returned.
+        watch.register("codex", "s1", "main", os.getpid(), 0.1, now=self.now)
+        self.assertEqual(self.stop("codex"), {})
+
     def test_claude_code_sends_back_a_turn_that_ends_with_a_member_working_and_nothing_armed(self):
         # 26.11.6 let the turn end: the member's question then waited until the developer happened to write
         self.member_works()
@@ -116,9 +137,9 @@ class WaitRuleTests(StopRuleCase):
                           "payload": {"type": "function_call", "name": "exec_command", "call_id": "call_w",
                                       "arguments": json.dumps({"cmd": "dev watch --wait --timeout 10"})}}]
         self.write()
-        self.assertNotIn("dev watch --wait", self.stop("codex").get("reason") or "")  # waited in this turn
+        self.assertIn("dev watch --wait", self.stop("codex").get("reason") or "")  # no live wait record
 
-    def test_a_codex_code_mode_wait_in_the_foreground_lets_the_turn_end(self):
+    def test_a_codex_code_mode_call_without_a_live_wait_does_not_claim_a_wake(self):
         # Codex 0.167 (code mode on by default): the turn opens with task_started and the wait runs inside the
         # model's exec script, as a real rollout records it
         self.member_works("codex")
@@ -129,7 +150,7 @@ class WaitRuleTests(StopRuleCase):
                                       "name": "exec", "input": "text(await tools.exec_command({cmd:\"dev watch "
                                                                "--wait --timeout 10\",max_output_tokens:2000}));\n"}}]
         self.write()
-        self.assertNotIn("dev watch --wait", self.stop("codex").get("reason") or "")
+        self.assertIn("dev watch --wait", self.stop("codex").get("reason") or "")
 
     def test_a_live_background_wait_lets_the_turn_end(self):
         self.member_works()

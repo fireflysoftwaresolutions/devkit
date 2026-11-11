@@ -124,7 +124,10 @@ exist in the dev root.
 ### Codex scratch folders
 
 Codex scratch access comes from the hook's registered session and actor, not a tool's chosen working directory.
-The hook directory must match the registered host directory. Paths must be canonical and have no escaping links.
+The hook directory must match the registered host directory. An app event may also name a directory inside its
+independently registered checkout: devkit verifies the recorded project, repository root, and canonical main
+checkout or managed worktree. The original app directory remains the scratch base. A tool's `workdir` cannot
+establish that registration. Paths must be canonical and have no escaping links.
 
 | Host | Main session | Crew member |
 | --- | --- | --- |
