@@ -247,6 +247,25 @@ class CodexGrantTests(CodexCase):
                 self.assertEqual(pg._keep_human("codex", SID, [entry]), [])
         self.assertIsNone(self.grant(T0 + 3))
 
+    def test_legacy_opaque_turns_confirm_only_existing_genuine_evidence(self):
+        turn = "t-legacy"
+        entry = {"agent": "codex", "channel": "E2", "covers": "release v26.11.9", "excerpt": LINE,
+                 "transcript_uuid": turn, "transcript": str(self.rollout.path), "session": SID, "ts": T0}
+        self.assertFalse(pg.confirmed(entry, SID))
+        self.rollout.typed(LINE, turn, T0 + 0.3)
+        self.assertTrue(pg.confirmed(entry, SID))
+        self.assertFalse(pg.confirmed(dict(entry, ts=T0 + 600), SID))
+        self.assertFalse(pg.confirmed(dict(entry, excerpt="grant release v26.11.10"), SID))
+        _, created = self.prompt(LINE, T0 + 1, turn=turn)
+        self.assertEqual(created, [])  # legacy reading does not widen new grant admission
+        self.assertEqual(pg._keep_human("codex", SID, [entry]), [])
+        self.assertIsNone(self.grant(T0 + 2))
+
+        for malformed in ("codex-prompt", "codex-prompt:short", "codex-prompt-invalid", "t-legacy:extra"):
+            with self.subTest(malformed=malformed):
+                self.rollout.typed(LINE, malformed, T0 + 0.3)
+                self.assertFalse(pg.confirmed(dict(entry, transcript_uuid=malformed), SID))
+
     def test_a_grant_typed_in_codex_opens_its_action_once(self):
         entries = self.typed(f"The notes look right.\n{LINE}", T0)
         self.assertEqual([e["covers"] for e in entries], ["release v26.11.9"])

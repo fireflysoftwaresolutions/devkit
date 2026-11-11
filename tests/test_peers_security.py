@@ -96,6 +96,114 @@ class SettleOnlyByTheDeveloperTests(PeerHookCase):
         self.assertEqual((done["choice"], done["session"]), ("B", f"codex:{CODEX_A}"))
         self.assertEqual([m["kind"] for m in peers.take("claude", CLAUDE_A)], ["settled"])
 
+    def test_native_and_legacy_settlement_prompts_each_confirm_once(self):
+        home = mock.patch.object(core, "CODEX_HOME", self.root / ".codex")
+        home.start()
+        self.addCleanup(home.stop)
+        rollout = Rollout(core.CODEX_HOME, CODEX_A, at=time.time() - 60)
+
+        def tool_done():  # a Bash call of the Codex thread ends
+            self.n += 1
+            self.hook("post-tool", "codex", self.codex("PostToolUse", CODEX_A, tool_name="Bash",
+                                                       tool_use_id=f"exec-{self.n}", tool_input={"command": "ls"},
+                                                       tool_response=""))
+        for turn in ("019a6b2e-77c0-7d21-9a40-1f2e3d4c5b6a", "t-legacy"):
+            with self.subTest(turn=turn):
+                eid = self.escalation()
+                line = f"settle {eid}: B"
+                ctx = self.hook("prompt", "codex", self.codex("UserPromptSubmit", CODEX_A,
+                                                             prompt=line, turn_id=turn))
+                self.assertNotIn("the developer settled", ctx)
+                tool_done()
+                self.assertEqual([e["id"] for e in peers.escalations("open")], [eid])
+                rollout.typed(line, turn, time.time())
+                tool_done()
+                done = next(e for e in peers.escalations("settled") if e["id"] == eid)["settled"]
+                self.assertEqual((done["choice"], done["session"]), ("B", f"codex:{CODEX_A}"))
+                self.assertEqual([m["kind"] for m in peers.take("claude", CLAUDE_A)], ["settled"])
+                tool_done()
+                self.assertEqual(peers.take("claude", CLAUDE_A), [])
+
+    def test_distinct_codex_settlement_messages_in_one_turn_both_complete(self):
+        first = self.escalation()
+        second = peers.escalate(sender(CLAUDE_A), "@0199a213", "Which project verifies the second release?",
+                                ["A: devkit first", "B: kit-consulting first"], recommend="A")["id"]
+        home = mock.patch.object(core, "CODEX_HOME", self.root / ".codex")
+        home.start()
+        self.addCleanup(home.stop)
+        rollout = Rollout(core.CODEX_HOME, CODEX_A, at=time.time() - 60)
+        turn = "019a6b2e-77c0-7d21-9a40-1f2e3d4c5b6a"
+        for eid, choice in ((first, "A"), (second, "B")):
+            line = f"settle {eid}: {choice}"
+            self.hook("prompt", "codex", self.codex("UserPromptSubmit", CODEX_A, prompt=line, turn_id=turn))
+            self.assertIn(eid, peers.settling("codex", CODEX_A))
+            rollout.typed(line, turn, time.time())
+            peers.settle_waiting("codex", CODEX_A)
+            done = next(e for e in peers.escalations("settled") if e["id"] == eid)["settled"]
+            self.assertEqual(done["choice"], choice)
+        self.assertEqual(len(peers.escalations("settled")), 2)
+        self.assertEqual([m["kind"] for m in peers.take("claude", CLAUDE_A)], ["settled", "settled"])
+
+    def test_queued_codex_settlement_prompts_keep_their_complete_message(self):
+        first, second = self.escalation(), self.escalation()
+        home = mock.patch.object(core, "CODEX_HOME", self.root / ".codex")
+        home.start()
+        self.addCleanup(home.stop)
+        rollout = Rollout(core.CODEX_HOME, CODEX_A, at=time.time() - 60)
+        turn = "019a6b2e-77c0-7d21-9a40-1f2e3d4c5b6a"
+        messages = [f"Approve the first project.\nsettle {first}: A", f"Approve the second project.\nsettle {second}: B"]
+        for message in messages:
+            self.hook("prompt", "codex", self.codex("UserPromptSubmit", CODEX_A, prompt=message, turn_id=turn))
+        self.assertEqual(set(peers.settling("codex", CODEX_A)), {first, second})
+        rollout.typed(f"A different wrapper.\nsettle {first}: A", turn, time.time())
+        self.assertEqual(peers.settle_waiting("codex", CODEX_A), [])
+        self.assertEqual(peers.escalations("settled"), [])
+        for message in messages:
+            rollout.typed(message, turn, time.time())
+        self.assertEqual({e["id"] for e in peers.settle_waiting("codex", CODEX_A)}, {first, second})
+        self.assertEqual(peers.settle_waiting("codex", CODEX_A), [])
+
+    def test_consumed_legacy_and_composite_settlement_identities_block_each_other(self):
+        home = mock.patch.object(core, "CODEX_HOME", self.root / ".codex")
+        home.start()
+        self.addCleanup(home.stop)
+        rollout = Rollout(core.CODEX_HOME, CODEX_A, at=time.time() - 60)
+        for i, legacy_first in enumerate((True, False)):
+            with self.subTest(legacy_first=legacy_first):
+                first, second = self.escalation(), self.escalation()
+                turn, now = f"019a6b2e-77c0-7d21-9a40-1f2e3d4c5b6{i}", time.time()
+                first_line, second_line = f"settle {first}: A", f"settle {second}: B"
+                rollout.typed(first_line, turn, now)
+                rollout.typed(second_line, turn, now)
+                first_id = turn if legacy_first else pg._codex_prompt_id(turn, first_line)
+                second_id = pg._codex_prompt_id(turn, second_line) if legacy_first else turn
+                done = peers.settle_from_prompt("codex", CODEX_A, [first_line], first_id, now=now)
+                self.assertEqual([e["id"] for e in done], [first])
+                self.assertEqual(peers.settle_from_prompt("codex", CODEX_A, [second_line], second_id, now=now), [])
+                self.assertIn(second, {e["id"] for e in peers.escalations("open")})
+                self.assertEqual([m["kind"] for m in peers.take("claude", CLAUDE_A)], ["settled"])
+
+    def test_waiting_legacy_and_composite_settlements_consume_one_identity(self):
+        home = mock.patch.object(core, "CODEX_HOME", self.root / ".codex")
+        home.start()
+        self.addCleanup(home.stop)
+        rollout = Rollout(core.CODEX_HOME, CODEX_A, at=time.time() - 60)
+        for i, legacy_first in enumerate((True, False)):
+            with self.subTest(legacy_first=legacy_first):
+                first, second = self.escalation(), self.escalation()
+                turn, now = f"019a6b2e-77c0-7d21-9a40-1f2e3d4c5b6{i}", time.time()
+                first_line, second_line = f"settle {first}: A", f"settle {second}: B"
+                first_id = turn if legacy_first else pg._codex_prompt_id(turn, first_line)
+                second_id = pg._codex_prompt_id(turn, second_line) if legacy_first else turn
+                self.assertEqual(peers.settle_from_prompt("codex", CODEX_A, [first_line], first_id, now=now), [])
+                self.assertEqual(peers.settle_from_prompt("codex", CODEX_A, [second_line], second_id, now=now), [])
+                self.assertEqual(set(peers.settling("codex", CODEX_A)), {first, second})
+                rollout.typed(first_line, turn, now)
+                rollout.typed(second_line, turn, now)
+                self.assertEqual([e["id"] for e in peers.settle_waiting("codex", CODEX_A, now=now)], [first])
+                self.assertIn(second, {e["id"] for e in peers.escalations("open")})
+                self.assertEqual([m["kind"] for m in peers.take("claude", CLAUDE_A)], ["settled"])
+
     # A settle line counts only when the session's own transcript shows its prompt as the developer's (the
     # confirmation a typed grant needs, progress.confirmed), at the prompt hook or at a later hook of the session:
     # no record of the prompt, a record another session or a notification wrote, or a record of the prompt id that

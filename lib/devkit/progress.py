@@ -3675,11 +3675,16 @@ def _codex_prompt_id(turn: str, text: str) -> str:
 
 
 def _codex_prompt_parts(identity: str) -> tuple[str, str]:
-    """Decode a prompt identity or a legacy bare turn; malformed composite identities fail closed."""
+    """Decode a prompt identity or a legacy opaque turn for reading existing evidence.
+
+    Settlement also confirms bare turn IDs. Preserve that reader contract without allowing a malformed
+    reserved composite identity to fall back to it; new evidence has stricter admission below.
+    """
     match = _CODEX_PROMPT_ID.fullmatch(identity)
     if match:
         return match.group(1), match.group(2)
-    return (identity, "") if re.fullmatch(_CODEX_TURN_ID, identity) else ("", "")
+    legacy = not identity.casefold().startswith("codex-prompt") and _SESSION_ID.fullmatch(identity)
+    return (identity, "") if legacy else ("", "")
 
 
 def _seen_ids(sess: dict) -> set:
@@ -3706,10 +3711,11 @@ def _keep_human(agent: str, sid: str, new: list, extra=None) -> list:
         for e in new:
             uid = str(e.get("transcript_uuid") or "")
             codex = e.get("agent") == "codex" and e.get("channel") == "E2"
-            turn = _codex_prompt_parts(uid)[0] if codex else ""
+            turn, digest = _codex_prompt_parts(uid) if codex else ("", "")
+            native = bool(digest or re.fullmatch(_CODEX_TURN_ID, turn))
             # A legacy entry has no full prompt digest: never reopen its turn during migration, including
             # when another hook recorded it after on_human_prompt's initial read and before this lock.
-            duplicate = (uid and uid in seen) or (codex and (not turn or turn in seen))
+            duplicate = (uid and uid in seen) or (codex and (not native or turn in seen))
             (replayed if duplicate else kept).append(e)
         s["human"] = ((s.get("human") or []) + kept)[-HUMAN_KEEP:]
         ids = [str(e["transcript_uuid"]) for e in kept if e.get("transcript_uuid")]

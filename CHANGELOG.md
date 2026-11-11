@@ -37,6 +37,11 @@ installed-host acceptance remains a separate check.
 - Distinct Codex grant messages in the same host turn keep separate evidence, verified against each complete
   message in the session's own transcript. A corrected grant is no longer discarded as a repeated turn; identical
   text and older turn-only evidence remain protected against reuse. Claude prompt identity is unchanged.
+- Codex decisions sent to other sessions keep distinct message identities within one turn, including while
+  waiting for transcript confirmation. Saved decision evidence remains readable, and consumed approval evidence
+  cannot be reused through a different identity format.
+- Codex crew guidance distinguishes a new native task from continuation of an existing step and requires an
+  explicit step name when recording completion.
 
 ## [26.11.13] - 2026-11-10
 

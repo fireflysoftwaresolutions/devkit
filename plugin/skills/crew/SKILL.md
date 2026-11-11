@@ -15,6 +15,12 @@ its agent starts: it binds to the step its `task_name` names and takes a crew sl
 cannot be refused, only marked (its step comes back to you and the member is told to stop), so keep to the slots and
 the order `dev crew next` shows.
 
+**Codex step identity.** For a new plan step, verify that the earlier member's lane has ended, assign the new step,
+generate its brief, and launch a fresh native task with the `task_name` the brief prints. Use the host's
+continuation tool (`followup_task` or `send_input`) when continuing the same step. Every Codex member includes
+`--step "<exact step name>"` in its `dev progress step` completion command. After the native final report, the lead
+checks `dev progress history` to verify that this exact step is done before integrating its result.
+
 **Name them by role.** In every message, report, and brief, write a member as `<Role> (<Name>)`, such as Backend
 engineer (Tank), or by the role alone, in the developer's language; never by the Matrix name alone. The end-of-turn
 check sends a final message or a member's report back once when its prose breaks this. Commands and code keep the ids

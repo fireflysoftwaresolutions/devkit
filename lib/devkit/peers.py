@@ -1703,13 +1703,28 @@ def _used_prompts() -> set:
     return {str((d.get("settled") or {}).get("prompt_uuid") or "") for d in escalations("all")} - {""}
 
 
+def _settlement_prompt_used(agent: str, identity: str, used: set) -> bool:
+    """A Codex legacy turn and its newer prompt identities cannot consume the same old evidence twice."""
+    if identity in used:
+        return True
+    if agent != "codex":
+        return False
+    from . import progress
+    turn, digest = progress._codex_prompt_parts(identity)
+    if not turn:
+        return False  # confirmation still rejects malformed identities
+    if digest:
+        return turn in used
+    return any(progress._codex_prompt_parts(old)[0] == turn for old in used)
+
+
 def settle_from_prompt(agent: str, sid: str, lines: list, prompt_uuid: str, now=None) -> list:
     """The developer's `settle E-<8>: <choice>` lines (case-insensitive), from the lines progress._own_lines gives for
     a UserPromptSubmit prompt, in a Claude Code or Codex session with someone at the keyboard -> the escalations
     settled. A line is the developer's only when the session's own transcript shows its prompt as typed by them
     (progress.confirmed, the confirmation a typed grant needs). `prompt_uuid` is Claude Code's prompt id or Codex's
-    turn id. Both write the prompt there after this hook runs, so the lines of an open escalation wait in the session
-    record's `settle_waiting` list (`settling` names them) until a later hook of the session settles them (the
+    full prompt identity (older records have a bare turn id). Both write the prompt after this hook, so lines wait in
+    the session record's `settle_waiting` list (`settling` names them) until a later hook settles them (the
     function settle_waiting). A prompt counts once: a prompt uuid that settled before settles nothing again. Every
     party gets `settled`."""
     from . import progress
@@ -1724,7 +1739,7 @@ def settle_from_prompt(agent: str, sid: str, lines: list, prompt_uuid: str, now=
     if not uuid:
         _audit("peer.refused", wanted[0][0], "settle: a prompt without an id is not found in the transcript", "refused")
         return []
-    if uuid in _used_prompts():
+    if _settlement_prompt_used(agent, uuid, _used_prompts()):
         _audit("peer.refused", uuid[:80], "settle: a prompt that settled before counts once", "refused")
         return []
     if all(_typed(agent, sid, uuid, line, now) for _, _, line in wanted):
@@ -1800,8 +1815,11 @@ def settle_waiting(agent: str, sid: str, now=None) -> list:
         return []
     done, used = [], _used_prompts()
     for uuid, wanted in ready:
-        if uuid in taken and uuid not in used:
-            done += _settle(agent, sid, rec, wanted, uuid, now)
+        if uuid in taken and not _settlement_prompt_used(agent, uuid, used):
+            settled = _settle(agent, sid, rec, wanted, uuid, now)
+            done += settled
+            if agent == "codex" and settled:
+                used.add(uuid)  # a legacy entry consumed in this pass blocks its composite siblings too
     return done
 
 

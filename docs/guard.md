@@ -659,6 +659,8 @@ In Codex, distinct messages can share one host turn. Devkit binds each new grant
 complete user message, then checks it against your own transcript before use. A corrected message can therefore
 carry its own grant. Identical text within the same turn still counts once; older evidence recorded for the whole
 turn remains protected against reuse. Claude continues to identify prompts by its native prompt ID.
+Decisions sent to another session use the same complete-message identity, including while waiting for transcript
+confirmation. Existing saved decision evidence remains readable, with its original provenance checks.
 Restart Codex sessions after updating so one installed version handles each session's approval evidence.
 
 ### Lesson rules
