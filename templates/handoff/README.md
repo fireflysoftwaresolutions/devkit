@@ -19,7 +19,7 @@ any machine, starts from where the last one stopped.
 | `plans/<scope>/` | Plans, specs, spikes, bug-fix plans and ADRs, versioned with a changelog | `dev plan`, agents |
 | `sessions/<scope>/YYYY-MM.md` | Append-only session log: one line per session (who, machine, agent, branch, outcome) | hooks, `dev handoff --log` |
 | `presence/<user>@<host>.json` | What each machine is doing now: live sessions, progress, held locks | `dev sync` on that machine |
-| `log/YYYY-MM.md` | Operations: worktree removals, cleanups, adoptions, imports, restored settings | `dev` |
+| `log/YYYY-MM.md` | Append-only operations log: worktree removals, cleanups, adoptions, imports, restored settings | `dev` |
 
 A scope is a project id or `initiatives/<slug>`.
 
@@ -30,8 +30,9 @@ A scope is a project id or `initiatives/<slug>`.
 - **Every change has a reason.** Changes of scope (edit, move, cancel) need `--why`, and every other change accepts
   one. Each change bumps the item's version, adds a changelog line (who, machine, agent, when, why), and makes one
   commit.
-- **No merge conflicts.** Session logs merge as a union, generated views keep the local copy and are regenerated,
-  and presence files are written only by their own machine.
+- **No merge conflicts.** The session and operations logs merge as a union, so every machine's lines are kept;
+  generated views keep the local copy and are regenerated; and presence files are written only by their own machine.
+  `dev install --only handoff` adds the merge rules an older devkit did not write.
 - `dev team` shows who is working on what, and `dev report` gives a status report for the team.
 
 A project id is the project's path under `~/Development`: `owner/repo` for GitHub, `<host>/<group>/<repo>` for other

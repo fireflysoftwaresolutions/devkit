@@ -59,6 +59,32 @@ class HandoffSetupTests(unittest.TestCase):
         self.assertIn("aborted a rebase of the handoff repository that was left stopped", out.getvalue())
         self.assertEqual([(r["outcome"], r["target"]) for r in recs], [("blocked", "notes.md")])
 
+    # `dev update` runs `dev install`, so an older handoff repository gets the rules a newer devkit adds: the month's
+    # activity log (log/) merges as a union like the session logs, and so do the rules themselves. Lines already in
+    # the file stay as they are, in their order: two Macs that upgrade only ever add lines at the end.
+    def test_dev_install_adds_the_missing_merge_rules_to_an_older_handoff_repository(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name) / ".handoff"
+        _git(Path(tmp.name), "init", "-q", "-b", "main", str(root))
+        older = ("*.pdf binary\n# devkit: safe merges between machines and developers\nsessions/** merge=union\n"
+                 "presence/*.json merge=ours\nPROJECTS.md merge=ours\nTASKS.md merge=ours\nACTIVITY.md merge=ours\n"
+                 "registry.json merge=ours\n")  # a person's rule, then what devkit 26.11.14 and older wrote
+        (root / ".gitattributes").write_text(older)
+        with mock.patch.object(setup, "HANDOFF", root):
+            setup.handoff_merge_rules()
+            once = (root / ".gitattributes").read_text()
+            setup.handoff_merge_rules()
+        merge = _git(root, "check-attr", "merge", "--", "log/2026-11.md", "sessions/acme/api/2026-11.md",
+                     ".gitattributes", "PROJECTS.md", "a.pdf")
+        self.assertEqual(merge.splitlines(), ["log/2026-11.md: merge: union",
+                                              "sessions/acme/api/2026-11.md: merge: union",
+                                              ".gitattributes: merge: union", "PROJECTS.md: merge: ours",
+                                              "a.pdf: merge: unset"])
+        self.assertTrue(once.startswith(older), once)
+        self.assertEqual((root / ".gitattributes").read_text(), once)
+        self.assertEqual(_git(root, "config", "merge.ours.driver"), "true")
+
 
 if __name__ == "__main__":
     unittest.main()

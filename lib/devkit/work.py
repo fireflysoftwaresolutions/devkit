@@ -705,11 +705,21 @@ def _stage(rel: str, n: int):
     return out + "\n" if rc == 0 else None
 
 
+# The append-only logs: the month's activity log (log/) and the session logs (sessions/). Every Mac only adds lines at
+# the end, so a conflict in one keeps both sides' lines, as their merge=union rule in .gitattributes does. Git applies
+# that rule only from the commit it rebases onto: a Mac whose own unpushed commit brings the rule would stop on every
+# pull until another Mac pushed it.
+_APPEND_ONLY = re.compile(r"^(log/[^/]+\.md|sessions/.+)$")
+
+
 def _settle(rel: str, retake: bool):
-    """The text of an item in conflict during the rebase: the remote's version with this Mac's change applied again
-    (`merge_item`). When both changed the same thing, the remote's version if `retake` (the caller applies its change
+    """The text of a file in conflict during the rebase, or None when devkit cannot settle it. An append-only log: both
+    sides' lines, the remote's first. An item: the remote's version with this Mac's change applied again
+    (`merge_item`); when both changed the same thing, the remote's version if `retake` (the caller applies its change
     again), else None."""
     base, remote, mine = _stage(rel, 1), _stage(rel, 2), _stage(rel, 3)  # in a rebase, 2 is the remote's side
+    if _APPEND_ONLY.match(rel):  # a side that deleted the log loses to the one that added lines
+        return _merge_text(base or "", remote, mine, union=True) if remote and mine else remote or mine
     if not (rel.startswith("items/") and remote and mine):
         return None
     merged = merge_item(base, remote, mine) if base else None
@@ -744,9 +754,9 @@ def _hollow(text: str) -> tuple:
     return text, blocks
 
 
-def _merge_text(base: str, remote: str, mine: str):
+def _merge_text(base: str, remote: str, mine: str, union: bool = False):
     """Three-way merge of two versions of a text with the one both started from (git merge-file). -> the merged text,
-    or None when both changed the same lines."""
+    or None when both changed the same lines; with `union`, both sides' lines there instead (the remote's first)."""
     import tempfile
     with tempfile.TemporaryDirectory(prefix="devkit-merge-") as d:
         paths = []
@@ -754,7 +764,7 @@ def _merge_text(base: str, remote: str, mine: str):
             p = Path(d) / name
             p.write_text(text)
             paths.append(str(p))
-        rc, out, _ = core.sh(["git", "merge-file", "-p", "-q", *paths])
+        rc, out, _ = core.sh(["git", "merge-file", "-p", "-q", *(["--union"] if union else []), *paths])
     return out + "\n" if rc == 0 else None
 
 
@@ -855,9 +865,10 @@ def pull_rebase(retake=()) -> tuple:
 
 def rebase_fetched(retake=()) -> tuple:
     """Rebase this Mac's commits on the remote's as last fetched: local git work only, under _rebase_locks, and nothing
-    to do (no lock taken) when the remote has no new commit or the branch follows none. A conflict in an item is
-    settled (`_settle`), one in a note file by file (`_settle_note`: never a stop, so the other files still go
-    through); any other conflict aborts the rebase, leaves the commits as they were and records a sync problem.
+    to do (no lock taken) when the remote has no new commit or the branch follows none. A conflict in an item or an
+    append-only log is settled (`_settle`), one in a note file by file (`_settle_note`: never a stop, so the other
+    files still go through); any other conflict aborts the rebase, leaves the commits as they were and records a sync
+    problem.
     `retake`: item paths (relative) whose change the caller applies again itself. Never call it while holding
     _repo_lock. -> (ok, the problem when not ok)."""
     if core.gitout(HANDOFF, "rev-list", "--count", "HEAD..@{u}") in ("", "0"):
