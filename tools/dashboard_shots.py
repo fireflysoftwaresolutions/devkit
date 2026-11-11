@@ -29,6 +29,11 @@ at least, whatever its window size, so the tool sets the page's width and height
 as Playwright does, and stops when the page's innerWidth is not the width asked for. Chrome runs headless with a mock
 keychain, since the hermetic home has no login keychain. A picture that cannot be taken stops the run with the reason
 and the last lines of Chrome's log; nothing is half-written, so running the same command again is safe.
+
+The docs' Now pictures (docs/images/dashboard/home-*.webp), into a scratch folder, then encoded over the old ones:
+    python3 tools/dashboard_shots.py <dir> --live --route home=#/now --width 1440 --theme dark light --height 1000
+    python3 tools/dashboard_shots.py <dir> --live --route home=#/now --width 390 --theme dark --height 1784
+    cwebp -quiet -q 85 -m 6 -metadata none <dir>/<name>.png -o docs/images/dashboard/<name>.webp
 """
 import argparse
 import base64
@@ -282,11 +287,12 @@ def serve_forever() -> int:
 
 
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("out", type=Path, nargs="?")
-    ap.add_argument("--route", action="append", default=[], metavar="NAME=HASH", help="default: now=#/now")
-    ap.add_argument("--width", type=int, nargs="+", default=[1440, 390])
-    ap.add_argument("--theme", nargs="+", choices=("light", "dark"), default=["light", "dark"])
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("out", type=Path, nargs="?", help="the folder the pictures go to (created when missing)")
+    ap.add_argument("--route", action="append", default=[], metavar="NAME=HASH",
+                    help="a picture's name and the page's hash route; repeat for more (default: now=#/now)")
+    ap.add_argument("--width", type=int, nargs="+", default=[1440, 390], help="viewport widths in px (default: 1440 390)")
+    ap.add_argument("--theme", nargs="+", choices=("light", "dark"), default=["light", "dark"], help="default: light dark")
     src = ap.add_mutually_exclusive_group()
     src.add_argument("--doc", choices=("example", "empty", "welcome"), help="Now's areas from this golden")
     src.add_argument("--live", action="store_true", help="the live page: the real server and collect() over the fixture's example")
