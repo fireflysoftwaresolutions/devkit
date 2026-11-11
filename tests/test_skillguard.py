@@ -201,6 +201,17 @@ class OutsideTheRepository(unittest.TestCase):
             self.assertIn("`frontend-design`", why or "")
             self.assertIn("page.py", why or "")
 
+    # a probe in a scratch folder is scratch work even inside a repository built there (a fixture repo for a test,
+    # say): the UI rule reads no Python in the session scratchpad or devkit's .tmp, and still reads it in a real repo
+    def test_a_python_probe_in_a_scratch_folder_is_not_ui_work(self):
+        html = 'PAGE = "<!doctype html><style>p{}</style>"\n'
+        with tempfile.TemporaryDirectory() as d:
+            probes = [make_repo(Path(d) / "scratchpad" / "kid" / "fixture", {"probe.py": html}) / "probe.py",
+                      make_repo(Path(d) / "Development" / ".tmp" / "fixture", {"lib/probe.py": html}) / "lib" / "probe.py"]
+            real = make_repo(Path(d) / "Development" / "acme" / "app", {"lib/page.py": html}) / "lib" / "page.py"
+            ui = [f for r, m in sg.rules_for_files([str(p) for p in probes + [real]]) if r["id"] == "ui" for f in m]
+            self.assertEqual(ui, [str(real)])
+
 
 class CommandsAtStop(unittest.TestCase):
     def setUp(self):
