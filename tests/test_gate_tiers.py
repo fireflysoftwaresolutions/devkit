@@ -681,6 +681,21 @@ class UnknownProgramTests(GateCase):
         self.assertIn("push-destructive", [a for a, _, _ in self.acts(force)])
         self.assertIn("git push --force", self.member(force) or "")
 
+    def test_the_words_after_a_substitution_belong_to_the_command_around_it(self):
+        # the tokenizer ended a segment at the `)` of `$(…)`, so the rest of the word (`/*` in `ls $(echo x)/*`) was a
+        # command of its own, and its glob read as a program named at run time
+        for cmd in ("ls $(echo x)/*", "head -3 $(dirname x)/*.md", "echo $(date)-$(whoami)", "x=$(echo a)$y",
+                    "echo $(case x in a) echo a;; esac)/*.md"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.acts(cmd), [])
+                self.assertIsNone(self.member(cmd))
+        # a command after it is still one, and so is a program named by a substitution or after an assignment
+        for cmd in ("ls $(echo x) ; $y", "ls $(echo x)/* | $y", "x=$(echo a) $y", "$(echo gh) pr merge 12"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual([a for a, _, _ in self.acts(cmd)], ["unknown"])
+        # the words after it are the command's own: this push forces
+        self.assertIn("push-destructive", [a for a, _, _ in self.acts("git push $(echo origin) --force")])
+
     def test_the_main_session_is_told_how_to_clear_it_and_a_grant_of_that_command_opens_it(self):
         target = self.acts("$X pr merge 12")[0][2]
         why = self.main("$X pr merge 12")

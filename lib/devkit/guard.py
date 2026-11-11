@@ -867,6 +867,57 @@ def strip_heredocs(cmd: str) -> str:
     return _split_heredocs(cmd)[0]
 
 
+_PUNCT = ";&|()<>"  # the characters the tokenizer cuts words at
+
+
+def _paren_step(frames: list, t: str, argv, glued: bool):
+    """Read the parentheses of punctuation token `t` into `frames`, the open `$(…)`, groups, `<(…)`/`>(…)` and case
+    statements (_case_word) of a command line. `argv`: the words of the command so far when its last word is the token
+    before `t`. -> (the word list of the command a `$(…)` is a word of, whether the next word is glued to it) when `t`
+    is only `)` and its last one ends that `$(…)`; the words after it go into that list, so they are that command's
+    and never a command of their own. A pattern's `)` in a case statement ends the pattern; a `)` the frames cannot
+    pair ends nothing."""
+    ended = None
+    for i, c in enumerate(t):
+        top = frames[-1] if frames else None
+        pattern = top is not None and top[0] == "case" and top[1] == "pattern"
+        if c == "(":
+            if not i and argv and argv[-1].endswith("$") and set(t) <= set(";&|()"):  # `$(`, `$((`
+                frames.append(["subst", argv])
+            elif i and t[i - 1] in "<>":
+                frames.append(["proc"])
+            elif not pattern:  # `case $x in (a)`: the pattern's `(` opens nothing
+                frames.append(["group"])
+        elif c == ")":
+            ended = None
+            if pattern:
+                top[1] = "body"
+            elif top is not None and top[0] != "case":
+                frames.pop()
+                ended = top if top[0] == "subst" else None
+        elif top is not None and top[0] == "case" and top[1] == "body" and (";;" in t or ";&" in t):
+            top[1] = "pattern"  # an arm's end: a pattern or `esac` comes next
+    return (ended[1], glued) if ended and set(t) == {")"} else None
+
+
+def _case_word(frames: list, t: str, before: list):
+    """Read word `t` into `frames` (_paren_step): `case` at a command's start opens a case statement, its `in` starts
+    the patterns, and `esac` at a command's start closes it. `before`: the command's words before `t`."""
+    top = frames[-1] if frames else None
+    start = all(a in _RESERVED for a in before)
+    if top is not None and top[0] == "case":
+        if top[1] == "head" and t == "in":
+            top[1] = "pattern"
+            return
+        if start and t == "esac":
+            frames.pop()
+            return
+        if top[1] == "pattern":  # a pattern's word
+            return
+    if start and t == "case":
+        frames.append(["case", "head"])
+
+
 def split_commands(cmd: str, ops: bool = False, newline: str = ";", inputs: list | None = None,
                    stripped: bool = False, heredocs: list | None = None, modes: list | None = None):
     """-> list of (argv, redirect_targets). None when the command cannot be tokenised. With `ops`, each entry is
@@ -878,16 +929,26 @@ def split_commands(cmd: str, ops: bool = False, newline: str = ";", inputs: list
     list that gets, for each segment, how each of its redirect targets is opened, in order: "truncate" (`>`, `&>`),
     "append" (`>>`, `&>>`) or "overwrite" (`<>`, which keeps what it does not write over)."""
     try:
-        lex = shlex.shlex(_newlines_to_semicolons(cmd if stripped else strip_heredocs(cmd), newline), posix=True,
-                          punctuation_chars=";&|()<>")
+        line = _newlines_to_semicolons(cmd if stripped else strip_heredocs(cmd), newline)
+        lex = shlex.shlex(line, posix=True, punctuation_chars=_PUNCT)
         lex.whitespace_split = True
         lex.commenters = ""
-        tokens = list(lex)
+        tokens, glued = [], []
+        for t in lex:  # after a `)`, shlex has read the character that follows it, which a word may be glued to
+            at = lex.instream.tell()
+            tokens.append(t)
+            glued.append(bool(at) and line[at - 1] not in _PUNCT and not line[at - 1].isspace())
     except ValueError:
         return None
     segs, argv, redirs, expect_redir, here, herestr = [], [], [], False, [], False
     fd, stdin, ins, hd, opened, mode = None, False, [], False, [], "truncate"
+    # frames: _paren_step's; into: [the words of the command a `$(…)` that just ended is a word of, whether the next
+    # word is glued to it, whether words went there]; cur: the words the word at token `last` went to
+    frames, into, cur, last = [], None, None, -1
     for k, t in enumerate(tokens):
+        ended = None
+        if set(t) <= set(_PUNCT) and ("(" in t or ")" in t):
+            ended = _paren_step(frames, t, cur if last == k - 1 else None, glued[k])
         nxt = tokens[k + 1] if k + 1 < len(tokens) else ""
         if t.isdigit() and nxt[:1] in ("<", ">"):
             fd = t
@@ -901,7 +962,7 @@ def split_commands(cmd: str, ops: bool = False, newline: str = ";", inputs: list
             fd = None
             continue
         if t and set(t) <= set(";&|()"):
-            if argv or redirs:
+            if argv or redirs or (into and into[2]):  # the part after a `$(…)` keeps its operator and redirects
                 segs.append((argv, redirs, t, here) if ops else (argv, redirs))
                 if inputs is not None:
                     inputs.append(ins)
@@ -910,6 +971,7 @@ def split_commands(cmd: str, ops: bool = False, newline: str = ";", inputs: list
                 if modes is not None:
                     modes.append(opened)
             argv, redirs, here, ins, hd, opened = [], [], [], [], False, []
+            into = [*ended, False] if ended else None
             continue
         if t and set(t) <= set("<>"):
             herestr = t == "<<<"
@@ -931,8 +993,20 @@ def split_commands(cmd: str, ops: bool = False, newline: str = ";", inputs: list
                 here.append(t)
             expect_redir, herestr, stdin = False, False, False
             continue
-        argv.append(t)
-    if argv or redirs:
+        if into is not None and not argv:  # `ls $(echo x)/*`: the rest of the word, and the words after it, are the
+            outer = into[0]                  # command's the `$(…)` is a word of, as the shell reads them
+            _case_word(frames, t, outer)
+            if into[1] and not into[2]:
+                outer[-1] += t
+            else:
+                outer.append(t)
+            into[2], cur = True, outer
+        else:
+            _case_word(frames, t, argv)
+            argv.append(t)
+            cur = argv
+        last = k
+    if argv or redirs or (into and into[2]):
         segs.append((argv, redirs, "", here) if ops else (argv, redirs))
         if inputs is not None:
             inputs.append(ins)
