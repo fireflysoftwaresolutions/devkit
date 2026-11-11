@@ -31,7 +31,12 @@ APP = {
     "agents/AGENTS.md": "# Global instructions\n",
     "tests/test_page.py": 'HTML = "<!doctype html><style>p{}</style>"\n',
     "lib/report.py": 'PAGE = "<!doctype html><style>body{}</style>"\n',
+    "lib/shout.py": 'PAGE = "<!DOCTYPE html><HTML><STYLE>P{}</STYLE>"\n',
     "lib/tool.py": "def main():\n    return 0\n",
+    "lib/junit.py": 'SAMPLE = \'<testcase classname="tests.test_calc" name="test_add" time="0.001"/>\'\n',
+    "lib/term.py": "def lines(rows):\n    styled = []\n    for r in rows:\n        styled.append(r.upper())\n    return styled\n",
+    "web/src/Button.js": 'export const Button = () => <button className="primary">Go</button>;\n',
+    "web/src/Title.js": "export const Title = styled.h1`\n  color: red;\n`;\n",
     "src/main/java/acme/AuditSink.java": 'import org.springframework.stereotype.Component;\n@Component("auditSink")\n'
                                          "class AuditSink {}\n",
     "web/src/app/hero.component.ts": "@Component({\n  selector: 'app-hero',\n})\nexport class Hero {}\n",
@@ -56,7 +61,12 @@ EXPECT_APP = {
     "agents/AGENTS.md": ["docs"],
     "tests/test_page.py": ["testing"],
     "lib/report.py": ["ui"],
+    "lib/shout.py": ["ui"],
     "lib/tool.py": [],
+    "lib/junit.py": [],
+    "lib/term.py": [],
+    "web/src/Button.js": ["ui"],
+    "web/src/Title.js": ["ui"],
     "src/main/java/acme/AuditSink.java": ["spring"],
     "web/src/app/hero.component.ts": ["angular", "ui"],
     "app/Http/Controllers/UserController.php": ["api"],
@@ -138,6 +148,12 @@ class RuleFixtures(unittest.TestCase):
     def test_ui_rule_fires_on_ui_code_only(self):
         self.assert_rules(["tests/test_page.py", "lib/report.py", "lib/tool.py", "src/main/java/acme/AuditSink.java",
                            "web/src/app/hero.component.ts"])
+
+    # JSX's className and styled-components' styled.<tag>` are case-sensitive code: a Python module that holds JUnit
+    # XML (classname=) or builds a list named styled is no UI, while HTML in any case and real components still are
+    def test_ui_rule_reads_component_tokens_as_written(self):
+        self.assert_rules(["lib/junit.py", "lib/term.py", "lib/shout.py", "lib/report.py", "web/src/Button.js",
+                           "web/src/Title.js"])
 
     # service code in PHP, Python and Node needs the backend skill, like a Java controller does; a plain module not
     def test_service_code_needs_the_backend_skill(self):
