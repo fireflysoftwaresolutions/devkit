@@ -80,13 +80,16 @@ def check(key: str) -> dict:
     if not installed:
         return {"installed": False, "signed_in": False, "detail": f"{cli} not installed",
                 "fix": "dev install --only tools"}
+    if key == "kubernetes" and not core.have("helm"):
+        return {"installed": False, "signed_in": False, "detail": "helm not installed",
+                "fix": "dev install --only tools"}
     if isinstance(probe, str) and probe.startswith("env:"):
         options = probe[4:].split("|")
         ok = any(all(os.environ.get(v) for v in opt.split("+")) for opt in options)
         extra = ""
         if key == "azure-devops" and cli and core.sh(["az", "extension", "show", "--name", "azure-devops",
                                                       "--only-show-errors"], timeout=20)[0] != 0:
-            return {"installed": True, "signed_in": ok, "detail": "az devops extension missing",
+            return {"installed": False, "signed_in": ok, "detail": "az devops extension missing",
                     "fix": "az extension add --name azure-devops"}
         return {"installed": True, "signed_in": ok,
                 "detail": ("token set" if ok else f"no token ({' or '.join(options)})") + extra, "fix": how}

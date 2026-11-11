@@ -127,13 +127,18 @@ precedence.
 | `skills.enforce` | `false` turns off the brief and Stop enforcement points; the crew gates follow `crew.gates.enforce` |
 | `skills.rules` | Your rules: one with an existing `id` changes the fields you give, a new `id` adds a rule |
 
-The format and an example are in [Configuration › Skills](configuration.md#skills). `dev doctor` checks, for each
-agent, that every rule's skills are installed ("skills for every rule"); removing the `postgres` group, for example,
-leaves the `database` rule without its skill.
+The format and an example are in [Configuration › Skills](configuration.md#skills). `dev doctor` checks core skills
+and selected optional groups for each selected agent. Intentionally omitting an optional group does not make the
+installation unhealthy.
+
+Work rules still apply to the task. For example, omitting `postgres` does not waive the skill required for a
+PostgreSQL schema change: the matching rule reports the missing skill before that work can proceed. Add the group
+to `skills.groups` and run `dev install --only skills` in your own terminal when you need that capability.
 
 ## Claude Code plugins
 
-From the `claude-plugins-official` marketplace, enabled for every project.
+These plugins come from the `claude-plugins-official` marketplace and apply when Claude is selected. Language-server
+plugins follow the effective language stacks, including runtimes required by a selected framework.
 
 | Plugin | Source · license | Purpose | Why |
 | --- | --- | --- | --- |
@@ -148,8 +153,9 @@ From the `claude-plugins-official` marketplace, enabled for every project.
 | `jdtls-lsp` | Anthropic · Apache-2.0 | Java code intelligence (Eclipse JDT LS) | The same, for Java; needs a Java 25 runtime |
 | `php-lsp` | Anthropic · Apache-2.0 | PHP code intelligence (Intelephense) | The same, for PHP; Intelephense premium features need a license |
 
-The LSP plugins need their language servers, which `dev setup` installs for your stacks: `typescript-language-server`
-and `typescript`, `pyright`, `jdtls`, and `intelephense`.
+The LSP plugins need their language servers, which setup installs for the effective stacks:
+`typescript-language-server` and `typescript` for Node, `pyright` for Python, `jdtls` for Java, and `intelephense` for
+PHP. An unselected stack's plugin is not an installation requirement. This selection adds no Codex LSP plugin.
 
 ## Codex plugins
 
@@ -167,12 +173,25 @@ Codex has no LSP plugin mechanism; its global instructions tell it to run the pr
 | Server | Claude Code | Codex | Notes |
 | --- | --- | --- | --- |
 | Chrome DevTools | user scope | yes | `chrome-devtools-mcp@1.12.0` pinned, `--no-usage-statistics --no-performance-crux`; performance, network, and accessibility debugging in a real browser |
-| Angular CLI | user scope | yes | `@angular/cli@22.2.6 mcp`: best practices, documentation search, project tools |
+| Angular CLI | when Angular applies | when Angular applies | `@angular/cli@22.2.6 mcp`: best practices, documentation search, project tools |
+
+Angular applies when `frameworks` includes `angular`, or when the key is absent and legacy defaults apply. An
+explicit empty list does not enable Angular. A selected agent is still required. Chrome DevTools remains browser
+tooling. An explicit [extension overlay](configuration.md#extensions) can opt into another capability.
 
 Figma is not added: it is already available as a claude.ai connector, and Codex can add `figma@openai-curated` per
 project when needed.
 
 ## Shared skills (both agents)
+
+The catalog lists available skills, not a requirement to install every framework. With explicit framework choices,
+Angular skills apply to Angular, React and composition skills to React or Next.js, and Spring skills to Spring Boot.
+JUnit follows Java. Filtering applies per skill, so documentation and security skills from the same source stay
+available. An absent framework setting preserves legacy framework skills.
+
+NestJS, Laravel, and Symfony use shared backend/testing guidance; no dedicated skill sources are added for them.
+Optional `skills.groups` are independent: `all` selects every optional group, not every framework. Matching work
+rules still require the skills needed for the task.
 
 Fetched at install time from upstream at the pinned commits in `config/skills.json`, and linked into
 `~/.claude/skills` and `~/.agents/skills`.
@@ -311,7 +330,7 @@ settings or hooks is the developer's.
 impeccable offers to write PRODUCT.md and DESIGN.md. devkit's global instructions keep agents from creating them
 unless the developer asks (see [Settings that tame the plugins](#settings-that-tame-the-plugins)).
 
-`dev doctor` checks all three parts:
+`dev doctor` checks the parts used by each selected agent:
 
 | Row | Passes when | Fix |
 | --- | --- | --- |
@@ -356,7 +375,9 @@ To move to a newer impeccable, change its `ref` in `config/skills.json` after re
 ### Optional groups
 
 A source with a `group` is installed only when the group is listed in `skills.groups` (or `all` is). The first three
-are on by default.
+are on by default. Those defaults apply when `skills.groups` is absent; `[]` keeps every optional group off.
+Installation health checks use that same selection. A task can still require a skill from an omitted group (see
+[Configure the rules](#configure-the-rules)).
 
 | Group | Default | Skills | Source · license |
 | --- | --- | --- | --- |

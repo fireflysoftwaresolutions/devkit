@@ -185,6 +185,28 @@ a release or a branch, then run `dev update` again.
 
 Every refusal is also written to the audit trail (`dev audit --action install`).
 
+### `dev doctor` requires a component you did not choose
+
+Run `dev config show` and check `agents`, `stacks`, `frameworks`, `hosts`, `clouds`, and `skills.groups`. These choices govern
+installation and diagnostics. The presence of an app, CLI, or old config folder does not make its integration
+required. Change your choices with `dev setup` in your own terminal, then review and apply the plan.
+
+| What the check names | What it means |
+| --- | --- |
+| An unselected agent, its plugins, MCP servers, or Desktop extension | Its ordinary health checks should be skipped. Check the saved agent flags and the installed devkit version; follow [Updating](getting-started.md#updating) if a newer release fixes the check |
+| Remaining devkit files for an agent you turned off | Cleanup is still pending. Run the terminal command the check prints; your own agent settings are preserved |
+| A selected tool or optional skill group | Its requirements still apply. Turning off automatic package installation or using one-run `--skip-packages` does not remove them |
+| A selected npm CLI such as `ng`, `pyright`, or `typescript-language-server` | Run `dev install --only tools` in your terminal with `packages.auto` enabled; the repair checks npm tools even when Homebrew is complete |
+| Kubernetes or Helm | They belong to the `kubernetes` entry in `clouds`; neither is required when that entry is absent |
+| A framework you did not select | An absent `frameworks` key keeps legacy defaults. Customize Frameworks in setup to select specific frameworks or none; global tools already installed are not removed |
+| A runtime absent from `stacks` | Angular, React, Next.js, and NestJS require Node; Spring requires Java; Laravel and Symfony require PHP |
+| Invalid framework configuration | Use an array of supported IDs. `[]` is valid; `null`, unknown IDs and non-array values are rejected before installation or update changes |
+| Docker, GitHub, or another base tool | These are part of every installation. Docker's autostart choice controls the VM, not its required packages |
+| A skill requested by a work rule | The task can need a framework or optional skill group outside the installation choices. Select and install that capability before continuing |
+
+Restart existing agent sessions after an update so they load the new hooks. A passing installation check does not
+prove a live session loaded them; see [Where to use devkit](surfaces.md).
+
 ### `dev doctor` says the pinned copy changed or is not used
 
 | Check that fails | Cause | Fix |

@@ -1,7 +1,9 @@
 # Docker
 
 devkit runs Docker on [Colima](https://github.com/abiosoft/colima), a lightweight Linux VM, with the Docker CLI,
-Compose, and Buildx from Homebrew. No Docker Desktop license is needed.
+Compose, and Buildx from Homebrew. No Docker Desktop license is needed. These are base packages in every devkit
+installation. The wizard's start-now and start-at-login choices control when the VM runs; they do not remove the
+Docker packages from installation or health checks.
 
 ## Start and stop
 

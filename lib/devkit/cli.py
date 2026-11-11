@@ -1765,7 +1765,8 @@ def cmd_install(a):
     only = {x.strip() for x in a.only.split(",") if x.strip()} if a.only else None
     rc = setup.run_install(only=only, unverified_why=why if a.unverified else None, version=a.version,
                            as_pinned=a.as_pinned, commit_template=getattr(a, "commit_template", None),
-                           assume_yes=bool(getattr(a, "yes", False)))
+                           assume_yes=bool(getattr(a, "yes", False)),
+                           skip_packages=bool(getattr(a, "skip_packages", False)))
     if rc == 0 and (not only or "claude" in only):  # what was installed: `dev config` tells new from removed
         try:
             write_install_record(create=not only)  # only a whole install that finished creates it
@@ -1824,6 +1825,12 @@ def cmd_update(a):
         return updatecheck.cmd_check(a)
     if getattr(a, "quiet", False) or getattr(a, "record", False):
         ui.err("--quiet and --record go with --check")
+        return 2
+    from . import profiles
+    try:
+        profiles.resolve(CFG)
+    except ValueError as e:
+        ui.err(str(e))
         return 2
     from . import hooks
     if not hooks.confirm_restart(assume_yes=bool(getattr(a, "yes", False))):  # before anything changes
@@ -3887,15 +3894,16 @@ def cmd_guard(a):
     return 1
 
 
-def plugin_checks():
+def plugin_checks(agents=None):
     """Validate the devkit plugin with Claude Code's validator and Codex's own manifest parser. -> [(name, ok, detail)]"""
     root = core.DEVKIT_HOME
     out = []
-    if core.have("claude"):
+    agents = ("claude", "codex") if agents is None else agents
+    if "claude" in agents and core.have("claude"):
         rc, o, e = core.sh(["claude", "plugin", "validate", str(root / "plugin")], timeout=120)
         out.append(("Claude Code validator", rc == 0 and "Validation passed" in o + e,
                     "validation passed" if rc == 0 else (o + e).strip().splitlines()[-1:] or ["failed"]))
-    if core.have("codex"):
+    if "codex" in agents and core.have("codex"):
         from .codexrpc import CodexError, CodexRPC
         try:
             with CodexRPC(timeout=40) as rpc:
@@ -4607,6 +4615,8 @@ def build_parser():
                    help="pin HEAD although it is neither a release nor tested (`dev ci --run`); needs --why")
     p.add_argument("--why", help="the reason for --unverified, recorded in the audit")
     p.add_argument("--as-pinned", action="store_true", help=argparse.SUPPRESS)  # the second half, from the copy
+    p.add_argument("--skip-packages", action="store_true",
+                   help="skip Homebrew/npm tool installation for this run without changing saved selections")
     p.add_argument("--yes", "-y", action="store_true",
                    help="go on without asking when Claude Code or Codex sessions that use devkit run (they are "
                         "listed; restart each to load the new hooks)")

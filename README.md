@@ -88,7 +88,7 @@ Pass options after `bash -s --`, for example `curl -fsSL … | bash -s -- --yes`
 | Option or variable | Effect |
 | --- | --- |
 | `--yes` | Accept every default in the setup wizard |
-| `--skip-packages` | Configure only; do not install the toolchain packages for your stacks |
+| `--skip-packages` | Skip toolchain packages for this run; bootstrap prerequisites and selected-agent installers still apply |
 | `--no-setup` | Get devkit and its prerequisites, but do not sign in or run the wizard |
 | `DEVKIT_HOME` | Where devkit goes (default `~/Development/fireflysoftwaresolutions/devkit`) |
 | `DEVKIT_REPO` | The repository to clone, for example your fork |
@@ -178,7 +178,8 @@ stage's guide is in [Concepts › From plan to operate](docs/concepts.md#from-pl
 | Lessons | Blameless lessons from mistakes, recalled before the work they apply to, measured by whether agents heeded or missed them, screened before any agent sees them, turned into tests and guard rules when they repeat, and consolidated every night by `dev sleep` without losing any that still matter | [Lessons](docs/lessons.md) |
 | Bug registry | When devkit itself fails, agents get the known detour from a public registry in GitHub Issues, share the ones they find under trust rules, and report what nobody solved, with devkit facts only; votes rank the bugs for hotfixes | [The bug registry](docs/bug-registry.md) |
 | Scheduled jobs and audit | Sync, sleep, cleanup, repair, audit, update check, health, and lesson review as launchd jobs you can see and reschedule; an audit trail of everything devkit changed or decided, with secrets redacted | [Scheduled jobs and the audit trail](docs/jobs-and-audit.md) |
-| Git hosts and clouds | The CLIs for GitLab, Bitbucket, Azure DevOps, AWS, Azure, Google Cloud, DigitalOcean, Kubernetes, and OpenTofu, installed and checked for sign-in | [Getting started](docs/getting-started.md#the-setup-wizard) |
+| Git hosts and clouds | Installs and checks the hosts and clouds you select, including GitLab, Bitbucket, Azure DevOps, AWS, Azure, Google Cloud, DigitalOcean, Kubernetes with Helm, and OpenTofu. GitHub is part of the base setup | [Getting started](docs/getting-started.md#the-setup-wizard) |
+| Languages and frameworks | Choose runtimes separately from Angular, React, Next.js, NestJS, Spring Boot, Laravel, and Symfony. Setup, updates, extensions, skills, and checks share the selection; existing installations retain legacy defaults until customized | [Configuration](docs/configuration.md#frameworks) |
 | Security | `dev sec scan` (gitleaks, osv-scanner, Semgrep, Trivy, zizmor), a secret check before every commit, devkit run isolated from Python's environment, and the DevSecOps skills and plugins | [Skills and plugins](docs/skills-and-plugins.md), [Guard rules](docs/guard.md) |
 | Guard | A pre-tool hook that blocks what wastes time or disk or breaks shared records, holds irreversible actions for your grant, and explains the right way. It is a seatbelt, not a sandbox: it catches an agent's mistakes and common prompt injection, and your own review stays the boundary, since agents work with your own `gh` account and keys | [Guard rules › What the guard is and is not](docs/guard.md#what-the-guard-is-and-is-not) |
 | Backups and continuity | `dev backup` copies branches that exist only on this Mac to the remote when that starts no CI run, with a policy per project and embargoes; a session keeps its run, crew, and your requests through compaction | [Delivery](docs/delivery.md#back-up-early-ci-once), [Continuity](docs/continuity.md) |

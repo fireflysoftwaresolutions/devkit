@@ -6,7 +6,9 @@ environment variables, and the files in the devkit repository that decide what i
 ## `~/.config/devkit/config.json`
 
 `dev setup` (or the first `dev install`) creates it. Every key is optional; missing keys take the defaults below.
-Nested objects are merged with the defaults, so you write only what you change.
+Nested objects are merged with the defaults, so you write only what you change. An explicit `false` or empty list
+keeps that choice; it does not restore the default. Installation, updates, and `dev doctor` use these saved choices.
+The [base package groups](getting-started.md#the-setup-wizard) and GitHub remain part of every installation.
 
 ```json
 {
@@ -32,21 +34,51 @@ Run `dev config edit` to open it and validate it, `dev config show` to print the
 | `default_host` | `github.com` | Host whose repositories live at `<owner>/<repo>`; all others live at `<host>/<group…>/<repo>` |
 | `host_dirs` | `{}` | Folder aliases for hosts, for example `{"gitlab.com": "gitlab"}` → `~/Development/gitlab/<group>/<repo>` |
 | `editor` | `code` | Editor for `dev open` (and for `dev handoff --edit` and `dev config edit` when `$EDITOR` is unset) |
-| `stacks` | `["java", "python", "php", "node"]` | The stacks whose packages `dev setup` and `dev install --only tools` install, and whose tools and language servers `dev doctor` requires. `dev doctor` lists the other stacks as not chosen, not as failures |
+| `stacks` | `["java", "python", "php", "node"]` | The language stacks to install and check; selected frameworks can add required runtimes. Doctor lists other stacks as not chosen, not as failures |
+| `frameworks` | absent (legacy behavior) | Framework support: `angular`, `react`, `nextjs`, `nestjs`, `spring`, `laravel`, `symfony`. `[]` selects none. Each selection adds its runtime requirements; see [Frameworks](#frameworks) |
 | `hosts` | `["github"]` | Git hosts you use: `github`, `gitlab`, `bitbucket`, `azure-devops`. devkit installs their CLIs, `dev doctor` checks the sign-in, and `dev ci status` reads their pipelines |
 | `clouds` | `[]` | Clouds and infrastructure tools you use: `aws`, `azure`, `gcp`, `digitalocean`, `kubernetes`, `terraform` (OpenTofu). devkit installs their CLIs and `dev doctor` checks the sign-in |
-| `packages.auto` | `true` | `dev install` installs missing packages for your stacks, hosts, and clouds; `false` only reports them |
+| `packages.auto` | `true` | `dev install` repairs missing Homebrew and npm tools for selected stacks, frameworks, hosts, and clouds; `false` also skips host-extension installation |
 | `language` | `en-US` | The language for replies and documents, which the `communicating` skill asks agents to follow, and the language of the pull request template that `dev pr create` fills (`es-ES` uses the Spanish one). devkit does not put it in the session context, so also state another language in your [personal agent rules](#personal-agent-rules) |
 
 Changing `dev_root`, `default_host`, or `host_dirs` changes every canonical path: run `dev ls` and `dev adopt` the
 repositories that are no longer in place.
 
+### Frameworks
+
+Language stacks and frameworks are separate choices. A framework selects its required runtime even when that
+runtime is absent from `stacks`; the setup review shows the combined requirements.
+
+| Framework ID | Runtime | Support |
+| --- | --- | --- |
+| `angular` | `node` | Angular CLI, its MCP server, and Angular skills |
+| `react` | `node` | React performance and composition skills |
+| `nextjs` | `node` | The React and Next.js skills |
+| `nestjs` | `node` | Shared backend and testing guidance |
+| `spring` | `java` | Spring Boot, testing, security, and observability skills |
+| `laravel` | `php` | Shared backend and testing guidance |
+| `symfony` | `php` | Shared backend and testing guidance |
+
+The selection configures development tools and guidance. It does not install a project's framework dependencies
+globally or add a global React CLI. Python remains a language-stack choice; this catalog adds no dedicated Django
+or FastAPI integration.
+
+An absent `frameworks` key preserves the previous skill and MCP defaults; legacy Node still includes Angular CLI.
+An explicit `[]` turns off framework defaults. New setup records supported frameworks found in your repositories,
+or `[]` when none are found. An existing legacy setup keeps the key absent until you customize Frameworks. Saved
+choices, including an empty list, take precedence over detection.
+
+Use an array of supported IDs. Unknown IDs, `null`, and values that are not arrays are rejected before installation
+writes or an update changes the checkout. Installation, updates, and `dev doctor` use the same effective selection. Deselecting a framework does not
+uninstall global tools; only agent entries that devkit can prove it manages are reconciled. Full installs apply
+the choice across tools, skills, and agent integrations. A partial install repairs only its named steps.
+
 ### Agents
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `agents.claude` · `agents.codex` | `true` | Configure Claude Code or Codex. `false` skips that agent in `dev install` and `dev doctor` |
-| `claude.default_mode` | `bypassPermissions` | Claude Code's permission mode: `bypassPermissions` (no prompts; the guard protects the workspace), `acceptEdits` or `default` |
+| `agents.claude` · `agents.codex` | `true` | Select the Claude Code or Codex integration. `false` skips its setup and ordinary health checks, even when its app or CLI is present. Remaining devkit configuration is still reported for cleanup |
+| `claude.default_mode` | `bypassPermissions` | Claude Code's permission mode: `bypassPermissions` (no prompts; the guard protects the workspace), `acceptEdits` or `default`. `dev doctor` checks the mode you chose |
 | `claude.subagent_model` · `claude.subagent_effort` | empty | Model and effort for every Claude subagent. Empty keeps the session's (recommended). See [Models and tokens](models-and-tokens.md#configuration-keys) |
 | `claude.fast_mode_per_session` | `true` | Keep `fastModePerSessionOptIn` in Claude's settings |
 | `claude.statusline` | `true` | Install devkit's status line when you have none (it records Claude's quota; see [Agents](agents.md#settings-claudesettingsjson)) |
@@ -67,6 +99,10 @@ Apply agent changes with `dev install --only claude` or `dev install --only code
 | `skills.optional` | `{"iac": ["terraform"]}` | Skill groups the setup wizard offers, but never installs by default, each with the tools that bring the offer: when you pick Terraform, the wizard offers `iac` and adds it to `skills.groups` unless you say no |
 | `skills.enforce` | `true` | Enforce the skills each kind of work requires (see [Skills and plugins › Required skills](skills-and-plugins.md#required-skills)) |
 | `skills.rules` | `[]` | Your own skill rules. A rule with the same `id` as a devkit rule changes the fields you give; a new `id` adds a rule |
+
+An empty `skills.groups` list installs no optional groups; omitting the key keeps the defaults, and `all` selects
+every optional group. `dev doctor` checks core skills and the groups you chose for each selected agent. Work that
+requires an omitted skill still needs that skill before it can proceed.
 
 Apply group changes with `dev install --only skills`. Rule changes apply at the next prompt.
 
@@ -100,7 +136,17 @@ Change them with `dev ext add|remove|enable|disable` (see
 rather than by hand; `dev ext ls` shows the result with its layer. Ids are
 those `dev ext ls --json` prints. devkit itself and its security plugins (`security-guidance`, `claude-security`,
 `codex-security`) stay on whatever the overlay says. `dev install`, `dev config repair`, and the managed-settings
-lock use the same effective set, so they never undo your choice.
+lock use the same effective set, so they never undo your choice. Installation health checks cover extensions for
+the selected agents; missing plugins or MCP servers for an agent you turned off are not failures. Required extensions remain
+required for each selected agent.
+
+Framework and language-stack choices filter devkit's default extensions. An explicit `ext.add` or `ext.enable`
+can opt into an extension outside those defaults. It cannot enable an agent that you turned off, remove required
+security protections, bypass trust or provenance checks, or override an existing `ext.remove` or `ext.disable` choice.
+
+`dev ext ls` keeps the catalog visible, including entries outside the installation profile. Those entries are not
+missing requirements unless selected or explicitly enabled. An MCP entry is removed only when its full
+configuration proves devkit owns it; sharing a catalog name is not enough. Your own entries stay intact.
 
 ```json
 {
@@ -351,7 +397,8 @@ These files apply to everyone who installs devkit. Change them in a branch of th
 | `config/git/` | Shared git defaults and the global ignore file |
 | `plugin/` | The devkit plugin: its skills, slash commands and the `scout` agent |
 | `templates/` | Plan, task, pull request and handoff templates (see [Templates](templates.md)) |
-| `Brewfile`, `config/npm-globals.txt` | Packages in `# @group` sections: the base groups (`core`, `docker`, `agents`, `docs`, `security`), one per stack, and one per git host or cloud (`gitlab`, `azure-devops`, `aws`, `azure`, `gcp`, `digitalocean`, `kubernetes`, `terraform`) |
+| `Brewfile`, `config/npm-globals.txt` | Packages in `# @group` sections: the base groups (`core`, `docker`, `docs`, `security`), one per selected agent (`claude`, `codex`), one per stack, the Angular framework group (`angular`), and one per git host or cloud (`gitlab`, `azure-devops`, `aws`, `azure`, `gcp`, `digitalocean`, `kubernetes`, `terraform`) |
+| `config/profiles.json` | Language and framework capabilities: required runtimes, package groups, skills, language-server plugins, and MCP servers |
 
 Placeholders `{{DEVKIT}}`, `{{HOME}}`, `{{DEV}}`, and `{{UID}}` are expanded at install time. After editing:
 

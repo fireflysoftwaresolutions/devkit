@@ -11,7 +11,8 @@ report and plan (see [Claude Desktop chat and Cowork](desktop-chat-and-cowork.md
 
 ## What you need
 
-- devkit installed on your Mac, with every line of `dev doctor` showing `✓`. If you have not installed it yet, follow
+- devkit installed on your Mac, with Claude Code chosen in the setup wizard and every line of `dev doctor` showing
+  `✓`. If you have not installed it yet, follow
   [Your first install, step by step](../getting-started.md#your-first-install-step-by-step).
 - Claude Desktop for Mac, signed in with a Claude account that includes Claude Code.
 - Bypass mode allowed, for the setup devkit recommends. In Claude Desktop, open **Settings › Code** and turn on

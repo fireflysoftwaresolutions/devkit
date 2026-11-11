@@ -2659,6 +2659,7 @@ _dev__install() {
     '--version=[switch to a pinned copy kept from an earlier install]:pinned copy: _dev_live versions -' \
     '--unverified[pin HEAD although it is neither a release nor tested]' \
     '--why=[the reason for --unverified, recorded in the audit]:why: ' \
+    '--skip-packages[skip Homebrew/npm tool installation for this run without changing saved…]' \
     '(--yes -y)'{--yes,-y}'[go on without asking when Claude Code or Codex sessions that use devkit…]' \
     '--commit-template=[dev setup'\''s answer for the commit template]:commit template:(yes no)'
 }

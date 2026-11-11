@@ -2,7 +2,8 @@
 
 devkit configures Claude Code and Codex from the same sources, so both follow the same instructions, use the same
 skills, and are checked by the same hooks. This page lists exactly what it configures in each, and how it keeps devkit
-active in every session.
+active in every session. Choose Claude Code, Codex, or both in `dev setup`; the setup and health checks below apply
+to the selected agents. Having the other agent's CLI or desktop app installed does not enable its integration.
 
 | Surface | Reads | Configured by |
 | --- | --- | --- |
@@ -25,7 +26,7 @@ Both apps bundle their own copy of the agent, and both copies read the same conf
 - **Claude Desktop's chat and Cowork** do not run Claude Code. devkit reaches them through its own extension, which
   shows in **Settings → Extensions** with the devkit name and icon.
 
-`dev doctor` checks all of this with evidence: the bundled versions, the plugins the ChatGPT app's Codex sees, the
+`dev doctor` checks this for the selected agents with evidence: the bundled versions, the plugins the ChatGPT app's Codex sees, the
 extension's version and state, and the sessions recorded from each surface.
 
 Plugins uploaded in Claude Desktop (**Customize → Plugins**) sync into every Claude Code session, so devkit does not
@@ -56,7 +57,7 @@ devkit updates the tools without reinstalling the extension. The launcher looks 
 | `devkit_team` · `devkit_doctor` · `devkit_audit` · `devkit_jobs` | Who works on what; health; the audit trail; scheduled jobs |
 | `devkit_task_add` · `devkit_task_update` | Add a task; start, finish, block, unblock or release one (through `dev task`, so it is audited) |
 
-Install or update it:
+With Claude selected in `dev setup` and Claude Desktop installed, install or update it:
 
 ```bash
 dev install --only desktop     # builds the bundle and opens it in Claude Desktop; click Install
@@ -165,7 +166,7 @@ devkit does not edit `config.toml` as text. It starts `codex app-server` and wri
 | `agents.max_concurrent_threads_per_session` | `4` | At most four subagent threads per session |
 | `review_model` | `gpt-6-astra` | `/review` uses the strongest model |
 | `project_doc_max_bytes` | `131072` | Codex reads a project's AGENTS.md whole (its default stops at 32 KiB; Claude Code reads CLAUDE.md whole) |
-| `mcp_servers` | from `config/codex/plugins.json` | Chrome DevTools, Angular CLI (`dev ext ls --agent codex` lists them) |
+| `mcp_servers` | from `config/codex/plugins.json` and the extension overlay | Chrome DevTools and, when selected or kept by legacy defaults, Angular CLI; `dev ext ls --agent codex` lists the catalog and effective selection |
 | `hooks.state."<key>".trusted_hash` | the hashes Codex reports | Trust for devkit's hooks |
 
 **Attribution in Codex.** Codex can add `Co-authored-by: Codex` to commits and "Generated with Codex" to pull requests, in the terminal and in the ChatGPT app. No `config.toml` key turns it off: it is an account setting on OpenAI's side, which every session records as `git_attribution`. `dev doctor` reads it from your newest session and fails when it is on. Either way, the guard refuses attribution in commits that agents run, and `dev commit` and `dev pr create` remove the lines.

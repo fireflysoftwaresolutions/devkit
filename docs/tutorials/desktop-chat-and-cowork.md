@@ -23,7 +23,8 @@ Terminal. Every other tool only reads.
 
 ## Install the extension
 
-The setup wizard installs it when Claude Desktop is on your Mac. To install it later, or to check it:
+The setup wizard prepares it when Claude is selected and Claude Desktop is on your Mac. A Codex-only installation
+does not require this extension. To add it, choose Claude in `dev setup` first. Then install or check it:
 
 ```bash
 dev install --only desktop   # builds the extension and opens it in Claude Desktop: choose Install
