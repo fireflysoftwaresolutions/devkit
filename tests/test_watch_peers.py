@@ -161,6 +161,7 @@ class DeliveryTests(PeerCase):
         self.assertEqual((states[normal], states[standby], states[newer]), ("superseded", "superseded", "live"))
 
     def test_standby_is_the_tech_leads_and_goes_with_wait(self):
+        self.crew()  # the member has a registered parent lane before its standby request is judged
         def args(**kw):
             return type("A", (), dict({"wait": True, "standby": True, "for_": None, "only": None, "timeout": "1",
                                         "json": False}, **kw))()

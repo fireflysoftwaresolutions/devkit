@@ -1362,7 +1362,10 @@ def on_midturn(agent: str, sid: str, text: str, ts=None, now=None) -> None:
         prompts = cp.get("prompts") or []
         if any(p.get("text") == entry["text"] and abs((p.get("ts") or 0) - entry["ts"]) < 1 for p in prompts):
             return state.SKIP
-        cp["prompts"] = (prompts + [entry])[-PROMPTS:]
+        merged = prompts + [entry]
+        if agent == "codex":  # bounded rollout backfill can arrive after a newer request from the tail
+            merged.sort(key=lambda p: p.get("ts") or 0)
+        cp["prompts"] = merged[-PROMPTS:]
         r["checkpoint"] = _fit(cp)
     _quietly(agent, sid, add, now)
     return None

@@ -87,7 +87,7 @@ def visible(text: str) -> str:
     return text if text.isascii() else "".join(c for c in text if not _hidden(c))
 
 
-def clean(text, limit: int = LINE_MAX) -> str:
+def clean(text, limit: int | None = LINE_MAX) -> str:
     """Text someone else wrote (a member, CI, another session) as one inert span of a line: escape sequences, C0 and
     C1 controls, and every invisible character (`visible`) dropped (a line break, a tab or another control that
     separates words becomes a space); devkit's curly quotes become plain ones, so the text cannot close the span it is
@@ -131,10 +131,12 @@ def _ci_line(text: str) -> str:
     return out + (" · first error: dev ci status (untrusted CI output)" if "untrusted CI output" in str(text) else "")
 
 
-def _message_event(run: dict, m: dict, me: str) -> dict:
+def _message_event(run: dict, m: dict, me: str, agent: str = "") -> dict:
     from . import progress
     frm, mid, who = m.get("from") or "", m.get("id") or "", _who(m.get("from_name"))
-    text = clean(m.get("text"))
+    # Codex consumes this line as the message, with no background result that can supply its missing tail.
+    # Keep the storage bound, then sanitize without a preview cut (redaction may lengthen the stored text).
+    text = clean(str(m.get("text") or "")[:progress.MESSAGE_MAX], None) if agent == "codex" else clean(m.get("text"))
     if frm == "ci":
         return _ev("ci", mid, True, _ci_line(m.get("text")), m.get("ts"))
     if progress._asks(m):
@@ -151,14 +153,36 @@ def _message_event(run: dict, m: dict, me: str) -> dict:
     return _ev("notice", mid, me != "main", f"devkit · notice {mid} from {who}: “{text}”", m.get("ts"))
 
 
-def _messages(agent, sid, me, mark, want, limit):
+def _messages(agent, sid, me, mark, want, limit, emit=None):
     from . import progress
     run = progress.load_run(agent, sid)
     if not run:
         return [], ""
 
     def pick(r, m):
-        return want(_message_event(r, m, me))
+        ev = _message_event(r, m, me, agent)
+        return want(ev) and (bool(ev["line"]) if emit is not None and agent == "codex" else True)
+    if mark and emit is not None and agent == "codex":
+        # Hold the existing run lock through each write/flush and acknowledge only that message afterward.
+        # A closed pipe leaves its message and the rest unread; competing hooks cannot take them mid-delivery.
+        evs = []
+        with progress._tx(agent, sid):
+            run = progress.normalize(progress.load_run(agent, sid) or {})
+            msgs = progress._take_messages(agent, sid, me, mark=False, select=pick, limit=limit)
+            for m in msgs:
+                ev = _message_event(run, m, me, agent)
+                emit(ev["line"])
+                for stored in run.get("messages") or []:
+                    if stored.get("id") == m["id"]:
+                        stored["delivered"] = True
+                        break
+                progress._save(run, touch_session=False)
+                if ev["line"].startswith("devkit · moot:"):
+                    progress._audit("crew.message-moot", ev["id"], ev["line"][:300], "moot",
+                                    project=run.get("project") or "", why=ev["line"].split("): ", 1)[-1][:300])
+                ev["_emitted"] = True
+                evs.append(ev)
+        return evs, ""
     msgs, text = [], ""
     if mark:
         text = progress.messages_context(agent, sid, me, select=pick, limit=limit, taken=msgs)
@@ -167,7 +191,7 @@ def _messages(agent, sid, me, mark, want, limit):
     if not msgs:
         return [], ""
     run = progress.normalize(progress.load_run(agent, sid) or run)
-    evs = [_message_event(run, m, me) for m in msgs]
+    evs = [_message_event(run, m, me, agent) for m in msgs]
     if mark:
         for ev in evs:  # a moot question leaves the record told as moot, with why
             if ev["line"].startswith("devkit · moot:"):
@@ -335,12 +359,12 @@ def _peer_mail(agent, sid, mark, want, limit):
     return evs, "\n".join([h for h in (getattr(peers, "FRAME_HEADER", ""),) if h] + [ev["line"] for ev in evs])
 
 
-def _sources(agent, sid, me, mark, want, limit) -> list:
+def _sources(agent, sid, me, mark, want, limit, emit=None) -> list:
     """[(events, hook text)] of every source of the consumer, in delivery order, each taken (`mark`) or peeked."""
     if me != "main":
-        return [_messages(agent, sid, me, mark, want, limit)]
+        return [_messages(agent, sid, me, mark, want, limit, emit)]
     out = []
-    for take in (lambda n: _messages(agent, sid, me, mark, want, n), lambda n: _decisions(agent, sid, mark, want),
+    for take in (lambda n: _messages(agent, sid, me, mark, want, n, emit), lambda n: _decisions(agent, sid, mark, want),
                  lambda n: _ready(agent, sid, mark, want), lambda n: _ci(agent, sid, mark, want),
                  lambda n: _session_items(agent, sid, mark, want), lambda n: _peer_mail(agent, sid, mark, want, n)):
         left = limit - sum(len(e) for e, _ in out)
@@ -358,19 +382,19 @@ def _wanted(only):
     return lambda ev: not kinds or ev["kind"] in kinds
 
 
-def _collect(agent, sid, me, mark=True, only=None, wakes_only=False, limit=MAX_EVENTS) -> list:
+def _collect(agent, sid, me, mark=True, only=None, wakes_only=False, limit=MAX_EVENTS, emit=None) -> list:
     ok = _wanted(only)
     if not wakes_only:
-        return _sources(agent, sid, me, mark, ok, limit)
+        return _sources(agent, sid, me, mark, ok, limit, emit)
     if not any(ev["wakes"] for evs, _ in _sources(agent, sid, me, False, ok, limit) for ev in evs):
         return []
     # what wakes first, then what rides along with it: a hook that took the waking events meanwhile leaves the
     # notices where they are
-    woke = _sources(agent, sid, me, mark, lambda ev: ok(ev) and ev["wakes"], limit)
+    woke = _sources(agent, sid, me, mark, lambda ev: ok(ev) and ev["wakes"], limit, emit)
     n = sum(len(e) for e, _ in woke)
     if not n:
         return []
-    return woke + _sources(agent, sid, me, mark, lambda ev: ok(ev) and not ev["wakes"], limit - n)
+    return woke + _sources(agent, sid, me, mark, lambda ev: ok(ev) and not ev["wakes"], limit - n, emit)
 
 
 def mail(agent: str, sid: str, me: str = "main", mark: bool = True, only=None, wakes_only: bool = False) -> str:
@@ -833,10 +857,11 @@ def _emit_lines(evs: list, emit, prefix: str = "", tail=None):
 
 def _deliver(agent, sid, me, only, emit, rid, arm, start, clock):
     """Take what wakes this consumer, with what rides along, and print it -> 0, or None when nothing woke it."""
-    taken = [ev for evs, _ in _collect(agent, sid, me, True, only, wakes_only=True) for ev in evs if ev["line"]]
+    taken = [ev for evs, _ in _collect(agent, sid, me, True, only, wakes_only=True,
+                                      emit=emit if agent == "codex" else None) for ev in evs if ev["line"]]
     if not taken:
         return None
-    _emit_lines(taken, emit)
+    _emit_lines([ev for ev in taken if not ev.get("_emitted")], emit)
     more = [ev for ev in pending(agent, sid, me) if not only or ev["kind"] in only]
     if more:
         emit(f"more: {len(more)} event{'s' if len(more) > 1 else ''} wait · dev watch shows them; the next wait takes "

@@ -3,6 +3,55 @@
 All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH restarts at 0 each month); tags are
 `vYY.MM.PATCH`. Sections follow [Keep a Changelog](https://keepachangelog.com/).
 
+## [26.11.12] - 2026-11-10
+
+This release repairs Codex session context, crew isolation, message delivery, and continuity. Runtime changes are
+limited to Codex; paired provider tests preserve Claude's behavior. It builds on the installer fixes in 26.11.11.
+
+### Fixed
+
+- A projectless Codex session binds its own managed checkout from an executed tool call or a repository progress
+  run while preserving the app's original working directory. Short tasks, executed test failures, and deferred
+  command results no longer require a progress run. Session presence and resumed or compacted context use the
+  bound checkout; rejected calls and another session's context cannot create or replace the binding.
+- Development replies from a projectless Codex app chat now use that session's registered repository for canary scoring
+  and Stop enforcement. An unrelated session cannot supply the project, and non-development turns stay excluded.
+- A Codex member resumed after a capacity refusal is admitted only after the launch checks pass again. Successful
+  readmission removes the old refusal; an unresolved depth or ordering restriction still blocks the member.
+- Codex commands and members sharing a host process keep their own registered session identity in nested and
+  background shells. Command redaction or a closed call no longer redirects a message to the newest chat.
+  Unknown, contradictory, or ambiguous ownership is refused with guidance instead of an internal-error report;
+  Claude's selection behavior is unchanged.
+- Codex command audit records use the native thread identity and its own run context instead of inherited Claude
+  metadata. A registered Claude process keeps its identity, and a Codex child retains its parent only when process
+  ancestry, the root stamp, and recorded ownership agree. Explicit hook payloads keep precedence; audit labels
+  never authorize commands. Backup and embargo restrictions retain their existing caller context; native
+  enrichment applies only when constructing audit records.
+- A registered Codex app chat can use its own `work/` and `outputs/` folders. Crew launches create and name each
+  member's exact `work/scratchpad/<member>` folder. The guard rejects foreign members, malformed identity and
+  escaping links, and a repository inside scratch still follows its project scope.
+- Codex CLI sessions use isolated scratch folders under `Development/.tmp/codex/<session>/scratchpad/<member>`.
+  Read-only reviewers can create and run their own probes without gaining access to another member's files,
+  the lead's scratch folder, or an unrelated session.
+- Accepted Codex patches enter the pending-write ledger before execution, so a concurrent reader is not falsely
+  identified as their certain author. Failed patches provide no exact authorship, and possible attribution is
+  limited to the reader's call window and the same repository. Patch scope checks preserve spaces, check move
+  destinations, and ignore patch-header text inside added content.
+- Documented Codex watch deadlines and empty CI watches no longer count as failed tools. Invalid arguments,
+  compound-command failures and failed CI still do. Crew messages retain their complete sanitized stored text,
+  and a failed output write leaves that message and later messages pending for the next wait.
+- Human requests received during a Codex turn reach the continuity brief and request clock. The reader validates
+  the session's own interactive rollout, reads bounded chunks, and ignores duplicate, foreign, child, and synthetic
+  records. Failed and deferred tools also retain steering; recovered text never grants approval or permissions.
+
+### Changed
+
+- The surface comparison distinguishes live Codex app observations, contract tests, implementation inspection,
+  and checks that still need installation and a fresh session. It no longer treats a visible status block or an
+  empty canary report as proof that every control ran.
+- Codex wait instructions name the timeout unit (minutes), show a bounded six-second wait, and explain how to
+  continue an existing command when the host yields.
+
 ## [26.11.11] - 2026-11-10
 
 This release keeps `dev` working through updates and installs. An update could leave `dev` off the PATH, and a fresh

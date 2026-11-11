@@ -437,7 +437,9 @@ class _View:
                 self._git[k] = {"branch": str(rec.get("branch") or ""), "head": str(rec.get("head") or ""),
                                 "gitdir": str(rec["gitdir"]), "worktree": str(rec["worktree"])}
             else:
-                g = _git_facts(rec.get("cwd") or rec.get("top"))
+                cwd = (rec.get("top") or rec.get("cwd")) if _split(k)[0] == "codex" else \
+                    (rec.get("cwd") or rec.get("top"))
+                g = _git_facts(cwd)
                 if g and rec.get("branch") and not g.get("branch"):
                     g["branch"] = str(rec["branch"])
                 self._git[k] = g
@@ -1218,7 +1220,8 @@ def refresh(agent: str, sid: str, now=None) -> None:
     rec = state.read(f)
     if not isinstance(rec, dict):
         return
-    g = _git_facts(rec.get("cwd") or rec.get("top"))
+    cwd = (rec.get("top") or rec.get("cwd")) if agent == "codex" else (rec.get("cwd") or rec.get("top"))
+    g = _git_facts(cwd)
     if g and any(rec.get(k) != v for k, v in g.items()):
         try:
             state.update(f, lambda d: d.update(g, refreshed=now), create=False)

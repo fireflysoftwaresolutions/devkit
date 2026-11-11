@@ -489,10 +489,13 @@ def session_start(agent: str):
         work.request_sync("session start", delay=1)  # pull other machines' claims and publish this session
     except Exception as e:
         _swallowed("session-start", e)
-    _SEEN.pop(cwd, None)
+    # An app's host cwd can stay outside the repository after its own run binds this session. Resume and
+    # compaction must inject that checkout's context without rewriting the host location in the session record.
+    context_cwd = ((state.read(f) or {}).get("top") or cwd) if agent == "codex" else cwd
+    _SEEN.pop(context_cwd, None)
     brief = _continuity("on_session_start", agent, data)
-    context = _with_catalog(context_for(cwd, agent), agent)
-    seen = _SEEN.pop(cwd, {})  # what context_for inspected, for the welcome
+    context = _with_catalog(context_for(context_cwd, agent), agent)
+    seen = _SEEN.pop(context_cwd, {})  # what context_for inspected, for the welcome
     _session_lessons_shown(data, seen)
     shown = [older] if older else []  # the notices the developer must see when no welcome carries them
     told = [older] if older else []  # the notices the model reads, before the workspace context: a cut keeps them
@@ -591,6 +594,12 @@ def pre_compact(agent: str):
     instructions on stdout, which Claude adds to the summarizer's. Never blocks: always exit 0, never a decision
     (a member's stdout is ignored, and Codex gets nothing)."""
     data = _stdin_json()
+    if agent == "codex":  # a request can arrive after the last tool result, just before compaction
+        try:
+            from . import progress
+            progress.note_midturn(agent, data)
+        except Exception as e:
+            _swallowed("pre-compact-requests", e)
     text = _continuity("on_pre_compact", agent, data)
     if text and agent == "claude" and not data.get("agent_id"):
         print(text)
@@ -1464,7 +1473,8 @@ def _check_writes(agent: str, data: dict):
         before = {k: tuple(v) if isinstance(v, list) else v for k, v in e["wt_before"].items()}  # JSON keeps lists
         paths = g.written_paths(before, g.worktree_state(e["wt_base"]))
         if paths:
-            progress.scope_written(agent, data.get("session_id") or "-", data["agent_id"], paths)
+            progress.scope_written(agent, data.get("session_id") or "-", data["agent_id"], paths,
+                                   call=data if agent == "codex" else None)
     except Exception as ex:
         g.failopen("scope-write", ex)
 
@@ -1482,10 +1492,11 @@ def _reconcile(agent: str, data: dict):
 
 def _close_call(data: dict):
     """The call's entry leaves the ledger: it ran (PostToolUse, PostToolUseFailure) or never will (refused)."""
-    if data.get("tool_name") in SHELL_TOOLS:
+    if data.get("tool_name") in SHELL_TOOLS or data.get("tool_name") == "apply_patch":
         try:
             from . import progress
-            progress.call_closed(data)
+            if data.get("tool_name") in SHELL_TOOLS or progress.call_entry(data).get("agent") == "codex":
+                progress.call_closed(data)
         except Exception:
             _log(f"ledger close: {traceback.format_exc()[-300:]}")
 
@@ -1617,6 +1628,15 @@ def _member_folder(run: dict, aid: str) -> str:
         return str(aid)
 
 
+def _codex_session_assignment(agent: str, data: dict):
+    """A shell-safe root identity from the trusted Codex hook, empty for Claude, None for a malformed root."""
+    if agent != "codex":
+        return ""
+    sid = data.get("session_id")
+    return f"DEVKIT_SESSION=codex:{sid}" if isinstance(sid, str) and \
+        re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", sid) else None
+
+
 def _route_subagent_progress(data: dict, agent: str = "claude"):
     """Inside a subagent (the hook input carries `agent_id`, in Claude Code and Codex), each `dev progress …` or
     `dev crew ask|answer|inbox|decide|decisions|mode|delegate|decline|route` call of its shell command gets
@@ -1637,6 +1657,11 @@ def _route_subagent_progress(data: dict, agent: str = "claude"):
         return None
     if not guard.runs_one_command(cmd) and _lane_verdict(data, agent, cmd, routed=True):
         return None  # _unroutable_lane_command gives the refusal
+    stamp = _codex_session_assignment(agent, data)
+    if stamp is None:
+        return None
+    if stamp:
+        new = f"{stamp} {new}" if guard.runs_one_command(cmd) else f"export {stamp}; {new}"
     return {**inp, key: new}
 
 
@@ -1732,18 +1757,22 @@ def _speaker_route(data: dict, agent: str = "claude"):
         return None
     var, value, wanted = ("DEVKIT_FROM_AGENT", aid, MEMBER_STAMPED) if aid else \
         ("DEVKIT_SPEAKER", "main", SPEAKER_COMMANDS)
+    stamp = _codex_session_assignment(agent, data)
+    if stamp is None:
+        return None
+    assignments = f"{var}={value}" + (f" {stamp}" if stamp else "")
     from . import guard
     try:
         argv = shlex.split(cmd) if guard.runs_one_command(cmd) else []
     except ValueError:
         return None
     if len(argv) > 1 and os.path.basename(argv[0]) == "dev":  # one dev call, the whole command
-        return {**inp, key: f"{var}={value} {cmd.strip()}"} if argv[1] in wanted else None
+        return {**inp, key: f"{assignments} {cmd.strip()}"} if argv[1] in wanted else None
     if not _stampable(cmd, _shell_cwd(data), wanted):  # eval, sh -c, ( … ) and compound commands
         return None
     if aid and _lane_verdict(data, agent, cmd):
         return None  # the member's lane refuses part of it: _unroutable_lane_command says why
-    return {**inp, key: f"export {var}={value}; {cmd}"}
+    return {**inp, key: f"export {assignments}; {cmd}"}
 
 
 _HOOK_TEXT = re.compile(r"\bdevkit\.hooks\b|\bfrom\s+devkit\s+import\b[^\n]*\bhooks\b|(?:^|[\s;&|(`'\"])(?:\S*/)?dev\s+"
@@ -2042,9 +2071,113 @@ def codex_outcome(item):
     if not isinstance(item, dict):
         return None
     code, status = item.get("exit_code"), item.get("status")
+    if _codex_watch_control(item):
+        return True
     if status in ("failed", "declined") or (isinstance(code, int) and not isinstance(code, bool) and code != 0):
         return False
     return True if status == "completed" or code == 0 else None
+
+
+def _codex_watch_control(item: dict) -> bool:
+    """A completed standalone wait's documented non-error outcome, never a shell's unrelated failure.
+
+    Codex reports nonzero commands as failed even for watch's control-flow exits. Require both the literal wait
+    invocation and its complete matching terminal notice; a declined call, parser error or compound shell command
+    remains a failure. The rollout and its raw exit status are left intact.
+    """
+    from . import ciwatch, guard, watch
+    code, status, command = item.get("exit_code"), item.get("status"), item.get("command")
+    if type(code) is not int or code not in (watch.EXIT["nothing"], watch.EXIT["timeout"], watch.EXIT["superseded"],
+                                           ciwatch.EXIT["none"]) \
+            or status not in ("completed", "failed"):
+        return False
+    if not isinstance(command, list) or len(command) != 3 or not all(isinstance(x, str) for x in command) \
+            or os.path.basename(command[0]) not in ("sh", "bash", "zsh") or command[1] not in ("-c", "-lc"):
+        return False
+    if not guard.runs_one_command(command[2]):
+        return False
+    try:
+        args = shlex.split(command[2])
+    except ValueError:
+        return False
+    while args and re.fullmatch(r"DEVKIT_(?:SPEAKER|FROM_AGENT|SESSION)=[A-Za-z0-9_.:-]+", args[0]):
+        args.pop(0)
+    if len(args) < 3 or not guard._LITERAL_DEV.fullmatch(args[0]):
+        return False
+    ci = args[1:3] == ["ci", "watch"]
+    if not ci and (args[1] != "watch" or code == ciwatch.EXIT["none"]):
+        return False
+    args = args[3:] if ci else args[2:]
+    if "--wait" not in args:
+        return False
+    # A narrow literal argv: no wrappers, options the CLI rejects, expansion, substitution or extra programs.
+    number = r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?"
+    flags = ("--wait", "--quiet", "--json") if ci else ("--wait", "--standby", "--json")
+    values = ("--timeout", "--branch", "--sha", "--tag", "--pr", "-p", "--project") if ci else \
+        ("--timeout", "--for", "--only")
+    while args:
+        arg = args.pop(0)
+        key, eq, value = arg.partition("=")
+        if key in flags and not eq:
+            continue
+        if key not in values:
+            return False
+        if not eq:
+            if not args:
+                return False
+            value = args.pop(0)
+        if key == "--timeout" and not re.fullmatch(number, value):
+            return False
+        if key == "--for" and value != "me":
+            return False
+        if key == "--only" and any(x.strip() not in watch.KINDS for x in value.split(",") if x.strip()):
+            return False
+    output = item.get("aggregated_output")
+    if not isinstance(output, str):
+        return False
+    text = output.strip()
+    if ci:
+        return _codex_ci_watch_control(code, text, number)
+    if code == watch.EXIT["superseded"]:
+        return text == "watch: a newer wait of this session took over; this one ends"
+    if code == watch.EXIT["nothing"]:
+        return text in (
+            "watch: the session ended",
+            "watch: nothing can arrive for you: none of your questions waits for an answer. End the turn without a wait.",
+            "watch: nothing can arrive for this session: no crew member works, no launch is pending, no step waits "
+            "for a slot, no other session owes it an answer and no CI run is unfinished. End the turn without a wait.")
+    arm = r"dev watch --wait(?: --for me)? --timeout \d+(?: --standby)?"
+    return bool(re.fullmatch(
+        r"watch: (?:nothing arrived in " + number + r" min|stopped before anything arrived|"
+        r"this conversation goes on under session codex:[A-Za-z0-9_.:-]{1,12}…? "
+        r"\(a compaction gave it a new id\)) · arm again: " + arm, text))
+
+
+def _codex_ci_watch_control(code: int, text: str, number: str) -> bool:
+    """Only CI watch's timeout/no-result notices; a pipeline failure or unexpected output stays a failure."""
+    from . import ciwatch
+    lines = text.splitlines()
+    if not lines or any(not re.fullmatch(r"job .+ · .+ #\d+", line) for line in lines[:-1]):
+        return False
+    last = lines[-1]
+    if code == ciwatch.EXIT["timeout"]:
+        return bool(re.fullmatch(
+            r"CI still running · .+ @ [0-9a-f]+(?: after " + number + r" min(?: \([^\n]*\))?)?"
+            r": this watch (?:ended first|was stopped before the run ended); re-arm: dev ci watch --wait .+", last))
+    if code == ciwatch.EXIT["none"]:
+        return bool(re.fullmatch(r"CI none · .+ @ [0-9a-f]+: no pipeline run appeared for this commit(?: \([^\n]*\))?",
+                                 last) or re.fullmatch(
+            r"CI (?:skipped|neutral|stale)(?: and (?:skipped|neutral|stale))* · .+ @ [0-9a-f]+ · .+ · "
+            + number + r" min", last))
+    return False
+
+
+def _codex_executed(item) -> bool:
+    """Whether a command ran, independently of success; declined or pre-execution failures prove nothing."""
+    if not isinstance(item, dict):
+        return False
+    code, status = item.get("exit_code"), item.get("status")
+    return status == "completed" or status == "failed" and isinstance(code, int) and not isinstance(code, bool)
 
 
 def _codex_call(agent: str, data: dict) -> tuple:
@@ -2052,6 +2185,7 @@ def _codex_call(agent: str, data: dict) -> tuple:
     context of the session's earlier commands settled now (_codex_settle); (True, "") for any other call."""
     if agent != "codex" or data.get("tool_name") not in SHELL_TOOLS:
         return True, ""
+    data["_codex_command_executed"] = False  # derived only from the rollout, never from the incoming payload
     read = {}  # the rollouts this hook read, once each
     try:
         settled = _codex_settle(agent, data, read=read)
@@ -2061,6 +2195,7 @@ def _codex_call(agent: str, data: dict) -> tuple:
     try:
         items, writes = _rollout_once(read, data.get("transcript_path"))
         item = items.get(str(data.get("tool_use_id") or ""))
+        data["_codex_command_executed"] = _codex_executed(item)
         outcome = codex_outcome(item) if item else (None if writes else True)
     except Exception:
         _log(f"post-tool outcome {agent}: {traceback.format_exc()[-300:]}")
@@ -2082,7 +2217,7 @@ def _codex_defer(agent: str, data: dict):
         return
     from . import audit, bugs
     keep = {k: data.get(k) for k in ("session_id", "tool_name", "tool_use_id", "agent_id", "cwd", "transcript_path")}
-    keep.update(tool_input={"command": audit.redact(_command_of(data))[:4000]},
+    keep.update(tool_input={"command": audit.redact(_command_of(data))[:4000], "workdir": _shell_cwd(data)},
                 tool_response="\n".join(m.group(0) for m in bugs.MARKER_RE.finditer(_output_text(data))),
                 keys=list(_call_keys(data, False)), lessons=[x["meta"]["id"] for x in _recall_quietly(agent, data)],
                 ts=time.time())
@@ -2117,19 +2252,25 @@ def _codex_settle(agent: str, data: dict, loop: bool = True, read: dict = None) 
                 keep.append(c)
                 continue
             got = read.get(str(c.get("transcript_path") or ""))  # None: deferred after the read, for the next hook
-            outcome = codex_outcome(got[0].get(str(c.get("tool_use_id") or ""))) if got else None
+            item = got[0].get(str(c.get("tool_use_id") or "")) if got else None
+            outcome = codex_outcome(item)
             if outcome is None and now - (c.get("ts") or 0) < CODEX_SETTLE_S:
                 keep.append(c)
             else:
-                settled.append((c, outcome))
+                settled.append((c, outcome, _codex_executed(item)))
         doc["calls"] = keep
     state.update(f, take, create=False)
     out = []
-    for c, outcome in settled:
+    for c, outcome, executed in settled:
         if outcome is None:
             _log(f"post-tool {agent}: no CommandExecution record for {c.get('tool_use_id')} after {CODEX_SETTLE_S} s; "
                  f"the call leaves the ledger unsettled")
             continue
+        if outcome or executed:
+            try:
+                _codex_bind_tool_project(agent, c)
+            except Exception as e:
+                _swallowed("post-tool-project", e)
         key, sig = c.get("keys") or _call_keys(c, False)  # computed when the call was deferred, from its output
         keys = (key, "" if outcome else sig)
         _output_bugs(agent, c, outcome, keys)
@@ -2527,7 +2668,8 @@ def _scope_violation(agent: str, data: dict):
         paths = [inp.get("file_path") or inp.get("notebook_path") or ""]
         if tool == "apply_patch" or not paths[0]:
             body = inp.get("input") or inp.get("patch") or inp.get("command") or ""
-            paths = re.findall(r"\*\*\* (?:Add|Update|Delete) File: (\S+)", str(body)) or paths
+            paths = ([p for _, p in guard.parse_patch_paths(str(body))] if agent == "codex" else
+                     re.findall(r"\*\*\* (?:Add|Update|Delete) File: (\S+)", str(body))) or paths
         name = _who(lane.get("persona") or lane.get("label") or "this crew member")
         head = _who(chain[-1].get("persona") or chain[-1].get("label") or "its crew member")
         if len(chain) > 1:  # a helper: the limits it inherits are its member's
@@ -2683,6 +2825,12 @@ def guard(agent: str):
 
 
 def _guard(agent: str, data: dict, held: dict):
+    from . import guard as g
+    with g.codex_scratch_context(agent, data):
+        return _guard_in_context(agent, data, held)
+
+
+def _guard_in_context(agent: str, data: dict, held: dict):
     """The guard hook's judgment of one call. `held` keeps what it has decided so far for _guard_failed: the verdict
     (`verdict`) and whether every rule has run on an allowed call (`done`)."""
     headless = _headless()  # devkit's own headless call: judged, never recorded
@@ -2710,7 +2858,7 @@ def _guard(agent: str, data: dict, held: dict):
     rule = {}
     if not verdict:
         verdict, made = g.check(data.get("tool_name") or "", data.get("tool_input") or {},
-                                data.get("cwd") or os.getcwd(), agent), ""
+                                data.get("cwd") or os.getcwd(), agent, call=data if agent == "codex" else None), ""
         rule = _lesson_rule_hit(agent, data)  # before any other lesson this call shows is recorded
     skip = (rule.get("lesson"),) if rule else ()  # the rule said its lesson: not again as a pitfall
     for name, judge in (("identity", lambda: _identity_verdict(data)), ("crew-limits", lambda: _crew_limits(agent, data)),
@@ -2744,6 +2892,13 @@ def _guard(agent: str, data: dict, held: dict):
             print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
                                                      "permissionDecisionReason": told}}))
             return
+        if agent == "codex" and data.get("tool_name") == "apply_patch" and not headless:
+            # An accepted edit may overlap a reader before its result arrives. Its declared paths are possible
+            # writes, never exact authorship; a refused edit never opens this ledger entry.
+            try:
+                progress.call_opened(agent, data)
+            except Exception:
+                _log(f"guard edit ledger {agent}: {traceback.format_exc()[-300:]}")
         routed = _route_subagent_progress(data, agent)
         stamped = None if routed else _speaker_route(data, agent)
         if stamped:  # an allowed call that only gains who runs it: what every allowed call records, it records
@@ -3279,14 +3434,15 @@ def closing_reminder(data: dict, sess: dict, now: float, agent: str = "claude") 
 NOTICE_COMMAND_MAX = 80  # characters of a member's command the tech lead's context shows
 
 
-def _inline(text, limit: int = NOTICE_COMMAND_MAX) -> str:
+def _inline(text, limit: int | None = NOTICE_COMMAND_MAX) -> str:
     """Text a member wrote, as one inert code span of the tech lead's context: secrets redacted as the audit redacts
     them (audit.redact, before the cut, so a token the cut would halve is still found), backticks dropped (it cannot
     close its span), every run of whitespace, newlines and carriage returns included, one space, at most `limit`
-    characters with "…" at the cut. Then no part of it can start a line that reads as devkit's own."""
+    characters with "…" at the cut (None keeps already bounded messages whole). Then no part of it can start a line
+    that reads as devkit's own."""
     from . import audit
     s = " ".join(audit.redact(str(text or "")).replace("`", "").split())
-    return s if len(s) <= limit else s[:limit - 1] + "…"
+    return s if limit is None or len(s) <= limit else s[:limit - 1] + "…"
 
 
 def crew_background_notice(sess: dict) -> str:
@@ -3362,6 +3518,50 @@ def _background_told(agent: str, data: dict) -> str:
         return ""
 
 
+def _codex_bind_tool_project(agent: str, data: dict):
+    """A completed main call can identify a projectless Codex chat without requiring a progress run.
+
+    Only its own registered host context and one managed checkout qualify. A child, an unknown session, an
+    ambiguous edit or a later call in another repository cannot move the chat's existing binding.
+    """
+    if agent != "codex" or data.get("agent_id") or _interrupted(data):
+        return
+    sid = data.get("session_id")
+    if not isinstance(sid, str) or not sid:
+        return
+    from . import progress, guard
+    rec = state.read(progress.session_path(agent, sid))
+    if not isinstance(rec, dict) or rec.get("agent") != agent or rec.get("session") != sid or \
+            rec.get("project") or rec.get("top") or not isinstance(rec.get("cwd"), str) or not rec.get("cwd") or \
+            rec.get("cwd") != data.get("cwd"):
+        return
+    response = data.get("tool_response")
+    if data.get("error") or data.get("is_error") or isinstance(response, dict) and \
+            (response.get("isError") or response.get("error") or response.get("success") is False):
+        return
+    tool, inp = data.get("tool_name"), data.get("tool_input") or {}
+    if not isinstance(inp, dict):
+        return
+    if tool in SHELL_TOOLS:
+        folders = [_shell_cwd(data)]
+    elif tool in EDIT_TOOLS:
+        paths = [inp.get("file_path") or inp.get("notebook_path")]
+        if tool == "apply_patch":
+            paths = [p for _, p in guard.parse_patch_paths(inp.get("input") or inp.get("patch") or "")]
+        if not paths or any(not isinstance(p, str) or not p for p in paths):
+            return
+        folders = [str(Path(guard.resolve(p, data.get("cwd"))).parent) for p in paths]
+    else:
+        return
+    tops = {core.gitout(folder, "rev-parse", "--show-toplevel") for folder in folders}
+    if len(tops) != 1:
+        return
+    top = next(iter(tops))
+    if not top or not core.is_under(top, core.DEV) or core.is_temp(top):
+        return
+    progress._bind_run_project(agent, sid, top, progress._project(top))
+
+
 def post_tool(agent: str):
     """PostToolUse: time slow calls; remind the agent to update the developer after a long silence; sync the
     handoff repository right after a delivery event (commit, push, merge, tag, PR, release); at a call that usually
@@ -3369,7 +3569,17 @@ def post_tool(agent: str):
     finished, and those that finished with background work still running (crew_notices)."""
     from . import progress
     data = _stdin_json()
+    if agent == "codex":  # steering must reach continuity before a failed/deferred result or compaction
+        try:
+            progress.note_midturn(agent, data)
+        except Exception as e:
+            _swallowed("post-tool-requests", e)
     outcome, settled = _codex_call(agent, data)
+    if outcome is True or agent == "codex" and data.get("_codex_command_executed"):
+        try:
+            _codex_bind_tool_project(agent, data)
+        except Exception as e:
+            _swallowed("post-tool-project", e)
     if outcome is False:  # Codex has no PostToolUseFailure event: its failed command takes that path, under its event
         _tool_failed(agent, data, "PostToolUse", settled)
         return
@@ -3389,7 +3599,8 @@ def post_tool(agent: str):
     # its own compaction. Each once
     carried = _continuity("on_tool", agent, data)
     try:  # the main session: what the developer typed mid-turn is their latest request (no prompt hook ran for it)
-        progress.note_midturn(agent, data)
+        if agent != "codex":  # Codex already read once, before outcome settlement and continuity
+            progress.note_midturn(agent, data)
         if data.get("tool_name") == "SendMessage":  # the tech lead answered a member's question outside devkit
             progress.answered_by_sendmessage(agent, data)
     except Exception:
@@ -3488,8 +3699,11 @@ def subagent_start(agent: str):
     data = _stdin_json()
     launch = _codex_launch(agent, data) if agent == "codex" else None  # what its spawn_agent call never got
     progress.on_subagent(agent, data, True)
-    _make_scratch_folder(agent, data)
+    scratch = _make_scratch_folder(agent, data)
     told = _codex_member_context(agent, data, launch) if launch else ""
+    if agent == "codex" and scratch:
+        told = _fit(f"devkit · Your scratch folder is `{scratch}`. Put temporary files only in that folder; "
+                    "other members' scratch folders and the main session's scratch files and outputs are not yours.\n\n" + told)
     _prompt_refresh(data, force=True)  # a lane opened: the prompt's crew count follows
     if told:  # Codex's subagent-start output: hookSpecificOutput, and nothing beside it
         print(json.dumps({"hookSpecificOutput": {"hookEventName": "SubagentStart", "additionalContext": told}}))
@@ -3532,9 +3746,17 @@ def _claude_tmp() -> Path:
 def _make_scratch_folder(agent: str, data: dict):
     """Creates a crew member's own folder in the session scratchpad, scratchpad/<member id>/, when its lane opens: the
     brief names it and the guard lets the member write only there, but a read-only member may not create a folder.
-    Only when Claude Code made the session's scratchpad (<tmp>/claude-<uid>/<project key>/<session id>/scratchpad),
-    and only for a crew member: a helper that names no member gets nothing."""
+    Codex folders use the same trusted registration as the guard. Claude uses only the scratchpad its host
+    made (<tmp>/claude-<uid>/<project key>/<session id>/scratchpad); a helper naming no member gets nothing."""
     try:
+        if agent == "codex":
+            from . import guard
+            with guard.codex_scratch_context(agent, data):
+                ctx = guard._APP_SCRATCH.get()
+                if ctx and ctx[2] and guard._app_scratch_allows(ctx[1][0], ctx[2]):
+                    Path(ctx[1][0]).mkdir(parents=True, exist_ok=True)
+                    return ctx[1][0]
+            return
         sid, aid = str(data.get("session_id") or ""), str(data.get("agent_id") or "")
         transcript = str(data.get("transcript_path") or "")
         if agent != "claude" or not (sid and aid and transcript):
@@ -3880,22 +4102,24 @@ def run(event: str, agent: str) -> int:
     state.WAIT, state.SAY_BUSY = state.HOOK_WAIT, False  # a hook waits at most 2 s for a record, silently
     marked = _bug_marks_start(event)
     saved = {}  # the identity variables as they were: none changed until _own_identity runs
-    try:
-        (STATE / "logs").mkdir(parents=True, exist_ok=True)
-        saved = _own_identity(event, agent)  # inside the try: a hook with no stdin fails open like any other error
-        fn(agent)
-    except SystemExit:
-        raise
-    except Exception as e:  # fail open: never break the agent session (guard() already refused, in _guard_failed,
-        _log(f"{event} {agent} error:\n{traceback.format_exc()}")  # a call that acts and was not judged in full)
-        if event == "guard":  # the guard failed open: recorded, so a rule that never runs is seen (spec G12)
-            from . import guard as g
-            g.failopen("guard-hook", e)
-        _bug_hook_error(event, e)
-    finally:
-        _restore_identity(saved)
-        if marked:
-            _bug_marks_end(event)
+    from . import audit
+    with audit.hook_identity():
+        try:
+            (STATE / "logs").mkdir(parents=True, exist_ok=True)
+            saved = _own_identity(event, agent)  # inside the try: a hook with no stdin fails open like any other error
+            fn(agent)
+        except SystemExit:
+            raise
+        except Exception as e:  # fail open: never break the agent session (guard() already refused, in _guard_failed,
+            _log(f"{event} {agent} error:\n{traceback.format_exc()}")  # a call that acts and was not judged in full)
+            if event == "guard":  # the guard failed open: recorded, so a rule that never runs is seen (spec G12)
+                from . import guard as g
+                g.failopen("guard-hook", e)
+            _bug_hook_error(event, e)
+        finally:
+            _restore_identity(saved)
+            if marked:
+                _bug_marks_end(event)
     return 0
 
 

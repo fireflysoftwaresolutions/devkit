@@ -12,7 +12,8 @@ It inspects:
   [Skills and plugins › Required skills](skills-and-plugins.md#required-skills)); no guard rule applies to them.
 - **Codex:** `Bash` and `exec_command` (`command`, and `cmd`, which `exec_command` may send instead: a list is read
   word by word, and when both keys are present and differ, each is judged and the call is refused if either is) and
-  `apply_patch` (the patch's `Add File`, `Update File`, and `Move to` paths).
+  `apply_patch` (the patch's `Add File`, `Update File`, `Delete File`, and `Move to` paths). Patch scope checks keep
+  spaces in paths and inspect move destinations; a patch-header literal inside added content is not another target.
 
 Shell commands are tokenized: chains (`&&`, `||`, `;`, `|`, new lines) are checked one by one, `cd` and `pushd` change
 the directory used to resolve later paths, leading `VAR=value`, `sudo`, `env`, `command`, `nohup`, `time`, `exec`,
@@ -97,6 +98,7 @@ does not change.
 | Inside the dev root, a top-level folder that is not an owner you belong to, a host folder (contains a dot), `_local` or a dot folder, for example `kit-consulting-pr12` | deny |
 | Backup-style names: `*.bak`, `*.orig`, `*.backup`, `*.old`, `*.rej`, `*~`, `*_old.*`, `*-copy.*`, `* copy.*`, `* (2).*` | deny |
 | Inside the handoff repository | see [The handoff repository](#the-handoff-repository) |
+| A registered Codex session's own scratch folder | allow within its session and member boundary; see [Codex scratch folders](#codex-scratch-folders) |
 | Anywhere else (Desktop, Documents, `~/notes.md`, …) | Claude: ask · Codex: deny |
 | A path with a NUL character, in a file tool's `file_path` or `notebook_path` or an MCP tool's path | deny: the system reads a path up to its first NUL, so another file would be written, and a later rule would fail on it and let the call through |
 
@@ -118,6 +120,21 @@ as a shell command, even one that starts like a patch. The rules on the handoff 
 
 "Owners you belong to" are your GitHub login and organizations (from `gh`, cached for a day) plus folders that already
 exist in the dev root.
+
+### Codex scratch folders
+
+Codex scratch access comes from the hook's registered session and actor, not a tool's chosen working directory.
+The hook directory must match the registered host directory. Paths must be canonical and have no escaping links.
+
+| Host | Main session | Crew member |
+| --- | --- | --- |
+| App chat under `~/Documents/Codex/<chat>` | Its own `work/` and `outputs/` | Its own `work/scratchpad/<member>/` |
+| CLI in a managed checkout or worktree | `~/Development/.tmp/codex/<session>/scratchpad/main/` | `~/Development/.tmp/codex/<session>/scratchpad/<member>/` |
+
+The launch creates the member's folder and includes its exact path in the context. A read-only reviewer may create
+and run probes there. This does not permit writes in another member's folder, another session, or the lead's
+scratch or output folders. Unknown actors and malformed identities receive no scratch exception. A repository
+inside scratch still follows repository scope. Claude's existing scratch behavior is unchanged.
 
 ### The handoff repository
 
@@ -665,7 +682,7 @@ These rules apply while a progress run has crew members working ([The crew](crew
 
 | Action | Decision |
 | --- | --- |
-| A fifth crew member launched while four work (`progress.max_parallel`) | deny, with who is working |
+| A fifth crew member launched while four work (`progress.max_parallel`) | Claude: deny before launch, with who is working; Codex: restrict the member at SubagentStart because the host has no pre-launch hook |
 | A crew member edits a file outside the scope of its step (`dev progress assign … --scope`) | deny, and how to ask for more |
 | The main session edits a file inside a working member's scope | deny, and how to ask that member |
 | A crew member records or withdraws a decision (`dev crew decide`, `dev crew withdraw`) | refused by `dev crew`: only Morpheus records the developer's answers and withdraws a decision |
@@ -760,6 +777,12 @@ A call that is the whole command gets the mark in front of it. A compound comman
 unmarked, and devkit reads the call ledger instead: an open call that typed exactly this `dev` command names its
 caller. Codex may not apply the hook's rewrite of a command; its call ledger then names who calls. When devkit still
 cannot tell, a command that needs to know refuses (see [Commands › dev watch](commands.md#dev-watch---wait---for-me---only-kinds---timeout-min---standby---json)).
+
+Codex also stamps the registered root as `DEVKIT_SESSION=codex:<session>` on routed commands. This includes nested
+and background shells. The resolver checks that stamp against process, thread, and child ownership. An unstamped
+command must have a unique matching executable call; a quoted mention of a command, a shared host process, or the
+newest session is not enough. Conflicting or ambiguous identity is refused. These checks do not change Claude's
+caller selection.
 
 A member's mark wins over the main mark, so a member can never become the tech lead by a variable. Every hook drops
 both marks before it acts, so a hook never takes a mark it inherited for its own. A process that carries

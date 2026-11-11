@@ -114,7 +114,7 @@ class FieldVocabularyTests(unittest.TestCase):
             if isinstance(node, ast.FunctionDef) and node.name == "_lane_rule":
                 named |= {r.value.value for r in ast.walk(node) if isinstance(r, ast.Return)
                           and isinstance(r.value, ast.Constant)}
-            if isinstance(node, ast.FunctionDef) and node.name == "_guard":
+            if isinstance(node, ast.FunctionDef) and node.name in ("_guard", "_guard_in_context"):
                 for a in ast.walk(node):
                     if isinstance(a, ast.Assign) and isinstance(a.targets[0], ast.Tuple) and \
                             isinstance(a.value, ast.Tuple):

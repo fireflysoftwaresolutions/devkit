@@ -396,7 +396,6 @@ class AuditTrail(Shared):
         created = [x for x in self.records(self.ana) if x.get("action") == "handoff.items" and x.get("target") in items]
         self.assertEqual(len(created), added)
 
-    @unittest.expectedFailure  # open defect B-g3dzv3864m1: a Codex thread's records name no agent and no session
     def test_each_sessions_records_name_its_own_agent_and_session(self):
         # A Claude Code session and a Codex thread add one item each at once: the audit record of each item's commit
         # names the agent and the session that made it.

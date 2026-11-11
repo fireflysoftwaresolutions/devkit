@@ -99,12 +99,13 @@ class PeerHookCase(PeerCase):
 class SpeakerStampTests(PeerHookCase):
     def test_pretooluse_stamps_main_session_calls(self):
         for agent in ("claude", "codex"):
+            root = f" DEVKIT_SESSION=codex:{CODEX_A}" if agent == "codex" else ""
             for cmd in ("dev watch --wait", "dev watch --wait --timeout 10", "dev session ask @0199a213 'May I?'",
                         "dev session ls --json"):
                 with self.subTest(agent=agent, cmd=cmd):
                     out = self.hook("guard", agent, self.call(agent, cmd, tool_input={"run_in_background": True}))
                     spec = json.loads(out)["hookSpecificOutput"]
-                    self.assertEqual(spec["updatedInput"], {"command": f"DEVKIT_SPEAKER=main {cmd}",
+                    self.assertEqual(spec["updatedInput"], {"command": f"DEVKIT_SPEAKER=main{root} {cmd}",
                                                             "run_in_background": True})
                     self.assertEqual(spec.get("permissionDecision"), "allow" if agent == "codex" else None)
             for cmd in ("dev status", "echo dev session ls", "devwatch --wait", "dev ci status"):
@@ -114,6 +115,7 @@ class SpeakerStampTests(PeerHookCase):
                 out = self.hook("guard", agent, self.call(agent, "dev watch --wait --for me --timeout 9",
                                                           agent_id="a_tank", agent_type="devkit:tank"))
                 self.assertEqual(self.updated(out).get("command"),
+                                 (f"DEVKIT_SESSION=codex:{CODEX_A} " if agent == "codex" else "") +
                                  "DEVKIT_FROM_AGENT=a_tank dev watch --wait --for me --timeout 9")
                 out = self.hook("guard", agent, self.call(agent, "dev session ls", agent_id="a_tank"))
                 self.assertNotIn("DEVKIT_SPEAKER", out)
@@ -130,17 +132,20 @@ class SpeakerStampTests(PeerHookCase):
                  "sh -c 'dev watch --wait --timeout 9'", "(dev watch --wait --timeout 9)",
                  "cd /tmp && dev session ls --json | head -20")
         for agent in ("claude", "codex"):
+            root = f" DEVKIT_SESSION=codex:{CODEX_A}" if agent == "codex" else ""
             for cmd in forms:
                 with self.subTest(agent=agent, cmd=cmd, member=True):
                     out = self.hook("guard", agent, self.call(agent, cmd, agent_id="a_mouse",
                                                               agent_type="devkit:mouse"))
-                    self.assertEqual(self.updated(out).get("command"), f"export DEVKIT_FROM_AGENT=a_mouse; {cmd}")
+                    self.assertEqual(self.updated(out).get("command"),
+                                     f"export DEVKIT_FROM_AGENT=a_mouse{root}; {cmd}")
                 with self.subTest(agent=agent, cmd=cmd, member=False):
                     out = self.hook("guard", agent, self.call(agent, cmd))
-                    self.assertEqual(self.updated(out).get("command"), f"export DEVKIT_SPEAKER=main; {cmd}")
+                    self.assertEqual(self.updated(out).get("command"), f"export DEVKIT_SPEAKER=main{root}; {cmd}")
             with self.subTest(agent=agent, main_lane_calls=True):  # the tech lead's own crew and progress calls
                 for cmd in ('dev crew answer M7 "yes"', 'dev progress note "half done" | tail -3'):
-                    want = f"DEVKIT_SPEAKER=main {cmd}" if "|" not in cmd else f"export DEVKIT_SPEAKER=main; {cmd}"
+                    want = f"DEVKIT_SPEAKER=main{root} {cmd}" if "|" not in cmd else \
+                        f"export DEVKIT_SPEAKER=main{root}; {cmd}"
                     self.assertEqual(self.updated(self.hook("guard", agent, self.call(agent, cmd))).get("command"),
                                      want)
             for cmd in ("dev watch --wait; rm -rf build", "dev watch --wait > /tmp/w.txt",

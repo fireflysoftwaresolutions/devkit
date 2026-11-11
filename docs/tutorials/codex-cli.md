@@ -5,10 +5,10 @@ give devkit's crew a real task: a small reading-list web page. On the way you le
 the status block, the progress updates, the moments it waits for you, the crew graph, and the dashboard. It takes
 about 30 minutes, most of it while the crew works.
 
-> **Not verified live yet.** devkit's live test of Codex waits for the Codex usage quota of the test account to reset
-> on 2026-11-09. This page follows devkit's code, its tests, and the Codex configuration that `dev doctor` checks, not
-> a recorded Codex session. If Codex behaves differently on your Mac, `dev doctor` and `dev canary` show it; see
-> [When something goes wrong](#when-something-goes-wrong).
+> **Partly verified live.** Codex CLI 0.167.0 sessions on November 9, 2026 exercised hooks, guard, skills, crew
+> lifecycle, and compaction. The later context, routing, scratch, wait, and steering corrections have contract
+> coverage; they still need a fresh-session check after installation. This complete tutorial flow and the terminal
+> welcome remain unverified. See the [surface evidence matrix](../surfaces.md#evidence-matrix).
 
 ## What you need
 
@@ -54,12 +54,13 @@ The reply starts with a bold line that begins with `[Firefly> DevKit]`, followed
 - **Next:** tell me what to build; I plan it and bring in the crew.
 ```
 
-That block is the **status block**. Every development reply starts with it, so it also proves that Codex loaded
-devkit's rules from `~/.codex/AGENTS.md`. If the reply has no such line, go to
+That block is the **status block**. Every development reply should start with it. It checks the visible format,
+not whether every hook ran. Use `dev canary` to inspect scored turns; an empty report is not a pass.
+If the reply has no such line, go to
 [When something goes wrong](#when-something-goes-wrong).
 
-With its first reply, Codex also shows devkit's welcome, the message of devkit's session-start hook. For this new
-project it reads:
+At the first prompt, devkit sends its welcome through the session-start hook. Its placement in the terminal UI is
+not yet verified. For this new project the message reads:
 
 ```text
 devkit · reading-list · new project
@@ -81,17 +82,21 @@ list in the browser, add tests, and write a short README that explains how to op
 
 What happens, and what you see:
 
-1. **devkit suggests a route.** Along with your request, devkit tells Codex which kind of work it looks like and who
-   on the crew does it: front-end work, done by the Frontend engineer (Trinity) and approved by the Code reviewer
-   (Seraph). The suggestion reads English words only; Codex itself understands your request in any language and
-   declares the kind of work when it plans.
-2. **Codex answers as Morpheus, the tech lead.** He posts a plan and an estimate. Work under ten minutes he does
+1. **devkit routes the request.** Codex declares the kind of work when it plans, in any language. That declaration
+   selects the responsible crew member: front-end work goes to the Frontend engineer (Trinity), with review by
+   the Code reviewer (Seraph).
+2. **Codex answers as the tech lead (Morpheus).** He posts a plan and an estimate. Work under ten minutes he does
    himself; this request gets steps for the crew.
-3. **The crew starts.** Morpheus launches each member as a Codex agent role that devkit installed in
-   `~/.codex/agents/`, for example `trinity`. At most four run at once. Codex does not let devkit add the required
-   skills to a member's brief on the way, so the brief that `dev crew brief` writes lists them.
+3. **The crew starts.** The tech lead launches each member as a Codex agent role, for example `trinity`, in the
+   order and slots shown by `dev crew next`. The brief lists required skills, and SubagentStart supplies skill
+   context too. An over-limit launch is restricted after it starts because Codex has no pre-launch hook.
 4. **Progress updates arrive** after each finished step, and every ten minutes or so while a long step runs.
 5. **The final report** closes the run: what changed, the evidence, what is not done, and the next step.
+
+For a registered CLI session in a managed checkout or worktree, temporary probes live under
+`~/Development/.tmp/codex/<session>/scratchpad/<member>/`; the main session uses `main` in place of the member.
+The launch names the exact folder. Read-only reviewers can run their own probes, but cannot write into other
+members' folders or the lead's scratch. See [Codex scratch folders](../guard.md#codex-scratch-folders).
 
 ## Step 4: read what devkit shows you
 
@@ -122,7 +127,8 @@ macOS shows a notification when a run finishes or gets blocked.
 
 - **A decision that is yours.** A crew member reaches a choice, for example whether finished books move to the bottom
   of the list. The member stops, and Codex asks you and gives the options and a recommendation. Answer in the
-  conversation; Morpheus records it and the member goes on.
+  conversation using the `approve D<n>: <letter>` line devkit asks for; the tech lead records it and the member goes
+  on. Recovering a mid-turn request for continuity is not approval evidence.
 - **An action that cannot be undone or leaves your Mac**, such as a push to GitHub, a pull request, a merge, a release,
   or deleting data. It waits for your OK, unless you approved it in advance.
 
@@ -138,7 +144,7 @@ Open a second Terminal window (Command-N) and run:
 dev crew graph --latest
 ```
 
-It draws the newest run on this Mac, with Morpheus, every step with its state and owner, what each step waits for, and the
+It draws the newest run on this Mac, with the tech lead, every step with its state and owner, what each step waits for, and the
 decisions waiting for you. The steps carry `✓` done, `▸` running, `◇` ready to start, `○` waiting for another step,
 `✗` blocked, `–` skipped, and `!` reopened to check again. The [Claude Code tutorial](claude-code.md#the-crew-graph)
 shows a full example.

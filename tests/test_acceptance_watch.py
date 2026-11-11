@@ -476,8 +476,8 @@ class SessionIsolationTests(WatchSandbox):
 
 
 class CodexThreadTests(WatchSandbox):
-    # The Codex app runs several threads in one process, so their session records hold the same pid; Codex exports
-    # no DEVKIT_SESSION. Each thread waits in the foreground with `dev watch --wait --timeout 10`. Thread x1 (acme/api)
+    # The Codex app runs several threads in one process, so their session records hold the same pid. The guard
+    # stamps each thread's own identity on its wait. Thread x1 (acme/api)
     # started before thread x2 (acme/web); each has a CI run devkit follows for it, so events can still arrive.
     def setUp(self):
         super().setUp()
@@ -502,6 +502,18 @@ class CodexThreadTests(WatchSandbox):
     def wait(self, repo):
         return self.spawn(["watch", "--wait", "--timeout", "10"], cwd=self.repos[repo])
 
+    def wait_from_hook(self, sid, repo, tid):
+        # Execute the actual rewritten command, including its identity, rather than manufacturing an env stamp.
+        reply = self.py(f'''
+            from devkit import hooks
+            hooks._guard("codex", {{"session_id": {sid!r}, "tool_use_id": {tid!r}, "tool_name": "Bash",
+                "cwd": {str(self.repos[repo])!r},
+                "tool_input": {{"command": "exec dev watch --wait --timeout 10"}}}}, {{}})
+        ''', cwd=self.repos[repo], lead=False)
+        output = reply["hookSpecificOutput"]
+        self.assertEqual(output["permissionDecision"], "allow")
+        return self.spawn(output["updatedInput"]["command"], shell=True, cwd=self.repos[repo])
+
     def test_a_thread_whose_call_alone_is_open_waits_for_its_own_thread(self):
         self.open_call("x1", "call_x1")
         p = self.wait("api")
@@ -512,16 +524,25 @@ class CodexThreadTests(WatchSandbox):
         # Before the fix: progress.resolve_session found both threads by the shared pid, both ledgers hold an open call
         # typing these arguments, and it takes the newest (max of the matches): thread x1's wait registers as x2's,
         # supersedes x2's own wait and takes x2's events, while x1's wake nobody.
-        self.open_call("x2", "call_x2")
-        w2 = self.wait("web")
+        w2 = self.wait_from_hook("x2", "web", "call_x2")
         self.armed_wait(w2, "x2")
-        self.open_call("x1", "call_x1")
-        w1 = self.wait("api")
-        rec = until(lambda: [w for w in self.waits() if w["pid"] == w1.pid], 30)
+        w1 = self.wait_from_hook("x1", "api", "call_x1")
+        rec = self.armed_wait(w1, "x1")
         with self.subTest("x1's wait is x1's"):
-            self.assertEqual([w["session"] for w in rec], ["x1"])
+            self.assertEqual((rec["agent"], rec["session"], rec["consumer"]), ("codex", "x1", "main"))
         with self.subTest("x2's wait is still live"):
             self.assertEqual(self.wait_of("x2", pid=w2.pid)[0]["state"], "live")
+
+    def test_ambiguous_unstamped_commands_explain_the_refusal_without_registering_a_wait(self):
+        self.open_call("x1", "call_x1")
+        self.open_call("x2", "call_x2")
+        for argv in (["watch", "--wait", "--timeout", "10"], ["watches"]):
+            with self.subTest(command=argv[0]):
+                rc, out = self.finish(self.spawn(argv, cwd=self.repos["api"]), seconds=10)
+                self.assertEqual(rc, 2, out)
+                self.assertIn("cannot identify this Codex session uniquely", out)
+                self.assertEqual(self.waits(), [])
+                self.assertEqual(list((self.state / "crashes").glob("*.txt")), [])
 
 
 class CIWatchSessionTests(WatchSandbox):

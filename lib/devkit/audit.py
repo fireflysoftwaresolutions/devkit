@@ -30,6 +30,8 @@ CEF).
 from __future__ import annotations
 
 import argparse
+import contextlib
+import contextvars
 import csv
 import fcntl
 import hashlib
@@ -1731,13 +1733,55 @@ def _place(rec: dict, key: str, v, extra) -> None:
         rec[where] = _value(v, extra)
 
 
+_HOOK_IDENTITY = contextvars.ContextVar("devkit_audit_hook_identity", default=False)
+_THREAD_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
+
+
+@contextlib.contextmanager
+def hook_identity():
+    """Keep a hook's explicit payload identity ahead of inherited shell markers, including on nested hooks."""
+    token = _HOOK_IDENTITY.set(True)
+    try:
+        yield
+    finally:
+        _HOOK_IDENTITY.reset(token)
+
+
+def _codex_identity():
+    """Codex audit metadata only: (root session, owned native child), or None for the existing identity path.
+    A native marker never grants permission. Registered Claude ancestry wins over an inherited Codex marker;
+    a different Codex root needs its process, explicit stamp and ownership of the native child to agree."""
+    thread = os.environ.get("CODEX_THREAD_ID", "")
+    if _HOOK_IDENTITY.get() or _FINDING or not _THREAD_ID.fullmatch(thread):
+        return None
+    _FINDING.append(True)  # records emitted during lookup keep the variables alone, as _found_session does
+    try:
+        from . import progress
+        agent, sid, how = progress.resolve_session()
+        if agent == "claude" and how == "ancestry":
+            return None
+        if (agent == "codex" and how == "ancestry" and sid != thread and _THREAD_ID.fullmatch(sid)
+                and os.environ.get("DEVKIT_SESSION") == f"codex:{sid}"):
+            run = core.read_json(progress.run_path("codex", sid), {})
+            if (isinstance(run, dict) and run.get("agent") == "codex" and run.get("session") == sid
+                    and isinstance((run.get("agents") or {}).get(thread), dict)):
+                return sid, thread
+    except Exception:
+        pass  # uncertain provenance can name the native thread, never another session's run
+    finally:
+        _FINDING.pop()
+    return thread, ""
+
+
 def actor() -> dict:
-    """Who a record names: the session the hooks or the agent's shell say (DEVKIT_SESSION, DEVKIT_AGENT), else the
-    one identity finds for this process (_found_session: a Codex thread exports neither to its commands), else the
-    developer's own terminal."""
+    """The hook's explicit identity, the native Codex command's metadata, or the existing shell/process identity.
+    This label does not change the caller identity used by command restriction checks."""
     sess = os.environ.get("DEVKIT_SESSION", "")
     agent = os.environ.get("DEVKIT_AGENT") or ("claude" if os.environ.get("CLAUDECODE") else "")
-    if not sess:
+    codex = _codex_identity()
+    if codex:
+        agent, sess = "codex", f"codex:{codex[0]}"
+    elif not sess:
         agent, sess = _found_session() or (agent, "")
     return {"user": core.CFG.get("github_user") or os.environ.get("USER", "?"),
             "host": socket.gethostname().split(".")[0].lower(), "agent": agent or "human",
@@ -1814,18 +1858,29 @@ def _where(cwd=None):
 
 
 def context(agent_id: str = "") -> dict:
+    """Existing caller context, also used by backup and embargo restrictions; native record labels do not alter it."""
+    return _context(agent_id)
+
+
+def _context(agent_id: str = "", *, native: bool = False) -> dict:
     """Where a record belongs: project, branch, run and step from the session and its run (the F2/F4 ledger), and the
-    crew member when one acts (DEVKIT_FROM_AGENT in its commands, or the agent id a hook passes)."""
+    crew member when one acts. Only record construction opts into native Codex metadata; public context keeps
+    its existing behavior for command restriction checks."""
     out: dict = {}
     env = os.environ
-    aid = str(agent_id or env.get("DEVKIT_FROM_AGENT") or "")
-    sess = env.get("DEVKIT_SESSION", "")
+    codex = _codex_identity() if native else None
+    aid = str(agent_id or (codex[1] if codex else "") or env.get("DEVKIT_FROM_AGENT") or "")
+    sess = f"codex:{codex[0]}" if codex else env.get("DEVKIT_SESSION", "")
     if ":" in sess:
         from . import progress
         agent, sid = sess.split(":", 1)
         s = core.read_json(progress.session_path(agent, sid), {}) or {}
+        if codex and (not isinstance(s, dict) or s.get("agent") != agent or s.get("session") != sid):
+            s = {}
         out.update(project=str(s.get("project") or ""), branch=str(s.get("branch") or ""))
         run = core.read_json(progress.run_path(agent, sid), None)
+        if codex and (not isinstance(run, dict) or run.get("agent") != agent or run.get("session") != sid):
+            run = None
         if isinstance(run, dict) and run.get("goal"):
             out["project"] = out["project"] or str(run.get("project") or "")
             out["run"] = str(run["goal"])[:80]
@@ -1844,7 +1899,7 @@ def context(agent_id: str = "") -> dict:
                          if owner and (x.get("owner") or "main") == owner and x.get("state") == "running"), "")
             if step:
                 out["step"] = str(step)
-    if aid and "crew" not in out:
+    if aid and "crew" not in out and not codex:
         out["crew"] = {"lane": aid}
     if not out.get("project"):
         out["project"], branch = _where()
@@ -1881,7 +1936,7 @@ def build(action: str, target="", detail="", outcome="ok", extra: dict = None, c
         rec.setdefault("evidence", {}).setdefault("exit", code)
     if raw:
         rec.setdefault("ref", {}).setdefault("result", raw)
-    where = context(str((rec.get("crew") or {}).get("lane") or ""))
+    where = _context(str((rec.get("crew") or {}).get("lane") or ""), native=True)
     for k in ("project", "branch", "run", "step"):  # the run goal and step names are free text, like target
         if where.get(k) and not rec.get(k):
             rec[k] = _clean(where[k], rx)
