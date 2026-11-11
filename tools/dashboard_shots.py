@@ -4,7 +4,7 @@
 """Screenshots of the dashboard from neutral fixture data, for reviews, the UX critique and the docs.
 
     python3 tools/dashboard_shots.py <out dir> [--route NAME=HASH ...] [--width 1440 390] [--theme light dark]
-                                     [--doc example|empty|welcome | --live] [--height N]
+                                     [--doc example|empty|welcome | --live | --page FILE] [--height N]
     python3 tools/dashboard_shots.py --serve
 
 It runs inside the test suite's hermetic home (tests/_hermetic.py), so the page is built from the tests' fixture and
@@ -18,6 +18,10 @@ server's clock is the fixture's (2026-11-06 15:15 UTC) and the page's clock star
 prints a sign-in link and keeps serving, for a check in a real browser: `kill -USR2 <pid>` prints a new link (each works
 once, for a minute), Ctrl-C stops it. Answering D1 is the tech lead's typed command (progress, spec C4): this tool never
 records one.
+
+With --page, the pictures are of a dashboard page built elsewhere, such as the fictional demo workspace the docs' other
+views come from: the file is read once, and each picture gets its theme before anything paints. Build that page from
+neutral data in a temporary HOME, never from a real handoff.
 
 Each file is <name>-<width>-<theme>.png. It needs Chrome or the Playwright Chromium, found like the browser tests find it
 (DEVKIT_TEST_CHROME names another one). Every picture is taken at a true viewport: Chrome lays a page out 500 px wide
@@ -287,6 +291,7 @@ def main(argv=None) -> int:
     src.add_argument("--doc", choices=("example", "empty", "welcome"), help="Now's areas from this golden")
     src.add_argument("--live", action="store_true", help="the live page: the real server and collect() over the fixture's example")
     src.add_argument("--serve", action="store_true", help="serve the live page for a real browser until Ctrl-C")
+    src.add_argument("--page", type=Path, metavar="FILE", help="a dashboard page built elsewhere, such as the docs' demo workspace")
     ap.add_argument("--height", type=int, help="window height (default 900, 844 under 768 px)")
     a = ap.parse_args(argv)
     if a.serve:
@@ -305,6 +310,12 @@ def main(argv=None) -> int:
             for name, hash_ in routes:
                 for width, theme, h in sizes:
                     print(shoot(link("/" + hash_.lstrip("#/"), theme), a.out / f"{name}-{width}-{theme}.png", width, h, env))
+        return 0
+    if a.page:
+        page = a.page.read_text(encoding="utf-8")
+        for name, hash_ in routes:
+            for width, theme, h in sizes:
+                print(shoot_page(theme_first(page, theme), a.out / f"{name}-{width}-{theme}.png", width, h, hash_, env))
         return 0
     with tempfile.TemporaryDirectory() as t:
         data = T.fixture_data(Path(t) / "handoff", T.NOW)

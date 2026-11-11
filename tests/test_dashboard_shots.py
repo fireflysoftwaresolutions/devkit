@@ -63,6 +63,24 @@ class TrueViewport(unittest.TestCase):
         self.assertTrue(r > 200 and g < 60 and b < 60, f"the top right corner is {(r, g, b)}, not the red square")
 
 
+@unittest.skipUnless(T.CHROME, T.NO_CHROME)
+class PageBuiltElsewhere(unittest.TestCase):
+    # --page shoots a page built elsewhere (the docs' demo workspace): one picture per route, width and theme, named
+    # <route>-<width>-<theme>.png, each drawn in its theme from the first paint
+    def test_page_option_shoots_each_route_width_and_theme(self):
+        themed = EDGE.replace("</style>", ' html[data-theme="dark"], html[data-theme="dark"] body { background: #000 }</style>')
+        with tempfile.TemporaryDirectory() as t:
+            page, out = Path(t) / "demo.html", Path(t) / "shots"
+            page.write_text(themed, encoding="utf-8")
+            DS.main([str(out), "--page", str(page), "--route", "edge=#/x", "--width", "390", "--theme", "dark", "light",
+                     "--height", "300"])
+            shots = sorted(f.name for f in out.iterdir())
+            dark = png_pixels((out / "edge-390-dark.png").read_bytes())
+            light = png_pixels((out / "edge-390-light.png").read_bytes())
+        self.assertEqual(shots, ["edge-390-dark.png", "edge-390-light.png"])
+        self.assertEqual((dark[0], dark[1], dark[2](20, 150), light[2](20, 150)), (390, 300, (0, 0, 0), (255, 255, 255)))
+
+
 class WidthCheck(unittest.TestCase):
     # a page laid out at another width than the one asked for stops the run, naming the picture and both widths
     def test_a_page_of_another_width_stops_the_run(self):
