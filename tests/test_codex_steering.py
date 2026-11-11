@@ -3,6 +3,7 @@
 # Codex Desktop 0.167.0-alpha.3.2, observed 2026-11-10: mid-turn steering is
 # event_msg/item_completed/UserMessage, with the original thread and turn ids.
 # These tests replay that record shape; they do not claim an installed-host test.
+import argparse
 import contextlib
 import io
 import json
@@ -27,6 +28,41 @@ class CodexSteeringTests(CodexCase):
     def prompts(self):
         record = state.read(continuity.record_path("codex", SID)) or {}
         return record.get("checkpoint", {}).get("prompts", [])
+
+    def test_own_cli_brief_shows_captured_pending_steering_without_granting_authority(self):
+        def brief_cli(reader=SID, agent="codex", *argv):
+            parser = argparse.ArgumentParser(prog="dev session")
+            continuity.add_arguments(parser)
+            out = io.StringIO()
+            who = {"caller": "main", "agent": agent, "session": reader, "how": "env", "calls": []}
+            # Host caller identity is the boundary; run the real CLI reader/filter path.
+            with mock.patch.object(pg, "caller", return_value=who), \
+                    mock.patch.object(pg, "resolve_session", return_value=(agent, reader, "env")), \
+                    contextlib.redirect_stdout(out):
+                result = continuity.cmd_session(parser.parse_args(["brief", "--session", "codex:" + SID, *argv]))
+            self.assertEqual(result, 0)
+            return out.getvalue()
+
+        # Same UserMessage shape observed live on 2026-11-10 at 18:29 and 18:32 PDT.
+        text = "Arregla todo para que el devkit funcione perfectamente con codex, pero no rompas nada de lo de claude!"
+        self.rollout.typed(text, "turn", T0 + 1)
+        pg.note_midturn("codex", self.data)
+        self.assertTrue(self.prompts()[-1]["pending"])
+        for provider in ([], ["--provider", "codex"], ["--provider", "openai"]):
+            with self.subTest(provider=provider):
+                self.assertIn(text, brief_cli(SID, "codex", *provider))
+        session = state.read(pg.session_path("codex", SID))
+        self.assertFalse(session.get("human"))
+        self.assertIsNone(self.grant(T0 + 5, consume=False))
+        for reader, agent, argv in ((OTHER, "codex", []), (SID, "claude", []),
+                                    (SID, "codex", ["--provider", "claude"]),
+                                    (SID, "codex", ["--for-chat", "--provider", "codex"])):
+            with self.subTest(reader=reader, agent=agent, argv=argv):
+                self.assertNotIn(text, brief_cli(reader, agent, *argv))
+        # Claude's existing explicit-provider filter and own-hook visibility stay unchanged.
+        continuity.on_midturn("claude", "s1", text, T0 + 1)
+        self.assertNotIn(text, continuity.brief("claude", "s1", provider="claude", caller=("claude", "s1")))
+        self.assertIn(text, continuity.brief("claude", "s1"))
 
     def test_only_own_human_steering_updates_continuity_without_granting_authority(self):
         self.rollout.typed("old request", "old", T0 - 2)

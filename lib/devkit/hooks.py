@@ -3193,8 +3193,8 @@ def _peer_settle(agent: str, data: dict) -> str:
     the lines they typed themselves (progress._own_lines: no code block, quote or indented line) and only once the
     session's transcript shows the prompt as theirs, never from a relayed comment, a notification or an event naming
     another transcript. Claude Code and Codex write the prompt to the transcript (Codex: the thread's rollout) after
-    this hook, so a line usually waits and a later hook settles it (_peer_settle_waiting). The prompt's id (Codex: its
-    turn id) counts it once. -> the echo for the context, or ''."""
+    this hook, so a line usually waits and a later hook settles it (_peer_settle_waiting). Codex native turns use
+    the complete prompt identity because several typed messages can share one turn. -> the echo, or ''."""
     sid = str(data.get("session_id") or "")
     text = str(data.get("prompt") or "")
     if not sid or data.get("agent_id") or "settle" not in text.lower():
@@ -3206,8 +3206,13 @@ def _peer_settle(agent: str, data: dict) -> str:
     found = peers.settle_lines(progress._own_lines(text))
     if not found:
         return ""
-    done = peers.settle_from_prompt(agent, sid, [ln for _, _, ln in found],
-                                    str(data.get("prompt_id") or data.get("turn_id") or ""))
+    prompt_id = str(data.get("prompt_id") or data.get("turn_id") or "")
+    if agent == "codex":
+        turn = str(data.get("turn_id") or "")
+        prompt_id = progress._codex_prompt_id(turn, text)
+        if not prompt_id and progress._codex_prompt_parts(turn) == (turn, ""):
+            prompt_id = turn  # retain the older opaque settlement-id contract, never a malformed composite
+    done = peers.settle_from_prompt(agent, sid, [ln for _, _, ln in found], prompt_id)
     wanted = list(dict.fromkeys(eid for eid, _, _ in found))
     got = {d.get("id") for d in done}
     waiting = set(peers.settling(agent, sid))

@@ -502,7 +502,11 @@ def apply(run: dict, moves: list, now: float) -> list:
                 continue
             lane["state"] = m["to"]
             if m["to"] == "running":  # recovered: its silence counts from when it was seen again
-                lane.update(finished=None, recovered=round(now, 1), resumed_at=round(m.get("at") or now, 1))
+                admitted = m.get("at") or now
+                # Codex compares this admission with native interruption timestamps.
+                # Rounding upward can hide a later stop; Claude keeps its existing precision.
+                lane.update(finished=None, recovered=round(now, 1),
+                            resumed_at=admitted if run.get("agent") == "codex" else round(admitted, 1))
                 _interval(run, m["id"], now, True)
             else:
                 lane["finished"] = round(m.get("at") or now, 1)

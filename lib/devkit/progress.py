@@ -2143,7 +2143,10 @@ def _reply_to(run, aid: str, now: float | None = None, own: bool = True) -> str:
     member works, as `dev crew owner` reads it (lane_gone over lane_states of `run`, the caller's own unless `own` is
     False; a lane the run does not know counts as working); else the member's name, which crew_ask addresses (_addr)
     to their working lane or to their next launch, telling the sender (_waits_notice). A lane with no name to address
-    keeps its id."""
+    keeps its id. Codex keeps the original child id even after it stops: another concurrent task may use the
+    same role, and a native follow-up resumes the original child."""
+    if run.get("agent") == "codex":
+        return aid
     lane = (run.get("agents") or {}).get(aid)
     if not isinstance(lane, dict) or not (lane.get("persona") or lane.get("label")):
         return aid
@@ -2213,6 +2216,10 @@ def _post(run, frm: str, to: str, text: str, now: float, from_name: str = "", ki
     m = {"id": _next_id(msgs, "M"), "ts": round(now), "from": frm, "to": to, "text": text.strip()[:MESSAGE_MAX],
          "delivered": False, "kind": kind or ("notice" if frm in NOTICE_SENDERS else "question")}
     m["from_name"], m["to_name"] = from_name or _name_of(run, frm), _name_of(run, to)
+    if run.get("agent") == "codex" and to == "main" and frm not in ("", "main") and m["kind"] == "question":
+        # Steps are identified by their unique names within this run, as dependencies and transitions are.
+        m["steps"] = [s["name"] for s in run.get("plan") or [] if isinstance(s, dict) and s.get("name")
+                      and s.get("owner") == frm and s.get("state") not in DONE]
     msgs.append(m)
     run["messages"] = msgs[-200:]
     return m
@@ -2240,16 +2247,19 @@ def _open_questions(run) -> list:
 
 def is_moot_message(run, m: dict) -> bool:
     """A question to the tech lead that nobody waits on any more: the lane that asked it has ended (done, stopped,
-    lost, or closed unverified) and owns no running or blocked step. Not answered and not closed, it is moot: never
-    waiting, never waking, shown as moot. A question of the tech lead's, or of a lane the run does not know, never
-    is."""
+    lost, or closed unverified) and owns no running or blocked step. Codex also keeps questions for pending or
+    unverified work actionable, including its recorded originating steps after reassignment. A moot question
+    never waits or wakes and is shown as moot. A question of the tech lead's, or of an unknown lane, never is."""
     if not isinstance(m, dict) or m.get("to") != "main" or not _asks(m) or m.get("answered") or m.get("closed"):
         return False
     lane = ((run or {}).get("agents") or {}).get(m.get("from") or "")
     if m.get("from") in (None, "", "main") or not isinstance(lane, dict) or \
             lane.get("state") not in ENDED_LANE + ("unverified",):
         return False
-    return not any(isinstance(s, dict) and s.get("owner") == m.get("from") and s.get("state") in ("running", "blocked")
+    codex = (run or {}).get("agent") == "codex"
+    steps = m.get("steps") if codex and isinstance(m.get("steps"), list) else []
+    return not any(isinstance(s, dict) and (s.get("owner") == m.get("from") or s.get("name") in steps)
+                   and (s.get("state") not in DONE if codex else s.get("state") in ("running", "blocked"))
                    for s in (run or {}).get("plan") or [])
 
 
@@ -3653,6 +3663,30 @@ def _decision(run, did):
     return next((x for x in (run or {}).get("decisions") or [] if x["id"].lower() == str(did).lower()), None)
 
 
+_CODEX_TURN_ID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+_CODEX_PROMPT_ID = re.compile(rf"codex-prompt:({_CODEX_TURN_ID}):([0-9a-f]{{64}})")
+
+
+def _codex_prompt_id(turn: str, text: str) -> str:
+    """One exact typed prompt within a Codex turn; identical text in that turn remains one-use."""
+    if not re.fullmatch(_CODEX_TURN_ID, turn):
+        return ""
+    return f"codex-prompt:{turn}:{hashlib.sha256(text.encode('utf-8')).hexdigest()}"
+
+
+def _codex_prompt_parts(identity: str) -> tuple[str, str]:
+    """Decode a prompt identity or a legacy opaque turn for reading existing evidence.
+
+    Settlement also confirms bare turn IDs. Preserve that reader contract without allowing a malformed
+    reserved composite identity to fall back to it; new evidence has stricter admission below.
+    """
+    match = _CODEX_PROMPT_ID.fullmatch(identity)
+    if match:
+        return match.group(1), match.group(2)
+    legacy = not identity.casefold().startswith("codex-prompt") and _SESSION_ID.fullmatch(identity)
+    return (identity, "") if legacy else ("", "")
+
+
 def _seen_ids(sess: dict) -> set:
     """The prompt and question tool ids this session recorded evidence from: the kept entries' and the longer list."""
     return set((sess or {}).get("human_ids") or []) | {str(h.get("transcript_uuid") or "")
@@ -3676,7 +3710,13 @@ def _keep_human(agent: str, sid: str, new: list, extra=None) -> list:
         kept[:], replayed[:] = [], []
         for e in new:
             uid = str(e.get("transcript_uuid") or "")
-            (replayed if uid and uid in seen else kept).append(e)
+            codex = e.get("agent") == "codex" and e.get("channel") == "E2"
+            turn, digest = _codex_prompt_parts(uid) if codex else ("", "")
+            native = bool(digest or re.fullmatch(_CODEX_TURN_ID, turn))
+            # A legacy entry has no full prompt digest: never reopen its turn during migration, including
+            # when another hook recorded it after on_human_prompt's initial read and before this lock.
+            duplicate = (uid and uid in seen) or (codex and (not native or turn in seen))
+            (replayed if duplicate else kept).append(e)
         s["human"] = ((s.get("human") or []) + kept)[-HUMAN_KEEP:]
         ids = [str(e["transcript_uuid"]) for e in kept if e.get("transcript_uuid")]
         s["human_ids"] = list(dict.fromkeys((s.get("human_ids") or []) + ids))[-HUMAN_IDS_KEEP:]
@@ -3793,10 +3833,16 @@ def on_human_prompt(agent: str, data: dict, now: float | None = None) -> list:
         return []
     run = load_run(agent, sid)
     live = run if run and run.get("goal") and run.get("state") != "done" else None
-    # what binds the entry to the prompt's record: Claude Code's prompt id, Codex's turn id (it sends no prompt id)
-    uuid = str(data.get("turn_id" if agent == "codex" else "prompt_id") or "")
+    # Codex steering prompts share a turn id. Bind each to its complete text as well; confirmation still
+    # requires the genuine UserMessage in this thread's rollout, never the hook payload alone.
+    native_id = str(data.get("turn_id" if agent == "codex" else "prompt_id") or "")
+    uuid = _codex_prompt_id(native_id, text) if agent == "codex" else native_id
+    if agent == "codex" and not uuid:
+        return []
     tp, new = harness_transcript(agent, sid), []
-    if uuid and str(uuid) in _seen_ids(sess):  # the same prompt again (B3): `dev hook prompt` fed its event back
+    seen = _seen_ids(sess)
+    if uuid and (uuid in seen or (agent == "codex" and native_id in seen)):
+        # Legacy bare-turn evidence stays one-use too; its original full prompt was not retained.
         _refuse_replay(agent, sid, str(uuid), "a prompt")
         return []
     repo = sess.get("project") or (live or {}).get("project") or ""  # a grant holds in this repository only
@@ -4000,8 +4046,11 @@ def confirmed(e: dict, sid: str = "") -> bool:
         meta = _codex_meta(path, sid) or {}
         if not meta or meta.get("originator") == "codex_exec" or meta.get("source") == "exec":
             return False  # a `codex exec` run: nobody at the keyboard (HEADLESS_SURFACES), whatever its record says
+    search_id = _codex_prompt_parts(uuid)[0] if agent == "codex" else uuid
+    if not search_id:
+        return False
     try:
-        for ln in _lines_back(path, json.dumps(uuid).encode()):
+        for ln in _lines_back(path, json.dumps(search_id).encode()):
             try:
                 r = json.loads(ln)
             except (ValueError, RecursionError):
@@ -4044,9 +4093,12 @@ def _codex_holds(r, e: dict, sid: str) -> bool:
 
 def _codex_turn_prompt(r, sid: str, turn: str, since: float):
     """The text of rollout record `r` when it is thread `sid`'s typed prompt of turn `turn` (_codex_prompt), written
-    at or after `since` (CODEX_PROMPT_GRACE aside); None otherwise."""
+    at or after `since` (CODEX_PROMPT_GRACE aside); a composite identity also binds the exact complete text."""
+    turn, digest = _codex_prompt_parts(turn)
     text = _codex_prompt(r, sid)
     if text is None or not turn or str(r["payload"].get("turn_id") or "") != turn:
+        return None
+    if digest and hashlib.sha256(text.encode("utf-8")).hexdigest() != digest:
         return None
     import datetime as dt
     try:
@@ -4063,11 +4115,12 @@ def _codex_backs(path, sid: str, turn: str, covers: str, since: float) -> bool:
     D<n>? Re-derived from the prompt, never from the record's detail, which the audit may have redacted. A
     `codex exec` run's rollout backs nothing."""
     meta = _codex_meta(path, sid) or {}
-    if not turn or not meta or meta.get("originator") == "codex_exec" or meta.get("source") == "exec":
+    native_turn, _ = _codex_prompt_parts(turn)
+    if not native_turn or not meta or meta.get("originator") == "codex_exec" or meta.get("source") == "exec":
         return False
     want = _norm(covers)
     try:
-        for ln in _lines_back(path, json.dumps(turn).encode()):
+        for ln in _lines_back(path, json.dumps(native_turn).encode()):
             try:
                 text = _codex_turn_prompt(json.loads(ln), sid, turn, since)
             except (ValueError, RecursionError):
@@ -5318,6 +5371,12 @@ def reconcile_hook(agent: str, data: dict, now: float | None = None) -> list:
     if not isinstance(run, dict) or run.get("state") not in approvals.LIVE:
         return stopped
     sess = state.read(session_path(agent, sid))
+    if agent == "codex":
+        from . import codexlaunch
+        stopped += codexlaunch.reconcile_lifecycle(run, sess, now)
+        if stopped:
+            run = load_run(agent, sid)
+            sess = state.read(session_path(agent, sid))
     aid = str(data.get("agent_id") or "")
     lane = (run.get("agents") or {}).get(aid) if aid else None
     seen = bool(lane) and now - float(lane.get("last_seen") or 0) >= LAST_SEEN_EVERY
@@ -5329,7 +5388,7 @@ def reconcile_hook(agent: str, data: dict, now: float | None = None) -> list:
     lim = approvals.limits()
     moves = approvals.reconcile(run, fx, now, lim)
     if not (seen or moves):
-        return []
+        return stopped if agent == "codex" else []
     made = []
     with _tx(agent, sid):
         doc = load_run(agent, sid)

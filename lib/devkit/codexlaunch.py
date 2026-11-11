@@ -23,10 +23,86 @@ and the member is told to stop and report.
 import json
 import re
 import time
+from datetime import datetime
 from pathlib import Path
 
 SPAWN_TAIL = 4_000_000  # bytes of a spawning thread's rollout read for its spawn calls, from the end
 THREAD = re.compile(r"[A-Za-z0-9_-]{1,80}")
+
+
+def lifecycle_events(path, thread_id: str, agent_ids) -> dict:
+    """Latest native interruption for each known child of this thread.
+
+    Read only the registered parent's own rollout and native completed items, never
+    message text or a caller-supplied target path. An interaction only delivers a
+    message: it cannot cancel a stop before the child's next admission check.
+    """
+    if not THREAD.fullmatch(str(thread_id or "")) or session_meta(path).get("id") != thread_id:
+        return {}
+    known = {aid for aid in agent_ids if isinstance(aid, str) and THREAD.fullmatch(aid)}
+    try:
+        with open(path, "rb") as stream:
+            size = stream.seek(0, 2)
+            stream.seek(max(0, size - SPAWN_TAIL))
+            lines = stream.read().splitlines()
+    except (OSError, TypeError, ValueError):
+        return {}
+    events = {}
+    for line in lines:
+        if b'"SubAgentActivity"' not in line:
+            continue
+        try:
+            rec = json.loads(line)
+            payload = rec.get("payload") if isinstance(rec, dict) else None
+            if rec.get("type") != "event_msg" or not isinstance(payload, dict) or \
+                    payload.get("type") != "item_completed" or payload.get("thread_id") != thread_id:
+                continue
+            item = payload.get("item")
+            if not isinstance(item, dict) or item.get("type") != "SubAgentActivity" or \
+                    item.get("kind") != "interrupted" or \
+                    item.get("agent_thread_id") not in known or not item.get("id"):
+                continue
+            stamp = datetime.fromisoformat(str(rec.get("timestamp", "")).replace("Z", "+00:00"))
+            if stamp.tzinfo is None:
+                continue
+            at = stamp.timestamp()
+            aid = item["agent_thread_id"]
+            if at > 0 and at >= events.get(aid, {}).get("at", 0):
+                events[aid] = {"kind": item["kind"], "at": at, "call_id": item["id"]}
+        except (ValueError, TypeError, AttributeError, OverflowError):
+            continue
+    return events
+
+
+def reconcile_lifecycle(run: dict, session: dict, now: float) -> list:
+    """Reconcile native stops through the normal lane transition; never resume a lane."""
+    from . import progress
+    if run.get("agent") != "codex" or not isinstance(session, dict) or \
+            session.get("agent") != "codex" or session.get("session") != run.get("session"):
+        return []
+    sid = run["session"]
+    lanes = run.get("agents") or {}
+    events = lifecycle_events(session.get("transcript"), sid, lanes)
+    moves = []
+    for aid, event in events.items():
+        if event["kind"] != "interrupted" or event["at"] > now:
+            continue
+        # The snapshot predates this lock: a child may already have resumed. The
+        # existing lane stop takes this same reentrant session lock.
+        with progress._tx("codex", sid):
+            live = progress.load_run("codex", sid) or {}
+            lane = (live.get("agents") or {}).get(aid) or {}
+            if live.get("state") not in ("running", "blocked") or lane.get("state") != "running" or \
+                    _admitted_at(lane) > event["at"]:
+                continue
+            moves += progress.lane_stopped(aid, "Codex native interruption", agent="codex", sid=sid,
+                                           now=event["at"])
+    return moves
+
+
+def _admitted_at(lane: dict) -> float:
+    """Precise admission times; rounded telemetry cannot supersede a native stop."""
+    return max(float(lane.get(key) or 0) for key in ("started", "resumed_at"))
 
 
 def session_meta(path) -> dict:

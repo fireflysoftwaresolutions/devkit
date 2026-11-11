@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import ast
 import contextlib
+import fcntl
 import fnmatch
 import hashlib
 import json
@@ -1910,18 +1911,19 @@ def _run_step(top, groups, stream, json_out, kind, header):
         print(ui.section(header))
     results = []
     for r, sel in groups:
-        res = run_tests(top, r, files=sel.get("files", ()), ids=sel.get("ids", ()), related=sel.get("related", ()),
-                        all_=sel.get("all", False), stream=stream, log=_log_path(top, r))
-        results.append(res)
-        if not json_out:
-            _show(res, top)
+        with _run_log(top, r) as log:
+            res = run_tests(top, r, files=sel.get("files", ()), ids=sel.get("ids", ()), related=sel.get("related", ()),
+                            all_=sel.get("all", False), stream=stream, log=log)
+            results.append(res)
+            if not json_out:
+                _show(res, top)
     return {"kind": kind, "runs": results}
 
 
 _LOGS_KEPT = 10  # per worktree, runner and root
 
 
-def _log_path(top, runner) -> Path:
+def _log_path(top, runner, codex=False) -> Path:
     """A log of its own for each run: in a folder per worktree (lanes share the project), named by time and
     process. The oldest logs of the same worktree and runner beyond the newest few are removed."""
     key = project_key(top)[1]
@@ -1930,11 +1932,67 @@ def _log_path(top, runner) -> Path:
     root = re.sub(r"[^A-Za-z0-9._-]+", "_", runner["root"])
     d = core.STATE / "tests" / "logs" / key / tree
     stem = f"{runner['name']}-{root}"
+    if codex:
+        # The legacy cleaner does not descend into this folder, including when Claude runs alongside Codex.
+        return d / "codex" / stem
     old = sorted(d.glob(f"{stem}-*.log")) if d.is_dir() else []
     for f in old[:max(0, len(old) - _LOGS_KEPT + 1)]:
         with contextlib.suppress(OSError):
             f.unlink()
     return d / f"{stem}-{time.strftime('%Y%m%d-%H%M%S')}-{time.time_ns() % 10 ** 9:09d}-{os.getpid()}.log"
+
+
+@contextlib.contextmanager
+def _run_log(top, runner):
+    """Own a Codex log until the runner and its report finish; other callers keep the legacy log policy."""
+    from . import progress
+    agent, _, how = progress.resolve_session(str(top))
+    if agent != "codex" or how in ("recency", "shell"):
+        yield _log_path(top, runner)
+        return
+    base = _log_path(top, runner, codex=True)
+    base.parent.mkdir(parents=True, exist_ok=True)
+    fd = None
+    try:
+        # Publication and cleaning share a lock, so no cleaner sees a newly created file before its owner locks it.
+        with core.file_lock(base.parent) as held:
+            if not held:
+                raise OSError("test log allocation is busy; retry dev test when the other allocation finishes")
+            fd, name = tempfile.mkstemp(prefix=f"{base.name}-{time.strftime('%Y%m%d-%H%M%S')}-",
+                                        suffix=".log", dir=str(base.parent))
+            log = Path(name)
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            _prune_codex_logs(base)
+        try:
+            yield log
+        finally:
+            with core.file_lock(base.parent) as held:
+                if held:
+                    # Completed logs age from completion, so a long run keeps its report after shorter peers end.
+                    with contextlib.suppress(OSError):
+                        os.utime(log, None)
+                    os.close(fd)
+                    fd = None
+                    _prune_codex_logs(base, keep=log)
+    finally:
+        if fd is not None:
+            os.close(fd)  # errors and interrupted runs release ownership too; the next run can prune their logs
+
+
+def _prune_codex_logs(base, keep=None):
+    """Under the directory lock, retain ten completed logs and every live writer (an actual flock, never a PID)."""
+    with contextlib.ExitStack() as opened:
+        completed = []
+        for path in base.parent.glob(f"{base.name}-*.log"):
+            try:
+                handle = opened.enter_context(path.open("r"))
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                completed.append((path == keep, path.stat().st_mtime_ns, str(path), path))
+            except OSError:
+                continue  # a live writer or a file that disappeared is not ours to prune
+        for _, _, _, path in sorted(completed)[:-_LOGS_KEPT]:
+            with contextlib.suppress(OSError):
+                path.unlink()
 
 
 def _emit(data) -> None:

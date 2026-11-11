@@ -211,7 +211,33 @@ def background_work(path) -> list:
     return out
 
 
-def _invocations(commands) -> list:
+def _uv_command(words) -> list:
+    """Unwrap an unambiguous uv run invocation; unknown options keep their original command identity."""
+    if len(words) < 3 or os.path.basename(words[0]) != "uv" or words[1] != "run":
+        return words
+    at = 2
+    flags = {"--no-project", "--offline", "--no-sync", "--locked", "--frozen", "--no-python-downloads"}
+    while at < len(words):
+        word = words[at]
+        if word == "--":
+            at += 1
+            break
+        if word in flags:
+            at += 1
+        elif word in ("--python", "-p"):
+            if at + 1 >= len(words) or not words[at + 1] or words[at + 1].startswith("-"):
+                return words
+            at += 2
+        elif word.startswith("--python=") and word[len("--python="):]:
+            at += 1
+        elif word.startswith("-"):
+            return words
+        else:
+            break
+    return words[at:] if at < len(words) else words
+
+
+def _invocations(commands, agent: str = "claude") -> list:
     """Every simple command the shell ran, as words; the program is its base name (`bin/dev` -> `dev`). Quoted
     strings and heredoc bodies are dropped first (`hooks.command_words`): they are text, not commands."""
     from .hooks import command_words
@@ -221,6 +247,8 @@ def _invocations(commands) -> list:
             words = part.split()
             while words and (words[0] in _LEAD or _ASSIGN.match(words[0])):
                 words.pop(0)
+            if agent == "codex":
+                words = _uv_command(words)
             if words and _PYTHON.match(os.path.basename(words[0])):  # the script is the program: skip the flags
                 rest = words[1:]
                 while rest and rest[0].startswith("-") and rest[0] not in ("-m", "-c"):
@@ -258,6 +286,59 @@ def _written(path) -> dict:
             else:
                 continue
             out[os.path.realpath(fp)] = (whole, texts)
+    return out
+
+
+def _codex_written(path, cwd) -> dict:
+    """Completed native file changes from this member, never inherited history or another thread's events.
+    FileChange carries whole added files and the added lines of updates, so sibling edits remain unattributed."""
+    from .codexlaunch import session_meta
+    records = _records(path)
+    meta = session_meta(path)
+    thread = meta.get("id")
+    if not isinstance(thread, str) or not thread:
+        return {}
+    forked = bool(meta.get("forked_from_id"))
+    boundary = meta.get("subagent_history_start_ordinal")
+    if forked and (not isinstance(boundary, int) or isinstance(boundary, bool) or boundary < 0):
+        return {}
+    truncated = not records or records[0].get("type") != "session_meta" or records[0].get("payload") != meta
+    # The bounded tail may start after the child's task_started. Its native ordinal still proves the event is
+    # beyond the fork boundary from the separately read header; a full transcript must also show task_started.
+    start = 0 if truncated else skillguard.fork_start([json.dumps(rec) for rec in records])
+    out = {}
+    for rec in records[start:]:
+        ordinal = rec.get("ordinal")
+        if forked and (not isinstance(ordinal, int) or isinstance(ordinal, bool) or ordinal < boundary):
+            continue
+        payload = rec.get("payload") if rec.get("type") == "event_msg" else None
+        if not isinstance(payload, dict) or payload.get("type") != "item_completed" or \
+                payload.get("thread_id") != thread:
+            continue
+        item = payload.get("item")
+        if not isinstance(item, dict) or item.get("type") != "FileChange" or item.get("status") != "completed":
+            continue
+        changes = item.get("changes")
+        for fp, change in (changes.items() if isinstance(changes, dict) else []):
+            if not isinstance(change, dict) or change.get("type") not in ("add", "update", "delete"):
+                continue
+            target = change.get("move_path") or fp
+            if not isinstance(target, str) or not target:
+                continue
+            real = os.path.realpath(os.path.join(cwd or ".", target))
+            whole, texts = out.get(real, (False, []))
+            if change["type"] == "add":
+                text = change.get("content")
+                if not isinstance(text, str):
+                    continue
+                whole = True
+            else:
+                diff = change.get("unified_diff") or ""
+                if not isinstance(diff, str):
+                    continue
+                text = "\n".join(line[1:] for line in diff.splitlines()
+                                 if line.startswith("+") and not line.startswith("+++ "))
+            out[real] = (whole, texts + [text])
     return out
 
 
@@ -584,8 +665,10 @@ def crew_gates(member, transcript_path, cwd, roster=None, agent: str = "", sessi
     read_only = (m or {}).get("tools") == "read"
     agent = agent or agent_of(transcript_path)
     commands, refusals = _activity(transcript_path, agent)
-    inv = _invocations(commands)
+    inv = _invocations(commands, agent)
     loaded, edited, _ = skillguard.scan(agent, transcript_path)
+    native_written = _codex_written(transcript_path, cwd) if agent == "codex" else {}
+    edited += list(native_written)
     paths = [str(Path(f) if os.path.isabs(f) else Path(cwd or ".") / f) for f in dict.fromkeys(edited) if f]
     top = core.gitout(cwd, "rev-parse", "--show-toplevel") if cwd and os.path.isdir(cwd) else ""
     # real paths: git names the top as /private/var/… where the member wrote /var/… (macOS temp folders)
@@ -599,7 +682,13 @@ def crew_gates(member, transcript_path, cwd, roster=None, agent: str = "", sessi
     if not read_only:
         for x in (m or {}).get("procedure") or []:
             proof = x.get("proof") if isinstance(x, dict) else None
-            if proof and _proof_owed(x, kinds) and not _ran(proof, inv):
+            proof_kinds = kinds
+            if agent == "codex" and " ".join(str(proof or "").split()) == "dev test prove":
+                # A diagnostic probe outside every repository has no delivered change to mutate. Keep actual
+                # repository writes (including a repository nested in scratch), and keep phase skills unchanged.
+                delivered = skillguard.delivered([os.path.realpath(f) for f in paths + touched])
+                proof_kinds = [_rel(f, top) for f in delivered]
+            if proof and _proof_owed(x, proof_kinds) and not _ran(proof, inv):
                 found.append(_finding("proofs", proof, f"`{proof}` is not among your {len(commands)} shell commands "
                                       "(text inside quotes or a heredoc does not count)",
                                       f"run `{proof}{PROOF_ARGS.get(proof, '')}`"))
@@ -608,7 +697,7 @@ def crew_gates(member, transcript_path, cwd, roster=None, agent: str = "", sessi
     edits = (m or {}).get("tools") not in ("review", "read")
     found += _skill_findings(m, inv, loaded, paths + (touched if edits else []), top, kinds, agent)
     if in_repo or shell:
-        written = {**_written(transcript_path), **shell}
+        written = {**(native_written if agent == "codex" else _written(transcript_path)), **shell}
         changed = in_repo + sorted(shell)
         found += _stub_findings(top, changed, written)
         found += _test_findings(top, changed, written)

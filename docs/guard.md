@@ -124,7 +124,10 @@ exist in the dev root.
 ### Codex scratch folders
 
 Codex scratch access comes from the hook's registered session and actor, not a tool's chosen working directory.
-The hook directory must match the registered host directory. Paths must be canonical and have no escaping links.
+The hook directory must match the registered host directory. An app event may also name a directory inside its
+independently registered checkout: devkit verifies the recorded project, repository root, and canonical main
+checkout or managed worktree. The original app directory remains the scratch base. A tool's `workdir` cannot
+establish that registration. Paths must be canonical and have no escaping links.
 
 | Host | Main session | Crew member |
 | --- | --- | --- |
@@ -651,6 +654,14 @@ in, and expires after 30 minutes. `grant backup <project>` opens one public back
 `grant developer-only <target>` with the target the refusal names (`embargo/<branch>`, `backup-public/<project>`,
 `backup-policy/<project>`, `lesson-block/<lesson>`) works too. None of them is ever pre-approved with `dev crew mode auto --approve`. A dry run,
 the help, `dev branch embargo` (the list), and `dev backup policy` (the read) need no grant.
+
+In Codex, distinct messages can share one host turn. Devkit binds each new grant to both that turn and the exact
+complete user message, then checks it against your own transcript before use. A corrected message can therefore
+carry its own grant. Identical text within the same turn still counts once; older evidence recorded for the whole
+turn remains protected against reuse. Claude continues to identify prompts by its native prompt ID.
+Decisions sent to another session use the same complete-message identity, including while waiting for transcript
+confirmation. Existing saved decision evidence remains readable, with its original provenance checks.
+Restart Codex sessions after updating so one installed version handles each session's approval evidence.
 
 ### Lesson rules
 
