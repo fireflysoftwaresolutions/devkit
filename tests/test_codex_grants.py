@@ -12,6 +12,7 @@
 # Tests carry comments, not docstrings (`dev test prove` leaves out tests with one).
 # Run: python3 -m unittest tests.test_codex_grants (and with /usr/bin/python3, for Python 3.9)
 import json
+import hashlib
 import os
 import sys
 import time
@@ -162,6 +163,90 @@ class CodexRolloutTests(CodexCase):
 
 
 class CodexGrantTests(CodexCase):
+    def test_a_corrected_grant_in_the_same_codex_turn_has_its_own_evidence(self):
+        wrong = "grant release `v26.11.9`"
+        turn, first = self.prompt(wrong, T0)
+        self.rollout.typed(wrong, turn, T0 + 0.3)
+        self.assertEqual([e["covers"] for e in first], ["release `v26.11.9`"])
+        self.assertIsNone(self.grant(T0 + 1, consume=False))
+
+        _, corrected = self.prompt(LINE, T0 + 2, turn=turn)
+        self.rollout.typed(LINE, turn, T0 + 2.3)
+        self.assertEqual([e["covers"] for e in corrected], ["release v26.11.9"])
+        self.assertIsNotNone(self.grant(T0 + 3))
+        self.assertIsNone(self.grant(T0 + 4))
+        _, replayed = self.prompt(LINE, T0 + 4, turn=turn)
+        self.assertEqual(replayed, [])
+        self.assertIsNone(self.grant(T0 + 4.1))
+
+    def test_same_turn_evidence_requires_its_full_typed_prompt(self):
+        turn, _ = self.prompt(LINE, T0)
+        self.rollout.typed(LINE, turn, T0 + 0.3)
+        self.assertIsNotNone(self.grant(T0 + 1))
+
+        wrapped = f"The complete release is approved.\n{LINE}"
+        _, forged = self.prompt(wrapped, T0 + 2, turn=turn)
+        self.assertEqual(len(forged), 1)
+        self.assertIsNone(self.grant(T0 + 2.1))
+        self.rollout.typed(f"A different prompt.\n{LINE}", turn, T0 + 2.3)
+        self.assertIsNone(self.grant(T0 + 2.4))
+        record = audit.records(1, "crew.evidence")[-1]
+        self.assertIn("no message of the developer", pg.evidence_check(record, None, 0) or "")
+
+        self.rollout.typed(wrapped, turn, T0 + 2.5)
+        self.assertIsNotNone(self.grant(T0 + 3))
+        self.assertIsNone(pg.evidence_check(record, None, 0))
+        self.assertIsNone(self.grant(T0 + 4))
+
+    def test_distinct_multiline_grants_in_one_turn_are_each_used_once(self):
+        turn, _ = self.prompt("grant release `v26.11.9`", T0)
+        self.rollout.typed("grant release `v26.11.9`", turn, T0 + 0.3)
+        lines = f"{LINE}\ngrant release v26.11.10"
+        _, entries = self.prompt(lines, T0 + 2, turn=turn)
+        self.rollout.typed(lines, turn, T0 + 2.3)
+        self.assertEqual([e["covers"] for e in entries], ["release v26.11.9", "release v26.11.10"])
+        self.assertIsNotNone(self.grant(T0 + 3))
+        other = dict(action="release", target="v26.11.10", repo="acme/api")
+        self.assertIsNotNone(pg.use_grant("codex", SID, now=T0 + 3, **other))
+        self.assertIsNone(self.grant(T0 + 4))
+        self.assertIsNone(pg.use_grant("codex", SID, now=T0 + 4, **other))
+        _, replayed = self.prompt(lines, T0 + 4.5, turn=turn)
+        self.assertEqual(replayed, [])
+
+    def test_legacy_turn_evidence_stays_one_use_during_prompt_key_migration(self):
+        turn = "01a1c1a0-1111-7000-8000-000000000001"
+        legacy = {"agent": "codex", "channel": "E2", "covers": "release v26.11.9", "excerpt": LINE,
+                  "transcript_uuid": turn, "transcript": str(self.rollout.path), "session": SID,
+                  "ts": T0, "expires": T0 + 1800, "used": None, "repo": "acme/api", "run": None}
+        pg.state.update(pg.session_path("codex", SID),
+                        lambda s: s.update(human=[legacy], human_ids=[turn]))
+        self.rollout.typed(LINE, turn, T0 + 0.3)
+        self.assertIsNotNone(self.grant(T0 + 1))
+        _, replayed = self.prompt(f"A new wrapper.\n{LINE}", T0 + 2, turn=turn)
+        self.assertEqual(replayed, [])
+
+        # A hook that read before the legacy entry was kept must still be refused by the atomic writer.
+        # Retention can remove the entry; its replay tombstone must still hold.
+        pg.state.update(pg.session_path("codex", SID), lambda s: s.update(human=[]))
+        new = dict(legacy, ts=T0 + 2, used=None,
+                   transcript_uuid=f"codex-prompt:{turn}:{hashlib.sha256(LINE.encode()).hexdigest()}")
+        self.assertEqual(pg._keep_human("codex", SID, [new]), [])
+        self.assertIsNone(self.grant(T0 + 3))
+
+    def test_malformed_prompt_identities_cannot_create_evidence(self):
+        turn = "01a1c1a0-2222-7000-8000-000000000002"
+        malformed = ("", "not-a-native-turn", f"codex-prompt:{turn}:short",
+                     f"codex-prompt:{turn}:{'0' * 64}:extra")
+        for identity in malformed:
+            with self.subTest(identity=identity):
+                data = {"session_id": SID, "turn_id": identity, "prompt": LINE,
+                        "transcript_path": str(self.rollout.path)}
+                self.assertEqual(pg.on_human_prompt("codex", data, now=T0), [])
+                entry = {"agent": "codex", "channel": "E2", "covers": "release v26.11.9",
+                         "excerpt": LINE, "transcript_uuid": identity, "ts": T0}
+                self.assertEqual(pg._keep_human("codex", SID, [entry]), [])
+        self.assertIsNone(self.grant(T0 + 3))
+
     def test_a_grant_typed_in_codex_opens_its_action_once(self):
         entries = self.typed(f"The notes look right.\n{LINE}", T0)
         self.assertEqual([e["covers"] for e in entries], ["release v26.11.9"])
@@ -275,6 +360,22 @@ class CodexDecisionTests(CodexCase):
         self.assertEqual(next(d for d in pg.load_run("codex", SID)["decisions"] if d["id"] == "D2")["state"],
                          "pending")
 
+    def test_a_same_turn_denial_is_recorded_and_ends_the_earlier_approval(self):
+        pg.crew_decision("Release 26.11.9 now?", options="yes | no", recommend="yes",
+                         irreversible="release", now=T0 + 60)
+        pg.on_final_message("codex", SID, "**[Firefly> DevKit]** … D1 waits for you.", now=T0 + 120)
+        turn, _ = self.prompt("approve D1: yes", T0 + 180)
+        self.rollout.typed("approve D1: yes", turn, T0 + 180.3)
+        _, denial = self.prompt("approve D1: no", T0 + 182, turn=turn)
+        self.rollout.typed("approve D1: no", turn, T0 + 182.3)
+        self.assertEqual([e["answer"] for e in denial], ["no"])
+        with self.assertRaises(pg.StepError):
+            pg.crew_decide("D1", "yes", now=T0 + 184)
+        decision = pg.crew_decide("D1", "no", now=T0 + 185)
+        self.assertEqual((decision["by"], decision["verified"], decision["answer"]),
+                         ("developer", True, "no"))
+        self.assertIsNone(self.grant(T0 + 186))
+
 
 class CodexAuditVerifyTests(CodexCase):
     # `dev audit verify` re-reads each crew.evidence record's prompt in the thread's own rollout: a grant the
@@ -284,10 +385,13 @@ class CodexAuditVerifyTests(CodexCase):
         self.rollout.typed("Run the tests and fix what fails.", turn, T0 + 0.3)
         forged = audit.records(1, "crew.evidence")[-1]
         self.assertIn("no message of the developer", pg.evidence_check(forged, None, 0) or "")
-        self.typed(f"Ship it.\n{LINE}", T0 + 60)
+        turn, _ = self.prompt(f"Ship it.\n{LINE}", T0 + 60)
+        self.rollout.typed(f"Ship it.\n{LINE}", turn, T0 + 60.3)
         typed = audit.records(1, "crew.evidence")[-1]
-        self.assertEqual(typed["evidence"]["transcript_uuid"], f"01a1c1a0-0002-7000-8000-000000000002")
         self.assertIsNone(pg.evidence_check(typed, None, 0))
+        self.prompt(f"A fabricated wrapper.\n{LINE}", T0 + 62, turn=turn)
+        wrapped = audit.records(1, "crew.evidence")[-1]
+        self.assertIn("no message of the developer", pg.evidence_check(wrapped, None, 0) or "")
 
 
 class CodexClaimBreakTests(test_peerscli.CliCase):

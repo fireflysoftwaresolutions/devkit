@@ -3663,6 +3663,25 @@ def _decision(run, did):
     return next((x for x in (run or {}).get("decisions") or [] if x["id"].lower() == str(did).lower()), None)
 
 
+_CODEX_TURN_ID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+_CODEX_PROMPT_ID = re.compile(rf"codex-prompt:({_CODEX_TURN_ID}):([0-9a-f]{{64}})")
+
+
+def _codex_prompt_id(turn: str, text: str) -> str:
+    """One exact typed prompt within a Codex turn; identical text in that turn remains one-use."""
+    if not re.fullmatch(_CODEX_TURN_ID, turn):
+        return ""
+    return f"codex-prompt:{turn}:{hashlib.sha256(text.encode('utf-8')).hexdigest()}"
+
+
+def _codex_prompt_parts(identity: str) -> tuple[str, str]:
+    """Decode a prompt identity or a legacy bare turn; malformed composite identities fail closed."""
+    match = _CODEX_PROMPT_ID.fullmatch(identity)
+    if match:
+        return match.group(1), match.group(2)
+    return (identity, "") if re.fullmatch(_CODEX_TURN_ID, identity) else ("", "")
+
+
 def _seen_ids(sess: dict) -> set:
     """The prompt and question tool ids this session recorded evidence from: the kept entries' and the longer list."""
     return set((sess or {}).get("human_ids") or []) | {str(h.get("transcript_uuid") or "")
@@ -3686,7 +3705,12 @@ def _keep_human(agent: str, sid: str, new: list, extra=None) -> list:
         kept[:], replayed[:] = [], []
         for e in new:
             uid = str(e.get("transcript_uuid") or "")
-            (replayed if uid and uid in seen else kept).append(e)
+            codex = e.get("agent") == "codex" and e.get("channel") == "E2"
+            turn = _codex_prompt_parts(uid)[0] if codex else ""
+            # A legacy entry has no full prompt digest: never reopen its turn during migration, including
+            # when another hook recorded it after on_human_prompt's initial read and before this lock.
+            duplicate = (uid and uid in seen) or (codex and (not turn or turn in seen))
+            (replayed if duplicate else kept).append(e)
         s["human"] = ((s.get("human") or []) + kept)[-HUMAN_KEEP:]
         ids = [str(e["transcript_uuid"]) for e in kept if e.get("transcript_uuid")]
         s["human_ids"] = list(dict.fromkeys((s.get("human_ids") or []) + ids))[-HUMAN_IDS_KEEP:]
@@ -3803,10 +3827,16 @@ def on_human_prompt(agent: str, data: dict, now: float | None = None) -> list:
         return []
     run = load_run(agent, sid)
     live = run if run and run.get("goal") and run.get("state") != "done" else None
-    # what binds the entry to the prompt's record: Claude Code's prompt id, Codex's turn id (it sends no prompt id)
-    uuid = str(data.get("turn_id" if agent == "codex" else "prompt_id") or "")
+    # Codex steering prompts share a turn id. Bind each to its complete text as well; confirmation still
+    # requires the genuine UserMessage in this thread's rollout, never the hook payload alone.
+    native_id = str(data.get("turn_id" if agent == "codex" else "prompt_id") or "")
+    uuid = _codex_prompt_id(native_id, text) if agent == "codex" else native_id
+    if agent == "codex" and not uuid:
+        return []
     tp, new = harness_transcript(agent, sid), []
-    if uuid and str(uuid) in _seen_ids(sess):  # the same prompt again (B3): `dev hook prompt` fed its event back
+    seen = _seen_ids(sess)
+    if uuid and (uuid in seen or (agent == "codex" and native_id in seen)):
+        # Legacy bare-turn evidence stays one-use too; its original full prompt was not retained.
         _refuse_replay(agent, sid, str(uuid), "a prompt")
         return []
     repo = sess.get("project") or (live or {}).get("project") or ""  # a grant holds in this repository only
@@ -4010,8 +4040,11 @@ def confirmed(e: dict, sid: str = "") -> bool:
         meta = _codex_meta(path, sid) or {}
         if not meta or meta.get("originator") == "codex_exec" or meta.get("source") == "exec":
             return False  # a `codex exec` run: nobody at the keyboard (HEADLESS_SURFACES), whatever its record says
+    search_id = _codex_prompt_parts(uuid)[0] if agent == "codex" else uuid
+    if not search_id:
+        return False
     try:
-        for ln in _lines_back(path, json.dumps(uuid).encode()):
+        for ln in _lines_back(path, json.dumps(search_id).encode()):
             try:
                 r = json.loads(ln)
             except (ValueError, RecursionError):
@@ -4054,9 +4087,12 @@ def _codex_holds(r, e: dict, sid: str) -> bool:
 
 def _codex_turn_prompt(r, sid: str, turn: str, since: float):
     """The text of rollout record `r` when it is thread `sid`'s typed prompt of turn `turn` (_codex_prompt), written
-    at or after `since` (CODEX_PROMPT_GRACE aside); None otherwise."""
+    at or after `since` (CODEX_PROMPT_GRACE aside); a composite identity also binds the exact complete text."""
+    turn, digest = _codex_prompt_parts(turn)
     text = _codex_prompt(r, sid)
     if text is None or not turn or str(r["payload"].get("turn_id") or "") != turn:
+        return None
+    if digest and hashlib.sha256(text.encode("utf-8")).hexdigest() != digest:
         return None
     import datetime as dt
     try:
@@ -4073,11 +4109,12 @@ def _codex_backs(path, sid: str, turn: str, covers: str, since: float) -> bool:
     D<n>? Re-derived from the prompt, never from the record's detail, which the audit may have redacted. A
     `codex exec` run's rollout backs nothing."""
     meta = _codex_meta(path, sid) or {}
-    if not turn or not meta or meta.get("originator") == "codex_exec" or meta.get("source") == "exec":
+    native_turn, _ = _codex_prompt_parts(turn)
+    if not native_turn or not meta or meta.get("originator") == "codex_exec" or meta.get("source") == "exec":
         return False
     want = _norm(covers)
     try:
-        for ln in _lines_back(path, json.dumps(turn).encode()):
+        for ln in _lines_back(path, json.dumps(native_turn).encode()):
             try:
                 text = _codex_turn_prompt(json.loads(ln), sid, turn, since)
             except (ValueError, RecursionError):

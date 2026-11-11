@@ -655,6 +655,12 @@ in, and expires after 30 minutes. `grant backup <project>` opens one public back
 `backup-policy/<project>`, `lesson-block/<lesson>`) works too. None of them is ever pre-approved with `dev crew mode auto --approve`. A dry run,
 the help, `dev branch embargo` (the list), and `dev backup policy` (the read) need no grant.
 
+In Codex, distinct messages can share one host turn. Devkit binds each new grant to both that turn and the exact
+complete user message, then checks it against your own transcript before use. A corrected message can therefore
+carry its own grant. Identical text within the same turn still counts once; older evidence recorded for the whole
+turn remains protected against reuse. Claude continues to identify prompts by its native prompt ID.
+Restart Codex sessions after updating so one installed version handles each session's approval evidence.
+
 ### Lesson rules
 
 A team can add its own rules, made from lessons that keep repeating (see
