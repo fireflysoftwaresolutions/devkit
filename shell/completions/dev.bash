@@ -414,7 +414,7 @@ _dev_spec() {
     'ext ack') o='-h --help' ;;
     'impeccable') o='-h --help' p='*n' ;;
     'doctor') o='-h --help' ;;
-    'install') o='-h --help --only --version --unverified --why --yes -y --commit-template' v='--only=m:config,tools,cli,git,handoff,instructions,skills,claude,codex,desktop,docker,docs,launchd,prompt,shell --version=l:versions:-:: --why=n --commit-template=c:yes,no' ;;
+    'install') o='-h --help --only --version --unverified --why --skip-packages --yes -y --commit-template' v='--only=m:config,tools,cli,git,handoff,instructions,skills,claude,codex,desktop,docker,docs,launchd,prompt,shell --version=l:versions:-:: --why=n --commit-template=c:yes,no' ;;
     'docs') o='-h --help --online --fix --no-prose' p='c:check *f' ;;
     'sec') o='-h --help --history --config -v --verbose' v='--config=n' p='c:scan l:projects:-::' ;;
     'diagram') o='-h --help' p='*l:-:-:render,check,new:f' ;;
