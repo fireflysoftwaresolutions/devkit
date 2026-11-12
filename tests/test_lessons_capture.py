@@ -37,13 +37,22 @@ class DuplicateTests(LessonCase):
         self.assertEqual(len(self.active_ids()), 2)
         self.assertIn(old["meta"]["id"], les["changelog"][0])
 
-    def test_an_archived_lesson_sharing_a_command_anchor_is_found(self):
-        old = lessons.archive(self.add("Never force push a shared branch", commands=["git push --force"]),
-                              "merged into L-other", A)
-        self.add("Force pushed main again", commands=["git push --force"], scope="acme/web")  # another project's
+    def test_an_archived_lesson_sharing_an_error_anchor_is_found(self):
+        where = {"commands": ["git push --force"], "errors": ["remote rejected: protected branch hook declined"]}
+        old = lessons.archive(self.add("Never force push a shared branch", **where), "merged into L-other", A)
+        self.add("Force pushed main again", scope="acme/web", **where)  # another project's
         with self.assertRaises(ValueError) as e:
-            self.add("Force pushed main again", commands=["git push --force"])
+            self.add("Force pushed main again", **where)
         self.assertIn(f"looks like {old['meta']['id']}", str(e.exception))
+
+    def test_two_different_errors_in_the_same_command_are_two_lessons(self):
+        # any shared command anchor made a duplicate: 1,201 live pairs share only a command and have their own
+        # errors, and an agent told to recur another lesson's id records nothing for its own mistake
+        first = self.add("Push only from a branch, never to main", commands=["git push"],
+                         errors=["remote rejected: protected branch hook declined"])
+        other = self.add("Run the pre-push tests with pipefail before pushing", commands=["git push"],
+                         errors=["pre-push hook failed: 3 tests failed"])
+        self.assertEqual(self.active_ids(), sorted([first["meta"]["id"], other["meta"]["id"]]))
 
 
 class ArchiveTests(LessonCase):

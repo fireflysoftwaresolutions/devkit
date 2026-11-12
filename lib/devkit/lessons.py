@@ -344,12 +344,13 @@ class Duplicate(Refused):
 
 
 def same_record(scope: str, anchored: dict) -> list:
-    """The lessons of this scope and the global ones, active or archived, that share an error anchor (any case) or a
-    command anchor with these anchors: the active ones first, then by occurrences. A superseded lesson is left out
-    (its successor is the one to recur)."""
+    """The lessons of this scope and the global ones, active or archived, that share an error anchor (any case: the
+    output or the guard refusal the mistake shows) with these anchors: the active ones first, then by occurrences. A
+    shared command, file or kind of work alone is not the same mistake: one command goes wrong in many ways (the
+    nightly merge, `consolidate`, still joins lessons whose anchors are mostly the same). A superseded lesson is left
+    out (its successor is the one to recur)."""
     errs = {e.casefold() for e in anchored.get("errors") or []}
-    cmds = set(anchored.get("commands") or [])
-    if not (errs or cmds):
+    if not errs:
         return []
     scopes = [scope] + ([] if scope == "global" else ["global"])
     hits, seen = [], set()
@@ -359,7 +360,7 @@ def same_record(scope: str, anchored: dict) -> list:
                 m, an = les["meta"], anchors(les)
                 if m["id"] in seen or m.get("superseded_by") or m.get("scope") != s:
                     continue
-                if errs & {e.casefold() for e in an["errors"]} or cmds & set(an["commands"]):
+                if errs & {e.casefold() for e in an["errors"]}:
                     seen.add(m["id"])
                     hits.append((archived, -m["occurrences"], les))
     return [les for _, _, les in sorted(hits, key=lambda h: h[:2])]
@@ -385,7 +386,7 @@ def add(scope: str, title: str, kind: str = "mistake", severity: str = "medium",
         new: bool = False, author: str = "") -> dict:
     """Record a lesson. Refused (Refused, a ValueError, with every problem at once) by the anchor gate, the capture
     shape (lessonlint.check_shape), a missing root cause or prevention, or a lesson of this scope or the global ones,
-    active or archived, that shares an error or command anchor (Duplicate; `new=True` with a `why` records it
+    active or archived, that shares an error anchor (Duplicate, same_record; `new=True` with a `why` records it
     anyway). A refusal is recorded in the audit trail with its problems (`dev.lesson.refused`). Text the screen
     judges unsafe is recorded but held: `quarantine` says why, and recall leaves it out until the developer releases
     it. `author`: the writer's role (an agent) or name; the agent, session and machine are added."""
