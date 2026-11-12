@@ -318,6 +318,42 @@ class InstallReads(Case):
                 self.assertIsNotNone(main(cmd))
 
 
+class ProgramWrites(unittest.TestCase):
+    """A Python program whose every write is a path its code writes out is judged by those paths: an edit of a
+    repository file whose text names devkit's state or a handoff note runs; a write to devkit's state, a handoff note
+    or an agent settings file, or to a path built at run time, stays refused, in the main session and a lane."""
+
+    EDIT = ("python3 - <<'EOF'\np = 'tests/test_x.py'\ns = open(p).read()\n"
+            "s = s.replace('{old}', '{new}')\nopen(p, 'w').write(s)\nEOF")
+
+    def verdicts(self, cmd):
+        v = guard.check("Bash", {"command": cmd}, CWD, "claude")
+        return [v[1] if v else None, member(cmd)]
+
+    def test_an_edit_of_a_repository_file_that_names_devkit_records_runs(self):
+        for old, new in (("~/.local/state/devkit/old.json", "~/.local/state/devkit/new.json"),
+                         ("handoff/projects/acme/api.md", "handoff/projects/acme/web.md")):
+            cmd = self.EDIT.format(old=old, new=new)
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.verdicts(cmd), [None, None])
+
+    def test_a_write_to_a_record_or_a_path_built_at_run_time_stays_refused(self):
+        state, note = core.STATE / "x.json", core.HANDOFF / "projects" / "acme" / "api.md"
+        settings = core.DEV / "acme" / "api" / ".claude" / "settings.json"
+        for code in (f"open('{state}', 'w').write('x')",
+                     "import os\nopen(os.path.expanduser('~/.local/state/devkit/x.json'), 'w').write('x')",
+                     "from pathlib import Path\n(Path.home() / '.local/state/devkit/x.json').write_text('x')",
+                     "import sys\nopen(sys.argv[1], 'w').write('x')  # ~/.local/state/devkit",
+                     "p = 'tests/a.py'\np = '~/.local/state/devkit/x.json'\nopen(p, 'w').write('x')",
+                     "for p in ['~/.local/state/devkit/x.json']:\n    open(p, 'w').write('x')",
+                     f"open('{note}', 'a').write('x')", f"open('{settings}', 'w').write('{{}}')"):
+            cmd = f"python3 - <<'EOF'\n{code}\nEOF"
+            with self.subTest(code=code):
+                main_why, lane_why = self.verdicts(cmd)
+                self.assertIsNotNone(main_why)
+                self.assertIsNotNone(lane_why or main_why)  # the lane runs the guard's rules first
+
+
 class LaneStamp(unittest.TestCase):
     """A member's command that holds lane calls the router cannot place one by one is run with the member's lane
     variable exported, so every dev call in it acts as the member (Claude Code, whose rewrite approves nothing); a

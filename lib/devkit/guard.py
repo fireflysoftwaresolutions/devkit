@@ -5591,6 +5591,22 @@ class _Shell:
         # which hold everything), its relative paths can land in them
         in_handoff = bool(here) and _under_ci(real(here), real(core.HANDOFF)) and \
             (handoff_record(here) or holds_handoff_record(here))
+        if code and seen and not inside and not in_handoff and _family(name) in ("python", "pypy"):
+            # every file the program writes is a path its code writes out: judged by those paths, as a redirect or
+            # the Write tool is, whatever else its text names (an edit of devkit's own tests names devkit's state)
+            paths, why = _py_write_paths(code, cwd)
+            if not why:
+                # a written path that names a note or devkit's state in its text counts as one, wherever the
+                # configured roots are (`~/Development/.handoff/projects/…` with the handoff repository elsewhere)
+                if any(_note_text().search(q) for q in paths):
+                    return deny(f"This {name} program writes a path that names a project's handoff note or the "
+                                f"team's records. Edit a note with the Edit or Write tool; use the dev command that "
+                                f"owns a record.", key="handoff-writes-path")
+                if any(_mark().search(q) for q in paths):
+                    return deny(f"This {name} program writes a path that names devkit's state, configuration or "
+                                f"install (spec C11). For a devkit record, use the `dev` command that owns it. {_TAIL}",
+                                key="state-writes-path")
+                return self.targets(paths, cwd)
         if code and (_CODE_WRITES.search(code) or _ANY_WRITE.search(code)) and (
                 in_handoff or _note_text().search(code) or
                 any(handoff_record(resolve(c, cwd)) for c in named)):  # B2a: a path built by calls counts too
@@ -9017,6 +9033,11 @@ _PY_WRITES = {"remove": 0, "unlink": 0, "rmdir": 0, "removedirs": 0, "rmtree": 0
               "rename": 0, "renames": 0, "replace": 0, "move": 0, "copy": 1, "copy2": 1, "copyfile": 1,
               "copytree": 1, "copymode": 1, "copystat": 1, "make_archive": 0, "unpack_archive": 1, "extract": 0,
               "extractall": 0, "connect": 0, "FileHandler": 0, "savefig": 0, "to_csv": 0, "to_json": 0, "save": 0}
+# the modules whose functions of _PY_WRITES write files (os.remove, shutil.copy, sqlite3.connect), and the method names
+# that write a file whatever object has them; any other method of those names (d.copy(), sock.connect()) is no write
+_PY_FILE_MODULES = frozenset({"os", "shutil", "sqlite3", "tarfile", "zipfile", "logging", "posix", "dbm", "shelve"})
+_PY_METHOD_WRITES = frozenset({"extractall", "extract", "savefig", "to_csv", "to_json", "make_archive",
+                               "unpack_archive", "copytree", "rmtree", "makedirs"})
 # the methods of a path object that write what it names
 _PY_PATH_WRITES = frozenset({"write_text", "write_bytes", "touch", "mkdir", "unlink", "rmdir", "rename", "replace",
                              "chmod", "lchmod"})
@@ -9025,51 +9046,79 @@ _PY_WRITE_MODE = re.compile(r"[wax+]")
 _PY_WRITE_FLAGS = re.compile(r"\bO_(?:WRONLY|RDWR|CREAT|APPEND|TRUNC)\b")
 
 
-def _py_path(node, cwd):
+def _py_path(node, cwd, names=None, depth=0):
     """The path a Python expression names, when it is written out: a string, Path(…)/PurePath(…) of strings,
-    os.path.join of strings, a path joined with / to a string. None for anything computed at run time."""
+    os.path.join of strings, a path joined with / to a string, or a name the program binds once, to one of those
+    (`names`: _py_once). None for anything computed at run time."""
     import ast
+    if isinstance(node, ast.Name) and names and node.id in names and depth < 8:
+        return _py_path(names[node.id], cwd, names, depth + 1)
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
         return node.value
     if isinstance(node, ast.Call):
         f = node.func
         n = f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", "")
         if n in ("Path", "PurePath", "PosixPath", "join", "expanduser") and node.args and not node.keywords:
-            parts = [_py_path(a, cwd) for a in node.args]
+            parts = [_py_path(a, cwd, names, depth + 1) for a in node.args]
             if all(isinstance(x, str) for x in parts):
-                return os.path.expanduser(os.path.join(*parts)) if n != "join" or \
+                joined = os.path.join(*parts) if n != "join" or \
                     (isinstance(f, ast.Attribute) and getattr(f.value, "attr", "") == "path") else None
+                if joined is not None and n == "expanduser" and (joined == "~" or joined.startswith("~/")):
+                    joined = str(HOME) + joined[1:]  # the guard's own home, which its rules judge paths by
+                return joined
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
-        left, right = _py_path(node.left, cwd), _py_path(node.right, cwd)
+        left, right = _py_path(node.left, cwd, names, depth + 1), _py_path(node.right, cwd, names, depth + 1)
         return os.path.join(left, right) if isinstance(left, str) and isinstance(right, str) else None
     return None
 
 
-def _py_reader_why(code, cwd, member) -> str:
-    """'' when a Python program a read-only lane types inline only reads: it starts no process, calls no function by
-    a name it builds, makes no link, and every file it writes, moves or deletes is a path written out in its code
-    inside crew member `member`'s own scratch folder or a temporary folder outside the session scratchpad; else why
-    not."""
+def _py_once(tree) -> dict:
+    """{name: value} for each name a Python program binds exactly once, by a plain `name = value`: any other binding
+    (a loop, with, a parameter, an import, unpacking, :=, +=, global, del) leaves the name out."""
+    import ast
+    stores, plain = {}, {}
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Name) and not isinstance(n.ctx, ast.Load):
+            stores[n.id] = stores.get(n.id, 0) + 1
+        elif isinstance(n, ast.arg):
+            stores[n.arg] = stores.get(n.arg, 0) + 2
+        elif isinstance(n, (ast.Import, ast.ImportFrom)):
+            for a in n.names:
+                k = (a.asname or a.name).split(".")[0]
+                stores[k] = stores.get(k, 0) + 2
+        elif isinstance(n, (ast.Global, ast.Nonlocal)):
+            for k in n.names:
+                stores[k] = stores.get(k, 0) + 2
+        elif isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            stores[n.name] = stores.get(n.name, 0) + 2
+        if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name):
+            plain[n.targets[0].id] = n.value
+    return {k: v for k, v in plain.items() if stores.get(k) == 1}
+
+
+def _py_write_paths(code, cwd) -> tuple:
+    """The files a Python program writes, moves or deletes, read with Python's parser -> (paths, why): `paths`, each
+    written out in its code (_py_path), when `why` is ''; else why the guard cannot know them: the program does not
+    parse, can start a process, calls a function by a name it builds, makes a link, loads code from a file, or writes
+    a path computed at run time."""
     import ast
     try:
         tree = ast.parse(code)
     except (SyntaxError, ValueError, RecursionError, MemoryError):
-        return "the guard cannot parse this program"
+        return [], "the guard cannot parse this program"
     if _code_spawns(code, "python3"):
-        return "this program can start a process: run that command itself"
+        return [], "this program can start a process: run that command itself"
     found = _py_dynamic(code)
     if found:
-        return f"this program calls a function by a name it builds ({_code(found)})"
+        return [], f"this program calls a function by a name it builds ({_code(found)})"
+    paths, once = [], _py_once(tree)
 
-    def place(node, what):
-        p = _py_path(node, cwd) if node is not None else None
-        if p is None:
-            return f"this program {what} a file the guard cannot place: write the path out, in your scratch folder"
-        r = resolve(p, cwd)
-        if r != UNKNOWN and is_temp(r) and not _SCRATCHPAD.match(str(r)):
-            return ""
-        why = _ro_scratch_target(p, cwd, member)
-        return f"this program {what} {why}" if why else ""
+    def place(node):
+        q = _py_path(node, cwd, once) if node is not None else None
+        if q is None:
+            return "this program writes a file the guard cannot place: write the path out"
+        paths.append(q)
+        return ""
 
     for n in ast.walk(tree):
         if not isinstance(n, ast.Call):
@@ -9077,12 +9126,13 @@ def _py_reader_why(code, cwd, member) -> str:
         f = n.func
         name = f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", "")
         if name in _PY_LINKS:
-            return "this program makes a link"
+            return [], "this program makes a link"
         if name in _PY_LOADS:
-            return f"this program loads code from a file ({_code(name)}), which the guard does not read"
+            return [], f"this program loads code from a file ({_code(name)}), which the guard does not read"
         on_path = isinstance(f, ast.Attribute) and not (isinstance(f.value, ast.Name) and
                                                         f.value.id in ("os", "shutil", "io", "codecs", "gzip", "bz2",
                                                                        "lzma", "tarfile", "zipfile", "sqlite3"))
+        why = ""
         if name in ("open", "ZipFile", "TarFile", "GzipFile"):
             modes = (list(n.args) if on_path and name == "open" else list(n.args[1:])) + \
                 [k.value for k in n.keywords if k.arg in ("mode", "flags")]
@@ -9090,22 +9140,36 @@ def _py_reader_why(code, cwd, member) -> str:
                          (isinstance(m.value, str) and _PY_WRITE_MODE.search(m.value)) for m in modes[:1]) or \
                 any(_PY_WRITE_FLAGS.search(ast.dump(m)) for m in modes)
             if writes:
-                why = place(f.value if on_path and name == "open" else (n.args[0] if n.args else None), "writes")
-                if why:
-                    return why
-        elif on_path and name in _PY_PATH_WRITES:
-            why = place(f.value, "writes")
-            if why:
-                return why
-        elif name in _PY_WRITES:
+                why = place(f.value if on_path and name == "open" else (n.args[0] if n.args else None))
+        elif on_path and name in _PY_PATH_WRITES and not (name in ("replace", "rename") and len(n.args) != 1):
+            why = place(f.value)  # str.replace(old, new) takes two words: no path's
+        elif name in _PY_WRITES and (isinstance(f, ast.Name) or name in _PY_METHOD_WRITES or
+                                     (isinstance(f.value, ast.Name) and f.value.id in _PY_FILE_MODULES)):
             k = _PY_WRITES[name]
             if name == "connect" and n.args and isinstance(n.args[0], ast.Constant) and n.args[0].value == ":memory:":
                 continue
             for arg in (n.args[k:k + 1] + (n.args[:1] if name in ("rename", "renames", "replace", "move") else [])
                         or [None]):
-                why = place(arg, "writes")
-                if why:
-                    return why
+                why = why or place(arg)
+        if why:
+            return [], why
+    return paths, ""
+
+
+def _py_reader_why(code, cwd, member) -> str:
+    """'' when a Python program a read-only lane types inline only reads: _py_write_paths knows every file it writes,
+    and each is inside crew member `member`'s own scratch folder or a temporary folder outside the session
+    scratchpad; else why not."""
+    paths, why = _py_write_paths(code, cwd)
+    if why:
+        return why + (", in your scratch folder" if why.endswith("write the path out") else "")
+    for q in paths:
+        r = resolve(q, cwd)
+        if r != UNKNOWN and is_temp(r) and not _SCRATCHPAD.match(str(r)):
+            continue
+        why = _ro_scratch_target(q, cwd, member)
+        if why:
+            return f"this program writes {why}"
     return ""
 
 
