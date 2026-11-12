@@ -735,6 +735,20 @@ class ParseTests(unittest.TestCase):
                          {"tests/test_calc.py::test_add": "failed", "tests/test_calc.py::TestOps::test_sub": "passed",
                           "tests/test_calc.py::test_skip": "skipped"})
 
+    # a module pytest could not import is one case with no class, named by its dotted module (pytest 9 writes
+    # classname="" name="tests.test_calc"): it belongs to its file, and its message is the error, not
+    # "collection failure"
+    def test_a_pytest_collection_error_belongs_to_its_file_with_its_error(self):
+        xml = ('<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" '
+               'errors="1" failures="0" skipped="0" tests="1"><testcase classname="" name="tests.test_calc" '
+               'time="0.000"><error message="collection failure">ImportError while importing test module '
+               f"'{self.top}/tests/test_calc.py'.\nHint: make sure your test modules/packages have valid Python "
+               "names.\nTraceback:\ntests/test_calc.py:1: in &lt;module&gt;\n    import newmod\n"
+               "E   ModuleNotFoundError: No module named 'newmod'</error></testcase></testsuite></testsuites>")
+        cases = testx.parse_junit(xml, str(self.top), str(self.top), "pytest")
+        self.assertEqual(failures(cases), [("tests/test_calc.py", "tests/test_calc.py", 1,
+                                            "ModuleNotFoundError: No module named 'newmod'")])
+
     def test_surefire_and_gradle_junit(self):
         cases = testx.parse_junit(SUREFIRE_XML, str(self.top), str(self.top), "maven")
         self.assertEqual(failures(cases), [("com.acme.FooTest#adds", "src/test/java/com/acme/FooTest.java", 12,
@@ -1406,6 +1420,9 @@ def with_tests(*extra):
 # A stand-in for pytest, so a parametrized test runs where pytest is not installed. `python -m pytest [-q]
 # [--junitxml=R] <file>[::<test>]…` runs the test functions, one case per @pytest.mark.parametrize value, named
 # name[value] as pytest names them, and writes pytest's JUnit report (classname and name, as pytest's xunit2 does).
+# A module it cannot import is a collection error, reported as pytest 9 reports it (no classname, the dotted module as
+# the name, "collection failure" and the error on an `E` line), and it stops the session before any test runs
+# unless --continue-on-collection-errors is given.
 STANDIN_PYTEST = '''
 import importlib.util
 import sys
@@ -1424,11 +1441,15 @@ class _Mark:
 mark = _Mark()
 
 
-def _cases(target):
-    path, _, name = target.partition("::")
+def _load(path):
     spec = importlib.util.spec_from_file_location(path[:-3].replace("/", "."), path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
+    return mod
+
+
+def _cases(target, mod):
+    path, _, name = target.partition("::")
     for n in [name] if name else [n for n in vars(mod) if n.startswith("test")]:
         fn = getattr(mod, n)
         for case, kw in getattr(fn, "cases", [(n, {})]):
@@ -1438,8 +1459,20 @@ def _cases(target):
 def main(argv):
     suite = ET.Element("testsuite", name="pytest")
     ran = failed = 0
+    loaded = []
     for target in [a for a in argv if not a.startswith("-")]:
-        for cls, case, fn, kw in _cases(target):
+        path = target.partition("::")[0]
+        try:
+            loaded.append((target, _load(path)))
+        except Exception as e:
+            failed += 1
+            tc = ET.SubElement(suite, "testcase", classname="", name=path[:-3].replace("/", "."), time="0")
+            ET.SubElement(tc, "error", message="collection failure").text = (
+                f"ImportError while importing test module '{path}'.\\nE   {type(e).__name__}: {e}")
+    if failed and "--continue-on-collection-errors" not in argv:
+        loaded = []
+    for target, mod in loaded:
+        for cls, case, fn, kw in _cases(target, mod):
             ran += 1
             tc = ET.SubElement(suite, "testcase", classname=cls, name=case, time="0.001")
             try:
@@ -1637,6 +1670,96 @@ class ProveTests(unittest.TestCase):
             self.assertEqual(rc, 0, out + err)
             self.assertNotIn("fail with your change present", out)
             self.assertRegex(out, r"skipped[^\n]*:\n\s+tests/test_calc.py\s+test_calc.CalcTests.test_mul_elsewhere")
+
+    # a test helper the change adds is test code, not the change under test: it stays in the copy, so the new test
+    # runs against the old production code. Removed, every test that imports it failed on the import and was
+    # reported as proving the change, here a test the change does not touch at all.
+    def test_a_new_test_helper_stays_so_a_test_is_judged_on_its_assertion(self):
+        pair_test = """
+    def test_add_a_pair(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import _pairs
+        self.assertEqual(calc.add(*_pairs.one_and_two()), 3)
+"""
+        with Env() as e:
+            r = e.repo(PROVE_BASE)
+            write(r, {"tests/_pairs.py": "def one_and_two():\n    return 1, 2\n", "calc.py": MUL})
+            (r / "tests" / "test_calc.py").write_text(with_tests(TEST_MUL, pair_test))
+            rc, out, err = dev(r, "prove", "--json", "--runs", "1")
+            self.assertEqual(rc, 1, out + err)
+            data = json.loads(out)
+            self.assertEqual(data["helpers"], ["tests/_pairs.py"])
+            self.assertEqual([(t["id"], t["verdict"]) for t in data["tests"]],
+                             [("test_calc.CalcTests.test_add_a_pair", "does not test the change"),
+                              ("test_calc.CalcTests.test_mul", "proves the change")])
+
+    # when a new test helper is the whole change, it goes with the change, and a test that imports it cannot be
+    # proven: exit 2, nothing proven, never 0
+    def test_a_new_helper_that_is_the_whole_change_cannot_be_proven(self):
+        pair_test = """
+    def test_add_a_pair(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import _pairs
+        self.assertEqual(calc.add(*_pairs.one_and_two()), 3)
+"""
+        with Env() as e:
+            r = e.repo(PROVE_BASE)
+            write(r, {"tests/_pairs.py": "def one_and_two():\n    return 1, 2\n"})
+            (r / "tests" / "test_calc.py").write_text(with_tests(pair_test))
+            rc, out, err = dev(r, "prove", "--json", "--runs", "1")
+            self.assertEqual(rc, 2, out + err)
+            self.assertEqual([(t["id"], t["verdict"]) for t in json.loads(out)["tests"]],
+                             [("test_calc.CalcTests.test_add_a_pair", "cannot be proven: imports a file the change adds")])
+
+    # a test that imports a module the change adds cannot run without the change: its import fails before any
+    # assertion, which proves nothing about the test. It is reported as such, neither as proof nor as a failure.
+    def test_a_test_of_a_new_module_cannot_be_proven(self):
+        with Env() as e:
+            r = e.repo(PROVE_BASE)
+            write(r, {"calc.py": MUL, "stats.py": "def mean(xs):\n    return sum(xs) / len(xs)\n",
+                      "tests/test_stats.py": """
+                          import sys
+                          import unittest
+                          from pathlib import Path
+
+                          sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+                          import stats  # noqa: E402
+
+
+                          class StatsTests(unittest.TestCase):
+                              def test_mean(self):
+                                  self.assertEqual(stats.mean([1, 2, 3]), 2)
+                          """})
+            (r / "tests" / "test_calc.py").write_text(with_tests(TEST_MUL))
+            rc, out, err = dev(r, "prove", "--json", "--runs", "1")
+            self.assertEqual(rc, 0, out + err)
+            self.assertEqual([(t["id"], t["verdict"]) for t in json.loads(out)["tests"]],
+                             [("test_calc.CalcTests.test_mul", "proves the change"),
+                              ("test_stats.StatsTests.test_mean", "cannot be proven: imports a file the change adds")])
+            rc, out, err = dev(r, "prove", "--runs", "1", "tests/test_stats.py")
+            self.assertEqual(rc, 2, out + err)
+            self.assertRegex(out, r"cannot be proven: (they )?import a file the change adds[^\n]*\n\s+tests/test_stats")
+            self.assertNotIn("fail without the change, as expected", out)
+
+    # with pytest, a test module that imports a file the change adds is a collection error without the change: it
+    # cannot be proven, and the other new tests of the same run still run and prove the change (pytest stops the
+    # session at a collection error unless it is told to go on)
+    def test_a_pytest_module_of_a_new_file_cannot_be_proven_and_the_rest_still_runs(self):
+        with Env() as e:
+            r = e.repo(HOSTS_BASE)
+            write(r, {"hosts.py": HOSTS_CHANGE, "ports.py": "def default():\n    return 443\n",
+                      "tests/test_ports.py": "import sys\nfrom pathlib import Path\n\n"
+                                             "sys.path.insert(0, str(Path(__file__).resolve().parents[1]))\n"
+                                             "import ports  # noqa: E402\n\n\ndef test_default_is_https():\n"
+                                             "    assert ports.default() == 443\n"})
+            with open(r / "tests" / "test_hosts.py", "a") as fh:
+                fh.write("\n\ndef test_count_skips_empty_hosts():\n    assert hosts.count([None, 'a']) == 1\n")
+            rc, out, err = dev(r, "prove", "--json", "--runs", "1")
+            self.assertEqual(rc, 0, out + err)
+            self.assertEqual([(t["id"], t["without_change"], t["verdict"]) for t in json.loads(out)["tests"]],
+                             [("tests/test_hosts.py::test_count_skips_empty_hosts", "failed", "proves the change"),
+                              ("tests/test_ports.py::test_default_is_https", "failed",
+                               "cannot be proven: imports a file the change adds")])
 
     # when every new test was skipped, nothing is proven: exit 2, as when no runner here can run them, never 0
     def test_a_change_whose_only_new_test_is_skipped_proves_nothing(self):

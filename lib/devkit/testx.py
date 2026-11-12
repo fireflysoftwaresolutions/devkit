@@ -1247,7 +1247,17 @@ def parse_junit(text, top, base, runner) -> list:
         body = (bad.text or "") if bad is not None else ""
         msg = _first_line(bad.get("message") or "") if bad is not None else ""
         line = None
-        if runner == "pytest":
+        if runner == "pytest" and not cls and bad is not None and name and \
+                os.path.isfile(os.path.join(base, name.replace(".", "/") + ".py")):
+            # a module pytest could not collect: no class, named by its dotted module; the error is in the body
+            file = _relto(top, os.path.join(base, name.replace(".", "/") + ".py"))
+            id_ = file
+            hits = re.findall(r"(?m)^(\S+?\.py):(\d+):", body)
+            pick = [h for h in hits if file.endswith(re.sub(r"^(?:\./)+", "", h[0]))]
+            line = int(pick[-1][1]) if pick else None
+            errs = re.findall(r"(?m)^E\s+(\S.*)$", body)
+            msg = errs[-1].strip() if errs else msg
+        elif runner == "pytest":
             id_, file = _pytest_id(cls, name, base, top)
             if tc.get("file"):
                 file = _relto(top, os.path.join(base, tc.get("file")))
@@ -2598,7 +2608,11 @@ def _no_runner(a, f) -> str:
     return "no runner here takes it (dev test plan lists the runners found)"
 
 
-_NOT_PROVEN = ("skipped",)  # verdicts that neither prove the change nor fail: listed, never red
+_IMPORTS_ADDED = "cannot be proven: imports a file the change adds"
+_NOT_PROVEN = ("skipped", _IMPORTS_ADDED)  # verdicts that neither prove the change nor fail: listed, never red
+# how a runner says a module or file could not be imported or found
+_IMPORT_FAILED = re.compile(r"ModuleNotFoundError|ImportError|No module named|Failed to import|collection failure|"
+                            r"Cannot find module|ERR_MODULE_NOT_FOUND|Failed to (?:load|resolve)|could not be resolved")
 
 
 def _prove(a, top, runners) -> int:
@@ -2630,6 +2644,13 @@ def _prove(a, top, runners) -> int:
     if not tests and not skipped:
         return _refuse(f"no new or changed tests since {label}",
                        "write the test first, or name it: dev test prove <test file>")
+    # A test helper the change adds is test code: it stays in the copy, so the new tests that use it run against the
+    # old production code. Only when the helpers are the whole change do they go with it.
+    at_base = {f: core.git(top, "cat-file", "-e", f"{base}:{f}")[0] == 0 for f in prod + helpers}
+    undo = prod + [h for h in helpers if at_base[h] or not prod]
+    # the tests that import a file the change adds cannot reach an assertion without it
+    added = [f for f in undo if not at_base[f]]
+    needs_added = _dependents(repo, added) if added else set()
     plan = []
     for f in tests:
         r = owner(runners, f)
@@ -2643,7 +2664,10 @@ def _prove(a, top, runners) -> int:
                        "dev test plan shows the runners found here")
     groups = {}
     for r, f, units, ids in plan:
-        g = groups.setdefault(id(r), (r, {"files": [], "ids": []}, []))
+        # pytest stops the whole session at a module it cannot import (one that imports a file the change adds): the
+        # other tests of the run still run
+        g = groups.setdefault(id(r), (dict(r, exec=list(r["exec"]) + ["--continue-on-collection-errors"])
+                                      if r["name"] == "pytest" else r, {"files": [], "ids": []}, []))
         (g[1]["ids"].extend(ids) if ids else g[1]["files"].append(f))
         g[2].append((f, units, ids))
     runs = max(1, int(a.runs))
@@ -2702,14 +2726,15 @@ def _prove(a, top, runners) -> int:
                                                    "message": mine[0]["message"] if mine else "did not run"})
         without = {}
         if not problem:
-            _restore_base(top, base, dest, prod + helpers)
+            _restore_base(top, base, dest, undo)
             for r, sel, members in groups.values():
                 res = run_tests(dest, r, files=sel["files"], ids=sel["ids"], env=env)
                 for key, c in place(res, members):
                     without[key] = (c["status"], c["message"])
                 for f, units, ids in members:
+                    mine = [c for c in res["failures"] if c["file"] == f] + res["failures"]
                     for key in [k for k in found if k[0] == f and k not in without]:
-                        without[key] = ("failed", _tail_line(res["failures"][0]["message"]) if res["failures"]
+                        without[key] = ("failed", _tail_line(mine[0]["message"]) if mine
                                         else "") if unmatched_failed(res, f, ids) else ("not run", "")
     finally:
         shutil.rmtree(dest, ignore_errors=True)
@@ -2722,11 +2747,13 @@ def _prove(a, top, runners) -> int:
         # a test its runner skipped in every run with the change ran neither way: it proves nothing and fails nothing
         verdict = ("skipped" if rec.get("skips") == runs else "flaky" if 0 < p < runs else
                    "fails with the change" if p == 0 else
+                   _IMPORTS_ADDED if st == "failed" and rec["file"] in needs_added and _IMPORT_FAILED.search(msg) else
                    "proves the change" if st == "failed" else
                    "does not test the change" if st == "passed" else "did not run without the change")
         rows.append({"id": rec["id"], "file": rec["file"], "with_change": f"{p}/{runs}", "without_change": st,
                      "verdict": verdict, "message": msg if st == "failed" else rec["message"]})
-    # 0: every test that ran proves the change; 1: one does not; 2: none could be proven (each was skipped)
+    # 0: every test that ran proves the change; 1: one does not; 2: none could be proven (skipped, or it imports a
+    # file the change adds)
     red = [x for x in rows if x["verdict"] not in _NOT_PROVEN and x["verdict"] != "proves the change"]
     rc = 1 if red or not rows else 0 if any(x["verdict"] == "proves the change" for x in rows) else 2
     if a.json:
@@ -2753,6 +2780,8 @@ def _prove(a, top, runners) -> int:
                 ("fails with the change", ui.FAIL, "fail with your change present (fix them first):"),
                 ("did not run without the change", ui.WARN, "did not run without the change:"),
                 ("skipped", ui.WARN, "skipped by their runner, so neither proven nor failing:"),
+                (_IMPORTS_ADDED, ui.WARN, "cannot be proven: they import a file the change adds, so without the "
+                                          "change they stop at the import, before any assertion:"),
                 ("proves the change", ui.OK, "fail without the change, as expected:"))
     for verdict, mark, title in sections:
         mine = [x for x in rows if x["verdict"] == verdict]
