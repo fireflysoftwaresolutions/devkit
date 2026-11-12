@@ -1571,6 +1571,28 @@ def _carry_refused(agent: str, from_sid: str, to_sid: str, run: dict, cwd=None) 
             f"ended, or from this conversation before /clear or a compaction. Ask its owner with {tell}")
 
 
+_AGENTS = ("claude", "codex")
+
+
+def bare_session_id(agent: str, sid) -> str:
+    """A session id as devkit stores it, without the `<agent>-` that names its runs and records: people copy that
+    form (`claude-8f6d…`), and it names the same session as `8f6d…`."""
+    sid = str(sid or "").strip()
+    prefix = f"{agent}-"
+    return sid[len(prefix):] if agent and sid.startswith(prefix) and len(sid) > len(prefix) else sid
+
+
+def parse_session(value) -> tuple:
+    """A `--session` value: `<agent>:<id>`, `<agent>:<agent>-<id>` or `<agent>-<id>` -> (agent, the bare id), or
+    ("", "") when it names no session."""
+    value = str(value or "").strip()
+    agent, colon, sid = value.partition(":")
+    if not colon:
+        agent, sid = next((a for a in _AGENTS if value.startswith(a + "-")), ""), value
+    sid = bare_session_id(agent, sid)
+    return (agent, sid) if agent and sid else ("", "")
+
+
 def carry(agent: str, from_sid: str, to_sid: str, now=None, cwd=None) -> dict:
     """Move the open run of `from_sid` (the session /clear ended) to `to_sid`, under both sessions' locks. Refused,
     before any lock, for a run of another project (unless an initiative holds both) and for a session that still
@@ -1578,8 +1600,9 @@ def carry(agent: str, from_sid: str, to_sid: str, now=None, cwd=None) -> dict:
     run's history (progress.close_quiet_lanes); refused while a member of that run still works (its results go to the
     old session) and when this session already has an open run. A run the reconciler orphaned when that session
     ended runs again here, with the reason in its history (progress.take_back). Audited as session.carry. `cwd`: where
-    this session's project is read when its record names none."""
+    this session's project is read when its record names none. Either session id may carry its `<agent>-` prefix."""
     now = now or time.time()
+    from_sid, to_sid = bare_session_id(agent, from_sid), bare_session_id(agent, to_sid)
     if not from_sid or from_sid == to_sid:
         raise ValueError("nothing to carry: name the cleared session with --from <session id>")
     src, dst = progress.run_path(agent, from_sid), progress.run_path(agent, to_sid)
@@ -1650,7 +1673,7 @@ def forget(session=None, all_: bool = False) -> dict:
         if all_:
             targets = [f for f in sorted(CONT.iterdir()) if _OWN.match(f.name)]
         else:
-            agent, _, sid = str(session or "").partition(":")
+            agent, sid = parse_session(session)
             if not agent or not sid:
                 raise ValueError("--session takes <agent>:<session id>")
             targets = [record_path(agent, sid)] + [
@@ -1683,7 +1706,8 @@ def add_arguments(p):
                         "the resource (release:<project>, push:<project>@<branch>, handoff:<project>, "
                         "branch:<project>@<branch>, custom:<name>) · escalate: a message id S-… or a target")
     p.add_argument("text", nargs="*", help="tell, ask, answer: the message · escalate: the question")
-    p.add_argument("--session", help="<agent>:<session id> (brief: default this session; forget: that session)")
+    p.add_argument("--session", help="<agent>:<session id>, the id bare or as devkit names its files (claude-<id>) "
+                                      "(brief: default this session; forget: that session)")
     p.add_argument("--latest", action="store_true",
                    help="brief: the project's newest session with an open run or requests (last 12 hours)")
     p.add_argument("-p", "--project", help="brief --latest: a project id, e.g. owner/repo (default: this folder's) · "
@@ -1693,9 +1717,10 @@ def add_arguments(p):
     p.add_argument("--provider", help="brief: who will read it (claude, codex, anthropic, openai); request text "
                                       "only for the session's own provider, otherwise their count and times")
     p.add_argument("--from", dest="from_sid",
-                   help="carry: the cleared session (default: the one /clear ended); a session of this project or "
-                        "of an initiative both share that ended, or that this conversation continues after /clear "
-                        "or a compaction. A live session keeps its run: ask its owner with dev session tell")
+                   help="carry: the cleared session's id, bare or as claude-<id> (default: the one /clear ended); a "
+                        "session of this project or of an initiative both share that ended, or that this conversation "
+                        "continues after /clear or a compaction. A live session keeps its run: ask its owner with dev "
+                        "session tell")
     p.add_argument("--members", action="store_true", help="compactions: the members' transcripts too")
     p.add_argument("--all", action="store_true", help="forget: every continuity record and clear link here · ls: the "
                                                       "idle and ended sessions too · inbox: every message kept · "
@@ -1779,8 +1804,10 @@ def _session_command(a) -> int:
                 print("devkit: no session of this project has an open run or requests in the last 12 hours")
                 return 0
             agent, sid = hit
-        elif a.session and ":" in a.session:
-            agent, sid = a.session.split(":", 1)
+        elif a.session:
+            agent, sid = parse_session(a.session)
+            if not agent:
+                raise ValueError("--session takes <agent>:<session id>")
         else:
             agent, sid, how = me
             if how == "shell":
@@ -1794,7 +1821,7 @@ def _session_command(a) -> int:
             raise ValueError("dev session carry runs inside the agent session that takes the run over")
         from_sid = a.from_sid or (read(agent, to_sid) or {}).get("cleared_from")
         out = carry(agent, from_sid, to_sid, cwd=cwd)
-        print(f"✓ run «{out['goal']}» moved from {agent}:{from_sid[:12]} to this session ({out['steps']} steps)")
+        print(f"✓ run «{out['goal']}» moved from {agent}:{out['from'][:12]} to this session ({out['steps']} steps)")
         return 0
     if not a.all and not a.session:
         raise ValueError("say which: --session <agent>:<session id> or --all")
