@@ -92,7 +92,11 @@ DEFAULTS = {
                "enforce": True, "rules": []},
     # ext: the developer's own extensions on top of devkit's (`dev ext add|remove|enable|disable`, spec P-fym583l7sg1)
     "ext": {"add": [], "remove": [], "disable": [], "enable": []},
-    "language": "en-US",
+    # language: what the agents reply to the developer in. auto: the language of the developer's latest message (the
+    # earlier ones when it is too short to tell, American English when none tells); a locale (en-US, es-ES) fixes it.
+    # Code, commits, PRs, docs and records stay in American English (lib/devkit/language.py). Setup never writes the
+    # key, so a stored value is the developer's own choice.
+    "language": "auto",
     "hosts": ["github"],
     "clouds": [],
     "packages": {"auto": True},
@@ -292,6 +296,10 @@ def config_errors(cfg: dict) -> list:
     return out + (progress_config(cfg.get("progress"))[1] if "progress" in cfg else [])
 
 
+# `language`: auto, or a locale as the developer writes it: es, es-ES, pt_BR, zh-Hant
+LOCALE_RE = re.compile(r"(?i)auto|[a-z]{2,3}(?:[-_][a-z]{2,4})?")
+
+
 class ConfigError(ValueError):
     """Why `dev config set` changed nothing, and what to do instead."""
 
@@ -345,6 +353,8 @@ def config_set(key: str, value: str, path=None, developer=None) -> tuple:
     except Exception as e:  # a value the checks cannot judge is refused (fail closed)
         problems = [f"{key}: the value could not be checked ({type(e).__name__})"]
     default = DEFAULTS[section].get(name) if name is not None else DEFAULTS[section]
+    if section == "language" and not (isinstance(new, str) and LOCALE_RE.fullmatch(new)):
+        problems = ["language must be auto or a locale such as en-US or es-ES"]
     if not problems and section not in ("audit", "progress") and default is not None and \
             type(new) is not type(default) and not (isinstance(default, float) and isinstance(new, int)):
         problems = [f"{key} must be {type(default).__name__} like its default ({json.dumps(default)})"]
