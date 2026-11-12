@@ -73,6 +73,28 @@ class GcWorktreeTests(GcCase):
         self.assertFalse(wt.exists())
         self.assertIn("local branch deleted (merged by content", out)
 
+    # dev wt rm said "local branch deleted (still on the remote)" for a branch never pushed whose commits had reached
+    # origin/main: it judged by the commits being on some remote branch, not by the branch being there
+    def test_wt_rm_says_the_branch_is_still_on_the_remote_only_when_its_own_ref_is_there(self):
+        from devkit import cli
+        self.feature("feat/ff", "feat: add the fast-forward thing")
+        git(self.repo, "merge", "-q", "--ff-only", "feat/ff")
+        git(self.repo, "push", "-q", "origin", "main")
+        self.feature("feat/pushed", "feat: add the pushed thing", push=True)
+        for branch, said, unsaid in (
+                ("feat/ff", "local branch deleted (not on the remote as a branch; its commits are in origin/main)",
+                 "still on the remote"),
+                ("feat/pushed", "local branch deleted (still on the remote as origin/feat/pushed)", "not on the remote")):
+            with self.subTest(branch=branch):
+                wt = self.worktree(branch)
+                with mock.patch.object(cli, "_reg", lambda prs=True: self.reg()):
+                    rc, out = self.dev("wt", "rm", branch)
+                self.assertEqual(rc, 0, out)
+                self.assertFalse(wt.exists())
+                self.assertEqual(self.local(branch), "")
+                self.assertIn(said, out)
+                self.assertNotIn(unsaid, out)
+
     def test_a_worktree_with_a_commit_the_default_branch_lacks_stays(self):
         self.feature("feat/wip", "feat: add the unfinished thing")
         wt = self.worktree("feat/wip")

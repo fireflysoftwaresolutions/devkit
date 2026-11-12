@@ -293,6 +293,23 @@ def _listed(rels: list, most=5) -> str:
     return ", ".join(rels[:most]) + (f" and {len(rels) - most} more" if len(rels) > most else "")
 
 
+def _on_the_remote(main: str, branch: str) -> str:
+    """How a local branch whose commits are all on a remote stands there, as the remote-tracking refs say (no network
+    call): the branch itself (its upstream, or origin/<branch>), or only its commits, inside another branch."""
+    up = gitout(main, "rev-parse", "--symbolic-full-name", f"{branch}@{{upstream}}")
+    for ref in dict.fromkeys(r for r in (up, f"refs/remotes/origin/{branch}") if r.startswith("refs/remotes/")):
+        if git(main, "rev-parse", "--verify", "-q", ref)[0] == 0:
+            return f"still on the remote as {ref[len('refs/remotes/'):]}"
+    default = gitout(main, "symbolic-ref", "-q", "refs/remotes/origin/HEAD")
+    found = [r for r in gitout(main, "for-each-ref", "--contains", f"refs/heads/{branch}", "--format=%(refname)",
+                               "refs/remotes").splitlines() if r and not r.endswith("/HEAD")]
+    found.sort(key=lambda r: r != default)  # the default branch first, when it has them
+    if not found:
+        return "not on the remote as a branch"
+    more = f" and {len(found) - 1} more remote branch(es)" if len(found) > 1 and found[0] != default else ""
+    return f"not on the remote as a branch; its commits are in {found[0][len('refs/remotes/'):]}{more}"
+
+
 def remove_worktree(main: str, path: str, branch: str = None, github: str = None, require_pr=None, log=True,
                     merged: dict = None):
     """Safe removal used by `dev wt rm`, gc, `dev branch prune` and `dev pr merge`. `merged`: {base, sha, prs} when the
@@ -318,8 +335,9 @@ def remove_worktree(main: str, path: str, branch: str = None, github: str = None
         msg += f"; its ignored dependencies, caches and copies went with it: {_listed(rebuilt)}"
     if branch and branch != "detached":
         if int(gitout(main, "rev-list", "--count", branch, "--not", "--remotes") or 1) == 0:
+            where = _on_the_remote(main, branch)
             git(main, "branch", "-D", branch)
-            msg += "; local branch deleted (still on the remote)"
+            msg += f"; local branch deleted ({where})"
         elif landed and gitout(main, "rev-parse", "--verify", "-q", f"refs/heads/{branch}") == merged.get("sha"):
             from . import branches
             git(main, "branch", "-D", branch)
