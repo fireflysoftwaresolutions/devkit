@@ -275,7 +275,7 @@ that launch alone, so two members launched together never swap lanes:
 ### File scopes
 
 A step's `--scope` is a list of globs, relative to the repository. The edit check, `dev commit` in a lane, the MCP
-scope check, `dev crew owner`, and the overlap check of `assign` all read it the same way, folder by folder:
+scope check, `dev crew owner`, and the overlap check of `assign` all match it the same way, folder by folder:
 
 | Glob | Holds |
 | --- | --- |
@@ -287,7 +287,10 @@ scope check, `dev crew owner`, and the overlap check of `assign` all read it the
 - A relative glob never holds a path outside its repository, such as the handoff plans or the tech lead's
   scratchpad, so `**` alone holds the repository and nothing else. It holds a path only when its real path, links
   resolved, is inside the repository too: `shared/**` holds nothing behind a tracked link `shared` that leads out of
-  the repository, and still holds the files of a link that stays inside it.
+  the repository.
+- The edit check (the Write and Edit tools) also judges the file a write lands on: with links resolved, that file
+  must be in the scope too: `docs/**` does not let a member edit `docs/core.py` when it links to `lib/core.py`.
+  A new file is judged by its nearest existing folder, and the refusal names where the write would land.
 - A scope that names a whole checkout (`<worktree>/**`) becomes that checkout's top-level entries.
 - Two scopes overlap only when one path matches both, compared without case, so two members can split one folder:
   `src/pkg/*.py` for one and `src/pkg/studio/host.py` for the other.
