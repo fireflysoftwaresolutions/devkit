@@ -1427,7 +1427,7 @@ def _lane_verdict(data: dict, agent: str, cmd: str, routed: bool = False):
                                      agent=agent, routed=routed)
     except Exception as e:  # unchecked is not allowed: the member's command fails closed (the Keymaker's review)
         _log(f"crew-lane {agent} {aid}: {traceback.format_exc()[-300:]}")
-        return (f"devkit could not check this command against your lane ({type(e).__name__}), so it is refused "
+        return (f"{_LANE_CHECK_FAILED} ({type(e).__name__}), so it is refused "
                 f"rather than run unchecked. Run it once more; if it is refused again, ask the tech lead with "
                 f"`dev crew ask \"…\"` and name the command.")
     return v[1] if v else None
@@ -1436,17 +1436,23 @@ def _lane_verdict(data: dict, agent: str, cmd: str, routed: bool = False):
 # The refusals the guard hook makes itself, each recorded as hooks:<rule> (guard.py's deny() calls name the rest).
 # devkit's bug registry takes a guard refusal id only from these and guard.py (bugs.guard_refusal_ids): a new one
 # goes here, or its refusals cannot be reported.
+# hooks:crew-lane names every lane refusal that clients up to 26.11.15 recorded; newer ones record a lane refusal by
+# its guard site (guard.refusal_of) and a lane check that failed as hooks:lane-check.
 HOOK_REFUSALS = ("hook-forgery", "identity", "crew-limits", "stub-commit", "irreversible", "crew-scope", "readonly",
-                 "hatch", "crew-lane")
+                 "hatch", "crew-lane", "lane-check")
+_LANE_CHECK_FAILED = "devkit could not check this command against your lane"
 
 
 def _lane_rule(why: str) -> str:
     """The rule a lane command's refusal is recorded under: readonly (the records the read-only allowlist grows
-    from), hatch (an escape hatch a member used), else crew-lane."""
+    from), hatch (an escape hatch a member used), lane-check (the lane check failed, so the command was refused
+    unchecked), else crew-lane."""
     if why.startswith("read-only lane"):
         return "readonly"
     if why.startswith("Crew members do not use devkit's escape hatches"):
         return "hatch"
+    if why.startswith(_LANE_CHECK_FAILED):
+        return "lane-check"
     return "crew-lane"
 
 
@@ -2933,8 +2939,8 @@ def _guard_in_context(agent: str, data: dict, held: dict):
             _close_call(data)
             from . import audit
             # a lane refusal is named by the guard site that made it and its command word (a team change, a program
-            # named at run time, a lane call in a chain), so each has a bug fingerprint of its own; the hook's rule
-            # names one only when no site did (the check itself failed)
+            # named at run time, a lane call in a chain), so each has a bug fingerprint of its own; a failed lane
+            # check is hooks:lane-check
             rid, word = g.refusal_of(("deny", why)) if held["rule"] == "crew-lane" else ("", "")
             rid = rid or f"hooks:{held['rule']}"
             audit.record("guard.deny", (data.get("tool_input") or {}).get("command", "")[:200], why, "deny",

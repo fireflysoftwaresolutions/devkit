@@ -169,8 +169,12 @@ class FailClosedTests(WiringCase):
                 before = len(self.records("guard.deny"))
                 why = self.deny(self.hook("guard", self.bash("ls", aid="a_tank")))
                 self.assertIn("could not check this command against your lane", why or "")
-                self.assertEqual([r["evidence"].get("rule") for r in self.records("guard.deny")[before:]],
-                                 ["crew-lane"])
+                recs = self.records("guard.deny")[before:]
+                self.assertEqual([r["evidence"].get("rule") for r in recs], ["lane-check"])
+                # a rule of its own, so its bug fingerprint is not #20's (hooks:crew-lane with no word, 26.11.15)
+                rid = (recs[0].get("ref") or {}).get("refusal_id")
+                self.assertEqual(bugs._refusal_id(rid), "hooks:lane-check")
+                self.assertNotEqual(bugs.guard_fingerprint(rid, ""), bugs.guard_fingerprint("hooks:crew-lane", ""))
         self.assertIsNone(self.deny(self.hook("guard", self.bash("ls", aid="a_tank"))))  # checked, it runs
 
 
