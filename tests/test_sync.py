@@ -312,6 +312,28 @@ def lessons_of(root: Path):
         yield
 
 
+@contextlib.contextmanager
+def lesson_macs():
+    # TwoMacs with this Mac's lessons, their usage and state in the test's folder, and no model to judge them
+    with TwoMacs() as m, lessons_of(m.here), mock.patch.object(lessons, "STATE", m.base / "state"), \
+            mock.patch.object(lessons, "USAGE_LOCAL", m.base / "state" / "lessons-usage.json"), \
+            mock.patch.dict(core.CFG, {"ai": {"enabled": False}}):
+        yield m
+
+
+def shared_lesson(m, title: str = "Migration ran twice") -> str:
+    # A global lesson recorded on this Mac, pushed, and pulled on the other one. -> its id
+    lid = lessons.add("global", title, files=["db/**"], happened="it ran twice in CI", cause="the job retried a step",
+                      prevention="make the migration idempotent", a=A)["meta"]["id"]
+    _git(m.here, "push", "-q")
+    _git(m.other, "pull", "-q")
+    return lid
+
+
+def unpushed(m) -> str:
+    return _git(m.here, "rev-list", "--count", "@{u}..HEAD")
+
+
 class LessonConflictTests(unittest.TestCase):
     def test_two_macs_recording_a_repeat_of_the_same_lesson_both_count_after_the_sync(self):
         # Each Mac recorded a repeat of the same lesson since the last pull (`dev lesson recur`), as two Macs did on
@@ -340,6 +362,117 @@ class LessonConflictTests(unittest.TestCase):
         self.assertEqual([(e.split(" · ")[0], e.split("why: ")[-1]) for e in pushed["changelog"]][:2],
                          [("v3", "CI run 7 on this Mac"), ("v2", "CI run 8 on the other Mac")])
         self.assertEqual(len(pushed["changelog"]), 3)
+
+    def test_two_macs_that_change_a_lessons_status_differently_still_push_and_keep_this_macs_version_aside(self):
+        # The Weave Mac's failure: since the last pull this Mac retired a lesson and the other Mac prevented it, and
+        # each wrote other files. Neither change can be applied to the other, so every sync aborted its rebase and
+        # kept this Mac's commits unpushed. The sync pushes them now: the lesson keeps the other Mac's status with
+        # both changelog entries, and this Mac's version is saved aside, with the command that brings it back.
+        with lesson_macs() as m:
+            lid = shared_lesson(m)
+            with m.on_other(), lessons_of(m.other):
+                lessons.prevent(lessons.find(lid), "test", "tests/test_db.py::test_once", "a test now", a=B)
+                work.create("acme/api", "The other Mac's item", why="a reason", a=B)
+                _git(m.other, "push", "-q")
+            lessons.retire(lessons.find(lid), "not needed any more", a=A)
+            work.create("acme/api", "This Mac's item", why="a reason", a=A)
+            warned = sync()
+            self.assertEqual(m.stopped(), [], m.problem())
+            self.assertEqual(unpushed(m), "0", m.problem() + warned)
+            pushed = lessons.parse(_git(m.here, "show", f"origin/main:lessons/global/{lid}.md") + "\n")
+            aside = sorted((m.base / "state" / "handoff-conflicts" / "lessons" / "global").glob(f"{lid}.*.mine.md"))
+            self.assertEqual(len(aside), 1, warned)
+            saved = lessons.parse(aside[0].read_text())
+            items = _git(m.here, "ls-tree", "-r", "--name-only", "origin/main", "items/acme/api").splitlines()
+        self.assertEqual(pushed["meta"]["status"], "prevented")
+        self.assertEqual([e.split(" · ")[3].split(" — ")[0] for e in pushed["changelog"]],
+                         ["retired", "prevented by test: tests/test_db.py::test_once", "recorded"])
+        self.assertEqual(saved["meta"]["status"], "retired")
+        self.assertIn(f"lessons/global/{lid}.md", warned)
+        self.assertEqual(len(items), 2, items)
+
+    def test_a_lesson_this_mac_archived_while_the_other_counted_a_repeat_keeps_the_repeat_and_pushes(self):
+        # This Mac's nightly `dev sleep` archived a lesson while the other Mac recorded a repeat of it: the archive's
+        # removal of the lesson's active file meets the other Mac's change to that file. The sync pushes this Mac's
+        # commits, and the remote keeps the lesson at its active path with the repeat counted.
+        with lesson_macs() as m:
+            lid = shared_lesson(m)
+            with m.on_other(), lessons_of(m.other):
+                lessons.recur(lessons.find(lid), "CI run 8 on the other Mac", a=B)
+                _git(m.other, "push", "-q")
+            lessons.archive(lessons.find(lid), "idle for six months", a=A)
+            warned = sync()
+            self.assertEqual(m.stopped(), [], m.problem())
+            self.assertEqual(unpushed(m), "0", m.problem() + warned)
+            pushed = lessons.parse(_git(m.here, "show", f"origin/main:lessons/global/{lid}.md") + "\n")
+        self.assertEqual(pushed["meta"]["occurrences"], 2)
+        self.assertIn("CI run 8 on the other Mac", pushed["sections"]["Evidence"])
+
+
+class WorkingTreeTests(unittest.TestCase):
+    def test_a_pull_that_settles_a_conflict_never_takes_away_or_rewrites_this_macs_files(self):
+        # While a pull settles a conflict, other devkit processes on this Mac keep reading and writing the handoff
+        # repository. A lesson recorded only here stays readable, and a file a writer changed but has not committed
+        # yet keeps the writer's text, during the pull and after it.
+        with lesson_macs() as m:
+            draft = m.here / "plans" / "acme" / "api" / "draft.md"
+            draft.parent.mkdir(parents=True)
+            draft.write_text("the first draft\n")
+            _git(m.here, "add", "-A")
+            _git(m.here, "commit", "-qm", "a plan")
+            lid = shared_lesson(m)
+            with m.on_other(), lessons_of(m.other):
+                lessons.recur(lessons.find(lid), "CI run 8 on the other Mac", a=B)
+                _git(m.other, "push", "-q")
+            lessons.recur(lessons.find(lid), "CI run 7 on this Mac", a=A)
+            mine = lessons.add("global", "Only this Mac has it", files=["api/**"], happened="it broke here",
+                               cause="a cause", prevention="a prevention", a=A)["meta"]["id"]
+            draft.write_text("the writer's text\n")
+            seen, real = [], work.merge_lesson
+
+            def watching(*texts):
+                seen.append(((lessons.LESSONS / "global" / f"{mine}.md").exists(), draft.read_text()))
+                return real(*texts)
+            with mock.patch.object(work, "merge_lesson", watching):
+                ok, problem = work.pull_rebase()
+            self.assertTrue(ok, problem)
+            self.assertEqual(seen, [(True, "the writer's text\n")])
+            self.assertEqual(draft.read_text(), "the writer's text\n")
+            self.assertEqual(_git(m.here, "status", "--porcelain", "--", "plans"), " M plans/acme/api/draft.md")
+            self.assertEqual(lessons.find(lid)["meta"]["occurrences"], 3)
+
+    def test_a_rebase_git_cannot_run_falls_back_to_a_merge_that_pushes_every_commit(self):
+        # When the rebase cannot finish (here a pre-rebase hook refuses it, as any git failure would), the pull merges
+        # the remote's commits instead of keeping this Mac's commits unpushed: the remote gets both Macs' changes in
+        # one merge commit, and a conflict in the month's log keeps both lines, the remote's first.
+        with TwoMacs() as m:
+            append(m.here, "log/2026-11.md", "2026-11-10 09:00 · gc · removed a merged worktree",
+                   "# Activity log 2026-11")
+            _git(m.here, "add", "-A")
+            _git(m.here, "commit", "-qm", "start")
+            iid = m.shared_item("Export invoices")
+            hook = m.here / ".git" / "hooks" / "pre-rebase"
+            hook.parent.mkdir(parents=True, exist_ok=True)
+            hook.write_text("#!/bin/sh\nexit 1\n")
+            hook.chmod(0o755)
+            with m.on_other():
+                append(m.other, "log/2026-11.md", "2026-11-11 10:00 · free · from the other Mac")
+                _git(m.other, "commit", "-qam", "the other Mac's log")
+                work.create("acme/api", "Import invoices", why="a reason", a=B)
+                _git(m.other, "push", "-q")
+            append(m.here, "log/2026-11.md", "2026-11-11 10:05 · adopt · from this Mac")
+            work.update(m.item(iid), "edit", why="our wording", a=A, body="Our text.")
+            warned = sync()
+            self.assertEqual(m.stopped(), [], m.problem())
+            self.assertEqual(unpushed(m), "0", m.problem() + warned)
+            parents = _git(m.here, "rev-list", "--parents", "-1", "origin/main").split()
+            log = _git(m.here, "show", "origin/main:log/2026-11.md").splitlines()
+            self.assertEqual(m.remote_item(iid)["body"].strip(), "Our text.")
+            titles = [x["meta"]["title"] for x in work.all_items("acme/api")]
+        self.assertEqual(len(parents), 3, "not a merge commit")
+        self.assertEqual(log[-2:], ["- 2026-11-11 10:00 · free · from the other Mac",
+                                    "- 2026-11-11 10:05 · adopt · from this Mac"])
+        self.assertEqual(sorted(titles), ["Export invoices", "Import invoices"])
 
 
 if __name__ == "__main__":

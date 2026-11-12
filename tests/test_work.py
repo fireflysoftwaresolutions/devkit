@@ -6,6 +6,7 @@ import io
 import json
 import os
 import re
+import shlex
 import sys
 import tempfile
 import time
@@ -724,9 +725,10 @@ class HandoffSyncTests(unittest.TestCase):
             self.assertIn("· move: bucket=now — why: start now", pushed["changelog"][1])
             self.assertFalse(work.push_failed_file().exists())
 
-    def test_dev_sync_reports_a_conflict_it_cannot_settle_and_leaves_the_commits_as_they_were(self):
-        # A file that is neither an item nor a note (a plan edited on both Macs) stops the pull; notes are settled
-        # file by file (tests/test_sync.py).
+    def test_dev_sync_keeps_both_sides_of_a_conflict_it_cannot_merge_and_still_pushes(self):
+        # A file that is neither an item nor a note (a plan edited on both Macs at the same lines) never stops the
+        # pull: it keeps the remote's version, saves this Mac's aside, pushes this Mac's commit, and the command its
+        # warning prints brings this Mac's text back.
         from devkit import cli
         with TwoMacs() as m:
             rel = "plans/acme/api/2026-11-09-export.md"
@@ -744,13 +746,15 @@ class HandoffSyncTests(unittest.TestCase):
             warned = io.StringIO()
             with contextlib.redirect_stderr(warned):
                 cli.commit_push(quiet=True)
-            self.assertIn(f"stopped on a conflict in {rel}", warned.getvalue())
             self.assertEqual(m.stopped(), [], m.problem())
             self.assertEqual(_git(m.here, "branch", "--show-current"), "main")
-            self.assertEqual(_git(m.here, "rev-list", "--count", "@{u}..HEAD"), "1")
-            self.assertEqual(plan.read_text(), "# Export\n\nState: our words.\n")
-            problem = json.loads(work.push_failed_file().read_text())["error"]
-            self.assertIn(f"conflict in {rel}", problem)
+            self.assertEqual(_git(m.here, "rev-list", "--count", "@{u}..HEAD"), "0", m.problem())
+            self.assertEqual(_git(m.here, "show", f"origin/main:{rel}"), "# Export\n\nState: their words.")
+            self.assertEqual(plan.read_text(), "# Export\n\nState: their words.\n")
+            cmd = re.search(r"run `(git -C [^`]+ merge-file [^`]+)`", warned.getvalue())
+            self.assertIsNotNone(cmd, warned.getvalue())
+            core.sh(shlex.split(cmd.group(1)))
+            self.assertIn("State: our words.", plan.read_text())
 
 
 class ClaimReachesRemoteTests(unittest.TestCase):

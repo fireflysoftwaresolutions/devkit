@@ -180,7 +180,7 @@ def _state(co):
 
 def commit_push(push=True, quiet=False):
     """Commit what changed in the handoff repository and push it. A rebase left stopped is aborted first, a pull
-    settles conflicts in items and stops cleanly on any other (work.rebase_fetched), and every failure is recorded in
+    settles every conflict in a private checkout (work.rebase_fetched), and every failure is recorded in
     handoff-push-failed.json, which `dev status` shows until a push succeeds. The commit, the fetch and the push hold
     work._repo_lock; the rebase holds the notes lock first, so it runs after that lock is released."""
     from . import audit, identity, work
