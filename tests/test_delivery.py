@@ -64,6 +64,30 @@ class DetectTests(unittest.TestCase):
         r = repo_with({"README.md": "x"}, tags=["v1.2.0", "v1.3.0-rc.1"])
         self.assertEqual(delivery.detect(r)["versioning"], "semver")
 
+    # firefly-weave versions as PEP 440 pre-releases (0.1.0aN, tags v0.1.0aN): a consistent scheme of its own, kept,
+    # not replaced by CalVer
+    def test_pep440_prerelease_tags_are_a_scheme_of_their_own_and_kept(self):
+        r = repo_with({"pyproject.toml": '[project]\nname = "weave"\nversion = "0.1.0a16"\n'},
+                      tags=["v0.1.0a9", "v0.1.0a10", "v0.1.0a16"])
+        d = delivery.detect(r)
+        fmt = "vMAJOR.MINOR.MICRO[{a|b|rc}N][.postN][.devN]"
+        self.assertEqual((d["versioning"], d["tag_format"], d["latest_tag"]), ("pep440", fmt, "v0.1.0a16"))
+        rec = delivery.recommend(d)
+        self.assertEqual((rec["versioning"], rec["tag_format"]), ("pep440", fmt))
+        self.assertIn("0.1.0a16 → 0.1.0a17", rec["bump"])
+        self.assertNotIn("no version scheme", " | ".join(g[1] for g in delivery.gaps(d, rec, True)))
+
+    def test_pep440_post_and_dev_releases_and_a_version_file_alone(self):
+        for tags, version in ((["v1.0.0", "v1.0.0.post1", "v1.1.0rc1"], "1.1.0rc1"), ([], "2.0.0.dev3"),
+                              (["1.4.0", "1.4.1b2"], "1.4.1b2")):
+            with self.subTest(tags=tags, version=version):
+                d = delivery.detect(repo_with({"pyproject.toml": f'[project]\nversion = "{version}"\n'}, tags=tags))
+                self.assertEqual(d["versioning"], "pep440")
+                self.assertEqual(delivery.recommend(d)["tag_format"].startswith("v"), not tags or tags[0][0] == "v")
+        for tags in (["v1.2.0", "v1.3.0-rc.1"], ["v1.2.0", "v1.3.0"]):  # SemVer stays SemVer
+            with self.subTest(tags=tags):
+                self.assertEqual(delivery.detect(repo_with({"README.md": "x"}, tags=tags))["versioning"], "semver")
+
     def test_the_test_gate_leaves_out_runner_only_setup(self):
         wf = ("on: [pull_request]\njobs:\n  t:\n    runs-on: ubuntu-24.04\n    steps:\n"
               "      - run: sudo rm -rf /usr/share/dotnet /opt/hostedtoolcache/CodeQL\n"
@@ -103,6 +127,14 @@ class RecordTests(unittest.TestCase):
         self.assertIn("CalVer", delivery.tag_violation("acme/api", "v26.13.0"))  # no 13th month
         self.assertIn("test gate: ./mvnw -B verify", delivery.summary_line("acme/api"))
         self.assertIsNone(delivery.tag_violation("acme/other", "anything"))  # no policy, no rule
+
+    def test_a_pep440_policy_takes_pep440_tags_only(self):
+        delivery.record("acme/weave", {"versioning": "pep440", "tag_format": "vMAJOR.MINOR.MICRO[{a|b|rc}N]"},
+                        "keep the PEP 440 pre-releases", a=A)
+        for tag in ("v0.1.0a17", "v0.1.0rc1", "v0.1.0", "v0.1.0.post1", "v0.2.0.dev2"):
+            self.assertIsNone(delivery.tag_violation("acme/weave", tag), tag)
+        for tag in ("v0.1.0-alpha.17", "release-0.1", "v0.1.0a"):
+            self.assertIn("PEP 440", delivery.tag_violation("acme/weave", tag) or "", tag)
 
     def test_job_timeout_is_a_policy_field(self):
         p = delivery.set_field({}, "job_timeout_minutes", "45")

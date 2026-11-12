@@ -24,6 +24,10 @@ from .core import HANDOFF
 POLICIES = HANDOFF / "policies"
 CALVER_RE = re.compile(r"^v?(\d{2})\.(\d{1,2})\.(\d+)$")
 SEMVER_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)(?:[-+][0-9A-Za-z.-]+)?$")
+# A PEP 440 public version in its normal form: [N!]N(.N)*[{a|b|rc}N][.postN][.devN]
+PEP440_RE = re.compile(r"^v?(?:\d+!)?\d+(?:\.\d+)*(?:(?:a|b|rc)\d+)?(?:\.post\d+)?(?:\.dev\d+)?$")
+PEP440_ONLY = re.compile(r"\d(?:a|b|rc)\d+|\.post\d+|\.dev\d+")  # a pre, post or dev release: not SemVer's syntax
+PEP440_FORMAT = "MAJOR.MINOR.MICRO[{a|b|rc}N][.postN][.devN]"
 FIELDS = ("versioning", "tag_format", "version_source", "release_flow", "changelog", "test_gate", "ci", "branch_model",
           "publish", "deploy", "kind", "release_train", "job_timeout_minutes", "delete_branch_on_merge")
 LIST_FIELDS = ("test_gate", "publish", "deploy")
@@ -66,13 +70,23 @@ def _tags(repo: Path) -> list:
     return [t for t in core.gitout(repo, "tag", "--sort=-v:refname").splitlines()[:60] if t]
 
 
+def _pep440(v: str) -> bool:
+    """A PEP 440 version that uses a pre, post or dev release (0.1.0a16, 1.0.0.post1, 2.0.0.dev3, 1.1.0rc1)."""
+    return bool(PEP440_RE.match(v) and PEP440_ONLY.search(v))
+
+
 def _scheme_from_tags(tags: list):
+    """-> (scheme, tag format) of the version tags: calver, semver, pep440 (tags that use PEP 440's pre, post or dev
+    releases and none of SemVer's own `-pre` or `+build` forms), other, or (None, None) without tags."""
     cal = [t for t in tags if CALVER_RE.match(t) and 1 <= int(CALVER_RE.match(t).group(2)) <= 12]
     sem = [t for t in tags if SEMVER_RE.match(t) and t not in cal]
+    pep = [t for t in tags if _pep440(t) and t not in cal and t not in sem]
     if not tags:
         return None, None
-    if len(cal) >= max(1, len(sem)):
+    if len(cal) >= max(1, len(sem) + len(pep)):
         return "calver", "vYY.MM.PATCH" if cal[0].startswith("v") else "YY.MM.PATCH"
+    if pep and not any(re.search(r"[-+]", t) for t in sem):
+        return "pep440", ("v" if pep[0].startswith("v") else "") + PEP440_FORMAT
     if sem:
         return "semver", "vMAJOR.MINOR.PATCH" if sem[0].startswith("v") else "MAJOR.MINOR.PATCH"
     return "other", tags[0]
@@ -113,7 +127,8 @@ def detect(repo) -> dict:
     scheme, tag_format = _scheme_from_tags(tags)
     vsrc, vval = _version_source(repo)
     if not scheme and vval:
-        scheme = "calver" if CALVER_RE.match(vval) else "semver" if SEMVER_RE.match(vval.split("-")[0]) else "other"
+        scheme = "calver" if CALVER_RE.match(vval) else "semver" if SEMVER_RE.match(vval.split("-")[0]) else \
+            "pep440" if _pep440(vval) else "other"
     tools = []
     for marker, name in ((".release-please-manifest.json", "release-please"), ("release-please-config.json", "release-please"),
                          (".releaserc", "semantic-release"), (".releaserc.json", "semantic-release"),
@@ -197,10 +212,11 @@ def _default_gate(repo: Path) -> list:
 # --------------------------------------------------------------------------- recommendation and gaps
 
 def recommend(found: dict) -> dict:
-    scheme = found.get("versioning")
+    scheme = found.get("versioning")  # a consistent scheme the repository already has is kept
     if scheme in (None, "other"):
         scheme = "semver" if found.get("kind") == "library" else "calver"
-    tag_format = found.get("tag_format") or ("vYY.MM.PATCH" if scheme == "calver" else "vMAJOR.MINOR.PATCH")
+    tag_format = found.get("tag_format") or {"calver": "vYY.MM.PATCH", "pep440": "v" + PEP440_FORMAT}.get(
+        scheme, "vMAJOR.MINOR.PATCH")
     tools = found.get("release_tools") or []
     if "release-please" in tools or "semantic-release" in tools:
         flow = tools[0]
@@ -218,7 +234,9 @@ def recommend(found: dict) -> dict:
         "publish": found.get("publish") or [], "deploy": found.get("deploy") or [], "kind": found.get("kind"),
         "release_train": None, "delete_branch_on_merge": True,
         "bump": "CalVer: `dev calver --next` (YY.MM.PATCH; PATCH restarts each month)" if scheme == "calver" else
-        "SemVer from Conventional Commits: BREAKING CHANGE → major, feat → minor, fix/perf → patch",
+        "PEP 440, the repository's own scheme: the next pre-release raises N (0.1.0a16 → 0.1.0a17); aN → bN → rcN "
+        "→ the final release; .postN republishes a release, .devN marks a development build" if scheme == "pep440"
+        else "SemVer from Conventional Commits: BREAKING CHANGE → major, feat → minor, fix/perf → patch",
     }
 
 
@@ -314,6 +332,11 @@ def tag_violation(scope: str, tag: str):
             return None
         return (f"`{tag}` is not a SemVer tag ({p.get('tag_format')}). Use vMAJOR.MINOR.PATCH, or change the policy "
                 f"with `dev delivery apply --set versioning=… --why \"…\"`.")
+    if p["versioning"] == "pep440":
+        if PEP440_RE.match(tag):
+            return None
+        return (f"`{tag}` is not a PEP 440 version tag ({p.get('tag_format')}). Use v{PEP440_FORMAT}, for example "
+                f"v0.1.0a17, or change the policy with `dev delivery apply --set versioning=… --why \"…\"`.")
     return None
 
 
