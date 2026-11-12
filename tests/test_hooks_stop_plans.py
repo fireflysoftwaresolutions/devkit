@@ -21,7 +21,7 @@ TESTS = Path(__file__).resolve().parent
 sys.path.insert(0, str(TESTS.parent / "lib"))
 sys.path.insert(0, str(TESTS))
 
-from devkit import canary, guard, hooks, skillguard, state  # noqa: E402
+from devkit import canary, guard, hooks, plans, skillguard, state  # noqa: E402
 from test_language_neutral_hooks import HookCase  # noqa: E402
 
 UNVERSIONED = "# Export plan\n\nEdited by hand, without dev plan revise.\n"  # no body_sha: it needs a revision
@@ -109,6 +109,24 @@ class OtherSessionsPlansTests(PlanCheckCase):
         # a pull of the handoff repository brings another machine's change to a plan of this very project
         theirs = self.plan("fireflysoftwaresolutions/devkit", "2026-11-10-release-train.md")
         self.shell(f"git -C {self.handoff_root} pull --rebase", during=lambda: self.write(theirs))
+        self.assertNotIn(REMINDER, self.stop("fireflysoftwaresolutions/devkit"))
+
+    def test_a_plan_this_session_wrote_and_revised_then_a_sync_changed_is_not_this_sessions(self):
+        # the reported case: this session wrote another project's plan and recorded why (dev plan revise); later the
+        # hourly sync brought another Mac's change to it, made without dev plan revise. That change is not this
+        # session's, so its turns end without the reminder
+        plan = self.plan("fireflysoftwaresolutions/kit-consulting", "2026-11-09-offer.md")
+        body = "# Offer plan\n\nRevised here, with the reason recorded."
+        revised = plans._render({"id": "P-g1", "title": "Offer plan", "version": 2, "body_sha": plans._sha(body)},
+                                body, ["v2 · 2026-11-12T09:00:00Z · ana@mbp1 (claude:s1) · revised—why: scope"])
+        self.calls += 1
+        plan.write_text(revised)
+        self.hook("post-tool", {"session_id": "s1", "hook_event_name": "PostToolUse", "tool_name": "Write",
+                                "tool_use_id": f"toolu_{self.calls}", "cwd": str(self.root),
+                                "tool_input": {"file_path": str(plan), "content": revised},
+                                "tool_response": {"type": "create"}})
+        self.assertNotIn(REMINDER, self.stop("fireflysoftwaresolutions/devkit"))
+        self.write(plan)  # the sync, a process of its own, writes the other Mac's version
         self.assertNotIn(REMINDER, self.stop("fireflysoftwaresolutions/devkit"))
 
 
