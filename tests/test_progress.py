@@ -420,7 +420,10 @@ class TimeModelTests(unittest.TestCase):
                          'DEVKIT_FROM_AGENT=a1b2 dev progress step "parser done"')
         self.assertIsNone(hooks._route_subagent_progress(dict(sub, agent_id=None)))  # the main agent: untouched
         compound = dict(sub, tool_input={"command": "dev progress step x && rm -rf build"})
-        self.assertIsNone(hooks._route_subagent_progress(compound))  # never approve anything but that one command
+        # Claude Code stamps the whole command and approves nothing; Codex, whose rewrite approves, never stamps
+        self.assertEqual(hooks._route_subagent_progress(compound)["command"],
+                         "export DEVKIT_FROM_AGENT=a1b2; " + compound["tool_input"]["command"])
+        self.assertIsNone(hooks._route_subagent_progress(compound, "codex"))
         self.assertIsNone(hooks._route_subagent_progress(dict(sub, tool_input={"command": "git status"})))
 
 
@@ -1598,7 +1601,9 @@ class CrewMessageAuditTests(unittest.TestCase):
 class CrewSafetyTests(unittest.TestCase):
     def test_a_subagent_cannot_act_as_morpheus_through_a_compound_command(self):
         # the lane router (guard.lane_route) routes a lane call joined only to cd or to reads, as its own lane; any
-        # other compound stays refused, so it never runs as the tech lead
+        # other compound that holds lane calls is stamped for the member as a whole on Claude Code, so none of its dev
+        # calls acts as the tech lead (what else it runs is judged by guard.check before routing); Codex, whose
+        # rewrite approves, keeps it refused
         from devkit import hooks
         sub = {"agent_id": "a1", "tool_name": "Bash"}
         for cmd, routed in (('cd lib && dev progress step "x" --check y',
@@ -1611,8 +1616,12 @@ class CrewSafetyTests(unittest.TestCase):
         for cmd in ('echo $(dev crew mode auto)', 'dev progress step x && rm -rf build', 'echo y | dev crew decide D1 A',
                     'cd lib && dev progress step x | tee /tmp/out', 'cd lib && env dev crew decide D1 A'):
             with self.subTest(cmd=cmd):
-                self.assertIsNone(hooks._route_subagent_progress(dict(sub, tool_input={"command": cmd})))
-                self.assertIn("command of its own", hooks._unroutable_lane_command(dict(sub, tool_input={"command": cmd})))
+                call = dict(sub, tool_input={"command": cmd})
+                self.assertEqual((hooks._route_subagent_progress(call) or {}).get("command"),
+                                 "export DEVKIT_FROM_AGENT=a1; " + cmd)
+                self.assertIsNone(hooks._unroutable_lane_command(call))
+                self.assertIsNone(hooks._route_subagent_progress(call, "codex"))
+                self.assertIn("command of its own", hooks._unroutable_lane_command(call, "codex"))
         self.assertIsNone(hooks._unroutable_lane_command({"tool_name": "Bash", "tool_input": {
             "command": "cd lib && dev progress step x"}}))  # the main session may chain commands
         self.assertIsNone(hooks._unroutable_lane_command(dict(sub, tool_input={"command": "git status && ls"})))
@@ -1639,10 +1648,14 @@ class CrewSafetyTests(unittest.TestCase):
             with self.subTest(cmd=cmd):
                 self.assertEqual(hooks._route_subagent_progress(dict(sub, tool_input={"command": cmd}))["command"],
                                  f"DEVKIT_FROM_AGENT=a1 {cmd}")
-        for cmd in ('dev progress step "$(rm -rf build)"', 'dev progress step "`id`"', "dev progress step x\nrm -rf b",
-                    'dev progress step "x" > /etc/passwd'):
-            with self.subTest(cmd=cmd):  # expansions run inside double quotes; a newline separates commands
+        for cmd in ('dev progress step "$(rm -rf build)"', 'dev progress step "`id`"'):
+            with self.subTest(cmd=cmd):  # expansions run inside double quotes: the member is told first
                 self.assertIsNone(hooks._route_subagent_progress(dict(sub, tool_input={"command": cmd})))
+        for cmd in ("dev progress step x\nrm -rf b", 'dev progress step "x" > /etc/passwd'):
+            with self.subTest(cmd=cmd):  # a newline separates commands; the delete and the write meet guard.check
+                call = dict(sub, tool_input={"command": cmd})
+                self.assertEqual(hooks._route_subagent_progress(call)["command"], "export DEVKIT_FROM_AGENT=a1; " + cmd)
+                self.assertIsNone(hooks._route_subagent_progress(call, "codex"))
         self.assertIsNone(hooks._unroutable_lane_command(dict(sub, tool_input={"command": "dev progress"})))
 
     def test_a_subagent_cannot_change_the_main_plan(self):

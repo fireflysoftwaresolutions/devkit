@@ -1066,10 +1066,13 @@ class WiringTests(unittest.TestCase):
                     'dev crew route "add a migration"'):
             with self.subTest(cmd=cmd):
                 self.assertEqual(route(cmd), f"DEVKIT_FROM_AGENT=a1 {cmd}")
-        for cmd in ("dev crew", "dev crew sync", "dev crew show neo", "dev crew next", "dev crewmode",
-                    "dev crew ask x && rm -rf build"):
+        for cmd in ("dev crew", "dev crew sync", "dev crew show neo", "dev crew next", "dev crewmode"):
             with self.subTest(cmd=cmd):
                 self.assertIsNone(route(cmd))
+        # Claude Code stamps the whole command for the member and approves nothing; the delete is judged by
+        # guard.check before routing
+        self.assertEqual(route("dev crew ask x && rm -rf build"),
+                         "export DEVKIT_FROM_AGENT=a1; dev crew ask x && rm -rf build")
         self.assertIsNone(route("dev crew inbox", aid=None))  # the main session: untouched
 
     def test_devkit_crew_is_a_read_only_mcp_tool(self):
