@@ -26,7 +26,8 @@ import _sandbox  # noqa: E402,F401
 from devkit import canary, core, hooks, scope  # noqa: E402
 from devkit import progress as pg  # noqa: E402
 from test_progress import TempState  # noqa: E402
-from test_language_samples import ENGLISH_ABOUT_OTHER_TEXT, PROMPTS, REPLIES, claude_transcript  # noqa: E402
+from test_language_samples import (ENGLISH_ABOUT_OTHER_TEXT, PROMPTS, REPLIES, SWITCHED,  # noqa: E402
+                                   claude_transcript)
 
 T0 = 1_800_000_000.0
 
@@ -74,6 +75,14 @@ class LanguageGateTests(unittest.TestCase):
             claude_transcript(self.transcript, [prompt])
             with self.subTest(prompt=prompt[:50]):
                 self.assertEqual(self.gate(REPLIES["en"], {"turn_started": T0}), "")
+
+    def test_a_reply_in_the_language_the_developer_switched_to_passes(self):
+        # an earlier message in one language, the latest in another, often with text to work on: the latest one's own
+        # words decide, or nothing does; an older message never decides for a message that has prose
+        for earlier, latest, reply in SWITCHED:
+            claude_transcript(self.transcript, [earlier, latest])
+            with self.subTest(latest=latest[:40]):
+                self.assertEqual(self.gate(reply, {"turn_started": T0}), "")
 
     def test_a_spanish_reply_passes(self):
         self.assertEqual(self.gate(REPLIES["es"], {"turn_started": T0}), "")

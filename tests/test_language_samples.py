@@ -194,3 +194,25 @@ ENGLISH_ABOUT_OTHER_TEXT = [
     "Check the German strings in the onboarding screen:\nWillkommen bei Acme! Bitte gib deine E-Mail-Adresse ein, "
     "damit wir dir einen Link senden können. Wenn du noch kein Konto hast, kannst du es hier erstellen.",
 ]
+
+
+# Latest messages after an earlier message in the other language: the check must stay silent on a reply in the
+# language the developer wrote now. (earlier message, latest message, a correct reply)
+EARLIER_EN = "Please run the tests for the parser and tell me which ones fail, then fix the first one."
+EARLIER_ES = "Revisa los tests del parser y dime cuáles fallan, luego arregla el primero por favor."
+REPLY_ES = ("Listo: el build fallaba porque el lockfile estaba desactualizado. Lo he regenerado con la misma versión "
+            "de npm, he vuelto a ejecutar las pruebas y ahora pasan todas. No he tocado ninguna otra dependencia.")
+REPLY_EN = ("Here is the translation: Hello team, the sales report cannot be opened since yesterday and the users "
+            "cannot work. We need an urgent fix because the month closes on Friday and we have no other way to get "
+            "the data.")
+SWITCHED = [
+    (EARLIER_EN, "Problema: el build falla en main porque el lockfile está desactualizado y npm ci lo rechaza, ¿lo "
+                 "puedes arreglar hoy?", REPLY_ES),
+    (EARLIER_EN, "Ojo: no toques la base de datos de producción, solo la de pruebas, y avísame cuando termines con el "
+                 "cambio.", REPLY_ES),
+    (EARLIER_EN, "¿Puedes revisarlo?\n\nEl build falla en main porque el lockfile está desactualizado y npm ci lo "
+                 "rechaza siempre.", REPLY_ES),
+    (EARLIER_EN, "Traduce esto al español:\n\nThe sales report cannot be opened since yesterday and the users cannot "
+                 "work at all.", REPLY_ES),
+    (EARLIER_ES, "Translate into English:\n" + SPANISH_EMAIL, REPLY_EN),
+]

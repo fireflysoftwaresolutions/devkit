@@ -209,17 +209,18 @@ def _ranked(scores: dict) -> list:
 
 
 MIN_WORDS, MIN_SCORE, MARGIN = 3, 2.0, 1.8
-# "Translate this: Hola equipo, …": words without a colon, then ": " and the text they introduce (one pass per line)
-_INTRO = re.compile(r"([^\s:]+(?:[ \t]+[^\s:]+)*):[ \t]+(\S.*)")
+# "Translate this: Hola equipo, …": two or more words without a colon, then ": " and the text they introduce (one
+# pass per line). One word before the colon is a label ("Problema:", "Note:"): the sentence after it is the writer's.
+_INTRO = re.compile(r"([^\s:]+(?:[ \t]+[^\s:]+)+):[ \t]+(\S.*)")
 _PARAGRAPHS = re.compile(r"\n[ \t]*\n\s*")
 _SENTENCE_END = (".", ",", ";", "!", "¡", "…")
 
 
 def _own_and_introduced(body: str) -> tuple:
     """(the developer's own words, the text they bring to work on): a pasted email, log or strings is what the
-    message is about, not what it is written in. Introduced text is the rest of a line after "<words>: ", every line
-    after a line that ends with ":", and every paragraph after a first one that ends with ":" or "?" or is a bare
-    instruction of one to three words ("translate")."""
+    message is about, not what it is written in. Introduced text is the rest of a line after two or more words and
+    ": ", every line after a line that ends with ":", and every paragraph after a first one that ends with ":" or "?"
+    or is a bare instruction of one to three words ("translate")."""
     paragraphs = [x for x in _PARAGRAPHS.split(body.strip()) if x.strip()]
     if len(paragraphs) > 1:
         first = paragraphs[0].strip()
@@ -242,24 +243,36 @@ def _own_and_introduced(body: str) -> tuple:
     return "\n".join(own), "\n".join(introduced)
 
 
-def _decide(scores: dict, n: int):
-    """The leading language when it leads clearly, else None (few words, a close call)."""
+SHORT, CLOSE, BROUGHT = "short", "close", "brought"  # why a message gives no language
+
+
+def _decide(scores: dict, n: int) -> tuple:
+    """(the leading language, "") when it leads clearly, else (None, SHORT) for too little prose to tell or (None,
+    CLOSE) for a close call."""
     ranked = _ranked(scores)
-    if n < MIN_WORDS or not ranked:
-        return None
+    if n < MIN_WORDS or not ranked or ranked[0][1] < MIN_SCORE:
+        return None, SHORT
     best, top = ranked[0]
     second = ranked[1][1] if len(ranked) > 1 else 0.0
-    return best if top >= MIN_SCORE and top >= MARGIN * second else None
+    return (best, "") if top >= MARGIN * second else (None, CLOSE)
+
+
+def _reading(text: str) -> tuple:
+    """(language, "") or (None, why): SHORT ("ok", "continúa", a command), CLOSE, or BROUGHT (the message brings text
+    to work on, and the developer's own words around it cannot tell)."""
+    body = prose(text)
+    own, introduced = _own_and_introduced(body)
+    if not introduced.strip():
+        return _decide(*_count(body))
+    lang, _ = _decide(*_count(own))
+    return (lang, "") if lang else (None, BROUGHT)
 
 
 def detect(text: str):
     """The language a developer's message is written in ("es"), or None when unsure. When it brings text to work on
-    (an email to translate, strings to check, output to read), only the developer's own words decide, and when they
-    are too few to tell the answer is None, so the earlier messages decide (wanted). The leading language is the
-    answer or nothing: English leading never gives another language."""
-    body = prose(text)
-    own, introduced = _own_and_introduced(body)
-    return _decide(*_count(own if introduced.strip() else body))
+    (an email to translate, strings to check, output to read), only the developer's own words decide. The leading
+    language is the answer or nothing: English leading never gives another language."""
+    return _reading(text)[0]
 
 
 SURE_WORDS, SURE_SCORE, SURE_SHARE = 12, 4.0, 0.2
@@ -380,19 +393,24 @@ def name(lang: str) -> str:
 
 def wanted(prompt=None, transcript=None, cfg=None) -> tuple:
     """(language, how) the reply must be in: ("fr", "set") for a set locale; ("es", "latest") from the developer's
-    message; ("es", "earlier") from an earlier one when it is unclear; (None, "") when nothing tells."""
+    latest message; ("es", "earlier") from an earlier one only when the latest is too short to tell ("ok", a
+    command); (None, "") when nothing tells, and when the latest has prose that cannot tell (a close call, or text to
+    work on that the developer's own words cannot place): an older message never decides for it."""
     value = setting(cfg)
     if value != AUTO:
         return _base(value), "set"
-    if prompt and not prompt.lstrip().startswith(_NOT_HUMAN):
-        lang = detect(prompt)
-        if lang:
-            return lang, "latest"
-    first = True
+    latest = bool(prompt) and not prompt.lstrip().startswith(_NOT_HUMAN)
+    if latest:
+        lang, why = _reading(prompt)
+        if lang or why != SHORT:  # only a message too short to tell leaves it to the earlier ones
+            return (lang, "latest") if lang else (None, "")
+    first = not latest
     for text in developer_messages(transcript):
-        lang = detect(text)
+        lang, why = _reading(text)
         if lang:
-            return lang, "latest" if first and not prompt else "earlier"
+            return lang, "latest" if first else "earlier"
+        if first and why != SHORT:
+            return None, ""
         first = False
     return None, ""
 

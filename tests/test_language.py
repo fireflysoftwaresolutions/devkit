@@ -24,7 +24,8 @@ import _sandbox  # noqa: E402,F401
 
 from devkit import language  # noqa: E402
 from test_language_samples import (ENGLISH_ABOUT_OTHER_TEXT, ENGLISH_WITH_SPANISH_NAMES, PROMPTS,  # noqa: E402
-                                   REPLIES, SPANISH_QUOTING_ENGLISH, UNSURE, claude_transcript, reply)
+                                   REPLIES, SPANISH_EMAIL, SPANISH_QUOTING_ENGLISH, UNSURE, claude_transcript,
+                                   reply)
 
 
 def fastest(call, runs=3):
@@ -186,6 +187,17 @@ class ReplyLanguageTests(unittest.TestCase):
     def test_an_unclear_message_keeps_the_language_of_earlier_ones(self):
         claude_transcript(self.transcript, [PROMPTS["en"][0], PROMPTS["es"][0], "ok"])
         self.assertEqual(language.wanted("continua", str(self.transcript), {"language": "auto"}), ("es", "earlier"))
+
+    def test_text_to_work_on_that_the_own_words_cannot_place_gives_no_language_whatever_came_before(self):
+        claude_transcript(self.transcript, [PROMPTS["es"][0]])
+        for prompt in ("Translate into English:\n" + SPANISH_EMAIL, "translate\n\n" + SPANISH_EMAIL):
+            with self.subTest(prompt=prompt[:30]):
+                self.assertEqual(language.wanted(prompt, str(self.transcript), {"language": "auto"}), (None, ""))
+        self.assertEqual(language.wanted("ok", str(self.transcript), {"language": "auto"}), ("es", "earlier"))
+
+    def test_a_one_word_label_before_a_colon_keeps_the_sentence_the_developers_own(self):
+        self.assertEqual(language.detect("Problema: el build falla en main porque el lockfile está desactualizado y "
+                                         "npm ci lo rechaza, ¿lo puedes arreglar hoy?"), "es")
 
     def test_nothing_clear_gives_no_language(self):
         claude_transcript(self.transcript, ["ok", "sí"])
