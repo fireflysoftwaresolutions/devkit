@@ -2200,10 +2200,12 @@ _CLOSES = re.compile(r"(?:^|[;&|\n]|\b(?:then|do|else))[ \t]*(fi|done|esac)\b")
 
 
 def _pipefail_on(cmd: str) -> bool:
-    """True when `set -o pipefail` holds for every pipeline of the command: it comes before the first pipe, in the
-    shell that runs them (not in a subshell, a `$(…)`, a pipeline, a background job, or a branch or loop that may
-    skip it), after nothing but the start, `;`, a new line or `{`, and nothing turns it off (`set +o pipefail`,
-    setopt, shopt, emulate)."""
+    """True when `set -o pipefail` holds for every pipeline of the command: a top-level simple command of the list
+    before the first pipe (after nothing but the start, `;` or a new line, not in a group, a function body, a
+    subshell, a `$(…)`, a pipeline, a background job, or a branch or loop), with nothing between it and the first
+    pipe that may turn it off or run text the guard does not read as this shell (a function definition, eval,
+    source, `.`, set, setopt, unsetopt, shopt, emulate), and no `+o pipefail` anywhere. A negated pipeline
+    (`! check | tail`) is gated whatever pipefail says (_pipe_gate_closed)."""
     try:
         text = _blank_quoted(strip_heredocs(cmd))
     except Exception:
@@ -2216,13 +2218,22 @@ def _pipefail_on(cmd: str) -> bool:
     before, after = text[:m.start()], text[m.end():]
     if re.search(r"(?<!\|)\|(?!\|)", before):
         return False  # a pipeline before it runs without it
-    if not re.search(r"(?:^|[;\n{])[ \t]*$", before):
-        return False  # after `&&`, `||`, `!`, `then`, … it may not run
+    if not re.search(r"(?:^|[;\n])[ \t]*$", before) or "{" in before or re.search(r"\(\s*\)|\bfunction\b", before):
+        return False  # after `&&`, `||`, `!`, `then`, `{`, in a function body, … it may not run here
+    pipe = re.search(r"(?<!\|)\|(?!\|)", after)
+    between = after[:pipe.start()] if pipe else after
+    if re.search(r"(?:^|[;&|\n({]|\b(?:then|do|else))[ \t]*(?:eval|source|\.|set|setopt|unsetopt|shopt|emulate|"
+                 r"function)(?=[ \t;\n]|$)|\(\s*\)", between):
+        return False  # something between may turn it off where the guard does not read it
     if re.match(r"[ \t]*(?:\|(?!\|)|&(?![&>]))", after):
         return False  # in a pipeline or a background job: a subshell's option
     if before.count("(") > before.count(")"):
         return False  # in a subshell or a substitution: another shell's option
     return len(_OPENS.findall(before)) <= len(_CLOSES.findall(before))
+
+
+# `! check | tail`: the negation is the pipeline's status turned around, which pipefail does not make the check's
+_NEGATED_PIPE = re.compile(r"(?:^|[;&|\n({]|\b(?:then|do|else|if|while|until))[ \t]*![ \t]+[^;&|\n]*\|(?!\|)")
 
 
 def _pipe_feeds(segs, k) -> bool:
@@ -2281,7 +2292,7 @@ def _pipe_gate_closed(cmd: str, cwd: str, pipefail: bool = False, depth: int = 0
     three, or one that cannot be parsed, is read by its text."""
     if depth > 3:
         return bool(PIPE_GATE.search(cmd))
-    opened = pipefail or _pipe_gate_open(cmd) == "pipefail"
+    opened = (pipefail or _pipe_gate_open(cmd) == "pipefail") and not _NEGATED_PIPE.search(_blank_quoted(cmd))
     segs = split_commands(cmd, ops=True)
     if segs is None:
         return bool(PIPE_GATE.search(cmd)) and not opened

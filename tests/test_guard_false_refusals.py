@@ -311,11 +311,17 @@ class PipeGate(unittest.TestCase):
         for pre in ("(set -o pipefail); ", "set -o pipefail & ", "true | set -o pipefail; ",
                     "false || set -o pipefail; ", "false && set -o pipefail; ", "set -o pipefail; set +o pipefail; ",
                     "bash -c 'set -o pipefail'; ", "if false; then set -o pipefail; fi; ",
-                    "echo $(set -o pipefail); ", "git log | head -1; set -o pipefail; "):
+                    "echo $(set -o pipefail); ", "git log | head -1; set -o pipefail; ",
+                    # the Red team tester's second round: a function body, a group, what eval, source and . may undo,
+                    # a case arm, unsetopt, and a negated pipeline, which pipefail does not make the check's
+                    "f() { set -o pipefail; }; ", "{ set -o pipefail; }; ", "set -o pipefail; eval 'set +o pipefail'; ",
+                    "set -o pipefail; source off.sh; ", "set -o pipefail; . off.sh; ",
+                    "case x in y) set -o pipefail;; esac; ", "set -o pipefail; unsetopt pipefail; ",
+                    "set -o pipefail; ! "):
             cmd = pre + "python3 -m unittest x | tail -1 && git commit -m x"
             with self.subTest(cmd=cmd):
                 self.assertEqual(self.verdict(cmd), guard.PIPE_REASON)
-        for pre in ("set -o pipefail; ", "set -euo pipefail; ", "set -e -o pipefail\n", "{ set -o pipefail; }; "):
+        for pre in ("set -o pipefail; ", "set -euo pipefail; ", "set -e -o pipefail\n"):
             cmd = pre + "python3 -m unittest x | tail -1 && git commit -m x"
             with self.subTest(cmd=cmd):
                 self.assertIsNone(self.verdict(cmd))
