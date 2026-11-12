@@ -1010,6 +1010,26 @@ class MachineIdentityTests(unittest.TestCase):
         work.write_record(it["path"], work.render(it))
         return work.load(it["path"])
 
+    def audit_log(self, *records):
+        # this Mac's own audit log as devkit wrote it before the machine id: each record names the hostname of the time
+        d = core.STATE / "audit"
+        d.mkdir(parents=True, exist_ok=True)
+        with (d / "2026-11.jsonl").open("a") as fh:
+            for ts, host in records:
+                fh.write(json.dumps({"v": 2, "ts": ts, "actor": {"user": "ana", "host": host, "agent": "claude"},
+                                     "action": "guard.allow"}) + "\n")
+
+    def test_a_cut_over_under_a_dhcp_name_leaves_another_macs_earlier_lock_alone(self):
+        # this Mac has carried mac-55 for the last 2 h; another Mac carried it before and took a lock that still runs
+        now = time.time()
+        self.audit_log((now - 7200, "mac-55"), (now - 3600, "mac-55"))
+        self.name = "mac-55.lan"
+        theirs, ours = self.legacy_lock("ana@mac-55", now - 5 * 3600), self.legacy_lock("ana@mac-55", now - 1800)
+        self.assertFalse(work.mine(theirs["meta"]["claimed_by"], self.me(), at=now - 5 * 3600))
+        with self.assertRaises(ValueError):
+            work.release(theirs, a=self.me())
+        self.assertTrue(work.mine(ours["meta"]["claimed_by"], self.me(), at=now - 1800))
+
     def test_a_rename_between_two_calls_keeps_the_lock_this_mac_took(self):
         it = work.claim(work.create("acme/api", "Fix login", a=self.me()), a=self.me())
         self.name = "andress-mbp-2"

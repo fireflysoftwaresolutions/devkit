@@ -286,10 +286,23 @@ def _record_name(doc: dict, name: str, now: float) -> None:
 
 
 def _created(now: float, name: str) -> dict:
-    """A new record: a fresh id, the names the audit log shows, and the hostname of this moment counted from the
-    start, as devkit read it until now (a record that named this Mac by it was this Mac's)."""
-    doc = {"version": 1, "id": _new_id(), "created": int(now), "aliases": _seen_in_audit()}
-    doc["aliases"].setdefault(name, []).insert(0, [0, now])
+    """A new record: a fresh id, the names the audit log shows, and the hostname of this moment counted from when this
+    Mac took it. When the audit log ends under that name, its last period there runs on to now; when it ends under
+    another name, this Mac took the name after that last record. Only with no audit record at all does the name
+    count from the start, as devkit read it until now: nothing tells when this Mac took it. A DHCP name (`mac-55`)
+    another Mac carried before this one took it so stays that Mac's."""
+    seen = _seen_in_audit()
+    doc = {"version": 1, "id": _new_id(), "created": int(now), "aliases": seen}
+    ends = [(p[1], n) for n, periods in seen.items() for p in periods]
+    if not ends:
+        seen[name] = [[0, now]]
+    else:
+        last_end, last_name = max(ends)
+        periods = seen.setdefault(name, [])
+        if last_name == name:
+            next(p for p in periods if p[1] == last_end)[1] = now
+        else:
+            periods.append([last_end, now])
     doc["current"] = name
     return doc
 

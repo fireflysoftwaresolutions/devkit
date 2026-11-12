@@ -515,6 +515,17 @@ class MachineTests(unittest.TestCase):
         self.assertFalse(identity.was_this_mac("mac-55", T0 - 2400, m))
         self.assertFalse(identity.was_this_mac("mac-55", T0 - 9 * 3600, m))  # before this Mac carried it
 
+    def test_the_hostname_at_cut_over_counts_from_when_the_audit_log_shows_this_mac_took_it(self):
+        # the audit log ends under mac-158; the Mac carries mac-55 at the cut-over, so it took mac-55 after T0 - 600
+        # (its period under mac-55 two hours earlier ended when it moved to mac-158)
+        self.audit_log((T0 - 7200, "mac-55"), (T0 - 5400, "mac-55"), (T0 - 1800, "mac-158"), (T0 - 600, "mac-158"))
+        self.name = "mac-55"
+        m = identity.machine(now=T0)
+        self.assertTrue(identity.was_this_mac("mac-55", T0 - 6000, m))  # its earlier period
+        self.assertTrue(identity.was_this_mac("mac-55", T0 - 300, m))  # since it took the name again
+        self.assertFalse(identity.was_this_mac("mac-55", T0 - 1700, m))  # while it was mac-158
+        self.assertFalse(identity.was_this_mac("mac-55", T0 - 9 * 3600, m))  # before this Mac ever carried it
+
     def test_a_name_or_id_this_mac_never_carried_is_not_its(self):
         m = identity.machine(now=T0)
         self.assertFalse(identity.was_this_mac("mac-640", T0, m))
