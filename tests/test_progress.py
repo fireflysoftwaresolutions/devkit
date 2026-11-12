@@ -2515,5 +2515,21 @@ class MemberOwnStepTests(KidSyncCase):
         self.assertIn("not your step", run["lane_outcome"]["why"])
 
 
+class OwnRunFirstTests(unittest.TestCase):
+    # part of B-g7g1e0a8l9g: dev progress listed the live runs newest first, so another session's run that started
+    # later came first, and a status block once took that run's step counts
+    T0 = 1_800_000_000.0
+
+    def test_this_sessions_run_comes_first_even_when_another_started_later(self):
+        with TempState():
+            (pg.SESSIONS / "claude-s2.json").write_text(json.dumps(
+                {"agent": "claude", "session": "s2", "started": self.T0, "project": "acme/api"}))
+            pg.start("Mine", plan=["a"], now=self.T0)
+            with mock.patch.dict(os.environ, {"DEVKIT_SESSION": "claude:s2"}):
+                pg.start("Theirs", plan=["b"], now=self.T0 + 600)
+            self.assertEqual([r["goal"] for r in pg.active_runs()], ["Theirs", "Mine"])  # newest first, as before
+            self.assertEqual([r["goal"] for r in pg.active_runs(first=("claude", "s1"))], ["Mine", "Theirs"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -5407,13 +5407,20 @@ def notify(title: str, text: str, security: bool = False):
         pass
 
 
-def active_runs(max_age_h: float = 12) -> list:
+def active_runs(max_age_h: float = 12, first=None) -> list:
+    """The live runs on this Mac, newest first. `first`: an (agent, session id) whose run comes ahead of every other
+    one, so `dev progress` shows the caller's own run first however recently another session started one (part of
+    B-g7g1e0a8l9g: a status block once took the step counts of the run listed first)."""
     out = []
     for f in RUNS.glob("*.json") if RUNS.exists() else []:
         r = core.read_json(f, None)
         if r and r.get("state") != "orphaned" and time.time() - f.stat().st_mtime < max_age_h * 3600:
             out.append(r)  # an orphaned run (its session ended, approvals.reconcile) is not live
-    return sorted(out, key=lambda r: -r.get("started", 0))
+    out.sort(key=lambda r: -r.get("started", 0))
+    if first:
+        agent, sid = first
+        out.sort(key=lambda r: not (r.get("agent") == agent and str(r.get("session") or "") == str(sid)))
+    return out
 
 
 def _shown_lane(lane: dict, live) -> str:
