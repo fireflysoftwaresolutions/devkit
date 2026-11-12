@@ -2917,9 +2917,6 @@ def cmd_lesson(a):
             if les["meta"].get("quarantine"):
                 print(f"  {ui.WARN} held, not recalled: {les['meta']['quarantine']}. Only the developer releases it: "
                       f"dev lesson release {les['meta']['id']} --why …")
-            if not any(_lesson_anchors(a).values()):
-                print(ui.dim("  no anchors: only the session start recalls it. Add where it applies: dev lesson anchor "
-                             + les["meta"]["id"] + " --file … --command … --activity … --error … --why …"))
             for line in _registry_hint(scope, lessons.anchors(les)):
                 print(line)
             print(ui.dim("  automate it when you can: dev lesson prevent " + les["meta"]["id"] +
@@ -4367,7 +4364,7 @@ def build_parser():
     x.add_argument("--retire-when", help="the outside condition that makes it obsolete (a tool version, an issue)")
     x.add_argument("--why")
     x.add_argument("--new", action="store_true",
-                   help="record it although a lesson shares an error or command anchor: another mistake (needs --why)")
+                   help="record it although a lesson shares an error anchor: another mistake (needs --why)")
     _anchor_flags(x)
     x = lsp.add_parser("anchor", help="add where a lesson applies (files, commands, kinds of work, errors, stack)")
     x.add_argument("selector", nargs="+")

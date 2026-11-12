@@ -1007,7 +1007,7 @@ _dev__lesson__add() {
     '*--tag=[tag]:tag: ' \
     '--retire-when=[the outside condition that makes it obsolete]:retire when: ' \
     '--why=[why]:why: ' \
-    '--new[record it although a lesson shares an error or command anchor]' \
+    '--new[record it although a lesson shares an error anchor]' \
     '*--file=[a file or glob it applies to]:file: ' \
     '*--command=[the command words it applies to, e.g. "git push --force"]:command: ' \
     '*--activity=[the kind of work it applies to]:kind of work: _dev_live activities -' \
