@@ -3255,11 +3255,23 @@ def _bug_pending(a, bugs):
         return 0
     print(f"{len(items)} item{'s' if len(items) != 1 else ''} held for review, each exactly as it would be sent:")
     for it in items:
-        where = "private vulnerability reporting" if it.get("security") else "a public issue comment"
+        p = it["payload"] if isinstance(it.get("payload"), dict) else {}
         state = "approved, goes with the next sync" if it.get("approved") else f"dev bug send {it.get('id')}"
-        print(f"\n  {it.get('id')} · {it['payload'].get('type')} · {it['payload'].get('fingerprint')} · to {where} · "
-              f"{state}" + (f" · {it['problem']}" if it.get("problem") else ""))
-        print(bugs.render_payload(it["payload"]))
+        print(f"\n  {it.get('id')} · {p.get('type')} · {p.get('fingerprint')} · {state}" +
+              (f" · {it['problem']}" if it.get("problem") else ""))
+        texts = bugs.outgoing(it)  # the strings the sender posts, rendered the same way
+        number = bugs._issue_number(p.get("fingerprint")) if isinstance(p.get("fingerprint"), str) else None
+        if "private" in texts:
+            print(f"  To private vulnerability reporting, never to a public issue\n  Title: {texts['private_title']}")
+            print(texts["private"])
+        elif number is None and "issue" in texts:
+            print(f"  As a new public issue, when the registry has none for this bug yet\n  Title: {texts['title']}")
+            print(texts["issue"])
+            print("\n  Or, when the registry has one by then, as a comment on it:")
+            print(texts["comment"])
+        else:
+            print(f"  As a comment on issue #{number}:" if number else "  As a comment on the bug's issue:")
+            print(texts["comment"])
     return 0
 
 

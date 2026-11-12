@@ -2133,8 +2133,8 @@ def flush(client=None, now: float = None) -> dict:
                 try:
                     if report is None:
                         raise RuntimeError("this client cannot send private vulnerability reports")
-                    title = title_for(p) if p.get("type") == "report" else f"{p['type']} for {p['fingerprint']}"
-                    report(title, render_payload(p))
+                    texts = outgoing(item)
+                    report(texts["private_title"], texts["private"])
                 except Exception as e:  # never falls back to Issues: the item waits for the developer
                     item["problem"] = f"private reporting failed: {_short(e)}"
                     _save_item(item)
@@ -2149,7 +2149,7 @@ def flush(client=None, now: float = None) -> dict:
                     votes.setdefault(p["fingerprint"], []).append(item)
             else:
                 try:
-                    _send(client, p, cache)
+                    _send(client, item, cache)
                 except _NoIssue:
                     counts["skipped"] += 1
                     continue
@@ -2179,22 +2179,51 @@ def registry_issue_number(item) -> int:
     return number if ok else 0
 
 
-def _send(client, p: dict, cache: dict):
-    """Post one payload: a comment on the bug's issue; a report for a bug nobody filed yet creates the issue."""
+def _first_record(report: dict, now: float) -> dict:
+    """The record the registry workflow's first fold makes of a report, as of `now`: the client writes the issue it
+    opens from it, so the issue reads the same before and after that fold."""
+    rec = _new_record(report, now)
+    _add_vote(rec, "reporter", report["impact"], report["version"], False, now)
+    counted = people(rec, now)
+    rec["impacts"] = {k: counted[k] for k in IMPACT}
+    rec["score"] = round(score(rec, now), 4)
+    return rec
+
+
+def outgoing(item: dict) -> dict:
+    """The exact text the sender posts for an outbox item, which `dev bug pending` prints: {"comment"}, the comment
+    on the bug's issue; for a valid report also {"title", "issue"}, the issue it opens when the registry has none for
+    the bug yet; for a security item {"private_title", "private"}, what goes to private vulnerability reporting
+    instead. Written as of the time the item was queued, so the text the developer reviewed is the text that goes."""
+    p = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+    when = float(item["ts"]) if _is_ts(item.get("ts")) else 0.0
+    out = {"comment": render_comment(p)}
+    if p.get("type") == "report" and not validate_payload(p):
+        out["title"] = title_for(p)
+        out["issue"] = render_issue(_first_record(p, when), p, created=_day(when), now=when)
+    if _security(item):
+        out["private_title"] = out.get("title") or f"devkit {p.get('type')} for bug {_safe(p.get('fingerprint'))}"
+        out["private"] = out.get("issue") or out["comment"]
+    return out
+
+
+def _send(client, item: dict, cache: dict):
+    """Post one outbox item: a comment on the bug's issue; a report for a bug nobody filed yet opens the issue."""
+    p, texts = item["payload"], outgoing(item)
     number = _issue_number(p["fingerprint"], cache)
     if number is None and p["type"] == "report":
         finder = getattr(client, "find", None)
         found = [n for n in map(registry_issue_number, (finder(p["fingerprint"]) if finder else None) or []) if n]
         number = min(found) if found else None
         if number is None:
-            number = client.create_issue(title_for(p), render_payload(p))
+            number = client.create_issue(texts["title"], texts["issue"])
             created = core.read_json(BUGS / "created.json", {}) or {}
             created[p["fingerprint"]] = number
             _write_json(BUGS / "created.json", created)
             return
     if number is None:
         raise _NoIssue(p["fingerprint"])
-    client.comment(number, render_payload(p))
+    client.comment(number, texts["comment"])
 
 
 def _send_votes(client, votes: dict, cache: dict, now: float, counts: dict):
@@ -2217,7 +2246,7 @@ def _send_votes(client, votes: dict, cache: dict, now: float, counts: dict):
         vote = {"devkit_bug": SCHEMA_VERSION, "type": "vote", "fingerprint": fp, "version": newest["version"],
                 "impact": worst, "window": _day(now)}
         try:
-            client.comment(number, render_payload(vote))
+            client.comment(number, render_comment(vote))
         except Exception as e:
             for item in group:
                 _backoff(item, now, e)

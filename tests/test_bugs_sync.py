@@ -327,6 +327,53 @@ class OutboxTests(StateCase):
         self.assertEqual(len(client.created), 1)  # the second report goes to the issue this machine filed
         self.assertEqual([n for n, _ in client.posted], [101])
 
+    def test_a_new_bug_opens_an_issue_people_can_read(self):
+        # the title from the title table with no [bug] prefix, and the body the workflow writes after its first fold,
+        # with the report in its one data block
+        client = FakeClient()
+        p = _payload("report", fp=NEW_FP)
+        bugs.queue({"payload": p})
+        bugs.flush(client, now=NOW + 60)
+        (title, body), = client.created
+        self.assertEqual(title, bugs.title_for(p))
+        self.assertFalse(title.startswith("[bug]"))
+        self.assertEqual(_sent(body), p)
+        self.assertIn("\n- **Status:** Open. Not triaged yet.\n", body)
+        self.assertIn("\n- **Impact:** Blocks work for everyone who hit it (1 person).\n", body)
+        self.assertIn(f"\n- `dev bug report {NEW_FP}` counts you in", body)
+
+    def test_each_comment_opens_with_its_plain_line(self):
+        self.cache_bug()
+        bugs.queue({"payload": _payload("vote")})
+        bugs.queue({"payload": _payload("detour")})
+        client = FakeClient()
+        bugs.flush(client, now=NOW + 2 * 3600)
+        self.assertEqual(sorted(_sent(b)["type"] for _, b in client.posted), ["detour", "vote"])
+        for _, body in client.posted:
+            self.assertEqual(body, bugs.render_comment(_sent(body)))
+            self.assertTrue(body.startswith(("**devkit vote** · blocked · devkit 26.11.7 · ",
+                                             "**Workaround proposed** for devkit 26.11.7 and later: ")), body)
+
+    def test_a_private_report_reads_like_a_public_issue(self):
+        p = _payload("report", fp=NEW_FP, frames=["guard.check_git"])
+        bugs.approve(bugs.queue({"payload": p}))
+        client = FakeClient()
+        self.assertEqual(bugs.flush(client, now=NOW + 60)["sent"], 1)
+        (title, body), = client.private
+        self.assertEqual(title, bugs.title_for(p))
+        self.assertEqual(_sent(body), p)
+        self.assertIn("\n- **Status:** Open. Not triaged yet.\n", body)
+
+    def test_a_vote_carries_no_count_of_how_often(self):
+        # how often a bug hit this Mac in a day is deferred: no vote this client sends carries it, and the schema
+        # every client and the workflow share refuses one that does
+        self.cache_bug()
+        bugs.queue({"payload": _payload("vote")})
+        client = FakeClient()
+        bugs.flush(client, now=NOW + 2 * 3600)
+        self.assertNotIn("count", _sent(client.posted[0][1]))
+        self.assertEqual(bugs.validate_payload(_payload("vote", count="2 to 9")), ["unknown field count"])
+
     def test_a_new_report_goes_only_to_an_issue_the_registry_labeled(self):
         class Searching(FakeClient):
             def __init__(self, hits):

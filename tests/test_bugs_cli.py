@@ -287,10 +287,30 @@ class ReviewTests(BugCLI):
         return self.outbox()[-1]
 
     def test_pending_prints_exactly_what_would_be_sent(self):
+        # the title and body of the issue a new report opens, and the comment it posts when the registry has the bug
+        # by then: each string the sender passes to GitHub is in the review, whole
         item = self.held()
         rc, out = self.dev("pending")
         self.assertEqual(rc, 0, out)
-        self.assertIn(bugs.render_payload(item["payload"]), out)
+        bugs.set_consent("on", "ana")
+        self.assertEqual(self.dev("send", item["id"], person=True)[0], 0)
+        (title, body), = self.client.created
+        self.assertIn(f"\n  Title: {title}\n{body}\n", out)
+        self.assertIn(f"\n{bugs.render_comment(item['payload'])}\n", out)
+
+    def test_pending_prints_the_comment_a_known_bug_gets(self):
+        self.cache((42, _record(fp=FP_A), "open"))
+        item = bugs.queue({"payload": {"devkit_bug": 1, "type": "detour", "fingerprint": FP_A, "version": "26.11.7",
+                                       "impact": "detoured", "steps": [{"text": "Run it again from a new shell"}],
+                                       "evidence": {"successes": 1}}})
+        rc, out = self.dev("pending")
+        self.assertEqual(rc, 0, out)
+        bugs.set_consent("on", "ana")
+        self.dev("send", item, person=True)
+        (number, body), = self.client.posted
+        self.assertEqual(number, 42)
+        self.assertIn(f"\n  As a comment on issue #42:\n{body}\n", out)
+        self.assertNotIn("Title:", out)
 
     def test_send_approves_and_sends_the_exact_payload(self):
         item = self.held()
