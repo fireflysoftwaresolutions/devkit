@@ -41,6 +41,7 @@ import os
 import re
 import socket
 import stat
+import sys
 import time
 from pathlib import Path
 
@@ -1866,14 +1867,52 @@ def context(agent_id: str = "") -> dict:
     return _context(agent_id)
 
 
+UNKNOWN_CREW = {"member": "unknown"}  # a record whose caller devkit cannot tie to a lane: `dev audit --member unknown`
+
+
+def _caller(agent: str, sid: str) -> str:
+    """Who makes a record that names no lane, in the session `agent:sid`: "main", a crew member's lane, or "" when
+    devkit cannot tie the record to one. A hook knows from its payload (identity.from_hook: agent_id is a member's
+    lane, its absence the main session). A `dev` command asks identity: its lane mark, the call ledger, or the main
+    session when no crew member can be speaking. The hook stamps a member's lane only on its `dev progress|crew|watch|
+    session` calls, so a member's `dev commit` reaches here with no lane named, and only the ledger tells it from
+    the tech lead's. The audit never guesses: another session than the record's, a command that open calls of more
+    than one caller hold (identity gives those to the member, for permissions), or a record made while identity
+    looks (an expired call it audits) all give ""."""
+    if _FINDING:
+        return ""
+    from . import identity
+    payload = getattr(sys.modules.get("devkit.hooks"), "_PAYLOAD", None) if _HOOK_IDENTITY.get() else None
+    if isinstance(payload, dict) and payload.get("session_id"):
+        return identity.from_hook(agent, payload).lane if str(payload["session_id"]) == sid else ""
+    _FINDING.append(True)
+    try:
+        from . import progress
+        found = identity._find()
+        sp = found.speaker
+        if sp.how in ("human", "unknown") or (sp.agent, sp.session) != (agent, sid):
+            return ""
+        if sp.how == "ledger" and len({str(c.get("caller") or "main") for c in progress.open_calls(sid)
+                                       if c.get("tool_use_id") in found.calls}) > 1:
+            return ""
+        return sp.lane
+    except Exception:
+        return ""
+    finally:
+        _FINDING.pop()
+
+
 def _context(agent_id: str = "", *, native: bool = False) -> dict:
     """Where a record belongs: project, branch, run and step from the session and its run (the F2/F4 ledger), and the
-    crew member when one acts. Only record construction opts into native Codex metadata; public context keeps
-    its existing behavior for command restriction checks."""
+    crew member when one acts. Only record construction opts into native Codex metadata and into finding a caller
+    that named no lane (_caller): a member's record carries its own lane and step, the tech lead's the main lane's
+    running step, and one devkit cannot tie to a lane no step and UNKNOWN_CREW. Public context keeps its existing
+    behavior for command restriction checks."""
     out: dict = {}
     env = os.environ
     codex = _codex_identity() if native else None
     aid = str(agent_id or (codex[1] if codex else "") or env.get("DEVKIT_FROM_AGENT") or "")
+    who = aid  # the caller's lane as named; inside a run, as _caller finds it when none is named
     sess = f"codex:{codex[0]}" if codex else env.get("DEVKIT_SESSION", "")
     if ":" in sess:
         from . import progress
@@ -1889,8 +1928,10 @@ def _context(agent_id: str = "", *, native: bool = False) -> dict:
             out["project"] = out["project"] or str(run.get("project") or "")
             out["run"] = str(run["goal"])[:80]
             agents = run.get("agents") or {}
-            key = aid if aid in agents else next((k for k in agents if len(aid) >= 8 and k.startswith(aid)), None)
-            owner = key or ("main" if not aid else None)
+            if not who:  # the Codex thread and the public context keep the main session for a caller without a lane
+                who = "main" if codex or not native else _caller(agent, sid)
+            key = who if who in agents else next((k for k in agents if len(who) >= 8 and k.startswith(who)), None)
+            owner = key or ("main" if who == "main" else None)
             if key:
                 lane = agents[key]
                 chain = progress.lane_chain(run, key) or [key]
@@ -1899,12 +1940,14 @@ def _context(agent_id: str = "", *, native: bool = False) -> dict:
                 out["crew"] = {k: v for k, v in (("member", mid), ("role", role), ("lane", key),
                                                  ("parent", str(lane.get("parent") or "main")),
                                                  ("tool_use_id", str(lane.get("launch") or ""))) if v}
+            elif not who:
+                out["crew"] = dict(UNKNOWN_CREW)
             step = next((x.get("name") for x in run.get("plan") or []
                          if owner and (x.get("owner") or "main") == owner and x.get("state") == "running"), "")
             if step:
                 out["step"] = str(step)
-    if aid and "crew" not in out and not codex:
-        out["crew"] = {"lane": aid}
+    if who and (who != "main" or aid) and "crew" not in out and not codex:
+        out["crew"] = {"lane": who}
     if not out.get("project"):
         out["project"], branch = _where()
         out["branch"] = out.get("branch") or branch
@@ -1944,7 +1987,10 @@ def build(action: str, target="", detail="", outcome="ok", extra: dict = None, c
     for k in ("project", "branch", "run", "step"):  # the run goal and step names are free text, like target
         if where.get(k) and not rec.get(k):
             rec[k] = _clean(where[k], rx)
-    crew = {**(rec.get("crew") or {}), **(where.get("crew") or {})}  # the run's lane wins over a caller's guess
+    found = where.get("crew") or {}
+    if found == UNKNOWN_CREW and rec.get("crew"):
+        found = {}  # a record that names its crew member keeps it: only who made the record is unknown
+    crew = {**(rec.get("crew") or {}), **found}  # the run's lane wins over a caller's guess
     if crew.get("member") and "role" not in crew:
         crew["member"], role = _member(crew["member"])
         if role:

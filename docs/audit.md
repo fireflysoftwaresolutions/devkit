@@ -255,8 +255,8 @@ dev audit show 01M6SFPEZ2
 | `id` | yes | A ULID: 26 characters of Crockford base 32 that sort by time. `dev audit show` takes any unique start of it |
 | `ts` · `time` | yes | When, as Unix seconds with milliseconds, and as ISO 8601 in UTC |
 | `actor` | yes | Who acted: `user` (the GitHub login), `host` (this Mac's machine id, the same whatever its hostname; a record from before 26.11.16 holds the short hostname), `label` (the hostname at the time, for display), `agent` (`claude`, `codex`, `job`, or `human`), and `session` (the first 12 characters of the session id). A `dev` command a Codex thread runs is recorded under `codex` and that thread's session, even though Codex passes no devkit variable to its commands; only your own terminal is `human` |
-| `crew` | when a crew member acts | `member` (its id), `role`, `lane` (the subagent's id), `parent` (the lane that launched it, or `main`), and `tool_use_id` (its launch) |
-| `project` · `branch` · `run` · `step` | when known | The repository, its branch, the goal of the session's `dev progress` run, and the step running in it |
+| `crew` | when a crew member acts, or devkit cannot tell who did | `member` (its id), `role`, `lane` (the subagent's id), `parent` (the lane that launched it, or `main`), and `tool_use_id` (its launch). A record made during a run whose caller devkit cannot tie to a lane (a background job a command started, or a command that open calls of the tech lead and a member both hold) holds `{"member": "unknown"}` and no `step`; `dev audit --member unknown` lists them |
+| `project` · `branch` · `run` · `step` | when known | The repository, its branch, the goal of the session's `dev progress` run, and the step running in the caller's lane: a crew member's own step, the main session's for the tech lead |
 | `action` | yes | What happened, as a dotted name such as `dev.commit`, `guard.deny`, `crew.decided`, or `audit.verify` |
 | `category` · `severity` | yes | Set by the action, see [Categories, severities, and outcomes](#categories-severities-and-outcomes) |
 | `target` · `detail` | yes | What the action was about and how, redacted. At most 300 and 600 characters |
