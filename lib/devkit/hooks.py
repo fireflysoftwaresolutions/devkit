@@ -368,10 +368,13 @@ def context_for(cwd: str, agent: str) -> str:
                                    "(`release-policy` skill) before the first release.")
     except Exception as e:
         _swallowed("session-start", e)
-    lang = (core.CFG.get("language") or "en-US")
-    if lang.lower() not in ("en-us", "en"):
-        lines.append(f"Language: this developer set devkit's language to {lang}: write replies, commits, PRs and docs "
-                     f"in it unless they ask otherwise.")
+    try:  # a set locale fixes the reply language; with auto, each prompt gets its own line (language.prompt_line)
+        from . import language
+        said = language.session_line()
+        if said:
+            lines.append(said)
+    except Exception as e:
+        _swallowed("session-start", e)
     lines.append("Long work: `dev progress start \"<goal>\" --plan \"a; b; c\" --estimate 30m`, then `dev progress step` "
                  "and an update to the developer every few minutes (`communicating` skill: templates for updates, "
                  "decisions, PRs, handovers; plain American English).")
@@ -1235,6 +1238,9 @@ def stop(agent: str):
         why = canary.progress_gate(agent, data, sess) if dev_turn else ""  # the Progress rule, once per turn
         if why:
             reasons.append(("progress", why))
+        why = canary.language_gate(agent, data, sess) if dev_turn else ""  # the reply language, once per turn
+        if why:
+            reasons.append(("language", why))
         try:
             from . import skillguard
             why = skillguard.on_stop(agent, data, sess) if dev_turn else None
@@ -3429,6 +3435,12 @@ def prompt(agent: str):
         _log(f"prompt overlaps {agent}: {traceback.format_exc()[-300:]}")
     raw = (data.get("prompt") or "").lstrip()
     background = _background_told(agent, data)  # a member's completion notice is often this very prompt
+    lang = ""
+    try:  # what to reply in: the developer's language (this prompt, else their earlier ones) or the set locale
+        from . import language
+        lang = language.prompt_line(data.get("prompt") or "", data.get("transcript_path"))
+    except Exception:
+        _log(f"prompt language {agent}: {traceback.format_exc()[-300:]}")
     if raw.startswith(("<task-notification", "[SYSTEM NOTIFICATION", "<system-reminder", "<agent-message")) or \
             "<task-notification>" in raw[:400]:
         # background events are not the developer's request; what waits for the woken session comes with them
@@ -3439,7 +3451,7 @@ def prompt(agent: str):
                 mail = watch.mail(agent, sid, "main")
             except Exception:
                 _log(f"prompt wake mail {agent}: {traceback.format_exc()[-300:]}")
-        _context_out("UserPromptSubmit", "\n\n".join(x for x in (extra, background, mail, overlaps) if x))
+        _context_out("UserPromptSubmit", "\n\n".join(x for x in (extra, background, mail, overlaps, lang) if x))
         return
     # the prompt waits as pending in the checkpoint until Stop classes the turn; then what waits for the main session
     # (a late compaction's brief, "Not in the summary"), first in the context
@@ -3474,7 +3486,7 @@ def prompt(agent: str):
     except Exception:
         _log(f"prompt hatches {agent}: {traceback.format_exc()[-300:]}")
     _context_out("UserPromptSubmit", "\n\n".join(x for x in (carried, extra, granted, background, hatches, overlaps,
-                                                             route, text) if x))
+                                                             route, lang, text) if x))
 
 
 DELIVERY = re.compile(r"\bgit\s+(?:-C\s+\S+\s+)?(commit|push|merge|tag|rebase|cherry-pick|revert)\b|"
