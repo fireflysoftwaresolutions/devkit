@@ -3,8 +3,10 @@
 """Lesson lint: what a lesson must look like before it is recorded, what holds it back from recall, and whether its
 prevention still exists.
 
-    check_anchors(anchors) -> [str]       the anchor gate: a command anchor that is one bare common program, and an
-                                          error anchor shorter than 12 characters or on the stoplist, are refused
+    check_anchors(anchors) -> [str]       the anchor gate: a command anchor that is one word too broad to recall by
+                                          (a common program or shell, a shell keyword or builtin, a variable), an
+                                          error anchor shorter than 12 characters or on the stoplist, and a file
+                                          anchor that matches every file, are refused
     check_shape(title, happened, evidence) -> [str]
                                           the capture shape: the title is the rule, one line of at most 80
                                           characters, not starting with "["; what happened or evidence is given
@@ -46,6 +48,23 @@ from pathlib import Path
 
 BARE_PROGRAMS = frozenset(("python3", "python", "git", "dev", "cp", "mkdir", "sed", "cat", "cd", "ls", "echo", "bash",
                            "sh", "node", "npm"))
+# also too broad as a one-word command anchor, though often a second word of a good one (`git grep`, `make test`), so
+# not in BARE_PROGRAMS, which lint also reads as "several programs in one anchor": the other shells, and the tools of
+# almost every script or session
+EVERYDAY_PROGRAMS = frozenset((
+    "zsh", "dash", "ksh", "fish", "csh", "tcsh", "rm", "mv", "ln", "touch", "chmod", "chown", "grep", "egrep", "rg",
+    "awk", "gawk", "find", "xargs", "head", "tail", "sort", "uniq", "wc", "cut", "tr", "tee", "printf", "env", "sudo",
+    "curl", "wget", "tar", "make", "docker", "kubectl", "pytest", "pip", "pip3", "uv", "npx", "pnpm", "yarn", "go",
+    "cargo", "java", "mvn", "gradle", "ruby", "perl", "php", "gh", "jq", "rsync", "ssh", "scp", "kill", "ps", "which",
+    "brew", "open", "sleep", "date", "diff"))
+# words of the shell itself: a keyword or builtin alone matches every loop, block or script that uses it
+SHELL_WORDS = frozenset((
+    "for", "while", "until", "if", "then", "else", "elif", "fi", "do", "done", "case", "esac", "select", "function",
+    "time", "export", "set", "unset", "source", ".", "eval", "exec", "command", "builtin", "alias", "local", "declare",
+    "typeset", "readonly", "trap", "return", "exit", "shift", "pushd", "popd", "true", "false", "test", "[", "[[",
+    "read", "wait"))
+_ASSIGNMENT = re.compile(r"[A-Za-z_]\w*=.*")
+_ENV_NAME = re.compile(r"[A-Z_][A-Z0-9_]+")  # PYTHONPATH: a variable's name, never a program's
 _PYTHON = re.compile(r"python\d*(?:\.\d+)?")
 ERROR_MIN = 12
 # error anchors that match ordinary output: the spec's list, and the generic messages any shell or OS prints
@@ -73,16 +92,39 @@ def _norm_error(text: str) -> str:
 
 # what a hint shows as a command anchor that names the risky use of a bare program
 EXAMPLES = {"python3": "python3 -c", "python": "python -c", "bash": "bash -c", "sh": "sh -c", "node": "node -e",
-            "git": "git push --force", "dev": "dev progress step", "npm": "npm run <script>", "sed": "sed -i"}
+            "git": "git push --force", "dev": "dev progress step", "npm": "npm run <script>", "sed": "sed -i",
+            "zsh": "zsh -c", "rm": "rm -rf", "find": "find -delete", "sudo": "sudo rm"}
 
 
 def _command_errors(command: str) -> list:
+    """Why a command anchor is too broad to recall a lesson by, or [] when it is not: one word that is a common
+    program (BARE_PROGRAMS, EVERYDAY_PROGRAMS, by any path or python version), a shell keyword or builtin, or a
+    variable (its name, or an assignment)."""
     words = _words(command)
-    if len(words) == 1 and _bare(words[0]):
-        name = words[0].rsplit("/", 1)[-1]
+    if len(words) != 1:
+        return []
+    word = words[0]
+    name = word.rsplit("/", 1)[-1]
+    if _bare(word) or name in EVERYDAY_PROGRAMS:
         example = EXAMPLES.get(name, f"{name} <the flag or argument that goes wrong>")
         return [f"the command anchor `{command}` alone matches every {name} call: anchor the words that go wrong "
                 f"too, such as `{example}`"]
+    if word in SHELL_WORDS:
+        return [f"the command anchor `{command}` is a shell keyword or builtin, in almost every script: anchor the "
+                f"command that goes wrong instead, the program with its words"]
+    if _ASSIGNMENT.fullmatch(word) or _ENV_NAME.fullmatch(word):
+        return [f"the command anchor `{command}` is a variable, not a command: anchor the command that goes wrong "
+                f"with it, the program with its words"]
+    return []
+
+
+_EVERY_FILE = re.compile(r"[*/.?]*")  # `**`, `*`, `**/*`, `./**`, `.`: a file anchor that matches every file
+
+
+def _file_errors(anchor: str) -> list:
+    if _EVERY_FILE.fullmatch(anchor):
+        return [f"the file anchor `{anchor}` matches every file: anchor the folder or files the mistake is in, such "
+                f"as `src/billing/**`"]
     return []
 
 
@@ -97,13 +139,18 @@ def _error_errors(error: str) -> list:
 
 
 def check_anchors(anchors: dict) -> list:
-    """The anchor gate for new anchors: [error text], [] when they pass. Files, kinds of work and stack are not judged
-    here (lessons._clean_anchors checks kinds of work against the RACI); lint lists broad file anchors."""
+    """The anchor gate for new anchors: [error text], [] when they pass. A command anchor too broad to recall by
+    (_command_errors), an error anchor that is short or ordinary output, and a file anchor that matches every file
+    are refused. Kinds of work and stack are not judged here (lessons._anchor_problems checks kinds of work against
+    the RACI); lint lists the file anchors that match no file."""
     anchors = anchors or {}
     out = []
     for c in anchors.get("commands") or []:
         if str(c).strip():
             out += _command_errors(str(c).strip())
+    for f in anchors.get("files") or []:
+        if str(f).strip():
+            out += _file_errors(str(f).strip())
     for e in anchors.get("errors") or []:
         if str(e).strip():
             out += _error_errors(e)
@@ -510,7 +557,6 @@ _SKIP_DIRS = frozenset((".git", "node_modules", ".venv", "venv", "__pycache__", 
                         ".ruff_cache", ".tox"))
 WALK_MAX = 100_000  # files a walk lists; past it, an unmatched glob is not reported
 _GLOB = re.compile(r"[*?\[]")
-_EVERYTHING = re.compile(r"[*/.?]*")
 NOT_LINTED = ("retired", "dormant")
 
 
@@ -656,7 +702,7 @@ def lint(lessons: list, repo_root=None) -> list:
                 out.append(_finding(lid, "wrong", f"the kind of work `{a}` is not in the crew's RACI",
                                     f"{anchor} --activity <an id from dev crew raci>, then drop `{a}`"))
         for f in an["files"]:
-            if _EVERYTHING.fullmatch(f):
+            if _file_errors(f):
                 out.append(_finding(lid, "broad", f"the file anchor `{f}` matches every file",
                                     f"{anchor} --file <the folder or files the mistake is in>, then drop `{f}`"))
             elif root and not _scratch(f) and no_file(f):

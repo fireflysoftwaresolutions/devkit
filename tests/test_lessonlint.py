@@ -46,6 +46,33 @@ class AnchorGateTests(unittest.TestCase):
             self.assertEqual(len(errors), 1, prog)
             self.assertIn(f"`{prog}`", errors[0])
 
+    def test_a_shell_or_an_everyday_tool_alone_needs_a_second_word(self):
+        # macOS's own shell and the tools of every script passed the gate: `zsh` alone matched every zsh call, made
+        # unrelated lessons look like one, and kept recalling them
+        for prog in ("zsh", "rm", "grep", "awk", "pytest", "find", "xargs", "make", "docker", "/bin/zsh"):
+            errors = lessonlint.check_anchors({"commands": [prog]})
+            self.assertEqual(len(errors), 1, prog)
+            self.assertIn(f"`{prog}` alone matches every", errors[0])
+
+    def test_a_shell_keyword_or_builtin_alone_is_refused(self):
+        for word in ("for", "while", "if", "export", "source", "eval"):
+            errors = lessonlint.check_anchors({"commands": [word]})
+            self.assertEqual(len(errors), 1, word)
+            self.assertIn("shell keyword or builtin", errors[0])
+
+    def test_a_variable_alone_is_refused(self):
+        for word in ("PYTHONPATH", "DEVKIT_X=1", "lines=3"):
+            errors = lessonlint.check_anchors({"commands": [word]})
+            self.assertEqual(len(errors), 1, word)
+            self.assertIn("is a variable, not a command", errors[0])
+
+    def test_a_file_anchor_that_matches_every_file_is_refused(self):
+        for f in ("**", "*", "**/*", "./**", "."):
+            errors = lessonlint.check_anchors({"files": [f]})
+            self.assertEqual(len(errors), 1, f)
+            self.assertIn("matches every file", errors[0])
+        self.assertEqual(lessonlint.check_anchors({"files": ["src/**", "**/*.sql", "Makefile"]}), [])
+
     def test_a_bare_program_named_by_its_path_or_version_is_still_bare(self):
         self.assertEqual(len(lessonlint.check_anchors({"commands": ["/usr/bin/python3", "python3.12"]})), 2)
 

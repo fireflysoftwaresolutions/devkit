@@ -106,6 +106,13 @@ class CheckTests(LessonCase):
                 lessons.set_anchors(got, "backfill", a=A, commands=["python3"])
         self.assertEqual(lessons.anchors(lessons.find(les["meta"]["id"]))["files"], ["scripts/**", "tools/**"])
 
+    def test_a_file_anchor_that_matches_every_file_is_refused(self):
+        # L-g7aeuethjp8 was recorded today anchored on `**`: no file anchor was judged at capture
+        with self.assertRaises(ValueError) as e:
+            self.add("Name the scratch folder in every brief", files=["**"])
+        self.assertIn("`**` matches every file", str(e.exception))
+        self.assertEqual(self.active_ids(), [])
+
     def test_add_refuses_what_the_shape_check_refuses(self):
         with mock.patch.object(self.lint, "check_shape", return_value=["the title is 96 characters"]):
             with self.assertRaises(ValueError) as e:
