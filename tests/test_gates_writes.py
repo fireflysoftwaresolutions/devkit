@@ -63,12 +63,13 @@ class BuildMemberCredit(GateCase):
         self.assertEqual(self.rules(self.gates_of_lane()), [])
         self.assertEqual(self.rules(self.gates(KID_DOCS)), [("proofs", "dev docs check"), ("skills", "docs")])
 
-    def test_a_doc_the_members_program_only_read_owes_it_nothing(self):
-        # the guard reads the program: it opens the doc to read and writes nothing, so the doc is not the member's
+    def test_a_doc_the_members_program_names_counts_as_one_it_may_have_written(self):
+        # no reading of a program's code tells every way it may write (the read-only lanes run none for that
+        # reason), so a doc a member's program names owes that member the doc checks, as a doc it edits does
         self.finished()
         self.another_lane_writes_the_guide()
         self.tx.bash("python3 - <<'EOF'\nprint(open('docs/guide.md').read().count('lane'))\nEOF")
-        self.assertEqual(self.rules(self.gates(KID_DOCS)), [])
+        self.assertEqual(self.rules(self.gates(KID_DOCS)), [("proofs", "dev docs check"), ("skills", "docs")])
 
     def test_the_edit_record_keeps_a_lanes_edits_for_its_whole_life(self):
         t0 = time.time() - 3 * 3600  # an edit three hours ago, then another one now
