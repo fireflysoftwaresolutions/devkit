@@ -475,5 +475,20 @@ class PreventByRuleTests(LessonCLI):
         self.assertEqual(lessons.find(self.lid)["meta"]["status"], "open")
 
 
+class InitiativeListingTests(LessonCLI):
+    # docs/lessons.md: `dev lesson` lists the lessons of this project, of its initiatives, and the global ones; the
+    # listing added only the global ones, so an initiative's lessons never showed on its member projects
+    def test_dev_lesson_lists_the_projects_initiative_lessons(self):
+        h = Path(work.HANDOFF)
+        (h / "initiatives" / "payments").mkdir(parents=True)
+        (h / "initiatives" / "payments" / "README.md").write_text(
+            "---\nkind: initiative\ntitle: Payments\nprojects: [acme/api]\n---\n# Payments\n")
+        lid = self.add("Never force-push a release branch", scope="initiatives/payments",
+                       commands=["git push --force"])["meta"]["id"]
+        rc, out = self.dev()
+        self.assertEqual(rc, 0, out)
+        self.assertIn(lid, out)
+
+
 if __name__ == "__main__":
     unittest.main()

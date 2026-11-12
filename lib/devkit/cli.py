@@ -3002,6 +3002,8 @@ def cmd_lesson(a):
     items = lessons.search(a.search) if getattr(a, "search", None) else lessons.all_lessons(
         None if a.all else _lesson_scope(a))
     if not a.all and not getattr(a, "search", None) and _lesson_scope(a) != "global":
+        from . import guard  # this project's initiatives: their lessons apply to it too (docs/lessons.md)
+        items += [x for s in guard.initiatives_of(_lesson_scope(a)) for x in lessons.all_lessons(f"initiatives/{s}")]
         items += lessons.all_lessons("global")
     items = [x for x in items if a.all or x["meta"].get("status") != "retired"]
     lag = lessons.sync_lag()
