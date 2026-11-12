@@ -238,11 +238,42 @@ class MachineIdentityLineTests(unittest.TestCase):
         self.assertIn("Run of bob@studio", out)
         self.assertNotIn("Run of ana@mac-158", out)
 
-    def test_dev_team_names_each_machine_by_its_id_and_its_label(self):
+    def test_dev_team_names_each_machine_by_its_hostname_and_its_id(self):
         work.write_presence([], a=self.me)
         rc, out = dev("team")
         self.assertEqual(rc, 0, out)
-        self.assertIn(f"ana@{self.me['host']} (andress-mbp-2)", out)
+        self.assertIn(f"ana@andress-mbp-2 ({self.me['host']})", out)
+
+    # presence is another machine's text: a label that is not a plain hostname (here terminal escapes) never reaches
+    # the terminal, and that machine shows by its id
+    def test_a_label_that_is_not_a_hostname_never_reaches_the_terminal(self):
+        work.PRESENCE.mkdir(parents=True)
+        (work.PRESENCE / "bob@m-0b0b0b0b.json").write_text(json.dumps(
+            {"user": "bob", "host": "m-0b0b0b0b", "label": "\u001b[2Jyou", "updated": work.now_iso(self.t0),
+             "locks": [], "sessions": [{"agent": "codex", "project": "acme/api", "progress": {"goal": "Their run"}}]}))
+        self.held("bob@m-0b0b0b0b")
+        for argv in (["team"], ["progress"]):
+            with self.subTest(argv=argv), TempState():
+                rc, out = dev(*argv)
+                self.assertEqual(rc, 0, out)
+                self.assertIn("bob@m-0b0b0b0b", out)
+                self.assertNotIn("\x1b", out)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli._print_items("acme/api", "acme/api", rebind=False)
+        self.assertIn("🔒 bob@m-0b0b0b0b", out.getvalue())
+        self.assertNotIn("\x1b", out.getvalue())
+
+    def test_another_macs_lock_shows_by_its_hostname(self):
+        work.PRESENCE.mkdir(parents=True)
+        (work.PRESENCE / "bob@m-0b0b0b0b.json").write_text(json.dumps(
+            {"user": "bob", "host": "m-0b0b0b0b", "label": "studio", "updated": work.now_iso(self.t0), "locks": [],
+             "sessions": []}))
+        self.held("bob@m-0b0b0b0b")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli._print_items("acme/api", "acme/api", rebind=False)
+        self.assertIn("🔒 bob@studio", out.getvalue())
 
     def test_the_handoff_sync_commit_names_the_mac_by_its_label_and_id(self):
         git = ["git", "-C", str(self.handoff.root), "-c", "user.email=t@example.com", "-c", "user.name=t"]

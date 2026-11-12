@@ -2134,7 +2134,7 @@ def _print_items(scope, label, show_all=False, rebind=True):
         lock = ""
         if holder and not expired:  # this Mac's lock, also one taken under a hostname it carried then (work.mine)
             mine = work.mine(holder, me, at=work.parse_iso(m.get("claimed_at")) or None)
-            lock = ui.green(" 🔒 you") if mine else ui.yellow(f" 🔒 {holder.split(' ')[0]}")
+            lock = ui.green(" 🔒 you") if mine else ui.yellow(f" 🔒 {work.display(holder.split(' ')[0])}")
         st = {"doing": ui.cyan("doing"), "blocked": ui.red("blocked")}.get(m.get("status"), ui.dim(m.get("bucket", "")))
         pr = ui.yellow(" !") if m.get("priority") == "high" else ""
         num = str(n).rjust(2) if numbered else " ·"
@@ -2516,7 +2516,8 @@ def cmd_progress(a):
     runs = pg.active_runs(first=pg.current_session())
     from . import work
     me = work.actor()  # this Mac's presence, also a file under a hostname it carried then, is not another machine's
-    others = [(_presence_name(t), s_) for t in work.team() for s_ in t.get("sessions", [])
+    team = work.team()
+    others = [(_presence_name(t, team), s_) for t in team for s_ in t.get("sessions", [])
               if s_.get("progress") and not work.mine(f"{t['user']}@{t['host']}", me,
                                                        at=work.parse_iso(t.get("updated")) or None)]
     print(ui.section("Progress"))
@@ -3403,12 +3404,14 @@ def cmd_jobs(a):
     return 0
 
 
-def _presence_name(rec: dict) -> str:
-    """A machine as presence names it, `user@machine id`, with the hostname it carries beside the id for people:
-    `ana@m-0a1b2c3d (andress-mbp-2)`. A record from before the machine id names the hostname itself."""
-    host, label = rec.get("host") or "", rec.get("label") or ""
-    who = f"{rec.get('user')}@{host}"
-    return f"{who} ({label})" if label and label != host else who
+def _presence_name(rec: dict, team: list = None) -> str:
+    """A machine as people read it: `ana@andress-mbp-2 (m-0a1b2c3d)`, the hostname from work.display (this Mac's own,
+    or the label another Mac's presence publishes when it is a plain hostname) and the machine id beside it. A record
+    from before the machine id, or one whose label is not a plain hostname, shows as presence names it."""
+    from . import work
+    who = f"{rec.get('user')}@{rec.get('host')}"
+    shown = work.display(who, team)
+    return f"{shown} ({rec.get('host')})" if shown != who else who
 
 
 def cmd_team(a):
@@ -3418,7 +3421,7 @@ def cmd_team(a):
     if not t:
         print("  no presence yet (each machine publishes it on sync)")
     for m in t:
-        print(f"\n  {ui.bold(_presence_name(m))}  {ui.dim('updated ' + m.get('updated', ''))}")
+        print(f"\n  {ui.bold(_presence_name(m, t))}  {ui.dim('updated ' + m.get('updated', ''))}")
         for s_ in m.get("sessions", []):
             print(f"    {ui.ACTIVE} {s_.get('agent')} · {s_.get('project')}@{s_.get('branch')}  {ui.dim((s_.get('status') or '')[:80])}")
         for l_ in m.get("locks", []):
