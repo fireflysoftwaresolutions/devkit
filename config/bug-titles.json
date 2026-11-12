@@ -1,0 +1,974 @@
+{
+  "guard": {
+    "": {
+      "title": "Guard refuses {word} for a reason the report does not name",
+      "what": "The guard refused a command, and the report names no refusal id that this version of devkit knows, so the rule it broke is not known. The command word and the versions below are what the report carries.",
+      "reproduce": "Not known from the report alone, which names no refusal id."
+    },
+    "_attribution": {
+      "title": "Guard refuses an AI attribution line in a commit or pull request",
+      "what": "The guard refused a commit, tag, or pull request whose text holds an AI attribution line, such as a `Co-Authored-By` trailer that names a model or a `Generated with` line. devkit keeps such lines out of everything it publishes.",
+      "reproduce": "Ask an agent to run `git commit` with a message that ends in a `Co-Authored-By:` trailer naming an AI model."
+    },
+    "_check": {
+      "title": "Guard refuses a file path that holds a NUL character",
+      "what": "The guard refused a file tool call whose path holds a NUL character. The system reads a path only up to its first NUL, so the file written would not be the one named.",
+      "reproduce": "Ask an agent to write a file with the Write tool to a path that holds a NUL character."
+    },
+    "_check_bash_reading:nul": {
+      "title": "Guard refuses a shell command that holds a NUL character",
+      "what": "The guard refused a shell command that holds a NUL character. Shells read a NUL in different ways (bash ends the line there, zsh keeps it in the word), so the guard cannot tell what runs.",
+      "reproduce": "Ask an agent to run a shell command that holds a literal NUL byte, rather than one that makes it with `printf '\\0'`."
+    },
+    "_check_bash_reading:pipe-gate": {
+      "title": "Guard refuses a commit or push gated on a pipeline that hides failures",
+      "what": "The guard refused a command that commits, pushes, or tags after a pipeline joined with `&&`. The `&&` sees only the exit code of the pipe's last command, so a check that fails before the pipe would still let the commit run.",
+      "reproduce": "Ask an agent to run `false | cat && git commit -m test` in a throwaway repository, without `set -o pipefail` first."
+    },
+    "_check_bash_reading:unreadable": {
+      "title": "Guard refuses {word} it cannot read",
+      "what": "The guard could not read the command safely, for example because a quote never closes, so it refused the command rather than guess what it runs.",
+      "reproduce": "Ask an agent to run a shell command with a quote that never closes. An apostrophe in a `#` comment counts."
+    },
+    "_check_bash_reading:wait-or-ungated": {
+      "title": "Guard refuses a wait or a check chained to work that ignores its result",
+      "what": "The guard refused a command line that runs more work after a wait, such as `dev watch --wait`, or after a check, without depending on its result: after `;`, `||`, or `&`, or after a pipe whose filter hides the check's exit code.",
+      "reproduce": "Ask an agent to run `dev watch --wait; git status`."
+    },
+    "_check_segments:backup-copy": {
+      "title": "Guard refuses {word} that makes a backup copy",
+      "what": "The guard refused a copy or a move to a backup name in `~/Development`, such as `README.md.bak`, `app_old.py`, or `notes copy.md`. devkit keeps history in git, not in backup copies.",
+      "reproduce": "Ask an agent to run `cp README.md README.md.bak` in a repository."
+    },
+    "_check_segments:create-layout": {
+      "title": "Guard refuses {word} that breaks the workspace layout",
+      "what": "The guard refused a `mkdir` or `touch` that would create a folder outside devkit's workspace layout in `~/Development`, such as a sibling copy of a repository or a folder that is not an owner, host, or `_local` folder.",
+      "reproduce": "Ask an agent to run `mkdir ~/Development/scratch`."
+    },
+    "_check_segments:env-split-string": {
+      "title": "Guard refuses env -S because it runs a command line from a string",
+      "what": "The guard refused `env -S` (`--split-string`), which runs a command line held in one string that the guard cannot check.",
+      "reproduce": "Ask an agent to run `env -S 'echo test'`."
+    },
+    "_check_segments:find-delete": {
+      "title": "Guard refuses find with -delete or -exec rm",
+      "what": "The guard refused `find` with `-delete` or `-exec rm`, which permanently deletes whatever matches. devkit offers `dev find` to list the matches and `dev rm` to move them to the Trash.",
+      "reproduce": "Ask an agent to run `find . -name '*.tmp' -delete` in a throwaway repository."
+    },
+    "_check_segments:gh-merge-admin": {
+      "title": "Guard refuses gh pr merge with --admin",
+      "what": "The guard refused `gh pr merge --admin`, which bypasses branch protection and required reviews.",
+      "reproduce": "Ask an agent to run `gh pr merge` with `--admin` on a pull request of a throwaway repository."
+    },
+    "_check_segments:gh-pager-config": {
+      "title": "Guard refuses gh config set of a pager",
+      "what": "The guard refused `gh config set` of a pager. A pager is a command line that runs each time gh pages its output, in every later session, where the guard sees only a read such as `gh pr view`.",
+      "reproduce": "Ask an agent to run `gh config set pager less`."
+    },
+    "_check_segments:gh-pr-head-branch": {
+      "title": "Guard refuses gh pr create with a head branch that breaks the naming rule",
+      "what": "The guard refused `gh pr create --head` because the branch name breaks devkit's branch naming standard, `<type>/<ticket>-<topic>` in lowercase, for example with a tool or agent prefix such as `claude/`.",
+      "reproduce": "Ask an agent to run `gh pr create --head claude/fix-login`."
+    },
+    "_check_segments:gh-raw-merge-release": {
+      "title": "Guard refuses a raw gh pr merge or gh release create",
+      "what": "The guard refused a raw `gh pr merge` or `gh release create`. devkit runs these through `dev pr merge` and `dev release`, which check CI, reviews, conflicts, and the delivery policy first.",
+      "reproduce": "Ask an agent to run `gh pr merge --squash` on a pull request of a throwaway repository."
+    },
+    "_check_segments:gh-run-rerun": {
+      "title": "Guard refuses gh run rerun without a change",
+      "what": "The guard refused `gh run rerun`. Running CI again without a change repeats the same failure and costs a full CI cycle, so only a failure known to be flaky may run again.",
+      "reproduce": "Ask an agent to run `gh run rerun` on a failed run."
+    },
+    "_check_segments:identity-hiding": {
+      "title": "Guard refuses {word} that hides an agent identity variable",
+      "what": "The guard refused a command that unsets or blanks one of the variables that tell a project's tools an agent is at work, such as `CLAUDECODE` or `CODEX_SANDBOX`, with `unset`, `env -u`, `env -i`, or an empty assignment before the command.",
+      "reproduce": "Ask an agent to run `env -i bash -c 'echo test'`."
+    },
+    "_check_segments:nested-depth": {
+      "title": "Guard refuses {word} nested too deep for its command rules",
+      "what": "The guard refused a command that nests shells, `eval`, or wrappers four levels deep or more, such as `sh -c` inside `sh -c`, so its rules on deleting, git, and gh cannot judge what the innermost command does.",
+      "reproduce": "Ask an agent to run a command wrapped in four levels of `sh -c`."
+    },
+    "_check_segments:overwrite": {
+      "title": "Guard refuses {word} to a target it may not replace or create",
+      "what": "The guard refused a `cp`, `mv`, `rsync`, or `ditto` because of its target: a `cp` or `mv` that would overwrite an existing file in the workspace without keeping the old version, or a target that breaks devkit's workspace layout in `~/Development`. `dev cp` and `dev mv` refuse to overwrite, or move the old version to the Trash.",
+      "reproduce": "Ask an agent to run `cp a.txt b.txt` in a throwaway repository where `b.txt` already exists."
+    },
+    "_check_segments:session-member": {
+      "title": "Guard refuses dev session tell or ask from a crew member",
+      "what": "The guard refused a crew member's `dev session tell`, `ask`, `answer`, `claim`, `release`, or `escalate`. These act for the whole session, so only its tech lead runs them; reading with `dev session ls` stays open.",
+      "reproduce": "As a crew member, run `dev session tell` to another session."
+    },
+    "_check_segments:speaker-stamp": {
+      "title": "Guard refuses {word} that sets DEVKIT_SPEAKER",
+      "what": "The guard refused a command that sets `DEVKIT_SPEAKER`, the stamp that tells devkit the tech lead's main session speaks. Only devkit's own hook sets it; typed by hand, it would let a crew member or a program speak as the tech lead.",
+      "reproduce": "Ask an agent to run `DEVKIT_SPEAKER=main dev session ls`."
+    },
+    "_check_segments:substitution-depth": {
+      "title": "Guard refuses {word} whose substitutions nest too deep",
+      "what": "The guard refused a command whose command substitutions, `$(…)` or backticks, nest four levels deep or more, so it cannot judge what the innermost command does.",
+      "reproduce": "Ask an agent to run a command with four levels of `$(…)` inside each other."
+    },
+    "_check_segments:thread-id": {
+      "title": "Guard refuses {word} that sets CODEX_THREAD_ID in a crew lane",
+      "what": "The guard refused a crew member's command that sets `CODEX_THREAD_ID`, which names the Codex thread, and so the agent session, that runs it. A crew member's command runs in its own thread.",
+      "reproduce": "As a crew member in Codex, run `CODEX_THREAD_ID=test dev status`."
+    },
+    "_check_segments:xargs-rm": {
+      "title": "Guard refuses xargs rm because it deletes whatever it is fed",
+      "what": "The guard refused `xargs rm`, which permanently deletes whatever its input names. `dev rm` moves files to the Trash instead.",
+      "reproduce": "Ask an agent to run `ls *.log | xargs rm` in a throwaway repository."
+    },
+    "_dev_cross_violation:dev-fed-words": {
+      "title": "Guard refuses a dev command whose words xargs or find add at run time",
+      "what": "The guard refused a `dev` command that writes handoff files while `xargs`, `find -exec`, or `parallel` adds words to it when it runs, so the guard cannot tell whose handoff it writes.",
+      "reproduce": "In a project session, ask an agent to run `echo test | xargs dev task add`."
+    },
+    "_dev_cross_violation:dev-folder-unknown": {
+      "title": "Guard refuses a dev command run in a folder known only at run time",
+      "what": "The guard refused a `dev` command that writes handoff files from a folder the shell names only when it runs, such as a `cd` to a variable, so it cannot tell which project's handoff it writes.",
+      "reproduce": "In a project session, ask an agent to run `cd \"$PWD\" && dev task add test`."
+    },
+    "_dev_cross_violation:initiative-membership": {
+      "title": "Guard refuses a project session that changes initiative membership",
+      "what": "The guard refused `dev initiative add`, `rm`, or `new` from a project session. Changing an initiative's members is a portfolio decision, made in a portfolio-level session started in `~/Development`.",
+      "reproduce": "In a project session, ask an agent to run `dev initiative new test`."
+    },
+    "_dev_cross_violation:not-member": {
+      "title": "Guard refuses a dev command on an initiative the project is not in",
+      "what": "The guard refused a `dev` command whose `-i` option names an initiative that this session's project is not a member of.",
+      "reproduce": "In a project session, ask an agent to run `dev task add test -i` with an initiative the project does not belong to."
+    },
+    "_dev_cross_violation:other-project": {
+      "title": "Guard refuses a dev command that names another project with -p",
+      "what": "The guard refused a `dev` command whose `-p` option names another project. A session writes only its own project's handoff files.",
+      "reproduce": "In a project session, ask an agent to run `dev task add test -p` with another project's id."
+    },
+    "_dev_cross_violation:other-project-folder": {
+      "title": "Guard refuses a dev command run in another project folder",
+      "what": "The guard refused a `dev` command that runs in a folder of another project, so it would write that project's handoff files instead of this session's.",
+      "reproduce": "In a project session, ask an agent to `cd` into another repository and run `dev task add test`."
+    },
+    "_dev_cross_violation:other-project-log": {
+      "title": "Guard refuses dev handoff --log or --edit for another project",
+      "what": "The guard refused `dev handoff` with `--log` or `--edit` for another project, which would write that project's session log or handoff note.",
+      "reproduce": "In a project session, ask an agent to run `dev handoff` with another project's id and `--log test`."
+    },
+    "_dev_cross_violation:other-project-plan": {
+      "title": "Guard refuses dev plan on a plan of another project",
+      "what": "The guard refused `dev plan revise`, `approve`, or `supersede` on a plan that is not this project's, or on a path the shell fills in when it runs.",
+      "reproduce": "In a project session, ask an agent to run `dev plan revise` on a plan file of another project."
+    },
+    "_gate_failed": {
+      "title": "Guard refuses an irreversible command because its check failed",
+      "what": "devkit's check of an irreversible action the command names, such as a push, a merge, or a release, failed with an error, so the guard refused the command rather than let it run unchecked.",
+      "reproduce": "Happens only when the guard's own check raises an error on a command that names an irreversible action."
+    },
+    "_lesson_rule_verdict": {
+      "title": "Guard refuses {word} that a lesson rule blocks",
+      "what": "The guard refused a shell command because a lesson rule, written from an earlier mistake in this project, is set to block it.",
+      "reproduce": "Ask an agent to run a command that matches a lesson rule set to block; `dev lesson ls` lists the lessons."
+    },
+    "_main_gate:grant-used-up": {
+      "title": "Guard refuses {word} as irreversible after its grant ran out",
+      "what": "In the main session, the guard refused an action devkit counts as irreversible, such as a publish, a deploy, or a command whose program it cannot name, because the developer's one-time grant for it was used up between the check and the command.",
+      "reproduce": "Happens when two calls use the same one-time grant at the same moment."
+    },
+    "_main_gate:no-grant": {
+      "title": "Guard refuses {word} as irreversible without a grant",
+      "what": "In the main session, the guard refused an action devkit counts as irreversible (tier 2), such as a publish, a deploy, or a command whose program it cannot name, because the developer has not granted it with a typed `grant` line.",
+      "reproduce": "In the main session, ask the agent to run a command whose program the guard cannot name, such as `$CLI pr merge 1`."
+    },
+    "_main_gate:registry": {
+      "title": "Guard refuses an agent post to the devkit bug registry",
+      "what": "The guard refused a command that posts to devkit's bug registry on GitHub directly. Agents report through `dev bug report` and `dev bug detour`, which check what leaves the Mac.",
+      "reproduce": "Ask an agent to run `gh issue comment` on an issue of `fireflysoftwaresolutions/devkit`."
+    },
+    "_sync_verdict": {
+      "title": "Guard refuses dev crew sync outside the crew member step scope",
+      "what": "The guard refused `dev crew sync` from a crew member whose step scope does not hold `plugin/agents/`, the generated files the command rewrites and removes.",
+      "reproduce": "As a crew member whose scope leaves out `plugin/agents/**`, run `dev crew sync`."
+    },
+    "check_clone:canonical": {
+      "title": "Guard refuses a clone outside the canonical path",
+      "what": "The guard refused a clone into a folder other than the repository's canonical path in `~/Development`, by host, owner, and name, which is where `dev clone` places it.",
+      "reproduce": "Ask an agent to run `git clone https://github.com/octocat/Hello-World ~/Development/hello`."
+    },
+    "check_clone:outside-layout": {
+      "title": "Guard refuses a clone of a source it cannot place in the layout",
+      "what": "The guard refused a clone whose source devkit cannot place by host, owner, and repository, such as a local path, into a folder that is neither temporary nor in `~/Development/_local`.",
+      "reproduce": "Ask an agent to clone a local repository path into `~/Development/test`."
+    },
+    "check_git:branch-create": {
+      "title": "Guard refuses git branch with a name that breaks the naming rule",
+      "what": "The guard refused `git branch` because the new name breaks devkit's branch naming standard, `<type>/<ticket>-<topic>` in lowercase, for example with a tool or agent prefix such as `claude/`.",
+      "reproduce": "Ask an agent to run `git branch claude/fix-login`."
+    },
+    "check_git:branch-rename": {
+      "title": "Guard refuses git branch -m to a name that breaks the naming rule",
+      "what": "The guard refused a rename with `git branch -m` because the new name breaks devkit's branch naming standard, `<type>/<ticket>-<topic>` in lowercase, for example with a tool or agent prefix such as `claude/`.",
+      "reproduce": "Ask an agent to run `git branch -m claude/fix-login`."
+    },
+    "check_git:checkout-branch": {
+      "title": "Guard refuses git checkout -b with a name that breaks the naming rule",
+      "what": "The guard refused `git checkout -b` or `git switch -c` because the new branch's name breaks devkit's branch naming standard, `<type>/<ticket>-<topic>` in lowercase, for example with a tool or agent prefix such as `claude/`.",
+      "reproduce": "Ask an agent to run `git switch -c claude/fix-login`."
+    },
+    "check_git:clean-ignored": {
+      "title": "Guard refuses git clean -x or -X because it deletes ignored files",
+      "what": "The guard refused `git clean -x` or `-X`, which also deletes ignored files such as `.env`, local configuration, and caches.",
+      "reproduce": "Ask an agent to run `git clean -fdx` in a throwaway repository."
+    },
+    "check_git:clean-untracked": {
+      "title": "Guard refuses git clean -f on untracked files",
+      "what": "The guard refused `git clean -f`, which would permanently delete untracked files that git cannot recover. `dev rm --discard` moves them to the Trash instead.",
+      "reproduce": "Ask an agent to run `git clean -f` in a throwaway repository with an untracked file."
+    },
+    "check_git:force-push": {
+      "title": "Guard refuses a plain git push --force",
+      "what": "The guard refused a plain force push, `git push --force` or `-f`. devkit allows `git push --force-with-lease` on your own feature branch.",
+      "reproduce": "Ask an agent to run `git push --force` on a feature branch of a throwaway repository."
+    },
+    "check_git:force-push-default": {
+      "title": "Guard refuses a force push to main or master",
+      "what": "The guard refused a force push to `main` or `master`.",
+      "reproduce": "Ask an agent to run `git push --force-with-lease origin main` in a throwaway repository."
+    },
+    "check_git:git-config": {
+      "title": "Guard refuses git config that sets a pager or another command it runs",
+      "what": "The guard refused a `git config` write of a key that makes git run a command line, such as `core.pager`. That command would run under every later git call, in every session, where the guard sees only a read such as `git log`.",
+      "reproduce": "Ask an agent to run `git config core.pager less` in a throwaway repository."
+    },
+    "check_git:init-layout": {
+      "title": "Guard refuses git init in a folder outside the workspace layout",
+      "what": "The guard refused `git init` in a folder that breaks devkit's workspace layout in `~/Development`, such as a sibling copy of a repository or a folder that is not an owner, host, or `_local` folder.",
+      "reproduce": "Ask an agent to run `git init ~/Development/scratch`."
+    },
+    "check_git:push-branch": {
+      "title": "Guard refuses git push of a branch whose name breaks the naming rule",
+      "what": "The guard refused `git push` of a branch whose name breaks devkit's branch naming standard, `<type>/<ticket>-<topic>` in lowercase, for example with a tool or agent prefix such as `claude/`.",
+      "reproduce": "On a branch named `claude/fix-login` in a throwaway repository, ask an agent to run `git push`."
+    },
+    "check_git:reset-hard": {
+      "title": "Guard refuses git reset --hard with uncommitted changes",
+      "what": "The guard refused `git reset --hard` in a repository with uncommitted changes, which it would discard.",
+      "reproduce": "Ask an agent to run `git reset --hard` in a throwaway repository with an uncommitted change."
+    },
+    "check_git:secrets": {
+      "title": "Guard refuses a git commit whose staged changes look like a secret",
+      "what": "The guard refused a commit because gitleaks found content shaped like a secret, such as a token or a private key, in the staged changes.",
+      "reproduce": "In a throwaway repository, stage a file that holds a test value shaped like an access token, then ask an agent to run `git commit`."
+    },
+    "check_git:stash": {
+      "title": "Guard refuses git stash because every worktree shares the stash",
+      "what": "The guard refused `git stash`. The stash is shared by every worktree of a repository, so another session can pop your changes; `dev commit --wip` keeps them on your branch instead.",
+      "reproduce": "Ask an agent to run `git stash` in a repository with a change."
+    },
+    "check_git:tag-format": {
+      "title": "Guard refuses a git tag that breaks the project tag format",
+      "what": "The guard refused `git tag` because the tag name breaks the tag format of the project's recorded delivery policy, such as `vYY.MM.PATCH` for CalVer.",
+      "reproduce": "In a project with a recorded delivery policy, ask an agent to run `git tag test-1`."
+    },
+    "check_git:worktree-branch": {
+      "title": "Guard refuses git worktree add -b with a name that breaks the naming rule",
+      "what": "The guard refused `git worktree add -b` because the new branch's name breaks devkit's branch naming standard, `<type>/<ticket>-<topic>` in lowercase, for example with a tool or agent prefix such as `claude/`.",
+      "reproduce": "Ask an agent to run `git worktree add -b claude/fix-login ../fix-login`."
+    },
+    "check_push_budget": {
+      "title": "Guard refuses a third push of a branch within an hour",
+      "what": "The guard refused the third push of the same branch within an hour that starts CI, to stop a push-and-see loop. A local green run recorded with `dev ci --run` lets the push through.",
+      "reproduce": "Ask an agent to push one branch three times in an hour, each push starting CI, without `dev ci --run`."
+    },
+    "check_rm:checkout": {
+      "title": "Guard refuses rm -r of a repository checkout",
+      "what": "The guard refused a recursive delete of a folder that is a repository checkout, which can lose unpushed work.",
+      "reproduce": "Ask an agent to run `rm -r` on a throwaway repository's folder in `~/Development`."
+    },
+    "check_rm:git-dir": {
+      "title": "Guard refuses rm -r of a .git folder",
+      "what": "The guard refused a recursive delete of a `.git` folder, which destroys the repository's history.",
+      "reproduce": "Ask an agent to run `rm -rf .git` in a throwaway repository."
+    },
+    "check_rm:protected-path": {
+      "title": "Guard refuses rm -r of a protected path",
+      "what": "The guard refused a recursive delete of a path devkit protects, such as the home folder, `~/Development`, or devkit's own install.",
+      "reproduce": "Happens when an agent runs a recursive `rm` on a path devkit protects. Do not try it: the guard judges only an agent's calls, and the same command in a terminal deletes the path."
+    },
+    "check_rm:top-folder": {
+      "title": "Guard refuses rm -r of a whole top-level workspace folder",
+      "what": "The guard refused a recursive delete of a whole folder directly in `~/Development`, such as an owner or host folder that holds repositories.",
+      "reproduce": "Happens when an agent runs a recursive `rm` on a folder directly in `~/Development`. Do not try it outside an agent session: the same command in a terminal deletes the folder."
+    },
+    "check_rm:workspace-wipe": {
+      "title": "Guard refuses rm -r that would wipe the workspace",
+      "what": "The guard refused `rm -r` of `*`, `.`, or `..` in the home folder, `~/Development`, or an owner folder, which would wipe the workspace.",
+      "reproduce": "Happens when an agent runs `rm -r *` in `~/Development`. Do not try it outside an agent session: the same command in a terminal deletes the workspace."
+    },
+    "check_rm:worktree": {
+      "title": "Guard refuses rm -r of a git worktree",
+      "what": "The guard refused a recursive delete of a git worktree. `dev wt rm` removes it, checks for unpushed work, and keeps git's records of worktrees consistent.",
+      "reproduce": "Ask an agent to run `rm -rf` on a throwaway worktree."
+    },
+    "check_worktree_add": {
+      "title": "Guard refuses a raw git worktree add",
+      "what": "The guard refused a raw `git worktree add`, which would create a worktree devkit does not manage. `dev wt new` places it in `~/Development/.worktrees` and registers it for cleanup.",
+      "reproduce": "Ask an agent to run `git worktree add ../test-tree` in a repository."
+    },
+    "check_write_path:backup-copy": {
+      "title": "Guard refuses a file write that creates a backup copy",
+      "what": "The guard refused a file tool write to a backup name in `~/Development`, such as `README.md.bak`, `app_old.py`, or `notes copy.md`. devkit keeps history in git, not in backup copies.",
+      "reproduce": "Ask an agent to write `README.md.bak` in a repository with the Write tool."
+    },
+    "check_write_path:codex-cli-scratch": {
+      "title": "Guard refuses a Codex CLI scratch path outside the session folder",
+      "what": "During a Codex hook, the guard refused a write to a Codex CLI scratch path outside the session's registered folder and the crew member's folder.",
+      "reproduce": "In Codex, ask an agent to write a file in another session's CLI scratch folder."
+    },
+    "check_write_path:codex-scratch-link": {
+      "title": "Guard refuses a Codex scratch write through a link that leaves its folder",
+      "what": "The guard refused a write in a Codex chat's folder through a link that points outside the chat's registered folder.",
+      "reproduce": "In Codex, ask an agent to write a file through a symbolic link in the chat folder that points outside it."
+    },
+    "check_write_path:handoff": {
+      "title": "Guard refuses a write to a handoff file this session does not own",
+      "what": "The guard refused a file tool write in the handoff repository to a file this session does not own: another project's note or plans, a generated file such as `PROJECTS.md`, or a record such as a delivery policy that its own `dev` command writes.",
+      "reproduce": "In a project session, ask an agent to edit another project's note in `~/Development/.handoff/projects/`."
+    },
+    "check_write_path:layout": {
+      "title": "Guard refuses a file write that breaks the workspace layout",
+      "what": "The guard refused a file tool write to a path that breaks devkit's workspace layout in `~/Development`, such as a sibling copy of a repository or a folder that is not an owner, host, or `_local` folder.",
+      "reproduce": "Ask an agent to write `~/Development/scratch/notes.md` with the Write tool."
+    },
+    "check_write_path:outside": {
+      "title": "Guard refuses a file write outside the workspace and temp folders",
+      "what": "The guard refused a file tool write outside `~/Development`, the temporary folders, and the agents' configuration folders. Scratch files belong in the session scratchpad or devkit's temporary folder.",
+      "reproduce": "In Codex, ask an agent to write `~/Documents/test.txt`."
+    },
+    "claim_refusal:claim": {
+      "title": "Guard refuses an action on work another agent session has claimed",
+      "what": "The guard refused a release, a push, or a write to a handoff note that another agent session on this Mac has claimed with `dev session claim`. Only the session that holds the claim, or a grant the developer types, can act on it.",
+      "reproduce": "Claim a release in one agent session with `dev session claim`, then ask an agent in another session to release the same project."
+    },
+    "copy": {
+      "title": "Guard refuses a copy that changes a devkit variable in a settings file",
+      "what": "The guard refused a `cp` or `install` onto an agent settings file or a shell startup file that would set, change, or remove a `DEVKIT_*` variable or `DEV_ROOT`. Those variables switch devkit's safeguards for every hook.",
+      "reproduce": "In a throwaway repository, ask an agent to copy a file that sets a `DEVKIT_*` variable onto `.claude/settings.json`."
+    },
+    "crew_shell_verdict:crew-word": {
+      "title": "Guard refuses dev crew with a word that is not a crew command",
+      "what": "The guard refused a crew member's `dev crew` call whose next word is not one of the crew commands, so it cannot tell what the call would do. `dev crew --help` lists them.",
+      "reproduce": "As a crew member, run `dev crew notes`."
+    },
+    "crew_shell_verdict:impeccable": {
+      "title": "Guard refuses a crew member dev impeccable form only the developer runs",
+      "what": "The guard refused a crew member's `dev impeccable` call with a form that is not on the allowlist agents may run. Every other form of the design engine is the developer's, in a terminal.",
+      "reproduce": "As a crew member, run `dev impeccable doctor --fix`."
+    },
+    "crew_shell_verdict:impeccable-lane": {
+      "title": "Guard refuses dev impeccable in a crew lane where it writes outside the scope",
+      "what": "The guard refused a crew member's `dev impeccable` call because a path it writes is outside the step's scope, outside the workspace, in the handoff repository, or counted from a folder the guard cannot know before the shell runs.",
+      "reproduce": "As a crew member with a narrow scope, run a `dev impeccable` form that writes, with a `--target` outside that scope."
+    },
+    "crew_shell_verdict:lane": {
+      "title": "Guard refuses a dev progress or dev crew call that is not a command of its own",
+      "what": "The guard refused a crew member's `dev progress` or `dev crew` call that devkit could not route to the member's lane: inside `$(…)`, `bash -c`, a loop, or a program; chained to a command that writes or runs code; or with backticks or `$(` in its own quoted message.",
+      "reproduce": "As a crew member, run `dev progress note \"test\" && touch test.txt`."
+    },
+    "crew_shell_verdict:lane-unparsed": {
+      "title": "Guard refuses a dev progress or dev crew call in a command it cannot parse",
+      "what": "The guard refused a crew member's command that names a `dev progress` or `dev crew` call and that the shell would read another way than the guard does, so devkit cannot route the call to the member's lane.",
+      "reproduce": "As a crew member, run `dev progress note` in a command line with a quote that never closes."
+    },
+    "crew_shell_verdict:member-escape": {
+      "title": "Guard refuses {word} with an escape hatch in a crew lane",
+      "what": "The guard refused a crew member's command that uses one of devkit's escape hatches, such as a `DEVKIT_RAW_FS=1` prefix or a change to `.gitleaksignore`. The hatches are for the developer and the main session, where each use is recorded.",
+      "reproduce": "As a crew member, run `DEVKIT_RAW_FS=1 rm test.txt` in a throwaway repository."
+    },
+    "crew_shell_verdict:member-gate": {
+      "title": "Guard refuses {word} as irreversible for a crew member",
+      "what": "The guard refused a crew member's command that names an action devkit counts as irreversible: a tier 2 action, such as a publish, a deploy, or a command whose program it cannot name, or a tier 1 action, such as a push or a pull request, without a step grant for the member's lane.",
+      "reproduce": "As a crew member, run a command whose program the guard cannot name, such as `$CLI pr merge 1`."
+    },
+    "crew_shell_verdict:member-gate-unparsed": {
+      "title": "Guard refuses a crew member command it cannot parse that may be irreversible",
+      "what": "The guard refused a crew member's command that the shell would read another way than the guard does and that names an irreversible action, so the guard cannot tell what it does.",
+      "reproduce": "As a crew member, run `git push` in a command line with a quote that never closes."
+    },
+    "crew_shell_verdict:readonly": {
+      "title": "Guard refuses {word} in a read-only crew lane",
+      "what": "In a review or read-only lane, the guard refused a command that is not on the read-only allowlist: readers such as `cat`, `grep`, and `git log`, the project's checks, and scripts from the member's own scratch folder.",
+      "reproduce": "As a review crew member, run `touch test.txt`."
+    },
+    "crew_shell_verdict:readonly-unparsed": {
+      "title": "Guard refuses a command it cannot parse in a read-only crew lane",
+      "what": "In a review or read-only lane, the guard refused a command that the shell would read another way than the guard does, so it cannot check the command against the read-only allowlist.",
+      "reproduce": "As a review crew member, run a command with a quote that never closes."
+    },
+    "crew_shell_verdict:session-member": {
+      "title": "Guard refuses a crew member program that sends to other sessions",
+      "what": "The guard refused a crew member's command or program that runs `dev session tell`, `ask`, `answer`, `claim`, `release`, or `escalate`. These act for the whole session, so only its tech lead runs them.",
+      "reproduce": "As a crew member, run a Python program that calls `dev session tell` through `subprocess`."
+    },
+    "crew_shell_verdict:team": {
+      "title": "Guard refuses a crew member dev crew command that changes the team",
+      "what": "The guard refused a crew member's `dev crew` command that changes the team's crew or briefs a member, such as `dev crew set` or `dev crew brief`. The tech lead runs those.",
+      "reproduce": "As a crew member, run `dev crew set` on a member's field."
+    },
+    "dev:config-agents": {
+      "title": "Guard refuses dev config set agents from an agent",
+      "what": "The guard refused `dev config set` of a key under `agents.`, which turns devkit on or off for an agent. Only the developer changes it, in their own terminal.",
+      "reproduce": "Ask an agent to run `dev config set` on a key under `agents.`."
+    },
+    "dev:config-audit": {
+      "title": "Guard refuses dev config set audit from an agent",
+      "what": "The guard refused `dev config set` of a key under `audit.`, which changes what devkit records about the agents' actions. Only the developer changes audit settings, in a terminal.",
+      "reproduce": "Ask an agent to run `dev config set` on a key under `audit.`."
+    },
+    "dev:config-bugs-share": {
+      "title": "Guard refuses dev config set bugs.share from an agent",
+      "what": "The guard refused `dev config set bugs.share`, which decides whether devkit posts bug reports, votes, and workarounds publicly under the developer's GitHub account. Only the developer decides that, with `dev bug share`.",
+      "reproduce": "Ask an agent to run `dev config set bugs.share` with any value."
+    },
+    "dev:config-edit": {
+      "title": "Guard refuses dev config edit from an agent",
+      "what": "The guard refused `dev config edit`, which opens devkit's configuration file for editing. Agents may not edit devkit's state, configuration, or install; devkit's own commands write them.",
+      "reproduce": "Ask an agent to run `dev config edit`."
+    },
+    "dev:config-lock": {
+      "title": "Guard refuses dev config lock or unlock from an agent",
+      "what": "The guard refused `dev config lock` or `dev config unlock`, which adds or removes the managed settings that keep user and project settings from turning off devkit's hooks. That is a safeguards change, which only the developer makes.",
+      "reproduce": "Ask an agent to run `dev config lock`."
+    },
+    "dev:config-safeguards": {
+      "title": "Guard refuses dev config set safeguards from an agent",
+      "what": "The guard refused `dev config set` of a key under `safeguards.`, which changes devkit's safeguards. Only the developer changes them, in a terminal.",
+      "reproduce": "Ask an agent to run `dev config set` on a key under `safeguards.`."
+    },
+    "dev:ext": {
+      "title": "Guard refuses a dev ext command that changes plugins or MCP servers",
+      "what": "The guard refused a `dev ext` command that changes the plugins, skills, or MCP servers that run in every session on the Mac, such as `dev ext add`, `remove`, `update --apply`, or `ack`. Only the developer runs those, in a terminal.",
+      "reproduce": "Ask an agent to run `dev ext remove` with the name of an extension that is not installed."
+    },
+    "dev:guardless-session": {
+      "title": "Guard refuses dev claude or dev codex that runs without the guard",
+      "what": "The guard refused `dev claude` or `dev codex` with a flag or a variable that would start a nested session without devkit's hooks or sandbox, such as `CLAUDE_CONFIG_DIR` pointing at another settings folder.",
+      "reproduce": "Ask an agent to run `dev claude` with `CLAUDE_CONFIG_DIR` set to another folder."
+    },
+    "dev:hook": {
+      "title": "Guard refuses dev hook typed through a shell",
+      "what": "The guard refused `dev hook`, which runs one of devkit's hooks. Only the agent's harness runs hooks, when their event fires; a hook event typed through a shell could forge the developer's prompt or answer.",
+      "reproduce": "Ask an agent to run `dev hook prompt`."
+    },
+    "dev:impeccable": {
+      "title": "Guard refuses a dev impeccable form that only the developer runs",
+      "what": "The guard refused `dev impeccable` with a form that is not on the allowlist agents may run. Every other form of the design engine is the developer's, in a terminal.",
+      "reproduce": "Ask an agent to run `dev impeccable doctor --fix`."
+    },
+    "dev:install": {
+      "title": "Guard refuses dev install or dev update from an agent",
+      "what": "The guard refused `dev install` or `dev update`, which pin a new devkit copy and rewrite the agents' settings. The developer runs them, in a terminal.",
+      "reproduce": "Ask an agent to run `dev update`."
+    },
+    "dev:setup": {
+      "title": "Guard refuses dev setup from an agent",
+      "what": "The guard refused `dev setup`, which decides which agents devkit sets up and rewrites their settings, hooks, and instructions. Agents may run only `dev setup --preview`.",
+      "reproduce": "Ask an agent to run `dev setup`."
+    },
+    "dev:vendor-ext": {
+      "title": "Guard refuses dev claude or dev codex as a plugin or MCP change",
+      "what": "The guard refused `dev claude` or `dev codex` with words that include `plugin`, `plugins`, `mcp`, or `marketplace`, because it could not tell that the call only reads. Such a call can add, remove, switch, or update a plugin, a marketplace, or an MCP server that runs in every session on the Mac.",
+      "reproduce": "Ask an agent to run `dev claude mcp` with a verb that is not read-only, such as `add`."
+    },
+    "devkit_off:settings-edit-unseen": {
+      "title": "Guard refuses an edit of an agent settings file it cannot match",
+      "what": "The guard refused an Edit or MultiEdit of an agent settings file, such as `.claude/settings.json`, whose `old_string` is not in the file, so it cannot tell what the edit leaves there or whether it turns devkit's hooks off.",
+      "reproduce": "In a throwaway repository, ask an agent to edit `.claude/settings.json` with an `old_string` the file does not hold."
+    },
+    "devkit_off_texts": {
+      "title": "Guard refuses a write that turns devkit off in an agent settings file",
+      "what": "The guard refused a file tool write that would leave devkit off in an agent settings file, for example by turning off all hooks. devkit stays active in every Claude and Codex session; turning it off is a change to devkit's configuration.",
+      "reproduce": "In a throwaway repository, ask an agent to set `disableAllHooks` to `true` in `.claude/settings.json`."
+    },
+    "evidence_forgery:decoded": {
+      "title": "Guard refuses {word} that runs code it decodes at run time",
+      "what": "The guard refused a program that runs code it decodes when it runs, such as `exec` of base64, hex, zlib, or marshal data, so the guard cannot tell whether it forges the developer's approval or writes devkit's records.",
+      "reproduce": "Ask an agent to run `python3 -c` with code that passes a decoded base64 string to `exec`."
+    },
+    "evidence_forgery:developer-only": {
+      "title": "Guard refuses {word} calling a developer-only devkit function",
+      "what": "The guard refused a program that loads devkit and calls a function that only a `dev` command runs, after the developer types a grant line. Called from an agent's program, it would skip that grant.",
+      "reproduce": "Ask an agent to run a Python program that imports devkit and calls a function that applies a developer's grant."
+    },
+    "evidence_forgery:forgery": {
+      "title": "Guard refuses {word} calling devkit code that records grants",
+      "what": "The guard refused a program that loads devkit and reaches a function that records or uses the developer's prompts, answers, and grants. Called from an agent's program, it would forge the developer's approval.",
+      "reproduce": "Ask an agent to run a Python program that imports devkit's evidence module and records a prompt."
+    },
+    "evidence_forgery:nested": {
+      "title": "Guard refuses {word} nested too deep for its forgery check",
+      "what": "The guard refused a command that nests shells, `eval`, or wrappers four levels deep or more, so it cannot tell whether the innermost program loads devkit and forges its records.",
+      "reproduce": "Ask an agent to run a program wrapped in four levels of `sh -c`."
+    },
+    "forged_env:dev-program-env": {
+      "title": "Guard refuses a program that runs devkit with forged variables",
+      "what": "The guard refused an interpreter program that sets `HOME`, `DEV_ROOT`, or a `DEVKIT_*` variable in its environment and runs devkit. Those variables decide where devkit finds its records and who calls it.",
+      "reproduce": "Ask an agent to run a Python program that sets `HOME` in `os.environ` and then runs `dev status`."
+    },
+    "forged_env:forged-env": {
+      "title": "Guard refuses {word} that runs devkit with forged variables",
+      "what": "The guard refused a command that runs devkit with `HOME`, `DEVKIT_CONFIG`, `DEV_ROOT`, `CODEX_THREAD_ID`, or a `DEVKIT_*` variable other than the one-command hatches set to another value. Those variables decide where devkit finds its records and who calls it.",
+      "reproduce": "Ask an agent to run `HOME=/tmp dev status`."
+    },
+    "forged_env:launchctl": {
+      "title": "Guard refuses launchctl setenv of a devkit variable",
+      "what": "The guard refused `launchctl setenv` of `HOME`, `DEV_ROOT`, a `DEVKIT_*` variable, or one of devkit's hatches. launchd passes it to every app and job it starts from then on, devkit's included.",
+      "reproduce": "Ask an agent to run `launchctl setenv` with a `DEVKIT_*` variable."
+    },
+    "forged_env:python-env": {
+      "title": "Guard refuses a devkit call with PYTHONPATH or a similar variable set",
+      "what": "The guard refused a command that runs devkit with a variable that makes Python load other code or another interpreter into devkit's process, such as `PYTHONPATH`, `PYTHONSTARTUP`, or `PYTHONHOME`. devkit runs isolated and needs none of them.",
+      "reproduce": "Ask an agent to run `PYTHONPATH=. dev status`."
+    },
+    "git_handoff": {
+      "title": "Guard refuses a git command that rewrites files in the handoff repository",
+      "what": "The guard refused a git command, such as `git checkout`, `git reset`, or `git merge`, that rewrites files in the handoff repository and can bring back an older handoff note without its embargo list. `dev sync` commits, pulls, and pushes that repository.",
+      "reproduce": "Ask an agent to run `git checkout` on a file in `~/Development/.handoff`."
+    },
+    "git_internal_write": {
+      "title": "Guard refuses a write into a git folder or git configuration",
+      "what": "The guard refused a write to part of a repository's `.git` folder, such as its config, hooks, or info, or to git's own configuration. git runs what those files name, such as a pager or a hook, under later ordinary git calls.",
+      "reproduce": "Ask an agent to write a file in `.git/hooks/` of a throwaway repository."
+    },
+    "interpreter:handoff-writes": {
+      "title": "Guard refuses a program that writes files and names a handoff note",
+      "what": "The guard refused an interpreter program that writes files and names a project's handoff note or the team's records in the handoff repository, because it cannot see what the program changes there.",
+      "reproduce": "Ask an agent to run a Python program that opens a file in `~/Development/.handoff/projects/` for writing."
+    },
+    "interpreter:note-calls": {
+      "title": "Guard refuses a program that calls devkit code for embargoes or backups",
+      "what": "The guard refused an interpreter program that calls devkit's code that writes a project's embargo list or backup policy, past the `dev` commands that own them.",
+      "reproduce": "Ask an agent to run a Python program that imports devkit and changes a project's backup policy."
+    },
+    "interpreter:settings-program": {
+      "title": "Guard refuses a program that writes files and names an agent settings file",
+      "what": "The guard refused an interpreter program that writes files and names an agent settings file, such as `.claude/settings.json` or `.codex/config.toml`, because it cannot see the text the program writes there.",
+      "reproduce": "In a throwaway repository, ask an agent to run a Python program that writes `.claude/settings.json`."
+    },
+    "interpreter:state-writes": {
+      "title": "Guard refuses a program that writes files and names devkit state",
+      "what": "The guard refused an interpreter program that writes files and names devkit's state, configuration, or install, or a `DEVKIT_*` setting, because it cannot see which file the program writes.",
+      "reproduce": "Ask an agent to run a Python program that opens a file in `~/.config/devkit/` for writing."
+    },
+    "irreversible_verdict": {
+      "title": "Guard refuses an irreversible command it cannot parse",
+      "what": "In the main session, the guard refused a command that names an irreversible action and that it cannot parse, so it cannot tell what the command does.",
+      "reproduce": "In the main session, ask the agent to run `git push` in a command line the guard cannot parse."
+    },
+    "member_tool_verdict:allow-comment": {
+      "title": "Guard refuses a crew member edit that adds a secret scan allow comment",
+      "what": "The guard refused a crew member's file edit that adds the comment that tells the secret scan, gitleaks, to skip a line. That is one of devkit's escape hatches, which are for the developer and the main session.",
+      "reproduce": "As a crew member, add the gitleaks allow comment to a line with the Edit tool."
+    },
+    "member_tool_verdict:external": {
+      "title": "Guard refuses a crew member MCP tool that sends or publishes",
+      "what": "The guard refused a crew member's MCP tool call that sends a message, publishes, deploys, or creates or deletes something outside the Mac. Crew members never do; they report it to the tech lead.",
+      "reproduce": "As a crew member, call an MCP tool that sends a message."
+    },
+    "member_tool_verdict:gitleaksignore": {
+      "title": "Guard refuses a crew member edit of .gitleaksignore",
+      "what": "The guard refused a crew member's write to `.gitleaksignore`, which tells the secret scan which findings to skip. That is one of devkit's escape hatches, which are for the developer and the main session.",
+      "reproduce": "As a crew member, write `.gitleaksignore` with the Write tool."
+    },
+    "member_tool_verdict:readonly": {
+      "title": "Guard refuses an MCP write in a read-only crew lane",
+      "what": "In a review or read-only lane, the guard refused an MCP tool call that writes.",
+      "reproduce": "As a review crew member, call an MCP tool that writes a file."
+    },
+    "member_tool_verdict:scope": {
+      "title": "Guard refuses a crew member MCP write outside the step scope",
+      "what": "The guard refused a crew member's MCP tool call that writes a path outside the member's step scope.",
+      "reproduce": "As a crew member with a narrow scope, call an MCP tool that writes a file outside it."
+    },
+    "nested": {
+      "title": "Guard refuses {word} nested too deep for its safeguard rules",
+      "what": "The guard refused a command that nests shells, `eval`, or wrappers four levels deep or more, so its rules on devkit's state, settings, and handoff cannot judge what the innermost command does.",
+      "reproduce": "Ask an agent to run a command wrapped in four levels of `sh -c`."
+    },
+    "note_keys_violation": {
+      "title": "Guard refuses an edit of the embargo list or backup policy in a note",
+      "what": "The guard refused a file tool write that changes or removes the embargo list or the backup policy of a project's handoff note, which decide what devkit pushes.",
+      "reproduce": "Ask an agent to delete the embargo list from a project's handoff note with the Edit tool."
+    },
+    "other_release:named-copy": {
+      "title": "Guard refuses {word} that names another devkit copy",
+      "what": "The guard refused a command that names a devkit copy in the releases folder other than the one `dev install` pinned. An older copy may lack newer safeguards, and its repair writes its own hooks and guard back over the installed ones.",
+      "reproduce": "Ask an agent to run `dev` from an older folder in `~/.local/share/devkit/releases/`."
+    },
+    "other_release:releases-folder": {
+      "title": "Guard refuses {word} building a path to another devkit copy",
+      "what": "The guard refused a command that names another devkit copy in the releases folder through a path it builds, such as a variable followed by the copy's name.",
+      "reproduce": "Ask an agent to run an older copy's `bin/dev` through a variable that holds the releases folder."
+    },
+    "other_release_word": {
+      "title": "Guard refuses {word} with a path inside another devkit copy",
+      "what": "The guard refused a command with a program, an argument, or a redirect whose path is inside another devkit copy, or is the releases folder itself.",
+      "reproduce": "Ask an agent to run `cat` on a file of an older copy in `~/.local/share/devkit/releases/`."
+    },
+    "patch_devkit_off:settings-unseen": {
+      "title": "Guard refuses a patch of an agent settings file it cannot read in full",
+      "what": "The guard refused an `apply_patch` that updates or moves an agent settings file it cannot read in full, so it cannot tell what the patch leaves there or whether it turns devkit's hooks off.",
+      "reproduce": "In Codex, apply a patch to an agent settings file larger than the guard reads."
+    },
+    "patch_header_refusal": {
+      "title": "Guard refuses a patch whose file path holds a control character",
+      "what": "The guard refused an `apply_patch` whose file path holds a control character or a line separator, such as a carriage return or U+2028, which tools split in different places.",
+      "reproduce": "In Codex, apply a patch whose file path holds a carriage return."
+    },
+    "patch_note_violation:note-source": {
+      "title": "Guard refuses a patch that moves or deletes a handoff note",
+      "what": "The guard refused an `apply_patch` that deletes a project's handoff note or moves it away, which would remove its embargo list and backup policy.",
+      "reproduce": "In Codex, apply a patch that deletes a project's handoff note."
+    },
+    "patch_note_violation:note-target": {
+      "title": "Guard refuses a patch that changes the embargo list or backup policy",
+      "what": "The guard refused an `apply_patch` that changes or removes the embargo list or the backup policy of a project's handoff note.",
+      "reproduce": "In Codex, apply a patch that removes the embargo list from a project's handoff note."
+    },
+    "protected_patch:dev-command": {
+      "title": "Guard refuses a patch of the dev command a shell finds",
+      "what": "The guard refused an `apply_patch` that writes or deletes the `dev` a shell finds on the PATH, such as `~/.local/bin/dev`. `dev install` links it to the pinned copy.",
+      "reproduce": "In Codex, apply a patch that adds a file at `~/.local/bin/dev`."
+    },
+    "protected_patch:protected": {
+      "title": "Guard refuses a patch of a devkit state or configuration file",
+      "what": "The guard refused an `apply_patch` that writes or deletes devkit's state, configuration, or install. devkit's own commands write them.",
+      "reproduce": "In Codex, apply a patch to `~/.config/devkit/config.json`."
+    },
+    "protected_patch:settings-env": {
+      "title": "Guard refuses a patch that sets a devkit variable in a settings file",
+      "what": "The guard refused an `apply_patch` that adds a `DEVKIT_*` variable or `DEV_ROOT` to an agent settings file or a shell startup file. Those variables switch devkit's safeguards for every hook.",
+      "reproduce": "In Codex, in a throwaway repository, apply a patch that adds a `DEVKIT_*` line to `.codex/config.toml`."
+    },
+    "protected_write:dev-command": {
+      "title": "Guard refuses a file write to the dev command a shell finds",
+      "what": "The guard refused a file tool write to the `dev` a shell finds on the PATH, such as `~/.local/bin/dev`. `dev install` links it to the pinned copy.",
+      "reproduce": "Ask an agent to write `~/.local/bin/dev` with the Write tool."
+    },
+    "protected_write:protected": {
+      "title": "Guard refuses a file write to devkit state or configuration",
+      "what": "The guard refused a file tool write to devkit's state, configuration, or install. devkit's own commands write them; reading stays open.",
+      "reproduce": "Ask an agent to edit `~/.config/devkit/config.json` with the Edit tool."
+    },
+    "run:note-unparsed": {
+      "title": "Guard refuses a command it cannot parse that names a handoff note",
+      "what": "The guard refused a command that names a project's handoff note or the team's records, may write files, and that the guard cannot parse to see where it writes.",
+      "reproduce": "Ask an agent to run a command with a quote that never closes and a path in `~/Development/.handoff/projects/`."
+    },
+    "run:note-variable": {
+      "title": "Guard refuses a write to a variable path in a command that names a handoff note",
+      "what": "The guard refused a command that writes to a path built from a variable or a subshell, and that names a project's handoff note or the team's records in the handoff repository. Shell commands may not write them.",
+      "reproduce": "Ask an agent to run `echo test > \"$F\"` in a command that also names a file in `~/Development/.handoff/projects/`."
+    },
+    "run:state-unparsed": {
+      "title": "Guard refuses a command it cannot parse that names devkit state",
+      "what": "The guard refused a command that names devkit's state, configuration, or install, writes files, and that the guard cannot parse to see where it writes.",
+      "reproduce": "Ask an agent to run a command with a quote that never closes and a path in `~/.config/devkit/`."
+    },
+    "run:state-variable": {
+      "title": "Guard refuses a write to a variable path in a command that names devkit state",
+      "what": "The guard refused a command that writes to a path built from a variable or a subshell, and that names devkit's state, configuration, or install.",
+      "reproduce": "Ask an agent to run `echo test > \"$F\"` in a command that also names `~/.config/devkit/`."
+    },
+    "run:tmux-list": {
+      "title": "Guard refuses a tmux command list in one call",
+      "what": "The guard refused a tmux command list, several tmux commands joined with `\\;` or `';'` in one call, because a command in the list may type into a terminal session.",
+      "reproduce": "Ask an agent to run `tmux list-sessions \\; list-windows`."
+    },
+    "run:unreadable": {
+      "title": "Guard refuses {word} with an inner line it cannot read",
+      "what": "The guard could not read a command line that this command hands to a shell (`sh -c`, `eval`, a heredoc a shell reads) or keeps in a program's code, for example because a quote never closes, so it refused the command rather than guess what it runs.",
+      "reproduce": "Ask an agent to run `sh -c` with a line whose quote never closes."
+    },
+    "segment:code-session": {
+      "title": "Guard refuses {word} whose code holds a guarded command line",
+      "what": "The guard refused an interpreter program whose code holds a command line that the guard refuses in a shell: a nested agent session without devkit's hooks, a change to plugins or MCP servers, `dev install`, `dev update`, or `dev hook`. The guard cannot tell a line a program runs from one it only keeps as data.",
+      "reproduce": "Ask an agent to run a Python program that can start processes and holds `claude mcp add` in a string, even one it only keeps as a test case."
+    },
+    "segment:git-config": {
+      "title": "Guard refuses a git call that writes a pager into git configuration",
+      "what": "The guard refused a git call that writes a pager or another key that makes git run a command line into git's configuration. That command would run under every later git call, in every session, where the guard sees only a read such as `git log`.",
+      "reproduce": "Ask an agent to run `git config core.pager less` in a throwaway repository."
+    },
+    "segment:guardless-session": {
+      "title": "Guard refuses a claude or codex session that runs without the guard",
+      "what": "The guard refused a `claude` or `codex` call that would start a nested session without devkit's hooks or sandbox, such as one with `--dangerously-skip-permissions`, `CLAUDE_CONFIG_DIR`, or `CODEX_HOME` pointing at another settings folder.",
+      "reproduce": "Ask an agent to run `claude -p test --dangerously-skip-permissions`."
+    },
+    "segment:input-command": {
+      "title": "Guard refuses {word} that runs a command its input names",
+      "what": "The guard refused a command that runs a command its input names, which the guard cannot see before it runs: `xargs` with only a wrapper after it, a runner's placeholder in the command's place, or a shell or interpreter whose script the input names.",
+      "reproduce": "Ask an agent to run `echo ls | xargs env`."
+    },
+    "segment:installer": {
+      "title": "Guard refuses a run of the devkit installer script",
+      "what": "The guard refused running devkit's `install.sh`, which pins a devkit copy and rewrites the agents' settings. The developer runs it, in a terminal.",
+      "reproduce": "Ask an agent to run `sh install.sh` in the devkit checkout."
+    },
+    "segment:terminal-open": {
+      "title": "Guard refuses open of a Terminal window or a .command file",
+      "what": "The guard refused `open` of Terminal, iTerm, or a `.command` or `.tool` file, which starts a shell the guard cannot read and that looks to devkit like the developer's own terminal. Opening files, folders, and URLs in other apps stays open.",
+      "reproduce": "Ask an agent to run `open -a Terminal`."
+    },
+    "segment:terminal-typing": {
+      "title": "Guard refuses {word} that types into a terminal session",
+      "what": "The guard refused a `tmux` or `screen` command that types into a terminal session or carries a command, such as `tmux send-keys` or `screen -X stuff`. What runs there looks to devkit like the developer's own terminal.",
+      "reproduce": "Ask an agent to run `tmux send-keys` to a session."
+    },
+    "segment:vendor-ext": {
+      "title": "Guard refuses {word} as a plugin or MCP change",
+      "what": "The guard refused a command whose words include `plugin`, `plugins`, `mcp`, or `marketplace`, because it could not tell that the command only reads. Such a command can add, remove, switch, or update a plugin, a marketplace, or an MCP server that runs in every session on the Mac.",
+      "reproduce": "Ask an agent to run a `claude` or `codex` command with one of those words in a form the guard does not list as read-only (it lists exact forms, such as `claude mcp list`), to run such a command through a program the guard cannot name, or to keep such a command line as text in a program's code."
+    },
+    "settings_env_violation": {
+      "title": "Guard refuses an edit that sets a devkit variable in a settings file",
+      "what": "The guard refused a Write or Edit that sets, changes, or removes a `DEVKIT_*` variable or `DEV_ROOT` in an agent settings file's env block or a shell startup file. Those variables switch devkit's safeguards for every hook.",
+      "reproduce": "In a throwaway repository, ask an agent to add a `DEVKIT_*` variable to the env block of `.claude/settings.json`."
+    },
+    "settings_write:settings-off": {
+      "title": "Guard refuses a shell write that turns devkit off in agent settings",
+      "what": "The guard refused a shell command that writes an agent settings file so that devkit would be off, for example by turning off all hooks.",
+      "reproduce": "In a throwaway repository, ask an agent to run `echo` with `disableAllHooks` set to `true` into `.claude/settings.json`."
+    },
+    "settings_write:settings-overwrite-bytes": {
+      "title": "Guard refuses a byte overwrite of an agent settings file with non-ASCII text",
+      "what": "The guard refused a `<>` write over the first bytes of an agent settings file while the file or the text holds more than ASCII, so it cannot tell what the write leaves there.",
+      "reproduce": "In a throwaway repository, ask an agent to write text with an accented letter onto `.claude/settings.json` with a `<>` redirect."
+    },
+    "settings_write:settings-readings": {
+      "title": "Guard refuses a write to agent settings with too many readings to judge",
+      "what": "The guard refused a shell write to an agent settings file that has more than 64 possible readings, from several writes and texts in one command, too many to judge.",
+      "reproduce": "In a throwaway repository, ask an agent to run one command that appends many different texts to `.claude/settings.json`."
+    },
+    "settings_write:settings-unread": {
+      "title": "Guard refuses an append to an agent settings file it cannot read in full",
+      "what": "The guard refused an append, a `<>` write, or a patch to an agent settings file it cannot read in full, because it is too large or unreadable, so it cannot tell what the write leaves there.",
+      "reproduce": "Ask an agent to append text to an agent settings file larger than the guard reads."
+    },
+    "settings_write:settings-unseen": {
+      "title": "Guard refuses a shell write to agent settings whose text it cannot see",
+      "what": "The guard refused a shell command that writes an agent settings file without showing the text it writes, such as a copy, a link, `sed -i`, a program, or a variable, a substitution, or a glob in the text.",
+      "reproduce": "In a throwaway repository, ask an agent to run `sed -i` on `.claude/settings.json`."
+    },
+    "steer_rm": {
+      "title": "Guard refuses a plain rm outside scratch folders",
+      "what": "The guard refused a plain `rm`, which deletes permanently, outside temporary and scratch folders. `dev rm` moves files to the Trash and can undo it.",
+      "reproduce": "Ask an agent to run `rm test.txt` in a throwaway repository."
+    },
+    "target:dev-command": {
+      "title": "Guard refuses a shell write to the dev command a shell finds",
+      "what": "The guard refused a shell command that writes, links, or deletes the `dev` a shell finds on the PATH, such as `~/.local/bin/dev`.",
+      "reproduce": "Ask an agent to run a shell command that writes `~/.local/bin/dev`."
+    },
+    "target:dev-command-holder": {
+      "title": "Guard refuses a shell command that changes a folder holding the dev command",
+      "what": "The guard refused a shell command that changes or deletes a folder that holds the `dev` a shell finds, such as `~/.local/bin`.",
+      "reproduce": "Ask an agent to run a shell command that moves or deletes `~/.local/bin`."
+    },
+    "target:handoff-record": {
+      "title": "Guard refuses a shell write to a team record in the handoff repository",
+      "what": "The guard refused a shell command that writes, links, or deletes one of the team's records in the handoff repository, such as a delivery policy, the crew, a lesson, or an audit trail. Each record has its own `dev` command.",
+      "reproduce": "Ask an agent to append to a file in `~/Development/.handoff/lessons/` with a shell redirect."
+    },
+    "target:protected": {
+      "title": "Guard refuses a shell write to devkit state or configuration",
+      "what": "The guard refused a shell command that writes, links, or deletes devkit's state, configuration, or install. devkit's own commands write them.",
+      "reproduce": "Ask an agent to run a shell redirect into `~/.config/devkit/config.json`."
+    },
+    "target:scratch": {
+      "title": "Guard refuses a crew member write outside its own scratch folder",
+      "what": "The guard refused a crew member's shell command that writes or deletes in the session scratchpad outside the member's own folder, `scratchpad/<member>/`.",
+      "reproduce": "As a crew member, run `touch` on a file at the top level of the session scratchpad."
+    },
+    "target:settings-env": {
+      "title": "Guard refuses a shell write that sets a devkit variable in a settings file",
+      "what": "The guard refused a shell command that writes a `DEVKIT_*` variable or `DEV_ROOT` into an agent settings file or a shell startup file. Those variables switch devkit's safeguards for every hook.",
+      "reproduce": "In a throwaway repository, ask an agent to append an env block that sets a `DEVKIT_*` variable to `.claude/settings.json` with `echo`."
+    },
+    "webfetch_verdict": {
+      "title": "Guard refuses a web fetch of a URL that carries a secret",
+      "what": "The guard refused a WebFetch whose URL carries something shaped like a secret, such as a token, a key, or a password, because fetching it sends the secret to that host and its logs.",
+      "reproduce": "Ask an agent to fetch a URL with a query value shaped like an access token."
+    },
+    "xargs:dev": {
+      "title": "Guard refuses xargs dev because its input picks the command",
+      "what": "The guard refused `xargs dev`, which adds the words it reads to the `dev` call, so its input decides what runs, such as `dev install`.",
+      "reproduce": "Ask an agent to run `echo status | xargs dev`."
+    },
+    "xargs:terminal-typing": {
+      "title": "Guard refuses xargs that types into a tmux or screen session",
+      "what": "The guard refused an `xargs` that runs `tmux` or `screen` with words its input adds, which may type into a terminal session.",
+      "reproduce": "Ask an agent to run `echo ls | xargs tmux send-keys -t 0`."
+    },
+    "hooks:crew-lane": {
+      "title": "Guard refuses crew member commands of several kinds under one id",
+      "what": "The guard refused a shell command that a crew member, a subagent devkit launched, ran in its lane. Up to 26.11.15 every kind of lane refusal but the read-only and escape-hatch ones used this one id, so this issue collects several causes: a change to the crew, a program named at run time, and a `dev progress` or `dev crew` call chained with other commands.",
+      "reproduce": "In a crew member's session on 26.11.15 or earlier, run a command its lane refuses, such as `dev progress note` joined with `&&` to a command that writes a file."
+    },
+    "hooks:lane-check": {
+      "title": "Guard refuses a crew member command when its lane check fails",
+      "what": "devkit could not check a crew member's shell command against the member's lane, because the check itself failed with an error, so it refused the command rather than run it unchecked.",
+      "reproduce": "Happens only when devkit's own lane check fails while a crew member runs a shell command."
+    },
+    "hooks:crew-limits": {
+      "title": "Guard refuses a crew launch or edit the crew limits do not allow",
+      "what": "The guard hook refused a call that the crew's limits do not allow: a subagent launch when no crew slot is free, or deeper than the crew allows, or an edit by the main session of a file a working crew member owns.",
+      "reproduce": "Launch more crew members at once than `progress.max_parallel` allows."
+    },
+    "hooks:crew-scope": {
+      "title": "Guard refuses a crew member file edit outside its step scope",
+      "what": "The guard hook refused a crew member's file or MCP tool call: an edit outside the member's step scope, any edit from a review or read-only lane, a send or a publish, or a change to the secret scan's ignore list.",
+      "reproduce": "As a crew member with a narrow scope, edit a file outside it with the Edit tool."
+    },
+    "hooks:hatch": {
+      "title": "Guard refuses a crew member command that uses an escape hatch",
+      "what": "The guard refused a crew member's shell command that uses one of devkit's escape hatches, such as a `DEVKIT_RAW_FS=1` prefix or a change to `.gitleaksignore`. The hatches are for the developer and the main session, where each use is recorded.",
+      "reproduce": "As a crew member, run `DEVKIT_RAW_FS=1 rm test.txt` in a throwaway repository."
+    },
+    "hooks:hook-forgery": {
+      "title": "Guard refuses a shell call that runs a devkit hook by hand",
+      "what": "The guard hook refused a shell command that runs one of devkit's hooks by hand, such as `dev hook prompt` fed by `echo`. A hook event typed through a shell could forge the developer's prompt or answer.",
+      "reproduce": "Ask an agent to run `echo test | dev hook prompt`."
+    },
+    "hooks:identity": {
+      "title": "Guard refuses a crew member command that changes devkit identity variables",
+      "what": "The guard hook refused a crew member's shell command that sets, exports, or unsets devkit's `DEVKIT_*` variables, or runs a program with `env -i` or `env -u`. Those variables say who calls devkit.",
+      "reproduce": "As a crew member, run `export DEVKIT_AGENT=test`."
+    },
+    "hooks:irreversible": {
+      "title": "Guard refuses an irreversible action or message the developer has not granted",
+      "what": "In the main session, the guard hook refused a shell command's tier 2 action, or an MCP tool that sends or publishes outside the Mac, because the developer has not granted it with a typed `grant` line.",
+      "reproduce": "In the main session, ask the agent to call an MCP tool that sends a message."
+    },
+    "hooks:readonly": {
+      "title": "Guard refuses a shell command in a read-only crew lane",
+      "what": "In a review or read-only lane, the guard refused a shell command that is not on the read-only allowlist: readers such as `cat`, `grep`, and `git log`, the project's checks, and scripts from the member's own scratch folder.",
+      "reproduce": "As a review crew member, run `touch test.txt`."
+    },
+    "hooks:stub-commit": {
+      "title": "Guard refuses a commit that holds stubs or TODOs without a task",
+      "what": "The guard hook refused a commit whose changes hold unfinished work: stubs, placeholders, or TODO comments that name no tracked task.",
+      "reproduce": "In a throwaway repository, ask an agent to commit a file with a bare TODO comment."
+    }
+  },
+  "crash": {
+    "title": "dev {command} crashes with {exc_class}",
+    "what": "`dev {command}` stopped with an error devkit does not handle ({exc_class}). devkit printed a short notice instead of a traceback and exited with code 70.",
+    "reproduce": "Run `dev {command}`.",
+    "without": {
+      "command": {
+        "title": "devkit crashes with {exc_class}",
+        "what": "A `dev` command stopped with an error devkit does not handle ({exc_class}). devkit printed a short notice instead of a traceback and exited with code 70.",
+        "reproduce": "The report does not name the command; the stack below shows where the error came from."
+      }
+    }
+  },
+  "hook": {
+    "title": "{event} hook fails with {exc_class}",
+    "what": "One of devkit's hooks hit an error devkit does not handle ({exc_class}), so what the hook does for that event was skipped. A failure of the guard hook can refuse the tool call it was judging.",
+    "reproduce": "Start an agent session in which this hook event fires; the stack below shows where the error came from.",
+    "without": {
+      "exc_class": {
+        "title": "{event} hook runs out of time",
+        "what": "One of devkit's hooks ran past the time limit the agent gives it, and the agent stopped it, so what the hook does for that event was skipped.",
+        "reproduce": "Start an agent session in which this hook event fires; the bug shows when the hook runs past the time limit in the agent's hook settings."
+      }
+    }
+  },
+  "command": {
+    "title": "dev {command} does not work as expected",
+    "what": "Someone reported that `dev {command}` does not do what it should, without an error. Their description is under How to reproduce.",
+    "reproduce": "Run `dev {command}` as the reporter's description says.",
+    "without": {
+      "command": {
+        "title": "A dev command does not work as expected",
+        "what": "Someone reported that a `dev` command does not do what it should, without an error. Their description is under How to reproduce.",
+        "reproduce": "Follow the reporter's description below."
+      }
+    }
+  },
+  "events": {
+    "": "A devkit",
+    "config-change": "Config change",
+    "guard": "Guard",
+    "instructions-loaded": "Instructions loaded",
+    "post-compact": "After-compact",
+    "post-tool": "After-tool",
+    "post-tool-failure": "Tool failure",
+    "pre-compact": "Before-compact",
+    "prompt": "Prompt",
+    "session-end": "Session end",
+    "session-start": "Session start",
+    "statusline": "Status line",
+    "stop": "Stop",
+    "subagent-start": "Subagent start",
+    "subagent-stop": "Subagent stop"
+  },
+  "words": {
+    "": "a command",
+    "<program>": "a program it cannot name",
+    "<path>": "a program run by its path",
+    "*": "a {word} command",
+    "Rscript": "an Rscript command",
+    "ack": "an ack command",
+    "ag": "an ag command",
+    "alias": "an alias command",
+    "arch": "an arch command",
+    "autossh": "an autossh command",
+    "awk": "an awk command",
+    "aws": "an aws command",
+    "eb": "an eb command",
+    "echo": "an echo command",
+    "egrep": "an egrep command",
+    "env": "an env command",
+    "eslint": "an eslint command",
+    "exec": "an exec command",
+    "expect": "an expect command",
+    "export": "an export command",
+    "fgrep": "an fgrep command",
+    "id": "an id command",
+    "install": "an install command",
+    "ionice": "an ionice command",
+    "ln": "an ln command",
+    "ls": "an ls command",
+    "lsof": "an lsof command",
+    "md5": "an md5 command",
+    "md5sum": "an md5sum command",
+    "mv": "an mv command",
+    "nawk": "an nawk command",
+    "nl": "an nl command",
+    "npm": "an npm command",
+    "npx": "an npx command",
+    "oc": "an oc command",
+    "od": "an od command",
+    "open": "an open command",
+    "osascript": "an osascript command",
+    "ovsx": "an ovsx command",
+    "rg": "an rg command",
+    "rm": "an rm command",
+    "rmdir": "an rmdir command",
+    "rspec": "an rspec command",
+    "rsync": "an rsync command",
+    "scp": "an scp command",
+    "sh": "an sh command",
+    "sls": "an sls command",
+    "srm": "an srm command",
+    "ssh": "an ssh command",
+    "unbuffer": "an unbuffer command",
+    "unlink": "an unlink command",
+    "unset": "an unset command",
+    "xargs": "an xargs command",
+    "xattr": "an xattr command",
+    "xxd": "an xxd command"
+  }
+}
