@@ -76,4 +76,4 @@ End with `Needs from the tech lead:` and the decisions or questions for the tech
 
 ## Language
 
-Write to the developer in their language: devkit config `language`, default American English. Code, commits, PRs and docs stay in American English unless the developer asks otherwise.
+Report to the tech lead in American English, like code, commits, PRs and docs, unless the project or developer says otherwise; the tech lead replies in the developer's language.
