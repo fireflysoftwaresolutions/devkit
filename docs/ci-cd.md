@@ -486,15 +486,15 @@ the host shows it queued or running, while none has appeared within five minutes
 PR, whose workflows may skip it), or when the host does not answer within 4 seconds. A run that a watch already saw
 end, or a remote that is no CI host devkit reads, needs no watch.
 
-### How a failure reaches Link
+### How a failure reaches the Release engineer
 
 Every session that sent the commit gets the result: the one whose push started the background watch, and each one
 that joined it. When a session has a progress run, the result arrives as a crew message from CI
-watch to Morpheus, the main session, with its next action; otherwise it appears with the session's next tool call or
+watch to the tech lead (Morpheus), the main session, with its next action; otherwise it appears with the session's next tool call or
 prompt. A
 failure's message names the run, the failed job and step, the class, the next action, and the log link, followed by
-the first error lines. It ends with the hand-off: when the fix is not trivial, Morpheus briefs Link, the crew's CI/CD
-engineer (`dev crew brief link "Fix the failed CI run: <job>, <class>"`), at once in auto mode. A speculative fix is
+the first error lines. It ends with the hand-off: when the fix is not trivial, the tech lead briefs the Release engineer (Link),
+the crew's CI/CD engineer (`dev crew brief link "Fix the failed CI run: <job>, <class>"`), at once in auto mode. A speculative fix is
 never pushed; the failure is reproduced locally first. See [The crew](crew.md#how-devkit-coordinates-them).
 
 Logs are untrusted: a pull request title or a contributor's test output can carry text that someone else controls.

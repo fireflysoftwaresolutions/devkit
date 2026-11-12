@@ -86,12 +86,13 @@ list in the browser, add tests, and write a short README that explains how to op
 
 What happens, and what you see:
 
-1. **devkit routes the request.** Along with your request, devkit tells Claude which kind of work this is and who on
-   the crew does it: front-end work, done by the Frontend engineer (Trinity) and approved by the Code reviewer
-   (Seraph).
-2. **Claude answers as Morpheus, the tech lead.** He posts a plan and an estimate. Work under ten minutes he does
+1. **devkit reminds the tech lead how to route.** Along with your request, devkit reminds Claude that it is the tech
+   lead: declare the request's kinds of work by their ids from the catalog and route each to the member the RACI
+   makes Responsible. For this request, the tech lead declares front-end work, done by the Frontend engineer (Trinity)
+   and approved by the Code reviewer (Seraph).
+2. **Claude answers as the tech lead (Morpheus).** He posts a plan and an estimate. Work under ten minutes he does
    himself; this request gets steps for the crew.
-3. **The crew starts.** Each member Morpheus launches appears in the conversation as an agent with its description,
+3. **The crew starts.** Each member the tech lead launches appears in the conversation as an agent with its description,
    for example `Frontend engineer (Trinity): reading list page`.
 4. **Progress updates arrive** after each finished step, and every ten minutes or so while a long step runs.
 5. **The final report** closes the run: what changed, the evidence, what is not done, and the next step.
@@ -128,7 +129,7 @@ macOS shows a notification when a run finishes or gets blocked, so you can switc
 
 - **A decision that is yours.** A crew member reaches a choice, for example whether finished books move to the
   bottom of the list. The member stops, and Claude shows you the question with its options and a recommendation. Pick an option
-  or type your answer; Morpheus records it and the member goes on.
+  or type your answer; the tech lead records it and the member goes on.
 - **An action that cannot be undone or leaves your Mac**, such as a push to GitHub, a pull request, a merge, a release,
   or deleting data. It waits for your OK, unless you approved it in advance.
 - **A file outside your development folder.** devkit's guard asks you to confirm before Claude writes a file somewhere

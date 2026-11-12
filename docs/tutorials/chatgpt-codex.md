@@ -101,8 +101,10 @@ list in the browser, add tests, and write a short README that explains how to op
 
 What happens, and what you see:
 
-1. **devkit routes the request.** Along with your request, devkit tells Codex which kind of work this is and who on the
-   crew does it: front-end work, done by the Frontend engineer (Trinity) and approved by the Code reviewer (Seraph).
+1. **devkit reminds the tech lead how to route.** Along with your request, devkit reminds Codex that it is the tech
+   lead: declare the request's kinds of work by their ids from the catalog and route each to the member the RACI
+   makes Responsible. For this request, the tech lead declares front-end work, done by the Frontend engineer (Trinity)
+   and approved by the Code reviewer (Seraph).
 2. **Codex answers as the tech lead (Morpheus).** He posts a plan and an estimate. Work under ten minutes he does
    himself; this request gets steps for the crew.
 3. **The crew starts.** The tech lead launches each member as a Codex agent role, for example `trinity`, in the order

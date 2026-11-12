@@ -14,7 +14,7 @@ Mac:
 | Every project and initiative, one project's state, its tasks, a standup, a status report | `devkit_overview`, `devkit_project_status`, `devkit_tasks`, `devkit_standup`, `devkit_report` |
 | CI runs, the delivery policy, unfinished work, which tests a change can break, a pipeline audit | `devkit_ci_status`, `devkit_delivery_policy`, `devkit_stubs`, `devkit_test_plan`, `devkit_ci_audit` |
 | The crew: who does and approves each kind of work, who works now, and the decisions waiting for you | `devkit_crew` |
-| devkit's rules for agents, whole or one section (for example the status block, or how Morpheus routes work) | `devkit_rules` |
+| devkit's rules for agents, whole or one section (for example the status block, or how the tech lead routes work) | `devkit_rules` |
 | Who works on what, the setup's health, the audit trail, the scheduled jobs, lessons learned | `devkit_team`, `devkit_doctor`, `devkit_audit`, `devkit_jobs`, `devkit_lessons` |
 | Add a task, or start, finish, block, unblock, or release one | `devkit_task_add`, `devkit_task_update` |
 
@@ -64,7 +64,7 @@ purpose:
 
 - **The guard runs only in the Code tab.** It is what stops an agent from deleting work, pushing to `main`, or filling
   your disk.
-- **The crew runs only in the Code tab.** Morpheus can route the work to its crew member and have it approved there.
+- **The crew runs only in the Code tab.** The tech lead (Morpheus) can route the work to its crew member and have it approved there.
 - **The status block is checked only in the Code tab.** Chat is asked for it, but nothing checks it or records it.
 - **The handoff note is kept current from the Code tab.** Sessions there are recorded, so the next session starts from
   where the last one stopped.

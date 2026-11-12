@@ -327,12 +327,13 @@ A member assigned a scope (`dev progress assign <step> --to <member> --scope "<g
 parallel members never write the same file. The refusal names the file and the scope:
 
 ```text
-<file> is outside <member>'s scope (<globs>): another crew member may own it. Ask Morpheus to widen it:
+<file> is outside <member>'s scope (<globs>): another crew member may own it. Ask the tech lead to widen it:
 dev crew ask "may I change <file>? why: …"
 ```
 
-The member asks, and Morpheus widens the scope or gives the file to its owner. Review-only and read-only members
-(Seraph, Agent Smith, The Merovingian, Persephone, The Oracle, Councillor Hamann, and Sparks) never edit: they report
+The member asks, and the tech lead widens the scope or gives the file to its owner. Review-only and read-only members
+(the Code reviewer, the Red team tester, the Performance analyst, the Compliance reviewer, the Business analyst, the
+Product owner, and the Lookup scout) never edit: they report
 the change with `file:line` and the fix. The main session is refused too when it edits a file that a working member
 owns; it asks the member (`dev crew ask --to "<member>" "…"`) or waits. `DEVKIT_SCOPE_OVERRIDE=1` is for emergencies
 only. A member's own scratch files outside the repository are never refused.
@@ -347,7 +348,7 @@ A step closes only with its evidence, and only the step that evidence is about. 
 | `step "<name>" waits for <steps>, not done yet` | Close those steps first; use `--force` only when the order really changed |
 | `step "<name>" belongs to <member>, still working on it` | It closes when the member finishes; use `--force` only when it is really done |
 | `step "<name>" is already done` | `dev progress reopen "<name>" --why "…"` |
-| `only Morpheus …` | A crew member asked to `assign`, `begin`, `reopen`, `skip`, or `confirm`: ask Morpheus with `dev crew ask` |
+| `only the tech lead …` | A crew member asked to `assign`, `begin`, `reopen`, `skip`, or `confirm`: ask the tech lead with `dev crew ask` |
 
 Every change, including a forced one, is in `dev progress history`.
 

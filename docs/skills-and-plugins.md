@@ -54,8 +54,8 @@ MCP servers, and scheduled tasks), so `dev install` builds Codex's own copy of t
 ChatGPT app list them with the other skills.
 
 The plugin also brings the crew: 25 specialist agents (`devkit:neo`, `devkit:trinity`, `devkit:seraph`, …),
-generated from `config/crew.json`, among them Sparks, the read-only lookup agent on a small model (`scout` still
-works as an alias; see [Models and tokens › Sparks, the scout agent](models-and-tokens.md#sparks-the-scout-agent)). Codex gets the
+generated from `config/crew.json`, among them the Lookup scout (Sparks), the read-only lookup agent on a small model (`scout` still
+works as an alias; see [Models and tokens › The Lookup scout (Sparks)](models-and-tokens.md#the-lookup-scout-sparks)). Codex gets the
 same roles in `~/.codex/agents/`. See [The crew](crew.md).
 
 ## Required skills

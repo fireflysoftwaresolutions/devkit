@@ -24,18 +24,18 @@ devkit never sets the main model or its effort, in either agent. You choose them
 
 | Setting | Claude Code | Codex |
 | --- | --- | --- |
-| A small read-only agent for lookups | Sparks, the crew's scout (`devkit:sparks`, alias `devkit:scout`) | The `sparks` role and its `scout` alias in `~/.codex/agents/` |
+| A small read-only agent for lookups | The Lookup scout (Sparks) (`devkit:sparks`, alias `devkit:scout`) | The `sparks` role and its `scout` alias in `~/.codex/agents/` |
 | Profiles for other tiers | Not needed: `/model` and `/effort` | `fast`, `deep`, and `review` in `~/.codex/<name>.config.toml` |
 | Subagent model and effort | Inherit the session (optional override) | Inherit the session (optional override) |
 | Parallel subagents | — | At most 4 threads per session |
 | Fast mode | Opt in per session (`fastModePerSessionOptIn`) | — |
 
-### Sparks, the scout agent
+### The Lookup scout (Sparks)
 
 A lookup whose answer you can check cheaply (where a symbol is used, which file sets a value, which log line failed)
-does not need the session's model. Sparks, the crew's scout, answers with `path:line` references and short excerpts,
-says "not found" rather than guess, marks what it inferred, and never edits. `scout` is an alias for Sparks in both
-agents, so briefs that name the scout still work.
+does not need the session's model. The Lookup scout (Sparks) answers with `path:line` references and short excerpts,
+says "not found" rather than guess, marks what it inferred, and never edits. `scout` is an alias for the Lookup scout in
+both agents, so briefs that name the scout still work.
 
 | | Claude Code | Codex |
 | --- | --- | --- |
@@ -43,7 +43,7 @@ agents, so briefs that name the scout still work.
 | Model and effort | Haiku, low effort | The `fast` profile's model and effort (`gpt-6-luna`, low) |
 | Tools or sandbox | `Read`, `Grep`, `Glob`; it does not load `CLAUDE.md` | Read-only sandbox |
 
-Sparks is the only `fast` member of the crew; the others use the session's model (see
+The Lookup scout is the only `fast` member of the crew; the others use the session's model (see
 [The crew › Who is on the crew](crew.md#who-is-on-the-crew)).
 
 ### Codex profiles
@@ -119,7 +119,7 @@ tokens. In short:
 | Security, auth, money, personal data, migrations, public API changes | The session model or stronger, never smaller; high effort |
 | Final review before "done" or a PR | A fresh context at the session model, high effort |
 | Routine implementation with a clear scope | The session model at its default effort |
-| Searches and lookups, log triage | Sparks (the scout), low effort, only when the result can be checked |
+| Searches and lookups, log triage | The Lookup scout (Sparks), low effort, only when the result can be checked |
 | Mechanical edits from a pattern | A tool first (formatter, LSP rename, codemod); otherwise a small agent |
 
 - **Downgrade only what you can verify cheaply.** A judgment, an unverifiable summary or "no issues found" from a
