@@ -269,9 +269,9 @@ class MachineIdentityLineTests(unittest.TestCase):
     # no bidirectional control reaches the terminal from dev team or dev progress; a line break cannot start a row
     # that reads as another machine's, and the words around them still read as written
     def test_no_field_of_another_machines_presence_reaches_the_terminal_with_a_control_character(self):
-        controls = ("\x00\x07\x08\x0b\x0d\x1b\x7f\x85\x9b\x9d؜‎‏"
-                    "‪‫‬‭‮⁦⁧⁨⁩")
-        bad = lambda w: f"\x1b]0;owned\x07‮{w}‬\x1b[2J\x9b31m{controls}"  # noqa: E731
+        controls = ("\x00\x07\x08\x0b\x0d\x1b\x7f\x85\x9b\x9d\u061c\u200e\u200f"
+                    "\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069")
+        bad = lambda w: f"\x1b]0;owned\x07\u202e{w}\u202c\x1b[2J\x9b31m{controls}"  # noqa: E731
         work.PRESENCE.mkdir(parents=True)
         (work.PRESENCE / "eve@m-0e0e0e0e.json").write_text(json.dumps(
             {"user": bad("eve"), "host": bad("m-0e0e0e0e"), "label": "studio", "updated": work.now_iso(self.t0),

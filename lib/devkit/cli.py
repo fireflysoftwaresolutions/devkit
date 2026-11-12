@@ -3412,7 +3412,7 @@ def cmd_jobs(a):
 # return overwrites the line), DEL, the C1 controls (a lone CSI or OSC byte acts as ESC [ or ESC ]), and the
 # bidirectional controls that reorder what the developer reads (the embeddings, overrides and isolates, and the
 # LRM, RLM and ALM marks).
-_PRESENCE_UNSAFE = re.compile("[\x00-\x08\x0b-\x1f\x7f-\x9f؜‎‏‪-‮⁦-⁩]")
+_PRESENCE_UNSAFE = re.compile("[\x00-\x08\x0b-\x1f\x7f-\x9f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]")
 
 
 def _from_presence(value, width: int = 0) -> str:
