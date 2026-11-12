@@ -96,8 +96,11 @@ def parse(text: str) -> dict:
     heads = _section_heads(lines)
     sections = {name: lines[i + 1:(heads[n + 1][0] if n + 1 < len(heads) else len(lines))]
                 for n, (i, name) in enumerate(heads)}
-    meta["occurrences"] = int(meta.get("occurrences") or 1)
-    meta["version"] = int(meta.get("version") or 1)
+    for k in ("occurrences", "version"):
+        try:
+            meta[k] = int(meta.get(k) or 1)
+        except (TypeError, ValueError):
+            raise ValueError(f"its {k} is “{meta.get(k)}”, not a number") from None
     for k in REFS + ("author",):
         meta[k] = meta.get(k) or ""
     return {"meta": meta, "extra": extra, "sections": {k: "\n".join(v).strip() for k, v in sections.items()},
@@ -122,13 +125,43 @@ def render(lesson: dict) -> str:
     return "---\n" + head + "---\n" + body + "## Changelog\n\n" + "".join(f"- {c}\n" for c in lesson["changelog"])
 
 
+class Unreadable(ValueError):
+    """A lesson file devkit cannot read: not UTF-8 text, no front matter with its id, title and scope, or a count
+    that is not a number. `path`, `problem`."""
+
+    def __init__(self, path, problem: str):
+        self.path, self.problem = Path(path), problem
+        super().__init__(f"{core.tilde(path)} cannot be read as a lesson: {problem}")
+
+
+REQUIRED = ("id", "title", "scope")  # what every reader of a lesson takes for granted
+
+
 def load(path: Path) -> dict:
-    les = parse(Path(path).read_text())
-    les["path"] = Path(path)
+    """A lesson file -> the lesson, with its `path`. Unreadable when the file is not a lesson devkit can read;
+    FileNotFoundError when it is gone (another session merged or archived it, or a sync took it away)."""
+    path = Path(path)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as e:
+        raise Unreadable(path, f"it is not UTF-8 text (byte {e.start})") from None
+    except FileNotFoundError:
+        raise
+    except OSError as e:
+        raise Unreadable(path, e.strerror or type(e).__name__) from None
+    try:
+        les = parse(text)
+    except ValueError as e:
+        raise Unreadable(path, str(e)) from None
+    missing = [k for k in REQUIRED if not str(les["meta"].get(k) or "").strip()]
+    if missing:
+        raise Unreadable(path, f"its front matter has no {', no '.join(missing)}")
+    les["path"] = path
     return les
 
 
-def all_lessons(scope: str = None, archived: bool = False) -> list:
+def _files(scope: str = None, archived: bool = False) -> list:
+    """The lesson files of a scope (every scope when None), active or archived, as listed now."""
     base = (LESSONS / "archive" / scope if archived else _dir(scope)) if scope else \
         (LESSONS / "archive" if archived else LESSONS)
     if not base.exists():
@@ -136,13 +169,59 @@ def all_lessons(scope: str = None, archived: bool = False) -> list:
     files = sorted(base.rglob("L-*.md"))
     if not archived:
         files = [f for f in files if "archive" not in f.relative_to(LESSONS).parts[:1]]
+    return files
+
+
+def all_lessons(scope: str = None, archived: bool = False) -> list:
+    """The lessons of a scope (every scope when None), active or archived. A file that left since it was listed
+    (merged, archived or pulled away by another session) is left out, and so is one that cannot be read, so one bad
+    file never hides the others: `unreadable` lists those for `dev lesson lint`."""
     out = []
-    for f in files:
+    for f in _files(scope, archived):
         try:
             out.append(load(f))
-        except FileNotFoundError:  # merged, archived or pulled away by another session since rglob listed it
+        except (FileNotFoundError, Unreadable):
             continue
     return out
+
+
+def unreadable(scope: str = None) -> list:
+    """The lesson files of a scope (every scope when None), active and archived, that no `dev lesson` command can
+    read, as lint findings: [{id, kind: "unreadable", problem, fix, path, why}], `id` from the file's name, `why`
+    what is wrong with it."""
+    out = []
+    for archived in (False, True):
+        for f in _files(scope, archived):
+            try:
+                load(f)
+            except FileNotFoundError:
+                continue
+            except Unreadable as e:
+                rel = f.relative_to(work.HANDOFF) if f.is_relative_to(work.HANDOFF) else f
+                out.append({"id": f.stem, "kind": "unreadable", "path": f, "why": e.problem,
+                            "problem": f"{'the archived file' if archived else 'the file'} cannot be read, so no "
+                                       f"dev lesson command and no recall sees it: {e.problem}",
+                            "fix": f"repair it by hand: git -C {core.tilde(work.HANDOFF)} log -p -- {rel} shows its "
+                                   f"last good version"})
+    return out
+
+
+def sync_lag() -> str:
+    """Why lessons recorded on other machines may be missing here: the handoff repository stopped syncing (the record
+    work.sync_problem keeps until a push succeeds), with the commits of the remote this Mac has not applied. "" while
+    it syncs."""
+    rec = core.read_json(work.push_failed_file(), None)
+    if not isinstance(rec, dict):
+        return ""
+    since = time.strftime("%Y-%m-%d %H:%M", time.localtime(rec["ts"])) if isinstance(rec.get("ts"), int) else "?"
+    behind = core.gitout(work.HANDOFF, "rev-list", "--count", "HEAD..@{u}") if (work.HANDOFF / ".git").exists() \
+        else ""
+    if behind.isdigit() and int(behind):
+        n = int(behind)
+        return f"the handoff repository has not synced since {since}: {n} commit{'s' if n != 1 else ''} from other " \
+               f"machines are not on this Mac, so the lessons they hold are missing here (dev status shows why)"
+    return f"the handoff repository has not synced since {since}: lessons recorded on other machines may be missing " \
+           f"here (dev status shows why)"
 
 
 def is_archived(les: dict) -> bool:
@@ -167,7 +246,11 @@ def find(selector: str, scope: str = None) -> dict:
             return hits[0]
         if hits:
             raise ValueError(f"“{selector}” matches {len(hits)} lessons: " + ", ".join(h["meta"]["id"] for h in hits[:5]))
-    raise ValueError(f"“{selector}” matches 0 lessons")
+    bad = [f for f in unreadable(scope) if f["id"].lower() == sel]
+    if bad:
+        raise ValueError(f"{core.tilde(bad[0]['path'])} cannot be read as a lesson: {bad[0]['why']}; {bad[0]['fix']}")
+    lag = sync_lag()
+    raise ValueError(f"“{selector}” matches 0 lessons" + (f"; {lag}" if lag else ""))
 
 
 def _log(les: dict, a: dict, op: str, why: str = ""):
@@ -333,7 +416,7 @@ def update(les: dict, op, why: str = "", a=None, apply=None, paths=(), **changes
     a = a or work.actor()
     path = Path(les["path"])
     with state.hold(_lock_of(les["meta"]["id"])):
-        les = load(path)
+        les = _reload(les)
         if apply:
             changes = {**changes, **apply(les)}
         if callable(op):
@@ -361,6 +444,18 @@ def update(les: dict, op, why: str = "", a=None, apply=None, paths=(), **changes
     work._commit([path] + _committable(paths),
                  f"{m['id']}: {op} v{m['version']} ({work.actor_str(a)})" + (f" — {why}" if why else ""))
     return les
+
+
+def _reload(les: dict) -> dict:
+    """The lesson as it is on disk now. A file that left since it was read (another session merged or archived it,
+    or a sync of the handoff took it away) is a refusal (ValueError) that says so; nothing is written."""
+    try:
+        return load(les["path"])
+    except FileNotFoundError:
+        lag = sync_lag()
+        raise ValueError(f"{les['meta']['id']} is no longer at {core.tilde(les['path'])}: another session merged, "
+                         f"archived or moved it, or a sync of the handoff took it away. Nothing was written: run the "
+                         f"command again" + (f" ({lag})" if lag else "")) from None
 
 
 def _committable(paths) -> list:
@@ -394,9 +489,10 @@ def _settle(les: dict, a=None) -> dict:
     if not (act.exists() and arc.exists()):
         return les
     with state.hold(_lock_of(les["meta"]["id"])):
-        if not (act.exists() and arc.exists()):
-            return load(act if act.exists() else arc)
-        mine, other = load(act), load(arc)
+        try:
+            mine, other = load(act), load(arc)
+        except FileNotFoundError:  # one copy left meanwhile: one file again, and the caller's write re-reads it
+            return les if Path(les["path"]).exists() else dict(les, path=act if act.exists() else arc)
         rank = (lambda x: (x["meta"]["version"], x["meta"]["occurrences"]))
         if rank(other) > rank(mine):
             work._replace(act, arc.read_text())
@@ -525,7 +621,7 @@ def supersede(old: dict, new: dict, why: str, a=None) -> dict:
         raise ValueError("say why the new lesson replaces the old one: --why \"…\"")
     if o["id"] == n["id"]:
         raise ValueError("a lesson cannot supersede itself")
-    fresh = load(new["path"])["meta"]
+    fresh = _reload(new)["meta"]
     if is_archived(new) or fresh.get("status") == "retired":
         raise ValueError(f"{n['id']} is {'archived' if is_archived(new) else 'retired'}: restore it first")
     if fresh.get("quarantine"):

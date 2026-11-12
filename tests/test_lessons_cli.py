@@ -22,7 +22,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from devkit import audit, cli, core, lessonevents, lessonrules, lessons  # noqa: E402
+from devkit import audit, cli, core, lessonevents, lessonrules, lessons, work  # noqa: E402
 from devkit import progress as pg  # noqa: E402
 from test_lessons_base import A, LessonCase  # noqa: E402
 
@@ -224,6 +224,55 @@ class AddTests(LessonCLI):
                            "--error", "IndexError: list index out of range")
         self.assertEqual(rc, 0, out)
         self.assertNotIn("dev bug report", out)
+
+
+class ReadTests(LessonCLI):
+    def test_recur_of_a_lesson_that_left_after_find_is_a_clear_error_not_a_crash(self):
+        # the same race the listing survives, between find and the write: update raised FileNotFoundError, which
+        # cmd_lesson does not catch, so the agent saw a crash notice and exit 70
+        lid = self.add("Wait for the input before the step", commands=["make deploy"])["meta"]["id"]
+        real_find = lessons.find
+
+        def find_then_vanish(sel, scope=None):
+            les = real_find(sel, scope)
+            Path(les["path"]).unlink()  # the hourly sync's aborted rebase takes the file away again
+            return les
+        with mock.patch.object(lessons, "find", find_then_vanish):
+            rc, out = self.dev("recur", lid, "--evidence", "it happened again")
+        self.assertEqual(rc, 2, out)
+        self.assertNotIn("Traceback", out)
+        self.assertIn("run the command again", out)
+
+    def test_one_malformed_lesson_file_leaves_dev_lesson_working(self):
+        good = self.add("Wait for the input before the step", commands=["make deploy"])["meta"]["id"]
+        bad = lessons.LESSONS / "acme/api" / "L-broken000.md"
+        bad.write_text("---\nid: L-broken000\ntitle: x\nscope: acme/api\noccurrences: two\n---\n# x\n")
+        rc, out = self.dev("ls")
+        self.assertEqual(rc, 0, out)
+        self.assertIn(good, out)
+        rc, out = self.dev("recur", "L-broken000", "--evidence", "again")
+        self.assertEqual(rc, 2, out)
+        self.assertIn("cannot be read", out)  # the selector names a file devkit cannot read: say so, not "0 lessons"
+
+    def test_a_lesson_missing_while_the_handoff_has_stopped_syncing_says_why(self):
+        # lessons recorded on another Mac never arrive while every pull aborts; `dev lesson` said only "matches 0"
+        remote, other = self.root / "remote.git", self.root / "other"
+        git = ["git", "-c", "user.email=t@example.com", "-c", "user.name=t"]
+        for args in (["init", "-q", "--bare", "-b", "main", str(remote)], ["clone", "-q", str(remote), str(other)],
+                     ["-C", str(other), "commit", "-q", "--allow-empty", "-m", "first"],
+                     ["-C", str(other), "push", "-q", "origin", "HEAD:main"],
+                     ["clone", "-q", str(remote), str(lessons.HANDOFF)],
+                     ["-C", str(other), "commit", "-q", "--allow-empty", "-m", "L-g6i3aj1j5sf: lesson"],
+                     ["-C", str(other), "push", "-q", "origin", "HEAD:main"],
+                     ["-C", str(lessons.HANDOFF), "fetch", "-q"]):
+            subprocess.run(git + args, check=True, capture_output=True)
+        work.sync_problem("a pull of the handoff repository stopped on a conflict in log/2026-11.md",
+                          "handoff.rebase-aborted")
+        rc, out = self.dev("recur", "L-g6i3aj1j5sf", "--evidence", "again")
+        self.assertEqual(rc, 2, out)
+        self.assertIn("matches 0 lessons", out)
+        self.assertIn("has not synced", out)
+        self.assertIn("1 commit", out)
 
 
 class AuthorTests(LessonCLI):

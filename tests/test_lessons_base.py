@@ -27,7 +27,7 @@ class LessonCase(unittest.TestCase):
         for obj, name, value in ((lessons, "LESSONS", handoff / "lessons"), (lessons, "HANDOFF", handoff),
                                  (lessons, "STATE", state), (lessons, "USAGE_LOCAL", state / "lessons-usage.json"),
                                  (work, "HANDOFF", handoff), (work, "ITEMS", handoff / "items"),
-                                 (core, "HANDOFF", handoff)):
+                                 (core, "HANDOFF", handoff), (core, "STATE", state)):
             p = mock.patch.object(obj, name, value)
             p.start()
             self.addCleanup(p.stop)

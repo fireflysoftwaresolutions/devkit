@@ -102,5 +102,49 @@ class RecordTextTests(LessonCase):
         self.assertIn("- 2026-11-08: release 4", les["sections"]["Evidence"])
 
 
+class UnreadableFileTests(LessonCase):
+    # One lesson file a teammate edited by hand, or a half-applied pull, raised out of all_lessons: every `dev lesson`
+    # command failed, and the hooks, which swallow the error, recalled nothing at all.
+    def write(self, name, data):
+        path = lessons.LESSONS / "acme/api" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        return path
+
+    def test_one_malformed_lesson_file_does_not_hide_the_others(self):
+        good = self.add("Wait for the input before the step", commands=["make deploy"])["meta"]["id"]
+        self.write("L-broken000.md", b"---\nid: L-broken000\ntitle: x\nscope: acme/api\noccurrences: two\n---\n# x\n")
+        self.assertEqual(self.ids(lessons.all_lessons()), [good])
+        self.assertEqual(lessons.find(good)["meta"]["id"], good)
+
+    def test_a_lesson_file_that_is_not_utf8_does_not_hide_the_others(self):
+        good = self.add("Wait for the input before the step", commands=["make deploy"])["meta"]["id"]
+        self.write("L-latin10000.md", b"---\nid: L-latin10000\ntitle: caf\xe9\n")
+        self.assertEqual(self.ids(lessons.all_lessons("acme/api")), [good])
+
+    def test_unreadable_lists_each_file_no_command_can_read_and_why(self):
+        self.add("Wait for the input before the step", commands=["make deploy"])
+        self.write("L-broken000.md", b"---\nid: L-broken000\ntitle: x\nscope: acme/api\noccurrences: two\n---\n# x\n")
+        self.write("L-latin10000.md", b"---\nid: L-latin10000\ntitle: caf\xe9\n")
+        self.write("L-notes00000.md", b"notes about a lesson, with no front matter\n")
+        found = {f["id"]: f for f in lessons.unreadable("acme/api")}
+        self.assertEqual(sorted(found), ["L-broken000", "L-latin10000", "L-notes00000"])
+        self.assertEqual({f["kind"] for f in found.values()}, {"unreadable"})
+        self.assertIn("occurrences", found["L-broken000"]["problem"])
+        self.assertIn("UTF-8", found["L-latin10000"]["problem"])
+        self.assertIn("no id", found["L-notes00000"]["problem"])
+        self.assertIn("lessons/acme/api/L-broken000.md", found["L-broken000"]["fix"])
+
+    def test_a_lesson_that_left_after_it_was_found_is_a_clear_refusal(self):
+        # the hourly sync's aborted rebase takes a file away between `find` and the write: update re-read it and
+        # raised FileNotFoundError, which `dev lesson` does not catch (a crash, exit 70)
+        les = self.add("Wait for the input before the step", commands=["make deploy"])
+        les["path"].unlink()
+        with self.assertRaises(ValueError) as e:
+            lessons.recur(les, "it happened again", a=A)
+        self.assertIn(les["meta"]["id"], str(e.exception))
+        self.assertIn("run the command again", str(e.exception))
+
+
 if __name__ == "__main__":
     unittest.main()
