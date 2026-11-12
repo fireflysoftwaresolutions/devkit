@@ -2,8 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Lesson behavior no other test pins: a night's sleep never forgets the lesson a merge keeps (its dry run included,
 # which must predict the real night); `dev lesson scan` names a guard refusal only from its third time; and the Codex
-# path of a lesson: recalled at a Codex session's start, missed when a Codex call runs its command, and carried to a
-# Codex crew member at its SubagentStart, whose first call makes it pending for that member.
+# path of a lesson: recalled at a Codex session's start, missed when a refusal of a Codex call shows its error (not
+# when the call runs its command again), and carried to a Codex crew member at its SubagentStart, whose first call
+# makes it pending for that member.
 # Every test points devkit at a temporary handoff and state; none reads or writes the developer's.
 # Tests carry comments, not docstrings (`dev test prove` leaves out tests with one).
 # Run: python3 -m unittest tests.test_lessons_gaps
@@ -89,6 +90,7 @@ class ScanThresholdTests(LessonCase):
 class CodexSessionLessonTests(LessonHookCase):
     # a Codex session in a real git checkout, with every module's handoff pointed at the test's own
     SID = "019a1c19-0000-7000-8000-00000000c0de"
+    REFUSED = "a deploy from a laptop is refused"  # the lesson's error anchor, as a refusal shows it
 
     def setUp(self):
         super().setUp()
@@ -107,16 +109,17 @@ class CodexSessionLessonTests(LessonHookCase):
             subprocess.run(["git", "-C", str(self.repo), *args], check=True, env=env, capture_output=True)
         self.pid = core.project_identity(self.repo, "")[0]
         self.lid = lessons.add(self.pid, "Deploy only through the release job", severity="high",
-                               commands=["make deploy"], cause="a laptop deploy skipped the checks",
+                               commands=["make deploy"], errors=[self.REFUSED],
+                               cause="a laptop deploy skipped the checks",
                                prevention="run the release job", happened="a deploy from a laptop broke prod",
                                a=A)["meta"]["id"]
 
-    def codex(self, event: str, payload: dict) -> str:
+    def codex(self, event: str, payload: dict, verdict=None) -> str:
         import contextlib
         import io
         out = io.StringIO()
         with mock.patch("sys.stdin", io.StringIO(json.dumps(payload))), contextlib.redirect_stdout(out), \
-                mock.patch("devkit.guard.check", lambda *a, **k: None), \
+                mock.patch("devkit.guard.check", lambda *a, **k: verdict), \
                 mock.patch.object(registry, "update_note", lambda *a, **k: False), \
                 mock.patch.object(core, "is_temp", lambda p, real=core.is_temp: False if str(p).startswith(
                     str(self.repo)) else real(p)):
@@ -141,10 +144,11 @@ class CodexSessionLessonTests(LessonHookCase):
     def told(out: dict) -> str:
         return out["hookSpecificOutput"]["additionalContext"]
 
-    def call(self, cmd: str, tid: str) -> str:
+    def call(self, cmd: str, tid: str, verdict=None) -> str:
+        # `verdict`: what the guard's check says of the call (None allows it)
         return self.codex("guard", {"session_id": self.SID, "turn_id": "t1", "hook_event_name": "PreToolUse",
                                     "tool_name": "Bash", "tool_use_id": tid, "cwd": str(self.repo),
-                                    "model": "gpt-6.1-sol", "tool_input": {"command": cmd}})
+                                    "model": "gpt-6.1-sol", "tool_input": {"command": cmd}}, verdict)
 
     def outcomes(self):
         return [(e["event"], e["agent"]) for e in lessonevents._events(self.SID) if e["id"] == self.lid]
@@ -163,13 +167,15 @@ class CodexSessionLessonTests(LessonHookCase):
         told = self.told(out)
         self.assertIn(f"- Lesson {self.lid} (recorded by", told[told.index("Known pitfalls"):])
 
-    def test_a_codex_call_that_runs_the_recalled_lessons_command_marks_it_missed(self):
+    def test_a_codex_call_that_runs_the_lessons_command_is_no_miss_and_a_refusal_showing_its_error_is(self):
+        # A lesson is missed when its mistake comes back (a refusal or an output shows its error), not when the
+        # command runs again, which the right way does too
         self.start()
-        self.call("ls", "exec-1")
-        self.assertEqual(self.outcomes(), [("shown", "main")])  # a call that does not run it settles nothing
-        self.call("make deploy", "exec-2")
-        self.assertEqual(self.outcomes(), [("shown", "main"), ("missed", "main")])
-        self.assertEqual(lessonevents.shown_in(self.SID, "main"), [])
+        self.call("make deploy", "exec-1")
+        self.assertEqual(self.outcomes(), [("shown", "main")])
+        self.call("make deploy HOST=laptop", "exec-2", verdict=("deny", f"devkit · {self.REFUSED}: run the job"))
+        self.assertEqual(self.outcomes(), [("shown", "main"), ("missed", "main"), ("shown", "main")])
+        self.assertEqual(lessonevents.shown_in(self.SID, "main"), [self.lid])  # the refusal shows it again
 
 
 class CodexBriefLessonTests(CodexCrew):

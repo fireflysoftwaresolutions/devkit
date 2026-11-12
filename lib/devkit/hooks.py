@@ -358,7 +358,7 @@ def context_for(cwd: str, agent: str) -> str:
 
 def _session_lessons_shown(data: dict, seen: dict):
     """The known pitfalls the session's context showed (context_for, which counted them) are pending for its main
-    agent until it hits them (missed) or its turn ends (heeded)."""
+    agent until a refusal or an output shows their error again (missed) or its turn ends (heeded)."""
     try:
         _shown(data, (seen or {}).get("lessons") or [], "session", count=False)
     except Exception as e:
@@ -1889,8 +1889,9 @@ def _pitfalls(agent: str, data: dict, found: list, remember: bool = True, channe
 
 
 def _shown(data: dict, ids: list, channel: str, count: bool = True):
-    """Lessons that reached the agent of this hook event: counted on `channel`, and pending for that agent until it
-    hits them again (missed) or its turn or lane ends (heeded). devkit's own headless calls record nothing."""
+    """Lessons that reached the agent of this hook event: counted on `channel`, and pending for that agent until a
+    refusal or an output shows their error again (missed) or its turn or lane ends (heeded). devkit's own
+    headless calls record nothing."""
     if ids and not _headless():
         from . import lessons
         lessons.shown(ids, channel, str(data.get("session_id") or ""), _lesson_agent(data), count=count)
@@ -1907,8 +1908,8 @@ def _note_call(sess: dict, data: dict, ids: list):
 
 
 def _lesson_hits(data: dict, ids: list):
-    """The agent hit these lessons' refusal, command or error anchors: those shown to it earlier in this session and
-    still pending are missed (lessonevents.on_hit). Nothing is read when nothing was hit."""
+    """A refusal or a tool's output showed these lessons' error anchors: those shown to the agent earlier in this
+    session and still pending are missed (lessonevents.on_hit). Nothing is read when nothing was hit."""
     sid = str(data.get("session_id") or "")
     ids = [x for x in dict.fromkeys(ids) if x]
     if ids and sid and not _headless():
@@ -1992,10 +1993,11 @@ def _brief_shown(agent: str, data: dict, sess: dict):
 def _call_pitfalls(agent: str, data: dict, remember: bool = True, channel: str = "call", show: bool = True,
                    skip=(), refused: str = "") -> str:
     """PreToolUse: the open lessons anchored on the command this call runs or the file it writes, and, for a refusal
-    (`refused`: its own text), those anchored on that text as an error, first. A lesson whose command or refusal
-    anchor the call hits is first resolved as missed when it was shown to the agent earlier and still pending; then
-    what is shown is recorded. `show=False` only resolves (a Codex call, which reads no context). `skip`: the lesson
-    of a lesson rule this call matched, which the rule already said and recorded."""
+    (`refused`: its own text), those anchored on that text as an error, first. A lesson whose error anchor the
+    refusal shows is first resolved as missed when it was shown to the agent earlier and still pending: the mistake
+    came back. Running a lesson's command again is no miss, since the right way runs it too (`dev progress step`,
+    `dev test prove`). Then what is shown is recorded. `show=False` only resolves (a Codex call, which reads no
+    context). `skip`: the lesson of a lesson rule this call matched, which the rule already said and recorded."""
     try:
         sess = _session_record(agent, data)
         project = str(sess.get("project") or "")
@@ -2013,8 +2015,7 @@ def _call_pitfalls(agent: str, data: dict, remember: bool = True, channel: str =
             if cmd or files else []
         by_refusal = lessons.for_output(project, refused, limit=LESSON_HITS_MAX, pool=pool) if refused else []
         skip = {x for x in skip if x}
-        hit = by_refusal + [x for x in found if cmd and any(lessons.runs(cmd, c) for c in lessons.anchors(x)["commands"])]
-        _lesson_hits(data, [x["meta"]["id"] for x in hit if x["meta"]["id"] not in skip])
+        _lesson_hits(data, [x["meta"]["id"] for x in by_refusal if x["meta"]["id"] not in skip])
         if not show:
             return ""
         picked = list({x["meta"]["id"]: x for x in by_refusal + found if x["meta"]["id"] not in skip}.values())

@@ -99,6 +99,15 @@ class OutcomeTests(LessonHookCase):
         self.assertEqual(self.events(hit), [("shown", "output", "main"), ("missed", "output", "main")])
         self.assertEqual(self.events(calm), [("shown", "call", "main"), ("heeded", "call", "main")])
 
+    def test_running_a_lessons_command_the_right_way_again_is_not_a_miss(self):
+        # On this Mac the most missed lessons were anchored on `dev progress step`, `dev test prove` and `dev watch`,
+        # which the crew's procedure runs on purpose: running the command again is not making the mistake again
+        lid = self.lesson("Run dev progress as a command of its own", commands=["dev progress step"],
+                          errors=["as a command of its own"])
+        self.hook("guard", self.bash('dev progress step "built it" --check "12 tests pass"', tid="t1"))
+        self.hook("guard", self.bash('dev progress step "tested it" --check "dev test: 3 passed"', tid="t2"))
+        self.assertNotIn("missed", [e[0] for e in self.events(lid)], self.events(lid))
+
     def test_the_output_of_the_call_that_showed_a_lesson_is_no_miss(self):
         lid = self.lesson("Ran the integration tests without Docker", commands=["./mvnw verify"],
                           errors=["Could not find a valid Docker environment"])
