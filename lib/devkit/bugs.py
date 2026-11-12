@@ -1017,6 +1017,7 @@ VOTER_DAYS = 90  # a voter quiet this long no longer counts anywhere
 # under RECORD_MAX, and past MAX_VOTERS_PER_IMPACT voters of one impact it names only the newest (fit_record)
 RECORD_MAX = 60000
 MAX_VOTERS_PER_IMPACT = 100
+ISSUE_MAX = 60000  # GitHub refuses an issue body over 65,536 characters too: render_issue stays under this (_fit_issue)
 _BLOCK_RE = re.compile(r"^```json\n(.*?)\n```$", re.M | re.S)
 _SUMMARY_SAFE = re.compile(r"[^A-Za-z0-9._ -]")
 _TITLE_SAFE = re.compile(r"[^A-Za-z0-9._ :-]")
@@ -1474,7 +1475,8 @@ def render_issue(rec: dict, first: dict = None, *, created: str = "", now: float
     collapsed block, which the workflow reads while the issue has no record (its only fenced block: the text before
     it holds no triple backtick). `first`: the report the body shows, by default the record's `first`; its free text
     (a description, an error message) shows escaped, so the client, which posts the reporter's own body, passes the
-    report it sends. `created`: the day the issue was opened (YYYY-MM-DD), else the day of `now`."""
+    report it sends. `created`: the day the issue was opened (YYYY-MM-DD), else the day of `now`. The body stays
+    under GitHub's limit: workarounds that do not fit are counted in one line instead (_fit_issue)."""
     now = time.time() if now is None else now
     first = first if isinstance(first, dict) else rec.get("first") if isinstance(rec.get("first"), dict) else {}
     source = rec.get("report") if isinstance(rec.get("report"), dict) else {}
@@ -1494,15 +1496,13 @@ def render_issue(rec: dict, first: dict = None, *, created: str = "", now: float
         (versions[0] if versions else "a version the record does not name")
     bullet, steps = _workaround(rec)
     score_ = float(rec["score"]) if _is_ts(rec.get("score")) else 0.0
-    parts = [_fill(entry.get("what"), slots), "",
-             f"- **Status:** {_status_line(rec)}",
-             f"- **Impact:** {_impact_line(counted)}",
-             f"- **How often:** {often}. First seen {created}, last seen {last}.",
-             f"- **Versions:** seen on {seen}.",
-             f"- **Workaround:** {bullet}", ""]
-    if steps:
-        parts += ["## Workaround", "", *steps, ""]
-    parts += ["## How to reproduce", "", *_reproduce(rec, facts, first, entry, slots), "",
+    head = [_fill(entry.get("what"), slots), "",
+            f"- **Status:** {_status_line(rec)}",
+            f"- **Impact:** {_impact_line(counted)}",
+            f"- **How often:** {often}. First seen {created}, last seen {last}.",
+            f"- **Versions:** seen on {seen}.",
+            f"- **Workaround:** {bullet}", ""]
+    parts = ["## How to reproduce", "", *_reproduce(rec, facts, first, entry, slots), "",
               "## If you hit this bug", "",
               "This is a bug in devkit, not in your project. In a terminal:", "",
               f"- `dev bug show {fp}` shows this bug and its workarounds.",
@@ -1521,7 +1521,27 @@ def render_issue(rec: dict, first: dict = None, *, created: str = "", now: float
     parts.append(f"_devkit's registry workflow writes this text from the reports and rewrites it after each report, "
                  f"vote, or release. Write in a comment instead. How the registry works: [the bug registry]"
                  f"(https://github.com/{core.DEVKIT_REPO}/blob/main/docs/bug-registry.md)._")
-    return "\n".join(parts)
+    return _fit_issue(head, steps, parts, fp)
+
+
+def _fit_issue(head: list, steps: list, rest: list, fp: str) -> str:
+    """The issue body from its lines, at most ISSUE_MAX characters: the Workaround section shows the workarounds that
+    fit, in order, and one line that says how many more the record holds. Only that section can grow past the limit
+    (up to MAX_DETOURS detours of MAX_STEPS steps, each free text up to five times longer once escaped); every other
+    part is fixed text, closed-list values, or at most a few MAX_TEXT free texts, and the report data the workflow
+    reads is never cut."""
+    def body(n: int) -> str:
+        more = len(steps) - n
+        section = ["## Workaround", "", *steps[:n]] + (
+            [f"{more} more workaround{'s are' if more != 1 else ' is'} in the registry's record: "
+             f"`dev bug show {fp}` lists them all."] if more else []) + [""] if steps else []
+        return "\n".join(head + section + rest)
+    n = len(steps)
+    text = body(n)
+    while len(text) > ISSUE_MAX and n:
+        n -= 1
+        text = body(n)
+    return text
 
 
 def render_comment(payload: dict) -> str:

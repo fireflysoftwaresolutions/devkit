@@ -284,6 +284,24 @@ class IssueBodyTests(TableCase):
                 else:
                     self.assertNotIn("## Workaround", body)
 
+    # GitHub refuses an issue body over 65,536 characters, and the workflow's rewrite of that issue then fails: twenty
+    # served workarounds of escaped text took the body past it. The body stays under the limit: the workarounds that
+    # do not fit become one line that says where the rest is, and the report data the workflow reads stays whole
+    def test_a_body_with_more_workarounds_than_fit_stays_under_githubs_limit(self):
+        steps = [{"text": "*" * 200}] * 5  # each star shows as a five-character entity
+        served = [{"id": f"d{i}", "steps": steps, "since": "26.11.10", "until": "", "author_assoc": "MEMBER",
+                   "author_hash": "a1", "evidence": {"successes": 1}, "failures": [],
+                   "confirmations": [{"author_assoc": "OWNER", "author_hash": "a2"}]} for i in range(1, 21)]
+        report = guard_report()
+        body = bugs.render_issue({**folded(report), "detours": served}, report, now=NOW)
+        self.assertLessEqual(len(body), 65536)
+        section = body.split("## Workaround\n\n")[1].split("\n\n## ")[0]
+        shown = [ln for ln in section.splitlines() if ln.startswith("1. ")]
+        self.assertTrue(0 < len(shown) < 20, len(shown))
+        self.assertTrue(section.endswith(f"{20 - len(shown)} more workarounds are in the registry's record: "
+                                         f"`dev bug show {report['fingerprint']}` lists them all."), section[-200:])
+        self.assert_parses(body, report)
+
     def test_how_to_reproduce_lists_the_reports_devkit_facts(self):
         report = crash_report(frames=["<local>", "work.actor_str"], template="KeyError: <str>")
         body = bugs.render_issue(folded(report), report, now=NOW)
