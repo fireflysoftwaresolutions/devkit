@@ -822,7 +822,64 @@ def _newlines_to_semicolons(cmd: str, op: str = ";") -> str:
 
 
 HEREDOC_RE = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
-_HEREDOC_AT = re.compile(r"<<-?[ \t]*(?:'([^'\n]+)'|\"([^\"\n]+)\"|\\?([A-Za-z_][A-Za-z0-9_]*))")
+class _HeredocMatch:
+    """What _HEREDOC_AT.match finds: group(0) the operator and its delimiter word as written; group(1) the delimiter
+    when any part of the word is quoted (the body is text), group(3) when none is (the shell expands the body)."""
+
+    def __init__(self, text, start, end, delim, quoted):
+        self._text, self._start, self._end, self._delim, self._quoted = text, start, end, delim, quoted
+
+    def group(self, k=0):
+        if k == 0:
+            return self._text
+        if k == 1:
+            return self._delim if self._quoted else None
+        return None if k == 2 or self._quoted else self._delim
+
+    def start(self, k=0):
+        return self._start
+
+    def end(self, k=0):
+        return self._end
+
+
+class _HeredocAt:
+    """The heredoc operator at s[i] and its delimiter word, read as the shells read it: the whole word up to a blank
+    or an operator, with its quotes removed (`E\\OF`, `E''OF`, `"E"OF` and `E'OF'` all end at a line `EOF`), quoted
+    when any part of it is."""
+
+    _OP = re.compile(r"<<-?[ \t]*")
+
+    def match(self, s, i=0):
+        m = self._OP.match(s, i)
+        if not m:
+            return None
+        j, n, word, quoted = m.end(), len(s), [], False
+        while j < n and s[j] not in " \t\n;&|<>()":
+            c = s[j]
+            if c in "'\"":
+                k = s.find(c, j + 1)
+                if k < 0 or "\n" in s[j + 1:k]:
+                    return None
+                word.append(s[j + 1:k])
+                quoted, j = True, k + 1
+            elif c == "\\":
+                if j + 1 >= n or s[j + 1] == "\n":
+                    return None
+                word.append(s[j + 1])
+                quoted, j = True, j + 2
+            elif c in "$`":
+                return None  # a delimiter the shell would expand: no heredoc the guard can read
+            else:
+                word.append(c)
+                j += 1
+        delim = "".join(word)
+        if not delim:
+            return None
+        return _HeredocMatch(s[i:j], i, j, delim, quoted)
+
+
+_HEREDOC_AT = _HeredocAt()
 
 # `#` starts a comment only at the start of a word, as bash and zsh read it: after a blank, a newline, an operator or
 # a redirection. A `)` that ends a substitution ends no word, so `x$(true)#c` and `<(true)#<(…)` are one word each,

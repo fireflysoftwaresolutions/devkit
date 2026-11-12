@@ -488,6 +488,26 @@ class StalledJudge(unittest.TestCase):
                     self.assertLess(time.monotonic() - started, 2.5)  # each verdict within the 1 s budget, or refused
 
 
+class HeredocDelimiters(Case):
+    """The shells take a heredoc's whole delimiter word without its quotes: `<<E\\OF` ends at a line `EOF`. A command
+    after the body is a command, whatever quoting the delimiter has; text inside the body stays text."""
+
+    def test_a_command_after_a_partly_quoted_delimiter_is_judged(self):
+        for op in ("<<E\\OF", "<<E''OF", '<<"E"OF', "<<E'OF'", "<<\\E\\O\\F", "<<-E\\OF"):
+            cmd = f"cat {op}\nx\nEOF\ngit push --force origin main"
+            with self.subTest(cmd=cmd):
+                self.assertIsNotNone(main(cmd))
+                self.refused(cmd)
+                self.refused(cmd, level="review", who="seraph")
+
+    def test_the_body_of_such_a_heredoc_is_text(self):
+        for op in ("<<E\\OF", "<<'EOF'", '<<"E"OF'):
+            cmd = f"cat {op}\ngit push --force origin main\nEOF"
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(main(cmd))
+                self.runs(cmd)
+
+
 class LaneStamp(unittest.TestCase):
     """A member's command that holds lane calls the router cannot place one by one is run with the member's lane
     variable exported, so every dev call in it acts as the member (Claude Code, whose rewrite approves nothing); a
