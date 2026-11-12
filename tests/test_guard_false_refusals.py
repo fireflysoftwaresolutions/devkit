@@ -354,7 +354,12 @@ class ReadOnlyLanes(Case):
                     "PYTHONPATH=/tmp/x; python3 -m pytest", "x=$(cat f); echo $((x))",
                     # a link in the scratch folder that points elsewhere, one a program may make, a computed target
                     "rm -rf @P/out/sub", "cp lib/a.py @P/out/", "rm -rf @P/x && python3 @P/p.py",
-                    "python3 @P/mklink.py; rm -rf @P/l/x", "rm -rf @P/x$(cat f)"):
+                    "python3 @P/mklink.py; rm -rf @P/l/x", "rm -rf @P/x$(cat f)",
+                    # the Red team tester's: braces, patterns and `..` expand past the folder; a temporary folder,
+                    # a task's output file among them, is no scratch folder
+                    "rm -rf @P/{x,../kid}", "rm -rf @P/o*/sub", "touch @P/[o]ut/x", "rm -f @P/?ut/sub",
+                    "rm -rf @P/../kid", "echo x > /tmp/forged.txt", "echo x > @P/../../tasks/b1.output",
+                    "python3 -c \"open('/tmp/forged.txt', 'w').write('x')\""):
             with self.subTest(cmd=cmd):
                 self.assertIsNotNone(self.ro(cmd))
 

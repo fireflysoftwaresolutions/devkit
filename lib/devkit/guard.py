@@ -8487,7 +8487,7 @@ TOOL_LEVELS = ("all", "build", "review", "read")  # least to most restrictive, a
 READONLY_REASON = ("read-only lane: {what}. Report the change with file:line and the fix, or ask the tech lead to run it "
                    "(`dev crew ask \"…\"`). Readers (cat, grep, rg, sed -n '1,20p', find, git log|diff|show, gh pr "
                    "view, dev status|grep|diff, …) and the project's checks (pytest, python3 -m unittest, ruff check, "
-                   "tsc --noEmit, …) run; redirects only to /dev/null or a temp folder.")
+                   "tsc --noEmit, …) run; redirects only to /dev/null or your own scratch folder.")
 _RO_READERS = frozenset({
     "cat", "head", "tail", "wc", "ls", "tree", "file", "stat", "du", "pwd", "basename", "dirname", "realpath",
     "readlink", "which", "type", "echo", "printf", "date", "diff", "cmp", "comm", "cut", "tr", "sort", "uniq",
@@ -9593,19 +9593,12 @@ def member_code_why(name, code, cwd) -> str:
 
 def _py_reader_why(code, cwd, member) -> str:
     """'' when a Python program a read-only lane types inline only reads: _py_write_paths knows every file it writes,
-    and each is inside crew member `member`'s own scratch folder or a temporary folder outside the session
-    scratchpad; else why not."""
+    and each is inside crew member `member`'s own scratch folder (a temporary folder is no scratch: a task's output
+    there is evidence the tech lead reads, a checkout there is a repository); else why not."""
     paths, why = _py_write_paths(code, cwd)
     if why:
         return why + (", in your scratch folder" if why.endswith("write the path out") else "")
-    here = resolve(".", cwd) if cwd else UNKNOWN
     for q in paths:
-        r = resolve(q, cwd)
-        # a temporary folder, but not the folder the command runs in: a checkout copied to a temporary folder (a test
-        # repository, `dev test prove`'s copy) is still a repository
-        if r != UNKNOWN and is_temp(r) and not _SCRATCHPAD.match(str(r)) and \
-                (here == UNKNOWN or not is_under(r, here)):
-            continue
         why = _ro_scratch_target(q, cwd, member)
         if why:
             return f"this program writes {why}"
@@ -9893,8 +9886,9 @@ def _ro_scratch_target(a, cwd, member, deletes: bool = False) -> str | None:
         return f"{_code(a)} is known only when the command runs"
     if (deletes and a.endswith(("/", "/.", "/.."))) or a in (".", "..") or a.endswith(("/.", "/..")):
         return f"{_code(a)} ends with a slash or a dot, which follows a link or names a folder above"
-    if os.path.basename(a).startswith(".") and _GLOB.search(os.path.basename(a)):
-        return f"{_code(a)} is a pattern that can match `..`"
+    if re.search(r"[{}*?\[\]]", a) or "/../" in f"/{a}/":
+        return (f"{_code(a)} holds a brace, a pattern or `..`, which the shell expands to paths the guard does not "
+                f"see: name each file")
     p = resolve(a, cwd)
     if p == UNKNOWN:
         return f"{_code(a)} is known only when the command runs"
@@ -10022,11 +10016,17 @@ def _ro_reader(name, args, cwd, member=None) -> str | None:
     return None
 
 
-def _redirect_ok(target, cwd) -> bool:
+def _redirect_ok(target, cwd, member=None) -> bool:
+    """A read-only lane's redirect target: /dev/null and the standard streams, a registered Codex scratch folder, or
+    the member's own scratch folder by its real path, named without a brace or a pattern (_ro_scratch_target)."""
     if target in ("/dev/null", "/dev/stdout", "/dev/stderr", "-"):
         return True
     p = resolve(target, cwd)
-    return p != UNKNOWN and (_app_scratch_allows(p) or is_temp(p))
+    if p == UNKNOWN:
+        return False
+    if member is None:  # a caller with no lane (progress's attribution): a temporary folder holds no repository file
+        return _app_scratch_allows(p) or is_temp(p)
+    return _app_scratch_allows(p) or _ro_scratch_target(target, cwd, member) is None
 
 
 _SUBST_WORD = "/dev/fd/63"  # what a substitution stands for while the command around it is read
@@ -10145,7 +10145,8 @@ def _plan_write(argv0) -> bool:
 
 def readonly_refusal(cmd: str, cwd, member=None, depth: int = 0, plans=None) -> str | None:
     """Why a review or read-only lane may not run `cmd` (spec F7, consultation §4), or None when every segment is on
-    the read-only allowlist: a command that parses, redirects only to /dev/null or a temp folder, and each program a
+    the read-only allowlist: a command that parses, redirects only to /dev/null or the member's own scratch folder
+    (no other temporary folder: a task's output file there is evidence), and each program a
     reader, a read of git, gh or dev, one of the project's checks, or a script from crew member `member`'s own scratch
     folder. A command substitution (`$(…)`, backticks) or process substitution (`<(…)`, `>(…)`) passes when the
     command inside it does, by the same rules; never as the program a command runs, and never arithmetic. `plans`: a
@@ -10189,7 +10190,7 @@ def readonly_refusal(cmd: str, cwd, member=None, depth: int = 0, plans=None) -> 
             k = next(j for j, t in enumerate(argv0) if t in (">|", ">>|"))
             extra += argv0[k + 1:k + 2] or [""]
             del argv0[k:k + 2]
-        bad = next((r for r in list(redirs) + extra if not _redirect_ok(r, here)), None)
+        bad = next((r for r in list(redirs) + extra if not _redirect_ok(r, here, member)), None)
         if bad is not None:
             return READONLY_REASON.format(what=f"the redirect to {_code(bad)} writes a file")
         argv = _unwrap(argv0)

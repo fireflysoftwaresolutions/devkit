@@ -148,7 +148,7 @@ class AllowlistTests(unittest.TestCase):
             self.assertIsNone(lane("just check --quiet"))
             self.assertIsNotNone(lane("make install"))
 
-    def test_reading_commands_and_redirects_to_dev_null_or_a_temp_folder_run(self):
+    def test_reading_commands_and_redirects_to_dev_null_run_and_others_do_not(self):
         for cmd in ("cat lib/devkit/guard.py | head -50", "grep -rn 'def check' lib", "rg -n crew_shell lib",
                     "find lib -name '*.py' -newer README.md", "ls -la tests", "wc -l lib/devkit/*.py",
                     "git status --porcelain", "git log --oneline -12", "git diff HEAD~1 -- lib", "git show --stat HEAD",
@@ -158,13 +158,15 @@ class AllowlistTests(unittest.TestCase):
                     "gh api repos/o/r/pulls", "bin/dev status", "dev task", "dev task show 4", "dev grep guard",
                     "dev diff --names", "dev sec scan", "dev test plan", "dev plan show x", "dev crew raci",
                     "dev lesson add 'x' --cause y --prevent z", "jq '.a' f.json", "yq '.a' f.yml",
-                    "git grep -n crew_shell 2>/dev/null", "ls > /tmp/listing.txt", "LC_ALL=C sort f",
+                    "git grep -n crew_shell 2>/dev/null", "LC_ALL=C sort f",
                     "GIT_PAGER=cat git log -3", "for f in lib/devkit/*.py; do wc -l \"$f\"; done",
                     "find lib -name '*.py' -exec grep -l crew {} +", "git ls-files | xargs wc -l",
                     "diff -u a b || true", "echo done", "cd tests && ls"):
             with self.subTest(cmd=cmd):
                 self.assertIsNone(lane(cmd))
         self.assertIsNotNone(lane("ls > listing.txt"))  # a redirect into the repository writes a file
+        # a temporary folder is no scratch folder: a task's output there is evidence the tech lead reads
+        self.assertIsNotNone(lane("ls > /tmp/listing.txt"))
 
     def test_a_review_lane_reads_the_audit_trail_but_never_publishes_or_exports_it_to_a_file(self):
         # Persephone's lesson L-fxwm448qq5i (Morpheus, M163): the audit reads are read commands
