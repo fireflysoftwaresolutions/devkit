@@ -471,7 +471,7 @@ project data, and hotfix rankings. The guide is [The bug registry](bug-registry.
 | `dev bug show <number\|fingerprint>` | One bug: versions, votes, detours with their trust, related lessons. In an agent session, only the registry's bot-written fields; proposed detours as a count |
 | `dev bug search <words\|fingerprint>` | Bugs by generated title or fingerprint |
 | `dev bug report [fingerprint] [--title "…"] [--guard [refusal id]] [--security]` | Files a bug, or votes on a known one. `--guard` flags a wrong refusal, this session's last one when no id is given; `--security` holds the report for private vulnerability reporting |
-| `dev bug detour <fingerprint> --hint "<name> <slot>=<value> …"\|--dev "<subcommand>"\|--text "…"` | Records a detour of one to five steps, each flag one step in order, once the session ledger shows it worked. A `--dev` step names a subcommand and its flags that take no value, with or without the leading `dev` (`--dev "dev push"` is `--dev "push"`). Free text that names something of this Mac is refused, and so is a step with a URL or one of `\|`, `>`, `<`, `;`, `&&`, `$(`, or a backtick |
+| `dev bug detour <fingerprint> --hint "<name> <slot>=<value> …"\|--dev "<subcommand>"\|--text "…"` | Records a detour of one to five steps, each flag one step in order, once the session ledger shows it worked. A `--dev` step names a subcommand and its flags, with no value except a number for a numeric flag or one of a flag's listed choices (`watch --wait --for me --timeout 9`), with or without the leading `dev` (`--dev "dev push"` is `--dev "push"`). Free text that names something of this Mac is refused, and so is a step with a URL or one of `\|`, `>`, `<`, `;`, `&&`, `$(`, or a backtick |
 | `dev bug top [--task]` | Up to 10 open bugs by score, each with its reason, and the five highest as the suggested hotfix scope; `--task` adds those five as work items with their issue links |
 | `dev bug sync` | Refreshes the cache and sends the outbox; the hourly sync job does the same |
 | `dev bug pending` | Items held for review, each with the exact issue title and body, comment, or private report it would post |
@@ -555,8 +555,8 @@ that run is still running.
 
 | Verb | Effect |
 | --- | --- |
-| `brief` | Prints what devkit kept for a session: this session by default, another with `--session <agent>:<session id>`, or the project's newest session with an open run or requests in the last 12 hours with `--latest` (`-p` names the project). `--for-chat` cuts each request to 200 characters for a chat surface; `--provider` names the reader, and the request text is shown only to the session's own provider |
-| `carry` | Moves the run into this session after `/clear`; `--from` names the cleared session when it is not the one `/clear` ended |
+| `brief` | Prints what devkit kept for a session: this session by default, another with `--session <agent>:<session id>` (also `<agent>-<session id>`, as devkit names its files; a `--session` that names no session is refused), or the project's newest session with an open run or requests in the last 12 hours with `--latest` (`-p` names the project). `--for-chat` cuts each request to 200 characters for a chat surface; `--provider` names the reader, and the request text is shown only to the session's own provider |
+| `carry` | Moves the run into this session after `/clear`; `--from` names the cleared session when it is not the one `/clear` ended, by its id bare or as `claude-<id>` |
 | `compactions <transcript>` | Counts a transcript's compactions with their tokens before and after; `--members` adds the members' transcripts. Reads only |
 | `forget` | Deletes a session's continuity records (`--session`), or every record and `/clear` link here (`--all`); recorded in the audit trail |
 

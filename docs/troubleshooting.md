@@ -453,8 +453,10 @@ gh auth status
 ```
 
 Check that `handoff_repo` in `~/.config/devkit/config.json` matches the `origin` remote, and that `gh auth setup-git`
-has run (`dev install --only git`). If `git status` shows a merge conflict (two people changed the same work item at
-the same moment), resolve it in the handoff repository, commit, and run `dev sync`. If `.gitattributes` lacks the
+has run (`dev install --only git`). A conflict no longer stops the push: devkit keeps the remote's version and saves
+this Mac's aside with the command that brings it back (see
+[Teams and machines › The handoff repository stopped syncing](teams.md#the-handoff-repository-stopped-syncing)). If
+`git status` shows a conflict that a rebase or merge run by hand left, finish it or end it, then run `dev sync`. If `.gitattributes` lacks the
 devkit merge rules, run `dev install --only handoff`. The warning disappears with the next push that succeeds.
 
 ### A scheduled job fails or does not run

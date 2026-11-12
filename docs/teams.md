@@ -554,22 +554,27 @@ the rules a newer devkit adds, and two Macs that upgrade only ever add lines:
 | `presence/*.json` | `ours` | Each machine writes only its own file |
 | `PROJECTS.md`, `TASKS.md`, `ACTIVITY.md`, `registry.json` | `ours` | Generated views: the local copy is kept and regenerated after the pull |
 
-Work items are separate files, and syncs pull with `--rebase --autostash` before they push, so conflicts are rare. When
-two machines change the same item at the same moment, devkit settles it item by item: it takes the version pushed
+Work items are separate files, so conflicts are rare. A sync rebases this Mac's commits on the remote's in a private
+checkout, never in the repository's own, then moves the repository's checkout to the result with `git reset --keep`,
+which changes nothing while a file it would change holds a change not committed yet. When two machines change the same item at the same moment, devkit settles it item by item: it takes the version pushed
 first and applies your change to it again. Each field, the title, and the description take the side that changed
 them, the links keep what either side added, and your changelog lines go on top of the other machine's, numbered after
 them. Two changes to the same thing, such as a lock taken on both machines or a description edited on both, cannot be
-settled that way: a claim reads the item again and is refused with the holder's name, and any other change stops the
-sync as described next. On this Mac, devkit runs its pulls, commits, and pushes of the handoff repository one at a
+settled that way: a claim reads the item again and is refused with the holder's name, and any other change keeps the
+remote's version and saves this Mac's aside, as described next. On this Mac, devkit runs its pulls, commits, and pushes of the handoff repository one at a
 time.
 
 ### The handoff repository stopped syncing
 
-A pull that stops on a conflict leaves git in the middle of a rebase. Before this was handled, every later pull,
-commit, and push then failed without a word, and a commit made in that state was lost. Now devkit:
+A pull that stopped on a conflict used to leave git in the middle of a rebase: every later pull, commit, and push then
+failed without a word, and a Mac could keep its commits unpushed for hours. Now every conflict settles, and this Mac's
+commits reach the remote:
 
-1. Ends a rebase it finds stopped (`git rebase --abort`) before any read of the items, pull, or commit, and when
-   `dev sync` or `dev install` runs. Your commits come back as they were.
+1. Rebases in a private checkout. The repository's own checkout never goes through a rebase, so other devkit
+   processes keep reading every file this Mac has, and a change a writer has not committed is never stashed, removed,
+   or rewritten. A rebase devkit finds stopped in the repository's own checkout (an older devkit's, or one run by
+   hand) it ends with `git rebase --abort` before the next read, pull, or commit, and when `dev sync` or
+   `dev install` runs; your commits come back as they were.
 2. Settles a conflict in a project's handoff note or an initiative's README during the pull. Two Macs regenerate the
    same note, so its generated blocks differ: devkit merges the hand-written text three ways with the generated blocks
    emptied, takes the blocks whole from this Mac, and after the pull writes the tasks block again from the work items
@@ -582,27 +587,30 @@ commit, and push then failed without a word, and a commit made in that state was
    cannot settle a conflict; devkit does it itself.
 4. Merges a lesson that both Macs changed, such as a repeat recorded on each: the occurrences add up, the Evidence
    keeps both sides' lines, `last_seen` is the later day, and the changelog and version merge as for items. Any other
-   field or section takes the side that changed it.
-5. Ends at once a pull whose conflict it cannot settle: any other file, an item whose same field (or description)
-   both machines changed, or a lesson both changed differently in the same field. Your commits stay on your Mac,
-   unpushed.
-6. Records each pull it ended as a sync problem: a `handoff.rebase-aborted` record in the audit trail, kept at every
-   audit level, with the files in conflict as its target, and the problem under "Needs attention" in `dev status` and
-   the dashboard until a push succeeds.
+   field or section takes the side that changed it. A field both Macs changed differently keeps the remote's value,
+   with both sides' repeats, Evidence, and changelogs; a side that removed the lesson loses to the side that changed
+   it.
+5. Keeps the remote's version of anything else it cannot merge, and saves this Mac's version and the one both started
+   from in `~/.local/state/devkit/handoff-conflicts/`. A warning and a `handoff.conflict` record in the audit trail,
+   kept at every audit level, name the file and the `git merge-file` command that brings your change back.
+6. Falls back to a merge when a rebase still cannot finish, so the push goes on.
 
-To recover from a conflict devkit cannot settle, resolve it by hand in the handoff repository, then sync:
+A stopped rebase that devkit ended is recorded as a sync problem: a `handoff.rebase-aborted` record in the audit trail,
+kept at every audit level, with the files in conflict as its target, and the problem under "Needs attention" in
+`dev status` and the dashboard until a push succeeds.
+
+To bring back a change devkit saved aside, run the `git merge-file` command its warning printed, check the result, and
+sync:
 
 ```bash
 cd ~/Development/.handoff
-git pull --rebase            # stops on the conflict again
-git status                   # the files in conflict
-$EDITOR <file>               # keep the lines both sides need, remove the conflict markers
-git add <file>
-git rebase --continue
+git merge-file <file> <the version both started from> <this Mac's saved copy>   # as the warning prints it
+git diff <file>              # keep the lines both sides need, remove any conflict markers
 dev sync
 ```
 
-`dev audit --action handoff.rebase-aborted` lists every rebase devkit ended, with the files in conflict.
+`dev audit --action handoff.conflict` lists every file devkit saved aside, and
+`dev audit --action handoff.rebase-aborted` every stopped rebase it ended.
 
 ## What the guard protects
 
