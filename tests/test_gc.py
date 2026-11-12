@@ -10,6 +10,7 @@
 # Offline: the sandbox of tests/test_branches.py (a bare "origin", devkit's state, handoff repository and audit trail
 # in a temp folder, gh answering with self.prs). gc's scan of the real temp folders and its Docker prune are replaced,
 # so nothing outside the sandbox is read or deleted. Run: python3 -m unittest tests.test_gc -v
+import os
 import sys
 import time
 import unittest
@@ -20,7 +21,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
 from test_branches import HOUR, PID, PruneCase, git  # noqa: E402
-from devkit import audit, core, gc, registry  # noqa: E402
+from devkit import audit, branches, core, gc, gitx, registry  # noqa: E402
+
+DAY = 24 * HOUR
 
 
 class GcCase(PruneCase):
@@ -78,6 +81,123 @@ class GcWorktreeTests(GcCase):
         self.assertTrue(any("feat/wip" in n and "not on any remote" in n for n in pl["notes"]), pl["notes"])
         gc.apply(pl, remote=True)
         self.assertTrue(wt.is_dir())
+
+
+class GcIgnoredFilesTests(GcCase):
+    # `git worktree remove` refuses modified and untracked files but deletes ignored ones without asking: a merged
+    # release worktree lost 3.6 GB of evidence kept under its ignored build/. A worktree goes only when each ignored
+    # entry is a dependency folder or cache a tool rebuilds, or a byte-for-byte copy of the main checkout's file.
+    def setUp(self):
+        super().setUp()
+        (self.repo / ".git" / "info" / "exclude").write_text("evidence/\nbuild/\nnode_modules/\n__pycache__/\n.env\n")
+        self.land(*self.feature("fix/picked", "fix: keep the picked thing"))
+        self.wt = self.worktree("fix/picked")
+        (self.repo / ".env").write_text("TOKEN=main\n")
+
+    def put(self, rel, text="x"):
+        f = self.wt / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(text)
+        return f
+
+    def remove(self):
+        m = branches.merge_test(str(self.repo), "fix/picked", "origin/main")
+        return gc.remove_worktree(str(self.repo), str(self.wt), "fix/picked",
+                                  merged={"base": "origin/main", "sha": m["sha"], "prs": None})
+
+    def test_a_merged_worktree_with_ignored_files_no_tool_rebuilds_stays_whole_and_names_them(self):
+        evidence = self.put("evidence/run.json", "release proof")
+        asset = self.put("build/a16-predecessor/asset.bin", "the predecessor's assets")
+        env = self.put(".env", "TOKEN=changed here\n")
+        deps = self.put("node_modules/pkg/index.js")
+        ok, msg = self.remove()
+        self.assertFalse(ok, msg)
+        self.assertEqual([evidence.read_text(), asset.read_text(), env.read_text()],
+                         ["release proof", "the predecessor's assets", "TOKEN=changed here\n"])
+        self.assertTrue(deps.exists())
+        self.assertTrue(self.local("fix/picked"))
+        for named in ("build/ (", "evidence/ (", ".env (", f"then dev wt rm {core.tilde(str(self.wt))}"):
+            self.assertIn(named, msg)
+        self.assertNotIn("node_modules", msg)
+        self.assertNotIn("\n", msg)  # dev branch prune shows the last line of it
+
+    def test_a_merged_worktree_whose_ignored_files_are_caches_or_copies_goes_and_says_what_went_with_it(self):
+        self.put(".env", "TOKEN=main\n")  # .worktreeinclude copied it: the main checkout has the same bytes
+        self.put("node_modules/pkg/index.js")
+        self.put("src/__pycache__/m.pyc")
+        ok, msg = self.remove()
+        self.assertTrue(ok, msg)
+        self.assertFalse(self.wt.exists())
+        self.assertIn("went with it: .env, node_modules/, src/__pycache__/", msg)
+
+    def test_dev_pr_merge_says_it_kept_the_merged_branchs_worktree_for_its_ignored_files(self):
+        evidence = self.put("evidence/run.json", "release proof")
+        note, said = gitx._after_merge(gitx.ctx(self.repo), "fix/picked")  # a warning line, never the success line
+        self.assertEqual(note, "")
+        self.assertTrue(said.startswith(f"kept {core.tilde(str(self.wt))}: "), said)
+        self.assertIn("evidence/ (", said)
+        self.assertEqual(evidence.read_text(), "release proof")
+        self.assertTrue(self.local("fix/picked"))
+
+    def test_dev_branch_prune_says_it_kept_the_worktree_down_to_how_to_remove_it(self):
+        self.put("evidence/run.json", "release proof")
+        rc, out = self.dev("branch", "prune", "--local", "--apply")
+        self.assertIn(f"not deleted local fix/picked: kept {core.tilde(str(self.wt))}: ", out)
+        self.assertIn(f"then dev wt rm {core.tilde(str(self.wt))} (merged by content", out)
+        self.assertTrue((self.wt / "evidence" / "run.json").exists())
+        self.assertTrue(self.local("fix/picked"))
+
+    def test_the_dry_run_lists_a_worktree_kept_for_its_ignored_files_under_kept_and_out_of_the_total(self):
+        # dev gc counted it as "remove worktree" in the reclaimable total, and the apply then kept it
+        self.put("build/a16-predecessor/asset.bin", "the predecessor's assets")
+
+        def reg(**_):
+            r = self.reg()
+            for w in r["projects"][0]["worktrees"]:
+                w["size_kb"] = 3 * 1024 * 1024
+            return r
+        with mock.patch.object(registry, "build", reg):
+            rc, out = self.dev("gc", "-v")
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn("remove worktree", out)
+        self.assertNotIn("3.0 GB", out)
+        self.assertIn(f"fix/picked · {core.tilde(str(self.wt))} — removing it would delete ignored files that are "
+                      f"not known to be regenerable: build/ (", out)
+
+
+class GcBuildOutputTests(GcCase):
+    # The nightly job prunes ignored folders in a worktree idle for idle_artefact_days. Only what a tool fills again
+    # goes without a person; a generic output name (build, dist, target, coverage, .cache) can hold files no build
+    # step wrote, such as a release's evidence or a predecessor's assets.
+    def setUp(self):
+        super().setUp()
+        (self.repo / ".git" / "info" / "exclude").write_text("build/\nnode_modules/\n")
+        self.feature("feat/wip", "feat: add the unfinished thing", push=True)
+        self.wt = self.worktree("feat/wip")
+        self.asset = self.wt / "build" / "a16-predecessor" / "asset.bin"
+        self.asset.parent.mkdir(parents=True)
+        self.asset.write_bytes(b"the predecessor's assets" * 512)
+        self.deps = self.wt / "node_modules" / "pkg" / "index.js"
+        self.deps.parent.mkdir(parents=True)
+        self.deps.write_text("module.exports = 1\n")
+
+    def test_the_nightly_cleanup_keeps_build_output_no_tool_fills_again_and_prunes_what_one_does(self):
+        results = gc.apply(self.plan(idle=8 * DAY), only_auto=True, remote=True)
+        self.assertTrue(self.asset.is_file(), results)
+        self.assertEqual(self.asset.read_bytes(), b"the predecessor's assets" * 512)
+        self.assertFalse((self.wt / "node_modules").exists(), results)
+
+    def test_build_output_no_tool_fills_again_is_a_check_first_action_only_an_explicit_apply_deletes(self):
+        pl = gc.plan(self.reg(idle=8 * DAY), with_sizes=True)
+        prunes = self.actions(pl, "prune-artefacts")
+        self.assertEqual(sorted((bool(a.get("auto")), [os.path.basename(i) for i in a["items"]]) for a in prunes),
+                         [(False, ["build"]), (True, ["node_modules"])])
+        [check] = [a for a in prunes if not a.get("auto")]
+        self.assertTrue(check["reason"].startswith("check first: "), check["reason"])
+        self.assertIn(f"build/ ({core.human_kb(check['kb'])})", check["reason"])
+        self.assertIn("dev gc --apply deletes it", check["reason"])
+        gc.apply(pl, only_auto=False, remote=True)  # dev gc --apply, after the person saw the plan
+        self.assertFalse(self.asset.exists())
 
 
 class GcBranchTests(GcCase):

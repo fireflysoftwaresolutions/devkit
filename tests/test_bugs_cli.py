@@ -20,7 +20,9 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from devkit import bugs, cli, core, progress, work  # noqa: E402
+from devkit import bugs, cli, core, identity, progress, work  # noqa: E402
+
+DENY_WORDS = bugs.deny_words  # the real one: BugCLI replaces it with a fixed list
 from test_bugs_sync import FakeClient, _bot, _issue, _record  # noqa: E402
 
 NOW = time.time()
@@ -33,7 +35,8 @@ PROPOSED = {"id": "d2", "steps": [{"text": "move the folder named zebra first"}]
             "until": ""}
 CONSENT = ("Reports, votes and workarounds are posted publicly on github.com/fireflysoftwaresolutions/devkit under "
            "your GitHub account `ana`. They are public and permanent: deleting a comment does not remove it from "
-           "notification e-mails or public archives. Only devkit facts are sent, never anything about your projects.")
+           "notification e-mails or public archives. devkit's workflow writes and updates the text of issues you open. "
+           "Only devkit facts are sent, never anything about your projects.")
 
 
 def voters(*impacts):
@@ -193,6 +196,38 @@ class ReportTests(BugCLI):
         self.assertEqual(self.outbox(), [])
 
 
+class MachineNameTests(BugCLI):
+    # The machine id and the hostnames this Mac carried before name it as surely as its hostname now, but this Mac's
+    # private words left them out, so a detour's free text could carry them into the public registry
+    def setUp(self):
+        super().setUp()
+        self.name = "Mac-158.lan"
+        for p in (mock.patch.object(bugs, "deny_words", DENY_WORDS),
+                  mock.patch.object(bugs, "_git_identity", lambda: ("", "")),
+                  mock.patch.object(bugs, "_host_names", lambda: [self.name]),
+                  mock.patch.object(core, "STATE", self.root / "state"),
+                  mock.patch("socket.gethostname", side_effect=lambda: self.name)):
+            p.start()
+            self.addCleanup(p.stop)
+        identity.machine()  # devkit ran here as mac-158 ...
+        self.name = "andress-mbp-2"  # ... and the network renamed the Mac
+        bugs.note_refusal("s1", "_check_sed", "sed")
+        bugs.ledger_append("s1", "Edit", True, "", [])
+
+    def detour(self, text):
+        return self.dev("detour", bugs.guard_fingerprint("_check_sed", "sed"), "--hint", "use-tool tool=Edit word=sed",
+                        "--text", text)
+
+    def test_a_detour_never_carries_the_machine_id_or_a_former_hostname(self):
+        for text in (f"then rerun the tests on {identity.machine().id}", "then rerun the tests on mac-158"):
+            with self.subTest(text=text):
+                rc, out = self.detour(text)
+                self.assertEqual(rc, 1, out)
+                self.assertIn("names something of this Mac", out)
+        rc, out = self.detour("then rerun the tests")
+        self.assertEqual(rc, 0, out)
+
+
 class DetourTests(BugCLI):
     def test_detour_without_evidence_refuses_with_the_reason(self):
         self.crash()
@@ -227,6 +262,15 @@ class DetourTests(BugCLI):
         self.assertEqual(item["payload"]["steps"][1], {"text": "then rerun the tests"})
         self.assertTrue(item["held"])  # free text waits for the developer
 
+    # An agent wrote the step as it types the command, `--dev "dev push"`, and was refused with "not a dev
+    # subcommand": the leading `dev` is the command's own name, so the step keeps the subcommand after it
+    def test_a_dev_step_written_with_its_leading_dev_keeps_the_subcommand(self):
+        self.crash()
+        bugs.ledger_append("s1", "Bash", True, "progress step", [])
+        rc, out = self.dev("detour", FP_A, "--dev", "dev progress step")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.outbox()[-1]["payload"]["steps"], [{"dev": "progress step"}])
+
     def test_detour_with_an_invalid_step_says_what_is_wrong(self):
         self.crash()
         bugs.ledger_append("s1", "Bash", True, "progress step", [])
@@ -234,6 +278,31 @@ class DetourTests(BugCLI):
         self.assertEqual(rc, 1)
         self.assertIn("`|`", out)
         self.assertEqual(self.outbox(), [])
+
+    # An agent read --dev as any dev command line (`--dev "test --since main"`) and the refusal of `;` in its free
+    # text as devkit parsing the text as a command: the refusal names each word's problem and the rule it breaks.
+    def test_a_refused_step_says_which_rule_its_words_break(self):
+        self.crash()
+        bugs.ledger_append("s1", "Bash", True, "progress step", [])
+        rc, out = self.dev("detour", FP_A, "--dev", "test --since main --nope")
+        self.assertEqual(rc, 1)
+        line = " ".join(out.split())
+        self.assertIn("`--since` takes a value, `main` is a value or an argument, `--nope` is not a flag of "
+                      "`dev test`: a dev step is a dev subcommand and only its flags that take no value", line)
+        rc, out = self.dev("detour", FP_A, "--text", "run the tests; then retry")
+        self.assertEqual(rc, 1)
+        self.assertIn("`;` is a shell form: a step may not contain `|`, `>`, `<`, `;`, `&&`, `$(` or a backtick",
+                      " ".join(out.split()))
+        self.assertEqual(self.outbox(), [])
+
+    def test_detour_help_says_what_a_dev_step_and_free_text_may_hold(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit):
+            cli.main(["bug", "detour", "--help"])
+        # each flag's help follows its last mention (the first is the usage line)
+        dev_help, _, text_help = " ".join(out.getvalue().split()).rpartition("--text 'TEXT'")
+        self.assertIn("only its flags that take no value", dev_help.rpartition("--dev 'COMMAND'")[2])
+        self.assertIn("none of the shell forms |, >, <, ;, &&, $( or a backtick", text_help)
 
 
 class RankTests(BugCLI):
@@ -262,10 +331,30 @@ class ReviewTests(BugCLI):
         return self.outbox()[-1]
 
     def test_pending_prints_exactly_what_would_be_sent(self):
+        # the title and body of the issue a new report opens, and the comment it posts when the registry has the bug
+        # by then: each string the sender passes to GitHub is in the review, whole
         item = self.held()
         rc, out = self.dev("pending")
         self.assertEqual(rc, 0, out)
-        self.assertIn(bugs.render_payload(item["payload"]), out)
+        bugs.set_consent("on", "ana")
+        self.assertEqual(self.dev("send", item["id"], person=True)[0], 0)
+        (title, body), = self.client.created
+        self.assertIn(f"\n  Title: {title}\n{body}\n", out)
+        self.assertIn(f"\n{bugs.render_comment(item['payload'])}\n", out)
+
+    def test_pending_prints_the_comment_a_known_bug_gets(self):
+        self.cache((42, _record(fp=FP_A), "open"))
+        item = bugs.queue({"payload": {"devkit_bug": 1, "type": "detour", "fingerprint": FP_A, "version": "26.11.7",
+                                       "impact": "detoured", "steps": [{"text": "Run it again from a new shell"}],
+                                       "evidence": {"successes": 1}}})
+        rc, out = self.dev("pending")
+        self.assertEqual(rc, 0, out)
+        bugs.set_consent("on", "ana")
+        self.dev("send", item, person=True)
+        (number, body), = self.client.posted
+        self.assertEqual(number, 42)
+        self.assertIn(f"\n  As a comment on issue #42:\n{body}\n", out)
+        self.assertNotIn("Title:", out)
 
     def test_send_approves_and_sends_the_exact_payload(self):
         item = self.held()

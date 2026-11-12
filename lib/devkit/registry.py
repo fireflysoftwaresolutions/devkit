@@ -753,12 +753,12 @@ def status_line(pid: str):
 
 
 def plans_for(pid: str) -> list:
+    from . import plans as plansmod
     d = HANDOFF / "plans" / pid
     out = []
     if d.is_dir():
         for f in sorted(d.rglob("*.md"), key=lambda x: -x.stat().st_mtime):
-            title = next((ln[2:].strip() for ln in f.read_text(errors="ignore").splitlines() if ln.startswith("# ")),
-                         f.stem)
+            title = plansmod.title_of(f.read_text(errors="ignore"), f.stem)
             out.append({"title": title, "path": str(f.relative_to(HANDOFF)), "mtime": int(f.stat().st_mtime)})
     return out[:20]
 
@@ -1202,7 +1202,7 @@ def render_tasks_block(scope: str) -> str:
         its = [i for i in s["open"] if i["bucket"] == b]
         lines.append(f"### {b.capitalize()}")
         for i in its:
-            lock = f" · 🔒 {i['claimed_by'].split(' ')[0]}" if i["claimed_by"] else ""
+            lock = f" · 🔒 {work.display(i['claimed_by'].split(' ')[0])}" if i["claimed_by"] else ""
             st = "" if i["status"] in ("todo", "doing") else f" · {i['status']}"
             lines.append(f"- [ ] `{i['id']}` {i['title']}{st}{lock}")
     lines.append("### Done")

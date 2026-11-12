@@ -183,7 +183,7 @@ def commit_push(push=True, quiet=False):
     settles conflicts in items and stops cleanly on any other (work.rebase_fetched), and every failure is recorded in
     handoff-push-failed.json, which `dev status` shows until a push succeeds. The commit, the fetch and the push hold
     work._repo_lock; the rebase holds the notes lock first, so it runs after that lock is released."""
-    from . import audit, work
+    from . import audit, identity, work
     root = work.HANDOFF  # the repository work.pull_rebase works on, read now (tests point it elsewhere)
     if not (root / ".git").exists():
         return
@@ -198,7 +198,9 @@ def commit_push(push=True, quiet=False):
         rc, _, _ = core.git(root, "diff", "--cached", "--quiet")
         if rc != 0:
             n = len(core.gitout(root, "diff", "--cached", "--name-only").splitlines())
-            core.git(root, "commit", "-q", "-m", f"sync: {n} file(s) from {os.uname().nodename.split('.')[0]}")
+            m = identity.machine()  # the hostname a person knows, and the id presence and locks name the Mac by
+            core.git(root, "commit", "-q", "-m", f"sync: {n} file(s) from " +
+                     (m.label if m.label == m.id else f"{m.label} ({m.id})"))
         if not push or not core.gitout(root, "remote"):
             return
         core.git(root, "fetch", "-q", "origin", timeout=60)
@@ -2125,13 +2127,14 @@ def _print_items(scope, label, show_all=False, rebind=True):
         hint = 'no tasks yet — dev task add "…" --now'
         print(f"  {ui.dim(hint)}")
         return
-    me = f"{work.actor()['user']}@{work.actor()['host']}"
+    me = work.actor()
     for n, it in enumerate(ordered, 1):
         m = it["meta"]
         holder, expired = work.lock_holder(it)
         lock = ""
-        if holder and not expired:
-            lock = ui.green(" 🔒 you") if holder.startswith(me) else ui.yellow(f" 🔒 {holder.split(' ')[0]}")
+        if holder and not expired:  # this Mac's lock, also one taken under a hostname it carried then (work.mine)
+            mine = work.mine(holder, me, at=work.parse_iso(m.get("claimed_at")) or None)
+            lock = ui.green(" 🔒 you") if mine else ui.yellow(f" 🔒 {work.display(holder.split(' ')[0])}")
         st = {"doing": ui.cyan("doing"), "blocked": ui.red("blocked")}.get(m.get("status"), ui.dim(m.get("bucket", "")))
         pr = ui.yellow(" !") if m.get("priority") == "high" else ""
         num = str(n).rjust(2) if numbered else " ·"
@@ -2437,7 +2440,8 @@ def cmd_progress(a):
         return 0
     if act == "note":
         try:
-            run = pg.note(" ".join(a.text), a.next or "", from_agent=from_agent)
+            run = pg.note(" ".join(a.text), a.next or "", from_agent=from_agent,
+                          which=getattr(a, "step", None), check=getattr(a, "check", "") or "")
         except ValueError as e:
             ui.err(str(e))
             return 2
@@ -2464,7 +2468,10 @@ def cmd_progress(a):
             return 2
         if from_agent:
             lane = (run.get("agents") or {}).get(from_agent) or {}
-            print(f"{ui.OK} {lane.get('persona') or lane.get('label') or 'lane'} · {' '.join(a.text)}")
+            out = run.get("lane_outcome") or {}
+            tail = (f" · closed “{out['step']}” ({out['state']})" if out.get("closed")
+                    else f" · {out['why']}" if out.get("why") else "")
+            print(f"{ui.OK} {lane.get('persona') or lane.get('label') or 'lane'} · {' '.join(a.text)}{tail}")
             return 0
         print(pg.render_update(run))
         changed = [(i, s) for i, s in enumerate(run.get("plan") or [], 1) if before.get(s["name"]) != s.get("state")]
@@ -2506,10 +2513,13 @@ def cmd_progress(a):
     if act == "time":
         print(pg.report(a.days, a.project))
         return 0
-    runs = pg.active_runs()
+    runs = pg.active_runs(first=pg.current_session())
     from . import work
-    others = [(t["user"] + "@" + t["host"], s_) for t in work.team() for s_ in t.get("sessions", [])
-              if s_.get("progress") and not (t["user"] == work.actor()["user"] and t["host"] == work.actor()["host"])]
+    me = work.actor()  # this Mac's presence, also a file under a hostname it carried then, is not another machine's
+    team = work.team()
+    others = [(_presence_name(t, team), s_) for t in team for s_ in t.get("sessions", [])
+              if s_.get("progress") and not work.mine(f"{t['user']}@{t['host']}", me,
+                                                       at=work.parse_iso(t.get("updated")) or None)]
     print(ui.section("Progress"))
     if not runs and not others:
         print("  no runs — agents start one with dev progress start \"<goal>\" --steps N --estimate 30m")
@@ -2519,11 +2529,12 @@ def cmd_progress(a):
         print(f"  {mark} {ui.bold(r.get('goal', ''))}  {ui.dim(r.get('agent', '') + ' · ' + (r.get('project') or '-'))}")
         print(f"    {pg.headline(r)}" + (f" · last: {last.get('text')}" if last.get("text") else "")
               + (f" · next: {last.get('next')}" if last.get("next") else ""))
+    shown = _from_presence  # another machine's run, as its presence summarizes it
     for who, s_ in others:
         p_ = s_["progress"]
-        print(f"  {ui.ACTIVE} {who} · {s_.get('agent')} · {s_.get('project')} · {p_.get('goal')} — "
-              f"{p_.get('step')}/{p_.get('steps') or '?'}" + (f" · ETA ~{_about(p_['eta_min'])}" if p_.get("eta_min")
-                                                               else ""))
+        print(f"  {ui.ACTIVE} {who} · {shown(s_.get('agent'))} · {shown(s_.get('project'))} · {shown(p_.get('goal'))}"
+              f" — {shown(p_.get('step'))}/{shown(p_.get('steps') or '?')}"
+              + (f" · ETA ~{_about(p_['eta_min'])}" if p_.get("eta_min") else ""))
     print()
     return 0
 
@@ -2687,7 +2698,8 @@ def _lesson_root(scope: str):
     return path if path.is_dir() else None
 
 
-LINT_ORDER = ("no-cause", "missing", "quarantined", "broad", "wrong", "no-file")  # what recall cannot show comes first
+# what recall cannot show comes first: a lesson file no command can read, then the lessons it cannot use
+LINT_ORDER = ("unreadable", "no-cause", "missing", "quarantined", "broad", "wrong", "no-file")
 
 
 def _lesson_lint(a, lessons) -> int:
@@ -2695,11 +2707,13 @@ def _lesson_lint(a, lessons) -> int:
     anchors checked against its own checkout, printed by kind with the command that fixes each finding. Exit 1 when
     something needs fixing."""
     from . import lessonlint
-    items = lessons.all_lessons(_lesson_scope(a) if _lesson_scoped(a) else None)
+    scoped = _lesson_scope(a) if _lesson_scoped(a) else None
+    items = lessons.all_lessons(scoped)
     scopes = {}
     for x in items:
         scopes.setdefault(x["meta"].get("scope") or "", []).append(x)
-    found = [f for scope, group in scopes.items() for f in lessonlint.lint(group, _lesson_root(scope))]
+    found = lessons.unreadable(scoped) + [f for scope, group in scopes.items()
+                                          for f in lessonlint.lint(group, _lesson_root(scope))]
     if not found:
         print(f"{ui.OK} {len(items)} lesson{'s' if len(items) != 1 else ''}: nothing to fix")
         return 0
@@ -2914,9 +2928,6 @@ def cmd_lesson(a):
             if les["meta"].get("quarantine"):
                 print(f"  {ui.WARN} held, not recalled: {les['meta']['quarantine']}. Only the developer releases it: "
                       f"dev lesson release {les['meta']['id']} --why …")
-            if not any(_lesson_anchors(a).values()):
-                print(ui.dim("  no anchors: only the session start recalls it. Add where it applies: dev lesson anchor "
-                             + les["meta"]["id"] + " --file … --command … --activity … --error … --why …"))
             for line in _registry_hint(scope, lessons.anchors(les)):
                 print(line)
             print(ui.dim("  automate it when you can: dev lesson prevent " + les["meta"]["id"] +
@@ -2992,8 +3003,13 @@ def cmd_lesson(a):
     items = lessons.search(a.search) if getattr(a, "search", None) else lessons.all_lessons(
         None if a.all else _lesson_scope(a))
     if not a.all and not getattr(a, "search", None) and _lesson_scope(a) != "global":
+        from . import guard  # this project's initiatives: their lessons apply to it too (docs/lessons.md)
+        items += [x for s in guard.initiatives_of(_lesson_scope(a)) for x in lessons.all_lessons(f"initiatives/{s}")]
         items += lessons.all_lessons("global")
     items = [x for x in items if a.all or x["meta"].get("status") != "retired"]
+    lag = lessons.sync_lag()
+    if lag:
+        ui.warn(lag)
     print(ui.section(f"Lessons · {len(items)}"))
     if not items:
         print("  none yet — record one after a fix, a revert or a repeated mistake: dev lesson add \"…\" --happened \"…\" "
@@ -3249,11 +3265,23 @@ def _bug_pending(a, bugs):
         return 0
     print(f"{len(items)} item{'s' if len(items) != 1 else ''} held for review, each exactly as it would be sent:")
     for it in items:
-        where = "private vulnerability reporting" if it.get("security") else "a public issue comment"
+        p = it["payload"] if isinstance(it.get("payload"), dict) else {}
         state = "approved, goes with the next sync" if it.get("approved") else f"dev bug send {it.get('id')}"
-        print(f"\n  {it.get('id')} · {it['payload'].get('type')} · {it['payload'].get('fingerprint')} · to {where} · "
-              f"{state}" + (f" · {it['problem']}" if it.get("problem") else ""))
-        print(bugs.render_payload(it["payload"]))
+        print(f"\n  {it.get('id')} · {p.get('type')} · {p.get('fingerprint')} · {state}" +
+              (f" · {it['problem']}" if it.get("problem") else ""))
+        texts = bugs.outgoing(it)  # the strings the sender posts, rendered the same way
+        number = bugs._issue_number(p.get("fingerprint")) if isinstance(p.get("fingerprint"), str) else None
+        if "private" in texts:
+            print(f"  To private vulnerability reporting, never to a public issue\n  Title: {texts['private_title']}")
+            print(texts["private"])
+        elif number is None and "issue" in texts:
+            print(f"  As a new public issue, when the registry has none for this bug yet\n  Title: {texts['title']}")
+            print(texts["issue"])
+            print("\n  Or, when the registry has one by then, as a comment on it:")
+            print(texts["comment"])
+        else:
+            print(f"  As a comment on issue #{number}:" if number else "  As a comment on the bug's issue:")
+            print(texts["comment"])
     return 0
 
 
@@ -3379,18 +3407,49 @@ def cmd_jobs(a):
     return 0
 
 
+# What a terminal must never receive from a presence file, which is another person's text: the C0 control characters
+# but tab and line feed (an escape sequence sets the window title, clears the screen or moves the cursor; a carriage
+# return overwrites the line), DEL, the C1 controls (a lone CSI or OSC byte acts as ESC [ or ESC ]), and the
+# bidirectional controls that reorder what the developer reads (the embeddings, overrides and isolates, and the
+# LRM, RLM and ALM marks).
+_PRESENCE_UNSAFE = re.compile("[\x00-\x08\x0b-\x1f\x7f-\x9f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]")
+
+
+def _from_presence(value, width: int = 0) -> str:
+    """A field of a presence file as dev team and dev progress print it: the characters in _PRESENCE_UNSAFE go, and a
+    tab or line feed becomes a space, so the field stays on its row and cannot start one that reads as another
+    machine's. Cut to `width` characters when given. None prints as nothing. Every presence-derived string these
+    commands print goes through here."""
+    s = _PRESENCE_UNSAFE.sub("", "" if value is None else str(value)).replace("\t", " ").replace("\n", " ")
+    return s[:width] if width else s
+
+
+def _presence_name(rec: dict, team: list = None) -> str:
+    """A machine as people read it: `ana@andress-mbp-2 (m-0a1b2c3d)`, the hostname from work.display (this Mac's own,
+    or the label another Mac's presence publishes when it is a plain hostname) and the machine id beside it. A record
+    from before the machine id, or one whose label is not a plain hostname, shows as presence names it, through
+    _from_presence."""
+    from . import work
+    who = f"{rec.get('user')}@{rec.get('host')}"
+    shown = work.display(who, team)
+    return _from_presence(f"{shown} ({rec.get('host')})" if shown != who else who)
+
+
 def cmd_team(a):
     from . import work
     t = work.team(max_age_h=a.hours)
     print(ui.section(f"Team · machines active in the last {a.hours} h"))
     if not t:
         print("  no presence yet (each machine publishes it on sync)")
+    shown = _from_presence  # every field below is another machine's text
     for m in t:
-        print(f"\n  {ui.bold(m['user'] + '@' + m['host'])}  {ui.dim('updated ' + m.get('updated', ''))}")
+        print(f"\n  {ui.bold(_presence_name(m, t))}  {ui.dim('updated ' + shown(m.get('updated')))}")
         for s_ in m.get("sessions", []):
-            print(f"    {ui.ACTIVE} {s_.get('agent')} · {s_.get('project')}@{s_.get('branch')}  {ui.dim((s_.get('status') or '')[:80])}")
+            print(f"    {ui.ACTIVE} {shown(s_.get('agent'))} · {shown(s_.get('project'))}@{shown(s_.get('branch'))}"
+                  f"  {ui.dim(shown(s_.get('status'), 80))}")
         for l_ in m.get("locks", []):
-            print(f"    🔒 {l_['id']} {l_['title']}  {ui.dim(l_['scope'] + ' · until ' + l_['until'])}")
+            print(f"    🔒 {shown(l_.get('id'))} {shown(l_.get('title'))}"
+                  f"  {ui.dim(shown(l_.get('scope')) + ' · until ' + shown(l_.get('until')))}")
     print()
     return 0
 
@@ -4272,6 +4331,8 @@ def build_parser():
     x = gsp.add_parser("note", help="an update while a step is still running: no step changes state")
     x.add_argument("text", nargs="+")
     x.add_argument("--next", help="what comes next")
+    x.add_argument("--step", help="the plan step this partial evidence is about (number or part of its name)")
+    x.add_argument("--check", help="partial evidence for that step: kept on it, and the step stays open")
     for verb, h_ in (("step", "a step finished"), ("block", "blocked: why and what is needed"),
                      ("done", "finished: the outcome")):
         x = gsp.add_parser(verb, help=h_)
@@ -4349,7 +4410,7 @@ def build_parser():
     x.add_argument("--retire-when", help="the outside condition that makes it obsolete (a tool version, an issue)")
     x.add_argument("--why")
     x.add_argument("--new", action="store_true",
-                   help="record it although a lesson shares an error or command anchor: another mistake (needs --why)")
+                   help="record it although a lesson shares an error anchor: another mistake (needs --why)")
     _anchor_flags(x)
     x = lsp.add_parser("anchor", help="add where a lesson applies (files, commands, kinds of work, errors, stack)")
     x.add_argument("selector", nargs="+")
@@ -4411,9 +4472,11 @@ def build_parser():
     x.add_argument("--hint", dest="steps", action="append", type=lambda v: ("hint", v), metavar="'NAME SLOT=VALUE …'",
                    help="a hint template: use-tool, from-root, one-at-a-time, scratch-tool, sync-retry, ask-update")
     x.add_argument("--dev", dest="steps", action="append", type=lambda v: ("dev", v), metavar="'COMMAND'",
-                   help="a dev command of devkit's own subcommands and flags")
+                   help="a dev subcommand and only its flags that take no value, such as 'test --failed' (no "
+                        "values, arguments or paths)")
     x.add_argument("--text", dest="steps", action="append", type=lambda v: ("text", v), metavar="'TEXT'",
-                   help="free text, at most 200 characters (held for review)")
+                   help="free text, at most 200 characters, held for review: no URL, no path of this Mac and none "
+                        "of the shell forms |, >, <, ;, &&, $( or a backtick")
     x = bsp.add_parser("top", help="hotfix recommendations: open bugs by score, with a reason each")
     x.add_argument("--task", action="store_true", help="add the suggested bugs as work items with the issue link")
     bsp.add_parser("sync", help="refresh the cache and send the outbox")
@@ -4685,6 +4748,23 @@ def _crashed(argv, exc: BaseException) -> int:
     return bugs.handle_crash(argv, exc)
 
 
+def _closed_pipe() -> int:
+    """The reader of dev's output went away before dev finished writing (`dev audit --json | head -c 100`): that is
+    no devkit bug, so no crash record and no notice. What is left to write goes to /dev/null, so the flush at exit
+    cannot fail again, and dev exits as a program that SIGPIPE stopped (128 + 13 = 141), the code the shell and
+    `set -o pipefail` report for `yes | head`."""
+    import signal
+    try:
+        null = os.open(os.devnull, os.O_WRONLY)
+        try:
+            os.dup2(null, sys.stdout.fileno())
+        finally:
+            os.close(null)
+    except (OSError, ValueError):  # an output with no file descriptor (a test's StringIO): nothing to redirect
+        pass
+    return 128 + signal.SIGPIPE
+
+
 def main(argv=None) -> int:
     global _ARGV
     argv = sys.argv[1:] if argv is None else argv
@@ -4709,6 +4789,7 @@ def main(argv=None) -> int:
     rc = 1
     try:
         rc = a.fn(a) or 0
+        sys.stdout.flush()  # a reader that closed the pipe shows here, where it is handled, not in the flush at exit
         return rc
     except KeyboardInterrupt:
         rc = 130
@@ -4716,6 +4797,9 @@ def main(argv=None) -> int:
     except CodexSessionError as e:
         print(f"{a.cmd}: {e}")
         rc = 2
+        return rc
+    except BrokenPipeError:  # before Exception: a closed pipe is the reader's choice, not devkit's crash
+        rc = _closed_pipe()
         return rc
     except Exception as e:  # devkit's own bug: a notice with its marker and exit 70, never a traceback
         rc = _crashed(argv, e)

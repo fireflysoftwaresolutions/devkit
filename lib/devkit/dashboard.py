@@ -39,7 +39,6 @@ import json
 import os
 import re
 import shlex
-import socket
 import subprocess
 import time
 from pathlib import Path
@@ -424,13 +423,24 @@ def build_actions(reg: dict, now: float = None, items: list = None, colls: list 
     return acts
 
 
+def _machine_id() -> str:
+    """This Mac as presence and locks name it: its machine id, the same whatever the hostname (identity.machine)."""
+    from . import identity
+    return identity.machine().id
+
+
+def _me(reg: dict) -> str:
+    """This Mac's person, `user@machine id`, as the presence and session records of this Mac name it."""
+    return f"{reg.get('github_user') or os.environ.get('USER', '')}@{_machine_id()}"
+
+
 def since_yesterday(reg: dict, cache: dict, now: float = None, items: list = None, slog: list = None, me: str = "") -> dict:
     """What happened since the start of yesterday: sessions, commits, merged PRs, completed tasks.
 
     This machine's live sessions (reg["sessions"]) are `me`'s; a logged line of the same session is not repeated."""
     from . import work
     now = now or time.time()
-    me = me or f"{reg.get('github_user') or os.environ.get('USER', '')}@{socket.gethostname().split('.')[0].lower()}"
+    me = me or _me(reg)
     y0 = _midnight(now, 1)
     yday = time.strftime("%Y-%m-%d", time.localtime(y0))
     sessions = []
@@ -695,7 +705,9 @@ def live_sessions_of(person: dict, now: float, max_idle_s: float = 2 * 3600) -> 
 
 
 def collisions(team: list, items: list, now: float = None) -> list:
-    """Two people or sessions on the same project and branch; locks that expired but are still held."""
+    """Two people or sessions on the same project and branch; locks that expired but are still held. The texts name
+    a Mac by its hostname (work.display); the `who` lists keep the ids."""
+    from . import work
     now = now or time.time()
     by = {}
     for person in team:
@@ -709,17 +721,19 @@ def collisions(team: list, items: list, now: float = None) -> list:
     out = []
     for (proj, br), found in sorted(by.items()):
         if len(found) > 1:
-            labels = {}
+            labels, shown = {}, {}
             for w, a, _sid in found:
                 labels[f"{w} ({a})"] = labels.get(f"{w} ({a})", 0) + 1
-            named = sorted(f"{lb} ×{n}" if n > 1 else lb for lb, n in labels.items())
+                shown[f"{w} ({a})"] = f"{work.display(w, team)} ({a})"
+            named = sorted(f"{shown[lb]} ×{n}" if n > 1 else shown[lb] for lb, n in labels.items())
             out.append({"kind": "same-branch", "project": proj, "branch": br, "who": sorted(labels),
                         "sessions": len(found), "text": f"{len(found)} sessions on {proj}@{br or '?'}: " + ", ".join(named)})
     for it in items:
         if it.get("lock") == "expired" and it.get("status") not in ("done", "cancelled"):
             out.append({"kind": "expired-lock", "id": it["id"], "scope": it["scope"], "holder": it["claimed_by"],
                         "until": it["lock_expires"],
-                        "text": f"{it['id']} “{it['title'][:60]}” is still claimed by {_who(it['claimed_by'])}, "
+                        "text": f"{it['id']} “{it['title'][:60]}” is still claimed by "
+                                f"{work.display(_who(it['claimed_by']), team)}, "
                                 f"lock expired {it['lock_expires'][:16].replace('T', ' ')}"})
     return out
 
@@ -758,7 +772,16 @@ def people(team: list, items: list, slog: list, now: float = None, local: list =
         if ln.get("who") and ln["who"] not in out:
             e = get(ln["who"])
             e["recent"].append(ln)
+    for e in out.values():  # `who` and `host` stay the keys people are matched by; `label` is what the page shows
+        e["label"] = _host_label(e["who"], team)
+        e["recent"] = [dict(ln, label=_host_label(ln.get("who") or "", team)) for ln in e["recent"]]
     return sorted(out.values(), key=lambda e: (-len(e["sessions"]), -len(e["claimed"]), -e["updated"], e["who"]))
+
+
+def _host_label(who: str, team: list) -> str:
+    """The hostname part of `who` as a person reads it (work.display): `mac-158` for `ana@m-…`."""
+    from . import work
+    return work.display(who, team).partition("@")[2]
 
 
 def linked_items(items: list, slug: str, members: list) -> list:
@@ -1189,8 +1212,8 @@ def item_detail(item_id: str, handoff: Path = None, reg: dict = None, now: float
         except OSError:
             continue
         if item_id in text:
-            title = next((ln[2:].strip() for ln in text.splitlines() if ln.startswith("# ")), p.stem)
-            plans.append({"path": str(p.relative_to(base)), "title": title})
+            from . import plans as plansmod
+            plans.append({"path": str(p.relative_to(base)), "title": plansmod.title_of(text, p.stem)})
     sessions = [s for s in read_session_log(base, months=12, limit=100_000) if item_id in s.get("text", "")]
     reg = reg or {}
     proj = next((p for p in reg.get("projects") or [] if isinstance(p, dict) and p.get("id") == scope), None) or {}
@@ -1554,7 +1577,7 @@ def collect(reg: dict, handoff: Path = None, now: float = None) -> dict:
     items = read_items(handoff, now)
     team = read_presence(handoff, reg, now=now)
     slog = read_session_log(handoff)
-    me = f"{reg.get('github_user') or os.environ.get('USER', '')}@{socket.gethostname().split('.')[0].lower()}"
+    me = _me(reg)
     ppl = people(team, items, slog, now, local=reg.get("sessions") or [], me=me)
     colls = collisions(ppl, items, now)
     acts = build_actions(reg, now, items, colls)
@@ -1566,7 +1589,7 @@ def collect(reg: dict, handoff: Path = None, now: float = None) -> dict:
     from . import dashnow  # Now's areas (contract P-fyli4qqn0y7): computed from what was read above, no other read
     peer_view = peer_sessions(now)  # the agent sessions on this Mac; their open escalations count in the headline
     now_areas = dashnow.areas(reg, raw, _runs(now, host, raw), acts, ci, jobs, items,
-                              since_yesterday(reg, cache, now, items, slog, me), team, now, host,
+                              since_yesterday(reg, cache, now, items, slog, me), team, now, _machine_id(),
                               roster=_roster(), prs_at=_prs_at(), escalations=peer_view.get("escalations"))
     return {
         "v": 3,

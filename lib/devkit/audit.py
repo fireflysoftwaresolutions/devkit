@@ -41,6 +41,7 @@ import os
 import re
 import socket
 import stat
+import sys
 import time
 from pathlib import Path
 
@@ -1775,7 +1776,11 @@ def _codex_identity():
 
 def actor() -> dict:
     """The hook's explicit identity, the native Codex command's metadata, or the existing shell/process identity.
-    This label does not change the caller identity used by command restriction checks."""
+    This label does not change the caller identity used by command restriction checks. `host` is this Mac's machine
+    id (identity.machine), the same whatever the hostname, so this Mac's records stay in one team folder; `label` is
+    the hostname of the moment, which the SIEM exports name as the host (_hostname)."""
+    from . import identity
+    m = identity.machine()
     sess = os.environ.get("DEVKIT_SESSION", "")
     agent = os.environ.get("DEVKIT_AGENT") or ("claude" if os.environ.get("CLAUDECODE") else "")
     codex = _codex_identity()
@@ -1784,7 +1789,7 @@ def actor() -> dict:
     elif not sess:
         agent, sess = _found_session() or (agent, "")
     return {"user": core.CFG.get("github_user") or os.environ.get("USER", "?"),
-            "host": socket.gethostname().split(".")[0].lower(), "agent": agent or "human",
+            "host": m.id, "label": m.label, "agent": agent or "human",
             "session": sess.split(":", 1)[-1][:12] if sess else ""}
 
 
@@ -1862,14 +1867,52 @@ def context(agent_id: str = "") -> dict:
     return _context(agent_id)
 
 
+UNKNOWN_CREW = {"member": "unknown"}  # a record whose caller devkit cannot tie to a lane: `dev audit --member unknown`
+
+
+def _caller(agent: str, sid: str) -> str:
+    """Who makes a record that names no lane, in the session `agent:sid`: "main", a crew member's lane, or "" when
+    devkit cannot tie the record to one. A hook knows from its payload (identity.from_hook: agent_id is a member's
+    lane, its absence the main session). A `dev` command asks identity: its lane mark, the call ledger, or the main
+    session when no crew member can be speaking. The hook stamps a member's lane only on its `dev progress|crew|watch|
+    session` calls, so a member's `dev commit` reaches here with no lane named, and only the ledger tells it from
+    the tech lead's. The audit never guesses: another session than the record's, a command that open calls of more
+    than one caller hold (identity gives those to the member, for permissions), or a record made while identity
+    looks (an expired call it audits) all give ""."""
+    if _FINDING:
+        return ""
+    from . import identity
+    payload = getattr(sys.modules.get("devkit.hooks"), "_PAYLOAD", None) if _HOOK_IDENTITY.get() else None
+    if isinstance(payload, dict) and payload.get("session_id"):
+        return identity.from_hook(agent, payload).lane if str(payload["session_id"]) == sid else ""
+    _FINDING.append(True)
+    try:
+        from . import progress
+        found = identity._find()
+        sp = found.speaker
+        if sp.how in ("human", "unknown") or (sp.agent, sp.session) != (agent, sid):
+            return ""
+        if sp.how == "ledger" and len({str(c.get("caller") or "main") for c in progress.open_calls(sid)
+                                       if c.get("tool_use_id") in found.calls}) > 1:
+            return ""
+        return sp.lane
+    except Exception:
+        return ""
+    finally:
+        _FINDING.pop()
+
+
 def _context(agent_id: str = "", *, native: bool = False) -> dict:
     """Where a record belongs: project, branch, run and step from the session and its run (the F2/F4 ledger), and the
-    crew member when one acts. Only record construction opts into native Codex metadata; public context keeps
-    its existing behavior for command restriction checks."""
+    crew member when one acts. Only record construction opts into native Codex metadata and into finding a caller
+    that named no lane (_caller): a member's record carries its own lane and step, the tech lead's the main lane's
+    running step, and one devkit cannot tie to a lane no step and UNKNOWN_CREW. Public context keeps its existing
+    behavior for command restriction checks."""
     out: dict = {}
     env = os.environ
     codex = _codex_identity() if native else None
     aid = str(agent_id or (codex[1] if codex else "") or env.get("DEVKIT_FROM_AGENT") or "")
+    who = aid  # the caller's lane as named; inside a run, as _caller finds it when none is named
     sess = f"codex:{codex[0]}" if codex else env.get("DEVKIT_SESSION", "")
     if ":" in sess:
         from . import progress
@@ -1885,8 +1928,10 @@ def _context(agent_id: str = "", *, native: bool = False) -> dict:
             out["project"] = out["project"] or str(run.get("project") or "")
             out["run"] = str(run["goal"])[:80]
             agents = run.get("agents") or {}
-            key = aid if aid in agents else next((k for k in agents if len(aid) >= 8 and k.startswith(aid)), None)
-            owner = key or ("main" if not aid else None)
+            if not who:  # the Codex thread and the public context keep the main session for a caller without a lane
+                who = "main" if codex or not native else _caller(agent, sid)
+            key = who if who in agents else next((k for k in agents if len(who) >= 8 and k.startswith(who)), None)
+            owner = key or ("main" if who == "main" else None)
             if key:
                 lane = agents[key]
                 chain = progress.lane_chain(run, key) or [key]
@@ -1895,12 +1940,14 @@ def _context(agent_id: str = "", *, native: bool = False) -> dict:
                 out["crew"] = {k: v for k, v in (("member", mid), ("role", role), ("lane", key),
                                                  ("parent", str(lane.get("parent") or "main")),
                                                  ("tool_use_id", str(lane.get("launch") or ""))) if v}
+            elif not who:
+                out["crew"] = dict(UNKNOWN_CREW)
             step = next((x.get("name") for x in run.get("plan") or []
                          if owner and (x.get("owner") or "main") == owner and x.get("state") == "running"), "")
             if step:
                 out["step"] = str(step)
-    if aid and "crew" not in out and not codex:
-        out["crew"] = {"lane": aid}
+    if who and (who != "main" or aid) and "crew" not in out and not codex:
+        out["crew"] = {"lane": who}
     if not out.get("project"):
         out["project"], branch = _where()
         out["branch"] = out.get("branch") or branch
@@ -1940,7 +1987,10 @@ def build(action: str, target="", detail="", outcome="ok", extra: dict = None, c
     for k in ("project", "branch", "run", "step"):  # the run goal and step names are free text, like target
         if where.get(k) and not rec.get(k):
             rec[k] = _clean(where[k], rx)
-    crew = {**(rec.get("crew") or {}), **(where.get("crew") or {})}  # the run's lane wins over a caller's guess
+    found = where.get("crew") or {}
+    if found == UNKNOWN_CREW and rec.get("crew"):
+        found = {}  # a record that names its crew member keeps it: only who made the record is unknown
+    crew = {**(rec.get("crew") or {}), **found}  # the run's lane wins over a caller's guess
     if crew.get("member") and "role" not in crew:
         crew["member"], role = _member(crew["member"])
         if role:
@@ -2595,7 +2645,37 @@ def _plan_prune(now: float, cfg: dict) -> dict:
     mine = team_dir()
     team = [f for f in sorted(mine.glob("*.jsonl")) if month.fullmatch(f.stem) and f.stem < tcut] \
         if mine.exists() and not cfg["hold"] else []
+    if not cfg["hold"]:
+        team += [f for d in _former_team_dirs() for f in sorted(d.glob("*.jsonl"))
+                 if month.fullmatch(f.stem) and f.stem < tcut and _this_macs_copy(f)]
     return {"keeps_from": cut, "team_keeps_from": tcut, "local": local, "team": team}
+
+
+def _former_team_dirs() -> list:
+    """This user's handoff folders under the hostnames this Mac carried (audit/<user>@<hostname>/), where devkit
+    published before the machine id. A DHCP name (`mac-55`) may also be another Mac's folder: _this_macs_copy
+    decides per file."""
+    from . import identity
+    a, m = actor(), identity.machine()
+    root = core.HANDOFF / "audit"
+    return [root / f"{a['user']}@{name}" for name in sorted(m.aliases)
+            if name != m.id and (root / f"{a['user']}@{name}").is_dir()]
+
+
+def _this_macs_copy(f: Path) -> bool:
+    """Was this published month file this Mac's? A copy is a prefix of one Mac's own month file, so its last record
+    tells: written under this Mac's id, or under a hostname this Mac carried at that time."""
+    from . import identity
+    try:
+        lines = [ln for ln in f.read_bytes().splitlines() if ln.strip()]
+        last = json.loads(lines[-1]) if lines else {}
+    except (OSError, ValueError):
+        return False
+    a = last.get("actor") if isinstance(last, dict) else None
+    if not isinstance(a, dict) or not isinstance(last.get("ts"), (int, float)):
+        return False
+    host = str(a.get("host") or "")
+    return host == identity.machine().id or identity.was_this_mac(host, float(last["ts"]))
 
 
 def prune(now: float = None) -> dict:
@@ -2708,11 +2788,28 @@ def to_csv(recs: list) -> str:
     return buf.getvalue()
 
 
+def _hostname(a: dict) -> str:
+    """The host a SIEM shows for a record's actor: its hostname of the time (`label`), or `host` for a record from
+    before the machine id, which named the Mac by its hostname."""
+    return str(a.get("label") or a.get("host") or "")
+
+
+def _device_id(a: dict) -> str:
+    """The record's machine id, for the SIEM's device id field; "" for a record that names a hostname only."""
+    from . import identity
+    host = str(a.get("host") or "")
+    return host if identity.MACHINE_ID.fullmatch(host) else ""
+
+
 def to_ocsf(r: dict) -> dict:
-    """One record as an OCSF Base Event (class 0, activity Other); devkit's own fields are under `unmapped`."""
+    """One record as an OCSF Base Event (class 0, activity Other); devkit's own fields are under `unmapped`. The
+    device is the hostname of the time, and its uid the machine id when the record has one."""
     sid, sname = _OCSF_STATUS.get(r.get("outcome"), (0, "Unknown"))
     a = r.get("actor") or {}
     sev = r.get("severity", "info")
+    device = {"hostname": _hostname(a), "type_id": 0}
+    if _device_id(a):
+        device["uid"] = _device_id(a)
     return {"activity_id": 99, "activity_name": r.get("action"), "category_uid": 0, "category_name": "Uncategorized",
             "class_uid": 0, "class_name": "Base Event", "type_uid": 99, "type_name": "Base Event: Other",
             "severity_id": _OCSF_SEVERITY.get(sev, 0), "severity": sev.capitalize(), "status_id": sid,
@@ -2723,7 +2820,7 @@ def to_ocsf(r: dict) -> dict:
                          "product": {"name": "devkit", "vendor_name": VENDOR, "version": core.VERSION}},
             "actor": {"user": {"name": a.get("user") or ""}, "session": {"uid": a.get("session") or ""},
                       "app_name": a.get("agent") or ""},
-            "device": {"hostname": a.get("host") or "", "type_id": 0},
+            "device": device,
             "unmapped": {k: r[k] for k in ("category", "project", "branch", "run", "step", "crew", "target", "detail",
                                            "why", "evidence", "ref", "prev", "hash", "v", "cleaned")
                          if r.get(k) not in (None, "")}}
@@ -2739,7 +2836,8 @@ def _cef_ext(s) -> str:
 
 def to_cef(r: dict) -> str:
     a, c = r.get("actor") or {}, r.get("crew") or {}
-    ext = [("rt", int(round((r.get("ts") or 0) * 1000))), ("suser", a.get("user")), ("shost", a.get("host")),
+    ext = [("rt", int(round((r.get("ts") or 0) * 1000))), ("suser", a.get("user")), ("shost", _hostname(a)),
+           ("deviceExternalId", _device_id(a)),
            ("act", r.get("action")), ("cat", r.get("category")), ("outcome", r.get("outcome")),
            ("msg", r.get("detail")), ("cs1Label", "id"), ("cs1", r.get("id")), ("cs2Label", "project"),
            ("cs2", r.get("project")), ("cs3Label", "member"), ("cs3", c.get("member")), ("cs4Label", "step"),
@@ -2754,7 +2852,7 @@ def to_cef(r: dict) -> str:
 def _syslog_line(r: dict) -> bytes:
     pri = 13 * 8 + _SYSLOG_SEVERITY.get(r.get("severity"), 6)  # facility 13: log audit
     stamp = time.strftime("%b %d %H:%M:%S", time.localtime(r.get("ts") or time.time()))
-    return f"<{pri}>{stamp} {(r.get('actor') or {}).get('host') or 'localhost'} devkit: {to_cef(r)}".encode("utf-8")
+    return f"<{pri}>{stamp} {_hostname(r.get('actor') or {}) or 'localhost'} devkit: {to_cef(r)}".encode("utf-8")
 
 
 def export(fmt: str = "jsonl", **filters) -> str:

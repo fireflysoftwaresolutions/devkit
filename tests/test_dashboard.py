@@ -8,7 +8,6 @@ import json
 import os
 import re
 import shutil
-import socket
 import subprocess
 import sys
 import tempfile
@@ -20,7 +19,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
-from devkit import core, dashboard, plans, work  # noqa: E402
+from devkit import core, dashboard, identity, plans, work  # noqa: E402
 
 EVIL = "<img src=x onerror=alert(1)>"
 BREAKOUT = "</script><script>alert('pwned')</script>"
@@ -36,7 +35,17 @@ LONG_MILESTONE = "Business-first journey delivery across the experience, domain 
 LONG_GOAL = "Deliver working banking and insurance operations through Experience, Domain and Core services, with verified artefacts and consumer adoption."
 LEGACY = "DevKit ·"                  # the legacy marker, still accepted
 SAVED = "widget · main ❯ Ship export ❯ export endpoint done ❯ ✓ 31 tests green ❯ ▸ 3/7 ❯ next → contract test"   # what devkit saves
-ME = f"me@{socket.gethostname().split('.')[0].lower()}"
+ME = "me@m-thismac1"  # this Mac in the fixtures: its machine id (setUpModule), whatever the hostname is
+REAL_MACHINE = identity.machine
+_MACHINE = mock.patch.object(identity, "machine", lambda now=None: identity.Machine("m-thismac1", "mac-158", {}))
+
+
+def setUpModule():
+    _MACHINE.start()
+
+
+def tearDownModule():
+    _MACHINE.stop()
 
 
 def iso(t):
@@ -166,6 +175,21 @@ class TempState:
     def __exit__(self, *exc):
         core.STATE = self.old
         self.tmp.cleanup()
+
+
+class HostnameChangeTests(unittest.TestCase):
+    # macOS renames the Mac with the network; the dashboard names this Mac by its machine id, so "me" and this Mac's
+    # own presence stay this Mac's when the hostname changes between two renders
+    def test_who_stays_the_same_when_the_hostname_changes(self):
+        with tempfile.TemporaryDirectory() as tmp, TempState(), mock.patch.object(identity, "machine", REAL_MACHINE):
+            handoff = Path(tmp) / "handoff"
+            make_handoff(handoff)
+            seen = []
+            for name in ("Mac-158.lan", "mac-55"):
+                with mock.patch("socket.gethostname", return_value=name):
+                    seen.append(embedded(dashboard.render(registry(), handoff=handoff, now=NOW))["who"])
+        self.assertEqual(seen[0], seen[1])
+        self.assertRegex(seen[0], r"^me@m-[0-9a-z]{8}$")
 
 
 class RenderTests(unittest.TestCase):
@@ -726,6 +750,25 @@ class TeamWorkTests(unittest.TestCase):
         self.assertEqual(ppl["bob@studio"]["claimed"], ["T-a2"])               # expired but still held
         self.assertTrue(all(r["who"] == "bob@studio" for r in ppl["bob@studio"]["recent"]))
 
+    def test_people_and_collisions_name_a_machine_by_its_hostname_label(self):
+        # presence names a Mac by its machine id; people and texts show its hostname (this Mac's current one)
+        ses = lambda agent: [{"project": "p", "branch": "b", "agent": agent, "last_seen": NOW}]  # noqa: E731
+        team = [{"user": "me", "host": "m-thismac1", "label": "old-name", "updated": iso(NOW), "sessions": ses("claude")},
+                {"user": "bob", "host": "m-0000beef", "label": "mini", "updated": iso(NOW), "sessions": ses("codex")},
+                {"user": "cy", "host": "studio", "updated": iso(NOW), "sessions": []}]
+        lock = {"id": "T-z1", "scope": "p", "title": "Fix", "status": "doing", "lock": "expired",
+                "claimed_by": "bob@m-0000beef (codex)", "lock_expires": ISO}
+        slog = [{"who": "bob@m-0000beef", "ts": NOW, "text": "done"}]
+        ppl = {p["who"]: p for p in dashboard.people(team, [lock], slog, NOW, me=ME)}
+        self.assertEqual({w: p["label"] for w, p in ppl.items()},
+                         {ME: "mac-158", "bob@m-0000beef": "mini", "cy@studio": "studio"})
+        self.assertEqual([r["label"] for r in ppl["bob@m-0000beef"]["recent"]], ["mini"])
+        texts = " ".join(c["text"] for c in dashboard.collisions(team, [lock], NOW))
+        self.assertIn("bob@mini (codex)", texts)
+        self.assertIn("me@mac-158 (claude)", texts)
+        self.assertIn("still claimed by bob@mini", texts)
+        self.assertNotIn("m-0000beef", texts)
+
     def test_actions_for_locks_and_collisions(self):
         reg = registry()
         cs = dashboard.collisions(self.team, self.items, NOW)
@@ -968,6 +1011,9 @@ class DetailTests(unittest.TestCase):
         f = h / "items/acme/widget/T-big.md"
         f.write_text(f.read_text().replace("Body " + EVIL, "x" * 10_000))
         (h / "plans/acme/widget/export.md").write_text("# Export plan\n\nCovers T-big.\n")
+        # a plan `dev plan new` writes holds its title in the front matter only
+        (h / "plans/acme/widget/2026-11-11-import.md").write_text(
+            "---\nid: P-x\ntitle: Import plan\nkind: plan\n---\n## Summary\n\nFollows T-big.\n\n## Changelog\n\n- v1\n")
         (h / "sessions/acme/widget/2026-11.md").write_text(f"# Sessions\n\n- {time.strftime('%Y-%m-%d %H:%M', time.localtime(NOW))} · me@testmac · claude · `main` · worked on T-big\n")
         (self.st / "sessions").mkdir()
         (self.st / "sessions" / "claude-sess12345678-rest.json").write_text(json.dumps({"branch": "feat/export", "top": "/w/export"}))
@@ -982,7 +1028,8 @@ class DetailTests(unittest.TestCase):
         self.assertEqual((len(d["body"]), len(d["changelog"])), (10_000, 100))
         self.assertEqual(d["links"], [{"kind": "initiative", "target": "lending", "text": "initiative:lending"}])
         self.assertEqual((d["lock"]["state"], d["lock"]["session"]), ("held", "sess12345678"))
-        self.assertEqual(d["plans"], [{"path": "plans/acme/widget/export.md", "title": "Export plan"}])
+        self.assertEqual(d["plans"], [{"path": "plans/acme/widget/2026-11-11-import.md", "title": "Import plan"},
+                                      {"path": "plans/acme/widget/export.md", "title": "Export plan"}])
         self.assertEqual(len(d["sessions"]), 1)
         self.assertEqual(d["branches"], [{"branch": "feat/export", "worktree": "/w/export", "match": "the holder's session works on it"}])
         self.assertEqual([(p["number"], p["match"]) for p in d["prs"]], [(40, "the PR's branch is linked")])

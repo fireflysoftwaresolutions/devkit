@@ -803,6 +803,8 @@ _dev__progress__note() {
   _arguments -s -S : \
     '(- *)'{-h,--help}'[show this help message and exit]' \
     '--next=[what comes next]:next: ' \
+    '--step=[the plan step this partial evidence is about]:plan step: _dev_live steps -' \
+    '--check=[partial evidence for that step]:check: ' \
     '*:text: '
 }
 
@@ -1007,7 +1009,7 @@ _dev__lesson__add() {
     '*--tag=[tag]:tag: ' \
     '--retire-when=[the outside condition that makes it obsolete]:retire when: ' \
     '--why=[why]:why: ' \
-    '--new[record it although a lesson shares an error or command anchor]' \
+    '--new[record it although a lesson shares an error anchor]' \
     '*--file=[a file or glob it applies to]:file: ' \
     '*--command=[the command words it applies to, e.g. "git push --force"]:command: ' \
     '*--activity=[the kind of work it applies to]:kind of work: _dev_live activities -' \
@@ -1236,8 +1238,8 @@ _dev__bug__detour() {
   _arguments -s -S : \
     '(- *)'{-h,--help}'[show this help message and exit]' \
     '*--hint=[a hint template]:'\''name slot=value …'\'': ' \
-    '*--dev=[a dev command of devkit'\''s own subcommands and flags]:'\''command'\'': ' \
-    '*--text=[free text, at most 200 characters]:'\''text'\'': ' \
+    '*--dev=[a dev subcommand and only its flags that take no value, such as '\''test…]:'\''command'\'': ' \
+    '*--text=[free text, at most 200 characters, held for review]:'\''text'\'': ' \
     ':fingerprint: '
 }
 

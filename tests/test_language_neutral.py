@@ -18,6 +18,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
 from devkit import ai, cli, core, crew, lessons, raci, scope, skillguard, wizard, work  # noqa: E402
+from test_lessons_base import unanchor  # noqa: E402
 
 A = {"user": "ana", "host": "mbp1", "agent": "claude", "session": "s1"}
 DAY = 86400
@@ -53,8 +54,9 @@ class AnchoredLessonTests(_Handoff):
                              activities=["release"])
         self.mig = self.add("Edited an applied migration", files=["db/migrations/**"], activities=["database"],
                             errors=["checksum mismatch"], stack=["java"])
-        self.words = self.add("Migration tests were skipped", scope="global", cause="migration tests skipped",
-                              prevention="run the migration tests")
+        # a lesson written before anchors existed: it shares the step's words and nothing else
+        self.words = unanchor(self.add("Migration tests were skipped", scope="global", cause="migration tests skipped",
+                                       prevention="run the migration tests", activities=["testing"]))
 
     def test_anchors_round_trip_and_a_lesson_written_before_them_has_none(self):
         self.assertEqual(lessons.anchors(lessons.find(self.mig["meta"]["id"])),
@@ -113,9 +115,10 @@ class ConsolidationTests(_Handoff):
                       errors=["checksum mismatch"])
         es = self.add("Se editó una migración ya aplicada", files=["db/migrations/**"], activities=["database"],
                       errors=["checksum mismatch"], new=True, why="the same mistake in Spanish, for the merge")
-        self.add("Commit after a pipe hides failing tests", cause="tail hides the exit code", prevention="pipefail")
+        self.add("Commit after a pipe hides failing tests", cause="tail hides the exit code", prevention="pipefail",
+                 files=["ci/unit.yml"])  # the same words as the next one, and no anchor in common
         self.add("Commit chained after a pipe hides failing tests", cause="tail hides the exit code",
-                 prevention="pipefail")
+                 prevention="pipefail", files=["ci/integration.yml"])
         self.add("The guard refused a heredoc", files=["lib/devkit/guard.py"], activities=["tooling"],
                  errors=["Run as a command of its own"])
         self.add("The guard missed a nested shell", files=["lib/devkit/guard.py"], activities=["tooling"],

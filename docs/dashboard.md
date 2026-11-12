@@ -38,7 +38,7 @@ The server's log is `~/.local/state/devkit/logs/dashboard.log`.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="images/dashboard/home-1440-dark.webp">
-  <img src="images/dashboard/home-1440-light.webp" alt="The dashboard's Now view: the headline says 2 things need you, and the line under it says Invoice export is paused until you answer D1 and CI failed on feat/rules-engine. On the left, the Needs you queue: the decision D1, Include cancelled invoices in the export?, with an amber bar, who asks, the two options with the recommended one, the words to type, and Open the run; a failed CI run with its first error and the command to copy; a pull request with changes requested; and one Housekeeping row. On the right, two runs: Invoice export with its landing strip, paused on you and landing 25 to 60 minutes after you answer D1, and Rules engine migration on another Mac, landing 15:55 to 16:10. Below, a line says one branch is only on this Mac, and the Since yesterday line lists 4 tasks done, 2 PRs merged, and 1 run finished." width="100%">
+  <img src="images/dashboard/home-1440-light.webp" alt="The dashboard's Now view: the headline says 2 things need you, and the line under it says Invoice export is paused until you answer D1@7f3a and CI failed on feat/rules-engine. On the left, the Needs you queue: the decision D1@7f3a, Include cancelled invoices in the export?, with an amber bar, who asks, the two options with the recommended one, the words to type, and Open the run; a failed CI run with its first error and the command to copy; a pull request with changes requested; and the Housekeeping row with 5 items: 2 finished worktrees, 1 expired lock, 1 branch with two sessions, and 1 note behind the code. On the right, two runs: Invoice export with its landing strip, paused on you and landing 25 to 60 minutes after you answer D1@7f3a, and Rules engine migration on another Mac, landing 15:55 to 16:10. Below, the Sessions on this Mac section says no agent session runs on this Mac; then a line says one branch is only on this Mac, and the Since yesterday line lists 4 tasks done, 2 PRs merged, and 1 run finished." width="100%">
 </picture>
 
 ## Views
@@ -115,7 +115,7 @@ Mac's last presence update.
 
 On a phone the queue comes before the runs:
 
-<img src="images/dashboard/home-390-dark.webp" alt="The Now view on a 390-pixel-wide phone screen in the dark theme: the headline 2 things need you; the Needs you queue with the decision D1 and its amber bar, the failed CI run, the pull request with changes requested, and the Housekeeping row; then the two runs with their landing strips; then the line about the branch only on this Mac and the Since yesterday line." width="320">
+<img src="images/dashboard/home-390-dark.webp" alt="The Now view on a 390-pixel-wide phone screen in the dark theme: the headline 2 things need you; the Needs you queue with the decision D1@7f3a and its amber bar, the failed CI run, the pull request with changes requested, and the Housekeeping row with 5 items; then the two runs with their landing strips; then the Sessions on this Mac section, the line about the branch only on this Mac, and the Since yesterday line." width="320">
 
 ## Background work
 
@@ -438,8 +438,12 @@ where links to `#/actions?kind=…` go), and the command palette list the items 
   activity in the last 14 days; otherwise it is _quiet_ or _no data_ (see [Honest states](#honest-states)). An
   initiative is off track when blocked or past its due date, and at risk when paused, due within a week, or holding
   blocked tasks. _Done_ is grey.
-- **People** are `user@host`. This Mac's own sessions come from the local registry, which is fresher than its
-  presence file. Presence older than 24 hours is ignored.
+- **People** are `user@host`, where the host is the Mac's [machine id](teams.md#machine-identity). The page shows
+  each one as `user@hostname`, with the id beside it in a quieter type when the two differ, on the Team cards, the
+  person drawer, Who is on it, avatars, activity rows, the Claimed by filter, search, and the Now team line; a run
+  on another Mac says `on <hostname>`. Links, locks, and filters keep the id. The Now team line lists other Macs
+  only, never another user of this Mac. This Mac's own sessions come from the local registry, which is fresher
+  than its presence file. Presence older than 24 hours is ignored.
 - **Locks** appear wherever tasks appear, as a lock icon with who holds it and the time left (_bob, 3 h left_); in
   drawers the lock has a countdown ring. Yours read _you_; an expired lock is amber.
 
@@ -509,7 +513,7 @@ view opens Now. Links from earlier versions still resolve: `#/overview` opens No
 | Live page | Served by the dashboard server (`dev dashboard`), which keeps a snapshot of the data, rebuilds it when the files behind it change, and sends open pages the areas that changed. Details (a whole task, run, job, or CI result) come from its read-only API under `/api/v1`; `/api/v1/branches/<project id>` reads one project's branch map from git when its Branches tab opens (a `502` problem quotes git's message when it cannot; the server reads a project's map at most once every 5 seconds and at most two maps at once, and one more gets a `429` problem with `Retry-After`) |
 | Static copy | `~/.local/state/devkit/dashboard/index.html` (or the file you name with `--export`): one self-contained HTML file (inline CSS, JS and SVG), written after every `dev sync` (session ends, debounced turn ends), by the hourly background job, and by `--path` |
 | Refresh | the live page updates in place; a static copy reloads every 2 minutes while visible (not while a drawer is open), keeping its view, filters, and scroll position |
-| Data | The registry (projects, git state, worktrees, PRs, initiatives, live sessions with progress, providers, drift). From the handoff repo: **work items** (`items/<scope>/<id>.md`, with lock and changelog), **presence** (`presence/<user>@<host>.json`), **session logs** (`sessions/<scope>/<YYYY-MM>.md`), **versioned plans** (`plans/<scope>/**/*.md`, sub-folders included), notes, and initiative READMEs. Also the PR cache, the instruction canary, guard decisions, the operations log, **timing records**, and **active runs** |
+| Data | The registry (projects, git state, worktrees, PRs, initiatives, live sessions with progress, providers, drift). From the handoff repo: **work items** (`items/<scope>/<id>.md`, with lock and changelog), **presence** (`presence/<user>@<machine id>.json`), **session logs** (`sessions/<scope>/<YYYY-MM>.md`), **versioned plans** (`plans/<scope>/**/*.md`, sub-folders included), notes, and initiative READMEs. Also the PR cache, the instruction canary, guard decisions, the operations log, **timing records**, and **active runs** |
 
 The decisions are computed in Python and unit-tested:
 

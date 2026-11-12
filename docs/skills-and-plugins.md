@@ -101,7 +101,10 @@ their quoted text and heredocs, with `bin/dev` counted as `dev`); and the kinds 
 (`activities`, ids from `dev crew raci`). A `project` condition limits a rule to repositories whose project files
 match, such as the `postgres` rule, and a `group` condition applies a rule only when its optional skill group is in
 `skills.groups`, such as the `terraform` rule. A file on disk outside every repository is scratch work and matches no
-rule.
+rule, and the UI rule's content check also skips `scratchpad/**` and `.tmp/**`, so a probe in a test repository built
+there does not count. The UI rule matches `className=` and the styled-components form (`styled.<tag>` followed by a
+template, an object, or `.attrs`) as written, so JUnit's `classname=` or a Python list named `styled` is not UI; HTML
+tags match in any case.
 
 ### Where devkit enforces them
 
@@ -456,7 +459,11 @@ such as an option's value read as the group (`claude --model mcp … plugin inst
 in the forms it reads: a relative path from the folder the command runs in, a link with another name on your
 `PATH`, the npm package or command a runner starts (`npx`, `npm exec`, `bun x`, `yarn exec`, `pnpm claude`), or the
 CLI's own script a JS runtime runs. A program it cannot know before the command runs (a variable, a `PATH` the
-command sets, a copy the command makes) counts as one of them. With `claude` or `codex`, a word the shell expands
+command sets, a copy the command makes) counts as one of them, unless its words are a read-only form that claude
+and codex share (`mcp`, `mcp list`, `mcp get <name>`, `plugin`, `plugin list`, `plugin marketplace list`), so
+`./node_modules/.bin/ng mcp` runs. The refusal says which case it found: a form that is not read-only, a program
+the guard cannot name (and how to name it), or a command line a program's code holds as data (see
+[Guard rules](guard.md#devkits-own-state-configuration-and-install)). With `claude` or `codex`, a word the shell expands
 (`$P`, `"$@"`, `$(…)`, `{plugin,install}`, `plugi?`) or a word `xargs` adds counts as a group word, so
 `claude -p "$PROMPT"` is refused too. devkit itself also refuses `dev ext update --apply` and
 `dev ext enable|disable --project` outside your terminal.

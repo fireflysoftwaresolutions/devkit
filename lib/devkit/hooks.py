@@ -13,6 +13,7 @@ errors, logs them to ~/.local/state/devkit/logs/hooks.log and exits 0.
 from __future__ import annotations
 
 import copy
+import functools
 import io
 import json
 import re
@@ -202,6 +203,25 @@ def _clone_node_modules(wt: Path, main: Path):
 
 
 _SEEN = {}  # cwd -> what context_for inspected there last ("top", "repo"): the welcome reuses that one inspection
+# the shapes a field of another Mac's presence must have to reach the model as written: a user name and a hostname
+# (or machine id), an agent's name, a git branch name. None holds a space, a quote or a control character.
+_PLAIN_WHO = re.compile(r"[A-Za-z0-9._-]{1,40}@[A-Za-z0-9._-]{1,80}")
+_PLAIN_AGENT = re.compile(r"[a-z][a-z0-9-]{0,19}")
+_PLAIN_BRANCH = re.compile(r"[A-Za-z0-9._/+-]{1,100}")
+
+
+def _presence_words(t: dict, s_: dict, team: list) -> str:
+    """Another Mac's presence as the session-start context names it, `user@hostname (agent, branch)`. Presence is
+    another person's text and the model reads this context, so each field shows only in its plain shape (its label
+    only when it looks like a hostname, work.display's rule, else its host), else a neutral word: no sentence or
+    escape code from a presence file reaches the model."""
+    from . import work
+    label, host = str(t.get("label") or ""), str(t.get("host") or "")
+    who = work.display(f"{t.get('user')}@{label if work._LABEL.fullmatch(label) else host}", team)
+    agent, branch = str(s_.get("agent") or ""), str(s_.get("branch") or "")
+    return (f"{who if _PLAIN_WHO.fullmatch(who) else 'someone on another Mac'} "
+            f"({agent if _PLAIN_AGENT.fullmatch(agent) else 'an agent'}, "
+            f"{branch if _PLAIN_BRANCH.fullmatch(branch) else 'a branch'})")
 
 
 def context_for(cwd: str, agent: str) -> str:
@@ -292,21 +312,23 @@ def context_for(cwd: str, agent: str) -> str:
         from . import work
         me = work.actor(agent)
         mine, theirs = [], []
-        scopes = [p["id"]] + [f"initiatives/{d.name}" for d in (HANDOFF / "initiatives").glob("*")
-                              if p["id"] in notesmod.summarize((d / "README.md").read_text())["projects"]] \
-            if (HANDOFF / "initiatives").exists() else [p["id"]]
+        # an initiative folder whose README cannot be read lists no member (guard.initiatives_of), and hides nothing
+        scopes = [p["id"]] + [f"initiatives/{slug}" for slug in _initiatives(p["id"])]
         for sc in scopes:
             for it in work.all_items(sc):
                 holder, expired = work.lock_holder(it)
                 if holder and not expired:
                     entry = f"{it['meta']['id']} “{it['meta']['title']}” ({sc})"
-                    (mine if holder.startswith(f"{me['user']}@{me['host']}") else theirs).append(f"{entry} — {holder}")
+                    at = work.parse_iso(it["meta"].get("claimed_at")) or None  # a former hostname of this Mac's
+                    (mine if work.mine(holder, me, at=at) else theirs).append(f"{entry} — {holder}")
         if mine:
             lines.append("Your claimed tasks: " + "; ".join(x.rsplit(" — ", 1)[0] for x in mine[:6]))
         if theirs:
             lines.append("Claimed by others — do NOT work on these: " + "; ".join(theirs[:6]))
-        others = [t for t in work.team() if not (t["user"] == me["user"] and t["host"] == me["host"])]
-        busy = [f"{t['user']}@{t['host']} ({s_.get('agent')}, {s_.get('branch')})" for t in others
+        team = work.team()
+        others = [t for t in team  # this Mac's presence under a former hostname is still its own
+                  if not work.mine(f"{t['user']}@{t['host']}", me, at=work.parse_iso(t.get("updated")) or None)]
+        busy = [_presence_words(t, s_, team) for t in others
                 for s_ in t.get("sessions", []) if s_.get("project") == p["id"]]
         if busy:
             lines.append("Also working on this project right now: " + ", ".join(busy[:5]) +
@@ -315,9 +337,7 @@ def context_for(cwd: str, agent: str) -> str:
         _swallowed("session-start", e)
     try:
         from . import lessons
-        inits = [d.name for d in (HANDOFF / "initiatives").glob("*") if (d / "README.md").exists() and
-                 p["id"] in notesmod.summarize((d / "README.md").read_text())["projects"]] \
-            if (HANDOFF / "initiatives").exists() else []
+        inits = _initiatives(p["id"])
         try:  # the lessons of the files this branch changes come first
             from . import testx
             changed = testx.changed_files(top)
@@ -331,6 +351,14 @@ def context_for(cwd: str, agent: str) -> str:
                          "<id> --evidence …` if one happens again):")
             lines.append(lessons.ADVICE)
             lines += ["- " + x for x in known]
+        try:  # recall leaves out the lesson files it cannot read: name them, so they are repaired, not forgotten
+            bad = [x for sc in [p["id"], *(f"initiatives/{s}" for s in inits), "global"]
+                   for x in lessons.unreadable(sc) if not lessons.is_archived(x)]
+        except Exception as e:
+            bad = []
+            _swallowed("session-start", e)
+        if bad:
+            lines.append(_unreadable_lessons(bad))
     except Exception as e:
         _swallowed("session-start", e)
     try:
@@ -356,13 +384,27 @@ def context_for(cwd: str, agent: str) -> str:
     return "\n".join(lines)
 
 
+def _unreadable_lessons(bad: list) -> str:
+    """The session start's line for the lesson files recall cannot read (lessons.unreadable's findings)."""
+    n, ids = len(bad), ", ".join(x["id"] for x in bad[:3]) + (" …" if len(bad) > 3 else "")
+    return (f"{n} lesson file{'s' if n != 1 else ''} cannot be read, so no recall shows "
+            f"{'them' if n != 1 else 'it'}: {ids} (`dev lesson lint` names each with its fix).")
+
+
 def _session_lessons_shown(data: dict, seen: dict):
     """The known pitfalls the session's context showed (context_for, which counted them) are pending for its main
-    agent until it hits them (missed) or its turn ends (heeded)."""
+    agent until a refusal or an output shows their error again (missed) or the session ends (heeded)."""
     try:
         _shown(data, (seen or {}).get("lessons") or [], "session", count=False)
     except Exception as e:
         _swallowed("session-start", e)
+
+
+def _initiatives(project: str) -> list:
+    """The initiatives `project` is a member of, in the handoff the hooks read: their lessons are the project's too,
+    at the session start and on every call and output (guard.initiatives_of)."""
+    from . import guard
+    return guard.initiatives_of(project, HANDOFF)
 
 
 def _note_excerpt(ns) -> str:
@@ -844,7 +886,7 @@ def _handoff_nudge(agent: str, data: dict, sess: dict, now=None):
     from . import work
     a = work.actor(agent, sess.get("session") or "")
     mine = [i["meta"]["id"] for i in work.all_items(pid) if i["meta"].get("status") == "doing" and
-            str(i["meta"].get("claimed_by") or "").startswith(f"{a['user']}@{a['host']}")]
+            work.mine(i["meta"].get("claimed_by") or "", a, at=work.parse_iso(i["meta"].get("claimed_at")) or None)]
     tasks = (f"Tasks: keep {', '.join(mine)} current (`dev task done <id>` once verified; `dev task add \"…\" --why "
              f"\"…\"` for follow-ups)." if mine else
              "Tasks: claim the work item for this work (`dev task start <id>`) or add it (`dev task add \"…\" --now`).")
@@ -1217,10 +1259,7 @@ def stop(agent: str):
                 fixes = lessons.fixed_in_session(sess["top"], sess.get("head"))
                 if fixes:
                     sess["lesson_nudged"] = True
-                    reasons.append(("lesson", "devkit: this session fixed or reverted something (" + "; ".join(fixes[:3]) +
-                                   "). If it was a mistake that could happen again, record a lesson: `dev lesson add "
-                                   "\"<title>\" --cause \"…\" --prevent \"…\" --evidence \"commit …\"` (or "
-                                   "`dev lesson recur <id>` if a known pitfall repeated). Skip it for a trivial fix."))
+                    reasons.append(("lesson", _lesson_nudge(fixes)))
             except Exception:
                 _log(f"stop lessons {agent}: {traceback.format_exc()[-300:]}")
         try:  # crew members may be writing plans right now; their own `dev plan revise` records them
@@ -1249,7 +1288,6 @@ def stop(agent: str):
         _patch_quietly(sf, before, sess)  # a subagent that started meanwhile stays; an ended session stays ended
         if ended:  # the turn is not sent back: keep its prompts only for development work, refresh the checkpoint
             _continuity("on_stop", agent, data, sess=sess, dev_turn=classed)
-            _lessons_end(data, "main")  # what the turn was shown and did not hit again was heeded
     if out:
         print(json.dumps(out))
     if sid == "-":
@@ -1380,6 +1418,7 @@ def session_end(agent: str):
     data = _stdin_json()
     sid = data.get("session_id") or ""
     _continuity("on_session_end", agent, data)  # /clear: the clear link, and the old checkpoint's prompts go
+    _lessons_end(data, "main")  # what the session was shown and did not hit again was heeded, in any of its turns
     if sid:
         _spawn_sync(["--session", f"{agent}:{sid}", "--finish"])
 
@@ -1427,7 +1466,7 @@ def _lane_verdict(data: dict, agent: str, cmd: str, routed: bool = False):
                                      agent=agent, routed=routed)
     except Exception as e:  # unchecked is not allowed: the member's command fails closed (the Keymaker's review)
         _log(f"crew-lane {agent} {aid}: {traceback.format_exc()[-300:]}")
-        return (f"devkit could not check this command against your lane ({type(e).__name__}), so it is refused "
+        return (f"{_LANE_CHECK_FAILED} ({type(e).__name__}), so it is refused "
                 f"rather than run unchecked. Run it once more; if it is refused again, ask the tech lead with "
                 f"`dev crew ask \"…\"` and name the command.")
     return v[1] if v else None
@@ -1436,17 +1475,23 @@ def _lane_verdict(data: dict, agent: str, cmd: str, routed: bool = False):
 # The refusals the guard hook makes itself, each recorded as hooks:<rule> (guard.py's deny() calls name the rest).
 # devkit's bug registry takes a guard refusal id only from these and guard.py (bugs.guard_refusal_ids): a new one
 # goes here, or its refusals cannot be reported.
+# hooks:crew-lane names every lane refusal that clients up to 26.11.15 recorded; newer ones record a lane refusal by
+# its guard site (guard.refusal_of) and a lane check that failed as hooks:lane-check.
 HOOK_REFUSALS = ("hook-forgery", "identity", "crew-limits", "stub-commit", "irreversible", "crew-scope", "readonly",
-                 "hatch", "crew-lane")
+                 "hatch", "crew-lane", "lane-check")
+_LANE_CHECK_FAILED = "devkit could not check this command against your lane"
 
 
 def _lane_rule(why: str) -> str:
     """The rule a lane command's refusal is recorded under: readonly (the records the read-only allowlist grows
-    from), hatch (an escape hatch a member used), else crew-lane."""
+    from), hatch (an escape hatch a member used), lane-check (the lane check failed, so the command was refused
+    unchecked), else crew-lane."""
     if why.startswith("read-only lane"):
         return "readonly"
     if why.startswith("Crew members do not use devkit's escape hatches"):
         return "hatch"
+    if why.startswith(_LANE_CHECK_FAILED):
+        return "lane-check"
     return "crew-lane"
 
 
@@ -1499,7 +1544,15 @@ def _reconcile(agent: str, data: dict):
 
 
 def _close_call(data: dict):
-    """The call's entry leaves the ledger: it ran (PostToolUse, PostToolUseFailure) or never will (refused)."""
+    """The call's entry leaves the ledger: it ran (PostToolUse, PostToolUseFailure) or never will (refused). An edit
+    call in flight that failed or was refused writes nothing, so its record goes; one that ran gives way to the
+    record of its result at the end of its PostToolUse (progress.note_edit)."""
+    if data.get("tool_name") in ("Write", "Edit", "MultiEdit") and data.get("hook_event_name") != "PostToolUse":
+        try:
+            from . import progress
+            progress.edit_dropped(data)
+        except Exception:
+            _log(f"edit record drop: {traceback.format_exc()[-300:]}")
     if data.get("tool_name") in SHELL_TOOLS or data.get("tool_name") == "apply_patch":
         try:
             from . import progress
@@ -1604,6 +1657,22 @@ def identity_change(cmd: str, cwd=None) -> list:
     return sorted(set(found))
 
 
+def _in_guard_time(as_reason: bool = False):
+    """Decorator for the guard hook's own judges of a call (guard._in_time): each runs within the guard's time,
+    which in the hook's own process every judge of the call shares from the moment the guard loaded, check's
+    included. An agent that stops the hook at its timeout runs the call unjudged, so past that time the judge refuses
+    the call: ("deny", guard.judge_time_reason(…)), or the reason alone with `as_reason`. guard.py loads at the first
+    call, as each judge loads it."""
+    def wrap(fn):
+        @functools.wraps(fn)
+        def in_time(*args, **kwargs):
+            from . import guard
+            return guard._in_time(as_reason=as_reason)(fn)(*args, **kwargs)
+        return in_time
+    return wrap
+
+
+@_in_guard_time()
 def _identity_verdict(data: dict):
     """Inside a subagent: ("deny", why) for a shell command that changes who calls devkit; None otherwise."""
     if not data.get("agent_id") or data.get("tool_name") not in SHELL_TOOLS:
@@ -1886,8 +1955,9 @@ def _pitfalls(agent: str, data: dict, found: list, remember: bool = True, channe
 
 
 def _shown(data: dict, ids: list, channel: str, count: bool = True):
-    """Lessons that reached the agent of this hook event: counted on `channel`, and pending for that agent until it
-    hits them again (missed) or its turn or lane ends (heeded). devkit's own headless calls record nothing."""
+    """Lessons that reached the agent of this hook event: counted on `channel`, and pending for that agent until a
+    refusal or an output shows their error again (missed) or the session or its lane ends (heeded). devkit's own
+    headless calls record nothing."""
     if ids and not _headless():
         from . import lessons
         lessons.shown(ids, channel, str(data.get("session_id") or ""), _lesson_agent(data), count=count)
@@ -1904,8 +1974,8 @@ def _note_call(sess: dict, data: dict, ids: list):
 
 
 def _lesson_hits(data: dict, ids: list):
-    """The agent hit these lessons' refusal, command or error anchors: those shown to it earlier in this session and
-    still pending are missed (lessonevents.on_hit). Nothing is read when nothing was hit."""
+    """A refusal or a tool's output showed these lessons' error anchors: those shown to the agent earlier in this
+    session and still pending are missed (lessonevents.on_hit). Nothing is read when nothing was hit."""
     sid = str(data.get("session_id") or "")
     ids = [x for x in dict.fromkeys(ids) if x]
     if ids and sid and not _headless():
@@ -1913,9 +1983,20 @@ def _lesson_hits(data: dict, ids: list):
         lessonevents.on_hit(ids, sid, _lesson_agent(data))
 
 
+def _lesson_nudge(fixes: list) -> str:
+    """The Stop hook's question, once per session, after a fix or revert commit (lessons.fixed_in_session): whether
+    the mistake deserves a lesson."""
+    return ("devkit: this session fixed or reverted something (" + "; ".join(fixes[:3]) + "). If it was a mistake "
+            "that could happen again, record a lesson: `dev lesson add \"<the rule>\" --happened \"…\" --cause \"…\" "
+            "--prevent \"…\" --file <glob> --command \"<command words>\" --error \"<output text>\" --evidence "
+            "\"commit …\"` (keep the anchors that say where it applies: a lesson with none is refused), or "
+            "`dev lesson recur <id> --evidence \"…\"` if a known pitfall repeated. Skip it for a trivial fix.")
+
+
 def _lessons_end(data: dict, who: str):
-    """The turn of the main session, or a member's lane, ended without a send-back: the lessons still pending for
-    that agent were heeded (lessonevents.on_end)."""
+    """The main session ended (SessionEnd: an exit, a /clear, a logout), or a member's lane did: the lessons still
+    pending for that agent were heeded (lessonevents.on_end). A turn's end resolves nothing: a lesson shown in turn
+    one is missed when its mistake comes back in turn five."""
     sid = str(data.get("session_id") or "")
     if not sid or not who or _headless():
         return
@@ -1979,10 +2060,11 @@ def _brief_shown(agent: str, data: dict, sess: dict):
 def _call_pitfalls(agent: str, data: dict, remember: bool = True, channel: str = "call", show: bool = True,
                    skip=(), refused: str = "") -> str:
     """PreToolUse: the open lessons anchored on the command this call runs or the file it writes, and, for a refusal
-    (`refused`: its own text), those anchored on that text as an error, first. A lesson whose command or refusal
-    anchor the call hits is first resolved as missed when it was shown to the agent earlier and still pending; then
-    what is shown is recorded. `show=False` only resolves (a Codex call, which reads no context). `skip`: the lesson
-    of a lesson rule this call matched, which the rule already said and recorded."""
+    (`refused`: its own text), those anchored on that text as an error, first. A lesson whose error anchor the
+    refusal shows is first resolved as missed when it was shown to the agent earlier and still pending: the mistake
+    came back. Running a lesson's command again is no miss, since the right way runs it too (`dev progress step`,
+    `dev test prove`). Then what is shown is recorded. `show=False` only resolves (a Codex call, which reads no
+    context). `skip`: the lesson of a lesson rule this call matched, which the rule already said and recorded."""
     try:
         sess = _session_record(agent, data)
         project = str(sess.get("project") or "")
@@ -1995,13 +2077,12 @@ def _call_pitfalls(agent: str, data: dict, remember: bool = True, channel: str =
         files = [x for x in (inp.get("file_path"), inp.get("notebook_path")) if x]
         if not (cmd or files or refused):
             return ""
-        pool = lessons.recall_pool(project)  # loaded once for both questions
+        pool = lessons.recall_pool(project, _initiatives(project))  # loaded once for both questions
         found = lessons.for_call(project, files=files, command=cmd, limit=LESSON_HITS_MAX, pool=pool) \
             if cmd or files else []
         by_refusal = lessons.for_output(project, refused, limit=LESSON_HITS_MAX, pool=pool) if refused else []
         skip = {x for x in skip if x}
-        hit = by_refusal + [x for x in found if cmd and any(lessons.runs(cmd, c) for c in lessons.anchors(x)["commands"])]
-        _lesson_hits(data, [x["meta"]["id"] for x in hit if x["meta"]["id"] not in skip])
+        _lesson_hits(data, [x["meta"]["id"] for x in by_refusal if x["meta"]["id"] not in skip])
         if not show:
             return ""
         picked = list({x["meta"]["id"]: x for x in by_refusal + found if x["meta"]["id"] not in skip}.values())
@@ -2298,7 +2379,8 @@ def _recall_quietly(agent: str, data: dict) -> list:
     try:
         project = str(_session_record(agent, data).get("project") or "")
         from . import lessons
-        return lessons.for_output(project, _output_text(data), limit=LOOP_SHOW) if project else []
+        return lessons.for_output(project, _output_text(data), limit=LOOP_SHOW, initiatives=_initiatives(project)) \
+            if project else []
     except Exception:
         _log(f"settle recall {agent}: {traceback.format_exc()[-300:]}")
         return []
@@ -2311,7 +2393,7 @@ def _recalled(agent: str, data: dict, ids: list) -> list:
     try:
         project = str(_session_record(agent, data).get("project") or "")
         from . import lessons
-        pool = {x["meta"]["id"]: x for x in lessons.recall_pool(project)} if project else {}
+        pool = {x["meta"]["id"]: x for x in lessons.recall_pool(project, _initiatives(project))} if project else {}
     except Exception:
         _log(f"settle lessons {agent}: {traceback.format_exc()[-300:]}")
         return []
@@ -2331,7 +2413,8 @@ def _output_pitfalls(agent: str, data: dict, take: int = 0, taken: list = None) 
         from . import lessons
         same_call = set((sess.get("lessons_by_call") or {}).get(str(data.get("tool_use_id") or "")) or [])
         rules, said = _output_rules(data, project, text, same_call)
-        found = [x for x in lessons.for_output(project, text, limit=LESSON_HITS_MAX) if x["meta"]["id"] not in said]
+        found = [x for x in lessons.for_output(project, text, limit=LESSON_HITS_MAX, initiatives=_initiatives(project))
+                 if x["meta"]["id"] not in said]
         _lesson_hits(data, [x["meta"]["id"] for x in found if x["meta"]["id"] not in same_call])
         if take and taken is not None:
             taken.extend(found[:take])
@@ -2542,6 +2625,7 @@ EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit", "apply_patch")
 COMMIT_RE = re.compile(r"\bgit\s+(?:-C\s+(\S+)\s+)?commit\b|\bdev\s+commit\b")
 
 
+@_in_guard_time()
 def _stub_commit_gate(data: dict):
     """A commit that would include unfinished work (stubs, placeholders, TODOs without a task) is refused.
     DEVKIT_ALLOW_STUBS=1 as the commit's own prefix, or `dev commit --wip`, when the developer accepts them (spec F8,
@@ -2571,6 +2655,7 @@ def _stub_commit_gate(data: dict):
     return None
 
 
+@_in_guard_time()
 def _crew_limits(agent: str, data: dict):
     """Coordination guardrails -> ("deny", reason) or None:
     - the crew's slots (progress.launch_verdict): `progress.max_parallel` (default 4) under the team's ceiling,
@@ -2628,13 +2713,42 @@ def _same_repository(a: str, b: str) -> bool:
     return bool(ca) and ca == common(b)
 
 
+def _lane_scope_miss(path: str, cwd: str, top: str, layers: list):
+    """Why a crew lane's step scope (`layers`, counted from its repository `top`) does not hold a file write to
+    `path`, or None when it does. Each layer must hold the path as written (guard.scope_holds) and the file the write
+    reaches, links resolved: a path that does not exist yet by its nearest existing folder, and a `..` after a link
+    from the link's target, as the system resolves it. So a link inside the scope that leads out of the repository,
+    or into its files that the scope does not name, holds nothing. A path in another checkout of the same repository
+    counts from that checkout. -> (the path relative to the repository, where it lands when a link takes it out of
+    the scope, else '')."""
+    from . import guard
+    raw = path if os.path.isabs(path) else os.path.join(cwd, path)
+    ap = os.path.normpath(raw)
+    base = top
+    if guard.scope_rel(ap, cwd, top).startswith(".."):  # a worktree of the same repository: the scope counts from it
+        wt = _repo_top_of(ap)
+        if wt and _same_repository(wt, top):
+            base = wt
+    rel = guard.scope_rel(ap, cwd, base)
+
+    def holds(p):
+        return all(guard.scope_holds(p, cwd, layer, base=base) for layer in layers if layer)
+    for lands in dict.fromkeys((os.path.realpath(raw), os.path.realpath(ap))):  # `..` read physically, then lexically
+        inside = os.path.relpath(lands, os.path.realpath(base))
+        if inside != rel and not holds(lands):  # a link takes the write out of the scope
+            return rel, (core.tilde(lands) if inside.startswith("..") else inside)
+    return None if holds(ap) else (rel, "")
+
+
+@_in_guard_time(as_reason=True)
 def _scope_violation(agent: str, data: dict):
     """A crew member assigned a scope (dev progress assign … --scope "globs") edits only those files, so parallel
     agents never write the same file, and review-only and read-only members edit nothing. A helper a member
     launches has the member's tool level and scope, never more (spec F3). Every subagent's file and MCP tools are
     judged by guard.member_tool_verdict (spec F8): no sending or publishing, no MCP writes from a review or read-only
     lane or outside the step's scope, no edit of the secret scan's ignore list. Scopes count from the run's
-    repository (spec F7, G13). -> the refusal, or None."""
+    repository (spec F7, G13). It judges within the guard's time, and a patch of more files than the guard judges is
+    refused. -> the refusal, or None."""
     aid, tool = data.get("agent_id"), str(data.get("tool_name") or "")
     if not aid or not (tool in EDIT_TOOLS or tool.startswith("mcp__")):
         return None
@@ -2678,6 +2792,8 @@ def _scope_violation(agent: str, data: dict):
             body = inp.get("input") or inp.get("patch") or inp.get("command") or ""
             paths = ([p for _, p in guard.parse_patch_paths(str(body))] if agent == "codex" else
                      re.findall(r"\*\*\* (?:Add|Update|Delete) File: (\S+)", str(body))) or paths
+        if len(paths) > guard._PATCH_PATHS:  # check refuses such a patch first; this holds for what only it reads
+            return guard.PATCH_PATHS_REASON
         name = _who(lane.get("persona") or lane.get("label") or "this crew member")
         head = _who(chain[-1].get("persona") or chain[-1].get("label") or "its crew member")
         if len(chain) > 1:  # a helper: the limits it inherits are its member's
@@ -2697,17 +2813,18 @@ def _scope_violation(agent: str, data: dict):
                     f"handoff repository when its step's scope names them.")
         if not layers:
             return None
+        where = " and ".join(", ".join(g) for g in layers)
         for p_ in paths:
-            ap = os.path.normpath(p_ if os.path.isabs(p_) else os.path.join(cwd, p_))
-            rel = guard.scope_rel(ap, cwd, top)
-            if rel.startswith(".."):  # a worktree of the same repository: the scope's paths are relative to it
-                wt = _repo_top_of(ap)
-                if wt and _same_repository(wt, top):
-                    rel = os.path.relpath(os.path.realpath(ap), wt)
-            if not progress.in_scope(rel, layers):
-                return (f"{rel} is outside {name}'s scope ({' and '.join(', '.join(g) for g in layers)}): another "
-                        f"crew member may own it. "
-                        f"Ask the tech lead to widen it: dev crew ask \"may I change {rel}? why: …\"")
+            miss = _lane_scope_miss(p_, cwd, top, layers)
+            if not miss:
+                continue
+            rel, lands = miss
+            if lands:
+                return (f"{rel} leads through a link to {lands}, which is outside {name}'s scope ({where}): the write "
+                        f"would land there. Write to a path in your scope that is not a link, or ask the tech lead: "
+                        f"dev crew ask \"may I change {lands}? why: …\"")
+            return (f"{rel} is outside {name}'s scope ({where}): another crew member may own it. "
+                    f"Ask the tech lead to widen it: dev crew ask \"may I change {rel}? why: …\"")
     except Exception as e:
         guard.failopen("crew-scope", e)
         return None
@@ -2740,6 +2857,7 @@ def _guard_off(agent: str, data: dict):
                      "session", "allow", rule="guard-off", session=sid, tool=data.get("tool_name") or "")
 
 
+@_in_guard_time()
 def _irreversible_main(agent: str, data: dict):
     """The main session's irreversible-action gate (spec C6, F5 tiers): a shell command's tier-2 actions, and an MCP
     tool that sends or publishes outside this machine, need the developer's live grant while
@@ -2888,15 +3006,19 @@ def _guard_in_context(agent: str, data: dict, held: dict):
                 _swallowed("guard", e)
         why = _scope_violation(agent, data)
         if why:
-            held["verdict"], held["rule"] = ("deny", why), "crew-scope"
+            # the guard's time ran out during the scope check: recorded as the guard's own time refusal
+            late = why == g.judge_time_reason(g.judge_budget())
+            rule = "judge-time" if late else "crew-scope"
+            rid = (late and g.refusal_of(("deny", why))[0]) or "hooks:crew-scope"
+            held["verdict"], held["rule"] = ("deny", why), rule
             _log(f"guard {agent} deny: {why[:160]}")
             _close_call(data)
             from . import audit
             audit.record("guard.deny", (data.get("tool_input") or {}).get("file_path") or data.get("tool_name") or "",
-                         why[:400], "deny", tool=data.get("tool_name") or "", rule="crew-scope",
-                         agent_id=data.get("agent_id") or "", refusal_id="hooks:crew-scope")
+                         why[:400], "deny", tool=data.get("tool_name") or "", rule=rule,
+                         agent_id=data.get("agent_id") or "", refusal_id=rid)
             held["recorded"] = True  # a failure after this keeps the refusal, and records it no second time
-            told = _with_pitfalls(agent, data, _refusal_with_bug("hooks:crew-scope", "", why, data), why, skip)
+            told = _with_pitfalls(agent, data, _refusal_with_bug(rid, "", why, data), why, skip)
             print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
                                                      "permissionDecisionReason": told}}))
             return
@@ -2932,12 +3054,16 @@ def _guard_in_context(agent: str, data: dict, held: dict):
             held["verdict"], held["rule"] = ("deny", why), _lane_rule(why)
             _close_call(data)
             from . import audit
-            rid = f"hooks:{held['rule']}"
+            # a lane refusal is named by the guard site that made it and its command word (a team change, a program
+            # named at run time, a lane call in a chain), so each has a bug fingerprint of its own; a failed lane
+            # check is hooks:lane-check
+            rid, word = g.refusal_of(("deny", why)) if held["rule"] == "crew-lane" else ("", "")
+            rid = rid or f"hooks:{held['rule']}"
             audit.record("guard.deny", (data.get("tool_input") or {}).get("command", "")[:200], why, "deny",
                          tool=data.get("tool_name") or "", rule=held["rule"], agent_id=data.get("agent_id") or "",
                          refusal_id=rid)
             held["recorded"] = True
-            told = _with_pitfalls(agent, data, _refusal_with_bug(rid, "", why, data), why, skip)
+            told = _with_pitfalls(agent, data, _refusal_with_bug(rid, word, why, data), why, skip)
             print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
                                                      "permissionDecisionReason": told}}))
             return
@@ -2961,6 +3087,9 @@ def _guard_in_context(agent: str, data: dict, held: dict):
         try:
             _record_bypasses(agent, data)
             _watch_writes(agent, data)
+            if not headless:  # an allowed edit writes before its result: a reading lane's check meanwhile sees it
+                from . import progress
+                progress.edit_opened(agent, data)
         except Exception as e:
             g.failopen("guard-allow", e)
         out = _with_context(agent, {"hookEventName": "PreToolUse"}, data, skip)
@@ -3094,19 +3223,20 @@ def _lesson_rule_hit(agent: str, data: dict) -> dict:
     (guard.lesson_rule_hit: a miss when that agent was shown the lesson earlier and it is still pending, the rule's
     hit and miss counted, and the lesson shown again; a miss never changes the rule's mode, since only the developer's
     typed `grant lesson-block <lesson>` with `dev lesson prevent --by guard … --block` in a terminal makes a rule
-    refuse), then counted as shown (`call` for a warning, `refusal` for a block). It runs before any other lesson
-    this call shows is recorded, or the rule's own lesson would count as a miss of this very call.
-    -> guard.lesson_rule_hit's {"rule", "lesson", "mode", "missed"}, {} for none."""
+    refuse), then counted as shown (`call` for a warning, `refusal` for a block) when it reaches the agent: a
+    warning goes in the call's context, which Codex does not read (_with_context), so on Codex only a block shows its
+    lesson. It runs before any other lesson this call shows is recorded, or the rule's own lesson would count as a
+    miss of this very call. -> guard.lesson_rule_hit's {"rule", "lesson", "mode", "missed", "shown"}, {} for none."""
     sid = str(data.get("session_id") or "")
     if not sid or _headless():
         return {}
     try:
         from . import guard as g, lessons
-        hit = g.lesson_rule_hit(sid, _lesson_agent(data)) or {}
+        hit = g.lesson_rule_hit(sid, _lesson_agent(data), reads_context=agent == "claude") or {}  # as _with_context
     except Exception as e:
         _swallowed("guard", e)
         return {}
-    if hit:
+    if hit.get("shown"):
         try:
             lessons.track([hit["lesson"]], "shown", "call" if hit["mode"] == "warn" else "refusal")
             if hit["mode"] == "warn":

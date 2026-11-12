@@ -152,7 +152,10 @@ never touched):
 
 The copy carries a clone of the checkout's git repository that shares its objects, so a test that runs git on its
 checkout works there. The dependency folders (`node_modules`, `.venv`, `vendor`) are linked into the copy, not
-copied. The command exits with `1` unless every test proves the change.
+copied. A Python project installed in editable mode with a `src` layout would import the checkout's code, with your
+change, through the linked environment's `.pth` file, so devkit puts the copy's own source folders that those files
+name first on `PYTHONPATH`, and the run without the change really runs the old code. The command exits with `1` unless
+every test proves the change.
 
 - **Each case on its own.** A parametrized test is reported case by case, by its id (`test_label[None]`,
   `test_label[a]`), each with its own result with and without the change.

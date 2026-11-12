@@ -293,6 +293,89 @@ def message_violation(header: str, what: str = "Commit message"):
     return None
 
 
+TITLE_SAMPLE = 20  # the merged pull requests, or default-branch commits, a title convention is read from
+TITLE_MIN_SEEN = 5  # fewer titles than this show no convention: Conventional Commits stay the default
+TITLE_PLAIN_SHARE = 0.8  # plain sentences in at least this share of the titles are the repository's convention
+
+
+def _conventional(title: str) -> bool:
+    m = CC_RE.match((title or "").strip())
+    return bool(m) and m.group("type").lower() in _cc_types()
+
+
+def _sentence_of(desc: str) -> str:
+    d = (desc or "").strip().rstrip(".")
+    return d[:1].upper() + d[1:]
+
+
+def title_convention(c) -> dict:
+    """How this repository titles its pull requests, read from its own history: the titles of its last merged pull
+    requests on GitHub (bots left out: their prefix is their own configuration), or, when GitHub lists fewer than
+    five, the subjects of the default branch's last commits (merges, reverts, WIP and bots left out). Plain sentences
+    in at least 80% of five or more titles are the repository's convention, `sentence` (firefly-weave); anything else
+    keeps devkit's default, `conventional` (Conventional Commits, as devkit's own repository uses).
+    -> {"style", "seen": titles read, "plain": plain sentences among them, "source": where they come from}"""
+    titles, source = [], "merged PRs"
+    if c.provider == "github" and c.slug:
+        prs, _ = gh_json(["pr", "list", "-R", c.slug, "--state", "merged", "--limit", str(TITLE_SAMPLE),
+                          "--json", "title,author"], c)
+        for p in prs if isinstance(prs, list) else []:
+            who = p.get("author") or {}
+            login = str(who.get("login") or "")
+            if not (who.get("is_bot") or login.endswith("[bot]") or login.startswith("app/")):
+                titles.append(str(p.get("title") or "").strip())
+    titles = [t for t in titles if t]
+    if len(titles) < TITLE_MIN_SEEN:
+        ref = f"origin/{c.default}" if _ref_sha(c.top, f"refs/remotes/origin/{c.default}") else c.default
+        out = core.gitout(c.top, "log", "--no-merges", f"-{TITLE_SAMPLE * 2}", "--format=%s%x1f%an%x1f%ae", ref)
+        titles, source = [], f"commits on {c.default}"
+        for line in out.splitlines():
+            subject, _, who = line.partition("\x1f")
+            if subject.strip() and "[bot]" not in who and not re.match(r"(Merge |Revert \")", subject) and \
+                    not _WIP_RE.match(subject):
+                titles.append(subject.strip())
+        titles = titles[:TITLE_SAMPLE]
+    plain = sum(1 for t in titles if not _conventional(t))
+    style = "sentence" if len(titles) >= TITLE_MIN_SEEN and plain >= TITLE_PLAIN_SHARE * len(titles) else "conventional"
+    return {"style": style, "seen": len(titles), "plain": plain, "source": source}
+
+
+def _sentence_violation(title: str, conv=None, what: str = "PR title"):
+    """Reason when `title` is not a plain imperative sentence (a capital first letter, no Conventional Commit prefix,
+    no period, no WIP marker), the convention `conv` found; None when it is one. No length rule: such a repository's
+    own titles run past 72 characters."""
+    h = (title or "").strip()
+    rule = "this repository titles its pull requests as plain imperative sentences" + (
+        f" ({conv['plain']} of the last {conv['seen']} {conv['source']})" if conv else "")
+    if not h:
+        return f"{what} is empty: {rule}, for example `Handle expired tokens`."
+    if _WIP_RE.match(h):
+        return f"{what} `{h}` is a WIP marker: {rule}; say what the change does."
+    m = CC_RE.match(h)
+    if m and m.group("type").lower() in _cc_types():
+        return f"{what} `{h}` is a Conventional Commit, but {rule}: write `{_sentence_of(m.group('desc'))}`."
+    if h[0].isalpha() and h[0].islower():
+        return f"{what} `{h}`: start with a capital letter (`{_sentence_of(h)}`), as {rule}."
+    if h.endswith("."):
+        return f"{what} `{h}` ends with a period: drop it."
+    w = _non_imperative(h)
+    if w:
+        return f"{what} `{h}` starts with `{w}`: use the imperative mood (`Add`, not `Added`, `Adds` or `Adding`)."
+    return None
+
+
+def pr_title_violation(c, title: str, conv=None):
+    """Reason when a pull request title breaks this repository's title convention (title_convention), else None."""
+    conv = conv or title_convention(c)
+    if conv["style"] == "sentence":
+        return _sentence_violation(title, conv)
+    return message_violation(title, "PR title")
+
+
+def _title_hint(conv) -> str:
+    return '"<an imperative sentence>"' if conv and conv.get("style") == "sentence" else '"type(scope): summary"'
+
+
 def strip_attribution(text: str):
     """-> (text without AI-attribution lines, number of lines removed)."""
     pats = [p.lower() for p in guard.ATTRIBUTION] + list(_ATTRIBUTION_EXTRA)
@@ -1811,7 +1894,8 @@ def plan_workflow(text: str, fname: str, root: str) -> list:
             continue
         for item in _sequence(lines, steps_entry[1], steps_entry[2]):
             sm = _mapping(item, 0, len(item))
-            st = {"job": jname, "name": "", "run": None, "cwd": root, "env": {}, "skip": None, "blocking": False}
+            st = {"job": jname, "name": "", "run": None, "cwd": root, "env": {}, "skip": None, "blocking": False,
+                  "dropped": []}
             if "uses" in sm:
                 st.update(name=_scalar(sm["uses"][0]), skip="setup")
                 job["steps"].append(st)
@@ -1825,10 +1909,10 @@ def plan_workflow(text: str, fname: str, root: str) -> list:
             shell = _scalar(sm["shell"][0]) if "shell" in sm else ""
             scond = _scalar(sm["if"][0]) if "if" in sm else ""
             wd = _scalar(sm["working-directory"][0]) if "working-directory" in sm else job_wd
-            st["skip"], st["blocking"] = _step_skip(run, shell, scond, wd, root)
+            st["skip"], st["blocking"], here, st["dropped"] = _step_plan(run, shell, scond, wd, root, st["env"])
             if not st["skip"] and wd:
                 st["cwd"] = str(Path(root) / wd)
-            st["run"] = _expand(run, root)
+            st["run"] = _expand(here, root)
             job["steps"].append(st)
     return jobs
 
@@ -1859,18 +1943,534 @@ def _expand(run: str, root: str) -> str:
     return re.sub(r"\$\{\{\s*([\w.]+)\s*\}\}", lambda m: vals.get(m.group(1), m.group(0)), run)
 
 
-def _step_skip(run: str, shell: str, cond: str, wd, root):
-    """-> (reason or None, blocking). Blocking: a real check that could not run here."""
+_PRUNABLE = frozenset({"system", "image", "container", "volume", "network", "builder", "buildx"})
+_SHELL_VAR = re.compile(r"\$(?:\{([A-Za-z_]\w*)\}|([A-Za-z_]\w*))")
+
+
+def _shell_path(word: str, cwd, env: dict):
+    """The absolute path a shell word names, as the shell expands it here: `~`, and `$VAR` / `${VAR}` from `env`
+    (an unset variable is empty, so `"$UNSET/"` is `/`). None when this Mac cannot tell: a command's output (the
+    guard's reader leaves a `$` for `$(…)`), another expansion, or a folder `cd` went to that is not known."""
+    if word == "~" or word.startswith("~/"):
+        word = os.path.expanduser("~") + word[1:]
+    word = _SHELL_VAR.sub(lambda m: env.get(m.group(1) or m.group(2)) or "", word)
+    if "$" in word or "`" in word or word.startswith("~") or (cwd is None and not os.path.isabs(word)):
+        return None
+    return os.path.realpath(os.path.join(cwd or "/", word))
+
+
+_SHELLS = frozenset({"bash", "sh", "zsh", "dash", "ksh"})
+_OS_PACKAGERS = frozenset({"apt-get", "apt", "aptitude", "yum", "dnf", "microdnf", "apk", "zypper", "snap", "brew",
+                           "port", "choco", "winget", "scoop"})
+_PACKAGER_VERBS = frozenset({"install", "reinstall", "upgrade", "update", "dist-upgrade", "full-upgrade", "add",
+                             "remove", "uninstall", "purge", "autoremove", "del", "tap", "bundle", "link"})
+_GIT_CONFIG_READS = frozenset({"--get", "--get-all", "--get-regexp", "--get-urlmatch", "--list", "-l", "get", "list"})
+
+
+def _segments(run: str, depth: int = 0):
+    """(the words as written, the command they run) for each command of a step's script, read by the guard's command
+    reader (read-only use: it unwraps env, sudo, nice, npx, uv run, if/then and the like). The script a shell runs
+    with `-c` is read too, wherever it sits (`xvfb-run bash -c '…'`, `dbus-run-session -- bash -c '…'`)."""
+    for argv, _ in guard.split_commands(run) or []:
+        argv = list(argv)
+        yield argv, guard._unwrap(argv)
+        if depth < 3:
+            for i, w in enumerate(argv[:-2]):
+                if os.path.basename(w) in _SHELLS and re.fullmatch(r"-[a-z]*c[a-z]*", argv[i + 1]):
+                    yield from _segments(argv[i + 2], depth + 1)
+                    break
+
+
+def _as_root(argv) -> bool:
+    """The words run their command with sudo or doas, after any VAR=value assignments and env."""
+    for w in argv:
+        b = os.path.basename(w)
+        if b in ("sudo", "doas"):
+            return True
+        if not (b == "env" or (re.match(r"[A-Za-z_]\w*=", w))):
+            return False
+    return False
+
+
+# what a hosted runner runs as root to set itself up: services, kernel settings, system files and folders
+_ROOT_SETUP = frozenset({"systemctl", "service", "sysctl", "chown", "chmod", "chgrp", "chattr", "setfacl", "mkdir", "ln",
+                         "tee", "cp", "mv", "install", "touch", "truncate", "sed", "dd", "tar", "unzip", "curl", "wget",
+                         "mount", "umount", "swapoff", "swapon", "fallocate", "mkswap", "modprobe", "usermod",
+                         "useradd", "groupadd", "update-alternatives", "update-ca-certificates", "xcode-select",
+                         "locale-gen", "update-locale", "dpkg", "dpkg-reconfigure", "rpm", "ldconfig", "timedatectl",
+                         "hostnamectl", "launchctl", "killall", "pkill", "kill", "add-apt-repository", "apt-key",
+                         "debconf-set-selections", "gpg", "snap", "rm", "rmdir", "unlink", "ufw", "iptables",
+                         "defaults", "installer", "hdiutil", "spctl", "pmset", "scutil", "dscl", "Xvfb", "psql",
+                         "createuser", "createdb", "mysql", "mysqladmin"})
+_SETUP_SCRIPT = re.compile(r"(?i)install|setup|set-up|prepare|provision|bootstrap|deps|dependencies|free[-_]?(?:disk|"
+                           r"space)|clean|configure|init")
+_SERVICE_VERBS = frozenset({"install", "setup", "start", "stop", "restart", "reload", "enable", "disable"})
+# commands that only report or steer the shell: next to the runner's setup they do not make a step a check
+# (`source` and `.` run a script, so they are checks; a command or process substitution makes its piece one too)
+_INFO = frozenset({"echo", "printf", "true", ":", "cd", "pushd", "popd", "export", "set", "unset", "shopt", "alias",
+                   "sleep", "pwd", "ls", "df", "du", "free", "uname", "whoami", "id", "date", "env",
+                   "printenv", "nproc", "which", "type", "hash", "sw_vers", "lscpu", "ulimit", "umask", "test", "[",
+                   "[[", "wait", "exit", "return", "local", "declare", "readonly", "trap", "cat"})
+_VERSION_ARGS = (["--version"], ["version"], ["-V"], ["-v"], ["--help"], ["-h"])
+# a download piped into a shell: the installer scripts of trivy, syft, grype, gitleaks, rustup and the like
+_PIPED_INSTALLER = re.compile(r"\b(?:curl|wget)\b[^|\n]*\|\s*(?:sudo\s+(?:-\S+\s+)*)?(?:ba|z|da|k)?sh\b")
+_LEAD_WORDS = re.compile(r"^(\s*)((?:(?:then|do|else|elif|if|while|until|time|!|\{)\s+)*)")
+_TANGLED = "a check and runner setup{} that devkit cannot separate: the check cannot run here without the setup"
+
+
+def _nested_script(argv):
+    """The script the words hand to a shell (`bash -c '…'`, `xvfb-run sh -c '…'`), or None."""
+    for i, w in enumerate(argv[:-2]):
+        if os.path.basename(w) in _SHELLS and re.fullmatch(r"-[a-z]*c[a-z]*", argv[i + 1]):
+            return argv[i + 2]
+    return None
+
+
+def _substitutions(code: str) -> list:
+    """The scripts that the command and process substitutions in `code` run, nested ones too: `$(…)` and `…` outside
+    single quotes, `<(…)` and `>(…)` outside quotes. The guard's command reader keeps a quoted `$(…)`, backticks and
+    `<(…)` inside a word and drops `> >(…)`, so they are read from the text. An arithmetic `$((…))` runs none."""
+    out, stack, i, n = [], [], 0, len(code)  # stack: (what is open, where its script starts)
+    while i < n:
+        ch, top = code[i], (stack[-1][0] if stack else None)
+        if top in ("'", "$'"):
+            if ch == "\\" and top == "$'":
+                i += 1
+            elif ch == "'":
+                stack.pop()
+        elif ch == "\\":
+            i += 1
+        elif ch == "#" and top in (None, "sub", "(", "`") and (i == 0 or code[i - 1] in " \t\n;&|()"):
+            j = code.find("\n", i)  # a comment runs to the end of its line
+            i = n if j < 0 else j
+            continue
+        elif top == "`" and ch == "`":
+            out.append(code[stack.pop()[1]:i])
+        elif top == '"' and ch == '"':
+            stack.pop()
+        elif code.startswith("$((", i):
+            stack.append(("((", i))
+            i += 2
+        elif code.startswith("$(", i) or (top != '"' and code[i:i + 2] in ("<(", ">(")):
+            stack.append(("sub", i + 2))
+            i += 1
+        elif ch == "`":
+            stack.append(("`", i + 1))
+        elif top == '"':
+            pass
+        elif ch in "'\"":
+            stack.append(("$'" if ch == "'" and code[i - 1:i] == "$" else ch, i))
+        elif ch == "(":
+            stack.append(("(", i))
+        elif top == "((" and code.startswith("))", i):
+            stack.pop()
+            i += 1
+        elif ch == ")" and top in ("sub", "("):
+            start = stack.pop()[1]
+            if top == "sub":
+                out.append(code[start:i])
+        i += 1
+    return out + [code[start:] for what, start in stack if what in ("sub", "`")]  # unclosed: the rest runs
+
+
+def _commands(code: str, as_root: bool = False, depth: int = 0):
+    """(the words as written, the command they run, whether it runs as root, whether it is a shell on a script of its
+    own) for each command of `code`, with the commands of the scripts such shells run (see _segments)."""
+    for argv, _ in guard.split_commands(code) or []:
+        argv = list(argv)
+        root = as_root or _as_root(argv)
+        script = _nested_script(argv)
+        yield argv, guard._unwrap(argv), root, script is not None
+        if script is not None and depth < 3:
+            yield from _commands(script, root, depth + 1)
+
+
+def _informational(argv, words) -> bool:
+    """The command only reports or steers the shell (echo, cd, `command -v`, a tool's --version, a test)."""
+    if not words or words[0].startswith("#"):
+        return True
+    plain = guard._strip_prefix(list(argv))
+    if plain[:1] in (["for"], ["select"]) or (plain[:1] == ["command"] and plain[1:2] in (["-v"], ["-V"])):
+        return True  # a loop's header only names its values: its body decides
+    return os.path.basename(words[0]) in _INFO or words[1:] in _VERSION_ARGS
+
+
+def _prep_one(argv, words, as_root: bool, state: dict):
+    """("setup", why) when this one command only sets up a hosted runner, ("root", why) when it is a check that runs
+    as root, or None. `state` carries the folder `cd` went to ("here"), the checkout ("top") and the variables."""
+    if not words:
+        return None
+    env, top = state["env"], state["top"]
+    name = os.path.basename(words[0])
+    if re.fullmatch(r"python[\d.]*", name) and words[1:3] == ["-m", "playwright"]:
+        words, name = words[2:], "playwright"
+    pos = [w for w in words[1:] if not w.startswith("-")]
+    if name == "cd":
+        state["here"] = _shell_path(words[1], state["here"], env) if len(words) > 1 and words[1] != "-" else None
+    elif name in ("docker", "podman"):
+        if pos[:1] and pos[0] in _PRUNABLE and pos[1:2] == ["prune"]:
+            return "setup", f"runner prep ({name} {pos[0]} prune deletes Docker data on this Mac)"
+    elif name in _OS_PACKAGERS and pos[:1] and pos[0] in _PACKAGER_VERBS:
+        return "setup", f"runner prep ({name} {pos[0]} changes the runner's OS packages)"
+    elif name == "playwright" and pos[:1] in (["install"], ["install-deps"]):
+        if pos[0] == "install-deps" or "--with-deps" in words:
+            return "setup", f"runner prep (playwright {pos[0]}{' --with-deps' if pos[0] == 'install' else ''} " \
+                            f"installs OS packages for the browsers)"
+        return "setup", "runner prep (playwright install writes the shared Playwright browser cache; the browsers " \
+                        "installed here are used)"
+    elif name == "git" and "config" in words[1:3] and {"--global", "--system"} & set(words) and \
+            not _GIT_CONFIG_READS & set(words):
+        return "setup", "runner prep (git config --global changes this Mac's git settings)"
+    elif name in ("rm", "rmdir", "unlink"):
+        ops, opts = [], True
+        for w in words[1:]:
+            if opts and w == "--":
+                opts = False
+            elif not (opts and w.startswith("-") and w != "-"):
+                ops.append(w)
+        for w in ops:
+            p = _shell_path(w, state["here"], env)
+            if p is None or not p.startswith(top + os.sep):
+                return "setup", f"runner prep (deletes {w}, which is not inside the checkout)"
+    if as_root:  # setup the runner does as root, or a check that runs as root, which cannot run here
+        if name in _ROOT_SETUP or _informational(argv, words) or _SERVICE_VERBS & set(pos) or \
+                _SETUP_SCRIPT.search(name) or re.match(r"/(?:etc|sbin|usr/sbin)/", words[0]):
+            return "setup", f"runner prep (sudo {' '.join(words[:2])} runs as root on the runner's machine)"
+        return "root", f"runs {' '.join(words[:2])} as root (sudo), which dev ci --run does not do on this Mac"
+    return None
+
+
+def _top_pieces(run: str):
+    """A step's script cut at its top-level separators (&&, ||, ;, &, a newline), outside quotes, substitutions,
+    subshells and comments: [{"raw", "code" (without comments, line continuations joined), "sep" (the separator
+    after it), "subshell" (it holds a `( … )` of its own)}]. A pipeline stays one piece. None when the script cannot
+    be cut safely: a heredoc, a `case` arm, or unbalanced quotes or brackets."""
+    pieces, raw, code, stack, sub, i, n = [], [], [], [], False, 0, len(run)
+
+    def put(text):
+        raw.append(text)
+        code.append(text)
+
+    while i < n:
+        ch, top = run[i], (stack[-1] if stack else None)
+        start = not raw or raw[-1][-1:].isspace() or raw[-1][-1:] in ";&|()"
+        if top == "'":
+            put(ch)
+            stack.pop() if ch == "'" else None
+            i += 1
+        elif ch == "\\":
+            if run[i + 1:i + 2] == "\n" and top is None:
+                raw.append(run[i:i + 2])
+                code.append(" ")
+            else:
+                put(run[i:i + 2])
+            i += 2
+        elif top in ('"', "`", "${"):
+            if ch == {'"': '"', "`": "`", "${": "}"}[top]:
+                stack.pop()
+            elif ch == "$" and run[i + 1:i + 2] in ("(", "{"):
+                stack.append("$" + run[i + 1])
+                put(run[i:i + 2])
+                i += 2
+                continue
+            elif ch == "`" or (ch == '"' and top == "${"):
+                stack.append(ch)
+            put(ch)
+            i += 1
+        elif ch == "#" and start:
+            j = run.find("\n", i)
+            j = n if j < 0 else j
+            raw.append(run[i:j])
+            i = j
+        elif ch in "'\"`":
+            stack.append(ch)
+            put(ch)
+            i += 1
+        elif ch == "$" and run[i + 1:i + 2] in ("(", "{"):
+            stack.append("$" + run[i + 1])
+            put(run[i:i + 2])
+            i += 2
+        elif ch == "(":
+            sub = sub or (top is None and run[i - 1:i] not in ("<", ">"))  # <(…) and >(…) are read as substitutions
+            stack.append("(")
+            put(ch)
+            i += 1
+        elif ch == ")":
+            if top not in ("(", "$("):
+                return None
+            stack.pop()
+            put(ch)
+            i += 1
+        elif ch == "<" and run.startswith("<<", i) and not run.startswith("<<<", i):
+            return None
+        elif top is None and (run.startswith(";;", i) or run.startswith(";&", i)):
+            return None
+        elif top is None and (run.startswith("&&", i) or run.startswith("||", i) or ch in ";\n" or
+                              (ch == "&" and run[i - 1:i] not in ("<", ">", "|") and run[i + 1:i + 2] != ">")):
+            sep = run[i:i + 2] if run[i:i + 2] in ("&&", "||") else ch
+            pieces.append({"raw": "".join(raw), "code": "".join(code), "sep": sep, "subshell": sub})
+            raw, code, sub = [], [], False
+            i += len(sep)
+        else:
+            put(ch)
+            i += 1
+    if stack:
+        return None
+    pieces.append({"raw": "".join(raw), "code": "".join(code), "sep": "", "subshell": sub})
+    return pieces
+
+
+def _classify(piece: dict, state: dict, installs: bool) -> dict:
+    """What one top-level piece of a step's script does: its kind ("setup", "check", "root", "tangled" or "info") and
+    why. A pipeline or a command substitution that feeds the runner's setup is setup too; a subshell, a nested shell or
+    a substitution that runs the setup, next to a check, is tangled: the setup cannot be taken out without the check.
+    `source`/`.` and a command or process substitution (see _substitutions) are checks."""
+    code = piece["code"]
+    piped = _PIPED_INSTALLER.search(code)
+    setup = "runner prep (curl … | sh runs an installer downloaded from the internet)" if piped else None
+    first = "curl … | sh" if piped else None
+    install, checks, roots, nested = None, [], [], False
+    for argv, words, as_root, container in _commands(code):
+        nested = nested or container
+        if container:
+            continue
+        got = _prep_one(argv, words, as_root, state)
+        if got and got[0] == "setup":
+            setup = setup or got[1]
+            first = first or " ".join(words[:2])
+        elif installs and words and _INSTALL.search(" ".join(words)):
+            install = install or "dependency install (your local environment is used)"
+            first = first or " ".join(words[:2])
+        elif got:
+            roots.append(got[1])
+        elif not _informational(argv, words):
+            checks.append(words)
+    for script in _substitutions(guard.strip_heredocs(code)):
+        # a substitution runs a command the reader keeps inside a word (`test -z "$(gofmt -l .)"`): a check. Setup it
+        # runs cannot be left out without the command that uses its output, so next to a check it is tangled; one
+        # that only feeds the setup (`apt-get install "linux-headers-$(uname -r)"`) leaves the piece setup.
+        checks.append([script])
+        inside = dict(state)  # it runs in a subshell of its own: a `cd` in it holds for the rest of it only
+        for argv, words, as_root, container in _commands(script):
+            got = None if container else _prep_one(argv, words, as_root, inside)
+            if got and got[0] == "setup":
+                setup, first, nested = setup or got[1], first or " ".join(words[:2]), True
+    why = setup or install
+    if why and (checks or roots) and (nested or piece["subshell"]):
+        return {"kind": "tangled", "why": _TANGLED.format(f" ({first})")}
+    if why:
+        return {"kind": "setup", "why": why, "prep": bool(setup)}
+    if roots:
+        return {"kind": "root", "why": roots[0]}
+    return {"kind": "check" if checks else "info"}
+
+
+def _separate(run: str, cwd: str, root: str, env: dict, installs: bool = False) -> dict:
+    """A step's script split into the hosted runner's own setup and the check it runs: {"kind", "why", "run",
+    "dropped"}. kind None: no setup, run as it is. "setup": only setup (and commands that report), skipped. "check":
+    `run` is the script without its setup commands (a leading one is left out, a later one becomes `true`, as if it
+    had succeeded: the tools installed here are used, and a missing one fails the step), "dropped" lists them.
+    "tangled": setup and a check that cannot be separated (a nested shell, a subshell, a heredoc). "root": the check
+    itself runs as root. `installs`: dependency installs (npm ci, pip install) count as setup too, as for dev ci --run."""
+    state = {"here": os.path.realpath(cwd), "top": os.path.realpath(root), "env": env}
+    pieces = _top_pieces(run)
+    whole = pieces is None
+    if whole:  # the guard's reader leaves heredoc bodies out
+        pieces = [{"raw": run, "code": run, "sep": "", "subshell": True}]
+    for p in pieces:
+        p.update(_classify(p, state, installs))
+    kinds = [p["kind"] for p in pieces]
+    out = {"kind": None, "why": None, "run": run, "dropped": []}
+    for k in ("tangled", "root"):
+        if k in kinds:
+            return dict(out, kind=k, why=next(p["why"] for p in pieces if p["kind"] == k))
+    if "setup" not in kinds:
+        return out
+    if "check" not in kinds:
+        setup = [p for p in pieces if p["kind"] == "setup"]
+        return dict(out, kind="setup", why=next((p["why"] for p in setup if p["prep"]), setup[0]["why"]))
+    if whole:
+        return dict(out, kind="tangled", why=_TANGLED.format(""))
+    kept, dropped, lead = [], [], True
+    for p in pieces:
+        if p["kind"] != "setup":
+            lead = lead and not p["code"].strip()
+            kept.append(p["raw"] + p["sep"])
+            continue
+        indent, words = _LEAD_WORDS.match(p["code"]).groups()
+        dropped.append(" ".join(p["code"][len(indent + words):].split()))
+        if lead and not words and p["sep"] in ("&&", ";", "\n"):
+            continue
+        kept.append(indent + words + "true" + (" " if p["sep"] in ("&&", "||", "&") else "") + p["sep"])
+    script = "".join(kept).strip()
+    try:
+        parses = subprocess.run(["bash", "-n", "-c", script], capture_output=True, timeout=10).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        parses = False
+    if not parses:
+        return dict(out, kind="tangled", why=_TANGLED.format(""))
+    return dict(out, kind="check", run=script, dropped=dropped)
+
+
+def _runner_prep(run: str, cwd: str, root: str, env: dict):
+    """Why a step only sets up a hosted runner, which on this Mac would change the developer's own machine, or None:
+    it deletes a path that is not inside the checkout (`rm -rf /opt/hostedtoolcache/CodeQL`, a `~` path, a variable
+    unset here, a command's output, `cd /opt && rm -rf ghc`), prunes Docker (`docker system prune -af`), runs a setup
+    command as root (`sudo systemctl …`), installs OS packages (`apt-get update`, `brew install`, `playwright install
+    --with-deps`, `curl … | sh`), installs browsers into the shared Playwright cache (`npx playwright install
+    chromium`; the tests then use the browsers installed here), or changes the global git config (`git config
+    --global …`), and does nothing else but report. The one classifier for runner-only setup: `dev ci --run` skips
+    these steps and `dev ci --commands` leaves them out. A step that also runs a check is not runner-only setup:
+    _separate keeps its check without the setup."""
+    got = _separate(run, cwd, root, env)
+    return got["why"] if got["kind"] == "setup" else None
+
+
+def _local_env(env) -> dict:
+    step_env = dict(os.environ, CI="true")
+    step_env.update({k: v for k, v in (env or {}).items() if "${{" not in str(v)})
+    return step_env
+
+
+def runner_setup(run: str, root, cwd=None, env=None):
+    """Why a step's script only sets up a hosted runner (see _runner_prep), or None. `cwd`: its working directory
+    (the checkout by default); `env`: its variables over this Mac's, as `dev ci --run` gives them."""
+    return _runner_prep(_expand(run, str(root)), str(cwd or root), str(root), _local_env(env))
+
+
+def local_step(run: str, root, cwd=None, env=None):
+    """The command a developer runs here for a step's script: None when it only sets up a hosted runner, the script
+    without the runner's setup when it also runs a check (`brew install gitleaks && gitleaks detect` is `gitleaks
+    detect`), and the script as it is otherwise (a check devkit cannot separate from its setup is still a check)."""
+    where, step_env = str(cwd or root), _local_env(env)
+    got = _separate(_expand(run, str(root)), where, str(root), step_env)
+    if got["kind"] == "setup":
+        return None
+    if got["kind"] != "check":
+        return run
+    as_written = _separate(run, where, str(root), step_env)  # keeps ${{ github.workspace }} out of the listing
+    return as_written["run"] if as_written["kind"] == "check" else got["run"]
+
+
+_DOCKER_VALUE_OPTS = frozenset({"-H", "--host", "--config", "-l", "--log-level", "--tlscacert", "--tlscert",
+                                "--tlskey"})
+
+
+def _docker_contexts(env: dict) -> set:
+    """The Docker contexts this Mac's Docker CLI has set up by name (its context store under $DOCKER_CONFIG or
+    ~/.docker); the built-in `default` is never in it."""
+    meta = Path(env.get("DOCKER_CONFIG") or os.path.expanduser("~/.docker")) / "contexts" / "meta"
+    names = set()
+    for f in meta.glob("*/meta.json"):
+        try:
+            n = json.loads(f.read_text()).get("Name")
+        except (OSError, ValueError, AttributeError):
+            continue
+        if isinstance(n, str) and n:
+            names.add(n)
+    return names
+
+
+def _named_contexts(run: str, env: dict) -> list:
+    """The Docker contexts a step's script chooses: DOCKER_CONTEXT=…, `docker --context …` / `-c …`,
+    `docker context use …`, and a program's `--docker-context …`. A value this Mac cannot tell (a command's output, a
+    variable unset here) names none."""
+    out = []
+
+    def add(v):
+        v = _SHELL_VAR.sub(lambda m: env.get(m.group(1) or m.group(2)) or "", v or "")
+        if v and "$" not in v and "`" not in v and v not in out:
+            out.append(v)
+
+    for argv, words in _segments(run):
+        for w in argv:
+            if w.startswith("DOCKER_CONTEXT="):
+                add(w.split("=", 1)[1])
+            elif not re.match(r"[A-Za-z_]\w*=", w):
+                break
+        if not words:
+            continue
+        name = os.path.basename(words[0])
+        if name == "export":
+            for w in words[1:]:
+                if w.startswith("DOCKER_CONTEXT="):
+                    add(w.split("=", 1)[1])
+        if name == "docker":
+            rest = words[1:]
+            while rest and rest[0].startswith("-"):
+                flag = rest.pop(0)
+                if flag in ("-c", "--context") and rest:
+                    add(rest.pop(0))
+                elif flag.startswith("--context="):
+                    add(flag.split("=", 1)[1])
+                elif flag in _DOCKER_VALUE_OPTS and rest:
+                    rest.pop(0)
+            if rest[:2] == ["context", "use"] and len(rest) > 2:
+                add(rest[2])
+        for i, w in enumerate(words):
+            if w == "--docker-context" and i + 1 < len(words):
+                add(words[i + 1])
+            elif w.startswith("--docker-context="):
+                add(w.split("=", 1)[1])
+    return out
+
+
+def _foreign_context(run: str, env: dict):
+    """Why a step cannot run against this Mac's Docker, or None: it names a Docker context that is not set up here
+    (a hosted or self-hosted runner's), or the built-in `default`, a hosted runner's own engine, which on this Mac is
+    whatever DOCKER_HOST or /var/run/docker.sock points to. It is not run against the current context instead: that
+    is another engine (another architecture, the developer's own containers and networks), not the one CI uses."""
+    named = _named_contexts(run, env)
+    if not named:
+        return None
+    here = _docker_contexts(env)
+    for n in named:
+        if n not in here:
+            where = f"contexts here: {', '.join(sorted(here)) or 'none'}"
+            if n == "default":
+                return f"Docker context default is a hosted runner's own engine ({where})"
+            return f"Docker context {n} is not set up here ({where})"
+    return None
+
+
+def _step_skip(run: str, shell: str, cond: str, wd, root, env=None):
+    """-> (reason or None, blocking). Blocking: a real check that could not run here. `env`: the step's variables."""
+    return _step_plan(run, shell, cond, wd, root, env)[:2]
+
+
+def _step_plan(run: str, shell: str, cond: str, wd, root, env=None):
+    """-> (reason or None, blocking, the script to run here, the runner's setup commands left out of it). A step
+    that installs its tools and runs a check (`brew install gitleaks && gitleaks detect`) runs the check without the
+    setup (see _separate); one whose check cannot be separated from its setup, or runs as root, blocks."""
     if cond:
         verdict = _condition(cond)
         if verdict == "never":
-            return f"conditional (if: {cond[:40]})", False
+            return f"conditional (if: {cond[:40]})", False, run, []
         if verdict == "unknown":
-            return f"conditional (if: {cond[:40]})", True
+            return f"conditional (if: {cond[:40]})", True, run, []
     if re.search(r"\$\{\{\s*secrets\.", run) or re.search(r"\bsecrets\.", cond or ""):
-        return "needs CI secrets", False
+        return "needs CI secrets", False, run, []
+    here = Path(root) / wd if wd and not os.path.isabs(wd) and "${{" not in wd else Path(root)
+    step_env = _local_env(env)  # what run_local_ci gives the step
+    got = _separate(_expand(run, root), str(here), root, step_env, installs=True)
+    if got["kind"] == "setup":
+        return got["why"], False, run, []
+    if got["kind"] in ("tangled", "root"):
+        return got["why"], True, run, []
+    dropped = got["dropped"]
+    if dropped:
+        run = got["run"]
+    reason, blocking = _check_skip(run, shell, wd, root, step_env)
+    return reason, blocking, run, dropped
+
+
+def _check_skip(run: str, shell: str, wd, root, step_env: dict):
+    """-> (reason or None, blocking) for a step's script without the runner's setup."""
     if _SIDE_EFFECT.search(run):
         return "side effect (publish, deploy, push, system install)", False
+    foreign = _foreign_context(_expand(run, root), step_env)
+    if foreign:
+        return foreign, True
     if _PLUMBING.search(run):
         return "CI plumbing ($GITHUB_ENV/OUTPUT)", False
     if _INSTALL.search(run):
@@ -2052,7 +2652,8 @@ def run_local_ci(c, dry_run=False, keep_going=False, step_timeout=30, resume=Fal
                 d, detail = _resume_plan(c, s, records.get(_step_key(s)), tree, cache)
                 how = f"  resume: {d}" + (f" ({detail})" if isinstance(detail, str) else
                                           " (failed and affected tests; whole step if the change is global)")
-            print(f"  $ {s['job']} › {s['name']}{ui.dim(cwd + how)}")
+            left = f"  setup left out: {'; '.join(s['dropped'])}" if s.get("dropped") else ""
+            print(f"  $ {s['job']} › {s['name']}{ui.dim(cwd + how + left)}")
         for job, step, why, blk in skipped:
             print(f"  {ui.WARN if blk else '–'} {job} › {step}  {ui.dim(why)}")
         return 0
@@ -2145,11 +2746,16 @@ def run_local_ci(c, dry_run=False, keep_going=False, step_timeout=30, resume=Fal
             results.append({"job": s["job"], "step": s["name"], "rc": rc, "secs": round(secs, 1), "command": command,
                             "how": "full", "sha": sha, "tree": tree})
             print(f"  {ui.OK if rc == 0 else ui.FAIL} {label}  {ui.dim(_fmt_secs(secs))}")
+            if s.get("dropped"):
+                print(f"      {ui.dim('setup left out here: ' + '; '.join(s['dropped']))}")
             if rc != 0:
                 tail = [ln.rstrip()[:200] for ln in log.read_text(errors="replace").splitlines() if ln.strip()][-20:]
                 for ln in tail:
                     print(f"      {ui.dim(ui.ANSI_RE.sub('', ln))}")
                 print(f"      {ui.dim('exit ' + str(rc) + ' · full log: ' + core.tilde(log))}")
+                if rc == 127 and s.get("dropped"):
+                    print("      " + ui.dim("a tool this step installs on the runner is missing here: install it on "
+                                            "this Mac, then dev ci --run --resume"))
         if tree:
             _save_step(c, key, new)
         if rc != 0:
@@ -2452,13 +3058,24 @@ def branch_commits(c, base: str) -> list:
     return commits
 
 
-def derive_title(branch: str, commits: list) -> str:
+def derive_title(branch: str, commits: list, style: str = "conventional") -> str:
+    """The default PR title: the branch's first real commit, else its name; `style` is the repository's title
+    convention (title_convention): a plain sentence there, made from a Conventional Commit's summary if need be."""
     real = [x for x in commits if not _WIP_RE.match(x["subject"])]
-    if real and not message_violation(real[0]["subject"]):
-        return real[0]["subject"]
     head, _, rest = (branch or "").partition("/")
     rest = _JIRA.sub("", rest).strip("-_ ")
     words = re.sub(r"[-_]+", " ", rest).strip()
+    if style == "sentence":
+        if real:
+            m = CC_RE.match(real[0]["subject"])
+            cand = _sentence_of(m.group("desc")) if _conventional(real[0]["subject"]) else real[0]["subject"]
+            if not _sentence_violation(cand):
+                return cand
+        verb = {"fix": "Fix", "hotfix": "Fix", "release": "Release", "integration": "Integrate",
+                "revert": "Revert"}.get(head)
+        return f"{verb} {words}" if verb else _sentence_of(words)
+    if real and not message_violation(real[0]["subject"]):
+        return real[0]["subject"]
     if head == "release":
         return f"chore(release): {words}"
     if head == "integration":
@@ -2560,10 +3177,11 @@ def _pr_create(c, a) -> int:
         if not draft or why:
             return no_evidence(c, "pr create", draft_ci=why)
     commits = branch_commits(c, f"origin/{base}" if _ref_sha(c.top, f"refs/remotes/origin/{base}") else base)
-    title = (a.title or derive_title(b, commits)).strip()
-    v = message_violation(title, "PR title")
+    conv = title_convention(c)
+    title = (a.title or derive_title(b, commits, conv["style"])).strip()
+    v = pr_title_violation(c, title, conv)
     if v:
-        return refuse(v, 'dev pr create --title "type(scope): summary"')
+        return refuse(v, f"dev pr create --title {_title_hint(conv)}")
     template, source = pr_template(c.top, lang)
     if a.body_file:
         try:
@@ -2896,10 +3514,11 @@ def _pr_merge(c, a) -> int:
         return refuse(err)
     args = ["pr", "merge", str(n), "-R", c.slug, f"--{method}", "--match-head-commit", p.get("headRefOid", "")]
     if method == "squash":
-        v = message_violation(p.get("title", ""), "PR title")
+        conv = title_convention(c)
+        v = pr_title_violation(c, p.get("title", ""), conv)
         if v:
             return refuse(v + " It becomes the squash commit on " + p.get("baseRefName", c.default) + ".",
-                          f'dev gh pr edit {n} --title "type(scope): summary"')
+                          f"dev gh pr edit {n} --title {_title_hint(conv)}")
         subject, body = squash_message(p["title"], p.get("body") or "")
         args += ["--subject", subject, "--body", body]
     if a.auto:
@@ -2918,11 +3537,14 @@ def _pr_merge(c, a) -> int:
     if a.auto:
         ok(f"auto-merge ({method}) enabled for #{n}: GitHub merges it when the checks pass")
         return 0
-    tail = [f"merged #{n} ({method}) into {p.get('baseRefName')}"]
+    tail, kept = [f"merged #{n} ({method}) into {p.get('baseRefName')}"], ""
     if not a.keep_branch:
         tail.append("remote branch deleted")
-        tail.append(_after_merge(c, p.get("headRefName"), p))
+        note, kept = _after_merge(c, p.get("headRefName"), p)
+        tail.append(note)
     ok(" · ".join(x for x in tail if x))
+    if kept:
+        ui.warn(kept)
     _refresh_prs(c)
     _close_merged_items(c, p.get("headRefName"), n)
     return 0
@@ -3076,10 +3698,18 @@ def _merged_pr(c, p: dict):
     return [dict(pm, state="MERGED")] if isinstance(pm, dict) else None
 
 
-def _after_merge(c, head: str, p: dict = None) -> str:
+def _after_merge(c, head: str, p: dict = None) -> tuple:
     """Local clean-up after a merge, when the merge test finds the branch merged (it says how): the branch's clean
     worktree goes with the local branch (gc.remove_worktree checks it again), or this checkout leaves the branch for
-    an updated default branch and deletes it. A branch with work the default branch lacks stays, with the reason."""
+    an updated default branch and deletes it. A branch with work the default branch lacks stays, with the reason.
+    -> (a note for the merge's success line, a warning of its own or ''): a worktree gc.remove_worktree kept holds
+    work, so it is a warning, never part of the success line."""
+    note = _after_merge_note(c, head, p)
+    return ("", note[1]) if isinstance(note, tuple) else (note, "")
+
+
+def _after_merge_note(c, head: str, p: dict = None):
+    """_after_merge's clean-up: its note, or (False, the reason) when gc.remove_worktree kept the worktree."""
     _fetch(c)
     if not head or not _ref_sha(c.top, f"refs/heads/{head}"):
         return ""
@@ -3095,7 +3725,8 @@ def _after_merge(c, head: str, p: dict = None) -> str:
         if core.real(wts[head]) == core.real(c.main):
             return f"the main checkout has {head}: switch it to {c.default}, then dev branch prune --apply"
         from . import gc
-        return gc.remove_worktree(c.main, wts[head], head, merged={"base": base, "sha": m["sha"], "prs": prs})[1]
+        removed, msg = gc.remove_worktree(c.main, wts[head], head, merged={"base": base, "sha": m["sha"], "prs": prs})
+        return msg if removed else (False, msg)
     if c.branch == head:
         if core.real(c.top) != core.real(c.main):
             return f"this worktree's branch is merged: dev wt rm {head} when you are done here"
@@ -3118,9 +3749,10 @@ def _pr_ready(c, a) -> int:
                       "number,title,body,isDraft,url,headRefName,headRefOid"], c)
     if p is None:
         return fail(f"no PR for {sel}: {err}")
-    v = message_violation(p.get("title", ""), "PR title")
+    conv = title_convention(c)
+    v = pr_title_violation(c, p.get("title", ""), conv)
     if v:
-        return refuse(v, f'dev gh pr edit {p["number"]} --title "type(scope): summary"')
+        return refuse(v, f'dev gh pr edit {p["number"]} --title {_title_hint(conv)}')
     template, _ = pr_template(c.top, lang_of(a))
     missing = body_problems(p.get("body") or "", template)
     if missing:
@@ -4011,8 +4643,9 @@ def cmd_gh(a) -> int:
                 if not draft or why:
                     return no_evidence(c, "pr create", draft_ci=why)
             t = guard._opt_value(args[2:], ("--title", "-t"))
-            if t and message_violation(t, "PR title"):
-                return refuse(message_violation(t, "PR title"))
+            v = pr_title_violation(c, t) if t else None
+            if v:
+                return refuse(v)
             body = guard._opt_value(args[2:], ("--body", "-b"))
             bf = guard._opt_value(args[2:], ("--body-file", "-F"))
             if bf and bf != "-":
@@ -4038,8 +4671,9 @@ def cmd_gh(a) -> int:
             why = merge_gate(c, p, auto="--auto" in args)
             if why:
                 return refuse(f"not merging #{p['number']}: " + "; ".join(why))
-            if ("--squash" in args or "-s" in args) and message_violation(p.get("title", ""), "PR title"):
-                return refuse(message_violation(p.get("title", ""), "PR title"))
+            v = pr_title_violation(c, p.get("title", "")) if "--squash" in args or "-s" in args else None
+            if v:
+                return refuse(v)
         elif head == ["release", "create"]:
             if c.branch != c.default or _dirty(c.top, untracked=False):
                 return refuse(f"release from a clean `{c.default}`", "dev release (checks, tag, notes)")

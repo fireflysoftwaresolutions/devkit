@@ -138,7 +138,7 @@ dev update --check           is a newer devkit out? (read-only)       dev update
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/dashboard/home-1440-dark.webp">
-  <img src="docs/images/dashboard/home-1440-light.webp" alt="The devkit dashboard's Now view: the headline says 2 things need you, because a run is paused until you answer the decision D1 and CI failed on a branch. On the left, the Needs you queue: the decision with an amber bar, its options and the words to type, the failed CI run with the command to copy, a pull request with changes requested, and one Housekeeping row. On the right, two running runs, each with a landing strip of its steps and when it lands. Below, a line about a branch that is only on this Mac, and what finished since yesterday." width="100%">
+  <img src="docs/images/dashboard/home-1440-light.webp" alt="The devkit dashboard's Now view: the headline says 2 things need you, because a run is paused until you answer the decision D1@7f3a and CI failed on a branch. On the left, the Needs you queue: the decision with an amber bar, its options and the words to type, the failed CI run with the command to copy, a pull request with changes requested, and a Housekeeping row of 5 items. On the right, two running runs, each with a landing strip of its steps and when it lands. Below, the Sessions on this Mac section, a line about a branch that is only on this Mac, and what finished since yesterday." width="100%">
 </picture>
 
 All commands are in [docs/commands.md](docs/commands.md).
@@ -256,6 +256,7 @@ The ideas behind it are in [docs/concepts.md](docs/concepts.md).
 | `install.sh`, `Brewfile` | Bootstrap and toolchain |
 | `shell/` | zsh integration (`dcd`, `dwt`, the opt-in pickers, Docker environment) and the Tab completion for zsh and bash, generated from the parser (`shell/completions/`) |
 | `tools/brand/` | Renders devkit's icon and banners from the Firefly brand elements |
+| `tools/dashboard_shots.py` | Screenshots of the dashboard from neutral fixture data, at a true viewport, for reviews and the docs (`--help` has the guide) |
 | `docs/` | The guides, diagram specs, and images |
 | `tests/` | Unit tests (`python3 -m unittest discover -s tests -t .`) |
 

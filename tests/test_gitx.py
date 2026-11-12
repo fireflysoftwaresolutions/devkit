@@ -10,6 +10,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import sys
 import tempfile
 import time
@@ -19,7 +20,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
-from devkit import audit, cistatus, core, delivery, gitx, guard, registry, work  # noqa: E402
+from devkit import audit, cistatus, core, delivery, gitx, guard, registry, ui, work  # noqa: E402
 
 GITHUB_URL = "https://github.com/acme/widget.git"
 ISOLATE = {"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1", "GIT_AUTHOR_NAME": "Ana Dev",
@@ -738,6 +739,110 @@ class LocalCiTests(unittest.TestCase):
             self.assertIn("exit 3", out)
             self.assertIsNone(gitx.evidence(s.ctx()))
 
+    # A hosted runner's housekeeping frees disk on a throwaway machine; on this Mac it deletes the developer's files.
+    # Steps that delete a path not inside the checkout (literal, ~, a variable that is unset here, a command's output)
+    # or prune Docker are skipped, without sudo too; a deletion inside the checkout still runs.
+    def test_runner_prep_that_deletes_outside_the_checkout_or_prunes_docker_is_skipped(self):
+        with Sandbox() as s:
+            prep = {"Free disk": "rm -rf /opt/hostedtoolcache/CodeQL",
+                    "Tool cache": 'if [ -d "$AGENT_TOOLSDIRECTORY_UNSET" ]; then\n  rm -rf "$AGENT_TOOLSDIRECTORY_UNSET/"\n'
+                                  'fi',
+                    "Pip cache": "env FOO=1 nice -n 5 rm -rf ~/.cache/pip",
+                    "Go cache": "rm -rf $(go env GOCACHE)",
+                    "Elsewhere": "cd /opt && rm -rf ghc",
+                    "Up a level": "rm -f ../sibling.txt",
+                    "Docker": "docker system prune -af",
+                    "Images": "docker image prune --all --force"}
+            kept = {"Clean build": "rm -rf build dist *.egg-info", "Workspace": "rm -rf ${{ github.workspace }}/out",
+                    "Unit": "test -f sub/marker.txt"}
+            steps = "".join(f"      - name: {n}\n        run: |\n" + "".join(f"          {ln}\n" for ln in r.splitlines())
+                            for n, r in {**prep, **kept}.items())
+            s.write(".github/workflows/ci.yml", "name: CI\non: [pull_request]\njobs:\n  test:\n    runs-on: ubuntu-latest\n"
+                                                "    steps:\n" + steps)
+            s.write("sub/marker.txt", "x")
+            s.branch("feat/ci")
+            s.commit("ci: add the workflow")
+            got = {st["name"]: (st["skip"], st["blocking"]) for j in gitx.plan(str(s.repo)) for st in j["steps"]}
+            for name in prep:
+                with self.subTest(step=name):
+                    self.assertRegex(got[name][0] or "", r"^runner prep \(")
+                    self.assertFalse(got[name][1])
+            self.assertIn("/opt/hostedtoolcache/CodeQL", got["Free disk"][0])
+            self.assertIn("docker system prune", got["Docker"][0])
+            self.assertEqual({n: got[n] for n in kept}, {n: (None, False) for n in kept})
+
+    # A hosted runner installs its OS packages and browsers; on this Mac the same steps install into the developer's
+    # Homebrew, rewrite the shared Playwright browser cache or change the global git config. They are skipped like the
+    # housekeeping above, without blocking the evidence; the tests that use the browsers still run.
+    def test_os_package_browser_and_global_config_setup_is_runner_prep(self):
+        with Sandbox() as s:
+            prep = {"Browsers with OS deps": "npx playwright install --with-deps chromium",
+                    "Browsers": "npx playwright install chromium",
+                    "Python browsers": "uv run python -m playwright install --with-deps",
+                    "Browser OS deps": "pnpm exec playwright install-deps",
+                    "Apt": "apt-get update",
+                    "Brew": "brew install librsvg",
+                    "Root": "sudo systemctl start postgresql",
+                    "Nested": "xvfb-run bash -c 'npx playwright install chromium && echo ready'",
+                    "Line endings": "git config --global core.autocrlf false"}
+            kept = {"Browser tests": "npx playwright test --grep @xplat", "Versions": "npx playwright --version",
+                    "Brew prefix": "brew --prefix openssl"}
+            steps = "".join(f"      - name: {n}\n        run: {r}\n" for n, r in {**prep, **kept}.items())
+            s.write(".github/workflows/ci.yml", "name: CI\non: [pull_request]\njobs:\n  test:\n    runs-on: ubuntu-latest\n"
+                                                "    steps:\n" + steps)
+            s.branch("feat/ci")
+            s.commit("ci: add the workflow")
+            got = {st["name"]: (st["skip"], st["blocking"]) for j in gitx.plan(str(s.repo)) for st in j["steps"]}
+            for name in prep:
+                with self.subTest(step=name):
+                    self.assertRegex(got[name][0] or "", r"^runner prep \(")
+                    self.assertFalse(got[name][1])
+            self.assertIn("OS packages", got["Browsers with OS deps"][0])
+            self.assertIn("shared Playwright browser cache", got["Browsers"][0])
+            self.assertIn("apt-get update", got["Apt"][0])
+            self.assertIn("sudo", got["Root"][0])
+            self.assertIn("git config --global", got["Line endings"][0])
+            self.assertEqual({n: got[n] for n in kept}, {n: (None, False) for n in kept})
+            self.assertIsNone(gitx.runner_setup("git config --global --get core.autocrlf", s.repo))  # a read
+
+    # A step that names a Docker context runs only when this Mac's Docker has a context of that name. The built-in
+    # `default` is a hosted runner's own engine: here it is whatever DOCKER_HOST points to, which the workflow never
+    # chose. Such a step is a real check that could not run here, so it blocks the evidence.
+    def test_a_step_that_names_a_docker_context_this_mac_lacks_blocks_the_evidence(self):
+        with Sandbox() as s, tempfile.TemporaryDirectory() as cfg:
+            meta = Path(cfg) / "contexts" / "meta" / "0f3a"
+            meta.mkdir(parents=True)
+            (meta / "meta.json").write_text(json.dumps({"Name": "colima", "Endpoints": {"docker": {
+                "Host": "unix:///Users/ana/.colima/default/docker.sock"}}}))
+            (Path(cfg) / "contexts" / "meta" / "broken").mkdir()
+            (Path(cfg) / "contexts" / "meta" / "broken" / "meta.json").write_text("{not json")
+            elsewhere = {"Acceptance": "dbus-run-session -- bash -c 'uv run python scripts/acceptance.py --profile pr "
+                                       "--docker-context default --block-egress'",
+                         "Compose": "DOCKER_CONTEXT=ci-runner docker compose up -d",
+                         "Exported": "export DOCKER_CONTEXT=ci-runner",
+                         "Use": "docker context use ci-runner",
+                         "Flag": "docker --context=ci-runner ps",
+                         "Short flag": "docker -c ci-runner ps",
+                         "Equals": "python scripts/check.py --docker-context=default"}
+            here = {"Mine": "python scripts/check.py --docker-context colima", "Mine too": "docker --context colima ps",
+                    "Current": "docker compose up -d", "Unset": 'python scripts/check.py --docker-context "$NO_CTX_SET"'}
+            steps = "".join(f"      - name: {n}\n        run: {r}\n" for n, r in {**elsewhere, **here}.items())
+            s.write(".github/workflows/ci.yml", "name: CI\non: [pull_request]\njobs:\n  test:\n    runs-on: ubuntu-latest\n"
+                                                "    steps:\n" + steps)
+            s.branch("feat/ci")
+            s.commit("ci: add the workflow")
+            with mock.patch.dict(os.environ, {"DOCKER_CONFIG": cfg}):
+                os.environ.pop("NO_CTX_SET", None)
+                got = {st["name"]: (st["skip"], st["blocking"]) for j in gitx.plan(str(s.repo)) for st in j["steps"]}
+            for name in elsewhere:
+                with self.subTest(step=name):
+                    self.assertRegex(got[name][0] or "", r"^Docker context \S+ ")
+                    self.assertTrue(got[name][1])
+            self.assertEqual(got["Acceptance"][0],
+                             "Docker context default is a hosted runner's own engine (contexts here: colima)")
+            self.assertEqual(got["Compose"][0], "Docker context ci-runner is not set up here (contexts here: colima)")
+            self.assertEqual({n: got[n] for n in here}, {n: (None, False) for n in here})
+
     def test_no_workflows(self):
         with Sandbox() as s:
             s.branch("feat/none")
@@ -745,6 +850,189 @@ class LocalCiTests(unittest.TestCase):
             self.assertEqual(rc, 1)
             self.assertIn("--mark-passed", err)
             self.assertEqual(dev("ci", "--evidence")[0], 2)
+
+
+def _workflow(steps: dict) -> str:
+    """A pull-request workflow with one job whose steps are {name: script}, each script a `run: |` block."""
+    body = "".join(f"      - name: {n}\n        run: |\n" + "".join(f"          {ln}\n" for ln in r.splitlines())
+                   for n, r in steps.items())
+    return "name: CI\non: [pull_request]\njobs:\n  security:\n    runs-on: ubuntu-latest\n    steps:\n" + body
+
+
+class RunnerSetupInsideACheckTests(unittest.TestCase):
+    """A step that installs its scanner and runs it: the scan is a check, only the install is the runner's setup."""
+
+    def plan_steps(self, s, steps: dict) -> dict:
+        s.write(".github/workflows/ci.yml", _workflow(steps))
+        s.branch("feat/ci")
+        s.commit("ci: add the workflow")
+        return {st["name"]: st for j in gitx.plan(str(s.repo)) for st in j["steps"]}
+
+    # The scan still runs on this Mac with the setup commands left out: the tools installed here are used.
+    def test_a_step_that_installs_its_scanner_keeps_the_scan_without_the_setup(self):
+        with Sandbox() as s:
+            got = self.plan_steps(s, {
+                "Gitleaks": "brew install gitleaks && gitleaks detect --no-git --exit-code 1",
+                "Trivy": "sudo apt-get install -y trivy\ntrivy fs --exit-code 1 --severity HIGH,CRITICAL .",
+                "Shellcheck": "apt-get update && apt-get install -y shellcheck && shellcheck scripts/*.sh",
+                "Browser tests": "npx playwright install --with-deps chromium && npx playwright test",
+                "Semgrep": 'git config --global --add safe.directory "$PWD" && semgrep scan --error --config p/default',
+                "Fallback": "command -v osv-scanner || brew install osv-scanner  # the runner lacks it\n"
+                            "osv-scanner --lockfile=package-lock.json",
+                "Installer": "curl -sSfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh"
+                             " | sudo sh -s -- -b /usr/local/bin\ntrivy fs .",
+                "Pip scanner": "pip install semgrep && semgrep scan --error",
+                "Install only": "brew install gitleaks && gitleaks version"})
+            kept = {n: (st["skip"], st["blocking"], st["run"], st["dropped"]) for n, st in got.items()}
+            self.assertEqual(kept["Gitleaks"], (None, False, "gitleaks detect --no-git --exit-code 1",
+                                                ["brew install gitleaks"]))
+            self.assertEqual(kept["Trivy"], (None, False, "trivy fs --exit-code 1 --severity HIGH,CRITICAL .",
+                                             ["sudo apt-get install -y trivy"]))
+            self.assertEqual(kept["Shellcheck"], (None, False, "shellcheck scripts/*.sh",
+                                                  ["apt-get update", "apt-get install -y shellcheck"]))
+            self.assertEqual(kept["Browser tests"][:3], (None, False, "npx playwright test"))
+            self.assertEqual(kept["Semgrep"][:3], (None, False, "semgrep scan --error --config p/default"))
+            # a fallback install becomes `true`, so the scan after it still runs and fails when the tool is missing
+            self.assertEqual(kept["Fallback"][:3], (None, False, "command -v osv-scanner || true\n"
+                                                                 "osv-scanner --lockfile=package-lock.json"))
+            self.assertEqual(kept["Installer"][:3], (None, False, "trivy fs ."))
+            self.assertEqual(kept["Pip scanner"][:3], (None, False, "semgrep scan --error"))
+            # a step that only installs (and prints the version) is still the runner's setup
+            self.assertRegex(kept["Install only"][0] or "", r"^runner prep \(brew install ")
+            self.assertFalse(kept["Install only"][1])
+
+    # When devkit cannot take the setup out without taking the scan too, the scan is a check that could not run
+    # here: it blocks the evidence instead of being skipped as setup.
+    def test_a_scan_tangled_with_its_setup_or_run_as_root_blocks_the_evidence(self):
+        with Sandbox() as s:
+            got = self.plan_steps(s, {
+                "Nested": "bash -c 'brew install gitleaks && gitleaks detect --no-git'",
+                "Subshell": "(sudo apt-get install -y trivy && trivy fs .)",
+                "Heredoc": "brew install gitleaks\ncat > .gitleaks.toml <<'EOF'\ntitle = \"widget\"\nEOF\n"
+                           "gitleaks detect --config .gitleaks.toml",
+                "Root scan": 'sudo -E env PATH="$PATH" ./scripts/security-scan.sh'})
+            for name, st in got.items():
+                with self.subTest(step=name):
+                    self.assertTrue(st["blocking"], st["skip"])
+                    self.assertNotRegex(st["skip"] or "", r"^runner prep")
+            self.assertIn("as root", got["Root scan"]["skip"])
+            rc, out, err = dev("ci", "--run")
+            self.assertEqual(rc, 1)
+            self.assertIn("4 check(s) could not run here", err)
+            self.assertIsNone(gitx.evidence(s.ctx()))
+
+    def fake_tools(self, d: Path) -> Path:
+        """A bin folder with a `brew` that leaves a marker when it runs and a `fakescan` that records its arguments
+        and exits with the code in fakescan.rc."""
+        (d / "bin").mkdir()
+        (d / "bin" / "brew").write_text(f"#!/bin/sh\ntouch '{d / 'brew-ran'}'\n")
+        (d / "bin" / "fakescan").write_text(f"#!/bin/sh\necho \"$@\" > '{d / 'fakescan.args'}'\n"
+                                            f"exit \"$(cat '{d / 'fakescan.rc'}')\"\n")
+        for f in (d / "bin").iterdir():
+            f.chmod(0o755)
+        return d / "bin"
+
+    def test_the_scan_runs_without_its_setup_and_a_finding_fails_the_evidence(self):
+        with Sandbox() as s, tempfile.TemporaryDirectory() as t:
+            d = Path(t)
+            path = f"{self.fake_tools(d)}{os.pathsep}{os.environ.get('PATH', '')}"
+            self.plan_steps(s, {"Gitleaks": "brew install fakescan && fakescan detect --exit-code 1"})
+            with mock.patch.dict(os.environ, {"PATH": path}):
+                (d / "fakescan.rc").write_text("1")
+                rc, out, err = dev("ci", "--run")
+                self.assertEqual(rc, 1, out + err)
+                self.assertIsNone(gitx.evidence(s.ctx()))
+                (d / "fakescan.rc").write_text("0")
+                rc, out, err = dev("ci", "--run")
+            self.assertEqual(rc, 0, out + err)
+            self.assertEqual((d / "fakescan.args").read_text().strip(), "detect --exit-code 1")
+            self.assertFalse((d / "brew-ran").exists(), "the runner's setup ran on this Mac")
+            self.assertIn("brew install fakescan", out)
+            self.assertEqual([x["step"] for x in gitx.evidence(s.ctx())["steps"]], ["Gitleaks"])
+
+    def test_a_scanner_missing_here_fails_the_evidence(self):
+        with Sandbox() as s, tempfile.TemporaryDirectory() as t:
+            d = Path(t)
+            path = f"{self.fake_tools(d)}{os.pathsep}{os.environ.get('PATH', '')}"
+            self.plan_steps(s, {"Gitleaks": "brew install devkit-absent-scanner && devkit-absent-scanner detect"})
+            with mock.patch.dict(os.environ, {"PATH": path}):
+                rc, out, err = dev("ci", "--run")
+            self.assertEqual(rc, 1, out + err)
+            self.assertIn("local CI failed", err)
+            self.assertIn("exit 127", out)
+            self.assertIn("brew install devkit-absent-scanner", out)
+            self.assertFalse((d / "brew-ran").exists())
+            self.assertIsNone(gitx.evidence(s.ctx()))
+
+
+class ChecksHiddenFromTheCommandReaderTests(unittest.TestCase):
+    """A check that runs through `source`/`.` or inside a command or process substitution, after the step installed
+    its tool: the guard's command reader sees only a reporting command (`test`, `[`, `cat`), so the whole step was
+    skipped as the runner's setup and the evidence recorded with no scan. The check now runs here without the setup."""
+
+    def plan_steps(self, s, steps: dict) -> dict:
+        s.write(".github/workflows/ci.yml", _workflow(steps))
+        s.branch("feat/ci")
+        s.commit("ci: add the workflow")
+        return {st["name"]: (st["skip"], st["blocking"], st["run"], st["dropped"])
+                for j in gitx.plan(str(s.repo)) for st in j["steps"]}
+
+    def test_a_scan_script_run_with_source_or_dot_after_its_install_is_a_check(self):
+        with Sandbox() as s:
+            got = self.plan_steps(s, {"Source": "brew install gitleaks && source scripts/scan.sh",
+                                      "Dot": "brew install gitleaks && . scripts/scan.sh"})
+        self.assertEqual(got["Source"], (None, False, "source scripts/scan.sh", ["brew install gitleaks"]))
+        self.assertEqual(got["Dot"], (None, False, ". scripts/scan.sh", ["brew install gitleaks"]))
+
+    def test_a_gofmt_check_in_a_command_substitution_after_its_install_is_a_check(self):
+        with Sandbox() as s:
+            got = self.plan_steps(s, {"Gofmt": 'sudo apt-get install -y golang && test -z "$(gofmt -l .)"',
+                                      "Backticks": 'sudo apt-get install -y golang && test -z "`gofmt -l .`"'})
+        self.assertEqual(got["Gofmt"], (None, False, 'test -z "$(gofmt -l .)"', ["sudo apt-get install -y golang"]))
+        self.assertEqual(got["Backticks"], (None, False, 'test -z "`gofmt -l .`"', ["sudo apt-get install -y golang"]))
+
+    def test_a_scan_in_a_bracket_test_after_its_install_is_a_check(self):
+        with Sandbox() as s:
+            got = self.plan_steps(s, {"Trivy": 'brew install trivy && [ -z "$(trivy fs --quiet .)" ]'})
+        self.assertEqual(got["Trivy"], (None, False, '[ -z "$(trivy fs --quiet .)" ]', ["brew install trivy"]))
+
+    # The command reader drops `> >(…)` from the words altogether, so the substitution is found in the script's text.
+    def test_a_scan_in_a_process_substitution_after_its_install_is_a_check(self):
+        with Sandbox() as s:
+            got = self.plan_steps(s, {"Input": "brew install gitleaks && cat <(gitleaks detect)",
+                                      "Output": "brew install gitleaks && cat .gitleaks.toml > >(gitleaks detect --pipe)"})
+        self.assertEqual(got["Input"], (None, False, "cat <(gitleaks detect)", ["brew install gitleaks"]))
+        self.assertEqual(got["Output"], (None, False, "cat .gitleaks.toml > >(gitleaks detect --pipe)",
+                                         ["brew install gitleaks"]))
+
+    # `found=$(…)` exits with the scan's status, and bare backticks are split across the reader's words.
+    def test_a_scan_kept_in_a_variable_or_bare_backticks_after_its_install_is_a_check(self):
+        with Sandbox() as s:
+            got = self.plan_steps(s, {"Assignment": 'brew install gitleaks && found="$(gitleaks detect)"',
+                                      "Bare backticks": "brew install gitleaks && echo `gitleaks detect`"})
+        self.assertEqual(got["Assignment"], (None, False, 'found="$(gitleaks detect)"', ["brew install gitleaks"]))
+        self.assertEqual(got["Bare backticks"], (None, False, "echo `gitleaks detect`", ["brew install gitleaks"]))
+
+    # Setup that runs inside a substitution cannot be left out without the command that uses its output, so next
+    # to a check it blocks the evidence. A substitution that only feeds the setup keeps a setup-only step skipped.
+    def test_setup_inside_a_substitution_next_to_a_check_blocks_the_evidence(self):
+        with Sandbox() as s:
+            tangled = {"Install in the check": 'test -z "$(brew install gofmt && gofmt -l .)"',
+                       "Install in the input": "cat <(sudo apt-get install -y trivy && trivy fs .)"}
+            setup = {"Kernel headers": 'sudo apt-get install -y "linux-headers-$(uname -r)"',
+                     "Docker repository": 'echo "deb [arch=$(dpkg --print-architecture)] https://download.docker.com/'
+                                          'linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/'
+                                          'docker.list',
+                     "Go cache": 'rm -rf "$(go env GOCACHE)"'}
+            got = self.plan_steps(s, {**tangled, **setup})
+        for name in tangled:
+            with self.subTest(step=name):
+                self.assertTrue(got[name][1], got[name][0])
+                self.assertRegex(got[name][0] or "", r"^a check and runner setup \(")
+        for name in setup:
+            with self.subTest(step=name):
+                self.assertRegex(got[name][0] or "", r"^runner prep \(")
+                self.assertFalse(got[name][1])
 
 
 # --------------------------------------------------------------------------- PR body template
@@ -1093,7 +1381,10 @@ class PrTests(unittest.TestCase):
             rc, out, err = dev("pr", "merge", "7")
             self.assertEqual(rc, 0, err)
             self.assertTrue((wt / "notes.txt").exists())
-            self.assertIn("uncommitted", out)
+            # the kept worktree is a warning of its own, never part of the merge's success line
+            self.assertIn("merged #7", out)
+            self.assertNotIn("kept", out)
+            self.assertRegex(err, rf"(?m)^{re.escape(ui.WARN)} kept .*wt-invoice: it has uncommitted")
 
     def test_merge_closes_the_open_items_linked_to_the_merged_branch(self):
         with Sandbox() as s:
@@ -1217,6 +1508,99 @@ class PrTests(unittest.TestCase):
             self.assertEqual(rc, 2)
             self.assertIn("supports GitHub only", err)
             self.assertEqual(s.gh.calls, [])
+
+
+class PrTitleConventionTests(unittest.TestCase):
+    # firefly-weave titles its PRs as plain imperative sentences; the repository's convention wins over devkit's
+    # Conventional Commit default. Bots do not count: dependabot's prefix is its own configuration.
+    WEAVE_TITLES = ("Keep run statistics and chart them in Studio", "Execute steps in Studio without a platform",
+                    "test(agentic): count lease expiry from the observed capacity retry",
+                    "Run workflow transactions: settle, undo in reverse and never lose an outcome",
+                    "Keep test data in the editor: test input, pinned output and out-of-date marks",
+                    "Run local operations out of the box and review every infrastructure change",
+                    "Make Studio's CI reliable: start the test host before use, cache contract schemas, retry a busy "
+                    "DMG step")
+
+    def sentence_repo(self, s, subject="Export invoices as CSV"):
+        merged = [{"title": t, "author": {"login": "ana", "is_bot": False}} for t in self.WEAVE_TITLES]
+        merged += [{"title": f"chore(deps): bump {p} from 1.0 to 1.1", "author": {"login": "app/dependabot",
+                                                                                  "is_bot": True}}
+                   for p in ("certifi", "authlib")]
+        s.gh.on(["pr", "list"], merged, when=lambda a: "merged" in a)
+        s.branch("feat/invoice-export")
+        s.commit(subject, {"inv.py": "x\n"})
+        dev("ci", "--mark-passed", "--note", "python3 -m unittest: 42 passed")
+        self.assertEqual(dev("push")[0], 0)
+        s.gh.on(["pr", "create"], "https://github.com/acme/widget/pull/7\n")
+
+    def test_create_takes_a_plain_sentence_title_where_the_repository_uses_them(self):
+        with Sandbox() as s:
+            self.sentence_repo(s)
+            rc, out, err = dev("pr", "create", "--draft")
+            self.assertEqual(rc, 0, err)
+            call = s.gh.called("pr", "create")[0]
+            self.assertEqual(call[call.index("--title") + 1], "Export invoices as CSV")
+            self.assertEqual(gitx.title_convention(s.ctx())["seen"], 7)  # the bots' two are not counted
+
+    def test_create_checks_a_title_against_the_plain_sentence_convention(self):
+        with Sandbox() as s:
+            self.sentence_repo(s)
+            for t, why in (("feat(invoice): add csv export", "plain imperative sentences (6 of the last 7 merged"),
+                           ("Added a CSV export", "imperative"), ("export invoices as CSV", "capital letter"),
+                           ("Export invoices as CSV.", "period"), ("WIP export", "WIP")):
+                with self.subTest(title=t):
+                    rc, _, err = dev("pr", "create", "--draft", "--title", t)
+                    self.assertEqual(rc, 2, err)
+                    self.assertIn(why, err)
+            self.assertIn("`Add csv export`", dev("pr", "create", "--draft", "--title", "feat(invoice): add csv export")[2])
+            self.assertEqual(s.gh.called("pr", "create"), [])
+
+    def test_a_conventional_commit_on_the_branch_becomes_a_sentence_title_there(self):
+        with Sandbox() as s:
+            self.sentence_repo(s, subject="feat(invoice): export invoices as CSV")
+            rc, _, err = dev("pr", "create", "--draft")
+            self.assertEqual(rc, 0, err)
+            call = s.gh.called("pr", "create")[0]
+            self.assertEqual(call[call.index("--title") + 1], "Export invoices as CSV")
+
+    def test_ready_follows_the_same_title_convention(self):
+        with Sandbox() as s:
+            self.sentence_repo(s)
+            text, _ = gitx.pr_template(s.repo)
+            body = text.replace("## Changes", "Exports invoices.\n\n## Changes").replace(
+                "## Risk and rollback", "- Ran python3 -m unittest: 42 passed\n\n## Risk and rollback")
+            s.gh.on(["pr", "view"], _pr(isDraft=True, title="Export invoices as CSV", headRefName="feat/invoice-export",
+                                        headRefOid=s.head(), body=body))
+            s.gh.on(["pr", "ready"], "")
+            rc, _, err = dev("pr", "ready")
+            self.assertEqual(rc, 0, err)
+            self.assertEqual(len(s.gh.called("pr", "ready")), 1)
+
+    def test_the_default_branch_history_decides_when_github_lists_no_merged_prs(self):
+        with Sandbox() as s:
+            for subject in ("Add the widget", "Render the widget's frame", "Fix the frame's border",
+                            "Document the widget", "Merge branch 'feat/frame'", "Release 0.1.0a1"):
+                s.commit(subject)
+            git(s.repo, "push", "-q", "origin", "main")
+            got = gitx.title_convention(s.ctx())
+            self.assertEqual((got["style"], got["source"], got["seen"], got["plain"]),
+                             ("sentence", "commits on main", 6, 5))  # the start commit is conventional; merges skip
+
+    def test_conventional_commits_stay_the_default_without_a_consistent_convention(self):
+        with Sandbox() as s:
+            ctx = s.ctx()
+            self.assertEqual(gitx.title_convention(ctx)["style"], "conventional")  # one commit, no merged PR
+            mixed = ["feat: add a", "fix: repair b", "Add c", "Render d", "docs: explain e", "Fix f"]
+            s.gh.on(["pr", "list"], [{"title": t, "author": {"login": "ana"}} for t in mixed],
+                    when=lambda a: "merged" in a)
+            self.assertEqual(gitx.title_convention(ctx)["style"], "conventional")
+            devkit_like = ["fix(setup): align saved profiles", "chore(release): 26.11.10",
+                           "docs: add a security policy and a contributing guide", "fix: hotfix 26.11.7, nothing waits",
+                           "fix(agents): read the self-test's log from its byte offset"]
+            s.gh.on(["pr", "list"], [{"title": t, "author": {"login": "ana"}} for t in devkit_like],
+                    when=lambda a: "merged" in a)
+            self.assertEqual(gitx.title_convention(ctx)["style"], "conventional")
+            self.assertIn("is not a Conventional Commit", gitx.pr_title_violation(ctx, "Add c") or "")
 
 
 # --------------------------------------------------------------------------- dev run

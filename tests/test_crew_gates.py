@@ -3,8 +3,12 @@
 # devkit: allow-stub-words (fixtures with the markers the stub gate looks for)
 # The crew gates at SubagentStop: a member ran its proofs, loaded its skills, left no unfinished work or tests that
 # cannot fail, and recorded a lesson after repeated guard refusals. Run: python3 -m unittest tests.test_crew_gates
+import contextlib
+import io
 import json
 import os
+import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -16,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
 from unittest import mock  # noqa: E402
 
-from devkit import audit, bugs, core, gates, guard, lessons, skillguard  # noqa: E402
+from devkit import audit, bugs, cli, core, gates, gitx, guard, lessonevents, lessons, skillguard, work  # noqa: E402
 
 # Skills "installed" on this test machine: the gate asks only for skills a member can load.
 HAVE = {"test-driven-development", "testing", "docs", "communicating"}
@@ -43,12 +47,23 @@ KID_DOCS = {**KID, "procedure": [
      "proof": "dev test prove"},
     KID["procedure"][-1]]}
 
+# A release engineer shaped like config/crew.json: its proof is the full local CI run, which a brief or the project
+# can forbid (a shared checkout where other members' uncommitted work fails it, runner preparation not to replay).
+LINK = {"id": "link", "name": "Link", "title": "Release engineer", "tools": "all", "skills": ["communicating"],
+        "procedure": [
+            {"phase": "Know the pipeline", "do": "run what CI runs", "skills": [], "devkit": ["dev ci", "dev ci --run"],
+             "proof": "dev ci --run"},
+            {"phase": "Hand off", "do": "hand off", "skills": ["communicating"], "devkit": ["dev progress step"],
+             "proof": "dev progress step"}]}
+WAIVER = "Waived proof: `dev ci --run` — the shared checkout holds other members' uncommitted work"
+
 # A read-only member (tools: read) whose procedure still names a proof and a skill.
 SCOUT = {"id": "sparks", "name": "Sparks", "tools": "read", "skills": ["docs"],
          "procedure": [{"phase": "Search", "do": "search", "skills": ["docs"], "devkit": ["dev grep"],
                         "proof": "dev grep"}]}
 
 SKILL_MD = "/Users/dev/.claude/plugins/cache/official/superpowers/7.0.0/skills/{}/SKILL.md"
+LONG_TITLE = "In a crew lane, prove shell expansion of a program word with dev guard check, never by running it"
 DENIAL = ("PreToolUse:Bash hook error: Raw `git worktree add ../copy` would create an unmanaged worktree. "
           "Use `dev wt new <branch>`.")
 GOOD_TEST = ("import unittest\nfrom calc import add\n\n\nclass AddTests(unittest.TestCase):\n"
@@ -57,6 +72,15 @@ GOOD_TEST = ("import unittest\nfrom calc import add\n\n\nclass AddTests(unittest
 
 def git(cwd, *args):
     subprocess.run(["git", "-C", str(cwd), *args], check=True, capture_output=True)
+
+
+def taught_anchors(text: str) -> tuple:
+    # The `dev lesson add …` a hint teaches, as the CLI parses it: (its anchors, what the anchor gate says of them)
+    taught = re.search(r"`(dev lesson add [^`]*)`", text)
+    assert taught, f"no dev lesson add taught in: {text}"
+    a = cli.build_parser().parse_args(shlex.split(taught.group(1))[1:])
+    anchors = cli._lesson_anchors(a)
+    return anchors, [p for p, _ in lessons._anchor_problems(**anchors)[1]]
 
 
 class Transcript:
@@ -69,6 +93,11 @@ class Transcript:
         self.records = [{"type": "user", "isSidechain": True, "timestamp": stamp,
                          "message": {"role": "user", "content": "the brief"}}]
         self.n = 0
+
+    def brief(self, text):
+        # the launch's prompt, which Claude Code writes as the first record of the member's transcript
+        self.records[0]["message"]["content"] = text
+        return self
 
     def call(self, name, result="ok", is_error=False, **inp):
         self.n += 1
@@ -343,12 +372,22 @@ class CrewGateTests(GateCase):
         self.assertIn("2 guard refusals", found[0]["evidence"])
         self.assertIn("dev lesson add", found[0]["fix"])
 
-    def test_a_lesson_recurrence_answers_the_refusals(self):
+    def test_the_lessons_fix_teaches_an_add_with_an_anchor_the_gate_accepts(self):
+        # `dev lesson add` refuses a lesson with no anchor: a fix without one sends the member to a command that fails
         self.complete()
         self.tx.refused("git worktree add ../copy").refused("git worktree add ../copy2")
-        self.tx.bash('echo "dev lesson add later"')  # mentioned, not run
-        self.assertEqual([f["rule"] for f in self.gates()], ["lessons"])
-        self.tx.bash('bin/dev lesson recur L-fx1 --evidence "worktree refused twice"')
+        anchors, problems = taught_anchors(self.gates()[0]["fix"])
+        self.assertTrue(any(anchors.values()), anchors)
+        self.assertEqual(problems, [])
+
+    def test_a_progress_note_with_a_steps_evidence_records_that_step(self):
+        # A long or paused step records its evidence without closing (progress.note with a step and a check): that is
+        # the step's record the gate asks for; a note without evidence is not
+        self.tx.skill("superpowers:test-driven-development").skill("testing").skill("devkit:communicating")
+        self.tx.bash("bin/dev test")
+        self.tx.bash('dev progress note "the parser builds" --next "the tests"')
+        self.assertEqual(self.rules(self.gates()), [("proofs", "dev progress step")])
+        self.tx.bash('dev progress note "the parser builds" --step parser --check "12 tests pass"')
         self.assertEqual(self.gates(), [])
 
     def test_a_read_only_member_skips_the_shell_checks(self):
@@ -371,9 +410,13 @@ class RefusalAnswerTests(GateCase):
     def setUp(self):
         super().setUp()
         root = Path(self.tmp.name)
-        for obj, name, value in ((lessons, "LESSONS", root / "handoff" / "lessons"),
-                                 (lessons, "USAGE_LOCAL", root / "state" / "lessons-usage.json"),
-                                 (lessons, "STATE", root / "state"), (bugs, "BUGS", root / "bugs")):
+        handoff, state = root / "handoff", root / "state"
+        for obj, name, value in ((lessons, "LESSONS", handoff / "lessons"), (lessons, "HANDOFF", handoff),
+                                 (lessons, "USAGE_LOCAL", state / "lessons-usage.json"),
+                                 (lessons, "STATE", state), (bugs, "BUGS", root / "bugs"),
+                                 (work, "HANDOFF", handoff), (work, "ITEMS", handoff / "items"),
+                                 (core, "HANDOFF", handoff), (core, "STATE", state),
+                                 (lessonevents, "EVENTS", state / "lessons-events.jsonl")):
             p = mock.patch.object(obj, name, value)
             p.start()
             self.addCleanup(p.stop)
@@ -386,6 +429,53 @@ class RefusalAnswerTests(GateCase):
 
     def owed(self):
         return [f["rule"] for f in gates.crew_gates(KID, self.tx.save(), str(self.repo), session="s1")]
+
+    def dev_lesson(self, *argv):
+        # `dev lesson …` as the member's shell runs it: its exit code and what it printed, both streams
+        out, here = io.StringIO(), os.getcwd()
+        os.chdir(self.repo)
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+                rc = cli.main(["lesson", *argv])
+        finally:
+            os.chdir(here)
+        return rc, out.getvalue()
+
+    def ran(self, command, rc, out):
+        # the member's Bash call and its result, as Claude Code writes a command that exited with `rc`
+        return self.tx.bash(command, out if rc == 0 else f"Exit code {rc}\n{out}", is_error=rc != 0)
+
+    def test_a_lesson_recurrence_answers_the_refusals_and_a_recurrence_of_no_lesson_does_not(self):
+        self.tx.refused("git worktree add ../copy").refused("git worktree add ../copy2")
+        self.tx.bash('echo "dev lesson recur later"')  # mentioned, not run
+        cmd = 'bin/dev lesson recur {} --evidence "worktree refused twice"'
+        self.ran(cmd.format("L-fx1"), *self.dev_lesson("recur", "L-fx1", "--evidence", "worktree refused twice"))
+        self.assertEqual(self.owed(), ["lessons"])  # it ran, and counted nothing: no such lesson
+        lid = self.lesson("Create worktrees with dev wt new", commands=["git worktree add"])["meta"]["id"]
+        rc, out = self.dev_lesson("recur", lid, "--evidence", "worktree refused twice")
+        self.assertEqual(rc, 0, out)
+        self.ran(cmd.format(lid), rc, out)
+        self.assertEqual(self.owed(), [])
+
+    def test_a_failed_lesson_add_does_not_answer_the_refusals(self):
+        # A lane passed the gate after four refused adds and a crashed recur, with no lesson recorded: an add that
+        # ran is not an add that recorded a lesson. Piped through tail, a refused add even exits 0.
+        self.tx.refused("git worktree add ../copy").refused("git worktree add ../copy2")
+        why = ["--global", "--happened", "git worktree add was refused", "--cause", "a raw worktree is unmanaged",
+               "--prevent", "use dev wt new", "--command", "git worktree add"]
+
+        def piped(argv):
+            return "bin/dev lesson " + " ".join(shlex.quote(a) for a in argv) + " 2>&1 | tail -5"
+        refused = ["add", LONG_TITLE, *why]
+        rc, out = self.dev_lesson(*refused)
+        self.assertEqual(rc, 2, out)
+        self.tx.bash(piped(refused), out)
+        self.assertEqual(self.owed(), ["lessons"])
+        recorded = ["add", "Create worktrees with dev wt new", *why]
+        rc, out = self.dev_lesson(*recorded)
+        self.assertEqual(rc, 0, out)
+        self.tx.bash(piped(recorded), out)
+        self.assertEqual(self.owed(), [])
 
     def test_a_bug_report_on_the_refusal_from_the_lane_answers_the_refusals(self):
         self.tx.refused("git worktree add ../copy").refused("git worktree add ../copy2")
@@ -419,6 +509,19 @@ class RefusalAnswerTests(GateCase):
         lessons.retire(covering, "dev wt new is gone", a={"user": "ana", "host": "mbp1", "agent": "human"})
         self.assertEqual(self.owed(), ["lessons"])
 
+    def test_a_refusal_an_open_lesson_of_the_projects_initiative_covers_owes_no_lesson(self):
+        # an initiative's lessons are each member project's own: one that covers the refusal answers it
+        from devkit import delivery
+        project = delivery.scope_for(str(self.repo))
+        readme = core.HANDOFF / "initiatives" / "platform" / "README.md"
+        readme.parent.mkdir(parents=True)
+        readme.write_text(f"---\nkind: initiative\ntitle: Platform\nprojects: [{project}]\n---\n# Platform\n")
+        self.tx.refused("git worktree add ../copy").refused("git worktree add ../copy2")
+        lessons.add("initiatives/platform", "Create worktrees with dev wt new", happened="the guard refused it",
+                    cause="no managed worktree", prevention="use dev wt new", errors=["would create an unmanaged worktree"],
+                    a={"user": "ana", "host": "mbp1", "agent": "claude", "session": "s1"})
+        self.assertEqual(self.owed(), [])
+
     def test_a_refusal_that_names_an_open_lesson_owes_none_and_one_that_only_quotes_its_id_still_does(self):
         les = self.lesson("Create worktrees with dev wt new", commands=["git worktree add"])
         lid = les["meta"]["id"]
@@ -438,6 +541,96 @@ class RefusalAnswerTests(GateCase):
         lessons.retire(les, "dev wt new is gone", a={"user": "ana", "host": "mbp1", "agent": "human"})
         found = gates.crew_gates(KID, self.tx.save(), str(self.repo), session="s1")
         self.assertIn("4 guard refusals", found[0]["evidence"])
+
+
+class CiProofTests(GateCase):
+    # `dev ci --run` is the one proof the tech lead may meet for a member whose brief or project forbids the run: a
+    # waiver line in the tech lead's brief, or a passed `dev ci --run` on exactly the tree the member leaves. The
+    # member's own `dev ci --mark-passed` attests a run, so it never counts. Without either, the gate refuses as before.
+    def setUp(self):
+        super().setUp()
+        p = mock.patch.object(core, "STATE", Path(self.tmp.name) / "state")  # where local CI evidence is written
+        p.start()
+        self.addCleanup(p.stop)
+        self.stops = 0
+        self.tx.skill("communicating").bash('dev progress step "release branch ready" --check "dev test: 40 passed"')
+
+    def ci_gate(self):
+        return self.rules(gates.crew_gates(LINK, self.tx.save(), str(self.repo)))
+
+    def stop(self, lead="Release engineer (Link)"):
+        # the SubagentStop entry as the hook calls it; `lead` is the name devkit's launch records give the member (a
+        # member the main session launched), and each call is a fresh stop: None lets it through, else it is sent back
+        self.stops += 1
+        data = {"agent_id": f"a{self.stops}", "agent_transcript_path": self.tx.save(), "cwd": str(self.repo)}
+        return gates.check("Link", data, {}, "owner/repo", roster={"members": [LINK]}, lead_name=lead)
+
+    def dev_ci(self, *argv):
+        # `dev ci …` as the member's shell runs it in the repository: its exit code and what it printed
+        out, here = io.StringIO(), os.getcwd()
+        os.chdir(self.repo)
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+                rc = cli.main(["ci", *argv])
+        finally:
+            os.chdir(here)
+        return rc, out.getvalue()
+
+    def evidence(self, how):
+        # the marker `dev ci --run` ("run") or `dev ci --mark-passed` ("marked") records for the tree as it is now
+        return gitx.record_evidence(gitx.ctx(str(self.repo)), how, gitx.work_tree(str(self.repo)))
+
+    def test_only_a_waiver_line_with_its_reason_in_the_brief_meets_the_ci_proof(self):
+        for line in ("Do not run `dev ci --run` yourself.",  # a request in prose, not a waiver
+                     "Waived proof: `dev ci --run` — <why>",  # the template, not a reason
+                     "Waived proof: dev ci --run — shared",  # too short to say why
+                     "Waived proof: `dev ci --run --resume` — the shared checkout holds other members' work",
+                     "Waived proof: `dev progress step` — the shared checkout holds other members' work"):
+            with self.subTest(line=line):
+                self.tx.brief(f"## Task\n\nShip the release branch.\n\n- {line}\n")
+                out = self.stop()
+                self.assertEqual(out["decision"], "block")
+                self.assertIn("`dev ci --run`", out["reason"])
+        self.tx.brief("## Task\n\nShip the release branch.\n")
+        self.tx.bash("cat notes.md", WAIVER)  # the line in a file the member read is not its brief
+        self.assertEqual(self.stop()["decision"], "block")
+        self.tx.brief(f"## Task\n\nShip the release branch.\n\n- {WAIVER}\n")
+        self.assertIsNone(self.stop())
+
+    def test_the_hook_entry_takes_a_waiver_only_from_the_tech_leads_brief_and_audits_it(self):
+        self.tx.brief(f"## Task\n\nShip the release branch.\n\n{WAIVER}\n")
+        for lead in ("a helper of Release engineer (Link)", ""):  # a member wrote the brief, or no record says who
+            with self.subTest(lead=lead):
+                self.assertEqual(self.stop(lead)["decision"], "block")
+        self.assertIsNone(self.stop("Release engineer (Link)"))
+        rec = audit.records(1, action="crew.gate")[-1]
+        self.assertEqual(rec["outcome"], "ok")
+        self.assertIn("dev ci --run", rec["detail"])
+        self.assertIn("the shared checkout holds other members' uncommitted work", rec["detail"])
+
+    def test_a_passed_ci_run_on_exactly_the_tree_the_member_leaves_meets_the_ci_proof_and_its_own_mark_does_not(self):
+        note = "pytest -q: 212 passed"
+        rc, out = self.dev_ci("--mark-passed", "--note", note)  # the member attests its own run, for this tree
+        self.assertEqual(rc, 0, out)
+        self.tx.bash(f'dev ci --mark-passed --note "{note}"', out)
+        self.assertEqual(self.ci_gate(), [("proofs", "dev ci --run")])
+        self.evidence("run")  # the tech lead's passed `dev ci --run` on the tree as it is now
+        self.assertEqual(self.ci_gate(), [])
+        (self.repo / "README.md").write_text("# repo\n\nChanged after the run.\n")  # the tree is not the one it ran
+        self.assertEqual(self.ci_gate(), [("proofs", "dev ci --run")])
+
+    def test_without_either_the_refusal_names_the_three_ways_to_meet_the_ci_proof(self):
+        found = gates.crew_gates(LINK, self.tx.save(), str(self.repo))
+        self.assertEqual(self.rules(found), [("proofs", "dev ci --run")])
+        self.assertIn("is not among your 1 shell commands", found[0]["evidence"])  # the evidence reads as before
+        fix = found[0]["fix"]
+        self.assertTrue(fix.startswith("run `dev ci --run`"), fix)
+        self.assertIn("passed `dev ci --run` of their own on exactly the tree you leave", fix)
+        self.assertIn("your own `dev ci --mark-passed` does not meet it", fix)
+        taught = re.search(r"`(Waived proof: [^`]*)`", fix)
+        self.assertTrue(taught, fix)
+        self.tx.brief("## Task\n\n- " + taught.group(1).replace("<why>", "the project's runner prep must not run twice"))
+        self.assertIsNone(self.stop())  # the line it teaches is one the gate accepts
 
 
 class SendBackTests(GateCase):
@@ -478,6 +671,40 @@ class SendBackTests(GateCase):
     def test_the_hook_entry_fails_open_without_the_member_transcript(self):
         data = {"agent_id": "a3", "transcript_path": "/elsewhere/main.jsonl", "cwd": str(self.repo)}
         self.assertIsNone(gates.check("Kid", data, {}, "owner/repo", roster={"members": [KID]}))
+
+
+class PassTokenTests(GateCase):
+    # gates.check writes a pass token, the agent id and the time its stop passed, only when it judged a stop and found
+    # nothing missing, and a stop never keeps the token an earlier stop of the same agent left: progress approves a
+    # review's Check or a member's --approves only with the token of that stop (tests/test_approvals_token.py)
+    def check(self, sess, **extra):
+        data = {"agent_id": "a1", "agent_transcript_path": self.tx.save(), "cwd": str(self.repo), **extra}
+        return gates.check("Kid", data, sess, "owner/repo", roster={"members": [KID]})
+
+    def test_a_clean_pass_writes_the_agents_token_with_the_time_it_passed(self):
+        self.complete()
+        sess = {gates.PASSED: {"a9": 5.0}}  # another lane's pass stays
+        before = time.time()
+        self.assertIsNone(self.check(sess))
+        self.assertEqual(sorted(sess[gates.PASSED]), ["a1", "a9"])
+        self.assertTrue(before <= sess[gates.PASSED]["a1"] <= time.time())
+
+    def test_a_send_back_and_its_let_through_write_none_and_drop_an_earlier_token(self):
+        self.tx.bash("dev test")  # no dev progress step: the gates send it back
+        sess = {gates.PASSED: {"a1": 5.0}}  # an earlier stop of a1 passed
+        self.assertEqual(self.check(sess)["decision"], "block")
+        self.assertNotIn("a1", sess.get(gates.PASSED) or {})
+        self.assertIsNone(self.check(sess, stop_hook_active=True))  # let through, not passed
+        self.assertNotIn("a1", sess.get(gates.PASSED) or {})
+
+    def test_a_gate_that_cannot_judge_writes_no_token(self):
+        self.complete()
+        sess = {gates.PASSED: {"a1": 5.0}}
+        with mock.patch.object(gates, "crew_gates", side_effect=RuntimeError("the gates broke")):
+            self.assertIsNone(self.check(sess))  # fails open: the member is not held back
+        self.assertNotIn("a1", sess.get(gates.PASSED) or {})
+        self.assertIsNone(self.check(sess, agent_transcript_path=""))  # no transcript: nothing judged
+        self.assertNotIn("a1", sess.get(gates.PASSED) or {})
 
 
 class BackgroundWorkTests(GateCase):

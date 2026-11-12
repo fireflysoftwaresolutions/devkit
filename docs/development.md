@@ -69,6 +69,8 @@ config/                 Claude Code, Codex, git, docs, skill and skill-rule conf
 templates/              plan, task, pull request and handoff templates
 shell/                  zsh integration and completion
 tools/brand/            renders the icon, the plugin logo and the hero banners
+tools/dashboard_shots.py  dashboard screenshots from neutral fixtures at a true viewport (--live, --page, --help)
+tools/bug_registry_action.py  the bug registry's GitHub workflow: folds payloads, writes each issue's text
 docs/                   these guides, diagram specs (docs/diagrams) and images
 tests/                  unit tests
 install.sh · Brewfile   bootstrap and toolchain

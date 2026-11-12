@@ -207,7 +207,7 @@ class FoldTests(unittest.TestCase):
         self.assertAlmostEqual(rec["score"], 2 * 3.0 * 1.5, places=4)  # a crash in dev progress
         self.assertEqual((rec["fingerprint"], rec["kind"], rec["component"], rec["status"]),
                          (FP, "crash", "progress", "open"))
-        self.assertEqual(rec["title"], "crash in dev progress step: KeyError")
+        self.assertEqual(rec["title"], "dev progress step crashes with KeyError")
 
     def test_fold_detour_then_confirmations(self):
         rec = bugs.fold({}, _payload("report"), author_hash="h1", author_assoc="NONE", now=NOW)

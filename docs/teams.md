@@ -165,7 +165,8 @@ blocked.
 5. **Finish.** `done` and `release` give the lock back and push at once. `dev pr merge` does it for every open item
    linked to the branch it merges.
 
-The lock length is `work.lock_hours` in [Configuration](configuration.md).
+The lock length is `work.lock_hours` in [Configuration](configuration.md). A lock belongs to the Mac, not to its
+hostname, so it stays yours when macOS renames the Mac (see [Machine identity](#machine-identity)).
 
 ### Shipped and stale items
 
@@ -244,7 +245,9 @@ to teammates.
 ## Versioned plans
 
 Plans and specs live in `plans/<scope>/` with frontmatter (id `P-…`, title, kind, scope, status, version, a hash of
-the body, who created and last changed it) and a changelog at the end.
+the body, who created and last changed it) and a changelog at the end. The title lives only in the frontmatter, so a
+new plan has no `#` heading of its own and passes `dev docs check`. Each revision adds a changelog line that reads
+`<change>—why: <reason>`; lines written earlier stay as they were.
 
 ```bash
 dev plan new "Refund events" --kind spec -i payments    # draft, version 1, from the spec template
@@ -282,7 +285,7 @@ there is one per scope and month, so concurrent machines never conflict.
 
 ## Presence and `dev team`
 
-Each machine writes only its own file, `presence/<user>@<host>.json`, on every sync: its tracked sessions (agent,
+Each machine writes only its own file, `presence/<user>@<machine id>.json`, on every sync: its tracked sessions (agent,
 project, branch, start time, latest status, progress of the current run, running subagents, turn start, and whether
 the session is still active) and the locks it holds. A session that has ended is removed before the sync that ends it
 publishes presence, and a session marked not active is left out wherever presence is read. Presence carries a summary
@@ -290,12 +293,42 @@ of each run, not its plan. The summary holds the goal and state, how many steps 
 to three steps that run or are blocked now, how many crew lanes work, and the ETA. A session of a 60-step run with six
 lanes takes about 1 KB.
 
+Another machine's presence file is that person's text, so devkit never shows it as written. `dev team` and
+`dev progress` show its fields as plain text, without control characters. The session context the
+model reads names a person, an agent, and a branch only in their plain shapes (`user@hostname`, an agent's name, a
+branch name, none with a space, a quote, or a control character), and anything else as a neutral word: someone on
+another Mac, an agent, a branch.
+
 ```bash
 dev team               # machines active in the last 24 hours
 dev team --hours 4
 ```
 
-The session context, `dev progress`, the dashboard's Team view and `dev report` read the same files.
+The session context, `dev progress`, the dashboard's Team view and `dev report` read the same files. They name each
+person as `user@hostname`, with the machine id beside it, such as `ana@ana-mbp (m-0a1b2c3d)`; a label that does not
+look like a hostname leaves the machine named by its id.
+
+### Machine identity
+
+macOS changes a Mac's hostname with the network (`mac-158` at the office, `ana-mbp` at home). devkit used to name a
+Mac by its hostname, so one Mac looked like more than one: its own locks read as another machine's, `dev team` listed it
+more than once, and its lesson usage counted twice. devkit now names each Mac by a **machine id**:
+
+- **The id** is `m-` and 8 random characters, created once in `~/.local/state/devkit/machine.json` (readable only by
+  you). It stays the same whatever the hostname, and names this Mac's presence file, lesson usage file, and audit
+  folder in the handoff repository.
+- **The hostname is a display label.** devkit shows it next to the id and records every hostname this Mac carried,
+  with when it carried it, starting from this Mac's own audit log.
+- **A rename keeps what is yours.** A lock, presence file, or usage file written under a hostname this Mac carried at
+  the time it was written stays this Mac's: you can still renew, edit, and release your locks. A record another Mac
+  wrote under the same name, before or after this Mac carried it, is never yours.
+- **Former names fade.** This Mac's presence file under a former hostname goes once it has not been updated for 30
+  minutes, and until then `dev team` shows the Mac once. Its usage files under former hostnames are folded into the
+  id file by the larger value of each count.
+- **Records keep the hostname for people.** The audit trail records the id as `actor.host` and the hostname as
+  `actor.label` (see [Audit trail](audit.md)). The handoff's sync commits name both.
+
+The id never leaves this Mac in a bug report: the [bug registry](bug-registry.md) refuses it like a hostname.
 
 ## Sessions on one Mac
 
@@ -509,12 +542,15 @@ has the fixes.
 
 ## Merge rules
 
-`dev install --only handoff` appends these lines to the handoff repository's `.gitattributes` and sets the `ours`
-merge driver:
+`dev install --only handoff` adds the lines the handoff repository's `.gitattributes` lacks, at its end, and sets the
+`ours` merge driver. Lines already there are never changed or moved, so `dev update` brings an existing repository
+the rules a newer devkit adds, and two Macs that upgrade only ever add lines:
 
 | Path | Merge rule | Why |
 | --- | --- | --- |
 | `sessions/**` | `union` | Append-only logs: both machines' lines are kept |
+| `log/**` | `union` | The monthly operations log is append-only too |
+| `.gitattributes` | `union` | The rules file itself, so two Macs that add the same new rule do not conflict |
 | `presence/*.json` | `ours` | Each machine writes only its own file |
 | `PROJECTS.md`, `TASKS.md`, `ACTIVITY.md`, `registry.json` | `ours` | Generated views: the local copy is kept and regenerated after the pull |
 
@@ -541,9 +577,16 @@ commit, and push then failed without a word, and a commit made in that state was
    note, so the pull and the push go on, and saves this Mac's version and the one both started from in
    `~/.local/state/devkit/handoff-conflicts/`. A warning and a `handoff.note-conflict` record in the audit trail name
    the file and the `git merge-file` command that brings your changes back.
-3. Ends at once a pull whose conflict it cannot settle: any other file, or an item whose same field or description
-   both machines changed. Your commits stay on your Mac, unpushed.
-4. Records each pull it ended as a sync problem: a `handoff.rebase-aborted` record in the audit trail, kept at every
+3. Settles a conflict in an append-only log (`log/*.md` and `sessions/**`) as the union of both sides, the remote's
+   lines first. git applies a merge rule only from the commit it rebases onto, so a rule this Mac has not pushed yet
+   cannot settle a conflict; devkit does it itself.
+4. Merges a lesson that both Macs changed, such as a repeat recorded on each: the occurrences add up, the Evidence
+   keeps both sides' lines, `last_seen` is the later day, and the changelog and version merge as for items. Any other
+   field or section takes the side that changed it.
+5. Ends at once a pull whose conflict it cannot settle: any other file, an item whose same field (or description)
+   both machines changed, or a lesson both changed differently in the same field. Your commits stay on your Mac,
+   unpushed.
+6. Records each pull it ended as a sync problem: a `handoff.rebase-aborted` record in the audit trail, kept at every
    audit level, with the files in conflict as its target, and the problem under "Needs attention" in `dev status` and
    the dashboard until a push succeeds.
 

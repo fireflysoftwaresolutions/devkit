@@ -11,7 +11,9 @@ import contextlib
 import io
 import json
 import os
+import subprocess
 import sys
+import tempfile
 import time
 import unittest
 from pathlib import Path
@@ -19,9 +21,13 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from devkit import audit, cli, core, progress as pg  # noqa: E402
+import _sandbox  # noqa: E402  (the environment of a devkit child: the suite's stand-ins first on PATH)
+from devkit import audit, bugs, cli, core, identity, ui, work, progress as pg  # noqa: E402
 from test_language_neutral_hooks import HookCase  # noqa: E402
 from test_progress import TempState, launch  # noqa: E402
+from test_work import TempHandoff  # noqa: E402
+
+DEV = Path(__file__).resolve().parents[1] / "bin" / "dev"
 
 REPORT = ("**[Firefly> DevKit · Release engineer (Link)]** api · `main` · tag\n- **Done:** tagged v1\n"
           "- **Check:** ✓ the tag points at the verified commit\n- **Next:** Morpheus")
@@ -142,6 +148,169 @@ class ParserReadsFlagsAsTheGuardDoesTests(unittest.TestCase):
                 (flags if act.nargs == 0 else values).update(act.option_strings)
         self.assertEqual(sorted(values - guard._DEV_VALUES), [])  # a value it does not know reads as a word
         self.assertEqual(sorted(flags & guard._DEV_VALUES), [])  # a flag it reads as a value hides the next word
+
+
+class ClosedPipeTests(unittest.TestCase):
+    # `dev audit --json | head -c 100`: the reader closes the pipe before dev has written everything. dev stops
+    # quietly with the exit code of a program that a closed pipe stopped (128 + SIGPIPE, as `yes | head` reports it)
+    # and records no crash: a reader that has read enough is no devkit bug.
+
+    def test_a_write_to_a_closed_pipe_during_the_command_is_no_crash(self):
+        # what `print(json.dumps(recs))` in cmd_audit raised once its output passed the 128 KiB buffer
+        def write_to_a_closed_pipe(a):
+            raise BrokenPipeError(32, "Broken pipe")
+
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(bugs, "BUGS", Path(d) / "bugs"), \
+                mock.patch.object(bugs, "CRASHES", Path(d) / "crashes"), \
+                mock.patch.object(cli, "cmd_version", write_to_a_closed_pipe):
+            rc, out = dev("version")
+            self.assertEqual((rc, out), (141, ""))
+            self.assertFalse((Path(d) / "crashes").exists())
+            self.assertEqual(bugs.occurrences(""), [])
+
+    def test_a_closed_pipe_at_exit_ends_dev_quietly(self):
+        # the version line stays in the output buffer until the process exits; the pipe's reading end is closed
+        # before dev starts, so that flush meets a closed pipe
+        with tempfile.TemporaryDirectory() as d:
+            home = Path(d).resolve()
+            env = _sandbox.env(base={"HOME": str(home), "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+                                     "LANG": "en_US.UTF-8", "DEVKIT_NO_NOTIFY": "1"})
+            r, w = os.pipe()
+            os.close(r)
+            try:
+                p = subprocess.run([sys.executable, "-I", "-S", str(DEV), "version"], stdout=w, stderr=subprocess.PIPE,
+                                   stdin=subprocess.DEVNULL, env=env, cwd=str(home), timeout=60)
+            finally:
+                os.close(w)
+            self.assertEqual((p.returncode, p.stderr.decode(errors="replace")), (141, ""))
+            crashes = home / ".local" / "state" / "devkit" / "crashes"
+            self.assertEqual(sorted(f.name for f in crashes.iterdir()) if crashes.is_dir() else [], [])
+
+
+class MachineIdentityLineTests(unittest.TestCase):
+    # After the machine id came, the command line still named this Mac by its hostname: `dev task` showed this Mac's
+    # lock under a former hostname as another machine's, `dev progress` listed this Mac's own presence as another
+    # machine's run, `dev team` showed the machine id with no name a person knows, and the handoff's sync commit
+    # named the hostname alone
+    def setUp(self):
+        self.handoff = TempHandoff().__enter__()
+        self.addCleanup(self.handoff.__exit__, None, None, None)
+        self.name = "Mac-158.lan"
+        for p in (mock.patch.object(core, "STATE", self.handoff.root.parent / "state"),
+                  mock.patch.dict(core.CFG, {"github_user": "ana"}),
+                  mock.patch.object(ui, "COLOR", False),
+                  mock.patch("socket.gethostname", side_effect=lambda: self.name)):
+            p.start()
+            self.addCleanup(p.stop)
+        self.t0 = time.time()
+        identity.machine()  # devkit runs here as mac-158 ...
+        self.name = "andress-mbp-2"  # ... and the network renames the Mac
+        self.me = work.actor("claude", "s1")
+
+    def held(self, holder):
+        it = work.create("acme/api", f"Fix {holder}", a=self.me)
+        it["meta"].update(claimed_by=f"{holder} (codex)", claimed_at=work.now_iso(self.t0), status="doing",
+                          lock_expires=work.now_iso(self.t0 + 3600))
+        work.write_record(it["path"], work.render(it))
+
+    def test_dev_task_marks_this_macs_lock_under_a_former_hostname_as_yours(self):
+        self.held("ana@mac-158")
+        self.held("ana@mac-55")  # a name this Mac never carried: another Mac's lock
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli._print_items("acme/api", "acme/api", rebind=False)
+        rows = {ln.split("Fix ")[1].split()[0]: ln for ln in out.getvalue().splitlines() if "Fix " in ln}
+        self.assertIn("🔒 you", rows["ana@mac-158"])
+        self.assertIn("🔒 ana@mac-55", rows["ana@mac-55"])
+
+    def test_dev_progress_never_lists_this_macs_own_presence_as_another_machines_run(self):
+        work.PRESENCE.mkdir(parents=True)
+        for who in ("ana@mac-158", "bob@studio"):
+            user, host = who.split("@")
+            (work.PRESENCE / f"{who}.json").write_text(json.dumps(
+                {"user": user, "host": host, "updated": work.now_iso(self.t0), "locks": [],
+                 "sessions": [{"agent": "claude", "project": "acme/api",
+                               "progress": {"goal": f"Run of {who}", "step": 1, "steps": 3}}]}))
+        with TempState():
+            rc, out = dev("progress")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("Run of bob@studio", out)
+        self.assertNotIn("Run of ana@mac-158", out)
+
+    def test_dev_team_names_each_machine_by_its_hostname_and_its_id(self):
+        work.write_presence([], a=self.me)
+        rc, out = dev("team")
+        self.assertEqual(rc, 0, out)
+        self.assertIn(f"ana@andress-mbp-2 ({self.me['host']})", out)
+
+    # presence is another machine's text: a label that is not a plain hostname (here terminal escapes) never reaches
+    # the terminal, and that machine shows by its id
+    def test_a_label_that_is_not_a_hostname_never_reaches_the_terminal(self):
+        work.PRESENCE.mkdir(parents=True)
+        (work.PRESENCE / "bob@m-0b0b0b0b.json").write_text(json.dumps(
+            {"user": "bob", "host": "m-0b0b0b0b", "label": "\u001b[2Jyou", "updated": work.now_iso(self.t0),
+             "locks": [], "sessions": [{"agent": "codex", "project": "acme/api", "progress": {"goal": "Their run"}}]}))
+        self.held("bob@m-0b0b0b0b")
+        for argv in (["team"], ["progress"]):
+            with self.subTest(argv=argv), TempState():
+                rc, out = dev(*argv)
+                self.assertEqual(rc, 0, out)
+                self.assertIn("bob@m-0b0b0b0b", out)
+                self.assertNotIn("\x1b", out)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli._print_items("acme/api", "acme/api", rebind=False)
+        self.assertIn("🔒 bob@m-0b0b0b0b", out.getvalue())
+        self.assertNotIn("\x1b", out.getvalue())
+
+    # every field of another machine's presence is that person's text, not only its label: no C0 or C1 control
+    # character (a title-setting OSC, a screen clear, a CSI, a carriage return that overwrites the line), no DEL and
+    # no bidirectional control reaches the terminal from dev team or dev progress; a line break cannot start a row
+    # that reads as another machine's, and the words around them still read as written
+    def test_no_field_of_another_machines_presence_reaches_the_terminal_with_a_control_character(self):
+        controls = ("\x00\x07\x08\x0b\x0d\x1b\x7f\x85\x9b\x9d\u061c\u200e\u200f"
+                    "\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069")
+        bad = lambda w: f"\x1b]0;owned\x07\u202e{w}\u202c\x1b[2J\x9b31m{controls}"  # noqa: E731
+        work.PRESENCE.mkdir(parents=True)
+        (work.PRESENCE / "eve@m-0e0e0e0e.json").write_text(json.dumps(
+            {"user": bad("eve"), "host": bad("m-0e0e0e0e"), "label": "studio", "updated": work.now_iso(self.t0),
+             "sessions": [{"agent": bad("codex"), "project": bad("acme/api"), "branch": bad("feat/x"),
+                           "status": bad("all good") + "\nforged row",
+                           "progress": {"goal": bad("Their run"), "step": bad("2"), "steps": bad("5")}}],
+             "locks": [{"id": bad("T-e1"), "title": bad("Fix it"), "scope": bad("acme/api"),
+                        "until": bad("2026-11-12")}]}))
+        for argv, words in ((["team"], ("eve", "codex", "acme/api", "feat/x", "all good", "T-e1", "Fix it",
+                                        "2026-11-12")),
+                            (["progress"], ("eve", "codex", "acme/api", "Their run", "2", "5"))):
+            with self.subTest(argv=argv), TempState():
+                rc, out = dev(*argv)
+                self.assertEqual(rc, 0, out)
+                self.assertEqual(sorted(set(out) & set(controls)), [])
+                self.assertEqual([ln for ln in out.splitlines() if ln.strip().startswith("forged")], [])
+                for w in words:
+                    self.assertIn(w, out)
+
+    def test_another_macs_lock_shows_by_its_hostname(self):
+        work.PRESENCE.mkdir(parents=True)
+        (work.PRESENCE / "bob@m-0b0b0b0b.json").write_text(json.dumps(
+            {"user": "bob", "host": "m-0b0b0b0b", "label": "studio", "updated": work.now_iso(self.t0), "locks": [],
+             "sessions": []}))
+        self.held("bob@m-0b0b0b0b")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli._print_items("acme/api", "acme/api", rebind=False)
+        self.assertIn("🔒 bob@studio", out.getvalue())
+
+    def test_the_handoff_sync_commit_names_the_mac_by_its_label_and_id(self):
+        git = ["git", "-C", str(self.handoff.root), "-c", "user.email=t@example.com", "-c", "user.name=t"]
+        subprocess.run(git + ["init", "-q"], check=True)
+        (self.handoff.root / "note.md").write_text("x\n")
+        with mock.patch.dict(os.environ, {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com",
+                                          "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.com"}):
+            cli.commit_push(push=False, quiet=True)
+        subject = subprocess.run(git + ["log", "-1", "--format=%s"], capture_output=True, text=True).stdout.strip()
+        self.assertEqual(subject, f"sync: 1 file(s) from andress-mbp-2 ({self.me['host']})")
 
 
 if __name__ == "__main__":

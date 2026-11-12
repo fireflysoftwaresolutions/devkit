@@ -21,12 +21,11 @@ import hashlib
 import json
 import os
 import re
-import socket
 import time
 from collections import Counter
 from pathlib import Path
 
-from . import core
+from . import core, identity
 from .core import HANDOFF
 
 ITEMS = HANDOFF / "items"
@@ -47,14 +46,60 @@ LIST_FIELDS = ("links",)  # written as `[a, b]`; every other value is text, even
 # --------------------------------------------------------------------------- identity
 
 def actor(agent: str = None, session: str = None, user: str = None) -> dict:
+    """Who acts: the GitHub user, this Mac (`host`: its machine id, the same whatever the hostname), the agent and its
+    session. `label` is the Mac's hostname, for display only; every hostname devkit runs under is recorded as one this
+    Mac carried (identity.machine), so records that name the Mac by a former hostname stay its own (mine)."""
     user = user or core.github_user() or os.environ.get("USER", "unknown")
-    host = socket.gethostname().split(".")[0].lower()
+    m = identity.machine()
+    host = m.id
     agent = agent or os.environ.get("DEVKIT_AGENT") or ("claude" if os.environ.get("CLAUDECODE") else
                                                         "codex" if os.environ.get("CODEX_SANDBOX") or
                                                         os.environ.get("CODEX_THREAD_ID") else "human")
     sid = session or os.environ.get("DEVKIT_SESSION", "")
     sid = sid.split(":", 1)[1] if ":" in sid else sid  # DEVKIT_SESSION is "<agent>:<session id>"
-    return {"user": user, "host": host, "agent": agent, "session": sid[:12]}
+    return {"user": user, "host": host, "label": m.label, "agent": agent, "session": sid[:12]}
+
+
+def mine(who: str, a: dict = None, at: float = None) -> bool:
+    """Is `who` this actor? `who` is a `user@machine` text or a lock holder (`user@machine (agent:session)`), and
+    `at` the time it was written (seconds; now when None). Yes for the same user on the same machine: the actor's
+    own `host`, this Mac's machine id, or a hostname this Mac carried at `at` (records from before the machine id,
+    identity.was_this_mac). An actor of another machine (or a test's) matches exactly. Another person, another
+    machine id, or a hostname this Mac did not carry at that time is never this actor."""
+    a = a or actor()
+    user, _, host = str(who or "").split(" ")[0].partition("@")
+    if not host or user != a.get("user"):
+        return False
+    if host == a.get("host"):
+        return True
+    m = identity.machine()
+    if a.get("host") not in (m.id, m.label):
+        return False
+    return host == m.id or identity.was_this_mac(host, at, m)
+
+
+_LABEL = re.compile(r"[a-z0-9][a-z0-9-]{0,62}")  # a short hostname: what a label must look like to be shown
+
+
+def display(who: str, team: list = None) -> str:
+    """`who` as a person reads it: `user@<machine id>` (or a lock holder `user@<id> (agent:session)`) becomes
+    `user@<hostname>`. This Mac's id shows its hostname now; another Mac's the `label` its presence publishes (from
+    `team` when given, else its presence file). A label that is not a plain hostname (presence is another person's
+    text), an id with no presence, and a record that names a hostname already stay as they are. For display only:
+    compare people with mine() and the id."""
+    head, sep, rest = str(who or "").partition(" ")
+    user, at, host = head.partition("@")
+    if not at or not identity.MACHINE_ID.fullmatch(host) or not re.fullmatch(r"[A-Za-z0-9._-]+", user):
+        return str(who or "")
+    m = identity.machine()
+    label = m.label if host == m.id else ""
+    if not label:
+        found = [t for t in team if isinstance(t, dict) and t.get("user") == user and t.get("host") == host] \
+            if team is not None else [core.read_json(PRESENCE / f"{user}@{host}.json", None)]
+        label = next((str(t.get("label") or "") for t in found if isinstance(t, dict)), "")
+    if not _LABEL.fullmatch(label):
+        return str(who)
+    return f"{user}@{label}" + (sep + rest if sep else "")
 
 
 def actor_str(a: dict) -> str:
@@ -330,20 +375,70 @@ def merge_item(base: str, remote: str, mine: str):
     from the base's, or when the result would drop a line either side added (`lost_lines`)."""
     b, r, m = parse(base), parse(remote), parse(mine)
     out = parse(remote)
-    for k in FIELDS:
-        if k in _BY_RULE:
+    if not _merge_fields(b, r, m, out, FIELDS, LIST_FIELDS, _BY_RULE):
+        return None
+    for part in ("body", "extra"):
+        ok, out[part] = _either(b[part], r[part], m[part])
+        if not ok:
+            return None
+    added = _merge_history(b, r, m, out)
+    return None if added is None else _kept(base, remote, mine, render(out), added)
+
+
+def merge_lesson(base: str, remote: str, mine: str):
+    """This Mac's change to a lesson applied again to the remote's version, for a pull whose rebase stopped on the
+    lesson (the arguments as for merge_item). Two Macs that each recorded a repeat (`dev lesson recur`) both count:
+    the occurrences add up, the Evidence keeps both sides' lines (the remote's first), `last_seen` is the later day,
+    and the changelog and version merge as merge_item's do. Any other field, section, list or front-matter line takes
+    the side that changed it, as in merge_item. -> the lesson's text, or None when both sides changed the same thing
+    differently (the status, a section other than Evidence), when the changelogs do not both start from the base's,
+    or when the result would drop a line either side added."""
+    from . import lessons  # it imports this module
+    b, r, m = lessons.parse(base), lessons.parse(remote), lessons.parse(mine)
+    out = lessons.parse(remote)
+    if not _merge_fields(b, r, m, out, lessons.FIELDS, lessons.LISTS, _BY_RULE + ("occurrences", "last_seen")):
+        return None
+    ok, out["extra"] = _either(b["extra"], r["extra"], m["extra"])
+    if not ok:
+        return None
+    for s in dict.fromkeys([*r["sections"], *m["sections"]]):
+        texts = [x["sections"].get(s, "") for x in (b, r, m)]
+        if s == "Evidence":
+            merged = _merge_text(*(t + "\n" if t else "" for t in texts), union=True)
+            if merged is None:
+                return None
+            out["sections"][s] = merged.strip()
             continue
-        if k in LIST_FIELDS:
+        ok, out["sections"][s] = _either(*texts)
+        if not ok:
+            return None
+    out["meta"]["occurrences"] = r["meta"]["occurrences"] + m["meta"]["occurrences"] - b["meta"]["occurrences"]
+    out["meta"]["last_seen"] = max(r["meta"].get("last_seen") or "", m["meta"].get("last_seen") or "")
+    added = _merge_history(b, r, m, out)
+    return None if added is None else _kept(base, remote, mine, lessons.render(out), added)
+
+
+def _merge_fields(b, r, m, out, fields, lists, by_rule) -> bool:
+    """A record's front-matter fields merged into `out` (the remote's): a list keeps what either side added and loses
+    what either removed; any other field takes the side that changed it. The caller sets the fields in `by_rule`.
+    -> False when both sides changed one field differently."""
+    for k in fields:
+        if k in by_rule:
+            continue
+        if k in lists:
             bl, rl, ml = (_as_list(x["meta"].get(k)) for x in (b, r, m))
             out["meta"][k] = [x for x in rl if x in ml or x not in bl] + [x for x in ml if x not in bl + rl]
             continue
         ok, out["meta"][k] = _either(*(x["meta"].get(k, "") for x in (b, r, m)))
         if not ok:
-            return None
-    for part in ("body", "extra"):
-        ok, out[part] = _either(b[part], r[part], m[part])
-        if not ok:
-            return None
+            return False
+    return True
+
+
+def _merge_history(b, r, m, out):
+    """A record's changelog in `out`: this Mac's entries on top of the remote's, numbered after them, and a version
+    that counts both; `updated` and `updated_by` from the side changed last. -> this Mac's added entries as it wrote
+    them, or None when the changelogs do not both start from the base's."""
     n = len(b["changelog"])
     if any(x["changelog"][len(x["changelog"]) - n:] != b["changelog"] for x in (r, m) if n):
         return None
@@ -353,7 +448,12 @@ def merge_item(base: str, remote: str, mine: str):
     out["meta"]["version"] = version
     later = max((r, m), key=lambda x: x["meta"].get("updated") or "")
     out["meta"]["updated"], out["meta"]["updated_by"] = later["meta"].get("updated", ""), later["meta"].get("updated_by", "")
-    text = render(out)
+    return added
+
+
+def _kept(base: str, remote: str, mine: str, text: str, added) -> str | None:
+    """`text`, or None when it would drop a line either side added (`lost_lines`); this Mac's `added` changelog
+    entries may change, since they are numbered again."""
     renumbered = [ln for e in added for ln in f"- {e}".split("\n")]
     if lost_lines(remote, text, base.splitlines()) or lost_lines(mine, text, base.splitlines() + renumbered):
         return None
@@ -705,11 +805,24 @@ def _stage(rel: str, n: int):
     return out + "\n" if rc == 0 else None
 
 
+# The append-only logs: the month's activity log (log/) and the session logs (sessions/). Every Mac only adds lines at
+# the end, so a conflict in one keeps both sides' lines, as their merge=union rule in .gitattributes does. Git applies
+# that rule only from the commit it rebases onto: a Mac whose own unpushed commit brings the rule would stop on every
+# pull until another Mac pushed it.
+_APPEND_ONLY = re.compile(r"^(log/[^/]+\.md|sessions/.+)$")
+_LESSON_FILE = re.compile(r"^lessons/(.+/)?L-[^/]+\.md$")  # active and archived lessons
+
+
 def _settle(rel: str, retake: bool):
-    """The text of an item in conflict during the rebase: the remote's version with this Mac's change applied again
-    (`merge_item`). When both changed the same thing, the remote's version if `retake` (the caller applies its change
-    again), else None."""
+    """The text of a file in conflict during the rebase, or None when devkit cannot settle it. An append-only log: both
+    sides' lines, the remote's first. A lesson: both sides' changes (`merge_lesson`), or None. An item: the remote's
+    version with this Mac's change applied again (`merge_item`); when both changed the same thing, the remote's
+    version if `retake` (the caller applies its change again), else None."""
     base, remote, mine = _stage(rel, 1), _stage(rel, 2), _stage(rel, 3)  # in a rebase, 2 is the remote's side
+    if _APPEND_ONLY.match(rel):  # a side that deleted the log loses to the one that added lines
+        return _merge_text(base or "", remote, mine, union=True) if remote and mine else remote or mine
+    if _LESSON_FILE.match(rel):
+        return merge_lesson(base, remote, mine) if base and remote and mine else None
     if not (rel.startswith("items/") and remote and mine):
         return None
     merged = merge_item(base, remote, mine) if base else None
@@ -744,9 +857,9 @@ def _hollow(text: str) -> tuple:
     return text, blocks
 
 
-def _merge_text(base: str, remote: str, mine: str):
+def _merge_text(base: str, remote: str, mine: str, union: bool = False):
     """Three-way merge of two versions of a text with the one both started from (git merge-file). -> the merged text,
-    or None when both changed the same lines."""
+    or None when both changed the same lines; with `union`, both sides' lines there instead (the remote's first)."""
     import tempfile
     with tempfile.TemporaryDirectory(prefix="devkit-merge-") as d:
         paths = []
@@ -754,7 +867,7 @@ def _merge_text(base: str, remote: str, mine: str):
             p = Path(d) / name
             p.write_text(text)
             paths.append(str(p))
-        rc, out, _ = core.sh(["git", "merge-file", "-p", "-q", *paths])
+        rc, out, _ = core.sh(["git", "merge-file", "-p", "-q", *(["--union"] if union else []), *paths])
     return out + "\n" if rc == 0 else None
 
 
@@ -855,9 +968,10 @@ def pull_rebase(retake=()) -> tuple:
 
 def rebase_fetched(retake=()) -> tuple:
     """Rebase this Mac's commits on the remote's as last fetched: local git work only, under _rebase_locks, and nothing
-    to do (no lock taken) when the remote has no new commit or the branch follows none. A conflict in an item is
-    settled (`_settle`), one in a note file by file (`_settle_note`: never a stop, so the other files still go
-    through); any other conflict aborts the rebase, leaves the commits as they were and records a sync problem.
+    to do (no lock taken) when the remote has no new commit or the branch follows none. A conflict in an item, a lesson
+    or an append-only log is settled (`_settle`), one in a note file by file (`_settle_note`: never a stop, so the other
+    files still go through); any other conflict aborts the rebase, leaves the commits as they were and records a sync
+    problem.
     `retake`: item paths (relative) whose change the caller applies again itself. Never call it while holding
     _repo_lock. -> (ok, the problem when not ok)."""
     if core.gitout(HANDOFF, "rev-list", "--count", "HEAD..@{u}") in ("", "0"):
@@ -1055,7 +1169,12 @@ def lock_holder(it: dict):
 
 def _owned_by(it: dict, a: dict) -> bool:
     holder, expired = lock_holder(it)
-    return not holder or expired or holder.split(" ")[0] == f"{a['user']}@{a['host']}"
+    return not holder or expired or mine(holder, a, _claimed_at(it))
+
+
+def _claimed_at(it: dict):
+    """When the item's lock was taken (seconds), or None when the item does not say."""
+    return parse_iso(it["meta"].get("claimed_at")) or None
 
 
 def update(it: dict, op: str, why: str = "", a=None, **changes) -> dict:
@@ -1258,8 +1377,10 @@ def renew_locks(a=None, hours: float = None, sessions=None) -> int:
             continue
         holder, expired = lock_holder(it)
         working = any((it["scope"], ln[len("branch:"):]) in live for ln in _links(it) if ln.startswith("branch:"))
-        if holder and holder.startswith(me) and not expired and working:
+        if holder and not expired and working and mine(holder, a, _claimed_at(it)):
             if parse_iso(it["meta"]["lock_expires"]) - time.time() < hours * 1800:
+                # only the expiry: a holder under a former name stays as written, so an older devkit session still
+                # running on this Mac keeps its own lock (the rename waits for the contract step)
                 it["meta"]["lock_expires"] = now_iso(time.time() + hours * 3600)
                 try:
                     write_record(it["path"], render(it))
@@ -1529,13 +1650,15 @@ def run_summary(brief):
 def write_presence(sessions: list, a=None):
     """presence/<user>@<host>.json: this machine's tracked sessions, each with its `active` flag (a session still
     tracked a while after its agent stopped is not active) and a summary of its run (run_summary), and held locks
-    (written only by this machine)."""
+    (written only by this machine). `host` is the machine id and `label` the hostname, for display. This Mac's
+    presence files from before the machine id go (_drop_former_presence)."""
     a = a or actor("human")
     me = f"{a['user']}@{a['host']}"
+    dropped = _drop_former_presence(a)
     held = [{"id": i["meta"]["id"], "title": i["meta"]["title"], "scope": i["scope"],
              "until": i["meta"]["lock_expires"]} for i in all_items()
-            if (i["meta"].get("claimed_by") or "").startswith(me) and not lock_holder(i)[1]]
-    data = {"user": a["user"], "host": a["host"], "updated": now_iso(),
+            if mine(i["meta"].get("claimed_by"), a, _claimed_at(i)) and not lock_holder(i)[1]]
+    data = {"user": a["user"], "host": a["host"], "label": a.get("label") or a["host"], "updated": now_iso(),
             "sessions": [dict({k: s.get(k) for k in ("agent", "project", "branch", "started", "status", "last_seen",
                                                      "subagents", "turn_started", "active")},
                               progress=run_summary(s.get("progress")))
@@ -1546,15 +1669,57 @@ def write_presence(sessions: list, a=None):
     if {k: v for k, v in old.items() if k != "updated"} != {k: v for k, v in data.items() if k != "updated"}:
         f.write_text(json.dumps(data, indent=1) + "\n")
         return True
-    return False
+    return dropped
+
+
+FORMER_PRESENCE_IDLE = 1800  # seconds without an update before this Mac's presence file under a hostname goes
+
+
+def _former_presence(d, user: str, m) -> bool:
+    """Is `d` a presence record of `user` that this Mac wrote under a hostname (before the machine id, or by an older
+    devkit session still running here)? Its `host` is a name this Mac carried when the record was last written."""
+    if not isinstance(d, dict) or d.get("user") != user:
+        return False
+    host = str(d.get("host") or "")
+    return host != m.id and identity.was_this_mac(host, parse_iso(d.get("updated")) or None, m)
+
+
+def _drop_former_presence(a: dict) -> bool:
+    """Remove this Mac's presence files from before the machine id: presence/<user>@<hostname>.json for a hostname
+    this Mac carried when the file was last written (its `updated`), once nothing has written it for
+    FORMER_PRESENCE_IDLE. While an older devkit session on this Mac still rewrites it, it stays (deleting it on every
+    write made every sync commit), and team() hides it. A file of another person, or one written under a name this
+    Mac did not carry then (another Mac's), stays. Only for this Mac's own actor. -> whether a file went (the sync
+    commits the removal)."""
+    m = identity.machine()
+    if a.get("host") != m.id:
+        return False
+    gone = False
+    for name in m.aliases:
+        f = PRESENCE / f"{a['user']}@{name}.json"
+        if name == m.id or not f.is_file():
+            continue
+        d = core.read_json(f, None)
+        if _former_presence(d, a["user"], m) and \
+                time.time() - parse_iso(d.get("updated")) >= FORMER_PRESENCE_IDLE:
+            f.unlink()
+            gone = True
+    return gone
 
 
 def team(max_age_h: float = 24) -> list:
     """The machines that published presence in the last `max_age_h` hours, each with its live sessions only: a
-    session marked not active has ended (presence from an older devkit has no flag, and its sessions stay)."""
+    session marked not active has ended (presence from an older devkit has no flag, and its sessions stay). This
+    Mac's own presence files under a former hostname are left out when it publishes under its machine id, so it shows
+    once (another Mac cannot tell them apart and lists both until the old file goes)."""
     out = []
-    for f in sorted(PRESENCE.glob("*.json")) if PRESENCE.exists() else []:
+    files = sorted(PRESENCE.glob("*.json")) if PRESENCE.exists() else []
+    m = identity.machine() if files else None
+    for f in files:
         d = core.read_json(f, None)
+        user = str(d.get("user") or "") if isinstance(d, dict) else ""
+        if user and (PRESENCE / f"{user}@{m.id}.json").is_file() and _former_presence(d, user, m):
+            continue
         if d and time.time() - parse_iso(d.get("updated")) < max_age_h * 3600:
             if isinstance(d, dict) and isinstance(d.get("sessions"), list):
                 d["sessions"] = [s for s in d["sessions"] if not (isinstance(s, dict) and s.get("active") is False)]

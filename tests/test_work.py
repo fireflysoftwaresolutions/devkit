@@ -867,13 +867,14 @@ class TemplateTests(unittest.TestCase):
                               ("spike", "## Recommendation"), ("bugfix", "## Root cause"), ("adr", "## Consequences")):
             with self.subTest(kind=kind):
                 text = plans.template(kind, "Invoice export")
-                self.assertTrue(text.startswith("# Invoice export"))
+                self.assertNotRegex(text, r"(?m)^# ")  # the front-matter title is the plan's one title (MD025)
                 self.assertIn(section, text)
         with self.assertRaises(ValueError):
             plans.template("novel", "x")
         with TempHandoff():
             path = plans.new("acme/api", "Event store", a=A, kind="adr")
             self.assertIn("kind: adr", path.read_text())
+            self.assertIn("title: Event store", path.read_text().splitlines())  # where the title now lives
             self.assertFalse(plans.needs_revision(path))
 
     def test_delegate_message(self):
@@ -982,6 +983,180 @@ class IsolationTests(unittest.TestCase):
             self.assertIsNone(bash("dev task add x -p acme/one"))
             self.assertIsNone(bash("DEVKIT_CROSS_PROJECT=1 dev task add x -p acme/two"))
             self.assertEqual(bash("dev initiative add platform acme/one")[0], "deny")
+
+
+class MachineIdentityTests(unittest.TestCase):
+    # macOS renames the Mac with the network: devkit's records of this Mac (locks, presence) must stay this Mac's
+    # across a rename, and another Mac's must never become this one's
+    def setUp(self):
+        self.handoff = TempHandoff().__enter__()
+        self.addCleanup(self.handoff.__exit__, None, None, None)
+        state = mock.patch.object(core, "STATE", self.handoff.root.parent / "state")
+        state.start()
+        self.addCleanup(state.stop)
+        self.name = "Mac-158.lan"
+        host = mock.patch("socket.gethostname", side_effect=lambda: self.name)
+        host.start()
+        self.addCleanup(host.stop)
+
+    def me(self):
+        return work.actor("claude", "s1", user="ana")
+
+    def legacy_lock(self, holder: str, at: float):
+        # a lock as devkit wrote it before the machine id: the holder names the Mac by its hostname of the time
+        it = work.create("acme/api", "Fix login", a=B)
+        it["meta"].update(claimed_by=f"{holder} (codex)", claimed_at=work.now_iso(at), status="doing",
+                          lock_expires=work.now_iso(time.time() + 3600))
+        work.write_record(it["path"], work.render(it))
+        return work.load(it["path"])
+
+    def audit_log(self, *records):
+        # this Mac's own audit log as devkit wrote it before the machine id: each record names the hostname of the time
+        d = core.STATE / "audit"
+        d.mkdir(parents=True, exist_ok=True)
+        with (d / "2026-11.jsonl").open("a") as fh:
+            for ts, host in records:
+                fh.write(json.dumps({"v": 2, "ts": ts, "actor": {"user": "ana", "host": host, "agent": "claude"},
+                                     "action": "guard.allow"}) + "\n")
+
+    def test_a_cut_over_under_a_dhcp_name_leaves_another_macs_earlier_lock_alone(self):
+        # this Mac has carried mac-55 for the last 2 h; another Mac carried it before and took a lock that still runs
+        now = time.time()
+        self.audit_log((now - 7200, "mac-55"), (now - 3600, "mac-55"))
+        self.name = "mac-55.lan"
+        theirs, ours = self.legacy_lock("ana@mac-55", now - 5 * 3600), self.legacy_lock("ana@mac-55", now - 1800)
+        self.assertFalse(work.mine(theirs["meta"]["claimed_by"], self.me(), at=now - 5 * 3600))
+        with self.assertRaises(ValueError):
+            work.release(theirs, a=self.me())
+        self.assertTrue(work.mine(ours["meta"]["claimed_by"], self.me(), at=now - 1800))
+
+    def test_a_rename_between_two_calls_keeps_the_lock_this_mac_took(self):
+        it = work.claim(work.create("acme/api", "Fix login", a=self.me()), a=self.me())
+        self.name = "andress-mbp-2"
+        it = work.update(work.load(it["path"]), "edit", why="scope", a=self.me(), title="Fix the login")
+        self.assertEqual(it["meta"]["title"], "Fix the login")
+        it = work.release(work.load(it["path"]), a=self.me(), status="done")
+        self.assertEqual(it["meta"]["claimed_by"], "")
+
+    def test_a_lock_under_a_hostname_this_mac_carried_then_is_its_own(self):
+        self.me()  # devkit runs here as mac-158 ...
+        it = self.legacy_lock("ana@mac-158", time.time())
+        self.name = "andress-mbp-2"  # ... and the network renames the Mac
+        self.assertTrue(work.mine(it["meta"]["claimed_by"], self.me(), at=time.time()))
+        work.release(it, a=self.me())
+
+    def test_another_macs_lock_is_never_taken_over(self):
+        self.me()
+        self.name = "mac-55"
+        self.me()  # this Mac carries mac-55 from now on ...
+        self.name = "andress-mbp-2"
+        self.me()
+        # ... so a mac-55 lock from yesterday is another Mac's; so are another person's and another machine id's
+        for holder, at in (("ana@mac-55", time.time() - 86400), ("ana@mac-640", time.time()),
+                           ("bob@mac-158", time.time()), ("ana@m-0000aaaa", time.time())):
+            it = self.legacy_lock(holder, at)
+            self.assertFalse(work.mine(it["meta"]["claimed_by"], self.me(), at=at), holder)
+            with self.assertRaises(ValueError):
+                work.release(it, a=self.me())
+            with self.assertRaises(ValueError):
+                work.update(work.load(it["path"]), "edit", why="scope", a=self.me(), title="mine now")
+
+    def test_renewal_extends_this_macs_lock_under_a_former_name_keeps_its_holder_and_never_another_macs(self):
+        # the holder stays as written: an older devkit session still on this Mac keeps its own lock, and a lock read
+        # as this Mac's by mistake is never renamed for good (the rename waits for the contract step)
+        self.me()
+        ours, theirs = self.legacy_lock("ana@mac-158", time.time()), self.legacy_lock("ana@mac-55", time.time())
+        for it in (ours, theirs):
+            it["meta"].update(lock_expires=work.now_iso(time.time() + 60), links=["branch:feat/x"])
+            work.write_record(it["path"], work.render(it))
+        self.name = "andress-mbp-2"
+        live = [{"active": True, "project": "acme/api", "branch": "feat/x"}]
+        self.assertEqual(work.renew_locks(a=self.me(), sessions=live), 1)
+        ours, theirs = work.load(ours["path"]), work.load(theirs["path"])
+        self.assertEqual(ours["meta"]["claimed_by"], "ana@mac-158 (codex)")
+        self.assertGreater(work.parse_iso(ours["meta"]["lock_expires"]), time.time() + 3600)
+        self.assertEqual(theirs["meta"]["claimed_by"], "ana@mac-55 (codex)")
+
+    def test_a_rename_between_two_calls_keeps_the_machine_and_its_presence_file(self):
+        before = self.me()
+        work.write_presence([], a=work.actor("human", user="ana"))
+        self.name = "andress-mbp-2"
+        after = self.me()
+        work.write_presence([], a=work.actor("human", user="ana"))
+        self.assertEqual(after["host"], before["host"])
+        self.assertRegex(after["host"], r"^m-[0-9a-z]{8}$")
+        self.assertEqual((before["label"], after["label"]), ("mac-158", "andress-mbp-2"))
+        files = sorted(f.name for f in self.handoff.root.glob("presence/*.json"))
+        self.assertEqual(files, [f"ana@{after['host']}.json"])
+        data = json.loads((self.handoff.root / "presence" / files[0]).read_text())
+        self.assertEqual((data["host"], data["label"]), (after["host"], "andress-mbp-2"))
+
+    def test_an_older_session_still_writing_this_macs_old_presence_file_is_hidden_and_never_flaps(self):
+        # an older devkit session on this Mac rewrites ana@mac-158.json; deleting it on every write made each sync
+        # commit, so the file stays while it is written, and this Mac shows once in the team
+        a = work.actor("human", user="ana")
+        work.write_presence([], a=a)
+        legacy = work.PRESENCE / "ana@mac-158.json"
+        legacy.write_text(json.dumps({"user": "ana", "host": "mac-158", "updated": work.now_iso(), "sessions": [],
+                                      "locks": []}))
+        self.assertFalse(work.write_presence([], a=a))  # nothing changed: nothing for the sync to commit
+        self.assertTrue(legacy.is_file())
+        self.assertEqual([t["host"] for t in work.team()], [a["host"]])
+
+    def test_this_macs_old_presence_file_goes_and_another_macs_stays(self):
+        self.me()
+        # last written 31 minutes ago: no older session of this Mac writes it any more
+        legacy = {"user": "ana", "updated": work.now_iso(time.time() - 31 * 60), "sessions": [], "locks": []}
+        work.PRESENCE.mkdir(parents=True, exist_ok=True)
+        for host in ("mac-158", "mac-55"):  # mac-158 is this Mac's name now; mac-55 another Mac's
+            (work.PRESENCE / f"ana@{host}.json").write_text(json.dumps(dict(legacy, host=host)))
+        self.name = "andress-mbp-2"
+        work.write_presence([], a=work.actor("human", user="ana"))
+        files = sorted(f.name for f in work.PRESENCE.glob("*.json"))
+        self.assertEqual(files, sorted([f"ana@{self.me()['host']}.json", "ana@mac-55.json"]))
+        self.assertEqual(sorted(m["host"] for m in work.team()), sorted([self.me()["host"], "mac-55"]))
+
+    def test_a_rename_between_two_calls_keeps_the_lesson_usage_counted_once(self):
+        from devkit import lessons
+        with mock.patch.object(lessons, "LESSONS", self.handoff.root / "lessons"), \
+                mock.patch.object(lessons, "USAGE_LOCAL", core.STATE / "lessons-usage.json"):
+            lessons.track(["L-1"], "shown")
+            lessons.publish_usage(a=work.actor("human", user="ana"))
+            self.name = "andress-mbp-2"
+            lessons.track(["L-1"], "shown")
+            lessons.publish_usage(a=work.actor("human", user="ana"))
+            self.assertEqual(len(list((self.handoff.root / "lessons" / "usage").glob("*.json"))), 1)
+            self.assertEqual(lessons.usage()["L-1"]["shown"], 2)
+
+    def test_a_person_is_shown_by_the_hostname_label_of_their_machine(self):
+        a = self.me()
+        work.PRESENCE.mkdir(parents=True, exist_ok=True)
+        for user, host, label in (("bob", "m-0000beef", "mini"), ("eve", "m-0000dead", "<b>x</b>")):
+            (work.PRESENCE / f"{user}@{host}.json").write_text(json.dumps({"user": user, "host": host, "label": label,
+                                                                          "updated": work.now_iso()}))
+        self.assertEqual(work.display(f"ana@{a['host']}"), "ana@mac-158")  # this Mac: its hostname now
+        self.assertEqual(work.display(f"ana@{a['host']} (codex:s1)"), "ana@mac-158 (codex:s1)")  # a lock holder
+        self.assertEqual(work.display("bob@m-0000beef"), "bob@mini")  # another Mac: the label its presence publishes
+        self.assertEqual(work.display("bob@m-0000beef", team=[{"user": "bob", "host": "m-0000beef",
+                                                               "label": "studio"}]), "bob@studio")
+        self.assertEqual(work.display("eve@m-0000dead"), "eve@m-0000dead")  # a label that is no hostname: the id
+        self.assertEqual(work.display("cy@m-00000000"), "cy@m-00000000")  # no presence: the id
+        self.assertEqual(work.display("ana@mac-55"), "ana@mac-55")  # a record from before the id names its host
+        self.assertEqual(work.display(""), "")
+
+    def test_the_notes_task_list_shows_a_lock_by_the_holders_hostname(self):
+        from devkit import registry
+        work.claim(work.create("acme/api", "Fix login", a=self.me()), a=self.me())
+        self.assertIn("🔒 ana@mac-158", registry.render_tasks_block("acme/api"))
+
+    def test_presence_lists_this_macs_locks_across_a_rename(self):
+        it = work.claim(work.create("acme/api", "Fix login", a=self.me()), a=self.me())
+        other = self.legacy_lock("ana@mac-55", time.time())
+        self.name = "andress-mbp-2"
+        work.write_presence([], a=work.actor("human", user="ana"))
+        held = [json.loads(f.read_text()) for f in self.handoff.root.glob("presence/*.json")][0]["locks"]
+        self.assertEqual([x["id"] for x in held], [it["meta"]["id"]])
+        self.assertNotIn(other["meta"]["id"], [x["id"] for x in held])
 
 
 if __name__ == "__main__":

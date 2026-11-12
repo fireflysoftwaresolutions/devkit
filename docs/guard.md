@@ -52,6 +52,17 @@ or a redirection. A `#` right after the `)` that ends a substitution is part of 
 shells read a parenthesis differently (bash reads `a=(1 2)#x` as one word, zsh as a comment), the guard takes the
 reading that shows more of what runs.
 
+The guard also reads the command lines a command holds or starts: a launcher's command (`taskpolicy`, `sandbox-exec`,
+`xcrun`, `op run`, `direnv exec`, `mise exec`, `asdf exec`, `dotenv`, `nix run`, and `ccr code`, which starts
+`claude`), each alias body an `alias` defines, and hyperfine's benchmark, `--prepare`, `--setup`, `--cleanup`, and
+`--conclude` lines. Every rule judges each of them, and the strictest verdict stands:
+`taskpolicy -b git push --force origin main` is refused as the push is. Any word of a launcher may name the program
+it starts, so the guard reads the command from each one, at most 64 commands, 128,000 characters, and 4 launchers
+deep. A launcher call past those bounds is refused, because the guard cannot read it in full: run the program
+without the launcher, or hand the launcher a script file or an `sh -c '…'` line, which the guard reads as one
+command. A `NAME+=value` prefix is an assignment, so the command after it is the one the rules read. The words right
+after a `$(…)` belong to the same command (`ls $(echo x)/*`, `git push $(echo origin) --force`).
+
 ## What the guard is and is not
 
 The guard is a seatbelt. It catches an agent's mistakes and the common forms of prompt injection: a command that
@@ -280,7 +291,7 @@ If devkit really should be off somewhere, change devkit's own configuration (see
 | A wait (`dev watch --wait`, `dev ci watch --wait`) with more work after it in the same command line: after `;`, `&&`, `\|\|`, `&`, or a new line, or a pipe into anything but a read-only filter (`tail`, `head`, `grep`, `wc`, `jq`, …) | deny → run the wait alone and act after it wakes you: the wait wakes the session only when everything after it has ended |
 | An action that must depend on a check's result sequenced after it without depending on it: after `;`, `\|\|`, or `&`, or after the check piped into a filter and joined with `&&` without `set -o pipefail` (`npm test; npm run release`, `npm test \| tail -3 && npm run release`). Checks are a CI watch or run, `dev test`, test runners, linters, type checkers, and `test`, `lint`, `check`, `build` scripts; actions are commit, push, tag, merge, release, publish, and deploy, a project's `release`, `publish`, or `deploy` script included (`npm run release`, `make release`, `just release`) | deny → gate it on the real result: `check && action` without a pipe, `set -o pipefail;` first, or a separate call |
 | `git commit` when gitleaks finds a secret in what the commit is about to record: the staged changes, plus any `git add` earlier in the same command, or every tracked change with `commit -a` | deny, with the rule, file, and line of each finding |
-| `git tag <name>` that breaks the project's recorded delivery policy (a non-CalVer tag in a CalVer project, a non-SemVer tag in a SemVer project) | deny, with the version to use, unless prefixed `DEVKIT_TAG_ANY=1` |
+| `git tag <name>` that breaks the project's recorded delivery policy (a non-CalVer tag in a CalVer project, a non-SemVer tag in a SemVer project, a tag that is not a PEP 440 version in a `pep440` project) | deny, with the version to use, unless prefixed `DEVKIT_TAG_ANY=1` |
 | `git commit`, `tag`, `merge`, or `notes` whose message (inline or `-F` file) contains AI attribution | deny |
 | `git init <dir>` that breaks the layout | deny |
 | `git config` that sets `core.pager`, `pager.<command>`, or a key the guard cannot read (`git config $K …`), in any scope or file, also as `git config set` | deny: git runs the pager as a command each time it pages, under every later read. Use `git --no-pager` or `-P` for one call |
@@ -386,7 +397,7 @@ three folders readable and writable by your account only (`0700`) every time it 
 | `open -a Terminal` or `iTerm` (also by path or `-b` bundle id, and other terminal apps), or `open` of a `.command` or `.tool` file, also from a program's code | deny: the shell it starts is one the guard cannot read, and it looks like the developer's terminal. Opening files, folders, and URLs in other apps is allowed |
 | `dev update --check` (with `--quiet` and `--record` only) | allow: it only fetches tags and reports; any other word makes it the update itself, which is denied |
 | `dev ext update <name> --apply`, `dev ext add`, `remove`, `enable`, `disable` (also with `--project`), `dev ext ack`, and any other `dev ext` verb | deny: they change the plugins, skills, or MCP servers that run in every session on this Mac, or confirm that what was accepted was the developer's, so the developer runs them, in a terminal. The rule is an allowlist that fails closed: `dev ext ls`, `dev ext outdated`, a team pin bump (`dev ext update <name> --to <ref> --why "…"`), and `dev ext add\|remove --team` (a change to devkit's defaults in the checkout, which goes through a PR) are allowed; `--team` counts only before a `--`, after which it is the entry's name |
-| A `claude` or `codex` call whose words include `plugin`, `plugins`, `mcp`, or `marketplace` anywhere (an option's value and any case included), in the forms the guard reads: a path or link that resolves to the binary (a relative one from the folder the command runs in), Claude Code's `~/.local/share/claude/versions/<version>`, a link on the `PATH`, a package runner (`npx`, `bunx`, `bun x`, `npm exec`, `npm x`, `pnpm dlx`, `yarn dlx`, `yarn exec`, `pnpm claude`, `yarn codex`), `node …/@openai/codex/bin/codex.js`, `bash -c`, `bash -s` with its input, `xargs`, `find -exec`, `dev claude … --`, or a program's code (`subprocess.run([...])`) | deny, unless the whole command is one of the read-only forms: `claude plugin list`, `claude plugin details <name>`, `claude plugin validate <path>`, `claude plugin marketplace list`, `claude mcp list`, `claude mcp get <name>`, `codex plugin list`, `codex plugin marketplace list`, `codex mcp list`, `codex mcp get <name>`, or a group alone (`claude mcp`, which prints its help). `claude plugins` is `claude plugin`, and only `-h`, `--help`, and `--json` may come with these forms. Anything else is denied even when it only reads (`claude -- plugin list`, `claude --debug plugin list`): the rule is an allowlist that fails closed, because each block list of verbs lost to a new spelling. With `claude` or `codex`, a word the shell expands counts as one of those words: one with `$` or a backtick (`$P`, `"$@"`, `$'…'`, `$(…)`), or one without spaces with `{`, `*`, `?`, or `[` (`{plugin,install}`, `plugi?`), and a word `xargs` adds counts too. This denies `claude -p "$PROMPT"` too: put the prompt in the command. A program the shell picks at run time (`$c plugin …`, a `PATH` the command sets, a path the command has yet to create) with one of those words is denied too. See [What the guard cannot see](#what-the-guard-cannot-see) and [Skills and plugins](skills-and-plugins.md#who-changes-extensions-and-how-drift-shows) |
+| A `claude` or `codex` call whose words include `plugin`, `plugins`, `mcp`, or `marketplace` anywhere (an option's value and any case included), in the forms the guard reads: a path or link that resolves to the binary (a relative one from the folder the command runs in), Claude Code's `~/.local/share/claude/versions/<version>`, a link on the `PATH`, a package runner (`npx`, `bunx`, `bun x`, `npm exec`, `npm x`, `pnpm dlx`, `yarn dlx`, `yarn exec`, `pnpm claude`, `yarn codex`), `node …/@openai/codex/bin/codex.js`, `bash -c`, `bash -s` with its input, `xargs`, `find -exec`, `dev claude … --`, or a program's code (`subprocess.run([...])`) | deny, unless the whole command is one of the read-only forms: `claude plugin list`, `claude plugin details <name>`, `claude plugin validate <path>`, `claude plugin marketplace list`, `claude mcp list`, `claude mcp get <name>`, `codex plugin list`, `codex plugin marketplace list`, `codex mcp list`, `codex mcp get <name>`, or a group alone (`claude mcp`, which prints its help). `claude plugins` is `claude plugin`, and only `-h`, `--help`, and `--json` may come with these forms. Anything else is denied even when it only reads (`claude -- plugin list`, `claude --debug plugin list`): the rule is an allowlist that fails closed, because each block list of verbs lost to a new spelling. With `claude` or `codex`, a word the shell expands counts as one of those words: one with `$` or a backtick (`$P`, `"$@"`, `$'…'`, `$(…)`), or one without spaces with `{`, `*`, `?`, or `[` (`{plugin,install}`, `plugi?`), and a word `xargs` adds counts too. This denies `claude -p "$PROMPT"` too: put the prompt in the command. A program the shell picks at run time (`$c plugin …`, a `PATH` the command sets, a path the command has yet to create) with one of those words is denied too, unless its words are a read-only form that claude and codex share (`mcp`, `mcp list`, `mcp get <name>`, `plugin`, `plugin list`, or `plugin marketplace list`, with `-h`, `--help`, or `--json`), with no `xargs` before it and a program word the shell does not make: `export PATH=$HOME/.local/bin:$PATH; ng mcp` and `./node_modules/.bin/ng mcp` run. The guard reads a program word the shell makes: zsh's `=claude` is `claude`, a brace list (`{claude,mcp} add …`) is expanded first, and a glob (`cla?de`) or a variable it cannot resolve is a program it cannot name. A `$X`, `${X}`, or zsh `${=X}` program word is read as the words the command line assigns to `X` (`X="claude mcp"; $X add …`). `hash -p`, `hash name=…`, zsh's `path=(…)`, `PATH+=`, and an `export` it cannot read (`export $(cat f)`) count as setting `PATH`. Each refusal says which case it found: a form that is not read-only, with the list of forms; a program the guard cannot name, with how to name it by a path that exists; or a command line a program's code holds, which the guard cannot tell from data, with where to keep data instead. See [What the guard cannot see](#what-the-guard-cannot-see) and [Skills and plugins](skills-and-plugins.md#who-changes-extensions-and-how-drift-shows) |
 | `dev config lock` or `dev config unlock` | deny: they add or remove the [settings lock](agents.md#the-settings-lock) that keeps settings files from turning off devkit's hooks |
 | `dev impeccable` with a verb or form off its allowlist, in any shell form. Agents run `context` (with `--target` only), `detect` on local paths, `doctor` (with `--json` or `--target`, never `--fix`), `surface-brief read`, and `critique-storage slug` and `trend`, and in write lanes and the main session also `detect` on URLs on `localhost` or `127.0.0.1`, `live`, `generate`, `document`, `extract`, and `init` (these four with no other words), and the skill's helpers in the forms it uses (the `live-…` helpers, `surface-brief write`, `critique-storage`, `comp-spec`, and `build-phase start --direction`), with `--target`, `--file`, `--artifact`, `--build`, `--decision-comp`, `--comp`, `--regions`, and the targets and snapshot file of `surface-brief` and `critique-storage` inside the project (never a URL or a route): the first word, spelled as listed, never after `skills` or a second `--`. `--id`, `--session-id`, and `--crop` take a name (letters, digits, `.`, `_`, and `-`, never `.` or `..` alone), `live-server --port` a port number, and no path, URL, or port may hold a character the shell expands (`$`, a backtick, `{`, `*`, `?`, or `[`) | deny, in the main session and both lane kinds: every other form is the developer's, in a terminal. `hooks`, `install`, `link`, `update`, `pin`, `unpin`, and `doctor --fix` write the agents' settings, hooks, or skill folders, which change what runs in every later session; `concept-seed` and `generate-image` reach the internet; `build-phase advance --force`, `build-phase start --comp` or `--reset`, and `live-complete --force` skip the skill's gates; `comp-spec --out`, `--out-dir`, and `--spec` write outside the project; the engine also has hidden verbs, and an update can add more. `dev impeccable` itself refuses them outside the developer's terminal |
 | `dev impeccable` whose `--target` or `--file` leads, from the folder the shell is in after `cd`, `pushd`, or `env -C`, outside the workspace, into the handoff repository, or outside a write lane's step scope | ask in the main session, as for any write outside the workspace; deny in a write lane. `dev impeccable` itself also refuses an agent's call run outside a project checkout of the workspace, or whose path values (the ones the preceding row lists) lead out of that checkout through a symbolic link or `..` |
@@ -449,7 +460,8 @@ as one word with spaces is the shell line parallel runs (`parallel 'gzip -9 {}' 
 A command that decides what runs only when it runs in other ways gets through. For the extension rule, these are not
 refused:
 
-- a program name built at run time: `$(printf claude) plugin install x`, or an alias (`alias c=claude; c plugin …`);
+- a program name an alias gives a bare word (`alias c=claude; c plugin …`). A program word the shell makes, such as
+  `$(printf claude) plugin install x`, is refused as a program the guard cannot name;
 - a script a shell reads from a source the guard cannot read: `curl … | sh`, `echo '…' | sh`, or a file the same
   command writes;
 - a command another program starts later from text the guard does not read: a git alias that runs a shell command
@@ -533,6 +545,12 @@ action `unknown`, tier 2, with the target `cmd-<hash>` of that exact command tex
   xargs npm`, `xargs -I{} npm {}`, `parallel npm ::: publish`. The guard counts a filled word up to the second word
   that is no option, so `xargs npm install` and `find … -exec docker load -i {} \;` count too. `git push` with any
   word the input fills in (`echo --force origin main | xargs git push`) is `unknown` as well.
+
+A `make`, `just`, or `task` target, a package script, or a script whose filename holds `release`, `publish`,
+`deploy`, `push`, or `ship` takes that action's class, because the gate cannot always see what it does. The name
+decides whatever the script's code holds, read or not, whether an interpreter runs it (`python3 release_notes.py`)
+or its path does (`./release_notes.py`): code that imports only standard modules can still reach a process or run
+code it builds in ways the guard does not read. A crew member that needs such a script asks the tech lead to run it.
 
 These are not `unknown`:
 
@@ -702,6 +720,15 @@ These rules apply while a progress run has crew members working ([The crew](crew
 
 A message is data, so quoted operators in it (`dev crew ask "x; y && z"`) keep the call a single command. A `$(…)` or
 backtick that the shell expands in a message runs a command of its own, so it makes the call more than one command.
+When a lane call's own double-quoted message holds one, the refusal says so and asks for single quotes, or the
+message without it, because a command inside it would run as the tech lead. A `dev crew` word that is no crew
+command, such as `messages` where `dev crew inbox` is meant, is refused as no command, with the list of crew commands,
+not as a change to the team.
+
+Each lane refusal is recorded with the refusal id of the guard rule that refused it and its command word (such as
+`crew_shell_verdict:team` or `crew_shell_verdict:lane`), so the [bug registry](bug-registry.md) tells one cause from
+another. A lane check that itself failed, and so refused the command unchecked, is recorded as `hooks:lane-check`;
+`hooks:crew-lane` keeps the meaning it had for reports from devkit 26.11.15 and earlier.
 
 #### Lane calls in a list
 
@@ -767,8 +794,10 @@ checks. These run as well:
   refuses it. When devkit cannot look up the member's kinds of work or the project, it refuses.
 - A command continued with a backslash-newline, read as the shell joins it.
 
-A script from the member's own scratch folder (`python3 scratchpad/<member id>/probe.py`) already ran before this
-change, and still does; a script in another member's folder does not.
+A script from the member's own scratch folder runs when an interpreter names it directly:
+`python3 scratchpad/<member id>/probe.py`. A script in another member's folder stays refused, and so do the same
+script under a runner (`uv run`, `npx`), inline code (`python3 -c`), a shell line or script (`bash -c '…'`,
+`bash x.sh`), `sed -i`, and a `PYTHONPATH=` prefix.
 
 ### Who runs a `dev` call: the session marks
 
@@ -869,6 +898,16 @@ DEVKIT_LOCAL_CI_PASSED=1.
   reached also stands when a later part of the hook fails, recorded once, under its own rule. The agent rewrites the command more simply or stops and
   tells the developer, who can run it in their own terminal (hooks run only in agent sessions) or start the session
   with `DEVKIT_GUARD=off`, which the hook reads before any rule runs.
+- A call the guard cannot judge within its time is refused with the reason "devkit's guard could not judge this call
+  within the 10 s it has for one." The agents stop the guard hook at its timeout (15 s, the shortest guard hook
+  timeout devkit installs) and then run the call unjudged, so the guard keeps 5 s of that timeout in reserve and
+  refuses a call it has not judged by then. Every judge of one call shares that time from the moment the guard hook
+  starts: the guard's rules, the irreversible-action gate, the crew-member checks, and a crew lane's edit-scope
+  check. A lock wait inside a judgment ends at the same deadline. The refusal is recorded as `guard.deny` with
+  refusal id `_judged_in_time:judge-time`. Split the call into smaller ones: one command per call, with a long text
+  or program in a file the command reads.
+- An `apply_patch` that names more than 1,000 files (its Add File, Update File, Delete File, and Move to headers) is
+  refused before any of its files is judged. Split it into patches of at most 1,000 files.
 - Other exceptions in the guard are logged there and the call is allowed, with a `guard.failopen` record: a call that
   only reads or launches (`Read`, `Grep`, `Glob`, `WebSearch`, and `Agent`, `Task`, and Codex's `spawn_agent`, whose
   subagent's calls each pass the guard again), and a call every rule has already allowed when only the context the hook

@@ -22,10 +22,14 @@ TREE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TREE / "lib"))
 sys.path.insert(0, str(TREE / "tests"))
 
-from devkit import audit, cli, notes, registry, work  # noqa: E402
+from devkit import audit, cli, core, lessons, notes, registry, setup, work  # noqa: E402
 from test_work import A, B, TwoMacs, _git  # noqa: E402
 
 PID = "acme/api"
+# The merge rules devkit 26.11.14 and older wrote in a handoff repository: none for the month's activity log (log/).
+OLDER_RULES = ("# devkit: safe merges between machines and developers\nsessions/** merge=union\n"
+               "presence/*.json merge=ours\nPROJECTS.md merge=ours\nTASKS.md merge=ours\nACTIVITY.md merge=ours\n"
+               "registry.json merge=ours\n")
 
 
 def note_text(auto: str, state: str = "") -> str:
@@ -226,6 +230,116 @@ class NoteConflictTests(unittest.TestCase):
             issues = registry.handoff_conflict_issues()
             self.assertEqual(len(issues), 1)
             self.assertIn("1 handoff note was set aside after a sync conflict (acme/api):", issues[0][1])
+
+
+def append(root: Path, rel: str, line: str, heading: str = "") -> None:
+    # A line added at the end of an append-only log, as gc._log and work.log_session write it (the heading first when
+    # the file is new)
+    f = root / rel
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text((f.read_text() if f.exists() else heading + "\n\n") + f"- {line}\n")
+
+
+class AppendOnlyLogTests(unittest.TestCase):
+    def test_a_mac_whose_own_unpushed_commit_adds_the_log_rule_still_pulls_a_conflict_in_the_months_log(self):
+        # The live failure: the remote has an older devkit's merge rules, and since the last pull both Macs added a line
+        # to the month's activity log and wrote the project's note. This Mac then ran `dev update` (dev install adds
+        # the log/ rule) and committed, so the rule is only in its own unpushed commit, which git does not apply to
+        # that commit's own rebase. The sync still finishes: the remote gets both Macs' lines once each, the note with
+        # one auto block, and the new rule, which every Mac's git applies from then on.
+        with TwoMacs() as m:
+            (m.here / ".gitattributes").write_text(OLDER_RULES)
+            append(m.here, "log/2026-11.md", "2026-11-10 09:00 · gc · removed a merged worktree", "# Activity log 2026-11")
+            write_note(m.here, note_text("- **Main checkout:** `main` · clean"))
+            _git(m.here, "add", "-A")
+            _git(m.here, "commit", "-qm", "start")
+            _git(m.here, "push", "-q")
+            _git(m.other, "pull", "-q")
+            with m.on_other():
+                append(m.other, "log/2026-11.md", "2026-11-11 10:00 · free · docker trim: from the other Mac")
+                write_note(m.other, note_text("- **Main checkout:** `feat/bob` · clean"))
+                _git(m.other, "commit", "-qam", "the other Mac's sync")
+                _git(m.other, "push", "-q")
+            with mock.patch.object(setup, "HANDOFF", m.here):
+                setup.handoff_merge_rules()
+            append(m.here, "log/2026-11.md", "2026-11-11 10:05 · adopt · from this Mac")
+            write_note(m.here, note_text("- **Main checkout:** `fix/sync` · clean"))
+            _git(m.here, "add", "-A")
+            _git(m.here, "commit", "-qm", "this Mac's sync")
+            warned = sync()
+            self.assertEqual(m.stopped(), [], m.problem())
+            self.assertEqual(_git(m.here, "rev-list", "--count", "@{u}..HEAD"), "0", m.problem() + warned)
+            self.assertFalse(work.push_failed_file().exists(), m.problem())
+            log = _git(m.here, "show", "origin/main:log/2026-11.md").splitlines()
+            self.assertEqual(log, ["# Activity log 2026-11", "", "- 2026-11-10 09:00 · gc · removed a merged worktree",
+                                   "- 2026-11-11 10:00 · free · docker trim: from the other Mac",
+                                   "- 2026-11-11 10:05 · adopt · from this Mac"])
+            pushed = _git(m.here, "show", f"origin/main:projects/{PID}.md")
+            self.assertNotIn("<<<<<<<", pushed)
+            self.assertEqual(pushed.count(registry.AUTO_START), 1)
+            self.assertEqual(_git(m.here, "check-attr", "merge", "--", "log/2026-12.md"), "log/2026-12.md: merge: union")
+            self.assertIn("log/** merge=union", _git(m.here, "show", "origin/main:.gitattributes").splitlines())
+
+    def test_two_macs_that_start_the_same_new_month_logs_keep_one_heading_and_both_lines(self):
+        # A handoff repository with no merge rules at all (made by hand, or imported): on the first sync of a month both
+        # Macs created the month's activity log and session log. The sync finishes, and each pushed log has its heading
+        # once and both Macs' lines.
+        with TwoMacs() as m:
+            logs = {"log/2026-12.md": "# Activity log 2026-12",
+                    f"sessions/{PID}/2026-12.md": f"# Sessions · {PID} · 2026-12"}
+            with m.on_other():
+                for rel, heading in logs.items():
+                    append(m.other, rel, "from the other Mac", heading)
+                _git(m.other, "add", "-A")
+                _git(m.other, "commit", "-qm", "the other Mac's December")
+                _git(m.other, "push", "-q")
+            for rel, heading in logs.items():
+                append(m.here, rel, "from this Mac", heading)
+            _git(m.here, "add", "-A")
+            _git(m.here, "commit", "-qm", "this Mac's December")
+            warned = sync()
+            self.assertEqual(m.stopped(), [], m.problem())
+            self.assertEqual(_git(m.here, "rev-list", "--count", "@{u}..HEAD"), "0", m.problem() + warned)
+            for rel, heading in logs.items():
+                self.assertEqual(_git(m.here, "show", f"origin/main:{rel}").splitlines(),
+                                 [heading, "", "- from the other Mac", "- from this Mac"], rel)
+
+
+@contextlib.contextmanager
+def lessons_of(root: Path):
+    # The lessons of one Mac's handoff repository (TwoMacs points the rest of devkit at it)
+    with mock.patch.object(lessons, "LESSONS", root / "lessons"), mock.patch.object(lessons, "HANDOFF", root):
+        yield
+
+
+class LessonConflictTests(unittest.TestCase):
+    def test_two_macs_recording_a_repeat_of_the_same_lesson_both_count_after_the_sync(self):
+        # Each Mac recorded a repeat of the same lesson since the last pull (`dev lesson recur`), as two Macs did on
+        # the live handoff repository: both changed its occurrences, Evidence, changelog and version. This Mac's sync
+        # finishes and pushes a lesson that counts both repeats, keeps both evidence lines, and lists both changelog
+        # entries, this Mac's on top, numbered after the other Mac's.
+        with TwoMacs() as m, lessons_of(m.here), mock.patch.object(lessons, "STATE", m.base / "state"), \
+                mock.patch.object(lessons, "USAGE_LOCAL", m.base / "state" / "lessons-usage.json"), \
+                mock.patch.dict(core.CFG, {"ai": {"enabled": False}}):
+            lid = lessons.add("global", "Migration ran twice", files=["db/**"], happened="it ran twice in CI",
+                              cause="the job retried a step", prevention="make the migration idempotent",
+                              a=A)["meta"]["id"]
+            _git(m.here, "push", "-q")
+            _git(m.other, "pull", "-q")
+            with m.on_other(), lessons_of(m.other):
+                lessons.recur(lessons.find(lid), "CI run 8 on the other Mac", a=B)
+                _git(m.other, "push", "-q")
+            lessons.recur(lessons.find(lid), "CI run 7 on this Mac", a=A)
+            warned = sync()
+            self.assertEqual(m.stopped(), [], m.problem())
+            self.assertEqual(_git(m.here, "rev-list", "--count", "@{u}..HEAD"), "0", m.problem() + warned)
+            pushed = lessons.parse(_git(m.here, "show", f"origin/main:lessons/global/{lid}.md") + "\n")
+        self.assertEqual((pushed["meta"]["occurrences"], pushed["meta"]["version"]), (3, 3))
+        evidence = [ln.split(": ", 1)[1] for ln in pushed["sections"]["Evidence"].splitlines() if ln.startswith("- ")]
+        self.assertEqual(evidence, ["CI run 8 on the other Mac", "CI run 7 on this Mac"])
+        self.assertEqual([(e.split(" · ")[0], e.split("why: ")[-1]) for e in pushed["changelog"]][:2],
+                         [("v3", "CI run 7 on this Mac"), ("v2", "CI run 8 on the other Mac")])
+        self.assertEqual(len(pushed["changelog"]), 3)
 
 
 if __name__ == "__main__":

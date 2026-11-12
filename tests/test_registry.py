@@ -172,5 +172,21 @@ class CheckoutStateTests(unittest.TestCase):
         self.assertEqual(issues, [("work", f"{p['id']}: 2 unpushed commit(s) on fix/theirs")])
 
 
+class PlansForTests(unittest.TestCase):
+    # A project's plans by title: the front-matter title of a plan `dev plan new` writes (its body has no `# title`,
+    # the front matter holds it), the top heading of a plan another tool wrote, and the file name of one with neither.
+    def test_a_plan_is_named_by_its_front_matter_title_then_its_heading_then_its_file(self):
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(registry, "HANDOFF", Path(d)):
+            plans = Path(d) / "plans" / "acme" / "api"
+            plans.mkdir(parents=True)
+            (plans / "2026-11-11-invoice-export.md").write_text(
+                "---\nid: P-x\ntitle: Invoice export\nkind: plan\n---\n## Summary\n\nExport invoices.\n\n"
+                "## Changelog\n\n- v1 · created\n")
+            (plans / "superpowers-spec.md").write_text("# Event store\n\n## Goal\n\nKeep events.\n")
+            (plans / "notes.md").write_text("Loose notes.\n")
+            titles = sorted(p["title"] for p in registry.plans_for("acme/api"))
+        self.assertEqual(titles, ["Event store", "Invoice export", "notes"])
+
+
 if __name__ == "__main__":
     unittest.main()

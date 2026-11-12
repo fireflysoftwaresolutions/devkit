@@ -91,6 +91,15 @@ def launch(aid, kind, label, at=None, sid="s1"):
                      now=at)
 
 
+def gates_passed(aid, at=None, sid="s1"):
+    # the crew gates passed this agent's next stop cleanly: their pass token in the session record, as gates.check
+    # writes it at SubagentStop. A test that ends a lane with pg.on_subagent skips the hook and its gates, and without
+    # the token that lane's review step and --approves verdicts approve nothing
+    from devkit import gates, state
+    stamp = time.time() if at is None else at
+    state.update(pg.session_path("claude", sid), lambda s: s.setdefault(gates.PASSED, {}).update({aid: stamp}))
+
+
 def repo_with_worktrees(d, *paths):
     # a repository at <d>/api and a worktree of it at each path (<d>/wt by default) -> (main, *worktrees), built from
     # files: dev test prove runs the tests in a copy without .git
@@ -2022,6 +2031,119 @@ class ScopeWriteTests(unittest.TestCase):
         self.assertIn("changed by another lane: docs/audit.md (Code reviewer (Seraph), certain)", review)
 
 
+class ReaderWriteCreditTests(unittest.TestCase):
+    # M138 and M146 of release 26.11.16's run: while the review-only Code reviewer's test run was open, the Senior
+    # engineer's Edit of a file in his own step's scope reached the disk before its PostToolUse recorded it (the
+    # record came 0.2 s after the reviewer's check), and the reviewer was held to have written it "while no other
+    # writer was at work", its report unverified. An allowed edit is on record from its PreToolUse, so a reading
+    # lane's check meanwhile credits its caller, the tech lead's included; a builder's scope alone is still no alibi
+    # (ScopeWriteTests): only a change nobody else was at work on is the reader's, as certain
+    def setUp(self):
+        from devkit import hooks
+        self.hooks = hooks
+        self.state = TempState().__enter__()
+        self.addCleanup(self.state.__exit__, None, None, None)
+        root = Path(self.state.tmp.name)
+        for p in (mock.patch.object(hooks, "STATE", root),
+                  mock.patch("devkit.guard.check", lambda *a, **k: None)):  # guard.py's own rules are not under test
+            p.start()
+            self.addCleanup(p.stop)
+        pg.start("Work", plan="guard names=10m; review=10m")
+        pg.assign("guard names", "Neo", scope="tests/test_caller_identity.py", why="test")
+        pg.assign("review", "Seraph")
+        launch("a_neo", "devkit:neo", "Neo: guard names")
+        launch("a_seraph", "devkit:seraph", "Seraph: review")
+        self.t0 = time.time()
+        # the reviewer's test run has started (PreToolUse): the window its written files are judged in
+        pg.call_opened("claude", {"session_id": "s1", "tool_use_id": "toolu_seraph_tests", "agent_id": "a_seraph",
+                                  "tool_input": {"command": "python3 -m unittest tests.test_caller_identity"}},
+                       now=self.t0)
+
+    def edit(self, aid, path, tid):
+        data = {"session_id": "s1", "tool_name": "Edit", "tool_use_id": tid, "cwd": "/repo",
+                "tool_input": {"file_path": f"/repo/{path}", "old_string": "a", "new_string": "b"}}
+        return dict(data, agent_id=aid) if aid != "main" else data
+
+    def hook(self, name, payload):
+        import contextlib
+        import io
+        out = io.StringIO()
+        with mock.patch("sys.stdin", io.StringIO(json.dumps(payload))), contextlib.redirect_stdout(out):
+            self.hooks.run(name, "claude")
+        return out.getvalue()
+
+    def written(self, paths):
+        return pg.scope_written("claude", "s1", "a_seraph", paths, now=time.time())
+
+    def told(self):
+        return [m["text"] for m in pg.load_run("claude", "s1").get("messages") or [] if m.get("to") == "main"
+                and "shell call" in m["text"]]
+
+    def review_ends(self):
+        report = ("**[Firefly> DevKit · Code reviewer (Seraph)]** api · `main` · review\n- **Done:** read the diff\n"
+                  "- **Check:** ✓ read the diff, 12 tests pass\n- **Next:** the tech lead merges it.")
+        pg.on_subagent("claude", {"session_id": "s1", "agent_id": "a_seraph", "agent_type": "devkit:seraph",
+                                  "last_assistant_message": report}, False, now=time.time())
+        return next(st for st in pg.load_run("claude", "s1")["plan"] if st["name"] == "review")
+
+    def test_a_builders_edit_in_flight_when_the_reviewer_is_judged_is_its_possible_write(self):
+        # M138: the Senior engineer's Edit of a file in his scope is allowed, and the reviewer's check runs before
+        # the Edit's PostToolUse
+        self.hook("guard", dict(self.edit("a_neo", "tests/test_caller_identity.py", "toolu_neo_edit"),
+                                hook_event_name="PreToolUse"))
+        flagged = self.written(["tests/test_caller_identity.py"])
+        self.assertEqual((flagged["paths"], flagged["certainty"]), (["tests/test_caller_identity.py"], "possible"))
+        (text,) = self.told()
+        self.assertIn("tests/test_caller_identity.py (possibly written by Senior engineer (Neo))", text)
+        self.assertNotIn("unverified", text)
+        gates_passed("a_seraph")  # the reviewer's report passes the crew gates
+        self.assertEqual(self.review_ends()["state"], "done")
+
+    def test_a_builders_scope_is_an_alibi_only_while_the_builder_is_at_work_on_the_file(self):
+        # the Code reviewer's finding L1: the same write into the Senior engineer's scope is the reviewer's while he
+        # is idle, and his possible write while his Edit of it is open
+        from devkit import audit
+        self.written(["tests/test_caller_identity.py"])
+        self.hook("guard", dict(self.edit("a_neo", "tests/test_caller_identity.py", "toolu_neo_edit"),
+                                hook_event_name="PreToolUse"))
+        self.written(["tests/test_caller_identity.py"])
+        self.assertEqual([(r["target"], r["detail"]) for r in audit.query(action="scope.write")],
+                         [("Seraph", "certain: tests/test_caller_identity.py"),
+                          ("Seraph", "possible: tests/test_caller_identity.py")])
+
+    def test_the_tech_leads_edit_reaches_the_record_before_its_result_so_a_check_meanwhile_credits_it(self):
+        # the tech lead's Edit of a file no lane holds: the guard allowed it, the file is written, and the reviewer's
+        # call is judged before the Edit's PostToolUse
+        self.hook("guard", dict(self.edit("main", "lib/x.py", "toolu_main_edit"), hook_event_name="PreToolUse"))
+        flagged = self.written(["lib/x.py"])
+        self.assertEqual((flagged["paths"], flagged["certainty"]), (["lib/x.py"], "possible"))
+        (text,) = self.told()
+        self.assertIn("lib/x.py (possibly written by Tech lead (Morpheus))", text)
+
+    def test_an_edit_the_guard_refused_never_writes_so_it_names_nobody(self):
+        # the Senior engineer's Edit outside his scope is refused, the tech lead's is allowed: only the tech lead's
+        # file has another writer
+        out = self.hook("guard", dict(self.edit("a_neo", "lib/x.py", "toolu_neo_edit"), hook_event_name="PreToolUse"))
+        self.assertIn('"permissionDecision": "deny"', out)
+        self.hook("guard", dict(self.edit("main", "lib/y.py", "toolu_main_edit"), hook_event_name="PreToolUse"))
+        self.written(["lib/x.py", "lib/y.py"])
+        self.assertEqual(pg.load_run("claude", "s1")["agents"]["a_seraph"]["scope_writes"]["certain"], ["lib/x.py"])
+
+    def test_an_edit_that_failed_names_its_caller_no_longer(self):
+        data = self.edit("main", "lib/x.py", "toolu_main_failed")
+        self.hook("guard", dict(data, hook_event_name="PreToolUse"))
+        self.assertEqual(self.written(["lib/x.py"])["certainty"], "possible")  # in flight: it may have written
+        self.hook("post-tool-failure", dict(data, hook_event_name="PostToolUseFailure", error="old_string not found"))
+        self.assertEqual(self.written(["lib/x.py"])["certainty"], "certain")
+
+    def test_the_atomic_temp_file_of_an_edit_is_credited_with_it(self):
+        # M146: Claude Code writes an edit through <file>.tmp.<pid>.<hex> and renames it into place
+        self.hook("guard", dict(self.edit("main", "lib/x.py", "toolu_main_edit"), hook_event_name="PreToolUse"))
+        flagged = self.written(["lib/x.py.tmp.48356.daac1215b767"])
+        self.assertEqual(flagged["certainty"], "possible")
+        self.assertIn("possibly written by Tech lead (Morpheus)", self.told()[0])
+
+
 LANE_REPORT = ("**[Firefly> DevKit · Security engineer (The Keymaker)]** acme/api · `main` · {task}\n"
                "- **Done:** {task}\n- **Check:** {check}\n- **Next:** the tech lead")
 
@@ -2361,6 +2483,375 @@ class RunEndTests(unittest.TestCase):
         self.assertIn("Code reviewer (Seraph) approves “build the JSON API server”", str(e.exception))
         run = pg.load_run("claude", "s1")
         self.assertEqual((run["state"], run["plan"][0]["state"]), ("running", "running"))
+
+
+class ScopeMatchTests(unittest.TestCase):
+    # B-g7g0pps6sve: lane scopes were matched with fnmatch, whose * crosses /, so src/pkg/*.py held
+    # src/pkg/studio/host.py, and ** held paths outside the repository: the handoff plans and the tech lead's own
+    # scratchpad, which deadlocked the tech lead. A glob holds the paths it matches segment by segment, and everything
+    # under a folder it matches, never a path outside its repository
+    def held(self, path, glob):
+        return pg.in_scope(path, [[glob]])
+
+    def test_a_star_stays_inside_one_folder_and_a_folder_holds_every_file_under_it(self):
+        self.assertTrue(self.held("src/pkg/app.py", "src/pkg/*.py"))
+        self.assertFalse(self.held("src/pkg/studio/host.py", "src/pkg/*.py"))
+        self.assertFalse(self.held("docs/guide.md", "*.md"))
+        self.assertTrue(self.held("docs/a/b/guide.md", "docs/**/*.md"))
+        self.assertTrue(self.held("docs/guide.md", "docs/**/*.md"))  # ** spans no folder too
+        for g in ("lib/parser", "lib/parser/", "lib/parser/**", "lib/pars*"):
+            self.assertTrue(self.held("lib/parser/core/x.py", g), g)
+        self.assertFalse(self.held("lib/parser_test.py", "lib/parser"))
+
+    def test_no_glob_holds_a_path_outside_its_repository(self):
+        for g in ("**", "*", "../**", "*/**"):
+            self.assertFalse(self.held("../../.handoff/plans/acme/api/plan.md", g), g)
+        self.assertTrue(self.held("lib/x.py", "**"))
+
+
+class ScopeOverlapTests(unittest.TestCase):
+    # B-g7g0pps6sve: the overlap check compared the globs' fixed prefixes, so two members could not split one folder.
+    # Two scopes overlap when at least one real path matches both, by the same rules the edit check matches with
+    T0 = 1_800_000_000.0
+
+    def m(self, minutes):
+        return self.T0 + minutes * 60
+
+    def test_two_globs_overlap_only_when_one_real_path_matches_both(self):
+        apart = (("src/firefly_weave/*.py", "src/firefly_weave/studio/host.py"),
+                 ("migrations/versions/*_editor_step_tests.py", "migrations/versions/0039_transactions_reserve.py"),
+                 ("tests/unit/test_parser*.py", "tests/unit/test_cli*.py"),
+                 ("tests/unit/**", "tests/integration/test_a.py"),
+                 ("docs/*.md", "docs/images/**"),
+                 ("lib/**", "/tmp/scratch/kid/**"))  # a relative glob never reaches a folder outside the repository
+        together = (("tests/unit/**", "tests/unit/test_a.py"),
+                    ("lib/**", "lib/devkit/install.py"),
+                    ("src/*/host.py", "src/studio/*.py"),
+                    ("a/**/z.py", "a/b/c/*.py"),
+                    ("**", "README.md"),
+                    ("docs/", "docs/guide.md"),
+                    ("src/*", "src/studio/host.py"),  # src/* matches the folder src/studio, which holds host.py
+                    ("Docs/**", "docs/guide.md"),  # one file on macOS's case-insensitive disk
+                    ("/tmp/scratch/**", "/tmp/scratch/kid/*.md"))
+        for a, b in apart:
+            self.assertFalse(pg._globs_overlap(a, b) or pg._globs_overlap(b, a), (a, b))
+        for a, b in together:
+            self.assertTrue(pg._globs_overlap(a, b) and pg._globs_overlap(b, a), (a, b))
+
+    def test_two_members_split_one_folder_and_each_writes_only_its_own_files(self):
+        from devkit import hooks
+        with TempState(), tempfile.TemporaryDirectory() as repo:
+            pg.start("Feature", plan=["parser", "studio", "everything"], now=self.m(0))
+            pg.assign("parser", "Tank", scope="src/pkg/*.py,tests/unit/test_parser*.py", why="test", now=self.m(0))
+            launch("t1", "devkit:tank", "Tank: parser", self.m(1))
+            run = pg.assign("studio", "Neo", scope="src/pkg/studio/host.py,tests/unit/test_cli*.py", why="test",
+                            now=self.m(2))
+            self.assertEqual(run["plan"][1]["scope"], ["src/pkg/studio/host.py", "tests/unit/test_cli*.py"])
+            with self.assertRaises(pg.StepError) as e:
+                pg.assign("everything", "Neo", scope="tests/unit/**", why="test", now=self.m(3))
+            self.assertIn("tests/unit/** overlaps the files Backend engineer (Tank) owns", str(e.exception))
+            edit = lambda p: {"session_id": "s1", "agent_id": "t1", "tool_name": "Edit", "cwd": repo,  # noqa: E731
+                              "tool_input": {"file_path": os.path.join(repo, p)}}
+            self.assertIsNone(hooks._scope_violation("claude", edit("src/pkg/app.py")))
+            self.assertIn("outside Backend engineer (Tank)'s scope",
+                          hooks._scope_violation("claude", edit("src/pkg/studio/host.py")))
+
+
+class WholeCheckoutScopeTests(unittest.TestCase):
+    # B-g7g0pps6sve: --scope '<worktree>/**' was rewritten to a bare **, which then held the handoff plans folder and
+    # the tech lead's scratchpad; the tech lead could not write his own plan while the member worked
+    T0 = 1_800_000_000.0
+
+    def m(self, minutes):
+        return self.T0 + minutes * 60
+
+    def test_a_scope_naming_a_whole_checkout_becomes_its_top_level_entries(self):
+        with TempState(), tempfile.TemporaryDirectory() as d:
+            main, wt = repo_with_worktrees(d)
+            for rel, text in (("lib/devkit/a.py", "x"), ("tests/test_a.py", "x"), ("README.md", "x"),
+                              (".gitignore", "build/\n"), ("build/out.bin", "x")):
+                (wt / rel).parent.mkdir(parents=True, exist_ok=True)
+                (wt / rel).write_text(text)
+            pg.start("Feature", plan=["sweep"], now=self.m(0))
+            for scope in (f"{wt}/**", f"{wt}/", str(wt)):
+                run = pg.assign("sweep", "Kid", scope=scope, cwd=str(main), why="test", now=self.m(0))
+                self.assertEqual(run["plan"][0]["scope"], [".gitignore", "README.md", "lib/**", "tests/**"], scope)
+            told = [x["text"] for x in run.get("messages") or [] if x["from"] == "devkit"]
+            self.assertIn(f"{wt}/** → .gitignore, README.md, lib/**, tests/**", told[0])
+
+    def test_a_member_holding_every_file_holds_nothing_outside_the_repository(self):
+        from devkit import hooks
+        with TempState(), tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as lead:
+            (main,) = repo_with_worktrees(d)[:1]
+            pg.start("Feature", plan=["sweep"], now=self.m(0))
+            pg.assign("sweep", "Kid", scope="**", cwd=str(main), why="test", now=self.m(0))
+            launch("k1", "devkit:kid", "Kid: sweep", self.m(1))
+            for outside in (os.path.join(lead, "plans", "acme", "api", "plan.md"), os.path.join(lead, "notes.md")):
+                self.assertEqual(pg.scope_holders(outside, "claude", "s1", cwd=str(main)), [], outside)
+            inside = pg.scope_holders(str(main / "lib" / "x.py"), "claude", "s1", cwd=str(main))
+            self.assertEqual([h["who"] for h in inside], ["DevEx engineer (Kid)"])
+            other = os.path.expanduser("~/Development/acme/billing/src/app.py")  # another repository
+            self.assertIn("outside DevEx engineer (Kid)'s scope", hooks._scope_violation("claude", {
+                "session_id": "s1", "agent_id": "k1", "tool_name": "Edit", "cwd": str(main),
+                "tool_input": {"file_path": other}}))
+
+
+class KidSyncCase(unittest.TestCase):
+    # the DevEx engineer works on "sync"; "docs" comes after it
+    T0 = 1_800_000_000.0
+
+    def m(self, minutes):
+        return self.T0 + minutes * 60
+
+    def setUp(self):
+        self.state = TempState().__enter__()
+        self.addCleanup(self.state.__exit__, None, None, None)
+        pg.start("Hotfix", plan=["sync=30m", "docs=20m after sync"], now=self.m(0))
+        pg.assign("sync", "Kid", why="test", now=self.m(0))
+        launch("k1", "devkit:kid", "Kid: sync", self.m(1))
+
+
+class MemberOwnStepTests(KidSyncCase):
+    # B-g7a562x5pyi: a member's `dev progress step "…" --step <its step> --check "…"` printed ✓ but recorded only a
+    # note in its lane, so its step stayed running, and the steps after it waited, until the member's report
+    def test_a_members_close_of_its_own_step_closes_it_at_once(self):
+        run = pg.step("handoff sync rewritten", which="sync", check="✓ 14 tests pass", from_agent="k1",
+                      now=self.m(10))
+        self.assertEqual([s["state"] for s in run["plan"]], ["done", "running"])  # the next step need not wait
+        self.assertEqual(run["agents"]["k1"]["state"], "running")  # the member still works: its lane stays open
+        self.assertEqual((run["lane_outcome"]["step"], run["lane_outcome"]["closed"]), ("sync", True))
+        last = [h for h in run["history"] if h["step"] == "sync"][-1]
+        self.assertEqual((last["from"], last["to"], last["by"]), ("running", "done", "k1"))
+        self.assertIn("14 tests pass", last["why"])
+
+    def test_a_members_close_with_a_warning_ends_its_step_unverified(self):
+        run = pg.step("sync rewritten", which="sync", check="⚠ the PostgreSQL tests did not run", from_agent="k1",
+                      now=self.m(10))
+        self.assertEqual(run["plan"][0]["state"], "unverified")
+        self.assertEqual(run["lane_outcome"]["state"], "unverified")
+
+    def test_a_member_naming_a_step_it_does_not_hold_fails_and_records_nothing(self):
+        # M176-M177 of release 26.11.16's run: the member's close was kept in its lane with no error, so it reported
+        # the step closed while it stayed pending
+        with self.assertRaises(pg.StepError) as e:
+            pg.step("docs look fine", which="docs", check="✓ read them", from_agent="k1", now=self.m(10))
+        self.assertIn("“docs” is not your step (the tech lead's)", str(e.exception))
+        run = pg.load_run("claude", "s1")
+        self.assertEqual([s["state"] for s in run["plan"]], ["running", "pending"])
+        self.assertEqual(run["agents"]["k1"].get("updates") or [], [])
+
+    def test_a_members_close_of_its_own_step_without_evidence_fails_and_says_how(self):
+        with self.assertRaises(pg.StepError) as e:
+            pg.step("sync rewritten", which="sync", from_agent="k1", now=self.m(10))
+        self.assertIn("--check", str(e.exception))
+        self.assertEqual(pg.load_run("claude", "s1")["plan"][0]["state"], "running")
+
+
+class ReviewCloseAfterGatesTests(unittest.TestCase):
+    # A review step's Check ✓ is its member's approval of the work it follows. A member that closed its review itself
+    # (`dev progress step --step review --check "✓ …"`) had that approval recorded at once, before the crew gates read
+    # its report at SubagentStop, so a report the gates sent back still approved the work and the run could end on it.
+    # The Backend engineer builds "api"; the Code reviewer approves it in "review".
+    REPORT = ("**[Firefly> DevKit · Code reviewer (Seraph)]** api · `main` · review\n- **Done:** read the diff\n"
+              "- **Check:** ✓ read the diff, 9 tests pass\n- **Next:** the tech lead merges")
+
+    def at(self, minutes):
+        return self.t0 + minutes * 60
+
+    def setUp(self):
+        self.state = TempState().__enter__()
+        self.addCleanup(self.state.__exit__, None, None, None)
+        self.t0 = time.time() - 3600  # the hook ends a lane at the real time, so the work comes before it
+        pg.start("Work", plan="api=10m; review=10m after api", now=self.at(0))
+        pg.assign("api", "Tank", now=self.at(0))
+        launch("a_tank", "devkit:tank", "Tank: api", self.at(1))
+        pg.step("api built", which="api", check="✓ 12 tests pass", from_agent="a_tank", now=self.at(10))
+        pg.assign("review", "Seraph", now=self.at(11))
+        launch("a_seraph", "devkit:seraph", "Code reviewer (Seraph): review", self.at(12))
+        self.closed = pg.step("review done", which="review", check="✓ read the diff, 9 tests pass",
+                              from_agent="a_seraph", now=self.at(20))
+
+    def plan(self):
+        return {s["name"]: s for s in pg.load_run("claude", "s1")["plan"]}
+
+    def transcript(self, *commands):
+        # the Code reviewer's own transcript: the shell commands it ran. Without `dev progress step` among them the
+        # crew gates send its report back once (the proof of its verdict phase), then let the next stop through
+        root = Path(self.state.tmp.name)
+        tr = root / "agent-a_seraph.jsonl"
+        records = []
+        for i, command in enumerate(commands, 1):
+            records += [{"type": "assistant", "isSidechain": True, "message": {"role": "assistant", "content": [
+                            {"type": "tool_use", "id": f"toolu_{i:04}", "name": "Bash", "input": {"command": command}}]}},
+                        {"type": "user", "isSidechain": True, "message": {"role": "user", "content": [
+                            {"type": "tool_result", "tool_use_id": f"toolu_{i:04}", "content": "ok"}]}}]
+        tr.write_text("".join(json.dumps(r) + "\n" for r in records))
+        return tr
+
+    def stop(self, tr=None, **extra):
+        # the Code reviewer's SubagentStop through the hook (canary, crew gates, then the lane's end)
+        import contextlib
+        import io
+        from devkit import hooks, lessonevents
+        root = Path(self.state.tmp.name)
+        tr = tr or self.transcript()
+        data = {"session_id": "s1", "agent_id": "a_seraph", "agent_type": "devkit:seraph",
+                "agent_transcript_path": str(tr), "last_assistant_message": self.REPORT, **extra}
+        out = io.StringIO()
+        with mock.patch.object(hooks, "STATE", root), mock.patch.object(canary, "LOG", root / "canary.jsonl"), \
+                mock.patch.object(lessonevents, "EVENTS", root / "lessons-events.jsonl"), \
+                mock.patch("sys.stdin", io.StringIO(json.dumps(data))), contextlib.redirect_stdout(out):
+            hooks.subagent_stop("claude")
+        return out.getvalue()
+
+    def assert_approves_nothing(self):
+        # the review ended without a clean pass of the gates: unverified, no approval, the work it follows still owed
+        run = pg.load_run("claude", "s1")
+        self.assertEqual(self.plan()["review"]["state"], "unverified")
+        why = [h for h in run["history"] if h["step"] == "review"][-1]["why"]
+        self.assertIn("crew gates did not pass its report", why)
+        self.assertEqual(run.get("approvals") or [], [])
+        self.assertEqual(pg.approvals_owed(run), [("seraph", ["api"])])
+        with self.assertRaises(pg.StepError):
+            pg.step("all done", kind="done")
+
+    def test_a_builders_own_close_lands_at_once_and_a_reviewers_waits_for_its_gates(self):
+        plan = self.plan()
+        self.assertEqual(plan["api"]["state"], "done")  # not a review: the member's own close lands at once
+        self.assertEqual(plan["review"]["state"], "running")  # its verdict waits for the report to pass the gates
+        run = pg.load_run("claude", "s1")
+        self.assertEqual(run.get("approvals") or [], [])
+        self.assertEqual(pg.approvals_owed(run), [("seraph", ["api"])])
+        out = self.closed["lane_outcome"]
+        self.assertEqual((out["step"], out["closed"]), ("review", False))
+        self.assertIn("crew gates", out["why"])
+
+    def test_a_review_the_gates_send_back_approves_nothing_even_when_let_through(self):
+        sent = json.loads(self.stop() or "{}")
+        self.assertEqual(sent.get("decision"), "block")
+        self.assertIn("crew gates", sent.get("reason", ""))
+        self.assertEqual(self.plan()["review"]["state"], "running")
+        self.assertEqual(pg.load_run("claude", "s1").get("approvals") or [], [])
+        with self.assertRaises(pg.StepError):  # the run cannot end on a review the gates sent back
+            pg.step("all done", kind="done")
+        # the next stop is let through without the gates judging it again: that is no pass, so no approval
+        self.assertEqual(self.stop(stop_hook_active=True), "")
+        self.assert_approves_nothing()
+
+    def test_a_review_whose_gates_crash_approves_nothing(self):
+        from devkit import gates
+        tr = self.transcript('dev progress step "review done" --step review --check "✓ read the diff, 9 tests pass"')
+        with mock.patch.object(gates, "crew_gates", side_effect=RuntimeError("the gates broke")):
+            self.assertEqual(self.stop(tr), "")  # the gates fail open: the member is not sent back
+        self.assert_approves_nothing()
+
+    def test_a_review_whose_findings_are_only_recorded_approves_nothing(self):
+        with mock.patch.dict(core.CFG, {"crew": {"gates": {"enforce": False}}}):
+            self.assertEqual(self.stop(), "")  # the gates record what is missing and let the report through
+        self.assert_approves_nothing()
+
+    def test_a_review_whose_report_passes_the_gates_approves_the_work_it_follows(self):
+        from devkit import gates
+        tr = self.transcript('dev progress step "review done" --step review --check "✓ read the diff, 9 tests pass"')
+        self.assertEqual(gates.crew_gates("seraph", str(tr), ""), [])  # the gates have nothing to send back
+        passed = time.time()
+        self.assertEqual(self.stop(tr), "")
+        self.assertEqual(self.plan()["review"]["state"], "done")
+        run = pg.load_run("claude", "s1")
+        self.assertEqual([(a["by"], a["steps"], a["verdict"]) for a in run.get("approvals") or []],
+                         [("seraph", ["api"], "approved")])
+        self.assertGreaterEqual(run["approvals"][0]["ts"], passed)  # recorded when the report passed, not before
+        self.assertEqual(pg.approvals_owed(run), [])
+
+
+class OwnRunFirstTests(unittest.TestCase):
+    # part of B-g7g1e0a8l9g: dev progress listed the live runs newest first, so another session's run that started
+    # later came first, and a status block once took that run's step counts
+    T0 = 1_800_000_000.0
+
+    def test_this_sessions_run_comes_first_even_when_another_started_later(self):
+        with TempState():
+            (pg.SESSIONS / "claude-s2.json").write_text(json.dumps(
+                {"agent": "claude", "session": "s2", "started": self.T0, "project": "acme/api"}))
+            pg.start("Mine", plan=["a"], now=self.T0)
+            with mock.patch.dict(os.environ, {"DEVKIT_SESSION": "claude:s2"}):
+                pg.start("Theirs", plan=["b"], now=self.T0 + 600)
+            self.assertEqual([r["goal"] for r in pg.active_runs()], ["Theirs", "Mine"])  # newest first, as before
+            self.assertEqual([r["goal"] for r in pg.active_runs(first=("claude", "s1"))], ["Mine", "Theirs"])
+
+
+class PartialEvidenceTests(KidSyncCase):
+    # part of B-g7g1e0a8l9g: `dev progress step` could not record a long step's proof without closing it, and the
+    # crew gate wanted a step record; partial evidence goes on the step while it stays open
+    def test_a_members_partial_evidence_keeps_its_step_running(self):
+        check = "⚠ 9 unit tests pass; the PostgreSQL tests are written, not run"
+        run = pg.note("PostgreSQL tests written", which="sync", check=check, from_agent="k1", now=self.m(10))
+        sync = run["plan"][0]
+        self.assertEqual(sync["state"], "running")
+        self.assertEqual((sync["partial"][-1]["check"], sync["partial"][-1]["by"]), (check, "k1"))
+        up = run["agents"]["k1"]["updates"][-1]
+        self.assertEqual((up["kind"], up["step"], up["check"]), ("note", "sync", check))
+
+    def test_the_tech_leads_partial_evidence_names_a_step_of_the_plan(self):
+        run = pg.note("docs drafted", which="docs", check="✓ dev docs check clean", now=self.m(10))
+        self.assertEqual((run["plan"][1]["state"], run["plan"][1]["partial"][-1]["by"]), ("pending", "main"))
+        with self.assertRaises(pg.StepError) as e:
+            pg.note("half done", which="release", check="✓ x", now=self.m(11))
+        self.assertIn("1. sync; 2. docs", str(e.exception))
+
+
+def progress_cli_out(*argv):
+    """`dev progress …` through the real parser and handler -> (exit code, stdout, stderr)."""
+    import contextlib
+    import io
+    from devkit import cli
+    a = cli.build_parser().parse_args(["progress", *argv])
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        rc = a.fn(a) or 0
+    return rc, out.getvalue(), err.getvalue()
+
+
+class ProgressCommandLineTests(unittest.TestCase):
+    # progress.py kept partial evidence on an open step, closed a member's own step at once and put the caller's run
+    # first, but the command line had no --step or --check on `note`, printed a member's close without saying whether
+    # the step closed, and listed the live runs without the caller
+    def setUp(self):
+        self.state = TempState().__enter__()
+        self.addCleanup(self.state.__exit__, None, None, None)
+        pg.start("Hotfix", plan=["sync=30m", "docs=20m after sync"])
+        pg.assign("sync", "Kid", why="test")
+        launch("k1", "devkit:kid", "Kid: sync")
+
+    def test_a_note_keeps_partial_evidence_on_the_step_it_names(self):
+        rc, _, err = progress_cli_out("note", "docs drafted", "--step", "docs", "--check", "✓ dev docs check clean")
+        self.assertEqual(rc, 0, err)
+        docs = pg.load_run("claude", "s1")["plan"][1]
+        self.assertEqual((docs["state"], docs["partial"][-1]["check"]), ("pending", "✓ dev docs check clean"))
+
+    def test_a_members_close_of_its_own_step_says_it_closed(self):
+        with mock.patch.dict(os.environ, {"DEVKIT_FROM_AGENT": "k1"}):
+            rc, out, err = progress_cli_out("step", "sync rewritten", "--step", "sync", "--check", "✓ 14 tests pass")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("· sync rewritten · closed “sync” (done)", out)
+
+    def test_a_members_evidence_for_a_step_it_does_not_hold_fails_and_says_what_to_do(self):
+        # M176-M177: it printed ✓ and exited 0, so the member reported the step closed while it stayed pending
+        with mock.patch.dict(os.environ, {"DEVKIT_FROM_AGENT": "k1"}):
+            rc, out, err = progress_cli_out("step", "docs look fine", "--step", "docs", "--check", "✓ read them")
+        self.assertEqual(rc, 2, out)
+        self.assertIn("“docs” is not your step", err)
+        self.assertIn("dev crew ask", err)
+        self.assertEqual(pg.load_run("claude", "s1")["plan"][1]["state"], "pending")
+
+    def test_the_listing_shows_this_sessions_run_before_a_newer_one(self):
+        (pg.SESSIONS / "claude-s2.json").write_text(json.dumps(
+            {"agent": "claude", "session": "s2", "started": time.time(), "project": "acme/api"}))
+        with mock.patch.dict(os.environ, {"DEVKIT_SESSION": "claude:s2"}):
+            pg.start("Theirs", plan=["b"], now=time.time() + 60)
+        rc, out, err = progress_cli_out()
+        self.assertEqual(rc, 0, err)
+        self.assertLess(out.index("Hotfix"), out.index("Theirs"))
 
 
 if __name__ == "__main__":

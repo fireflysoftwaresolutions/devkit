@@ -27,7 +27,7 @@ import _hermetic  # noqa: E402
 _hermetic.activate()  # run alone, this module gets the suite's temporary home too (tests/_hermetic.py)
 sys.path.insert(0, str(ROOT / "lib"))
 
-from devkit import audit, core, guard  # noqa: E402
+from devkit import audit, core, guard, progress  # noqa: E402
 
 DAY = 86400.0
 
@@ -301,6 +301,25 @@ class ClassifyTests(GateCase):
             with self.subTest(cmd=cmd):
                 self.assertEqual(self.acts(cmd), [])
 
+    def test_a_script_named_for_a_release_takes_that_class_whatever_its_code(self):
+        # 26.11.16 judged a Python script by its code when the guard read it and found only standard modules; the
+        # Security engineer's review showed that proof can be defeated, so the name decides again for every script
+        d = Path(self.tmp.name) / "scratch"
+        d.mkdir()
+        notes = d / "release_notes_a17.py"
+        notes.write_text("import sys\nfrom pathlib import Path\n"
+                         "Path(sys.argv[2]).write_text(Path(sys.argv[1]).read_text())\n")
+        runnable = d / "publish_check.py"
+        runnable.write_text("#!/usr/bin/env python3\nimport json, sys\nprint(json.dumps(sys.argv))\n")
+        runnable.chmod(0o755)
+        for cmd, found in ((f"python3 -I {notes} CHANGELOG.md out.md", ("release", "release_notes_a17")),
+                           (f"cd {d} && python3 release_notes_a17.py CHANGELOG.md out.md",
+                            ("release", "release_notes_a17")),
+                           (str(runnable), ("publish", "publish_check"))):
+            with self.subTest(cmd=cmd):
+                self.assertEqual([(a, t) for a, _, t in self.acts(cmd)], [found])
+                self.assertIn("Crew members never run", self.member(cmd) or "")
+
     def test_every_shell_form_that_runs_an_action_is_classified(self):
         for cmd in ("bash -c 'gh pr merge 12'", "sh -c \"gh pr merge 12\"", "eval 'gh pr merge 12'",
                     "printf 'gh pr merge 12' | sh", "echo \"gh pr merge 12\" | bash", "bash <<< 'gh pr merge 12'",
@@ -408,8 +427,29 @@ class MemberTests(GateCase):
     def test_member_push_without_grant_is_denied(self):
         why = self.member("git push origin feat/x", grant=Store())
         self.assertIn("step grant", why or "")
-        self.assertIn("--allow push,pr", why or "")
+        self.assertIn("grant push feat/x", why or "")  # the line the developer types, which --allow needs
         self.assertIn("step grant", self.member("gh pr create --fill", grant=Store()) or "")
+
+    def test_a_member_push_refusal_names_the_missing_grant_and_what_to_ask_for(self):
+        # B-g7g18niqtw4: after `dev progress assign … --allow push,pr` with no grant typed by the developer, the step
+        # allowed nothing (assign keeps an action only with the developer's evidence), and four refusals in a day said
+        # only "crew members push only with a step grant", so the member could not tell what to ask for
+        def run(**step):
+            return {"goal": "g", "project": "o/r",
+                    "plan": [{"name": "ship", "owner": "a1", "state": "running", **step}]}
+        cases = {"no run": (None, ["owns no running step", "grant push feat/x", "--allow push"]),
+                 "another lane's step": (run(owner="a2"), ["owns no running step", "grant push feat/x"]),
+                 "allow dropped": (run(allow=[]), ["step ship does not allow push", "grant push feat/x",
+                                                   "dev progress assign ship --to tank --allow push"]),
+                 "another branch": (run(allow=["push"], allow_evidence={"push": {"target": "feat/old", "repo": "o/r"}}),
+                                    ["covers push feat/old, not feat/x", "grant push feat/x",
+                                     "dev progress assign ship --to tank --allow push"])}
+        for case, (r, parts) in cases.items():
+            with self.subTest(case=case), mock.patch.object(progress, "load_run", return_value=r):
+                why = self.member("git push origin feat/x", grant=Store()) or ""
+                for part in parts:
+                    self.assertIn(part, why)
+                self.assertIn("typed by the developer", why)
 
     def test_a_member_push_with_a_step_grant_runs_and_uses_it(self):
         store = Store({"push feat/x": 2, "pr feat/x": 1})
@@ -662,6 +702,21 @@ class UnknownProgramTests(GateCase):
                 self.assertEqual(self.acts(cmd), [])
         self.assertEqual(self.acts("a=($(gh pr merge 12))"), [("merge", 2, "12")])  # what it runs still counts
 
+    def test_the_words_after_a_substitution_belong_to_the_command_around_it(self):
+        # the tokenizer ended a segment at the `)` of `$(…)`, so the rest of the word (`/*` in `ls $(echo x)/*`) was a
+        # command of its own, and its glob read as a program named at run time
+        for cmd in ("ls $(echo x)/*", "head -3 $(dirname x)/*.md", "echo $(date)-$(whoami)", "x=$(echo a)$y",
+                    "echo $(case x in a) echo a;; esac)/*.md"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.acts(cmd), [])
+                self.assertIsNone(self.member(cmd))
+        # a command after it is still one, and so is a program named by a substitution or after an assignment
+        for cmd in ("ls $(echo x) ; $y", "ls $(echo x)/* | $y", "x=$(echo a) $y", "$(echo gh) pr merge 12"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual([a for a, _, _ in self.acts(cmd)], ["unknown"])
+        # the words after it are the command's own: this push forces
+        self.assertIn("push-destructive", [a for a, _, _ in self.acts("git push $(echo origin) --force")])
+
     def test_the_main_session_is_told_how_to_clear_it_and_a_grant_of_that_command_opens_it(self):
         target = self.acts("$X pr merge 12")[0][2]
         why = self.main("$X pr merge 12")
@@ -756,6 +811,20 @@ class GrantRuleTests(unittest.TestCase):
                                ("merge", "12"), ("pr", "feat/x")):
             with self.subTest(action=action, target=target):
                 self.assertIsNone(guard.preapproval_problem(action, target))
+
+
+class NoLineAfterACaseWordIsSkipped(GateCase):
+    # the guard does not parse case statements: it once skipped a one-word piped segment as an arm's pattern after
+    # text that only looked like a case (`#;case z in` in a comment, or a blank line read as `;;`), so a variable that
+    # held an irreversible command ran in a lane with no action found
+
+    def test_a_variable_run_after_a_case_comment_or_a_blank_line_is_still_judged(self):
+        for head in ("#;case z in\n", "#case z in\n", "#;case z in\n\n", "\n"):
+            for run in ("$X | cat", "${=X} | cat"):
+                cmd = f"X='gh release create v1'\n{head}{run}"
+                with self.subTest(cmd=cmd):
+                    self.assertTrue(self.acts(cmd))
+                    self.assertIsNotNone(self.member(cmd, setting="enforce"))
 
 
 if __name__ == "__main__":

@@ -7,6 +7,8 @@
 # and the high-trust channels (a refusal, a call's context) carry only a lesson's title and prevention, capped.
 # Tests carry comments, not docstrings (`dev test prove` leaves out tests with one).
 # Run: python3 -m unittest tests.test_lessons_hooks
+import contextlib
+import io
 import json
 import os
 import re
@@ -18,8 +20,9 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from devkit import audit, core, guard, hooks, lessonevents, lessonrules, lessons  # noqa: E402
-from devkit import progress as pg, registry  # noqa: E402
+from devkit import audit, core, crew, guard, hooks, lessonevents, lessonrules, lessons  # noqa: E402
+from devkit import progress as pg, registry, skillguard, work  # noqa: E402
+from test_crew_gates import taught_anchors  # noqa: E402
 from test_language_neutral_hooks import A, HookCase  # noqa: E402
 
 GIT_ENV = {"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"}
@@ -68,6 +71,10 @@ class LessonHookCase(HookCase):
         with mock.patch("devkit.scope.decide", lambda *a: False), mock.patch.object(hooks, "_audit_turn_end", gates):
             return self.hook("stop", {"session_id": "s1", "hook_event_name": "Stop", "cwd": str(self.root)})
 
+    def end_session(self):
+        return self.hook("session-end", {"session_id": "s1", "hook_event_name": "SessionEnd", "reason": "exit",
+                                         "cwd": str(self.root)})
+
     def path_of(self, lid) -> Path:
         return next(Path(lessons.LESSONS).rglob(f"{lid}.md"))
 
@@ -84,7 +91,7 @@ class ShownTests(LessonHookCase):
 
 
 class OutcomeTests(LessonHookCase):
-    def test_a_lesson_hit_again_is_missed_and_one_not_hit_is_heeded_when_the_turn_ends(self):
+    def test_a_lesson_hit_again_is_missed_and_one_not_hit_is_heeded_when_the_session_ends(self):
         hit = self.lesson("Validated the migrations without the database", errors=["checksum mismatch for migration"])
         calm = self.lesson("Repaired the schema history instead of fixing the migration",
                            commands=["./mvnw flyway:repair"])
@@ -92,11 +99,30 @@ class OutcomeTests(LessonHookCase):
         self.hook("post-tool", self.output("t1", failed))
         self.hook("guard", self.bash("./mvnw flyway:repair", tid="t2"))
         self.hook("post-tool", self.output("t3", failed))
-        self.stop(sent_back=True)
-        self.assertEqual(self.events(calm), [("shown", "call", "main")])  # a turn sent back has not ended
         self.stop()
+        self.assertEqual(self.events(calm), [("shown", "call", "main")])  # a turn ended; the session goes on
+        self.end_session()
         self.assertEqual(self.events(hit), [("shown", "output", "main"), ("missed", "output", "main")])
         self.assertEqual(self.events(calm), [("shown", "call", "main"), ("heeded", "call", "main")])
+
+    def test_running_a_lessons_command_the_right_way_again_is_not_a_miss(self):
+        # On this Mac the most missed lessons were anchored on `dev progress step`, `dev test prove` and `dev watch`,
+        # which the crew's procedure runs on purpose: running the command again is not making the mistake again
+        lid = self.lesson("Run dev progress as a command of its own", commands=["dev progress step"],
+                          errors=["as a command of its own"])
+        self.hook("guard", self.bash('dev progress step "built it" --check "12 tests pass"', tid="t1"))
+        self.hook("guard", self.bash('dev progress step "tested it" --check "dev test: 3 passed"', tid="t2"))
+        self.assertNotIn("missed", [e[0] for e in self.events(lid)], self.events(lid))
+
+    def test_a_session_start_lesson_hit_in_a_later_turn_counts_as_missed(self):
+        # A lesson the session start showed stays pending for the whole session, not one turn: a mistake in turn two
+        # is a miss
+        lid = self.lesson("Fix the migration, never repair the history", errors=["checksum mismatch for migration"])
+        lessons.shown([lid], "session", "s1", "main", count=False)
+        self.stop()  # turn one ends
+        self.hook("post-tool", self.output("t9", "[ERROR] Validate failed: checksum mismatch for migration 3"))
+        self.assertEqual(self.events(lid), [("shown", "session", "main"), ("missed", "session", "main"),
+                                            ("shown", "output", "main")])
 
     def test_the_output_of_the_call_that_showed_a_lesson_is_no_miss(self):
         lid = self.lesson("Ran the integration tests without Docker", commands=["./mvnw verify"],
@@ -150,6 +176,53 @@ class BriefTests(LessonHookCase):
         self.assertEqual(self.events(lid), [("shown", "brief", "a_tank")])
 
 
+class InitiativeRecallTests(LessonHookCase):
+    # An initiative's lessons belong to each of its member projects: they reach the project's tool calls, outputs and
+    # briefs, not only its session start
+    def setUp(self):
+        super().setUp()
+        h = Path(work.HANDOFF)
+        (h / "initiatives" / "payments").mkdir(parents=True)
+        (h / "initiatives" / "payments" / "README.md").write_text(
+            "---\nkind: initiative\ntitle: Payments\nprojects: [acme/api]\n---\n# Payments\n")
+        for obj in (hooks, core):  # the hooks read the initiatives in their handoff, the briefs in core's
+            p = mock.patch.object(obj, "HANDOFF", h)
+            p.start()
+            self.addCleanup(p.stop)
+
+    def initiative_lesson(self, title, **anchors):
+        return lessons.add("initiatives/payments", title, cause="cause of " + title, prevention="prevention of " + title,
+                           happened="it happened: " + title, a=A, **anchors)["meta"]["id"]
+
+    def test_an_initiatives_lesson_reaches_a_tool_call_of_a_member_project(self):
+        lid = self.initiative_lesson("Never force-push a release branch", commands=["git push --force"])
+        out = self.hook("guard", self.bash("git push --force origin release/1.2", tid="t1"))
+        self.assertIn(lid, self.context(out))
+
+    def test_an_initiatives_lesson_reaches_the_output_of_a_member_projects_call(self):
+        lid = self.initiative_lesson("Settle a payment once", errors=["duplicate settlement for payment"])
+        out = self.hook("post-tool", self.output("t1", "[ERROR] duplicate settlement for payment 42"))
+        self.assertIn(lid, self.context(out))
+
+    def test_an_initiatives_lesson_reaches_a_launch_brief_for_a_member_project(self):
+        lid = self.initiative_lesson("Keep payment amounts in minor units", activities=["backend"])
+        out = skillguard.on_agent_brief("claude", {"description": "Tank: the payments API",
+                                                   "prompt": "Build the payments API."}, "acme/api", activity="backend")
+        self.assertIn(lid, out["prompt"])
+
+    def test_an_initiatives_lesson_reaches_a_dev_crew_brief_for_a_member_project(self):
+        lid = self.initiative_lesson("Keep payment amounts in minor units", activities=["backend"])
+        repo = self.root / "src" / "api"
+        repo.mkdir(parents=True)
+        for args in (("init", "-q"), ("remote", "add", "origin", "https://github.com/acme/api.git")):
+            subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, env=dict(os.environ,
+                                                                                                    **GIT_ENV))
+        roster = crew.load(team=False)
+        text = crew.brief_text(crew.member("tank", roster), "Build the payments API.", roster=roster, cwd=str(repo),
+                               activity="backend")
+        self.assertIn(lid, text)
+
+
 class RuleTests(LessonHookCase):
     def global_lesson(self, title, prevention, **anchors):
         return lessons.add("global", title, cause="cause of " + title, prevention=prevention, a=A,
@@ -177,6 +250,29 @@ class RuleTests(LessonHookCase):
         denied = self.reason(self.hook("guard", self.bash("python3 -c 4", tid="t4"), real_guard=True))
         self.assertIn(lid, denied)
         self.assertEqual(self.events(lid)[-1], ("shown", "refusal", "main"))
+
+    def codex_call(self, cmd, tid):
+        # PreToolUse as Codex 0.167 sends it, judged by the real guard
+        payload = {"session_id": "c1", "turn_id": "t1", "hook_event_name": "PreToolUse", "tool_name": "Bash",
+                   "tool_use_id": tid, "cwd": str(self.root), "model": "gpt-6.1-sol", "tool_input": {"command": cmd}}
+        out = io.StringIO()
+        with mock.patch("sys.stdin", io.StringIO(json.dumps(payload))), contextlib.redirect_stdout(out):
+            hooks.run("guard", "codex")
+        return out.getvalue()
+
+    def test_a_warn_rule_codex_never_reads_is_not_counted_as_shown(self):
+        # Codex reads no PreToolUse context, so a warn rule's text never reaches it: counting it as shown made the next
+        # matching call a miss of a text the agent never read
+        les = self.global_lesson("Run probes as a script file, not python3 -c",
+                                 "Write the probe to the scratch folder and run it as a file.", commands=["python3 -c"])
+        lid, rule = les["meta"]["id"], lessonrules.propose(les, match="python3 -c")
+        lessons.shown([lid], "session", "c1", "main", count=False)  # the session start showed it: Codex read that
+        first = self.codex_call("python3 -c 1", "exec-1")
+        self.codex_call("python3 -c 2", "exec-2")
+        self.assertNotIn(rule["id"], first)  # nothing reaches Codex from an allowed call
+        self.assertEqual(self.events(lid), [("shown", "session", "main"), ("missed", "session", "main")])
+        self.assertIsNone(lessons.usage().get(lid, {}).get("shown_call"))
+        self.assertEqual(json.loads(lessonrules.HITS.read_text())[rule["id"]]["hits"], 2)  # the rule still counts
 
     def test_an_output_rule_names_its_lesson_when_the_output_shows_its_error(self):
         les = self.global_lesson("Import devkit from lib, not from the tests folder",
@@ -220,14 +316,36 @@ class HighTrustTextTests(LessonHookCase):
             self.assertNotIn(explanation, reason)
 
 
+class LessonNudgeTests(unittest.TestCase):
+    def test_the_nudge_after_a_fix_teaches_an_add_with_an_anchor_the_gate_accepts(self):
+        # `dev lesson add` refuses a lesson with no anchor: a hint without one teaches a command that fails
+        anchors, problems = taught_anchors(hooks._lesson_nudge(["a1b2c3d fix(parser): keep quoted commas"]))
+        self.assertTrue(any(anchors.values()), anchors)
+        self.assertEqual(problems, [])
+
+
 class SessionStartTests(LessonHookCase):
-    def test_the_session_start_puts_the_branchs_files_first_as_advice_and_records_them_shown(self):
+    def checkout(self) -> Path:
         repo = (self.root / "work" / "api").resolve()
         repo.mkdir(parents=True)
         env = dict(os.environ, **GIT_ENV)
         for args in (["init", "-q", "-b", "main"], ["-c", "user.email=a@example.com", "-c", "user.name=a", "commit",
                                                      "-q", "--allow-empty", "-m", "init"]):
             subprocess.run(["git", "-C", str(repo), *args], check=True, env=env, capture_output=True)
+        return repo
+
+    def start(self, repo: Path) -> str:
+        # the session start's context in `repo`
+        with mock.patch.object(registry, "update_note", lambda *a, **k: False), \
+                mock.patch.object(core, "is_temp", lambda p, real=core.is_temp: False if str(p).startswith(
+                    str(repo)) else real(p)), \
+                mock.patch.object(hooks, "HANDOFF", self.root / "handoff"):
+            out = self.hook("session-start", {"session_id": "s9", "hook_event_name": "SessionStart",
+                                              "source": "startup", "cwd": str(repo)})
+        return json.loads(out)["hookSpecificOutput"]["additionalContext"] if out.startswith("{") else out
+
+    def test_the_session_start_puts_the_branchs_files_first_as_advice_and_records_them_shown(self):
+        repo = self.checkout()
         (repo / "src" / "billing").mkdir(parents=True)
         (repo / "src" / "billing" / "invoice.py").write_text("x = 1\n")  # the branch's change
         pid = core.project_identity(repo, "")[0]
@@ -237,19 +355,28 @@ class SessionStartTests(LessonHookCase):
             lessons.recur(les, "again", a=A)
         weak = lessons.add(pid, "Invoices round half-even", severity="low", files=["src/billing/**"],
                            cause="a cause", prevention="round half-even", happened="it happened", a=A)["meta"]["id"]
-        with mock.patch.object(registry, "update_note", lambda *a, **k: False), \
-                mock.patch.object(core, "is_temp", lambda p, real=core.is_temp: False if str(p).startswith(
-                    str(repo)) else real(p)), \
-                mock.patch.object(hooks, "HANDOFF", self.root / "handoff"):
-            out = self.hook("session-start", {"session_id": "s9", "hook_event_name": "SessionStart",
-                                              "source": "startup", "cwd": str(repo)})
-        text = json.loads(out)["hookSpecificOutput"]["additionalContext"] if out.startswith("{") else out
+        text = self.start(repo)
         head = text.index("Known pitfalls")
         self.assertEqual(text[head:].splitlines()[1], lessons.ADVICE)
         self.assertIn(weak, text[head:].splitlines()[2])
         shown = re.findall(r"Lesson (L-[0-9A-Za-z]+) \(recorded by", text[head:])
         self.assertEqual(len(shown), 3)
         self.assertEqual(lessonevents.shown_in("s9", "main"), shown)  # what it showed is pending for its main agent
+
+    def test_a_lesson_file_that_cannot_be_read_is_named_and_the_others_are_still_recalled(self):
+        # A file edited by hand or half-applied by a pull: recall leaves it out, and the session says so instead of
+        # keeping quiet about a lesson nobody sees
+        repo = self.checkout()
+        pid = core.project_identity(repo, "")[0]
+        good = lessons.add(pid, "Invoices round half-even", files=["src/billing/**"], cause="a cause",
+                           prevention="round half-even", happened="it happened", a=A)["meta"]["id"]
+        bad = Path(lessons.LESSONS) / pid / "L-latin10000.md"
+        bad.write_bytes(b"---\nid: L-latin10000\ntitle: caf\xe9\nscope: " + pid.encode() + b"\n---\n# caf\xe9\n")
+        text = self.start(repo)
+        self.assertIn(f"Lesson {good} (recorded by", text)
+        line = next((ln for ln in text.splitlines() if "L-latin10000" in ln), "")
+        self.assertIn("cannot be read", line, text)
+        self.assertIn("dev lesson lint", line)
 
 
 if __name__ == "__main__":

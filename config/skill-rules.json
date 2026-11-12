@@ -1,5 +1,5 @@
 {
-  "_comment": "Which skills a kind of work, a file or a command requires. devkit enforces them in three places: the session catalog lists them by kind of work; a brief for a Claude subagent gets the skills of its kind of work appended; and the Stop hook sends a turn back, once per skill per session, when it changed matching files or ran matching commands without loading the skills (the crew gates do the same for a member's files when it stops). `files` are globs on changed paths; `content` is a regex checked in the changed files that match `files` (or `content_files`, except those matching `content_exclude`, such as tests that hold HTML); `project` keeps a rule's files only in repositories whose project files (`files`, at the repository's top) match `content`, such as a project that uses Postgres; `group` names the optional skill group of config/skills.json a rule needs, and the rule applies only when that group is in `skills.groups`; `activities` are the kinds of work (ids from the crew's RACI) a step or a brief declares; `commands` are command words the agent runs, read as the shell runs them (quoted text is not a command). A file on disk outside every repository is scratch work and matches no rule. No rule matches the developer's words, so the rules work whatever language the developer writes in; the model picks skills from the catalog it gets at session start. Extend or override with `skills.rules` in ~/.config/devkit/config.json; turn enforcement off with `skills.enforce: false`.",
+  "_comment": "Which skills a kind of work, a file or a command requires. devkit enforces them in three places: the session catalog lists them by kind of work; a brief for a Claude subagent gets the skills of its kind of work appended; and the Stop hook sends a turn back, once per skill per session, when it changed matching files or ran matching commands without loading the skills (the crew gates do the same for a member's files when it stops). `files` are globs on changed paths; `content` is a regex checked, ignoring case, in the changed files that match `files` (or `content_files`, except those matching `content_exclude`, such as tests that hold HTML and probes in a scratch folder); a part of it that must match as written, such as JSX's className, goes in `(?-i:…)`; `project` keeps a rule's files only in repositories whose project files (`files`, at the repository's top) match `content`, such as a project that uses Postgres; `group` names the optional skill group of config/skills.json a rule needs, and the rule applies only when that group is in `skills.groups`; `activities` are the kinds of work (ids from the crew's RACI) a step or a brief declares; `commands` are command words the agent runs, read as the shell runs them (quoted text is not a command). A file on disk outside every repository is scratch work and matches no rule. No rule matches the developer's words, so the rules work whatever language the developer writes in; the model picks skills from the catalog it gets at session start. Extend or override with `skills.rules` in ~/.config/devkit/config.json; turn enforcement off with `skills.enforce: false`.",
   "rules": [
     {
       "id": "ui",
@@ -46,9 +46,11 @@
         "*IT.java",
         "*_test.go",
         "*Test.php",
-        "conftest.py"
+        "conftest.py",
+        "scratchpad/**",
+        ".tmp/**"
       ],
-      "content": "<style[\\s>]|<!doctype html|className=|styled\\.|@Component\\(\\s*\\{",
+      "content": "<style[\\s>]|<!doctype html|(?-i:className=)|(?-i:styled\\.[a-z][a-z0-9]*(?:\\.attrs\\(|\\s*(?:<[^>\\n]*>\\s*)?(?:`|\\(\\s*\\{)))|@Component\\(\\s*\\{",
       "skills": {
         "claude": [
           "frontend-design",

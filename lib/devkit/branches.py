@@ -1415,8 +1415,8 @@ def prune(plan: dict, only=None) -> list:
                 rc, err = 1, f"it moved to {tip[:7]} since the listing"
             elif rc == 0 and tip:
                 rc, _, err = core.git(top, "branch", "-D", name, timeout=60)
-        last = (err or "").strip().splitlines()[-1:] or ["failed"]
-        r["result"], r["error"] = ("deleted", "") if rc == 0 else ("failed", last[0][:200])
+        last = (err or "").strip().splitlines()[-1:] or ["failed"]  # a kept worktree's line ends with how to remove it
+        r["result"], r["error"] = ("deleted", "") if rc == 0 else ("failed", last[0][:400])
         _record(plan, r, what if rc == 0 else what.replace("deleted", "not deleted"), "ok" if rc == 0 else "failed",
                 r["error"])
         r["did"] = what

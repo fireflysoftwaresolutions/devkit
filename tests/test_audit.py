@@ -305,7 +305,7 @@ class SchemaTests(AuditCase):
         self.assertLess(a["id"], b["id"])  # sortable by time, unique
         self.assertEqual(time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(a["ts"])), a["time"][:19])
         self.assertTrue(a["time"].endswith("Z"))
-        self.assertEqual(set(a["actor"]), {"user", "host", "agent", "session"})
+        self.assertEqual(set(a["actor"]), {"user", "host", "label", "agent", "session"})
         self.assertEqual((a["category"], a["severity"], a["outcome"]), ("change", "warning", "failed"))
         self.assertEqual(a["evidence"], {"duration": 1.25, "cwd": "~/Development/acme/app", "exit": 2})
         self.assertEqual(a["why"], "asked")
@@ -1395,6 +1395,26 @@ class RetentionTests(AuditCase):
         self.assertFalse((mine / "2025-01.jsonl").exists())
         self.assertTrue((other / "2025-01.jsonl").exists())  # another machine's folder is its own
 
+    def test_team_months_prune_this_macs_copies_under_its_former_hostnames_and_never_another_macs(self):
+        from devkit import identity
+        jan, jan_end = time.mktime((2025, 1, 10, 12, 0, 0, 0, 0, -1)), time.mktime((2025, 1, 31, 12, 0, 0, 0, 0, -1))
+        # this Mac carried mac-158 all January 2025; another Mac carried mac-55 then, this one only since October
+        m = identity.Machine("m-0000aaaa", "andress-mbp-2",
+                             {"mac-158": [[jan - 86400, jan_end + 86400]], "mac-55": [[NOV6 - 30 * 86400, NOV6]]})
+        core.CFG["audit"]["retention"]["team_months"] = 6
+        with mock.patch.object(identity, "machine", return_value=m):
+            user = audit.actor()["user"]
+            for host in ("mac-158", "mac-55"):
+                d = core.HANDOFF / "audit" / f"{user}@{host}"
+                d.mkdir(parents=True)
+                for st, ts in (("2025-01", jan_end), ("2026-10", NOV6 - 20 * 86400)):
+                    (d / f"{st}.jsonl").write_text(json.dumps({"ts": ts, "actor": {"user": user, "host": host}}) + "\n")
+            out = audit.prune(now=NOV6)
+        self.assertEqual(sorted(str(p.relative_to(core.HANDOFF)) for p in out["team"]),
+                         [f"audit/{user}@mac-158/2025-01.jsonl"])
+        self.assertTrue((core.HANDOFF / "audit" / f"{user}@mac-55" / "2025-01.jsonl").exists())  # another Mac's
+        self.assertTrue((core.HANDOFF / "audit" / f"{user}@mac-158" / "2026-10.jsonl").exists())  # within 6 months
+
     def test_a_policy_asking_for_less_changes_nothing(self):
         core.CFG["audit"]["hold"] = True
         self.policy({"level": "security", "hold": False, "publish": False,
@@ -1495,6 +1515,24 @@ class ExportTests(AuditCase):
         self.assertEqual((head[4], head[6]), ("guard.deny", "6"))
         self.assertIn(r"dev sync \| dev status", lines[0])
         self.assertIn(r"key\=value \\ back", lines[0])
+
+    def test_siem_exports_name_the_host_by_its_label_and_the_machine_id_as_the_device(self):
+        from devkit import identity
+        m = identity.Machine("m-0000aaaa", "andress-mbp-2", {"andress-mbp-2": [[0, NOV6]]})
+        with mock.patch.object(identity, "machine", return_value=m):
+            self.assertEqual((audit.actor()["host"], audit.actor()["label"]), ("m-0000aaaa", "andress-mbp-2"))
+            audit.record("dev.task", "done 9")
+        r = audit.query(action="dev.task")[-1]
+        dev = audit.to_ocsf(r)["device"]
+        self.assertEqual((dev["hostname"], dev["uid"]), ("andress-mbp-2", "m-0000aaaa"))
+        self.assertIn("shost=andress-mbp-2", audit.to_cef(r))
+        self.assertIn("deviceExternalId=m-0000aaaa", audit.to_cef(r))
+        self.assertIn(b" andress-mbp-2 devkit: ", audit._syslog_line(r))
+        # a record from before the machine id names the host only: it stays the hostname, with no device id
+        old = dict(r, actor={"user": "ana", "host": "mac-158", "agent": "claude", "session": ""})
+        self.assertEqual(audit.to_ocsf(old)["device"], {"hostname": "mac-158", "type_id": 0})
+        self.assertIn("shost=mac-158", audit.to_cef(old))
+        self.assertNotIn("deviceExternalId", audit.to_cef(old))
 
     def test_jsonl_is_the_stored_records_and_the_window_filters(self):
         out = [json.loads(ln) for ln in audit.export("jsonl").splitlines()]

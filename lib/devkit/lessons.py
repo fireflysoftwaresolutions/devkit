@@ -19,7 +19,7 @@ The loop:
   prevent   `dev lesson prevent --by test|lint|guard|skill|ci|rule --ref …`: automation beats prose
   review    `dev lesson review` lists recurring, unprevented and stale lessons
   use       every time a lesson is shown in a session, applied (named in a reply), repeated or looked up, its usage is
-            counted (per machine: lessons/usage/<user>@<host>.json, summed across the team)
+            counted (per machine: lessons/usage/<user>@<machine id>.json, summed across the team)
   sleep     `dev sleep` (nightly, the `sleep` job) consolidates like a brain at night: strength decays unless
             a lesson is seen again; near-duplicates are merged; lessons are archived into lessons/archive/
             (restorable) only by the archive policy (`consolidate`), never to fit a count: storage is unbounded and
@@ -36,7 +36,7 @@ import time
 import unicodedata
 from pathlib import Path
 
-from . import core, state, work
+from . import core, identity, state, work
 from .core import HANDOFF, STATE
 
 LESSONS = HANDOFF / "lessons"
@@ -60,25 +60,47 @@ def _dir(scope: str) -> Path:
     return LESSONS / scope
 
 
+def _section_heads(lines: list) -> list:
+    """[(line index, section)] of the section headings devkit writes (render): `## <name>` for the names in SECTIONS,
+    outside fenced code, in SECTIONS order. Any other `## ` line is text of the section it is in. The first section
+    starts at its first heading (the title comes before it); each later one at the last heading of its name before
+    the next section's, as the record's changelog is its last `## Changelog` (work.split_changelog), so a section
+    that quotes the headings of a lesson keeps them."""
+    fenced = work._fenced(lines)
+    at = {}
+    for i, ln in enumerate(lines):
+        name = ln[3:].strip() if ln.startswith("## ") and i not in fenced else ""
+        if name in SECTIONS:
+            at.setdefault(name, []).append(i)
+    heads, bound = [], len(lines)
+    for name in reversed(SECTIONS[1:]):
+        before = [i for i in at.get(name, ()) if i < bound]
+        if before:
+            heads.append((before[-1], name))
+            bound = before[-1]
+    first = [i for i in at.get(SECTIONS[0], ()) if i < bound]
+    if first:
+        heads.append((first[0], SECTIONS[0]))
+    return sorted(heads)
+
+
 def parse(text: str) -> dict:
     """A lesson file -> {meta, extra, sections, changelog}. Only the anchor and tag fields are lists (a title in
-    brackets stays text); the record's changelog is the last `## Changelog` outside fenced code (work.split_changelog),
-    and a `## ` line inside fenced code belongs to its section. `extra`: front-matter lines devkit does not know,
-    kept as they are."""
+    brackets stays text); the record's changelog is the last `## Changelog` outside fenced code (work.split_changelog);
+    the sections start at the headings devkit writes (_section_heads), so a `## ` line inside a section, fenced or
+    not, stays in it. `extra`: front-matter lines devkit does not know, kept as they are."""
     front, body = work.split_frontmatter(text)
     meta, extra = work.read_frontmatter(front, FIELDS, LISTS)
     body, changelog = work.split_changelog(body)
     lines = body.split("\n")
-    fenced = work._fenced(lines)
-    sections, cur = {}, None
-    for i, ln in enumerate(lines):
-        if ln.startswith("## ") and i not in fenced:
-            cur = ln[3:].strip()
-            sections[cur] = []
-        elif cur:
-            sections[cur].append(ln)
-    meta["occurrences"] = int(meta.get("occurrences") or 1)
-    meta["version"] = int(meta.get("version") or 1)
+    heads = _section_heads(lines)
+    sections = {name: lines[i + 1:(heads[n + 1][0] if n + 1 < len(heads) else len(lines))]
+                for n, (i, name) in enumerate(heads)}
+    for k in ("occurrences", "version"):
+        try:
+            meta[k] = int(meta.get(k) or 1)
+        except (TypeError, ValueError):
+            raise ValueError(f"its {k} is “{meta.get(k)}”, not a number") from None
     for k in REFS + ("author",):
         meta[k] = meta.get(k) or ""
     return {"meta": meta, "extra": extra, "sections": {k: "\n".join(v).strip() for k, v in sections.items()},
@@ -96,19 +118,50 @@ def render(lesson: dict) -> str:
         v = "[" + ", ".join(m.get(k) or []) + "]" if k in LISTS else _one_line(m.get(k, ""))
         head += f"{k}: {v}".rstrip() + "\n"
     head += "".join(ln + "\n" for ln in lesson.get("extra") or [])
-    others = [s for s in lesson["sections"] if s not in SECTIONS]  # a section written by hand stays
+    others = [s for s in lesson["sections"] if s not in SECTIONS]  # a caller's own section stays; parse reads it back
+    #                                                                as text of the section before it
     body = f"# {_one_line(m['title'])}\n\n" + "".join(f"## {s}\n\n{lesson['sections'].get(s) or '_—_'}\n\n"
                                                     for s in list(SECTIONS) + others)
     return "---\n" + head + "---\n" + body + "## Changelog\n\n" + "".join(f"- {c}\n" for c in lesson["changelog"])
 
 
+class Unreadable(ValueError):
+    """A lesson file devkit cannot read: not UTF-8 text, no front matter with its id, title and scope, or a count
+    that is not a number. `path`, `problem`."""
+
+    def __init__(self, path, problem: str):
+        self.path, self.problem = Path(path), problem
+        super().__init__(f"{core.tilde(path)} cannot be read as a lesson: {problem}")
+
+
+REQUIRED = ("id", "title", "scope")  # what every reader of a lesson takes for granted
+
+
 def load(path: Path) -> dict:
-    les = parse(Path(path).read_text())
-    les["path"] = Path(path)
+    """A lesson file -> the lesson, with its `path`. Unreadable when the file is not a lesson devkit can read;
+    FileNotFoundError when it is gone (another session merged or archived it, or a sync took it away)."""
+    path = Path(path)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as e:
+        raise Unreadable(path, f"it is not UTF-8 text (byte {e.start})") from None
+    except FileNotFoundError:
+        raise
+    except OSError as e:
+        raise Unreadable(path, e.strerror or type(e).__name__) from None
+    try:
+        les = parse(text)
+    except ValueError as e:
+        raise Unreadable(path, str(e)) from None
+    missing = [k for k in REQUIRED if not str(les["meta"].get(k) or "").strip()]
+    if missing:
+        raise Unreadable(path, f"its front matter has no {', no '.join(missing)}")
+    les["path"] = path
     return les
 
 
-def all_lessons(scope: str = None, archived: bool = False) -> list:
+def _files(scope: str = None, archived: bool = False) -> list:
+    """The lesson files of a scope (every scope when None), active or archived, as listed now."""
     base = (LESSONS / "archive" / scope if archived else _dir(scope)) if scope else \
         (LESSONS / "archive" if archived else LESSONS)
     if not base.exists():
@@ -116,7 +169,59 @@ def all_lessons(scope: str = None, archived: bool = False) -> list:
     files = sorted(base.rglob("L-*.md"))
     if not archived:
         files = [f for f in files if "archive" not in f.relative_to(LESSONS).parts[:1]]
-    return [load(f) for f in files]
+    return files
+
+
+def all_lessons(scope: str = None, archived: bool = False) -> list:
+    """The lessons of a scope (every scope when None), active or archived. A file that left since it was listed
+    (merged, archived or pulled away by another session) is left out, and so is one that cannot be read, so one bad
+    file never hides the others: `unreadable` lists those for `dev lesson lint`."""
+    out = []
+    for f in _files(scope, archived):
+        try:
+            out.append(load(f))
+        except (FileNotFoundError, Unreadable):
+            continue
+    return out
+
+
+def unreadable(scope: str = None) -> list:
+    """The lesson files of a scope (every scope when None), active and archived, that no `dev lesson` command can
+    read, as lint findings: [{id, kind: "unreadable", problem, fix, path, why}], `id` from the file's name, `why`
+    what is wrong with it."""
+    out = []
+    for archived in (False, True):
+        for f in _files(scope, archived):
+            try:
+                load(f)
+            except FileNotFoundError:
+                continue
+            except Unreadable as e:
+                rel = f.relative_to(work.HANDOFF) if f.is_relative_to(work.HANDOFF) else f
+                out.append({"id": f.stem, "kind": "unreadable", "path": f, "why": e.problem,
+                            "problem": f"{'the archived file' if archived else 'the file'} cannot be read, so no "
+                                       f"dev lesson command and no recall sees it: {e.problem}",
+                            "fix": f"repair it by hand: git -C {core.tilde(work.HANDOFF)} log -p -- {rel} shows its "
+                                   f"last good version"})
+    return out
+
+
+def sync_lag() -> str:
+    """Why lessons recorded on other machines may be missing here: the handoff repository stopped syncing (the record
+    work.sync_problem keeps until a push succeeds), with the commits of the remote this Mac has not applied. "" while
+    it syncs."""
+    rec = core.read_json(work.push_failed_file(), None)
+    if not isinstance(rec, dict):
+        return ""
+    since = time.strftime("%Y-%m-%d %H:%M", time.localtime(rec["ts"])) if isinstance(rec.get("ts"), int) else "?"
+    behind = core.gitout(work.HANDOFF, "rev-list", "--count", "HEAD..@{u}") if (work.HANDOFF / ".git").exists() \
+        else ""
+    if behind.isdigit() and int(behind):
+        n = int(behind)
+        return f"the handoff repository has not synced since {since}: {n} commit{'s' if n != 1 else ''} from other " \
+               f"machines are not on this Mac, so the lessons they hold are missing here (dev status shows why)"
+    return f"the handoff repository has not synced since {since}: lessons recorded on other machines may be missing " \
+           f"here (dev status shows why)"
 
 
 def is_archived(les: dict) -> bool:
@@ -141,7 +246,11 @@ def find(selector: str, scope: str = None) -> dict:
             return hits[0]
         if hits:
             raise ValueError(f"“{selector}” matches {len(hits)} lessons: " + ", ".join(h["meta"]["id"] for h in hits[:5]))
-    raise ValueError(f"“{selector}” matches 0 lessons")
+    bad = [f for f in unreadable(scope) if f["id"].lower() == sel]
+    if bad:
+        raise ValueError(f"{core.tilde(bad[0]['path'])} cannot be read as a lesson: {bad[0]['why']}; {bad[0]['fix']}")
+    lag = sync_lag()
+    raise ValueError(f"“{selector}” matches 0 lessons" + (f"; {lag}" if lag else ""))
 
 
 def _log(les: dict, a: dict, op: str, why: str = ""):
@@ -168,11 +277,11 @@ def _refuse(errors: list) -> None:
         raise ValueError("; ".join(errors))
 
 
-def _clean_anchors(**given) -> dict:
-    """The anchors given, validated: one line each, no commas (the front matter's list separator), activity ids the
-    crew's RACI knows, and the anchor gate (lessonlint.check_anchors: no bare common program as a command, no short or
-    stoplisted error). Only anchors being added are judged: a lesson written before the gate still loads."""
-    out = {}
+def _anchor_problems(**given) -> tuple:
+    """The anchors given, cleaned (one line each), and every problem with them: a comma (the front matter's list
+    separator), a kind of work the crew's RACI does not know, and what the anchor gate refuses
+    (lessonlint.check_anchors). -> (anchors, [(problem, the same problem without output text, for the audit)])."""
+    out, problems = {}, []
     for k in ANCHORS:
         items = []
         for x in given.get(k) or []:
@@ -180,36 +289,68 @@ def _clean_anchors(**given) -> dict:
             if not x:
                 continue
             if "," in x:
-                raise ValueError(f"an anchor cannot contain a comma: {x!r} (give each one on its own flag)")
+                problems.append((f"the anchor `{x}` contains a comma: give each one on its own flag",
+                                 f"a {k[:-1] if k != 'activities' else 'activity'} anchor contains a comma"))
+                continue
             if k == "activities":
                 from . import raci
-                x = raci.resolve_activity(x)["id"]
+                try:
+                    x = raci.resolve_activity(x)["id"]
+                except ValueError as e:
+                    problems.append((str(e), f"no kind of work `{x}` in the crew's RACI"))
+                    continue
             if x not in items:
                 items.append(x)
         out[k] = items
-    _refuse(_lint().check_anchors(out))
+    for k in ANCHORS:
+        for x in out[k]:
+            for p in _lint().check_anchors({k: [x]}):
+                # an error anchor is the tool's output: the audit leaves it out, as it does on the command line
+                problems.append((p, p.replace(f" `{x}`", "") if k == "errors" else p))
+    return out, problems
+
+
+def _clean_anchors(**given) -> dict:
+    """The anchors given, validated (_anchor_problems), every problem refused at once. Only anchors being added are
+    judged: a lesson written before the gate still loads."""
+    out, problems = _anchor_problems(**given)
+    _refuse([p for p, _ in problems])
     return out
 
 
-class Duplicate(ValueError):
-    """`add` found a lesson, active or archived, that records the same mistake: an error or command anchor in common.
+class Refused(ValueError):
+    """`add` refused a lesson, with every problem it found at once (`problems`), so one corrected command records
+    it; `audit`: the same problems as the audit trail keeps them, without titles or output text."""
+
+    def __init__(self, problems: list, audit: list = None):
+        self.problems, self.audit = list(problems), list(audit or problems)
+        super().__init__(self.problems[0] if len(self.problems) == 1 else
+                         f"{len(self.problems)} problems: correct them all, then run it once more\n" +
+                         "\n".join(f"  - {p}" for p in self.problems))
+
+
+class Duplicate(Refused):
+    """`add` found a lesson, active or archived, that records the same mistake, among the problems it refuses.
     `lesson`: that lesson."""
 
-    def __init__(self, les: dict):
+    def __init__(self, les: dict, problems: list = (), audit: list = ()):
         self.lesson = les
         lid = les["meta"]["id"]
         where = ", archived" if is_archived(les) else ""
-        super().__init__(f"looks like {lid} (“{les['meta']['title'][:80]}”{where}): run `dev lesson recur {lid} "
-                         f"--evidence …`, or add `--new --why …` if it is another mistake")
+        mine = f"looks like {lid} (“{les['meta']['title'][:80]}”{where}): run `dev lesson recur {lid} --evidence " \
+               f"…`, or add `--new --why …` if it is another mistake"
+        super().__init__(list(problems) + [mine],
+                         list(audit) + [f"looks like {lid}{where}: recur it, or add --new --why"])
 
 
 def same_record(scope: str, anchored: dict) -> list:
-    """The lessons of this scope and the global ones, active or archived, that share an error anchor (any case) or a
-    command anchor with these anchors: the active ones first, then by occurrences. A superseded lesson is left out
-    (its successor is the one to recur)."""
+    """The lessons of this scope and the global ones, active or archived, that share an error anchor (any case: the
+    output or the guard refusal the mistake shows) with these anchors: the active ones first, then by occurrences. A
+    shared command, file or kind of work alone is not the same mistake: one command goes wrong in many ways (the
+    nightly merge, `consolidate`, still joins lessons whose anchors are mostly the same). A superseded lesson is left
+    out (its successor is the one to recur)."""
     errs = {e.casefold() for e in anchored.get("errors") or []}
-    cmds = set(anchored.get("commands") or [])
-    if not (errs or cmds):
+    if not errs:
         return []
     scopes = [scope] + ([] if scope == "global" else ["global"])
     hits, seen = [], set()
@@ -219,7 +360,7 @@ def same_record(scope: str, anchored: dict) -> list:
                 m, an = les["meta"], anchors(les)
                 if m["id"] in seen or m.get("superseded_by") or m.get("scope") != s:
                     continue
-                if errs & {e.casefold() for e in an["errors"]} or cmds & set(an["commands"]):
+                if errs & {e.casefold() for e in an["errors"]}:
                     seen.add(m["id"])
                     hits.append((archived, -m["occurrences"], les))
     return [les for _, _, les in sorted(hits, key=lambda h: h[:2])]
@@ -239,30 +380,45 @@ def _screen(fields: dict) -> str:
     return _lint().screen({k: v for k, v in fields.items() if v}) if fields else ""
 
 
+NO_ANCHOR = ("a lesson with no anchor is never recalled: say where it applies with --file \"<glob>\", --command "
+             "\"<command words>\", --error \"<text the output shows>\" or --activity <a kind of work from dev crew "
+             "raci> (each repeatable)")
+
+
 def add(scope: str, title: str, kind: str = "mistake", severity: str = "medium", happened: str = "", cause: str = "",
         fix: str = "", prevention: str = "", detection: str = "", evidence=None, tags=None, why: str = "",
         a=None, retire_when: str = "", files=None, commands=None, activities=None, errors=None, stack=None,
         new: bool = False, author: str = "") -> dict:
-    """Record a lesson. Refused (ValueError) by the anchor gate, the capture shape (lessonlint.check_shape), or a
-    lesson of this scope or the global ones, active or archived, that shares an error or command anchor (Duplicate;
-    `new=True` with a `why` records it anyway). Text the screen judges unsafe is recorded but held: `quarantine`
+    """Record a lesson. Refused (Refused, a ValueError, with every problem at once) by the anchor gate, no anchor at
+    all (recall shows only anchored lessons: _usable), the capture shape (lessonlint.check_shape), a missing root
+    cause or prevention, or a lesson of this scope or the global ones, active or archived, that shares an error
+    anchor (Duplicate, same_record; `new=True` with a `why` records it anyway). A refusal is recorded in the audit
+    trail with its problems (`dev.lesson.refused`). Text the screen judges unsafe is recorded but held: `quarantine`
     says why, and recall leaves it out until the developer releases it. `author`: the writer's role (an agent) or
     name; the agent, session and machine are added."""
-    anchored = _clean_anchors(files=files, commands=commands, activities=activities, errors=errors, stack=stack)
+    anchored, found = _anchor_problems(files=files, commands=commands, activities=activities, errors=errors,
+                                       stack=stack)
+    if not (any(anchored.values()) or found):  # an anchor that was refused is already one of the problems
+        found.append((NO_ANCHOR,) * 2)
     if kind not in KINDS:
-        raise ValueError(f"kind must be one of {', '.join(KINDS)}")
+        found.append((f"kind must be one of {', '.join(KINDS)}",) * 2)
     if severity not in SEVERITIES:
-        raise ValueError(f"severity must be one of {', '.join(SEVERITIES)}")
+        found.append((f"severity must be one of {', '.join(SEVERITIES)}",) * 2)
     if not (cause.strip() and prevention.strip()):
-        raise ValueError("a lesson needs the root cause (--cause) and the prevention (--prevent): what makes it not "
-                         "happen again")
+        found.append(("a lesson needs the root cause (--cause) and the prevention (--prevent): what makes it not "
+                      "happen again",) * 2)
     evidence = [str(e) for e in evidence or []]
-    _refuse(_lint().check_shape(title, happened, evidence))
+    found += [(p, p) for p in _lint().check_shape(title, happened, evidence)]  # no title text: only its length
     twins = same_record(scope, anchored)
-    if twins and not new:
-        raise Duplicate(twins[0])
-    if twins and not why.strip():
-        raise ValueError(f"it looks like {twins[0]['meta']['id']}: say why it is another mistake (--why \"…\")")
+    if twins and new and not why.strip():
+        found.append((f"it looks like {twins[0]['meta']['id']}: say why it is another mistake (--why \"…\")",) * 2)
+    problems, safe = [p for p, _ in found], [s for _, s in found]
+    if found or (twins and not new):
+        refusal = Duplicate(twins[0], problems, safe) if twins and not new else Refused(problems, safe)
+        from . import audit
+        audit.record("dev.lesson.refused", scope, "; ".join(refusal.audit), "blocked", category="refusal",
+                     severity="notice", count=len(refusal.problems))
+        raise refusal
     a = a or work.actor()
     lid = "L-" + work.new_id("task")[2:]
     now, day = work.now_iso(), today()
@@ -307,7 +463,7 @@ def update(les: dict, op, why: str = "", a=None, apply=None, paths=(), **changes
     a = a or work.actor()
     path = Path(les["path"])
     with state.hold(_lock_of(les["meta"]["id"])):
-        les = load(path)
+        les = _reload(les)
         if apply:
             changes = {**changes, **apply(les)}
         if callable(op):
@@ -335,6 +491,18 @@ def update(les: dict, op, why: str = "", a=None, apply=None, paths=(), **changes
     work._commit([path] + _committable(paths),
                  f"{m['id']}: {op} v{m['version']} ({work.actor_str(a)})" + (f" — {why}" if why else ""))
     return les
+
+
+def _reload(les: dict) -> dict:
+    """The lesson as it is on disk now. A file that left since it was read (another session merged or archived it,
+    or a sync of the handoff took it away) is a refusal (ValueError) that says so; nothing is written."""
+    try:
+        return load(les["path"])
+    except FileNotFoundError:
+        lag = sync_lag()
+        raise ValueError(f"{les['meta']['id']} is no longer at {core.tilde(les['path'])}: another session merged, "
+                         f"archived or moved it, or a sync of the handoff took it away. Nothing was written: run the "
+                         f"command again" + (f" ({lag})" if lag else "")) from None
 
 
 def _committable(paths) -> list:
@@ -368,9 +536,10 @@ def _settle(les: dict, a=None) -> dict:
     if not (act.exists() and arc.exists()):
         return les
     with state.hold(_lock_of(les["meta"]["id"])):
-        if not (act.exists() and arc.exists()):
-            return load(act if act.exists() else arc)
-        mine, other = load(act), load(arc)
+        try:
+            mine, other = load(act), load(arc)
+        except FileNotFoundError:  # one copy left meanwhile: one file again, and the caller's write re-reads it
+            return les if Path(les["path"]).exists() else dict(les, path=act if act.exists() else arc)
         rank = (lambda x: (x["meta"]["version"], x["meta"]["occurrences"]))
         if rank(other) > rank(mine):
             work._replace(act, arc.read_text())
@@ -499,7 +668,7 @@ def supersede(old: dict, new: dict, why: str, a=None) -> dict:
         raise ValueError("say why the new lesson replaces the old one: --why \"…\"")
     if o["id"] == n["id"]:
         raise ValueError("a lesson cannot supersede itself")
-    fresh = load(new["path"])["meta"]
+    fresh = _reload(new)["meta"]
     if is_archived(new) or fresh.get("status") == "retired":
         raise ValueError(f"{n['id']} is {'archived' if is_archived(new) else 'retired'}: restore it first")
     if fresh.get("quarantine"):
@@ -572,27 +741,97 @@ def track(ids, kind: str, channel: str = "") -> None:
         pass
 
 
+def _larger(into: dict, snapshot: dict) -> dict:
+    """Fold a snapshot of one machine's counter into another by the larger value of each field: the files one Mac
+    published are snapshots of the same cumulative counter, so adding them would count an event once per file."""
+    for lid, e in snapshot.items():
+        if isinstance(e, dict):
+            t = into.setdefault(lid, {})
+            for k, v in e.items():
+                t[k] = max(int(t.get(k) or 0), int(v))
+    return into
+
+
+def _newest_use(counts: dict) -> float:
+    return max((float(v) for e in counts.values() if isinstance(e, dict) for k, v in e.items()
+                if k.endswith("_last") and isinstance(v, (int, float))), default=0.0)
+
+
+def former_usage(a=None) -> list:
+    """This Mac's usage files from before its machine id: lessons/usage/<user>@<hostname>.json of this actor, for a
+    hostname this Mac carried when the file's newest use was counted (identity.was_this_mac at its newest `*_last`).
+    Another person's file, or one written under a name this Mac did not carry then (another Mac's), is never among
+    them, and neither is anything for an actor of another machine. -> [(path, counts)], oldest name first."""
+    folder = LESSONS / "usage"
+    named = [(f, *f.stem.rpartition("@")[::2]) for f in sorted(folder.glob("*.json"))] if folder.is_dir() else []
+    named = [(f, user, host) for f, user, host in named if user and host and not identity.MACHINE_ID.fullmatch(host)]
+    if not named:
+        return []
+    m = identity.machine()
+    named = [(f, user, host) for f, user, host in named if host in m.aliases]
+    if not named:
+        return []
+    a = a or work.actor("human")
+    if a.get("host") != m.id:
+        return []
+    out = []
+    for f, user, host in named:
+        counts = core.read_json(f, None) if user == a.get("user") else None
+        newest = _newest_use(counts) if isinstance(counts, dict) else 0.0
+        if newest and identity.was_this_mac(host, newest, m):
+            out.append((f, counts, newest))
+    return [(f, counts) for f, counts, _ in sorted(out, key=lambda x: x[2])]
+
+
 def publish_usage(a=None) -> bool:
-    """lessons/usage/<user>@<host>.json: this machine's counts, so the team's usage can be summed (written by sync)."""
+    """lessons/usage/<user>@<machine id>.json: this machine's counts, so the team's usage can be summed (written by
+    sync). This Mac's files from before its machine id (former_usage) are folded into its local counts first, by the
+    larger value of each field, and deleted, so the team counts this Mac once. -> whether a file changed or went."""
     a = a or work.actor("human")
     f = LESSONS / "usage" / f"{a['user']}@{a['host']}.json"
+    former = former_usage(a)
+    if former:
+        def fold(u):
+            for _, counts in former:
+                _larger(u, counts)
+        try:
+            state.update(USAGE_LOCAL, fold, indent=1)
+        except (state.StateBusy, OSError):
+            former = []  # the counts stay where they are; the next publish folds them
     data = _usage_local()
     if not data:
         return False
-    old = core.read_json(f, None)
-    if old == data:
-        return False
-    f.parent.mkdir(parents=True, exist_ok=True)
-    f.write_text(json.dumps(data, indent=1, sort_keys=True) + "\n")
-    return True
+    changed = core.read_json(f, None) != data
+    if changed:
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(json.dumps(data, indent=1, sort_keys=True) + "\n")
+    gone = False
+    for path, _ in former:
+        try:
+            path.unlink()
+            gone = True
+        except OSError:
+            pass
+    return changed or gone
 
 
 def usage() -> dict:
-    """Team-wide usage: counts summed over machines, latest timestamps kept."""
+    """Team-wide usage: counts summed over machines, latest timestamps kept. This Mac counts once: its own file and
+    its files from before the machine id (former_usage) are snapshots of one counter, taken by the larger value of
+    each field until publish_usage folds them in and deletes them."""
     total = {}
-    files = list((LESSONS / "usage").glob("*.json")) if (LESSONS / "usage").exists() else []
-    mine = _usage_local()
-    sources = [core.read_json(f, {}) or {} for f in files] or [mine]
+    files = sorted((LESSONS / "usage").glob("*.json")) if (LESSONS / "usage").exists() else []
+    former = former_usage() if files else []
+    if former:
+        user = former[0][0].stem.rpartition("@")[0]
+        own = LESSONS / "usage" / f"{user}@{identity.machine().id}.json"
+        skip = {own} | {f for f, _ in former}
+        share = _larger({}, core.read_json(own, {}) or {})
+        for _, counts in former:
+            _larger(share, counts)
+        sources = [core.read_json(f, {}) or {} for f in files if f not in skip] + [share]
+    else:
+        sources = [core.read_json(f, {}) or {} for f in files] or [_usage_local()]
     for src in sources:
         for lid, e in src.items():
             t = total.setdefault(lid, {})

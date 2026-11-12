@@ -1,5 +1,3 @@
-# {{title}}
-
 ## Symptom
 
 _What users see, since when, how often. Link the report or alert._

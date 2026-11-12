@@ -13,6 +13,7 @@ Pure functions; the hook wrapper fails open on any error.
 """
 from __future__ import annotations
 
+import bisect
 import contextlib
 import contextvars
 import filecmp
@@ -24,7 +25,10 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import sys
+import threading
+import time
 from pathlib import Path
 
 from . import core
@@ -230,6 +234,145 @@ def _judged(verdict):
     global LAST_REFUSAL, LAST_REFUSAL_WORD
     LAST_REFUSAL, LAST_REFUSAL_WORD = refusal_of(verdict)
     return verdict
+
+
+# The guard's time to judge one call. The agents stop the guard hook at the timeout devkit installs for it
+# (_hook_timeout) and then run the call unjudged, so a slow judgment would be a way around every rule: past its time
+# the guard refuses the call instead. In the guard hook's own process (`dev hook guard`) the time runs from the moment
+# the guard loaded, for all its judges of the call together (check, then the gates after it); anywhere else (`dev guard
+# check`, tests) for each call. JUDGE_MARGIN leaves the hook time to start and to report its verdict.
+JUDGE_MARGIN = 5.0
+_LOADED = time.monotonic()
+_IN_GUARD_HOOK = sys.argv[1:3] == ["hook", "guard"]
+_TIMED = contextvars.ContextVar("devkit_guard_timed", default=False)  # a judge inside another runs on the outer's time
+
+
+@functools.lru_cache(maxsize=4)
+def _hook_timeout_at(home: str) -> float:
+    found = []
+    for rel in ("config/claude/settings.json", "config/codex/hooks.json"):
+        data = core.read_json(Path(home) / rel, {}) or {}
+        events = data.get("hooks") if isinstance(data, dict) and isinstance(data.get("hooks"), dict) else {}
+        for group in (g for gs in events.values() if isinstance(gs, list) for g in gs if isinstance(g, dict)):
+            for h in (h for h in group.get("hooks") or [] if isinstance(h, dict)):
+                limit = h.get("timeout")
+                if re.search(r"\bhook\s+guard\b", str(h.get("command") or "")) and \
+                        isinstance(limit, (int, float)) and not isinstance(limit, bool) and limit > 0:
+                    found.append(float(limit))
+    return min(found) if found else 15.0
+
+
+def _hook_timeout() -> float:
+    """The guard hook's timeout in seconds as devkit installs it into the agents' settings (config/claude/settings.json
+    and config/codex/hooks.json of the copy that runs): the shortest they give, so the guard ends before either agent
+    stops it; 15, what devkit installs, when none can be read."""
+    return _hook_timeout_at(str(core.DEVKIT_HOME))
+
+
+def judge_budget() -> float:
+    """The seconds the guard may spend judging one call: the guard hook's timeout less JUDGE_MARGIN, at least 1."""
+    return max(1.0, _hook_timeout() - JUDGE_MARGIN)
+
+
+def judge_time_reason(budget: float) -> str:
+    return (f"devkit's guard could not judge this call within the {budget:g} s it has for one, so it refuses it rather "
+            f"than let the hook's timeout run it unjudged. Split it into smaller calls: one command per call, with a "
+            f"long text or program in a file the command reads rather than in the command line.")
+
+
+class _OutOfTime(BaseException):
+    """The guard's time to judge a call ran out: a BaseException, so no rule's `except Exception` swallows it."""
+
+
+@contextlib.contextmanager
+def _time_limit(seconds: float):
+    """Raise _OutOfTime in the main thread once `seconds` have passed, and again every 50 ms until the block ends, so
+    a handler that swallowed one cannot keep the judgment going. Python's regular-expression engine checks for
+    signals while it matches, so a pattern scan in C stops too. An outer timer (a lock wait's, a test's) keeps its
+    handler and the time it had left, and fires first when it is due first. Off the main thread, which takes no
+    signals, the block runs without a limit."""
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    started = time.monotonic()
+    left, period = signal.getitimer(signal.ITIMER_REAL)
+    before, due = signal.getsignal(signal.SIGALRM), started + seconds
+    before = signal.SIG_DFL if before is None else before  # None: a handler set outside Python
+    outer = [started + left if left else None]  # when the outer timer is due, until it is handed to its handler
+
+    def ran_out(signum, frame):
+        now = time.monotonic()
+        if outer[0] is not None and now >= outer[0]:
+            outer[0] = None
+            signal.setitimer(signal.ITIMER_REAL, max(due - now, 0.001), 0.05)
+            if callable(before):
+                before(signum, frame)
+        if now >= due:
+            raise _OutOfTime()
+
+    signal.signal(signal.SIGALRM, ran_out)
+    signal.setitimer(signal.ITIMER_REAL, max(min(due, outer[0] or due) - started, 0.001), 0.05)
+    try:
+        yield
+    finally:
+        while True:  # ignore our ticks first: one still on its way is dropped, and never leaves ran_out in place
+            try:
+                signal.signal(signal.SIGALRM, signal.SIG_IGN)
+                break
+            except _OutOfTime:
+                pass
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, before)
+        if outer[0] is not None:
+            signal.setitimer(signal.ITIMER_REAL, max(outer[0] - time.monotonic(), 0.001), period)
+
+
+def _in_time(judged: bool = False, as_reason: bool = False):
+    """Decorator: a judge of a call (check, a gate, the guard hook's own judges) runs within the guard's time; past
+    it, its verdict refuses the call with judge_time_reason, through _judged when `judged` (check's own verdicts do),
+    and as the reason alone when `as_reason` (a judge that returns only its refusal's reason). The outermost judge
+    opens the judgment that _once keeps git's answers for."""
+    def wrap(fn):
+        @functools.wraps(fn)
+        def _judged_in_time(*args, **kwargs):
+            if _TIMED.get():
+                return fn(*args, **kwargs)
+            budget = judge_budget()
+            left = budget - (time.monotonic() - _LOADED) if _IN_GUARD_HOOK else budget
+            token, asked = _TIMED.set(True), _ASKED.set({})
+            try:
+                if left <= 0:
+                    raise _OutOfTime()
+                with _time_limit(left):
+                    return fn(*args, **kwargs)
+            except _OutOfTime:
+                verdict = deny(judge_time_reason(budget), key="judge-time")
+                if as_reason:
+                    return verdict[1]
+                return _judged(verdict) if judged else verdict
+            finally:
+                _ASKED.reset(asked)
+                _TIMED.reset(token)
+        return _judged_in_time
+    return wrap
+
+
+# What one judgment asks git about a folder (its project, whether it lies in a checkout), kept until the judgment
+# ends: a patch names up to _PATCH_PATHS files, often in a few folders, and asking git for each (6 ms in a temporary
+# repository, 20 ms and three git processes in a real one) outran the guard's time. A call may run after a checkout
+# changed, so nothing is kept from one judgment to the next.
+_ASKED = contextvars.ContextVar("devkit_guard_asked", default=None)
+
+
+def _once(kind: str, key: str, ask):
+    """ask()'s answer for (`kind`, `key`), asked once per judgment (_in_time) and kept until it ends; outside a
+    judgment, asked each time."""
+    asked = _ASKED.get()
+    if asked is None:
+        return ask()
+    if (kind, key) not in asked:
+        asked[(kind, key)] = ask()
+    return asked[(kind, key)]
 
 
 # The escape hatches a command's own prefix sets (DEVKIT_RAW_GH=1 gh pr merge …): the main session may use them, and
@@ -511,9 +654,14 @@ def session_project(cwd):
 
 
 def current_project(cwd):
-    """Project id of the session's working directory, or None for portfolio-level sessions."""
+    """Project id of the session's working directory, or None for portfolio-level sessions. Asked once per judgment
+    for each folder (_once)."""
     if not cwd or str(cwd) == str(UNKNOWN):
         return None
+    return _once("project", str(cwd), lambda: _project_at(cwd))
+
+
+def _project_at(cwd):
     top = core.gitout(cwd, "rev-parse", "--show-toplevel")
     if not top or is_temp(top) or real(top) == real(core.HANDOFF):
         return None
@@ -528,6 +676,24 @@ def initiative_members(slug: str) -> list:
         return []
     from . import notes
     return notes.summarize(f.read_text())["projects"]
+
+
+def initiatives_of(project: str, handoff=None) -> list:
+    """The initiatives `project` is a member of: the slugs whose README lists it, sorted. `handoff`: the handoff
+    repository to read (core.HANDOFF when None). A README that cannot be read lists no member, so one bad initiative
+    never hides the others."""
+    base = Path(handoff or core.HANDOFF) / "initiatives"
+    if not project or not base.is_dir():
+        return []
+    from . import notes
+    out = []
+    for d in sorted(base.iterdir()):
+        try:
+            if project in notes.summarize((d / "README.md").read_text(encoding="utf-8"))["projects"]:
+                out.append(d.name)
+        except (OSError, ValueError):  # no README, or one that is not UTF-8 text
+            continue
+    return out
 
 
 def handoff_violation(rel: str, cwd, envs=frozenset()):
@@ -867,6 +1033,57 @@ def strip_heredocs(cmd: str) -> str:
     return _split_heredocs(cmd)[0]
 
 
+_PUNCT = ";&|()<>"  # the characters the tokenizer cuts words at
+
+
+def _paren_step(frames: list, t: str, argv, glued: bool):
+    """Read the parentheses of punctuation token `t` into `frames`, the open `$(…)`, groups, `<(…)`/`>(…)` and case
+    statements (_case_word) of a command line. `argv`: the words of the command so far when its last word is the token
+    before `t`. -> (the word list of the command a `$(…)` is a word of, whether the next word is glued to it) when `t`
+    is only `)` and its last one ends that `$(…)`; the words after it go into that list, so they are that command's
+    and never a command of their own. A pattern's `)` in a case statement ends the pattern; a `)` the frames cannot
+    pair ends nothing."""
+    ended = None
+    for i, c in enumerate(t):
+        top = frames[-1] if frames else None
+        pattern = top is not None and top[0] == "case" and top[1] == "pattern"
+        if c == "(":
+            if not i and argv and argv[-1].endswith("$") and set(t) <= set(";&|()"):  # `$(`, `$((`
+                frames.append(["subst", argv])
+            elif i and t[i - 1] in "<>":
+                frames.append(["proc"])
+            elif not pattern:  # `case $x in (a)`: the pattern's `(` opens nothing
+                frames.append(["group"])
+        elif c == ")":
+            ended = None
+            if pattern:
+                top[1] = "body"
+            elif top is not None and top[0] != "case":
+                frames.pop()
+                ended = top if top[0] == "subst" else None
+        elif top is not None and top[0] == "case" and top[1] == "body" and (";;" in t or ";&" in t):
+            top[1] = "pattern"  # an arm's end: a pattern or `esac` comes next
+    return (ended[1], glued) if ended and set(t) == {")"} else None
+
+
+def _case_word(frames: list, t: str, before: list):
+    """Read word `t` into `frames` (_paren_step): `case` at a command's start opens a case statement, its `in` starts
+    the patterns, and `esac` at a command's start closes it. `before`: the command's words before `t`."""
+    top = frames[-1] if frames else None
+    start = all(a in _RESERVED for a in before)
+    if top is not None and top[0] == "case":
+        if top[1] == "head" and t == "in":
+            top[1] = "pattern"
+            return
+        if start and t == "esac":
+            frames.pop()
+            return
+        if top[1] == "pattern":  # a pattern's word
+            return
+    if start and t == "case":
+        frames.append(["case", "head"])
+
+
 def split_commands(cmd: str, ops: bool = False, newline: str = ";", inputs: list | None = None,
                    stripped: bool = False, heredocs: list | None = None, modes: list | None = None):
     """-> list of (argv, redirect_targets). None when the command cannot be tokenised. With `ops`, each entry is
@@ -878,16 +1095,26 @@ def split_commands(cmd: str, ops: bool = False, newline: str = ";", inputs: list
     list that gets, for each segment, how each of its redirect targets is opened, in order: "truncate" (`>`, `&>`),
     "append" (`>>`, `&>>`) or "overwrite" (`<>`, which keeps what it does not write over)."""
     try:
-        lex = shlex.shlex(_newlines_to_semicolons(cmd if stripped else strip_heredocs(cmd), newline), posix=True,
-                          punctuation_chars=";&|()<>")
+        line = _newlines_to_semicolons(cmd if stripped else strip_heredocs(cmd), newline)
+        lex = shlex.shlex(line, posix=True, punctuation_chars=_PUNCT)
         lex.whitespace_split = True
         lex.commenters = ""
-        tokens = list(lex)
+        tokens, glued = [], []
+        for t in lex:  # after a `)`, shlex has read the character that follows it, which a word may be glued to
+            at = lex.instream.tell()
+            tokens.append(t)
+            glued.append(bool(at) and line[at - 1] not in _PUNCT and not line[at - 1].isspace())
     except ValueError:
         return None
     segs, argv, redirs, expect_redir, here, herestr = [], [], [], False, [], False
     fd, stdin, ins, hd, opened, mode = None, False, [], False, [], "truncate"
+    # frames: _paren_step's; into: [the words of the command a `$(…)` that just ended is a word of, whether the next
+    # word is glued to it, whether words went there]; cur: the words the word at token `last` went to
+    frames, into, cur, last = [], None, None, -1
     for k, t in enumerate(tokens):
+        ended = None
+        if set(t) <= set(_PUNCT) and ("(" in t or ")" in t):
+            ended = _paren_step(frames, t, cur if last == k - 1 else None, glued[k])
         nxt = tokens[k + 1] if k + 1 < len(tokens) else ""
         if t.isdigit() and nxt[:1] in ("<", ">"):
             fd = t
@@ -901,7 +1128,7 @@ def split_commands(cmd: str, ops: bool = False, newline: str = ";", inputs: list
             fd = None
             continue
         if t and set(t) <= set(";&|()"):
-            if argv or redirs:
+            if argv or redirs or (into and into[2]):  # the part after a `$(…)` keeps its operator and redirects
                 segs.append((argv, redirs, t, here) if ops else (argv, redirs))
                 if inputs is not None:
                     inputs.append(ins)
@@ -910,6 +1137,7 @@ def split_commands(cmd: str, ops: bool = False, newline: str = ";", inputs: list
                 if modes is not None:
                     modes.append(opened)
             argv, redirs, here, ins, hd, opened = [], [], [], [], False, []
+            into = [*ended, False] if ended else None
             continue
         if t and set(t) <= set("<>"):
             herestr = t == "<<<"
@@ -931,8 +1159,20 @@ def split_commands(cmd: str, ops: bool = False, newline: str = ";", inputs: list
                 here.append(t)
             expect_redir, herestr, stdin = False, False, False
             continue
-        argv.append(t)
-    if argv or redirs:
+        if into is not None and not argv:  # `ls $(echo x)/*`: the rest of the word, and the words after it, are the
+            outer = into[0]                  # command's the `$(…)` is a word of, as the shell reads them
+            _case_word(frames, t, outer)
+            if into[1] and not into[2]:
+                outer[-1] += t
+            else:
+                outer.append(t)
+            into[2], cur = True, outer
+        else:
+            _case_word(frames, t, argv)
+            argv.append(t)
+            cur = argv
+        last = k
+    if argv or redirs or (into and into[2]):
         segs.append((argv, redirs, "", here) if ops else (argv, redirs))
         if inputs is not None:
             inputs.append(ins)
@@ -974,7 +1214,7 @@ def _strip_prefix(argv):
     i = 0
     while i < len(argv):
         a = argv[i]
-        if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", a) or a == _DASH_PRECOMMAND:
+        if re.match(r"^[A-Za-z_][A-Za-z0-9_]*\+?=", a) or a == _DASH_PRECOMMAND:  # `X=1`, and `PATH+=:/x` appends
             i += 1
         elif os.path.basename(a) in PREFIX_CMDS:
             i = _prefix_opts(os.path.basename(a), argv, i + 1)[1]
@@ -2171,13 +2411,22 @@ def _shell_line(args, name="bash"):
     return _with_positionals(args[k], args[k + 1:])
 
 
-def _nested_lines(argv, cwd=None) -> list:
+def _nested_lines(argv, cwd=None) -> list | None:
     run = _unwrap(argv)
     if not run:
         return []
     if run != list(argv):  # a runner (uv run, npx, npm exec, timeout, a wrapper): its command is read as a line (F3)
         return [shlex.join(run)]
     argv = run
+    runs = _launched(argv)
+    if runs is None:  # more of what a launcher may start than the guard reads: the caller refuses it
+        return None
+    launched = [shlex.join(r) for r in map(_unwrap, runs) if r]
+    if launched:  # `op run -- git push --force …`: each command the launcher may start, read as a line
+        return launched
+    held = _held_lines(argv)
+    if held:  # an alias body, hyperfine's lines
+        return held
     real = _as_run(argv, cwd)[1:]  # `./bash-link -c …`: the shell its file is
     name, args = os.path.basename((real[0] if real else argv)[0]), argv[1:]
     if name in _SHELLS:
@@ -2354,6 +2603,8 @@ def _check_segments(cmd: str, segs, ecwd: str, agent: str, depth: int = 0, outer
         if res:
             return res
         lines = _nested_lines(argv, ecwd)
+        if lines is None:  # a launcher with more words, or launchers deeper, than the guard reads
+            return deny(LAUNCH_REASON, key="launcher-words")
         if lines and depth >= 4:  # too deep to read is no "nothing found": refused
             return deny(NESTED_REASON, key="nested-depth")
         feeds = fed or _feeds_words(argv)
@@ -2562,6 +2813,22 @@ PATCH_HEADER_REASON = (
     "This patch names a file whose path holds a control character or a line separator (such as `\\r`, `\\x0b`, "
     "`\\x1c`, `\\x85` or U+2028), which tools split in different places, so the guard cannot be sure which file it "
     "writes. Name the file without it.")
+
+
+# the files one apply_patch may name (its Add, Update, Delete and Move to headers). check judges each one, and a crew
+# lane's scope check judges each again; a patch of a few thousand files ran past the hook's timeout, so past the bound
+# the guard refuses the patch before it judges any of its files. Real patches stay far below it.
+_PATCH_PATHS = 1_000
+PATCH_PATHS_REASON = (
+    f"This patch names more than {_PATCH_PATHS:,} files, more than the guard judges in one call: it judges each file "
+    f"a patch adds, updates, moves or deletes, and refuses a patch it cannot judge in full within its time. Split it "
+    f"into patches of at most {_PATCH_PATHS:,} files each.")
+
+
+def patch_size_refusal(patch: str):
+    """("deny", PATCH_PATHS_REASON) when an apply_patch envelope names more files than _PATCH_PATHS; None
+    otherwise."""
+    return deny(PATCH_PATHS_REASON) if len(parse_patch_paths(patch)) > _PATCH_PATHS else None
 
 
 def patch_header_refusal(patch: str):
@@ -3723,7 +3990,7 @@ def patch_devkit_off(patch: str, cwd):
 def protected_patch(patch: str, cwd):
     """apply_patch: Add, Update, Delete and Move all count, and an added DEVKIT_* line in a settings or shell startup
     file."""
-    v = patch_header_refusal(patch) or patch_note_violation(patch, cwd)
+    v = patch_size_refusal(patch) or patch_header_refusal(patch) or patch_note_violation(patch, cwd)
     if v:
         return v
     added = _unescape("\n".join(ln[1:] for ln in _patch_lines(patch) if ln.startswith("+")))
@@ -3805,9 +4072,25 @@ def dev_command_reason(p, verb="replace") -> str:
 # only as the pinned release (core.runtime_home, core.release_home) or a file in it; any other copy, the folder
 # itself (a find, a glob or a cd chooses a copy from it) or a pattern is refused, however the path is written.
 
-_RELEASES_TEXT = re.compile(r"(?P<pre>[^\s;|&<>()`=]*?)\.local/+share/+devkit/+releases(?![\w.-])"
-                            r"(?:/+(?P<name>[^/\s;|&<>()`'\"]*))?")
-_WORD_ENDS = frozenset(" \t\n;|&<>()`'\"=")
+# the releases folder and the copy named after it; the path written before it is found by _releases_mentions
+_RELEASES_FOLDER = re.compile(r"\.local/+share/+devkit/+releases(?![\w.-])(?:/+(?P<name>[^/\s;|&<>()`'\"]*))?")
+_PATH_ENDS = re.compile(r"[\s;|&<>()`=]")  # what ends the path written before the releases folder
+_WORDS = re.compile(r"[^ \t\n;|&<>()`'\"=]+")  # the words a copy's name is looked for in
+
+
+def _releases_mentions(text) -> list:
+    """(mention, path before the folder, copy name) for each mention of the releases folder in `text`, in order. The
+    path before it runs back to the word's start, or to the end of the mention before it in the same word. Found
+    from the folder's name, in time linear in the text: a pattern that opened with that path tried each start of a
+    word without separators, quadratic in its length, and past the hook's timeout the command ran unjudged."""
+    ends = [m.start() for m in _PATH_ENDS.finditer(text)]
+    out, done = [], 0
+    for m in _RELEASES_FOLDER.finditer(text):
+        k = bisect.bisect_left(ends, m.start())
+        start = max(done, ends[k - 1] + 1 if k else 0)
+        out.append((text[start:m.end()], text[start:m.start()], m.group("name") or ""))
+        done = m.end()
+    return out
 
 
 def _pinned_names() -> set:
@@ -3842,24 +4125,32 @@ def other_release(cmd: str, cwd):
     allowed = _pinned_names()
     flat = re.sub(r"[\\'\"]", "", cmd)  # quotes and escapes do not change the path the shell builds
     for text in dict.fromkeys((cmd, flat)):
-        for m in _RELEASES_TEXT.finditer(text):
-            base = resolve(m.group("pre") + ".local/share/devkit/releases", cwd)
+        for mention, pre, name in _releases_mentions(text):
+            base = resolve(pre + ".local/share/devkit/releases", cwd)
             if base != UNKNOWN and real(base) != real(core.pin_root()):
                 continue  # another HOME's releases folder (a test's sandbox), not this install
-            name = (m.group("name") or "").casefold()
-            if not name or name not in allowed:
-                return deny(other_release_reason(m.group(0)), key="named-copy")
+            if not name or name.casefold() not in allowed:
+                return deny(other_release_reason(mention), key="named-copy")
     root = core.pin_root()
     others = [d.name for d in root.iterdir() if not d.name.startswith(".") and d.name.casefold() not in allowed] \
         if root.is_dir() else []
     for name in others:  # a copy's name with the path built some other way ($R/<name>/bin/dev)
-        for m in re.finditer(re.escape(name), flat, re.I):
-            start = m.start()
-            while start and flat[start - 1] not in _WORD_ENDS:
-                start -= 1
-            if not _RELEASES_TEXT.search(flat[start:m.end()]):  # with the folder written out, the loop above judged it
-                return deny(other_release_reason(name), key="releases-folder")
+        if _copy_named(flat, name):
+            return deny(other_release_reason(name), key="releases-folder")
     return None
+
+
+def _copy_named(flat, name) -> bool:
+    """True when the command text `flat` names the copy `name` (in any case) in a word that does not write the
+    releases folder out before it, as `$R/<name>/bin/dev` does; with the folder written out, other_release's first
+    loop judged it. Each word is read once, up to the copy's first name in it (a later one has more before it), so
+    the time is linear in the text, where reading from each name back to its word's start was quadratic."""
+    named = re.compile(re.escape(name), re.I)
+    for word in _WORDS.finditer(flat) if named.search(flat) else ():
+        m = named.search(flat, word.start(), word.end())
+        if m and not _RELEASES_FOLDER.search(flat, word.start(), m.end()):
+            return True
+    return False
 
 
 def other_release_word(word: str, cwd):
@@ -4193,6 +4484,29 @@ _VENDOR_READ = {
                         ("mcp", "get", _NAME)}),
 }
 _VENDOR_FLAGS = frozenset({"-h", "--help", "--json"})  # none takes a value, so the words around them are plain
+_VENDOR_FORMS = ", ".join(_code(" ".join((cli, *f))) for cli in ("claude", "codex") for f in sorted(_VENDOR_READ[cli]))
+# EXT_REASON says a command changes the extensions; these say why the guard could not show that a command does not
+EXT_FORM_REASON = (
+    "This command is not one of the read-only forms the guard lets agents run for the plugins, skills and MCP servers "
+    "that run in every session on this Mac, so it may add, remove, switch or update one (spec P-fym583l7sg1, K1): it "
+    "calls `dev ext`, or claude or codex with a plugin, plugins, mcp or marketplace word. The read-only forms are "
+    f"exact: `dev ext ls`, `dev ext outdated`, {_VENDOR_FORMS}, with no option but -h, --help or --json and no word the "
+    "shell or xargs fills in. Run one of them as written. A change is the developer's, in a terminal, with `dev ext`, "
+    f"which audits it and records it in the lock: ask them, with the command and why. {_TAIL}")
+EXT_UNNAMED_REASON = (
+    "The guard cannot tell which program this command runs: a variable or a substitution names it, the same command "
+    "line sets PATH before a bare name, or its path does not exist yet. Its words include plugin, plugins, mcp or "
+    "marketplace, so it may be claude or codex adding, removing, switching or updating a plugin, a marketplace or an "
+    "MCP server that runs in every session on this Mac (spec P-fym583l7sg1, K1). Name the program by a path that "
+    "exists from the folder the command runs in (`./node_modules/.bin/ng mcp`, `~/.local/bin/claude mcp list`), and "
+    f"leave PATH as it is. {_TAIL}")
+EXT_DATA_REASON = (
+    "This program can start processes, and its code holds a command line for the plugins, skills or MCP servers that "
+    "run in every session on this Mac: a `dev ext` change, or claude or codex with a plugin, plugins, mcp or "
+    "marketplace word in a form that is not read-only. The guard cannot tell a line a program runs from one it only "
+    "keeps as data, so the line may add, remove, switch or update one of them (spec P-fym583l7sg1, K1). Keep command "
+    "lines a program only reads, such as test cases or probe inputs, in a data file it opens. A change is the "
+    f"developer's, in a terminal, with `dev ext`. {_TAIL}")
 
 
 def _vendor_word(word: str) -> bool:
@@ -4291,38 +4605,81 @@ def _vendor_read_only(cli: str, args) -> bool:
                for form in _VENDOR_READ[cli])
 
 
-def vendor_ext_refusal(argv, cwd=None, names=(), more=False) -> bool:
-    """True when a claude or codex call may add, remove, switch or update a plugin, a marketplace or an MCP server:
-    its words include a group word (_vendor_word) and its argv is not an exact read-only form. The program is read as
-    the shell finds it (agent_cli: a path from the folder the command runs in, a link on the PATH, the npm package a
-    runner starts); one the shell picks at run time (a variable, or a bare name with PATH set by the command or the
-    shell before it, `names`) may be claude, so a group word with it is refused as well (N3). With claude or codex, a
-    word the shell expands (_shell_made) may be a group word, and xargs adds words the guard cannot see (`more`), so
-    such a call is no read-only form either (F2 of re-review four)."""
+def vendor_ext_refusal(argv, cwd=None, names=(), more=False) -> str:
+    """Why a claude or codex call may add, remove, switch or update a plugin, a marketplace or an MCP server, or '':
+    "form" when its words include a group word (_vendor_word) and its argv is not an exact read-only form, "unnamed"
+    when the guard cannot tell which program it is. The program is read as the shell finds it (agent_cli: a path from
+    the folder the command runs in, a link on the PATH, the npm package a runner starts); one the shell picks at run
+    time (a variable, or a bare name with PATH set by the command or the shell before it, `names`) may be claude, so a
+    group word with it is refused as well (N3). With claude or codex, a word the shell expands (_shell_made) may be a
+    group word, and xargs adds words the guard cannot see (`more`), so such a call is no read-only form either (F2 of
+    re-review four)."""
     if not argv:
-        return False
+        return ""
     prog, args = str(argv[0]), [str(a) for a in argv[1:]]
     if os.path.basename(prog) == "xargs":
         inner = _unwrap(_xargs_command(args))
-        return bool(inner) and vendor_ext_refusal(inner, cwd, names, more=True)
+        return vendor_ext_refusal(inner, cwd, names, more=True) if inner else ""
+    braced = _brace_list(prog)
+    if braced:  # `{claude,mcp} add …`: the shell expands the program word into words
+        return vendor_ext_refusal([*braced, *args], cwd, names, more)
+    runs = _launched(argv)
+    if runs is None:  # more than the guard reads: any of its words may start claude with the words after it
+        return "unnamed"
+    for sub in runs:  # `op run -- claude mcp add …`: the strictest reading stands
+        kind = vendor_ext_refusal(sub, cwd, names, more)
+        if kind:
+            return kind
     named = any(_vendor_word(a) for a in args)
     if not (named or more or any(_shell_made(a) for a in args)):
-        return False
-    cli = agent_cli(prog, cwd, search=True)
+        return ""
+    cli = agent_cli(prog[1:] if prog.startswith("=") else prog, cwd, search=True)  # zsh: `=claude` is the PATH's
     if not cli:
         cli, args = _agent_script(argv, cwd) or ("", args)
     if not cli:
         if not named:
-            return False
-        if "$" in prog or "`" in prog or ("PATH" in set(names) and "/" not in prog):
-            return True
+            return ""
+        if not more and not _shell_made(prog) and not prog.startswith("=") and \
+                not any(_shell_made(a) for a in args) and _vendor_read_only("claude", args) and \
+                _vendor_read_only("codex", args):
+            return ""  # whatever program it is, claude and codex both only read these words (issue 21)
+        # a variable, a substitution or a glob; or a bare name after PATH changed: zsh's path array or an export the
+        # guard cannot read (`export $(cat f)`) may set it too
+        if _shell_made(prog) or ({"PATH", "path", "?"} & set(names) and "/" not in prog):
+            return "unnamed"
         if "/" not in prog or prog.startswith("@"):  # a bare name the PATH finds, or a scoped npm package
-            return False
+            return ""
         path = os.path.expanduser(prog)
         if not os.path.isabs(path):
             path = os.path.join(str(cwd), path) if cwd and str(cwd) != str(UNKNOWN) else ""
-        return not (path and os.path.exists(path))  # a copy or a link the command has yet to make
-    return more or any(_shell_made(a) for a in args) or not _vendor_read_only(cli, args)
+        return "" if path and os.path.exists(path) else "unnamed"  # a copy or a link the command has yet to make
+    return "form" if more or any(_shell_made(a) for a in args) or not _vendor_read_only(cli, args) else ""
+
+
+def _split_values(word, text) -> list:
+    """The words bash makes of an unquoted `$X` program word (zsh: `${=X}`), for each literal value of more than one
+    word the command line `text` gives X: `X="claude mcp"; $X add …` runs claude. [] for any other word.
+    literal_variants already reads a value of one word."""
+    m = re.fullmatch(r"\$(?:\{=?([A-Za-z_]\w*)\}|([A-Za-z_]\w*))", str(word))
+    if not m:
+        return []
+    out = []
+    for v in re.finditer(rf"(?<![\w$]){m.group(1) or m.group(2)}\+?=(\"[^\"]*\"|'[^']*'|[^\s;&|]*)", text or ""):
+        value = v.group(1)[1:-1] if v.group(1)[:1] in "'\"" else v.group(1)
+        out += [value.split()] if len(value.split()) > 1 else []
+    return out
+
+
+def _brace_list(word) -> list:
+    """The words bash makes of a word with one brace list (`{claude,mcp}`, `cl{a,}ude`), or [] for none; a word with
+    more braces than one list is left to _shell_made, which counts it as a word the shell makes."""
+    m = re.fullmatch(r"([^{}]*)\{([^{}]*,[^{}]*)\}([^{}]*)", str(word))
+    return [m.group(1) + w + m.group(3) for w in m.group(2).split(",")] if m else []
+
+
+def _vendor_ext_reason(kind: str, code: str) -> str:
+    """The refusal for a vendor_ext_refusal kind; `code`: the line is a string of that interpreter's program."""
+    return EXT_DATA_REASON if code else EXT_UNNAMED_REASON if kind == "unnamed" else EXT_FORM_REASON
 
 
 _JS_RUNTIMES = frozenset({"node", "nodejs", "bun", "deno"})
@@ -4464,12 +4821,15 @@ def _env_split(argv0):
     """-> (names, argv): the variables a segment sets for the command it runs (VAR=…, env VAR=…, sudo VAR=…, also
     after timeout or uv run), and that command."""
     argv = _unwrap(argv0)
-    return {a.split("=", 1)[0] for a in argv0[:len(argv0) - len(argv)] if _ASSIGN.match(a)}, argv
+    return {m.group(1) for a in argv0[:len(argv0) - len(argv)] if (m := re.match(r"([A-Za-z_][A-Za-z0-9_]*)\+?=", a))}, \
+        argv
 
 
 def _exports(name, args) -> set:
     """The variables `export`, `declare`, `setenv` or fish's `set -x` set in the shell; '?' for one the guard cannot
     see (`export $(cat file)`)."""
+    if name == "hash" and any(a == "-p" or (not a.startswith("-") and "=" in a) for a in args):
+        return {"PATH"}  # `hash -p /x/claude ng` (bash), `hash ng=/x/claude` (zsh): a name runs another program
     if name in _EXPORTERS:
         pos = [a for a in args if not a.startswith(("-", "+"))]
     elif name == "setenv" or (name == "set" and any(a.startswith("-") and "x" in a for a in args)):
@@ -4576,6 +4936,7 @@ class _Shell:
         self.unresolved = []
         self.exported = set(exported)
         self.typed = True  # the command holds this text (D10 refuses it unread); False for a file read from disk
+        self.code = ""  # the interpreter whose program's code holds this text (program_lines), which may only keep it
         self.stdin = None  # what the segment being walked reads from its input, when the command shows it
         self.written = {}  # agent settings file -> the texts this command has written to it so far
 
@@ -4752,22 +5113,23 @@ class _Shell:
     def child(self, text, cwd, names=()):
         inner = _Shell(text, cwd, self.mentions, self.depth + 1, self.exported | set(names))
         inner.note_mentions = inner.note_mentions or self.note_mentions
+        inner.code = self.code  # a shell line in a program's code is still that program's text
         return inner
 
-    def nested(self, text, cwd, same_shell=False, names=(), typed=True):
+    def nested(self, text, cwd, same_shell=False, names=(), typed=True, code=""):
         if not text:
             return None
         if self.depth >= 4:  # too deep to read is no "nothing found": refused
             return deny(NESTED_REASON)
         inner = self.child(text, cwd, names)
-        inner.typed = typed
+        inner.typed, inner.code = typed, code or inner.code
         v = inner.run()
         self.unresolved += inner.unresolved
         if same_shell:  # source and eval run in this shell: what they export stays set
             self.exported |= inner.exported
         for alt in () if v else _substitution_readings(text):  # `sh -c 'dev $(true) install'`: only adds a refusal
             other = self.child(alt, cwd, names)
-            other.typed = typed
+            other.typed, other.code = typed, code or other.code
             v = other.run()
             if v:
                 break
@@ -4825,12 +5187,24 @@ class _Shell:
             return None
         env = _code_env_sets(code, name)
         for text in _code_texts(code, name, lists_only=_py_argv_only(code, name)):
-            v = self.nested(text, cwd, names=env, typed=False)
+            v = self.nested(text, cwd, names=env, typed=False, code=name)
             if v:
                 return v
         return None
 
     def segment(self, name, argv, assigns, cwd, names=()):
+        runs = _launched(argv)
+        if runs is None:  # a launcher with more words, or launchers deeper, than the guard reads
+            return deny(LAUNCH_REASON, key="launcher-words")
+        for sub in runs:  # `op run -- git push --force …`: each command the launcher may start
+            run = _unwrap(sub)
+            v = self.segment(os.path.basename(run[0]), run, assigns, cwd, names) if run else None
+            if v:
+                return v
+        for line in _held_lines(argv):  # an alias body, hyperfine's lines: what a shell runs from them
+            v = self.nested(line, cwd, names=names)
+            if v:
+                return v
         _WORD.set(name)  # the refused segment's command word
         args = argv[1:]
         why = input_command_refusal(argv)  # xargs env, parallel env, find -exec {}: the command comes from the input
@@ -4842,8 +5216,13 @@ class _Shell:
         why = guardless_session(name, argv, set(names) | self.exported, cwd)
         if why:
             return deny(why, key="guardless-session")
-        if vendor_ext_refusal(argv, cwd, set(names) | self.exported):
-            return deny(EXT_REASON, key="vendor-ext")
+        kind = vendor_ext_refusal(argv, cwd, set(names) | self.exported)
+        for words in [] if kind else _split_values(argv[0], self.cmd):  # `X="claude mcp"; $X add …`
+            kind = vendor_ext_refusal([*words, *argv[1:]], cwd, set(names) | self.exported)
+            if kind:
+                break
+        if kind:
+            return deny(_vendor_ext_reason(kind, self.code), key="vendor-ext")
         if terminal_open_refusal(argv):
             return deny(TERMINAL_REASON, key="terminal-open")
         if terminal_typing_refusal(argv):
@@ -4956,8 +5335,9 @@ class _Shell:
             why = guardless_session(args[0], inner, names)
             if why:
                 return deny(why, key="guardless-session")
-            if vendor_ext_refusal(inner, cwd, names):
-                return deny(EXT_REASON, key="vendor-ext")
+            kind = vendor_ext_refusal(inner, cwd, names)
+            if kind:
+                return deny(_vendor_ext_reason(kind, self.code), key="vendor-ext")
         if words[:2] == ["config", "set"]:
             # dev config set drops empty key parts (core.config_set): .agents.codex and bugs..share name agents.codex
             # and bugs.share
@@ -5145,6 +5525,103 @@ class _Shell:
 
 
 _FIND_RUNS = frozenset({"-exec", "-execdir", "-ok", "-okdir"})  # find's primaries that run a command
+
+
+# launchers that run a command their words name, after options the guard does not parse, with the verb that does it
+# (none: the program itself); _launcher_suffixes reads them without each one's option grammar
+_LAUNCHERS = {"taskpolicy": (), "sandbox-exec": (), "xcrun": (), "dotenv": (), "op": ("run",), "direnv": ("exec",),
+              "mise": ("exec", "x"), "asdf": ("exec",), "nix": ("run", "shell", "develop"), "ccr": ("code",)}
+# what the guard reads of the commands a launcher may start (_launched), the launchers among them included: at most
+# this many commands, this many characters of their words in all, and launchers this many deep inside launchers. A
+# reading past the hook's timeout lets the command run unjudged, so past any of them the guard refuses. Real commands
+# stay far below: a commit with three 4000-character texts after `op run --` reads 6 commands of about 60,000 characters
+_LAUNCH_RUNS, _LAUNCH_TEXT, _LAUNCH_DEPTH = 64, 128_000, 4
+LAUNCH_REASON = (
+    "This command gives a launcher (`xcrun`, `op run`, `nix run`, `mise exec` and the like) more words than the guard "
+    "reads, or launchers inside launchers deeper than it reads. Any word of a launcher may name the program it "
+    f"starts, so the guard reads the command from each one, up to {_LAUNCH_RUNS} commands, {_LAUNCH_TEXT:,} "
+    f"characters and {_LAUNCH_DEPTH} launchers deep, and it refuses what it cannot read in full. Run the program "
+    "without the launcher, or hand the launcher a script file or an `sh -c '…'` line, which the guard reads as one "
+    f"command. {_TAIL}")
+
+
+def _launcher_suffixes(argv):
+    """The commands a launcher of _LAUNCHERS may start, one at a time: each run of its words from a word that is no
+    option on (the first that names a program is the command, and the guard cannot tell which that is, so each is
+    read, the strictest verdict standing), a flake's `nixpkgs#claude-code` read as its package, and `ccr code …` as
+    claude. Nothing for any other command. One at a time, so _launched stops at its bound without building the rest."""
+    if not argv:
+        return
+    name, args = os.path.basename(str(argv[0])), [str(a) for a in argv[1:]]
+    verbs = _LAUNCHERS.get(name)
+    if verbs is None or (verbs and args[:1] and args[0] not in verbs) or (verbs and not args):
+        return
+    if name == "ccr":  # Claude Code Router's `ccr code` starts claude with the words after it
+        yield ["claude", *args[1:]]
+        return
+    args = args[1:] if verbs else args
+    for k, a in enumerate(args):
+        if a and not a.startswith("-"):
+            yield [a.rpartition("#")[2], *args[k + 1:]]
+
+
+def _launched(argv):
+    """Each command a launcher may start (_launcher_suffixes), once, with what each launcher among them starts in
+    turn: `xcrun xcrun git push` reads `git push` and `push` once each. Reading each launcher's commands again took
+    twice as long with every launcher in a chain, and past the hook's timeout the command ran unjudged. A launcher
+    among them is read for what it starts, not as a command of its own: no rule judges a launcher by its name. The
+    commands come as _launcher_suffixes gives them; the callers unwrap them. None when there is more to read than
+    _LAUNCH_RUNS, _LAUNCH_TEXT or _LAUNCH_DEPTH allow, which the callers refuse; [] for any other command."""
+    out, seen, size, todo, level = [], set(), 0, [argv], 0
+    while todo:
+        level += 1
+        if level > _LAUNCH_DEPTH:
+            return None
+        found, todo = todo, []
+        for cmd in found:
+            for sub in _launcher_suffixes(cmd):
+                key = tuple(sub)
+                if key in seen:
+                    continue
+                seen.add(key)
+                size += len(sub) + sum(map(len, sub))
+                if len(seen) > _LAUNCH_RUNS or size > _LAUNCH_TEXT:
+                    return None
+                run = _unwrap(sub)
+                if run and next(_launcher_suffixes(run), None) is not None:
+                    todo.append(run)  # a launcher in turn: read at the next level for what it starts
+                else:
+                    out.append(sub)
+    return out
+
+
+_HYPERFINE_LINES = frozenset({"-p", "--prepare", "-s", "--setup", "-c", "--cleanup", "--conclude"})
+
+
+def _held_lines(argv) -> list:
+    """The command lines a command holds as words for a shell to run: the body of each alias it defines (`alias
+    ng='claude mcp add …'` runs when `ng` does), and hyperfine's benchmarks and its --prepare, --setup, --cleanup and
+    --conclude lines. Each of hyperfine's other words that is no option is read as a line too (a value such as `10`
+    is a harmless one). [] for any other command."""
+    if not argv:
+        return []
+    name, args = os.path.basename(str(argv[0])), [str(a) for a in argv[1:]]
+    if name == "alias":
+        return [a.split("=", 1)[1] for a in args if "=" in a and not a.startswith("-")]
+    if name != "hyperfine":
+        return []
+    out, i = [], 0
+    while i < len(args):
+        key, eq, val = args[i].partition("=")
+        if args[i].startswith("--") and eq:
+            out += [val] if key in _HYPERFINE_LINES else []
+        elif args[i] in _HYPERFINE_LINES and i + 1 < len(args):
+            out.append(args[i + 1])
+            i += 1
+        elif not args[i].startswith("-"):
+            out.append(args[i])
+        i += 1
+    return out
 
 
 def _unwrap(argv, more: bool = False, stop=()):
@@ -5713,7 +6190,7 @@ def _xargs_dev_refusal(inner) -> str | None:
     if not dargs:
         return INSTALL_REASON
     if dargs == ["ext"]:
-        return EXT_REASON
+        return EXT_FORM_REASON  # its words come from the input: no read-only form the guard can see
     return None
 
 
@@ -6685,6 +7162,8 @@ def evidence_forgery(cmd: str, cwd):
 
 _CREW_LANE = frozenset({"ask", "answer", "inbox", "decide", "decisions", "mode", "delegate", "decline", "route"})
 _CREW_READ = frozenset({"graph", "show", "rules", "history", "next", "owner"})  # owner: who holds a file
+_CREW_TEAM = frozenset({"brief", "set", "withdraw", "raci"})  # raci with --set; sync is judged on its own
+_CREW_WORDS = ", ".join(_code(w) for w in sorted(_CREW_LANE | _CREW_READ | _CREW_TEAM | {"sync"}))
 _LANE_TEXT = re.compile(r"\bdev\W{1,6}(?:progress|crew)\b")
 _DEV_IN_CODE = re.compile(r"(?<![\w.-])dev[\s'\",\[\]]{1,6}(progress|crew)\b(?:[\s'\",\]]{1,6}(-{0,2}[A-Za-z][\w-]*))?")
 _SPAWNS = re.compile(
@@ -6701,6 +7180,44 @@ LANE_REASON = ("Run `dev progress …` and `dev crew …` as a command of its ow
                "to a command that writes or runs code it would act as the tech lead. Text that only mentions these "
                "commands (a quoted message, a heredoc written to a file) is fine, and read-only crew commands (graph, "
                "show, raci, …) work anywhere.")
+LANE_QUOTED_REASON = ("The message in double quotes holds {what}, which the shell runs as a command before devkit "
+                      "reads the message, so devkit cannot route this call to your lane: run that way, a command "
+                      "inside it would act as the tech lead. Put the message in single quotes, or write it without "
+                      "{what}.")
+
+
+def _lane_reason(cmd: str) -> str:
+    """LANE_REASON, or LANE_QUOTED_REASON when a lane call's own double-quoted message holds backticks or `$(`, which
+    keep a call that is otherwise a command of its own from its lane (a `"$(cat <<'EOF' …)"` message is data; a lane
+    call inside a substitution, `echo "$(dev crew …)"`, gets LANE_REASON)."""
+    what = "" if _DATA_HEREDOC.search(cmd) else _double_quoted_substitution(cmd)
+    for argv, _ in split_commands(cmd) or [] if what else []:
+        args = _dev_args(_unwrap(argv))
+        if args and _crew_kind(args) == "lane" and any("`" in a or "$(" in a for a in args):
+            return LANE_QUOTED_REASON.format(what=what)
+    return LANE_REASON
+
+
+def _double_quoted_substitution(cmd: str) -> str:
+    """What runs inside the first double-quoted word of a command line that holds a substitution: 'backticks' or
+    `$(`; '' for none."""
+    q, i, n = None, 0, len(cmd)
+    while i < n:
+        c = cmd[i]
+        if q == "'":
+            q = None if c == "'" else q
+        elif c == "\\":
+            i += 1
+        elif q == '"' and c == "`":
+            return "backticks"
+        elif q == '"' and cmd.startswith("$(", i):
+            return _code("$(")
+        elif c == '"':
+            q = None if q == '"' else '"'
+        elif c == "'" and q is None:
+            q = "'"
+        i += 1
+    return ""
 
 
 _DATA_HEREDOC = re.compile(r"\$\(cat <<(['\"])([A-Za-z_][A-Za-z0-9_]*)\1\n")
@@ -7205,25 +7722,35 @@ def _layers(scope) -> list:
 
 
 def _glob_hit(path: str, g: str) -> bool:
-    g = g.rstrip("/") if g not in ("/", "") else g
-    return fnmatch.fnmatchcase(path, g) or fnmatch.fnmatchcase(path, g + "/**") or \
-        path.startswith(g.rstrip("*").rstrip("/") + "/") or path == g
+    """Does scope glob `g` hold `path`? By the lanes' own rules (progress.scope_match): `*` stays inside one segment,
+    so `src/pkg/*.py` holds no file of src/pkg/studio/, and a folder holds what lies below it. The edit check and
+    `dev commit` must read a scope the same way, or one lane commits another's file."""
+    from . import progress
+    return progress.scope_match(path, g)
 
 
 def scope_holds(path, cwd, globs, base=None) -> bool:
     """True when `path` is in one of `globs`, by the crew scope rules: a glob relative to the lane's repository
     (`base`, from scope_base; without it the repository of `cwd`) such as `lib/**`, `docs/` or a file never reaches
-    outside it; an absolute or ~ glob names a folder anywhere, such as the project's plans in the handoff repository."""
+    outside it, also through a link (`shared/**` where shared leads elsewhere: the write lands where it leads); an
+    absolute or ~ glob names a folder anywhere, such as the project's plans in the handoff repository."""
     ap = os.path.normpath(os.path.join(str(cwd), str(path)))
-    rel = scope_rel(ap, cwd, base)
+    top = _scope_top(cwd, base)
+    rel = scope_rel(ap, cwd, top)
+    inside = not rel.startswith("..") and not os.path.relpath(real(ap), real(top)).startswith("..")
     for g in globs or []:
         if g.startswith(("/", "~")):
             ga = os.path.expanduser(g)
             if _glob_hit(ap, ga) or _glob_hit(real(ap), ga) or _glob_hit(real(ap), _real_glob(ga)):
                 return True
-        elif not rel.startswith("..") and _glob_hit(rel, g):
+        elif inside and _glob_hit(rel, g):
             return True
     return False
+
+
+def _scope_top(cwd, base=None) -> str:
+    """The folder a lane's scope globs count from: `base`, else the repository of `cwd`, else `cwd`."""
+    return str(base) if base else (core.gitout(cwd, "rev-parse", "--show-toplevel") or str(cwd))
 
 
 def _real_glob(g: str) -> str:
@@ -7237,7 +7764,7 @@ def scope_rel(path, cwd, base=None) -> str:
     """`path` relative to the folder a lane's scope globs count from (`base`, else the repository of `cwd`); it
     starts with '..' outside it. Symbolic links are resolved when the plain paths disagree (/var and /private/var)."""
     ap = os.path.normpath(os.path.join(str(cwd), str(path)))
-    top = str(base) if base else (core.gitout(cwd, "rev-parse", "--show-toplevel") or str(cwd))
+    top = _scope_top(cwd, base)
     rel = os.path.relpath(ap, top)
     return os.path.relpath(real(ap), real(top)) if rel.startswith("..") else rel
 
@@ -8702,6 +9229,7 @@ def failopen(where: str, exc: BaseException):
     _record("guard.failopen", where, f"{type(exc).__name__}: {exc}"[:300], "allow", rule=where)
 
 
+@_in_time()
 def crew_shell_verdict(cmd: str, cwd, scope=None, member=None, level=None, base=None, *, lane=None, session: str = "",
                        agent: str = "claude", grant=None, now=None, routed: bool = False):
     """For a crew member's shell command that devkit did not route to its lane (or, with `routed`, one it did):
@@ -8772,9 +9300,13 @@ def crew_shell_verdict(cmd: str, cwd, scope=None, member=None, level=None, base=
                 return deny(SESSION_MEMBER_REASON.format(what=_code(f"dev session {sub}")), key="session-member")
         for kind, args in _dev_calls(argv, code):
             if kind == "lane" and not one_routed:
-                return deny(LANE_REASON, key="lane")
+                return deny(_lane_reason(cmd), key="lane")
             if kind == "team":
                 sub = next((a for a in args[1:] if not a.startswith("-")), "")
+                if sub not in _CREW_TEAM:  # `dev crew messages`: no command at all
+                    return deny(f"{_code(f'dev crew {sub}')} is not a crew command, so the guard cannot tell what it "
+                                f"would do. The crew commands are {_CREW_WORDS}; `dev crew --help` says what each "
+                                f"does.", key="crew-word")
                 return deny(f"{_code(f'dev crew {sub}')} changes the team's crew or briefs a member: the tech lead "
                             f"runs it. Ask with `dev crew ask \"…\"` and say what should change and why.", key="team")
             if kind == "sync":
@@ -9286,9 +9818,25 @@ def _unread_action(argv, path) -> tuple:
 def _dynamic_code(name, code) -> bool:
     """True when an interpreter's program can call a function whose name it builds at run time (RT2), judged on its
     code outside string literals: an edit script whose strings hold JavaScript with `eval(` builds nothing."""
+    return bool(_dynamic_match(name, code))
+
+
+def _dynamic_match(name, code):
+    """The match of _dynamic_code in a program's code outside string literals, or None."""
     fam = re.sub(r"[0-9.]+$", "", os.path.basename(str(name or "")).casefold())
     fam = {"pypy": "python", "node": "js", "nodejs": "js", "deno": "js", "bun": "js"}.get(fam, fam)
-    return bool(code) and bool(_DYNAMIC_CODE.get(fam, _DYNAMIC_CODE[""]).search(_outside_strings(code)))
+    return _DYNAMIC_CODE.get(fam, _DYNAMIC_CODE[""]).search(_outside_strings(code)) if code else None
+
+
+def _built_action(argv, name, code) -> tuple | None:
+    """_unknown for an interpreter's program that may build what it runs: a function it calls by a name it builds at
+    run time (_dynamic_code), or a spawn whose command starts with what it fills in (_SPAWN_BUILT), with that code,
+    which the refusal names. None when the program has neither."""
+    m = _dynamic_match(name, code) or _SPAWN_BUILT.search(code or "")
+    if not m:
+        return None
+    action, target = _unknown(" ".join(argv))
+    return action, target, "", ("built", " ".join(m.group(0).split()))
 
 
 # a module name is a string, and naming child_process is how JavaScript reaches its spawn functions
@@ -10365,7 +10913,7 @@ def code_session_refusal(argv, cwd, bodies, depth: int = 0) -> str | None:
             dargs = _dev_args(inner)
             helps = dargs is not None and _dev_skips(dargs[1:], "-h", "--help")
             if vendor_ext_refusal(inner, cwd) or (dargs is not None and _ext_refusal(dargs) and not helps):
-                return EXT_REASON
+                return EXT_DATA_REASON
             if terminal_open_refusal(inner):
                 return TERMINAL_REASON
             if terminal_typing_refusal(inner):
@@ -10541,8 +11089,8 @@ def _segment_actions(argv, cwd, bodies, depth) -> list:
                 more += _text_actions(text, cwd, depth + 1, from_code=True, expand=expand) or []
             if unread:  # its program is too large or unreadable: it may do anything
                 found = [_unread_action(argv, unread[0])]
-            elif _dynamic_code(name, code) or _SPAWN_BUILT.search(code or ""):  # it may build what it runs
-                found = [_unknown(" ".join(argv))]
+            elif built := _built_action(argv, name, code):  # it may build what it runs
+                found = [built]
         if not found and "/" in argv[0] and name not in _SHELLS and not _INTERP.match(name):
             found, more = _path_run_actions(argv, cwd, bodies, depth)
         found = found or _opaque_actions(name, argv, cwd)
@@ -10651,6 +11199,22 @@ def _argv_actions(argv, cwd, bodies, depth):
     if _input_command(argv):
         return None
     out = _segment_actions(argv, cwd, bodies, depth)
+    runs = _launched(argv)
+    if runs is None:  # more than the gate reads of what a launcher may start: it may start anything
+        out += _found([_unsure_action(argv, f"{_code(os.path.basename(argv[0]))} with more words than the guard "
+                                            f"reads, or launchers deeper inside it (any of its words may name the "
+                                            f"program it starts)")], argv, cwd)
+    for sub in runs or ():  # `op run -- gh pr merge 12`: each command the launcher may start
+        run = _unwrap(sub)
+        more = _argv_actions(run, cwd, bodies, depth) if run else []
+        if more is None:
+            return None
+        out += more
+    for line in _held_lines(argv):  # an alias body, hyperfine's lines
+        more = _text_actions(line, cwd, depth + 1)
+        if more is None:
+            return None
+        out += more
     name, args = os.path.basename(argv[0]), argv[1:]
     texts, inners = [], []  # texts: (script, the path of a script file or None for a line the command holds)
     with _skipped_reads() as unread:
@@ -11409,6 +11973,9 @@ def _what(a) -> str:
                 f"action, tier 2 included (command {a['target']})")
     if (a.get("why") or ("",))[0] == "unsure":  # the guard cannot tell what runs
         return f"runs {a['why'][1]}, so it may be any action, tier 2 included (command {a['target']})"
+    if (a.get("why") or ("",))[0] == "built":  # a program that may build what it runs
+        return (f"runs a program that can call a function by a name it builds when it runs ({_code(a['why'][1])}), "
+                f"so it may be any action, tier 2 included (command {a['target']})")
     if a.get("why"):  # B2b: a push of an embargoed branch, or of a branch while the note cannot be read
         return (f"sends an embargoed branch or its commits to the remote, a decision only the developer makes "
                 f"({a['target']})")
@@ -11439,6 +12006,11 @@ def _main_reason(a) -> str:
                 f"its path) or cannot be read, so it may do anything, tier 2 included. Run a smaller script, "
                 f"or the commands it holds one by one. If it must run as it is, ask the developer first; they approve "
                 f"this exact command by typing this line on its own: {_code('grant unknown ' + str(a['target']))}.")
+    if a["action"] == "unknown" and (a.get("why") or ("",))[0] == "built":
+        return (f"{_code(a['words'])} {_what(a)}. Call the function by its own name, not through "
+                f"{_code(a['why'][1])}, so the guard can read what the program runs. If it must run as it is, ask the "
+                f"developer first; they approve this exact command by typing this line on its own: "
+                f"{_code('grant unknown ' + str(a['target']))}.")
     if a["action"] == "unknown" and (a.get("why") or ("",))[0] == "unsure":
         return (f"{_code(a['words'])} {_what(a)}. Write out what it runs, as plain words or a file the guard can read "
                 f"(for a GraphQL query, `-f query='…'` or `-F query=@query.graphql`), so the guard can classify it. "
@@ -11564,6 +12136,7 @@ def _main_gate(acts, agent, session, grant, now):
     return None
 
 
+@_in_time()
 def irreversible_verdict(cmd: str, cwd, *, agent: str = "claude", session: str = "", grant=None, now=None):
     """The irreversible-action gate for a shell command of the main session (spec C6): ("deny", why) for a tier-2
     action no live grant covers while safeguards.irreversible_main enforces; None otherwise. Every action is recorded
@@ -11650,6 +12223,50 @@ def _mcp_registry_write(tool, tool_input) -> bool:
     return _names_registry(repo if "/" in repo else f"{owner}/{repo}" if owner and repo else "")
 
 
+def _step_grant_gap(run, lane, member, a) -> str:
+    """What keeps crew member `member`'s tier-1 action `a` from a step grant, read from the run as progress.use_grant
+    reads it, and what the member asks for (B-g7g18niqtw4): the developer's own grant line for that target, typed
+    before the step is assigned, and the tech lead's `dev progress assign <step> --allow <action>` after it, because
+    assign keeps an action only with the developer's evidence."""
+    act, t, who = a["action"], str(a["target"]), member or "<you>"
+    typed = (f"the developer types {_code(f'grant {act} {t}')} on a line of its own (only a grant typed by the "
+             f"developer opens it; `--allow` alone does not)")
+    if _UNKNOWABLE.search(t):
+        return (f"Its target ({_code(t)}) is only known when it runs, so no grant typed by the developer can cover it: "
+                f"write the branch out (`git push origin <branch>`, `gh pr create -H <branch>`).")
+    live = run if isinstance(run, dict) and run.get("goal") and run.get("state") != "done" else None
+    step = next((s for s in (live or {}).get("plan") or [] if isinstance(s, dict) and s.get("owner") == lane
+                 and s.get("state") == "running"), None)
+    if not step:
+        return (f"Your lane owns no running step of the plan, and a step grant belongs to the step it runs. Ask for: "
+                f"{typed}, then the tech lead assigns your step with "
+                f"{_code(f'dev progress assign <step> --to {who} --allow {act}')}.")
+    name = step.get("name") or "<step>"
+    assign = _code(f"dev progress assign {name} --to {who} --allow {act}")
+    ev = (step.get("allow_evidence") or {}).get(act) or {}
+    if act not in (step.get("allow") or []) or not ev.get("target"):
+        return (f"Your step {name} does not allow {act}: it was assigned without {_code(f'--allow {act}')}, or while "
+                f"no grant typed by the developer was live, and `--allow` keeps an action only then. Ask for: {typed}, "
+                f"then the tech lead runs {assign} again.")
+    if not target_matches(act, ev["target"], t):
+        return (f"Your step {name}'s grant covers {act} {ev['target']}, not {t}. Ask for: {typed}, then the tech "
+                f"lead runs {assign} again.")
+    if str(ev.get("repo") or "").lower() != str(a.get("repo") or "").lower():
+        return (f"Your step {name}'s grant holds in {ev.get('repo') or 'no known repository'}, and this acts on "
+                f"{a.get('repo') or 'a repository devkit cannot name'}. Ask for: {typed} in that repository, then the "
+                f"tech lead runs {assign} again.")
+    return f"Ask for: {typed}, then the tech lead runs {assign} again."
+
+
+def _lane_run(agent, session):
+    """The run of the session a lane works in, for the refusal's explanation only; None when it cannot be read."""
+    try:
+        from . import progress
+        return progress.load_run(agent, session)
+    except Exception:
+        return None
+
+
 def _member_gate(cmd, cwd, member, lane, agent, session, grant, now) -> str | None:
     """Why a crew member may not run this command's irreversible actions (spec C6), or None: tier 2 never; tier 1 only
     with a step grant of its lane; any failure to check denies (grants fail closed, P4)."""
@@ -11681,10 +12298,10 @@ def _member_gate(cmd, cwd, member, lane, agent, session, grant, now) -> str | No
         missing = next((a for a, g in found if not g), None)
         if missing and setting == "enforce":
             _gate_record(missing, "deny", who, setting, lane, session)
+            gap = _step_grant_gap(_lane_run(agent, session) if lane else None, lane, member, missing)
             return (f"{_code(missing['words'])} {_what(missing)}, and crew members push and open PRs only with a step "
-                    f"grant (spec C6, tier 1). Ask the tech lead with `dev crew ask \"…\"`: once the developer agrees, "
-                    f"the tech lead assigns your step with `dev progress assign <step> --to <you> --allow push,pr`, or "
-                    f"pushes it.")
+                    f"grant (spec C6, tier 1). {gap} Ask the tech lead with `dev crew ask \"…\"`, or ask them to "
+                    f"push it.")
         for a, g in found:
             used = look(a["action"], a["target"], a["repo"], True) if g else None
             if g and not used and setting == "enforce":
@@ -11744,11 +12361,12 @@ def bulk_rewrite(cmd: str, cwd=None) -> bool:
 
 
 def _in_checkout(path) -> bool:
-    """True when `path` lies in a git checkout (a worktree or a repository in a temp folder keeps its scope)."""
+    """True when `path` lies in a git checkout (a worktree or a repository in a temp folder keeps its scope). Asked
+    once per judgment for each folder (_once)."""
     d = os.path.dirname(real(path))
     while d and not os.path.isdir(d):
         d = os.path.dirname(d)
-    return bool(d and core.gitout(d, "rev-parse", "--show-toplevel"))
+    return bool(d) and _once("checkout", d, lambda: bool(core.gitout(d, "rev-parse", "--show-toplevel")))
 
 
 def member_write_exempt(path, cwd, scope=None, member=None, base=None) -> bool:
@@ -11803,6 +12421,7 @@ _SHELL = _Judged(None)  # the call is a shell command: check_bash judges it
 _TILDE_READINGS = (_EXPAND, _AS_IS)
 
 
+@_in_time(judged=True)
 def check(tool: str, tool_input: dict, cwd: str, agent: str, call: dict | None = None):
     """The guard's verdict on one tool call: ("deny", why), ("ask", why) or None. It begins a judgment: the refusal
     ids of what it and the gates after it refuse are kept for refusal_of, and LAST_REFUSAL names its own refusal.
@@ -11951,25 +12570,29 @@ def lesson_rule_context() -> str:
             f"{_code('grant lesson-block ' + str(rule['lesson']))} for {_code(block)}.")
 
 
-def lesson_rule_hit(session: str, agent: str) -> dict:
+def lesson_rule_hit(session: str, agent: str, reads_context: bool = True) -> dict:
     """Record the lesson rule check() just matched, for the hook that knows the session: a miss when the agent was
     shown the lesson earlier in this session and still pending (lessonevents.on_hit), the rule's hit
     (lessonrules.record_hit, which counts it; only the developer's grant makes a rule refuse), then the lesson as
-    shown on channel `call` (warn) or `refusal` (block). Call it before the hook records any other lesson it shows
-    for this call. -> {"rule", "lesson", "mode", "missed"}, {} when no rule matched. Never raises: a failure is
-    guard.failopen."""
+    shown on channel `call` (warn) or `refusal` (block). A warning reaches the agent only through the call's context:
+    with `reads_context` False (Codex reads no PreToolUse context) a warn rule's lesson is not shown, so it is not
+    recorded as shown either, and a later matching call is no miss of a text the agent never read. Call it before the
+    hook records any other lesson it shows for this call. -> {"rule", "lesson", "mode", "missed", "shown"}, {} when
+    no rule matched. Never raises: a failure is guard.failopen."""
     if not LAST_LESSON_RULE.get("rule"):
         return {}
     rule, mode = LAST_LESSON_RULE["rule"], LAST_LESSON_RULE["mode"]
+    shown = mode != "warn" or reads_context
     try:
         from . import lessonevents, lessonrules
         missed = rule["lesson"] in lessonevents.on_hit([rule["lesson"]], session, agent)
         lessonrules.record_hit(rule["id"], missed)
-        lessonevents.record("shown", rule["lesson"], "call" if mode == "warn" else "refusal", agent, session)
+        if shown:
+            lessonevents.record("shown", rule["lesson"], "call" if mode == "warn" else "refusal", agent, session)
     except Exception as e:
         failopen("lesson-rules", e)
         return {}
-    return {"rule": rule["id"], "lesson": rule["lesson"], "mode": mode, "missed": missed}
+    return {"rule": rule["id"], "lesson": rule["lesson"], "mode": mode, "missed": missed, "shown": shown}
 
 
 def _check(tool: str, tool_input: dict, cwd: str, agent: str):

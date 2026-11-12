@@ -4,13 +4,18 @@
 
 Safety rules (checked when planning AND again right before acting):
   * never touch a checkout with uncommitted changes, untracked files, or commits not on a remote;
+  * never remove a worktree whose ignored files hold anything but dependency folders and caches a tool rebuilds
+    (REBUILT) or byte-for-byte copies of the main checkout's files: `git worktree remove` deletes ignored files;
   * never touch a checkout where any process (agent session, shell, editor, server) is working;
   * never remove main checkouts; never remove Codex-app worktrees (the app manages them);
-  * only delete build output that git reports as ignored AND whose name is a known artefact;
+  * only delete build output that git reports as ignored AND whose name is a known artefact; without a person, only
+    what a tool fills again (tool_owned): a generic output name (build, dist, target, coverage, .cache) is a "check
+    first" action that only `dev gc --apply` deletes, after the person saw it;
   * every action is logged in the handoff repo (log/YYYY-MM.md).
 """
 from __future__ import annotations
 
+import filecmp
 import os
 import shutil
 import time
@@ -22,6 +27,23 @@ from .core import CFG, LOGDIR, git, gitout, human_kb, is_active, real, tilde
 ARTEFACTS = {"node_modules", ".venv", "venv", "dist", "build", "target", ".next", ".nuxt", ".angular", ".turbo",
              ".parcel-cache", ".cache", "coverage", ".pytest_cache", ".mypy_cache", ".ruff_cache", "__pycache__",
              ".gradle", ".build", "DerivedData", ".output", ".svelte-kit", "storybook-static", ".nx"}
+# What devkit deletes without a person (tool_owned): folders a tool owns and fills again (installs, caches), and
+# Finder's metadata. A worktree's removal may take them with it, the nightly job prunes them, and `dev free` offers
+# them as safe. Generic output names (build, dist, target, out, coverage, .cache, .output) are not here: people keep
+# files there too, and a merged worktree's ignored build/ held 3.6 GB of release evidence. Composer's vendor counts
+# when its composer.json is beside it.
+REBUILT = {"node_modules", ".venv", "venv", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache",
+           ".hypothesis", ".tox", ".nox", ".gradle", ".next", ".nuxt", ".angular", ".svelte-kit", ".turbo", ".nx",
+           ".parcel-cache", "DerivedData", ".DS_Store"}
+
+
+def tool_owned(full: str) -> bool:
+    """The one rule for an ignored entry devkit may delete without a person: a REBUILT name, or Composer's vendor
+    beside its composer.json. ignored_hold, the nightly plan and `dev free` all decide with it."""
+    full = full.rstrip("/")
+    name = os.path.basename(full)
+    return name in REBUILT or (name == "vendor" and
+                               os.path.isfile(os.path.join(os.path.dirname(full), "composer.json")))
 
 
 def _log(msg: str):
@@ -44,7 +66,7 @@ def artefacts(path: str, with_sizes=True):
         rel = ln[3:].rstrip("/")
         name = os.path.basename(rel)
         full = os.path.join(path, rel)
-        if name in ARTEFACTS or (name == "vendor" and os.path.exists(os.path.join(os.path.dirname(full), "composer.json"))):
+        if name in ARTEFACTS or (name == "vendor" and tool_owned(full)):
             if os.path.isdir(full) and not os.path.islink(full):
                 found.append((full, core.du_kb(full) if with_sizes else None))
     return found
@@ -149,29 +171,43 @@ def plan(reg: dict, with_sizes=True) -> dict:
                 continue
             pr = w.get("pr")
             removable = w.get("location") != "codex"
+            removal = {"kind": "remove-worktree", "project": p["id"], "main": p["path"], "path": w["path"],
+                       "branch": br, "github": p.get("github"), "pr": None, "kb": w.get("size_kb") or 0, "auto": True}
             if merged and removable and idle > grace:
-                actions.append({"kind": "remove-worktree", "project": p["id"], "main": p["path"], "path": w["path"],
-                                "branch": br, "github": p.get("github"), "pr": None,
-                                "merged": {"base": bp["base"], "sha": merged["sha"], "prs": bp.get("prs")},
-                                "reason": f"{merged['merge']}, idle {core.ago(now - idle)}",
-                                "kb": w.get("size_kb") or 0, "auto": True})
+                removal.update(merged={"base": bp["base"], "sha": merged["sha"], "prs": bp.get("prs")},
+                               reason=f"{merged['merge']}, idle {core.ago(now - idle)}")
             elif removable and pr and pr["state"] in ("MERGED", "CLOSED") and idle > grace:
-                actions.append({"kind": "remove-worktree", "project": p["id"], "main": p["path"], "path": w["path"],
-                                "branch": br, "github": p.get("github"), "pr": pr,
-                                "reason": f"PR #{pr['number']} {pr['state'].lower()}, idle {core.ago(now - idle)}",
-                                "kb": w.get("size_kb") or 0, "auto": True})
+                removal.update(pr=pr, reason=f"PR #{pr['number']} {pr['state'].lower()}, idle {core.ago(now - idle)}")
             elif removable and w.get("ahead_default") == 0 and idle > grace:
-                actions.append({"kind": "remove-worktree", "project": p["id"], "main": p["path"], "path": w["path"],
-                                "branch": br, "github": p.get("github"), "pr": None,
-                                "reason": f"no commits beyond origin/{p['default_branch']}, idle {core.ago(now - idle)}",
-                                "kb": w.get("size_kb") or 0, "auto": True})
+                removal.update(reason=f"no commits beyond origin/{p['default_branch']}, idle {core.ago(now - idle)}")
+            else:
+                removal = None
+            if removal:
+                held = ignored_hold(p["path"], w["path"])[1]  # remove_worktree's own check: the plan says what it does
+                if held:
+                    notes.append(f"keep   {label} — {held}")
+                else:
+                    actions.append(removal)
             elif idle > idle_art:
                 arts = artefacts(w["path"], with_sizes)
-                if arts:
+                days = int(idle // 86400)
+                rebuilt = [(a, k) for a, k in arts if tool_owned(a)]
+                other = [(a, k) for a, k in arts if not tool_owned(a)]
+                if rebuilt:
                     actions.append({"kind": "prune-artefacts", "project": p["id"], "path": w["path"], "branch": br,
-                                    "items": [a for a, _ in arts], "kb": sum(k or 0 for _, k in arts),
-                                    "reason": f"idle {int(idle // 86400)}d; regenerable build output", "auto": True})
-                else:
+                                    "items": [a for a, _ in rebuilt], "kb": sum(k or 0 for _, k in rebuilt),
+                                    "reason": f"idle {days}d; dependencies and caches a tool fills again",
+                                    "auto": True})
+                if other:  # people keep files under build/ and dist/ too: never without a person
+                    other.sort(key=lambda x: -(x[1] or 0))
+                    shown = _listed([os.path.relpath(a, w["path"]) + "/" + (
+                        f" ({human_kb(k)})" if k is not None else "") for a, k in other])
+                    actions.append({"kind": "prune-artefacts", "project": p["id"], "path": w["path"], "branch": br,
+                                    "items": [a for a, _ in other], "kb": sum(k or 0 for _, k in other),
+                                    "reason": f"check first: idle {days}d; {shown}: build output no tool is known to "
+                                              f"fill again, where people keep files too; look inside, then dev gc "
+                                              f"--apply deletes it (the nightly job does not)", "auto": False})
+                if not arts:
                     notes.append(f"keep   {label} — idle, nothing to prune")
             else:
                 why = f"PR #{pr['number']} {pr['state'].lower()}" if pr else "work in progress"
@@ -222,13 +258,52 @@ def _still_safe(path: str, branch: str = None, merged: dict = None):
     return True, ""
 
 
+def ignored_hold(main: str, path: str):
+    """The one check of a worktree's ignored files, for remove_worktree and `dev free`: the entries `git worktree
+    remove` deletes with the worktree at `path`, as git lists the ones that match an ignore pattern (a matching folder
+    whole, with its "/") -> (rebuilt, why). rebuilt: a REBUILT name, Composer's vendor, or a file with the same bytes at
+    the same place in the main checkout (what .worktreeinclude copied). why: "" when nothing else is there, else one
+    line naming the rest with their size, largest first, and how to remove the worktree on purpose (`dev branch prune`
+    shows only a failure's last line)."""
+    rc, out, _ = git(path, "status", "--ignored=matching", "--porcelain", "-z", "--untracked-files=normal", timeout=120)
+    if rc != 0:
+        return [], "git could not list its ignored files"
+    rebuilt, kept = [], []
+    for entry in out.split("\0"):
+        if not entry.startswith("!! "):
+            continue
+        rel = entry[3:]
+        full, twin = os.path.join(path, rel.rstrip("/")), os.path.join(main, rel.rstrip("/"))
+        copied = os.path.isfile(full) and not os.path.islink(full) and os.path.isfile(twin) and filecmp.cmp(
+            full, twin, shallow=False)
+        if tool_owned(full) or copied:
+            rebuilt.append(rel)
+        else:
+            kept.append(rel)
+    if not kept:
+        return rebuilt, ""
+    sized = sorted(((core.du_kb(os.path.join(path, rel), timeout=60), rel) for rel in kept[:50]),
+                   key=lambda s: -(s[0] or 0))
+    shown = _listed([f"{rel} ({human_kb(kb)})" for kb, rel in sized] + kept[50:])
+    return rebuilt, (f"removing it would delete ignored files that are not known to be regenerable: {shown}; move "
+                     f"them out or delete them, then dev wt rm {tilde(path)}")
+
+
+def _listed(rels: list, most=5) -> str:
+    return ", ".join(rels[:most]) + (f" and {len(rels) - most} more" if len(rels) > most else "")
+
+
 def remove_worktree(main: str, path: str, branch: str = None, github: str = None, require_pr=None, log=True,
                     merged: dict = None):
     """Safe removal used by `dev wt rm`, gc, `dev branch prune` and `dev pr merge`. `merged`: {base, sha, prs} when the
-    caller's merge test found the branch merged; it is tested again here. -> (ok, message)."""
+    caller's merge test found the branch merged; it is tested again here. A worktree with ignored files no tool rebuilds
+    stays, whole: `git worktree remove` would delete them. -> (ok, message)."""
     ok, why = _still_safe(path, branch, merged)
     if not ok:
         return False, f"kept {tilde(path)}: {why}"
+    rebuilt, held = ignored_hold(main, path)
+    if held:
+        return False, f"kept {tilde(path)}: {held}"
     landed = _merged_now(path, branch, merged) if merged else None
     if require_pr is not None and github and branch:
         fresh = registry.pr_fresh(github, branch)
@@ -239,6 +314,8 @@ def remove_worktree(main: str, path: str, branch: str = None, github: str = None
     if rc != 0:
         return False, f"git worktree remove failed for {tilde(path)}: {err}"
     msg = f"removed worktree {tilde(path)} ({branch})"
+    if rebuilt:
+        msg += f"; its ignored dependencies, caches and copies went with it: {_listed(rebuilt)}"
     if branch and branch != "detached":
         if int(gitout(main, "rev-list", "--count", branch, "--not", "--remotes") or 1) == 0:
             git(main, "branch", "-D", branch)

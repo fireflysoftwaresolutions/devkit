@@ -666,8 +666,9 @@ def private_words(login: str) -> frozenset:
 def deny_words() -> frozenset:
     """This machine's private words, in lower case: project ids (whole and their parts), owners and repository
     names of the projects map, their local branch names, worktree folder names and remote URLs, the handoff
-    repository's project ids and initiative slugs, git's user name and e-mail, the user and host names and the home
-    folder. Words shorter than 3 characters, devkit's own repository, public hosts,
+    repository's project ids and initiative slugs, git's user name and e-mail, the user and host names, this Mac's
+    machine id and the hostnames it carried before (identity.machine), and the home folder. Words shorter than 3
+    characters, devkit's own repository, public hosts,
     default branches and branch type prefixes are left out. A backstop: what a report carries is decided by its
     allowlist."""
     import getpass
@@ -728,6 +729,11 @@ def deny_words() -> frozenset:
         add(domain, ".")
     for i, host in enumerate(_host_names()):
         add(host, "." if i == 0 else "")  # the computer names stay whole: their parts are words like "pro"
+    from . import identity
+    m = identity.machine()
+    add(m.id)  # the handoff names this Mac by it
+    for former in m.aliases:  # the hostnames this Mac carried name it as surely as the one it carries now
+        add(former)
     home = Path.home()
     add(str(home))
     add(home.name)
@@ -794,7 +800,11 @@ def _text_problems(value: str) -> list:
     out = []
     if _URLISH.search(value):
         out.append("a URL")
-    out += [f"`{f}`" for f in _SHELL_FORMS if f in value]
+    found = [f"`{f}`" for f in _SHELL_FORMS if f in value]
+    if found:  # the rule with the forms found: the text is checked for them, never run or parsed as a command
+        rule = ", ".join(f"`{f}`" for f in _SHELL_FORMS if f != "`") + " or a backtick"
+        out.append(f"{', '.join(found)} {'is a shell form' if len(found) == 1 else 'are shell forms'}: a step may "
+                   f"not contain {rule}")
     if _PROTECTED_PATH.search(value):
         out.append("a path under an agent's or devkit's configuration folder")
     bad = next((p for p in map(_char_problem, value) if p), "")
@@ -818,11 +828,14 @@ def _dev_step_problems(value: str) -> list:
     if not words or words[0] not in tree:
         return ["not a dev subcommand"]
     parser, subs = tree[words[0]]
-    rest = words[1:]
+    rest, name = words[1:], words[0]
     if rest and rest[0] in subs:
-        parser, rest = subs[rest[0]], rest[1:]
+        parser, rest, name = subs[rest[0]], rest[1:], f"{name} {rest[0]}"
     flags = _value_free_flags(parser)
-    return [f"`{w}` is not a flag of this command that takes no value" for w in rest if w not in flags]
+    valued = {o for act in parser._actions if act.option_strings and act.nargs != 0 for o in act.option_strings}
+    what = [f"`{w}` takes a value" if w in valued else f"`{w}` is not a flag of `dev {name}`" if w.startswith("-")
+            else f"`{w}` is a value or an argument" for w in rest if w not in flags]
+    return [", ".join(what) + ": a dev step is a dev subcommand and only its flags that take no value"] if what else []
 
 
 _SLOT_CHECKS = {
@@ -885,9 +898,9 @@ _OTHER_TOOLS = ("Edit", "Write", "Read", "Grep", "Glob", "MultiEdit", "NotebookE
                 "Task", "apply_patch", "write_stdin")
 EVIDENCE_COUNTS = ("successes", "failures", "attempts")
 _COMMON_FIELDS = {"devkit_bug", "type", "fingerprint", "version"}
-_FREE_FIELDS = ("title", "text", "template")
+FREE_FIELDS = ("title", "text", "template")  # the reporter's free text: never in a record the bot writes
 _FIELDS = {
-    "report": _COMMON_FIELDS | set(REPORT_KEYS) | set(_FREE_FIELDS),
+    "report": _COMMON_FIELDS | set(REPORT_KEYS) | set(FREE_FIELDS),
     "vote": _COMMON_FIELDS | {"impact", "window"},
     "detour": _COMMON_FIELDS | {"impact", "steps", "evidence"},
     "confirm": _COMMON_FIELDS | {"detour_id"},
@@ -1010,6 +1023,7 @@ VOTER_DAYS = 90  # a voter quiet this long no longer counts anywhere
 # under RECORD_MAX, and past MAX_VOTERS_PER_IMPACT voters of one impact it names only the newest (fit_record)
 RECORD_MAX = 60000
 MAX_VOTERS_PER_IMPACT = 100
+ISSUE_MAX = 60000  # GitHub refuses an issue body over 65,536 characters too: render_issue stays under this (_fit_issue)
 _BLOCK_RE = re.compile(r"^```json\n(.*?)\n```$", re.M | re.S)
 _SUMMARY_SAFE = re.compile(r"[^A-Za-z0-9._ -]")
 _TITLE_SAFE = re.compile(r"[^A-Za-z0-9._ :-]")
@@ -1040,19 +1054,26 @@ def _one_block(body):
     return obj if isinstance(obj, dict) else None
 
 
+def _safe(v) -> str:
+    return _SUMMARY_SAFE.sub("", str(v if v is not None else ""))[:40]
+
+
 def _render(rec: dict) -> str:
-    def safe(v):
-        return _SUMMARY_SAFE.sub("", str(v if v is not None else ""))[:40]
     people = sum(n for _, _, n in _tallies(rec))
-    summary = (f"**Bug {safe(rec.get('fingerprint'))}** · {safe(rec.get('kind'))} · {safe(rec.get('component'))} · "
-               f"{people} {'person' if people == 1 else 'people'} · score {float(rec.get('score') or 0):.1f} · "
-               f"{safe(rec.get('status'))}" + (f" · fixed in {safe(rec['fixed_in'])}" if rec.get("fixed_in") else ""))
-    return f"{summary}\n\n{RECORD_MARK}\n{_json_block(rec)}"
+    kind, part = _safe(rec.get("kind")), _safe(rec.get("component"))
+    score_ = rec.get("score") if _is_ts(rec.get("score")) else 0.0
+    summary = (f"**Bug {_safe(rec.get('fingerprint'))}** · {kind}" + (f" · {part}" if part and part != kind else "")
+               + f" · {people} {'person' if people == 1 else 'people'} · score {float(score_):.1f} · "
+               f"{_safe(rec.get('status'))}" + (f" · fixed in {_safe(rec['fixed_in'])}" if rec.get("fixed_in") else ""))
+    return (f"{summary}\n\nThe registry's record of this bug: the data the issue text is written from. devkit reads "
+            f"only this comment.\n\n<details>\n<summary>Record data (written by the workflow; do not edit)</summary>"
+            f"\n\n{RECORD_MARK}\n{_json_block(rec)}\n\n</details>")
 
 
 def render_record(rec: dict) -> str:
-    """A record as the bot's comment: a summary line for people, the marker, and one escaped JSON block. Never more
-    than RECORD_MAX characters: a record that would be longer is fitted first (fit_record), as of its last vote."""
+    """A record as the bot's comment: a summary line and a sentence for people, then the marker and one escaped
+    JSON block, folded in a <details> block. Never more than RECORD_MAX characters: a record that would be longer is
+    fitted first (fit_record), as of its last vote."""
     body = _render(rec)
     if len(body) <= RECORD_MAX:
         return body
@@ -1156,20 +1177,421 @@ def parse_payload(body: str):
     return obj if obj is not None and "devkit_bug" in obj else None
 
 
-def title_for(report: dict) -> str:
-    """The generated title of a bug, from its report's allowlisted fields only."""
-    kind, cmd = report.get("kind"), report.get("command")
-    exc = report.get("exc_class") or ""
-    if kind == "crash":
-        title = (f"crash in dev {cmd}" + (f": {exc}" if exc else "")) if cmd else f"crash: {exc or 'unknown'}"
-    elif kind == "hook":
-        title = f"hook {report.get('event') or 'unknown'}: {exc or 'timeout'}"
-    elif kind == "guard":
-        title = f"guard refusal {report.get('refusal_id') or 'unknown'}" + (
-            f" on {report['word']}" if report.get("word") else "")
+# --------------------------------------------------------------------------- what people read
+#
+# A registry issue reads as a bug report. Its title comes from devkit's title table (config/bug-titles.json), by
+# refusal id for a guard bug and by kind otherwise, with slots filled only from allowlisted report fields. Its body
+# opens with the table's sentence and five facts, and each payload comment opens with one plain line. The data stays
+# on the page in collapsed <details> blocks, which the workflow and every client parse as before. Free text shows
+# only in the reporter's own issue body or comment, escaped by md_text, and never in a title.
+
+TITLES = core.DEVKIT_HOME / "config" / "bug-titles.json"
+TITLE_MAX = 80
+NO_CLASS = "an error"  # what readable text says for an exception class Python, its library and devkit do not define
+AGENT_NAMES = {"claude": "Claude Code", "codex": "Codex"}
+CHANNEL_NAMES = {"release": "a release install", "checkout": "a source checkout"}
+DURATION_WORDS = {"<1s": "under 1 second", "1-10s": "1 to 10 seconds", "10-60s": "10 to 60 seconds",
+                  "1-10m": "1 to 10 minutes", ">10m": "over 10 minutes"}
+VERDICTS = {  # the verdict:* labels maintainers give, and the sentence the body states for each
+    "confirmed": "Confirmed as a devkit bug.",
+    "false-positive": "Confirmed: the guard refused a command it should allow.",
+    "correct-refusal": "The refusal is right, and the guard keeps refusing this.",
+    "misleading-message": "The refusal is right, but its message was misleading.",
+    "split": "Split: the refusals this issue collected now report under ids of their own.",
+    "needs-info": "Needs more reports to find the cause.",
+    "not-planned": "Not planned: devkit keeps this behavior.",
+}
+_MD_ENTITY = {c: f"&#{ord(c)};" for c in "\\`*_[]<>|~@&#"}
+_JOIN = "&#8288;"  # a word joiner: it shows as nothing, and keeps a mention, an issue reference or a link from forming
+
+
+@functools.lru_cache(maxsize=1)
+def bug_titles() -> dict:
+    """The title table, config/bug-titles.json of the devkit copy that runs: "guard" {refusal id: entry, "": the
+    entry for an id this copy does not know}; "crash", "hook", "command": one entry each; "events" {hook event: its
+    name, "": the name for none}; "words" {command word: its phrase, "*": the phrase for any other word}. An entry
+    holds `title`, `what` and `reproduce`, with `before` {the last version an older meaning held for: entry} and
+    `without` {slot: the entry for a report whose slot is empty}. {} when the file cannot be read."""
+    data = core.read_json(TITLES, {})
+    return data if isinstance(data, dict) else {}
+
+
+def _stdlib_module(top: str) -> bool:
+    """Whether `top` is a module of Python's standard library: sys.stdlib_module_names (Python 3.10 and later), else
+    a module built into the interpreter or one that lives in the standard library's folder, outside site-packages."""
+    names = getattr(sys, "stdlib_module_names", None)
+    if names is not None:
+        return top in names
+    if top in sys.builtin_module_names:
+        return True
+    import importlib.util
+    import sysconfig
+    try:
+        origin = str(getattr(importlib.util.find_spec(top), "origin", "") or "")
+    except (ImportError, ValueError):
+        return False
+    return origin.startswith(sysconfig.get_paths()["stdlib"]) and "site-packages" not in origin
+
+
+def stdlib_namespaces() -> list:
+    """The standard-library modules devkit's source imports, each by its literal name, never by a computed one:
+    readable text may name the exception classes they define (_known_classes). tests/test_bugs_render.py fails when
+    devkit's source imports a module this list leaves out. tomllib joins on Python 3.11 and later."""
+    import __future__, _thread, argparse, ast, base64, bisect, builtins, calendar, collections  # noqa: E401
+    import contextlib, contextvars, copy, csv, dataclasses, datetime, fcntl, filecmp, fnmatch  # noqa: E401
+    import functools, getpass, glob, gzip, hashlib, hmac, importlib, io, itertools, json, math  # noqa: E401
+    import os, pathlib, platform, plistlib, posixpath, pty, py_compile, random, re, secrets, select  # noqa: E401
+    import selectors, shlex, shutil, signal, socket, stat, statistics, string, subprocess, sys  # noqa: E401
+    import sysconfig, tarfile, tempfile, termios, textwrap, threading, time, traceback, types  # noqa: E401
+    import unicodedata, warnings, zipfile, zlib  # noqa: E401
+    import concurrent.futures, http.client, http.server, importlib.util, urllib.error, urllib.parse  # noqa: E401
+    import urllib.request, xml.etree.ElementTree  # noqa: E401
+    bound = dict(locals())
+    found = [v for v in bound.values() if isinstance(v, types.ModuleType)] + [
+        concurrent.futures, http.client, http.server, importlib.util, urllib.error, urllib.parse, urllib.request,
+        xml.etree, xml.etree.ElementTree]
+    try:
+        import tomllib
+        found.append(tomllib)
+    except ImportError:  # Python 3.10 and older have no tomllib
+        pass
+    return found
+
+
+@functools.lru_cache(maxsize=1)
+def _known_classes() -> frozenset:
+    """The exception classes readable text may name: Python's built-in ones, those of the standard-library modules
+    devkit imports (stdlib_namespaces), and every class devkit's own modules define, read from the copy that runs."""
+    import ast
+    import builtins
+
+    def errors(namespace) -> set:
+        return {n for n, v in vars(namespace).items() if isinstance(v, type) and issubclass(v, BaseException)}
+    names = errors(builtins)
+    for path in Path(__file__).parent.rglob("*.py"):
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except (OSError, SyntaxError, ValueError):
+            continue
+        names.update(node.name for node in ast.walk(tree) if isinstance(node, ast.ClassDef))
+    for module in stdlib_namespaces():
+        names |= errors(module)
+    return frozenset(names)
+
+
+def readable_exc(value) -> str:
+    """An exception class as readable text names it: the class when Python, its standard library or devkit defines
+    it (`KeyError`, `JSONDecodeError`, `Duplicate`), else `an error`, so no class named after a project reaches a
+    title or an issue's text. The report's data keeps the class as it was sent."""
+    return value if isinstance(value, str) and value in _known_classes() else NO_CLASS
+
+
+def md_text(text) -> str:
+    """Free text as inert Markdown, on one line: each character that starts markup (\\ ` * _ [ ] < > | ~ @ & #) as an
+    HTML entity, which GitHub shows as the character itself, and a word joiner after @ and #, inside :// and before
+    the dot of www., so no mention, issue reference or link forms even where GitHub reads the text after its
+    entities. No code span, fence, link, image, HTML tag or table cell can start in it."""
+    s = " ".join(str(text if text is not None else "").split())
+    out = []
+    for i, c in enumerate(s):
+        if c in "@#":
+            out.append(_MD_ENTITY[c] + _JOIN)
+        elif c in _MD_ENTITY:
+            out.append(_MD_ENTITY[c])
+        elif c == ":" and s.startswith("//", i + 1):
+            out.append(":" + _JOIN)
+        elif c == "." and s[max(0, i - 3):i].lower() == "www":
+            out.append(_JOIN + ".")
+        else:
+            out.append(c)
+    return "".join(out)
+
+
+def _facts(source: dict) -> dict:
+    """The report fields a title or a sentence may use, each checked again: a public command word, a `dev` command
+    as devkit's parser names it, an exception class of a report's form, a hook event devkit has; else empty."""
+    word = source.get("word") if isinstance(source.get("word"), str) else ""
+    cmd, event = source.get("command"), source.get("event")
+    return {"word": word if public_word(word) == word else "<program>",
+            "command": cmd if isinstance(cmd, str) and cmd and _public_command(cmd) == cmd else "",
+            "exc_class": _exc_class(source.get("exc_class")), "event": event if _one_of(event, _hook_events()) else "",
+            "refusal_id": source.get("refusal_id") if isinstance(source.get("refusal_id"), str) else ""}
+
+
+def _entry(kind, facts: dict, first_version) -> dict:
+    """The title table's entry for a bug: by refusal id for a guard bug, by kind otherwise; its `without` variant
+    for each slot the report leaves empty, then the `before` variant of the smallest version at or after the bug's
+    first version, so a bug keeps the meaning its refusal id had when it was first seen."""
+    table = bug_titles()
+    if kind == "guard":
+        ids = table.get("guard") if isinstance(table.get("guard"), dict) else {}
+        found = ids.get(facts["refusal_id"]) if facts["refusal_id"] else None
+        entry = found if isinstance(found, dict) else ids.get("")
     else:
-        title = f"dev {cmd} misbehaves" if cmd else "a dev command misbehaves"
-    return _TITLE_SAFE.sub("", title)[:100]
+        entry = table.get(kind) if _one_of(kind, KINDS) else None
+    entry = dict(entry) if isinstance(entry, dict) else {}
+    without = entry.get("without") if isinstance(entry.get("without"), dict) else {}
+    for slot, variant in without.items():
+        if isinstance(variant, dict) and not facts.get(slot):
+            entry.update(variant)
+    first = core.version_key(first_version)
+    before = entry.get("before") if isinstance(entry.get("before"), dict) else {}
+    held = sorted((core.version_key(v), x) for v, x in before.items() if core.version_key(v) and isinstance(x, dict))
+    variant = next((x for v, x in held if first and first <= v), None)
+    if variant:
+        entry.update(variant)
+    return entry
+
+
+def _slots(facts: dict) -> dict:
+    table = bug_titles()
+    words = table.get("words") if isinstance(table.get("words"), dict) else {}
+    events = table.get("events") if isinstance(table.get("events"), dict) else {}
+    word = facts["word"]
+    phrase = words.get(word) if isinstance(words.get(word), str) else str(words.get("*") or "{word}")
+    return {"word": phrase.replace("{word}", word), "command": facts["command"],
+            "exc_class": readable_exc(facts["exc_class"]),
+            "event": str(events.get(facts["event"]) or events.get("") or "")}
+
+
+def _fill(text, slots: dict) -> str:
+    return _SLOT_RE.sub(lambda m: slots.get(m.group(1), ""), text if isinstance(text, str) else "")
+
+
+def _title_text(kind, source: dict, first_version) -> str:
+    facts = _facts(source)
+    title = " ".join(_TITLE_SAFE.sub("", _fill(_entry(kind, facts, first_version).get("title"), _slots(facts))).split())
+    return title[:TITLE_MAX].rstrip() or "devkit bug"
+
+
+def title_for(report: dict) -> str:
+    """The title of a bug from its report's allowlisted fields only, as the title table words it for the report's
+    version: the title the client gives the issue it opens, and the record's."""
+    return _title_text(report.get("kind"), report, report.get("version"))
+
+
+def human_title(rec: dict) -> str:
+    """The title of a recorded bug: its title table entry as the bug's first version knew it, filled from the facts
+    the record keeps."""
+    facts = rec.get("report") if isinstance(rec.get("report"), dict) else {}
+    return _title_text(rec.get("kind"), facts, rec.get("first_version"))
+
+
+def _people(n: int) -> str:
+    return f"{n} {'person' if n == 1 else 'people'}"
+
+
+def _version(value) -> str:
+    return value if _fits(value, _HINT_VERSION_RE) else ""
+
+
+def _status_line(rec: dict) -> str:
+    status, fixed, dup = rec.get("status"), _version(rec.get("fixed_in")), rec.get("duplicate_of")
+    if status == "duplicate" and isinstance(dup, int) and not isinstance(dup, bool) and dup > 0:
+        line = f"Duplicate of #{dup}. Reports and votes for this bug count there."
+    elif status == "fixed" and fixed:
+        line = f"Fixed in {fixed}: run `dev update` to get it."
+    elif status == "regressed":
+        line = "Regressed: seen again after its fix" + (f" in {fixed}." if fixed else ".")
+    else:
+        line = "Open."
+    verdict = rec["triage"].get("verdict") if isinstance(rec.get("triage"), dict) else None
+    return f"{line} {VERDICTS[verdict] if _one_of(verdict, VERDICTS) else 'Not triaged yet.'}"
+
+
+def _impact_line(counted: dict) -> str:
+    n, blocked, detoured = counted["all"], counted["blocked"], counted["detoured"]
+    if not n:
+        return "No one reported it in the last 30 days."
+    if blocked == n:
+        return f"Blocks work for everyone who hit it ({_people(n)})."
+    if blocked:
+        return f"Blocks work for {blocked} of {n} people" + (
+            f"; {detoured} got around it with a workaround." if detoured else ".")
+    if detoured == n:
+        return "Slows work down: " + ("the person who hit it got" if n == 1 else f"all {n} people got") + \
+            " around it with a workaround."
+    if detoured:
+        return f"Slows work down: {detoured} of {n} people got around it with a workaround."
+    return f"Minor: {_people(n)} saw it, and none was stopped."
+
+
+def _steps_text(steps) -> str:
+    """A valid detour's steps as one line of Markdown: the hint and `dev` sentences agents read, free text escaped."""
+    if validate_steps(steps):
+        return "The steps are in the data below."
+    return " ".join(md_text(s["text"] if s["text"].rstrip().endswith((".", "!", "?")) else s["text"].rstrip() + ".")
+                    if "text" in s else render_step(s) for s in steps)
+
+
+def _workaround(rec: dict) -> tuple:
+    """(the Workaround bullet, the lines of the Workaround section): only the detours agents are served show their
+    steps; proposed ones are counted, so a stranger's text never gets the bot's voice."""
+    detours = [d for d in rec.get("detours") or [] if isinstance(d, dict)] if isinstance(rec.get("detours"), list) \
+        else []
+    served = [d for d in detours if _trust(d) in SERVED and not validate_steps(d.get("steps"))]
+    proposed = sum(1 for d in detours if _trust(d) == "proposed")
+    lines = []
+    for d in served:
+        who = "Confirmed by a maintainer" if _trust(d) == "verified" else "Found by a team agent, not yet reviewed"
+        since, until = _version(d.get("since")), _version(d.get("until"))
+        span = (f", for devkit {since} up to {until}" if until else f", for devkit {since} and later") if since \
+            else (f", for devkit before {until}" if until else "")
+        lines.append(f"1. {_steps_text(d['steps'])} {who}{span}.")
+    if any(_trust(d) == "verified" for d in served):
+        bullet = "Yes, confirmed by a maintainer. See Workaround below."
+    elif served:
+        bullet = "Yes, found by a team agent and not yet reviewed. See Workaround below."
+    elif proposed:
+        bullet = (f"None confirmed yet; {proposed} proposed workaround{'s wait' if proposed != 1 else ' waits'} for "
+                  f"review.")
+    else:
+        bullet = "None known yet."
+    return bullet, lines
+
+
+def _first_report_line(first: dict) -> str:
+    macos, python = first.get("macos"), first.get("python")
+    surface = first.get("surface") if _one_of(first.get("surface"), _surfaces()) and first["surface"] != "unknown" \
+        else ""
+    parts = [AGENT_NAMES.get(first.get("agent"), "") if isinstance(first.get("agent"), str) else "", surface,
+             f"macOS {macos}" if isinstance(macos, str) and macos.isdigit() and len(macos) <= 3 else "",
+             f"Python {python}" if _fits(python, re.compile(r"\d\.\d{1,2}")) else "",
+             CHANNEL_NAMES.get(first.get("channel"), "") if isinstance(first.get("channel"), str) else "",
+             f"devkit {_version(first.get('version'))}" if _version(first.get("version")) else ""]
+    return "- First report: " + (", ".join(p for p in parts if p) or "no details")
+
+
+def _reproduce(rec: dict, facts: dict, first: dict, entry: dict, slots: dict) -> list:
+    """The How to reproduce section: the table's sentence, then the devkit facts the report carries."""
+    lines = [_fill(entry.get("reproduce"), slots), ""]
+    kind = rec.get("kind")
+    if kind == "guard" and _fits(facts["refusal_id"], _REFUSAL_RE):
+        lines.append(f"- Refusal id: `{facts['refusal_id']}`")
+    if kind == "guard" and facts["word"]:
+        lines.append(f"- Command word: `{facts['word']}`")
+    if facts["command"]:
+        lines.append(f"- Command: `dev {facts['command']}`")
+    if facts["event"]:
+        took = DURATION_WORDS.get(first.get("duration")) if isinstance(first.get("duration"), str) else None
+        lines.append(f"- Hook event: `{facts['event']}`" + (f", {took}" if took else ""))
+    if kind in ("crash", "hook") and readable_exc(facts["exc_class"]) != NO_CLASS:
+        lines.append(f"- Error: `{facts['exc_class']}`")
+    source = rec.get("report") if isinstance(rec.get("report"), dict) else {}
+    frames = [f for f in _frames(source.get("frames")) if f != LOCAL]
+    if frames:
+        lines.append("- devkit's stack, innermost first: " + ", ".join(f"`{f}`" for f in frames))
+    if _free_text_ok(first.get("template")):
+        lines.append(f"- Error message, with its values taken out: {md_text(first['template'])}")
+    said = [md_text(first[k]) for k in ("title", "text") if _free_text_ok(first.get(k))]
+    if said:
+        lines.append("- The reporter's description: " + " — ".join(said))
+    return lines + [_first_report_line(first)]
+
+
+def render_issue(rec: dict, first: dict = None, *, created: str = "", now: float = None) -> str:
+    """The body of a registry issue, written from the record and the bug's first report: the title table's sentence;
+    five facts (status with the fix version and the verdict, impact, how often, versions, workaround); the
+    workaround agents are served; how to reproduce; what to do; the maintainer facts; and the first report in a
+    collapsed block, which the workflow reads while the issue has no record (its only fenced block: the text before
+    it holds no triple backtick). `first`: the report the body shows, by default the record's `first`; its free text
+    (a description, an error message) shows escaped, so the client, which posts the reporter's own body, passes the
+    report it sends. `created`: the day the issue was opened (YYYY-MM-DD), else the day of `now`. The body stays
+    under GitHub's limit: workarounds that do not fit are counted in one line instead (_fit_issue)."""
+    now = time.time() if now is None else now
+    first = first if isinstance(first, dict) else rec.get("first") if isinstance(rec.get("first"), dict) else {}
+    source = rec.get("report") if isinstance(rec.get("report"), dict) else {}
+    facts = _facts(source)
+    entry, slots = _entry(rec.get("kind"), facts, rec.get("first_version")), _slots(facts)
+    fp, fixed = _safe(rec.get("fingerprint")), _version(rec.get("fixed_in"))
+    created = created if _fits(created, _WINDOW_RE) else _day(now)
+    counted = people(rec, now)
+    days = rec.get("days_seen") if isinstance(rec.get("days_seen"), int) and not isinstance(rec.get("days_seen"),
+                                                                                              bool) else 0
+    often = f"{_people(counted['all'])} in the last 30 days" + (f", on {days} day{'s' if days != 1 else ''}" if
+                                                                 days > 0 else "")
+    last = _day(rec["last_seen"]) if _is_ts(rec.get("last_seen")) else created
+    versions = [v for v in rec.get("versions") or [] if _version(v)] if isinstance(rec.get("versions"), list) else []
+    versions = versions or ([rec["first_version"]] if _version(rec.get("first_version")) else [])
+    seen = (", ".join(versions[:-1]) + " and " + versions[-1]) if len(versions) > 1 else \
+        (versions[0] if versions else "a version the record does not name")
+    bullet, steps = _workaround(rec)
+    score_ = float(rec["score"]) if _is_ts(rec.get("score")) else 0.0
+    head = [_fill(entry.get("what"), slots), "",
+            f"- **Status:** {_status_line(rec)}",
+            f"- **Impact:** {_impact_line(counted)}",
+            f"- **How often:** {often}. First seen {created}, last seen {last}.",
+            f"- **Versions:** seen on {seen}.",
+            f"- **Workaround:** {bullet}", ""]
+    parts = ["## How to reproduce", "", *_reproduce(rec, facts, first, entry, slots), "",
+              "## If you hit this bug", "",
+              "This is a bug in devkit, not in your project. In a terminal:", "",
+              f"- `dev bug show {fp}` shows this bug and its workarounds.",
+              f"- `dev bug report {fp}` counts you in, so the bug ranks higher for the next fix. devkit sends devkit "
+              f"facts only, never anything about your projects.",
+              f"- `dev update` gets the fix, in {fixed}." if rec.get("status") == "fixed" and fixed else
+              f"- `dev bug detour {fp}` records a workaround you found. devkit checks its evidence before it reaches "
+              f"anyone else.", "",
+              "## For maintainers", "",
+              f"- Fingerprint `{fp}`, kind `{_safe(rec.get('kind'))}`, component `{_safe(rec.get('component'))}`, "
+              f"score {score_:.1f} (`dev bug top` ranks it).",
+              "- The workflow's record of this bug is its first comment. This text is written from it.", ""]
+    if first.get("devkit_bug") == SCHEMA_VERSION:
+        parts += ["<details>", "<summary>Report data for devkit's registry (do not edit)</summary>", "",
+                  _json_block(first), "", "</details>", ""]
+    parts.append(f"_devkit's registry workflow writes this text from the reports and rewrites it after each report, "
+                 f"vote, or release. Write in a comment instead. How the registry works: [the bug registry]"
+                 f"(https://github.com/{core.DEVKIT_REPO}/blob/main/docs/bug-registry.md)._")
+    return _fit_issue(head, steps, parts, fp)
+
+
+def _fit_issue(head: list, steps: list, rest: list, fp: str) -> str:
+    """The issue body from its lines, at most ISSUE_MAX characters: the Workaround section shows the workarounds that
+    fit, in order, and one line that says how many more the record holds. Only that section can grow past the limit
+    (up to MAX_DETOURS detours of MAX_STEPS steps, each free text up to five times longer once escaped); every other
+    part is fixed text, closed-list values, or at most a few MAX_TEXT free texts, and the report data the workflow
+    reads is never cut."""
+    def body(n: int) -> str:
+        more = len(steps) - n
+        section = ["## Workaround", "", *steps[:n]] + (
+            [f"{more} more workaround{'s are' if more != 1 else ' is'} in the registry's record: "
+             f"`dev bug show {fp}` lists them all."] if more else []) + [""] if steps else []
+        return "\n".join(head + section + rest)
+    n = len(steps)
+    text = body(n)
+    while len(text) > ISSUE_MAX and n:
+        n -= 1
+        text = body(n)
+    return text
+
+
+def render_comment(payload: dict) -> str:
+    """A client payload as the comment it posts: one plain line for people, then the payload in a collapsed block
+    that the workflow reads (parse_payload). The line holds only the payload's fixed-vocabulary fields and, for a
+    detour, its steps, free text escaped."""
+    kind, version = payload.get("type"), _version(payload.get("version"))
+    impact = payload.get("impact") if _one_of(payload.get("impact"), IMPACT) else ""
+    on = f"devkit {version}" if version else ""
+    if kind == "report":
+        macos = payload.get("macos")
+        env = ", ".join(x for x in (AGENT_NAMES.get(payload.get("agent"), "") if isinstance(payload.get("agent"), str)
+                                    else "", f"macOS {macos}" if isinstance(macos, str) and macos.isdigit() else "")
+                        if x)
+        line = " · ".join(x for x in ("**devkit report**", impact, on, env) if x)
+    elif kind == "vote":
+        window = payload.get("window") if _fits(payload.get("window"), _WINDOW_RE) else ""
+        line = " · ".join(x for x in ("**devkit vote**", impact, on, window) if x) + \
+            ". The workflow counts it and deletes this comment."
+    elif kind == "detour":
+        line = (f"**Workaround proposed**{f' for {on} and later' if on else ''}: {_steps_text(payload.get('steps'))} "
+                f"The registry decides how far it is trusted; see the issue text.")
+    elif kind in ("confirm", "failed"):
+        did = payload.get("detour_id") if _fits(payload.get("detour_id"), _DETOUR_ID_RE) else ""
+        line = f"**Workaround {did} {'confirmed' if kind == 'confirm' else 'failed'}**" + (f" on {on}." if on else ".")
+    else:
+        line = "**devkit data**"
+    return (f"{line}\n\n<details>\n<summary>Data for devkit's registry (do not edit)</summary>\n\n"
+            f"{_json_block(payload)}\n\n</details>")
 
 
 def component_of(report: dict) -> str:
@@ -1231,11 +1653,14 @@ def _worse(a, b):
 
 
 def _new_record(report: dict, now: float) -> dict:
+    """A bug's record from its first report. `first` keeps that report without its free text, so the issue text can
+    be written from the record alone and nothing the reporter typed lands in a comment the bot writes."""
     facts = ("command", "exc_class", "frames", "refusal_id", "word", "event")
     return {"devkit_bug": SCHEMA_VERSION, "fingerprint": report["fingerprint"], "kind": report["kind"],
             "component": component_of(report), "title": title_for(report), "first_version": report["version"],
             "versions": [], "voters": {}, "impacts": {k: 0 for k in IMPACT}, "score": 0.0, "last_seen": now,
-            "status": "open", "fixed_in": "", "detours": [], "report": {k: report[k] for k in facts if report.get(k)}}
+            "status": "open", "fixed_in": "", "detours": [], "report": {k: report[k] for k in facts if report.get(k)},
+            "first": {k: v for k, v in report.items() if k not in FREE_FIELDS}, "days_seen": 0}
 
 
 def _add_vote(rec: dict, who: str, impact: str, version: str, trusted: bool, now: float):
@@ -1256,6 +1681,10 @@ def _add_vote(rec: dict, who: str, impact: str, version: str, trusted: bool, now
         versions.sort(key=lambda v: core.version_key(v) or (0,))
         del versions[:-MAX_VERSIONS]
     rec["last_seen"] = now
+    day, days = _day(now), rec.get("days_seen")
+    if rec.get("last_day") != day:  # the days the bug was seen, counted on the first report or vote of each day
+        rec["days_seen"] = (days if isinstance(days, int) and not isinstance(days, bool) and days > 0 else 0) + 1
+        rec["last_day"] = day
     fixed, seen_at = core.version_key(rec.get("fixed_in")), core.version_key(version)
     if fixed and seen_at and seen_at >= fixed:
         regressed = rec.setdefault("regression", [])
@@ -1323,7 +1752,6 @@ def fold(rec: dict, payload: dict, *, author_hash: str, author_assoc: str, now: 
 # read. Hooks match failures against this cache and never call the network; a failed fetch keeps the old cache.
 
 LABEL = "devkit-bug"
-TITLE_PREFIX = "[bug] "
 CACHE_MAX = 500
 MAX_PER_OPENER = 25
 CLOSED_DAYS = 90
@@ -1487,7 +1915,7 @@ def _item_ids() -> list:
 
 
 def _free_texts(p: dict) -> list:
-    out = [p[k] for k in _FREE_FIELDS if isinstance(p.get(k), str)]
+    out = [p[k] for k in FREE_FIELDS if isinstance(p.get(k), str)]
     return out + [s["text"] for s in p.get("steps") or [] if isinstance(s, dict) and isinstance(s.get("text"), str)]
 
 
@@ -1612,7 +2040,8 @@ def consent_text(login: str) -> str:
     """What the developer consents to, word for word, for the GitHub account `login`."""
     return (f"Reports, votes and workarounds are posted publicly on github.com/{core.DEVKIT_REPO} under your GitHub "
             f"account `{login}`. They are public and permanent: deleting a comment does not remove it from "
-            f"notification e-mails or public archives. Only devkit facts are sent, never anything about your projects.")
+            f"notification e-mails or public archives. devkit's workflow writes and updates the text of issues you "
+            f"open. Only devkit facts are sent, never anything about your projects.")
 
 
 def set_consent(share: str, login: str) -> None:
@@ -1634,7 +2063,7 @@ def _recheck(item: dict, deny) -> str:
     problems = validate_payload(p)
     if problems:
         return problems[0]
-    for k in _FREE_FIELDS:
+    for k in FREE_FIELDS:
         if isinstance(p.get(k), str):
             clean = template_message(p[k], deny=deny()) if k == "template" else scrub_text(p[k], deny())[0]
             if clean != p[k]:
@@ -1746,8 +2175,8 @@ def flush(client=None, now: float = None) -> dict:
                 try:
                     if report is None:
                         raise RuntimeError("this client cannot send private vulnerability reports")
-                    title = title_for(p) if p.get("type") == "report" else f"{p['type']} for {p['fingerprint']}"
-                    report(TITLE_PREFIX + title, render_payload(p))
+                    texts = outgoing(item)
+                    report(texts["private_title"], texts["private"])
                 except Exception as e:  # never falls back to Issues: the item waits for the developer
                     item["problem"] = f"private reporting failed: {_short(e)}"
                     _save_item(item)
@@ -1762,7 +2191,7 @@ def flush(client=None, now: float = None) -> dict:
                     votes.setdefault(p["fingerprint"], []).append(item)
             else:
                 try:
-                    _send(client, p, cache)
+                    _send(client, item, cache)
                 except _NoIssue:
                     counts["skipped"] += 1
                     continue
@@ -1792,22 +2221,51 @@ def registry_issue_number(item) -> int:
     return number if ok else 0
 
 
-def _send(client, p: dict, cache: dict):
-    """Post one payload: a comment on the bug's issue; a report for a bug nobody filed yet creates the issue."""
+def _first_record(report: dict, now: float) -> dict:
+    """The record the registry workflow's first fold makes of a report, as of `now`: the client writes the issue it
+    opens from it, so the issue reads the same before and after that fold."""
+    rec = _new_record(report, now)
+    _add_vote(rec, "reporter", report["impact"], report["version"], False, now)
+    counted = people(rec, now)
+    rec["impacts"] = {k: counted[k] for k in IMPACT}
+    rec["score"] = round(score(rec, now), 4)
+    return rec
+
+
+def outgoing(item: dict) -> dict:
+    """The exact text the sender posts for an outbox item, which `dev bug pending` prints: {"comment"}, the comment
+    on the bug's issue; for a valid report also {"title", "issue"}, the issue it opens when the registry has none for
+    the bug yet; for a security item {"private_title", "private"}, what goes to private vulnerability reporting
+    instead. Written as of the time the item was queued, so the text the developer reviewed is the text that goes."""
+    p = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+    when = float(item["ts"]) if _is_ts(item.get("ts")) else 0.0
+    out = {"comment": render_comment(p)}
+    if p.get("type") == "report" and not validate_payload(p):
+        out["title"] = title_for(p)
+        out["issue"] = render_issue(_first_record(p, when), p, created=_day(when), now=when)
+    if _security(item):
+        out["private_title"] = out.get("title") or f"devkit {p.get('type')} for bug {_safe(p.get('fingerprint'))}"
+        out["private"] = out.get("issue") or out["comment"]
+    return out
+
+
+def _send(client, item: dict, cache: dict):
+    """Post one outbox item: a comment on the bug's issue; a report for a bug nobody filed yet opens the issue."""
+    p, texts = item["payload"], outgoing(item)
     number = _issue_number(p["fingerprint"], cache)
     if number is None and p["type"] == "report":
         finder = getattr(client, "find", None)
         found = [n for n in map(registry_issue_number, (finder(p["fingerprint"]) if finder else None) or []) if n]
         number = min(found) if found else None
         if number is None:
-            number = client.create_issue(TITLE_PREFIX + title_for(p), render_payload(p))
+            number = client.create_issue(texts["title"], texts["issue"])
             created = core.read_json(BUGS / "created.json", {}) or {}
             created[p["fingerprint"]] = number
             _write_json(BUGS / "created.json", created)
             return
     if number is None:
         raise _NoIssue(p["fingerprint"])
-    client.comment(number, render_payload(p))
+    client.comment(number, texts["comment"])
 
 
 def _send_votes(client, votes: dict, cache: dict, now: float, counts: dict):
@@ -1830,7 +2288,7 @@ def _send_votes(client, votes: dict, cache: dict, now: float, counts: dict):
         vote = {"devkit_bug": SCHEMA_VERSION, "type": "vote", "fingerprint": fp, "version": newest["version"],
                 "impact": worst, "window": _day(now)}
         try:
-            client.comment(number, render_payload(vote))
+            client.comment(number, render_comment(vote))
         except Exception as e:
             for item in group:
                 _backoff(item, now, e)
@@ -2527,12 +2985,24 @@ def _kind_of(fp: str, session: str) -> str:
     return str((entry.get("record") or {}).get("kind") or "")
 
 
+def _as_typed(step):
+    """A `dev` step as an agent types the command, `{"dev": "dev push"}`: the leading `dev` is the command's own name,
+    so the step keeps the subcommand after it (`{"dev": "push"}`). Any other step is returned as it is."""
+    if isinstance(step, dict) and set(step) == {"dev"} and isinstance(step["dev"], str):
+        words = step["dev"].split()
+        if len(words) > 1 and words[0] == "dev":
+            return {"dev": " ".join(words[1:])}
+    return step
+
+
 def file_detour(fp: str, steps: list, session: str) -> dict:
     """Queue a detour for `fp` once its steps pass the validator and the session ledger shows it worked. Free text
     that names something of this Mac is refused, not scrubbed (a placeholder helps no other agent); other free text
-    makes the item wait for the developer. -> {"id", "held", "security", "why"}; ValueError says what is missing."""
+    makes the item wait for the developer. A `dev` step may start with `dev`, as the command is typed (_as_typed).
+    -> {"id", "held", "security", "why"}; ValueError says what is missing."""
     if not _fits(fp, _FP_RE):
         raise ValueError("a fingerprint is 12 lowercase hex characters (`dev bug ls --local` lists them)")
+    steps = [_as_typed(s) for s in steps]
     for s in steps:
         if set(s) == {"text"} and isinstance(s["text"], str) and scrub_text(s["text"], deny_words())[0] != s["text"]:
             raise ValueError("the free text names something of this Mac (a project, a path, a URL, an e-mail address "

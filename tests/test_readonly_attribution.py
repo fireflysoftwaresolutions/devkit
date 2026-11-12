@@ -27,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from devkit import audit, codexlaunch  # noqa: E402
 from devkit import progress as pg  # noqa: E402
 from test_codex_launch import REVIEWER, TANK, CodexCrew  # noqa: E402
-from test_progress import TempState, launch  # noqa: E402
+from test_progress import TempState, gates_passed, launch  # noqa: E402
 
 REVIEW_REPORT = ("**[Firefly> DevKit · Code reviewer (Seraph)]** api · `main` · review\n"
                  "- **Done:** read the diff of the work.\n- **Check:** ✓ read the diff, 12 tests pass\n"
@@ -99,6 +99,7 @@ class ClaudeShellOverlapTests(ShellOverlap, unittest.TestCase):
     def test_a_review_whose_files_are_only_possible_ends_done_on_its_check(self):
         self.ran("a_neo", "toolu_neo_heredoc", self.t0 + 2, self.t0 + 8)
         self.written(["docs/audit.md"])
+        gates_passed("a_seraph", at=self.t0 + 60)  # the reviewer's report passes the crew gates
         self.assertEqual(self.review_ends()["state"], "done")
 
     def test_the_tech_leads_shell_call_that_closed_during_the_reviewers_call_makes_a_file_possible(self):

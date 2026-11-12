@@ -1,14 +1,22 @@
 #!/usr/bin/env python3
 # Copyright (c) 2026 Firefly Software Solutions Inc.
 # SPDX-License-Identifier: Apache-2.0
-"""The bug registry's workflow: keep one bot-written record per registry issue.
+"""The bug registry's workflow: keep one bot-written record per registry issue, and the issue's text written from it.
 
-`.github/workflows/bug-registry.yml` runs this on `issues: opened`, `issue_comment: created` and `release: published`
-with two arguments, the event file GitHub writes and the event name. Event text is read from that file, never pasted
-into a command.
+`.github/workflows/bug-registry.yml` runs this on `issues: opened` and `labeled`, `issue_comment: created`,
+`release: published` and `workflow_dispatch`, with two arguments, the event file GitHub writes and the event name.
+Event text is read from that file, never pasted into a command.
 
-- An issue's first payload is its body. A valid report makes the issue a registry issue: it gets the labels, a title
-  generated from the report, and the record comment the bot writes. Anything else leaves the issue alone.
+- An issue's first payload is its body. A valid report makes the issue a registry issue: it gets the labels and the
+  record comment the bot writes. Anything else leaves the issue alone.
+- Every write of a record also writes the issue's title and body from it (bugs.human_title, bugs.render_issue) when
+  their text differs: after a fold, on a release that marks the bug fixed, and on a maintainer's `verdict:*` label,
+  which the body states in one sentence. The record keeps the first report without the reporter's free text; the
+  body shows that text only while the issue's own body still carries it, so a reporter who takes it out has it gone
+  from the next render. A record also forgets the accounts quiet for 90 days each time it is written (_pruned).
+- A manual run (workflow_dispatch) rewrites every registry issue, open or closed in the last 90 days, without folding
+  anything: one request a second at most, and at most RERENDER_MAX issues rewritten, so a second run goes on where
+  the first stopped. It also creates the `verdict:*` labels maintainers apply.
 - Each run folds every payload comment it has not folded yet, oldest first, so a run cancelled by the concurrency
   group loses nothing. The record keeps `seen`, the highest comment id handled, and `folds`, today's folded payloads
   per account, which cap every account at DAILY_CAP payloads a day across the registry. Folded votes, confirmations
@@ -54,7 +62,13 @@ from devkit import bugs, core  # noqa: E402
 DAILY_CAP = 20  # folded payloads per account per day, across the registry
 DELETED = ("vote", "confirm", "failed")  # once folded these comments go; detours and reports stay on the issue
 REGRESSION = "regression"
-EVENTS = {"issues": "opened", "issue_comment": "created", "release": "published"}
+EXPIRED = "expired-"  # stands in for the account of a team mark older than VOTER_DAYS; a digest is 64 hex characters
+EVENTS = {"issues": ("opened", "labeled"), "issue_comment": ("created",), "release": ("published",),
+          "workflow_dispatch": (None,)}  # the actions each event runs for; a manual run's event has none
+VERDICT = "verdict:"  # the labels maintainers give a bug, one for each of bugs.VERDICTS
+VERDICT_COLOR = "c5def5"
+RERENDER_MAX = 200  # issues one manual run rewrites; the next run goes on, skipping the ones already current
+RERENDER_PACE_S = 1.0  # seconds between two requests of a manual run, inside GitHub's limits for the workflow token
 TRIES = 3  # writes of one record that found it changed by another run, before the run gives up
 WAITS, WAIT_S = 4, 15  # a duplicate waits up to a minute for the first issue's own run to write its record
 MAINTAINERS = Path(__file__).resolve().parents[1] / ".github" / "bug-registry-maintainers"
@@ -187,16 +201,131 @@ def _read(client, number: int):
     return comments, holder, (bugs.parse_record(holder.get("body")) if holder else None)
 
 
-def _write(client, number: int, holder, rec: dict):
+def _write(client, number: int, holder, rec: dict) -> bool:
     """Write the record when the comment's text differs from it: after a fold, or after a person edited the comment.
-    The comment is read again just before; if it changed since this run read it, Changed says to start over."""
+    The comment is read again just before; if it changed since this run read it, Changed says to start over.
+    -> whether it wrote."""
     body = bugs.render_record(rec)
     if holder is None:
         client.create_comment(number, body)
-    elif holder.get("body") != body:
-        if (client.comment(holder["id"]) or {}).get("body") != holder.get("body"):
-            raise Changed(number)
-        client.edit_comment(holder["id"], body)
+        return True
+    if holder.get("body") == body:
+        return False
+    if (client.comment(holder["id"]) or {}).get("body") != holder.get("body"):
+        raise Changed(number)
+    client.edit_comment(holder["id"], body)
+    return True
+
+
+# --------------------------------------------------------------------------- what the record keeps, and the issue's text
+
+def _pruned(rec: dict, now: float) -> dict:
+    """The record without what it keeps about accounts quiet for bugs.VOTER_DAYS: their voter entries and totals, the
+    regression marks of voters it no longer names (a mark has no time of its own), a daily fold count of a day that
+    long ago, and the detour marks of accounts outside the team. A team member's older mark keeps its place under a
+    placeholder instead of the account's digest: clients count a detour's marks to decide its trust, so a confirmed
+    workaround stays served and a retired one stays retired."""
+    rec = json.loads(json.dumps(rec))
+    cut = now - bugs.VOTER_DAYS * 86400
+
+    def recent(entry) -> bool:
+        ts = entry.get("ts") if isinstance(entry, dict) else None
+        return isinstance(ts, (int, float)) and not isinstance(ts, bool) and ts >= cut
+    if isinstance(rec.get("voters"), dict):
+        rec["voters"] = {h: v for h, v in rec["voters"].items() if recent(v)}
+    if isinstance(rec.get("older_voters"), dict):
+        rec["older_voters"] = {k: t for k, t in rec["older_voters"].items() if recent(t)}
+        if not rec["older_voters"]:
+            del rec["older_voters"]
+    if isinstance(rec.get("regression"), list):
+        rec["regression"] = [h for h in rec["regression"] if h in (rec.get("voters") or {})]
+    folds = rec.get("folds")
+    if isinstance(folds, dict) and not (isinstance(folds.get("day"), str) and folds["day"] >= _today(cut)):
+        del rec["folds"]
+    for d in rec.get("detours") if isinstance(rec.get("detours"), list) else []:
+        for key in ("confirmations", "failures"):
+            marks = d.get(key) if isinstance(d, dict) else None
+            if not isinstance(marks, list):
+                continue
+            used, kept = {m.get("author_hash") for m in marks if isinstance(m, dict)}, []
+            for m in marks:
+                if not isinstance(m, dict) or recent(m) or str(m.get("author_hash") or "").startswith(EXPIRED):
+                    kept.append(m)
+                elif m.get("author_assoc") in bugs.TRUSTED:
+                    n = next(n for n in range(1, len(used) + 2) if f"{EXPIRED}{n}" not in used)
+                    used.add(f"{EXPIRED}{n}")
+                    kept.append({**m, "author_hash": f"{EXPIRED}{n}"})
+            d[key] = kept
+    return rec
+
+
+def _first_reports(holder: dict, issue: dict) -> tuple:
+    """(the first report a record keeps, the first report the issue's text shows). The record keeps only the report's
+    closed-list fields, never the reporter's free text (bugs.FREE_FIELDS), so nothing the reporter typed lands in a
+    comment the bot writes; a record from before it kept one takes it from the issue's body. The text shows the free
+    text only while the issue's own body still carries it in a valid report of this bug: once the reporter takes it
+    out, the next render leaves it out. `holder` is the record whose report counts: a duplicate's own stub."""
+    free = bugs.FREE_FIELDS
+    body = _first_report(issue)
+    if body is not None and body.get("fingerprint") != holder.get("fingerprint"):
+        body = None
+    kept = holder.get("first") if isinstance(holder.get("first"), dict) else body or {}
+    kept = {k: v for k, v in kept.items() if k not in free}
+    return kept, {**kept, **{k: body[k] for k in free if body and k in body}}
+
+
+def _verdict(labels: set, current, added=None):
+    """The verdict the issue's labels give: the `verdict:*` label just added, else the record's verdict while its
+    label stays on, else the first label left in the closed list's order; None without one. A label outside the
+    closed list (bugs.VERDICTS) is ignored."""
+    have = [v for v in bugs.VERDICTS if VERDICT + v in labels]
+    return next((v for v in (added, current) if v in have), have[0] if have else None)
+
+
+def _prepared(rec: dict, issue: dict, now: float, added=None) -> dict:
+    """The record as this run writes it: pruned, with the first report it keeps, the human title, and the verdict
+    of the issue's labels (`added`: the verdict a label event just added). A record from before the days were counted
+    starts at the days its voters last voted, which is never more than the days the bug was seen."""
+    rec = _pruned(rec, now)
+    kept, _ = _first_reports(rec, issue)
+    if kept:
+        rec["first"] = kept
+    if not isinstance(rec.get("days_seen"), int) or isinstance(rec.get("days_seen"), bool):
+        days = sorted({_today(v["ts"]) for v in (rec.get("voters") or {}).values() if isinstance(v, dict)
+                       and isinstance(v.get("ts"), (int, float)) and not isinstance(v.get("ts"), bool)})
+        if days:
+            rec["days_seen"], rec["last_day"] = len(days), days[-1]
+    rec["title"] = bugs.human_title(rec)
+    triage = rec.get("triage") if isinstance(rec.get("triage"), dict) else {}
+    verdict = _verdict(_labels(issue), triage.get("verdict"), added)
+    if verdict:
+        rec["triage"] = {**triage, "verdict": verdict}
+    else:
+        rec.pop("triage", None)
+    return rec
+
+
+def _write_text(client, number: int, rec: dict, issue: dict, now: float, holder: dict = None,
+                created: str = None) -> bool:
+    """Write the issue's title and body from the record when their text differs. Before writing a body the issue is
+    read again; when its body changed since this run read it (its author took out their own text, say), the text is
+    written from the body as it is now. `holder` keeps the first report (a duplicate's stub), `created` the day the
+    bug was first seen (the first issue's for a duplicate). -> whether it wrote."""
+    for _ in range(TRIES):
+        _, shown = _first_reports(holder or rec, issue)
+        day = created or str(issue.get("created_at") or "")[:10]
+        text = {"title": bugs.human_title(rec), "body": bugs.render_issue(rec, shown, created=day, now=now)}
+        fields = {k: v for k, v in text.items() if issue.get(k) != v}
+        if not fields:
+            return False
+        if "body" in fields:
+            fresh = client.issue(number) or {}
+            if fresh.get("body") != issue.get("body"):
+                issue = fresh
+                continue
+        client.edit_issue(number, **fields)
+        return True
+    raise RegistryError(f"the body of issue #{number} kept changing while this run wrote it")
 
 
 def _write_folded(client, number: int, holder, before, after: dict):
@@ -311,8 +440,9 @@ def _first_issue(client, fp: str, number: int, sleep):
                         f"the next event on #{number} folds it")
 
 
-def _fold_into(client, target: int, entries: list, now: float) -> list:
-    """Fold a duplicate's payloads into the first issue's record. -> the entries folded."""
+def _fold_into(client, target: int, entries: list, now: float) -> tuple:
+    """Fold a duplicate's payloads into the first issue's record. -> (the entries folded, the record written). The
+    first issue's text follows at its own next event."""
     for _ in range(TRIES):
         _, holder, rec = _read(client, target)
         if rec is None or rec.get("status") == "duplicate":
@@ -323,30 +453,38 @@ def _fold_into(client, target: int, entries: list, now: float) -> list:
         except Changed:
             continue
         _regressed(client, target, rec, new)
-        return done
+        return done, new
     raise RegistryError(f"the record of issue #{target} kept changing while this run wrote it")
 
 
 def _forward(client, number: int, issue: dict, holder, stub: dict, entries: list, seen: int, now: float) -> str:
     """A duplicate's payloads go to the first issue; the duplicate keeps its stub record, so nothing is folded twice,
-    has no labels, and is closed once with a pointer to the first issue."""
+    has no labels, and is closed once with a pointer to the first issue. Its text reads as the first issue's bug,
+    with "Duplicate of #n" for its status, and keeps its own first report."""
     target = _number(stub.get("duplicate_of"))
     if not target or target == number:
         raise RegistryError(f"the duplicate record of issue #{number} names no other issue")
+    kept, _ = _first_reports(stub, issue)
+    stub = {**stub, "seen": seen, **({"first": kept} if kept else {})}
     try:
-        done = _fold_into(client, target, entries, now) if entries else []
+        done, rec = _fold_into(client, target, entries, now) if entries else ([], None)
     except Refused:
-        _write(client, number, holder, {**stub, "seen": seen})  # counted on the first issue: not moved again
+        _write(client, number, holder, stub)  # counted on the first issue: not moved again
         raise
-    _write(client, number, holder, {**stub, "seen": seen})
+    _write(client, number, holder, stub)
     _delete(client, done)
     if issue.get("state") != "closed":
         client.edit_issue(number, state="closed", state_reason="not_planned")
         client.create_comment(number, f"Duplicate of #{target}. Reports and votes for this bug count there.")
+    rec = rec if rec is not None else _read(client, target)[2]
+    if rec is not None and rec.get("status") != "duplicate":
+        first = str((client.issue(target) or {}).get("created_at") or "")[:10]
+        _write_text(client, number, {**rec, "status": "duplicate", "duplicate_of": target}, issue, now, stub, first)
     return f"#{number} duplicates #{target}: {len(done)} payload(s) moved"
 
 
-def _fold_issue_once(client, key: bytes, number: int, now: float, sleep, maintainers: frozenset) -> str:
+def _fold_issue_once(client, key: bytes, number: int, now: float, sleep, maintainers: frozenset,
+                     added=None) -> str:
     issue = client.issue(number) or {}
     if issue.get("pull_request"):
         return f"#{number} is a pull request: skipped"
@@ -367,23 +505,23 @@ def _fold_issue_once(client, key: bytes, number: int, now: float, sleep, maintai
     if not new:
         return f"#{number}: its first payload is past its author's daily cap; the next event folds it"
     new["seen"] = seen
+    new = _prepared(new, issue, now, added)
     _write_folded(client, number, holder, rec, new)
     missing = [lb for lb in (bugs.LABEL, f"kind:{new['kind']}") if lb not in _labels(issue)]
     if missing:
         client.add_labels(number, missing)
-    if rec is None:
-        title = bugs.TITLE_PREFIX + bugs.title_for(first)
-        if issue.get("title") != title:
-            client.edit_issue(number, title=title)
     _regressed(client, number, rec, new, issue)
     _delete(client, done)
+    _write_text(client, number, new, issue, now)
     return f"#{number}: {len(done)} payload(s) folded"
 
 
-def _fold_issue(client, key: bytes, number: int, now: float, sleep, maintainers: frozenset) -> str:
+def _fold_issue(client, key: bytes, number: int, now: float, sleep, maintainers: frozenset, added=None) -> str:
+    """Fold what the issue has not folded yet and write its record and text; `added` is the verdict a label event
+    just added."""
     for _ in range(TRIES):
         try:
-            return _fold_issue_once(client, key, number, now, sleep, maintainers)
+            return _fold_issue_once(client, key, number, now, sleep, maintainers, added)
         except Changed:
             continue
     raise RegistryError(f"the record of issue #{number} kept changing while this run wrote it")
@@ -391,7 +529,9 @@ def _fold_issue(client, key: bytes, number: int, now: float, sleep, maintainers:
 
 # --------------------------------------------------------------------------- releases
 
-def _mark_fixed(client, number: int, version: str) -> bool:
+def _mark_fixed(client, number: int, version: str, issue: dict, now: float) -> bool:
+    """Set the version that fixes the bug, and write the issue's text with it, so "Fixed in" shows the day the
+    release is published."""
     for _ in range(TRIES):
         _, holder, rec = _read(client, number)
         if rec is None or rec.get("status") == "duplicate":
@@ -399,15 +539,17 @@ def _mark_fixed(client, number: int, version: str) -> bool:
         old = core.version_key(rec.get("fixed_in"))
         if old and old >= core.version_key(version) and rec.get("status") != "regressed":
             return False
+        new = _prepared({**rec, "fixed_in": version, "status": "fixed", "regression": []}, issue, now)
         try:
-            _write(client, number, holder, {**rec, "fixed_in": version, "status": "fixed", "regression": []})
+            _write(client, number, holder, new)
         except Changed:
             continue
+        _write_text(client, number, new, issue, now)
         return True
     raise RegistryError(f"the record of issue #{number} kept changing while this run wrote it")
 
 
-def _release(client, event: dict, maintainers: frozenset) -> str:
+def _release(client, event: dict, maintainers: frozenset, now: float) -> str:
     """Set `fixed_in` on the bugs closed as completed since the previous release by a merged pull request, a member
     or a listed maintainer. A draft or a prerelease marks nothing."""
     rel = event.get("release") if isinstance(event.get("release"), dict) else {}
@@ -433,10 +575,71 @@ def _release(client, event: dict, maintainers: frozenset) -> str:
         if not how.get("merged_pr") and not (actor and (_listed(actor, how.get("actor_id"), maintainers)
                                                         or client.is_member(actor))):
             continue
-        if _mark_fixed(client, number, version):
+        if _mark_fixed(client, number, version, issue, now):
             marked.append(number)
     return f"release {version}: {len(marked)} bug(s) marked fixed" + \
         (" (" + ", ".join(f"#{n}" for n in marked) + ")" if marked else "")
+
+
+# --------------------------------------------------------------------------- the manual run
+
+def _rerender(client, issue: dict, now: float):
+    """Write one registry issue's record and text again without folding anything: `seen`, the fold counts of today
+    and the score stay as they are. -> whether it wrote, or None for an issue with no record of its own yet (its next
+    event folds it)."""
+    number = _number(issue.get("number"))
+    for _ in range(TRIES):
+        _, holder, rec = _read(client, number)
+        if rec is None or rec.get("status") == "duplicate":
+            return None
+        new = _prepared(rec, issue, now)
+        try:
+            wrote = _write(client, number, holder, new)
+        except Changed:
+            continue
+        return _write_text(client, number, new, issue, now) or wrote
+    raise RegistryError(f"the record of issue #{number} kept changing while this run wrote it")
+
+
+def _verdict_labels(client) -> list:
+    """Create the `verdict:*` labels the repository lacks, each described by the sentence the issue's text states.
+    -> the labels created."""
+    have = {lb.get("name") for lb in client.labels() or [] if isinstance(lb, dict)}
+    made = [VERDICT + v for v in bugs.VERDICTS if VERDICT + v not in have]
+    for name in made:
+        client.create_label(name, VERDICT_COLOR, bugs.VERDICTS[name[len(VERDICT):]][:100])
+    return made
+
+
+def _rerender_all(client, now: float) -> str:
+    """Rewrite every registry issue, open or closed in the last 90 days, oldest first, at one request a second at
+    most. It stops once it has rewritten RERENDER_MAX issues and says how many are left; issues whose text is already
+    current cost one read each, so running it again goes on where it stopped."""
+    client.pace(RERENDER_PACE_S)
+    made = _verdict_labels(client)
+    cut = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now - bugs.CLOSED_DAYS * 86400))
+    issues = sorted((i for i in client.registry_issues(cut) or [] if isinstance(i, dict) and _number(i.get("number"))
+                     and not i.get("pull_request") and bugs.LABEL in _labels(i)
+                     and (i.get("state") != "closed" or str(i.get("closed_at") or "") >= cut)),
+                    key=lambda i: i["number"])
+    issues = list({i["number"]: i for i in issues}.values())
+    counts = {"rewritten": 0, "current": 0, "no record": 0}
+    for n, issue in enumerate(issues):
+        if counts["rewritten"] >= RERENDER_MAX:
+            break
+        try:
+            wrote = _rerender(client, issue, now)
+        except (GitHubError, RegistryError) as e:
+            raise RegistryError(f"stopped at #{issue['number']} ({e}): {_tally(counts, made)}, "
+                                f"{len(issues) - n} left") from None
+        counts["rewritten" if wrote else "current" if wrote is False else "no record"] += 1
+    return f"{_tally(counts, made)}, {len(issues) - sum(counts.values())} left"
+
+
+def _tally(counts: dict, made: list) -> str:
+    return (f"created {len(made)} verdict label(s); " if made else "") + \
+        f"rewrote {counts['rewritten']} issue(s), {counts['current']} already current, " \
+        f"{counts['no record']} without a record of their own"
 
 
 # --------------------------------------------------------------------------- entry point
@@ -462,10 +665,17 @@ def main(event_path: str, event_name: str, client, *, now: float = None, sleep=t
     if issue.get("pull_request"):
         print("bug registry: a pull request: skipped")
         return 0
-    if EVENTS.get(event_name) != event.get("action"):
+    if event.get("action") not in EVENTS.get(event_name, ()):
         print("bug registry: not an event the registry handles: skipped")
         return 0
-    if event_name != "release" and bugs.LABEL not in _labels(issue) and _first_report(issue) is None:
+    added = None
+    if event.get("action") == "labeled":
+        name = (event.get("label") or {}).get("name") if isinstance(event.get("label"), dict) else None
+        added = name[len(VERDICT):] if isinstance(name, str) and name.startswith(VERDICT) else None
+        if added not in bugs.VERDICTS:
+            print("bug registry: not a verdict label: skipped")
+            return 0
+    if event_name in ("issues", "issue_comment") and bugs.LABEL not in _labels(issue) and _first_report(issue) is None:
         print("bug registry: not a registry issue: skipped")
         return 0
     key = (os.environ.get("BUG_REGISTRY_KEY") or "").strip()
@@ -476,12 +686,14 @@ def main(event_path: str, event_name: str, client, *, now: float = None, sleep=t
     listed = read_maintainers(maintainers)
     try:
         if event_name == "release":
-            message = _release(client, event, listed)
+            message = _release(client, event, listed, now)
+        elif event_name == "workflow_dispatch":
+            message = _rerender_all(client, now)
         else:
             number = _number(issue.get("number"))
             if not number:
                 return _fail("the event names no issue", 1)
-            message = _fold_issue(client, key.encode(), number, now, sleep, listed)
+            message = _fold_issue(client, key.encode(), number, now, sleep, listed, added)
     except (GitHubError, RegistryError) as e:
         return _fail(str(e), 1)
     print(f"bug registry: {message}")
@@ -503,7 +715,8 @@ class GitHub:
 
     API = "https://api.github.com"
 
-    def __init__(self, repo: str = None, token: str = None, timeout: float = 30, opener=None):
+    def __init__(self, repo: str = None, token: str = None, timeout: float = 30, opener=None, sleep=time.sleep,
+                 clock=time.monotonic):
         self.repo = repo or os.environ.get("GITHUB_REPOSITORY", "")
         self.token = token or os.environ.get("GITHUB_TOKEN", "")
         if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", self.repo):
@@ -511,8 +724,19 @@ class GitHub:
         if not self.token:
             raise GitHubError("GITHUB_TOKEN is not set")
         self.timeout, self._open = timeout, opener or urllib.request.urlopen
+        self._sleep, self._clock, self._gap, self._last = sleep, clock, 0.0, None
+
+    def pace(self, seconds: float) -> None:
+        """Start every later request at least `seconds` after the one before it, pages of a listing included."""
+        self._gap = max(0.0, float(seconds))
+
+    def _wait(self) -> None:
+        if self._gap and self._last is not None and self._clock() - self._last < self._gap:
+            self._sleep(self._gap - (self._clock() - self._last))
+        self._last = self._clock()
 
     def _call(self, method: str, path: str, params: dict = None, body=None, missing_ok: bool = False):
+        self._wait()
         url = f"{self.API}/{path}" + (f"?{urllib.parse.urlencode(params)}" if params else "")
         data = None if body is None else json.dumps(body).encode("utf-8")
         headers = {"Accept": "application/vnd.github+json", "Authorization": f"Bearer {self.token}",
@@ -591,6 +815,19 @@ class GitHub:
     def closed_issues(self, label: str, since: str) -> list:
         params = {"labels": label, "state": "closed", **({"since": since} if since else {})}
         return self._pages(self._issues(), params)
+
+    def registry_issues(self, since: str) -> list:
+        """Every open issue labeled devkit-bug, then the closed ones updated since `since`: the API filters on the
+        update time, so the caller keeps those closed since then."""
+        return self._pages(self._issues(), {"labels": bugs.LABEL, "state": "open"}) + \
+            self.closed_issues(bugs.LABEL, since)
+
+    def labels(self) -> list:
+        return self._pages(f"repos/{self.repo}/labels")
+
+    def create_label(self, name: str, color: str, description: str) -> None:
+        self._call("POST", f"repos/{self.repo}/labels", body={"name": name, "color": color,
+                                                                "description": description})
 
     def closure(self, number: int) -> dict:
         """Who closed the issue last (login and account id), and whether a merged pull request closed it. REST issue

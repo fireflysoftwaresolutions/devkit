@@ -19,7 +19,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from devkit import hooks, dispatch, progress as pg  # noqa: E402
-from test_progress import TempState  # noqa: E402
+from test_progress import TempState, launch  # noqa: E402
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "hooks" / "claude"
 SETTINGS = Path(__file__).resolve().parents[1] / "config" / "claude" / "settings.json"
@@ -397,6 +397,141 @@ class SlotTests(LaneCase):
         self.assertEqual(self.limit()[0], "allow")
         self.start("a3", at=self.m(31))  # SendMessage resumes Dozer
         self.assertEqual(self.limit()[0], "deny")
+
+
+class BusyLaneQueueTests(unittest.TestCase):
+    # M176, M177 and M180 of release 26.11.16's run: the tech lead assigned case-revert and guard-timeouts to the
+    # Senior engineer while his lane worked on launcher-depth; devkit said they wait for a launch of their own, and
+    # `dev crew next` said to send them to him (SendMessage). He did the work, but his lane kept launcher-depth's
+    # scope, so the guard refused his edits to the new steps' files, and his `dev progress step --step case-revert`
+    # stayed in his lane with no error, so both steps stayed pending. A step assigned to a member who works in one
+    # live lane joins that lane once its current step closes, takes over the lane's scope then, and closes on the
+    # member's own `dev progress step --step`; when devkit cannot bind or close, the member's command fails and says
+    # what to do, and dispatch gives the advice progress follows
+    REPORT = ("**[Firefly> DevKit · Senior engineer (Neo)]** devkit · `release/26.11.16` · {task}\n- **Done:** {task}\n"
+              "- **Check:** ✓ 46 test files pass\n- **Next:** the Code reviewer reviews it")
+
+    def setUp(self):
+        self.state = TempState().__enter__()
+        self.addCleanup(self.state.__exit__, None, None, None)
+        self.t0 = time.time() - 3600
+        pg.start("Hotfix", plan=["launcher-depth=30m", "case-revert=15m", "guard-timeouts=45m"], now=self.m(0))
+        pg.assign("launcher-depth", "Neo", scope="lib/devkit/guard.py,tests/test_guard_launcher_depth.py",
+                  why="test", now=self.m(0))
+        launch("a_neo", "devkit:neo", "Neo: launcher-depth guard timing fix", at=self.m(1))
+
+    def m(self, minutes):
+        return self.t0 + minutes * 60
+
+    def run_(self):
+        return pg.load_run("claude", "s1")
+
+    def held(self, name):
+        st = next(s for s in self.run_()["plan"] if s["name"] == name)
+        return st.get("owner"), st.get("state")
+
+    def assign(self, name, scope, at):
+        pg.assign(name, "Neo", scope=scope, why="test", now=at)
+
+    def close(self, name, at, check="✓ 46 guard test files pass"):
+        return pg.step(f"{name} committed", which=name, check=check, from_agent="a_neo", now=at)
+
+    def test_a_step_assigned_to_a_busy_member_joins_its_lane_once_its_step_closes(self):
+        self.assign("case-revert", "lib/devkit/guard.py,tests/test_gate_tiers.py", self.m(5))
+        self.assertEqual(self.held("case-revert"), ("main", "pending"))
+        self.close("launcher-depth", self.m(10))
+        self.assertEqual(self.held("case-revert"), ("a_neo", "running"))
+        self.assertEqual(self.run_()["agents"]["a_neo"]["scope"], ["lib/devkit/guard.py", "tests/test_gate_tiers.py"])
+
+    def test_the_members_close_of_a_step_that_joined_its_lane_closes_it(self):
+        self.assign("case-revert", "tests/test_gate_tiers.py", self.m(5))
+        self.close("launcher-depth", self.m(10))
+        run = self.close("case-revert", self.m(20))
+        self.assertEqual(self.held("case-revert"), ("a_neo", "done"))
+        self.assertEqual((run["lane_outcome"]["step"], run["lane_outcome"]["closed"]), ("case-revert", True))
+
+    def test_queued_steps_join_one_at_a_time_in_the_order_they_were_assigned(self):
+        self.assign("guard-timeouts", "tests/test_guard_launcher_depth.py", self.m(5))
+        self.assign("case-revert", "tests/test_gate_tiers.py", self.m(6))
+        self.close("launcher-depth", self.m(10))
+        self.assertEqual((self.held("guard-timeouts"), self.held("case-revert")),
+                         (("a_neo", "running"), ("main", "pending")))
+        with self.assertRaises(pg.StepError) as e:
+            self.close("case-revert", self.m(15))
+        self.assertIn("“guard-timeouts”", str(e.exception))  # the step to close first
+        self.close("guard-timeouts", self.m(20))
+        self.assertEqual(self.held("case-revert"), ("a_neo", "running"))
+
+    def test_a_members_close_of_a_step_waiting_for_its_lane_fails_and_records_nothing(self):
+        self.assign("case-revert", "tests/test_gate_tiers.py", self.m(5))
+        updates = list(self.run_()["agents"]["a_neo"].get("updates") or [])
+        with self.assertRaises(pg.StepError) as e:
+            self.close("case-revert", self.m(8))
+        self.assertIn('--step "launcher-depth"', str(e.exception))
+        self.assertEqual(self.run_()["agents"]["a_neo"].get("updates") or [], updates)
+        self.assertEqual(self.held("case-revert"), ("main", "pending"))
+
+    def test_the_members_command_for_a_step_its_lane_cannot_close_exits_2_and_says_what_to_do(self):
+        # M176-M177: the command printed ✓ and exited 0, so the member reported case-revert closed
+        from test_progress import progress_cli_out
+        self.assign("case-revert", "tests/test_gate_tiers.py", self.m(5))
+        with mock.patch.dict(os.environ, {"DEVKIT_FROM_AGENT": "a_neo"}):
+            rc, out, err = progress_cli_out("step", "case-revert committed", "--step", "case-revert", "--check",
+                                            "✓ 67 tests pass")
+        self.assertEqual(rc, 2, out)
+        self.assertNotIn("✓", out)
+        self.assertIn('close “launcher-depth” first (dev progress step "…" --step "launcher-depth" --check "…")', err)
+        self.assertEqual(self.held("case-revert"), ("main", "pending"))
+
+    def test_a_members_close_of_a_step_that_is_not_its_own_fails_with_what_to_do(self):
+        with self.assertRaises(pg.StepError) as e:
+            self.close("case-revert", self.m(8))  # nobody assigned it to the Senior engineer: the tech lead's own
+        self.assertIn("“case-revert” is not your step (the tech lead's)", str(e.exception))
+        self.assertIn("dev crew ask", str(e.exception))
+        self.assertEqual(self.held("case-revert"), ("main", "running"))
+
+    def test_dispatch_gives_the_advice_progress_follows(self):
+        self.assign("case-revert", "tests/test_gate_tiers.py", self.m(5))
+        _, waiting = dispatch._sorted(self.run_())
+        (why,) = [w for s, w in waiting if s["name"] == "case-revert"]
+        self.assertIn("once “launcher-depth” closes", why)
+        self.assertNotIn("launch of its own", why)
+        told = [m["text"] for m in self.run_().get("messages") or [] if m.get("to") == "main"]
+        self.assertTrue(any(why in t for t in told), (why, told))
+
+    def test_a_queued_step_waits_for_a_launch_of_its_own_once_the_lane_ends(self):
+        # the queue is a promise of the lane while it works: its report closes launcher-depth and ends the lane, and
+        # case-revert, which no evidence of the lane names, is offered for a launch of its own
+        self.assign("case-revert", "tests/test_gate_tiers.py", self.m(5))
+        self.assertEqual((self.run_()["plan"][1].get("waits_lane") or {}).get("lane"), "a_neo")
+        pg.on_subagent("claude", {"session_id": "s1", "agent_id": "a_neo", "agent_type": "devkit:neo",
+                                  "last_assistant_message": self.REPORT.format(task="launcher-depth")}, False,
+                       now=self.m(30))
+        self.assertEqual((self.held("launcher-depth"), self.held("case-revert")),
+                         (("a_neo", "done"), ("main", "pending")))
+        self.assertNotIn("waits_lane", self.run_()["plan"][1])
+        self.assertIn("case-revert", [s["name"] for s in dispatch.ready(self.run_())["launch"]])
+
+    def test_assigning_a_closed_step_again_never_reopens_it_unrecorded(self):
+        # B-fyj09eek926: a wider scope for the resumed member's closed step reopened it, with no line in its history
+        pg.on_subagent("claude", {"session_id": "s1", "agent_id": "a_neo", "agent_type": "devkit:neo",
+                                  "last_assistant_message": self.REPORT.format(task="launcher-depth")}, False,
+                       now=self.m(30))
+        pg.on_subagent("claude", {"session_id": "s1", "agent_id": "a_neo", "agent_type": "devkit:neo"}, True,
+                       now=self.m(31))
+        self.assign("launcher-depth", "lib/devkit/guard.py,tests/test_gate_tiers.py", self.m(32))
+        self.assertEqual(self.held("launcher-depth"), ("a_neo", "done"))
+        told = [m["text"] for m in self.run_().get("messages") or [] if m.get("to") == "main"]
+        self.assertTrue(any('dev progress reopen "launcher-depth"' in t for t in told), told)
+        pg.reopen("launcher-depth", "the guard timing fix needs the gate tier tests too", now=self.m(33))
+        self.assertEqual(self.held("launcher-depth"), ("a_neo", "running"))
+        self.assertEqual(self.run_()["agents"]["a_neo"]["scope"], ["lib/devkit/guard.py", "tests/test_gate_tiers.py"])
+
+    def test_a_step_reopened_while_its_member_still_works_goes_back_to_their_lane(self):
+        # B-fxriigsni7c: the reopened step stayed pending with the tech lead while its member worked on
+        self.close("launcher-depth", self.m(10))
+        pg.reopen("launcher-depth", "the review found a slow launcher shape", now=self.m(12))
+        self.assertEqual(self.held("launcher-depth"), ("a_neo", "running"))
 
 
 class SettingsTests(unittest.TestCase):

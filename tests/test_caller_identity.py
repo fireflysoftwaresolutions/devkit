@@ -10,6 +10,7 @@ import contextlib
 import io
 import json
 import os
+import shlex
 import stat
 import sys
 import time
@@ -141,6 +142,32 @@ class MorpheusOnlyTests(CallerCase):
         run = self.run_()
         self.assertEqual((run["goal"], run["mode"], run["state"]), ("Work", "guided", "running"))
         self.assertEqual([(s["name"], s["state"], s.get("owner")) for s in run["plan"]], before)
+
+    def test_a_long_typed_command_is_matched_by_its_exact_words_and_not_by_the_text_the_ledger_kept(self):
+        # a dev progress assign with a 111-entry --scope (6.4 KB), typed as a command of its own, was refused three
+        # times: the ledger keeps CALL_TEXT characters of a call (its start and its end), and the check matched only
+        # that text, which had lost the middle of the scope
+        self.plan_with_tank()
+        globs = [f"docs/part_{i:03d}/**/*.md" for i in range(320)]
+        args = ["progress", "assign", "docs", "--to", "Tank", "--scope", ",".join(globs)]
+        typed = "dev " + " ".join(shlex.quote(a) for a in args)
+        self.assertGreater(len(typed), 7000)
+        # another command, typed in the same session, whose text keeps the same first CALL_TEXT characters and the
+        # same end: one glob in the cut middle differs
+        other = list(globs)
+        other[200] = "secrets/**"
+        twin = "dev " + " ".join(shlex.quote(a) for a in args[:-1] + [",".join(other)])
+        self.assertEqual((twin[:pg.CALL_TEXT], twin[-pg.CALL_TEXT // 2:]), (typed[:pg.CALL_TEXT], typed[-pg.CALL_TEXT // 2:]))
+        data = self.call(twin)
+        rc, out = self.dev(*args)
+        self.assertEqual(rc, 2, out)
+        self.assertIn("only the tech lead", out)
+        pg.call_closed(data)
+        data = self.call(typed)
+        self.assertTrue(pg.call_entry(data)["cut"])
+        rc, out = self.dev(*args)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(next(s for s in self.run_()["plan"] if s["name"] == "docs").get("scope"), globs)
 
     def test_only_a_call_of_morpheus_ends_the_run(self):
         self.plan_with_tank()

@@ -30,7 +30,9 @@ from pathlib import Path
 
 TREE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TREE / "tests"))
+sys.path.insert(0, str(TREE / "lib"))
 import _sandbox  # noqa: E402  (the suite's net against this Mac's codex, claude, brew and gh)
+from devkit.setup import GITATTRIBUTES  # noqa: E402  (the handoff merge rules dev setup writes, never a copy)
 
 DEV = TREE / "bin" / "dev"
 WIDGET, GADGET = "acme/widget", "acme/gadget"
@@ -42,8 +44,6 @@ TIMEOUT = 90  # seconds one dev process may take; a test fails rather than hang
 GIT_ENV = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1", "GIT_AUTHOR_NAME": "Ana Dev",
            "GIT_AUTHOR_EMAIL": "ana@example.com", "GIT_COMMITTER_NAME": "Ana Dev",
            "GIT_COMMITTER_EMAIL": "ana@example.com", "GIT_TERMINAL_PROMPT": "0"}
-GITATTRIBUTES = ("sessions/** merge=union\npresence/*.json merge=ours\nPROJECTS.md merge=ours\nTASKS.md merge=ours\n"
-                 "ACTIVITY.md merge=ours\nregistry.json merge=ours\n")  # what dev setup writes (handoff_merge_rules)
 
 
 def git(cwd, *args, check=True) -> str:
@@ -349,7 +349,7 @@ class Plans(Shared):
                                      for n, s in enumerate(sessions)])
             told += [f"{rnd}.{n}" for n, r in enumerate(res) if r.returncode == 0 and re.search(r"\bv\d+ ·", r.stdout)]
             text = plan.read_text()
-            kept = re.findall(r"(?m)^- v\d+ · .* · revised.* — why: round (\d+) by (\d)$", text)
+            kept = re.findall(r"(?m)^- v\d+ · .* · revised.*—why: round (\d+) by (\d)$", text)
             versions = re.findall(r"(?m)^- v(\d+) · .* · revised", text)
             self.assertEqual(len(versions), len(set(versions)), f"two revisions share a version:\n{text}")
             self.assertEqual(sorted(told), sorted(f"{r}.{n}" for r, n in kept),

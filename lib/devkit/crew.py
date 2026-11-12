@@ -1101,8 +1101,9 @@ def brief_text(m: dict, task: str, scope: str = "", step=None, roster=None, cwd=
         if str(roster.get("procedure_rule") or "").strip():  # the crew gates check it at SubagentStop
             b.append(_sentence(roster["procedure_rule"]))
     try:
-        from . import lessons
-        picked = lessons.for_task(pid, activity=(act or {}).get("id"), files=globs) if pid else []
+        from . import guard, lessons  # the project's initiatives' lessons are its own too
+        picked = lessons.for_task(pid, activity=(act or {}).get("id"), files=globs,
+                                  initiatives=guard.initiatives_of(pid)) if pid else []
     except Exception:
         picked = []
     if picked:

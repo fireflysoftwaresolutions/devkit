@@ -9,7 +9,10 @@ agent (`agent_of`: a Claude Code transcript or a Codex rollout), whose commands 
 
   proofs   the `proof` of each procedure phase that applied ran as a shell command, not as text inside quotes or a
            heredoc. A proof about files applies only when the member changed files of its kind (`FILE_PROOFS`: no
-           `dev docs check` without a docs change, no test proof without a code change); the others always apply
+           `dev docs check` without a docs change, no test proof without a code change); the others always apply.
+           `dev ci --run`, which a brief or the project may forbid, can be met by the tech lead instead
+           (`_ci_instead`): a `Waived proof:` line in the brief, or a passed `dev ci --run` on exactly the tree the
+           member leaves, never the member's own `dev ci --mark-passed`; `check` audits each one it accepts
   skills   it loaded the skills of each procedure phase it worked in (a phase whose proof applied, or one whose
            devkit commands it ran) and the skills devkit's skill rules require for the files it changed: a Skill
            tool call, or a read of the skill's SKILL.md
@@ -21,7 +24,8 @@ the file, or a command naming it that the guard's read-only allowlist does not h
 file (cat, grep, sed -n, git diff) does not make it the member's, and neither does a file another caller edited with
 its own edit tool during the lane (the session's edit record, progress.edits_since), unless a redirection of the
 member wrote into it. Only its own lines are blamed on it (`_mine`).
-  lessons  two or more guard refusals are answered with `dev lesson add` or `dev lesson recur`, or with devkit's bug
+  lessons  two or more guard refusals are answered with a lesson that `dev lesson add` recorded or `dev lesson recur`
+           counted (its output shows it: a refused add answers nothing, `_lessons_done`), or with devkit's bug
            registry: a `dev bug report --guard …` from the lane, or a vote on the bug a refusal's marker names. A
            refusal the registry served a workaround for in this session (the session ledger, by the marker's
            fingerprint and code), or that an open lesson covers (it names the lesson, or shows its error signature),
@@ -43,6 +47,7 @@ import json
 import os
 import re
 import shlex
+import time
 from pathlib import Path
 
 from . import core, skillguard
@@ -53,6 +58,10 @@ LABELS = {"proofs": "proof not run", "skills": "skill not loaded", "stubs": "unf
           "tests": "tests that cannot fail in", "lessons": "no lesson after repeated refusals:",
           "background": "still running in the background:"}
 MAX_BYTES = 8_000_000  # the end of a very long member transcript is enough
+# The session record's pass tokens, {agent id: the time its stop passed}: check writes one only when it judged a stop
+# and found nothing missing. At the lane's end, a review step's Check or a member's --approves approves only with the
+# token of that stop (progress._passed_now); without one, nothing approves.
+PASSED = "crew_passed"
 # A hook's denial as Claude Code writes it into the tool result: "PreToolUse:Bash hook error: <the guard's reason>".
 DENIAL_RE = re.compile(r"^\s*(?:PreToolUse|PermissionRequest)(?::[^\s:]+)? hook (?:blocking )?error\b", re.I)
 _SPLIT = re.compile(r"\|\||&&|\$\(|[;&|()`\n]")  # where a new simple command starts
@@ -475,12 +484,100 @@ def _phase_applied(phase: dict, invocations, changed) -> bool:
     return _proof_owed(phase, changed) or any(_ran(c, invocations) for c in phase.get("devkit") or [])
 
 
+def _flag(words, name: str) -> bool:
+    return any(x == name or x.startswith(name + "=") for x in words)
+
+
 def _ran(command: str, invocations) -> bool:
     want = command.split()
     if not want:
         return False
     want[0] = os.path.basename(want[0])
+    if want == ["dev", "progress", "step"] and any(
+            w[:3] == ["dev", "progress", "note"] and _flag(w, "--step") and _flag(w, "--check") for w in invocations):
+        return True  # partial evidence on a long step records it without closing it (progress.note)
     return any(w[:len(want)] == want for w in invocations)
+
+
+# The full local CI run is the one proof the tech lead may meet for a member. A brief can forbid the run (in a shared
+# checkout, other members' uncommitted work fails the suite, which takes ~40 minutes), and so can a project (runner
+# preparation that must not run twice). In its place the gate accepts one of two records the member cannot write
+# itself (`_ci_instead`). The member's own `dev ci --mark-passed` is not one: it attests a run, and a member does not
+# attest its own proof (the escape-hatch rule of `--ci-passed`, gitx._evidence_or_attest).
+CI_PROOF = "dev ci --run"
+WAIVER_LINE = "Waived proof: dev ci --run — <why>"  # a line of the brief; <why> is a sentence, as a root cause is
+_WAIVER = re.compile(r"(?im)^[ \t>*-]*waived proof:[ \t]*`?dev[ \t]+ci[ \t]+--run`?"
+                     r"(?:[ \t]*[—–:,]|[ \t]+-|[ \t]+because)[ \t]+(\S[^\n]*?)[ \t]*$")
+_TEMPLATE = re.compile(r"<[^<>\n]+>")  # a <placeholder> left in the line: not a reason
+CI_FIX = (f"run `{CI_PROOF}`. If your brief or the project forbids that run, only the tech lead can meet the proof "
+          f"for you, with either of these: this line in your brief, `{WAIVER_LINE}`, or a passed `{CI_PROOF}` of "
+          "their own on exactly the tree you leave. Ask with `dev crew ask`; your own `dev ci --mark-passed` does not "
+          "meet it")
+
+
+def _brief(path) -> str:
+    """The member's brief: the launch's prompt, which Claude Code writes as the first record of the member's own
+    transcript, a user record with plain text. Read from the file's first line, since `_records` keeps only the end
+    of a very long transcript. '' for any other first record, such as a Codex rollout's session metadata."""
+    try:
+        with open(path, "rb") as fh:
+            rec = json.loads(fh.readline().decode("utf-8", "replace"))
+    except (OSError, TypeError, ValueError):
+        return ""
+    if not isinstance(rec, dict) or rec.get("type") != "user":
+        return ""
+    return _text((rec.get("message") or {}).get("content"))
+
+
+def brief_waiver(path) -> str:
+    """Why the member's brief waives `dev ci --run`: the reason of its first `Waived proof: dev ci --run — <why>` line
+    (WAIVER_LINE; a colon, a hyphen or "because" may stand for the dash) that gives one, a sentence of at least
+    gitx.CAUSE_MIN characters with no <placeholder> left; else ''. Nothing else in the brief waives it, and no other
+    proof can be waived."""
+    from . import gitx
+    for m in _WAIVER.finditer(_brief(path)):
+        why = " ".join(m.group(1).split())
+        if len(why) >= gitx.CAUSE_MIN and not _TEMPLATE.search(why):
+            return why
+    return ""
+
+
+def _by_lead(lead_name: str) -> bool:
+    """The main session launched the member, so the tech lead wrote its brief. `lead_name` is the name the hook
+    passes (hooks._lead_name): the member's own then, "a helper of <member>" when a member launched it, and '' when
+    devkit's records show neither, which counts as no (fail closed)."""
+    return bool(lead_name) and not lead_name.startswith("a helper of ")
+
+
+def _ci_markers(top) -> list:
+    """The local CI evidence markers of the repository at `top`, newest first: what `dev ci --run` and
+    `dev ci --mark-passed` record (gitx.record_evidence). [] when they cannot be read."""
+    try:
+        from . import gitx
+        c = gitx.ctx(top)
+        return gitx._markers(c) if c else []
+    except Exception:
+        return []
+
+
+def _ci_instead(transcript_path, top, by_lead: bool) -> str:
+    """How the tech lead met `dev ci --run` for the member, as the audit record says it, or '' (the gate refuses as
+    before): (1) the tech lead's brief waives it (`brief_waiver`; `by_lead`: the main session launched the member);
+    (2) a passed `dev ci --run` (or `--resume`) holds the checkout's tree as it is now (gitx.work_tree, computed only
+    when such a marker exists). A marker does not say who ran it, but devkit writes a `run` marker only after every
+    step passed, so a run on the same tree is the same evidence; a `marked` one only attests a run and never counts."""
+    if not top:
+        return ""
+    why = brief_waiver(transcript_path) if by_lead else ""
+    if why:
+        return f"a waiver in the tech lead's brief: {why}"
+    runs = [m for m in _ci_markers(top) if m.get("how") in ("run", "resumed")]
+    if not runs:
+        return ""
+    from . import gitx
+    tree = gitx.work_tree(top)
+    hit = next((m for m in runs if tree and m.get("tree") == tree), None)
+    return f"a passed `{CI_PROOF}` on the tree it leaves ({tree[:7]}: {gitx.describe_evidence(hit)})" if hit else ""
 
 
 # A lesson a refusal shows, in the two forms devkit writes: a lesson rule's refusal ("… from lesson L-…: <title>") and
@@ -494,11 +591,38 @@ def _markers(text: str) -> list:
     return [m.groups() for m in bugs.MARKER_RE.finditer(text)] if "devkit-bug:" in text else []
 
 
-def _answered(invocations, refusals) -> bool:
-    """The lane answered its refusals: a lesson recorded or counted, a refusal reported to devkit's bug registry
-    (`dev bug report --guard`, with an id or the session's last refusal), or a vote on a bug that a refusal's marker
-    names (what the refusal itself asks for)."""
-    if _ran("dev lesson add", invocations) or _ran("dev lesson recur", invocations):
+# What `dev lesson add` prints when it recorded a lesson and `dev lesson recur` when it counted one (cli.cmd_lesson):
+# the lesson's id after a check mark. A refused add or a recur of no lesson prints ✗ and its problems instead.
+_LESSON_DONE = re.compile(r"(?m)^\s*✓ L-[0-9A-Za-z]{6,40} (?:recorded in |happened \d+×)")
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _lessons_done(path) -> list:
+    """The shell commands of a member's transcript whose output shows a lesson recorded or counted (_LESSON_DONE), in
+    order. Neither the exit code nor the command alone tells: `dev lesson add … | tail` exits 0 when it is refused."""
+    shells, out = {}, []
+    for rec in _records(path):
+        content = (rec.get("message") or {}).get("content")
+        if not isinstance(content, list):
+            continue
+        for c in content:
+            if not isinstance(c, dict):
+                continue
+            if rec.get("type") == "assistant" and c.get("type") == "tool_use" and c.get("name") in SHELL_TOOLS:
+                cmd = (c.get("input") or {}).get("command") or (c.get("input") or {}).get("cmd") or ""
+                shells[c.get("id")] = " ".join(map(str, cmd)) if isinstance(cmd, list) else str(cmd)
+            elif rec.get("type") == "user" and c.get("type") == "tool_result" and c.get("tool_use_id") in shells:
+                if _LESSON_DONE.search(_ANSI.sub("", _text(c.get("content")))):
+                    out.append(shells[c["tool_use_id"]])
+    return out
+
+
+def _answered(invocations, refusals, done=()) -> bool:
+    """The lane answered its refusals: a lesson recorded or counted (`done`: the invocations of the commands whose
+    output shows it, _lessons_done), a refusal reported to devkit's bug registry (`dev bug report --guard`, with an
+    id or the session's last refusal), or a vote on a bug that a refusal's marker names (what the refusal itself asks
+    for)."""
+    if _ran("dev lesson add", done) or _ran("dev lesson recur", done):
         return True
     reports = [w[3:] for w in invocations if w[:3] == ["dev", "bug", "report"]]
     if any(a == "--guard" or a.startswith("--guard=") for args in reports for a in args):
@@ -520,7 +644,7 @@ def _owed(refusals, session: str, top: str) -> list:
     except Exception:
         served = set()
     open_ids = None
-    project = "global"
+    project, inits = "global", []
     out = []
     for text in refusals:
         if any(m in served for m in _markers(text)):
@@ -533,8 +657,10 @@ def _owed(refusals, session: str, top: str) -> list:
                 if top:
                     from . import delivery
                     project = delivery.scope_for(top) or "global"
+                from . import guard
+                inits = guard.initiatives_of(project) if project != "global" else []
             shown = {i for pair in _SHOWN_LESSON.findall(text) for i in pair if i}
-            if open_ids & shown or lessons.for_output(project, text, limit=1):
+            if open_ids & shown or lessons.for_output(project, text, limit=1, initiatives=inits):
                 continue
         except Exception:
             pass
@@ -655,12 +781,14 @@ def _test_findings(top, files, written=None) -> list:
 
 
 def crew_gates(member, transcript_path, cwd, roster=None, agent: str = "", session: str = "",
-               lane: str = "") -> list:
+               lane: str = "", by_lead: bool = False, accepted=None) -> list:
     """What a crew member still owes, from its own transcript: [{rule, item, evidence, fix}], in the order of
     RULES. `member` is a roster entry or a name (`Kid`, `DevEx engineer (Kid)`, `devkit:kid`); an unknown name
     still gets the gates that need no procedure. `agent`: the member's agent ("claude" or "codex"; default: the one
     that wrote the transcript), whose transcript format and installed skills the gates read. `session`, `lane`: the
-    session and the member's agent id, whose edit record tells which files other callers edited meanwhile."""
+    session and the member's agent id, whose edit record tells which files other callers edited meanwhile.
+    `by_lead`: the main session launched the member, so a waiver in its brief counts (`_ci_instead`). `accepted`: a
+    list that gets {proof, how} for each proof met another way, for the audit trail."""
     m = _member(member, roster)
     read_only = (m or {}).get("tools") == "read"
     agent = agent or agent_of(transcript_path)
@@ -689,9 +817,15 @@ def crew_gates(member, transcript_path, cwd, roster=None, agent: str = "", sessi
                 delivered = skillguard.delivered([os.path.realpath(f) for f in paths + touched])
                 proof_kinds = [_rel(f, top) for f in delivered]
             if proof and _proof_owed(x, proof_kinds) and not _ran(proof, inv):
+                ci = " ".join(str(proof).split()) == CI_PROOF
+                how = _ci_instead(transcript_path, top, by_lead) if ci else ""
+                if how:
+                    if accepted is not None:
+                        accepted.append({"proof": proof, "how": how})
+                    continue
                 found.append(_finding("proofs", proof, f"`{proof}` is not among your {len(commands)} shell commands "
                                       "(text inside quotes or a heredoc does not count)",
-                                      f"run `{proof}{PROOF_ARGS.get(proof, '')}`"))
+                                      CI_FIX if ci else f"run `{proof}{PROOF_ARGS.get(proof, '')}`"))
     # a member that never edits (tools review or read) wrote nothing through its shell: a file its commands name that
     # changed during its lane is another lane's, and owes it no skill
     edits = (m or {}).get("tools") not in ("review", "read")
@@ -702,14 +836,16 @@ def crew_gates(member, transcript_path, cwd, roster=None, agent: str = "", sessi
         found += _stub_findings(top, changed, written)
         found += _test_findings(top, changed, written)
     owed = _owed(refusals, session, top) if not read_only and len(refusals) >= 2 and \
-        not _answered(inv, refusals) else []
+        not _answered(inv, refusals, _invocations(_lessons_done(transcript_path), agent)) else []
     if len(owed) >= 2:
         first = (re.sub(r"^[:\s]+", "", DENIAL_RE.sub("", owed[0], 1)).splitlines() or [""])[0][:120]
         found.append(_finding("lessons", "dev lesson add",
                               f"{len(owed)} guard refusals and no dev lesson add or dev lesson recur; the first: "
                               f"\"{first}\"",
-                              'run `dev lesson add "<what the guard refused>" --happened "<what you ran and what the '
-                              'guard said>" --cause "<why it happened>" --prevent "<the rule for next time>"`, or '
+                              'run `dev lesson add "<the rule to follow>" --happened "<what you ran and what the '
+                              'guard said>" --cause "<why it happened>" --prevent "<the rule for next time>" '
+                              '--command "<the refused command words>" --error "<text of the refusal>"` (an anchor '
+                              'says where it applies: a lesson with none is refused), or '
                               '`dev lesson recur <id> --evidence "<what happened>"` for a known pitfall; when the guard '
                               'was wrong, `dev bug report --guard <refusal id>` instead'))
     for t in background_work(transcript_path):
@@ -745,6 +881,18 @@ def _keep_for_lead(sess: dict, key: str, who: str, tasks: list):
                                                                          for t in tasks]}
 
 
+def _unpass(sess: dict, key: str):
+    """This member's pass token goes (and the record's key with the last), before its stop is judged: a pass of an
+    earlier stop never counts for this one."""
+    tokens = sess.get(PASSED)
+    if isinstance(tokens, dict):
+        tokens.pop(key, None)
+        if not tokens:
+            sess.pop(PASSED, None)
+    elif tokens is not None:
+        sess.pop(PASSED, None)  # not a record of tokens: none of it counts
+
+
 def check(name, data: dict, sess: dict, pid: str = "", roster=None, lead_name: str = "", agent: str = ""):
     """The SubagentStop entry point. -> the hook's {"decision": "block", "reason": …} the first time a member stops
     with something missing, else None. Records each finding set as `crew.gate` in the audit trail ("blocked", or
@@ -752,9 +900,17 @@ def check(name, data: dict, sess: dict, pid: str = "", roster=None, lead_name: s
     only once. A member let through with background work still running (sent back once already, or not enforced) is
     audited and kept for the tech lead as `lead_name` (`_keep_for_lead`): the name devkit's launch records give it
     (`hooks._lead_name`), never `name`, which may come from a description a member wrote for its helper. Without
-    one, nothing is kept. Fails open."""
+    one, nothing is kept. `lead_name` also says whether the tech lead wrote the brief (`_by_lead`), and a proof met
+    another way is audited as `crew.gate` with outcome "ok" and how it was met. Fails open: the member is never
+    held back by a gate that cannot judge. Approvals fail closed: only a clean pass (no findings) writes the member's
+    pass token, `sess[PASSED][agent id]` = the time it passed, in the session record the hook writes once this
+    returns. A stop let through after a send-back, findings only recorded, a missing transcript or agent id, or a
+    crash write none and drop the token an earlier stop left, so that member's review steps and --approves verdicts
+    approve nothing at its lane's end (progress._passed_now), and neither does a stop that never reaches this check
+    or whose record write is dropped."""
     try:
         key = data.get("agent_id") or str(name or "")
+        _unpass(sess, key)
         transcript = data.get("agent_transcript_path")
         if not transcript:
             return None
@@ -769,11 +925,19 @@ def check(name, data: dict, sess: dict, pid: str = "", roster=None, lead_name: s
                 _keep_for_lead(sess, key, lead_name, tasks)
             return None
         m = _member(name, roster)
+        accepted = []
         findings = crew_gates(m or name, transcript, data.get("cwd") or "", roster, agent,
-                              session=data.get("session_id") or "", lane=data.get("agent_id") or "")
-        if not findings:
-            return None
+                              session=data.get("session_id") or "", lane=data.get("agent_id") or "",
+                              by_lead=_by_lead(lead_name), accepted=accepted)
         who = crew.who(m) if m else str(name or "Agent")
+        if accepted:  # a proof met another way is a choice someone can review: `dev audit --action crew.gate`
+            audit.record("crew.gate", pid or "", f"{who}: " + "; ".join(
+                f"proofs: {a['proof']} met instead by {a['how']}" for a in accepted), "ok", member=who,
+                         rules=["proofs"])
+        if not findings:
+            if data.get("agent_id"):  # the token names the lane: without its id, nothing can be approved
+                sess.setdefault(PASSED, {})[key] = time.time()
+            return None
         sess.setdefault("crew_gated", {})[key] = who
         enforce = enforced()
         audit.record("crew.gate", pid or "", f"{who}: " + "; ".join(f"{f['rule']}: {f['item']}" for f in findings),

@@ -99,7 +99,16 @@ EVENTS = {
         "repository": {"full_name": "owner/registry", "default_branch": "main"},
         "sender": {"login": "maint", "id": 9, "type": "User"},
     },
+    "workflow_dispatch": {  # a manual run: no action, no issue
+        "inputs": {}, "ref": "refs/heads/main", "workflow": ".github/workflows/bug-registry.yml",
+        "repository": {"full_name": "owner/registry", "default_branch": "main"},
+        "sender": {"login": "maint", "id": 9, "type": "User"},
+    },
 }
+VERDICT_LABELS = {f"verdict:{v}" for v in ("confirmed", "false-positive", "correct-refusal", "misleading-message",
+                                           "split", "needs-info", "not-planned")}
+REPORTED ="Steps close but the board still shows them running"  # a reporter's own words, in a command report
+OLD = NOW - 100 * DAY  # past the 90 days a record keeps an account
 
 
 class FakeGitHub:
@@ -113,7 +122,9 @@ class FakeGitHub:
         self.members, self.closers, self.release_list = set(), {}, []
         self.calls, self.writes = [], []
         self.on_reread = None  # plays another writer: changes a comment right before the workflow re-reads it
+        self.after_record_write = None  # plays the reporter: edits the issue right after the bot writes its record
         self.max_body = 65536  # GitHub refuses a longer comment with HTTP 422
+        self.label_list, self.paced = [], 0.0
 
     # ---- set-up
     def add_issue(self, number, body, user, assoc="NONE", **fields):
@@ -151,6 +162,15 @@ class FakeGitHub:
         return next(c for c in self.notes.values()
                     if c["issue"] == number and c["user"]["login"] == BOT["login"] and bugs.RECORD_MARK in c["body"])
 
+    def set_record(self, number, rec):
+        """Write a record by hand, as an older run of the workflow left it."""
+        self.record_comment(number)["body"] = bugs.render_record(rec)
+
+    def _wrote_record(self, body):
+        if bugs.RECORD_MARK in body and self.after_record_write:
+            hook, self.after_record_write = self.after_record_write, None
+            hook(self)
+
     def ids(self, number):
         return {c["id"] for c in self.notes.values() if c["issue"] == number}
 
@@ -183,6 +203,7 @@ class FakeGitHub:
         self._check_size(body)
         self.writes.append(("create_comment", number))
         cid = self.add_comment(number, body, BOT, ts=NOW)
+        self._wrote_record(body)
         return {"id": cid}
 
     def edit_comment(self, cid, body):
@@ -190,6 +211,7 @@ class FakeGitHub:
         self.writes.append(("edit_comment", cid))
         self.notes[cid]["body"] = body
         self.notes[cid]["updated_at"] = _iso(NOW)
+        self._wrote_record(body)
 
     def delete_comment(self, cid):
         self.writes.append(("delete_comment", cid))
@@ -234,15 +256,35 @@ class FakeGitHub:
         self.calls.append(("is_member", login))
         return login in self.members
 
+    def registry_issues(self, since):
+        """Like the API: every open issue with the label, and the closed ones updated since `since`."""
+        self.calls.append(("registry_issues", since))
+        return [self._issue_view(i) for _, i in sorted(self.issues.items()) if "devkit-bug" in i["labels"]
+                and (i["state"] == "open" or i["updated_at"] >= since)]
 
-def _run(fake, event_name, number=None, comment=None, key=KEY, sleep=None, maintainers=None, **release):
+    def labels(self):
+        self.calls.append(("labels",))
+        return copy.deepcopy(self.label_list)
+
+    def create_label(self, name, color, description):
+        self.writes.append(("create_label", name))
+        self.label_list.append({"name": name, "color": color, "description": description})
+
+    def pace(self, seconds):
+        self.paced = seconds
+
+
+def _run(fake, event_name, number=None, comment=None, key=KEY, sleep=None, maintainers=None, label=None, **release):
     """Run the workflow's script on one event, as the runner would: the event JSON in a file, the secret in the
     environment. `maintainers` is the maintainers file's text, a path to read instead, or None for no file, so the
-    repository's own list never changes what a test sees. -> (exit code, stdout, stderr)."""
+    repository's own list never changes what a test sees. `label` makes an issues event the label a person added.
+    -> (exit code, stdout, stderr)."""
     event = copy.deepcopy(EVENTS[event_name])
     if number is not None:
         event["issue"] = fake.issue(number)
         fake.calls.clear()
+    if label is not None:
+        event.update(action="labeled", label={"name": label, "color": "ededed"})
     if comment is not None:
         event["comment"] = copy.deepcopy(fake.notes[comment])
     if event_name == "release":
@@ -261,6 +303,17 @@ def _run(fake, event_name, number=None, comment=None, key=KEY, sleep=None, maint
                 del os.environ["BUG_REGISTRY_KEY"]
             rc = action.main(path, event_name, fake, now=NOW, sleep=sleep or (lambda s: None), maintainers=listed)
     return rc, out.getvalue(), err.getvalue()
+
+
+class PublicNameTests(unittest.TestCase):
+    # The workflow runs the default branch's lib/devkit/bugs.py and reads its names as a contract: a private name
+    # (one that starts with _) can change without notice and break the registry's workflow, so it reads public ones
+    def test_the_workflow_reads_only_public_names_of_bugs(self):
+        import ast
+        tree = ast.parse((ROOT / "tools" / "bug_registry_action.py").read_text(encoding="utf-8"))
+        private = sorted({n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)
+                          and isinstance(n.value, ast.Name) and n.value.id == "bugs" and n.attr.startswith("_")})
+        self.assertEqual(private, [])
 
 
 class FoldTests(unittest.TestCase):
@@ -320,7 +373,7 @@ class FoldTests(unittest.TestCase):
         fake.add_issue(52, _body(guard("check_git:force-push")), _user(7))
         rc, _, err = _run(fake, "issues", 52)
         self.assertEqual(rc, 0, err)
-        self.assertEqual(fake.issues[52]["title"], "[bug] guard refusal check_git:force-push on git")
+        self.assertEqual(fake.issues[52]["title"], "Guard refuses a plain git push --force")
 
     def test_labels_and_record_follow_only_a_valid_first_payload(self):
         fake = FakeGitHub()
@@ -330,7 +383,7 @@ class FoldTests(unittest.TestCase):
         self.assertEqual(rc, 0, err)
         self.assertEqual(set(fake.issues[40]["labels"]), {"devkit-bug", "kind:crash"})
         self.assertEqual(set(fake.record(40)["voters"]), {_h(7)})
-        self.assertEqual(fake.issues[40]["title"], bugs.TITLE_PREFIX + bugs.title_for(_payload("report")))
+        self.assertEqual(fake.issues[40]["title"], "dev progress step crashes with KeyError")
 
         fake.add_issue(41, _body(_payload("report", extra="field")), _user(8))
         rc, _, _ = _run(fake, "issues", 41)
@@ -584,7 +637,7 @@ class HostileInputTests(unittest.TestCase):
         command = {**_payload("report", fingerprint="0123456789ab", exc_class="", frames=[]), "kind": "command"}
         fake.add_issue(82, _body(command), _user(7))
         self.assertEqual(_run(fake, "issues", 82)[0], 0)
-        self.assertEqual(fake.issues[82]["title"], "[bug] dev progress step misbehaves")
+        self.assertEqual(fake.issues[82]["title"], "dev progress step does not work as expected")
 
     def test_the_record_stays_within_one_github_comment(self):
         fake = FakeGitHub()
@@ -760,6 +813,271 @@ class MaintainersTests(unittest.TestCase):
         self.assertNotIn("devkit", text.lower())  # no brand words: the rebrand rewrites one constant
 
 
+def _command_report(**fields):
+    """A command report with the reporter's own words; it hashes nothing, so its fingerprint is random."""
+    return {**_payload("report", fingerprint="0123456789ab", exc_class="", frames=[],
+                       title="dev progress forgets a step", text=REPORTED), "kind": "command", **fields}
+
+
+def _edit_report(body, drop):
+    """The issue body after its author edited the report in its data block by hand, taking out the fields `drop`."""
+    m = re.search(r"```json\n(.*?)\n```", body, re.S)
+    report = {k: v for k, v in json.loads(m.group(1)).items() if k not in drop}
+    return body[:m.start()] + bugs.render_payload(report) + body[m.end():]
+
+
+class IssueTextTests(unittest.TestCase):
+    """The workflow writes each registry issue's title and body from its record, whenever their text differs."""
+
+    def test_a_fold_writes_the_title_and_body_from_the_record(self):
+        fake = FakeGitHub()
+        fake.registry_issue(12)  # as an older workflow left it: a title someone typed, a body of data only
+        vote = fake.add_comment(12, _body(_payload("vote", version="26.11.8")), _user(2))
+        rc, _, err = _run(fake, "issue_comment", 12, comment=vote)
+        self.assertEqual(rc, 0, err)
+        issue = fake.issues[12]
+        self.assertEqual((issue["title"], fake.record(12)["title"]), ("dev progress step crashes with KeyError",) * 2)
+        self.assertIn("- **Impact:** Blocks work for everyone who hit it (2 people).", issue["body"])
+        self.assertIn("- **Versions:** seen on 26.11.7 and 26.11.8.", issue["body"])
+        self.assertEqual(action._first_report(fake.issue(12)), _payload("report"))  # its data reads as before
+        self.assertFalse({_h(1), _h(2)} & set(re.findall(r"[0-9a-f]{64}", issue["body"])))
+
+    def test_a_run_that_changes_no_text_writes_nothing(self):
+        fake = FakeGitHub()
+        fake.registry_issue(12)
+        chat = fake.add_comment(12, "Same here.", _user(3))
+        vote = fake.add_comment(12, _body(_payload("vote")), _user(2))
+        self.assertEqual(_run(fake, "issue_comment", 12, comment=vote)[0], 0)
+        self.assertIn(("edit_issue", 12), fake.writes)  # the text it wrote from the record
+        fake.writes.clear()
+        rc, _, err = _run(fake, "issue_comment", 12, comment=chat)  # an event that brings nothing new
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(fake.writes, [])
+
+    def test_a_body_edited_while_the_run_writes_is_read_again(self):
+        fake = FakeGitHub()
+        fake.add_issue(30, _body(_command_report()), _user(7))
+
+        def reporter_takes_out_their_text(f):
+            f.issues[30]["body"] = _edit_report(f.issues[30]["body"], ["text"])
+        fake.after_record_write = reporter_takes_out_their_text
+        rc, _, err = _run(fake, "issues", 30)
+        self.assertEqual(rc, 0, err)
+        body = fake.issues[30]["body"]
+        self.assertNotIn(REPORTED, body)
+        self.assertIn("The reporter's description: dev progress forgets a step", body)  # the words they kept
+        self.assertEqual(fake.writes.count(("edit_issue", 30)), 1)
+
+    def test_the_record_keeps_none_of_the_reporters_words_and_the_text_drops_what_they_take_out(self):
+        fake = FakeGitHub()
+        fake.add_issue(31, _body(_command_report()), _user(7))
+        self.assertEqual(_run(fake, "issues", 31)[0], 0)
+        self.assertIn(f"- The reporter's description: dev progress forgets a step — {REPORTED}",
+                      fake.issues[31]["body"])  # shown while the reporter's own issue carries it
+        self.assertNotIn(REPORTED, fake.record_comment(31)["body"])
+        self.assertFalse({"title", "text", "template"} & set(fake.record(31)["first"]))
+
+        fake.issues[31]["body"] = _edit_report(fake.issues[31]["body"], ["text"])
+        vote = fake.add_comment(31, _body(_payload("vote", fp="0123456789ab")), _user(8))
+        rc, _, err = _run(fake, "issue_comment", 31, comment=vote)
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn(REPORTED, fake.issues[31]["body"])
+        self.assertNotIn(REPORTED, fake.record_comment(31)["body"])
+
+    def test_an_older_record_gets_its_first_report_without_the_reporters_words(self):
+        fake = FakeGitHub()
+        fake.add_issue(32, _body(_command_report()), _user(7), labels=["devkit-bug", "kind:command"])
+        rec = bugs.fold({}, _command_report(), author_hash=_h(7), author_assoc="NONE", now=NOW - DAY)
+        older = {k: v for k, v in rec.items() if k not in ("first", "days_seen", "last_day")}
+        older["voters"][_h(8)] = {"impact": "minor", "ts": NOW - 3 * DAY}
+        cid = fake.add_comment(32, "", BOT, ts=NOW - DAY)
+        fake.notes[cid]["body"] = bugs.render_record({**older, "title": "dev progress step misbehaves", "seen": cid})
+        chat = fake.add_comment(32, "Same here.", _user(5))
+        rc, _, err = _run(fake, "issue_comment", 32, comment=chat)
+        self.assertEqual(rc, 0, err)
+        rec = fake.record(32)
+        self.assertEqual(rec["first"], {k: v for k, v in _command_report().items() if k not in ("title", "text")})
+        self.assertEqual((rec["title"], fake.issues[32]["title"]), ("dev progress step does not work as expected",) * 2)
+        self.assertNotIn(REPORTED, fake.record_comment(32)["body"])
+        self.assertEqual((rec["days_seen"], rec["last_day"]), (2, "2027-01-14"))  # the days its voters last voted
+        self.assertIn("- **How often:** 2 people in the last 30 days, on 2 days.", fake.issues[32]["body"])
+
+    def test_a_duplicate_reads_as_the_first_issues_bug_and_points_to_it(self):
+        fake = FakeGitHub()
+        fake.registry_issue(7)
+        fake.issues[7]["created_at"] = _iso(NOW - 5 * DAY)
+        fake.add_issue(9, _body(_payload("report")), _user(2))
+        rc, _, err = _run(fake, "issues", 9)
+        self.assertEqual(rc, 0, err)
+        dup = fake.issues[9]
+        self.assertEqual(dup["title"], "dev progress step crashes with KeyError")
+        self.assertIn("- **Status:** Duplicate of #7. Reports and votes for this bug count there.", dup["body"])
+        self.assertIn("2 people in the last 30 days", dup["body"])  # the first issue's count, which it joined
+        self.assertIn("First seen 2027-01-10", dup["body"])
+        self.assertEqual(action._first_report(fake.issue(9)), _payload("report"))  # its own report stays readable
+
+    def test_a_release_rewrites_the_text_of_the_bugs_it_marks_fixed(self):
+        fake = _released()
+        left = fake.issues[62]["body"]
+        rc, _, err = _run(fake, "release")
+        self.assertEqual(rc, 0, err)
+        body = fake.issues[60]["body"]
+        self.assertIn("- **Status:** Fixed in 26.11.8: run `dev update` to get it.", body)
+        self.assertIn("- `dev update` gets the fix, in 26.11.8.", body)
+        self.assertEqual(fake.issues[62]["body"], left)  # not fixed by this release: not rewritten by it
+
+
+def _mark(account, assoc, ts):
+    return {"author_hash": _h(account), "author_assoc": assoc, "ts": ts}
+
+
+def _detour(n, confirmations, failures):
+    return {"id": f"d{n}", "steps": [{"hint": "scratch-tool", "tool": "Write"}], "since": "26.11.7", "until": "",
+            "author_hash": _h(2), "author_assoc": "NONE", "author_kind": "other", "evidence": {"successes": 1},
+            "confirmations": confirmations, "failures": failures, "flagged": True, "ts": OLD}
+
+
+class RetentionTests(unittest.TestCase):
+    """Every write of a record forgets the accounts that have been quiet for 90 days."""
+
+    def test_voters_regression_marks_and_fold_counts_of_quiet_accounts_go(self):
+        fake = _fixed(70)
+        rec = fake.record(70)
+        rec["voters"].update({_h(2): {"impact": "blocked", "ts": OLD}, _h(3): {"impact": "minor", "ts": NOW - 2 * DAY}})
+        rec.update(older_voters={"minor": {"n": 4, "ts": OLD}}, regression=[_h(2), _h(3)],
+                   folds={"day": "2026-10-07", "by": {_h(2): 1}})
+        fake.set_record(70, rec)
+        chat = fake.add_comment(70, "Same here.", _user(5))
+        rc, _, err = _run(fake, "issue_comment", 70, comment=chat)
+        self.assertEqual(rc, 0, err)
+        after = fake.record(70)
+        self.assertEqual((set(after["voters"]), after["regression"]), ({_h(1), _h(3)}, [_h(3)]))
+        self.assertFalse({"older_voters", "folds"} & set(after))
+        self.assertNotIn(_h(2), fake.record_comment(70)["body"])
+        self.assertEqual(after["score"], rec["score"])  # a quiet account never counted in the score
+
+    def test_old_team_marks_keep_their_count_so_what_agents_are_served_holds(self):
+        fake = FakeGitHub()
+        fake.registry_issue(12)
+        rec = fake.record(12)
+        rec["detours"] = [  # d1 verified only by old team marks; d2 retired only by old team failures
+            _detour(1, [_mark(3, "MEMBER", OLD), _mark(4, "OWNER", OLD)],
+                    [_mark(5, "NONE", OLD), _mark(6, "NONE", NOW - DAY)]),
+            _detour(2, [_mark(7, "MEMBER", NOW - DAY)], [_mark(8, "MEMBER", OLD), _mark(9, "MEMBER", OLD)])]
+        fake.set_record(12, rec)
+
+        def served(r):
+            return [(d["id"], d["trust"]) for d in bugs.agent_view(r)["detours"]]
+        self.assertEqual(served(rec), [("d1", "verified")])
+        chat = fake.add_comment(12, "Same here.", _user(5))
+        rc, _, err = _run(fake, "issue_comment", 12, comment=chat)
+        self.assertEqual(rc, 0, err)
+        after = fake.record(12)
+        self.assertEqual(served(after), [("d1", "verified")])
+        self.assertEqual([bugs.trust_of(d, d["confirmations"]) for d in after["detours"]], ["verified", "retired"])
+        d1 = after["detours"][0]
+        self.assertEqual((len(d1["confirmations"]), [m["author_hash"] for m in d1["failures"]], d1["flagged"]),
+                         (2, [_h(6)], True))
+        body = fake.record_comment(12)["body"]
+        for account in (3, 4, 5, 8, 9):
+            self.assertNotIn(_h(account), body, account)
+        for account in (6, 7):
+            self.assertIn(_h(account), body, account)
+
+
+class VerdictTests(unittest.TestCase):
+    """A maintainer gives a verdict with one verdict:* label; the issue's text states it."""
+
+    def test_a_verdict_label_states_its_sentence_and_changes_nothing_agents_see(self):
+        fake = FakeGitHub()
+        fake.registry_issue(12)
+        chat = fake.add_comment(12, "Same here.", _user(5))
+        self.assertEqual(_run(fake, "issue_comment", 12, comment=chat)[0], 0)
+        seen_by_agents = bugs.agent_view(fake.record(12))
+        fake.issues[12]["labels"].append("verdict:false-positive")
+        rc, _, err = _run(fake, "issues", 12, label="verdict:false-positive")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("- **Status:** Open. Confirmed: the guard refused a command it should allow.",
+                      fake.issues[12]["body"])
+        self.assertEqual(fake.record(12)["triage"], {"verdict": "false-positive"})
+        self.assertEqual(bugs.agent_view(fake.record(12)), seen_by_agents)
+
+    def test_the_verdict_added_last_counts_and_other_labels_change_nothing(self):
+        fake = FakeGitHub()
+        fake.registry_issue(12)
+        for name in ("verdict:confirmed", "verdict:not-planned"):
+            fake.issues[12]["labels"].append(name)
+            self.assertEqual(_run(fake, "issues", 12, label=name)[0], 0)
+        self.assertIn("- **Status:** Open. Not planned: devkit keeps this behavior.", fake.issues[12]["body"])
+        fake.writes.clear()
+        for name in ("verdict:wontfix", "help wanted"):
+            fake.issues[12]["labels"].append(name)
+            rc, _, err = _run(fake, "issues", 12, label=name)
+            self.assertEqual(rc, 0, err)
+        self.assertEqual(fake.writes, [])
+        fake.issues[12]["labels"].remove("verdict:not-planned")  # taken back: the next event uses the one left
+        chat = fake.add_comment(12, "Same here.", _user(5))
+        self.assertEqual(_run(fake, "issue_comment", 12, comment=chat)[0], 0)
+        self.assertIn("- **Status:** Open. Confirmed as a devkit bug.", fake.issues[12]["body"])
+
+
+class ManualRunTests(unittest.TestCase):
+    """A maintainer runs the workflow by hand once after a release that changes how issues read."""
+
+    def test_it_rewrites_every_registry_issue_and_folds_nothing(self):
+        fake = FakeGitHub()
+        for number in (17, 20, 21, 22):
+            fake.registry_issue(number)
+        unfolded = fake.add_comment(20, _body(_payload("vote")), _user(5))
+        fake.issues[21].update(state="closed", state_reason="completed", closed_at=_iso(NOW - 10 * DAY),
+                               updated_at=_iso(NOW - 10 * DAY))
+        fake.issues[22].update(state="closed", state_reason="completed", closed_at=_iso(OLD),
+                               updated_at=_iso(NOW - 2 * DAY))  # a later comment moved updated_at; closed_at decides
+        fake.add_issue(23, "A question about devkit.", _user(9))
+        before = {n: fake.record(n) for n in (17, 20, 21)}
+        untouched = {n: copy.deepcopy(fake.issues[n]) for n in (22, 23)}
+        rc, out, err = _run(fake, "workflow_dispatch")
+        self.assertEqual(rc, 0, err)
+        kept = ("seen", "folds", "score", "voters")
+        for n in (17, 20, 21):
+            self.assertEqual(fake.issues[n]["title"], "dev progress step crashes with KeyError", n)
+            self.assertIn("- **Workaround:** None known yet.", fake.issues[n]["body"], n)
+            self.assertEqual(action._first_report(fake.issue(n)), _payload("report"), n)
+            self.assertEqual({k: fake.record(n).get(k) for k in kept}, {k: before[n].get(k) for k in kept}, n)
+        self.assertIn(unfolded, fake.ids(20))
+        self.assertEqual({n: fake.issues[n] for n in (22, 23)}, untouched)
+        self.assertTrue(out.strip().endswith("0 left"), out)
+
+    def test_it_stops_at_its_cap_and_the_next_run_goes_on(self):
+        fake = FakeGitHub()
+        for number in (1, 2, 3):
+            fake.registry_issue(number)
+        with mock.patch.object(action, "RERENDER_MAX", 2):
+            rc, out, err = _run(fake, "workflow_dispatch")
+            self.assertEqual(rc, 0, err)
+            self.assertEqual(sorted(n for w, n in fake.writes if w == "edit_issue"), [1, 2])
+            self.assertTrue(out.strip().endswith("1 left"), out)
+            fake.writes.clear()
+            rc, out, err = _run(fake, "workflow_dispatch")
+            self.assertEqual(rc, 0, err)
+            self.assertEqual(sorted(n for w, n in fake.writes if w == "edit_issue"), [3])
+            self.assertIn("2 already current", out)
+            self.assertTrue(out.strip().endswith("0 left"), out)
+
+    def test_it_waits_a_second_between_requests_and_makes_the_verdict_labels(self):
+        fake = FakeGitHub()
+        fake.registry_issue(1)
+        fake.label_list = [{"name": "devkit-bug"}, {"name": "verdict:confirmed"}]
+        rc, _, err = _run(fake, "workflow_dispatch")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(fake.paced, 1.0)
+        self.assertEqual(sorted(n for w, n in fake.writes if w == "create_label"),
+                         sorted(VERDICT_LABELS - {"verdict:confirmed"}))
+        fake.writes.clear()
+        self.assertEqual(_run(fake, "workflow_dispatch")[0], 0)
+        self.assertEqual(fake.writes, [])
+
+
 class _Response:
     def __init__(self, status=200, data=None, link=""):
         self.status, self._raw, self.headers = status, b"" if data is None else json.dumps(data).encode(), {
@@ -818,6 +1136,35 @@ class ClientTests(unittest.TestCase):
         query = urllib.parse.parse_qs(urllib.parse.urlsplit(seen[0].full_url).query)["q"][0]
         self.assertEqual(query, f"repo:owner/registry is:issue label:devkit-bug in:body {FP}")
 
+    def test_a_paced_client_starts_each_request_a_second_after_the_last(self):
+        clock, starts, slept = [100.0], [], []
+
+        def opener(req, timeout):
+            starts.append(clock[0])
+            return _Response(data={})
+
+        def sleep(seconds):
+            slept.append(seconds)
+            clock[0] += seconds
+        client = action.GitHub(repo="owner/registry", token="t0k3n-value", opener=opener, sleep=sleep,
+                               clock=lambda: clock[0])
+        client.issue(1)
+        client.issue(2)
+        self.assertEqual(slept, [])  # unpaced: no wait
+        client.pace(1.0)
+        client.issue(3)
+        clock[0] += 0.25
+        client.issue(4)
+        client.issue(5)
+        self.assertEqual(starts, [100.0, 100.0, 101.0, 102.0, 103.0])
+
+    def test_the_registry_listing_reads_open_and_recently_closed_issues(self):
+        client, seen = self._client([_Response(data=[{"number": 1}]), _Response(data=[{"number": 2}])])
+        self.assertEqual([i["number"] for i in client.registry_issues("2026-10-17T08:00:00Z")], [1, 2])
+        queries = [urllib.parse.parse_qs(urllib.parse.urlsplit(r.full_url).query) for r in seen]
+        self.assertEqual([(q["labels"], q["state"], q.get("since")) for q in queries],
+                         [(["devkit-bug"], ["open"], None), (["devkit-bug"], ["closed"], ["2026-10-17T08:00:00Z"])])
+
     def test_the_client_needs_a_token(self):
         with mock.patch.dict(os.environ, {}, clear=True):
             with self.assertRaises(action.GitHubError):
@@ -831,10 +1178,13 @@ class WorkflowFileTests(unittest.TestCase):
     def test_event_text_reaches_no_command(self):
         exprs = sorted(" ".join(e.split()) for e in re.findall(r"\$\{\{(.*?)\}\}", self.text, re.S))
         self.assertEqual(exprs, sorted([
-            "!github.event.issue.pull_request && (github.event_name == 'release' || (github.event_name == 'issues' && "
-            "contains(github.event.issue.body, '```json')) || (github.event_name == 'issue_comment' && "
+            "!github.event.issue.pull_request && (github.event_name == 'release' || github.event_name == "
+            "'workflow_dispatch' || (github.event_name == 'issues' && github.event.action == 'opened' && "
+            "contains(github.event.issue.body, '```json')) || (github.event_name == 'issues' && github.event.action == "
+            "'labeled' && startsWith(github.event.label.name, 'verdict:')) || (github.event_name == 'issue_comment' && "
             "contains(github.event.comment.body, '```json')))",  # the job's condition: compared, never run
-            "github.event.issue.number || github.event.release.id",  # the concurrency group: numbers only
+            "github.event.issue.number || github.event.release.id || 'rerender'",  # the concurrency group: numbers
+            "github.event_name == 'workflow_dispatch' && 30 || 5",  # the job's timeout: longer for the manual run
             "github.token", "secrets.BUG_REGISTRY_KEY"]))
         self.assertNotIn("github.event", self.text[self.text.index("\n    steps:"):])
 
@@ -860,17 +1210,19 @@ class WorkflowFileTests(unittest.TestCase):
         self.assertIn("persist-credentials: false", self.text)
         runs = [ln.strip() for ln in self.text.splitlines() if re.match(r"\s*(- )?run:", ln)]
         self.assertEqual(runs, ['run: python3 tools/bug_registry_action.py "$GITHUB_EVENT_PATH" "$GITHUB_EVENT_NAME"'])
-        for line in ("runs-on: ubuntu-24.04", "timeout-minutes: 5", "cancel-in-progress: false",
+        for line in ("runs-on: ubuntu-24.04", "cancel-in-progress: false",
+                     "timeout-minutes: ${{ github.event_name == 'workflow_dispatch' && 30 || 5 }}",
                      "GITHUB_TOKEN: ${{ github.token }}", "BUG_REGISTRY_KEY: ${{ secrets.BUG_REGISTRY_KEY }}"):
             self.assertIn(line, self.text)
         self.assertNotRegex(self.text, r"pull_request_target|workflow_run|pip install")
         self.assertNotIn("devkit", self.text.lower())  # no brand words: the rebrand rewrites one constant
 
     def test_triggers(self):
-        for event, action_ in (("issues", "opened"), ("issue_comment", "created"), ("release", "published")):
-            self.assertRegex(self.text, rf"\n  {event}:( #[^\n]*)?\n    types: \[{action_}\]\n")
+        for event, types in (("issues", "opened, labeled"), ("issue_comment", "created"), ("release", "published")):
+            self.assertRegex(self.text, rf"\n  {event}:( #[^\n]*)?\n    types: \[{types}\]\n")
+        self.assertRegex(self.text, r"\n  workflow_dispatch:\n")  # by hand, with no inputs
         ons = re.findall(r"^  ([a-z_]+):", self.text.split("\npermissions:")[0], re.M)
-        self.assertEqual(ons, ["issues", "issue_comment", "release"])
+        self.assertEqual(ons, ["issues", "issue_comment", "release", "workflow_dispatch"])
 
 
 if __name__ == "__main__":

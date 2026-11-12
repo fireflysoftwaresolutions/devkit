@@ -846,14 +846,23 @@ PROJECTS.md merge=ours
 TASKS.md merge=ours
 ACTIVITY.md merge=ours
 registry.json merge=ours
+log/** merge=union
+.gitattributes merge=union
 """
 
 
 def handoff_merge_rules():
-    """Append-only logs merge as a union; generated views keep the local copy and are regenerated after a pull."""
+    """The append-only logs (sessions/, log/) merge as a union; generated views keep the local copy and are regenerated
+    after a pull. A repository with an older devkit's rules gets the missing ones added at the end: lines already there
+    are never changed or moved, so Macs that upgrade only ever add lines, and the rules file itself merges as a union
+    (add a new rule at the end of GITATTRIBUTES for the same reason). Safe to re-run: once every rule is there, it
+    changes nothing."""
     f = HANDOFF / ".gitattributes"
-    if not f.exists() or "devkit: safe merges" not in f.read_text():
-        f.write_text((f.read_text() if f.exists() else "") + GITATTRIBUTES)
+    text = f.read_text() if f.exists() else ""
+    have = {" ".join(ln.split()) for ln in text.splitlines()}
+    missing = [ln for ln in GITATTRIBUTES.splitlines() if " ".join(ln.split()) not in have]
+    if missing:
+        f.write_text(text + ("\n" if text and not text.endswith("\n") else "") + "\n".join(missing) + "\n")
     core.git(HANDOFF, "config", "merge.ours.driver", "true")
 
 
@@ -903,7 +912,7 @@ def setup_handoff():
             done("aborted a rebase of the handoff repository that was left stopped (docs/teams.md says why)")
     if (HANDOFF / ".git").exists():
         handoff_merge_rules()
-        done("multi-machine merge rules (sessions union · generated views ours)")
+        done("multi-machine merge rules (session and activity logs union · generated views ours)")
 
 
 def render_instructions() -> str:

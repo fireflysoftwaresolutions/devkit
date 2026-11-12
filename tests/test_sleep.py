@@ -40,7 +40,7 @@ class SleepTests(unittest.TestCase):
                            happened=kw.pop("happened", "it happened: " + title), a=A, **kw)
 
     def test_use_keeps_a_lesson_alive_and_unused_ones_fade(self):
-        used, idle = self.add("Used often"), self.add("Never used")
+        used, idle = self.add("Used often", files=["src/used/**"]), self.add("Never used", files=["src/idle/**"])
         now = time.time() + 120 * DAY
         lessons.track([used["meta"]["id"]] * 1, "applied")
         u = lessons.usage()
@@ -48,7 +48,7 @@ class SleepTests(unittest.TestCase):
         self.assertGreater(lessons.strength(used, u, now), 4 * lessons.strength(idle, u, now))
 
     def test_a_lesson_shown_500_times_with_no_misses_keeps_its_strength(self):
-        les, now = self.add("Often shown"), time.time()
+        les, now = self.add("Often shown", files=["src/shown/**"]), time.time()
         u = {les["meta"]["id"]: {"shown": 500, "shown_call": 500}}
         self.assertEqual(lessons.strength(les, u, now), lessons.strength(les, {}, now))
 
@@ -67,11 +67,11 @@ class SleepTests(unittest.TestCase):
         self.assertTrue((lessons.LESSONS / "archive" / "acme/api" / p["path"].name).exists())
 
     def test_forget_and_restore(self):
-        prevented = self.add("Old prevented")
+        prevented = self.add("Old prevented", files=["src/prevented/**"])
         lessons.prevent(prevented, "test", "tests/x.py", "covered", a=A)
-        retired = self.add("Old retired")
+        retired = self.add("Old retired", files=["src/retired/**"])
         lessons.retire(retired, "no longer applies", a=A)
-        fresh = self.add("Fresh and open")
+        fresh = self.add("Fresh and open", files=["src/fresh/**"])
         future = time.time() + 200 * DAY
         acts = {i: k for k, i, _ in lessons.consolidate(now=future)}
         self.assertEqual(acts.get(prevented["meta"]["id"]), "forget")
@@ -83,7 +83,7 @@ class SleepTests(unittest.TestCase):
         self.assertEqual([x["meta"]["id"] for x in lessons.all_lessons()], [fresh["meta"]["id"]])
 
     def test_dry_run_changes_nothing(self):
-        les = self.add("Retired soon")
+        les = self.add("Retired soon", files=["src/soon/**"])
         lessons.retire(les, "obsolete", a=A)
         acts = lessons.consolidate(dry_run=True, now=time.time() + 40 * DAY)
         self.assertEqual([k for k, _, _ in acts], ["forget"])

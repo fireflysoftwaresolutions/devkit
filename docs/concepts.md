@@ -114,11 +114,11 @@ that you, Claude Code and Codex share across sessions, machines, and developers.
 | `items/<scope>/<ID>.md` | Work items, one versioned file each | `dev task` only |
 | `plans/<scope>/` | Plans and specs, versioned, kept out of the code repositories | `dev plan`, agents |
 | `sessions/<scope>/YYYY-MM.md` | Append-only session log | the hooks, `dev handoff --log` |
-| `presence/<user>@<host>.json` | What each machine is doing now: live sessions, progress, held locks | `dev sync` on that machine |
+| `presence/<user>@<machine id>.json` | What each machine is doing now: live sessions, progress, held locks. Each Mac has a stable machine id; its hostname is a display label (see [Teams and machines › Machine identity](teams.md#machine-identity)) | `dev sync` on that machine |
 | `policies/<scope>.json` | The delivery policy of a project (or the release train of an initiative), versioned with its history | `dev delivery apply` only |
-| `lessons/<scope>/L-….md` | Lessons from mistakes, versioned; `lessons/archive/` holds forgotten ones, `lessons/usage/` each machine's usage counts | `dev lesson`, `dev sleep` |
-| `audit/<user>@<host>/YYYY-MM.jsonl` | Each machine's audit trail | the `audit` job |
-| `log/YYYY-MM.md` | Operations: worktree removals, cleanups, adoptions, imports, restored settings | `dev` |
+| `lessons/<scope>/L-….md` | Lessons from mistakes, versioned; `lessons/archive/` holds forgotten ones, `lessons/usage/<user>@<machine id>.json` each machine's usage counts | `dev lesson`, `dev sleep` |
+| `audit/<user>@<machine id>/YYYY-MM.jsonl` | Each machine's audit trail | the `audit` job |
+| `log/YYYY-MM.md` | Append-only operations log: worktree removals, cleanups, adoptions, imports, restored settings | `dev` |
 | `.gitattributes` | Merge rules that keep machines from conflicting | `dev install` |
 
 The guard keeps the generated files, `items/`, `sessions/`, `presence/`, `policies/`, and `lessons/` out of reach of direct edits, and keeps a

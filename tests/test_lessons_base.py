@@ -12,7 +12,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
-from devkit import core, lessonlint, lessons, work  # noqa: E402
+from devkit import audit, core, lessonlint, lessons, work  # noqa: E402
 
 A = {"user": "ana", "host": "mbp1", "agent": "claude", "session": "s1"}
 DAY = 86400
@@ -27,7 +27,8 @@ class LessonCase(unittest.TestCase):
         for obj, name, value in ((lessons, "LESSONS", handoff / "lessons"), (lessons, "HANDOFF", handoff),
                                  (lessons, "STATE", state), (lessons, "USAGE_LOCAL", state / "lessons-usage.json"),
                                  (work, "HANDOFF", handoff), (work, "ITEMS", handoff / "items"),
-                                 (core, "HANDOFF", handoff)):
+                                 (core, "HANDOFF", handoff), (core, "STATE", state),
+                                 (audit, "AUDIT", self.root / "audit")):
             p = mock.patch.object(obj, name, value)
             p.start()
             self.addCleanup(p.stop)
@@ -41,6 +42,11 @@ class LessonCase(unittest.TestCase):
         kw.setdefault("cause", "the cause of " + title)
         kw.setdefault("prevention", "the prevention of " + title)
         return lessons.add(scope, title, a=kw.pop("a", A), **kw)
+
+    def unanchored(self, title, scope="acme/api", **kw):
+        # A lesson as devkit wrote it before anchors existed: add refuses one with no anchor now, but such files are
+        # still in the handoff, and recall and lint must handle them
+        return unanchor(self.add(title, scope, activities=["testing"], **kw))
 
     def backdate(self, les, days: float):
         """Move a lesson's first and last sighting `days` into the past (as if recorded then)."""
@@ -60,6 +66,17 @@ class LessonCase(unittest.TestCase):
 
     def archived_ids(self):
         return sorted(self.ids(lessons.all_lessons(archived=True)))
+
+
+def unanchor(les: dict) -> dict:
+    """Rewrite a recorded lesson's file as devkit wrote it before anchors existed: every anchor list empty."""
+    path = Path(les["path"])
+    text = path.read_text()
+    end = text.index("\n---\n", 4)
+    front = "\n".join(f"{ln.split(':')[0]}: []" if ln.split(":")[0] in lessons.ANCHORS else ln
+                      for ln in text[:end].split("\n"))
+    path.write_text(front + text[end:])
+    return lessons.load(path)
 
 
 def tz(test: unittest.TestCase, zone: str):

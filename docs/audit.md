@@ -9,7 +9,9 @@ that publishes them and a first look at `dev audit`, see
 ## Retention
 
 Each machine appends its records to `~/.local/state/devkit/audit/YYYY-MM.jsonl` (mode 0600, in a 0700 folder). The
-daily `audit` job copies the last three month files to `audit/<user>@<host>/` in the handoff repository, then prunes.
+daily `audit` job copies the last three month files to `audit/<user>@<machine id>/` in the handoff repository, then
+prunes. Prune also covers the folders this Mac wrote under a hostname it had before (`audit/<user>@<hostname>/`), for
+the month files whose last record this Mac wrote.
 
 | Key | Default | What it keeps |
 | --- | --- | --- |
@@ -57,8 +59,8 @@ information the people recorded need (GDPR article 13).
 
 devkit records only what the purpose needs (data minimization, article 5(1)(c)):
 
-- **Who acted:** the GitHub login, the short host name, the agent (`claude`, `codex`, `job`, or `human`), the
-  session id, and, when a crew member acts, its member id, lane, and launch id.
+- **Who acted:** the GitHub login, this Mac's machine id and its hostname at the time, the agent (`claude`, `codex`,
+  `job`, or `human`), the session id, and, when a crew member acts, its member id, lane, and launch id.
 - **What happened:** the action, its target and details, the outcome, the project, branch, run and step, the reason
   given for an override (`why`), and evidence such as the command, the commit, or the exit code.
 
@@ -231,7 +233,7 @@ dev audit show 01M6SFPEZ2
   "id": "01M6SFPEZ26QJ416WAYP5S80YH",
   "ts": 1794004171.746,
   "time": "2026-11-06T22:29:31.746Z",
-  "actor": {"user": "ana", "host": "mac", "agent": "claude", "session": "3f2a91c0-7b1"},
+  "actor": {"user": "ana", "host": "m-0a1b2c3d", "label": "ana-mbp", "agent": "claude", "session": "3f2a91c0-7b1"},
   "action": "audit.verify",
   "category": "security",
   "severity": "info",
@@ -252,9 +254,9 @@ dev audit show 01M6SFPEZ2
 | `v` | yes | The schema version, `2` |
 | `id` | yes | A ULID: 26 characters of Crockford base 32 that sort by time. `dev audit show` takes any unique start of it |
 | `ts` · `time` | yes | When, as Unix seconds with milliseconds, and as ISO 8601 in UTC |
-| `actor` | yes | Who acted: `user` (the GitHub login), `host` (the short host name), `agent` (`claude`, `codex`, `job`, or `human`), and `session` (the first 12 characters of the session id). A `dev` command a Codex thread runs is recorded under `codex` and that thread's session, even though Codex passes no devkit variable to its commands; only your own terminal is `human` |
-| `crew` | when a crew member acts | `member` (its id), `role`, `lane` (the subagent's id), `parent` (the lane that launched it, or `main`), and `tool_use_id` (its launch) |
-| `project` · `branch` · `run` · `step` | when known | The repository, its branch, the goal of the session's `dev progress` run, and the step running in it |
+| `actor` | yes | Who acted: `user` (the GitHub login), `host` (this Mac's machine id, the same whatever its hostname; a record from before 26.11.16 holds the short hostname), `label` (the hostname at the time, for display), `agent` (`claude`, `codex`, `job`, or `human`), and `session` (the first 12 characters of the session id). A `dev` command a Codex thread runs is recorded under `codex` and that thread's session, even though Codex passes no devkit variable to its commands; only your own terminal is `human` |
+| `crew` | when a crew member acts, or devkit cannot tell who did | `member` (its id), `role`, `lane` (the subagent's id), `parent` (the lane that launched it, or `main`), and `tool_use_id` (its launch). A record made during a run whose caller devkit cannot tie to a lane (a background job a command started, or a command that open calls of the tech lead and a member both hold) holds `{"member": "unknown"}` and no `step`; `dev audit --member unknown` lists them |
+| `project` · `branch` · `run` · `step` | when known | The repository, its branch, the goal of the session's `dev progress` run, and the step running in the caller's lane: a crew member's own step, the main session's for the tech lead |
 | `action` | yes | What happened, as a dotted name such as `dev.commit`, `guard.deny`, `crew.decided`, or `audit.verify` |
 | `category` · `severity` | yes | Set by the action, see [Categories, severities, and outcomes](#categories-severities-and-outcomes) |
 | `target` · `detail` | yes | What the action was about and how, redacted. At most 300 and 600 characters |
@@ -372,8 +374,8 @@ dev audit stats --days 30                     # records per category and per day
 dev audit config                              # the effective settings, the files, and the next prune
 ```
 
-The filters are `--days`, `--since`, `--until`, `--action` (the start of the action), `--actor` (`user@host` or the
-agent), `-p` or `--project`, `--member`, `--category`, `--severity`, `--outcome`, and `--grep`. `--format` takes
+The filters are `--days`, `--since`, `--until`, `--action` (the start of the action), `--actor` (`user@<machine id>`,
+the user alone, or the agent), `-p` or `--project`, `--member`, `--category`, `--severity`, `--outcome`, and `--grep`. `--format` takes
 `table` (the default), `json`, or `csv`; `--json` is the same as `--format json`.
 
 `dev audit export` takes the same filters and writes the records in one of four formats:
@@ -382,8 +384,8 @@ agent), `-p` or `--project`, `--member`, `--category`, `--severity`, `--outcome`
 | --- | --- |
 | `jsonl` (default) | One record per line, as stored. A record cleaned on read carries `"cleaned": true` and no longer matches its `hash`; `dev audit verify` checks the stored line |
 | `csv` | A header row, then one row per record: `id`, `time`, `user`, `host`, `agent`, `session`, `member`, `role`, `lane`, `project`, `branch`, `run`, `step`, `action`, `category`, `severity`, `outcome`, `target`, `detail`, `why`, `evidence`, `ref`, and `hash`. A cell that starts with `=`, `+`, `-`, or `@` gets a leading `'`, so a spreadsheet never runs it as a formula |
-| `ocsf` | One OCSF 1.3.0 Base Event per line (class 0, activity Other), with the severity and status mapped and devkit's own fields under `unmapped` |
-| `cef` | One CEF line per record: `CEF:0\|Firefly Software Solutions\|devkit\|<version>\|<action>\|<target>\|<severity>`, then the time, user, host, action, category, outcome, and detail, with the id, project, member, step, why, and hash as custom strings |
+| `ocsf` | One OCSF 1.3.0 Base Event per line (class 0, activity Other), with the severity and status mapped and devkit's own fields under `unmapped`. `device.hostname` is the hostname at the time and `device.uid` the machine id |
+| `cef` | One CEF line per record: `CEF:0\|Firefly Software Solutions\|devkit\|<version>\|<action>\|<target>\|<severity>`, then the time, user, host, action, category, outcome, and detail, with the id, project, member, step, why, and hash as custom strings. `shost` and the syslog header carry the hostname at the time, and `deviceExternalId` the machine id |
 
 ```bash
 dev audit export --format cef --days 1

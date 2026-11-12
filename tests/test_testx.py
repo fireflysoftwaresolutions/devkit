@@ -1672,6 +1672,30 @@ class ProveTests(unittest.TestCase):
             self.assertEqual(data["helpers"], ["test/harness.mjs"])
             self.assertEqual([s["file"] for s in data["skipped"]], ["test/page.mjs", "test/slug.test.mjs"])
 
+    # A src layout installed in editable mode: the virtual environment's .pth names the checkout's src folder, and
+    # the copy links that environment. The copy's Python must import the copy's src, where the change is undone;
+    # otherwise the old code is never run, and a test that proves the change is reported as not testing it. The .pth
+    # is written by hand, as an editable install writes it, so no installer or network is needed.
+    def test_an_editable_src_layout_is_proven_against_the_copys_own_source(self):
+        import venv
+        with Env() as e:
+            r = e.repo({"pyproject.toml": '[project]\nname = "pkg"\nversion = "0"\n',
+                        "src/pkg/__init__.py": "", "src/pkg/mod.py": "def value():\n    return 1\n",
+                        "tests/__init__.py": "",
+                        "tests/test_mod.py": "import unittest\n\nfrom pkg import mod\n\n\nclass ModTests(unittest.TestCase):\n"
+                                             "    def test_one(self):\n        self.assertEqual(mod.value() % 1, 0)\n",
+                        ".gitignore": "__pycache__/\n.venv/\n"})
+            venv.create(r / ".venv", with_pip=False, symlinks=True)
+            site = next((r / ".venv" / "lib").glob("python*/site-packages"))
+            (site / "_pkg_editable.pth").write_text(f"{r / 'src'}\n")
+            (r / "src" / "pkg" / "mod.py").write_text("def value():\n    return 2\n")
+            (r / "tests" / "test_mod.py").write_text((r / "tests" / "test_mod.py").read_text() +
+                                                     "\n    def test_two(self):\n        self.assertEqual(mod.value(), 2)\n")
+            rc, out, err = dev(r, "prove", "--json", "--runs", "1")
+            self.assertEqual(rc, 0, out + err)
+            self.assertEqual([(t["id"], t["with_change"], t["without_change"]) for t in json.loads(out)["tests"]],
+                             [("tests.test_mod.ModTests.test_two", "1/1", "failed")])
+
 
 
 # --------------------------------------------------------------------------- dev ci --run --resume

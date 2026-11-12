@@ -22,7 +22,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from devkit import audit, cli, core, lessonevents, lessonrules, lessons  # noqa: E402
+from devkit import audit, cli, core, lessonevents, lessonrules, lessons, work  # noqa: E402
 from devkit import progress as pg  # noqa: E402
 from test_lessons_base import A, LessonCase  # noqa: E402
 
@@ -91,7 +91,7 @@ class LessonCLI(LessonCase):
 class LintTests(LessonCLI):
     def test_lint_lists_each_finding_under_its_kind_with_the_command_that_fixes_it(self):
         bare = self.front(self.add("Run probes from a file", commands=["python3 -c"]), "commands", "[python3]")
-        loose = self.add("Name the scratch folder in the brief", scope="global")
+        loose = self.unanchored("Name the scratch folder in the brief", scope="global")
         rc, out = self.dev("lint")
         self.assertEqual(rc, 1, out)
         broad = self.block(out, "broad")
@@ -126,8 +126,8 @@ class LintTests(LessonCLI):
 
 class EvalTests(LessonCLI):
     def test_eval_says_for_each_repeat_whether_recall_showed_the_lesson_before_it(self):
-        shown = self.add("Wait for the server before the probe", scope="global")["meta"]["id"]
-        blind = self.add("Close the port after the probe", scope="global")["meta"]["id"]
+        shown = self.add("Wait for the server before the probe", scope="global", files=["probes/**"])["meta"]["id"]
+        blind = self.add("Close the port after the probe", scope="global", files=["ports/**"])["meta"]["id"]
         lessonevents.record("shown", shown, "brief", "claude", SID, now=time.time() - 60)
         with mock.patch.dict(os.environ, {"DEVKIT_SESSION": f"claude:{SID}"}):
             for lid in (shown, blind):
@@ -140,7 +140,7 @@ class EvalTests(LessonCLI):
         self.assertIn("not shown before", self.line(out, blind))
 
     def test_eval_lists_the_newest_repeats_and_counts_the_rest(self):
-        lid = self.add("Wait for the server before the probe", scope="global")["meta"]["id"]
+        lid = self.add("Wait for the server before the probe", scope="global", files=["probes/**"])["meta"]["id"]
         with mock.patch.dict(os.environ, {"DEVKIT_SESSION": f"claude:{SID}"}):
             for _ in range(cli.EVAL_SHOWN + 3):
                 audit.record("dev.lesson", f"recur {lid}", "", "ok")
@@ -158,8 +158,8 @@ class EvalTests(LessonCLI):
 
 class SupersedeReleaseTests(LessonCLI):
     def test_supersede_marks_the_old_lesson_replaced_by_the_new_one(self):
-        old = self.add("Wait two seconds before the probe", scope="global")["meta"]["id"]
-        new = self.add("Wait for the port before the probe", scope="global")["meta"]["id"]
+        old = self.add("Wait two seconds before the probe", scope="global", files=["probes/**"])["meta"]["id"]
+        new = self.add("Wait for the port before the probe", scope="global", files=["probes/**"])["meta"]["id"]
         rc, out = self.dev("supersede", old, "--by", new, "--why", "a fixed wait fails on a slow machine")
         self.assertEqual(rc, 0, out)
         self.assertEqual(lessons.find(old)["meta"]["superseded_by"], new)
@@ -170,7 +170,8 @@ class SupersedeReleaseTests(LessonCLI):
 
     def test_add_says_when_the_screen_holds_a_lesson_and_release_lets_it_back_into_recall(self):
         rc, out = self.dev("add", "Commit when the hook is slow", "--global", "--cause", "the hook took a minute",
-                           "--prevent", "commit with --no-verify", "--happened", "the commit waited")
+                           "--prevent", "commit with --no-verify", "--happened", "the commit waited",
+                           "--command", "git commit")
         self.assertEqual(rc, 0, out)
         held = lessons.all_lessons("global")[0]
         lid = held["meta"]["id"]
@@ -183,6 +184,47 @@ class SupersedeReleaseTests(LessonCLI):
         rc, out = self.dev("release", lid, "--why", "again")
         self.assertEqual(rc, 2)
         self.assertIn("is not held", out)
+
+
+LONG = "In a crew lane, prove shell expansion of a program word with dev guard check, never by running it"  # 97
+
+
+class CaptureRefusalTests(LessonCLI):
+    def test_add_reports_every_capture_problem_in_one_refusal(self):
+        # each refusal named one problem (the checks stopped at the first), so the Security engineer's lane needed
+        # four tries, titles of 97, 83 and 82 characters and then a duplicate, and gave up
+        twin = self.add("Prove expansion with dev guard check", errors=["zsh: no matches found: ./lib/*"])
+        rc, out = self.dev("add", LONG, "--happened", "a zsh probe was refused", *WHY, "--command", "python3",
+                           "--error", "zsh: no matches found: ./lib/*")
+        self.assertEqual(rc, 2, out)
+        self.assertIn("`python3` alone matches every python3 call", out)  # the anchor problem
+        self.assertIn("the title is 97 characters", out)  # the title problem
+        self.assertIn(f"looks like {twin['meta']['id']}", out)  # and the duplicate, all in the same refusal
+        self.assertEqual(len(lessons.all_lessons("acme/api")), 1)
+
+    def test_an_unanchored_lesson_is_refused_with_the_anchors_to_give(self):
+        # add said "only the session start recalls it", but recall leaves out every lesson with no anchor: 78 live
+        # lessons were recorded and never shown
+        rc, out = self.dev("add", "Wait for the input before the step", "--happened", "the step ran early", *WHY)
+        self.assertEqual(rc, 2, out)
+        self.assertIn("never recalled", out)
+        for flag in ('--file "<glob>"', '--command "<command words>"', '--error "<text the output shows>"',
+                     "--activity <"):
+            self.assertIn(flag, out)
+        self.assertEqual(lessons.all_lessons("acme/api"), [])
+
+    def test_a_refused_add_records_why_in_the_audit_trail_without_its_text(self):
+        # the audit trail kept `detail: ""` for 84 refused adds, so nobody could see why capture kept failing
+        rc, out = self.dev("add", LONG, "--happened", "a zsh probe was refused", *WHY, "--command", "python3",
+                           "--error", "oops boom")
+        self.assertEqual(rc, 2, out)
+        rec = audit.query(action="dev.lesson.refused")[-1]
+        self.assertEqual((rec["outcome"], rec["category"], rec["target"]), ("blocked", "refusal", "acme/api"))
+        self.assertIn("the title is 97 characters", rec["detail"])
+        self.assertIn("`python3` alone", rec["detail"])
+        self.assertIn("the error anchor is 9 characters", rec["detail"])
+        self.assertNotIn("oops boom", json.dumps(audit.query()))  # output text and titles stay out, as for the
+        self.assertNotIn("prove shell expansion", json.dumps(audit.query()).lower())  # command line itself
 
 
 class AddTests(LessonCLI):
@@ -224,6 +266,83 @@ class AddTests(LessonCLI):
                            "--error", "IndexError: list index out of range")
         self.assertEqual(rc, 0, out)
         self.assertNotIn("dev bug report", out)
+
+
+class ReadTests(LessonCLI):
+    def test_recur_of_a_lesson_that_left_after_find_is_a_clear_error_not_a_crash(self):
+        # the same race the listing survives, between find and the write: update raised FileNotFoundError, which
+        # cmd_lesson does not catch, so the agent saw a crash notice and exit 70
+        lid = self.add("Wait for the input before the step", commands=["make deploy"])["meta"]["id"]
+        real_find = lessons.find
+
+        def find_then_vanish(sel, scope=None):
+            les = real_find(sel, scope)
+            Path(les["path"]).unlink()  # the hourly sync's aborted rebase takes the file away again
+            return les
+        with mock.patch.object(lessons, "find", find_then_vanish):
+            rc, out = self.dev("recur", lid, "--evidence", "it happened again")
+        self.assertEqual(rc, 2, out)
+        self.assertNotIn("Traceback", out)
+        self.assertIn("run the command again", out)
+
+    def test_one_malformed_lesson_file_leaves_dev_lesson_working(self):
+        good = self.add("Wait for the input before the step", commands=["make deploy"])["meta"]["id"]
+        bad = lessons.LESSONS / "acme/api" / "L-broken000.md"
+        bad.write_text("---\nid: L-broken000\ntitle: x\nscope: acme/api\noccurrences: two\n---\n# x\n")
+        rc, out = self.dev("ls")
+        self.assertEqual(rc, 0, out)
+        self.assertIn(good, out)
+        rc, out = self.dev("recur", "L-broken000", "--evidence", "again")
+        self.assertEqual(rc, 2, out)
+        self.assertIn("cannot be read", out)  # the selector names a file devkit cannot read: say so, not "0 lessons"
+
+    def stalled_handoff(self):
+        # The handoff as this Mac had it: another machine pushed a lesson, the fetch brought it, and the rebase that
+        # should apply it aborted on a conflict elsewhere (recorded as a sync problem), so HEAD is one commit behind
+        remote, other = self.root / "remote.git", self.root / "other"
+        git = ["git", "-c", "user.email=t@example.com", "-c", "user.name=t"]
+        for args in (["init", "-q", "--bare", "-b", "main", str(remote)], ["clone", "-q", str(remote), str(other)],
+                     ["-C", str(other), "commit", "-q", "--allow-empty", "-m", "first"],
+                     ["-C", str(other), "push", "-q", "origin", "HEAD:main"],
+                     ["clone", "-q", str(remote), str(lessons.HANDOFF)],
+                     ["-C", str(other), "commit", "-q", "--allow-empty", "-m", "L-g6i3aj1j5sf: lesson"],
+                     ["-C", str(other), "push", "-q", "origin", "HEAD:main"],
+                     ["-C", str(lessons.HANDOFF), "fetch", "-q"]):
+            subprocess.run(git + args, check=True, capture_output=True)
+        work.sync_problem("a pull of the handoff repository stopped on a conflict in log/2026-11.md",
+                          "handoff.rebase-aborted")
+
+    def test_a_lesson_missing_while_the_handoff_has_stopped_syncing_says_why(self):
+        # lessons recorded on another Mac never arrive while every pull aborts; `dev lesson` said only "matches 0"
+        self.stalled_handoff()
+        rc, out = self.dev("recur", "L-g6i3aj1j5sf", "--evidence", "again")
+        self.assertEqual(rc, 2, out)
+        self.assertIn("matches 0 lessons", out)
+        self.assertIn("has not synced", out)
+        self.assertIn("1 commit", out)
+
+    def test_dev_lesson_warns_only_while_the_handoff_has_stopped_syncing(self):
+        self.stalled_handoff()
+        rc, out = self.dev()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("has not synced", out)
+        self.assertIn("1 commit from other machines", out)
+        work.push_failed_file().unlink()  # a push succeeded: the sync works again
+        rc, out = self.dev()
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn("synced", out)
+
+    def test_lint_lists_a_lesson_file_no_command_can_read_first(self):
+        self.add("Wait for the input before the step", commands=["make deploy"])
+        bad = lessons.LESSONS / "acme/api" / "L-broken000.md"
+        bad.write_text("---\nid: L-broken000\ntitle: x\nscope: acme/api\noccurrences: two\n---\n# x\n")
+        rc, out = self.dev("lint")
+        self.assertEqual(rc, 1, out)
+        unreadable = self.block(out, "unreadable")
+        self.assertIn("L-broken000", unreadable)
+        self.assertIn("occurrences", unreadable)
+        self.assertIn("lessons/acme/api/L-broken000.md", unreadable)  # the fix names the file to repair
+        self.assertLess(out.index("unreadable ·"), out.index("wrong ·"))  # `make deploy` is named nowhere in it
 
 
 class AuthorTests(LessonCLI):
@@ -279,8 +398,8 @@ class AuthorTests(LessonCLI):
 
 class ReviewTests(LessonCLI):
     def test_review_shows_how_often_shown_lessons_were_heeded_per_channel_and_the_most_missed(self):
-        missed = self.add("Wait for the server before the probe", scope="global")["meta"]["id"]
-        heeded = self.add("Close the port after the probe", scope="global")["meta"]["id"]
+        missed = self.add("Wait for the server before the probe", scope="global", files=["probes/**"])["meta"]["id"]
+        heeded = self.add("Close the port after the probe", scope="global", files=["ports/**"])["meta"]["id"]
         lessonevents.record("shown", missed, "session", "claude", "s1")
         lessonevents.on_hit([missed], "s1", "claude")
         lessonevents.record("shown", heeded, "brief", "neo", "s2")
@@ -297,13 +416,14 @@ class ReviewTests(LessonCLI):
         self.assertNotIn(heeded, self.line(rates, "missed most"))
 
     def test_review_lists_lessons_to_automate_failed_preventions_and_held_lessons(self):
-        missed = self.add("Wait for the server before the probe", scope="global")["meta"]["id"]
+        missed = self.add("Wait for the server before the probe", scope="global", files=["probes/**"])["meta"]["id"]
         lessons.track([missed], "missed")
         lessons.track([missed], "missed")
-        failed = self.add("Close the port after the probe", scope="global")
+        failed = self.add("Close the port after the probe", scope="global", files=["ports/**"])
         lessons.prevent(failed, "test", "tests/test_probe.py::test_port_closes", "a test covers it", a=A)
         lessons.recur(lessons.find(failed["meta"]["id"]), "the port stayed open again", a=A)
-        held = self.add("Commit when the hook is slow", scope="global", prevention="commit with --no-verify")
+        held = self.add("Commit when the hook is slow", scope="global", prevention="commit with --no-verify",
+                        commands=["git commit"])
         rc, out = self.dev("review")
         self.assertEqual(rc, 0, out)
         self.assertIn(missed, self.block(out, "automate"))
@@ -353,6 +473,21 @@ class PreventByRuleTests(LessonCLI):
         self.assertIn("--match", out)
         self.assertEqual(lessonrules.load(["global"]), [])
         self.assertEqual(lessons.find(self.lid)["meta"]["status"], "open")
+
+
+class InitiativeListingTests(LessonCLI):
+    # docs/lessons.md: `dev lesson` lists the lessons of this project, of its initiatives, and the global ones; the
+    # listing added only the global ones, so an initiative's lessons never showed on its member projects
+    def test_dev_lesson_lists_the_projects_initiative_lessons(self):
+        h = Path(work.HANDOFF)
+        (h / "initiatives" / "payments").mkdir(parents=True)
+        (h / "initiatives" / "payments" / "README.md").write_text(
+            "---\nkind: initiative\ntitle: Payments\nprojects: [acme/api]\n---\n# Payments\n")
+        lid = self.add("Never force-push a release branch", scope="initiatives/payments",
+                       commands=["git push --force"])["meta"]["id"]
+        rc, out = self.dev()
+        self.assertEqual(rc, 0, out)
+        self.assertIn(lid, out)
 
 
 if __name__ == "__main__":

@@ -4,7 +4,7 @@
 """Screenshots of the dashboard from neutral fixture data, for reviews, the UX critique and the docs.
 
     python3 tools/dashboard_shots.py <out dir> [--route NAME=HASH ...] [--width 1440 390] [--theme light dark]
-                                     [--doc example|empty|welcome | --live] [--height N]
+                                     [--doc example|empty|welcome | --live | --page FILE] [--height N]
     python3 tools/dashboard_shots.py --serve
 
 It runs inside the test suite's hermetic home (tests/_hermetic.py), so the page is built from the tests' fixture and
@@ -19,14 +19,30 @@ prints a sign-in link and keeps serving, for a check in a real browser: `kill -U
 once, for a minute), Ctrl-C stops it. Answering D1 is the tech lead's typed command (progress, spec C4): this tool never
 records one.
 
-Each file is <name>-<width>-<theme>.png. It needs Chrome or the Playwright Chromium, found like the browser tests find it.
+With --page, the pictures are of a dashboard page built elsewhere, such as the fictional demo workspace the docs' other
+views come from: the file is read once, and each picture gets its theme before anything paints. Build that page from
+neutral data in a temporary HOME, never from a real handoff.
+
+Each file is <name>-<width>-<theme>.png. It needs Chrome or the Playwright Chromium, found like the browser tests find it
+(DEVKIT_TEST_CHROME names another one). Every picture is taken at a true viewport: Chrome lays a page out 500 px wide
+at least, whatever its window size, so the tool sets the page's width and height itself through the DevTools protocol,
+as Playwright does, and stops when the page's innerWidth is not the width asked for. Chrome runs headless with a mock
+keychain, since the hermetic home has no login keychain. A picture that cannot be taken stops the run with the reason
+and the last lines of Chrome's log; nothing is half-written, so running the same command again is safe.
+
+The docs' Now pictures (docs/images/dashboard/home-*.webp), into a scratch folder, then encoded over the old ones:
+    python3 tools/dashboard_shots.py <dir> --live --route home=#/now --width 1440 --theme dark light --height 1000
+    python3 tools/dashboard_shots.py <dir> --live --route home=#/now --width 390 --theme dark --height 1784
+    cwebp -quiet -q 85 -m 6 -metadata none <dir>/<name>.png -o docs/images/dashboard/<name>.webp
 """
 import argparse
+import base64
 import contextlib
 import http.client
 import json
 import os
 import secrets
+import select
 import signal
 import socket
 import subprocess
@@ -55,15 +71,116 @@ def theme_first(page: str, theme: str, nonce: str = "") -> str:
     return page.replace("<head>", f'<head><script{attr}>document.documentElement.dataset.theme="{theme}"</script>', 1)
 
 
-def shoot(url: str, out: Path, width: int, height: int, env: dict, budget: bool = True) -> Path:
-    """One screenshot. `budget`: let the page's timers run 4 s first (a file page); a live page holds its event stream
-    open, which stalls Chrome's virtual time, so it is taken once the page has loaded (it draws from embedded data)."""
-    with tempfile.TemporaryDirectory() as t:
-        res = subprocess.run([T.CHROME, "--headless", "--disable-gpu", "--hide-scrollbars", "--no-first-run", "--no-default-browser-check",
-                              f"--user-data-dir={t}/profile", f"--window-size={width},{height}", *(["--virtual-time-budget=4000"] if budget else []),
-                              f"--screenshot={out}", url], capture_output=True, text=True, timeout=120, env=env)
-    if res.returncode or not out.exists():
-        raise SystemExit(f"Chrome made no screenshot for {out.name}: {res.stderr.strip()[-400:]}")
+# runs in the page once it has loaded: its fonts are in and two frames are drawn; -> the width it is laid out at
+SETTLE = ("(async () => { if (document.fonts) await document.fonts.ready;"
+          " await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))); return innerWidth; })()")
+
+
+class Browser:
+    """A headless Chrome driven over the DevTools protocol on a pipe (--remote-debugging-pipe: commands on its fd 3,
+    answers and events on its fd 4, each a JSON text ended by a NUL byte). Its profile and log live in a temporary
+    folder that goes with it."""
+
+    def __init__(self, env: dict, timeout: float = 120):
+        self.deadline, self.next_id, self.events, self.buf = time.monotonic() + timeout, 0, [], b""
+        self.tmp = tempfile.TemporaryDirectory()
+        self.log = open(Path(self.tmp.name) / "chrome.log", "wb")
+        cmd_r, self.cmd_w = os.pipe()
+        self.ans_r, ans_w = os.pipe()
+        args = [T.CHROME, "--headless", "--use-mock-keychain", "--disable-gpu", "--hide-scrollbars", "--no-first-run",
+                "--no-default-browser-check", f"--user-data-dir={self.tmp.name}/profile", "--remote-debugging-pipe", "about:blank"]
+        # the shell gives Chrome the pipes as fds 3 and 4, no stdin, and stdout on its log, then becomes Chrome; Chrome
+        # and its helpers get a process group of their own, which goes with the picture
+        self.proc = subprocess.Popen(["/bin/sh", "-c", 'exec "$@" 3<&0 4>&1 0</dev/null 1>&2', "sh", *args],
+                                     stdin=cmd_r, stdout=ans_w, stderr=self.log, env=env, start_new_session=True)
+        os.close(cmd_r)
+        os.close(ans_w)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        try:
+            os.write(self.cmd_w, json.dumps({"id": self.next_id + 1, "method": "Browser.close"}).encode() + b"\0")
+        except OSError:
+            pass
+        os.close(self.cmd_w)  # the end of its command pipe also tells Chrome to quit
+        try:  # without a display Chrome hangs at exit until its teardown watchdog ends it (10 s); its profile is thrown away
+            self.proc.wait(2)
+        except subprocess.TimeoutExpired:
+            pass
+        with contextlib.suppress(ProcessLookupError, PermissionError):  # its helpers too, which outlive a killed Chrome
+            os.killpg(self.proc.pid, signal.SIGKILL)
+        self.proc.wait()
+        os.close(self.ans_r)
+        self.log.close()
+        self.tmp.cleanup()
+
+    def fail(self, what: str):
+        self.log.flush()
+        tail = (Path(self.tmp.name) / "chrome.log").read_text(errors="replace").strip()[-400:]
+        raise SystemExit(f"{what}. Chrome ({T.CHROME}) said: {tail or 'nothing'}. Check that it starts headless "
+                         "(it needs no display), or name another Chrome or Chromium in DEVKIT_TEST_CHROME, then run again.")
+
+    def _message(self, what: str) -> dict:
+        while b"\0" not in self.buf:
+            left = self.deadline - time.monotonic()
+            if left <= 0:
+                self.fail(f"Chrome did not answer in time while it {what}")
+            ready, _, _ = select.select([self.ans_r], [], [], min(left, 1.0))
+            if ready:
+                chunk = os.read(self.ans_r, 1 << 20)
+                if not chunk:
+                    self.fail(f"Chrome stopped (exit {self.proc.poll()}) while it {what}")
+                self.buf += chunk
+        raw, self.buf = self.buf.split(b"\0", 1)
+        return json.loads(raw)
+
+    def call(self, method: str, params: dict = None, session: str = None, what: str = "") -> dict:
+        self.next_id += 1
+        msg = {"id": self.next_id, "method": method, "params": params or {}}
+        if session:
+            msg["sessionId"] = session
+        os.write(self.cmd_w, json.dumps(msg).encode() + b"\0")
+        while True:
+            m = self._message(what or f"ran {method}")
+            if m.get("id") == msg["id"]:
+                if "error" in m:
+                    self.fail(f"Chrome refused {method}: {m['error'].get('message')}")
+                return m.get("result") or {}
+            self.events.append(m)
+
+    def wait(self, event: str, session: str, what: str) -> dict:
+        while True:
+            for i, m in enumerate(self.events):
+                if m.get("method") == event and m.get("sessionId") == session:
+                    return self.events.pop(i)
+            self.events.append(self._message(what))
+
+
+def check_width(page_width, width: int, out: Path):
+    """Stop when the page is laid out at another width than the picture's: it would show another layout, cropped."""
+    if page_width != width:
+        raise SystemExit(f"{out.name}: the page is {page_width} px wide, not {width}; no picture was written. "
+                         "The browser ignored the viewport the tool set: try another Chrome or Chromium (DEVKIT_TEST_CHROME).")
+
+
+def shoot(url: str, out: Path, width: int, height: int, env: dict) -> Path:
+    """One screenshot of `url` at a true `width` x `height` viewport, once the page has loaded, its fonts are in and two
+    frames are drawn (motion reduced). The live page holds its event stream open; that does not hold up the picture."""
+    with Browser(env) as b:
+        target = b.call("Target.createTarget", {"url": "about:blank"})["targetId"]
+        sid = b.call("Target.attachToTarget", {"targetId": target, "flatten": True})["sessionId"]
+        b.call("Emulation.setDeviceMetricsOverride", {"width": width, "height": height, "deviceScaleFactor": 1, "mobile": False}, sid)
+        b.call("Emulation.setEmulatedMedia", {"features": [{"name": "prefers-reduced-motion", "value": "reduce"}]}, sid)
+        b.call("Page.enable", {}, sid)
+        b.call("Page.navigate", {"url": url}, sid)
+        b.wait("Page.loadEventFired", sid, f"loaded the page for {out.name}")
+        res = b.call("Runtime.evaluate", {"expression": SETTLE, "awaitPromise": True, "returnByValue": True}, sid,
+                     f"drew the page for {out.name}")
+        check_width((res.get("result") or {}).get("value"), width, out)
+        png = base64.b64decode(b.call("Page.captureScreenshot", {"format": "png"}, sid, f"took {out.name}")["data"])
+    out.write_bytes(png)
     return out
 
 
@@ -170,15 +287,17 @@ def serve_forever() -> int:
 
 
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("out", type=Path, nargs="?")
-    ap.add_argument("--route", action="append", default=[], metavar="NAME=HASH", help="default: now=#/now")
-    ap.add_argument("--width", type=int, nargs="+", default=[1440, 390])
-    ap.add_argument("--theme", nargs="+", choices=("light", "dark"), default=["light", "dark"])
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("out", type=Path, nargs="?", help="the folder the pictures go to (created when missing)")
+    ap.add_argument("--route", action="append", default=[], metavar="NAME=HASH",
+                    help="a picture's name and the page's hash route; repeat for more (default: now=#/now)")
+    ap.add_argument("--width", type=int, nargs="+", default=[1440, 390], help="viewport widths in px (default: 1440 390)")
+    ap.add_argument("--theme", nargs="+", choices=("light", "dark"), default=["light", "dark"], help="default: light dark")
     src = ap.add_mutually_exclusive_group()
     src.add_argument("--doc", choices=("example", "empty", "welcome"), help="Now's areas from this golden")
     src.add_argument("--live", action="store_true", help="the live page: the real server and collect() over the fixture's example")
     src.add_argument("--serve", action="store_true", help="serve the live page for a real browser until Ctrl-C")
+    src.add_argument("--page", type=Path, metavar="FILE", help="a dashboard page built elsewhere, such as the docs' demo workspace")
     ap.add_argument("--height", type=int, help="window height (default 900, 844 under 768 px)")
     a = ap.parse_args(argv)
     if a.serve:
@@ -196,7 +315,13 @@ def main(argv=None) -> int:
         with live_server() as (_port, link):
             for name, hash_ in routes:
                 for width, theme, h in sizes:
-                    print(shoot(link("/" + hash_.lstrip("#/"), theme), a.out / f"{name}-{width}-{theme}.png", width, h, env, budget=False))
+                    print(shoot(link("/" + hash_.lstrip("#/"), theme), a.out / f"{name}-{width}-{theme}.png", width, h, env))
+        return 0
+    if a.page:
+        page = a.page.read_text(encoding="utf-8")
+        for name, hash_ in routes:
+            for width, theme, h in sizes:
+                print(shoot_page(theme_first(page, theme), a.out / f"{name}-{width}-{theme}.png", width, h, hash_, env))
         return 0
     with tempfile.TemporaryDirectory() as t:
         data = T.fixture_data(Path(t) / "handoff", T.NOW)

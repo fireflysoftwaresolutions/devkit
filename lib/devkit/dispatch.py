@@ -252,8 +252,7 @@ def _sorted(run, now: float | None = None):
         elif deps:
             waiting.append((s, "after " + ", ".join(deps)))
         elif any(progress._label_matches(s["label"], v) for _, v in busy):
-            from . import crew
-            waiting.append((s, f"{crew.who(s['label'])} is busy: send it to them (SendMessage / send_input)"))
+            waiting.append((s, progress.lane_wait(run, s, busy)))  # the advice progress follows
         else:
             launch.append(s)
     return launch, waiting

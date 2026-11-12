@@ -86,7 +86,9 @@ then the developer's latest request, then age); a launch out of that order needs
 
 Never two members on the same files; never parallel work on a design that is not settled. Follow-ups go to the
 **same** member (Claude `SendMessage`, Codex `send_input`), which keeps its context and its lane: a fresh one would
-have to learn everything again.
+have to learn everything again. Assign the follow-up's step to that member first (`dev progress assign <step> --to
+<member>`), then send the message: its lane takes the step with its scope as soon as it holds no other open step,
+and only then can the member's `dev progress step --step` close it.
 
 Patterns that work:
 
@@ -149,6 +151,19 @@ dev crew graph --global              # every live session on this Mac (the defau
   member that needs more asks you. Write scopes repository-relative (`lib/**`): they match in every checkout of the
   repository. `assign` and `dev crew delegate --scope` rewrite an absolute or `~` path inside one checkout to that
   form and tell you, and refuse one that spans checkouts or names a worktree that is not there (deleted included).
+- **Scopes match folder by folder.** `*`, `?`, and `[…]` stay inside one folder name; `**` spans folders; a glob
+  holds everything under a folder it matches. `*.md` means root-level Markdown only: write `**/*.md` for all of it.
+  A relative glob never holds a path outside the repository, a link that leads out of it included, and a
+  whole-checkout scope becomes its top-level entries. Two scopes overlap only when one path matches both (without case), so two members can split one folder
+  (`src/pkg/*.py` and `src/pkg/studio/host.py`).
+- **A member's own close lands at once.** `dev progress step "…" --step "<name>" --check "…"` from the member ends
+  that step right away, and the steps after it start. A review step is the exception: it ends with the member's
+  report, done only when the crew gates pass it. A `--step` on a step the lane does not hold, or still queued for it,
+  exits 2 and records nothing. For a long step that stays open, the member records partial evidence with
+  `dev progress note "…" --step "<name>" --check "…"`, which the crew gate accepts as the step's record.
+- **A busy member's next step waits in its lane.** Assigning a step to a member whose one working lane holds another
+  open step queues it for that lane: it joins, with its scope, when that step closes, one at a time in the order you
+  assigned them. If the lane ends first, or the member has two working lanes, the step waits for a launch.
 - **Check who holds the files first.** Before you assign a scope, or edit files outside your own lane, run
   `dev crew owner <paths>`: it names the member whose step holds each path. A member whose lane ended or went stale
   holds no files. When a step and its files go to another lane, a lane that kept those files may read but not write
@@ -295,6 +310,10 @@ them).
      files hold no unfinished work, its new tests can fail, two guard refusals got a lesson (`dev lesson add`), and
      every command it put in the background has ended (Claude Code lists a member until then).
 
+   When the member must not run `dev ci --run` (a shared checkout, runner preparation that must not run twice), put
+   `Waived proof: dev ci --run — <why>` on a line of its own in the brief, or run `dev ci --run` yourself on the tree
+   it leaves: only you can meet that proof for a member, and its own `dev ci --mark-passed` does not.
+
    `dev canary` counts the crew apart (`crew 12/13`), and `dev audit --action crew.gate` lists the gate findings. A
    member let through with background work still running is named once in your next context: stop it with
    `TaskStop <agent id>` if you no longer need it. Every other member you launched that finishes is named once too,
@@ -303,14 +322,18 @@ them).
 2. **The step ends on evidence.** It ends done only with a Check ✓ in the report or the member's own
    `dev progress step --check`; otherwise it shows as unverified, for you to close with evidence or reopen
    (`dev progress reopen <step> --why "…"`). A review or read-only member whose shell call wrote files ends
-   unverified too, until you check the diff. Write detection credits a file in a working builder's scope to that
-   builder only while it has a call open; the review step after it lists the files another lane changed there.
+   unverified too, until you check the diff. Write detection credits a file to another writer only while that writer
+   was at work on it: an edit of the file still in flight (yours included), or a writing shell call that overlapped
+   (when a builder's scope holds the file, only that builder's or yours). A scope alone credits nobody. The review
+   step after it lists the files another lane changed there.
    Reopening a step flags the finished steps that used it for a recheck: the flag clears when they finish again, or
    with `dev progress confirm <step> --why "…"` once you checked that their work still holds.
 3. **Review steps start on unverified work.** A review step (its kind of work is review, or its member works
    review-only) does not wait for the steps it follows to be verified, and its Check ✓ approves the ones its member
-   is the approver for. Every other step waits for done or skipped, and the run cannot end while a step is unverified
-   or an approval is owed.
+   is the approver for. A member's verdict, its review's Check or its `--approves`, counts only at the end of its
+   lane, once the crew gates pass its report without a finding: a report sent back approves nothing, and the work
+   stays owed. Your own `--approves` counts at once. Every other step waits for done or skipped, and the run cannot
+   end while a step is unverified or an approval is owed.
 4. **Check the work, don't trust the report:** read the diff (`git diff --stat`, then the files that matter), run the
    affected tests yourself (`dev test`), and spot-check a cited `file:line`.
 5. **Integrate** in your own lane. Run the full suite once at the end (`dev ci --run`), not after each member.

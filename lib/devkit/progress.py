@@ -449,11 +449,30 @@ def call_opened(agent: str, data: dict, now: float | None = None):
     cut = len(text) > CALL_TEXT
     if cut:
         text = text[:CALL_TEXT // 2] + " … " + text[-CALL_TEXT // 2:]
+    dev_args = _dev_arg_hashes(cmd, data.get("cwd")) if cut and not edit_paths else []
     _write_private(CALLS / sid / f"{tid}.json", {
         "tool_use_id": tid, "session": sid, "agent": agent, "caller": aid or "main", "depth": depth,
         "ts": round(now, 3), "ttl": ttl, "cmd_sha256": hashlib.sha256(cmd.encode()).hexdigest(), "cmd": text,
-        "cut": cut, **({"edit_paths": edit_paths} if edit_paths else
-                       {"reads": True} if call_reads(cmd, data.get("cwd")) else {})})
+        "cut": cut, **({"dev_args": dev_args} if dev_args else {}),
+        **({"edit_paths": edit_paths} if edit_paths else
+           {"reads": True} if call_reads(cmd, data.get("cwd")) else {})})
+
+
+def args_hash(args) -> str:
+    """The sha256 of a `dev` invocation's exact argument list, every word in order (never a prefix)."""
+    return hashlib.sha256(json.dumps([str(a) for a in args]).encode()).hexdigest()
+
+
+def _dev_arg_hashes(cmd: str, cwd) -> list:
+    """args_hash of each `dev` invocation a command runs, as the shell splits its words (guard.shell_calls): what a
+    call whose text the ledger cuts keeps of its `dev` commands, so a long command is still matched by its own words,
+    whole (a 7 KB `dev progress assign --scope …` lost the middle of its scope to the cut)."""
+    try:
+        from . import guard
+        found = [guard._dev_args(argv) for argv, _ in guard.shell_calls(cmd, cwd) or []]
+    except Exception:
+        return []
+    return list(dict.fromkeys(args_hash(d) for d in found if d))
 
 
 def call_entry(data: dict) -> dict:
@@ -521,6 +540,7 @@ def shells_since(sid: str, since: float, now: float | None = None) -> list:
 
 
 EDIT_TOOLS = ("Write", "Edit", "MultiEdit")  # the tools that name the one file they change (tool_input.file_path)
+_EDIT_TEMP = re.compile(r"\.tmp\.\d+\.[0-9a-f]+$")  # the temporary file an edit tool writes, then renames into place
 EDIT_SLACK = 2.0  # seconds an edit may precede a shell call's start and still fall in its window (hook ordering)
 EDIT_KEEP = 12 * 3600  # seconds the edit record keeps a call: a lane's whole life, which the crew gates read
 EDIT_MAX = 1000  # edit calls the record keeps at most, newest last
@@ -564,14 +584,64 @@ def note_edit(agent: str, data: dict, now: float | None = None):
         return
     now = now or time.time()
     who = str(data.get("agent_id") or "main")[:80]
+    tid = _safe_name(data.get("tool_use_id"))
 
     def add(doc):
         kept = [e for e in doc.get("edits") or [] if isinstance(e, dict) and now - (e.get("ts") or 0) <= EDIT_KEEP]
         doc["edits"] = (kept + [{"ts": round(now, 3), "caller": who, "path": p[:1024]} for p in paths])[-EDIT_MAX:]
+        if tid:  # the record of the call in flight gives way to the record of its result
+            doc["open"] = [e for e in doc.get("open") or [] if isinstance(e, dict) and e.get("tid") != tid]
     try:
         state.update(_edits_path(sid), add)
     except state.StateBusy:
         pass
+
+
+def edit_opened(agent: str, data: dict, now: float | None = None):
+    """PreToolUse of a Write, Edit or MultiEdit the guard allowed: its file and who changes it, as an edit in flight
+    {tid, ts, caller, path} (edits_open). The tool writes the file before its PostToolUse records the result
+    (note_edit, which takes this record's place), and a reading lane's check that runs in between must see that
+    another writer was at work (scope_written). A refused call never opens one; a call that failed drops it
+    (edit_dropped). Under the record's lock; a busy lock drops this one record."""
+    if data.get("tool_name") not in EDIT_TOOLS:
+        return
+    paths, sid, tid = _edit_paths(data), _safe_name(data.get("session_id")), _safe_name(data.get("tool_use_id"))
+    if not (sid and tid and paths):
+        return
+    now = now or time.time()
+    who = str(data.get("agent_id") or "main")[:80]
+
+    def add(doc):
+        kept = [e for e in doc.get("open") or [] if isinstance(e, dict) and now - (e.get("ts") or 0) <= CALL_TTL
+                and e.get("tid") != tid]
+        doc["open"] = (kept + [{"tid": tid, "ts": round(now, 3), "caller": who, "path": p[:1024]}
+                               for p in paths])[-EDIT_MAX:]
+    try:
+        state.update(_edits_path(sid), add)
+    except state.StateBusy:
+        pass
+
+
+def edit_dropped(data: dict):
+    """An edit call in flight that will not write: refused, or it failed (PostToolUseFailure). Its record goes."""
+    sid, tid = _safe_name(data.get("session_id")), _safe_name(data.get("tool_use_id"))
+    if not (sid and tid) or not _edits_path(sid).exists():
+        return
+
+    def drop(doc):
+        doc["open"] = [e for e in doc.get("open") or [] if isinstance(e, dict) and e.get("tid") != tid]
+    try:
+        state.update(_edits_path(sid), drop)
+    except state.StateBusy:
+        pass
+
+
+def edits_open(sid: str, now: float | None = None) -> list:
+    """The session's edit calls in flight (edit_opened): [{tid, ts, caller, path}], none older than CALL_TTL, the
+    longest a call waits for its result."""
+    now = now or time.time()
+    doc = core.read_json(_edits_path(sid), {}) or {}
+    return [e for e in doc.get("open") or [] if isinstance(e, dict) and now - (e.get("ts") or 0) <= CALL_TTL]
 
 
 def edits_since(sid: str, since: float, now: float | None = None) -> list:
@@ -621,6 +691,8 @@ def _names_args(entry: dict, args: list) -> bool:
     if entry.get("agent") == "codex" and "edit_paths" in entry:
         return False
     if entry.get("cut") and entry.get("caller") != "main":
+        return True
+    if args and args_hash(args) in (entry.get("dev_args") or []):  # a cut call's own dev command, word for word
         return True
     args = [a for a in args if a]
     if not args:
@@ -1424,7 +1496,9 @@ def _finish_step(run, s, now, agent, sid):
 
 
 def _advance_main(run, now):
-    """Keep one main step running: the first ready one (its dependencies done) not handed to a subagent."""
+    """Keep one main step running: the first ready one (its dependencies done) not handed to a subagent. Before that,
+    each lane that holds no open step takes the step queued for it (_bind_queued)."""
+    _bind_queued(run, now)
     plan = run.get("plan") or []
     if any(s.get("state") == "running" and (s.get("owner") or "main") == "main" for s in plan):
         return
@@ -1562,21 +1636,8 @@ def assign(which, label: str, cwd: str | None = None, now: float | None = None, 
                                         f"({', '.join(lane.get('scope'))}). Give each member different files, or "
                                         f"wait until they finish.")
             s["scope"] = globs
-        working = [k for k, v in live if _label_matches(label, v)]
-        # its launch's lane first; else a working lane of the member with no other open step (a member resumed
-        # with SendMessage keeps its first launch's words)
-        lane_id = None if deps_open(run, s) else next(
-            (k for k in working if s.get("owner") == k or _launch_takes(run, k, s)),
-            next((k for k in working if not _open_step_of(run, k, s)), None))
-        if working and not lane_id and not deps_open(run, s) and s.get("state") not in DONE:
-            from . import crew
-            busy = run["agents"][working[0]]
-            other = _open_step_of(run, working[0], s)
-            _post(run, "devkit", "main", f"{crew.who(busy.get('persona') or label)} works on “{other['name']}” "
-                  f"(one open step per lane): “{s['name']}” waits for a launch of its own (dev crew next), or for "
-                  f"that step to end, and that lane's report cannot close it", now, from_name="devkit")
+        lane_id = _route_to_lane(run, s, label, live, now)
         if lane_id:
-            _take_step(run, lane_id, s, now)
             if run["agents"][lane_id].get("binding") == "unbound":  # Morpheus confirms a lane with no launch record
                 run["agents"][lane_id]["binding"] = "confirmed"
                 _audit("crew.confirm", run["agents"][lane_id].get("persona") or label, f"Morpheus assigned "
@@ -1587,6 +1648,170 @@ def assign(which, label: str, cwd: str | None = None, now: float | None = None, 
         _advance_main(run, now)
         _save(run)
     return run
+
+
+def _route_to_lane(run: dict, s: dict, label: str, live: list, now: float):
+    """Step `s`, just assigned to `label` or reopened, goes to its member's live lane (`live`: working_agents) when
+    devkit can tell which. A lane whose launch names it, or that holds no other open step, takes it now, once its
+    dependencies are done (its launch's lane first: a member resumed with SendMessage keeps its first launch's
+    words). With one live lane that cannot take it yet (it works on another step, or the step's dependencies are
+    open), the step is queued for that lane (`waits_lane`): the same agent takes it once its open step closes
+    (_bind_queued), and its scope with it; the member is told. With several live lanes devkit cannot tell, and the
+    step waits for a launch of its own. A closed step goes to no lane: reopening it gives it back. Morpheus is told
+    why it waits (lane_wait). -> the lane that took it, or None."""
+    from . import crew
+    s.pop("waits_lane", None)  # assigned again: placed anew, at the end of the lane's queue
+    working = [k for k, v in live if _label_matches(label, v)]
+    if not working:
+        return None
+    if s.get("state") in DONE + ("unverified",):
+        _post(run, "devkit", "main", f"“{s['name']}” is {s.get('state')}, so {crew.who(label)}'s lane does not take "
+              f"it again: to have them work on it again, reopen it (dev progress reopen \"{s['name']}\" --why \"…\"), "
+              f"and their lane takes it with its scope", now, from_name="devkit")
+        return None
+    deps = deps_open(run, s)
+    lane_id = None if deps else next(
+        (k for k in working if s.get("owner") == k or _launch_takes(run, k, s)),
+        next((k for k in working if not _open_step_of(run, k, s)), None))
+    if lane_id:
+        _take_step(run, lane_id, s, now)
+        return lane_id
+    if len(working) == 1:
+        aid = working[0]
+        s["waits_lane"] = {"lane": aid, "ts": round(now, 3)}
+        before = _closes_before(run, aid, s)
+        if before:
+            _post(run, "devkit", aid, f"devkit: the tech lead gave you “{s['name']}”: it joins your lane once "
+                  f"{_quoted_and(before)} close{'s' if len(before) == 1 else ''} (dev progress step \"…\" --step "
+                  f"\"{before[0]}\" --check \"…\"), and its files become your scope then", now, from_name="devkit",
+                  kind="notice")
+    if not deps:
+        _post(run, "devkit", "main", lane_wait(run, s, live), now, from_name="devkit")
+    return None
+
+
+def _quoted_and(names: list) -> str:
+    """'“a”', '“a” and “b”', '“a”, “b” and “c”'."""
+    q = [f"“{n}”" for n in names]
+    return q[0] if len(q) == 1 else ", ".join(q[:-1]) + " and " + q[-1]
+
+
+def _queued_for(run: dict, aid: str) -> list:
+    """The steps queued for lane `aid` (waits_lane), in the order they were assigned."""
+    marks = [(((x.get("waits_lane") or {}).get("ts") or 0), i, x) for i, x in enumerate(run.get("plan") or [])
+             if isinstance(x.get("waits_lane"), dict) and x["waits_lane"].get("lane") == aid]
+    return [x for _, _, x in sorted(marks, key=lambda t: t[:2])]
+
+
+def _closes_before(run: dict, aid: str, s: dict) -> list:
+    """The names of the steps that close before queued step `s` joins lane `aid`: its open step, then the steps
+    queued for it ahead of `s`."""
+    cur = _open_step_of(run, aid, s)
+    queue = _queued_for(run, aid)
+    ahead = queue[:next((i for i, x in enumerate(queue) if x is s), len(queue))]
+    return ([cur["name"]] if cur else []) + [x["name"] for x in ahead]
+
+
+def lane_wait(run: dict, s: dict, live: list) -> str:
+    """Why step `s`, whose member works (`live`: working_agents), waits for that member, and what to do: the one
+    advice `dev progress assign` and `dev progress reopen` post and `dev crew next` gives (dispatch._sorted). Queued
+    for one of the member's lanes: it joins that lane once the steps before it close, and the member's own
+    `dev progress step --step` closes it. One lane, not queued: assigning it again queues it there. Several lanes:
+    devkit cannot tell which would take it, so it waits for a launch of its own. '' when its member does not work."""
+    from . import crew
+    label = s.get("label") or ""
+    lanes = [k for k, v in live if _label_matches(label, v)]
+    if not lanes:
+        return ""
+    who, name = crew.who(label), s["name"]
+    queued = next((k for k in lanes if k == (s.get("waits_lane") or {}).get("lane")), None)
+    aid = queued or (lanes[0] if len(lanes) == 1 else None)
+    if not aid:
+        return (f"{who} works in {len(lanes)} lanes, so devkit cannot tell which one would take “{name}”: it waits "
+                f"for a launch of its own once they finish (dev crew next)")
+    cur = _open_step_of(run, aid, s)
+    head = f"{who} works on “{cur['name']}”" if cur else f"{who} works with no step"
+    if queued:
+        before = _closes_before(run, aid, s)
+        when = f"once {_quoted_and(before)} close{'s' if len(before) == 1 else ''}" if before else "now"
+        return (f"{head}: “{name}” joins that lane {when}; send it to them (SendMessage / send_input), and their "
+                f"dev progress step --step \"{name}\" closes it")
+    if cur:
+        return (f"{head}: dev progress assign \"{name}\" --to \"{label}\" queues “{name}” for that lane, which "
+                f"takes it once “{cur['name']}” closes; otherwise it waits for a launch of its own once they finish")
+    return f"{head}: dev progress assign \"{name}\" --to \"{label}\" gives “{name}” to that lane"
+
+
+def _bind_queued(run: dict, now: float):
+    """Each live lane with steps queued for it (waits_lane) that holds no open step takes the first of them whose
+    dependencies are done, as a launch takes its step (_take_step: the step's scope becomes the lane's), and its
+    member is told. The step joined the lane (`joined`): only the lane's own evidence for it closes it
+    (_steps_about). A queue entry goes when its step is no longer the tech lead's to give, or its lane ended or
+    began again since (a resumed member asks anew); that step waits for a launch of its own."""
+    from . import crew
+    agents, lanes = run.get("agents") or {}, []
+    for s in run.get("plan") or []:
+        w = s.get("waits_lane")
+        if w is None:
+            continue
+        aid = str((w or {}).get("lane") or "") if isinstance(w, dict) else ""
+        lane = agents.get(aid) or {}
+        life = lane.get("resumed_at") or lane.get("started") or 0
+        mine = s.get("state") == "pending" and (s.get("owner") or "main") == "main"
+        if not mine or lane.get("state") != "running" or (w.get("ts") or 0) < life or \
+                not _label_matches(s.get("label") or "", lane):
+            s.pop("waits_lane")
+            if mine:
+                _log_change(run, s, "pending", "pending", "devkit", f"{crew.who(lane.get('persona') or s.get('label'))}"
+                            f"'s lane ended before it took this step: it waits for a launch of its own", now)
+            continue
+        if aid not in lanes:
+            lanes.append(aid)
+    for aid in lanes:
+        lane = agents[aid]
+        if lane.get("over_limit") or lane.get("waits_slot") or _open_step_of(run, aid):
+            continue
+        nxt = next((x for x in _queued_for(run, aid) if not deps_open(run, x)), None)
+        if not nxt:
+            continue
+        _take_step(run, aid, nxt, now)
+        nxt["joined"] = aid  # its launch does not name it
+        who = crew.who(lane.get("persona") or nxt.get("label") or "")
+        _log_change(run, nxt, "pending", "running", "devkit", f"{who} holds no other step now: it joined that lane",
+                    now)
+        rest = [x["name"] for x in _queued_for(run, aid)]
+        scope = f" (your scope: {', '.join(nxt['scope'])})" if nxt.get("scope") else ""
+        _post(run, "devkit", aid, f"devkit: “{nxt['name']}” is your step now{scope}: close it with dev progress step "
+              f"\"…\" --step \"{nxt['name']}\" --check \"…\"" + (f"; then “{rest[0]}” joins your lane" if rest else ""),
+              now, from_name="devkit", kind="notice")
+
+
+def _member_close_refused(run: dict, st: dict, aid: str, check: str) -> str:
+    """Why a member's `dev progress step "…" --step <name>` cannot close that step, with what to do; '' when it can,
+    when the step is closed already, or when it is a review, which closes with the member's report. The command is
+    refused before anything is recorded, so the member runs it again once it can close the step."""
+    from . import approvals
+    name = st["name"]
+    if st.get("state") in DONE:
+        return ""
+    if st.get("owner") == aid:
+        if str(check or "").strip() or approvals.is_review(st):
+            return ""
+        return (f"“{name}” stays {st.get('state')}: a step closes on its evidence, so run this again with --check "
+                f"\"✓ <tests run, output>\" (dev progress note \"…\" --step \"{name}\" keeps partial evidence and "
+                f"leaves it open); devkit recorded nothing")
+    if (st.get("waits_lane") or {}).get("lane") == aid:
+        before = _closes_before(run, aid, st)
+        if before:
+            return (f"“{name}” joins your lane once {_quoted_and(before)} close{'s' if len(before) == 1 else ''}, so it "
+                    f"cannot close yet and devkit recorded nothing: close “{before[0]}” first (dev progress step "
+                    f"\"…\" --step \"{before[0]}\" --check \"…\"), then run this again")
+        deps = deps_open(run, st)
+        return (f"“{name}” waits for {', '.join(deps)}, so it cannot close yet and devkit recorded nothing: it joins "
+                f"your lane once {'that is' if len(deps) == 1 else 'they are'} done; run this again then")
+    holder = "the tech lead's" if (st.get("owner") or "main") == "main" else f"{_name_of(run, st['owner'])}'s"
+    return (f"“{name}” is not your step ({holder}), so devkit cannot close it and recorded nothing: ask the tech lead "
+            f"to assign it to you (dev crew ask \"…\"), or record your work without --step")
 
 
 def _open_step_of(run: dict, aid: str, s: dict | None = None):
@@ -1600,6 +1825,7 @@ def _take_step(run: dict, aid: str, s: dict, now: float):
     """Lane `aid` takes step `s`: it owns it and runs it, its scope becomes the step's, and its member's step closes
     reach the plan."""
     s.update(owner=aid, state="running", started=s.get("started") or now)
+    s.pop("waits_lane", None)
     lane = run["agents"][aid]
     lane.pop("handed_over", None)  # Morpheus gives it a step of its own
     if s.get("scope"):
@@ -1622,7 +1848,8 @@ def _take_waiting_step(run: dict, aid: str, now: float, sess=None):
                   for r in ((sess or {}).get("launches") or {}).values() if isinstance(r, dict)):
         return None
     waiting = [x for x in run.get("plan") or [] if (x.get("owner") or "main") == "main" and x.get("state") == "pending"
-               and x.get("label") and _label_matches(x["label"], lane) and not deps_open(run, x)]
+               and x.get("label") and _label_matches(x["label"], lane) and not deps_open(run, x)
+               and (x.get("waits_lane") or {}).get("lane") in (None, aid)]  # never a step queued for another lane
     if len(waiting) != 1:
         return None
     s = waiting[0]
@@ -1666,8 +1893,10 @@ def _scope_globs(globs: list, project: str, cwd: str | None) -> tuple:
     """Step scopes count from the run's repository: the Edit guard matches a member's file by its path relative to
     the checkout that holds it (hooks._scope_violation), so an absolute or ~ glob inside a checkout never matched
     (L-fzi4pkv6bbh). -> (globs, rewrites): such a glob in its repository-relative form, with "old → new" for the
-    tech lead; absolute globs outside the repository (a scratch folder, the project's plans) as given. A glob is
-    rewritten only when that is exact: its fixed folder (the part before the first wildcard) lies in one checkout.
+    tech lead; absolute globs outside the repository (a scratch folder, the project's plans) as given; a glob that
+    names a whole checkout (`<worktree>/**`, `<worktree>/`) as that checkout's top-level entries (_checkout_entries),
+    never a bare `**`. A glob is rewritten only when that is exact: its fixed folder (the part before the first
+    wildcard) lies in one checkout.
     Raises StepError when it is not: the fixed folder holds checkouts (a wildcard or the folder spans several), or it
     is a managed worktree folder of the project with no checkout there (a removed worktree, a typo). A guess there
     could cover files the tech lead did not name, or keep a scope that never matches."""
@@ -1692,7 +1921,14 @@ def _scope_globs(globs: list, project: str, cwd: str | None) -> tuple:
         if top:
             rel = os.path.relpath(fixed, top)
             new = "/".join(x for x in (rel if rel != "." else "", rest) if x) or "**"
-            new += "/" if ga.endswith("/") and not rest and new != "**" else ""
+            if new == "**":  # the whole checkout: the entries it holds, never a bare ** (B-g7g0pps6sve)
+                entries = _checkout_entries(top)
+                if not entries:
+                    raise StepError(f"--scope {g} names {core.tilde(top)}, which holds no file git knows. {fix}")
+                out.extend(entries)
+                rewrites.append(f"{g} → {', '.join(entries)}")
+                continue
+            new += "/" if ga.endswith("/") and not rest else ""
             out.append(new)
             rewrites.append(f"{g} → {new}")
             continue
@@ -1705,7 +1941,19 @@ def _scope_globs(globs: list, project: str, cwd: str | None) -> tuple:
             raise StepError(f"--scope {g} points into {core.tilde(managed)}, but no checkout of {project} is there "
                             f"(git worktree list). {fix}")
         out.append(g)
-    return out, rewrites
+    return list(dict.fromkeys(out)), rewrites
+
+
+def _checkout_entries(top: str) -> list:
+    """The repository-relative globs that hold every file of the checkout at `top`: each top-level folder as
+    `<name>/**` and each top-level file by its name, from git's own list (tracked files and the untracked ones it
+    does not ignore). A scope that names a whole checkout becomes these, so it reads as the files it holds."""
+    heads = {}
+    for p in core.gitout(top, "ls-files", "-z", "--cached", "--others", "--exclude-standard").split("\0"):
+        head, sep, _ = p.partition("/")
+        if head:
+            heads[head] = heads.get(head, False) or bool(sep)
+    return sorted(f"{h}/**" if folder else h for h, folder in heads.items())
 
 
 def _tell_rewrites(run: dict, step: str, rewrites: list, now: float):
@@ -1716,20 +1964,146 @@ def _tell_rewrites(run: dict, step: str, rewrites: list, now: float):
               f"{run.get('project') or 'the repository'}.", now, from_name="devkit")
 
 
-def _globs_overlap(a: str, b: str) -> bool:
-    """Could two path globs match the same file? (conservative: compares the fixed prefixes)"""
+# How a lane's scope glob holds a path. The edit check (in_scope), the holders of a path (scope_holders) and the
+# overlap check that keeps two working lanes apart (_globs_overlap) read globs by the same rules, so two lanes whose
+# scopes do not overlap never write the same file (B-g7g0pps6sve):
+#   - a glob is matched segment by segment: `*`, `?` and `[…]` match inside one segment and never cross `/`, and `**`
+#     as a whole segment matches any number of segments, none included (`docs/**/*.md` holds docs/guide.md);
+#   - a glob holds everything under a folder it matches: `docs/`, `lib/parser`, `lib/parser/**` and `src/*` hold the
+#     files below those folders, `src/pkg/*.py` holds no file of src/pkg/studio/;
+#   - a relative glob counts from its repository and holds no path outside it (a `..` segment), `**` included; an
+#     absolute or ~ glob names a folder anywhere (a scratch folder, the project's plans) and holds absolute paths.
+
+def _glob_segments(glob: str) -> list:
+    """A scope glob as its segments, ending with the "**" that holds what lies under a folder it matches."""
+    segs = [s for s in glob.split("/") if s not in ("", ".")]
+    return segs if segs and segs[-1] == "**" else segs + ["**"]
+
+
+def _segments_match(segs: list, pat: list) -> bool:
     import fnmatch
-    pa, pb = re.split(r"[*?\[]", a, maxsplit=1)[0], re.split(r"[*?\[]", b, maxsplit=1)[0]
-    if fnmatch.fnmatch(a, b) or fnmatch.fnmatch(b, a):
+    memo = {}
+
+    def go(i, j):
+        if (i, j) not in memo:
+            if j == len(pat):
+                memo[(i, j)] = i == len(segs)
+            elif pat[j] == "**":
+                memo[(i, j)] = go(i, j + 1) or (i < len(segs) and go(i + 1, j))
+            else:
+                memo[(i, j)] = i < len(segs) and fnmatch.fnmatchcase(segs[i], pat[j]) and go(i + 1, j + 1)
+        return memo[(i, j)]
+    return go(0, 0)
+
+
+def scope_match(path, glob) -> bool:
+    """Does scope glob `glob` hold `path` (the rules above)? A relative glob holds a path relative to the lane's
+    repository, an absolute or ~ one an absolute path; a path with a `..` segment lies outside and is held by none."""
+    g, p = str(glob or ""), str(path or "")
+    g = os.path.expanduser(g) if g.startswith("~") else g
+    if not g or not p or g.startswith("/") != p.startswith("/"):
+        return False
+    segs = [s for s in p.split("/") if s not in ("", ".")]
+    return bool(segs) and ".." not in segs and _segments_match(segs, _glob_segments(g))
+
+
+def _glob_tokens(seg: str) -> list:
+    """One segment of a glob as fnmatch reads it: "*", "?", ("set", "[…]") or ("lit", <one character>)."""
+    out, i, n = [], 0, len(seg)
+    while i < n:
+        c = seg[i]
+        if c in "*?":
+            if not (c == "*" and out and out[-1] == "*"):
+                out.append(c)
+            i += 1
+            continue
+        if c == "[":
+            j = i + 1 + (seg[i + 1:i + 2] == "!")
+            j += seg[j:j + 1] == "]"  # a ] first in the set is one of its characters
+            end = seg.find("]", j)
+            if end >= 0:
+                out.append(("set", seg[i:end + 1]))
+                i = end + 1
+                continue
+        out.append(("lit", c))  # an unclosed [ is a literal, as fnmatch reads it
+        i += 1
+    return out
+
+
+def _one_char_both(x, y) -> bool:
+    """Can one character match glob tokens x and y (neither "*")? Two sets count as sharing one: an overlap is the
+    answer that keeps two lanes apart."""
+    import fnmatch
+    if "?" in (x, y):
         return True
-    return pa.startswith(pb) or pb.startswith(pa)
+    if x[0] == "lit" and y[0] == "lit":
+        return x[1] == y[1]
+    if x[0] == "lit" or y[0] == "lit":
+        lit, other = (x, y) if x[0] == "lit" else (y, x)
+        return fnmatch.fnmatchcase(lit[1], other[1])
+    return True
+
+
+def _segment_overlap(p: str, q: str) -> bool:
+    """Can one path segment match both segment patterns p and q?"""
+    a, b, memo = _glob_tokens(p), _glob_tokens(q), {}
+
+    def go(i, j):
+        if (i, j) not in memo:
+            r = i == len(a) and j == len(b)
+            if not r and i < len(a) and a[i] == "*":  # it matches nothing, or one more character of q's
+                r = go(i + 1, j) or (j < len(b) and b[j] != "*" and go(i, j + 1))
+            if not r and j < len(b) and b[j] == "*":
+                r = go(i, j + 1) or (i < len(a) and a[i] != "*" and go(i + 1, j))
+            if not r and i < len(a) and j < len(b) and "*" not in (a[i], b[j]):
+                r = _one_char_both(a[i], b[j]) and go(i + 1, j + 1)
+            memo[(i, j)] = r
+        return memo[(i, j)]
+    return go(0, 0)
+
+
+def _segments_overlap(a: list, b: list) -> bool:
+    """Can one path match both glob segment lists?"""
+    memo = {}
+
+    def go(i, j):
+        if (i, j) not in memo:
+            r = i == len(a) and j == len(b)
+            if not r and i < len(a) and a[i] == "**":  # it spans nothing, or one more segment of b's
+                r = go(i + 1, j) or (j < len(b) and go(i, j + 1))
+            if not r and j < len(b) and b[j] == "**":
+                r = go(i, j + 1) or (i < len(a) and go(i + 1, j))
+            if not r and i < len(a) and j < len(b) and "**" not in (a[i], b[j]):
+                r = _segment_overlap(a[i], b[j]) and go(i + 1, j + 1)
+            memo[(i, j)] = r
+        return memo[(i, j)]
+    return go(0, 0)
+
+
+def _glob_real(g: str) -> str:
+    """An absolute or ~ glob with its literal folders resolved (/tmp/x/** → /private/tmp/x/**)."""
+    parts = os.path.expanduser(g).split("/")
+    k = next((i for i, p in enumerate(parts) if re.search(r"[*?\[]", p)), len(parts))
+    return "/".join([core.real("/".join(parts[:k]) or "/")] + parts[k:])
+
+
+def _globs_overlap(a: str, b: str) -> bool:
+    """Could two scope globs hold the same file? True when at least one path matches both by scope_match's rules,
+    compared without case, since macOS's disk ignores it. `src/pkg/*.py` and `src/pkg/studio/host.py` do not
+    overlap, nor do `tests/unit/test_parser*.py` and `tests/unit/test_cli*.py`, so two lanes can split one folder;
+    `tests/unit/**` overlaps every file under tests/unit/. A relative glob never overlaps an absolute one: the
+    absolute globs a step keeps lie outside its repository (_scope_globs)."""
+    a, b = str(a or ""), str(b or "")
+    if not a or not b or a.startswith(("/", "~")) != b.startswith(("/", "~")):
+        return False
+    if a.startswith(("/", "~")):
+        a, b = _glob_real(a), _glob_real(b)
+    return _segments_overlap(_glob_segments(a.casefold()), _glob_segments(b.casefold()))
 
 
 def _in_globs(rel_path: str, globs) -> bool:
-    """A repo-relative path matches one of a scope's globs ("lib/parser/**", "docs/", "README.md")."""
-    import fnmatch
-    return any(fnmatch.fnmatch(rel_path, g) or fnmatch.fnmatch(rel_path, g.rstrip("/") + "/**") or
-               rel_path.startswith(g.rstrip("*").rstrip("/") + "/") or rel_path == g for g in globs)
+    """A repo-relative path is held by one of a scope's globs ("lib/parser/**", "docs/", "README.md"): scope_match."""
+    return any(scope_match(rel_path, g) for g in globs or [] if isinstance(g, str))
 
 
 def running_agents(run) -> list:
@@ -4836,6 +5210,8 @@ def reopen(which, why: str, cwd: str | None = None, now: float | None = None, sk
                         x["state"] = "pending"
                 s["state"] = "running"
                 s["started"] = s.get("started") or now
+            elif s.get("label"):  # its member still works: back to their lane, now or once its open step closes
+                _route_to_lane(run, s, s["label"], working_agents(run, now, own=True), now)
             s.pop("untimed", None)
             s["reopened"] = (s.get("reopened") or 0) + 1
         _log_change(run, s, old, s["state"], "main", why, now)
@@ -4908,9 +5284,12 @@ def _recheck_dependents(run, s, now):
 
 
 def note(text: str, nxt: str = "", cwd: str | None = None, from_agent: str | None = None,
-         now: float | None = None) -> dict:
+         now: float | None = None, which=None, check: str = "") -> dict:
     """An update while a step is still running: recorded and shown (it resets the silence timer), and no step
-    changes state. `dev progress step` is for a step that is finished."""
+    changes state. `dev progress step` is for a step that is finished. `which` and `check`: partial evidence for a
+    step that is not finished (`dev progress note "…" --step <name> --check "…"`, part of B-g7g1e0a8l9g), kept on
+    that step (`partial`, its last 5) and in the update, while the step stays as it is; a member's goes on a step its
+    lane holds, and stays in its lane for any other step."""
     now = now or time.time()
     from_agent = _as_lane(from_agent, cwd)
     if not (text or "").strip():
@@ -4920,7 +5299,16 @@ def note(text: str, nxt: str = "", cwd: str | None = None, from_agent: str | Non
         run = normalize(load_run(agent, sid) or {})
         if not run.get("goal"):
             raise StepError("no progress run in this session: dev progress start \"<goal>\" --plan \"…\"")
-        u = {"ts": round(now), "kind": "note", "text": text.strip(), "next": nxt, "check": ""}
+        named = _find_step(run, which) if which not in (None, "") else None
+        if which not in (None, "") and not named:
+            raise StepError(f"no step “{which}” in the plan: " + "; ".join(
+                f"{i}. {s['name']}" for i, s in enumerate(run.get("plan") or [], 1)))
+        u = {"ts": round(now), "kind": "note", "text": text.strip(), "next": nxt, "check": (check or "").strip()}
+        if named:
+            u["step"] = named["name"]
+            if u["check"] and (not from_agent or named.get("owner") == from_agent):
+                named["partial"] = (named.get("partial") or [])[-4:] + [
+                    {"ts": u["ts"], "by": from_agent or "main", "text": u["text"], "check": u["check"]}]
         if from_agent:  # a member's note stays in its lane
             lane = _lane(run, from_agent, now)
             lane["updates"] = (lane.get("updates") or [])[-19:] + [u]
@@ -4951,8 +5339,9 @@ def approvals_owed(run: dict) -> list:
 
 
 def _approve(run: dict, by: str, approves: str, check: str, now: float):
-    """`dev progress step --approves "<steps>"`: `by`'s verdict on the named steps, from the step's Check (spec F6,
-    R2-3). ApprovalError becomes StepError."""
+    """The tech lead's `dev progress step --approves "<steps>"`: `by`'s verdict on the named steps, from the step's
+    Check (spec F6, R2-3), recorded at once; a member's waits in its lane (_approve_later). ApprovalError becomes
+    StepError."""
     from . import approvals
     try:
         approvals.record(run, by, approves, approvals.verdict_of(check), now, check=check,
@@ -4961,11 +5350,58 @@ def _approve(run: dict, by: str, approves: str, check: str, now: float):
         raise StepError(str(e))
 
 
+def _approve_later(run: dict, lane: dict, by: str, approves: str, check: str, now: float) -> str:
+    """A member's `dev progress step --approves "<steps>"` from its lane: checked now as approvals.record would record
+    it, so a verdict it could never give is refused at once, then kept in the lane (`verdicts`), where it counts only
+    at the lane's end, once the crew gates passed that stop cleanly (_lane_verdicts), as a review step's Check does.
+    -> the line the member hears."""
+    from . import approvals
+    try:  # on a copy: nothing is recorded yet
+        entry = approvals.record({**run, "approvals": list(run.get("approvals") or [])}, by, approves,
+                                 approvals.verdict_of(check), now, check=check, doer_of=lambda s: member_of_step(run, s))
+    except approvals.ApprovalError as e:
+        raise StepError(str(e))
+    lane["verdicts"] = (lane.get("verdicts") or [])[-19:] + [{"ts": now, "by": by, "steps": entry["steps"],
+                                                              "check": str(check)[:300]}]
+    names = ", ".join(f"“{n}”" for n in entry["steps"])
+    return f"your verdict on {names} counts once your report passes the crew gates"
+
+
+def _lane_verdicts(run: dict, lane: dict, aid: str, passed: bool, now: float):
+    """At a lane's end, the `--approves` verdicts its member gave (_approve_later): each is recorded as given, at the
+    time it was given (approvals.record), when the crew gates passed this stop cleanly (`passed`), and is not counted
+    otherwise, with the reason in the history of each step it named and in the audit trail, so that work stays owed
+    until a verdict the gates pass. A verdict the run no longer takes (the step was reopened since) is audited."""
+    from . import approvals
+    held = lane.pop("verdicts", None) or []
+    who = lane.get("persona") or "the member"
+    steps = {s.get("name"): s for s in run.get("plan") or []}
+    for v in held:
+        names = [n for n in v.get("steps") or [] if n in steps]
+        if not passed:
+            why = (f"{who}'s verdict on it (dev progress step --approves) is not counted: the crew gates did not pass "
+                   f"its report (sent back, only recorded, or not judged)")
+            for n in names:
+                st = steps[n]
+                run.setdefault("history", []).append({"ts": round(now), "step": n, "from": st.get("state") or "-",
+                                                      "to": st.get("state") or "-", "by": aid, "why": why})
+            run["history"] = (run.get("history") or [])[-200:]
+            _audit("crew.approval-refused", ", ".join(names) or "?", why, "refused", project=run.get("project") or "")
+            continue
+        try:
+            approvals.record(run, v["by"], names, approvals.verdict_of(v.get("check")), v["ts"], check=v.get("check"),
+                             doer_of=lambda s_: member_of_step(run, s_))
+        except (approvals.ApprovalError, KeyError, TypeError) as e:
+            _audit("crew.approval-refused", ", ".join(names) or "?", str(e)[:300], "refused",
+                   project=run.get("project") or "")
+
+
 def step(text: str, nxt: str = "", cwd: str | None = None, kind: str = "step", check: str = "", which=None,
          from_agent: str | None = None, now: float | None = None, force: bool = False, why: str = "",
          approves: str = "") -> dict:
     """Record a step of the run: Morpheus's closes a plan step, a member's goes to its lane; `approves` names the
-    finished steps the Check approves or sends back (approvals.record). kind "done" ends the run, refused while a
+    finished steps the Check approves or sends back (approvals.record): Morpheus's verdict counts at once, a member's
+    once the crew gates pass its report (_approve_later). kind "done" ends the run, refused while a
     crew member still works on a step (_refuse_members_working), while an approval is owed or a step is flagged
     recheck once the plan is closed, unless `why` (approvals.end_check), or while a decision still needs the
     developer, unless `force`; the decisions still pending (moot ones too) and the questions still waiting for an
@@ -4992,6 +5428,9 @@ def step(text: str, nxt: str = "", cwd: str | None = None, kind: str = "step", c
             if which not in (None, "") and not named:
                 raise StepError(f"no step “{which}” in the plan: " + "; ".join(
                     f"{i}. {s['name']}" for i, s in enumerate(run.get("plan") or [], 1)))
+            refused = _member_close_refused(run, named, from_agent, check) if kind == "step" and named else ""
+            if refused:
+                raise StepError(refused)
             lane = _lane(run, from_agent, now)
             u = {"ts": round(now), "kind": kind, "text": text, "check": check}
             if named:  # the step this evidence is about: the lane's end closes it (_steps_about)
@@ -4999,16 +5438,24 @@ def step(text: str, nxt: str = "", cwd: str | None = None, kind: str = "step", c
             lane["updates"] = (lane.get("updates") or [])[-19:] + [u]
             if kind == "step":
                 lane["done"] = (lane.get("done") or 0) + 1
+            held = ""
             if approves:
                 from . import crew
                 mem = crew._for_lane(lane)
                 if not mem:
                     raise StepError("this lane names no crew member, so it approves nothing: report the verdict, and "
                                     "the step's approver records it")
-                _approve(run, mem["id"], approves, check, now)
+                held = _approve_later(run, lane, mem["id"], approves, check, now)
             run["updates"].append({"ts": round(now), "kind": "agent", "agent": from_agent, "text": text, "check": check})
             run["updates"] = run["updates"][-40:]
+            outcome = _member_close(run, named, lane, from_agent, u, now, agent, sid) if kind == "step" and named \
+                else None
+            if held:  # the command's line says why nothing is approved yet
+                outcome = dict(outcome or {"step": "", "state": "", "closed": False},
+                               why="; ".join(x for x in ((outcome or {}).get("why"), held) if x))
             _save(run)
+            if outcome:
+                run["lane_outcome"] = outcome  # for the command's own line; never saved
             return run
         run = normalize(run or {})
         plan = run["plan"]
@@ -5256,13 +5703,20 @@ def notify(title: str, text: str, security: bool = False):
         pass
 
 
-def active_runs(max_age_h: float = 12) -> list:
+def active_runs(max_age_h: float = 12, first=None) -> list:
+    """The live runs on this Mac, newest first. `first`: an (agent, session id) whose run comes ahead of every other
+    one, so `dev progress` shows the caller's own run first however recently another session started one (part of
+    B-g7g1e0a8l9g: a status block once took the step counts of the run listed first)."""
     out = []
     for f in RUNS.glob("*.json") if RUNS.exists() else []:
         r = core.read_json(f, None)
         if r and r.get("state") != "orphaned" and time.time() - f.stat().st_mtime < max_age_h * 3600:
             out.append(r)  # an orphaned run (its session ended, approvals.reconcile) is not live
-    return sorted(out, key=lambda r: -r.get("started", 0))
+    out.sort(key=lambda r: -r.get("started", 0))
+    if first:
+        agent, sid = first
+        out.sort(key=lambda r: not (r.get("agent") == agent and str(r.get("session") or "") == str(sid)))
+    return out
 
 
 def _shown_lane(lane: dict, live) -> str:
@@ -5857,6 +6311,7 @@ def _bind_step(run: dict, aid: str, lane: dict, now: float):
                   f"\"{st['name']}\" --to \"{st['label']}\"", now, from_name="devkit")
         return
     st.update(owner=aid, state="running", started=st.get("started") or now)
+    st.pop("waits_lane", None)  # the launch that names it takes it, not the lane it was queued for
     if st.get("scope"):
         lane["scope"] = st["scope"]
         _hand_scope(run, st, aid, now)
@@ -6636,7 +7091,8 @@ def _slot_refusal(run, sess: dict, b: dict, cost: float, parent: str, kind: str,
         if parent != "main":
             return (f"{head}. A helper takes a slot like any crew member, so do this part yourself, or name it in "
                     f"your report and the tech lead assigns it.")
-        return (f"{head}. Wait for one to finish (you are notified), or give the work to one of them (SendMessage / "
+        return (f"{head}. Wait for one to finish (you are notified), or give the work to one of them: dev progress "
+                f"assign \"<step>\" --to <member> queues it for their lane, then send it to them (SendMessage / "
                 f"send_input). progress.max_parallel in devkit config changes the limit.")
     if used + cost > limit - reserve + 1e-9:  # it would take the slot kept for the developer (spec R4)
         if parent == "main" and _for_the_developer(run, sess, kind, label):
@@ -6798,6 +7254,12 @@ def _on_subagent(agent: str, data: dict, started: bool, now: float | None = None
         if v:
             record("subagent", agent, sid, v.get("label") or v.get("type") or aid, now - v["started"],
                    s.get("project") or "")
+        # the crew gates' pass token for this agent (gates.check writes it only on a clean pass, in the session record
+        # the hook writes before it reaches this stop); it is spent on the stop it counts for
+        from . import gates
+        tokens = s.get(gates.PASSED)
+        token = tokens.get(aid) if isinstance(tokens, dict) else None
+        spent = []
 
         def finish(run, rsid=sid):
             _close(run, "agent", aid, now)
@@ -6818,13 +7280,31 @@ def _on_subagent(agent: str, data: dict, started: bool, now: float | None = None
                 _audit("crew.finish", lane.get("persona") or lane.get("label") or aid,
                        f"{active_minutes(run, lane.get('started'), now, now, aid):.1f} active minutes",
                        project=run.get("project") or "", agent_id=aid[:16])
-            _end_lane_steps(run, lane or {}, aid, report, now, agent, rsid)
+            passed = _passed_now(token, lane or {}, now)
+            spent.append(passed)
+            _end_lane_steps(run, lane or {}, aid, report, now, agent, rsid, passed=passed)
+            _lane_verdicts(run, lane or {}, aid, passed, now)
             run["step"] = sum(1 for x in run.get("plan") or [] if x.get("state") in ("done", "skipped"))
             _advance_main(run, now)
         _run_event(agent, sid, finish)
         for other in runs_listing(agent, aid, sid):  # every run that lists it frees its lane, whichever id it came under
             _run_event(agent, other, lambda run, o=other: finish(run, o))
+        if any(spent):
+            tokens.pop(aid, None)
+            if not tokens:
+                s.pop(gates.PASSED, None)
     state.replace(f, s)
+
+
+def _passed_now(token, lane: dict, now: float) -> bool:
+    """The crew gates passed the stop that ends this lane at `now` cleanly: their token (gates.PASSED, the time that
+    stop passed) was written during the lane's latest run, at or after its start or last resume, and no later than
+    this stop. A token of an earlier stop, or of a later one when this stop is applied late, does not count, nor does
+    any token for a lane with no start."""
+    if isinstance(token, bool) or not isinstance(token, (int, float)):
+        return False
+    since = lane.get("resumed_at") or lane.get("started")
+    return isinstance(since, (int, float)) and since <= token <= now
 
 
 def runs_listing(agent: str, aid: str, skip_sid: str) -> list:
@@ -6880,17 +7360,18 @@ def scope_written(agent: str, sid: str, aid: str, paths: list, now: float | None
     """A review or read-only lane's shell call wrote these files (write detection). A file is credited to whoever's
     own edit call (Write, Edit, MultiEdit, Codex apply_patch) touched that path during the call (note_edit: a build
     lane, its helper or the tech lead, never the reading lane itself): devkit audits it as attributed and flags
-    nothing, since the edit record is exact. Every other file is held against the reading lane in `scope_writes`. It
-    is "possible" when another writer had a shell call that overlapped the reading lane's call, still open or already
-    closed (open_calls, shells_since). Codex also keeps accepted patch calls pending or closed, as possible writers
-    only of their declared paths. A writer is the tech lead, or a build lane, which for a file in a working build lane's
-    scope must be that lane. A call that writes no file (call_reads: `git status`, `dev watch --wait`) makes nobody a
-    writer. With no such writer it is "certain": a script of the reading lane can write into a
-    working member's scope, so a scope alone is no alibi. Only a certain file makes the lane's report unverified
-    (_end_member_step). An open step whose scope holds a held file keeps it (`other_writes`), which the review step
-    after it lists; Morpheus gets one short crew notice naming the files and the possible writers; and the audit
-    trail a scope.write record per certainty. -> the lane's scope_writes, or None without a lane or when it has
-    none."""
+    nothing, since the edit record is exact. An edit tool's temporary file (<file>.tmp.<pid>.<hex>) counts as its
+    file. Every other file is held against the reading lane in `scope_writes`. It is "possible" when another writer
+    was at work on it: an edit call of that file still in flight (edits_open: the tool writes before its result is
+    recorded), or a shell call that overlapped the reading lane's call, still open or already closed (open_calls,
+    shells_since), whose caller, for a file in a working build lane's scope, must be that lane or the tech lead.
+    Codex also keeps accepted patch calls pending or closed, as possible writers only of their declared paths. A call
+    that writes no file (call_reads: `git status`, `dev watch --wait`) makes nobody a writer. With no such writer it
+    is "certain": a script of the reading lane can write into a working member's scope, so a scope alone is no alibi.
+    Only a certain file makes the lane's report unverified (_end_member_step). An open step whose scope holds a held
+    file keeps it (`other_writes`), which the review step after it lists; Morpheus gets one short crew notice naming
+    the files and the possible writers; and the audit trail a scope.write record per certainty. -> the lane's
+    scope_writes, or None without a lane or when it has none."""
     from . import crew
     now = now or time.time()
     paths = sorted({str(p) for p in paths or [] if p})
@@ -6914,6 +7395,7 @@ def scope_written(agent: str, sid: str, aid: str, paths: list, now: float | None
         overlap = calls + shells_since(sid, start, now)
         shells = _shell_writers(run, overlap, chain)  # who else had a writing shell call
         edits = [e for e in edits_since(sid, start, now) if str(e.get("caller") or "") not in chain]
+        inflight = [e for e in edits_open(sid, now) if str(e.get("caller") or "") not in chain]
         base = current.get("wt_base")
 
         def matches(path, rel):
@@ -6921,20 +7403,23 @@ def scope_written(agent: str, sid: str, aid: str, paths: list, now: float | None
 
         owned, held, maybe_by = {}, {}, {}  # credited by edit; held against the reading lane; possible files by writers
         for p in paths:
-            by = next((str(e.get("caller")) for e in edits if matches(e.get("path"), p)), None)
+            names = {p, _EDIT_TEMP.sub("", p)}  # an edit tool writes <file>.tmp.<pid>.<hex>, then renames it
+            by = next((str(e.get("caller")) for e in edits for n in names if matches(e.get("path"), n)), None)
             if by:
                 owned.setdefault(by, []).append(p)
                 continue
-            holders = {k for k in builders if layers[k] and in_scope(p, layers[k])}
+            holders = {k for k in builders for n in names if layers[k] and in_scope(n, layers[k])}
+            editing = {str(e.get("caller")) for e in inflight for n in names if matches(e.get("path"), n)}
             pending = _shell_writers(run, [{k: v for k, v in e.items() if k != "edit_paths"} for e in overlap
                                           if agent == "codex" and base and
                                           any(matches(path, p) for path in e.get("edit_paths") or [])], chain)
             candidates = shells | pending
-            writers = sorted((candidates & holders) if holders else candidates - {"main"}) + \
-                sorted(candidates & {"main"})
+            by_shell = ((candidates & holders) if holders else candidates - {"main"}) | (candidates & {"main"})
+            writers = sorted((by_shell | editing) - {"main"}) + sorted((by_shell | editing) & {"main"})
             held.setdefault("possible" if writers else "certain", []).append(p)
             if writers:
-                maybe_by.setdefault(tuple(writers), []).append(p)
+                how = "the shell call of" if set(writers) <= by_shell else "written by"
+                maybe_by.setdefault((tuple(writers), how), []).append(p)
         who = lane.get("persona") or lane.get("label") or aid
         name = crew.who(who)
         loose = sorted(p for files in held.values() for p in files)
@@ -6947,8 +7432,8 @@ def scope_written(agent: str, sid: str, aid: str, paths: list, now: float | None
             for c, files in held.items():
                 marked += [n for n in _mark_other_writes(run, files, chain, aid, name, c, now) if n not in marked]
             level = "review-only" if lane_tools(run, aid) == "review" else "read-only"
-            maybe = [f"{_shown(files)} (possibly the shell call of {_or_names(run, list(ks))})"
-                     for ks, files in maybe_by.items()]
+            maybe = [f"{_shown(files)} (possibly {how} {_or_names(run, list(ks))})"
+                     for (ks, how), files in maybe_by.items()]
             if held.get("certain"):
                 text = (f"devkit: {name} works {level}, and its shell call wrote {_shown(held['certain'])} while no "
                         "other writer was at work. Its report counts as unverified: check the change (git diff), keep "
@@ -6967,7 +7452,7 @@ def scope_written(agent: str, sid: str, aid: str, paths: list, now: float | None
                why=f"edited by {_name_of(run, k)} with its own edit tool during {who}'s shell call")
     for c, files in held.items():
         extra = {"severity": "warning"} if c == "certain" else \
-            {"writers": sorted({_name_of(run, k) for ks in maybe_by for k in ks})}
+            {"writers": sorted({_name_of(run, k) for ks, _ in maybe_by for k in ks})}
         _audit("scope.write", who, f"{c}: {', '.join(files[:20])}"[:600], "detected", lane=aid[:16],
                paths=files[:20], certainty=c, count=len(files), project=run.get("project") or "", **extra)
     return writes
@@ -7054,16 +7539,18 @@ def _steps_about(lane: dict, aid: str, report: str, mine: list) -> list:
             or re.search(r"(?<!\w)" + re.escape(st["name"].lower()) + r"(?!\w)", said)]
 
 
-def _end_lane_steps(run: dict, lane: dict, aid: str, report: str, now: float, agent: str, sid: str):
+def _end_lane_steps(run: dict, lane: dict, aid: str, report: str, now: float, agent: str, sid: str,
+                    passed: bool = False):
     """A lane's end at its SubagentStop: the steps its evidence is about end as its report or its last Check says
     (_end_member_step); any other step it holds goes back to pending, still its member's, with the reason in its
-    history, so a lane's ✓ never closes work it did not do (B-fy9639hfz5t)."""
+    history, so a lane's ✓ never closes work it did not do (B-fy9639hfz5t). `passed`: the crew gates passed this
+    stop cleanly (their token, _passed_now); without it, its review steps approve nothing (_end_member_step)."""
     mine = [st for st in run.get("plan") or [] if st.get("owner") == aid and st.get("state") not in DONE]
     about = _steps_about(lane, aid, report, mine)
     who = lane.get("persona") or "the subagent"
     for st in mine:
         if any(st is x for x in about):
-            _end_member_step(run, st, lane, aid, report, now, agent, sid)
+            _end_member_step(run, st, lane, aid, report, now, agent, sid, passed=passed)
             continue
         old = st.get("state")
         st.update(owner="main", state="pending", started=None)
@@ -7072,31 +7559,71 @@ def _end_lane_steps(run: dict, lane: dict, aid: str, report: str, now: float, ag
                     f"progress step names this step: it waits for a launch of its own", now)
 
 
-def _end_member_step(run: dict, st: dict, lane: dict, aid: str, report: str, now: float, agent: str, sid: str):
+def _end_member_step(run: dict, st: dict, lane: dict, aid: str, report: str, now: float, agent: str, sid: str,
+                     closing: bool = False, passed: bool = False):
     """A member's step at its SubagentStop (spec F6, R2-4): done with the evidence of its report's Check or its last
     `dev progress step --check` (approvals.ending), and a review step's Check is its verdict on the work it follows
     (approvals.from_review), whose ✓ also ends done the unverified work it approves (_verified_by_review);
     otherwise unverified, for Morpheus to close with evidence or reopen. A review or read-only lane whose shell wrote
     files nobody else could have written (scope_writes, certain) ends unverified whatever it reports; a possible
-    write leaves its ending to its report."""
+    write leaves its ending to its report. A review step ends done only when the crew gates passed this stop cleanly
+    (`passed`, their token): sent back and then let through unjudged, findings only recorded, a gate that could not
+    judge, a stop that never reached them or whose token the session record did not take end it unverified, since
+    its Check is no approval. Other steps end as their evidence says. `closing`: the member closes it itself while
+    it works on (_member_close), which never happens to a review step."""
     from . import approvals
     old = st.get("state")
     state_, why, check = approvals.ending(lane, report)
     sure = _certain_writes(lane.get("scope_writes") or {})
     if state_ == "done" and sure:
         state_, why = "unverified", f"its shell call wrote {', '.join(sure[:3])} while no other writer was at work"
+    if state_ == "done" and not passed and approvals.is_review(st):
+        state_, why = "unverified", ("the crew gates did not pass its report (sent back, only recorded, or not "
+                                     "judged), so its Check approves nothing: launch the review again for a verdict "
+                                     "the gates pass")
     who = lane.get("persona") or "subagent"
     if state_ != "done":
         st["state"] = "unverified"
-        _log_change(run, st, old, "unverified", aid, f"{who} stopped; unverified: {why}", now)
+        _log_change(run, st, old, "unverified", aid, f"{who} {'closed it' if closing else 'stopped'}; unverified: "
+                    f"{why}", now)
         return
     _finish_step(run, st, now, agent, sid)
-    _log_change(run, st, old, "done", aid, f"{who} finished; {why}", now)
+    _log_change(run, st, old, "done", aid, f"{who} {'closed it' if closing else 'finished'}; {why}", now)
     try:
         _verified_by_review(run, st, check, now, agent, sid, aid)
         approvals.from_review(run, st, check, now, doer_of=lambda s_: member_of_step(run, s_))
     except approvals.ApprovalError as e:  # a review that may approve nothing: its step still ends
         _audit("crew.approval-refused", st.get("name") or "", str(e)[:300], "refused", project=run.get("project") or "")
+
+
+def _member_close(run: dict, st: dict, lane: dict, aid: str, u: dict, now: float, agent: str, sid: str) -> dict:
+    """A member's `dev progress step "…" --step <name> --check "…"` (B-g7a562x5pyi): when its lane holds that step,
+    the step ends now, by the rules of the member's end (_end_member_step on this update's Check: done with a ✓, else
+    unverified), so the steps after it need not wait for the member's report while the lane works on. A review step
+    (approvals.is_review) stays running: its Check is the member's approval of the work it follows, which counts only
+    once the member's report passes the crew gates, so it ends at the lane's end (_end_lane_steps, which SubagentStop
+    reaches after the gates judged the report; this update's step name binds it there). A step the lane
+    does not hold, or one already done, keeps the evidence in the lane only. -> {step, state, closed, why}, which the
+    command's line reports."""
+    from . import approvals
+    name, state_ = st["name"], st.get("state")
+    if st.get("owner") != aid:
+        holder = "the tech lead's" if (st.get("owner") or "main") == "main" else f"{_name_of(run, st['owner'])}'s"
+        return {"step": name, "state": state_, "closed": False,
+                "why": f"“{name}” is not your step ({holder}), so it stays {state_}; your evidence is in your lane"}
+    if state_ in DONE:
+        return {"step": name, "state": state_, "closed": False, "why": f"“{name}” is {state_} already"}
+    if not str(u.get("check") or "").strip():
+        return {"step": name, "state": state_, "closed": False,
+                "why": f"“{name}” stays {state_}: a step closes on its evidence, --check \"✓ <tests run, output>\""}
+    if approvals.is_review(st):
+        return {"step": name, "state": state_, "closed": False,
+                "why": f"“{name}” is a review, so it stays {state_}: its Check is your verdict, which counts once your "
+                       f"report passes the crew gates, and the step closes with your report"}
+    _end_member_step(run, st, dict(lane, updates=[u]), aid, "", now, agent, sid, closing=True)
+    run["step"] = sum(1 for x in run.get("plan") or [] if x.get("state") in DONE)
+    _advance_main(run, now)
+    return {"step": name, "state": st.get("state"), "closed": True, "why": ""}
 
 
 def crew_working(run: dict) -> list:
