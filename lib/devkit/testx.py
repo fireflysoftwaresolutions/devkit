@@ -2429,8 +2429,10 @@ def _member(case, f, units, ids):
     return same and (units is None or any(case["name"].endswith(u) for u in units))
 
 
-def _copy_worktree(top, dest) -> None:
-    """HEAD plus uncommitted changes (tracked and untracked, not ignored); dependency folders are linked."""
+def _copy_worktree(top, dest) -> list:
+    """HEAD plus uncommitted changes (tracked and untracked, not ignored); dependency folders are linked.
+    -> the links made in `dest` to the checkout's dependency folders."""
+    linked = []
     listed = _ls(top, "-co", "--exclude-standard")
     for f in dict.fromkeys(listed):
         src, dst = os.path.join(top, f), os.path.join(dest, f)
@@ -2450,6 +2452,36 @@ def _copy_worktree(top, dest) -> None:
             if os.path.isdir(real) and not os.path.lexists(link):
                 os.makedirs(os.path.dirname(link), exist_ok=True)
                 os.symlink(real, link)
+                linked.append(link)
+    return linked
+
+
+def _copy_source_paths(top, dest, linked) -> list:
+    """The copy's own folders for the checkout folders that the .pth files of a linked virtual environment name.
+    An editable install writes one: `<checkout>/src` for a src layout. The copy links the checkout's environment, so
+    without these its Python imports the checkout's code, where the change is never undone. On PYTHONPATH they come
+    before site-packages, where Python adds the .pth paths. A .pth line that runs code (`import …`) names no folder."""
+    real_top = os.path.realpath(top)
+    out = []
+    for link in linked:
+        if os.path.basename(link) not in (".venv", "venv"):
+            continue
+        for pth in sorted(Path(link).glob("lib/python*/site-packages/*.pth")) + \
+                sorted(Path(link).glob("Lib/site-packages/*.pth")):
+            try:
+                lines = pth.read_text(errors="replace").splitlines()
+            except OSError:
+                continue
+            for ln in (x.strip() for x in lines):
+                if not ln or ln.startswith("#") or re.match(r"import[ \t]", ln):
+                    continue
+                p = os.path.realpath(os.path.join(os.path.dirname(pth), ln))
+                if p != real_top and not p.startswith(real_top + os.sep):
+                    continue
+                mine = os.path.join(dest, os.path.relpath(p, real_top))
+                if os.path.isdir(mine) and mine not in out:
+                    out.append(mine)
+    return out
 
 
 def _restore_base(top, base, dest, files) -> None:
@@ -2609,7 +2641,9 @@ def _prove(a, top, runners) -> int:
                    for c in res["cases"])
 
     try:
-        _copy_worktree(top, dest)
+        own = _copy_source_paths(top, dest, _copy_worktree(top, dest))
+        if own:  # the copy's src before the editable install's path to the checkout's src
+            env["PYTHONPATH"] = os.pathsep.join(own + [p for p in [os.environ.get("PYTHONPATH")] if p])
         gitless = _carry_git(top, dest)
         answered, first = set(), {}  # selected names some case answered to; each runner's first result
         for n in range(runs):
