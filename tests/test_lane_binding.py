@@ -572,6 +572,60 @@ class TwoLaneQueueTests(unittest.TestCase):
         self.assertNotIn("launch of its own", advice)
 
 
+class ReviewLaneTests(unittest.TestCase):
+    # Weave, five review steps in one run: a review step closes only with its reviewer's report (once the crew gates
+    # pass it), so a reviewer's lane never freed for the next review assigned to it, and one launch that named two
+    # reviews bound neither. The steps stayed the tech lead's, the reviewer's `dev progress step --step` was refused,
+    # and its report closed none of them
+    REPORT = ("**[Firefly> DevKit · Code reviewer (Seraph)]** devkit · `hotfix` · review-api and review-ui\n"
+              "- **Done:** reviewed review-api and review-ui\n- **Check:** ✓ approve: 21 tests read and run\n"
+              "- **Next:** the tech lead merges")
+
+    def setUp(self):
+        self.state = TempState().__enter__()
+        self.addCleanup(self.state.__exit__, None, None, None)
+        self.t0 = time.time() - 3600
+        pg.start("Hotfix", plan=["api=30m", "ui=30m", "review-api=20m after api", "review-ui=20m after ui"],
+                 now=self.m(0))
+        pg.assign("api", "Tank", why="test", now=self.m(0))
+        launch("a_tank", "devkit:tank", "Tank: api", at=self.m(1))
+        pg.assign("ui", "Trinity", why="test", now=self.m(0))
+        launch("a_tri", "devkit:trinity", "Trinity: ui", at=self.m(1))
+        pg.step("api committed", which="api", check="✓ 12 tests pass", from_agent="a_tank", now=self.m(10))
+        pg.step("ui committed", which="ui", check="✓ 9 tests pass", from_agent="a_tri", now=self.m(11))
+
+    def m(self, minutes):
+        return self.t0 + minutes * 60
+
+    def held(self, name):
+        st = next(s for s in pg.load_run("claude", "s1")["plan"] if s["name"] == name)
+        return st.get("owner"), st.get("state")
+
+    def stop(self, at):
+        from test_progress import gates_passed
+        gates_passed("a_ser", at=at - 1)
+        pg.on_subagent("claude", {"session_id": "s1", "agent_id": "a_ser", "agent_type": "devkit:seraph",
+                                  "last_assistant_message": self.REPORT}, False, now=at)
+
+    def test_a_review_assigned_to_a_reviewer_holding_a_review_joins_its_lane_and_closes_with_its_report(self):
+        pg.assign("review-api", "Seraph", why="test", activity="review", now=self.m(12))
+        launch("a_ser", "devkit:seraph", "Seraph: review-api", at=self.m(13))
+        pg.assign("review-ui", "Seraph", why="test", activity="review", now=self.m(14))
+        self.assertEqual(self.held("review-ui"), ("a_ser", "running"))
+        pg.step("review-ui approved", which="review-ui", check="✓ approve", from_agent="a_ser", now=self.m(20))
+        self.stop(self.m(25))
+        self.assertEqual((self.held("review-api"), self.held("review-ui")), (("a_ser", "done"), ("a_ser", "done")))
+
+    def test_one_launch_that_names_two_reviews_binds_both(self):
+        pg.assign("review-api", "Seraph", why="test", activity="review", now=self.m(12))
+        pg.assign("review-ui", "Seraph", why="test", activity="review", now=self.m(12))
+        launch("a_ser", "devkit:seraph", "Seraph: review-api and review-ui", at=self.m(13))
+        self.assertEqual((self.held("review-api"), self.held("review-ui")),
+                         (("a_ser", "running"), ("a_ser", "running")))
+        self.stop(self.m(25))
+        self.assertEqual((self.held("review-api"), self.held("review-ui")), (("a_ser", "done"), ("a_ser", "done")))
+
+
 class SettingsTests(unittest.TestCase):
     def test_claude_settings_send_a_failed_agent_launch_to_devkit(self):
         entries = json.loads(SETTINGS.read_text())["hooks"].get("PostToolUseFailure") or []

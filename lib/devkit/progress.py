@@ -1799,10 +1799,10 @@ def _bind_queued(run: dict, now: float):
         lanes += [aid for aid in valid if aid not in lanes]
     for aid in lanes:
         lane = agents[aid]
-        if lane.get("over_limit") or lane.get("waits_slot") or _open_step_of(run, aid):
+        if lane.get("over_limit") or lane.get("waits_slot"):
             continue
         nxt = next((x for x in _queued_for(run, aid) if not deps_open(run, x)), None)
-        if not nxt:
+        if not nxt or _open_step_of(run, aid, nxt):  # a review joins a lane that holds reviews only
             continue
         _take_step(run, aid, nxt, now)
         nxt["joined"] = aid  # its launch does not name it
@@ -1846,9 +1846,13 @@ def _member_close_refused(run: dict, st: dict, aid: str, check: str) -> str:
 
 def _open_step_of(run: dict, aid: str, s: dict | None = None):
     """The step lane `aid` still works on other than `s` (not done, skipped or unverified: a step that ended
-    unverified waits for the tech lead's evidence, not for the member), or None: a lane works one step at a time."""
+    unverified waits for the tech lead's evidence, not for the member), or None: a lane works one step at a time.
+    Reviews are the exception: a review step closes only with its reviewer's report (_member_close), so for a review
+    `s` the lane's open reviews do not count, and one report ends them all (_end_lane_steps)."""
+    from . import approvals
+    review = s is not None and approvals.is_review(s)
     return next((x for x in run.get("plan") or [] if x is not s and x.get("owner") == aid
-                 and x.get("state") not in DONE + ("unverified",)), None)
+                 and x.get("state") not in DONE + ("unverified",) and not (review and approvals.is_review(x))), None)
 
 
 def _take_step(run: dict, aid: str, s: dict, now: float):
@@ -6353,6 +6357,17 @@ def _bind_step(run: dict, aid: str, lane: dict, now: float):
     scored = [(_name_score(_task_text(label), st["name"]), st) for st in mine]
     best = max(sc for sc, _ in scored)
     top = [st for sc, st in scored if sc == best]
+    from . import approvals
+    if best[1] and len(top) > 1 and all(approvals.is_review(st) for st in top):
+        # one reviewer's launch for several reviews: each closes with its report, so the lane holds them together;
+        # one whose work is not finished yet joins once it is (_bind_queued)
+        rd = ready(run)
+        for st in top:
+            if any(x is st for x in rd):
+                _take_step(run, aid, st, now)
+            else:
+                st["waits_lane"] = {"lane": aid, "ts": round(now, 3)}
+        return
     if not best[1] or len(top) > 1:
         names = ", ".join(f"“{st['name']}”" for st in (top if best[1] else mine))
         what = f"names {names} equally" if best[1] else f"names none of {crew.who(mine[0]['label'])}'s steps ({names})"
