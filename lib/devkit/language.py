@@ -405,11 +405,11 @@ def wanted(prompt=None, transcript=None, cfg=None) -> tuple:
         if lang or why != SHORT:  # only a message too short to tell leaves it to the earlier ones
             return (lang, "latest") if lang else (None, "")
     first = not latest
-    for text in developer_messages(transcript):
+    for text in developer_messages(transcript):  # newest first: the first one with enough prose decides, or nothing
         lang, why = _reading(text)
         if lang:
             return lang, "latest" if first else "earlier"
-        if first and why != SHORT:
+        if why != SHORT:  # it could not decide: an older message never decides for it
             return None, ""
         first = False
     return None, ""

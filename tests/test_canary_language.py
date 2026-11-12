@@ -84,6 +84,13 @@ class LanguageGateTests(unittest.TestCase):
             with self.subTest(latest=latest[:40]):
                 self.assertEqual(self.gate(reply, {"turn_started": T0}), "")
 
+    def test_a_short_message_after_one_that_could_not_decide_never_reaches_an_older_one(self):
+        # English, then a Spanish question with a Spanish paragraph (no language: silent), then "vale": the short one
+        # stops at the message before it, which tells nothing, so the English one never decides
+        claude_transcript(self.transcript, [PROMPTS["en"][0], "¿Puedes revisarlo?\n\nEl build falla en main porque "
+                                            "el lockfile está desactualizado y npm ci lo rechaza siempre.", "vale"])
+        self.assertEqual(self.gate(REPLIES["es"], {"turn_started": T0}), "")
+
     def test_a_spanish_reply_passes(self):
         self.assertEqual(self.gate(REPLIES["es"], {"turn_started": T0}), "")
 
