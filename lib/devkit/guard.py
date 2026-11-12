@@ -5459,11 +5459,19 @@ class _Shell:
         # a formatter's check counts only when the PATH that finds it is the session's (not set or exported here)
         reads = _git_text_free(argv) if name == "git" else \
             _check_only(argv[0], args) and not {"PATH", "?"} & (set(names) | self.exported)
-        words = [c for c in _candidates(args) if inside or _pathlike(c)]
-        # an existing file a program is given as its configuration is read (vale --config=<devkit's vale.ini>)
-        read_cfg = {v for v in _dev_values(args, _CONFIG_OPTS) if resolve(v, cwd) != UNKNOWN and
-                    resolve(v, cwd).is_file()}
-        words = [w for w in words if w not in read_cfg]
+        # an existing file a program is given as its configuration is read (vale --config=<devkit's vale.ini>): only
+        # that option's own value, by its place; the same path elsewhere in the words (-o, --output, a bare word) is
+        # still one the program may write
+        def is_file(v):
+            r = resolve(v, cwd)
+            return r != UNKNOWN and r.is_file()
+        read_args = list(args)
+        for k, a in enumerate(args):
+            if a in _CONFIG_OPTS and k + 1 < len(args) and is_file(args[k + 1]):
+                read_args[k + 1] = ""
+            elif "=" in a and a.split("=", 1)[0] in _CONFIG_OPTS and is_file(a.split("=", 1)[1]):
+                read_args[k] = a.split("=", 1)[0]
+        words = [c for c in _candidates(read_args) if inside or _pathlike(c)]
         if name == "gh":  # its words are titles and bodies, except the file a download writes (-O, --output)
             outs = _dev_values(args, ("-O", "--output"))
             v = self.targets(outs, cwd, text=None)

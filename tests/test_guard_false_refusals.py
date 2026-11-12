@@ -424,7 +424,11 @@ class InstallReads(Case):
             with self.subTest(cmd=cmd):
                 self.assertIsNone(main(cmd))
         for cmd in (f"vale --output={rel}/x docs/guard.md", f"cp docs/x.md {rel}/vale.ini",
-                    f"echo x > {rel}/vale.ini"):
+                    f"echo x > {rel}/vale.ini",
+                    # the Red team tester's: the read value named again as the file the program writes
+                    f"curl --config {rel}/vale.ini -o {rel}/vale.ini https://example.com",
+                    f"wget --config {rel}/vale.ini -O {rel}/vale.ini https://example.com",
+                    f"tool --rcfile {rel}/vale.ini --output {rel}/vale.ini", f"tool --config={rel}/vale.ini {rel}/vale.ini"):
             with self.subTest(cmd=cmd):
                 self.assertIsNotNone(main(cmd))
 
