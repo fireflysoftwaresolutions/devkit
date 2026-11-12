@@ -5,6 +5,123 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
 
 ## [Unreleased]
 
+This release lets crew members combine their lane commands with other commands on Claude Code and gives review lanes
+the probes a review needs, makes agents reply in the developer's language, delivers crew messages whole, keeps the
+handoff sync pushing through any conflict, and corrects the docs where they had drifted from the code.
+
+### Added
+
+- **Reply language.** Agents reply in your language. `language` now defaults to `auto`, which follows your latest
+  message, then your earlier ones when the latest is too short to tell (`ok`, a command), then American English; a set
+  locale such as `es-ES` fixes it. Code, comments, commits, PRs, docs, and devkit's records stay in American English.
+  When the reply language is not English, a context line before the turn names it. A message that brings text to work
+  on, such as an email to translate, counts only for the words you wrote around it, and a turn whose words cannot
+  decide gets no reply language.
+- **Reply language.** The Stop hook sends a final message back once when its prose is surely in another language than
+  yours ("reply in Spanish"), and keeps the status block's marker and labels as they are. `canary.language: false`
+  turns the check off.
+- **Crew.** `dev crew inbox --all` prints every crew message the run keeps for you, the ones already delivered too,
+  whole and oldest first.
+- **Guard.** `tools/guard_replay.py` replays the guard refusals recorded on a Mac against a checkout and prints, per
+  rule, how many still refuse. On the maintainers' refusals recorded from November 1 to 12, this release refuses 1,378
+  of 3,191 recorded calls, down from 2,038 of 3,122: lane calls in compound commands 340 → 30, read-only lanes
+  535 → 370, and unknown programs 310 → 171.
+- **Tests.** `tests/test_regex_budget.py` times every module-level pattern of the hook modules on hostile text, so a
+  pattern that backtracks fails the suite instead of stalling a hook.
+- **Docs.** The concepts guide explains how devkit fits together: its parts, what happens in a turn, and which check
+  enforces which rule. The tutorial "A request from start to release" follows one request from the plan to its
+  release.
+
+### Changed
+
+- **Crew.** On Claude Code, a crew member's command that holds `dev progress` or `dev crew` calls runs with the
+  member's lane exported for the whole command, so those calls work inside lists, loops, pipes, and `bash -c`. A
+  refusal names what kept the command back. Codex keeps the narrow form: a lane call as the whole command, or joined
+  to `cd` and reads.
+- **Crew.** Review lanes may run the probes a review needs: Python or JavaScript typed in the command, or a script in
+  their scratch folder, when it only reads; `node --test`; arithmetic on numbers; their own
+  `dev watch --wait --for me`; and writes, copies, and deletes inside their own scratch folder. A checkout inside a
+  temporary folder counts as a repository, not scratch.
+- **Crew.** A crew message arrives whole in `dev watch --wait` and the hooks, up to the 1,500 characters a message
+  holds. In one recorded run, 91% of members' questions had arrived cut at 300 characters.
+- **Crew.** A SendMessage answers only the crew questions its text names (`M3: …`). One that names none, such as a
+  new work item, leaves them open, and a notice tells the tech lead which still wait.
+- **Crew.** A reviewer's lane holds more than one review step, and its report closes them all.
+- **Crew.** A member's `dev progress step --step` waits until the background commands it started have ended.
+- **Crew.** Members report to the tech lead in American English, and the tech lead replies to you in your language.
+- **Pull requests.** `dev pr create` writes in American English unless `--lang` names another language: `language` is
+  for devkit's replies only.
+- **Configuration.** `dev config set language` accepts only `auto` or a locale, such as `es`, `es-ES`, or `pt_BR`.
+- **Handoff sync.** The sync pushes this Mac's commits whatever the conflict. It settles a lesson two Macs changed
+  differently, keeps the remote's version of anything else and saves this Mac's aside with the command that brings it
+  back, and falls back to a merge when a rebase cannot finish. The rebase runs in a private checkout, so it no longer
+  takes away this Mac's files or a writer's uncommitted changes.
+- **Docs check.** `dev docs check` lists every Vale error first, then up to 40 warnings, then a count of the rest and
+  the command that shows them all.
+- **Testing.** `dev test prove` lists a test its runner skips as skipped, neither proven nor failing, and exits 2 when
+  nothing could be proven.
+- **Docs.** The docs, skills, and global instructions match the code again: how `assign` binds a step to a lane and
+  queues it for a busy member, the Codex wait, how the tech lead routes a request by its kinds of work, crew members
+  named by role, and the folders of the handoff repository.
+
+### Fixed
+
+- **Guard.** The guard reads `$((…))` as arithmetic and a `case` header as no command.
+- **Guard.** Variables set to `~/…` or to a choice between two literal echoes (`$( [ … ] && echo A || echo B )`), and
+  loops next to quoted heredocs, are judged by their values.
+- **Guard.** The rule against a commit after a pipeline without `pipefail` ignores quoted text and heredocs, and checks
+  the shells the command starts.
+- **Guard.** A Python program that writes only paths written out in its code is judged by those paths, not by the
+  words it mentions.
+- **Guard.** Test files named after a deploy (`test_deploy.py`), files git tracks that are named like a backup copy,
+  and `--config` reads of the installed copy are no longer refused.
+- **Guard.** Three patterns that backtracked on hostile text are bounded.
+- **Crew.** `dev watch --wait --for me` no longer takes another member's wait when two members type the same command:
+  the wait belongs to neither, and `dev watch` says to read `dev crew inbox --all` or wait again.
+- **Crew.** A step assigned to a member busy in more than one lane joins the first of those lanes that frees.
+- **Crew.** After you approve an irreversible action in a dialog devkit did not record, the context says the answer
+  grants nothing and gives the `grant` line to type.
+- **Canary.** The Stop hook's role check and its language reader read a message in one pass: long backtick runs,
+  dotted words, runs of blank lines, or a name repeated many times no longer stall them.
+- **Testing.** `dev test` no longer gets stuck rerunning a `unittest:.` failure that no runner can load: it never
+  records such a name and drops the ones an older run left.
+- **Testing.** `dev test prove` reports a test that imports a file the change adds as "cannot be proven" instead of
+  counting its import error as proof. A new test helper stays in place, so the tests that use it are judged on their
+  assertions, and a pytest module that cannot be imported no longer stops the other tests.
+- **Testing.** `dev test` runs pytest files that share a name in folders without `__init__.py`
+  (`tests/unit/x/test_api.py` and `tests/integration/x/test_api.py`) in separate pytest processes, so both collect. A
+  project in `--import-mode=importlib` stays in one process with pytest's own collection.
+- **Testing.** `dev test` and `dev test prove` read the result of a unittest test that writes to stderr while it runs.
+  On Python 3.9, a test that starts on the line of one whose subtests failed is no longer lost.
+- **CI.** `dev ci --run` passes each job's outputs to the jobs that need them. Every step gets a `$GITHUB_OUTPUT` file,
+  and a job's `outputs:` and result become `needs.<job>.outputs.<name>` and `needs.<job>.result` for `if:`, variables,
+  scripts, and expression matrices (one run per entry). A value this Mac cannot know is named and blocks the evidence
+  instead of failing a gate job.
+- **CI.** `dev ci --run` reads a retry script that a step hands its install to: the install and the script's own
+  `sudo` repair are skipped as runner setup, a check handed to such a script blocks the evidence, and
+  `apt-get -o … update` counts as an OS package install.
+- **Commits.** `dev commit` refuses while a revert, cherry-pick, merge, rebase, or `git am` is stopped halfway, and says
+  how whoever started it can finish it.
+- **Worktrees.** `dev wt rm` says a removed branch is "still on the remote as origin/<branch>" only when that branch is
+  there.
+- **Lessons.** `dev lesson recur` and every lesson read find the lessons recorded on this Mac while a rebase is left
+  stopped in the handoff repository.
+- **Plans.** The Stop hook asks a session to run `dev plan revise` only for the plans it left unrevised itself, not for
+  another Mac's change that a sync brought.
+- **Bug registry.** A `dev bug detour --dev` step may keep a number for a numeric flag or one of a flag's listed
+  choices, such as `watch --wait --for me --timeout 9`.
+- **Sessions.** `dev session carry --from`, and `--session` for `brief` and `forget`, accept a session id with its
+  agent prefix (`claude-<id>`).
+- **Shell.** Tab completion knows `dev crew inbox --all` and the new help texts.
+
+### Security
+
+- **Guard.** Arithmetic on a variable whose value may hold code is refused: the shell evaluates a name's value as an
+  expression, so `x='a[$(cmd)]'; echo $((x))` runs `cmd`.
+- **Guard.** Scripts are judged by what they can call: a lookup by a name written out in the code passes, while
+  `exec`, `eval`, computed lookups, and the interpreter's internals are refused. `exec(open(f).read())` and an escape
+  through `__subclasses__` used to pass.
+
 ## [26.11.16] - 2026-11-12
 
 This release makes the bug registry's issues readable by people, names each Mac by a stable machine id, tightens
