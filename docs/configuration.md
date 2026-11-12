@@ -39,10 +39,30 @@ Run `dev config edit` to open it and validate it, `dev config show` to print the
 | `hosts` | `["github"]` | Git hosts you use: `github`, `gitlab`, `bitbucket`, `azure-devops`. devkit installs their CLIs, `dev doctor` checks the sign-in, and `dev ci status` reads their pipelines |
 | `clouds` | `[]` | Clouds and infrastructure tools you use: `aws`, `azure`, `gcp`, `digitalocean`, `kubernetes`, `terraform` (OpenTofu). devkit installs their CLIs and `dev doctor` checks the sign-in |
 | `packages.auto` | `true` | `dev install` repairs missing Homebrew and npm tools for selected stacks, frameworks, hosts, and clouds; `false` also skips host-extension installation |
-| `language` | `en-US` | The language for replies and documents, which the `communicating` skill asks agents to follow, and the language of the pull request template that `dev pr create` fills (`es-ES` uses the Spanish one). devkit does not put it in the session context, so also state another language in your [personal agent rules](#personal-agent-rules) |
+| `language` | `auto` | The language agents reply to you in. `auto` follows your messages; a locale such as `es-ES` or `en-US` fixes it. Records, code, commits, PRs, and docs stay in American English either way (see [Reply language](#reply-language)). With a set locale, `dev pr create` also fills devkit's pull request template for it, when there is one (`es-ES`: the Spanish one) |
 
 Changing `dev_root`, `default_host`, or `host_dirs` changes every canonical path: run `dev ls` and `dev adopt` the
 repositories that are no longer in place.
+
+#### Reply language
+
+With `language` set to `auto`, agents reply in the language of your latest message. When that message is too short or
+unclear to tell (`ok`, `continue`, a command), they use the language of your earlier messages, and American English
+when there is none. A locale (`es-ES`, `en-US`, …) fixes the reply language whatever language you write in.
+
+| Follows the reply language | Stays in American English |
+| --- | --- |
+| The final message's prose, the agent's questions and decision requests, and the status block's text, with crew roles written in that language | The status block's marker and labels (`[Firefly> DevKit]`, Done, Check, Progress, Crew, You, Next); code, comments, commits, PRs, docs, plans; task, lesson, and progress records; crew briefs and members' reports to the tech lead |
+
+The right column changes only when the project's own rules (its AGENTS.md or CLAUDE.md) or you say otherwise. A
+decision that leads to an irreversible action keeps devkit's own words: the agent asks it exactly as
+`dev crew decisions --ask` prints it, because your answer approves that stored text (see
+[The crew › How the tech lead asks you](crew.md#how-the-tech-lead-asks-you)).
+
+devkit enforces it. When the reply language is not English, a context line before the turn names it, for example
+that you wrote in Spanish and the reply goes in Spanish while records stay in American English. The Stop hook reads
+the main session's final message and sends it back once when its prose is in another language; quoted text, code,
+and block quotes do not count. Members' reports go to the tech lead, not to you, so the check skips them.
 
 ### Frameworks
 

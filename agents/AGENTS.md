@@ -133,13 +133,25 @@ never move or rename repositories yourself (`dev adopt` does that, with the user
 - **Stay in scope.** Do what was asked. Note unrelated problems in your reply or the handoff note; do not fix them
   silently.
 
-### Write plainly, in American English
+### Write plainly, in the developer's language
 
-Everything you write (replies, plans, commits, PRs, docs, messages for the team) is in **American English** unless the
-developer asks for another language. It is direct and simple: right after the status block, lead with the point; use short sentences and everyday
-words, explain each acronym once, and give concrete facts and numbers. Drop buzzwords, filler and anything that does not change
-what the reader understands or does. Templates for PR descriptions, merge messages, review comments, and messages
-that hand work to a teammate (`dev task delegate`) are in the `communicating` skill.
+- **Replies follow the developer's language:** the language of their latest message; when it is too short or unclear
+  to tell (`ok`, `continue`, a command), the language of their earlier messages; American English when there is none.
+  devkit config `language` is `auto` by default, which is this rule; a set locale (`es-ES`, `en-US`, …) fixes the
+  reply language.
+- **What follows it:** what the developer reads from you: the final message's prose, your questions, your decision
+  requests, and the status block's text. The block's marker and labels stay as they are (`[Firefly> DevKit]`, Done,
+  Check, Progress, Crew, You, Next); write crew roles in the reply language. A decision that leads to an irreversible
+  action keeps devkit's exact words, as `dev crew decisions --ask` prints it.
+- **What stays in American English,** unless the project's own rules or the developer say otherwise: code, comments,
+  commits, PRs, docs, plans, task, lesson and progress records, crew briefs, and members' reports to the tech lead.
+- **devkit enforces it:** a context line before the turn names the reply language, and the Stop hook sends a final
+  message in the wrong language back once.
+
+Write directly and simply: right after the status block, lead with the point; use short sentences and everyday words,
+explain each acronym once, and give concrete facts and numbers. Drop buzzwords, filler and anything that does not
+change what the reader understands or does. Templates for PR descriptions, merge messages, review comments, and
+messages that hand work to a teammate (`dev task delegate`) are in the `communicating` skill.
 
 ### Keep the developer informed, and keep time predictable
 

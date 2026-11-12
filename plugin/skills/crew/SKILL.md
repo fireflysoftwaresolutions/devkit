@@ -344,9 +344,17 @@ them).
 
 ## 9. Language and tone
 
-Every member is professional, never theatrical. The names are identities, not role-play. Everyone writes to the
-developer in the developer's language (devkit config `language`, default American English); code, commits, PRs and
-docs stay in American English unless the developer asks otherwise.
+Every member is professional, never theatrical. The names are identities, not role-play.
+
+- **The tech lead replies in the developer's language:** the language of their latest message, else of their earlier
+  messages, else American English; a locale set in devkit config `language` (`auto` by default) fixes it. That covers
+  the final message's prose, questions and decision requests, and the status block's text. The block's marker and
+  labels stay as they are, and roles are written in the reply language: `Backend engineer (Tank)` in English,
+  `Ingeniero de backend (Tank)` in Spanish.
+- **The crew's records stay in American English,** unless the project's own rules or the developer say otherwise:
+  briefs, members' reports to the tech lead, plans, task, lesson and progress records, code, comments, commits, PRs,
+  and docs. A member writes its report in American English even when the developer writes in another language; the
+  tech lead relays it in the developer's language.
 
 ## Done when
 

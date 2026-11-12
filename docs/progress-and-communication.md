@@ -324,9 +324,17 @@ run.
 
 ## How agents write to you
 
-The `communicating` skill holds a template for every kind of message. Its rules apply to all of them: use American English
-by default, the status block first and then the answer, plain words, no filler or buzzwords, real evidence instead of
+The `communicating` skill holds a template for every kind of message. Its rules apply to all of them: reply in your
+language, the status block first and then the answer, plain words, no filler or buzzwords, real evidence instead of
 claims, short updates, and honest estimates given as ranges.
+
+**Your language.** Agents reply in the language of your latest message; when it is too short to tell (`ok`,
+`continue`), in the language of your earlier messages; with none, American English. A locale in devkit config
+`language` fixes it instead. The reply's prose, its questions and decision requests, and the status block's text follow
+your language; the block's marker and labels (`[Firefly> DevKit]`, Done, Check, Progress, Crew, You, Next) do not, and
+crew roles are written in your language. Code, comments, commits, PRs, docs, plans, records, crew briefs, and members'
+reports to the tech lead stay in American English unless the project's own rules or you say otherwise. A context line
+before each turn names the reply language, and the Stop hook sends a final message in the wrong language back once.
 
 **Nothing comes before the status block.** A message that ends the agent's turn (everything it writes after its last
 tool call) opens with the block, and the template's own content goes below it: the verdict, a correction, a greeting,

@@ -55,8 +55,9 @@ commands but never edits; `read` only reads and searches.
 | `fast` | Haiku at low effort | the `fast` profile's model and effort |
 
 The Lookup scout (Sparks), the only `fast` member, does mechanical lookups; `scout` is its alias. The names are
-identities, not role-play: every member writes plainly and professionally, in the developer's language (devkit
-config `language`, American English by default).
+identities, not role-play: every member writes plainly and professionally. The tech lead replies to you in your
+language, and the crew's briefs, reports, and records stay in American English (see
+[Configuration › Reply language](configuration.md#reply-language)).
 
 **Roles first.** devkit writes a member as _Backend engineer (Tank)_ in everything it shows (the crew views, the
 progress update, messages, decisions, refusals, briefs) and calls the main session the tech lead. Agents write them
