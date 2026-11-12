@@ -161,7 +161,10 @@ def load(path: Path) -> dict:
 
 
 def _files(scope: str = None, archived: bool = False) -> list:
-    """The lesson files of a scope (every scope when None), active or archived, as listed now."""
+    """The lesson files of a scope (every scope when None), active or archived, as listed now. A rebase left stopped in
+    the handoff repository is aborted first (work.recover_rebase): until then the files of this Mac's commits it has
+    not replayed are missing, and the ones it stopped on hold conflict markers."""
+    work.recover_rebase("a lesson read")
     base = (LESSONS / "archive" / scope if archived else _dir(scope)) if scope else \
         (LESSONS / "archive" if archived else LESSONS)
     if not base.exists():

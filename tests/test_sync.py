@@ -474,6 +474,27 @@ class WorkingTreeTests(unittest.TestCase):
                                     "- 2026-11-11 10:05 · adopt · from this Mac"])
         self.assertEqual(sorted(titles), ["Export invoices", "Import invoices"])
 
+    def test_a_lesson_only_this_mac_has_is_found_while_a_rebase_is_left_stopped(self):
+        # The Weave Mac's `dev lesson recur <id>`: a pull's rebase was left stopped on a conflict (an older devkit's
+        # sync, or `git pull --rebase` by hand) before it replayed this Mac's commit of the lesson, so the lesson's
+        # file was not in the working tree. The lesson is found, and its repeat counted.
+        with lesson_macs() as m:
+            iid = m.shared_item("Export invoices")
+            with m.on_other():
+                work.update(m.item(iid), "edit", why="their wording", a=B, body="Their text.")
+                _git(m.other, "push", "-q")
+            work.update(m.item(iid), "edit", why="our wording", a=A, body="Our text.")
+            lid = lessons.add("global", "Only this Mac has it", files=["api/**"], happened="it broke here",
+                              cause="a cause", prevention="a prevention", a=A)["meta"]["id"]
+            self.assertNotEqual(core.git(m.here, "pull", "-q", "--rebase")[0], 0)
+            self.assertEqual(m.stopped(), ["rebase-merge"])
+            warned = io.StringIO()
+            with contextlib.redirect_stderr(warned):
+                les = lessons.recur(lessons.find(lid), "CI run 9", a=A)
+            self.assertEqual(les["meta"]["occurrences"], 2)
+            self.assertEqual(m.stopped(), [])
+            self.assertIn("a lesson read aborted it", warned.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()
