@@ -534,6 +534,44 @@ class BusyLaneQueueTests(unittest.TestCase):
         self.assertEqual(self.held("launcher-depth"), ("a_neo", "running"))
 
 
+class TwoLaneQueueTests(unittest.TestCase):
+    # Weave: the tech lead assigned a step to a member who worked in two lanes; devkit said it waits for a launch of
+    # its own, and it stayed the tech lead's after one of the lanes freed and did the work, so the member's
+    # `dev progress step --step` was refused and the step bound only to a fresh launch that named it
+    def setUp(self):
+        self.state = TempState().__enter__()
+        self.addCleanup(self.state.__exit__, None, None, None)
+        self.t0 = time.time() - 3600
+        pg.start("Hotfix", plan=["parser=30m", "graph=30m", "docs=15m"], now=self.m(0))
+        pg.assign("parser", "Neo", why="test", now=self.m(0))
+        launch("a_neo1", "devkit:neo", "Neo: parser fix", at=self.m(1))
+        pg.assign("graph", "Neo", why="test", now=self.m(1))
+        launch("a_neo2", "devkit:neo", "Neo: graph command", at=self.m(2))
+
+    def m(self, minutes):
+        return self.t0 + minutes * 60
+
+    def held(self, name):
+        st = next(s for s in pg.load_run("claude", "s1")["plan"] if s["name"] == name)
+        return st.get("owner"), st.get("state")
+
+    def test_a_step_for_a_member_busy_in_two_lanes_joins_the_first_lane_that_frees(self):
+        pg.assign("docs", "Neo", why="test", now=self.m(5))
+        self.assertEqual(self.held("docs"), ("main", "pending"))
+        pg.step("graph committed", which="graph", check="✓ 12 tests pass", from_agent="a_neo2", now=self.m(10))
+        self.assertEqual(self.held("docs"), ("a_neo2", "running"))
+        pg.step("docs written", which="docs", check="✓ dev docs check clean", from_agent="a_neo2", now=self.m(20))
+        self.assertEqual(self.held("docs"), ("a_neo2", "done"))
+
+    def test_the_advice_for_two_lanes_says_how_to_give_the_step_to_one_of_them(self):
+        pg.assign("docs", "Neo", why="test", now=self.m(5))
+        told = [m["text"] for m in pg.load_run("claude", "s1").get("messages") or [] if m.get("to") == "main"]
+        advice = next((t for t in told if "“docs”" in t), "")
+        self.assertIn('dev progress assign "docs" --to "Neo: parser fix"', advice)
+        self.assertIn('--to "Neo: graph command"', advice)
+        self.assertNotIn("launch of its own", advice)
+
+
 class SettingsTests(unittest.TestCase):
     def test_claude_settings_send_a_failed_agent_launch_to_devkit(self):
         entries = json.loads(SETTINGS.read_text())["hooks"].get("PostToolUseFailure") or []
