@@ -526,6 +526,16 @@ class MachineTests(unittest.TestCase):
         self.assertFalse(identity.was_this_mac("mac-55", T0 - 1700, m))  # while it was mac-158
         self.assertFalse(identity.was_this_mac("mac-55", T0 - 9 * 3600, m))  # before this Mac ever carried it
 
+    def test_a_name_another_mac_took_minutes_after_this_one_left_it_is_that_macs(self):
+        # this Mac carried mac-640 for 3 h until T0, then moved on; another Mac may take mac-640 at once
+        self.audit_log((T0 - 3 * 3600, "mac-640"), (T0 - 3600, "mac-640"), (T0, "mac-640"))
+        self.name = "andress-mbp-2"
+        m = identity.machine(now=T0 + 3600)
+        self.assertTrue(identity.was_this_mac("mac-640", T0 + 240, m))  # within the refresh of the period's end
+        self.assertFalse(identity.was_this_mac("mac-640", T0 + 600, m))  # ten minutes later: another Mac's
+        self.assertTrue(identity.was_this_mac("mac-640", T0 - 3 * 3600 - 30, m))  # a clock a few seconds apart
+        self.assertFalse(identity.was_this_mac("mac-640", T0 - 3 * 3600 - 120, m))  # before this Mac took it
+
     def test_a_name_or_id_this_mac_never_carried_is_not_its(self):
         m = identity.machine(now=T0)
         self.assertFalse(identity.was_this_mac("mac-640", T0, m))

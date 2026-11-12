@@ -207,8 +207,12 @@ def _typed_exactly(entry: dict, args: list) -> bool:
 # carries later or carried before (`mac-55`) never makes that Mac's records this one's.
 
 MACHINE_ID = re.compile(r"m-[0-9a-z]{8}")
-ALIAS_MARGIN = 900  # seconds around a period: the record's clock and the last refresh of the period may differ
 _REFRESH = 300  # seconds between two writes of the same period's end
+# A period's margins. Before it starts: clocks a few seconds apart. After it ends: the end is written at most every
+# _REFRESH seconds, so this Mac may have carried the name up to that long after it, plus the clocks. Nothing wider:
+# another Mac may take the name the moment this one leaves it, and old devkit never matched that record either.
+MARGIN_BEFORE = 60
+MARGIN_AFTER = _REFRESH + 60
 _PERIODS_KEPT = 200  # periods kept per hostname; older ones merge, so a name never loses its whole history
 
 
@@ -365,4 +369,4 @@ def was_this_mac(name: str, at: float | None = None, m: Machine | None = None) -
         return False
     m = m or machine()
     at = time.time() if at is None else float(at)
-    return any(p[0] - ALIAS_MARGIN <= at <= p[1] + ALIAS_MARGIN for p in m.aliases.get(name) or [] if len(p) == 2)
+    return any(p[0] - MARGIN_BEFORE <= at <= p[1] + MARGIN_AFTER for p in m.aliases.get(name) or [] if len(p) == 2)
