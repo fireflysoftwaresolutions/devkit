@@ -557,6 +557,46 @@ class ReadOnlyLanes(Case):
             with self.subTest(cmd=cmd):
                 self.assertIsNotNone(self.ro(cmd))
 
+    def test_a_test_run_takes_only_options_that_load_and_write_nothing(self):
+        # the Code reviewer's review of the closed read-only rule: a permitted test run must not take an option that
+        # loads the member's code (preloads, plugins, ini overrides, extra packages) or writes a file (reports,
+        # logs, caches), in the spaced or the `=` form
+        for cmd in ("PYTHONPATH=@P python3 -m unittest tests.test_language",
+                    "export PYTHONPATH=@P; python3 -m unittest tests.test_language",
+                    "env PYTHONPATH=@P python3 -m unittest tests.test_language",
+                    "PYTHONSTARTUP=@P/x.py python3 -m unittest tests.test_language",
+                    "python3 -m unittest discover -s tests -t @P", "cd @P && python3 -m unittest test_w",
+                    "NODE_OPTIONS=--require=@P/x.js node --test tests/", "node --test --import=@P/x.mjs tests/",
+                    "node --test --import @P/x.mjs tests/", "node --test --require=@P/x.js tests/",
+                    "node --test --loader=@P/x.mjs tests/", "node --test --experimental-loader=@P/x.mjs tests/",
+                    "node --test --env-file=@P/.env tests/", "node --test --test-reporter=@P/r.js tests/",
+                    "node --test --test-reporter=spec --test-reporter-destination=README.md tests/",
+                    "node --test --test-update-snapshots tests/",
+                    "uv run --with-requirements @P/req.txt pytest -q", "uv run --with @P pytest -q",
+                    "uv run --with-editable @P pytest -q", "uv run python @P/test_w.py",
+                    "pytest -q --override-ini=pythonpath=@P tests/test_language.py",
+                    "pytest -q -o pythonpath=@P tests/test_language.py", "pytest -q -o addopts='-p evil' tests/",
+                    "pytest -q -o cache_dir=lib/devkit tests/", "pytest -q --pdbcls=evil:Pdb tests/",
+                    "pytest -q --import-mode=append tests/test_language.py @P/test_w.py",
+                    "python3 -m pytest --pyargs test_w --rootdir=. -q",
+                    "python3 -m unittest tests.test_language @P/test_w.py", "python3 -m http.server 8000",
+                    "pytest -q --junitxml=README.md tests/", "pytest -q --junit-xml=lib/devkit/core.py tests/",
+                    "pytest -q --log-file=README.md tests/", "pytest -q --debug=README.md tests/",
+                    "pytest -q --resultlog=README.md tests/", "pytest -q --cov=lib --cov-report=xml:README.md tests/",
+                    "pytest -p evil tests", "pytest -c @P/pytest.ini tests"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNotNone(self.ro(cmd))
+        for cmd in ("python3 -m unittest tests.test_language", "/usr/bin/python3 -m unittest tests.test_guard -v",
+                    "python3 -m unittest -q -f -b -k lang tests.test_language",
+                    "python3 -m unittest discover -s tests -p 'test_lang*.py'",
+                    "python3 -m unittest discover --start-directory=tests --pattern=test_x.py -v",
+                    "pytest -q tests/test_language.py", "pytest -qx --lf --tb=short -k lang -m 'not slow' tests/",
+                    "pytest -v --maxfail=2 -rN --co tests/test_x.py::T::test_a", "pytest -s --ff -ra tests",
+                    "node --test tests/", "node --test --test-name-pattern=lang --test-only tests/x.test.mjs",
+                    "node --test --test-reporter=dot tests/", "uv run pytest -q tests", "python3 --version"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(self.ro(cmd))
+
     # the Red team tester's second round: a read-only lane's program writes nothing, whatever module, alias, mode or
     # path it uses; the member writes its scratch files with the shell
     WRITERS = (

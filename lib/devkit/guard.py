@@ -10382,9 +10382,18 @@ RO_PROGRAM_REASON = ("a read-only lane runs no program of its own, typed inline 
                      "JavaScript): no reading of a program's code can tell all the ways it may write. Run the "
                      "repository's tracked tests and read files; for a probe, ask the tech lead to run it (`dev crew "
                      "ask \"…\"`), or describe the change with file:line")
-_PYTEST_VALUE_OPTS = frozenset({"-k", "-m", "-o", "--override-ini", "-W", "--deselect", "--ignore", "--ignore-glob",
-                                "--maxfail", "--tb", "-r", "--durations", "--junit-prefix", "--log-level",
-                                "--capture", "--import-mode", "--color", "-n", "--dist"})
+# a read-only lane's test runs: the options each runner may take that load no code and write no file (flags, and
+# options with a value, in the spaced or the `=` form); any other option is refused
+_RO_TEST_FLAGS = {
+    "unittest": frozenset({"-v", "-q", "-f", "-b", "--verbose", "--quiet", "--failfast", "--buffer"}),
+    "pytest": frozenset({"-q", "-v", "-x", "-s", "--lf", "--ff", "--co", "--collect-only", "--last-failed",
+                         "--failed-first", "--exitfirst", "--quiet", "--verbose", "-l", "--showlocals"}),
+    "node": frozenset({"--test-only"})}
+_RO_TEST_VALUES = {
+    "unittest": frozenset({"-k", "-s", "-p", "-t", "--start-directory", "--pattern", "--top-level-directory"}),
+    "pytest": frozenset({"-k", "-m", "--tb", "-r", "--maxfail"}),
+    "node": frozenset({"--test-name-pattern", "--test-reporter"})}
+_NODE_REPORTERS = frozenset({"spec", "tap", "dot", "junit", "lcov"})
 
 
 def _ro_tracked_tests(argv, cwd) -> str | None:
@@ -10406,30 +10415,36 @@ def _ro_tracked_tests(argv, cwd) -> str | None:
     discover = kind == "unittest" and rest[:1] == ["discover"]
     if discover:
         rest = rest[1:]
+    flags, values = _RO_TEST_FLAGS[kind], _RO_TEST_VALUES[kind]
     while k < len(rest):
         a = rest[k]
-        flag, eq, val = a.partition("=")
-        if kind == "pytest" and flag in ("-p", "-c", "--rootdir", "--confcutdir", "--basetemp", "--pyargs",
-                                         "--trace-config", "--pdbcls", "--debug"):
-            return f"{_code('pytest ' + flag)} loads or writes outside the repository's tracked tests"
-        if discover and flag in ("-s", "--start-directory", "-t", "--top-level-directory"):
-            paths.append(val if eq else (rest[k + 1] if k + 1 < len(rest) else ""))
-            k += 1 if eq else 2
-            continue
-        if discover and flag in ("-p", "--pattern"):
-            k += 1 if eq else 2
-            continue
-        if kind == "pytest" and flag in _PYTEST_VALUE_OPTS:
-            k += 1 if eq else 2
-            continue
-        if a.startswith("-"):
+        if a == "--":
+            paths += [x.split("::", 1)[0] for x in rest[k + 1:]]
+            break
+        if not a.startswith("-") or a == "-":
+            if discover:
+                paths.append(a if len(paths) != 1 else "")  # start folder, pattern, top folder
+            else:
+                paths.append(a.split("::", 1)[0])
             k += 1
             continue
-        if discover:
-            paths.append(a if len(paths) != 1 else "")  # start folder, pattern, top folder
-        else:
-            paths.append(a.split("::", 1)[0])
-        k += 1
+        flag, eq, val = a.partition("=")
+        if flag in values or (not a.startswith("--") and a[:2] in values and len(a) > 2):
+            name = flag if flag in values else a[:2]
+            val = val if eq else (a[2:] if name == a[:2] and len(a) > 2 and name != flag else
+                                  (rest[k + 1] if k + 1 < len(rest) else ""))
+            k += 1 if (eq or (name != flag)) else 2
+            if discover and name in ("-s", "--start-directory", "-t", "--top-level-directory"):
+                paths.append(val)
+            elif kind == "node" and name == "--test-reporter" and val not in _NODE_REPORTERS:
+                return f"{_code('--test-reporter=' + val)} loads a reporter module; use spec, tap, dot or junit"
+            continue
+        if a in flags or (not a.startswith("--") and len(a) > 2 and all(("-" + c) in flags for c in a[1:])):
+            k += 1
+            continue
+        return (f"{_code(a)} is no option a read-only lane's test run may take: it may load code or write a file; "
+                f"run the repository's tests with the plain options (-v, -q, -x, -k, …), or ask the tech lead to "
+                f"run it (`dev crew ask \"…\"`)")
     paths = [x for x in paths if x] or ["."]
     for x in paths:
         cand = [x]
@@ -10506,6 +10521,9 @@ def _ro_program(argv0, cwd, member=None, plans=None, bodies=()) -> str | None:
             return None  # `command -v gh dev`, `command -V x`: it only looks the names up and runs none of them
         elif n in _RO_RUNNERS:
             runner = True
+            if any(str(x).startswith(("--with", "--extra-index", "--index", "--find-links", "--script", "--env-file"))
+                   for x in pre[k + 1:]):
+                return f"{_code(n)} with an option that adds code or packages to the run"
     if not argv:
         return None
     why = input_command_refusal(argv)
