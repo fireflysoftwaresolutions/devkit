@@ -616,6 +616,8 @@ a.stile:hover{background:var(--card-hover)}
 .pcard3 .pc-h{display:flex;gap:var(--s3);align-items:center;min-width:0}
 .pcard3 .pc-n{flex:1;min-width:0} .pcard3 h3{margin:0;display:flex;gap:var(--s2);align-items:center;font-size:var(--fs-3);font-weight:600;min-width:0}
 .pcard3 h3 .rl{color:var(--ink-strong)}
+/* the machine id beside a person's hostname: quiet, and the first to give way when the line is short */
+.mid{flex:0 100 auto;min-width:3ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:var(--fs-1);font-weight:400;color:var(--ink-2)}
 .prow .sbars{margin-top:6px}
 /* page headers */
 .mh-row{display:flex;gap:var(--s4);align-items:center;min-width:0}

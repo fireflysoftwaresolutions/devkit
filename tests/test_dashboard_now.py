@@ -252,6 +252,15 @@ class NowScreenTests(unittest.TestCase):
         self.assertEqual((out["open"], out["title"]), (True, "Invoice export"))                 # today's drawer until the run page ships
         self.assertEqual(out["hash"], "#/now?modal=run%3Aclaude-7f3a")
 
+    # Since the machine id, a person's key names the Mac by its id (bob@m-0000beef): the team line reads the hostname
+    # the server resolved for it (people[].label)
+    def test_the_team_line_names_another_mac_by_its_hostname(self):
+        def on_mini(d):
+            next(x for x in d["people"] if x["who"] == "bob@studio").update(who="bob@m-0000beef", host="m-0000beef",
+                                                                            label="mini")
+        self.assertEqual(self.probe("""out.team = text($(".now-team"));""", change=on_mini)["team"],
+                         "bob@mini works on widget")
+
     # AC-16 on Now: every crew member's name follows its role.
     def test_crew_members_read_role_first(self):
         out = self.probe("""const m = $("main").innerText, bad = [];
