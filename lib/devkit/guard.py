@@ -2252,6 +2252,9 @@ def _nested_lines(argv, cwd=None) -> list:
     if run != list(argv):  # a runner (uv run, npx, npm exec, timeout, a wrapper): its command is read as a line (F3)
         return [shlex.join(run)]
     argv = run
+    launched = [shlex.join(r) for r in map(_unwrap, _launcher_suffixes(argv)) if r]
+    if launched:  # `op run -- git push --force …`: each command the launcher may start, read as a line
+        return launched
     real = _as_run(argv, cwd)[1:]  # `./bash-link -c …`: the shell its file is
     name, args = os.path.basename((real[0] if real else argv)[0]), argv[1:]
     if name in _SHELLS:
@@ -4406,6 +4409,10 @@ def vendor_ext_refusal(argv, cwd=None, names=(), more=False) -> str:
     braced = _brace_list(prog)
     if braced:  # `{claude,mcp} add …`: the shell expands the program word into words
         return vendor_ext_refusal([*braced, *args], cwd, names, more)
+    for sub in _launcher_suffixes(argv):  # `op run -- claude mcp add …`: the strictest reading stands
+        kind = vendor_ext_refusal(sub, cwd, names, more)
+        if kind:
+            return kind
     named = any(_vendor_word(a) for a in args)
     if not (named or more or any(_shell_made(a) for a in args)):
         return ""
@@ -4950,6 +4957,11 @@ class _Shell:
         return None
 
     def segment(self, name, argv, assigns, cwd, names=()):
+        for sub in _launcher_suffixes(argv):  # `op run -- git push --force …`: each command the launcher may start
+            run = _unwrap(sub)
+            v = self.segment(os.path.basename(run[0]), run, assigns, cwd, names) if run else None
+            if v:
+                return v
         _WORD.set(name)  # the refused segment's command word
         args = argv[1:]
         why = input_command_refusal(argv)  # xargs env, parallel env, find -exec {}: the command comes from the input
@@ -5286,6 +5298,29 @@ def _case_pattern(segs, k) -> bool:
     head = "case" in prev and not _unwrap(prev)
     return ";;" in op or ";&" in op or (op == "|" and (head or _case_pattern(segs, k - 1))) or \
         (head and op in ("(", ";") and prev[-1] == "in")
+
+
+# launchers that run a command their words name, after options the guard does not parse, with the verb that does it
+# (none: the program itself); _launcher_suffixes reads them without each one's option grammar
+_LAUNCHERS = {"taskpolicy": (), "sandbox-exec": (), "xcrun": (), "dotenv": (), "op": ("run",), "direnv": ("exec",),
+              "mise": ("exec", "x"), "asdf": ("exec",), "nix": ("run", "shell", "develop"), "ccr": ("code",)}
+
+
+def _launcher_suffixes(argv) -> list:
+    """The commands a launcher of _LAUNCHERS may start: each run of its words from a word that is no option on (the
+    first that names a program is the command, and the guard cannot tell which that is, so each is read, the
+    strictest verdict standing), a flake's `nixpkgs#claude-code` read as its package, and `ccr code …` as claude.
+    [] for any other command."""
+    if not argv:
+        return []
+    name, args = os.path.basename(str(argv[0])), [str(a) for a in argv[1:]]
+    verbs = _LAUNCHERS.get(name)
+    if verbs is None or (verbs and args[:1] and args[0] not in verbs) or (verbs and not args):
+        return []
+    if name == "ccr":  # Claude Code Router's `ccr code` starts claude with the words after it
+        return [["claude", *args[1:]]]
+    args = args[1:] if verbs else args
+    return [[a.rpartition("#")[2], *args[k + 1:]] for k, a in enumerate(args) if a and not a.startswith("-")]
 
 
 def _unwrap(argv, more: bool = False, stop=()):
@@ -10854,6 +10889,12 @@ def _argv_actions(argv, cwd, bodies, depth):
     if _input_command(argv):
         return None
     out = _segment_actions(argv, cwd, bodies, depth)
+    for sub in _launcher_suffixes(argv):  # `op run -- gh pr merge 12`: each command the launcher may start
+        run = _unwrap(sub)
+        more = _argv_actions(run, cwd, bodies, depth) if run else []
+        if more is None:
+            return None
+        out += more
     name, args = os.path.basename(argv[0]), argv[1:]
     texts, inners = [], []  # texts: (script, the path of a script file or None for a line the command holds)
     with _skipped_reads() as unread:

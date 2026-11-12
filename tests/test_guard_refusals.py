@@ -345,6 +345,27 @@ class OlderBypassesOfTheExtensionRule(unittest.TestCase):
                     ("[c]laude mcp add evil -- npx evil", guard.EXT_UNNAMED_REASON)),
                    ("=claude mcp list", "{claude,mcp} list", "ls {a,b}.md", "cla?de --version", "=git status"))
 
+    LAUNCHERS = ("taskpolicy -b", "sandbox-exec -p '(version 1)'", "xcrun", "op run --", "direnv exec .",
+                 "mise exec --", "asdf exec", "dotenv --", "nix run nixpkgs#hello --")
+
+    def test_a_launcher_the_guard_does_not_unwrap_starts_what_it_names(self):
+        # they run the command their words name, after options the guard does not parse: every rule reads each part
+        # of their words from a program's name on, and the strictest verdict stands
+        self.judge(tuple((f"{launcher} claude mcp add evil -- npx evil", guard.EXT_FORM_REASON)
+                         for launcher in self.LAUNCHERS) +
+                   (("nix run nixpkgs#claude-code -- mcp add evil -- npx evil", guard.EXT_FORM_REASON),
+                    ("ccr code mcp add evil -- npx evil", guard.EXT_FORM_REASON)),
+                   ("echo claude mcp add x", "which claude && claude mcp list", "mise exec -- npm test",
+                    "op run -- python3 -m pytest", "mise exec -- node --version", "op run -- claude mcp list",
+                    "npm i -g @openai/codex", "ccr code --version", "taskpolicy -b make test"))
+        for launcher in self.LAUNCHERS:
+            with self.subTest(launcher=launcher):
+                self.assertIn("force-push", self.check(f"{launcher} git push --force origin main") or "")
+                self.assertIsNotNone(self.check(f"{launcher} rm -rf ~"))
+                self.assertIn("dev pr merge", self.check(f"{launcher} gh pr merge 12") or "")
+        found = guard.irreversible_actions("op run -- gh pr merge 12", self.cwd) or []
+        self.assertEqual([(a["action"], a["target"]) for a in found], [("merge", "12")])  # the gate reads it too
+
 
 class PackageRunnersRunTheirCommand(unittest.TestCase):
     # F3 (re-review four): npm exec|x, bun x, yarn exec and `pnpm|yarn <bin>` run the command after them, so every
