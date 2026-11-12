@@ -106,6 +106,42 @@ class TheRouterPlacesTheLaneCall(unittest.TestCase):
                 self.assertIsNone(guard.lane_route("cd lib && dev progress step x", aid))
 
 
+class TheRefusalSaysWhatKeptTheCallBack(unittest.TestCase):
+    # three texts sent members the wrong way: a lane call alone, with backticks in its double-quoted message, was told
+    # to run as a command of its own; an unknown `dev crew` word was told it changes the team; and a program named
+    # nothing the guard found in it
+
+    def verdict(self, cmd):
+        v = guard.crew_shell_verdict(cmd, CWD, None, "neo", level="all", lane="a1", session="s1", agent="claude",
+                                     routed=guard.lane_route(cmd, "a1") is not None, grant=lambda *a, **k: None)
+        return v[1] if v else None
+
+    def test_a_substitution_in_a_double_quoted_message_is_named(self):
+        for cmd, what in (('dev crew ask "Should I run `dev push` now?"', "backticks"),
+                          ('dev crew answer M166 "Yes: use `dev test` first."', "backticks"),
+                          ('dev progress note "the cause is in $(cat notes)" --next "fix"', "`$(`")):
+            with self.subTest(cmd=cmd):
+                why = self.verdict(cmd) or ""
+                self.assertIn(f"holds {what}", why)
+                self.assertIn("single quotes", why)
+        self.assertEqual(self.verdict("dev crew inbox; ruff check lib"), guard.LANE_REASON)  # a chain: as before
+        self.assertIsNone(self.verdict("dev crew ask 'Should I run `dev push` now?'"))
+
+    def test_a_word_that_is_no_crew_command_is_named_as_such(self):
+        why = self.verdict("dev crew messages") or ""
+        self.assertIn("`dev crew messages` is not a crew command", why)
+        self.assertIn("`inbox`", why)
+        self.assertNotIn("changes the team", why)
+        self.assertIn("changes the team's crew", self.verdict("dev crew brief tank --step api") or "")
+
+    def test_a_program_names_the_construct_that_makes_it_unknown(self):
+        why = self.verdict("python3 - <<'PY'\nimport argparse\np = argparse.ArgumentParser()\n"
+                           "print(vars(p.parse_args([])))\nPY") or ""
+        self.assertIn("`vars(`", why)
+        self.assertNotIn("whose name is only known", why)
+        self.assertIn("whose name is only known", self.verdict("$X pr merge 12") or "")  # a name the shell builds
+
+
 class TheHookRoutesItToTheLane(unittest.TestCase):
     """hooks._route_subagent_progress and _unroutable_lane_command on a member's call, its lane mocked as in
     test_guard_crew.HookWiringTests: a review member (the Code reviewer) and a write member (the DevEx engineer)."""

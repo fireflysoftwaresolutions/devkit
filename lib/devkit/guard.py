@@ -6814,6 +6814,8 @@ def evidence_forgery(cmd: str, cwd):
 
 _CREW_LANE = frozenset({"ask", "answer", "inbox", "decide", "decisions", "mode", "delegate", "decline", "route"})
 _CREW_READ = frozenset({"graph", "show", "rules", "history", "next", "owner"})  # owner: who holds a file
+_CREW_TEAM = frozenset({"brief", "set", "withdraw", "raci"})  # raci with --set; sync is judged on its own
+_CREW_WORDS = ", ".join(_code(w) for w in sorted(_CREW_LANE | _CREW_READ | _CREW_TEAM | {"sync"}))
 _LANE_TEXT = re.compile(r"\bdev\W{1,6}(?:progress|crew)\b")
 _DEV_IN_CODE = re.compile(r"(?<![\w.-])dev[\s'\",\[\]]{1,6}(progress|crew)\b(?:[\s'\",\]]{1,6}(-{0,2}[A-Za-z][\w-]*))?")
 _SPAWNS = re.compile(
@@ -6830,6 +6832,44 @@ LANE_REASON = ("Run `dev progress …` and `dev crew …` as a command of its ow
                "to a command that writes or runs code it would act as the tech lead. Text that only mentions these "
                "commands (a quoted message, a heredoc written to a file) is fine, and read-only crew commands (graph, "
                "show, raci, …) work anywhere.")
+LANE_QUOTED_REASON = ("The message in double quotes holds {what}, which the shell runs as a command before devkit "
+                      "reads the message, so devkit cannot route this call to your lane: run that way, a command "
+                      "inside it would act as the tech lead. Put the message in single quotes, or write it without "
+                      "{what}.")
+
+
+def _lane_reason(cmd: str) -> str:
+    """LANE_REASON, or LANE_QUOTED_REASON when a lane call's own double-quoted message holds backticks or `$(`, which
+    keep a call that is otherwise a command of its own from its lane (a `"$(cat <<'EOF' …)"` message is data; a lane
+    call inside a substitution, `echo "$(dev crew …)"`, gets LANE_REASON)."""
+    what = "" if _DATA_HEREDOC.search(cmd) else _double_quoted_substitution(cmd)
+    for argv, _ in split_commands(cmd) or [] if what else []:
+        args = _dev_args(_unwrap(argv))
+        if args and _crew_kind(args) == "lane" and any("`" in a or "$(" in a for a in args):
+            return LANE_QUOTED_REASON.format(what=what)
+    return LANE_REASON
+
+
+def _double_quoted_substitution(cmd: str) -> str:
+    """What runs inside the first double-quoted word of a command line that holds a substitution: 'backticks' or
+    `$(`; '' for none."""
+    q, i, n = None, 0, len(cmd)
+    while i < n:
+        c = cmd[i]
+        if q == "'":
+            q = None if c == "'" else q
+        elif c == "\\":
+            i += 1
+        elif q == '"' and c == "`":
+            return "backticks"
+        elif q == '"' and cmd.startswith("$(", i):
+            return _code("$(")
+        elif c == '"':
+            q = None if q == '"' else '"'
+        elif c == "'" and q is None:
+            q = "'"
+        i += 1
+    return ""
 
 
 _DATA_HEREDOC = re.compile(r"\$\(cat <<(['\"])([A-Za-z_][A-Za-z0-9_]*)\1\n")
@@ -8901,9 +8941,13 @@ def crew_shell_verdict(cmd: str, cwd, scope=None, member=None, level=None, base=
                 return deny(SESSION_MEMBER_REASON.format(what=_code(f"dev session {sub}")), key="session-member")
         for kind, args in _dev_calls(argv, code):
             if kind == "lane" and not one_routed:
-                return deny(LANE_REASON, key="lane")
+                return deny(_lane_reason(cmd), key="lane")
             if kind == "team":
                 sub = next((a for a in args[1:] if not a.startswith("-")), "")
+                if sub not in _CREW_TEAM:  # `dev crew messages`: no command at all
+                    return deny(f"{_code(f'dev crew {sub}')} is not a crew command, so the guard cannot tell what it "
+                                f"would do. The crew commands are {_CREW_WORDS}; `dev crew --help` says what each "
+                                f"does.", key="crew-word")
                 return deny(f"{_code(f'dev crew {sub}')} changes the team's crew or briefs a member: the tech lead "
                             f"runs it. Ask with `dev crew ask \"…\"` and say what should change and why.", key="team")
             if kind == "sync":
@@ -9415,9 +9459,25 @@ def _unread_action(argv, path) -> tuple:
 def _dynamic_code(name, code) -> bool:
     """True when an interpreter's program can call a function whose name it builds at run time (RT2), judged on its
     code outside string literals: an edit script whose strings hold JavaScript with `eval(` builds nothing."""
+    return bool(_dynamic_match(name, code))
+
+
+def _dynamic_match(name, code):
+    """The match of _dynamic_code in a program's code outside string literals, or None."""
     fam = re.sub(r"[0-9.]+$", "", os.path.basename(str(name or "")).casefold())
     fam = {"pypy": "python", "node": "js", "nodejs": "js", "deno": "js", "bun": "js"}.get(fam, fam)
-    return bool(code) and bool(_DYNAMIC_CODE.get(fam, _DYNAMIC_CODE[""]).search(_outside_strings(code)))
+    return _DYNAMIC_CODE.get(fam, _DYNAMIC_CODE[""]).search(_outside_strings(code)) if code else None
+
+
+def _built_action(argv, name, code) -> tuple | None:
+    """_unknown for an interpreter's program that may build what it runs: a function it calls by a name it builds at
+    run time (_dynamic_code), or a spawn whose command starts with what it fills in (_SPAWN_BUILT), with that code,
+    which the refusal names. None when the program has neither."""
+    m = _dynamic_match(name, code) or _SPAWN_BUILT.search(code or "")
+    if not m:
+        return None
+    action, target = _unknown(" ".join(argv))
+    return action, target, "", ("built", " ".join(m.group(0).split()))
 
 
 # a module name is a string, and naming child_process is how JavaScript reaches its spawn functions
@@ -10670,8 +10730,8 @@ def _segment_actions(argv, cwd, bodies, depth) -> list:
                 more += _text_actions(text, cwd, depth + 1, from_code=True, expand=expand) or []
             if unread:  # its program is too large or unreadable: it may do anything
                 found = [_unread_action(argv, unread[0])]
-            elif _dynamic_code(name, code) or _SPAWN_BUILT.search(code or ""):  # it may build what it runs
-                found = [_unknown(" ".join(argv))]
+            elif built := _built_action(argv, name, code):  # it may build what it runs
+                found = [built]
         if not found and "/" in argv[0] and name not in _SHELLS and not _INTERP.match(name):
             found, more = _path_run_actions(argv, cwd, bodies, depth)
         found = found or _opaque_actions(name, argv, cwd)
@@ -11540,6 +11600,9 @@ def _what(a) -> str:
                 f"action, tier 2 included (command {a['target']})")
     if (a.get("why") or ("",))[0] == "unsure":  # the guard cannot tell what runs
         return f"runs {a['why'][1]}, so it may be any action, tier 2 included (command {a['target']})"
+    if (a.get("why") or ("",))[0] == "built":  # a program that may build what it runs
+        return (f"runs a program that can call a function by a name it builds when it runs ({_code(a['why'][1])}), "
+                f"so it may be any action, tier 2 included (command {a['target']})")
     if a.get("why"):  # B2b: a push of an embargoed branch, or of a branch while the note cannot be read
         return (f"sends an embargoed branch or its commits to the remote, a decision only the developer makes "
                 f"({a['target']})")
@@ -11570,6 +11633,11 @@ def _main_reason(a) -> str:
                 f"its path) or cannot be read, so it may do anything, tier 2 included. Run a smaller script, "
                 f"or the commands it holds one by one. If it must run as it is, ask the developer first; they approve "
                 f"this exact command by typing this line on its own: {_code('grant unknown ' + str(a['target']))}.")
+    if a["action"] == "unknown" and (a.get("why") or ("",))[0] == "built":
+        return (f"{_code(a['words'])} {_what(a)}. Call the function by its own name, not through "
+                f"{_code(a['why'][1])}, so the guard can read what the program runs. If it must run as it is, ask the "
+                f"developer first; they approve this exact command by typing this line on its own: "
+                f"{_code('grant unknown ' + str(a['target']))}.")
     if a["action"] == "unknown" and (a.get("why") or ("",))[0] == "unsure":
         return (f"{_code(a['words'])} {_what(a)}. Write out what it runs, as plain words or a file the guard can read "
                 f"(for a GraphQL query, `-f query='…'` or `-F query=@query.graphql`), so the guard can classify it. "
