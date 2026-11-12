@@ -293,6 +293,12 @@ of each run, not its plan. The summary holds the goal and state, how many steps 
 to three steps that run or are blocked now, how many crew lanes work, and the ETA. A session of a 60-step run with six
 lanes takes about 1 KB.
 
+Another machine's presence file is that person's text, so devkit never shows it as written. `dev team` and
+`dev progress` show its fields as plain text, without control characters. The session context the
+model reads names a person, an agent, and a branch only in their plain shapes (`user@hostname`, an agent's name, a
+branch name, none with a space, a quote, or a control character), and anything else as a neutral word: someone on
+another Mac, an agent, a branch.
+
 ```bash
 dev team               # machines active in the last 24 hours
 dev team --hours 4

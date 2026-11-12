@@ -638,7 +638,7 @@ Local CI evidence: proof that what CI runs passed on your Mac, on exactly the fi
 
 | Option | Effect |
 | --- | --- |
-| `--run` | Runs the `run:` steps of the workflows that run on pushes and pull requests, in order, and records the evidence when all pass. Setup actions, dependency installs, side effects, a hosted runner's own setup (deletions outside the checkout, Docker prunes, `sudo`, OS package installs, `playwright install`, `git config --global`), and steps that need CI secrets are skipped, with the reason; a step that names a Docker context this Mac lacks blocks the evidence (see [Git and GitHub › Local CI evidence](git-and-github.md#local-ci-evidence)) |
+| `--run` | Runs the `run:` steps of the workflows that run on pushes and pull requests, in order, and records the evidence when all pass. Setup actions, dependency installs, side effects, a hosted runner's own setup (deletions outside the checkout, Docker prunes, setup run with `sudo`, OS package installs, `playwright install`, `git config --global`), and steps that need CI secrets are skipped, with the reason. In a step that sets up a tool and runs it (`brew install gitleaks && gitleaks detect`), only the setup is left out and the check runs, so a tool missing on this Mac fails the evidence. A check that cannot be separated from its setup (a nested shell, a subshell, a heredoc, a `case`), a check run with `sudo`, and a step that names a Docker context this Mac lacks block the evidence (see [Git and GitHub › Local CI evidence](git-and-github.md#local-ci-evidence)) |
 | `--dry-run` | With `--run`: the plan, without running anything |
 | `--keep-going` | With `--run`: do not stop at the first failure |
 | `--step-timeout MIN` | With `--run`: minutes per step (default 30) |

@@ -544,14 +544,10 @@ action `unknown`, tier 2, with the target `cmd-<hash>` of that exact command tex
   word the input fills in (`echo --force origin main | xargs git push`) is `unknown` as well.
 
 A `make`, `just`, or `task` target, a package script, or a script whose filename holds `release`, `publish`,
-`deploy`, `push`, or `ship` takes that action's class, because the gate cannot always see what it does. A Python
-script the gate reads in full is judged by its content instead when it provably cannot act: it parses, starts no
-process, builds no call, imports only standard modules that read, write, and compute (`urllib.parse`, not
-`urllib.request`, and no relative import), and names none of `os`'s process functions and no dunder. Its name then
-decides nothing, whether an interpreter runs it or its path does with a python shebang, so a scratch
-`release_notes.py` that reads `CHANGELOG.md` and writes notes runs. A Python script that can act where the gate
-cannot see keeps the class of its name, and so do other interpreters' scripts and shell scripts, because Node has a
-global `fetch`, Perl has sockets built in, and a shell runs any program.
+`deploy`, `push`, or `ship` takes that action's class, because the gate cannot always see what it does. The name
+decides whatever the script's code holds, read or not, whether an interpreter runs it (`python3 release_notes.py`)
+or its path does (`./release_notes.py`): code that imports only standard modules can still reach a process or run
+code it builds in ways the guard does not read. A crew member that needs such a script asks the tech lead to run it.
 
 These are not `unknown`:
 
@@ -723,7 +719,8 @@ A message is data, so quoted operators in it (`dev crew ask "x; y && z"`) keep t
 backtick that the shell expands in a message runs a command of its own, so it makes the call more than one command.
 When a lane call's own double-quoted message holds one, the refusal says so and asks for single quotes, or the
 message without it, because a command inside it would run as the tech lead. A `dev crew` word that is no crew
-command (`dev crew messages`) is refused as no command, with the list of crew commands, not as a change to the team.
+command, such as `messages` where `dev crew inbox` is meant, is refused as no command, with the list of crew commands,
+not as a change to the team.
 
 Each lane refusal is recorded with the refusal id of the guard rule that refused it and its command word (such as
 `crew_shell_verdict:team` or `crew_shell_verdict:lane`), so the [bug registry](bug-registry.md) tells one cause from
@@ -772,8 +769,20 @@ checks. These run as well:
 - A command substitution or process substitution whose own command is on the allowlist:
   `git diff $(git merge-base HEAD main) HEAD`, `diff <(git show a:f) <(git show b:f)`. Arithmetic `$((…))` and a
   substitution used as the program stay refused.
-- `sed` whose script only prints, with or without `-n`: `sed 's/a/b/g' f`, `sed '/^#/d' f`. `-i`, `-f`, and the `w`,
-  `r`, and `e` commands stay refused.
+- `sed` whose script only prints, with or without `-n`: `sed 's/a/b/g' f`, `sed '/^#/d' f`. `-f`, and the `w`, `r`,
+  and `e` commands stay refused.
+- `sed -i` on the member's own scratch files: every file it edits, links resolved, is a regular file with one link
+  inside `scratchpad/<member id>/`, and its script has no `w`, `r`, or `e`. The guard reads `-i` as the installed sed
+  reads it (BSD or GNU), and a backup suffix must keep the backup beside its file. `sed -i` under `find -exec` or
+  `xargs` stays refused, because the files are added when it runs.
+- A shell (`bash`, `sh`, `dash`, `zsh`) whose `-c` line, script file, or quoted heredoc holds only commands this list
+  allows, judged again one shell deeper and at most two shells deep: `bash -c 'git log -1 && wc -l README.md'`,
+  `bash scratchpad/<member id>/read.sh`. The guard must read the script whole (256 KB at most). The options it allows
+  are `-e`, `-u`, `-x`, `-v`, `-f`, `-s`, `-o` with `pipefail`, `errexit`, `nounset`, `xtrace`, `verbose`,
+  `noglob`, or `posix`, and `--norc`, `--noprofile`, and `--posix`. An interactive or login shell, an rc file, any
+  other option, a heredoc with an unquoted delimiter, and a shell that reads its commands from a pipe stay refused.
+- A `PYTHONPATH=` prefix whose every entry, links resolved, is a workspace folder or the member's own scratch folder:
+  `PYTHONPATH=lib python3 -m pytest tests/test_x.py`. A temporary folder, a variable, or a glob in it stays refused.
 - `awk` whose program prints to standard output only. A program with `>`, `|`, `system()`, `getline`, `@load`, or a
   program file stays refused; compare with `<` instead of `>`.
 - `mkdir -p` inside the member's own scratch folder, `scratchpad/<member id>/`.
@@ -794,8 +803,13 @@ checks. These run as well:
   refuses it. When devkit cannot look up the member's kinds of work or the project, it refuses.
 - A command continued with a backslash-newline, read as the shell joins it.
 
-A script from the member's own scratch folder (`python3 scratchpad/<member id>/probe.py`) already ran before this
-change, and still does; a script in another member's folder does not.
+A script from the member's own scratch folder runs: `python3 scratchpad/<member id>/probe.py`, also after Python's
+`-W`, `-X`, or `--check-hash-based-pycs` value (`python3 -W ignore scratchpad/<member id>/probe.py`) and under a
+project runner (`uv run`, `poetry run`, `pdm run`, `hatch run`, `rye run`, `pipenv run`), which runs the project's own
+environment. A runner that fetches a package (`npx`, `uvx`, `bunx`, `pnpx`, `pnpm`) runs a download, so it stays
+refused, and so does a script in another member's folder. Inline Python (`python3 -c`) and Python heredocs stay
+refused, and so do a program named by a variable, `"$@"`, or a function, and an environment variable the guard does
+not know.
 
 ### Who runs a `dev` call: the session marks
 

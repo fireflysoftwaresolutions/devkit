@@ -151,8 +151,8 @@ dev crew graph --global              # every live session on this Mac (the defau
   form and tell you, and refuse one that spans checkouts or names a worktree that is not there (deleted included).
 - **Scopes match folder by folder.** `*`, `?`, and `[…]` stay inside one folder name; `**` spans folders; a glob
   holds everything under a folder it matches. `*.md` means root-level Markdown only: write `**/*.md` for all of it.
-  A relative glob never holds a path outside the repository, and a whole-checkout scope becomes its top-level
-  entries. Two scopes overlap only when one path matches both (without case), so two members can split one folder
+  A relative glob never holds a path outside the repository, a link that leads out of it included, and a
+  whole-checkout scope becomes its top-level entries. Two scopes overlap only when one path matches both (without case), so two members can split one folder
   (`src/pkg/*.py` and `src/pkg/studio/host.py`).
 - **A member's own close lands at once.** `dev progress step "…" --step "<name>" --check "…"` from the member ends
   that step right away, and the steps after it start. For a long step that stays open, the member records partial
@@ -302,6 +302,10 @@ them).
    - the crew gates, from its own transcript: the proofs of its procedure ran as commands, it loaded its skills, its
      files hold no unfinished work, its new tests can fail, two guard refusals got a lesson (`dev lesson add`), and
      every command it put in the background has ended (Claude Code lists a member until then).
+
+   When the member must not run `dev ci --run` (a shared checkout, runner preparation that must not run twice), put
+   `Waived proof: dev ci --run — <why>` on a line of its own in the brief, or run `dev ci --run` yourself on the tree
+   it leaves: only you can meet that proof for a member, and its own `dev ci --mark-passed` does not.
 
    `dev canary` counts the crew apart (`crew 12/13`), and `dev audit --action crew.gate` lists the gate findings. A
    member let through with background work still running is named once in your next context: stop it with

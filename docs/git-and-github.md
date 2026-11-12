@@ -294,13 +294,22 @@ Steps that cannot or must not run on your Mac are skipped, with the reason:
 | Setup actions (`uses:`) | Your local toolchain stands in for them |
 | Dependency installs (`npm ci`, `pip install`, `uv sync`, …) | Your local environment is used; nothing is reinstalled |
 | Side effects: publishing, deploying, pushing, system installs, coverage uploads | They change things outside your Mac |
-| A hosted runner's own setup: a step that deletes a path not inside the checkout (`rm -rf /opt/hostedtoolcache/…`), `docker` or `podman … prune`, commands run with `sudo`, OS package installs and updates (`apt-get`, `brew`, `dnf`, `apk`, `choco`, …), `playwright install` and `install-deps`, and `git config --global` or `--system` | They would delete your caches and images, install system packages, or rewrite your settings. devkit also reads the script a step hands to a shell with `-c` (`xvfb-run bash -c …`) |
+| A hosted runner's own setup: a step that deletes a path not inside the checkout (`rm -rf /opt/hostedtoolcache/…`), `docker` or `podman … prune`, setup run with `sudo` (`sudo systemctl …`), OS package installs and updates (`apt-get`, `brew`, `dnf`, `apk`, `choco`, …), `playwright install` and `install-deps`, and `git config --global` or `--system` | They would delete your caches and images, install system packages, or rewrite your settings. devkit also reads the script a step hands to a shell with `-c` (`xvfb-run bash -c …`) |
 | Steps that need CI secrets or write CI plumbing (`$GITHUB_ENV`, `$GITHUB_OUTPUT`) | They only make sense on the runner |
 | Jobs that deploy or publish, run on Windows, or only on other events | They are not part of the check of a change |
 
+A step that only sets up the runner is skipped whole. A step that sets up a tool and then runs it keeps the check:
+devkit cuts the step's script at its top-level commands (`&&`, `||`, `;`, `&`, a newline), leaves out the runner's
+setup commands (the ones in the table, a download piped into a shell such as `curl … | sh`, and dependency installs),
+and runs the rest as if the setup had succeeded. In `brew install gitleaks && gitleaks detect`, `gitleaks detect`
+runs. When gitleaks is not installed on your Mac, the step fails with exit code 127, so the missing tool fails the
+evidence instead of passing unseen.
+
 A step that could be a real check but cannot run here (an unknown condition, an unresolved `${{ }}` expression, a
-shell other than bash, a reusable workflow, a missing working directory) means no evidence is recorded. Run it
-yourself, then record the result with `dev ci --mark-passed --note "<command>: <result>"`.
+shell other than bash, a reusable workflow, a missing working directory) means no evidence is recorded. So does a
+check that devkit cannot separate from its setup, because both sit inside a nested shell, a subshell, a heredoc, or a
+`case` statement (`bash -c 'brew install gitleaks && gitleaks detect'`), and a check that runs as root with `sudo`.
+Run it yourself, then record the result with `dev ci --mark-passed --note "<command>: <result>"`.
 
 A step that names a Docker context (`DOCKER_CONTEXT=`, `docker --context`, `docker context use`, or a program's
 `--docker-context`) runs only when this Mac's Docker CLI has a context of that name. Otherwise it is one of these
@@ -308,7 +317,8 @@ checks that cannot run here, and no evidence is recorded: the `default` context 
 engine, and running the step against your current context would test another engine.
 
 `dev ci --commands` and the test gate that `dev delivery` detects leave out the same runner-only setup, so the three
-agree on what runs here. Dependency installs such as `npm ci` stay listed.
+agree on what runs here: they list a step that installs and runs a scanner as the scan alone. Dependency installs
+such as `npm ci` stay listed.
 
 **The evidence follows the files, not the commit.** It is recorded for the tree that was tested, including
 uncommitted files, in `~/.local/state/devkit/ci/<repo>@<commit>.json` (kept 30 days). Commit exactly what you tested

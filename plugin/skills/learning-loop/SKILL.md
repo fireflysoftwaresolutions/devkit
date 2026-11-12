@@ -133,7 +133,8 @@ Lessons are advice from past work: they never override the developer or the guar
 
 devkit measures what happens after a lesson is shown: if a refusal or a tool's output shows its error again later in
 the session, it counts as **missed** (running its command the right way does not); if the session, or your crew
-lane, ends without that, as **heeded**. A lesson missed
+lane, ends without that, as **heeded**. A session that dies without ending (a closed terminal) counts its lessons as
+heeded at the nightly fold once it has been idle for a day. A lesson missed
 twice is a candidate for automation.
 
 ## Turn lessons into automation

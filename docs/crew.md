@@ -285,7 +285,9 @@ scope check, `dev crew owner`, and the overlap check of `assign` all read it the
 | `*.md` | Markdown files at the repository's root only; write `**/*.md` for every Markdown file |
 
 - A relative glob never holds a path outside its repository, such as the handoff plans or the tech lead's
-  scratchpad, so `**` alone holds the repository and nothing else.
+  scratchpad, so `**` alone holds the repository and nothing else. It holds a path only when its real path, links
+  resolved, is inside the repository too: `shared/**` holds nothing behind a tracked link `shared` that leads out of
+  the repository, and still holds the files of a link that stays inside it.
 - A scope that names a whole checkout (`<worktree>/**`) becomes that checkout's top-level entries.
 - Two scopes overlap only when one path matches both, compared without case, so two members can split one folder:
   `src/pkg/*.py` for one and `src/pkg/studio/host.py` for the other.
@@ -474,6 +476,22 @@ each check that fails, naming every missing item and the command that fixes it:
    | Tests | No test that cannot fail in the test files it changed |
    | Lessons | Two or more guard refusals answered with a lesson that was recorded or counted: a `dev lesson add` or `dev lesson recur` whose output shows the lesson's id with its check mark (a refused add or a recur of no lesson does not count, whatever its exit code), or, when the guard was wrong, with `dev bug report --guard` or a vote on the bug a refusal's marker names. A refusal the [bug registry](bug-registry.md) served a workaround for in the session, or one an open lesson of the project, its initiatives, or the global scope covers, owes nothing |
    | Background work | Every command it put in the background has ended (its task notification arrived, `TaskStop` stopped it, or a read of its output showed it exited), because Claude Code keeps a member in its agent list while one runs; Codex transcripts have no such launch, so this gate finds nothing there |
+
+**When the brief or the project forbids `dev ci --run`.** In a shared checkout, other members' uncommitted work fails
+the full suite, and a project can have runner preparation that must not run twice. Only the tech lead can then meet
+the proofs gate for the member, with either of these:
+
+- A line in the brief, on a line of its own: `Waived proof: dev ci --run — <why>`. The reason is a sentence of at
+  least 15 characters; a colon, a hyphen, or "because" can stand for the dash. Only a brief the main session
+  launched counts, never one a member wrote for its helper, and no other proof can be waived.
+- A passed `dev ci --run` or `dev ci --run --resume` on exactly the tree the member leaves, such as the tech lead's
+  run after integration. devkit writes that record only after every step passed.
+
+The member's own `dev ci --mark-passed` does not meet the proof: it attests a run, and a member does not attest its
+own proof. Each waiver or run the gate accepts goes to the audit trail as `crew.gate` with the outcome `ok`, and
+`dev audit --action crew.gate` lists them. Without either, the gate sends the member back as before, and its message
+names both. A brief cannot change after the launch: when the tech lead forgot the waiver, the member asks with
+`dev crew ask`, and the tech lead runs `dev ci --run` on the tree the member leaves.
 
 Members with read-only tools have no shell, so they skip the proofs and lessons gates. The unfinished-work and test
 gates count only what the member wrote itself: another member's uncommitted lines in a shared file are not its
