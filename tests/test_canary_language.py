@@ -7,9 +7,12 @@
 # never on a crew member's report (members report to the tech lead in American English).
 # Tests carry comments, not docstrings (`dev test prove` leaves out tests with one).
 # Run: python3 -m unittest tests.test_canary_language
+import contextlib
+import io
 import json
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -20,7 +23,9 @@ sys.path.insert(0, str(TESTS))
 
 import _sandbox  # noqa: E402,F401
 
-from devkit import canary, core  # noqa: E402
+from devkit import canary, core, hooks, scope  # noqa: E402
+from devkit import progress as pg  # noqa: E402
+from test_progress import TempState  # noqa: E402
 from test_language_samples import PROMPTS, REPLIES, claude_transcript  # noqa: E402
 
 T0 = 1_800_000_000.0
@@ -103,6 +108,49 @@ class LanguageGateTests(unittest.TestCase):
     def test_an_error_fails_open(self):
         with mock.patch("devkit.language.wanted", side_effect=RuntimeError("boom")):
             self.assertEqual(self.gate(REPLIES["en"], {"turn_started": T0}), "")
+
+
+class HookWiringTests(unittest.TestCase):
+    # hooks.stop sends an English reply to a Spanish developer back on both agents; hooks.prompt adds the line
+    def setUp(self):
+        self.state = TempState()
+        self.state.__enter__()
+        self.addCleanup(self.state.__exit__, None, None, None)
+        self.transcript = Path(self.state.tmp.name) / "t.jsonl"
+        claude_transcript(self.transcript, [PROMPTS["es"][0]])
+        p = mock.patch.dict(core.CFG, {"language": "auto", "canary": {"enforce": True}})
+        p.start()
+        self.addCleanup(p.stop)
+
+    def run_hook(self, fn, agent, data):
+        sf = pg.SESSIONS / f"{agent}-s1.json"
+        sf.parent.mkdir(parents=True, exist_ok=True)
+        sf.write_text(json.dumps({"agent": agent, "session": "s1", "started": time.time() - 600,
+                                  "turn_started": time.time() - 60}))
+        out = io.StringIO()
+        with mock.patch.object(scope, "decide", lambda data, sess: True), \
+                mock.patch.object(hooks, "_session_file", lambda a, sid: pg.SESSIONS / f"{a}-{sid}.json"), \
+                mock.patch.object(hooks, "STATE", Path(self.state.tmp.name)), \
+                mock.patch.object(hooks, "_continuity", lambda *a, **k: None), \
+                mock.patch.object(hooks, "_spawn_sync", lambda args: None), \
+                mock.patch.object(canary, "LOG", Path(self.state.tmp.name) / "canary.jsonl"), \
+                mock.patch("sys.stdin", io.StringIO(json.dumps(data))), contextlib.redirect_stdout(out):
+            (hooks.stop if fn == "stop" else hooks.prompt)(agent)
+        return out.getvalue()
+
+    def test_stop_sends_an_english_reply_to_a_spanish_developer_back_on_both_agents(self):
+        for agent in ("claude", "codex"):
+            data = {"session_id": "s1", "cwd": self.state.tmp.name, "last_assistant_message": REPLIES["en"],
+                    "transcript_path": str(self.transcript)}
+            out = json.loads(self.run_hook("stop", agent, data) or "{}")
+            self.assertEqual(out.get("decision"), "block", agent)
+            self.assertIn("reply in Spanish", out.get("reason", ""), agent)
+
+    def test_the_prompt_hook_adds_the_reply_language_line(self):
+        data = {"session_id": "s1", "cwd": self.state.tmp.name, "prompt": PROMPTS["es"][1],
+                "transcript_path": str(self.transcript)}
+        out = json.loads(self.run_hook("prompt", "claude", data))["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("devkit · the developer wrote in Spanish: reply in Spanish", out)
 
 
 if __name__ == "__main__":
