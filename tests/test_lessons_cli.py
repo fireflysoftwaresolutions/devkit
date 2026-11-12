@@ -284,8 +284,9 @@ class ReadTests(LessonCLI):
         self.assertEqual(rc, 2, out)
         self.assertIn("cannot be read", out)  # the selector names a file devkit cannot read: say so, not "0 lessons"
 
-    def test_a_lesson_missing_while_the_handoff_has_stopped_syncing_says_why(self):
-        # lessons recorded on another Mac never arrive while every pull aborts; `dev lesson` said only "matches 0"
+    def stalled_handoff(self):
+        # The handoff as this Mac had it: another machine pushed a lesson, the fetch brought it, and the rebase that
+        # should apply it aborted on a conflict elsewhere (recorded as a sync problem), so HEAD is one commit behind
         remote, other = self.root / "remote.git", self.root / "other"
         git = ["git", "-c", "user.email=t@example.com", "-c", "user.name=t"]
         for args in (["init", "-q", "--bare", "-b", "main", str(remote)], ["clone", "-q", str(remote), str(other)],
@@ -298,11 +299,40 @@ class ReadTests(LessonCLI):
             subprocess.run(git + args, check=True, capture_output=True)
         work.sync_problem("a pull of the handoff repository stopped on a conflict in log/2026-11.md",
                           "handoff.rebase-aborted")
+
+    def test_a_lesson_missing_while_the_handoff_has_stopped_syncing_says_why(self):
+        # lessons recorded on another Mac never arrive while every pull aborts; `dev lesson` said only "matches 0"
+        self.stalled_handoff()
         rc, out = self.dev("recur", "L-g6i3aj1j5sf", "--evidence", "again")
         self.assertEqual(rc, 2, out)
         self.assertIn("matches 0 lessons", out)
         self.assertIn("has not synced", out)
         self.assertIn("1 commit", out)
+
+    def test_dev_lesson_warns_while_the_handoff_has_stopped_syncing(self):
+        self.stalled_handoff()
+        rc, out = self.dev()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("has not synced", out)
+        self.assertIn("1 commit from other machines", out)
+
+    def test_dev_lesson_says_nothing_of_syncing_while_the_handoff_syncs(self):
+        self.add("Wait for the input before the step", commands=["make deploy"])
+        rc, out = self.dev()
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn("synced", out)
+
+    def test_lint_lists_a_lesson_file_no_command_can_read_first(self):
+        self.add("Wait for the input before the step", commands=["make deploy"])
+        bad = lessons.LESSONS / "acme/api" / "L-broken000.md"
+        bad.write_text("---\nid: L-broken000\ntitle: x\nscope: acme/api\noccurrences: two\n---\n# x\n")
+        rc, out = self.dev("lint")
+        self.assertEqual(rc, 1, out)
+        unreadable = self.block(out, "unreadable")
+        self.assertIn("L-broken000", unreadable)
+        self.assertIn("occurrences", unreadable)
+        self.assertIn("lessons/acme/api/L-broken000.md", unreadable)  # the fix names the file to repair
+        self.assertLess(out.index("unreadable ·"), out.index("wrong ·"))  # `make deploy` is named nowhere in it
 
 
 class AuthorTests(LessonCLI):
