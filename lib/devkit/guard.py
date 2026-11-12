@@ -1084,6 +1084,34 @@ def _case_word(frames: list, t: str, before: list):
         frames.append(["case", "head"])
 
 
+def _arith_words(line: str) -> str:
+    """`line` with each arithmetic expansion `$((…))` outside single quotes written as `0`, the one word the shell
+    makes of it: its body is an expression, never a command (`$((n*2))`, `$((a > b))`), and the substitutions in it
+    are read by _subst with the other expansions. A `$((date)|wc -c)` is a command substitution and stays."""
+    if "$((" not in line:
+        return line
+    out, i, n, q = [], 0, len(line), None
+    while i < n:
+        c = line[i]
+        if q == "'":
+            q = None if c == "'" else q
+        elif c == "\\":
+            out.append(line[i:i + 2])
+            i += 2
+            continue
+        elif c == "'" and q is None:
+            q = "'"
+        elif c == '"':
+            q = None if q == '"' else '"'
+        elif line.startswith("$((", i) and (end := _arith_end(line, i + 3)) is not None:
+            out.append("0")
+            i = end + 2
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
 def split_commands(cmd: str, ops: bool = False, newline: str = ";", inputs: list | None = None,
                    stripped: bool = False, heredocs: list | None = None, modes: list | None = None):
     """-> list of (argv, redirect_targets). None when the command cannot be tokenised. With `ops`, each entry is
@@ -1095,7 +1123,7 @@ def split_commands(cmd: str, ops: bool = False, newline: str = ";", inputs: list
     list that gets, for each segment, how each of its redirect targets is opened, in order: "truncate" (`>`, `&>`),
     "append" (`>>`, `&>>`) or "overwrite" (`<>`, which keeps what it does not write over)."""
     try:
-        line = _newlines_to_semicolons(cmd if stripped else strip_heredocs(cmd), newline)
+        line = _arith_words(_newlines_to_semicolons(cmd if stripped else strip_heredocs(cmd), newline))
         lex = shlex.shlex(line, posix=True, punctuation_chars=_PUNCT)
         lex.whitespace_split = True
         lex.commenters = ""
@@ -5640,6 +5668,8 @@ def _unwrap(argv, more: bool = False, stop=()):
             argv = argv[3:]
         elif argv[0] == "function" and len(argv) > 2:  # `function f { gh …; }`: the body's first command
             argv = argv[2:]
+        elif argv[0] == "case":  # `case $f in a)`: a subject and a pattern, no command (their substitutions are
+            return []  # judged as commands of their own)
         elif argv[0] in _RESERVED:
             argv = argv[1:]
         elif n in ("timeout", "gtimeout"):
@@ -7464,6 +7494,86 @@ def _routed_lanes(cmd: str) -> int:
     return 1 if runs_one_command(cmd) else len(_route_plan(cmd) or [])
 
 
+def _arith_end(s: str, j: int):
+    """The index of the `))` that closes the arithmetic `$((` whose body starts at s[j], or None when the inner
+    parenthesis closes into anything else: bash and zsh then run `$((date)|wc -c)` as `$( (date) | wc -c )`."""
+    depth, n, q = 0, len(s), None
+    while j < n:
+        c = s[j]
+        if q:
+            q = None if c == q else q
+        elif c == "\\":
+            j += 2
+            continue
+        elif c in "'\"`":
+            q = c
+        elif c == "(":
+            depth += 1
+        elif c == ")":
+            if not depth:
+                return j if s.startswith("))", j) else None
+            depth -= 1
+        j += 1
+    return None
+
+
+# the programs whose output is a number: a name the command sets from one of them is a number in arithmetic
+_NUMBER_PROGRAMS = frozenset({"date", "wc", "expr", "seq", "stat"})
+_ARITH_BINDERS = re.compile(r"(?:^|[\s;&|(`{])(?:read|mapfile|readarray|printf|declare|typeset|local|readonly|export|"
+                            r"getopts|let|unset|select|eval|source|\.)(?=\s)")
+
+
+def _number_value(value: str) -> bool:
+    """True when an assignment's value (its text up to the end of the word) is a number: digits, an arithmetic
+    `$((…))`, or a substitution whose pipeline ends in a program that prints a number (_NUMBER_PROGRAMS, grep -c)."""
+    v = value[1:] if value.startswith('"') else value
+    if re.match(r"-?[0-9]+(?:[\s;&|)\"]|$)", v):
+        return True
+    if v.startswith("$((") and _arith_end(v, 3) is not None:
+        return True
+    if v.startswith("$("):
+        end = _close_paren(v, 2)
+        body = v[2:end - 1] if end > 2 else ""
+        last = re.split(r"(?<!\|)\|(?!\|)", body)[-1].split() if body and "$(" not in body and "`" not in body else []
+        return bool(last) and (os.path.basename(last[0]) in _NUMBER_PROGRAMS or
+                               (os.path.basename(last[0]) == "grep" and "-c" in last))
+    return False
+
+
+def _arith_unsafe_names(body: str, s: str) -> list:
+    """The names an arithmetic body reads whose value may be code: the shell reads each name's value as an
+    expression, and `x='a[$(cmd)]'; echo $((x))` runs cmd. A name is safe only when command `s` sets it, and every
+    value it gives it is a number (_number_value; a `for` loop over numbers), and nothing else in `s` can bind it
+    (read, printf -v, declare, eval, source, …)."""
+    bare = body
+    for _ in range(8):  # the substitutions inside are judged as commands of their own; their text is no name
+        m = re.search(r"\$\(|`", bare)
+        if not m:
+            break
+        if m.group(0) == "`":
+            k = bare.find("`", m.end())
+            bare = bare[:m.start()] + " 0 " + (bare[k + 1:] if k >= 0 else "")
+        else:
+            k = _close_paren(bare, m.end())
+            bare = bare[:m.start()] + " 0 " + (bare[k:] if k > m.end() else "")
+    names = sorted(set(re.findall(r"(?<![0-9A-Za-z_#])[A-Za-z_][A-Za-z0-9_]*", bare)))
+    out = []
+    for word in names:
+        w = re.escape(word)
+        if re.search(_ARITH_BINDERS.pattern + r"[^;&|\n]*(?<![\w$])" + w + r"\b", s) or \
+                re.search(r"(?:^|[\s;&|(`{])(?:eval|source|\.)\s", s):
+            out.append(word)
+            continue
+        values = [s[m.end():] for m in re.finditer(r"(?:^|[\s;&|(`{])" + w + r"\+?=(?!=)", s)]
+        loops = re.findall(r"(?:^|[\s;&|(`{])for\s+" + w + r"\s+in\s+([^;\n]*)", s)
+        safe = bool(values or loops) and all(_number_value(v) for v in values) and \
+            all(re.fullmatch(r"\s*\$\(seq(?:\s+-?[0-9]+){1,3}\)\s*", lst) or
+                all(re.fullmatch(r"-?[0-9]+|\{-?[0-9]+\.\.-?[0-9]+\}", item) for item in lst.split()) for lst in loops)
+        if not safe:
+            out.append(word)
+    return out
+
+
 def _subst(s: str, quotes: bool, procs: list | None = None) -> list:
     """The bodies of the substitutions the shell runs in `s`: `$(…)`, backticks, and with `quotes` (a command line,
     not a heredoc body) `<(…)`, `>(…)` and zsh's `=(…)` outside quotes. `procs`: a list that gets, for each body,
@@ -7485,6 +7595,18 @@ def _subst(s: str, quotes: bool, procs: list | None = None) -> list:
         elif quotes and q is None and c == "#" and parens.comment(i, False):
             j = s.find("\n", i)
             i = n if j < 0 else j
+            continue
+        elif s.startswith("$((", i) and (end := _arith_end(s, i + 3)) is not None:
+            # arithmetic: the shell runs only the substitutions inside it, and reads each name's value as an
+            # expression, so a name whose value may hold `a[$(cmd)]` runs cmd: it is judged as `$name`, a program
+            # known only when it runs (_arith_unsafe_names)
+            body = s[i + 3:end]
+            inner = _subst(body, False) + ["$" + name for name in _arith_unsafe_names(body, s)]
+            out += inner
+            if procs is not None:
+                procs += [False] * len(inner)
+            parens.close(end + 1, "w")  # `$((1))# <(…)`: a `#` glued to it starts no comment
+            i = end + 2
             continue
         elif s.startswith("$(", i) or (quotes and q is None and _proc_subst_at(s, i)):
             # `<(…)`, `>(…)` and zsh's `=(…)`: process substitutions, which the shell runs as `$(…)` (never in double
