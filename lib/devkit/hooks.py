@@ -912,15 +912,17 @@ PLAN_WRITE_SLACK = 1.0  # seconds a plan's change may precede its shell call's l
 
 def _plans_without_reason(sess: dict) -> list:
     """The plan and spec files this session's own tool calls wrote (its record's `plans_written`, _note_plan_writes)
-    whose version was not bumped (no `dev plan revise`). Each one counts in the project folder it is in, whatever
-    folder the session works in now. A plan another session changed, in this project or another, is never on the
+    that still hold, without `dev plan revise`, the text the session's last call left in them
+    (plans.unrevised_change_of): a change a pull of the handoff repository or another session made since is not this
+    session's. Each one counts in the project folder it is in, whatever folder the session works in now. A plan
+    another session changed, in this project or another, is never on the
     list, even for a session outside any project: revising it would break the one-project rule and disturb the session
     that works there."""
     from . import plans as plansmod
     out = []
-    for rel in sess.get("plans_written") or {}:
+    for rel, left in (sess.get("plans_written") or {}).items():
         f = HANDOFF / rel
-        if f.is_file() and plansmod.needs_revision(f):
+        if f.is_file() and plansmod.unrevised_change_of(f, left):
             out.append(rel)
     return sorted(out)
 
@@ -965,18 +967,19 @@ def _plans_written_by(data: dict, failed: bool = False) -> list:
 
 def _note_plan_writes(agent: str, data: dict, failed: bool = False):
     """PostToolUse or PostToolUseFailure: the session record keeps the plan files this call wrote
-    (_plans_written_by), the only ones the plan check at the end of the turn answers for. Fails open: a busy record
-    drops this one note (state audits it)."""
+    (_plans_written_by), each with the text the call left in it (plans.mark), the only ones the plan check at the end
+    of the turn answers for. Fails open: a busy record drops this one note (state audits it)."""
     try:
         found = _plans_written_by(data, failed)
         sf = _session_file(agent, data.get("session_id") or "-")
         if not found or not sf.exists():
             return
-        now = round(time.time(), 3)
+        from . import plans as plansmod
+        left = {rel: plansmod.mark(HANDOFF / rel) for rel in found}
 
         def add(d):
             kept = {k: v for k, v in (d.get("plans_written") or {}).items() if k not in found}
-            kept.update({rel: now for rel in found})
+            kept.update(left)
             d["plans_written"] = dict(list(kept.items())[-PLAN_WRITES_KEPT:])
         state.update(sf, add, create=False)
     except state.StateBusy:
