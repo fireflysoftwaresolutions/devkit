@@ -101,7 +101,10 @@ their quoted text and heredocs, with `bin/dev` counted as `dev`); and the kinds 
 (`activities`, ids from `dev crew raci`). A `project` condition limits a rule to repositories whose project files
 match, such as the `postgres` rule, and a `group` condition applies a rule only when its optional skill group is in
 `skills.groups`, such as the `terraform` rule. A file on disk outside every repository is scratch work and matches no
-rule.
+rule, and the UI rule's content check also skips `scratchpad/**` and `.tmp/**`, so a probe in a test repository built
+there does not count. The UI rule matches `className=` and the styled-components form (`styled.<tag>` followed by a
+template, an object, or `.attrs`) as written, so JUnit's `classname=` or a Python list named `styled` is not UI; HTML
+tags match in any case.
 
 ### Where devkit enforces them
 

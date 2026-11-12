@@ -322,7 +322,10 @@ At session start (or at the first prompt) the agent receives:
   ones, each with its prevention rule;
 - each initiative the project belongs to: status, progress, members, this project's workstream, the Now tasks, and the
   README's path;
-- your claimed tasks, the tasks claimed by others ("do NOT work on these"), and who else works on this project now;
+- your claimed tasks, the tasks claimed by others ("do NOT work on these"), and who else works on this project now,
+  named only in plain words: `user@hostname`, an agent's name, and a branch name, each without spaces, quotes, or
+  control characters, or else a neutral word (someone on another Mac, an agent, a branch), because another
+  machine's presence file is that person's text;
 - pointers to `dev progress`, the `communicating` skill and the `using-devkit` skill;
 - an index of the kinds of work it declares by id, and where the rest is: `dev crew raci` (who does and who approves
   each one), `dev crew rules` (the crew's rules and their checks), and `config/skill-rules.json` (the skills each one
