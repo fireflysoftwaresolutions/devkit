@@ -476,11 +476,18 @@ def _phase_applied(phase: dict, invocations, changed) -> bool:
     return _proof_owed(phase, changed) or any(_ran(c, invocations) for c in phase.get("devkit") or [])
 
 
+def _flag(words, name: str) -> bool:
+    return any(x == name or x.startswith(name + "=") for x in words)
+
+
 def _ran(command: str, invocations) -> bool:
     want = command.split()
     if not want:
         return False
     want[0] = os.path.basename(want[0])
+    if want == ["dev", "progress", "step"] and any(
+            w[:3] == ["dev", "progress", "note"] and _flag(w, "--step") and _flag(w, "--check") for w in invocations):
+        return True  # partial evidence on a long step records it without closing it (progress.note)
     return any(w[:len(want)] == want for w in invocations)
 
 

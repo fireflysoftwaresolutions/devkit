@@ -365,6 +365,16 @@ class CrewGateTests(GateCase):
         self.assertTrue(any(anchors.values()), anchors)
         self.assertEqual(problems, [])
 
+    def test_a_progress_note_with_a_steps_evidence_records_that_step(self):
+        # A long or paused step records its evidence without closing (progress.note with a step and a check): that is
+        # the step's record the gate asks for; a note without evidence is not
+        self.tx.skill("superpowers:test-driven-development").skill("testing").skill("devkit:communicating")
+        self.tx.bash("bin/dev test")
+        self.tx.bash('dev progress note "the parser builds" --next "the tests"')
+        self.assertEqual(self.rules(self.gates()), [("proofs", "dev progress step")])
+        self.tx.bash('dev progress note "the parser builds" --step parser --check "12 tests pass"')
+        self.assertEqual(self.gates(), [])
+
     def test_a_read_only_member_skips_the_shell_checks(self):
         self.tx.call("Grep", "calc.py:1: def add", pattern="def add")
         self.tx.refused("ls").refused("ls -la")  # its tools hold no shell, so neither proof nor lesson is owed
