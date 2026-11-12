@@ -269,6 +269,34 @@ class ReadOnlyLanes(Case):
                 self.assertIsNotNone(self.ro(cmd))
 
 
+class Names(Case):
+    """A test file named after what it tests (test_deploy.py, deploy.test.mjs) is no deploy, and a file git tracks is
+    no backup copy whatever its name. A script named deploy, a make or package target, and an untracked new copy stay
+    refused."""
+
+    def test_a_test_file_named_after_a_deploy_runs_in_a_lane(self):
+        for cmd in ("python3 tests/test_deploy.py", "node --test test/deploy.test.mjs", "node test/deploy.spec.mjs",
+                    "bash scripts/test_deploy.sh", "python3 -m unittest tests.test_deploy_policy"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(member(cmd))
+        for cmd in ("bash scripts/deploy.sh", "python3 scripts/deploy.py", "make deploy-test", "npm run deploy"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNotNone(member(cmd))
+
+    def test_a_tracked_file_named_like_a_copy_is_written(self):
+        import subprocess
+        repo = Path(core.DEV) / "acme" / "studio"
+        (repo / "src").mkdir(parents=True, exist_ok=True)
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        (repo / "src" / "connection-copy.ts").write_text("x\n")
+        subprocess.run(["git", "-C", str(repo), "add", "src/connection-copy.ts"], check=True)
+        v = guard.check("Write", {"file_path": str(repo / "src" / "connection-copy.ts"), "content": "y"}, str(repo),
+                        "claude")
+        self.assertIsNone(v)
+        v = guard.check("Write", {"file_path": str(repo / "src" / "app-copy.ts"), "content": "y"}, str(repo), "claude")
+        self.assertIn("backup copies", (v or ("", ""))[1])
+
+
 class LaneStamp(unittest.TestCase):
     """A member's command that holds lane calls the router cannot place one by one is run with the member's lane
     variable exported, so every dev call in it acts as the member (Claude Code, whose rewrite approves nothing); a

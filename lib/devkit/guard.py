@@ -741,6 +741,17 @@ def handoff_violation(rel: str, cwd, envs=frozenset()):
     return None
 
 
+def _tracked(p) -> bool:
+    """True when git tracks file `p` in its repository: a project's own file named like a copy (connection-copy.ts) is
+    no backup copy. False when git cannot tell."""
+    try:
+        rc, _, _ = core.sh(["git", "-C", str(Path(p).parent), "ls-files", "--error-unmatch", "--", Path(p).name],
+                           timeout=3)
+    except Exception:
+        return False
+    return rc == 0
+
+
 def check_write_path(path, cwd, agent):
     if not path:
         return None
@@ -769,7 +780,7 @@ def check_write_path(path, cwd, agent):
         v = layout_violation(p)
         if v:
             return deny(v, key="layout")
-        if BACKUP_RE.search(p.name) and not p.name.startswith("."):
+        if BACKUP_RE.search(p.name) and not p.name.startswith(".") and not _tracked(p):
             return deny(f"Do not create backup copies ({p.name}); git already keeps history. Edit the file in "
                         f"place, or put throwaway copies in a temp dir.", key="backup-copy")
         return None
@@ -2673,7 +2684,8 @@ def _check_segments(cmd: str, segs, ecwd: str, agent: str, depth: int = 0, outer
                     v = None if _hatch(envs, "DEVKIT_RAW_FS", "overwrite", v) else v
                 if v:
                     res = deny(v, key="overwrite")
-                elif dest != UNKNOWN and not dest.is_dir() and BACKUP_RE.search(dest.name) and is_under(dest, DEV):
+                elif dest != UNKNOWN and not dest.is_dir() and BACKUP_RE.search(dest.name) and is_under(dest, DEV) \
+                        and not _tracked(dest):
                     res = deny(f"Do not create backup copies ({dest.name}); git already keeps history.", key="backup-copy")
         if not res:
             why = session_write_refusal(argv)
@@ -11376,6 +11388,12 @@ def _http_writes(name, argv) -> list:
     return []
 
 
+# the names test files take (test_deploy, deploy_test, deploy.test, deploy.spec): a script by such a name tests what its
+# name says, it does not do it. A make, just, task or package target keeps its class (deploy-test may deploy to a test
+# environment).
+_TEST_FILE = re.compile(r"^test_|_test$|\.(?:test|spec)$", re.I)
+
+
 def _opaque_actions(name, argv, cwd) -> list:
     """make, just and task targets, package scripts and scripts named release, publish, deploy, push or ship take that
     class (spec C6, opaque): what they run is not seen."""
@@ -11406,8 +11424,12 @@ def _opaque_actions(name, argv, cwd) -> list:
         if script and "-c" not in args and not any(a.startswith("-") and not a.startswith("--") and "c" in a[1:]
                                                    for a in args[:args.index(script)]):
             names = [os.path.splitext(os.path.basename(script))[0]]
+        if "--test" in args and _family(name) == "node":  # node's test runner: its files are tests
+            names = []
     elif "/" in argv[0]:
         names = [os.path.splitext(name)[0]]
+    if not (name in ("make", "gmake", "just", "task", "go-task", "npm", "pnpm", "yarn", "bun")):
+        names = [n for n in names if not _TEST_FILE.search(n)]  # a file a test runner names: test_deploy.py tests one
     out = []
     for n in names:
         m = _OPAQUE_NAME.search(n)
