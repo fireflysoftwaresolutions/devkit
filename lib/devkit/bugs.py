@@ -1047,19 +1047,26 @@ def _one_block(body):
     return obj if isinstance(obj, dict) else None
 
 
+def _safe(v) -> str:
+    return _SUMMARY_SAFE.sub("", str(v if v is not None else ""))[:40]
+
+
 def _render(rec: dict) -> str:
-    def safe(v):
-        return _SUMMARY_SAFE.sub("", str(v if v is not None else ""))[:40]
     people = sum(n for _, _, n in _tallies(rec))
-    summary = (f"**Bug {safe(rec.get('fingerprint'))}** · {safe(rec.get('kind'))} · {safe(rec.get('component'))} · "
-               f"{people} {'person' if people == 1 else 'people'} · score {float(rec.get('score') or 0):.1f} · "
-               f"{safe(rec.get('status'))}" + (f" · fixed in {safe(rec['fixed_in'])}" if rec.get("fixed_in") else ""))
-    return f"{summary}\n\n{RECORD_MARK}\n{_json_block(rec)}"
+    kind, part = _safe(rec.get("kind")), _safe(rec.get("component"))
+    score_ = rec.get("score") if _is_ts(rec.get("score")) else 0.0
+    summary = (f"**Bug {_safe(rec.get('fingerprint'))}** · {kind}" + (f" · {part}" if part and part != kind else "")
+               + f" · {people} {'person' if people == 1 else 'people'} · score {float(score_):.1f} · "
+               f"{_safe(rec.get('status'))}" + (f" · fixed in {_safe(rec['fixed_in'])}" if rec.get("fixed_in") else ""))
+    return (f"{summary}\n\nThe registry's record of this bug: the data the issue text is written from. devkit reads "
+            f"only this comment.\n\n<details>\n<summary>Record data (written by the workflow; do not edit)</summary>"
+            f"\n\n{RECORD_MARK}\n{_json_block(rec)}\n\n</details>")
 
 
 def render_record(rec: dict) -> str:
-    """A record as the bot's comment: a summary line for people, the marker, and one escaped JSON block. Never more
-    than RECORD_MAX characters: a record that would be longer is fitted first (fit_record), as of its last vote."""
+    """A record as the bot's comment: a summary line and a sentence for people, then the marker and one escaped
+    JSON block, folded in a <details> block. Never more than RECORD_MAX characters: a record that would be longer is
+    fitted first (fit_record), as of its last vote."""
     body = _render(rec)
     if len(body) <= RECORD_MAX:
         return body
@@ -1165,12 +1172,30 @@ def parse_payload(body: str):
 
 # --------------------------------------------------------------------------- what people read
 #
-# A registry issue's title comes from devkit's title table (config/bug-titles.json), by refusal id for a guard bug
-# and by kind otherwise, with slots filled only from allowlisted report fields. Free text never reaches a title.
+# A registry issue reads as a bug report. Its title comes from devkit's title table (config/bug-titles.json), by
+# refusal id for a guard bug and by kind otherwise, with slots filled only from allowlisted report fields. Its body
+# opens with the table's sentence and five facts, and each payload comment opens with one plain line. The data stays
+# on the page in collapsed <details> blocks, which the workflow and every client parse as before. Free text shows
+# only in the reporter's own issue body or comment, escaped by md_text, and never in a title.
 
 TITLES = core.DEVKIT_HOME / "config" / "bug-titles.json"
 TITLE_MAX = 80
 NO_CLASS = "an error"  # what readable text says for an exception class Python, its library and devkit do not define
+AGENT_NAMES = {"claude": "Claude Code", "codex": "Codex"}
+CHANNEL_NAMES = {"release": "a release install", "checkout": "a source checkout"}
+DURATION_WORDS = {"<1s": "under 1 second", "1-10s": "1 to 10 seconds", "10-60s": "10 to 60 seconds",
+                  "1-10m": "1 to 10 minutes", ">10m": "over 10 minutes"}
+VERDICTS = {  # the verdict:* labels maintainers give, and the sentence the body states for each
+    "confirmed": "Confirmed as a devkit bug.",
+    "false-positive": "Confirmed: the guard refused a command it should allow.",
+    "correct-refusal": "The refusal is right, and the guard keeps refusing this.",
+    "misleading-message": "The refusal is right, but its message was misleading.",
+    "split": "Split: the refusals this issue collected now report under ids of their own.",
+    "needs-info": "Needs more reports to find the cause.",
+    "not-planned": "Not planned: devkit keeps this behavior.",
+}
+_MD_ENTITY = {c: f"&#{ord(c)};" for c in "\\`*_[]<>|~@&#"}
+_JOIN = "&#8288;"  # a word joiner: it shows as nothing, and keeps a mention, an issue reference or a link from forming
 
 
 @functools.lru_cache(maxsize=1)
@@ -1237,6 +1262,27 @@ def readable_exc(value) -> str:
     it (`KeyError`, `JSONDecodeError`, `Duplicate`), else `an error`, so no class named after a project reaches a
     title or an issue's text. The report's data keeps the class as it was sent."""
     return value if isinstance(value, str) and value in _known_classes() else NO_CLASS
+
+
+def md_text(text) -> str:
+    """Free text as inert Markdown, on one line: each character that starts markup (\\ ` * _ [ ] < > | ~ @ & #) as an
+    HTML entity, which GitHub shows as the character itself, and a word joiner after @ and #, inside :// and before
+    the dot of www., so no mention, issue reference or link forms even where GitHub reads the text after its
+    entities. No code span, fence, link, image, HTML tag or table cell can start in it."""
+    s = " ".join(str(text if text is not None else "").split())
+    out = []
+    for i, c in enumerate(s):
+        if c in "@#":
+            out.append(_MD_ENTITY[c] + _JOIN)
+        elif c in _MD_ENTITY:
+            out.append(_MD_ENTITY[c])
+        elif c == ":" and s.startswith("//", i + 1):
+            out.append(":" + _JOIN)
+        elif c == "." and s[max(0, i - 3):i].lower() == "www":
+            out.append(_JOIN + ".")
+        else:
+            out.append(c)
+    return "".join(out)
 
 
 def _facts(source: dict) -> dict:
@@ -1309,6 +1355,204 @@ def human_title(rec: dict) -> str:
     return _title_text(rec.get("kind"), facts, rec.get("first_version"))
 
 
+def _people(n: int) -> str:
+    return f"{n} {'person' if n == 1 else 'people'}"
+
+
+def _version(value) -> str:
+    return value if _fits(value, _HINT_VERSION_RE) else ""
+
+
+def _status_line(rec: dict) -> str:
+    status, fixed, dup = rec.get("status"), _version(rec.get("fixed_in")), rec.get("duplicate_of")
+    if status == "duplicate" and isinstance(dup, int) and not isinstance(dup, bool) and dup > 0:
+        line = f"Duplicate of #{dup}. Reports and votes for this bug count there."
+    elif status == "fixed" and fixed:
+        line = f"Fixed in {fixed}: run `dev update` to get it."
+    elif status == "regressed":
+        line = "Regressed: seen again after its fix" + (f" in {fixed}." if fixed else ".")
+    else:
+        line = "Open."
+    verdict = rec["triage"].get("verdict") if isinstance(rec.get("triage"), dict) else None
+    return f"{line} {VERDICTS[verdict] if _one_of(verdict, VERDICTS) else 'Not triaged yet.'}"
+
+
+def _impact_line(counted: dict) -> str:
+    n, blocked, detoured = counted["all"], counted["blocked"], counted["detoured"]
+    if not n:
+        return "No one reported it in the last 30 days."
+    if blocked == n:
+        return f"Blocks work for everyone who hit it ({_people(n)})."
+    if blocked:
+        return f"Blocks work for {blocked} of {n} people" + (
+            f"; {detoured} got around it with a workaround." if detoured else ".")
+    if detoured == n:
+        return "Slows work down: " + ("the person who hit it got" if n == 1 else f"all {n} people got") + \
+            " around it with a workaround."
+    if detoured:
+        return f"Slows work down: {detoured} of {n} people got around it with a workaround."
+    return f"Minor: {_people(n)} saw it, and none was stopped."
+
+
+def _steps_text(steps) -> str:
+    """A valid detour's steps as one line of Markdown: the hint and `dev` sentences agents read, free text escaped."""
+    if validate_steps(steps):
+        return "The steps are in the data below."
+    return " ".join(md_text(s["text"] if s["text"].rstrip().endswith((".", "!", "?")) else s["text"].rstrip() + ".")
+                    if "text" in s else render_step(s) for s in steps)
+
+
+def _workaround(rec: dict) -> tuple:
+    """(the Workaround bullet, the lines of the Workaround section): only the detours agents are served show their
+    steps; proposed ones are counted, so a stranger's text never gets the bot's voice."""
+    detours = [d for d in rec.get("detours") or [] if isinstance(d, dict)] if isinstance(rec.get("detours"), list) \
+        else []
+    served = [d for d in detours if _trust(d) in SERVED and not validate_steps(d.get("steps"))]
+    proposed = sum(1 for d in detours if _trust(d) == "proposed")
+    lines = []
+    for d in served:
+        who = "Confirmed by a maintainer" if _trust(d) == "verified" else "Found by a team agent, not yet reviewed"
+        since, until = _version(d.get("since")), _version(d.get("until"))
+        span = (f", for devkit {since} up to {until}" if until else f", for devkit {since} and later") if since \
+            else (f", for devkit before {until}" if until else "")
+        lines.append(f"1. {_steps_text(d['steps'])} {who}{span}.")
+    if any(_trust(d) == "verified" for d in served):
+        bullet = "Yes, confirmed by a maintainer. See Workaround below."
+    elif served:
+        bullet = "Yes, found by a team agent and not yet reviewed. See Workaround below."
+    elif proposed:
+        bullet = (f"None confirmed yet; {proposed} proposed workaround{'s wait' if proposed != 1 else ' waits'} for "
+                  f"review.")
+    else:
+        bullet = "None known yet."
+    return bullet, lines
+
+
+def _first_report_line(first: dict) -> str:
+    macos, python = first.get("macos"), first.get("python")
+    surface = first.get("surface") if _one_of(first.get("surface"), _surfaces()) and first["surface"] != "unknown" \
+        else ""
+    parts = [AGENT_NAMES.get(first.get("agent"), "") if isinstance(first.get("agent"), str) else "", surface,
+             f"macOS {macos}" if isinstance(macos, str) and macos.isdigit() and len(macos) <= 3 else "",
+             f"Python {python}" if _fits(python, re.compile(r"\d\.\d{1,2}")) else "",
+             CHANNEL_NAMES.get(first.get("channel"), "") if isinstance(first.get("channel"), str) else "",
+             f"devkit {_version(first.get('version'))}" if _version(first.get("version")) else ""]
+    return "- First report: " + (", ".join(p for p in parts if p) or "no details")
+
+
+def _reproduce(rec: dict, facts: dict, first: dict, entry: dict, slots: dict) -> list:
+    """The How to reproduce section: the table's sentence, then the devkit facts the report carries."""
+    lines = [_fill(entry.get("reproduce"), slots), ""]
+    kind = rec.get("kind")
+    if kind == "guard" and _fits(facts["refusal_id"], _REFUSAL_RE):
+        lines.append(f"- Refusal id: `{facts['refusal_id']}`")
+    if kind == "guard" and facts["word"]:
+        lines.append(f"- Command word: `{facts['word']}`")
+    if facts["command"]:
+        lines.append(f"- Command: `dev {facts['command']}`")
+    if facts["event"]:
+        took = DURATION_WORDS.get(first.get("duration")) if isinstance(first.get("duration"), str) else None
+        lines.append(f"- Hook event: `{facts['event']}`" + (f", {took}" if took else ""))
+    if kind in ("crash", "hook") and readable_exc(facts["exc_class"]) != NO_CLASS:
+        lines.append(f"- Error: `{facts['exc_class']}`")
+    source = rec.get("report") if isinstance(rec.get("report"), dict) else {}
+    frames = [f for f in _frames(source.get("frames")) if f != LOCAL]
+    if frames:
+        lines.append("- devkit's stack, innermost first: " + ", ".join(f"`{f}`" for f in frames))
+    if _free_text_ok(first.get("template")):
+        lines.append(f"- Error message, with its values taken out: {md_text(first['template'])}")
+    said = [md_text(first[k]) for k in ("title", "text") if _free_text_ok(first.get(k))]
+    if said:
+        lines.append("- The reporter's description: " + " — ".join(said))
+    return lines + [_first_report_line(first)]
+
+
+def render_issue(rec: dict, first: dict = None, *, created: str = "", now: float = None) -> str:
+    """The body of a registry issue, written from the record and the bug's first report: the title table's sentence;
+    five facts (status with the fix version and the verdict, impact, how often, versions, workaround); the
+    workaround agents are served; how to reproduce; what to do; the maintainer facts; and the first report in a
+    collapsed block, which the workflow reads while the issue has no record (its only fenced block: the text before
+    it holds no triple backtick). `first`: the report the body shows, by default the record's `first`; its free text
+    (a description, an error message) shows escaped, so the client, which posts the reporter's own body, passes the
+    report it sends. `created`: the day the issue was opened (YYYY-MM-DD), else the day of `now`."""
+    now = time.time() if now is None else now
+    first = first if isinstance(first, dict) else rec.get("first") if isinstance(rec.get("first"), dict) else {}
+    source = rec.get("report") if isinstance(rec.get("report"), dict) else {}
+    facts = _facts(source)
+    entry, slots = _entry(rec.get("kind"), facts, rec.get("first_version")), _slots(facts)
+    fp, fixed = _safe(rec.get("fingerprint")), _version(rec.get("fixed_in"))
+    created = created if _fits(created, _WINDOW_RE) else _day(now)
+    counted = people(rec, now)
+    days = rec.get("days_seen") if isinstance(rec.get("days_seen"), int) and not isinstance(rec.get("days_seen"),
+                                                                                              bool) else 0
+    often = f"{_people(counted['all'])} in the last 30 days" + (f", on {days} day{'s' if days != 1 else ''}" if
+                                                                 days > 0 else "")
+    last = _day(rec["last_seen"]) if _is_ts(rec.get("last_seen")) else created
+    versions = [v for v in rec.get("versions") or [] if _version(v)] if isinstance(rec.get("versions"), list) else []
+    versions = versions or ([rec["first_version"]] if _version(rec.get("first_version")) else [])
+    seen = (", ".join(versions[:-1]) + " and " + versions[-1]) if len(versions) > 1 else \
+        (versions[0] if versions else "a version the record does not name")
+    bullet, steps = _workaround(rec)
+    score_ = float(rec["score"]) if _is_ts(rec.get("score")) else 0.0
+    parts = [_fill(entry.get("what"), slots), "",
+             f"- **Status:** {_status_line(rec)}",
+             f"- **Impact:** {_impact_line(counted)}",
+             f"- **How often:** {often}. First seen {created}, last seen {last}.",
+             f"- **Versions:** seen on {seen}.",
+             f"- **Workaround:** {bullet}", ""]
+    if steps:
+        parts += ["## Workaround", "", *steps, ""]
+    parts += ["## How to reproduce", "", *_reproduce(rec, facts, first, entry, slots), "",
+              "## If you hit this bug", "",
+              "This is a bug in devkit, not in your project. In a terminal:", "",
+              f"- `dev bug show {fp}` shows this bug and its workarounds.",
+              f"- `dev bug report {fp}` counts you in, so the bug ranks higher for the next fix. devkit sends devkit "
+              f"facts only, never anything about your projects.",
+              f"- `dev update` gets the fix, in {fixed}." if rec.get("status") == "fixed" and fixed else
+              f"- `dev bug detour {fp}` records a workaround you found. devkit checks its evidence before it reaches "
+              f"anyone else.", "",
+              "## For maintainers", "",
+              f"- Fingerprint `{fp}`, kind `{_safe(rec.get('kind'))}`, component `{_safe(rec.get('component'))}`, "
+              f"score {score_:.1f} (`dev bug top` ranks it).",
+              "- The workflow's record of this bug is its first comment. This text is written from it.", ""]
+    if first.get("devkit_bug") == SCHEMA_VERSION:
+        parts += ["<details>", "<summary>Report data for devkit's registry (do not edit)</summary>", "",
+                  _json_block(first), "", "</details>", ""]
+    parts.append(f"_devkit's registry workflow writes this text from the reports and rewrites it after each report, "
+                 f"vote, or release. Write in a comment instead. How the registry works: [the bug registry]"
+                 f"(https://github.com/{core.DEVKIT_REPO}/blob/main/docs/bug-registry.md)._")
+    return "\n".join(parts)
+
+
+def render_comment(payload: dict) -> str:
+    """A client payload as the comment it posts: one plain line for people, then the payload in a collapsed block
+    that the workflow reads (parse_payload). The line holds only the payload's fixed-vocabulary fields and, for a
+    detour, its steps, free text escaped."""
+    kind, version = payload.get("type"), _version(payload.get("version"))
+    impact = payload.get("impact") if _one_of(payload.get("impact"), IMPACT) else ""
+    on = f"devkit {version}" if version else ""
+    if kind == "report":
+        macos = payload.get("macos")
+        env = ", ".join(x for x in (AGENT_NAMES.get(payload.get("agent"), "") if isinstance(payload.get("agent"), str)
+                                    else "", f"macOS {macos}" if isinstance(macos, str) and macos.isdigit() else "")
+                        if x)
+        line = " · ".join(x for x in ("**devkit report**", impact, on, env) if x)
+    elif kind == "vote":
+        window = payload.get("window") if _fits(payload.get("window"), _WINDOW_RE) else ""
+        line = " · ".join(x for x in ("**devkit vote**", impact, on, window) if x) + \
+            ". The workflow counts it and deletes this comment."
+    elif kind == "detour":
+        line = (f"**Workaround proposed**{f' for {on} and later' if on else ''}: {_steps_text(payload.get('steps'))} "
+                f"The registry decides how far it is trusted; see the issue text.")
+    elif kind in ("confirm", "failed"):
+        did = payload.get("detour_id") if _fits(payload.get("detour_id"), _DETOUR_ID_RE) else ""
+        line = f"**Workaround {did} {'confirmed' if kind == 'confirm' else 'failed'}**" + (f" on {on}." if on else ".")
+    else:
+        line = "**devkit data**"
+    return (f"{line}\n\n<details>\n<summary>Data for devkit's registry (do not edit)</summary>\n\n"
+            f"{_json_block(payload)}\n\n</details>")
+
+
 def component_of(report: dict) -> str:
     """The part of devkit a bug is in: the `dev` command's first word, `hooks` for a hook, `guard` for a refusal,
     else the module of its innermost devkit frame."""
@@ -1368,11 +1612,14 @@ def _worse(a, b):
 
 
 def _new_record(report: dict, now: float) -> dict:
+    """A bug's record from its first report. `first` keeps that report without its free text, so the issue text can
+    be written from the record alone and nothing the reporter typed lands in a comment the bot writes."""
     facts = ("command", "exc_class", "frames", "refusal_id", "word", "event")
     return {"devkit_bug": SCHEMA_VERSION, "fingerprint": report["fingerprint"], "kind": report["kind"],
             "component": component_of(report), "title": title_for(report), "first_version": report["version"],
             "versions": [], "voters": {}, "impacts": {k: 0 for k in IMPACT}, "score": 0.0, "last_seen": now,
-            "status": "open", "fixed_in": "", "detours": [], "report": {k: report[k] for k in facts if report.get(k)}}
+            "status": "open", "fixed_in": "", "detours": [], "report": {k: report[k] for k in facts if report.get(k)},
+            "first": {k: v for k, v in report.items() if k not in _FREE_FIELDS}, "days_seen": 0}
 
 
 def _add_vote(rec: dict, who: str, impact: str, version: str, trusted: bool, now: float):
@@ -1393,6 +1640,10 @@ def _add_vote(rec: dict, who: str, impact: str, version: str, trusted: bool, now
         versions.sort(key=lambda v: core.version_key(v) or (0,))
         del versions[:-MAX_VERSIONS]
     rec["last_seen"] = now
+    day, days = _day(now), rec.get("days_seen")
+    if rec.get("last_day") != day:  # the days the bug was seen, counted on the first report or vote of each day
+        rec["days_seen"] = (days if isinstance(days, int) and not isinstance(days, bool) and days > 0 else 0) + 1
+        rec["last_day"] = day
     fixed, seen_at = core.version_key(rec.get("fixed_in")), core.version_key(version)
     if fixed and seen_at and seen_at >= fixed:
         regressed = rec.setdefault("regression", [])
