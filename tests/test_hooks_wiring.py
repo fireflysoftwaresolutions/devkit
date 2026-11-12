@@ -345,7 +345,9 @@ class RefusalIdTests(WiringCase):
         launch("a_tank", "devkit:tank", "Tank: parser")
         cases = (("dev crew brief tank --step api", "crew_shell_verdict:team", "dev"),
                  ("$X pr merge 12", "crew_shell_verdict:member-gate", "$X"),
-                 ("dev crew inbox; ruff check lib", "crew_shell_verdict:lane", "ruff"))
+                 # a lane call whose message runs a command before devkit reads it, the lane refusal that remains on
+                 # Claude Code now that the hook stamps a member's whole command
+                 ('dev crew ask "run `ruff check lib` now?"', "crew_shell_verdict:lane", "ruff"))
         for cmd, _, _ in cases:
             with self.subTest(cmd=cmd):
                 self.assertIsNotNone(self.deny(self.hook("guard", self.bash(cmd, aid="a_tank"), real_guard=True)))
@@ -649,11 +651,18 @@ class CommandTextRecordTests(WiringCase):
         out = self.hook("guard", self.bash(f'cd /tmp && dev crew ask "{self.MESSAGE}"', aid="a_tank"))
         self.assertIsNone(self.deny(out))
         self.assertIn("cd /tmp && DEVKIT_FROM_AGENT=a_tank dev crew ask", out)
-        why = self.deny(self.hook("guard", self.bash(f'echo y | dev crew ask "{self.MESSAGE}"', aid="a_tank")))
-        self.assertTrue(why, "the lane's compound call is refused")
+        # fed by a pipe, the hook stamps the whole command for the member: no refusal, nothing recorded as refused
+        out = self.hook("guard", self.bash(f'echo y | dev crew ask "{self.MESSAGE}"', aid="a_tank"))
+        self.assertIsNone(self.deny(out))
+        self.assertIn("export DEVKIT_FROM_AGENT=a_tank; readonly DEVKIT_FROM_AGENT; echo y | dev crew ask", out)
+        # a lane refusal that remains: the message runs a substitution before devkit reads it
+        why = self.deny(self.hook("guard", self.bash(f'echo y | dev crew ask "{self.MESSAGE} `date`"', aid="a_tank")))
+        self.assertIn("backticks", why or "")
         recs = self.records("guard.deny")
         # echo is no program the masker knows: its name stays and its argument keeps only its length (26.11.5)
-        self.assertEqual([r["target"] for r in recs], [f"echo [text not recorded: 1 characters] | {self.MASKED}"])
+        self.assertEqual(len(recs), 1)
+        self.assertRegex(recs[0]["target"], r"^echo \[text not recorded: 1 characters\] \| dev crew ask \[message "
+                                            r"text not recorded: \d+ characters\]$")
         self.assertNotIn("secret plan", self.stored())
 
     def test_a_refused_irreversible_command_reads_whole_but_is_recorded_masked(self):

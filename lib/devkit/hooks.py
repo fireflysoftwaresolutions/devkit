@@ -368,10 +368,13 @@ def context_for(cwd: str, agent: str) -> str:
                                    "(`release-policy` skill) before the first release.")
     except Exception as e:
         _swallowed("session-start", e)
-    lang = (core.CFG.get("language") or "en-US")
-    if lang.lower() not in ("en-us", "en"):
-        lines.append(f"Language: this developer set devkit's language to {lang}: write replies, commits, PRs and docs "
-                     f"in it unless they ask otherwise.")
+    try:  # a set locale fixes the reply language; with auto, each prompt gets its own line (language.prompt_line)
+        from . import language
+        said = language.session_line()
+        if said:
+            lines.append(said)
+    except Exception as e:
+        _swallowed("session-start", e)
     lines.append("Long work: `dev progress start \"<goal>\" --plan \"a; b; c\" --estimate 30m`, then `dev progress step` "
                  "and an update to the developer every few minutes (`communicating` skill: templates for updates, "
                  "decisions, PRs, handovers; plain American English).")
@@ -912,15 +915,17 @@ PLAN_WRITE_SLACK = 1.0  # seconds a plan's change may precede its shell call's l
 
 def _plans_without_reason(sess: dict) -> list:
     """The plan and spec files this session's own tool calls wrote (its record's `plans_written`, _note_plan_writes)
-    whose version was not bumped (no `dev plan revise`). Each one counts in the project folder it is in, whatever
-    folder the session works in now. A plan another session changed, in this project or another, is never on the
+    that still hold, without `dev plan revise`, the text the session's last call left in them
+    (plans.unrevised_change_of): a change a pull of the handoff repository or another session made since is not this
+    session's. Each one counts in the project folder it is in, whatever folder the session works in now. A plan
+    another session changed, in this project or another, is never on the
     list, even for a session outside any project: revising it would break the one-project rule and disturb the session
     that works there."""
     from . import plans as plansmod
     out = []
-    for rel in sess.get("plans_written") or {}:
+    for rel, left in (sess.get("plans_written") or {}).items():
         f = HANDOFF / rel
-        if f.is_file() and plansmod.needs_revision(f):
+        if f.is_file() and plansmod.unrevised_change_of(f, left):
             out.append(rel)
     return sorted(out)
 
@@ -965,18 +970,19 @@ def _plans_written_by(data: dict, failed: bool = False) -> list:
 
 def _note_plan_writes(agent: str, data: dict, failed: bool = False):
     """PostToolUse or PostToolUseFailure: the session record keeps the plan files this call wrote
-    (_plans_written_by), the only ones the plan check at the end of the turn answers for. Fails open: a busy record
-    drops this one note (state audits it)."""
+    (_plans_written_by), each with the text the call left in it (plans.mark), the only ones the plan check at the end
+    of the turn answers for. Fails open: a busy record drops this one note (state audits it)."""
     try:
         found = _plans_written_by(data, failed)
         sf = _session_file(agent, data.get("session_id") or "-")
         if not found or not sf.exists():
             return
-        now = round(time.time(), 3)
+        from . import plans as plansmod
+        left = {rel: plansmod.mark(HANDOFF / rel) for rel in found}
 
         def add(d):
             kept = {k: v for k, v in (d.get("plans_written") or {}).items() if k not in found}
-            kept.update({rel: now for rel in found})
+            kept.update(left)
             d["plans_written"] = dict(list(kept.items())[-PLAN_WRITES_KEPT:])
         state.update(sf, add, create=False)
     except state.StateBusy:
@@ -1232,6 +1238,9 @@ def stop(agent: str):
         why = canary.progress_gate(agent, data, sess) if dev_turn else ""  # the Progress rule, once per turn
         if why:
             reasons.append(("progress", why))
+        why = canary.language_gate(agent, data, sess) if dev_turn else ""  # the reply language, once per turn
+        if why:
+            reasons.append(("language", why))
         try:
             from . import skillguard
             why = skillguard.on_stop(agent, data, sess) if dev_turn else None
@@ -1442,15 +1451,19 @@ def _unroutable_lane_command(data: dict, agent: str = "claude"):
     cmds = _shell_inputs(data)
     for key, cmd in cmds or [("", "")]:  # each command the call carries (Bash's command, Codex's cmd)
         routed = bool(key) and len(cmds) == 1 and guard.lane_route(cmd, data["agent_id"]) is not None
-        why = _lane_verdict(data, agent, cmd, routed)
+        # where the hook could have stamped the whole command, what kept it back is the reason a member needs; the
+        # unstamped verdict stands behind it, so a call the stamp did not reach is never passed
+        stampable = bool(key) and len(cmds) == 1 and _can_stamp(data, agent)
+        why = (stampable and _lane_verdict(data, agent, cmd, stamped=True)) or _lane_verdict(data, agent, cmd, routed)
         if why:
             return why
     return None
 
 
-def _lane_verdict(data: dict, agent: str, cmd: str, routed: bool = False):
+def _lane_verdict(data: dict, agent: str, cmd: str, routed: bool = False, stamped: bool = False):
     """guard.crew_shell_verdict for a subagent's shell command, with its lane's scope, member, tool level and
-    repository: the refusal, or None. `routed`: the lane router gives the command's lane calls to the lane."""
+    repository: the refusal, or None. `routed`: the lane router gives the command's lane calls to the lane;
+    `stamped`: the hook exports the lane's variable for the whole command (_stamp_member)."""
     from . import guard
     aid, sid, cwd = data["agent_id"], data.get("session_id") or "-", _shell_cwd(data)  # Codex's workdir, if any
     scope = member = level = base = None  # no lane names no member, so no member folder applies (M124)
@@ -1463,7 +1476,7 @@ def _lane_verdict(data: dict, agent: str, cmd: str, routed: bool = False):
             base = guard.scope_base((run or {}).get("project"), cwd)
         # the lane's id finds its step grant for a tier-1 push or PR (spec C6, M180)
         v = guard.crew_shell_verdict(cmd, cwd, scope, member, level=level, base=base, lane=aid, session=sid,
-                                     agent=agent, routed=routed)
+                                     agent=agent, routed=routed, stamped=stamped)
     except Exception as e:  # unchecked is not allowed: the member's command fails closed (the Keymaker's review)
         _log(f"crew-lane {agent} {aid}: {traceback.format_exc()[-300:]}")
         return (f"{_LANE_CHECK_FAILED} ({type(e).__name__}), so it is refused "
@@ -1618,10 +1631,60 @@ def _prefix_identity(argv0) -> list:
                     unset = after if u else ""
                 if unset.startswith("DEVKIT_"):
                     found.append(unset)
+        elif name == "exec":  # `exec -c` runs the command with an empty environment, alone or with -l or -a NAME
+            while i + 1 < len(words) and words[i + 1].startswith("-") and words[i + 1] != "--":
+                i += 1
+                if "c" in words[i][1:]:
+                    found.append("env -i")
+                if words[i].endswith("a"):  # -a NAME: the name the command runs as
+                    i += 1
         elif name not in _PREFIX_WORDS:
             break
         i += 1
     return found
+
+
+_VALUE_OPTS = {"read": "dinNptu", "mapfile": "dnOsuCc", "readarray": "dnOsuCc"}  # options that take the next word
+
+
+def _binder_identity(argv) -> list:
+    """The names a shell builtin that sets a variable by its name would set, when one is a DEVKIT_* name or a name
+    computed at run time (`read "$v"`): read, mapfile, readarray, getopts, printf -v, for and select, and a
+    declare, typeset, local, readonly or export that lifts a readonly flag (+r)."""
+    if not argv:
+        return []
+    name, args = os.path.basename(argv[0]), list(argv[1:])
+    targets = []
+    if name in ("read", "mapfile", "readarray"):
+        k, takes = 0, _VALUE_OPTS[name]
+        while k < len(args):
+            a = args[k]
+            if a.startswith("-") and len(a) > 1:
+                if a[-1] in takes and len(a) == 2:
+                    k += 1  # its value
+                elif a[1:2] == "a" or (len(a) > 2 and a[-1] == "a"):  # read -a NAME: an array
+                    if k + 1 < len(args):
+                        targets.append(args[k + 1])
+                    k += 1
+            else:
+                targets.append(a)
+            k += 1
+    elif name == "getopts" and len(args) >= 2:
+        targets = [args[1]]
+    elif name == "printf":
+        for k, a in enumerate(args):
+            if a == "-v" and k + 1 < len(args):
+                targets.append(args[k + 1])
+            elif a.startswith("-v") and len(a) > 2:
+                targets.append(a[2:])
+    elif name in ("for", "select") and args:
+        targets = [args[0]]
+    elif name in ("declare", "typeset", "local", "readonly", "export"):
+        if any(a.startswith("+") and "r" in a for a in args):
+            return ["a readonly flag (+r)"]
+        targets = [a.split("=", 1)[0] for a in args if not a.startswith(("-", "+"))]
+    return [t if t.startswith("DEVKIT_") else "a name computed at run time" for t in targets
+            if t.startswith("DEVKIT_") or "$" in t or "`" in t]
 
 
 def identity_change(cmd: str, cwd=None) -> list:
@@ -1639,6 +1702,7 @@ def identity_change(cmd: str, cwd=None) -> list:
             continue
         if name == "unset":
             found += [a for a in argv[1:] if a.startswith("DEVKIT_") or "$" in a]
+        found += _binder_identity(argv)
         found += [x for x in g._exports(name, argv[1:]) if x.startswith("DEVKIT_") or x == "?"]
         if name in g._SHELLS:  # the script of -c, and of +c, which bash 3.2 (macOS's /bin/bash) runs the same way
             texts += [argv[k + 1] for k in range(1, len(argv) - 1)
@@ -1652,7 +1716,8 @@ def identity_change(cmd: str, cwd=None) -> list:
             continue
         seen.add(t)
         for argv0, _ in g.split_commands(t) or []:
-            found += _prefix_identity(argv0)
+            found += _prefix_identity(argv0) + _binder_identity(list(argv0)) + \
+                _binder_identity(g._unwrap(list(argv0)) or [])
         texts += g._expansions(t)
     return sorted(set(found))
 
@@ -1731,7 +1796,7 @@ def _route_subagent_progress(data: dict, agent: str = "claude"):
     from . import guard
     new = guard.lane_route(cmd, str(aid)) or _watch_route(cmd, str(aid))
     if new is None:
-        return None
+        return _stamp_member(data, agent, key, cmd)
     if not guard.runs_one_command(cmd) and _lane_verdict(data, agent, cmd, routed=True):
         return None  # _unroutable_lane_command gives the refusal
     stamp = _codex_session_assignment(agent, data)
@@ -1740,6 +1805,33 @@ def _route_subagent_progress(data: dict, agent: str = "claude"):
     if stamp:
         new = f"{stamp} {new}" if guard.runs_one_command(cmd) else f"export {stamp}; {new}"
     return {**inp, key: new}
+
+
+def _can_stamp(data: dict, agent: str) -> bool:
+    """True when the hook may export a member's lane variable for its whole command: Claude Code, whose rewrite
+    approves nothing (its own permission check runs on the new command), and an agent id the shell reads as a plain
+    word. Codex's rewrite carries an explicit allow, so there a compound command gets only the router's placement."""
+    return agent == "claude" and bool(re.fullmatch(r"[A-Za-z0-9_.:-]{1,80}", str(data.get("agent_id") or "")))
+
+
+def _stamp_member(data: dict, agent: str, key: str, cmd: str):
+    """A member's command that runs lane calls the router cannot place one by one (`dev crew inbox 2>&1 | tail`, two
+    steps in a list, a loop, `NO_COLOR=1 dev crew rules`, a lane call next to a write in the member's scratch folder)
+    gets the lane variable exported in front (`export <LANE_VAR>=<agent id>; …`), so every dev call it starts, at any
+    depth and in the background, acts as the member, when the lane allows everything it runs
+    (guard.crew_shell_verdict, stamped). What removes the variable (unset, env -i, env -u, an empty assignment) is
+    refused before (_identity_verdict), and a lane call in a program that sets its child's environment stays
+    refused. -> the new tool input, or None."""
+    from . import guard, identity
+    if not _can_stamp(data, agent) or not guard.holds_lane_call(cmd, _shell_cwd(data)):
+        return None
+    if _lane_verdict(data, agent, cmd, stamped=True):
+        return None  # _unroutable_lane_command gives the refusal
+    inp = data.get("tool_input") or {}
+    # readonly: no read, loop, printf -v or assignment of the command reassigns it in this shell (zsh's typeset +r
+    # and a child shell's assignment are refused by _identity_verdict)
+    var = identity.LANE_VAR
+    return {**inp, key: f"export {var}={data['agent_id']}; readonly {var}; {cmd}"}
 
 
 def _watch_route(cmd: str, aid: str):
@@ -1852,8 +1944,10 @@ def _speaker_route(data: dict, agent: str = "claude"):
     return {**inp, key: f"export {assignments}; {cmd}"}
 
 
-_HOOK_TEXT = re.compile(r"\bdevkit\.hooks\b|\bfrom\s+devkit\s+import\b[^\n]*\bhooks\b|(?:^|[\s;&|(`'\"])(?:\S*/)?dev\s+"
-                        r"hook\s")
+# a path prefix (~/bin/, "$HOME"/bin/) cannot start inside a run of quotes, backticks or parentheses: \S*/ rescanned to
+# the end from each of them
+_HOOK_TEXT = re.compile(r"\bdevkit\.hooks\b|\bfrom\s+devkit\s+import\b[^\n]*\bhooks\b|(?:^|[\s;&|(`'\"])"
+                        r"(?:[^\s;&|(`'\"/]*/)*dev\s+hook\s")
 _RUNNERS = ("run", "Popen", "call", "check_call", "check_output", "system", "popen", "spawn", "spawnv", "spawnvp",
             "execv", "execvp", "execl", "execlp", "getoutput", "getstatusoutput", "main")
 
@@ -3398,6 +3492,12 @@ def prompt(agent: str):
         _log(f"prompt overlaps {agent}: {traceback.format_exc()[-300:]}")
     raw = (data.get("prompt") or "").lstrip()
     background = _background_told(agent, data)  # a member's completion notice is often this very prompt
+    lang = ""
+    try:  # what to reply in: the developer's language (this prompt, else their earlier ones) or the set locale
+        from . import language
+        lang = language.prompt_line(data.get("prompt") or "", data.get("transcript_path"))
+    except Exception:
+        _log(f"prompt language {agent}: {traceback.format_exc()[-300:]}")
     if raw.startswith(("<task-notification", "[SYSTEM NOTIFICATION", "<system-reminder", "<agent-message")) or \
             "<task-notification>" in raw[:400]:
         # background events are not the developer's request; what waits for the woken session comes with them
@@ -3408,7 +3508,7 @@ def prompt(agent: str):
                 mail = watch.mail(agent, sid, "main")
             except Exception:
                 _log(f"prompt wake mail {agent}: {traceback.format_exc()[-300:]}")
-        _context_out("UserPromptSubmit", "\n\n".join(x for x in (extra, background, mail, overlaps) if x))
+        _context_out("UserPromptSubmit", "\n\n".join(x for x in (extra, background, mail, overlaps, lang) if x))
         return
     # the prompt waits as pending in the checkpoint until Stop classes the turn; then what waits for the main session
     # (a late compaction's brief, "Not in the summary"), first in the context
@@ -3443,7 +3543,7 @@ def prompt(agent: str):
     except Exception:
         _log(f"prompt hatches {agent}: {traceback.format_exc()[-300:]}")
     _context_out("UserPromptSubmit", "\n\n".join(x for x in (carried, extra, granted, background, hatches, overlaps,
-                                                             route, text) if x))
+                                                             route, lang, text) if x))
 
 
 DELIVERY = re.compile(r"\bgit\s+(?:-C\s+\S+\s+)?(commit|push|merge|tag|rebase|cherry-pick|revert)\b|"

@@ -822,6 +822,19 @@ def _dev_path_ok(value) -> bool:
         _public_command(value) == value
 
 
+_NUMBER_VALUE = {int: re.compile(r"\d{1,6}"), float: re.compile(r"\d{1,6}(?:\.\d{1,3})?")}
+DEV_STEP_RULE = "a dev step is a dev subcommand and its flags, a flag's value only a number or one of its listed choices"
+
+
+def _plain_value(act, value: str) -> bool:
+    """Is `value` one a dev step may keep after the flag `act`: a number for a numeric flag (`--timeout 9`), or one of
+    the flag's listed choices (`--for me`)? Neither can name anything of this Mac."""
+    if act.choices is not None:
+        return value in {str(c) for c in act.choices}
+    pattern = _NUMBER_VALUE.get(act.type)
+    return bool(pattern and pattern.fullmatch(value))
+
+
 def _dev_step_problems(value: str) -> list:
     words = value.split()
     tree = _dev_tree()
@@ -832,10 +845,23 @@ def _dev_step_problems(value: str) -> list:
     if rest and rest[0] in subs:
         parser, rest, name = subs[rest[0]], rest[1:], f"{name} {rest[0]}"
     flags = _value_free_flags(parser)
-    valued = {o for act in parser._actions if act.option_strings and act.nargs != 0 for o in act.option_strings}
-    what = [f"`{w}` takes a value" if w in valued else f"`{w}` is not a flag of `dev {name}`" if w.startswith("-")
-            else f"`{w}` is a value or an argument" for w in rest if w not in flags]
-    return [", ".join(what) + ": a dev step is a dev subcommand and only its flags that take no value"] if what else []
+    valued = {o: act for act in parser._actions if act.option_strings and act.nargs != 0 for o in act.option_strings}
+    what, i = [], 0
+    while i < len(rest):
+        w = rest[i]
+        flag, eq, given = w.partition("=")
+        if w in flags:
+            pass
+        elif eq and flag in valued:  # --timeout=9
+            if not _plain_value(valued[flag], given):
+                what.append(f"`{w}` has a value that is not a number or one of its listed choices")
+        elif w in valued and i + 1 < len(rest) and _plain_value(valued[w], rest[i + 1]):
+            i += 1
+        else:
+            what.append(f"`{w}` takes a value" if w in valued else f"`{w}` is not a flag of `dev {name}`"
+                        if w.startswith("-") else f"`{w}` is a value or an argument")
+        i += 1
+    return [", ".join(what) + ": " + DEV_STEP_RULE] if what else []
 
 
 _SLOT_CHECKS = {

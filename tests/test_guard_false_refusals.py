@@ -1,0 +1,1095 @@
+# Copyright (c) 2026 Firefly Software Solutions Inc.
+# SPDX-License-Identifier: Apache-2.0
+# Forms of honest work the guard refused in recorded sessions, written here as synthetic commands: each must pass in
+# the context it was refused in (the main session, a crew member's write lane, a read-only lane), and each has a twin
+# that carries the risk the refusing rule guards against and stays refused. tools/guard_replay.py measures the same
+# classes on this Mac's own transcripts.
+# Run: python3 -m unittest tests.test_guard_false_refusals -v
+import re
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "tests"))
+import _hermetic  # noqa: E402
+
+_hermetic.activate()
+sys.path.insert(0, str(ROOT / "lib"))
+
+from devkit import core, guard  # noqa: E402
+
+# the folder the commands run in: a project of the run's dev root (below its temporary home)
+CWD = str(core.DEV / "fireflysoftwaresolutions" / "devkit")
+ENFORCE = {"safeguards": {"irreversible_main": "enforce", "irreversible_member": "enforce"}}
+
+
+def member(cmd, level="all", who="kid", cwd=CWD):
+    """The refusal of a crew member's command in its lane (crew_shell_verdict), or None."""
+    with mock.patch.object(core, "load_config", return_value=ENFORCE):
+        v = guard.crew_shell_verdict(cmd, cwd, None, who, level=level, lane="a1", session="s1", grant=lambda *a: None)
+    return v[1] if v else None
+
+
+def main(cmd, cwd=CWD):
+    """The refusal of the main session's command: the guard's rules, then the irreversible-action gate."""
+    with mock.patch.object(core, "load_config", return_value=ENFORCE):
+        v = guard.check("Bash", {"command": cmd}, cwd, "claude") or \
+            guard.irreversible_verdict(cmd, cwd, agent="claude", session="s1", grant=lambda *a: None)
+    return v[1] if v else None
+
+
+class Case(unittest.TestCase):
+
+    def runs(self, cmd, **kw):
+        with self.subTest(cmd=cmd, **kw):
+            self.assertIsNone(member(cmd, **kw))
+
+    def refused(self, cmd, **kw):
+        with self.subTest(cmd=cmd, **kw):
+            self.assertIsNotNone(member(cmd, **kw))
+
+
+class Arithmetic(Case):
+    """`$((…))` is arithmetic when its inner parenthesis closes into `))`; the shell runs only the substitutions in
+    it, and reads each variable's value as an expression (`x='a[$(cmd)]'; echo $((x))` runs cmd)."""
+
+    def test_arithmetic_on_numbers_runs(self):
+        for cmd in ("n=3; echo $((n*2))", "echo $((1 + 2))", 's=$(date +%s); true; echo "took $(( $(date +%s) - s )) s"',
+                    "sed -n \"$(( $(grep -n x lib/a.py | cut -d: -f1) + 2 )),+3p\" lib/a.py",
+                    "n=0; for f in a b; do n=$((n+1)); done; echo $n", "for i in 1 2 3; do echo $((i * 2)); done",
+                    "c=$(wc -l < lib/a.py); echo $((c / 2))"):
+            self.runs(cmd)
+
+    def test_a_command_inside_arithmetic_is_judged(self):
+        for cmd in ("echo $(( $(gh pr merge 12) + 1 ))", "echo $(( `gh pr merge 12` + 1 ))",
+                    'echo "$(( $(git push --force origin main) ))"'):
+            self.refused(cmd)
+
+    def test_a_value_read_as_an_expression_that_may_hold_code_is_refused(self):
+        for cmd in ("x='a[$(gh pr merge 12)]'; echo $((x))", "read x; echo $((x + 1))", "x=$(cat f.txt); echo $((x))",
+                    "echo $((x))", "printf -v x %s y; echo $((x))", "for x in $(cat f); do echo $((x)); done",
+                    "x=1; declare x; echo $((x))"):
+            self.refused(cmd)
+
+    def test_a_parenthesis_that_does_not_close_into_two_is_a_command_substitution(self):
+        # bash and zsh run `$((date)|wc -c)` as `$( (date) | wc -c )`
+        self.runs("echo $((date)|wc -c)")
+        self.refused("echo $((gh pr merge 12)|wc -c)")
+
+
+class ArithmeticContexts(Case):
+    """Every place bash, sh or zsh evaluates a value as an arithmetic expression runs `a[$(cmd)]` in it: (( )), for
+    (( )), let, [[ -eq ]] and the other comparisons, $[ ], declare -i, a substring's offset, and an array subscript
+    (also in zsh). A name or a substitution there counts only when its value is a number; test and [ never evaluate."""
+
+    X = "x='a[$(gh pr merge 12)]'; "
+
+    def test_a_value_that_may_hold_code_is_refused_in_every_arithmetic_context(self):
+        for tail in ("((x))", "(( x + 1 ))", "for ((i=x; i<3; i++)); do :; done", "let x", "let 'y=x+1'",
+                     "[[ $x -eq 1 ]]", "[[ x -lt 1 ]]", "if [[ 1 -ne $x ]]; then :; fi", "echo $[x]",
+                     "declare -i n=$x", "declare -i n; n=$x", "typeset -i n=x", "echo ${s:x}", "echo ${s:0:$x}",
+                     "a=(1 2); echo ${a[x]}", "a=(1 2); echo \"${a[$x]}\"", "a[x]=1", "unset 'a[x]'",
+                     "read 'b[x]' <<< 1"):
+            self.refused(self.X + tail)
+        for cmd in ("echo $(( $(cat f.txt) + 1 ))", "((n = $(cat f.txt)))", "[[ $(cat f.txt) -gt 1 ]]",
+                    "a=(1 2); echo ${a[$(cat f.txt)]}", "read x < f.txt; ((x))", "x=$1; let x"):
+            self.refused(cmd)
+
+    def test_the_guards_own_rules_refuse_a_value_that_is_not_a_proven_number(self):
+        # the Code reviewer's probes: a refused command hidden in a value, written out or built at run time by a
+        # program that prints what its format says; the guard's rules refuse it in the main session and every lane
+        values = ("x='a[$(git push --force origin main)]'; ",
+                  "x=$(date +$'a[\\x24(git push --force origin main)]'); ",
+                  "d='$'; x=$(date +\"a[${d}(git push --force origin main)]\"); ",
+                  "x=$(date +\"a[\\$(touch README.md)]\"); ", "x=$(seq -f 'a[%g]' 1 1); ",
+                  "x=$(expr substr abc 1 1); ", "x=$(stat -f %N README.md); ", "x=$(wc -l README.md); ")
+        for value in values:
+            for use in ("echo $((x))", "((x))", "let x", "[[ $x -eq 1 ]]", "declare -i n=$x", "a=(1); echo ${a[$x]}"):
+                with self.subTest(cmd=value + use):
+                    v = guard.check("Bash", {"command": value + use}, CWD, "claude")  # the rules alone, no gate
+                    self.assertIn("arithmetic expression", (v or ("", ""))[1])
+                    self.assertIsNotNone(main(value + use))
+                    self.assertIsNotNone(member(value + use, level="review", who="seraph"))
+        for cmd in ("n=$(date +%s); echo $((n+1))", "n=$(wc -l < README.md); ((n > 2))",
+                    "c=$(grep -c x README.md); [[ $c -gt 0 ]]"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(main(cmd))
+                self.assertIsNone(member(cmd))
+
+    def test_a_name_computed_from_a_value_that_may_hold_code_is_refused(self):
+        # bash and zsh evaluate the subscript of a name a builtin is given (declare, local, typeset, export in zsh,
+        # printf -v in zsh, read) and of `${!n}`, and zsh evaluates read -t's value: each runs `a[$(cmd)]`
+        for tail in ('declare "$x"=1', 'f() { local "$x"=1; }; f', 'typeset "$x"=1', 'export "$x"=1', "export $x",
+                     'printf -v "$x" %s 1', 'read "$x" <<< 1', "echo ${!x}", 'read -t "$x" v', "getopts a \"$x\""):
+            cmd = self.X + tail
+            with self.subTest(cmd=cmd):
+                self.assertIsNotNone(main(cmd))
+                self.assertIsNotNone(member(cmd))
+                self.assertIsNotNone(member(cmd, level="review", who="seraph"))
+        for cmd in ("printf -v 'a[$(gh pr merge 12)]' %s 1", "declare 'a[$(gh pr merge 12)]=1'",
+                    "read 'a[$(gh pr merge 12)]' <<< 1", "x=$(cat f.txt); echo ${!x}",
+                    "export $(grep -v '^#' .env | xargs)"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNotNone(main(cmd))
+                self.assertIsNotNone(member(cmd))
+
+    def test_literal_names_and_numeric_builtins_run(self):
+        # printf's %d, shift, exit and return take a number without evaluating it (bash 3.2 and 5, zsh 5.9), so a
+        # name there is text; a name the command gives literal names is a plain name
+        for cmd in (self.X + "printf -v n '%d' x", self.X + "set -- a b; shift x", self.X + "(exit x)",
+                    self.X + "f() { return x; }; f", "n=out; printf -v \"$n\" %s 1; echo $out",
+                    "for v in HOME USER; do echo ${!v}; done", 'read x < "$file"; echo $x',
+                    'while IFS= read -r line; do echo "$line"; done < "$1"', 'export PATH="$HOME/bin:$PATH"',
+                    "mapfile -t lines < <(git ls-files); echo ${#lines[@]}", 'read -p "Name: " name',
+                    'getopts "ab:" opt', "read -t 5 v < f.txt", "declare -a arr; arr=(1 2); echo ${!arr[@]}"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(main(cmd))
+                self.assertIsNone(member(cmd))
+
+    def test_numbers_counters_and_tests_run(self):
+        for cmd in ("for ((i=0; i<3; i++)); do echo $i; done", "i=0; while [[ $i -lt 3 ]]; do let i++; done",
+                    "i=0; let \"i=i+1\"; echo $i", "n=0; ((n++)); echo $n", "n=0; (( n += 2 ))",
+                    "a=(1 2 3); echo ${a[0]} ${a[@]} ${#a[@]} ${a[*]}", "a=(1 2); for i in 0 1; do echo ${a[$i]}; done",
+                    "s=abcdef; echo ${s:1:2} ${s:0:3}", "declare -i n=5; n=n+1; echo $n", "[ \"$x\" -eq 1 ]",
+                    "test \"$y\" -gt 2", "[[ $(wc -l < f.txt) -gt 3 ]]", "c=$(grep -c x f.txt); [[ $c -eq 0 ]]",
+                    "echo ${PIPESTATUS[0]} ${BASH_SOURCE[0]}", "echo $(( $(date +%s) - 5 ))",
+                    "sed -n \"$(( $(grep -n x lib/a.py | cut -d: -f1) + 2 )),+3p\" lib/a.py",
+                    'git commit -m "fix the ((x)) check and [[ y -eq z ]] text"', "echo 'let x; ((y))'"):
+            self.runs(cmd)
+
+
+class CaseArms(Case):
+    """A `case W in P)` header runs no command; its subject is data, and the substitutions in it are judged."""
+
+    def test_a_case_on_a_variable_runs(self):
+        for cmd in ("f=a; case $f in a) echo A;; b) echo B;; esac",
+                    "for f in a b; do case $f in a) echo A;; esac; done",
+                    'for f in $(ls); do case "$f" in *.py) wc -l "$f";; esac; done',
+                    "while read f; do case $f in a) echo A;; esac; done < x.txt"):
+            self.runs(cmd)
+
+    def test_a_command_in_a_case_arm_or_subject_is_judged(self):
+        for cmd in ("f=a; case $f in a) gh pr merge 12;; esac", "case $(gh pr merge 12) in a) echo A;; esac",
+                    "for f in a; do case $f in a) git push --force origin main;; esac; done"):
+            self.refused(cmd)
+
+    def test_the_patterns_of_later_arms_are_words_not_programs(self):
+        # a launcher script's `case "$entry" in /*) ;; *) entry="$parent/$entry" ;; esac` read in a review lane
+        for cmd in ('case "$e" in /*) ;; *) e="$p/$e" ;; esac; echo "$e"',
+                    "case $f in a|b) echo AB;; (c) echo C;; *.py | *.md ) echo doc;; esac",
+                    "case $f in\n  *.py) wc -l $f ;;\n  *) echo other ;;\nesac",
+                    'case $f in a) echo A ;& "esac") echo B ;;& *) echo C ;; esac'):
+            self.runs(cmd, level="review", who="seraph")
+            self.runs(cmd)
+
+    def test_a_command_that_only_looks_like_a_later_pattern_is_judged(self):
+        # a quoted or escaped `;;` ends no arm, a quoted `)` ends no pattern, a quoted `case` opens no statement, and
+        # a pattern with a substitution runs it
+        for cmd in ('case $f in a) echo ";;"; gh pr merge 12 ;; esac', "case $f in a) echo \\;\\; ; gh pr merge 12 ;; esac",
+                    'case $f in a) ;; "$(gh pr merge 12)") ;; esac',
+                    "case $f in a) ;; `gh pr merge 12`) ;; esac", "case $f in a) ;; $(gh pr merge 12)) ;; esac",
+                    '"case" $f in a) gh pr merge 12 ;; esac', "case $f in a) ;; *) gh pr merge 12 ;; esac",
+                    "case $f in a | *) gh pr merge 12 ;; esac"):
+            self.refused(cmd)
+        self.refused('case $f in a) echo ";;"; touch ")" ;; esac', level="review", who="seraph")
+
+
+class CommandStrings(Case):
+    """A program that runs a command line it is given as a string (awk's system(), pipes and getline, trap, vim's and
+    less's `!`, launchctl submit, make's $(shell …)) is judged by that line; one that runs commands from its input or
+    a file the guard does not read (at, batch, crontab, launchctl load, make -f -, an awk command built at run time)
+    may run anything; a variable that makes a shell or a pager run a file or a line (BASH_ENV, ZDOTDIR,
+    PROMPT_COMMAND, LESSOPEN, ENV for an interactive shell) is refused."""
+
+    REFUSED = ("awk 'BEGIN{system(\"gh pr merge 12\")}'", "gawk 'BEGIN{print \"x\" | \"gh pr merge 12\"}'",
+               "awk 'BEGIN{\"gh pr merge 12\" | getline x}'", "awk 'BEGIN{c=\"gh pr merge 12\"; system(c)}'",
+               "awk '{print | $1}' f.txt", "awk -f missing.awk f.txt", "trap 'gh pr merge 12' EXIT; echo hi",
+               "trap -- \"gh pr merge 12\" INT", "vim -c '!gh pr merge 12' -c q x.txt", "vi +'!gh pr merge 12' x.txt",
+               "nvim --headless -c 'silent !gh pr merge 12' -c q", "vim -c 'call system(\"x\")' x.txt",
+               "vim -S s.vim x.txt", "less +'!gh pr merge 12' x.txt", "more +'!gh pr merge 12' x.txt",
+               "echo 'gh pr merge 12' | at now", "at now <<< 'gh pr merge 12'", "echo x | batch",
+               "launchctl submit -l x -- gh pr merge 12", "launchctl load ~/Library/LaunchAgents/x.plist",
+               "echo '* * * * * gh pr merge 12' | crontab -", "crontab f.txt",
+               "printf 'all:\\n\\tgh pr merge 12\\n' | make -f /dev/stdin", "make -f - <<< 'all: ; gh pr merge 12'",
+               "make X='$(shell gh pr merge 12)'", "make SHELL=/tmp/evil all",
+               "PROMPT_COMMAND='gh pr merge 12' bash -i -c true", "BASH_ENV=<(echo 'gh pr merge 12') bash -c true",
+               "ENV=f.sh sh -i -c true", "ZDOTDIR=/tmp/z zsh -c true", "export BASH_ENV=f.sh; ./x.sh",
+               "env LESSOPEN='|gh pr merge 12 %s' less f.txt",
+               # GNU sed's e command and s///e flag run a command the script builds; a script file is not read
+               "sed '1e date' f.txt", "sed -i '' 's/a/b/e' f.txt", "sed -e 's/x/y/;e' f.txt", "sed -f s.sed f.txt")
+
+    def test_a_command_string_or_input_the_guard_cannot_read_is_refused(self):
+        for cmd in self.REFUSED:
+            with self.subTest(cmd=cmd):
+                self.assertIsNotNone(main(cmd))
+                # a startup variable is refused by the guard's rules for every caller (main covers it); the rest
+                # by the lane's gate too
+                if not re.search(r"\b(?:PROMPT_COMMAND|BASH_ENV|ENV|ZDOTDIR|LESSOPEN)=", cmd):
+                    self.assertIsNotNone(member(cmd))
+
+    def test_programs_that_run_no_command_string_run(self):
+        Path(CWD).mkdir(parents=True, exist_ok=True)
+        (Path(CWD) / "p.awk").write_text('{ n += $2 } END { print n }\n')
+        self.addCleanup((Path(CWD) / "p.awk").unlink)
+        for cmd in ("awk '{print $1}' f.txt", "awk -F: '/a|b/ {print $2 | \"sort\"}' f.txt", "awk -f p.awk f.txt",
+                    "awk 'BEGIN{while ((\"date\" | getline d) > 0) print d}'", "trap 'rm -f /tmp/x.$$' EXIT; echo hi",
+                    "trap - INT", "vim -c 'wq' x.txt", "vim -u NONE -c 'q!' x.txt", "less +G x.txt", "atq",
+                    "at -l", "crontab -l", "launchctl list", "make test", "make -C lib all",
+                    "ENV=staging npm test", 'git commit -m "doc: BASH_ENV=x"', "sed -i '' 's/a/b/g' f.txt",
+                    "sed -n '1,5p' f.txt", "sed '/^#/d; s/e/E/w out.txt' f.txt", "sed --sandbox '1e date' f.txt"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(main(cmd))
+                self.assertIsNone(member(cmd))
+
+
+class LiteralValues(Case):
+    """A variable the command sets from a literal, a `~` path or a choice between two literal echoes names a program
+    the guard reads before it runs."""
+
+    def test_a_home_path_or_a_choice_of_literals_runs(self):
+        for cmd in ("D=~/Development/x/bin/dev; $D bug --help 2>&1 | head -30",
+                    "PY=$( [ -x .venv/bin/python ] && echo .venv/bin/python || echo python3 ); $PY -m unittest x",
+                    "PY=$(test -x .venv/bin/python && echo .venv/bin/python || echo python3); $PY --version"):
+            self.runs(cmd)
+
+    def test_a_loop_next_to_a_quoted_heredoc_runs(self):
+        edit = "python3 - <<'EOF'\nfrom pathlib import Path\nprint('do $py and $x')\nEOF\n"
+        self.runs(edit + "for py in python3 /usr/bin/python3; do $py -m unittest tests.test_x; done")
+        self.runs("cat > notes.txt <<'EOF'\n$py here\nEOF\npy=python3; $py --version")
+        self.refused(edit + "for g in gh; do $g pr merge 12; done")
+        # the shell expands an unquoted heredoc's body: the variables stay unknown
+        self.refused("cat <<EOF\n$py\nEOF\nfor py in python3; do $py -c 1; done; $py -c 2")
+        self.assertEqual([], guard.literal_variants("bash <<EOF\n$g pr merge 12\nEOF\ng=gh"))
+
+    def test_a_value_that_names_an_irreversible_program_is_refused(self):
+        for cmd in ("G=~/bin/gh; $G pr merge 12", "G=$( [ -x x ] && echo gh || echo python3 ); $G pr merge 12",
+                    "G=$( [ -x x ] && echo python3 || echo gh ); $G pr merge 12",
+                    "G=$( [ -x x ] && echo $(cat f) || echo python3 ); $G -c 1",
+                    "G=$( [ -x x ] && gh pr merge 1 || echo python3 ); $G -c 1"):
+            self.refused(cmd)
+
+
+class PipeGate(unittest.TestCase):
+    """A commit, push or tag after a pipeline with `&&` is refused where the shell runs it; a message, note or evidence
+    that only quotes such a line is data, and `set -o pipefail` opens the gate for its own shell only."""
+
+    def verdict(self, cmd):
+        v = guard.check("Bash", {"command": cmd}, CWD, "claude")
+        return v[1] if v else None
+
+    def test_a_quoted_text_that_names_the_pattern_runs(self):
+        for cmd in ('dev lesson recur L-x --evidence "the lead chained pytest | tail -1 && git commit; tail hid it" '
+                    '2>&1 | tail -1', "dev progress step done --check 'ran x | tail && dev commit'",
+                    "set -o pipefail; python3 -m unittest x 2>&1 | tail -1 && git commit -m x",
+                    "wc -l <<'EOF'\nnever run pytest | tail -1 && git commit\nEOF"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(self.verdict(cmd))
+
+    def test_a_pipeline_before_a_commit_where_the_shell_runs_it_is_refused(self):
+        for cmd in ("python3 -m unittest x 2>&1 | tail -1 && git commit -m x",
+                    "bash -c 'python3 -m unittest x | tail -1 && git commit -m x'",
+                    "set -o pipefail; bash -c 'python3 -m unittest x | tail -1 && git commit -m x'",
+                    'echo "$(python3 -m unittest x | tail -1 && git push)"',
+                    "eval 'python3 -m unittest x | tail -1 && dev commit -m x'",
+                    "bash <<'EOF'\npython3 -m unittest x | tail -1 && git commit -m x\nEOF",
+                    # the Red team tester's: text that source runs from a substitution, also after a heredoc
+                    "source <(echo 'python3 -m unittest x | tail -1 && git commit -m x')",
+                    "cat <<'EOF'\nnote\nEOF\nsource <(echo 'python3 -m unittest x | tail -1 && git commit -m x')",
+                    ". /dev/stdin <<< 'python3 -m unittest x | tail -1 && git commit -m x'",
+                    # the forms the text pattern missed: a branch or a loop on a pipeline, a group, `|&`, a path
+                    "if python3 -m unittest x | tail -1; then git commit -m x; fi",
+                    "while python3 -m unittest x | tail -1; do git commit -m x; break; done",
+                    "python3 -m unittest x | tail -1 && { git commit -m x; }",
+                    "python3 -m unittest x |& tail -1 && git commit -m x",
+                    "python3 -m unittest x | tail -1 && /usr/bin/git commit -m x",
+                    "python3 -m unittest x | tail -1 && true && git push"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.verdict(cmd), guard.PIPE_REASON)
+
+    def test_pipefail_counts_only_where_it_holds_for_the_pipeline(self):
+        # a subshell, a background job, a pipeline, a branch that may skip it, or a later +o leaves the gate closed
+        for pre in ("(set -o pipefail); ", "set -o pipefail & ", "true | set -o pipefail; ",
+                    "false || set -o pipefail; ", "false && set -o pipefail; ", "set -o pipefail; set +o pipefail; ",
+                    "bash -c 'set -o pipefail'; ", "if false; then set -o pipefail; fi; ",
+                    "echo $(set -o pipefail); ", "git log | head -1; set -o pipefail; ",
+                    # the Red team tester's second round: a function body, a group, what eval, source and . may undo,
+                    # a case arm, unsetopt, and a negated pipeline, which pipefail does not make the check's
+                    "f() { set -o pipefail; }; ", "{ set -o pipefail; }; ", "set -o pipefail; eval 'set +o pipefail'; ",
+                    "set -o pipefail; source off.sh; ", "set -o pipefail; . off.sh; ",
+                    "case x in y) set -o pipefail;; esac; ", "set -o pipefail; unsetopt pipefail; ",
+                    "set -o pipefail; ! "):
+            cmd = pre + "python3 -m unittest x | tail -1 && git commit -m x"
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.verdict(cmd), guard.PIPE_REASON)
+        for pre in ("set -o pipefail; ", "set -euo pipefail; ", "set -e -o pipefail\n"):
+            cmd = pre + "python3 -m unittest x | tail -1 && git commit -m x"
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(self.verdict(cmd))
+        for cmd in ("python3 -m unittest x && git commit -m x", "git log | head -1; git status",
+                    "if python3 -m unittest x; then git commit -m x; fi", "git commit -m 'fix a | b && c'"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(self.verdict(cmd))
+
+
+class ScratchScripts(Case):
+    """A program a member types inline or writes in its own scratch folder runs when the allow-list judge vouches for
+    it: vetted modules only, a lookup by a literal name, writes through readers of literal paths. A program that
+    imports anything else (subprocess, pydoc, timeit, code, pdb, pickle, child_process, …), computes a name it calls
+    or a module it loads, evaluates code, or reaches the interpreter's internals is a program the guard cannot vouch
+    for, tier 2 for a member, as before this hotfix."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.pad = Path(guard.real(tmp.name)) / "claude-501" / "-x" / "962d6aba-c6a8-44ab-9e02-1d15272468e1" / \
+            "scratchpad" / "kid"
+        self.pad.mkdir(parents=True)
+
+    def script(self, name, text):
+        p = self.pad / name
+        p.write_text(text)
+        return str(p)
+
+    def test_a_python_probe_of_vetted_modules_runs(self):
+        p = self.script("probe.py", "import json, re, sys\nfrom pathlib import Path\nd = {'a': 1}\n"
+                                    "print(getattr(d, 'get')('a'), '$HOME is', json.dumps(d), sys.argv[1:])\n"
+                                    "text = Path('README.md').read_text() if Path('README.md').exists() else ''\n"
+                                    "print(len(re.findall('x', text)))\n"
+                                    f"Path('{self.pad}/out.txt').write_text(text)\n")
+        self.runs(f"python3 {p}")
+        self.runs(f"timeout 1500 python3 {p} 2>&1 | tail -5")
+        self.runs("python3 -c 'import json; print(json.dumps({\"a\": 1}))'")
+
+    def test_a_python_program_outside_the_vetted_lists_is_refused(self):
+        hidden = "\"__imp\" + \"ort__('o' + 's').sys\" + \"tem('gh pr mer' + 'ge 12 --admin')\""
+        for text in ("import subprocess\nsubprocess.run(['python3', '-m', 'unittest', 'tests.test_x'])\n",
+                     "import subprocess\nsubprocess.run(['gh', 'pr', 'merge', '12'])\n",
+                     "import subprocess, sys\ngetattr(subprocess, sys.argv[1])(['ls'])\n",
+                     "import os\ngetattr(os, 'system')('true')\n", "import os\nos.system('true')\n",
+                     "import sys\nm = __import__(sys.argv[1])\nm.run(['ls'])\n",
+                     "import importlib\nimportlib.import_module('subprocess').run(['ls'])\n",
+                     "exec(open('x.py').read())\n", "f = globals()[input()]\nf()\n",
+                     "print(().__class__.__bases__[0].__subclasses__())\n",
+                     "import pydoc\npydoc.pipepager('', 'gh pr merge 12 --admin')\n",
+                     f"import timeit\ntimeit.timeit({hidden}, number=1)\n", f"import cProfile\ncProfile.run({hidden})\n",
+                     f"import code\ncode.InteractiveInterpreter().runsource({hidden})\n", f"import pdb\npdb.run({hidden})\n",
+                     "import pickle\npickle.loads(bytes.fromhex('80049500'))\n", "help('modules')\n",
+                     "import sys\nsys.modules['os'].system('true')\n", "x = vars(object)\n"):
+            with self.subTest(text=text):
+                self.refused(f"python3 {self.script('p.py', text)}")
+                self.refused(f"python3 - <<'EOF'\n{text}EOF")
+
+    def test_a_script_written_and_run_in_one_command_is_refused(self):
+        # the judge reads the file before the command runs: one the same command writes first is not what it read
+        p = self.script("probe.py", "print(1)\n")
+        for level, who in (("all", "kid"), ("review", "kid")):
+            for cmd in (f"cat > {p} <<'EOF'\nimport os\nos.system('gh pr merge 12')\nEOF\npython3 {p}",
+                        f"echo 'import os' > {p}; python3 {p}", f"cp /tmp/x.py {p} && python3 {p}",
+                        f"printf x | tee {p} >/dev/null; node {p}"):
+                with self.subTest(cmd=cmd, level=level):
+                    self.assertIn("run it in another call", member(cmd, level=level, who=who) or "")
+        self.runs(f"python3 {p} > {self.pad}/out.txt")
+
+    def test_a_javascript_probe_of_vetted_modules_runs(self):
+        p = self.script("probe.mjs", "import { readFileSync } from 'node:fs';\nimport path from 'path';\n"
+                                     "const o = {a: 1};\nconst k = 'a';\n"
+                                     "console.log(o[k], path.join('a', 'b'), readFileSync('in.json', 'utf8'));\n"
+                                     "process.stdout.write('done');\n")
+        self.runs(f"node {p}")
+        self.runs(f"timeout 1500 node {p} 2>&1 | tail -8")
+
+    def test_a_javascript_program_outside_the_vetted_lists_is_refused(self):
+        for text in ("const m = await import(process.argv[2]);\nconsole.log(m);\n",
+                     "const m = await import(process.argv[2]);\nm[process.argv[3]]('gh pr merge 12');\n",
+                     "const cp = require(process.argv[2]);\ncp[process.argv[3]].call(null, 'x');\n",
+                     "require('child_process').execSync('git push --force origin main');\n",
+                     "const cp = require('child_process');\ncp.execSync(`${process.argv[2]} pr merge 12`);\n",
+                     "new Function(process.argv[2])();\n", "Reflect.apply(globalThis[process.argv[2]], null, []);\n",
+                     "import vm from 'vm';\nvm.runInThisContext(process.argv[2]);\n",
+                     "import { Worker } from 'worker_threads';\nnew Worker(process.argv[2]);\n",
+                     "''.constructor.constructor(process.argv[2])();\n", "process.binding('spawn_sync');\n"):
+            with self.subTest(text=text):
+                self.refused(f"node {self.script('p.mjs', text)}")
+
+
+class ReviewerWriteProbes(Case):
+    """The Code reviewer's probes: a read-only member's inline program that writes a repository file through a
+    writer the old deny list missed, and a program of any session that writes devkit's state the same way, are
+    refused; the reviewer's gates attribute such a write to it."""
+
+    WRITES = ("open('{f}','w').write('x')", "import builtins; builtins.open('{f}','w').write('x')",
+              "o = open; o('{f}','w').write('x')", "import io; io.FileIO('{f}','w').write(b'x')",
+              "import fileinput\nfor l in fileinput.input('{f}', inplace=True): print(l, end='')",
+              "import logging; logging.basicConfig(filename='{f}')",
+              "from urllib.request import urlretrieve; urlretrieve('http://x', '{f}')",
+              "import dbm; dbm.open('{f}', 'c')", "import py_compile; py_compile.compile('a.py', cfile='{f}')",
+              "from functools import partial; partial(open, '{f}', 'w')().write('x')",
+              "list(map(open, ['{f}'], ['w']))")
+
+    def test_a_read_only_inline_program_that_writes_a_repository_file_is_refused(self):
+        for prog in self.WRITES:
+            code = prog.format(f="lib/devkit/guard.py")
+            for cmd in (f"python3 -c \"{code}\"", f"python3 - <<'EOF'\n{code}\nEOF"):
+                for level, who in (("review", "seraph"), ("read", "oracle")):
+                    with self.subTest(cmd=cmd, level=level):
+                        self.assertIsNotNone(member(cmd, level=level, who=who))
+        self.assertIsNotNone(member("node -e \"const fs = require('fs'); new fs.WriteStream('lib/x.js')\"",
+                                    level="review", who="seraph"))
+
+    def test_a_program_that_writes_devkit_state_is_refused_in_the_main_session_and_a_build_lane(self):
+        state = str(core.STATE / "progress" / "probe.json")
+        for prog in self.WRITES[:5]:
+            cmd = f"python3 - <<'EOF'\n{prog.format(f=state)}\nEOF"
+            with self.subTest(cmd=cmd):
+                self.assertIsNotNone(guard.check("Bash", {"command": cmd}, CWD, "claude"))
+                self.assertIsNotNone(member(cmd, level="build", who="neo"))
+
+
+class ReadOnlyLanes(Case):
+    """A review or read-only lane runs the tests, reads and probes a review needs, and writes only in its own scratch
+    folder: arithmetic on numbers, a program it types inline when it writes nothing outside that folder and starts no
+    process, its own wait, and writes whose every target is in that folder. A write anywhere else, a link, a
+    recursive copy, a delete through a trailing slash, and a program that starts a process stay refused."""
+
+    def setUp(self):  # the folder, a file, and links from the folder to a folder and a file outside it
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.pad = str(Path(guard.real(tmp.name)) / "claude-501" / "-x" / "962d6aba-c6a8-44ab-9e02-1d15272468e1" /
+                       "scratchpad" / "seraph")
+        Path(self.pad).mkdir(parents=True)
+        (Path(self.pad) / "a").write_text("x")
+        (Path(guard.real(tmp.name)) / "outside" / "sub").mkdir(parents=True)
+        (Path(self.pad) / "out").symlink_to(Path(guard.real(tmp.name)) / "outside")
+        (Path(self.pad) / "lf").symlink_to(Path(guard.real(tmp.name)) / "outside" / "f")  # a file link out of it
+
+    def ro(self, cmd):
+        return member(cmd.replace("@P", self.pad), level="review", who="seraph")
+
+    def test_reviews_run_their_checks_reads_and_waits(self):
+        for cmd in ("node --test tests/x.test.mjs", "lsof -i :8080", "paste -sd, a.txt", "man git | col -b | head",
+                    "for i in 1 2 3; do [ -s x ] && break; done", "echo $((3 + 4))", "n=2; echo $((n * 3))",
+                    "dev watch --wait --for me --timeout 3 2>&1 | tail -5", "SP=@P; ls $SP",
+                    "OUT=@P/o.txt; grep -c x lib/a.py > $OUT"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(self.ro(cmd))
+
+    def test_writes_inside_the_own_scratch_folder_run(self):
+        for cmd in ("SP=@P; mkdir -p $SP/x && cp lib/a.py $SP/x/ && sed -i '' s/a/b/ $SP/x/a.py && rm -f $SP/x/a.py",
+                    "chmod +x @P/t.sh", "touch @P/n", "echo x | tee @P/o.txt", "mv @P/a @P/b", "rm -rf @P/x"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(self.ro(cmd))
+
+    def test_a_write_outside_it_a_link_or_a_recursive_copy_stays_refused(self):
+        for cmd in ("rm -rf lib/build", "rm -rf @P/../tank/x", "rm -rf @P/x/", "cp -R lib @P/", "ln -s /x @P/l",
+                    "mv lib/a.py @P/", "sed -i '' s/a/b/ lib/a.py", "echo x | tee lib/a.py", "chmod +x lib/a.py",
+                    "cp lib/a.py lib/b.py", "rm -rf $X", "PATH=/tmp/evil; ls", "IFS=x; ls",
+                    "PYTHONPATH=/tmp/x; python3 -m pytest", "x=$(cat f); echo $((x))",
+                    # a link in the scratch folder that points elsewhere, one a program may make, a computed target
+                    "rm -rf @P/out/sub", "cp lib/a.py @P/out/", "rm -rf @P/x && python3 @P/p.py",
+                    "python3 @P/mklink.py; rm -rf @P/l/x", "rm -rf @P/x$(cat f)",
+                    # the Red team tester's: braces, patterns and `..` expand past the folder; a temporary folder,
+                    # a task's output file among them, is no scratch folder
+                    "rm -rf @P/{x,../kid}", "rm -rf @P/o*/sub", "touch @P/[o]ut/x", "rm -f @P/?ut/sub",
+                    "rm -rf @P/../kid", "echo x > /tmp/forged.txt", "echo x > @P/../../tasks/b1.output",
+                    "python3 -c \"open('/tmp/forged.txt', 'w').write('x')\"",
+                    # every writer, a redirect too, with braces (zsh writes each word of a brace redirect), patterns,
+                    # `..`, or through a link that points out of the folder
+                    "touch @P/{a,../kid/b}", "touch @P/*/x", "touch @P/../kid/x", "cp README.md @P/{a,../kid/}",
+                    "cp README.md @P/../kid/a", "echo x > @P/{a,../kid/a}", "echo x > @P/a{,.bak}",
+                    "echo x > @P/../kid/a", "echo x > @P/*", "echo x >> @P/?", "echo x > @P/out/f",
+                    "cp README.md @P/out/f", "touch @P/out/f", "echo x | tee @P/out/f", "mv @P/a @P/out/f",
+                    "echo x > @P/lf", "sed -i '' s/a/b/ @P/lf", "chmod 777 @P/lf", "cp README.md @P/lf"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNotNone(self.ro(cmd))
+
+    def test_find_groups_numbered_sed_addresses_and_a_write_before_a_probe_run(self):
+        (Path(self.pad) / "probe.py").write_text("import json\nprint(json.dumps([1]))\n")
+        for cmd in ("find lib \\( -name '*.py' -o -name '*.md' \\) -print",
+                    "find . \\( -type f -newer x \\) -o -name y",
+                    "sed -n \"$(grep -n 'def x' lib/a.py | cut -d: -f1),+14p\" lib/a.py",
+                    "sed -n \"$(grep -n 'def x' lib/a.py | head -1 | cut -d: -f1),+5p\" lib/a.py",
+                    "rm -rf @P/res && mkdir -p @P/res && ls @P/res", "touch @P/n; ls @P > @P/out.txt"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(self.ro(cmd))
+        for cmd in ("sed -n \"$(cat f),+14p\" lib/a.py", "sed -n \"$(grep -n x a b | cut -d: -f1)p\" lib/a.py",
+                    "find lib \\( -name x -o -exec rm {} \\; \\)",
+                    "python3 @P/probe.py; rm -rf @P/res", "python3 @P/probe.py & rm -rf @P/res",
+                    "python3 @P/probe.py | tee @P/out.txt"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNotNone(self.ro(cmd))
+
+    def test_no_program_of_its_own_runs_in_a_read_only_lane(self):
+        # no reading of a program's code tells every way it may write (the Code reviewer's third round: functions
+        # passed as values, Path.copy, methodcaller, map(open, …, ['w'])): a read-only lane runs no program of its
+        # own, inline or from its scratch folder, Python or JavaScript, even one that only reads
+        (Path(self.pad) / "probe.py").write_text("import json\nprint(json.dumps([1]))\n")
+        for cmd in ("python3 -c 'import json; print(json.load(open(\"p.json\")))'",
+                    "python3 - <<'EOF'\nimport ast\nprint(len(ast.parse(open('lib/a.py').read()).body))\nEOF",
+                    "node -e 'console.log(require(\"fs\").readFileSync(\"package.json\", \"utf8\").length)'",
+                    "python3 @P/probe.py", "cd @P && python3 probe.py",
+                    "python3 - <<'EOF'\nfrom pathlib import Path\nPath('/etc/hosts').copy('README.md')\nEOF",
+                    "python3 - <<'EOF'\nfrom pathlib import Path\nlist(map(Path.write_text, [Path('README.md')], "
+                    "['x']))\nEOF",
+                    "python3 - <<'EOF'\nfrom pathlib import Path\nsorted([Path('README.md')], key=Path.unlink)\nEOF",
+                    "python3 - <<'EOF'\nimport operator\nfrom pathlib import Path\nlist(map(operator.methodcaller("
+                    "'write_text', 'x'), [Path('README.md')]))\nEOF",
+                    "python3 - <<'EOF'\nlist(map(open, ['README.md'], ['w']))\nEOF",
+                    "python3 - <<'EOF'\nimport functools\nfunctools.reduce(open, ['w'], 'README.md')\nEOF"):
+            with self.subTest(cmd=cmd):
+                why = self.ro(cmd)
+                self.assertIsNotNone(why)
+                self.assertIn("ask the tech lead", why)
+
+    def test_the_repositorys_tests_run_and_a_members_own_do_not(self):
+        (Path(self.pad) / "test_w.py").write_text("import unittest\n")
+        for cmd in ("python3 -m unittest tests.test_guard", "python3 -m unittest tests/test_guard.py", "pytest -q",
+                    "pytest tests", "python3 -m pytest tests/test_x.py::T::test_a", "node --test tests/x.test.mjs",
+                    "python3 -m unittest discover -s tests", "dev test"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(self.ro(cmd))
+        for cmd in ("python3 -m unittest discover -s @P", "python3 -m unittest @P/test_w.py",
+                    "python3 -m pytest @P/test_w.py", "pytest @P", "cd @P && python3 -m unittest test_w",
+                    "cd @P && pytest -q", "node --test @P/w.test.mjs", "pytest -p evil tests",
+                    "pytest --rootdir @P tests", "python3 -m unittest discover tests -t @P"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNotNone(self.ro(cmd))
+
+    def test_a_test_run_takes_only_options_that_load_and_write_nothing(self):
+        # the Code reviewer's review of the closed read-only rule: a permitted test run must not take an option that
+        # loads the member's code (preloads, plugins, ini overrides, extra packages) or writes a file (reports,
+        # logs, caches), in the spaced or the `=` form
+        for cmd in ("PYTHONPATH=@P python3 -m unittest tests.test_language",
+                    "export PYTHONPATH=@P; python3 -m unittest tests.test_language",
+                    "env PYTHONPATH=@P python3 -m unittest tests.test_language",
+                    "PYTHONSTARTUP=@P/x.py python3 -m unittest tests.test_language",
+                    "python3 -m unittest discover -s tests -t @P", "cd @P && python3 -m unittest test_w",
+                    "NODE_OPTIONS=--require=@P/x.js node --test tests/", "node --test --import=@P/x.mjs tests/",
+                    "node --test --import @P/x.mjs tests/", "node --test --require=@P/x.js tests/",
+                    "node --test --loader=@P/x.mjs tests/", "node --test --experimental-loader=@P/x.mjs tests/",
+                    "node --test --env-file=@P/.env tests/", "node --test --test-reporter=@P/r.js tests/",
+                    "node --test --test-reporter=spec --test-reporter-destination=README.md tests/",
+                    "node --test --test-update-snapshots tests/",
+                    "uv run --with-requirements @P/req.txt pytest -q", "uv run --with @P pytest -q",
+                    "uv run --with-editable @P pytest -q", "uv run python @P/test_w.py",
+                    "pytest -q --override-ini=pythonpath=@P tests/test_language.py",
+                    "pytest -q -o pythonpath=@P tests/test_language.py", "pytest -q -o addopts='-p evil' tests/",
+                    "pytest -q -o cache_dir=lib/devkit tests/", "pytest -q --pdbcls=evil:Pdb tests/",
+                    "pytest -q --import-mode=append tests/test_language.py @P/test_w.py",
+                    "python3 -m pytest --pyargs test_w --rootdir=. -q",
+                    "python3 -m unittest tests.test_language @P/test_w.py", "python3 -m http.server 8000",
+                    "pytest -q --junitxml=README.md tests/", "pytest -q --junit-xml=lib/devkit/core.py tests/",
+                    "pytest -q --log-file=README.md tests/", "pytest -q --debug=README.md tests/",
+                    "pytest -q --resultlog=README.md tests/", "pytest -q --cov=lib --cov-report=xml:README.md tests/",
+                    "pytest -p evil tests", "pytest -c @P/pytest.ini tests"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNotNone(self.ro(cmd))
+        for cmd in ("python3 -m unittest tests.test_language", "/usr/bin/python3 -m unittest tests.test_guard -v",
+                    "python3 -m unittest -q -f -b -k lang tests.test_language",
+                    "python3 -m unittest discover -s tests -p 'test_lang*.py'",
+                    "python3 -m unittest discover --start-directory=tests --pattern=test_x.py -v",
+                    "pytest -q tests/test_language.py", "pytest -qx --lf --tb=short -k lang -m 'not slow' tests/",
+                    "pytest -v --maxfail=2 -rN --co tests/test_x.py::T::test_a", "pytest -s --ff -ra tests",
+                    "node --test tests/", "node --test --test-name-pattern=lang --test-only tests/x.test.mjs",
+                    "node --test --test-reporter=dot tests/", "uv run pytest -q tests", "python3 --version"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(self.ro(cmd))
+
+    # the Red team tester's second round: a read-only lane's program writes nothing, whatever module, alias, mode or
+    # path it uses; the member writes its scratch files with the shell
+    WRITERS = (
+        'python3 -c \'import tempfile; f = tempfile.NamedTemporaryFile(dir="lib", suffix=".py", delete=False); f.write(b"x")\'',
+        'python3 -c \'import tempfile; tempfile.mkstemp(dir="@C/lib")\'',
+        'python3 -c \'import tempfile; tempfile.mkdtemp(prefix="../../../../../tmp/esc", dir="@P")\'',
+        'python3 -c \'import argparse; argparse.FileType("w")("lib/a.py").write("x")\'',
+        'python3 -c \'import xml.etree.ElementTree as ET; ET.ElementTree(ET.Element("a")).write("lib/a.py")\'',
+        'python3 -c \'from xml.etree.ElementTree import ElementTree, Element; ElementTree(Element("a")).write("lib/a.py")\'',
+        'python3 -c \'from pathlib import Path; p = Path("lib/a.py"); w = p.write_text; w("x")\'',
+        'python3 -c \'from pathlib import Path; [Path("lib/a.py")][0].write_text("x")\'',
+        'python3 -c \'from pathlib import Path; Path("lib", "a.py").write_text("x")\'',
+        'python3 -c \'from pathlib import Path; (Path("lib") / "a.py").write_text("x")\'',
+        'python3 -c \'from pathlib import Path; Path("@P/out/sub/f").write_text("x")\'',
+        'python3 -c \'from pathlib import Path; Path("@P").joinpath("../kid/x").write_text("x")\'',
+        'python3 -c \'from pathlib import Path; Path("@P/a").with_name("../../kid/x").write_text("x")\'',
+        'python3 -c \'from pathlib import Path; Path("@P/a").parent.parent.joinpath("kid", "x").write_text("x")\'',
+        'python3 -c \'import os; e = os.environ; e["PATH"] = "/x"\'',
+        'python3 -c \'import contextlib; print("x", file=contextlib.closing(open("lib/a.py", "w")).thing)\'',
+        "python3 -c 'import csv, sys; csv.writer(sys.stdout).writerow([1])' > lib/a.py",
+        'python3 -c \'import sys; sys.stdout.reconfigure(errors="x"); f = sys.stdout; f.write("x")\'',
+        'python3 -c \'import io; io.TextIOWrapper(open("lib/a.py", "rb+")).write("x")\'',
+        'python3 -c \'open("lib/a.py", "rb+").write(b"x")\'',
+        'python3 -c \'open("lib/a.py", mode="r+").write("x")\'',
+        'python3 -c \'open(file="lib/a.py", mode="w").write("x")\'',
+        'python3 -c \'open("lib/a.py", "r", opener=None, newline=None).write("x")\'',
+        'python3 -c \'open("lib/a.py", *["w"]).write("x")\'',
+        'python3 -c \'open("lib/a.py", **{"mode": "w"}).write("x")\'',
+        'python3 -c \'m = "w"; open("lib/a.py", m).write("x")\'',
+        'python3 -c \'open("lib/a.py", "w" if True else "r").write("x")\'',
+        'node -e \'require("fs").copyFileSync("@P/a", "lib/a.py")\'',
+        'node -e \'require("fs").renameSync("@P/a", "lib/a.py")\'',
+        'node -e \'require("fs").cpSync("@P/a", "lib/", {recursive: true})\'',
+        'node -e \'require("fs").linkSync("lib/a.py", "@P/h")\'',
+        'node -e \'require("fs").symlinkSync("/Users", "@P/l")\'',
+        'node -e \'const { writeFileSync: w } = require("fs"); w("lib/a.py", "x")\'',
+        'node -e \'const fs = require("fs"); const w = fs.writeFileSync; w("lib/a.py", "x")\'',
+        'node -e \'require("fs").writeFileSync.call(null, "lib/a.py", "x")\'',
+        'node -e \'require("fs").writeFileSync.apply(null, ["lib/a.py", "x"])\'',
+        'node -e \'require("fs").writeFileSync(`lib/a.py`, "x")\'',
+        'node -e \'require("fs").writeFileSync("@P/" + "../kid/x", "x")\'',
+        'node -e \'require("fs").writeFileSync("@P/x", "x"); require("fs").writeFileSync(process.argv[1], "x")\' lib/a.py',
+        'node -e \'const fs = require("fs"); fs.promises.writeFile("lib/a.py", "x")\'',
+        'node -e \'const s = require("stream"); const fs = require("fs"); fs.writeSync(fs.openSync("@P/x", "w"), "x"); fs.writeSync(1, "x")\'',
+        'node -e \'const fs = require("fs"); const fd = fs.openSync("@P/x", "w"); fs.closeSync(fd); fs.truncateSync("lib/a.py")\'',
+        'node -e \'const fs = require("fs"); fs.rmSync("lib", {recursive: true, force: true})\'',
+        'node -e \'const fs = require("fs"); fs.rmSync("@P/x"); fs.rmdirSync("lib")\'',
+        'node -e \'const fs = require("fs"); fs.utimesSync("lib/a.py", 0, 0)\'',
+        'node -e \'const fs = require("fs"); fs.appendFileSync("lib/a.py", "x")\'',
+        'node -e \'const fs = require("fs"); fs.writeSync(fs.openSync("lib/a.py", "r+"), "x")\'',
+        'node -e \'const {open} = require("fs/promises"); open("lib/a.py", "w")\'',
+        'node -e \'const fs = require("fs"); fs.createWriteStream("@P/x"); new fs.WriteStream("lib/a.py")\'',
+        'node -e \'const z = require("zlib"); const fs = require("fs"); fs.writeFileSync("@P/x", z.gzipSync("x"))\'',
+        'node -e \'process.chdir("lib"); require("fs").writeFileSync("@P/../../../../../../../../..@C/lib/a.py", "x")\'',
+        'node -e \'process.env.NODE_OPTIONS = "--require=/x"; require("os").setPriority(0)\'',
+        'node -e \'require("util").promisify(require("fs").writeFile)("lib/a.py", "x")\'',
+        "python3 -c 'open(\"@P/out.txt\", \"w\").write(\"x\")'",
+        "node -e 'require(\"fs\").writeFileSync(\"@P/x\", \"x\")'")
+
+    def test_a_program_writes_nothing_in_a_read_only_lane(self):
+        for cmd in self.WRITERS:
+            with self.subTest(cmd=cmd):
+                self.assertIsNotNone(self.ro(cmd.replace("@C", CWD)))
+
+    def test_an_inline_program_that_writes_links_or_starts_a_process_stays_refused(self):
+        for cmd in ("python3 -c 'open(\"lib/a.py\", \"w\").write(\"x\")'",
+                    "python3 -c 'import os; os.symlink(\"/x\", \"@P/l\")'",
+                    "python3 -c 'import subprocess; subprocess.run([\"git\", \"log\"])'",
+                    "python3 -c 'from pathlib import Path; Path(\"lib/a.py\").write_text(\"x\")'",
+                    "python3 -c 'import shutil; shutil.rmtree(\"lib\")'",
+                    "python3 -c 'import sys; open(sys.argv[1], \"w\").write(\"x\")' lib/a.py",
+                    "python3 -c 'import sqlite3; sqlite3.connect(\"lib/x.db\")'",
+                    "node -e 'require(\"fs\").writeFileSync(\"lib/a.js\", \"x\")'",
+                    "node -e 'require(\"child_process\").execSync(\"ls\")'"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNotNone(self.ro(cmd))
+
+
+class Names(Case):
+    """A test file named after what it tests (test_deploy.py, deploy.test.mjs) is no deploy, and a file git tracks is
+    no backup copy whatever its name. A script named deploy, a make or package target, and an untracked new copy stay
+    refused."""
+
+    def test_a_test_file_named_after_a_deploy_runs_in_a_lane(self):
+        for cmd in ("python3 tests/test_deploy.py", "node --test test/deploy.test.mjs", "node test/deploy.spec.mjs",
+                    "bash scripts/test_deploy.sh", "python3 -m unittest tests.test_deploy_policy"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(member(cmd))
+        for cmd in ("bash scripts/deploy.sh", "python3 scripts/deploy.py", "make deploy-test", "npm run deploy"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNotNone(member(cmd))
+
+    def test_a_test_file_that_deploys_is_read_by_its_content(self):
+        # the Red team tester's: a name filter must not let a test file that really deploys through
+        repo = Path(CWD)
+        (repo / "tests").mkdir(parents=True, exist_ok=True)
+        (repo / "tests" / "test_deploy_live.py").write_text("import subprocess\nsubprocess.run(['vercel', '--prod'])\n")
+        self.addCleanup((repo / "tests" / "test_deploy_live.py").unlink)
+        self.refused("python3 tests/test_deploy_live.py")
+        self.assertIsNotNone(main("python3 tests/test_deploy_live.py"))
+
+    def test_a_module_named_by_spliced_strings_is_refused_in_the_main_session(self):
+        for cmd in ("node -e \"require('child' + '_process').execSync('gh pr merge 12')\"",
+                    "node -e \"require(`child_${'process'}`).execSync('gh pr merge 12')\""):
+            with self.subTest(cmd=cmd):
+                self.assertIsNotNone(main(cmd))
+
+    def test_a_tracked_file_named_like_a_copy_is_written(self):
+        import subprocess
+        repo = Path(core.DEV) / "acme" / "studio"
+        (repo / "src").mkdir(parents=True, exist_ok=True)
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        (repo / "src" / "connection-copy.ts").write_text("x\n")
+        subprocess.run(["git", "-C", str(repo), "add", "src/connection-copy.ts"], check=True)
+        v = guard.check("Write", {"file_path": str(repo / "src" / "connection-copy.ts"), "content": "y"}, str(repo),
+                        "claude")
+        self.assertIsNone(v)
+        v = guard.check("Write", {"file_path": str(repo / "src" / "app-copy.ts"), "content": "y"}, str(repo), "claude")
+        self.assertIn("backup copies", (v or ("", ""))[1])
+
+
+class InstallReads(Case):
+    """Reading a file of devkit's installed copy (vale --config=<it>) is no write; a write into it stays refused."""
+
+    def test_reading_an_installed_file_is_no_write(self):
+        rel = core.HOME / ".local" / "share" / "devkit" / "releases" / "26.11.16-a13e187" / "config" / "docs"
+        rel.mkdir(parents=True, exist_ok=True)
+        for name in ("vale.ini", ".markdownlint.jsonc"):
+            (rel / name).write_text("x\n")
+        p = mock.patch.object(guard, "_pinned_names", lambda: {"26.11.16-a13e187"})  # the release `dev install` pinned
+        p.start()
+        self.addCleanup(p.stop)
+        for cmd in (f"vale --config={rel}/vale.ini docs/guard.md", f"vale --config {rel}/vale.ini docs/guard.md",
+                    f"markdownlint-cli2 --config {rel}/.markdownlint.jsonc docs/x.md"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(main(cmd))
+        for cmd in (f"vale --output={rel}/x docs/guard.md", f"cp docs/x.md {rel}/vale.ini",
+                    f"echo x > {rel}/vale.ini",
+                    # the Red team tester's: the read value named again as the file the program writes
+                    f"curl --config {rel}/vale.ini -o {rel}/vale.ini https://example.com",
+                    f"wget --config {rel}/vale.ini -O {rel}/vale.ini https://example.com",
+                    f"tool --rcfile {rel}/vale.ini --output {rel}/vale.ini", f"tool --config={rel}/vale.ini {rel}/vale.ini"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNotNone(main(cmd))
+
+
+class ModuleShadowing(unittest.TestCase):
+    """Python imports a module from the script's folder, the working folder (-c, -m, its input) and the folders a
+    program puts on sys.path before the standard library: a planted json.py there runs in place of json, in every
+    context. A program's own sibling module, and `python3 -I`, which keeps those folders off the path, run."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dir = Path(guard.real(tmp.name))
+        (self.dir / "json.py").write_text("import subprocess\nsubprocess.run(['gh', 'pr', 'merge', '12'])\n")
+        (self.dir / "w.py").write_text("import json\nprint(json.dumps(1))\n")
+        (self.dir / "own").mkdir()
+        (self.dir / "own" / "helper.py").write_text("X = 1\n")
+        (self.dir / "own" / "main.py").write_text("import helper\nimport json\nprint(json.dumps(helper.X))\n")
+        (self.dir / "rx").mkdir()
+        (self.dir / "rx" / "re.py").write_text("print('planted')\n")
+        (self.dir / "rx" / "t.py").write_text("import json\n")
+
+    def test_a_planted_standard_module_is_refused(self):
+        d = self.dir
+        for cmd in (f"python3 {d}/w.py", f"cd {d} && python3 -c 'import json; print(json.dumps(1))'",
+                    f"python3 -c 'import sys; sys.path.insert(0, \"{d}\"); import json'",
+                    f"python3 -c 'import sys; sys.path[0:0] = [\"{d}\"]; import json'",
+                    f"cd {d} && python3 -m json.tool x.json", f"python3 {d}/rx/t.py"):
+            with self.subTest(cmd=cmd):
+                self.assertIn("imports", guard.check("Bash", {"command": cmd}, CWD, "claude")[1])
+
+    def test_a_program_with_its_own_sibling_modules_or_isolated_runs(self):
+        d = self.dir
+        for cmd in (f"python3 {d}/own/main.py", f"python3 -I {d}/w.py", f"cd {d}/own && python3 -c 'import helper'",
+                    "python3 -c 'import json; print(1)'"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(guard.check("Bash", {"command": cmd}, CWD, "claude"))
+
+    def test_a_node_program_that_requires_a_module_the_command_writes_is_refused(self):
+        d = self.dir
+        for cmd in (f"echo 'x' > {d}/m.js && node -e 'require(\"./m\")'",
+                    f"cp {d}/w.py {d}/m.js; node -e 'require(\"./m.js\")'"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNotNone(member(f"cd {d} && " + cmd))
+                self.assertIn("then runs it", guard._writes_then_runs(f"cd {d} && " + cmd, str(d)) or "")
+
+
+class UnreadPrograms(unittest.TestCase):
+    """The Red team tester's verify round: code an interpreter runs that the guard did not read is read: node's
+    preloads given with `=` (--require=f, --import=f), a folder Python or node runs (__main__.py, package.json's main
+    or index.js), and `python3 -m pkg.mod` from the working folder; a planted standard module counts in every form
+    Python imports (.pyc, .so, .abi3.so, .cpython-312-darwin.so); a trap that may turn pipefail off keeps the
+    commit gate closed."""
+
+    MERGE_PY = "import os\nos.system('gh pr merge 12')\n"
+    MERGE_JS = "require('child_process').execSync('gh pr merge 12');\n"
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        d = self.dir = Path(guard.real(tmp.name))
+        for rel, text in (("app/__main__.py", self.MERGE_PY), ("pre.js", self.MERGE_JS),
+                          ("pre.mjs", "import { execSync } from 'node:child_process';\nexecSync('gh pr merge 12');\n"),
+                          ("nd/index.js", self.MERGE_JS), ("nd2/package.json", '{"main": "lib.js"}'),
+                          ("nd2/lib.js", self.MERGE_JS), ("pk/__init__.py", ""), ("pk/run.py", self.MERGE_PY),
+                          ("mm.py", self.MERGE_PY), ("w.py", "import json\nprint(json.dumps(1))\n")):
+            (d / rel).parent.mkdir(parents=True, exist_ok=True)
+            (d / rel).write_text(text)
+
+    def test_code_an_interpreter_runs_from_a_folder_a_module_or_a_preload_is_read(self):
+        d = self.dir
+        for cmd in (f"python3 {d}/app", f"node --require={d}/pre.js -e 'console.log(1)'",
+                    f"node -r {d}/pre.js -e 'console.log(1)'", f"node --import={d}/pre.mjs -e 'console.log(1)'",
+                    f"node --import {d}/pre.mjs -e 'console.log(1)'", f"node {d}/nd", f"node {d}/nd2",
+                    f"cd {d} && python3 -m pk.run", f"cd {d} && python3 -m mm"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNotNone(main(cmd))
+                self.assertIsNotNone(member(cmd))
+        self.assertIsNone(main(f"cd {d} && python3 -I -m json.tool --help"))
+
+    def test_a_planted_compiled_standard_module_is_refused(self):
+        for name in ("json.pyc", "json.so", "json.abi3.so", "json.cpython-312-darwin.so"):
+            planted = self.dir / name
+            planted.write_text("xx")
+            try:
+                with self.subTest(name=name):
+                    v = guard.check("Bash", {"command": f"python3 {self.dir}/w.py"}, CWD, "claude")
+                    self.assertIn("imports", (v or ("", ""))[1])
+            finally:
+                planted.unlink()
+        self.assertIsNone(guard.check("Bash", {"command": f"python3 {self.dir}/w.py"}, CWD, "claude"))
+
+    def test_a_trap_that_may_turn_pipefail_off_keeps_the_gate_closed(self):
+        for pre in ("set -o pipefail; trap 'set +o pipefail' DEBUG; ",
+                    'set -o pipefail; trap "set +o pipefail" RETURN; f() { :; }; f; ',
+                    "set -o pipefail; trap 'setopt no_pipe_fail' DEBUG; ", "trap 'shopt -u x' ERR; set -o pipefail; "):
+            cmd = pre + "python3 -m unittest x | tail -1 && git commit -m x"
+            with self.subTest(cmd=cmd):
+                v = guard.check("Bash", {"command": cmd}, CWD, "claude")
+                self.assertEqual((v or ("", ""))[1], guard.PIPE_REASON)
+        cmd = "set -o pipefail; trap 'rm -f /tmp/x' EXIT; python3 -m unittest x | tail -1 && git commit -m x"
+        self.assertIsNone(guard.check("Bash", {"command": cmd}, CWD, "claude"))
+
+
+class MainSessionPrograms(unittest.TestCase):
+    """In the main session too, an inline or scratch program that starts a process with a command it does not write
+    out (sys.argv, a parameter, a list it changes, a concatenation), passes a process function around, runs a string
+    as a worker's code or loads a module by a computed name may run any action: it is unknown. One whose commands
+    are written out, or bound once to a written-out command, is judged by those commands."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dir = Path(guard.real(tmp.name))
+
+    def script(self, name, text):
+        (self.dir / name).write_text(text)
+        return str(self.dir / name)
+
+    def test_a_process_with_a_command_built_at_run_time_is_unknown(self):
+        runner = self.script("runner.py", "import subprocess, sys\nsubprocess.run(sys.argv[1:])\n")
+        execs = self.script("runner2.py", "import os, sys\nos.execvp(sys.argv[1], sys.argv[1:])\n")
+        spliced = self.script("j1.js", "const m = 'child' + '_process';\nrequire(m).execSync('g' + 'h pr merge 12');\n")
+        for cmd in ("python3 -c 'import asyncio; asyncio.run(asyncio.create_subprocess_shell(\"gh pr merge 12\"))'",
+                    "python3 -c 'import asyncio; asyncio.run(asyncio.create_subprocess_exec(\"gh\", \"pr\", \"merge\", "
+                    "\"12\"))'", f"python3 {runner} gh pr merge 12", f"python3 {execs} gh pr merge 12",
+                    f"node {spliced}", "python3 -c 'import os; f = os.system; f(\"ls\")'",
+                    "python3 -c 'import subprocess; c = [\"gh\", \"pr\"]; c.append(\"merge\"); subprocess.run(c)'",
+                    "node -e \"const {Worker} = require('worker_threads'); new Worker(src, {eval: true})\"",
+                    "node -e \"require('child_process').execSync('g' + 'h pr merge 12')\""):
+            with self.subTest(cmd=cmd):
+                self.assertIsNotNone(main(cmd))
+
+    def test_a_process_with_a_written_out_command_runs(self):
+        ok = self.script("ok.py", "import subprocess\nprint(subprocess.run(['git', 'log', '-1'], capture_output=True, "
+                                  "text=True).stdout)\n")
+        for cmd in ("python3 -c 'import subprocess; subprocess.run([\"git\", \"status\"])'",
+                    "python3 -c 'import subprocess; c = [\"gh\", \"pr\", \"view\", \"12\"]; subprocess.run(c)'",
+                    "python3 -c 'import subprocess, sys; subprocess.run([\"git\", \"-C\", sys.argv[1], \"log\"])' .",
+                    "python3 -c 'import subprocess, sys; subprocess.run([\"ls\", sys.argv[1]])' .",
+                    "python3 -c 'import json, sys; print(json.load(sys.stdin))'", f"python3 {ok}",
+                    "node -e \"require('child_process').execSync('git status')\"",
+                    "node -e \"console.log(/a(b)/.exec('ab'))\""):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(main(cmd))
+
+
+class ProgramWrites(unittest.TestCase):
+    """A Python program whose every write is a path its code writes out is judged by those paths: an edit of a
+    repository file whose text names devkit's state or a handoff note runs; a write to devkit's state, a handoff note
+    or an agent settings file, or to a path built at run time, stays refused, in the main session and a lane."""
+
+    EDIT = ("python3 - <<'EOF'\np = 'tests/test_x.py'\ns = open(p).read()\n"
+            "s = s.replace('{old}', '{new}')\nopen(p, 'w').write(s)\nEOF")
+
+    def verdicts(self, cmd):
+        v = guard.check("Bash", {"command": cmd}, CWD, "claude")
+        return [v[1] if v else None, member(cmd)]
+
+    def test_an_edit_of_a_repository_file_that_names_devkit_records_runs(self):
+        for old, new in (("~/.local/state/devkit/old.json", "~/.local/state/devkit/new.json"),
+                         ("handoff/projects/acme/api.md", "handoff/projects/acme/web.md")):
+            cmd = self.EDIT.format(old=old, new=new)
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.verdicts(cmd), [None, None])
+
+    def test_a_write_to_a_record_or_a_path_built_at_run_time_stays_refused(self):
+        state, note = core.STATE / "x.json", core.HANDOFF / "projects" / "acme" / "api.md"
+        settings = core.DEV / "acme" / "api" / ".claude" / "settings.json"
+        for code in (f"open('{state}', 'w').write('x')",
+                     "import os\nopen(os.path.expanduser('~/.local/state/devkit/x.json'), 'w').write('x')",
+                     "from pathlib import Path\n(Path.home() / '.local/state/devkit/x.json').write_text('x')",
+                     "import sys\nopen(sys.argv[1], 'w').write('x')  # ~/.local/state/devkit",
+                     "p = 'tests/a.py'\np = '~/.local/state/devkit/x.json'\nopen(p, 'w').write('x')",
+                     "for p in ['~/.local/state/devkit/x.json']:\n    open(p, 'w').write('x')",
+                     f"open('{note}', 'a').write('x')", f"open('{settings}', 'w').write('{{}}')"):
+            cmd = f"python3 - <<'EOF'\n{code}\nEOF"
+            with self.subTest(code=code):
+                main_why, lane_why = self.verdicts(cmd)
+                self.assertIsNotNone(main_why)
+                self.assertIsNotNone(lane_why or main_why)  # the lane runs the guard's rules first
+
+
+class StalledJudge(unittest.TestCase):
+    """A command built to make a pattern backtrack is refused within the guard's time for one call, never let
+    through by the hook's timeout: the time limit interrupts a pattern while it matches."""
+
+    def test_a_command_built_to_stall_the_judge_is_refused_in_time(self):
+        import time
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        pad = Path(guard.real(tmp.name)) / "claude-501" / "-x" / "962d6aba-c6a8-44ab-9e02-1d15272468e1" / \
+            "scratchpad" / "seraph"
+        pad.mkdir(parents=True)
+        stall = {"sed": f"sed -i '' '1{' ' * 3000}!x' {pad}/f.txt",  # whitespace runs around an optional address
+                 "expect": "expect -c '" + "\n" * 20000 + "x'",  # whitespace after a separator, per line
+                 "hook": "echo " + "`" * 20000}  # a path prefix rescanned from each backtick
+        with mock.patch.object(guard, "judge_budget", lambda: 1.0):
+            for what, cmd in stall.items():
+                with self.subTest(what=what):
+                    started = time.monotonic()
+                    member(cmd, level="review", who="seraph")
+                    guard.check("Bash", {"command": cmd}, CWD, "claude")
+                    self.assertLess(time.monotonic() - started, 2.5)  # each verdict within the 1 s budget, or refused
+
+
+class HeredocDelimiters(Case):
+    """The shells take a heredoc's whole delimiter word without its quotes: `<<E\\OF` ends at a line `EOF`. A command
+    after the body is a command, whatever quoting the delimiter has; text inside the body stays text."""
+
+    def test_a_command_after_a_partly_quoted_delimiter_is_judged(self):
+        for op in ("<<E\\OF", "<<E''OF", '<<"E"OF', "<<E'OF'", "<<\\E\\O\\F", "<<-E\\OF"):
+            cmd = f"cat {op}\nx\nEOF\ngit push --force origin main"
+            with self.subTest(cmd=cmd):
+                self.assertIsNotNone(main(cmd))
+                self.refused(cmd)
+                self.refused(cmd, level="review", who="seraph")
+
+    def test_the_body_of_such_a_heredoc_is_text(self):
+        for op in ("<<E\\OF", "<<'EOF'", '<<"E"OF'):
+            cmd = f"cat {op}\ngit push --force origin main\nEOF"
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(main(cmd))
+                self.runs(cmd)
+
+
+class LaneStamp(unittest.TestCase):
+    """A member's command that holds lane calls the router cannot place one by one is run with the member's lane
+    variable exported, so every dev call in it acts as the member (Claude Code, whose rewrite approves nothing); a
+    command that drops the variable, runs a team command or an irreversible action, or writes from a read-only lane
+    stays refused, and Codex, whose rewrite approves, keeps the router's placement."""
+
+    def lane(self, persona, level):
+        from devkit import progress
+        run = {"agents": {"a1": {"persona": persona}}}
+        for name, value in (("lane_of", lambda *a: (run, run["agents"]["a1"])), ("lane_chain", lambda r, a: [a]),
+                            ("lane_tools", lambda r, a: level), ("lane_scope", lambda r, a: None)):
+            p = mock.patch.object(progress, name, value)
+            p.start()
+            self.addCleanup(p.stop)
+        p = mock.patch.object(core, "load_config", return_value=ENFORCE)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def data(self, cmd):
+        return {"agent_id": "a1", "tool_name": "Bash", "session_id": "s", "cwd": CWD, "tool_input": {"command": cmd}}
+
+    def test_a_compound_command_with_lane_calls_is_stamped_for_the_member(self):
+        from devkit import hooks
+        for persona, level in (("Kid", "all"), ("Seraph", "review")):
+            self.lane(persona, level)
+            for cmd in ('dev progress step "a" --check "x"; dev progress step "b" --check "y"',
+                        "NO_COLOR=1 dev crew inbox", "for s in a b; do dev progress note \"$s\"; done",
+                        "dev crew inbox 2>&1 | tail -15; dev progress note y", "(cd lib && dev progress note x)",
+                        "dev progress note x &") + (("bash -c 'dev crew inbox'",) if level == "all" else ()):
+                with self.subTest(cmd=cmd, persona=persona):
+                    routed = hooks._route_subagent_progress(self.data(cmd))
+                    self.assertEqual((routed or {}).get("command"), "export DEVKIT_FROM_AGENT=a1; readonly DEVKIT_FROM_AGENT; " + cmd)
+                    self.assertIsNone(hooks._unroutable_lane_command(self.data(cmd)))
+
+    def test_what_drops_the_stamp_or_acts_beyond_the_lane_stays_refused(self):
+        from devkit import hooks
+        self.lane("Kid", "all")
+        for cmd in ("python3 -c \"import subprocess; subprocess.run(['dev', 'progress', 'step', 'x'], "
+                    "env={'PATH': '/usr/bin'})\"",
+                    "node -e \"require('child_process').execFileSync('dev', ['progress', 'step', 'x'], "
+                    "{env: {}})\"",
+                    "dev progress step x; dev crew brief tank --step api", "dev progress step x && gh pr merge 12",
+                    "dev progress note x; git push --force origin main",
+                    'dev crew ask "Should I run `dev push` now?"; dev crew inbox',
+                    'dev progress step "$(gh pr merge 12)"; dev progress note y'):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(hooks._route_subagent_progress(self.data(cmd)))
+                self.assertIsNotNone(hooks._unroutable_lane_command(self.data(cmd)))
+        for cmd in ("env -u DEVKIT_FROM_AGENT dev progress step x; true", "unset DEVKIT_FROM_AGENT; dev progress note x",
+                    "DEVKIT_FROM_AGENT= dev progress step x | tail -1", "env -i PATH=/usr/bin dev progress step x; true",
+                    "dev progress step x; exec -c dev crew decide D1 A", "exec -cl dev progress note x",
+                    "exec -a x -c dev progress note x"):
+            with self.subTest(cmd=cmd):  # the identity gate refuses it before the lane is routed
+                self.assertIsNotNone(hooks._identity_verdict(self.data(cmd)))
+
+    def test_a_command_that_can_reassign_the_lane_variable_is_refused(self):
+        # the Red team tester's: after the hook exports the member's lane variable, a command could give it another
+        # lane's id (read, a loop, printf -v, directly or through a name computed at run time) and speak as that lane
+        from devkit import hooks
+        self.lane("Kid", "all")
+        for cmd in ("read DEVKIT_FROM_AGENT <<< a2; dev progress note x",
+                    "IFS= read -r DEVKIT_FROM_AGENT < f.txt; dev crew inbox",
+                    "while read DEVKIT_FROM_AGENT; do dev progress note x; done < ids.txt",
+                    "for DEVKIT_FROM_AGENT in a2; do dev progress note x; done",
+                    "select DEVKIT_FROM_AGENT in a2; do dev crew inbox; break; done <<< 1",
+                    "printf -v DEVKIT_FROM_AGENT %s a2; dev progress note x",
+                    "v=DEVKIT_FROM_AGENT; printf -v \"$v\" %s a2; dev progress note x",
+                    "v=DEVKIT_FROM_AGENT; read \"$v\" <<< a2; dev crew inbox",
+                    "f() { read DEVKIT_FROM_AGENT; }; f <<< a2; dev crew inbox",
+                    "typeset +r DEVKIT_FROM_AGENT; DEVKIT_FROM_AGENT=a2 dev crew inbox",
+                    "mapfile -t DEVKIT_FROM_AGENT < ids.txt; dev crew inbox",
+                    "getopts a DEVKIT_FROM_AGENT; dev crew inbox",
+                    "bash -c 'read DEVKIT_FROM_AGENT <<< a2; dev crew inbox'"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNotNone(hooks._identity_verdict(self.data(cmd)))
+        for cmd in ("read -r line < f.txt; dev progress note x", "for f in a b; do dev progress note $f; done",
+                    "printf -v out %s x; echo $out", "echo $DEVKIT_FROM_AGENT"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(hooks._identity_verdict(self.data(cmd)))
+
+    def test_the_stamp_cannot_be_reassigned_in_the_shell(self):
+        from devkit import hooks
+        self.lane("Kid", "all")
+        routed = hooks._route_subagent_progress(self.data("dev progress step x; dev progress note y"))
+        self.assertTrue(routed["command"].startswith(
+            "export DEVKIT_FROM_AGENT=a1; readonly DEVKIT_FROM_AGENT; "), routed)
+
+    def test_a_write_outside_the_scratch_folder_from_a_read_only_lane_stays_refused(self):
+        from devkit import hooks
+        self.lane("Seraph", "review")
+        cmd = "dev progress step x && sed -i '' s/a/b/ lib/x.py"
+        self.assertIsNone(hooks._route_subagent_progress(self.data(cmd)))
+        why = hooks._unroutable_lane_command(self.data(cmd)) or ""
+        self.assertIn("read-only lane", why)  # the real reason, not "run it as a command of its own"
+
+    def test_a_review_member_waits_and_reads_its_inbox(self):
+        # the wait every member is told to run when it is blocked on an answer, and its inbox, in a review lane
+        from devkit import hooks
+        self.lane("Seraph", "review")
+        for cmd in ("dev watch --wait --for me --timeout 5", "dev crew inbox", "dev crew inbox --all"):
+            with self.subTest(cmd=cmd):
+                routed = hooks._route_subagent_progress(self.data(cmd))
+                self.assertEqual((routed or {}).get("command"), "DEVKIT_FROM_AGENT=a1 " + cmd)
+                self.assertIsNone(hooks._unroutable_lane_command(self.data(cmd)))
+
+    def test_the_stamp_approves_nothing(self):
+        # the hook routes only a call guard.check allowed; Claude Code's rewrite adds the variable and no permission
+        # decision, so the harness's own permission check runs on the stamped command
+        from devkit import hooks
+        self.lane("Kid", "all")
+        for cmd in ("dev progress step x; dev progress note y", "for s in a b; do dev progress note $s; done",
+                    "NO_COLOR=1 dev crew inbox"):
+            with self.subTest(cmd=cmd):
+                routed = hooks._route_subagent_progress(self.data(cmd))
+                self.assertEqual(routed["command"], "export DEVKIT_FROM_AGENT=a1; readonly DEVKIT_FROM_AGENT; " + cmd)
+                self.assertNotIn("permissionDecision", hooks._rewrite("claude", routed))
+                self.assertIsNone(hooks._route_subagent_progress(self.data(cmd), "codex"))
+
+    def test_codex_keeps_the_routers_placement(self):
+        from devkit import hooks
+        self.lane("Kid", "all")
+        cmd = "dev progress step x; dev progress step y"
+        self.assertIsNone(hooks._route_subagent_progress(self.data(cmd), "codex"))
+        self.assertIn("command of its own", hooks._unroutable_lane_command(self.data(cmd), "codex") or "")
+
+
+if __name__ == "__main__":
+    unittest.main()

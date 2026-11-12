@@ -95,7 +95,11 @@ class TranscriptTests(unittest.TestCase):
                         f"python3 -c \"import runpy; runpy.run_path('{d}/w.py')\""):
                 with self.subTest(cmd=cmd.replace(d, "$D")):
                     self.assertIsNotNone(bash(cmd))
-            self.assertIsNone(bash(f"python3 -c \"import sys; sys.path.insert(0, '{d}'); import r\""))
+            # a module the program loads from a folder it names is outside the allow-list judge's vetted modules, so
+            # a program that imports it and names devkit's state is judged by its text and may write (fail closed);
+            # the same read run as the script itself is vouched for and judged by its paths: a read, which runs
+            self.assertIsNotNone(bash(f"python3 -c \"import sys; sys.path.insert(0, '{d}'); import r\""))
+            self.assertIsNone(bash(f"python3 {d}/r.py"))
 
 class EvidenceCallTests(unittest.TestCase):
 

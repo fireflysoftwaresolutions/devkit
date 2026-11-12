@@ -85,6 +85,16 @@
       "what": "The guard refused a command that unsets or blanks one of the variables that tell a project's tools an agent is at work, such as `CLAUDECODE` or `CODEX_SANDBOX`, with `unset`, `env -u`, `env -i`, or an empty assignment before the command.",
       "reproduce": "Ask an agent to run `env -i bash -c 'echo test'`."
     },
+    "_check_segments:module-shadow": {
+      "title": "Guard refuses a Python program next to a file named like a standard module",
+      "what": "The guard refused a Python command whose script folder, working folder, or a folder it puts on sys.path holds a file or folder named like a standard library module the program imports, which Python would import instead of the real one.",
+      "reproduce": "Ask an agent to create `json.py` in a folder and run `python3 -c 'import json'` there."
+    },
+    "_check_segments:startup-env": {
+      "title": "Guard refuses a command that sets a shell or pager startup variable",
+      "what": "The guard refused a command that sets BASH_ENV, ZDOTDIR, PROMPT_COMMAND, LESSOPEN or LESSCLOSE, or ENV for an interactive shell, which make a shell or a pager run a command line or a file of commands the guard does not read.",
+      "reproduce": "Ask an agent to run `BASH_ENV=setup.sh bash -c true`."
+    },
     "_check_segments:launcher-words": {
       "title": "Guard refuses {word} with a launcher it cannot read in full",
       "what": "The guard refused a command that gives a launcher such as `xcrun`, `op run`, `nix run`, or `mise exec` more words, more characters, or more launchers inside launchers than it reads. Any word of a launcher may name the program it starts, so the guard refuses what it cannot read in full.",
@@ -199,6 +209,11 @@
       "title": "Guard refuses dev crew sync outside the crew member step scope",
       "what": "The guard refused `dev crew sync` from a crew member whose step scope does not hold `plugin/agents/`, the generated files the command rewrites and removes.",
       "reproduce": "As a crew member whose scope leaves out `plugin/agents/**`, run `dev crew sync`."
+    },
+    "check_bash:arith": {
+      "title": "Guard refuses a value read as arithmetic or as a name that is not proven safe",
+      "what": "The guard refused a command that reads a name or a substitution as an arithmetic expression ($((…)), ((…)), let, [[ -eq ]], declare -i, a subscript or a substring offset) or as a variable's name (declare, local, export, printf -v, read, ${!n}, zsh's read -t) when the command does not prove its value a number or a literal name, because the shell runs a `$(…)` such a value holds.",
+      "reproduce": "Ask an agent to run `read x < f.txt; echo $((x + 1))`."
     },
     "check_clone:canonical": {
       "title": "Guard refuses a clone outside the canonical path",
@@ -420,6 +435,11 @@
       "what": "The guard refused a crew member's command or program that runs `dev session tell`, `ask`, `answer`, `claim`, `release`, or `escalate`. These act for the whole session, so only its tech lead runs them.",
       "reproduce": "As a crew member, run a Python program that calls `dev session tell` through `subprocess`."
     },
+    "crew_shell_verdict:write-then-run": {
+      "title": "Guard refuses a crew command that writes a script and then runs it",
+      "what": "The guard refused a crew member's command that writes a file and then runs it as a program in the same command, because the guard judges a script by the file it reads before the command runs, not by what the command writes into it.",
+      "reproduce": "As a crew member, run `echo 'print(1)' > probe.py && python3 probe.py`."
+    },
     "crew_shell_verdict:team": {
       "title": "Guard refuses a crew member dev crew command that changes the team",
       "what": "The guard refused a crew member's `dev crew` command that changes the team's crew or briefs a member, such as `dev crew set` or `dev crew brief`. The tech lead runs those.",
@@ -554,6 +574,16 @@
       "title": "Guard refuses a program that writes files and names a handoff note",
       "what": "The guard refused an interpreter program that writes files and names a project's handoff note or the team's records in the handoff repository, because it cannot see what the program changes there.",
       "reproduce": "Ask an agent to run a Python program that opens a file in `~/Development/.handoff/projects/` for writing."
+    },
+    "interpreter:handoff-writes-path": {
+      "title": "Guard refuses a program that writes a path naming a handoff note",
+      "what": "The guard refused an interpreter program whose writes are paths written out in its code, because one of those paths names a project's handoff note or the team's records, wherever the handoff repository is configured.",
+      "reproduce": "Ask an agent to run a Python program that opens `~/Development/.handoff/projects/<owner>/<repo>.md` for writing."
+    },
+    "interpreter:state-writes-path": {
+      "title": "Guard refuses a program that writes a path naming devkit state",
+      "what": "The guard refused an interpreter program whose writes are paths written out in its code, because one of those paths names devkit's state, configuration, or install.",
+      "reproduce": "Ask an agent to run a Python program that opens a file in `~/.local/state/devkit/` for writing."
     },
     "interpreter:note-calls": {
       "title": "Guard refuses a program that calls devkit code for embargoes or backups",

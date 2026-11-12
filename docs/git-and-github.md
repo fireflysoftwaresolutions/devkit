@@ -218,6 +218,10 @@ Refs: PROJ-142
 - **Not on the default branch.** In a repository with an `origin`, a commit on `main` is refused with
   `dev branch new`, which takes your changes along. A branch with a non-conforming name is refused with
   `dev branch rename`.
+- **Not in the middle of another git operation.** While git's own marks show a revert, cherry-pick, merge, rebase, or
+  `git am` stopped halfway, `dev commit` refuses before it stages anything, names the operation, and says how the one
+  who started it finishes it. A commit then would finish that operation for them, which matters in a checkout that
+  crew members share.
 - **No AI attribution.** `Co-Authored-By` and `Generated with` lines for Claude, Codex, ChatGPT, Copilot, Gemini,
   Cursor, and others are removed from the message, and the output says how many.
 - **No secrets.** The guard's gitleaks scan runs on what the commit records.
@@ -370,8 +374,9 @@ cannot tell, a draft needs the evidence too, and the refusal names the workflow.
   Conventional Commit summary written as a sentence, and a Conventional Commit title is refused with the sentence to
   write. `dev pr ready`, `dev pr merge --squash`, and `dev gh pr create` and `merge` check the same convention.
 - **Template.** The repository's own pull request template wins (`.github/pull_request_template.md` and the other
-  places GitHub reads). Otherwise devkit uses its own in your `language`: `templates/github/pull_request.md` in
-  English, `pull_request.es.md` in Spanish. `--lang es-ES` picks another one for this PR.
+  places GitHub reads). Otherwise devkit uses its own, in American English (`templates/github/pull_request.md`), whatever
+  your `language` setting, which is for replies only. `--lang es-ES` writes this one PR in Spanish, with
+  `pull_request.es.md`.
 - **Pre-filled.** Changes lists the commits (without WIP commits). How to verify gets the local CI line, for example
   `Local CI: dev ci --run → passed (2 steps: Lint, Unit tests) @ d75a9f9`. Links gets the task ids, ticket keys, and
   `Closes #n` found in the branch name and the commits.

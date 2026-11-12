@@ -61,6 +61,25 @@ def needs_revision(path: Path) -> bool:
     return not meta.get("body_sha") or meta["body_sha"] != _sha(body)
 
 
+def mark(path) -> str:
+    """The text a plan file holds now, as a short hash ("" when it cannot be read): what a session's tool call left in
+    it, kept by the Stop hook's plan check (hooks._note_plan_writes)."""
+    try:
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest()[:16]
+    except OSError:
+        return ""
+
+
+def unrevised_change_of(path, left) -> bool:
+    """Does the plan still hold, without a revision, the text a session's tool call left in it (`left`, its `mark`)?
+    A plan that changed since, by a pull of the handoff repository or another session, is no longer that session's
+    to revise: the change is someone else's. A `left` that is no mark (a session record an older devkit wrote) is
+    judged by needs_revision alone."""
+    if not needs_revision(path):
+        return False
+    return not isinstance(left, str) or mark(path) == left
+
+
 def scope_of(path: Path) -> str:
     rel = Path(path).resolve().relative_to(PLANS.resolve())
     return str(rel.parent)

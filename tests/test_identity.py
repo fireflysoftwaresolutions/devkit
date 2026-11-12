@@ -235,6 +235,45 @@ class SpeakerTests(IdentityCase):
         self.assertEqual((sp.lane, sp.how, sp.verified), (self.member, "stamped", True))
         self.assertEqual(self.consumer("watch", "--wait"), self.member)
 
+    def test_a_lane_variable_another_members_call_contradicts_names_that_member(self):
+        # a member's command gave the lane variable another lane's id before its `dev` call: its own open call,
+        # which typed this command, still names it, and the forged lane gets nothing
+        self.crew()
+        self.call("dev watch --wait --timeout 9 2>&1 | tail -3", member=True)
+        self.stack.enter_context(mock.patch.dict(os.environ, {"DEVKIT_FROM_AGENT": "a-forged-lane"}))
+        if self.agent == "codex":  # a lane of no session of the process selects no run at all
+            with self.assertRaises(pg.CodexSessionError):
+                self.speak("watch", "--wait", "--timeout", "9")
+            return
+        sp = self.speak("watch", "--wait", "--timeout", "9")
+        self.assertEqual((sp.lane, sp.how), (self.member, "ledger"))
+        self.assertEqual(self.consumer("watch", "--wait", "--timeout", "9"), self.member)
+
+    def test_a_lane_variable_no_open_call_of_that_lane_backs_acts_as_no_one(self):
+        # the Red team tester's second round: the member's stamped command starts a child shell (readonly does not
+        # cross into it) that gives the variable another lane's id with zsh's print -v or ${(P)v::=…}, bash's
+        # declare -n, or a sourced assignment, then runs `dev progress step` or `dev crew inbox`, whose words no
+        # open call typed. The member's own call is open; the forged lane has none, so the call has no lane at all
+        if self.agent == "codex":
+            return  # Codex selects no run for a lane of no session (test above)
+        self.crew()
+        self.call("dev progress note x; zsh s1.zsh", member=True)
+        for form in ("print -v", "${(P)v::=a2}", "${DEVKIT_FROM_AGENT::=a2}", "declare -n r", "source /dev/stdin"):
+            with self.subTest(form=form), mock.patch.dict(os.environ, {"DEVKIT_FROM_AGENT": "a2"}), \
+                    self.argv("progress", "step", "review", "--step", "review", "--check", "ok"):
+                with self.assertRaises(identity.IdentityError):
+                    pg._as_lane(os.environ["DEVKIT_FROM_AGENT"])
+        with mock.patch.dict(os.environ, {"DEVKIT_FROM_AGENT": self.member}), self.argv("crew", "inbox"):
+            self.assertEqual(pg._as_lane(os.environ["DEVKIT_FROM_AGENT"]), self.member)  # its own lane, call open
+        self.assertEqual(pg._as_lane("a-lane-devkit-names"), "a-lane-devkit-names")  # no variable: code names it
+
+    def test_a_lane_variable_its_own_call_confirms_is_stamped(self):
+        self.crew()
+        self.call("dev watch --wait --timeout 9 2>&1 | tail -3", member=True)
+        self.stack.enter_context(mock.patch.dict(os.environ, {"DEVKIT_FROM_AGENT": self.member}))
+        sp = self.speak("watch", "--wait", "--timeout", "9")
+        self.assertEqual((sp.lane, sp.how), (self.member, "stamped"))
+
     def test_tech_leads_unstamped_wait_never_becomes_a_members(self):
         # the tech lead's wait without the stamp (a compound command, run in the background, so its own open call
         # is gone) while a member's longer wait is open: the member's call holds the tech lead's words, but did not

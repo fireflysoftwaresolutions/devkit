@@ -51,6 +51,25 @@ class MemberView(WatchCase):
 
 
 
+class SameWaitTwoMembers(WatchCase):
+    # Weave (a Codex crew): two members waited for their answers with the very same `dev watch --wait --for me
+    # --timeout 9`, and no lane stamp reached them, so the call ledger held both calls and devkit gave the wait to the
+    # more restricted member. The other member's wait said none of its questions waited (and could take the first
+    # member's answers), while its `dev watch --json`, a command only it had typed, listed its question
+    def test_a_wait_two_members_typed_alike_is_never_given_to_one_of_them(self):
+        self.run_with_member()
+        launch("a2", "devkit:neo", "Neo: tests", self.t0)
+        cmd = "dev watch --wait --for me --timeout 9"
+        for aid in ("a1", "a2"):
+            pg.call_opened("claude", {"session_id": "s1", "agent_id": aid, "tool_use_id": f"toolu_{aid}_w",
+                                      "tool_input": {"command": cmd}})
+        with mock.patch.dict(os.environ, {"DEVKIT_FROM_AGENT": "", "DEVKIT_SPEAKER": ""}), \
+                mock.patch.object(sys, "argv", cmd.split()):
+            with self.assertRaises(ValueError) as e:
+                identity.consumer(True)
+        self.assertIn("several crew members", str(e.exception))
+
+
 class WhoseWait(unittest.TestCase):
     # whose wait `dev watch --wait` is: the speaker identity resolves (tests/test_identity.py has every rule). A
     # member's wait in a pipeline carries no lane mark; it was taken for the main session's, superseded the tech

@@ -283,8 +283,12 @@ class ShellParsingTests(unittest.TestCase):
     def test_a_program_that_edits_a_file_naming_devkit_state_points_to_the_edit_tools(self):
         cmd = ("python3 - <<'EOF'\nfrom pathlib import Path\np = Path('tests/test_x.py')\n"
                f"p.write_text(p.read_text().replace('a', '{STATE}/runs'))\nEOF")
-        v = guard.check("Bash", {"command": cmd}, CWD, "claude")
-        self.assertEqual(v[0], "deny")  # the guard cannot see which file the program writes: it stays refused
+        # the program writes only tests/test_x.py, a path written out in its code: judged by it, the edit runs
+        self.assertIsNone(guard.check("Bash", {"command": cmd}, CWD, "claude"))
+        # a path built at run time cannot be judged: the text rule refuses it and points to the edit tools
+        built = cmd.replace("Path('tests/test_x.py')", "Path(input())")
+        v = guard.check("Bash", {"command": built}, CWD, "claude")
+        self.assertEqual(v[0], "deny")
         self.assertIn("Edit or Write tool", v[1])
 
 
@@ -322,7 +326,8 @@ class HookWiringTests(unittest.TestCase):
             with self.subTest(cmd=cmd):
                 self.assertIsNone(self.lane(cmd))
         self.assertIsNone(self.lane("cd lib && dev progress step x"))  # routed to the lane (guard.lane_route)
-        self.assertIn("command of its own", self.lane("cd lib && dev progress step x && rm -rf build") or "")
+        # the hook could stamp the lane call for the member; what keeps the command back is the delete, named as such
+        self.assertIn("read-only lane: `rm`", self.lane("cd lib && dev progress step x && rm -rf build") or "")
         self.assertIn("command of its own", self.lane(["bash", "-lc", "dev crew decide D1 A"], "exec_command") or "")
         self.assertIn("scratchpad/oracle/", self.lane(f"rm {self.pad}/tank/f3.py") or "")
 

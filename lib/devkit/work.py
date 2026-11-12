@@ -21,6 +21,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import time
 from collections import Counter
 from pathlib import Path
@@ -393,14 +394,26 @@ def merge_lesson(base: str, remote: str, mine: str):
     the side that changed it, as in merge_item. -> the lesson's text, or None when both sides changed the same thing
     differently (the status, a section other than Evidence), when the changelogs do not both start from the base's,
     or when the result would drop a line either side added."""
+    return _merge_lesson(base, remote, mine)
+
+
+def _merge_lesson(base: str, remote: str, mine: str, contested: list = None):
+    """merge_lesson's work. With `contested` (a list), a field or section both sides changed differently takes the
+    remote's value instead of failing, and its name is added to the list: the repeats, the Evidence and the changelogs
+    of both sides still add up, and the caller keeps this Mac's whole version elsewhere, since the result drops its
+    contested lines. -> the lesson's text, or None."""
     from . import lessons  # it imports this module
     b, r, m = lessons.parse(base), lessons.parse(remote), lessons.parse(mine)
     out = lessons.parse(remote)
-    if not _merge_fields(b, r, m, out, lessons.FIELDS, lessons.LISTS, _BY_RULE + ("occurrences", "last_seen")):
+    if not _merge_fields(b, r, m, out, lessons.FIELDS, lessons.LISTS, _BY_RULE + ("occurrences", "last_seen"),
+                         contested):
         return None
-    ok, out["extra"] = _either(b["extra"], r["extra"], m["extra"])
+    ok, extra = _either(b["extra"], r["extra"], m["extra"])
+    if not ok and contested is None:
+        return None
+    out["extra"] = extra if ok else r["extra"]
     if not ok:
-        return None
+        contested.append("front matter")
     for s in dict.fromkeys([*r["sections"], *m["sections"]]):
         texts = [x["sections"].get(s, "") for x in (b, r, m)]
         if s == "Evidence":
@@ -409,19 +422,28 @@ def merge_lesson(base: str, remote: str, mine: str):
                 return None
             out["sections"][s] = merged.strip()
             continue
-        ok, out["sections"][s] = _either(*texts)
-        if not ok:
+        ok, text = _either(*texts)
+        if not ok and contested is None:
             return None
+        out["sections"][s] = text if ok else texts[1]
+        if not ok:
+            contested.append(s)
     out["meta"]["occurrences"] = r["meta"]["occurrences"] + m["meta"]["occurrences"] - b["meta"]["occurrences"]
     out["meta"]["last_seen"] = max(r["meta"].get("last_seen") or "", m["meta"].get("last_seen") or "")
     added = _merge_history(b, r, m, out)
-    return None if added is None else _kept(base, remote, mine, lessons.render(out), added)
+    if added is None:
+        return None
+    text = lessons.render(out)
+    if contested:  # this Mac's contested lines are dropped on purpose: only the remote's must all be there
+        return None if lost_lines(remote, text, base.splitlines()) else text
+    return _kept(base, remote, mine, text, added)
 
 
-def _merge_fields(b, r, m, out, fields, lists, by_rule) -> bool:
+def _merge_fields(b, r, m, out, fields, lists, by_rule, contested: list = None) -> bool:
     """A record's front-matter fields merged into `out` (the remote's): a list keeps what either side added and loses
     what either removed; any other field takes the side that changed it. The caller sets the fields in `by_rule`.
-    -> False when both sides changed one field differently."""
+    -> False when both sides changed one field differently, unless `contested` (a list) takes the field's name: the
+    field then keeps the remote's value."""
     for k in fields:
         if k in by_rule:
             continue
@@ -429,9 +451,13 @@ def _merge_fields(b, r, m, out, fields, lists, by_rule) -> bool:
             bl, rl, ml = (_as_list(x["meta"].get(k)) for x in (b, r, m))
             out["meta"][k] = [x for x in rl if x in ml or x not in bl] + [x for x in ml if x not in bl + rl]
             continue
-        ok, out["meta"][k] = _either(*(x["meta"].get(k, "") for x in (b, r, m)))
-        if not ok:
+        ok, value = _either(*(x["meta"].get(k, "") for x in (b, r, m)))
+        if not ok and contested is None:
             return False
+        if ok:
+            out["meta"][k] = value
+        else:
+            contested.append(k)
     return True
 
 
@@ -687,16 +713,20 @@ def now_warning(scope: str, items: list = None) -> str:
 
 
 # --------------------------------------------------------------------------- git (audit trail)
-# Every Mac pulls the handoff repository with a rebase. A rebase that stops (a conflict, a killed git) leaves the
-# repository on a detached HEAD: a commit made there is lost when the rebase ends, and every later pull and push
-# fails. So devkit's git writes to the repository run one at a time on a Mac (`_repo_lock`), a conflict in an item
-# is settled item by item (`merge_item`), a conflict in a project's note or an initiative's README file by file
-# (`_settle_note`), any other conflict aborts the rebase, and a rebase found stopped is aborted before the next pull
-# or commit. Each abort is a sync problem: an audit record, kept at every audit level, and handoff-push-failed.json,
-# which `dev status` and the dashboard show until a push succeeds. A rebase rewrites notes in the working tree, so it
-# also holds the notes lock that every note writer takes, before _repo_lock as every process takes them
-# (`_rebase_locks`); the fetch and the push, which can take a minute, hold _repo_lock alone, so a note writer never
-# waits for the network.
+# Every Mac pulls the handoff repository by rebasing its own commits on the remote's. The rebase runs in a private
+# checkout (`_rebase`), never in the repository's own: a rebase there took this Mac's newer files away while it ran,
+# stashed the files writers had not committed yet, and when it stopped, a commit made on its detached HEAD was lost.
+# Every conflict is settled (`_settle`): an item item by item (`merge_item`), a lesson field by field
+# (`merge_lesson`), a note file by file (`_settle_note`), an append-only log line by line, and what cannot be merged
+# keeps the remote's version with this Mac's saved aside (`_set_aside`), so a conflict never keeps this Mac's commits
+# from the remote. A rebase that still cannot finish falls back to a merge; then this checkout moves to the result
+# with `git reset --keep`, which changes nothing while a file it would change has a change not committed yet. devkit's
+# git writes to the repository run one at a time on a Mac (`_repo_lock`), and a rebase found stopped in the
+# repository's own checkout (an older devkit's, or one run by hand) is aborted before the next read, pull or commit:
+# an audit record, kept at every audit level, and handoff-push-failed.json, which `dev status` and the dashboard show
+# until a push succeeds. A pull rewrites notes in the working tree, so it also holds the notes lock that every note
+# writer takes, before _repo_lock as every process takes them (`_rebase_locks`); the fetch and the push, which can take
+# a minute, hold _repo_lock alone, so a note writer never waits for the network.
 
 _REBASE_DIRS = ("rebase-merge", "rebase-apply")
 _BUSY = "another devkit process kept the handoff repository busy"
@@ -755,12 +785,17 @@ def sync_problem(problem: str, action: str = "handoff.push", target: str = "") -
         pass
 
 
-def _stopped() -> bool:
-    return any((HANDOFF / ".git" / d).exists() for d in _REBASE_DIRS)
+def _stopped(root: Path = None) -> bool:
+    """Is a rebase stopped in the handoff repository's checkout, or in `root` (the private one a pull rebases in)?"""
+    git_dir = HANDOFF / ".git"
+    if root is not None:
+        found = core.gitout(root, "rev-parse", "--absolute-git-dir")
+        git_dir = Path(found) if found else root / ".git"
+    return any((git_dir / d).exists() for d in _REBASE_DIRS)
 
 
-def _conflicted() -> list:
-    return core.gitout(HANDOFF, "diff", "--name-only", "--diff-filter=U").splitlines()
+def _conflicted(root: Path = None) -> list:
+    return core.gitout(root or HANDOFF, "diff", "--name-only", "--diff-filter=U").splitlines()
 
 
 def _abort(reason: str, files=(), keep=()) -> bool:
@@ -800,9 +835,17 @@ def recover_rebase(where: str, keep=()) -> bool:
                       files, keep)
 
 
-def _stage(rel: str, n: int):
-    rc, out, _ = core.git(HANDOFF, "show", f":{n}:{rel}")
+def _stage(rel: str, n: int, root: Path = None):
+    rc, out, _ = core.git(root or HANDOFF, "show", f":{n}:{rel}")
     return out + "\n" if rc == 0 else None
+
+
+def _versions(rel: str, root: Path, merging: bool) -> tuple:
+    """A file in conflict in `root` -> (the version both sides started from, the remote's, this Mac's), None for a
+    side that has no such file. Git's stage 2 is the side being built on: the remote's in a rebase, this Mac's in a
+    merge."""
+    base, built_on, applied = (_stage(rel, n, root) for n in (1, 2, 3))
+    return (base, applied, built_on) if merging else (base, built_on, applied)
 
 
 # The append-only logs: the month's activity log (log/) and the session logs (sessions/). Every Mac only adds lines at
@@ -813,20 +856,42 @@ _APPEND_ONLY = re.compile(r"^(log/[^/]+\.md|sessions/.+)$")
 _LESSON_FILE = re.compile(r"^lessons/(.+/)?L-[^/]+\.md$")  # active and archived lessons
 
 
-def _settle(rel: str, retake: bool):
-    """The text of a file in conflict during the rebase, or None when devkit cannot settle it. An append-only log: both
-    sides' lines, the remote's first. A lesson: both sides' changes (`merge_lesson`), or None. An item: the remote's
-    version with this Mac's change applied again (`merge_item`); when both changed the same thing, the remote's
-    version if `retake` (the caller applies its change again), else None."""
-    base, remote, mine = _stage(rel, 1), _stage(rel, 2), _stage(rel, 3)  # in a rebase, 2 is the remote's side
-    if _APPEND_ONLY.match(rel):  # a side that deleted the log loses to the one that added lines
-        return _merge_text(base or "", remote, mine, union=True) if remote and mine else remote or mine
-    if _LESSON_FILE.match(rel):
-        return merge_lesson(base, remote, mine) if base and remote and mine else None
-    if not (rel.startswith("items/") and remote and mine):
-        return None
-    merged = merge_item(base, remote, mine) if base else None
-    return merged if merged is not None else remote if retake else None
+def _settle(rel: str, retake: bool, base, remote, mine, set_aside: dict) -> tuple:
+    """A file in conflict during a pull, from its three versions (_versions) -> (the text to keep, the problem when
+    this Mac's version was set aside, else ""). It always settles, so a pull never stops on a conflict and never keeps
+    this Mac's commits from the remote:
+    - one side removed (or moved) the file: the text the other side has, so no change is lost;
+    - a note: _settle_note; an append-only log: both sides' lines, the remote's first;
+    - a lesson: both sides' changes (`merge_lesson`); when both changed one field or section differently, the remote's
+      value there, with the repeats, the Evidence and the changelogs of both, and this Mac's version set aside;
+    - an item: this Mac's change applied again to the remote's version (`merge_item`); when both changed the same
+      thing, the remote's version, and this Mac's set aside unless `retake` (the caller applies its change again);
+    - anything else both changed: the remote's version, and this Mac's set aside (`_set_aside`, with the command that
+      brings it back)."""
+    if remote is None or mine is None:
+        return remote if mine is None else mine, ""
+    if _NOTE_FILE.match(rel):
+        return _settle_note(rel, base, remote, mine, set_aside)
+    merged, what = None, "it changed on this Mac and on another one at the same place"
+    if _APPEND_ONLY.match(rel):
+        merged = _merge_text(base or "", remote, mine, union=True)
+    elif _LESSON_FILE.match(rel) and base:
+        merged = merge_lesson(base, remote, mine)
+        if merged is None:
+            contested = []
+            merged = _merge_lesson(base, remote, mine, contested)
+            if merged is not None:
+                fields = ", ".join(dict.fromkeys(contested))
+                return merged, _set_aside(rel, base, mine, set_aside, f"this Mac and another one changed its {fields} "
+                                          f"differently, so devkit kept the remote's {fields} with both sides' other "
+                                          f"changes")
+    elif rel.startswith("items/") and base:
+        merged = merge_item(base, remote, mine)
+        if merged is None and retake:
+            return remote, ""
+    if merged is not None:
+        return merged, ""
+    return remote, _set_aside(rel, base or "", mine, set_aside, what + ", so devkit kept the remote's version")
 
 
 # A project's note (projects/<id>.md) and an initiative's README hold blocks devkit writes again on every sync (the
@@ -871,12 +936,10 @@ def _merge_text(base: str, remote: str, mine: str, union: bool = False):
     return out + "\n" if rc == 0 else None
 
 
-def _settle_note(rel: str, set_aside: dict = None) -> tuple:
-    """A note in conflict during the rebase -> (the text to keep, the problem when this Mac's hand-written change
-    could not be merged and was saved aside, else ""). See _NOTE_FILE; `set_aside`: see _save_note_conflict."""
-    base, remote, mine = _stage(rel, 1), _stage(rel, 2), _stage(rel, 3)  # in a rebase, 2 is the remote's side
-    if remote is None or mine is None:  # one side deleted the note: keep the text the other side has
-        return remote or mine or "", ""
+def _settle_note(rel: str, base, remote, mine, set_aside: dict = None) -> tuple:
+    """A note in conflict during a pull, from its three versions (_versions; neither side removed it) -> (the text to
+    keep, the problem when this Mac's hand-written change could not be merged and was saved aside, else ""). See
+    _NOTE_FILE; `set_aside`: see _set_aside."""
     (hb, _), (hr, remote_blocks), (hm, my_blocks) = _hollow(base or ""), _hollow(remote), _hollow(mine)
     merged = _merge_text(hb, hr, hm)
     if merged is None:
@@ -889,10 +952,18 @@ def _settle_note(rel: str, set_aside: dict = None) -> tuple:
 
 
 def _save_note_conflict(rel: str, base: str, mine: str, set_aside: dict = None) -> str:
-    """Save this Mac's version of a note whose hand-written text conflicts, and the version both sides started from,
-    in STATE/handoff-conflicts/; record it (audit, kept at every level) and say how to bring it back. -> the problem.
-    `set_aside`: the notes this pull saved already ({rel: (the saved copy, the problem)}). When a later commit of this
-    Mac conflicts on the same note in the same pull, only the saved copy changes, to this Mac's latest version: the
+    """_set_aside for a note whose hand-written text conflicts."""
+    return _set_aside(rel, base, mine, set_aside, "its hand-written text changed on this Mac and on another one at "
+                      "the same place, so devkit kept the remote's version", "handoff.note-conflict")
+
+
+def _set_aside(rel: str, base: str, mine: str, set_aside: dict = None, what: str = "",
+               action: str = "handoff.conflict") -> str:
+    """Save this Mac's version of a file a pull could not merge (`what` says why and what the pull kept), and the
+    version both sides started from, in STATE/handoff-conflicts/; record it (audit `action`, kept at every level) and
+    say how to bring it back. -> the problem.
+    `set_aside`: the files this pull saved already ({rel: (the saved copy, the problem)}). When a later commit of this
+    Mac conflicts on the same file in the same pull, only the saved copy changes, to this Mac's latest version: the
     copy then holds every local commit's change against the version the first one started from, so the command the
     first warning printed brings them all back. A copy never replaces another pull's: a second one saved in the same
     second takes a counter after the time."""
@@ -902,7 +973,7 @@ def _save_note_conflict(rel: str, base: str, mine: str, set_aside: dict = None) 
         saved, problem = set_aside[rel]
         core.replace_text(saved, mine)
         return problem
-    stem = f"{rel[:-len('.md')]}.{time.strftime('%Y%m%d-%H%M%S')}"
+    stem = f"{rel[:-len('.md')] if rel.endswith('.md') else rel}.{time.strftime('%Y%m%d-%H%M%S')}"
     saved, n = core.STATE / "handoff-conflicts" / f"{stem}.mine.md", 1
     while saved.exists():
         n += 1
@@ -912,11 +983,10 @@ def _save_note_conflict(rel: str, base: str, mine: str, set_aside: dict = None) 
     core.replace_text(saved, mine)
     core.replace_text(started, base)
     cmd = " ".join(shlex.quote(str(w)) for w in ("git", "-C", HANDOFF, "merge-file", rel, started, saved))
-    problem = (f"{rel}: its hand-written text changed on this Mac and on another one at the same place, so devkit kept "
-               f"the remote's version and saved this Mac's at {saved}; to bring your changes back, run `{cmd}`, keep "
+    problem = (f"{rel}: {what} and saved this Mac's at {saved}; to bring your changes back, run `{cmd}`, keep "
                f"the lines both sides need between the conflict markers, then run `dev sync`")
     from . import audit, ui
-    audit.record("handoff.note-conflict", rel, problem[:300], outcome="blocked")
+    audit.record(action, rel, problem[:300], outcome="blocked")
     ui.warn(f"handoff repository: {problem}")
     set_aside[rel] = (saved, problem)
     return problem
@@ -967,11 +1037,12 @@ def pull_rebase(retake=()) -> tuple:
 
 
 def rebase_fetched(retake=()) -> tuple:
-    """Rebase this Mac's commits on the remote's as last fetched: local git work only, under _rebase_locks, and nothing
-    to do (no lock taken) when the remote has no new commit or the branch follows none. A conflict in an item, a lesson
-    or an append-only log is settled (`_settle`), one in a note file by file (`_settle_note`: never a stop, so the other
-    files still go through); any other conflict aborts the rebase, leaves the commits as they were and records a sync
-    problem.
+    """Bring this Mac's branch onto the remote's commits as last fetched: local git work only, under _rebase_locks, and
+    nothing to do (no lock taken) when the remote has no new commit or the branch follows none. This Mac's commits are
+    rebased on the remote's in a private checkout (`_rebase`), so the handoff repository's own checkout never goes
+    through a rebase: other devkit processes keep reading every file this Mac has, and a file a writer changed but has
+    not committed is never stashed, removed or rewritten. Every conflict is settled (`_settle`); a rebase that cannot
+    finish falls back to a merge.
     `retake`: item paths (relative) whose change the caller applies again itself. Never call it while holding
     _repo_lock. -> (ok, the problem when not ok)."""
     if core.gitout(HANDOFF, "rev-list", "--count", "HEAD..@{u}") in ("", "0"):
@@ -983,40 +1054,120 @@ def rebase_fetched(retake=()) -> tuple:
         return _rebase(retake)
 
 
+def _private_checkout() -> Path:
+    """Where a pull rebases this Mac's commits: a linked worktree of the handoff repository that only the pull uses."""
+    return core.STATE / "handoff-sync"
+
+
+def _drop_private_checkout(tree: Path) -> None:
+    """Remove the private checkout, and one a pull left behind when it was killed."""
+    core.git(HANDOFF, "worktree", "remove", "--force", "--force", str(tree), timeout=60)
+    if tree.exists():
+        shutil.rmtree(tree, ignore_errors=True)
+    core.git(HANDOFF, "worktree", "prune")
+
+
 def _rebase(retake) -> tuple:
-    """rebase_fetched's work, under _rebase_locks."""
-    rc, out, err = core.git(HANDOFF, "rebase", "-q", "--autostash", timeout=60)
-    if rc == 0:
-        return True, ""
-    if not _stopped():  # git refused to start it: nothing changed here
-        return False, (err or out).strip()[:300] or "git rebase failed"
-    settled_notes, set_aside = [], {}
+    """rebase_fetched's work, under _rebase_locks: this Mac's commits rebased on the remote's in the private checkout
+    (`_replay`), or merged with them when the rebase cannot finish (`_merge`), then this checkout moved to the result
+    (`_move_to`). -> (ok, the problem when not ok)."""
+    head, upstream = core.gitout(HANDOFF, "rev-parse", "HEAD"), core.gitout(HANDOFF, "rev-parse", "@{u}")
+    if not (head and upstream):
+        return False, "the handoff repository has no commit or follows no remote branch"
+    if core.gitout(HANDOFF, "rev-list", "--count", f"{upstream}..{head}") == "0":  # nothing of this Mac's to replay
+        return _move_to(head, upstream)
+    tree = _private_checkout()
+    _drop_private_checkout(tree)
+    tree.parent.mkdir(parents=True, exist_ok=True)
+    rc, out, err = core.git(HANDOFF, "worktree", "add", "-q", "--detach", str(tree), head, timeout=120)
+    if rc != 0:
+        problem = "a pull of the handoff repository could not prepare its private checkout: " + \
+                  ((err or out).strip()[:200] or "git worktree add failed")
+        sync_problem(problem, "handoff.pull")
+        return False, problem
+    try:
+        settled_notes, set_aside = [], {}
+        new = _replay(tree, upstream, retake, settled_notes, set_aside) or \
+            _merge(tree, head, upstream, retake, settled_notes, set_aside)
+        if not new:
+            problem = "a pull of the handoff repository could neither rebase this Mac's commits on the remote's nor " \
+                      "merge them; nothing changed here"
+            sync_problem(problem, "handoff.pull")
+            return False, problem
+        ok, problem = _move_to(head, new)
+    finally:
+        _drop_private_checkout(tree)
+    if ok:
+        _rewrite_tasks(settled_notes)
+    return ok, problem
+
+
+def _settle_all(tree: Path, retake, merging: bool, settled_notes: list, set_aside: dict) -> bool:
+    """Settle and stage every file in conflict in the private checkout (`_settle`). `settled_notes` gets the notes
+    whose generated blocks were taken whole (_rewrite_tasks writes their tasks block again). -> False when a settled
+    file could not be written (a folder in its place): the rebase or merge cannot go on."""
+    for rel in _conflicted(tree):
+        base, remote, mine = _versions(rel, tree, merging)
+        text, problem = _settle(rel, rel in retake, base, remote, mine, set_aside)
+        if _NOTE_FILE.match(rel) and remote is not None and mine is not None and not problem:
+            settled_notes.append(rel)
+        if text is None:  # neither side has the file any more
+            core.git(tree, "rm", "-q", "--cached", "--ignore-unmatch", "--", rel)
+            continue
+        try:
+            (tree / rel).parent.mkdir(parents=True, exist_ok=True)
+            _replace(tree / rel, text)
+        except OSError:
+            return False
+        core.git(tree, "add", "--", rel)
+    return True
+
+
+def _replay(tree: Path, upstream: str, retake, settled_notes: list, set_aside: dict) -> str:
+    """Rebase the private checkout's commits (this Mac's) on `upstream`, settling each conflict. -> the rebased
+    commit, or "" when the rebase did not finish (it is aborted)."""
+    rc, _, _ = core.git(tree, "rebase", "-q", upstream, timeout=60)
     for _ in range(200):  # one round per commit of this Mac that conflicts
-        files = _conflicted()
-        if not files:
+        if rc == 0 or not _stopped(tree) or not _conflicted(tree):
             break
-        for rel in files:
-            if _NOTE_FILE.match(rel):
-                text, problem = _settle_note(rel, set_aside)
-                if not problem:
-                    settled_notes.append(rel)
-            else:
-                text = _settle(rel, rel in retake)
-            if text is None:
-                problem = f"a pull of the handoff repository stopped on a conflict in {', '.join(files)} that devkit " \
-                          f"cannot settle; it aborted the rebase and kept this Mac's commits unpushed"
-                _abort(problem, files)
-                return False, problem
-            _replace(HANDOFF / rel, text)
-            core.git(HANDOFF, "add", "--", rel)
-        nothing = core.git(HANDOFF, "diff", "--cached", "--quiet")[0] == 0
-        core.git(HANDOFF, "-c", "core.editor=true", "rebase", "--skip" if nothing else "--continue", timeout=60)
-        if not _stopped():
-            _rewrite_tasks(settled_notes)
-            return True, ""
-    problem = "a pull of the handoff repository stopped and did not finish; devkit aborted the rebase"
-    _abort(problem, _conflicted())
-    return False, problem
+        if not _settle_all(tree, retake, False, settled_notes, set_aside):
+            break
+        nothing = core.git(tree, "diff", "--cached", "--quiet")[0] == 0
+        rc = core.git(tree, "-c", "core.editor=true", "rebase", "--skip" if nothing else "--continue", timeout=60)[0]
+    if _stopped(tree):
+        core.git(tree, "rebase", "--abort", timeout=60)
+        return ""
+    new = core.gitout(tree, "rev-parse", "HEAD")
+    finished = rc == 0 and core.git(tree, "merge-base", "--is-ancestor", upstream, new)[0] == 0
+    return new if finished else ""
+
+
+def _merge(tree: Path, head: str, upstream: str, retake, settled_notes: list, set_aside: dict) -> str:
+    """Merge `upstream` into this Mac's commits in the private checkout, settling each conflict, when the rebase could
+    not finish. -> the merge commit, or "" when the merge did not finish either."""
+    core.git(tree, "reset", "-q", "--hard", head)
+    message = "sync: merge the remote's commits (the rebase of this Mac's could not finish)"
+    rc, _, _ = core.git(tree, "merge", "-q", "--no-edit", "-m", message, upstream, timeout=60)
+    if rc != 0 and _conflicted(tree) and _settle_all(tree, retake, True, settled_notes, set_aside):
+        rc = core.git(tree, "commit", "-q", "-m", message, timeout=60)[0]
+    new = core.gitout(tree, "rev-parse", "HEAD")
+    if rc != 0 or new == head:
+        core.git(tree, "merge", "--abort", timeout=60)
+        return ""
+    return new
+
+
+def _move_to(head: str, new: str) -> tuple:
+    """Move this Mac's branch and checkout from `head` to `new` (git reset --keep): only the files that differ between
+    them change, and git changes nothing at all when one of those has a change not committed yet (a writer is at
+    work), so a writer's file is never removed or rewritten. -> (ok, the problem when not ok)."""
+    if core.gitout(HANDOFF, "rev-parse", "HEAD") != head:
+        return False, "the handoff repository got a new commit during the pull; the next sync pulls again"
+    rc, out, err = core.git(HANDOFF, "reset", "-q", "--keep", new, timeout=60)
+    if rc != 0:
+        return False, "a pull of the handoff repository left this Mac's files as they were, since a file it would " \
+                      f"change has a change not committed yet; the next sync pulls again ({(err or out).strip()[:160]})"
+    return True, ""
 
 
 def _pushes() -> bool:

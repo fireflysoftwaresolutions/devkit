@@ -140,11 +140,12 @@ dev crew graph --global              # every live session on this Mac (the defau
   approver, and the skills, knowledge, and known pitfalls in the brief, whatever language the step is written in.
 - The plan's `after` dependencies and each lane (the main session, each member) give the ETA as a critical path:
   `api` and `ui` run in parallel, so the ETA counts the longer one, not both.
-- **A step binds only to the launch that names it.** `assign` links a step to a working lane only when that lane
-  holds no other open step and its launch description names the step; otherwise the step waits for a launch of its
-  own, and you are told why. Put the step's name in the launch description (`dev crew brief --step` does). A step
-  delegated into a working lane closes only on that lane's own evidence: the member names it with
-  `dev progress step "…" --step "<name>" --check "…"`.
+- **A step binds to the launch that names it.** A new launch takes the ready step its description names, so put the
+  step's name in the launch description (`dev crew brief --step` does). `assign` gives a step to a member's working
+  lane at once, when its dependencies are done, if that lane's launch names the step or the lane holds no other open
+  step; otherwise the step is queued for the member's lanes (next item), or, when the member does not work, waits
+  for a launch, and you are told why. A step delegated into a working lane closes only on that lane's own evidence:
+  the member names it with `dev progress step "…" --step "<name>" --check "…"`.
 - The step's time is its member's own time, and its `--scope` is the set of files the guard lets that member edit.
   It is also what the member commits: in a crew lane, `dev commit` commits only the staged files inside the scope and
   leaves the rest staged for their owner, so members who share one checkout never commit the files of another. A
@@ -158,12 +159,15 @@ dev crew graph --global              # every live session on this Mac (the defau
   (`src/pkg/*.py` and `src/pkg/studio/host.py`).
 - **A member's own close lands at once.** `dev progress step "…" --step "<name>" --check "…"` from the member ends
   that step right away, and the steps after it start. A review step is the exception: it ends with the member's
-  report, done only when the crew gates pass it. A `--step` on a step the lane does not hold, or still queued for it,
+  report, done only when the crew gates pass it, so a reviewer's lane may hold more than one review (one launch can
+  name them all). On Claude Code, a member's close is refused while a background command it started has not ended: run it
+  again once they end, or stop the ones that are not the step's work with TaskStop. A `--step` on a step the lane does not hold, or still queued for it,
   exits 2 and records nothing. For a long step that stays open, the member records partial evidence with
   `dev progress note "…" --step "<name>" --check "…"`, which the crew gate accepts as the step's record.
-- **A busy member's next step waits in its lane.** Assigning a step to a member whose one working lane holds another
-  open step queues it for that lane: it joins, with its scope, when that step closes, one at a time in the order you
-  assigned them. If the lane ends first, or the member has two working lanes, the step waits for a launch.
+- **A busy member's next step waits in its lanes.** Assigning a step to a member whose working lanes all hold another
+  open step queues it for them: it joins, with its scope, the first lane whose step closes, one at a time in the
+  order you assigned them. To give it to one lane, assign it with that lane's launch description
+  (`--to "<description>"`; the notice prints the line). If the lanes end first, the step waits for a launch.
 - **Check who holds the files first.** Before you assign a scope, or edit files outside your own lane, run
   `dev crew owner <paths>`: it names the member whose step holds each path. A member whose lane ended or went stale
   holds no files. When a step and its files go to another lane, a lane that kept those files may read but not write
@@ -172,7 +176,8 @@ dev crew graph --global              # every live session on this Mac (the defau
   time is its own; close a step only with its evidence and only the step it is about.
 - `dev crew brief` prints the brief and the exact spawn line. Launch every parallel member **in one message**. Then
   do non-overlapping work, and never poll. Before you end a turn while members work, arm `dev watch --wait` (in
-  Claude Code with Bash `run_in_background`, in Codex in the foreground with `--timeout 10`) and name its task id:
+  Claude Code with Bash `run_in_background`; in Codex as a bounded wait in the foreground, with the `--timeout` its
+  host allows: devkit's hint prints `10`, ten minutes, and `0.1` is six seconds) and name its task id:
   it wakes you for their questions, the decisions for the developer, steps that become ready, members that stop or
   are lost, and CI results. Arm it again after each wake while members still work (`wait-and-wake` skill).
 
@@ -205,13 +210,24 @@ files.
   write, and you are told once.
 - **Who is calling:** devkit records every shell call with the agent that made it. Your own plan commands
   (`dev progress start|assign|begin|reopen|skip|done`, `dev crew decide|mode`, `dev crew route --plan --apply`) count
-  as yours only when you type them: run through a script or `bash -c`, they are refused. A member runs its lane
-  commands on their own (not inside `&&`, a pipe, or `$(…)`; a message from a quoted heredoc is fine); read-only crew
-  commands run anywhere: `dev crew graph`, `show`, `rules`, `history`, `next`, and `dev crew raci` without `--set`.
+  as yours only when you type them: run through a script or `bash -c`, they are refused. A member's lane calls
+  (`dev progress …`, `dev crew ask|answer|inbox|…`) go to its own lane. On Claude Code they work inside any command
+  the lane allows (a list, a loop, a pipe, `bash -c`): devkit runs it with the member's lane variable exported, and
+  refuses only what drops that variable, a lane call in a program that sets its children's environment, a
+  double-quoted message that runs a substitution, or anything else the lane refuses. On Codex, a lane call runs as
+  the whole command, or joined to `cd` and reads with `&&` or `;` and piped into a read-only filter (`| tail -5`).
+  Read-only crew commands run anywhere: `dev crew graph`, `show`, `rules`, `history`, `next`, `owner`, and
+  `dev crew raci` without `--set`.
   After a compaction, Claude Code gives your conversation a new session id; devkit moves your open run and its
   working lanes to it (`session.adopt`), so your plan commands keep working.
-- **Read-only members** may run the reads of work state (`dev overview`, `dev standup`, `dev team`,
-  `dev initiative ls|show`, `dev report` without `-o`, `dev plan ls`). A member Responsible for requirements,
+- **Read-only members** (the Code reviewer and the other review-only members) may run the reads of work state
+  (`dev overview`, `dev standup`, `dev team`, `dev initiative ls|show`, `dev report` without `-o`, `dev plan ls`), the
+  repository's tests, and writes in their own scratch folder. They run no program of their own (`python3 -c`,
+  `python3 - <<'EOF'`, `node -e`, or a script in their scratch folder): for a probe, they ask the tech lead to run it,
+  or describe the change with file:line. They may run test runs such as `node --test` on the repository's tests (never
+  a test file in a scratch or temporary folder), arithmetic on numbers, their own `dev watch --wait --for me`, and `rm`, `cp`, `mv`, `touch`,
+  `tee`, or `sed -i` when every path written resolves inside `scratchpad/<member id>/`. A recursive copy, a link, or
+  such a write next to a program run stays refused (`docs/guard.md`, "What read-only lanes may run"). A member Responsible for requirements,
   architecture, research, UX, or docs also records its plan from its review lane with `dev plan new` (in the run's
   project checkout, without `-p` or `-i`) and `dev plan revise <file>` (a plan below that project's plans folder).
 - **Helpers:** a member may launch a helper for a narrow lookup or a slice of its own files. The helper gets the
@@ -231,8 +247,9 @@ files.
 - **Waiting for an answer:** a member keeps working on what does not need the answer. When it is blocked, it waits
   with `dev watch --wait --for me --timeout 9` in the foreground, as a command of its own, and continues with what
   it prints; with no answer, it ends with the question under "Needs from the tech lead." In Claude Code, your
-  `SendMessage` to the member who asked also answers its open questions (devkit records them as answered via
-  SendMessage, with your text); Codex's `send_input` does not, so answer with `dev crew answer` first. A question
+  `SendMessage` to the member who asked answers the questions its text names (`M3: …`; devkit records them as
+  answered via SendMessage, with your text); one that names none answers none, and a notice lists the questions that
+  still wait. Codex's `send_input` answers nothing, so answer with `dev crew answer` first. A question
   whose member ended and holds no open step is **moot**: nobody waits for it, and it needs no answer.
 - **Other agent sessions on this Mac** (another Claude Code or Codex session, any project): talk to them only through
   `dev session` (`ls`, `tell`, `ask`, `answer`, `inbox`, `claim`, `release`, `escalate`), never by editing their
@@ -344,9 +361,17 @@ them).
 
 ## 9. Language and tone
 
-Every member is professional, never theatrical. The names are identities, not role-play. Everyone writes to the
-developer in the developer's language (devkit config `language`, default American English); code, commits, PRs and
-docs stay in American English unless the developer asks otherwise.
+Every member is professional, never theatrical. The names are identities, not role-play.
+
+- **The tech lead replies in the developer's language:** the language of their latest message, else of their earlier
+  messages, else American English; a locale set in devkit config `language` (`auto` by default) fixes it. That covers
+  the final message's prose, questions and decision requests, and the status block's text. The block's marker and
+  labels stay as they are, and roles are written in the reply language: `Backend engineer (Tank)` in English,
+  `Ingeniero de backend (Tank)` in Spanish.
+- **The crew's records stay in American English,** unless the project's own rules or the developer say otherwise:
+  briefs, members' reports to the tech lead, plans, task, lesson and progress records, code, comments, commits, PRs,
+  and docs. A member writes its report in American English even when the developer writes in another language; the
+  tech lead relays it in the developer's language.
 
 ## Done when
 

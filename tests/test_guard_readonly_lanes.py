@@ -54,8 +54,9 @@ class ReadOnlyLanes(unittest.TestCase):
         self.assert_runs("python3 --version && python3 -m unittest tests.test_guard",
                          "/usr/bin/python3 --version && /usr/bin/python3 -m unittest tests.test_guard",
                          "which -a bash; bash --version", "zsh --version", "node --version", "python3 -V")
-        self.assert_refused('python3 -c "print(1)"', "bash -c 'echo x'", "python3 --version x.py",
-                            "bash --version; bash", "node -v -e 1")
+        # an inline program that only reads runs (test_guard_false_refusals.ReadOnlyLanes); one that writes does not
+        self.assert_refused('python3 -c "open(\'lib/x.py\', \'w\')"', "bash -c 'echo x'", "python3 --version x.py",
+                            "bash --version; bash", "node -v -e \"require('fs').rmSync('lib')\"")
 
     def test_command_v_only_looks_names_up(self):
         self.assert_runs("command -v gh dev", "command -v python3", "command -V git", "command -pv ls")
@@ -75,7 +76,7 @@ class ReadOnlyLanes(unittest.TestCase):
                          "for i in $(seq 1 3); do echo $i; done", 'echo "head is `git rev-parse HEAD`"',
                          "wc -l $(git ls-files 'lib/*.py')")
         self.assert_refused("echo $(touch /tmp/pwned)", "cat <(rm -rf build)", "diff <(ls a) >(tee /tmp/out)",
-                            "$(echo rm) -rf build", 'echo "`touch x`"', "echo $((1 + 2))",
+                            "$(echo rm) -rf build", 'echo "`touch x`"', "x=$(cat f); echo $((x + 2))",
                             "echo $(echo $(echo $(echo $(ls))))", "ls $(git log | tee /tmp/x)")
 
     def test_a_continued_line_is_read_as_the_shell_joins_it(self):
@@ -122,9 +123,17 @@ class ReadOnlyLanes(unittest.TestCase):
         self.assert_refused("dev lesson prevent L-x --by guard --ref t --why w", "dev lesson retire L-x",
                             "dev plan revise x.md --why y")
 
-    def test_a_script_from_the_members_own_scratch_folder_runs_and_another_members_does_not(self):
-        self.assert_runs(f"python3 {self.pad}/seraph/probe.py", f"cd {self.pad}/seraph && python3 probe.py data.json")
-        self.assert_refused(f"python3 {self.pad}/tank/probe.py", f"python3 -c 'x' {self.pad}/seraph/p.py",
+    def test_a_read_only_lane_runs_no_script_of_its_own(self):
+        # no reading of a program's code tells every way it may write (map(Path.write_text, …), sorted(key=
+        # Path.unlink), operator.methodcaller, Path.copy): a read-only lane runs no program of its own, even one that
+        # only reads; the tech lead runs a probe for it
+        (self.pad / "seraph" / "probe.py").write_text("import json, sys\nprint(json.dumps(sys.argv))\n")
+        (self.pad / "seraph" / "spawn.py").write_text("import subprocess\nsubprocess.run(['git', 'status'])\n")
+        self.assert_refused(f"python3 {self.pad}/seraph/probe.py",
+                            f"cd {self.pad}/seraph && python3 probe.py data.json",
+                            f"python3 {self.pad}/seraph/spawn.py", f"python3 {self.pad}/seraph/missing.py",
+                            f"python3 {self.pad}/tank/probe.py",
+                            f"python3 -c 'import runpy, sys; runpy.run_path(sys.argv[1])' {self.pad}/tank/p.py",
                             f"python3 -m http.server {self.pad}/seraph/p.py")
 
 

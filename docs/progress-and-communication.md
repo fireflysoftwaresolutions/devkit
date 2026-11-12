@@ -94,6 +94,12 @@ The status, the dashboard, the handoff and the next session all read the plan, s
   step is running, name it with `--step`.
 - **Not someone else's step,** while the crew member who owns it is still working, and **not before its
   dependencies** are done.
+- **Not over a member's running background work.** On Claude Code, a member's `dev progress step "…" --step <name>
+  --check "…"` is refused, with nothing recorded, while a background command the member started has not ended. The
+  refusal names the commands: run it again once they end, or stop the ones that are not the step's work with
+  TaskStop. `dev progress note "…" --step <name>` keeps partial evidence meanwhile.
+- **Reviews close with the report.** A review step ends with its reviewer's report, once the crew gates pass it, so
+  a reviewer's lane may hold more than one review at once, and the report ends every review the lane holds.
 - **Not finished with open steps:** `dev progress done` refuses while steps are pending; close or skip each one.
 - **Not finished over working members:** `dev progress done` refuses while a crew member owns a running step, and
   names each member and step. Wait for the reports, or skip a step on purpose with `dev progress skip`; neither
@@ -267,8 +273,9 @@ one message, never two.
 ### Questions nobody waits on
 
 A question to the tech lead closes when it is answered: with `dev crew answer`, or, on Claude Code, with a
-`SendMessage` from the main session to the member who asked, which devkit records as answered via SendMessage, with
-the text, in the inbox and the audit trail (`crew.message-answered`). A question whose member ended and holds no
+`SendMessage` from the main session to the member who asked that names the question (`M3: …`), which devkit records
+as answered via SendMessage, with the text, in the inbox and the audit trail (`crew.message-answered`). A
+`SendMessage` that names no question answers none, and a devkit notice lists the questions that still wait. A question whose member ended and holds no
 open step is **moot**: nobody waits for it, it wakes nobody, and `dev watch` shows it as moot with the reason (see
 [Work states › Crew messages](work-states.md#crew-messages)).
 
@@ -324,9 +331,17 @@ run.
 
 ## How agents write to you
 
-The `communicating` skill holds a template for every kind of message. Its rules apply to all of them: use American English
-by default, the status block first and then the answer, plain words, no filler or buzzwords, real evidence instead of
+The `communicating` skill holds a template for every kind of message. Its rules apply to all of them: reply in your
+language, the status block first and then the answer, plain words, no filler or buzzwords, real evidence instead of
 claims, short updates, and honest estimates given as ranges.
+
+**Your language.** Agents reply in the language of your latest message; when it is too short to tell (`ok`,
+`continue`), in the language of your earlier messages; with none, American English. A locale in devkit config
+`language` fixes it instead. The reply's prose, its questions and decision requests, and the status block's text follow
+your language; the block's marker and labels (`[Firefly> DevKit]`, Done, Check, Progress, Crew, You, Next) do not, and
+crew roles are written in your language. Code, comments, commits, PRs, docs, plans, records, crew briefs, and members'
+reports to the tech lead stay in American English unless the project's own rules or you say otherwise. A context line
+before each turn names the reply language, and the Stop hook sends a final message in the wrong language back once.
 
 **Nothing comes before the status block.** A message that ends the agent's turn (everything it writes after its last
 tool call) opens with the block, and the template's own content goes below it: the verdict, a correction, a greeting,

@@ -21,7 +21,7 @@ sys.path.insert(0, str(ROOT / "tests"))
 
 from devkit import audit, canary, cli, core, crew, hooks, mcp, selfcheck, ui  # noqa: E402
 from devkit import progress as pg  # noqa: E402
-from test_progress import TempState as ProgressState  # noqa: E402
+from test_progress import TempState as ProgressState, member_call  # noqa: E402
 
 try:
     import tomllib  # Python 3.11+
@@ -60,10 +60,9 @@ def run_cli(*argv, from_agent=None):
     a = cli.build_parser().parse_args(list(argv))
     out, err = io.StringIO(), io.StringIO()
     saved = os.environ.pop("DEVKIT_FROM_AGENT", None)
-    if from_agent:
-        os.environ["DEVKIT_FROM_AGENT"] = from_agent
     try:
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        with (member_call(from_agent, "dev crew") if from_agent else contextlib.nullcontext()), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             rc = a.fn(a) or 0
     finally:
         os.environ.pop("DEVKIT_FROM_AGENT", None)
@@ -557,6 +556,19 @@ class CrewSessionTests(unittest.TestCase):
             rc, _, err = run_cli("crew", "answer", "M9", "x")
             self.assertEqual(rc, 2)
             self.assertIn("no message M9", err)
+
+    def test_inbox_all_prints_messages_already_delivered_whole(self):
+        # a wait or a hook that delivered a question left `dev crew inbox` at "no new messages", and no command
+        # printed the delivered text again
+        with TempState() as t:
+            pg.start("Parser", plan=["parse", "review"])
+            t.launch()
+            question = "Should the parser accept empty lines? " + "Detail. " * 120 + "End of the question."
+            run_cli("crew", "ask", question, from_agent="a1")
+            run_cli("crew", "inbox")  # delivered to the tech lead
+            rc, out, _ = run_cli("crew", "inbox", "--all")
+            self.assertEqual(rc, 0)
+            self.assertIn(f"M1 from Senior engineer (Neo): {question}", out)
 
     def test_ask_tells_the_asker_the_wait_that_brings_the_answer(self):
         # it said the answer arrives "with their next tool call or prompt": nothing told a member how to wait for it
@@ -1053,10 +1065,13 @@ class WiringTests(unittest.TestCase):
                     'dev crew route "add a migration"'):
             with self.subTest(cmd=cmd):
                 self.assertEqual(route(cmd), f"DEVKIT_FROM_AGENT=a1 {cmd}")
-        for cmd in ("dev crew", "dev crew sync", "dev crew show neo", "dev crew next", "dev crewmode",
-                    "dev crew ask x && rm -rf build"):
+        for cmd in ("dev crew", "dev crew sync", "dev crew show neo", "dev crew next", "dev crewmode"):
             with self.subTest(cmd=cmd):
                 self.assertIsNone(route(cmd))
+        # Claude Code stamps the whole command for the member and approves nothing; the delete is judged by
+        # guard.check before routing
+        self.assertEqual(route("dev crew ask x && rm -rf build"),
+                         "export DEVKIT_FROM_AGENT=a1; readonly DEVKIT_FROM_AGENT; dev crew ask x && rm -rf build")
         self.assertIsNone(route("dev crew inbox", aid=None))  # the main session: untouched
 
     def test_devkit_crew_is_a_read_only_mcp_tool(self):

@@ -82,8 +82,8 @@ list in the browser, add tests, and write a short README that explains how to op
 
 What happens, and what you see:
 
-1. **devkit routes the request.** Codex declares the kind of work when it plans, in any language. That declaration
-   selects the responsible crew member: front-end work goes to the Frontend engineer (Trinity), with review by
+1. **The tech lead routes the request.** Codex declares the kind of work when it plans, in any language. That
+   declaration selects the responsible crew member: front-end work goes to the Frontend engineer (Trinity), with review by
    the Code reviewer (Seraph).
 2. **Codex answers as the tech lead (Morpheus).** He posts a plan and an estimate. Work under ten minutes he does
    himself; this request gets steps for the crew.

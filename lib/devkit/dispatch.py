@@ -218,6 +218,7 @@ def decline(which: str, why: str, from_agent: str | None = None, cwd: str | None
     now = now or time.time()
     if not (why or "").strip():
         raise StepError("say why: --why \"…\"")
+    from_agent = progress._as_lane(from_agent, cwd)  # a lane variable counts only for a member whose call is open
     agent, sid = current_session(cwd)
     with progress._tx(agent, sid):
         run = normalize(load_run(agent, sid) or {})

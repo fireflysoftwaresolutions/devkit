@@ -208,8 +208,10 @@ A detour is one to five steps. Each step is one of:
   | `sync-retry` | `dev` | Run `` `dev bug sync` ``, then retry `` `dev <dev>` ``. |
   | `ask-update` | `version` | Ask the developer to run `` `dev update` ``: the fix is in `<version>`. |
 
-- **A `dev` command** made only of devkit's own subcommands and flags that take no value, such as `test --failed`:
-  no values, arguments, or paths. A leading `dev` is accepted, so `--dev "dev push"` records the step `push`. A
+- **A `dev` command** made only of devkit's own subcommands and their flags, such as `test --failed`: no arguments
+  or paths, and no value except a number for a flag that takes one (up to six digits and three decimals) or one of a
+  flag's listed choices, written as two words or with `=`, such as `watch --wait --for me --timeout 9`. These cannot
+  name anything of this Mac. A leading `dev` is accepted, so `--dev "dev push"` records the step `push`. A
   refused step says, word by word, which word is a value or an argument and which flag takes a value or is not one
   of that command.
 - **Free text** of at most 200 characters. A detour with free text is held for review on its author's Mac and never

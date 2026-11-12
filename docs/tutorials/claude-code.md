@@ -78,19 +78,21 @@ list in the browser, add tests, and write a short README that explains how to op
 
 Here is what happens, and what you see:
 
-1. **devkit routes the request.** Along with your request, devkit tells Claude which kind of work this is and who on
-   the crew does it. For this request: front-end work, done by the Frontend engineer (Trinity) and approved by the
-   Code reviewer (Seraph). You do not see this hint; you see its effect in the plan.
-2. **Claude answers as Morpheus, the tech lead.** Work that takes less than ten minutes, he does himself. Bigger work
+1. **devkit reminds the tech lead how to route.** Along with your request, devkit reminds Claude that it is the tech
+   lead: declare the request's kinds of work by their ids from the catalog and route each to the member the RACI
+   makes Responsible. For this request, the tech lead declares front-end work, done by the Frontend engineer (Trinity)
+   and approved by the Code reviewer (Seraph). You do not see this reminder; you see its effect in the plan.
+2. **Claude answers as the tech lead (Morpheus).** Work that takes less than ten minutes, he does himself. Bigger work
    gets a plan first: a status block, then the steps with an estimate. For example:
 
    ```markdown
    **Plan · Reading list** — ~45 min (4 steps)
-   1. design (Morpheus) 2. page (Trinity) 3. tests (Mouse) 4. review (Seraph)
+   1. design, Tech lead (Morpheus) 2. page, Frontend engineer (Trinity) 3. tests, QA engineer (Mouse)
+   4. review, Code reviewer (Seraph)
    Checks: the tests pass in a browser · Risks: none yet · I need from you: nothing
    ```
 
-3. **The crew starts.** Morpheus launches each member as an agent. Claude Code shows each one in the conversation
+3. **The crew starts.** The tech lead launches each member as an agent. Claude Code shows each one in the conversation
    while it runs, with its description, for example `Frontend engineer (Trinity): reading list page`. Members work
    in parallel only when their steps do not change the same files.
 4. **Progress updates arrive** after each finished step, and every ten minutes or so while a long step runs. Each one
@@ -134,8 +136,8 @@ notification when a run finishes or gets blocked, so you can leave the window.
 devkit stops and asks in three cases. The **You** line names each one:
 
 - **A decision that is yours.** A crew member reaches a choice, for example whether finished books move to the
-  bottom of the list. In guided mode, the default, the member stops and Morpheus asks you, with the options and his
-  recommendation. Answer in the conversation; Morpheus records your answer and the member goes on.
+  bottom of the list. In guided mode, the default, the member stops and the tech lead asks you, with the options and his
+  recommendation. Answer in the conversation; the tech lead records your answer and the member goes on.
 - **An action that cannot be undone or leaves your Mac**, such as a push to GitHub, a pull request, a merge, a release,
   or deleting data. It waits for your OK in every mode, unless you approved it in advance.
 - **A file outside your development folder.** devkit's guard asks you to confirm before Claude Code writes a file
@@ -147,7 +149,7 @@ and Claude follows it.
 
 ### The crew graph
 
-The crew graph shows the whole run at once, with Morpheus, every step and what it waits for, the crew member on each
+The crew graph shows the whole run at once, with the tech lead (Morpheus), every step and what it waits for, the crew member on each
 step, and what waits for you. Open a second Terminal window (Command-N) and run:
 
 ```bash
@@ -162,12 +164,12 @@ output looks like this:
   ✓ done  ▸ running  ◇ ready  ○ waiting  ✗ blocked  – skipped  ! recheck · [kind of work] · after: the steps it waits for
   ● Tech lead (Morpheus) · main session · claude 3f2a9c1e
   ├─ Run · Reading list
-  │  running · mode guided · 2/4 · ETA ~15m
-  │  ├─ ✓ 1. design · done · Tech lead (Morpheus)
+  │  running · mode guided · 1 of 4 steps · now 2. page · 14m active of ~45m · ETA ~20m–35m · 1 agent working
+  │  ├─ ✓ 1. design · done · Tech lead (Morpheus) · [plan]
   │  ├─ ▸ 2. page · running · Frontend engineer (Trinity) · [frontend] · after 1
-  │  │  └─ ● Frontend engineer (Trinity) · Trinity: reading list page · running · 12m
-  │  ├─ ○ 3. tests · waiting for 2 · QA engineer (Mouse) · after 2
-  │  └─ ○ 4. review · waiting for 2, 3 · Code reviewer (Seraph) · after 2, 3
+  │  │  └─ ● Frontend engineer (Trinity) · page · working · 12m
+  │  ├─ ○ 3. tests · waiting for 2 · QA engineer (Mouse) · [testing] · after 2
+  │  └─ ○ 4. review · waiting for 2, 3 · Code reviewer (Seraph) · [review] · after 2, 3
   └─ Approvals owed
      └─ Code reviewer (Seraph) approves 2. page
 ```
@@ -225,6 +227,9 @@ works there. No IDE session has been recorded in devkit's checks yet: if somethi
 | `dev`, `dcd`, or `claude` is not found | Open a new Terminal window. Still not found: run `dev doctor` from `~/.local/bin/dev doctor` |
 
 [Troubleshooting](../troubleshooting.md) has more problems and their fixes.
+
+Next, follow [a request from start to release](request-to-release.md): the plan by kinds of work, the crew's lanes
+and scopes, reviews, and shipping with one push and one CI run.
 
 See also [Where to use devkit](../surfaces.md), [The crew](../crew.md), and
 [Progress and communication](../progress-and-communication.md).

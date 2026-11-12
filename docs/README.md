@@ -11,7 +11,7 @@ machine.
 | --- | --- |
 | [Getting started](getting-started.md) | Your first install step by step, even without a terminal habit; the setup wizard, the pinned copy, Tab completion and the zsh helpers (`dev setup shell`), onboarding another developer, the first-day checklist, updating and `dev update --check`, what devkit touches |
 | [Where to use devkit](surfaces.md) | The six surfaces compared: hooks, guard, crew, routing, skills in briefs, and status block checks on each, and which tutorial to follow |
-| [Concepts](concepts.md) | Workspace layout, project ids, how work is organized, from plan to operate, the handoff repository and notes, worktrees, the guard, the status block, the session-start welcome, and background sync and scheduled jobs |
+| [Concepts](concepts.md) | How devkit fits together (its parts, what happens in a turn, who checks what), workspace layout, project ids, how work is organized, from plan to operate, the handoff repository and notes, worktrees, the guard, the status block, the session-start welcome, and background sync and scheduled jobs |
 
 ## Tutorials: your first task
 
@@ -25,6 +25,12 @@ block, progress updates, approvals, the crew graph, and the dashboard.
 | [Codex CLI](tutorials/codex-cli.md) | Codex in Terminal (not verified live yet) |
 | [Codex in the ChatGPT app](tutorials/chatgpt-codex.md) | Codex in the ChatGPT desktop app (not verified live yet) |
 | [Claude Desktop chat and Cowork](tutorials/desktop-chat-and-cowork.md) | Status, plans, and reports through the devkit extension; code changes go to the Code tab |
+
+Then follow one request the whole way:
+
+| Tutorial | What you learn |
+| --- | --- |
+| [A request from start to release](tutorials/request-to-release.md) | How the tech lead plans by kinds of work and routes each step by the RACI, how members work in their own files and report, how reviews approve, and how the change ships with one push and one CI run |
 
 ## Work with devkit
 

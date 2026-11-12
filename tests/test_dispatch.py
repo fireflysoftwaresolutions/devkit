@@ -1,16 +1,18 @@
 # Copyright (c) 2026 Firefly Software Solutions Inc.
 # SPDX-License-Identifier: Apache-2.0
 """Who does what: routing, delegation between crew members, declines and dispatch of ready work."""
+import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from devkit import dispatch  # noqa: E402
 from devkit import progress as pg  # noqa: E402
-from test_progress import TempState, repo_with_worktrees  # noqa: E402
+from test_progress import TempState, member_call, repo_with_worktrees  # noqa: E402
 
 T0 = 1_800_000_000.0
 
@@ -185,6 +187,24 @@ class DelegationTests(unittest.TestCase):
             self.assertEqual((s["state"], s["owner"], s["label"]), ("pending", "main", ""))
             ctx = pg.on_tool_done("claude", {"session_id": "s1"})
             self.assertIn("declined", ctx)
+
+    def test_a_forged_lane_variable_cannot_decline_another_lanes_step(self):
+        # a member's child shell gave the lane variable the owner's id; no open call of that lane backs it, so the
+        # decline acts for no lane and the step stays the owner's. The owner, with its call open, declines it
+        with TempState():
+            pg.start("Feature", plan=["parser=30m"], now=m(0))
+            launch("a2", "devkit:dozer", "Dozer: schema", m(1))
+            launch("a3", "devkit:neo", "Neo: parser", m(1))
+            dispatch.delegate("add the export column", to="Dozer", now=m(2))
+            step = pg.load_run("claude", "s1")["plan"][-1]["name"]
+            with member_call("a3"), mock.patch.dict(os.environ, {"DEVKIT_FROM_AGENT": "a2"}):
+                with self.assertRaises(ValueError):
+                    dispatch.decline(step, "not mine to keep", from_agent=os.environ["DEVKIT_FROM_AGENT"], now=m(3))
+            self.assertNotEqual(pg.load_run("claude", "s1")["plan"][-1]["owner"], "main")  # still the owner's
+            with member_call("a2"):
+                s = dispatch.decline(step, "it needs a migration plan", from_agent=os.environ["DEVKIT_FROM_AGENT"],
+                                     now=m(4))
+            self.assertEqual((s["state"], s["owner"]), ("pending", "main"))
 
     def test_route_the_whole_plan(self):
         with TempState():

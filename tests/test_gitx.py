@@ -852,6 +852,124 @@ class LocalCiTests(unittest.TestCase):
             self.assertEqual(dev("ci", "--evidence")[0], 2)
 
 
+# A plan job writes the work to do to $GITHUB_OUTPUT, a matrix job runs one leg per planned part, and a gate job checks
+# every result. `dev ci --run` skipped the plan's output step as plumbing, judged `if: needs.…` unknown, and ran the
+# gate with its needs.* variables empty, so it failed in 0 s.
+PLANNED = """name: CI
+on: [pull_request]
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      jobs: ${{ steps.parts.outputs.jobs }}
+      plan: ${{ steps.parts.outputs.plan }}
+      skip: ${{ steps.tested.outputs.skip }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Already tested on its pull request?
+        id: tested
+        if: github.event_name == 'push'
+        run: echo "skip=true" >> "$GITHUB_OUTPUT"
+      - name: Parts
+        id: parts
+        run: |
+          echo "jobs=unit docs" >> "$GITHUB_OUTPUT"
+          {
+            echo "plan<<EOF"
+            echo '{"include": [{"name": "part one", "shard": "1/2"}, {"name": "part two", "shard": "2/2"}]}'
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+      - name: Say the plan
+        env:
+          PARTS: ${{ steps.parts.outputs.jobs }}
+        run: echo "planned $PARTS" >> "$SHARDS_LOG"
+  run:
+    needs: plan
+    if: needs.plan.outputs.jobs != '' && needs.plan.outputs.skip != 'true'
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.plan) }}
+    steps:
+      - name: Check
+        env:
+          JOBS: ${{ needs.plan.outputs.jobs }}
+        run: echo "${{ matrix.shard }} $JOBS" >> "$SHARDS_LOG"
+  check:
+    needs: [plan, run]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every job passed
+        env:
+          PLAN: ${{ needs.plan.result }}
+          RUN: ${{ needs.run.result }}
+          SKIP: ${{ needs.plan.outputs.skip }}
+        run: |
+          echo "plan: $PLAN, jobs: $RUN, skip: ${SKIP:-false}" >> "$SHARDS_LOG"
+          [ "$PLAN" = "success" ] && { [ "$RUN" = "success" ] || { [ "$SKIP" = "true" ] && [ "$RUN" = "skipped" ]; }; }
+"""
+
+
+class JobOutputsTests(unittest.TestCase):
+    def run_ci(self, s, workflow):
+        s.write(".github/workflows/ci.yml", workflow)
+        s.branch("feat/planned")
+        s.commit("ci: plan the jobs")
+        log = s.root / "shards.log"
+        with mock.patch.dict(os.environ, {"SHARDS_LOG": str(log)}):
+            rc, out, err = dev("ci", "--run")
+        return rc, out, err, log.read_text().splitlines() if log.exists() else []
+
+    def test_a_plan_jobs_outputs_drive_the_if_the_matrix_and_the_gate_of_the_jobs_after_it(self):
+        with Sandbox() as s:
+            rc, out, err, log = self.run_ci(s, PLANNED)
+            self.assertEqual(rc, 0, out + err)
+            self.assertEqual(log, ["planned unit docs", "1/2 unit docs", "2/2 unit docs",
+                                   "plan: success, jobs: success, skip: false"])
+            steps = [(x["job"], x["step"]) for x in gitx.evidence(s.ctx())["steps"]]
+            self.assertEqual(steps, [("plan", "Parts"), ("plan", "Say the plan"), ("part one", "Check"),
+                                     ("part two", "Check"), ("check", "Every job passed")])
+
+    def test_a_job_whose_if_on_a_plan_output_is_false_is_skipped_and_the_gate_sees_it_skipped(self):
+        with Sandbox() as s:
+            skipping = PLANNED.replace("        if: github.event_name == 'push'\n", "")  # already tested: skip=true
+            rc, out, err, log = self.run_ci(s, skipping)
+            self.assertEqual(rc, 0, out + err)
+            self.assertEqual(log, ["planned unit docs", "plan: success, jobs: skipped, skip: true"])
+            self.assertIn("run", out)
+            self.assertIn("is false here", out)
+
+    def test_a_needs_value_that_cannot_be_known_here_blocks_the_evidence_and_says_which(self):
+        # the matrix job runs on Windows, so its result is not known on this Mac: the gate that reads it is not run
+        with Sandbox() as s:
+            windows = PLANNED.replace("    name: ${{ matrix.name }}\n    runs-on: ubuntu-latest",
+                                      "    name: ${{ matrix.name }}\n    runs-on: windows-latest")
+            rc, out, err, log = self.run_ci(s, windows)
+            self.assertEqual(rc, 1, out + err)
+            self.assertIn("could not run here", err)
+            self.assertNotIn("local CI failed", err)
+            self.assertEqual(log, ["planned unit docs"])  # the gate did not run with an empty RUN
+            self.assertRegex(out, r"check › Every job passed .*needs\.run\.result")
+            self.assertIsNone(gitx.evidence(s.ctx()))
+
+    def test_a_resumed_run_keeps_the_plan_step_with_the_outputs_it_recorded(self):
+        with Sandbox() as s:
+            self.assertEqual(self.run_ci(s, PLANNED)[0], 0)
+            rc, out, err = dev("ci", "--run", "--resume")
+            self.assertEqual(rc, 0, out + err)
+            self.assertIn("plan › Parts  kept: passed on", out)
+            self.assertIn("part two › Check  kept: passed on", out)  # the legs come from the recorded plan
+            self.assertEqual(gitx.evidence(s.ctx())["how"], "resumed")
+
+    def test_a_matrix_from_an_expression_follows_githubs_include_and_exclude(self):
+        legs = gitx._matrix_legs({"os": ["mac", "linux"], "py": [9, 13], "exclude": [{"os": "linux", "py": 13}],
+                                  "include": [{"os": "mac", "arch": "arm"}, {"os": "bsd"}, {"py": 9, "os": "x"}]})
+        self.assertEqual(legs, [{"os": "mac", "py": 9, "arch": "arm"}, {"os": "mac", "py": 13, "arch": "arm"},
+                                {"os": "linux", "py": 9}, {"os": "bsd"}, {"py": 9, "os": "x"}])
+
+
 def _workflow(steps: dict) -> str:
     """A pull-request workflow with one job whose steps are {name: script}, each script a `run: |` block."""
     body = "".join(f"      - name: {n}\n        run: |\n" + "".join(f"          {ln}\n" for ln in r.splitlines())
@@ -962,6 +1080,86 @@ class RunnerSetupInsideACheckTests(unittest.TestCase):
             self.assertIn("exit 127", out)
             self.assertIn("brew install devkit-absent-scanner", out)
             self.assertFalse((d / "brew-ran").exists())
+            self.assertIsNone(gitx.evidence(s.ctx()))
+
+
+# A retry wrapper the way workflows keep it: it runs the command it is given, and before a second try it repairs the
+# runner's package manager as root.
+APT_RETRY = """#!/usr/bin/env bash
+# Run an install that uses apt again when a mirror is slow: the runner's dpkg is repaired first.
+set -u
+for try in 1 2; do
+  if [ "$try" -gt 1 ]; then
+    sudo dpkg --configure -a || true
+  fi
+  timeout 900 "$@" && exit 0
+  echo "apt-retry: try $try of '$*' did not finish"
+  sleep 20
+done
+exit 1
+"""
+
+
+class RunnerSetupNeverRunsAsRootTests(unittest.TestCase):
+    """`dev ci --run` on macOS never replays a hosted runner's root setup: fake sudo, timeout and sleep commands on
+    the PATH write down every call, and none may happen."""
+
+    def run_steps(self, s, steps: dict, gradlew=False):
+        s.write(".github/workflows/ci.yml", _workflow(steps))
+        s.write(".github/scripts/apt-retry.sh", APT_RETRY)
+        if gradlew:  # installs only off CI, then passes its arguments on
+            (s.write("gradlew", '#!/bin/sh\n[ -n "$CI" ] || npm ci\nexec echo "$@"\n')).chmod(0o755)
+        s.write("sub/marker.txt", "x")
+        s.branch("feat/ci")
+        s.commit("ci: add the workflow")
+        fake, called = s.root / "fakebin", s.root / "called.log"
+        fake.mkdir()
+        for tool, rc in (("sudo", 0), ("timeout", 1), ("sleep", 0)):
+            (fake / tool).write_text(f'#!/bin/sh\necho "{tool} $*" >> "$CALLED_LOG"\nexit {rc}\n')
+            (fake / tool).chmod(0o755)
+        path = f"{fake}{os.pathsep}{os.environ.get('PATH', '')}"
+        with mock.patch.dict(os.environ, {"PATH": path, "CALLED_LOG": str(called)}):
+            rc, out, err = dev("ci", "--run")
+        return rc, out, err, called.read_text().splitlines() if called.exists() else []
+
+    # 3fa845cc7d63: dev ci --run ran `sudo rm -rf` and `sudo apt-get` from a runner's free-disk and package steps
+    def test_inline_sudo_rm_and_sudo_apt_get_are_skipped_and_never_run(self):
+        with Sandbox() as s:
+            rc, out, err, called = self.run_steps(s, {
+                "Free disk": "sudo rm -rf /usr/share/dotnet /opt/ghc \"$AGENT_TOOLSDIRECTORY\"",
+                "Packages": "sudo apt-get update\nsudo apt-get install -y --no-install-recommends libvips-dev",
+                "Packages from a mirror": "sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update && "
+                                          "sudo apt-get -o Acquire::Retries=3 install -y libreoffice-writer",
+                "Unit": "test -f sub/marker.txt"})
+            self.assertEqual(rc, 0, out + err)
+            self.assertEqual(called, [])
+            self.assertRegex(out, r"security › Free disk .*runner prep \(")
+            self.assertRegex(out, r"security › Packages .*runner prep \(")
+            self.assertRegex(out, r"security › Packages from a mirror .*runner prep \(apt-get update")
+
+    # A step that hands its install to a retry script: on a Mac without `timeout` the first try fails and the second
+    # runs `sudo dpkg` before it. The install it hands over is the runner's setup, so the step is skipped whole.
+    def test_an_install_handed_to_a_retry_script_is_skipped_and_its_sudo_never_runs(self):
+        with Sandbox() as s:
+            rc, out, err, called = self.run_steps(s, {
+                "Chromium's system libraries": "bash .github/scripts/apt-retry.sh npx playwright install-deps chromium",
+                "LibreOffice": "bash .github/scripts/apt-retry.sh sh -c 'sudo apt-get update && sudo apt-get install "
+                               "-y libreoffice-writer'",
+                "Unit": "test -f sub/marker.txt",
+                "Build": "./gradlew build"}, gradlew=True)
+            self.assertEqual(rc, 0, out + err)
+            self.assertEqual(called, [])
+            self.assertRegex(out, r"Chromium's system libraries .*runner prep \(playwright install-deps")
+            self.assertRegex(out, r"LibreOffice .*runner prep \(apt-get update")
+            # a script that only passes its arguments on (gradlew's exec "$JAVACMD" "$@") is not read: it runs
+            self.assertRegex(out, r"(?m)^\s*✓ security › Build\s")
+
+    def test_a_check_handed_to_a_retry_script_that_runs_sudo_blocks_the_evidence(self):
+        with Sandbox() as s:
+            rc, out, err, called = self.run_steps(s, {"Unit": "bash .github/scripts/apt-retry.sh grep -q x sub/marker.txt"})
+            self.assertEqual(rc, 1, out + err)
+            self.assertIn("could not run here", err)
+            self.assertEqual(called, [])
             self.assertIsNone(gitx.evidence(s.ctx()))
 
 
@@ -1155,6 +1353,33 @@ class PrTests(unittest.TestCase):
             self.assertIn("- test(invoice): cover empty invoices", body)
             self.assertIn("- Local CI: python3 -m unittest: 42 passed", body)
             self.assertIn("PR #7 opened as draft", out)
+
+    # devkit's `language` setting is the language of its replies (default auto); pull requests stay in American
+    # English unless --lang names another
+    def test_create_fills_the_english_template_whatever_the_reply_language_unless_lang_names_one(self):
+        def body(*argv):
+            rc, out, err = dev("pr", "create", "--draft", *argv)
+            self.assertEqual(rc, 0, out + err)
+            call = s.gh.called("pr", "create")[0]
+            return call[call.index("--body") + 1]
+        for language in ("es-ES", "auto"):
+            with self.subTest(language=language), Sandbox() as s, mock.patch.dict(core.CFG, {"language": language}):
+                self.pushed(s)
+                sent = body()
+                self.assertIn("## What and why", sent)
+                self.assertNotIn("Qué y por qué", sent)
+        with Sandbox() as s, mock.patch.dict(core.CFG, {"language": "auto"}):
+            self.pushed(s)
+            self.assertIn("## Qué y por qué", body("--lang", "es"))
+
+    def test_a_lang_that_is_not_a_locale_never_names_a_template_file(self):
+        # --lang becomes part of the template's file name (pull_request.<lang>.md): a path never reaches it
+        for given in ("../../x", "es/../../etc", "es-ES.md", "", "auto"):
+            with self.subTest(given=given):
+                self.assertEqual(gitx.lang_of(argparse.Namespace(lang=given)), "en-US")
+        for given in ("es", "es-ES", "pt_BR", "fr-FR"):
+            with self.subTest(given=given):
+                self.assertEqual(gitx.lang_of(argparse.Namespace(lang=given)), given)
 
     def test_create_with_a_body_file_is_checked_and_cleaned(self):
         with Sandbox() as s:

@@ -20,7 +20,7 @@ event happens, and repair what drifted when the checks show it.
 | Step | pending, running, blocked, done, skipped, unverified | `dev progress step\|reopen\|skip\|confirm`; a member's report |
 | Crew lane | running, done, unverified, stopped, lost | the launch, the member's report, TaskStop, an interruption, silence |
 | Decision | pending (or moot), decided, withdrawn, closed | `dev crew decide`, `dev crew withdraw`, the end of its run |
-| Crew message | question (waits, or moot), notice and answer (never wait) | `dev crew ask`, `dev crew answer`, a `SendMessage` to the member who asked, the end of its run |
+| Crew message | question (waits, or moot), notice and answer (never wait) | `dev crew ask`, `dev crew answer`, a `SendMessage` to the member who asked that names the question, the end of its run |
 | Wait | live, expired, superseded, ended | `dev watch --wait`; its timeout, a newer wait, what it printed; `dev watches` lists them |
 | CI watch | live, expired, ended | `dev ci watch --wait`; `dev ci watches` lists them |
 | Install | the pinned release, or an older session | `dev install`, `dev update`, a restart |

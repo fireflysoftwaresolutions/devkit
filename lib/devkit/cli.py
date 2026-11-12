@@ -180,7 +180,7 @@ def _state(co):
 
 def commit_push(push=True, quiet=False):
     """Commit what changed in the handoff repository and push it. A rebase left stopped is aborted first, a pull
-    settles conflicts in items and stops cleanly on any other (work.rebase_fetched), and every failure is recorded in
+    settles every conflict in a private checkout (work.rebase_fetched), and every failure is recorded in
     handoff-push-failed.json, which `dev status` shows until a push succeeds. The commit, the fetch and the push hold
     work._repo_lock; the rebase holds the notes lock first, so it runs after that lock is released."""
     from . import audit, identity, work
@@ -4472,8 +4472,8 @@ def build_parser():
     x.add_argument("--hint", dest="steps", action="append", type=lambda v: ("hint", v), metavar="'NAME SLOT=VALUE …'",
                    help="a hint template: use-tool, from-root, one-at-a-time, scratch-tool, sync-retry, ask-update")
     x.add_argument("--dev", dest="steps", action="append", type=lambda v: ("dev", v), metavar="'COMMAND'",
-                   help="a dev subcommand and only its flags that take no value, such as 'test --failed' (no "
-                        "values, arguments or paths)")
+                   help="a dev subcommand and its flags, such as 'test --failed' or 'watch --wait --timeout 9': a "
+                        "flag's value only a number or one of its listed choices (no other values, arguments or paths)")
     x.add_argument("--text", dest="steps", action="append", type=lambda v: ("text", v), metavar="'TEXT'",
                    help="free text, at most 200 characters, held for review: no URL, no path of this Mac and none "
                         "of the shell forms |, >, <, ;, &&, $( or a backtick")

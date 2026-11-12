@@ -62,7 +62,7 @@ HEARTBEAT = 60.0  # seconds between two reconciles of the session's run while it
 REGISTER_WAIT = 30.0  # seconds a new wait waits for another registration to finish (it lists, supersedes, writes)
 MAX_EVENTS = 20  # events one wake takes and prints; the rest waits for the next
 NOTICES_MAX = 20  # notices kept in a session record
-LINE_MAX = 300  # characters of a member's or CI's text in one line
+LINE_MAX = 300  # characters of CI's or a decision's text in one line; a crew message is printed whole
 # escape sequences (ECMA-48): CSI, 7-bit or 8-bit; OSC, ended by BEL or ST; and every other ESC sequence (ESC c
 # resets the terminal, ESC 7 and ESC 8 save and restore the cursor, ESC ( B picks a character set)
 _ANSI = re.compile(r"(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]|(?:\x1b\]|\x9d)[^\x07\x1b\x9c]*(?:\x07|\x1b\\|\x9c)?|"
@@ -131,12 +131,18 @@ def _ci_line(text: str) -> str:
     return out + (" · first error: dev ci status (untrusted CI output)" if "untrusted CI output" in str(text) else "")
 
 
+def _message_text(m: dict) -> str:
+    """A crew message's text whole, as one inert span: the line is the only place the reader gets it, since taking
+    it marks it delivered. Bounded by what a message holds (MESSAGE_MAX), not cut to LINE_MAX (redaction may lengthen
+    the stored text)."""
+    from . import progress
+    return clean(str(m.get("text") or "")[:progress.MESSAGE_MAX], None)
+
+
 def _message_event(run: dict, m: dict, me: str, agent: str = "") -> dict:
     from . import progress
     frm, mid, who = m.get("from") or "", m.get("id") or "", _who(m.get("from_name"))
-    # Codex consumes this line as the message, with no background result that can supply its missing tail.
-    # Keep the storage bound, then sanitize without a preview cut (redaction may lengthen the stored text).
-    text = clean(str(m.get("text") or "")[:progress.MESSAGE_MAX], None) if agent == "codex" else clean(m.get("text"))
+    text = _message_text(m)
     if frm == "ci":
         return _ev("ci", mid, True, _ci_line(m.get("text")), m.get("ts"))
     if progress._asks(m):
@@ -1042,7 +1048,7 @@ def cmd_watch(a) -> int:
     for m in moot:  # told already, and still unanswered: nobody waits on it any more
         if m.get("id") not in seen:
             print(f"  devkit · moot: question {m.get('id')} from {_who(m.get('from_name'))} "
-                  f"(“{clean(m.get('text'))}”): {progress.moot_message_reason(run, m)}")
+                  f"(“{_message_text(m)}”): {progress.moot_message_reason(run, m)}")
     print("can still arrive: " + ("; ".join(why) if why else "nothing"))
     print("armed: " + (", ".join(w["id"] for w in live) if live else f"no wait · arm one: {again(agent, me)}"))
     return 0

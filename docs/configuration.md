@@ -39,10 +39,42 @@ Run `dev config edit` to open it and validate it, `dev config show` to print the
 | `hosts` | `["github"]` | Git hosts you use: `github`, `gitlab`, `bitbucket`, `azure-devops`. devkit installs their CLIs, `dev doctor` checks the sign-in, and `dev ci status` reads their pipelines |
 | `clouds` | `[]` | Clouds and infrastructure tools you use: `aws`, `azure`, `gcp`, `digitalocean`, `kubernetes`, `terraform` (OpenTofu). devkit installs their CLIs and `dev doctor` checks the sign-in |
 | `packages.auto` | `true` | `dev install` repairs missing Homebrew and npm tools for selected stacks, frameworks, hosts, and clouds; `false` also skips host-extension installation |
-| `language` | `en-US` | The language for replies and documents, which the `communicating` skill asks agents to follow, and the language of the pull request template that `dev pr create` fills (`es-ES` uses the Spanish one). devkit does not put it in the session context, so also state another language in your [personal agent rules](#personal-agent-rules) |
+| `language` | `auto` | The language agents reply to you in. `auto` follows your messages; a locale such as `es-ES` or `en-US` fixes it. `dev config set language` takes only `auto` or a locale (`es`, `es-ES`, `pt_BR`). It never changes the language of code, commits, PRs, docs, or records, which stay in American English (see [Reply language](#reply-language)) |
 
 Changing `dev_root`, `default_host`, or `host_dirs` changes every canonical path: run `dev ls` and `dev adopt` the
 repositories that are no longer in place.
+
+#### Reply language
+
+With `language` set to `auto`, agents reply in the language of your latest message. When that message is too short or
+unclear to tell (`ok`, `continue`, a command), they use the language of your earlier messages, and American English
+when there is none. A locale (`es-ES`, `en-US`, …) fixes the reply language whatever language you write in.
+
+| Follows the reply language | Stays in American English |
+| --- | --- |
+| The final message's prose, the agent's questions and decision requests, and the status block's text, with crew roles written in that language | The status block's marker and labels (`[Firefly> DevKit]`, Done, Check, Progress, Crew, You, Next); code, comments, commits, PRs, docs, plans; task, lesson, and progress records; crew briefs and members' reports to the tech lead |
+
+The right column changes only when the project's own rules (its AGENTS.md or CLAUDE.md) or you say otherwise. A
+decision that leads to an irreversible action keeps devkit's own words: the agent asks it exactly as
+`dev crew decisions --ask` prints it, because your answer approves that stored text (see
+[The crew › How the tech lead asks you](crew.md#how-the-tech-lead-asks-you)).
+
+devkit reads your language from your own words. A message that brings text to work on (an email to translate, strings
+to check) counts only for the words you wrote around it, and when they cannot decide, that turn gets no reply
+language: no context line and no check. A one-word label such as `Problema:` does not hide the sentence after it.
+
+devkit enforces it:
+
+- **Before the turn.** When the reply language is not English, a context line names it. For example, with `auto`:
+  `devkit · the developer wrote in Spanish: reply in Spanish (records, commits and docs stay in American English)`,
+  or `devkit · the developer has been writing in Spanish: …` when your latest message is too short to tell. With a set
+  locale: `devkit · devkit's language is set to es-ES: reply in Spanish whatever language the developer writes in
+  (…)`, and the session start adds the same rule. English gets no line.
+- **At the end of the turn.** The Stop hook reads the main session's final message and sends it back once when its
+  prose is surely in another language: `devkit: the developer wrote in Spanish, but your final message is in English:
+  reply in Spanish. Keep the status block's marker and labels as they are …`. Quoted text, code, and block quotes do
+  not count. Members' reports go to the tech lead, not to you, so the check skips them. `canary.language: false` (or
+  `canary.enforce: false`) turns the check off.
 
 ### Frameworks
 
@@ -190,6 +222,7 @@ configuration proves devkit owns it; sharing a catalog name is not enough. Your 
 | `handoff.block_after_minutes` | `60` | The Stop hook also sends the turn back when the oldest commit newer than the note is this many minutes old, or after a milestone: the end of a run (`dev progress done`), a work item closed, a push, a PR, or a release. An intermediate step is not a milestone, and a milestone counts only the commits made before it. While crew members work, the main session gets the reminder only, and a crew member is never sent back for the note |
 | `canary.enforce` | `true` | When a final message lacks the status block, the Stop hook asks the agent to reply again with it; while a `dev progress` run is active (running or blocked), it also sends back once a final message without the Progress bullet or with other step counts than the run's, with the line to use (see [Progress and communication › The Progress line](progress-and-communication.md#the-progress-line)); at SubagentStop, a crew member without its status block or its `dev progress step` is sent back once |
 | `canary.roles` | `true` | When a final message or a crew member's report names a crew member alone instead of `<role> (<Name>)`, such as Backend engineer (Tank), the Stop or SubagentStop hook sends it back once per turn (per member for reports). The role can be in any language; the status block's header and Crew line count, and names in code spans and commands do not. The tech lead (Morpheus) is checked too, so write the main session as the tech lead. Off with `canary.enforce` too |
+| `canary.language` | `true` | When the main session's final message is surely in another language than the developer's (see [Reply language](#reply-language)), the Stop hook sends it back once with the language to use. `false` turns this check off; `canary.enforce: false` turns it off too |
 
 `dev crew` and `dev crew next` show the slots in use and why the limit is lower ("1 of 3 slots in use (lowered from 6:
 5-hour usage at 87 %)"), the status block's Crew line ends with the same, and each change of the effective limit is

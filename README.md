@@ -208,7 +208,8 @@ devkit is also a plugin for **Claude Code** and **Codex**, installed automatical
   ready step, and CI result, and a crew member waits for its own answer with `dev watch --wait --for me`.
 - **A crew.** 25 specialist agents (the Senior engineer, the Frontend and Backend engineers, the Software
   architect, the Code reviewer, the Release engineer, and the rest) that the main session leads as the tech lead
-  (Morpheus), in parallel lanes with their own files and time.
+  (Morpheus): each kind of work goes to the member the RACI makes Responsible, in a lane with its own files and time,
+  and the run ends when each approver has reviewed the work they own.
 - **Slash commands:** `/devkit:status` · `/devkit:overview` · `/devkit:task` · `/devkit:handoff` · `/devkit:standup` ·
   `/devkit:progress` · `/devkit:crew-status` · `/devkit:test` · `/devkit:stubs` · `/devkit:ship` · `/devkit:ci` ·
   `/devkit:dashboard` · `/devkit:doctor` · `/devkit:reconcile` (skills of the same name in Codex).
@@ -216,8 +217,8 @@ devkit is also a plugin for **Claude Code** and **Codex**, installed automatical
   `workspace`, `delivery`, `release-policy`, `testing`, `cicd`, `learning-loop`, `root-cause`, `research`,
   `functional-analysis`, `backend`, `devsecops`, `docs`, and `diagrams`, plus a curated, pinned set for architecture, Angular, React, Spring, testing, security, and
   observability. Required skills are enforced for each kind of work.
-- **Rules:** one set of global instructions for both agents: the status block on every turn, method, plain American
-  English, progress and time, learning from mistakes, token use, files and disk, worktrees, branches, commits, delivery, backend practice, required
+- **Rules:** one set of global instructions for both agents: the status block on every turn, method, replies in
+  your language with code and records in American English, progress and time, learning from mistakes, token use, files and disk, worktrees, branches, commits, delivery, backend practice, required
   skills, the team protocol, and handoff.
 - **Guard:** a pre-tool hook that blocks what wastes time or disk and holds irreversible actions for your grant, and
   explains the right way in one sentence. It is a seatbelt, not a sandbox: keep reviewing what agents do.
@@ -242,7 +243,9 @@ go to private vulnerability reporting instead. Votes rank the bugs, so each hotf
   <img src="docs/images/diagrams/architecture-light.svg" alt="How devkit fits together: the devkit repo installs rules, the devkit plugin, and hooks into Claude Code (CLI and Desktop) and Codex (CLI and the ChatGPT app); the agents work in your repositories and exchange context, session records, tasks, and lessons with the private handoff repo, which a sync after every delivery event and the scheduled launchd jobs keep current; repositories and the handoff repo are pushed to GitHub, and the dashboard and overview read the handoff repo." width="100%">
 </picture>
 
-The ideas behind it are in [docs/concepts.md](docs/concepts.md).
+[Concepts › How devkit fits together](docs/concepts.md#how-devkit-fits-together) explains each part, what happens
+in a turn, and which check enforces which rule; [A request from start to release](docs/tutorials/request-to-release.md)
+follows one change through them.
 
 ## What's inside
 

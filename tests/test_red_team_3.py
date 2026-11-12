@@ -167,7 +167,9 @@ class SourcedFilesAreResolved(Case):
                     "python3 //dev/stdin <<< 'import os; os.system(\"gh pr merge 12\")'"):
             with self.subTest(cmd=cmd):
                 self.assertIn("merges PR 12", main(cmd) or "")
-                self.assertIn("merges PR 12", member(cmd) or "")
+                # a member's Python program is read from its input too: the allow-list judge names what it uses
+                why = member(cmd) or ""
+                self.assertTrue("merges PR 12" in why or "`os.system`" in why, why)
 
     def test_a_file_the_guard_cannot_place_that_is_fed_is_unknown(self):
         t = self.tmp

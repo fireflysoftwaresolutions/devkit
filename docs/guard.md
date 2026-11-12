@@ -45,6 +45,10 @@ runs, and the irreversible-action gate counts it as `unknown`, because the guard
 text a command only carries, such as a `dev crew ask` message, is data and never read as a command. A heredoc body
 ends at its tag line, and also at a line that starts with the tag and `)`: macOS `/bin/bash` 3.2 ends a heredoc there
 inside `$(…)` and runs what follows, while zsh reads on, so the guard reads it the way that shows what bash runs.
+The tag is the whole word after `<<` with its quotes and backslashes removed, as the shells read it: `<<E\OF`,
+`<<E''OF`, and `<<"E"OF` all end at a line `EOF`, and a quoted part makes the body text the shell does not expand. A
+tag the shell would expand (one with `$` or a backtick) opens no heredoc the guard reads, so the lines after it stay
+commands.
 A `<<WORD` inside `${…}`, `$[…]`, or `$((…))` is part of the expansion and opens no heredoc, so in
 `echo ${x/<<E/}` the next line is a command. A `#` starts a comment only at the start of a word, as bash and zsh read it: after a blank, a new line, an operator,
 or a redirection. A `#` right after the `)` that ends a substitution is part of the word, so in
@@ -107,7 +111,7 @@ does not change.
 | Inside the dev root, valid layout | allow |
 | Inside the dev root, a file directly in `~/Development` | deny |
 | Inside the dev root, a top-level folder that is not an owner you belong to, a host folder (contains a dot), `_local` or a dot folder, for example `kit-consulting-pr12` | deny |
-| Backup-style names: `*.bak`, `*.orig`, `*.backup`, `*.old`, `*.rej`, `*~`, `*_old.*`, `*-copy.*`, `* copy.*`, `* (2).*` | deny |
+| Backup-style names: `*.bak`, `*.orig`, `*.backup`, `*.old`, `*.rej`, `*~`, `*_old.*`, `*-copy.*`, `* copy.*`, `* (2).*` | deny, unless git already tracks the file (a project's own `connection-copy.ts` is no backup copy) |
 | Inside the handoff repository | see [The handoff repository](#the-handoff-repository) |
 | A registered Codex session's own scratch folder | allow within its session and member boundary; see [Codex scratch folders](#codex-scratch-folders) |
 | Anywhere else (Desktop, Documents, `~/notes.md`, …) | Claude: ask · Codex: deny |
@@ -287,7 +291,7 @@ If devkit really should be off somewhere, change devkit's own configuration (see
 | `git clean` with `-x` or `-X` | deny (it deletes `.env`, local config and caches) |
 | `git reset --hard` with uncommitted changes to tracked files | deny |
 | `git stash`, `git stash push`, `save`, `pop`, or `apply` (the stash is shared by every worktree) | deny → `dev commit --wip`, then `dev commit --unwip` |
-| A commit, push, or tag chained after a pipe without `pipefail` (`npm test \| tail -5 && git commit …`), and the same for `dev commit`, `dev push`, `dev release`, `gh pr create`, `gh pr merge`, and `gh release create` | deny → run the check without the pipe, start with `set -o pipefail;`, or test the output |
+| A commit, push, or tag chained after a pipe without `pipefail` (`npm test \| tail -5 && git commit …`), and the same for `dev commit`, `dev push`, `dev release`, `gh pr create`, `gh pr merge`, and `gh release create`, where the shell runs it: the command's own words, the substitutions it runs (which inherit `pipefail`), the lines of the shells and `eval`s it starts (a nested shell starts without it), and the lines `source` and `.` run (a file, their input, a here-string, or the text an `echo`, `printf`, or `cat` substitution prints into them). The parsed command counts too: a commit in the body of an `if`, `while` or `until` whose condition ends with a pipeline, in `{ }` after one, after `\|&`, through a chain of `&&`, or with git run by its path. `set -o pipefail` counts only as a top-level simple command of the list before the first pipeline: not in a function body, `{ }`, `( )`, `$(…)`, a pipeline, a background job, a branch, a loop or a case arm, not after `&&` or `\|\|`, with no function definition, `eval`, `source`, `.`, `set`, `setopt`, `unsetopt`, `shopt` or `emulate` between it and the pipeline, and no `+o pipefail` anywhere. A negated pipeline before a commit (`! check \| tail && git commit`) is refused whatever pipefail says. A quoted message, note or evidence and a heredoc body are data | deny → run the check without the pipe, start with `set -o pipefail;`, or test the output |
 | A wait (`dev watch --wait`, `dev ci watch --wait`) with more work after it in the same command line: after `;`, `&&`, `\|\|`, `&`, or a new line, or a pipe into anything but a read-only filter (`tail`, `head`, `grep`, `wc`, `jq`, …) | deny → run the wait alone and act after it wakes you: the wait wakes the session only when everything after it has ended |
 | An action that must depend on a check's result sequenced after it without depending on it: after `;`, `\|\|`, or `&`, or after the check piped into a filter and joined with `&&` without `set -o pipefail` (`npm test; npm run release`, `npm test \| tail -3 && npm run release`). Checks are a CI watch or run, `dev test`, test runners, linters, type checkers, and `test`, `lint`, `check`, `build` scripts; actions are commit, push, tag, merge, release, publish, and deploy, a project's `release`, `publish`, or `deploy` script included (`npm run release`, `make release`, `just release`) | deny → gate it on the real result: `check && action` without a pipe, `set -o pipefail;` first, or a separate call |
 | `git commit` when gitleaks finds a secret in what the commit is about to record: the staged changes, plus any `git add` earlier in the same command, or every tracked change with `commit -a` | deny, with the rule, file, and line of each finding |
@@ -383,7 +387,7 @@ three folders readable and writable by your account only (`0700`) every time it 
 | Action of an agent | Decision |
 | --- | --- |
 | A file write (Write, Edit, `apply_patch`) in those three folders, or in a subagent's meta file | deny, with the `dev` command that owns the record |
-| A shell write there: a redirect, `tee`, `cp`, `mv`, `ln`, `rm`, `dev rm`, `sed -i`, an interpreter that writes files, also inside `sh -c`, `eval`, `xargs`, or `find -exec` | deny |
+| A shell write there: a redirect, `tee`, `cp`, `mv`, `ln`, `rm`, `dev rm`, `sed -i`, an interpreter that writes files, also inside `sh -c`, `eval`, `xargs`, or `find -exec` | deny. A Python program the allow-list judge vouches for (see [Commands the guard cannot name](#commands-the-guard-cannot-name)), whose every write goes through `open` with a literal mode or a path's own writer to a path written out in its code (a string, `Path(…)` or `os.path.join` of strings, `~` expanded, or a name bound once to one of those), is judged by those paths, as a redirect is, so an edit of a repository file whose text names devkit's state or a handoff note runs; a written path that names one of them in its text counts as one. Any other program that names them (an alias of `open`, `io.FileIO`, `fileinput`, a module outside the vetted list) is judged by its text, as before, and counts as one that writes. An existing file given as a program's configuration (`--config`, `--config-file`, `--rcfile`, `--settings`) is read: `vale --config=<devkit's vale.ini>` runs. Only the word right after the option (or its `=value`) counts: the same path given to `-o` or `--output` (`curl --config F -o F`) is still a write |
 | `dev config set safeguards.*`, `audit.*`, `bugs.share`, or `agents.*`, also spelled with leading or doubled dots (`.agents.codex`, `bugs..share`), which `dev config set` reads as the same key; `dev config edit`; or a `DEVKIT_*` or `DEV_ROOT` value added to the `env` block of an agent settings file or to a shell startup file such as `~/.zshrc` | deny: `bugs.share` decides whether devkit posts under your GitHub account, so only you set it, with `dev bug share` in a terminal. `agents.*` turns devkit on or off for an agent, and the next `dev install` or `dev setup` takes devkit's hooks and rules out of an agent turned off, so only you set it, in your terminal |
 | `dev setup`, except `dev setup --preview` and `dev setup --help` | deny: it decides which agents devkit sets up and rewrites their settings, hooks, and instructions, so you run it in your own terminal. `--preview` only draws the setup's screens with sample data and changes nothing |
 | Replacing, writing, or deleting a `dev` that a shell finds: `~/.local/bin/dev` (the link itself) or another `dev` earlier on `PATH` | deny → the developer runs `dev install --only cli` |
@@ -519,7 +523,20 @@ action `unknown`, tier 2, with the target `cmd-<hash>` of that exact command tex
   names git's;
 - a program that builds the name of what it calls, such as `getattr(__import__('os'), 'sys' + 'tem')`, or starts a
   command that begins with what it fills in at run time, such as ``execSync(`${tool} pr merge 12`)`` or
-  `subprocess.run(f"{tool} …")`;
+  `subprocess.run(f"{tool} …")`, or loads a module by a name it splices (`require('child' + '_process')`, a
+  template literal);
+- an inline or scratch program, in the main session too, that starts a process with a command it does not write
+  out: `subprocess.run(sys.argv[1:])`, `os.execvp(sys.argv[1], …)`, a parameter, a list it changes in place, a
+  concatenation (`execSync('g' + 'h …')`), a process function it keeps in a variable, or a `worker_threads` Worker
+  that evaluates a string. A command written out, or a name bound once to a written-out list, is judged by its
+  words, and the value of `git -C` or `gh -R` may be a variable. `asyncio.create_subprocess_shell` and `_exec` are
+  read as the other spawns are;
+- a program that runs commands from its input or a file the guard does not read: `at` and `batch`, `crontab` with a
+  file or its input, `launchctl load`, `bootstrap`, `start`, `kickstart` and `enable`, `make -f -` or
+  `-f /dev/stdin`, `make SHELL=…`, an awk program that builds the command of its `system()`, pipe or `getline`,
+  `awk -f` with a file the guard cannot read, gawk's `@include` and `@load`, and vim's `system()`, `:terminal`,
+  `:execute`, `:source`, the script interfaces, and `-S`, `-s` or `-u` with a script, and a sed script with GNU's
+  `e` command or the `e` flag of `s`, or `sed -f` with a script file (`--sandbox` turns them off);
 - a program or script the gate must read and cannot: larger than it reads (512 KB for a program an interpreter runs
   or a script a shell runs, 256 KB for a shell script run by its path) or unreadable, such as `python3 big.py` padded
   past 512 KB with a force push at its end. A program run by its path is read as the system runs it: with a python,
@@ -551,6 +568,11 @@ A `make`, `just`, or `task` target, a package script, or a script whose filename
 decides whatever the script's code holds, read or not, whether an interpreter runs it (`python3 release_notes.py`)
 or its path does (`./release_notes.py`): code that imports only standard modules can still reach a process or run
 code it builds in ways the guard does not read. A crew member that needs such a script asks the tech lead to run it.
+A file named like a test (`test_deploy.py`, `deploy_test.py`, `deploy.test.mjs`, `deploy.spec.ts`) and any file
+`node --test` runs take no class from their names, because they test what their names say rather than do it. The
+guard reads such a file by its content instead, also inside the repository, so a test file that deploys or merges is
+judged by what it runs. A `make`, `just`, `task` or package target keeps its class (`make deploy-test` may deploy to
+a test environment).
 
 These are not `unknown`:
 
@@ -569,8 +591,32 @@ These are not `unknown`:
   zsh's `${(P)n}`, arithmetic, `setopt`, a function or an alias), also when a resolved variable holds such a word
   (`R=read; $R "$n"`), while `read`, `unset`, `wait`, and `export` count only with a computed word or an option
   other than the plain ones (`read -r line` is fine); a name the shell sets by itself (`REPLY`, `_`, `MATCH`,
-  `BASH_REMATCH`, `OPTARG`, `PWD`, …); a value with a `$`, quote, glob, or `~`, or one that starts with `=`; `IFS`,
-  `case`, heredocs, backticks, ANSI-C quotes (`$'…'`), and more than 16 combinations;
+  `BASH_REMATCH`, `OPTARG`, `PWD`, …); a value with a `$`, quote, or glob, or one that starts with `=`; `IFS`,
+  `case`, an unquoted heredoc (the shell expands its body), backticks, ANSI-C quotes (`$'…'`), and more than 16
+  combinations. A value `~` or `~/…` is the home folder's path, as the shell expands it in an assignment; a choice
+  between two literal echoes, `PY=$( [ -x .venv/bin/python ] && echo .venv/bin/python || echo python3 )`, gives both
+  values (the substitution is still judged as a command); and a command with quoted heredocs
+  (`python3 - <<'EOF' … EOF`, then a loop) is read with each body set aside;
+- arithmetic on numbers. bash and sh read a value as an arithmetic expression in `$((…))`, `$[…]`, `((…))`,
+  `for ((…))`, `let`, the operands of `[[ … -eq … ]]` and the other integer comparisons, an integer declaration
+  (`declare -i`, `typeset -i`) and later values of its names, a substring's offset and length (`${s:x}`), and an array
+  subscript (`${a[x]}`, `a[x]=…`, `unset 'a[x]'`, `read 'a[x]'`); zsh reads subscripts that way too. `test` and `[`
+  compare integers without evaluating them. In each of those places the shell runs a `$(…)` that a value holds
+  (`x='a[$(cmd)]'; echo $((x))` runs `cmd`), so a name or a substitution there counts only when the command proves it
+  a number: digits, a counter or an expression of such names (`i=i+1`), a loop over numbers, `wc` reading its input,
+  `seq`, `date` with a numeric format (`date +%s`), `grep -c` on one file, `git rev-list --count`, or
+  `grep -n … file | cut -d: -f1`. Anything else (a name the command reads, binds with `read` or `declare`, or sets
+  from another program's output) is refused by the guard's own rules, in the main session and every lane, with
+  the way: give the name numbers, or compare text with `[` or `test`. A variable's name is evaluated the same way:
+  bash and zsh run the subscript of a name `declare`, `typeset`, `local`, `read` and, in zsh, `export` and
+  `printf -v` are given (`declare "$x"=1`, `export $x`), and of `${!x}`, and zsh evaluates `read -t`'s value, so a
+  name computed from a value counts only when the command gives that value literal names (`n=out; printf -v "$n"`).
+  `printf '%d'`, `shift`, `exit` and `return` take a number without evaluating it, in bash and zsh alike, so a name
+  there is text. `$((date)|wc -c)` is a command substitution, as
+  the shells read it. A `case W in P)` header runs no command, and the patterns of its later arms (`*)`,
+  `a|b)`, `(c)`) are words the shell matches, not programs. A quoted or escaped `;;` or `)` ends no arm or pattern,
+  a quoted `case` opens no statement, and a pattern with a substitution (`"$(cmd)")`) still runs it, so each of those
+  is judged as a command;
 - a shell that only parses its program: `bash -n x.sh`, `sh -n`, `zsh -n` or `--noexec`, `bash -o noexec`, with a
   script, a `-c` line, or its input. It runs nothing, neither its startup files nor `BASH_ENV`, so it is a read of the
   file. `+n` or `+o noexec` after it, `-i`, `-l`, or `--login` (where `-n` does not hold), or `-n` after the script
@@ -578,6 +624,20 @@ These are not `unknown`:
   every option word must be one the guard knows runs nothing (`-norc`, `-noprofile`, `-posix`, set's letters and
   `-o` names, and `-O extglob` or another globbing option); `-login`, `-rcfile`, `-debugger`, `-O extdebug`, `-D`, an
   unknown option, or `-posix` after a short option (which bash reads as `-p -o … -s -i -x`) make it run;
+- a crew member's own Python or JavaScript program (typed with `-c`, `-e` or a heredoc, or a script outside the
+  repository) that the allow-list judge vouches for. The judge passes a program only when every module it imports
+  is a vetted one that cannot start a process, run code or load code (`json`, `re`, `pathlib`, `collections`,
+  `itertools`, `math`, `datetime`, `csv`, `ast`, `difflib`, `hashlib`, `textwrap`, `tempfile`, and the like; `os`,
+  `sys` and `io` only for their reads), every builtin it uses is a vetted one, a lookup names its attribute as a
+  literal (`getattr(r, 'returncode')`), `open` is only called (never aliased, passed or partially applied), and every
+  file it writes goes through `open` with a literal mode or a path's own writer, to a path written out in its code.
+  In JavaScript, only `fs`, `path`, `url`, `util`, `os`, `crypto` and other vetted modules by a literal name, no
+  `Function`, `eval`, `vm`, `Reflect`, `globalThis`, `child_process` or `worker_threads`, no computed call, and file
+  writes only to literal paths. Anything else (`subprocess`, `pydoc`, `timeit`, `code`, `pdb`, `pickle`, `runpy`, a
+  computed import, `eval`, a dunder attribute, a module of the project) is a program the guard cannot vouch for:
+  tier 2 for a member, as before devkit 26.11.17, with the way: run the command it needs yourself, or ask the tech
+  lead. A command that writes a file and then runs it as a script is refused: the judge reads the file as it is
+  before the command runs. Awk, sed, expect, Tcl, Ruby and Perl programs keep their own rules;
 - text inside an interpreter's string literals: `${…}`, `{…}`, `[…]` and `*` there belong to the language (a
   template literal, an f-string, a list), and the guard looks for spawn calls in the program's code, not in the
   text it carries. A program named in such a string (`os.system('gh pr merge 12')`) is still classified;
@@ -596,6 +656,19 @@ Node's `child_process.exec` and `execSync`, Ruby's `system` and backticks, Perl'
 the same line typed in the shell, with the variables the program sets in its own environment counted as set:
 `os.system('HOME=/tmp/x dev status')` is refused as `HOME=/tmp/x dev status` is, and so is `os.environ["HOME"] = …`
 followed by `os.system('cd /tmp && dev status')`.
+
+A command line a program runs from a string it is given is judged the same way: awk's `system("…")`,
+`print … | "…"` and `"…" | getline`, trap's action (`trap 'gh pr merge 12' EXIT`), vim's `-c`, `--cmd` and `+`
+commands after `!` (`vim -c '!gh pr merge 12'`), less's and more's `+!…`, `launchctl submit … -- <command>`,
+`launchctl asuser` and `bsexec`, and make's `$(shell …)` in its arguments. Setting `BASH_ENV`, `ZDOTDIR`,
+`PROMPT_COMMAND`, `LESSOPEN` or `LESSCLOSE`, or `ENV` for an interactive shell, is refused for every agent, the
+main session included: each makes a shell or a pager run a file or a line the guard does not read.
+
+A Python program next to a planted module is refused in every context: when its script's folder, the working
+folder of `python3 -c` or `-m`, or a folder it puts on `sys.path` holds a file or folder named like a standard
+module it imports (`json.py`), or a file named like a standard module those import (`re.py`), Python imports that
+instead of the real one. `python3 -I` and `-P` keep those folders off the path and run; a program's own sibling
+modules run.
 
 A pager is a command too: `git -c core.pager=…`, `-c pager.<command>=…`, `GIT_PAGER`, and `PAGER` for git, and
 `GH_PAGER` and `PAGER` for gh, are classified as the command they name, and so are `core.editor`,
@@ -716,7 +789,7 @@ These rules apply while a progress run has crew members working ([The crew](crew
 | The main session edits a file inside a working member's scope | deny, and how to ask that member |
 | A crew member records or withdraws a decision (`dev crew decide`, `dev crew withdraw`) | refused by `dev crew`: only Morpheus records the developer's answers and withdraws a decision |
 | A crew member writes or deletes in the session scratchpad outside its own folder, `scratchpad/<member id>/` (a file tool, a redirect, `rm`, `mv`, `find -delete`, a nested shell) | deny, with the folder to use. The member's brief names that folder, and devkit creates it when the lane opens (see [The crew › Scratch folders](crew.md#scratch-folders)) |
-| A crew member runs `dev progress …` or `dev crew ask\|answer\|…` | routed to its own lane when it is the whole command, or the one lane call in a list of `cd` and reads (see below); otherwise refused, since it would act as Morpheus |
+| A crew member runs `dev progress …` or `dev crew ask\|answer\|…` | routed to its own lane: as the whole command, as the one lane call in a list of `cd` and reads, or, in Claude Code, inside any command the lane allows, which then runs with the member's lane variable exported (see below). Refused when the command drops that variable or, in Codex, when the router cannot place the call |
 
 A message is data, so quoted operators in it (`dev crew ask "x; y && z"`) keep the call a single command. A `$(…)` or
 backtick that the shell expands in a message runs a command of its own, so it makes the call more than one command.
@@ -732,8 +805,23 @@ another. A lane check that itself failed, and so refused the command unchecked, 
 
 #### Lane calls in a list
 
-A member may join its lane call to `cd` and reads with `&&`, `||`, `;` or a newline, and pipe it into a read-only
-filter. These reach the member's lane:
+In Claude Code, a member's command that holds lane calls anywhere the shell runs them (two steps in one list, a loop,
+a pipeline, `bash -c`, a background job, a prefix such as `NO_COLOR=1`) runs with
+`export DEVKIT_FROM_AGENT=<agent id>; readonly DEVKIT_FROM_AGENT;` in front, so every `dev` call it starts acts as
+the member and the rest of the command cannot give the variable another value (bash refuses it, zsh stops the
+command), when the lane
+allows everything else the command runs. Claude Code's rewrite approves nothing: its own permission check runs on the
+new command. These stay refused: a command that drops the variable (`unset`, `env -i`, `env -u`, an empty
+assignment, `exec -c`, refused by the identity gate before routing) or gives it another value (`read`, a `for` or
+`select` loop, `printf -v`, `mapfile`, `getopts`, or any of them on a name computed at run time, also inside a
+function or a nested shell, and `typeset +r` or another option that lifts a readonly flag), a lane call in a program that gives the processes it starts
+an environment of its own (`env=` in Python, `env:` in Node, the `exec…e` and `spawn…e` forms), a lane call whose
+double-quoted message runs a substitution, a team command (`dev crew brief`, `dev crew set`), and any other action the
+lane refuses. Where the stamp was possible, the refusal names what kept the command back.
+
+Codex's rewrite carries an explicit allow, so in Codex only the router below places a lane call. A member may join its
+lane call to `cd` and reads with `&&`, `||`, `;` or a newline, and pipe it into a read-only filter. These reach the
+member's lane:
 
 ```bash
 cd ~/Development/.worktrees/acme/app/fix-login && dev progress step "login fixed" --check "12 tests pass"
@@ -754,7 +842,7 @@ these hold:
   group, `if` or loop, comment, background job, or heredoc, and redirects only to `/dev/null` or between stderr and
   stdout.
 
-Anything else stays refused: `dev progress step x && rm -rf build`, `echo y | dev crew decide D1 A`,
+In Codex anything else stays refused: `dev progress step x && rm -rf build`, `echo y | dev crew decide D1 A`,
 `dev progress step x | tee out`, `env dev crew …`, `bash -c 'dev crew …'`, and a lane call inside `$(…)`, `<(…)`,
 or `>(…)` (`wc -l <(dev crew decide D1 A)`).
 
@@ -770,15 +858,31 @@ checks. These run as well:
 - Machine diagnostics: `ps`, `pgrep`, `sw_vers`, `id`, `whoami`, `printenv`, `uptime`, `groups`, `locale`,
   `getconf`, `seq`, and `sysctl` without a value, `-w`, `-f`, or `-p`.
 - A command substitution or process substitution whose own command is on the allowlist:
-  `git diff $(git merge-base HEAD main) HEAD`, `diff <(git show a:f) <(git show b:f)`. Arithmetic `$((…))` and a
-  substitution used as the program stay refused.
-- `sed` whose script only prints, with or without `-n`: `sed 's/a/b/g' f`, `sed '/^#/d' f`. `-i`, `-f`, and the `w`,
-  `r`, and `e` commands stay refused.
+  `git diff $(git merge-base HEAD main) HEAD`, `diff <(git show a:f) <(git show b:f)`. A substitution used as the
+  program stays refused.
+- Arithmetic on numbers: `echo $((n * 2))` when the command gives `n` only numbers (see
+  [Commands the guard cannot name](#commands-the-guard-cannot-name)); a name whose value may hold code stays refused.
+- Test runners and reads: `node --test`, `paste`, `col`, `man`, `lsof`, `break`, `continue`, and the member's own
+  wait, `dev watch --wait --for me`.
+- `sed` whose script only prints, with or without `-n`: `sed 's/a/b/g' f`, `sed '/^#/d' f`. A substitution that can
+  only print a number stands as a line number in the script (`sed -n "$(grep -n x f | cut -d: -f1),+14p" f`), and
+  GNU's `N,+M` range prints. `-i`, `-f`, and the `w`, `r`, and `e` commands stay refused.
+- `find` with its tests grouped in escaped parentheses: `find lib \( -name '*.py' -o -name '*.md' \) -print`.
 - `awk` whose program prints to standard output only. A program with `>`, `|`, `system()`, `getline`, `@load`, or a
   program file stays refused; compare with `<` instead of `>`.
-- `mkdir -p` inside the member's own scratch folder, `scratchpad/<member id>/`.
-- A shell variable set on its own, when its name is lowercase or one capital letter (`S=/path; ls $S`). `PATH`,
-  `PAGER`, `IFS`, and zsh's tied names (`path`, `fpath`, …) stay refused.
+- `mkdir -p` inside the member's own scratch folder, `scratchpad/<member id>/`, and these writes when every path they
+  write or delete resolves inside it, with links resolved: `rm`, `rmdir`, `unlink`, `cp` (what it copies may come
+  from anywhere), `mv`, `chmod`, `touch`, `tee`, and `sed -i` with an edit that has no `w`, `e`, or `r`. A redirect
+  and a program's writes go to `/dev/null`, a registered Codex scratch folder, or that folder, never another
+  temporary folder (a background task's output file, `~/Development/.tmp`, a checkout under `/tmp`). A recursive or
+  link copy (`cp -R`, `-a`), `ln`, a delete through a trailing slash (`rm -rf link/` deletes what a link points to),
+  a path known only when the command runs, a path with a brace, a pattern, or `..` (the shell expands them after the
+  guard reads the path), and such a write after a program the command runs, or beside it in a pipeline or a
+  background job (the program could plant a link first), stay refused. A write that ends before any program starts
+  runs: `mkdir -p <scratch>/x && cp lib/a.py <scratch>/x/ && python3 <scratch>/probe.py`.
+- A shell variable set on its own, when its name is lowercase, one capital letter, or two to four capitals and digits
+  (`S=/path; ls $S`, `OUT=…`). `PATH`, `PAGER`, `IFS`, `ENV`, `HOME`, the other names the shell or the system export,
+  and zsh's tied names (`path`, `fpath`, …) stay refused.
 - `dev guard check`, and `dev lesson show` and `dev lesson ls`.
 - The reads of work state: `dev overview`, `dev standup`, `dev team`, `dev initiative`, `dev initiative ls`,
   `dev initiative show`, `dev report`, `dev plan`, and `dev plan ls`. They change no record and
@@ -794,10 +898,32 @@ checks. These run as well:
   refuses it. When devkit cannot look up the member's kinds of work or the project, it refuses.
 - A command continued with a backslash-newline, read as the shell joins it.
 
-A script from the member's own scratch folder runs when an interpreter names it directly:
-`python3 scratchpad/<member id>/probe.py`. A script in another member's folder stays refused, and so do the same
-script under a runner (`uv run`, `npx`), inline code (`python3 -c`), a shell line or script (`bash -c '…'`,
-`bash x.sh`), `sed -i`, and a `PYTHONPATH=` prefix.
+A read-only lane runs no program of its own: no Python or JavaScript typed in the command (`python3 -c '…'`,
+`python3 - <<'EOF'`, `node -e '…'`) and no script from its scratch folder, as in devkit 26.11.16. No reading of a
+program's code can tell every way it may write (a function passed as a value, `operator.methodcaller`, `Path.copy`),
+so until an OS sandbox holds the lane, the refusal names the way: ask the tech lead to run the probe, or describe the
+change with file:line. The member writes its scratch files with the shell (`cat > <scratch>/f <<'EOF'`), whose
+literal path the guard judges. Its test runs (`pytest`, `python3 -m pytest`, `python3 -m unittest`, `node --test`)
+run the repository's tests: a file, folder or module they name, a discovery's folders, or the working folder when
+they name none, in a temporary folder outside a git work tree (where the scratchpads are) is refused. They take
+only options that load no code and write no file, in the spaced or the `=` form: unittest's `-v`, `-q`, `-f`, `-b`,
+`-k` and discover's `-s`, `-p`, `-t`; pytest's `-q`, `-v`, `-x`, `-s`, `-k`, `-m`, `--tb`, `--lf`, `--ff`, `-r`,
+`--maxfail` and `--co`; node's `--test-name-pattern`, `--test-only` and `--test-reporter` with a built-in reporter;
+and `uv run` without `--with`. Any other option (`-o`, `-p`, `--junitxml`, `--log-file`, `--cov-report`,
+`--import=`, `--require=`, `--test-reporter-destination`, …) is refused, as is a variable such as `PYTHONPATH`.
+A script in another member's folder stays refused, and so do the same script under a runner (`uv run`, `npx`), a
+shell line or script (`bash -c '…'`, `bash x.sh`), and a `PYTHONPATH=` prefix.
+
+**Not covered yet.** In the main session, a program that hands a refused action to a code runner or a process
+starter the spawn list does not name (`pydoc.pipepager('', 'git push --force origin main')`, `timeit.timeit` or
+`code.InteractiveInterpreter().runsource` with a string it builds at run time, `pdb`, `cProfile`) is not classified
+as an action, so the main session allows it, while `exec` of the same string is unknown (B-g8vi3yz3h2h). Crew lanes
+refuse such programs through the allow-list judge.
+
+**Not covered yet.** In the main session, a command that writes a script and runs it in the same call
+(`cat > x.py <<'EOF' … EOF; python3 x.py`), or a script another process changes after the guard read it, is judged
+by the file as it was before the command ran. Crew lanes refuse a write followed by a run of the same file; the main
+session gets that rule, or an OS sandbox, in a later release.
 
 ### Who runs a `dev` call: the session marks
 
@@ -824,7 +950,12 @@ command must have a unique matching executable call; a quoted mention of a comma
 newest session is not enough. Conflicting or ambiguous identity is refused. These checks do not change Claude's
 caller selection.
 
-A member's mark wins over the main mark, so a member can never become the tech lead by a variable. Every hook drops
+A member's mark wins over the main mark, so a member can never become the tech lead by a variable. The call ledger
+checks a member's mark as well. A `dev progress` or `dev crew` call takes the lane the variable names only while an
+open call of this session belongs to that lane: a command can give the variable another member's id in a child
+shell, where readonly does not hold (zsh's `print -v` or `${(P)v::=…}`, bash's `declare -n`), and such a call has no
+lane identity and is refused. When the open calls that typed this `dev` command are other members' only, the
+caller is the most restricted of them, never the lane the variable names. Every hook drops
 both marks before it acts, so a hook never takes a mark it inherited for its own. A process that carries
 `DEVKIT_SPEAKER` counts as an agent's, never as your own terminal, when devkit decides who set `DEVKIT_CONFIG` or
 `DEV_ROOT`.
@@ -905,7 +1036,11 @@ DEVKIT_LOCAL_CI_PASSED=1.
   starts: the guard's rules, the irreversible-action gate, the crew-member checks, and a crew lane's edit-scope
   check. A lock wait inside a judgment ends at the same deadline. The refusal is recorded as `guard.deny` with
   refusal id `_judged_in_time:judge-time`. Split the call into smaller ones: one command per call, with a long text
-  or program in a file the command reads.
+  or program in a file the command reads. The limit is an alarm signal, and Python's pattern engine checks for
+  signals while it matches, so a pattern that backtracks on crafted text stops at the deadline too: what a stalled
+  judgment costs is a refusal after about 10 s, never a call run unjudged (`tests/test_guard_false_refusals.py`,
+  StalledJudge). `tests/test_regex_budget.py` keeps every pattern on the hooks' path fast on hostile text, so honest
+  work is not refused that way.
 - An `apply_patch` that names more than 1,000 files (its Add File, Update File, Delete File, and Move to headers) is
   refused before any of its files is judged. Split it into patches of at most 1,000 files.
 - Other exceptions in the guard are logged there and the call is allowed, with a `guard.failopen` record: a call that
@@ -956,7 +1091,22 @@ dev guard check --write ~/Desktop/notes.md --agent codex
 ```
 
 The rules are pure functions covered by `tests/test_devkit.py`, and the bypasses found by red-team testing by
-`tests/test_red_team.py` and `tests/test_guard_refusals.py`:
+`tests/test_red_team.py` and `tests/test_guard_refusals.py`. `tests/test_guard_false_refusals.py` holds one
+must-pass command for each kind of honest work the guard refused in recorded sessions, each next to a must-refuse
+twin that carries the risk the rule guards against.
+
+To measure the false refusals on your own sessions, replay them against a checkout's guard. It reads this Mac's
+Claude Code transcripts (subagents included) since a date, judges each refused call again in its context (the main
+session, or the member and tool level a subagent's `.meta.json` names), and prints per rule how many were refused
+then, are still refused, and pass now, with samples. It only reads and prints (a Python audit hook refuses every
+write), and its output names other projects' commands, so it stays on this Mac:
+
+```bash
+python3 -I tools/guard_replay.py --since 2026-11-01 --samples 2
+python3 -I tools/guard_replay.py --since 2026-11-01 --rule '^readonly$' --json > /tmp/readonly.jsonl
+```
+
+Run the tests:
 
 ```bash
 cd ~/Development/fireflysoftwaresolutions/devkit

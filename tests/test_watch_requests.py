@@ -148,7 +148,7 @@ class SendMessageAnswerTests(RequestCase):
         pg.crew_ask("May I rename the column?", from_agent="a_tank", now=self.now - 200)
         out = io.StringIO()
         payload = {"session_id": "s1", "hook_event_name": "PostToolUse", "tool_name": "SendMessage",
-                   "tool_use_id": "toolu_s", "tool_input": {"to": "a_tank", "message": "Yes, rename it to amount"},
+                   "tool_use_id": "toolu_s", "tool_input": {"to": "a_tank", "message": "M1: yes, rename it to amount"},
                    "tool_response": {"success": True}, "cwd": str(self.root)}
         with mock.patch("sys.stdin", io.StringIO(json.dumps(payload))), contextlib.redirect_stdout(out):
             hooks.run("post-tool", "claude")
@@ -158,7 +158,7 @@ class SendMessageAnswerTests(RequestCase):
         self.assertEqual(pg.waiting_messages(run), [])
         answer = next(m for m in run["messages"] if m.get("reply_to") == "M1")
         self.assertEqual((answer["text"], answer["to"], answer["delivered"]),
-                         ("Yes, rename it to amount", "a_tank", True))  # SendMessage delivered it already
+                         ("M1: yes, rename it to amount", "a_tank", True))  # SendMessage delivered it already
         rows = [json.loads(ln) for f in sorted(audit.AUDIT.glob("*.jsonl")) for ln in f.read_text().splitlines()]
         done = [r for r in rows if r.get("action") == "crew.message-answered"]
         self.assertEqual(len(done), 1, rows[-3:])
@@ -178,8 +178,18 @@ class SendMessageAnswerTests(RequestCase):
         pg.crew_ask("May I drop the index?", from_agent="a_tank2", now=self.now - 100)
         self.assertEqual(self.send("tank", "Yes"), [])
         self.assertEqual(self.open_ids(), ["M1", "M2"])
-        self.assertEqual(self.send("a_tank2", "Yes, drop it"), ["M2"])
+        self.assertEqual(self.send("a_tank2", "M2: yes, drop it"), ["M2"])
         self.assertEqual(self.open_ids(), ["M1"])
+
+    def test_a_message_that_names_no_question_answers_none_and_tells_the_lead(self):
+        # kit-consulting: the tech lead sent a member a new work item with SendMessage, devkit took it for the answer
+        # to the member's open question, and the member's `dev watch --wait --for me` said none of its questions waited
+        pg.crew_ask("May I change hooks/turn.mjs?", from_agent="a_tank", now=self.now - 200)
+        self.assertEqual(self.send("a_tank", "One more item after item 1: every logo Claude supplies is a proposal."), [])
+        self.assertEqual(self.open_ids(), ["M1"])
+        told = [m["text"] for m in pg.load_run("claude", "s1")["messages"]
+                if m.get("to") == "main" and m.get("from") == "devkit"]
+        self.assertTrue(any("M1 still waits" in t and 'dev crew answer M1 "' in t for t in told), told)
 
     def test_a_message_that_names_a_question_answers_only_that_one(self):
         pg.crew_ask("May I rename the column?", from_agent="a_tank", now=self.now - 200)

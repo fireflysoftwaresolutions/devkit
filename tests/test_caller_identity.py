@@ -469,7 +469,10 @@ class CallerShapeTests(CallerCase):
         pg.call_closed(main)
         self.call("cd lib && dev progress step 'parser done'", aid="a_tank")
         self.assertEqual(lane(), "a_tank")
-        self.assertEqual(lane({"DEVKIT_FROM_AGENT": "a_mouse"}), "a_mouse")
+        # a mark that another member's call contradicts is that member's: only a_tank typed this command, so a
+        # command that set the variable to a_mouse's id still acts as a_tank; the matching mark stays a_tank's
+        self.assertEqual(lane({"DEVKIT_FROM_AGENT": "a_mouse"}), "a_tank")
+        self.assertEqual(lane({"DEVKIT_FROM_AGENT": "a_tank"}), "a_tank")
         self.assertEqual(pg._as_lane("a_ghost", str(self.root)), "a_ghost")
         (pg.SESSIONS / "codex-t1.json").write_text(json.dumps({"agent": "codex", "session": "t1",
                                                                 "started": time.time()}))

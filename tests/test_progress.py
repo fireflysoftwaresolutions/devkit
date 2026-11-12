@@ -1,6 +1,7 @@
 # Copyright (c) 2026 Firefly Software Solutions Inc.
 # SPDX-License-Identifier: Apache-2.0
 """Progress, timing and predictability. Run: python3 -m unittest discover -s tests -v"""
+import contextlib
 import json
 import os
 import sys
@@ -89,6 +90,21 @@ def launch(aid, kind, label, at=None, sid="s1"):
     pg.on_subagent("claude", {"session_id": sid, "agent_id": aid, "agent_type": kind}, True, now=at)
     pg.launch_result("claude", {"session_id": sid, "tool_use_id": f"toolu_{aid}", "tool_response": {"agentId": aid}},
                      now=at)
+
+
+@contextlib.contextmanager
+def member_call(aid, cmd="dev progress"):
+    """A crew member's shell call, open in the call ledger of the session the command resolves to, with its lane
+    variable set: what a member's stamped `dev` command runs inside (identity.verified_lane)."""
+    agent, sid, _ = pg.resolve_session()
+    data = {"session_id": sid, "tool_use_id": f"toolu_call_{aid}", "tool_name": "Bash", "agent_id": aid,
+            "tool_input": {"command": cmd}}
+    pg.call_opened(agent, data)
+    try:
+        with mock.patch.dict(os.environ, {"DEVKIT_FROM_AGENT": aid}):
+            yield
+    finally:
+        pg.call_closed(data)
 
 
 def gates_passed(aid, at=None, sid="s1"):
@@ -420,7 +436,10 @@ class TimeModelTests(unittest.TestCase):
                          'DEVKIT_FROM_AGENT=a1b2 dev progress step "parser done"')
         self.assertIsNone(hooks._route_subagent_progress(dict(sub, agent_id=None)))  # the main agent: untouched
         compound = dict(sub, tool_input={"command": "dev progress step x && rm -rf build"})
-        self.assertIsNone(hooks._route_subagent_progress(compound))  # never approve anything but that one command
+        # Claude Code stamps the whole command and approves nothing; Codex, whose rewrite approves, never stamps
+        self.assertEqual(hooks._route_subagent_progress(compound)["command"],
+                         "export DEVKIT_FROM_AGENT=a1b2; readonly DEVKIT_FROM_AGENT; " + compound["tool_input"]["command"])
+        self.assertIsNone(hooks._route_subagent_progress(compound, "codex"))
         self.assertIsNone(hooks._route_subagent_progress(dict(sub, tool_input={"command": "git status"})))
 
 
@@ -1598,7 +1617,9 @@ class CrewMessageAuditTests(unittest.TestCase):
 class CrewSafetyTests(unittest.TestCase):
     def test_a_subagent_cannot_act_as_morpheus_through_a_compound_command(self):
         # the lane router (guard.lane_route) routes a lane call joined only to cd or to reads, as its own lane; any
-        # other compound stays refused, so it never runs as the tech lead
+        # other compound that holds lane calls is stamped for the member as a whole on Claude Code, so none of its dev
+        # calls acts as the tech lead (what else it runs is judged by guard.check before routing); Codex, whose
+        # rewrite approves, keeps it refused
         from devkit import hooks
         sub = {"agent_id": "a1", "tool_name": "Bash"}
         for cmd, routed in (('cd lib && dev progress step "x" --check y',
@@ -1611,8 +1632,12 @@ class CrewSafetyTests(unittest.TestCase):
         for cmd in ('echo $(dev crew mode auto)', 'dev progress step x && rm -rf build', 'echo y | dev crew decide D1 A',
                     'cd lib && dev progress step x | tee /tmp/out', 'cd lib && env dev crew decide D1 A'):
             with self.subTest(cmd=cmd):
-                self.assertIsNone(hooks._route_subagent_progress(dict(sub, tool_input={"command": cmd})))
-                self.assertIn("command of its own", hooks._unroutable_lane_command(dict(sub, tool_input={"command": cmd})))
+                call = dict(sub, tool_input={"command": cmd})
+                self.assertEqual((hooks._route_subagent_progress(call) or {}).get("command"),
+                                 "export DEVKIT_FROM_AGENT=a1; readonly DEVKIT_FROM_AGENT; " + cmd)
+                self.assertIsNone(hooks._unroutable_lane_command(call))
+                self.assertIsNone(hooks._route_subagent_progress(call, "codex"))
+                self.assertIn("command of its own", hooks._unroutable_lane_command(call, "codex"))
         self.assertIsNone(hooks._unroutable_lane_command({"tool_name": "Bash", "tool_input": {
             "command": "cd lib && dev progress step x"}}))  # the main session may chain commands
         self.assertIsNone(hooks._unroutable_lane_command(dict(sub, tool_input={"command": "git status && ls"})))
@@ -1639,10 +1664,15 @@ class CrewSafetyTests(unittest.TestCase):
             with self.subTest(cmd=cmd):
                 self.assertEqual(hooks._route_subagent_progress(dict(sub, tool_input={"command": cmd}))["command"],
                                  f"DEVKIT_FROM_AGENT=a1 {cmd}")
-        for cmd in ('dev progress step "$(rm -rf build)"', 'dev progress step "`id`"', "dev progress step x\nrm -rf b",
-                    'dev progress step "x" > /etc/passwd'):
-            with self.subTest(cmd=cmd):  # expansions run inside double quotes; a newline separates commands
+        for cmd in ('dev progress step "$(rm -rf build)"', 'dev progress step "`id`"'):
+            with self.subTest(cmd=cmd):  # expansions run inside double quotes: the member is told first
                 self.assertIsNone(hooks._route_subagent_progress(dict(sub, tool_input={"command": cmd})))
+        for cmd in ("dev progress step x\nrm -rf b", 'dev progress step "x" > /etc/passwd'):
+            with self.subTest(cmd=cmd):  # a newline separates commands; the delete and the write meet guard.check
+                call = dict(sub, tool_input={"command": cmd})
+                self.assertEqual(hooks._route_subagent_progress(call)["command"],
+                                 "export DEVKIT_FROM_AGENT=a1; readonly DEVKIT_FROM_AGENT; " + cmd)
+                self.assertIsNone(hooks._route_subagent_progress(call, "codex"))
         self.assertIsNone(hooks._unroutable_lane_command(dict(sub, tool_input={"command": "dev progress"})))
 
     def test_a_subagent_cannot_change_the_main_plan(self):
@@ -1714,6 +1744,28 @@ class TranscriptCase(unittest.TestCase):
         return pg.on_question("claude", {"session_id": "s1", "tool_name": "AskUserQuestion", "tool_use_id": tid,
                                          "tool_input": {"questions": result["questions"]}, "tool_response": result,
                                          "transcript_path": str(self.transcript)})
+
+
+class DialogApprovalTests(TranscriptCase):
+    # the developer approved a push in a question dialog the tech lead wrote; devkit recorded nothing and said nothing,
+    # so the developer learned only from the tech lead's second ask that a typed grant line was needed. The rule stays
+    # (a dialog answer counts only for a decision devkit recorded); the context says so at once, with the line to type
+    def test_an_approval_in_a_dialog_devkit_did_not_record_says_a_typed_grant_is_needed(self):
+        q, notes = "May I push feat/x to origin now?", "Should the release notes mention the guard fix?"
+        result = {"questions": [{"question": notes, "options": [{"label": "Yes"}, {"label": "No"}]},
+                                {"question": q, "options": [{"label": "Yes, push"}, {"label": "Not yet"}]}],
+                  "answers": {notes: "Yes", q: "Yes, push"}}
+        self.write({"type": "user", "uuid": "u-9", "isSidechain": False, "toolUseResult": result,
+                    "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_q9",
+                                                             "content": "answered"}]}})
+        line = pg.evidence_lines(pg.on_question("claude", {
+            "session_id": "s1", "tool_name": "AskUserQuestion", "tool_use_id": "toolu_q9",
+            "tool_input": {"questions": result["questions"]}, "tool_response": result,
+            "transcript_path": str(self.transcript)}))
+        self.assertIn(f"answer to “{q}” grants nothing", line)
+        self.assertIn("`grant push <target>`", line)
+        self.assertNotIn("release notes", line)  # a question that asks no permission is no approval
+        self.assertIsNone(self.grant(consume=False))  # the rule is unchanged: no grant
 
 
 class EvidenceReplayTests(TranscriptCase):
@@ -2830,14 +2882,14 @@ class ProgressCommandLineTests(unittest.TestCase):
         self.assertEqual((docs["state"], docs["partial"][-1]["check"]), ("pending", "✓ dev docs check clean"))
 
     def test_a_members_close_of_its_own_step_says_it_closed(self):
-        with mock.patch.dict(os.environ, {"DEVKIT_FROM_AGENT": "k1"}):
+        with member_call("k1"):
             rc, out, err = progress_cli_out("step", "sync rewritten", "--step", "sync", "--check", "✓ 14 tests pass")
         self.assertEqual(rc, 0, err)
         self.assertIn("· sync rewritten · closed “sync” (done)", out)
 
     def test_a_members_evidence_for_a_step_it_does_not_hold_fails_and_says_what_to_do(self):
         # M176-M177: it printed ✓ and exited 0, so the member reported the step closed while it stayed pending
-        with mock.patch.dict(os.environ, {"DEVKIT_FROM_AGENT": "k1"}):
+        with member_call("k1"):
             rc, out, err = progress_cli_out("step", "docs look fine", "--step", "docs", "--check", "✓ read them")
         self.assertEqual(rc, 2, out)
         self.assertIn("“docs” is not your step", err)

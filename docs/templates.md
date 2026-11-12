@@ -77,8 +77,8 @@ sections are the ones the `communicating` skill asks agents to fill:
 
 1. **It picks the template.** The repository's own template wins: `.github/pull_request_template.md`, or the other
    places GitHub reads (`.github/PULL_REQUEST_TEMPLATE.md`, the repository root, `docs/`). Otherwise it takes devkit's
-   in your `language`, trying `pull_request.<language>.md`, then `pull_request.<base language>.md`, then
-   `pull_request.md`; `--lang` overrides it for one PR.
+   in American English, `pull_request.md`, whatever your `language` setting. `--lang <locale>` writes one PR in another
+   language, trying `pull_request.<locale>.md`, then `pull_request.<base language>.md`, then `pull_request.md`.
 2. **It fills what it knows.** Changes gets one line per commit (WIP commits left out). How to verify gets the local
    CI result, `Local CI: dev ci --run → passed (2 steps: Lint, Unit tests) @ d75a9f9`, or the note of
    `dev ci --mark-passed`. Links gets the task ids (`T-…`), ticket keys (`PROJ-142`), and `Closes #n` found in the

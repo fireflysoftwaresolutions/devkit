@@ -25,7 +25,8 @@ rule that applies (speaker):
 
 A wait (consumer) reads the ledger more strictly: a call counts only when it typed this very `dev` command, nothing
 more, so the tech lead's `dev watch --wait` never becomes a member's because the member's open
-`dev watch --wait --timeout 9` holds the same words.
+`dev watch --wait --timeout 9` holds the same words; and when two members' open calls typed it alike, it is neither's
+(a Codex crew, whose rewrite may carry no lane mark, waits with one command for every member).
 
 Codex marks a spawned agent's hooks with its agent_id, but the main thread's hooks carry none, so a Codex speaker that
 devkit takes for main is not verified (`verified` False); progress.caller keeps reporting Codex as `unverified`.
@@ -71,6 +72,7 @@ class _Found:
     session_how: str  # resolve_session's how: ancestry, ledger, env, recency, shell
     calls: tuple  # tool_use_ids of the session's open calls whose text holds this command
     ledger: str  # who the ledger names: "main", a member's agent id, or "" (nobody, or main in a guessed session)
+    members: tuple = ()  # the members whose open calls hold this command
 
 
 def from_hook(agent: str, data: dict) -> Speaker:
@@ -103,14 +105,37 @@ def require(sp: Speaker, *, main: bool = False, what: str = "") -> Speaker:
     return sp
 
 
+def verified_lane(lane: str, cwd: str | None = None, now: float | None = None) -> str:
+    """`lane` (a lane variable a `dev progress` or `dev crew` call passes) when an open call of this session belongs
+    to that same lane, or IdentityError. A command can give the variable another member's id where the guard does not
+    read it (a child shell's `print -v`, `${(P)v::=…}`, `declare -n`), and a variable only narrows when the call
+    ledger shows that member at work: without one of its calls open, the call has no lane identity and acts as no
+    one. Codex selects its session by the lane and refuses one that belongs to none (progress.resolve_session)."""
+    from . import progress
+    agent, sid, how = progress.resolve_session(cwd, sys.argv[1:])
+    if agent == "codex":
+        return lane
+    if how != "shell" and any(str(c.get("caller")) == lane for c in progress.open_calls(sid, now)):
+        return lane
+    raise IdentityError(f"the lane variable names {lane[:40]}, and no open call of this session is that crew "
+                        "member's, so devkit cannot tell who runs this command: run the dev command as a command of "
+                        "your own, in your lane")
+
+
 def consumer(for_me: bool, cwd: str | None = None) -> str:
     """Whose wait `dev watch` is: "main" or a crew member's lane. `--for me` is a member's own wait, refused when it
     resolves to the main session; without it, the speaker's own (a member's call makes it the member's). A speaker
     devkit cannot name is refused: guessing would let one wait take the other's events."""
-    sp = _find(cwd, None, None, exact=True).speaker
+    got = _find(cwd, None, None, exact=True)
+    sp = got.speaker
     if sp.how == "human":
         raise IdentityError("no agent session here: dev watch runs in the agent session that waits (Claude Code, "
                             "Codex)")
+    if not sp.lane and len(got.members) > 1:
+        raise IdentityError(f"several crew members ({len(got.members)}) run this very wait at once and no lane mark "
+                            "says which one calls, so devkit gives it to none of them (it would take one member's "
+                            "events for another). Read your answer with dev crew inbox --all, or wait again in a "
+                            "moment")
     if for_me:
         if sp.lane == "main":
             raise IdentityError("--for me is for a crew member's own wait, and this call is the tech lead's: run "
@@ -143,16 +168,25 @@ def _find(cwd=None, argv=None, now=None, exact: bool = False, settle: bool = Tru
     run = None
     if members:
         run = progress.load_run(agent, sid) or {}
-        ledger = max(members, key=lambda m: (progress.TOOL_LEVELS.index(progress.lane_tools(run, m) or "read"),
-                                             ((run.get("agents") or {}).get(m) or {}).get("depth") or 0))
+        # a wait two members typed alike is neither's: the most restricted one is right for a permission, but a wait
+        # given to it would take that member's events and leave the other's waiting for nobody
+        ledger = "" if exact and len(members) > 1 else max(
+            members, key=lambda m: (progress.TOOL_LEVELS.index(progress.lane_tools(run, m) or "read"),
+                                    ((run.get("agents") or {}).get(m) or {}).get("depth") or 0))
     else:
         ledger = "main" if hits and how != "recency" else ""
     calls = tuple(c.get("tool_use_id") for c in hits)
     lane = (os.environ.get(LANE_VAR) or "").strip()[:80]
 
     def found(lane_, how_, verified):
-        return _Found(Speaker(agent, sid, lane_, how_, verified), agent, how, calls, ledger)
+        return _Found(Speaker(agent, sid, lane_, how_, verified), agent, how, calls, ledger, tuple(members))
     if lane:
+        # the hook's stamp names the member whose command it is; a command that gave the variable another lane's id
+        # before this call is told apart by the call ledger: the open calls that typed this command are other
+        # members' only, so the caller is the most restricted of them, never the lane the variable names (a lane
+        # with only the tech lead's call keeps the stamp, which narrows)
+        if members and lane not in members:
+            return found(ledger, "ledger", True) if ledger else found("", "unknown", False)
         return found(lane, "stamped", True)
     guessed = how == "recency"  # a session devkit only guessed never makes its caller the tech lead (rules 3 to 5)
     if os.environ.get(SPEAKER_VAR) == "main" and not guessed and not any(c.get("caller") != "main" for c in typed):

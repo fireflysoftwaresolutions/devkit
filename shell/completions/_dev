@@ -407,12 +407,12 @@ _dev__handoff() {
 _dev__session() {
   _arguments -s -S : \
     '(- *)'{-h,--help}'[show this help message and exit]' \
-    '--session=[<agent>:<session id>]:session: ' \
+    '--session=[<agent>:<session id>, the id bare or as devkit names its files]:session: ' \
     '--latest[brief: the project'\''s newest session with an open run or requests]' \
     '(--project -p)'{-p+,--project=}'[brief --latest]:project: _dev_live projects ids' \
     '--for-chat[brief: for a chat surface]' \
     '--provider=[brief: who will read it]:provider: ' \
-    '--from=[carry: the cleared session]:from sid: ' \
+    '--from=[carry: the cleared session'\''s id, bare or as claude-<id>]:from sid: ' \
     '--members[compactions: the members'\'' transcripts too]' \
     '--all[forget: every continuity record and clear link here]' \
     '--json[ls, tell, ask, answer, inbox, claim, release, claims, escalate…]' \
@@ -1238,7 +1238,7 @@ _dev__bug__detour() {
   _arguments -s -S : \
     '(- *)'{-h,--help}'[show this help message and exit]' \
     '*--hint=[a hint template]:'\''name slot=value …'\'': ' \
-    '*--dev=[a dev subcommand and only its flags that take no value, such as '\''test…]:'\''command'\'': ' \
+    '*--dev=[a dev subcommand and its flags, such as '\''test --failed'\'' or '\''watch…]:'\''command'\'': ' \
     '*--text=[free text, at most 200 characters, held for review]:'\''text'\'': ' \
     ':fingerprint: '
 }
@@ -2004,7 +2004,7 @@ _dev__pr__create() {
     '--edit[edit the pre-filled body in $EDITOR first]' \
     '--ci-passed[attest that the local suite passed on HEAD]' \
     '--dry-run[print the title and the pre-filled body]' \
-    '--lang=[language of generated text]:lang: '
+    '--lang=[language of the pull request text devkit writes]:lang: '
 }
 
 _dev__pr__view() {
@@ -2052,7 +2052,7 @@ _dev__pr__ready() {
   _arguments -s -S : \
     '(- *)'{-h,--help}'[show this help message and exit]' \
     '--ci-passed[attest that the local suite passed on HEAD]' \
-    '--lang=[language of generated text]:lang: ' \
+    '--lang=[language of the pull request text devkit writes]:lang: ' \
     '::number: '
 }
 
@@ -2458,7 +2458,8 @@ _dev__crew__answer() {
 
 _dev__crew__inbox() {
   _arguments -s -S : \
-    '(- *)'{-h,--help}'[show this help message and exit]'
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--all[also the messages a wait or a hook delivered already, each whole…]'
 }
 
 _dev__crew__mode() {

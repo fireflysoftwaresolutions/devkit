@@ -105,12 +105,26 @@ def has_marker(text: str) -> bool:
 
 # The role check (the developer, M346; lesson L-fy2lfvacp64): a final message names a crew member as
 # `<role> (<Name>)`, the role in any language, so the Matrix names never stand alone. It reads the structure only: the
-# roster's name inside parentheses right after other words. Code blocks, code spans and links are not prose.
+# roster's name inside parentheses right after other words. Code blocks, code spans and links are not prose. It runs
+# at every Stop, so each pattern costs one pass whatever the message holds (lesson L-g8lywzsgclv): a fence always ends
+# (at its closing line or the text's end), a code span is at most three backticks around 400 characters without one,
+# and a link starts only where a run of its characters starts.
 _NOT_PROSE = (re.compile(r"(?ms)^[ \t]*(`{3,}|~{3,}).*?(?:^[ \t]*\1[ \t]*$|\Z)"),  # fenced code blocks
-              re.compile(r"(`+)[^\n]*?\1"),  # code spans, commands among them
-              re.compile(r"\b[a-z][a-z0-9+.-]*://\S+"))  # links
-_ROLE_BEFORE = re.compile(r"[\w)\]*]\s*[(（]$")  # "Backend engineer (", "バックエンドエンジニア（"
+              re.compile(r"(`{1,3})[^`\n]{1,400}\1"),  # code spans, commands among them
+              re.compile(r"(?<![a-z0-9+.-])[a-z][a-z0-9+.-]*://\S+"))  # links
 _ROLE_AFTER = re.compile(r"[)）]")
+
+
+def _role_before(prose: str, at: int) -> bool:
+    """Does a role end right before `at`: a word character, `)`, `]` or `*`, optional spaces, then `(` or `（`
+    ("Backend engineer (", "バックエンドエンジニア（")? Read backward from `at`, never the whole text before it."""
+    j = at - 1
+    if j < 0 or prose[j] not in "(（":
+        return False
+    j -= 1
+    while j >= 0 and prose[j].isspace():
+        j -= 1
+    return j >= 0 and (prose[j].isalnum() or prose[j] in "_)]*")
 
 
 def _prose(text: str) -> str:
@@ -155,7 +169,7 @@ def bare_names(text: str, roster=None) -> list:
     found = []
     for pat, name in pats:
         for hit in pat.finditer(prose):
-            if _ROLE_BEFORE.search(prose[:hit.start()]) and _ROLE_AFTER.match(prose, hit.end()):
+            if _role_before(prose, hit.start()) and _ROLE_AFTER.match(prose, hit.end()):
                 continue
             found.append((hit.start(), name))
     return list(dict.fromkeys(name for _, name in sorted(found)))
@@ -252,12 +266,55 @@ def progress_gate(agent: str, data: dict, sess: dict, now=None) -> str:
     return why
 
 
+# The reply-language rule (the developer, 2026-11-12: "if the user speaks English you should speak English, Spanish
+# Spanish, etc. By default American English"): the final message's prose is in the developer's language, or in the
+# locale devkit's `language` is set to. Only the main session's final message is checked: a crew member reports to
+# the tech lead in American English (SubagentStop has no such check, and a Codex member's rollout is skipped).
+def language_reason(want: str, got: str, how: str) -> str:
+    """What to fix when the final message is in `got` but the developer's language is `want` (language.wanted)."""
+    from . import language
+    w, g = language.name(want), language.name(got)
+    cause = (f"devkit's language is set to {w}" if how == "set" else
+             f"the developer {'wrote' if how == 'latest' else 'has been writing'} in {w}")
+    return (f"devkit: {cause}, but your final message is in {g}: reply in {w}. Keep the status block's marker and "
+            f"labels as they are (**[Firefly> DevKit]**, Done, Check, Progress, Crew, You, Next); code, commands, "
+            f"commits, PRs, docs and devkit's records stay in American English. Reply again with the message fixed.")
+
+
+def language_gate(agent: str, data: dict, sess: dict) -> str:
+    """Stop, main session: language_reason when the developer's language is known (their latest message, an
+    earlier one when it is unclear, or a set locale) and the final message's prose is surely in another one; once per
+    turn (`sess["language_told"]`) and never on the reply to a send-back. '' when nothing is wrong, with
+    canary.enforce or canary.language off, or on any error (fails open)."""
+    if data.get("stop_hook_active") or sess.get("language_told", _UNTOLD) == sess.get("turn_started"):
+        return ""
+    cfg = core.CFG.get("canary") or {}
+    if not (cfg.get("enforce", True) and cfg.get("language", True)):
+        return ""
+    try:
+        from . import language
+        transcript = data.get("transcript_path")
+        want, how = language.wanted(None, transcript)
+        if not want:
+            return ""
+        text = data.get("last_assistant_message") or last_assistant_text(transcript) or ""
+        got = language.other_language(text, want)
+        if not got or (agent == "codex" and language.member_rollout(transcript)):
+            return ""
+        why = language_reason(want, got, how)
+    except Exception:
+        return ""
+    sess["language_told"] = sess.get("turn_started")
+    return why
+
+
 STATUS_RE = re.compile(r"^[*`_\s]*" + _MARK + r"[*`\s]*[·:—-]?\s*(.*)$", re.I)
 
 
 SEP = " ❯ "
 GLYPHS = "✓⚠✗–"
-BULLET_RE = re.compile(r"^\s*[-*•]\s+\**\s*(done|check|progress|crew|you|next)\s*\**\s*:\s*\**\s*(.*)$", re.I)
+# one character class per gap: \s* \** \s* side by side trade characters when no star or colon is there
+BULLET_RE = re.compile(r"^\s*[-*•][ \t]+(?:\*+[ \t]*)?(done|check|progress|crew|you|next)[ \t*]*:[ \t*]*(.*)$", re.I)
 
 
 def _clean(s: str) -> str:

@@ -660,6 +660,23 @@ class ClearTests(Base):
         with self.assertRaisesRegex(ValueError, "no run"):
             ct.carry("claude", SID, NEW, now=T0)
 
+    # `dev session carry --from claude-<id>` was refused with "no run to carry" while the bare id worked: devkit names
+    # a session's runs and records `<agent>-<id>`, and people copy that form. Both forms name the same session, for
+    # carry's --from and for the --session of brief and forget.
+    def test_a_session_id_written_with_its_agent_prefix_names_the_same_session(self):
+        self.make_run(lanes=())
+        self.cleared()
+        bare = self.cli("brief", "--session", f"claude:{SID}")
+        self.assertIn("Release 26.11.3", bare)
+        for form in (f"claude:claude-{SID}", f"claude-{SID}"):
+            self.assertEqual(self.cli("brief", "--session", form), bare, form)
+        with mock.patch.object(pg, "resolve_session", lambda *a, **k: ("claude", NEW, "env")):
+            out = self.cli("carry", "--from", f"claude-{SID}")
+        self.assertIn(f"moved from claude:{SID[:12]} to this session", out)
+        self.assertEqual(state.read(pg.run_path("claude", NEW))["carried_from"], SID)
+        self.assertIn("1 record(s)", self.cli("forget", "--session", f"claude:claude-{NEW}"))
+        self.assertFalse(ct.record_path("claude", NEW).exists())
+
     def test_carry_takes_back_a_run_its_ended_session_left_orphaned(self):
         # the reconciler orphans the run of the session /clear ended; the session it is carried to works on it
         self.make_run()

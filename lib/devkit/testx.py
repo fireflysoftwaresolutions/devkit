@@ -1165,6 +1165,54 @@ def build_command(top, runner, files=(), ids=(), report=None, related=(), all_=F
 # --------------------------------------------------------------------------- results
 
 
+def _pytest_module(rootdir, rel) -> str:
+    """The name pytest's default import mode imports test file `rel` (relative to `rootdir`) by: its file name, after
+    the names of the packages (folders with an __init__.py) that hold it."""
+    parts = rel.replace("\\", "/").split("/")
+    i = len(parts) - 1
+    while i > 0 and os.path.isfile(os.path.join(rootdir, *parts[:i], "__init__.py")):
+        i -= 1
+    return ".".join(parts[i:-1] + [re.sub(r"\.py$", "", parts[-1])])
+
+
+_IMPORTLIB = re.compile(r"--import-mode(?:=|[\s\"',]+)importlib\b")
+# pytest's configuration files in the order it picks the first one, each with the section that makes it pytest's
+_PYTEST_CONFIGS = (("pytest.ini", ""), (".pytest.ini", ""), ("pyproject.toml", "[tool.pytest"), ("tox.ini", "[pytest]"),
+                   ("setup.cfg", "[tool:pytest]"))
+
+
+def _pytest_importlib(top, runner, env=None) -> bool:
+    """Does pytest import this runner's tests in importlib mode: on its command, in PYTEST_ADDOPTS, or in the addopts
+    of the configuration file pytest reads (the first of pytest.ini, .pytest.ini, pyproject.toml, tox.ini and
+    setup.cfg that configures pytest, in the runner's folder)?"""
+    if _IMPORTLIB.search(" ".join(str(x) for x in runner.get("exec") or ())) or \
+            _IMPORTLIB.search((env or {}).get("PYTEST_ADDOPTS") or os.environ.get("PYTEST_ADDOPTS") or ""):
+        return True
+    root = _rootdir(top, runner)
+    for name, section in _PYTEST_CONFIGS:
+        text = _read(os.path.join(root, name))
+        if text and (not section or section in text):
+            return bool(_IMPORTLIB.search(text))
+    return False
+
+
+def _pytest_buckets(top, runner, files, ids) -> list:
+    """Test files (relative to the top) and node ids -> [(files, ids)], as few sets as possible in which no two test
+    files share the name pytest imports them by."""
+    rootdir = _rootdir(top, runner)
+    buckets = []  # [({module name: its file}, files, ids)]
+    for kind, item, rel in [("f", f, _rel(top, runner, f)) for f in files] + \
+                           [("i", i, _id(i).split("::")[0]) for i in ids]:
+        mod = _pytest_module(rootdir, rel)
+        b = next((b for b in buckets if b[0].get(mod, rel) == rel), None)
+        if b is None:
+            b = ({}, [], [])
+            buckets.append(b)
+        b[0][mod] = rel
+        (b[1] if kind == "f" else b[2]).append(item)
+    return [(fs, i_s) for _, fs, i_s in buckets]
+
+
 def _case(id_, file, line, status, message="", secs=0.0, name=""):
     return {"id": id_, "file": file, "line": line, "status": status, "message": (message or "")[:300],
             "secs": round(float(secs or 0), 3), "name": name or id_}
@@ -1247,7 +1295,17 @@ def parse_junit(text, top, base, runner) -> list:
         body = (bad.text or "") if bad is not None else ""
         msg = _first_line(bad.get("message") or "") if bad is not None else ""
         line = None
-        if runner == "pytest":
+        if runner == "pytest" and not cls and bad is not None and name and \
+                os.path.isfile(os.path.join(base, name.replace(".", "/") + ".py")):
+            # a module pytest could not collect: no class, named by its dotted module; the error is in the body
+            file = _relto(top, os.path.join(base, name.replace(".", "/") + ".py"))
+            id_ = file
+            hits = re.findall(r"(?m)^(\S+?\.py):(\d+):", body)
+            pick = [h for h in hits if file.endswith(re.sub(r"^(?:\./)+", "", h[0]))]
+            line = int(pick[-1][1]) if pick else None
+            errs = re.findall(r"(?m)^E\s+(\S.*)$", body)
+            msg = errs[-1].strip() if errs else msg
+        elif runner == "pytest":
             id_, file = _pytest_id(cls, name, base, top)
             if tc.get("file"):
                 file = _relto(top, os.path.join(base, tc.get("file")))
@@ -1404,10 +1462,14 @@ def parse_jest_json(text, top) -> list:
 
 
 _UT_HEAD = re.compile(r"^(FAIL|ERROR|UNEXPECTED SUCCESS): (\S+) \(([\w.]+)\)(.*)$")
-_UT_RESULT = r" \.\.\. (ok|FAIL|ERROR|skipped.*|expected failure|unexpected success)\s*$"
-_UT_LINE = re.compile(r"^(\S+) \(([\w.]+)\)(?:[^\n]*?)?" + _UT_RESULT)
-_UT_NAME = re.compile(r"^(\S+) \(([\w.]+)\)\s*$")  # a test with a docstring: the result follows on the next line
-_UT_DOC = re.compile(r"^.*?" + _UT_RESULT)
+# A test's line in the verbose list: `name (id) ... `, then what the test itself writes to stderr, then its result;
+# alone on its line when a docstring line follows (`Its docstring. ... `)
+_UT_START = re.compile(r"^(\S+) \(([\w.]+)\)(?:(?: [^\n]*?)?? \.\.\. (.*)|\s*)$")
+# a test that starts right after one that wrote no result (Python 3.9 prints none for a test whose subtests failed)
+_UT_NEXT = re.compile(r"^([A-Za-z_]\w*) \(([\w.]+)\) \.\.\. (.*)$")
+# the result, the last thing written for a test, glued to its stderr when that ends without a newline
+_UT_STATUS = re.compile(r"(ok|FAIL|ERROR|expected failure|unexpected success|skipped(?: '.*'| \".*\")?)\s*$")
+_UT_STOP = re.compile(r"^(?:[=-]{20,}\s*$|Ran \d+ tests? in )")
 _UT_FRAME = re.compile(r'^\s*File "(.+?)", line (\d+), in ')
 _UT_LOADER = ("unittest.loader._FailedTest", "unittest.loader.ModuleImportFailure")
 
@@ -1449,23 +1511,45 @@ def _ut_file(top, runner, id_: str) -> str:
     return ""
 
 
+def _ut_results(lines) -> list:
+    """The verbose list of a unittest run -> [(name, id in parentheses, result)]. Everything a test writes between its
+    name and its result (its own stderr, which devkit reads with stdout) belongs to it; the result is what ends it."""
+    out, cur, body, doc = [], None, [], False
+
+    def close():
+        said = [b for b in body if b.strip()]
+        m = _UT_STATUS.search(said[-1]) if cur and said else None
+        if m:
+            out.append((cur[0], cur[1], m.group(1)))
+
+    for ln in lines:
+        m = _UT_START.match(ln)
+        if m:
+            close()
+            cur, rest = (m.group(1), m.group(2)), m.group(3)
+            while rest is not None and (n := _UT_NEXT.match(rest)):
+                cur, rest = (n.group(1), n.group(2)), n.group(3)
+            body, doc = ([] if rest is None else [rest]), rest is None
+        elif _UT_STOP.match(ln):
+            close()
+            cur, body, doc = None, [], False
+        elif cur:
+            body.append(ln.split(" ... ", 1)[1] if doc and " ... " in ln else ln)
+            doc = False
+    close()
+    return out
+
+
 def parse_unittest(text, top, runner, names=()) -> list:
     """unittest's verbose output (3.9 and 3.11+ formats) -> cases, failures with file:line and the error line.
     `names` are the test names the command asked for: a test unittest could not load is reported by one of them,
     and marked `not_found` when the name itself no longer exists (renamed or deleted)."""
     lines = (text or "").splitlines()
     cases, pending = {}, list(names)
-    for k, ln in enumerate(lines):
-        m = _UT_LINE.match(ln)
-        name, paren, st = (m.group(1), m.group(2), m.group(3)) if m else (None, None, None)
-        if not m and (n := _UT_NAME.match(ln)) and k + 1 < len(lines) and (d := _UT_DOC.match(lines[k + 1])) \
-                and not _UT_LINE.match(lines[k + 1]):
-            name, paren, st = n.group(1), n.group(2), d.group(1)
-        if name:
-            id_ = _ut_id(name, paren, pending)
-            status = "passed" if st in ("ok", "expected failure") else "skipped" if st.startswith("skipped") \
-                else "failed"
-            cases[id_] = _case(id_, _ut_file(top, runner, id_), None, status, "", 0, name)
+    for name, paren, st in _ut_results(lines):
+        id_ = _ut_id(name, paren, pending)
+        status = "passed" if st in ("ok", "expected failure") else "skipped" if st.startswith("skipped") else "failed"
+        cases[id_] = _case(id_, _ut_file(top, runner, id_), None, status, "", 0, name)
     i, pending = 0, list(names)
     while i < len(lines):
         m = _UT_HEAD.match(lines[i])
@@ -1579,6 +1663,24 @@ def run_tests(top, runner, files=(), ids=(), related=(), all_=False, env=None, s
                                        [i for i in ids if _id(i).split("::")[0] == f], env=env, stream=stream,
                                        log=part_log, timeout=timeout))
             return _merged_runs(parts, files, ids, log)
+    if runner["name"] == "pytest" and not related and not _pytest_importlib(top, runner, env):
+        # pytest's default import mode imports a test file by its name inside its packages: two test files of one
+        # process with the same such name (tests/unit/x/test_api.py, tests/integration/x/test_api.py, no
+        # __init__.py) fail to collect. Each set of files with distinct names runs in its own process. In importlib
+        # mode no such names clash, and the run stays one, with pytest's own collection for the whole suite.
+        if all_:
+            repo = _Repo(top)
+            picked = [t for t in repo.tests if (owner(repo.runners(), t) or {}).get("root") == runner["root"]
+                      and _lang(t) == "py"]
+        else:
+            picked = files
+        buckets = _pytest_buckets(top, runner, picked, [] if all_ else ids)
+        if len(buckets) > 1:
+            parts = [run_tests(top, runner, fs, i_s, env=env, stream=stream, log=f"{log}.{k}" if log else None,
+                               timeout=timeout) for k, (fs, i_s) in enumerate(buckets)]
+            merged = _merged_runs(parts, [] if all_ else files, [] if all_ else ids, log)
+            merged["all"] = bool(all_)
+            return merged
     tmpd = core.STATE / "tests" / "tmp"
     tmpd.mkdir(parents=True, exist_ok=True)
     work = Path(tempfile.mkdtemp(prefix="run-", dir=str(tmpd)))
@@ -1710,9 +1812,22 @@ def _update_state(top, change) -> dict:
     return st
 
 
+_UT_DOTTED = re.compile(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*")
+
+
+def _loadable(runner, root, id_) -> bool:
+    """Can `runner` load the test named `id_` again? Not the label of a run that failed with no test to name
+    (`unittest:.`, the runner and its folder), and for unittest only a dotted name or a test file."""
+    if not id_ or id_ == f"{runner}:{root}":
+        return False
+    return runner != "unittest" or bool(_UT_DOTTED.fullmatch(id_)) or id_.endswith(".py")
+
+
 def _rerunnable(res, case) -> bool:
-    """A failure can be recorded only with its module or file: a bare unittest name would rerun as a module."""
-    return bool(case["file"]) or res["runner"] != "unittest" or "." in case["id"]
+    """A failure can be recorded only with its module or file (a bare unittest name would rerun as a module), and
+    only by a name its runner can load."""
+    return _loadable(res["runner"], res["root"], case["id"]) and \
+        (bool(case["file"]) or res["runner"] != "unittest" or "." in case["id"])
 
 
 def record(top, results, kind="run") -> dict:
@@ -1895,9 +2010,16 @@ def _group_tests(top, runners, tests, changed=()):
     return out, orphans
 
 
+def _unloadable(top, st) -> list:
+    """Recorded failures whose names no runner can load (an older devkit recorded them): [(runner, root, id)]."""
+    return [(f.get("runner"), f.get("root"), f.get("id")) for f in (st.get("failures") or {}).get(top) or []
+            if not _loadable(f.get("runner"), f.get("root"), f.get("id"))]
+
+
 def _failed_groups(top, runners, st):
     fails = [f for f in (st.get("failures") or {}).get(top) or []
-             if not f.get("file") or os.path.exists(os.path.join(top, f["file"]))]
+             if (not f.get("file") or os.path.exists(os.path.join(top, f["file"])))
+             and _loadable(f.get("runner"), f.get("root"), f.get("id"))]
     out = []
     for r in runners:
         mine = [f for f in fails if f.get("runner") == r["name"] and f.get("root") == r["root"]]
@@ -2091,6 +2213,12 @@ def _flow(a, top, runners):
 
     only_failed, only_affected = a.failed and not a.affected, a.affected and not a.failed
     if not only_affected:
+        bad = _unloadable(top, st)
+        if bad:
+            _forget(top, set(bad))
+            print(f"{ui.WARN} {len(bad)} recorded failure(s) name no test a runner can load: forgotten: "
+                  f"{', '.join(i for _, _, i in bad[:5])}" + (f" and {len(bad) - 5} more" if len(bad) > 5 else ""),
+                  file=sys.stderr)
         groups = _failed_groups(top, runners, st)
         if not groups and only_failed:
             if not json_out:
@@ -2572,6 +2700,13 @@ def _no_runner(a, f) -> str:
     return "no runner here takes it (dev test plan lists the runners found)"
 
 
+_IMPORTS_ADDED = "cannot be proven: imports a file the change adds"
+_NOT_PROVEN = ("skipped", _IMPORTS_ADDED)  # verdicts that neither prove the change nor fail: listed, never red
+# how a runner says a module or file could not be imported or found
+_IMPORT_FAILED = re.compile(r"ModuleNotFoundError|ImportError|No module named|Failed to import|collection failure|"
+                            r"Cannot find module|ERR_MODULE_NOT_FOUND|Failed to (?:load|resolve)|could not be resolved")
+
+
 def _prove(a, top, runners) -> int:
     base, label = base_ref(top, a.since)
     if not base:
@@ -2601,6 +2736,13 @@ def _prove(a, top, runners) -> int:
     if not tests and not skipped:
         return _refuse(f"no new or changed tests since {label}",
                        "write the test first, or name it: dev test prove <test file>")
+    # A test helper the change adds is test code: it stays in the copy, so the new tests that use it run against the
+    # old production code. Only when the helpers are the whole change do they go with it.
+    at_base = {f: core.git(top, "cat-file", "-e", f"{base}:{f}")[0] == 0 for f in prod + helpers}
+    undo = prod + [h for h in helpers if at_base[h] or not prod]
+    # the tests that import a file the change adds cannot reach an assertion without it
+    added = [f for f in undo if not at_base[f]]
+    needs_added = _dependents(repo, added) if added else set()
     plan = []
     for f in tests:
         r = owner(runners, f)
@@ -2614,7 +2756,10 @@ def _prove(a, top, runners) -> int:
                        "dev test plan shows the runners found here")
     groups = {}
     for r, f, units, ids in plan:
-        g = groups.setdefault(id(r), (r, {"files": [], "ids": []}, []))
+        # pytest stops the whole session at a module it cannot import (one that imports a file the change adds): the
+        # other tests of the run still run
+        g = groups.setdefault(id(r), (dict(r, exec=list(r["exec"]) + ["--continue-on-collection-errors"])
+                                      if r["name"] == "pytest" else r, {"files": [], "ids": []}, []))
         (g[1]["ids"].extend(ids) if ids else g[1]["files"].append(f))
         g[2].append((f, units, ids))
     runs = max(1, int(a.runs))
@@ -2654,8 +2799,10 @@ def _prove(a, top, runners) -> int:
                     break
                 first.setdefault(id(r), res)
                 for key, c in place(res, members):
-                    rec = found.setdefault(key, {"file": key[0], "id": key[1], "passes": 0, "message": ""})
+                    rec = found.setdefault(key, {"file": key[0], "id": key[1], "passes": 0, "skips": 0,
+                                                 "message": ""})
                     rec["passes"] += c["status"] == "passed"
+                    rec["skips"] += c["status"] == "skipped"
                     rec["message"] = rec["message"] or c["message"]
                 # a parametrized test answers by its cases (test_x[a], test_x[b]), never by its bare name
                 answered |= {(f, _id(i)) for c in res["cases"] for f, units, ids in members for i in ids or ()
@@ -2671,14 +2818,15 @@ def _prove(a, top, runners) -> int:
                                                    "message": mine[0]["message"] if mine else "did not run"})
         without = {}
         if not problem:
-            _restore_base(top, base, dest, prod + helpers)
+            _restore_base(top, base, dest, undo)
             for r, sel, members in groups.values():
                 res = run_tests(dest, r, files=sel["files"], ids=sel["ids"], env=env)
                 for key, c in place(res, members):
                     without[key] = (c["status"], c["message"])
                 for f, units, ids in members:
+                    mine = [c for c in res["failures"] if c["file"] == f] + res["failures"]
                     for key in [k for k in found if k[0] == f and k not in without]:
-                        without[key] = ("failed", _tail_line(res["failures"][0]["message"]) if res["failures"]
+                        without[key] = ("failed", _tail_line(mine[0]["message"]) if mine
                                         else "") if unmatched_failed(res, f, ids) else ("not run", "")
     finally:
         shutil.rmtree(dest, ignore_errors=True)
@@ -2688,12 +2836,18 @@ def _prove(a, top, runners) -> int:
     for key, rec in sorted(found.items()):
         st, msg = without.get(key, ("not run", ""))
         p = rec["passes"]
-        verdict = ("flaky" if 0 < p < runs else "fails with the change" if p == 0 else
+        # a test its runner skipped in every run with the change ran neither way: it proves nothing and fails nothing
+        verdict = ("skipped" if rec.get("skips") == runs else "flaky" if 0 < p < runs else
+                   "fails with the change" if p == 0 else
+                   _IMPORTS_ADDED if st == "failed" and rec["file"] in needs_added and _IMPORT_FAILED.search(msg) else
                    "proves the change" if st == "failed" else
                    "does not test the change" if st == "passed" else "did not run without the change")
         rows.append({"id": rec["id"], "file": rec["file"], "with_change": f"{p}/{runs}", "without_change": st,
                      "verdict": verdict, "message": msg if st == "failed" else rec["message"]})
-    rc = 0 if rows and all(x["verdict"] == "proves the change" for x in rows) else 1
+    # 0: every test that ran proves the change; 1: one does not; 2: none could be proven (skipped, or it imports a
+    # file the change adds)
+    red = [x for x in rows if x["verdict"] not in _NOT_PROVEN and x["verdict"] != "proves the change"]
+    rc = 1 if red or not rows else 0 if any(x["verdict"] == "proves the change" for x in rows) else 2
     if a.json:
         print(json.dumps({"base": label, "production": prod, "helpers": helpers,
                           "git": f"none: {gitless}" if gitless else "carried", "runs": runs, "tests": rows,
@@ -2705,9 +2859,10 @@ def _prove(a, top, runners) -> int:
                      f"{f' ({len(helpers)} in the tests)' if helpers else ''} (restored from {label} for the last run)"))
     if gitless:
         print(f"  {ui.WARN} the copy has no git repository ({gitless}): a test that runs git on its checkout fails there")
-    green = sum(1 for x in rows if x["with_change"] == f"{runs}/{runs}")
-    print(f"  {ui.OK if green == len(rows) else ui.FAIL} with the change: {green} of {len(rows)} test(s) passed "
-          f"{runs} of {runs} runs")
+    ran = [x for x in rows if x["verdict"] != "skipped"]
+    green = sum(1 for x in ran if x["with_change"] == f"{runs}/{runs}")
+    print(f"  {ui.OK if green == len(ran) else ui.FAIL} with the change: {green} of {len(ran)} test(s) passed "
+          f"{runs} of {runs} runs" + (f" · {len(rows) - len(ran)} skipped" if len(ran) < len(rows) else ""))
     if skipped:
         print(f"{ui.WARN} not proven, left out because they cannot run here:")
         for f, why in skipped:
@@ -2716,6 +2871,9 @@ def _prove(a, top, runners) -> int:
                 ("flaky", ui.FAIL, f"flaky with the change (not {runs} of {runs} green):"),
                 ("fails with the change", ui.FAIL, "fail with your change present (fix them first):"),
                 ("did not run without the change", ui.WARN, "did not run without the change:"),
+                ("skipped", ui.WARN, "skipped by their runner, so neither proven nor failing:"),
+                (_IMPORTS_ADDED, ui.WARN, "cannot be proven: they import a file the change adds, so without the "
+                                          "change they stop at the import, before any assertion:"),
                 ("proves the change", ui.OK, "fail without the change, as expected:"))
     for verdict, mark, title in sections:
         mine = [x for x in rows if x["verdict"] == verdict]
@@ -2726,6 +2884,8 @@ def _prove(a, top, runners) -> int:
             extra = f"  passed {x['with_change'].replace('/', ' of ')} runs" if verdict == "flaky" else \
                 f"  · {x['message'][:120]}" if x["message"] and verdict != "does not test the change" else ""
             print(f"    {x['file']}{'' if x['id'] == x['file'] else '  ' + x['id']}{extra}")
+    if rc == 2:
+        print(f"{ui.WARN} nothing proven: no new or changed test here could be proven against the change")
     return rc
 
 

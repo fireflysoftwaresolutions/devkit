@@ -473,9 +473,9 @@ class BusyLaneQueueTests(unittest.TestCase):
 
     def test_the_members_command_for_a_step_its_lane_cannot_close_exits_2_and_says_what_to_do(self):
         # M176-M177: the command printed ✓ and exited 0, so the member reported case-revert closed
-        from test_progress import progress_cli_out
+        from test_progress import member_call, progress_cli_out
         self.assign("case-revert", "tests/test_gate_tiers.py", self.m(5))
-        with mock.patch.dict(os.environ, {"DEVKIT_FROM_AGENT": "a_neo"}):
+        with member_call("a_neo"):  # the member's own call is open, as when its command runs
             rc, out, err = progress_cli_out("step", "case-revert committed", "--step", "case-revert", "--check",
                                             "✓ 67 tests pass")
         self.assertEqual(rc, 2, out)
@@ -532,6 +532,145 @@ class BusyLaneQueueTests(unittest.TestCase):
         self.close("launcher-depth", self.m(10))
         pg.reopen("launcher-depth", "the review found a slow launcher shape", now=self.m(12))
         self.assertEqual(self.held("launcher-depth"), ("a_neo", "running"))
+
+
+class TwoLaneQueueTests(unittest.TestCase):
+    # Weave: the tech lead assigned a step to a member who worked in two lanes; devkit said it waits for a launch of
+    # its own, and it stayed the tech lead's after one of the lanes freed and did the work, so the member's
+    # `dev progress step --step` was refused and the step bound only to a fresh launch that named it
+    def setUp(self):
+        self.state = TempState().__enter__()
+        self.addCleanup(self.state.__exit__, None, None, None)
+        self.t0 = time.time() - 3600
+        pg.start("Hotfix", plan=["parser=30m", "graph=30m", "docs=15m"], now=self.m(0))
+        pg.assign("parser", "Neo", why="test", now=self.m(0))
+        launch("a_neo1", "devkit:neo", "Neo: parser fix", at=self.m(1))
+        pg.assign("graph", "Neo", why="test", now=self.m(1))
+        launch("a_neo2", "devkit:neo", "Neo: graph command", at=self.m(2))
+
+    def m(self, minutes):
+        return self.t0 + minutes * 60
+
+    def held(self, name):
+        st = next(s for s in pg.load_run("claude", "s1")["plan"] if s["name"] == name)
+        return st.get("owner"), st.get("state")
+
+    def test_a_step_for_a_member_busy_in_two_lanes_joins_the_first_lane_that_frees(self):
+        pg.assign("docs", "Neo", why="test", now=self.m(5))
+        self.assertEqual(self.held("docs"), ("main", "pending"))
+        pg.step("graph committed", which="graph", check="✓ 12 tests pass", from_agent="a_neo2", now=self.m(10))
+        self.assertEqual(self.held("docs"), ("a_neo2", "running"))
+        pg.step("docs written", which="docs", check="✓ dev docs check clean", from_agent="a_neo2", now=self.m(20))
+        self.assertEqual(self.held("docs"), ("a_neo2", "done"))
+
+    def test_the_advice_for_two_lanes_says_how_to_give_the_step_to_one_of_them(self):
+        pg.assign("docs", "Neo", why="test", now=self.m(5))
+        told = [m["text"] for m in pg.load_run("claude", "s1").get("messages") or [] if m.get("to") == "main"]
+        advice = next((t for t in told if "“docs”" in t), "")
+        self.assertIn('dev progress assign "docs" --to "Neo: parser fix"', advice)
+        self.assertIn('--to "Neo: graph command"', advice)
+        self.assertNotIn("launch of its own", advice)
+
+
+class ReviewLaneTests(unittest.TestCase):
+    # Weave, five review steps in one run: a review step closes only with its reviewer's report (once the crew gates
+    # pass it), so a reviewer's lane never freed for the next review assigned to it, and one launch that named two
+    # reviews bound neither. The steps stayed the tech lead's, the reviewer's `dev progress step --step` was refused,
+    # and its report closed none of them
+    REPORT = ("**[Firefly> DevKit · Code reviewer (Seraph)]** devkit · `hotfix` · review-api and review-ui\n"
+              "- **Done:** reviewed review-api and review-ui\n- **Check:** ✓ approve: 21 tests read and run\n"
+              "- **Next:** the tech lead merges")
+
+    def setUp(self):
+        self.state = TempState().__enter__()
+        self.addCleanup(self.state.__exit__, None, None, None)
+        self.t0 = time.time() - 3600
+        pg.start("Hotfix", plan=["api=30m", "ui=30m", "review-api=20m after api", "review-ui=20m after ui"],
+                 now=self.m(0))
+        pg.assign("api", "Tank", why="test", now=self.m(0))
+        launch("a_tank", "devkit:tank", "Tank: api", at=self.m(1))
+        pg.assign("ui", "Trinity", why="test", now=self.m(0))
+        launch("a_tri", "devkit:trinity", "Trinity: ui", at=self.m(1))
+        pg.step("api committed", which="api", check="✓ 12 tests pass", from_agent="a_tank", now=self.m(10))
+        pg.step("ui committed", which="ui", check="✓ 9 tests pass", from_agent="a_tri", now=self.m(11))
+
+    def m(self, minutes):
+        return self.t0 + minutes * 60
+
+    def held(self, name):
+        st = next(s for s in pg.load_run("claude", "s1")["plan"] if s["name"] == name)
+        return st.get("owner"), st.get("state")
+
+    def stop(self, at):
+        from test_progress import gates_passed
+        gates_passed("a_ser", at=at - 1)
+        pg.on_subagent("claude", {"session_id": "s1", "agent_id": "a_ser", "agent_type": "devkit:seraph",
+                                  "last_assistant_message": self.REPORT}, False, now=at)
+
+    def test_a_review_assigned_to_a_reviewer_holding_a_review_joins_its_lane_and_closes_with_its_report(self):
+        pg.assign("review-api", "Seraph", why="test", activity="review", now=self.m(12))
+        launch("a_ser", "devkit:seraph", "Seraph: review-api", at=self.m(13))
+        pg.assign("review-ui", "Seraph", why="test", activity="review", now=self.m(14))
+        self.assertEqual(self.held("review-ui"), ("a_ser", "running"))
+        pg.step("review-ui approved", which="review-ui", check="✓ approve", from_agent="a_ser", now=self.m(20))
+        self.stop(self.m(25))
+        self.assertEqual((self.held("review-api"), self.held("review-ui")), (("a_ser", "done"), ("a_ser", "done")))
+
+    def test_one_launch_that_names_two_reviews_binds_both(self):
+        pg.assign("review-api", "Seraph", why="test", activity="review", now=self.m(12))
+        pg.assign("review-ui", "Seraph", why="test", activity="review", now=self.m(12))
+        launch("a_ser", "devkit:seraph", "Seraph: review-api and review-ui", at=self.m(13))
+        self.assertEqual((self.held("review-api"), self.held("review-ui")),
+                         (("a_ser", "running"), ("a_ser", "running")))
+        self.stop(self.m(25))
+        self.assertEqual((self.held("review-api"), self.held("review-ui")), (("a_ser", "done"), ("a_ser", "done")))
+
+
+class BackgroundCloseTests(unittest.TestCase):
+    # kit-consulting: members closed review-suite-fixes and client-editor-build with ✓ while their own dev test prove
+    # and test script still ran in the background, so the steps after them started on work nobody had verified
+    PROVE = "dev test prove --runs 1 tests/test_api.py"
+
+    def setUp(self):
+        self.state = TempState().__enter__()
+        self.addCleanup(self.state.__exit__, None, None, None)
+        self.t0 = time.time() - 3600
+        pg.start("Hotfix", plan=["api=30m"], now=self.t0)
+        pg.assign("api", "Neo", why="test", now=self.t0)
+        launch("a_neo", "devkit:neo", "Neo: api", at=self.t0 + 60)
+        main = Path(self.state.tmp.name) / "session.jsonl"
+        main.write_text("")
+        pg.state.update(pg.session_path("claude", "s1"), lambda s: s.update(transcript=str(main)))
+        self.member = main.with_suffix("") / "subagents" / "agent-a_neo.jsonl"  # where Claude Code keeps it
+        self.member.parent.mkdir(parents=True)
+
+    def write(self, *records):
+        with self.member.open("a") as fh:
+            fh.write("".join(json.dumps(r) + "\n" for r in records))
+
+    def held(self):
+        st = pg.load_run("claude", "s1")["plan"][0]
+        return st.get("owner"), st.get("state")
+
+    def close(self, at):
+        return pg.step("api committed", which="api", check="✓ 12 tests pass", from_agent="a_neo", now=at)
+
+    def test_a_members_close_waits_until_its_background_work_ended(self):
+        self.write({"type": "assistant", "message": {"content": [
+                       {"type": "tool_use", "id": "toolu_bg", "name": "Bash",
+                        "input": {"command": self.PROVE, "run_in_background": True}}]}},
+                   {"type": "user", "message": {"content": [
+                       {"type": "tool_result", "tool_use_id": "toolu_bg",
+                        "content": "Command running in background with ID: b1. Output is being written to: /tmp/b1"}]}})
+        with self.assertRaises(pg.StepError) as e:
+            self.close(self.t0 + 600)
+        self.assertIn(self.PROVE, str(e.exception))
+        self.assertEqual(self.held(), ("a_neo", "running"))
+        self.write({"type": "user", "message": {"content": "<task-notification><task-id>b1</task-id><tool-use-id>"
+                                                           "toolu_bg</tool-use-id><status>completed</status>"
+                                                           "</task-notification>"}})
+        self.close(self.t0 + 700)
+        self.assertEqual(self.held(), ("a_neo", "done"))
 
 
 class SettingsTests(unittest.TestCase):

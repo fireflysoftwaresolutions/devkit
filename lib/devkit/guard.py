@@ -13,6 +13,7 @@ Pure functions; the hook wrapper fails open on any error.
 """
 from __future__ import annotations
 
+import ast
 import bisect
 import contextlib
 import contextvars
@@ -27,6 +28,7 @@ import shlex
 import shutil
 import signal
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -741,6 +743,17 @@ def handoff_violation(rel: str, cwd, envs=frozenset()):
     return None
 
 
+def _tracked(p) -> bool:
+    """True when git tracks file `p` in its repository: a project's own file named like a copy (connection-copy.ts) is
+    no backup copy. False when git cannot tell."""
+    try:
+        rc, _, _ = core.sh(["git", "-C", str(Path(p).parent), "ls-files", "--error-unmatch", "--", Path(p).name],
+                           timeout=3)
+    except Exception:
+        return False
+    return rc == 0
+
+
 def check_write_path(path, cwd, agent):
     if not path:
         return None
@@ -769,7 +782,7 @@ def check_write_path(path, cwd, agent):
         v = layout_violation(p)
         if v:
             return deny(v, key="layout")
-        if BACKUP_RE.search(p.name) and not p.name.startswith("."):
+        if BACKUP_RE.search(p.name) and not p.name.startswith(".") and not _tracked(p):
             return deny(f"Do not create backup copies ({p.name}); git already keeps history. Edit the file in "
                         f"place, or put throwaway copies in a temp dir.", key="backup-copy")
         return None
@@ -810,8 +823,64 @@ def _newlines_to_semicolons(cmd: str, op: str = ";") -> str:
     return "".join(out)
 
 
-HEREDOC_RE = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
-_HEREDOC_AT = re.compile(r"<<-?[ \t]*(?:'([^'\n]+)'|\"([^\"\n]+)\"|\\?([A-Za-z_][A-Za-z0-9_]*))")
+class _HeredocMatch:
+    """What _HEREDOC_AT.match finds: group(0) the operator and its delimiter word as written; group(1) the delimiter
+    when any part of the word is quoted (the body is text), group(3) when none is (the shell expands the body)."""
+
+    def __init__(self, text, start, end, delim, quoted):
+        self._text, self._start, self._end, self._delim, self._quoted = text, start, end, delim, quoted
+
+    def group(self, k=0):
+        if k == 0:
+            return self._text
+        if k == 1:
+            return self._delim if self._quoted else None
+        return None if k == 2 or self._quoted else self._delim
+
+    def start(self, k=0):
+        return self._start
+
+    def end(self, k=0):
+        return self._end
+
+
+class _HeredocAt:
+    """The heredoc operator at s[i] and its delimiter word, read as the shells read it: the whole word up to a blank
+    or an operator, with its quotes removed (`E\\OF`, `E''OF`, `"E"OF` and `E'OF'` all end at a line `EOF`), quoted
+    when any part of it is."""
+
+    _OP = re.compile(r"<<-?[ \t]*")
+
+    def match(self, s, i=0):
+        m = self._OP.match(s, i)
+        if not m:
+            return None
+        j, n, word, quoted = m.end(), len(s), [], False
+        while j < n and s[j] not in " \t\n;&|<>()":
+            c = s[j]
+            if c in "'\"":
+                k = s.find(c, j + 1)
+                if k < 0 or "\n" in s[j + 1:k]:
+                    return None
+                word.append(s[j + 1:k])
+                quoted, j = True, k + 1
+            elif c == "\\":
+                if j + 1 >= n or s[j + 1] == "\n":
+                    return None
+                word.append(s[j + 1])
+                quoted, j = True, j + 2
+            elif c in "$`":
+                return None  # a delimiter the shell would expand: no heredoc the guard can read
+            else:
+                word.append(c)
+                j += 1
+        delim = "".join(word)
+        if not delim:
+            return None
+        return _HeredocMatch(s[i:j], i, j, delim, quoted)
+
+
+_HEREDOC_AT = _HeredocAt()
 
 # `#` starts a comment only at the start of a word, as bash and zsh read it: after a blank, a newline, an operator or
 # a redirection. A `)` that ends a substitution ends no word, so `x$(true)#c` and `<(true)#<(…)` are one word each,
@@ -1036,6 +1105,58 @@ def strip_heredocs(cmd: str) -> str:
 _PUNCT = ";&|()<>"  # the characters the tokenizer cuts words at
 
 
+def _bare_tokens(line: str, tokens: list):
+    """For each token of `line` (as split_commands' tokenizer reads it), whether it is written without quotes or
+    escapes: `case`, `in`, `esac`, `;;` and `)` are the shell's own only then, and `";;"` or `\\)` are words. Each
+    quoted or escaped character is read again as `x`, which cuts no word, so the tokens line up one to one. None
+    when they do not."""
+    out, q, i, n = [], None, 0, len(line)
+    while i < n:
+        c = line[i]
+        if q is None and c == "\\" and i + 1 < n:
+            out.append("\\x")
+            i += 2
+            continue
+        if q is None:
+            q = c if c in ("'", '"') else None
+            out.append(c)
+        elif c == q:
+            q = None
+            out.append(c)
+        elif q == '"' and c == "\\" and i + 1 < n:
+            out.append("xx")
+            i += 2
+            continue
+        else:
+            out.append("x")
+        i += 1
+    try:
+        lex = shlex.shlex("".join(out), posix=True, punctuation_chars=_PUNCT)
+        lex.whitespace_split = True
+        lex.commenters = ""
+        masked = list(lex)
+    except ValueError:
+        return None
+    return [a == b for a, b in zip(tokens, masked)] if len(masked) == len(tokens) else None
+
+
+def _case_pattern(tokens: list, bare: list, k: int):
+    """The index of the `)` that ends the case pattern starting at word k (`a|b)`, `*.py)`), or None when the words
+    from k are not one: a pattern is words joined by a bare `|` and ended by a bare `)`. A word with a substitution
+    (`$(…)`, a backquote, `<(…)`) is never one, so the command the shell runs to read it stays in sight."""
+    j, n = k, len(tokens)
+    while j < n:
+        w = tokens[j]
+        if bare[j] and set(w) <= set(_PUNCT) or "$(" in w or "`" in w or "<(" in w or ">(" in w:
+            return None
+        j += 1
+        if j < n and bare[j] and tokens[j] == "|":
+            j += 1
+            continue
+        return j if j < n and bare[j] and tokens[j].startswith(")") and set(tokens[j]) <= set(_PUNCT) else None
+    return None
+
+
 def _paren_step(frames: list, t: str, argv, glued: bool):
     """Read the parentheses of punctuation token `t` into `frames`, the open `$(…)`, groups, `<(…)`/`>(…)` and case
     statements (_case_word) of a command line. `argv`: the words of the command so far when its last word is the token
@@ -1084,6 +1205,41 @@ def _case_word(frames: list, t: str, before: list):
         frames.append(["case", "head"])
 
 
+def _arith_words(line: str) -> str:
+    """`line` with each arithmetic expansion `$((…))` outside single quotes written as `0`, the one word the shell
+    makes of it: its body is an expression, never a command (`$((n*2))`, `$((a > b))`), and the substitutions in it
+    are read by _subst with the other expansions. A `$((date)|wc -c)` is a command substitution and stays. An
+    arithmetic command `((…))` (also a for loop's header) is `((0))`: its body is an expression too."""
+    if "((" not in line:
+        return line
+    out, i, n, q = [], 0, len(line), None
+    while i < n:
+        c = line[i]
+        if q == "'":
+            q = None if c == "'" else q
+        elif c == "\\":
+            out.append(line[i:i + 2])
+            i += 2
+            continue
+        elif c == "'" and q is None:
+            q = "'"
+        elif c == '"':
+            q = None if q == '"' else '"'
+        elif line.startswith("$((", i) and (end := _arith_end(line, i + 3)) is not None:
+            out.append("0")
+            i = end + 2
+            continue
+        elif line.startswith("((", i) and q is None and (not i or line[i - 1] not in "$<>=" and
+                                                         not line[i - 1].isalnum()) and \
+                (end := _arith_end(line, i + 2)) is not None:
+            out.append("((0))")  # `((n > 2))`, `for ((i=0; i<3; i++))`: an expression, no redirect, no list
+            i = end + 2
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
 def split_commands(cmd: str, ops: bool = False, newline: str = ";", inputs: list | None = None,
                    stripped: bool = False, heredocs: list | None = None, modes: list | None = None):
     """-> list of (argv, redirect_targets). None when the command cannot be tokenised. With `ops`, each entry is
@@ -1095,7 +1251,7 @@ def split_commands(cmd: str, ops: bool = False, newline: str = ";", inputs: list
     list that gets, for each segment, how each of its redirect targets is opened, in order: "truncate" (`>`, `&>`),
     "append" (`>>`, `&>>`) or "overwrite" (`<>`, which keeps what it does not write over)."""
     try:
-        line = _newlines_to_semicolons(cmd if stripped else strip_heredocs(cmd), newline)
+        line = _arith_words(_newlines_to_semicolons(cmd if stripped else strip_heredocs(cmd), newline))
         lex = shlex.shlex(line, posix=True, punctuation_chars=_PUNCT)
         lex.whitespace_split = True
         lex.commenters = ""
@@ -1111,8 +1267,22 @@ def split_commands(cmd: str, ops: bool = False, newline: str = ";", inputs: list
     # frames: _paren_step's; into: [the words of the command a `$(…)` that just ended is a word of, whether the next
     # word is glued to it, whether words went there]; cur: the words the word at token `last` went to
     frames, into, cur, last = [], None, None, -1
+    # bare: _bare_tokens', read only for a case statement, whose patterns (`*)`, `a|b)`) are words the shell matches
+    # and never runs; skip: the index of the `)` that ends the pattern being passed over
+    bare = _bare_tokens(line, tokens) if "case" in tokens else None
+    skip = -1
     for k, t in enumerate(tokens):
         ended = None
+        if k < skip:
+            continue
+        if bare is not None and frames and frames[-1][0] == "case" and expect_redir is False:
+            top = frames[-1]
+            if top[1] == "body" and bare[k] and set(t) <= set(";&") and (";;" in t or ";&" in t):
+                top[1] = "pattern"  # an arm's end, `;;`, `;&` or `;;&`: a pattern or `esac` comes next
+            elif top[1] == "pattern" and not (bare[k] and t == "esac") and \
+                    (end := _case_pattern(tokens, bare, k)) is not None:
+                skip = end
+                continue
         if set(t) <= set(_PUNCT) and ("(" in t or ")" in t):
             ended = _paren_step(frames, t, cur if last == k - 1 else None, glued[k])
         nxt = tokens[k + 1] if k + 1 < len(tokens) else ""
@@ -1161,14 +1331,16 @@ def split_commands(cmd: str, ops: bool = False, newline: str = ";", inputs: list
             continue
         if into is not None and not argv:  # `ls $(echo x)/*`: the rest of the word, and the words after it, are the
             outer = into[0]                  # command's the `$(…)` is a word of, as the shell reads them
-            _case_word(frames, t, outer)
+            if bare is None or bare[k]:  # a quoted `"in"` or `"esac"` is a word
+                _case_word(frames, t, outer)
             if into[1] and not into[2]:
                 outer[-1] += t
             else:
                 outer.append(t)
             into[2], cur = True, outer
         else:
-            _case_word(frames, t, argv)
+            if bare is None or bare[k]:
+                _case_word(frames, t, argv)
             argv.append(t)
             cur = argv
         last = k
@@ -1991,6 +2163,9 @@ PIPE_REASON = ("This commits, pushes or tags after a pipeline (`… | … && git
                "…`). Lesson: gate on the real result.")
 
 
+_GATED_WORD = re.compile(r"\b(?:commit|push|tag|release|create|merge)\b")  # a word a gated command needs
+
+
 def _gated(argv) -> bool:
     """A command the pipe gate protects: git commit|push|tag, dev commit|push|release, gh pr create|merge, gh release
     create."""
@@ -2007,17 +2182,145 @@ def _gated(argv) -> bool:
 
 def _pipe_gate_open(cmd) -> str:
     """How the parsed command opens the pipe gate (spec F8, rule 3: parse, do not search the text): 'pipefail' for a
-    `set -o pipefail` (or `set -euo pipefail`) before the gated command, 'hatch' for DEVKIT_PIPE_OK as the prefix of a
-    segment, else ''."""
+    `set -o pipefail` (or `set -euo pipefail`) that holds for the command's pipelines (_pipefail_on), 'hatch' for
+    DEVKIT_PIPE_OK as the prefix of a segment, else ''."""
+    if _pipefail_on(cmd):
+        return "pipefail"
     segs = split_commands(cmd) or []
     argvs = [(argv0, _strip_prefix(argv0)) for argv0, _ in segs]
-    first = next((k for k, (_, argv) in enumerate(argvs) if _gated(argv)), len(argvs))
-    for _, argv in argvs[:first]:
-        if argv[:1] == ["set"] and any(a.startswith("-") and not a.startswith("--") and a.endswith("o") and
-                                       argv[k + 2:k + 3] == ["pipefail"] for k, a in enumerate(argv[1:])):
-            return "pipefail"
     names = {a.split("=", 1)[0] for argv0, argv in argvs for a in argv0[:len(argv0) - len(argv)] if _ASSIGN.match(a)}
     return "hatch" if "DEVKIT_PIPE_OK" in names else ""
+
+
+_SET_PIPEFAIL = re.compile(r"(?<![\w./-])set((?:[ \t]+-[A-Za-z]+)*)[ \t]+-[A-Za-z]*o[ \t]+pipefail\b")
+_UNSET_PIPEFAIL = re.compile(r"(?<![\w./-])set\b[^;&|\n]*\+[A-Za-z]*o[ \t]+pipefail\b|\+o[ \t]*pipefail|"
+                             r"(?<![\w./-])(?:shopt|setopt|unsetopt|emulate)\b")
+_OPENS = re.compile(r"(?:^|[;&|\n({]|\b(?:then|do|else))[ \t]*(if|while|until|for|case|select)\b")
+_CLOSES = re.compile(r"(?:^|[;&|\n]|\b(?:then|do|else))[ \t]*(fi|done|esac)\b")
+
+
+def _pipefail_on(cmd: str) -> bool:
+    """True when `set -o pipefail` holds for every pipeline of the command: a top-level simple command of the list
+    before the first pipe (after nothing but the start, `;` or a new line, not in a group, a function body, a
+    subshell, a `$(…)`, a pipeline, a background job, or a branch or loop), with nothing between it and the first
+    pipe that may turn it off or run text the guard does not read as this shell (a function definition, eval,
+    source, `.`, set, setopt, unsetopt, shopt, emulate), and no `+o pipefail` anywhere. A negated pipeline
+    (`! check | tail`) is gated whatever pipefail says (_pipe_gate_closed)."""
+    try:
+        text = _blank_quoted(strip_heredocs(cmd))
+    except Exception:
+        return False
+    if _UNSET_PIPEFAIL.search(text):
+        return False
+    for t in re.finditer(r"(?<![\w./-])trap\b", text):  # a trap's body may turn it off when the trap fires
+        end = re.search(r"[;&|\n]", text[t.end():])
+        body = cmd[t.start():t.end() + (end.start() if end else len(text))] if len(cmd) == len(text) else cmd
+        if re.search(r"\b(?:set|setopt|unsetopt|shopt|emulate)\b", body):
+            return False
+    m = _SET_PIPEFAIL.search(text)
+    if not m:
+        return False
+    before, after = text[:m.start()], text[m.end():]
+    if re.search(r"(?<!\|)\|(?!\|)", before):
+        return False  # a pipeline before it runs without it
+    if not re.search(r"(?:^|[;\n])[ \t]*$", before) or "{" in before or re.search(r"\(\s*\)|\bfunction\b", before):
+        return False  # after `&&`, `||`, `!`, `then`, `{`, in a function body, … it may not run here
+    pipe = re.search(r"(?<!\|)\|(?!\|)", after)
+    between = after[:pipe.start()] if pipe else after
+    if re.search(r"(?:^|[;&|\n({]|\b(?:then|do|else))[ \t]*(?:eval|source|\.|set|setopt|unsetopt|shopt|emulate|"
+                 r"function)(?=[ \t;\n]|$)|\(\s*\)", between):
+        return False  # something between may turn it off where the guard does not read it
+    if re.match(r"[ \t]*(?:\|(?!\|)|&(?![&>]))", after):
+        return False  # in a pipeline or a background job: a subshell's option
+    if before.count("(") > before.count(")"):
+        return False  # in a subshell or a substitution: another shell's option
+    return len(_OPENS.findall(before)) <= len(_CLOSES.findall(before))
+
+
+# `! check | tail`: the negation is the pipeline's status turned around, which pipefail does not make the check's
+_NEGATED_PIPE = re.compile(r"(?:^|[;&|\n({]|\b(?:then|do|else|if|while|until))[ \t]*![ \t]+[^;&|\n]*\|(?!\|)")
+
+
+def _pipe_feeds(segs, k) -> bool:
+    """True when segment k's command runs on a pipeline's exit status, which is its last filter's: after `&&`
+    following a pipeline, through a chain of `&&`, inside `{ }` or `( )` after one, or as the body of an `if`,
+    `elif`, `while` or `until` whose condition ends with a pipeline."""
+    def pipeline_start(j):
+        while j > 0 and segs[j - 1][2] in ("|", "|&"):
+            j -= 1
+        return j
+    lead = next((w for w in segs[k][0] if w not in ("{", "(", "!")), "")
+    if lead in ("then", "do"):
+        last = k - 1
+        j = last
+        while j >= 0 and not set(segs[j][0][:1]) & {"if", "elif", "while", "until"}:
+            j -= 1
+        return j >= 0 and last > 0 and segs[last - 1][2] in ("|", "|&") and pipeline_start(last) >= j
+    j = k - 1
+    while j >= 0 and segs[j][2] == "&&":
+        if j > 0 and segs[j - 1][2] in ("|", "|&"):
+            return True
+        j = pipeline_start(j) - 1
+    return False
+
+
+def _blank_quoted(cmd: str) -> str:
+    """`cmd` with the text inside its quotes blanked (the quotes stay): a quoted message, note or evidence is data,
+    whatever it says (`--evidence "pytest | tail -1 && git commit hid it"`). The substitutions a double-quoted
+    string runs are read on their own (_pipe_gate_closed)."""
+    out, q = [], None
+    i, n = 0, len(cmd)
+    while i < n:
+        c = cmd[i]
+        if c == "\\" and q != "'":
+            out.append("  " if q else cmd[i:i + 2])
+            i += 2
+            continue
+        if q:
+            if c == q:
+                q = None
+                out.append(c)
+            else:
+                out.append("\n" if c == "\n" else " ")
+        else:
+            if c in "'\"":
+                q = c
+            out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def _pipe_gate_closed(cmd: str, cwd: str, pipefail: bool = False, depth: int = 0) -> bool:
+    """True when a gated command (_gated) follows a pipeline with `&&` where the shell runs it and `pipefail` is off:
+    in the command's own words (outside quotes and heredoc bodies), in the substitutions it runs (which inherit the
+    option), and in the lines of the shells and evals it runs (a nested shell starts without it). A level deeper than
+    three, or one that cannot be parsed, is read by its text."""
+    if depth > 3:
+        return bool(PIPE_GATE.search(cmd))
+    opened = (pipefail or _pipe_gate_open(cmd) == "pipefail") and not _NEGATED_PIPE.search(_blank_quoted(cmd))
+    segs = split_commands(cmd, ops=True)
+    if segs is None:
+        return bool(PIPE_GATE.search(cmd)) and not opened
+    if PIPE_GATE.search(_blank_quoted(strip_heredocs(cmd))) and not opened:
+        return True
+    if not opened and any(_gated(_unwrap(argv0)) and _pipe_feeds(segs, k) for k, (argv0, *_) in enumerate(segs)):
+        return True
+    segs = [(argv0, redirs) for argv0, redirs, *_ in segs]
+    if any(_pipe_gate_closed(body, cwd, opened, depth + 1) for body in _subst(cmd, True)):
+        return True
+    bodies = heredoc_bodies(cmd)
+    for argv0, _ in segs:
+        argv = _unwrap(argv0)
+        name = os.path.basename(argv[0]) if argv else ""
+        texts = _shell_inputs(argv[1:], cwd, bodies, name) if name in _SHELLS else \
+            [" ".join(argv[1:])] if name == "eval" else \
+            [t for t, _, _ in _sourced(argv[1:], cwd, bodies)] if name in ("source", ".") and argv[1:] else []
+        if any(_pipe_gate_closed(t, cwd, opened and name in ("eval", "source", "."), depth + 1) for t in texts):
+            return True
+    for body in _process_substitutions(cmd):  # `source <(echo '…')`: what the substitution prints is run
+        if re.match(r"\s*(?:echo|printf|cat)\b", body) and PIPE_GATE.search(body) and not opened:
+            return True
+    return False
 
 
 # A wait for devkit's events or a CI run wakes the session when its command ends; work joined after it in the same
@@ -2135,12 +2438,9 @@ def ungated_action_refusal(cmd: str) -> str | None:
     segs = split_commands(cmd, ops=True)
     if not segs:
         return None
-    pipefail = False
+    pipefail = _pipefail_on(cmd)
     for k, (argv0, _, _, _) in enumerate(segs):
         argv = _unwrap(argv0)
-        if argv[:1] == ["set"] and any(re.fullmatch(r"-[A-Za-z]*o", a) and argv[i + 2:i + 3] == ["pipefail"]
-                                       for i, a in enumerate(argv[1:])):
-            pipefail = True
         what = _dependent_action(argv)
         if not what:
             continue
@@ -2173,6 +2473,157 @@ IDENTITY_REASON = ("This command hides from what it runs that an agent runs it: 
                    "`env -u`, `env -i`, or an empty assignment before the command), which tells a project's own tools "
                    "that an agent is at work. Run the command with the environment it has; if a tool misbehaves under "
                    "an agent, tell the developer.")
+
+
+# variables that make a shell or a pager run a command line or a file of commands: bash's BASH_ENV for every
+# non-interactive bash (scripts too), zsh's ZDOTDIR for every zsh, PROMPT_COMMAND before each interactive prompt,
+# less's LESSOPEN and LESSCLOSE for each file, and ENV for an interactive sh, bash or zsh
+_STARTUP_VARS = frozenset({"BASH_ENV", "ZDOTDIR", "PROMPT_COMMAND", "LESSOPEN", "LESSCLOSE"})
+_ENV_BINDERS = frozenset({"export", "declare", "typeset", "readonly", "local", "env", "setenv"})
+_INTERACTIVE_SHELL = re.compile(r"(?:^|[\s;&|(/])(?:ba|z|k|da|)sh\s+(?:-[A-Za-z]*i|--interactive|-o\s+interactive)")
+STARTUP_REASON = ("This command sets {name}, which makes a shell or a pager run a command line or a file of commands "
+                  "(bash's BASH_ENV, zsh's ZDOTDIR, PROMPT_COMMAND, less's LESSOPEN, ENV for an interactive shell) "
+                  "that the guard does not read. Run the commands themselves instead.")
+
+
+SHADOW_REASON = ("This runs a Python program that imports {mod}, and {where} holds a file or folder of that name, "
+                 "which Python imports instead of the real module: a planted module runs whatever it holds. Run the "
+                 "program from another folder or with `python3 -I`, or rename that file.")
+
+
+def _py_program_parts(args):
+    """(code or None, script path or None, module or None, isolated) of a Python command's arguments: -c's code, -m's
+    module, the first operand as the script, and whether -I or -P keeps the script's folder and the working folder
+    off the import path."""
+    isolated, k = False, 0
+    while k < len(args):
+        a = args[k]
+        if a == "--":
+            k += 1
+            break
+        if not a.startswith("-") or a == "-":
+            break
+        if a.startswith("--"):
+            k += 1
+            continue
+        for j, ch in enumerate(a[1:], 1):
+            if ch in "IP":
+                isolated = True
+            elif ch in "cmWX":
+                val = a[j + 1:] or (args[k + 1] if k + 1 < len(args) else "")
+                if ch == "c":
+                    return val, None, None, isolated
+                if ch == "m":
+                    return None, None, val, isolated
+                k += 0 if a[j + 1:] else 1
+                break
+        k += 1
+    script = args[k] if k < len(args) and args[k] != "-" else None
+    return None, script, None, isolated
+
+
+def _imported_tops(code) -> set:
+    """The top-level names of the modules a Python program imports (absolute imports only)."""
+    try:
+        tree = ast.parse(code or "")
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        return set()
+    out = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            out |= {a.name.split(".")[0] for a in node.names}
+        elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+            out.add(node.module.split(".")[0])
+    return out
+
+
+# standard modules that other standard modules import, and that Python has not loaded at startup: a planted `re.py`
+# next to a script runs when its `import json` imports re
+_SHADOW_CORE = frozenset("""re enum functools collections types operator keyword warnings contextlib typing struct
+    string tokenize token linecache reprlib heapq numbers locale datetime inspect ast dis dataclasses copy traceback
+    textwrap json random bisect hashlib base64 binascii fnmatch glob shutil tempfile subprocess signal threading
+    selectors socket pathlib ntpath urllib weakref copyreg sre_compile sre_parse sre_constants""".split())
+
+
+# what Python imports a module from: source, a compiled file without its source, an extension (`json.so`,
+# `json.abi3.so`, `json.cpython-312-darwin.so`), on any version, not only the running one's suffixes
+_MODULE_SUFFIXES = (".py", ".pyc", ".pyw", ".so", ".pyd")
+
+
+def _module_file_in(folder, top) -> bool:
+    """True when `folder` holds a file Python may import as module `top`: `top.py`, `top.pyc`, or `top.<tag>.so`."""
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return False
+    return any(n.startswith(top + ".") and n.endswith(_MODULE_SUFFIXES) and os.path.isfile(os.path.join(folder, n))
+               for n in names)
+
+
+@functools.lru_cache(maxsize=1)
+def _stdlib_names() -> frozenset:
+    """The top-level names of the standard library: sys.stdlib_module_names (3.10+), or on 3.9 the modules and
+    packages of its folder and the built-in ones."""
+    names = getattr(sys, "stdlib_module_names", None)
+    if names:
+        return frozenset(names)
+    out = set(sys.builtin_module_names)
+    try:
+        for n in os.listdir(os.path.dirname(os.__file__)):
+            out.add(n[:-3] if n.endswith(".py") else n)
+    except OSError:
+        pass
+    return frozenset(out)
+
+
+def module_shadow_refusal(argv, cwd) -> str | None:
+    """SHADOW_REASON when a Python command imports a module that a file or folder of the same name shadows: in the
+    script's folder (a script), in the working folder (-c, -m, its input), or in a folder the program writes into
+    sys.path as a literal; Python finds those before the standard library and the installed packages."""
+    if not argv or not re.match(r"(?:python|pypy)[0-9.]*$", os.path.basename(str(argv[0]))):
+        return None
+    code, script, module, isolated = _py_program_parts([str(a) for a in argv[1:]])
+    folders, tops = [], set()
+    if script:
+        path = resolve(script, cwd)
+        code = _read_small(path) if path is not None else ""
+        folders.append(os.path.dirname(str(path)) if path is not None else "")
+    else:
+        folders.append(str(cwd or os.getcwd()))
+    if module:
+        tops.add(module.split(".")[0])
+    tops |= _imported_tops(code)
+    if isolated:
+        folders = []
+    if code and "sys.path" in code:  # a folder the program puts on the path itself
+        folders += [m.group(2) for m in re.finditer(r"(['\"])([^'\"\n]{1,400})\1", code) if os.path.isdir(m.group(2))]
+    tops &= _stdlib_names()  # a sibling of its own name is the program's module; one of the standard library's is not
+    deep = _SHADOW_CORE if tops else frozenset()  # what those modules import in turn, as files only
+    for folder in folders:
+        for top in sorted(tops | deep):
+            if folder and (_module_file_in(folder, top) or
+                           top in tops and os.path.isdir(os.path.join(folder, top))) and \
+                    os.path.realpath(folder) != os.path.realpath(os.path.dirname(os.__file__)):
+                return SHADOW_REASON.format(mod=_code(top), where=_code(folder))
+    return None
+
+
+def startup_env_refusal(argv0, line: str = "") -> str | None:
+    """STARTUP_REASON when segment `argv0` sets a variable of _STARTUP_VARS (an assignment before the program, or a
+    word of export, declare, env and the other binders), or ENV while `line` starts an interactive shell."""
+    names = _STARTUP_VARS | ({"ENV"} if _INTERACTIVE_SHELL.search(line or "") else set())
+    words, k = list(argv0 or ()), 0
+    while k < len(words) and re.match(r"[A-Za-z_]\w*\+?=", words[k]):
+        k += 1
+    scan = words[:k]
+    if k < len(words) and os.path.basename(words[k]) in _ENV_BINDERS:
+        scan += words[k + 1:]
+    for w in scan:
+        name = re.match(r"[A-Za-z_]\w*", w)
+        if name and name.group(0) in names and (w[name.end():name.end() + 2] in ("=", "+=") or
+                                                 w[name.end():].startswith(("=", "+=")) or w == name.group(0)):
+            return STARTUP_REASON.format(name=_code(name.group(0)))
+    return None
 
 
 def identity_hiding(argv0) -> str | None:
@@ -2272,9 +2723,12 @@ def check_bash(cmd: str, cwd: str, agent: str):
     token = _COMMAND_TEXT.set(cmd or "")
     try:
         cmd = _quote_cd_git(cmd or "")
+        hazards = arithmetic_hazards(cmd)  # on the command as typed: its readings mask the values it gives names
         v = _check_bash_reading(cmd, cwd, agent)
         if v and v[0] == "deny":
-            return v
+            return v  # a rule's own reason first: it says what the command would do
+        if hazards:
+            return deny(ARITH_REASON.format(what=_code(hazards[0])), key="arith")
         first = v
         hatches = list(_BYPASSES)
         for alt in _continued_readings(cmd) + _substitution_readings(cmd, top=True):
@@ -2302,12 +2756,10 @@ def _check_bash_reading(cmd: str, cwd: str, agent: str):
     why = wait_then_work_refusal(cmd) or ungated_action_refusal(cmd)
     if why:
         return deny(why, key="wait-or-ungated")
-    if PIPE_GATE.search(cmd):
-        how = _pipe_gate_open(cmd)
-        if not how:
+    if "|" in cmd and _GATED_WORD.search(cmd) and _pipe_gate_closed(cmd, cwd or os.getcwd()):
+        if _pipe_gate_open(cmd) != "hatch":
             return deny(PIPE_REASON, key="pipe-gate")
-        if how == "hatch":
-            _hatch({"DEVKIT_PIPE_OK"}, "DEVKIT_PIPE_OK", "pipe-gate", PIPE_REASON)
+        _hatch({"DEVKIT_PIPE_OK"}, "DEVKIT_PIPE_OK", "pipe-gate", PIPE_REASON)
     segs = split_commands(cmd)
     if segs is None:  # D10: protected_bash's walker refuses it first; this keeps check_bash closed on its own
         return deny(UNREADABLE_REASON, key="unreadable")
@@ -2424,7 +2876,7 @@ def _nested_lines(argv, cwd=None) -> list | None:
     launched = [shlex.join(r) for r in map(_unwrap, runs) if r]
     if launched:  # `op run -- git push --force …`: each command the launcher may start, read as a line
         return launched
-    held = _held_lines(argv)
+    held = _held_lines(argv, cwd)
     if held:  # an alias body, hyperfine's lines
         return held
     real = _as_run(argv, cwd)[1:]  # `./bash-link -c …`: the shell its file is
@@ -2485,6 +2937,12 @@ def _check_segments(cmd: str, segs, ecwd: str, agent: str, depth: int = 0, outer
         why = identity_hiding(argv0)
         if why:
             return deny(why, key="identity-hiding")
+        why = startup_env_refusal(argv0, cmd)
+        if why:
+            return deny(why, key="startup-env")
+        why = module_shadow_refusal(_strip_prefix(argv0), ecwd)
+        if why:
+            return deny(why, key="module-shadow")
         why = speaker_forgery(argv0)
         if why:
             return deny(why, key="speaker-stamp")
@@ -2595,7 +3053,8 @@ def _check_segments(cmd: str, segs, ecwd: str, agent: str, depth: int = 0, outer
                     v = None if _hatch(envs, "DEVKIT_RAW_FS", "overwrite", v) else v
                 if v:
                     res = deny(v, key="overwrite")
-                elif dest != UNKNOWN and not dest.is_dir() and BACKUP_RE.search(dest.name) and is_under(dest, DEV):
+                elif dest != UNKNOWN and not dest.is_dir() and BACKUP_RE.search(dest.name) and is_under(dest, DEV) \
+                        and not _tracked(dest):
                     res = deny(f"Do not create backup copies ({dest.name}); git already keeps history.", key="backup-copy")
         if not res:
             why = session_write_refusal(argv)
@@ -4923,6 +5382,9 @@ def _pathlike(a: str) -> bool:
     return "/" in a or a.startswith(("~", ".")) or bool(_VARPATH.match(a))
 
 
+_CONFIG_OPTS = ("--config", "--config-file", "--rcfile", "--settings")  # the options that name a file a program reads
+
+
 class _Shell:
     """Walks one shell command for writes to protected paths; `unresolved` collects targets it cannot resolve, and
     `exported` the variables the shell has set so far (export, bare assignments: they reach later commands)."""
@@ -5201,7 +5663,7 @@ class _Shell:
             v = self.segment(os.path.basename(run[0]), run, assigns, cwd, names) if run else None
             if v:
                 return v
-        for line in _held_lines(argv):  # an alias body, hyperfine's lines: what a shell runs from them
+        for line in _held_lines(argv, cwd):  # an alias body, hyperfine's lines: what a shell runs from them
             v = self.nested(line, cwd, names=names)
             if v:
                 return v
@@ -5299,7 +5761,19 @@ class _Shell:
         # a formatter's check counts only when the PATH that finds it is the session's (not set or exported here)
         reads = _git_text_free(argv) if name == "git" else \
             _check_only(argv[0], args) and not {"PATH", "?"} & (set(names) | self.exported)
-        words = [c for c in _candidates(args) if inside or _pathlike(c)]
+        # an existing file a program is given as its configuration is read (vale --config=<devkit's vale.ini>): only
+        # that option's own value, by its place; the same path elsewhere in the words (-o, --output, a bare word) is
+        # still one the program may write
+        def is_file(v):
+            r = resolve(v, cwd)
+            return r != UNKNOWN and r.is_file()
+        read_args = list(args)
+        for k, a in enumerate(args):
+            if a in _CONFIG_OPTS and k + 1 < len(args) and is_file(args[k + 1]):
+                read_args[k + 1] = ""
+            elif "=" in a and a.split("=", 1)[0] in _CONFIG_OPTS and is_file(a.split("=", 1)[1]):
+                read_args[k] = a.split("=", 1)[0]
+        words = [c for c in _candidates(read_args) if inside or _pathlike(c)]
         if name == "gh":  # its words are titles and bodies, except the file a download writes (-O, --output)
             outs = _dev_values(args, ("-O", "--output"))
             v = self.targets(outs, cwd, text=None)
@@ -5494,14 +5968,34 @@ class _Shell:
         # which hold everything), its relative paths can land in them
         in_handoff = bool(here) and _under_ci(real(here), real(core.HANDOFF)) and \
             (handoff_record(here) or holds_handoff_record(here))
-        if code and (_CODE_WRITES.search(code) or _ANY_WRITE.search(code)) and (
+        unvouched = False  # a Python program the allow-list judge cannot vouch for may write anything it names
+        if code and _family(name) in ("python", "pypy"):
+            # every file the program writes is a path its code writes out: judged by those paths, as a redirect or
+            # the Write tool is, whatever else its text names (an edit of devkit's own tests names devkit's state)
+            paths, why = _py_write_paths(code, cwd)
+            unvouched = bool(why)
+        if code and seen and not inside and not in_handoff and _family(name) in ("python", "pypy") and not unvouched:
+            if not why:
+                # a written path that names a note or devkit's state in its text counts as one, wherever the
+                # configured roots are (`~/Development/.handoff/projects/…` with the handoff repository elsewhere)
+                if any(_note_text().search(q) for q in paths):
+                    return deny(f"This {name} program writes a path that names a project's handoff note or the "
+                                f"team's records. Edit a note with the Edit or Write tool; use the dev command that "
+                                f"owns a record.", key="handoff-writes-path")
+                if any(_mark().search(q) for q in paths):
+                    return deny(f"This {name} program writes a path that names devkit's state, configuration or "
+                                f"install (spec C11). For a devkit record, use the `dev` command that owns it. {_TAIL}",
+                                key="state-writes-path")
+                return self.targets(paths, cwd)
+        writes = bool(code) and (unvouched or _CODE_WRITES.search(code) or _ANY_WRITE.search(code))
+        if writes and (
                 in_handoff or _note_text().search(code) or
                 any(handoff_record(resolve(c, cwd)) for c in named)):  # B2a: a path built by calls counts too
             return deny(f"This {name} program writes files and names a project's handoff note or the team's records "
                         f"in the handoff repository, and the guard cannot see what it changes (B2a: the note's embargo "
                         f"list and backup policy decide what devkit pushes). Edit a note with the Edit or Write tool; "
                         f"use the dev command that owns a record.", key="handoff-writes")
-        if not code or not (_CODE_WRITES.search(code) or _ANY_WRITE.search(code)):  # a path from nested calls too
+        if not writes:  # a path from nested calls too
             return None
         if (_SETTINGS_TEXT.search(code) and _SETTINGS_FILE_TEXT.search(code)) or \
                 any(agent_settings(q) for c in named for q in (_lexical(c, cwd), resolve(c, cwd))):
@@ -5598,18 +6092,330 @@ def _launched(argv):
 _HYPERFINE_LINES = frozenset({"-p", "--prepare", "-s", "--setup", "-c", "--cleanup", "--conclude"})
 
 
-def _held_lines(argv) -> list:
+_AWKS = frozenset({"awk", "gawk", "mawk", "nawk"})
+_VIMS = frozenset({"vim", "vi", "nvim", "view", "ex", "vimdiff", "gvim", "mvim", "rvim", "rview", "evim", "nview"})
+_AWK_VALUE_OPTS = frozenset({"-F", "-v", "-f", "-i", "-l", "-E", "--field-separator", "--assign", "--file",
+                             "--include", "--load", "--exec"})
+_VIM_CODE = re.compile(r"\b(?:system|systemlist|jobstart|termopen|libcall\w*)\s*\(|\b(?:ter(?:minal)?|exe(?:cute)?|"
+                       r"py(?:thon)?3?|pyx?|lua|perl|ruby|tcl|mz(?:scheme)?|so(?:urce)?|ru(?:ntime)?)\b")
+
+
+def _awk_program(args, cwd=None):
+    """(the awk program text, a reason it cannot be read or "") from awk's arguments: the first word that is no
+    option, or the files of -f (read when the guard can); -i, -l, -E and --exec name more program the guard does not
+    read."""
+    texts, k = [], 0
+    while k < len(args):
+        a = args[k]
+        if a == "--":
+            k += 1
+            break
+        if not a.startswith("-") or a == "-":
+            break
+        flag, eq, val = a.partition("=")
+        opt = flag if flag in _AWK_VALUE_OPTS else (a[:2] if a[:2] in _AWK_VALUE_OPTS else "")
+        if opt:
+            value = val if eq else (a[2:] if len(a) > 2 and not a.startswith("--") else
+                                    (args[k + 1] if k + 1 < len(args) else ""))
+            k += 1 if (eq or (len(a) > 2 and not a.startswith("--"))) else 2
+            if opt in ("-f", "--file", "-E", "--exec"):
+                text = _whole_text(Path(cwd or os.getcwd()) / os.path.expanduser(value)) if value else None
+                if not text:
+                    return "", f"the awk program file {_code(value)}, which the guard cannot read"
+                texts.append(text)
+            elif opt in ("-i", "-l", "--include", "--load"):
+                return "", "an awk source or extension it loads, which the guard does not read"
+            continue
+        k += 1
+    if not texts:
+        texts = args[k:k + 1]
+    return "\n".join(texts), ""
+
+
+def _awk_tokens(prog: str) -> list:
+    """awk's tokens, roughly: ("s", text) for a string literal (escapes decoded), ("r", "") for a regular
+    expression, ("|", op) for `|` and `|&`, ("w", word), and ("p", char) for any other character but blanks.
+    A `/` opens a regular expression where an operand comes; `#` starts a comment."""
+    out, i, n = [], 0, len(prog)
+    while i < n:
+        c = prog[i]
+        if c in " \t\r\\":
+            i += 1
+        elif c == "#":
+            j = prog.find("\n", i)
+            i = n if j < 0 else j
+        elif c == '"':
+            j, buf = i + 1, []
+            while j < n and prog[j] != '"':
+                if prog[j] == "\\" and j + 1 < n:
+                    buf.append({"n": "\n", "t": "\t"}.get(prog[j + 1], prog[j + 1]))
+                    j += 2
+                    continue
+                buf.append(prog[j])
+                j += 1
+            out.append(("s", "".join(buf)))
+            i = j + 1
+        elif c == "/" and (not out or out[-1][0] == "p" and out[-1][1] in "({,;!~&|\n=" or
+                           out[-1] == ("w", "return") or out[-1][0] == "|"):
+            j = i + 1
+            while j < n and prog[j] not in "/\n":
+                j += 2 if prog[j] == "\\" else 1
+            out.append(("r", ""))
+            i = j + 1
+        elif c == "|":
+            if prog.startswith("||", i):
+                out.append(("p", "&"))
+                i += 2
+            else:
+                amp = prog.startswith("|&", i)
+                out.append(("|", "|&" if amp else "|"))
+                i += 2 if amp else 1
+        elif c.isalnum() or c in "_@":
+            m = re.match(r"[@\w.]+", prog[i:])
+            out.append(("w", m.group(0)))
+            i += m.end()
+        else:
+            out.append(("p", c))
+            i += 1
+    return out
+
+
+def _awk_commands(prog: str):
+    """(the command lines an awk program hands to a shell, a reason it may run one the guard cannot read or ""):
+    system("…"), print … | "…" and "…" | getline, each with one string literal; a command built from anything else
+    (a variable, a concatenation), @include and @load are the reason."""
+    toks, lines = _awk_tokens(prog), []
+    end = {("p", c) for c in ";}\n)>,"}
+    for k, t in enumerate(toks):
+        if t[0] == "w" and t[1] in ("@include", "@load", "@namespace"):
+            return lines, f"its {_code(t[1])}, which loads code the guard does not read"
+        if t == ("w", "system"):
+            if toks[k + 1:k + 2] == [("p", "(")] and k + 3 < len(toks) and toks[k + 2][0] == "s" and \
+                    toks[k + 3] == ("p", ")"):
+                lines.append(toks[k + 2][1])
+            else:
+                return lines, "a system() call whose command is built when it runs"
+        elif t[0] == "|":
+            nxt = toks[k + 1] if k + 1 < len(toks) else ("p", "")
+            if nxt == ("w", "getline"):
+                prev, before = toks[k - 1] if k else ("p", ""), toks[k - 2] if k > 1 else ("p", "{")
+                if prev[0] == "s" and (before[0] == "p" and before[1] in "{;(\n,!" or before[0] == "|"):
+                    lines.append(prev[1])
+                else:
+                    return lines, "a getline from a command built when it runs"
+            elif nxt[0] == "s" and (k + 2 >= len(toks) or toks[k + 2] in end):
+                lines.append(nxt[1])
+            else:
+                return lines, "a pipe to a command built when it runs"
+    return lines, ""
+
+
+def _vim_lines(args):
+    """(the shell lines vim's startup commands run, a reason they may run code the guard cannot read or ""): each
+    -c, --cmd and +command, whose `!` (`:!cmd`, `silent !cmd`, `r !cmd`, `%!sort`) hands the rest to a shell, while
+    system(), :terminal, :execute, the script interfaces and :source run what the guard does not read, as -S, -s
+    and -u with a file do."""
+    cmds, k = [], 0
+    while k < len(args):
+        a = args[k]
+        if a in ("-c", "--cmd") and k + 1 < len(args):
+            cmds.append(args[k + 1])
+            k += 2
+            continue
+        if a.startswith("+") and len(a) > 1 and not a[1:].isdigit() and a[1] != "/":
+            cmds.append(a[1:])
+        elif a in ("-S", "-s", "-u", "-U", "-W", "-w") or (a[:2] in ("-S",) and len(a) > 2):
+            val = args[k + 1] if k + 1 < len(args) else ""
+            if a in ("-u", "-U") and val in ("NONE", "NORC", "DEFAULTS"):
+                k += 2
+                continue
+            if a in ("-W", "-w"):  # writes the keys typed; reads nothing
+                k += 2
+                continue
+            return [], f"vim {a} with a script the guard does not read"
+        k += 1
+    lines = []
+    for c in cmds:
+        if _VIM_CODE.search(c):
+            return lines, "a vim command that runs code the guard does not read (system(), :terminal, :execute, " \
+                          ":python, :source)"
+        m = re.search(r"(?:^|[\s:%.,$0-9'<>])!(.*)", c)
+        if m and m.group(1).strip():
+            lines.append(m.group(1).strip())
+    return lines, ""
+
+
+def _command_strings(argv, cwd=None):
+    """(the command lines a program runs from a string it is given, a reason it runs commands the guard cannot
+    read or ""): awk's system(), pipes and getline; trap's action; vim's and less's startup commands with `!`;
+    launchctl submit, asuser and bsexec; make's $(shell …) in its arguments; and at, batch, crontab, launchctl load
+    and bootstrap, and make -f from its input, whose commands come from where the guard does not read."""
+    if not argv:
+        return [], ""
+    name, args = os.path.basename(str(argv[0])), [str(a) for a in argv[1:]]
+    if name in ("sed", "gsed"):
+        return [], _sed_command_reason(args)
+    if name in _AWKS:
+        prog, why = _awk_program(args, cwd)
+        return _awk_commands(prog) if not why else ([], why)
+    if name == "trap":
+        rest = args[1:] if args[:1] == ["--"] else args
+        if not rest or rest[0] in ("-", "-p", "-l", "") or rest[0].isdigit() or rest[0].startswith("-"):
+            return [], ""
+        return [rest[0]], ""
+    if name in _VIMS:
+        return _vim_lines(args)
+    if name in ("less", "more", "most"):
+        lines = []
+        for a in args:
+            if a.startswith("+") and "!" in a:
+                lines.append(a.split("!", 1)[1])
+            elif a.startswith("+") and "|" in a:
+                return lines, "a less command that pipes text to a command the guard does not read"
+        return lines, ""
+    if name in ("at", "batch"):
+        if any(a in ("-l", "-r", "-d", "-c") or (a.startswith("-") and set(a[1:]) & set("lrdc")) for a in args):
+            return [], ""
+        return [], f"{name}, which runs the commands of its input or of a file (-f) later, where the guard does " \
+                   f"not read them"
+    if name == "crontab":
+        if any(a in ("-l", "-r", "-e", "-i") for a in args):
+            return [], ""
+        return [], "crontab, which installs the command lines of a file or of its input as jobs the guard does not read"
+    if name == "launchctl" and args:
+        sub, rest = args[0], args[1:]
+        if sub == "submit":
+            if "--" in rest:
+                return [shlex.join(rest[rest.index("--") + 1:])], ""
+            return [], "launchctl submit with a program the guard cannot find"
+        if sub in ("asuser", "bsexec") and len(rest) > 1:
+            return [shlex.join(rest[1:])], ""
+        if sub in ("load", "bootstrap", "enable", "kickstart", "start"):
+            return [], f"launchctl {sub}, which starts a job whose program a property list names"
+        return [], ""
+    if name in ("make", "gmake", "bmake"):
+        lines = []
+        for k, a in enumerate(args):
+            if a in ("-f", "--file", "--makefile") and k + 1 < len(args) and \
+                    (args[k + 1] == "-" or args[k + 1].startswith(("/dev/", "<("))):
+                return [], "make reading its makefile from its input, which the guard does not read"
+            if re.match(r"(?:-f|--file=|--makefile=)(?:-|/dev/)", a):
+                return [], "make reading its makefile from its input, which the guard does not read"
+            if re.match(r"(?:SHELL|\.SHELLFLAGS|MAKESHELL|MAKEFLAGS)[:+?]?=", a):
+                return [], f"make with {_code(a.split('=', 1)[0])} set, which changes how it runs its recipes"
+            for m in re.finditer(r"\$[({]shell[ \t]+", a):
+                close = _close_paren(a.replace("{", "(").replace("}", ")"), m.end())
+                lines.append(a[m.end():close - 1] if close > m.end() else a[m.end():])
+        return lines, ""
+    return [], ""
+
+
+def _sed_runs(script: str) -> bool:
+    """True when a sed script runs a command: GNU sed's `e` command or the `e` flag of `s`, which runs the pattern
+    space; a script the walk cannot read counts as one that may."""
+    s, i, n = script, 0, len(script)
+    while i < n:
+        if s[i] in " \t\n;{}!":
+            i += 1
+            continue
+        if s[i] == "#":
+            j = s.find("\n", i)
+            i = n if j < 0 else j
+            continue
+        j = _sed_address(s, i)
+        if j < 0:
+            return True
+        if j > i and j < n and s[j] == ",":
+            j = _sed_address(s, j + 1)
+            if j < 0:
+                return True
+        while j < n and s[j] in " \t!":
+            j += 1
+        if j >= n:
+            return False
+        c, i = s[j], j + 1
+        if c == "e":
+            return True
+        if c in "aicrRwWbtTvF:":  # text, a file name or a label: up to the line's end (a branch also to `;`)
+            stop = "\n" if c in "aicrRwWF" else ";\n}"
+            while i < n and s[i] not in stop:
+                i += 2 if s[i] == "\\" else 1
+            continue
+        if c in "sy":
+            if i >= n:
+                return True
+            d = s[i]
+            i = _sed_part(s, i + 1, d)
+            i = _sed_part(s, i, d) if i > 0 else -1
+            if i < 0:
+                return True
+            while c == "s" and i < n and (s[i] in _SED_FLAGS or s[i] in "ew"):
+                if s[i] == "e":
+                    return True
+                if s[i] == "w":
+                    j = s.find("\n", i)
+                    i = n if j < 0 else j
+                    break
+                i += 1
+            continue
+        while c in "qQlL" and i < n and s[i].isdigit():
+            i += 1
+    return False
+
+
+def _sed_command_reason(args) -> str:
+    """Why a sed command runs a command the guard does not read (_sed_runs, or a script file it does not read), or
+    ""; --sandbox turns e, r and w off."""
+    if "--sandbox" in args:
+        return ""
+    scripts, files, k = [], [], 0
+    while k < len(args):
+        a = args[k]
+        if a in ("-e", "--expression") and k + 1 < len(args):
+            scripts.append(args[k + 1])
+            k += 2
+            continue
+        if a.startswith("--expression="):
+            scripts.append(a.split("=", 1)[1])
+        elif a in ("-i", "-I") and k + 1 < len(args) and (args[k + 1] == "" or args[k + 1].startswith(".")):
+            k += 2  # BSD sed's -i takes the backup suffix as its own word
+            continue
+        elif a in ("-f", "--file") or a.startswith("--file=") or (a.startswith("-") and not a.startswith("--") and
+                                                                    "f" in a[1:] and "e" not in a[1:a.find("f")]):
+            return "a sed script file, which the guard does not read for its e command"
+        elif a.startswith("-") and not a.startswith("--") and "e" in a[1:]:
+            tail = a[a.index("e", 1) + 1:]
+            scripts.append(tail or (args[k + 1] if k + 1 < len(args) else ""))
+            k += 1 if tail else 2
+            continue
+        elif not a.startswith("-"):
+            files.append(a)
+        k += 1
+    if not scripts and files:
+        scripts = files[:1]
+    if any(_sed_runs(x) for x in scripts):
+        return "a sed script with an e command or flag, which runs a command it builds (GNU sed)"
+    return ""
+
+
+def command_string_refusal(argv, cwd=None) -> str:
+    """The reason a command runs commands from a string or input the guard cannot read (_command_strings), or ""."""
+    return _command_strings(argv, cwd)[1]
+
+
+def _held_lines(argv, cwd=None) -> list:
     """The command lines a command holds as words for a shell to run: the body of each alias it defines (`alias
-    ng='claude mcp add …'` runs when `ng` does), and hyperfine's benchmarks and its --prepare, --setup, --cleanup and
-    --conclude lines. Each of hyperfine's other words that is no option is read as a line too (a value such as `10`
-    is a harmless one). [] for any other command."""
+    ng='claude mcp add …'` runs when `ng` does), hyperfine's benchmarks and its --prepare, --setup, --cleanup and
+    --conclude lines, and the command strings of awk, trap, vim, less, launchctl and make (_command_strings). Each of
+    hyperfine's other words that is no option is read as a line too (a value such as `10` is a harmless one). []
+    for any other command."""
     if not argv:
         return []
     name, args = os.path.basename(str(argv[0])), [str(a) for a in argv[1:]]
     if name == "alias":
         return [a.split("=", 1)[1] for a in args if "=" in a and not a.startswith("-")]
     if name != "hyperfine":
-        return []
+        return _command_strings(argv, cwd)[0]
     out, i = [], 0
     while i < len(args):
         key, eq, val = args[i].partition("=")
@@ -5640,6 +6446,8 @@ def _unwrap(argv, more: bool = False, stop=()):
             argv = argv[3:]
         elif argv[0] == "function" and len(argv) > 2:  # `function f { gh …; }`: the body's first command
             argv = argv[2:]
+        elif argv[0] == "case":  # `case $f in a)`: a subject and a pattern, no command (their substitutions are
+            return []  # judged as commands of their own)
         elif argv[0] in _RESERVED:
             argv = argv[1:]
         elif n in ("timeout", "gtimeout"):
@@ -5674,7 +6482,8 @@ def _unwrap(argv, more: bool = False, stop=()):
             return [argv[0], *rest[i:]]
         elif n == "yarn" and argv[1:2] == ["workspace"] and len(argv) > 2:  # `yarn workspace <name> <command>`
             return [argv[0], *argv[3:]]
-        elif (n == "," or (n.startswith("-") and len(n) > 1)) and any(a in _FIND_RUNS for a in argv):
+        elif (n == "," or (n.startswith("-") and len(n) > 1)) and (any(a in _FIND_RUNS for a in argv) or
+                                                                   argv[0] in _FIND_PRIMARIES):
             return ["find", *argv]
         else:
             return argv
@@ -6112,7 +6921,8 @@ def terminal_typing_refusal(argv, more: bool = False) -> bool:
     return False
 
 
-_EXPECT_RUN = re.compile(r"(?:^|[;\n\[{]|\bthen\b)\s*(?:spawn|exec|system)\s+([^;\n\]}]*)")
+# whitespace within the line only: a newline is a separator itself (\s* after one spanned every line after it)
+_EXPECT_RUN = re.compile(r"(?:^|[;\n\[{]|\bthen\b)[ \t]*(?:spawn|exec|system)[ \t]+([^;\n\]}]*)")
 _TCL = frozenset({"tclsh", "expect", "wish"})
 _EXPECT_SPAWN_OPTS = frozenset({"-noecho", "-console", "-nottycopy", "-nottyinit", "-pty", "-ignore", "-open",
                                 "-leaveopen"})
@@ -6691,11 +7501,53 @@ def _program(argv, cwd, bodies):
     rest = args[i:]
     if script and script != "-" and _reads_input(script, cwd):  # its input, as `-` is
         script = "-"
+    if fam in ("node", "nodejs", "bun", "deno"):  # the code node preloads (-r, --require=, --import=): read as its own
+        for k, a in enumerate(args[:i]):
+            flag, eq, val = a.partition("=")
+            if flag in ("-r", "--require", "--import", "--loader", "--experimental-loader", "--preload"):
+                val = val if eq else (args[k + 1] if k + 1 < len(args) else "")
+                if val.startswith((".", "/", "~")) or os.sep in val:
+                    code.append(_read_small(_run_target(resolve(val, cwd), fam)))
     if script and script != "-":
-        code.append(_read_small(resolve(script, cwd)))
+        code.append(_read_small(_run_target(resolve(script, cwd), fam)))
+    elif module and fam in ("python", "pypy") and not any(re.fullmatch(r"-[A-Za-z]*[IP][A-Za-z]*", a)
+                                                          for a in args[:i]):
+        code.append(_read_small(_module_file(module, cwd)))  # `python3 -m pkg.run` from the working folder
     elif not code and module is None:
         code += list(bodies)
     return "\n".join(code), rest, module, inplace
+
+
+def _run_target(path, fam):
+    """The file an interpreter runs for `path`: for a folder, Python's `__main__.py`, or node's package.json main
+    (else index.js); the path itself otherwise."""
+    try:
+        p = Path(str(path))
+        if not p.is_dir():
+            return path
+        if fam in ("python", "pypy"):
+            return p / "__main__.py"
+        try:
+            main = json.loads((p / "package.json").read_text()).get("main") or ""
+        except (OSError, ValueError, AttributeError):
+            main = ""
+        for c in ([main, main + ".js"] if main else []) + ["index.js", "index.mjs", "index.cjs"]:
+            if (p / c).is_file():
+                return p / c
+        return p / "index.js"
+    except (OSError, ValueError):
+        return path
+
+
+def _module_file(module, cwd):
+    """The file `python3 -m module` runs from the working folder, which comes first on its path: `a/b.py`, or
+    `a/b/__main__.py` for a package; UNKNOWN when the working folder holds neither (the standard library's or an
+    installed one, judged by its name)."""
+    base = Path(str(cwd or os.getcwd())).joinpath(*module.split("."))
+    for c in (base.with_name(base.name + ".py"), base / "__main__.py"):
+        if c.is_file():
+            return c
+    return UNKNOWN
 
 
 def protected_bash(cmd: str, cwd):
@@ -7170,6 +8022,7 @@ _SPAWNS = re.compile(
     r"\bsubprocess\b|\bos\.(?:system|popen|exec\w*|spawn\w*|posix_spawn\w*)\b|\bpty\.spawn\b|\bchild_process\b|"
     r"\b(?:execSync|spawnSync|execFile\w*|spawn|exec|system|popen|proc_open|shell_exec|passthru)\s*\(|"
     r"\bIO\.popen\b|\bOpen3\b|\bProcess\.(?:spawn|exec)\b|\bDeno\.(?:run|Command)\b|\bBun\.(?:spawn|\$)|"
+    r"\bcreate_subprocess_(?:shell|exec)\b|"
     # AppleScript: do shell script runs a line; Terminal's do script, iTerm's write text and keystroke type one into
     # a terminal (F1-R4 part 2)
     r"\bdo (?:shell )?script\b|\bwrite text\b|\bkeystroke\b")
@@ -7464,6 +8317,378 @@ def _routed_lanes(cmd: str) -> int:
     return 1 if runs_one_command(cmd) else len(_route_plan(cmd) or [])
 
 
+def _arith_end(s: str, j: int):
+    """The index of the `))` that closes the arithmetic `$((` whose body starts at s[j], or None when the inner
+    parenthesis closes into anything else: bash and zsh then run `$((date)|wc -c)` as `$( (date) | wc -c )`."""
+    depth, n, q = 0, len(s), None
+    while j < n:
+        c = s[j]
+        if q:
+            q = None if c == q else q
+        elif c == "\\":
+            j += 2
+            continue
+        elif c in "'\"`":
+            q = c
+        elif c == "(":
+            depth += 1
+        elif c == ")":
+            if not depth:
+                return j if s.startswith("))", j) else None
+            depth -= 1
+        j += 1
+    return None
+
+
+# the programs whose output is a number: a name the command sets from one of them is a number in arithmetic
+_ARITH_BINDERS = re.compile(r"(?:^|[\s;&|(`{])(?:read|mapfile|readarray|printf|declare|typeset|local|readonly|export|"
+                            r"getopts|unset|select|eval|source|\.)(?=\s)")
+# an integer declaration (declare -i, typeset -i, local -i): its names take the arithmetic value of what they are
+# given, so they bind no text; -n (a name reference) binds another name and stays a binder
+_INT_DECL = re.compile(r"\b(?:declare|typeset|local|readonly|export)((?:[ \t]+-[A-Za-z]{1,8}){1,4})")
+
+
+def _numeric_pipeline(body: str) -> bool:
+    """True when a substitution's command prints only a number: `wc` reading its input, `seq`, `date +%s`-like formats,
+    `grep -c` on one file, `git rev-list --count`, or `grep -n … <one file> | cut -d: -f1`, any of them followed by
+    head, tail, sort or uniq. Its output is spliced into an arithmetic expression, so any other output may be code."""
+    if not body or re.search(r"[;&\n`]|\$\(", body):
+        return False
+    try:
+        stages = [shlex.split(st) for st in re.split(r"(?<!\|)\|(?!\|)", body)]
+    except ValueError:
+        return False
+    if not stages or any(not st for st in stages):
+        return False
+    while len(stages) > 1 and os.path.basename(stages[-1][0]) in ("head", "tail", "sort", "uniq"):
+        stages.pop()
+
+    def operands(words):
+        out, skip = [], False
+        for w in words:
+            if skip:
+                skip = False
+            elif w == "<":
+                skip = True
+            elif not w.startswith(("-", "<")):
+                out.append(w)
+        return out
+    last = stages[-1]
+    name, args = os.path.basename(last[0]), last[1:]
+    opts = [a for a in args if a.startswith("-") and not a.startswith("--")]
+    if name == "wc":
+        return not operands(args)
+    if name == "seq":
+        return not any(a.startswith(("-f", "-s")) for a in args)
+    if name == "date":
+        return any(re.fullmatch(r"\+(?:%[sYmdHMSjuwNyCVUW]|[0-9 :._-])+", a) for a in args)
+    if name == "grep":
+        return any("c" in o[1:] for o in opts) and not any(set(o[1:]) & set("rRH") for o in opts) and \
+            len(operands(args)) <= 2
+    if name == "git":
+        return args[:1] == ["rev-list"] and "--count" in args
+    if name == "cut" and "".join(args) in ("-d:-f1", "-f1-d:", "-d:-f1-1") and len(stages) >= 2:
+        first = stages[0]
+        fopts = [a for a in first[1:] if a.startswith("-") and not a.startswith("--")]
+        return os.path.basename(first[0]) == "grep" and any("n" in o[1:] for o in fopts) and \
+            not any(set(o[1:]) & set("rRHc") for o in fopts) and len(operands(first[1:])) == 2 and \
+            all(os.path.basename(st[0]) in ("head", "tail", "sort", "uniq") for st in stages[1:-1])
+    return False
+
+
+def _number_value(value: str, s: str = "", seen=frozenset()) -> bool:
+    """True when an assignment's value is a number: digits, an arithmetic `$((…))` (its own names are judged where it
+    stands), a substitution that prints only a number (_numeric_pipeline), or an expression of numbers and names
+    that are numbers themselves (`i=i+1`, judged in command `s`)."""
+    v = value
+    if v.startswith("$((") and _arith_end(v, 3) is not None:
+        return True
+    if v.startswith(("$(", '"$(')):
+        k = 2 if v[0] == "$" else 3
+        end = _close_paren(v, k)
+        return end > k and _numeric_pipeline(v[k:end - 1])
+    if v[:1] in ("'", '"'):
+        close = v.find(v[0], 1)
+        v = v[1:close] if close > 0 else ""
+    else:
+        v = re.match(r"[^\s;&|)]*", v).group(0)
+    if re.fullmatch(r"-?[0-9]+", v):
+        return True
+    if not re.fullmatch(r"[A-Za-z0-9_+*/%()-]{1,200}", v):
+        return False
+    names = set(re.findall(r"(?<![0-9A-Za-z_#])[A-Za-z_][A-Za-z0-9_]*", v))
+    return all(_arith_name_safe(n, s, seen) for n in names)
+
+
+def _arith_name_safe(word: str, s: str, seen=frozenset()) -> bool:
+    """True when command `s` gives name `word` numbers only: it sets it, every value it gives it is a number
+    (_number_value, a name built from itself counting as its other values do), a `for` loop over numbers sets it
+    otherwise, and nothing else in `s` can bind it (read, printf -v, declare without -i, eval, source, …)."""
+    if word in seen:
+        return True
+    seen = seen | {word}
+    w = re.escape(word)
+    plain = _INT_DECL.sub(lambda m: m.group(0) if ("i" not in m.group(1) or "n" in m.group(1)) else
+                          " " * len(m.group(0)), s)  # an integer declaration binds no text
+    if re.search(_ARITH_BINDERS.pattern + r"[^;&|\n]*(?<![\w$])" + w + r"\b", plain) or \
+            re.search(r"(?:^|[\s;&|(`{])(?:eval|source|\.)\s", s):
+        return False
+    values = [s[m.end():] for m in re.finditer(r"(?:^|[\s;&|(`{])" + w + r"\+?=(?!=)", s)]
+    loops = re.findall(r"(?:^|[\s;&|(`{])for\s+" + w + r"\s+in\s+([^;\n]*)", s)
+    return bool(values or loops) and all(_number_value(v, s, seen) for v in values) and \
+        all(re.fullmatch(r"\s*\$\(seq(?:\s+-?[0-9]+){1,3}\)\s*", lst) or
+            all(re.fullmatch(r"-?[0-9]+|\{-?[0-9]+\.\.-?[0-9]+\}", item) for item in lst.split()) for lst in loops)
+
+
+def _arith_unsafe_names(body: str, s: str) -> list:
+    """What an arithmetic expression reads whose value may be code, as words a command would run: `$name` for a name
+    command `s` does not give numbers only (_arith_name_safe), `$(…)` for a substitution whose output may be any text
+    (_numeric_pipeline). The shell reads each value as an expression, and `x='a[$(cmd)]'; echo $((x))` runs cmd."""
+    bare, out = body, []
+    for _ in range(8):  # each substitution is a command of its own; its output is spliced into the expression
+        m = re.search(r"\$\(|`", bare)
+        if not m:
+            break
+        if m.group(0) == "`":
+            k = bare.find("`", m.end())
+            inner = bare[m.end():k] if k >= 0 else bare[m.end():]
+            bare = bare[:m.start()] + " 0 " + (bare[k + 1:] if k >= 0 else "")
+        else:
+            k = _close_paren(bare, m.end())
+            inner = bare[m.end():k - 1] if k > m.end() else bare[m.end():]
+            bare = bare[:m.start()] + " 0 " + (bare[k:] if k > m.end() else "")
+        if not _numeric_pipeline(inner):
+            out.append("$(" + inner + ")")
+    names = sorted(set(re.findall(r"(?<![0-9A-Za-z_#])[A-Za-z_][A-Za-z0-9_]*", bare)))
+    return out + ["$" + w for w in names if not _arith_name_safe(w, s)]
+
+
+def _blank_single(s: str) -> str:
+    """`s` with the text inside its single quotes blanked: the shell expands nothing there, while it expands
+    `${…}` inside double quotes."""
+    out, q = [], None
+    for c in s:
+        if q == "'":
+            q = None if c == "'" else q
+            out.append(c if c in "'\n" else " ")
+        else:
+            if c == '"':
+                q = None if q == '"' else '"'
+            elif c == "'" and q is None:
+                q = "'"
+            out.append(c)
+    return "".join(out)
+
+
+_LET = re.compile(r"(?:^|[;&|(\n{])[ \t]*(?:(?:then|do|else|!)[ \t]+)?let[ \t]+([^;&|\n)]{1,400})")
+_TEST_ARITH = re.compile(r"(?<!\S)(\S{1,400})[ \t]+-(?:eq|ne|lt|le|gt|ge)[ \t]+(\S{1,400})")
+_SUBSCRIPT_EXPAND = re.compile(r"\$\{[#!]?[A-Za-z_]\w{0,80}\[([^\]\n]{0,200})\]")
+_SUBSCRIPT_SET = re.compile(r"(?:^|[;&|\s(])[A-Za-z_]\w{0,80}\[([^\]\n]{0,200})\]\+?=")
+_SUBSCRIPT_WORD = re.compile(r"(?:^|[\s'\"])[A-Za-z_]\w{0,80}\[([^\]\n]{0,200})\]")
+_SUBSCRIPT_CMD = re.compile(r"(?:^|[;&|\n(])[ \t]*(unset|read|printf)\b([^;&|\n]{0,400})")
+_SUBSTRING = re.compile(r"\$\{[A-Za-z_]\w{0,80}:(?![-=+?])([^}\n]{0,400})\}")
+_DOLLAR_BRACKET = re.compile(r"\$\[([^\]\n]{0,400})\]")
+
+
+# a builtin that sets a variable by a name it is given, or `${!n}`: _name_targets reads them
+_NAME_HINT = re.compile(r"\$\{!|\b(?:declare|typeset|local|readonly|export|printf|read|mapfile|readarray|getopts)\b")
+
+
+def _unquote(w: str) -> str:
+    return w[1:-1] if len(w) > 1 and w[0] == w[-1] and w[0] in "'\"" else w
+
+
+ARITH_REASON = ("This command reads {what} as an arithmetic expression ($((…)), ((…)), let, [[ … -eq … ]], declare -i, "
+                "a subscript or a substring offset) or as a variable's name (declare, export, printf -v, read, "
+                "${{!n}}), and its value is not a number or a name the command gives it: the shell "
+                "runs a `$(…)` such a value holds, as `x='a[$(cmd)]'; echo $((x))` runs cmd. Give the name numbers "
+                "or a literal name in the command (a literal, a counter, wc -l < file, grep -c, date +%s), compare "
+                "text with `[` or `test`, or use the value as text.")
+
+
+def arithmetic_hazards(s: str) -> list:
+    """Every value command `s` reads as an arithmetic expression that may be code (_arith_unsafe_names): in its
+    `$((…))` outside single quotes, and in the other places _arith_hazards reads."""
+    if "((" not in s and "[" not in s and "let" not in s and "-i" not in s and ":" not in s and \
+            not _NAME_HINT.search(s):
+        return []
+    try:
+        text = strip_heredocs(s)
+    except Exception:
+        text = s
+    single, out, i = _blank_single(text), [], 0
+    while True:
+        i = single.find("$((", i)
+        if i < 0:
+            break
+        end = _arith_end(text, i + 3)
+        if end is not None:
+            out += [h for h in _arith_unsafe_names(text[i + 3:end], text) if h not in out]
+        i += 3
+    return out + [h for h in _arith_hazards(s) if h not in out]
+
+
+def _arith_hazards(s: str) -> list:
+    """What a command line reads as an arithmetic expression outside `$((…))` (read in _subst) and whose value may be
+    code (_arith_unsafe_names): `((…))` and `for ((…))`, `let`, the operands of [[ … -eq … ]] and the other integer
+    comparisons, `$[…]`, the values of an integer declaration and of the names it declares, a substring's offset and
+    length, and an array subscript (also in zsh). `test` and `[` compare integers without evaluating them."""
+    if not any(t in s for t in ("((", "let", "[[", "$[", "[", "-i", ":")) and not _NAME_HINT.search(s):
+        return []
+    try:
+        text = strip_heredocs(s)
+    except Exception:
+        text = s
+    plain, single = _blank_quoted(text), _blank_single(text)
+    exprs = []
+    i = 0
+    while True:
+        i = plain.find("((", i)
+        if i < 0:
+            break
+        if i == 0 or plain[i - 1] not in "$<>=" and not plain[i - 1].isalnum():
+            end = _arith_end(text, i + 2)
+            if end is not None:
+                exprs.append(text[i + 2:end])
+        i += 2
+    for m in _LET.finditer(plain):
+        exprs += [_unquote(w) for w in text[m.start(1):m.end(1)].split()]
+    i = 0
+    while True:
+        i = plain.find("[[", i)
+        if i < 0:
+            break
+        j = plain.find("]]", i + 2)
+        span, held = text[i + 2:j if j > 0 else len(text)], []
+        for _ in range(16):  # each substitution is one operand, whatever spaces it holds
+            k = span.find("$(")
+            if k < 0:
+                break
+            e = _close_paren(span, k + 2)
+            if e <= k:
+                break
+            held.append(span[k:e])
+            span = span[:k] + f"\0{len(held) - 1}\0" + span[e:]
+        for m in _TEST_ARITH.finditer(span):
+            exprs += [re.sub(r"\0(\d+)\0", lambda h: held[int(h.group(1))], _unquote(g)) for g in m.groups()]
+        i = j if j > 0 else len(text)
+    ints = set()
+    for m in _INT_DECL.finditer(plain):
+        if "i" in m.group(1) and "n" not in m.group(1):
+            rest = re.match(r"[^;&|\n]*", text[m.end():]).group(0)
+            for w in rest.split():
+                name, eq, val = w.partition("=")
+                if re.fullmatch(r"[A-Za-z_]\w*", name):
+                    ints.add(name)
+    for name in ints:
+        for m in re.finditer(r"(?:^|[\s;&|(`{])" + re.escape(name) + r"\+?=(?!=)", text):
+            exprs.append(_unquote(re.match(r"\"[^\"]*\"|'[^']*'|[^\s;&|)]*", text[m.end():]).group(0)))
+    exprs += [m.group(1) for m in _DOLLAR_BRACKET.finditer(single)]
+    exprs += [m.group(1) for m in _SUBSCRIPT_EXPAND.finditer(single)]
+    exprs += [text[m.start(1):m.end(1)] for m in _SUBSCRIPT_SET.finditer(plain)]
+    for m in _SUBSCRIPT_CMD.finditer(plain):
+        words = text[m.start(2):m.end(2)]
+        if m.group(1) == "printf":
+            pv = re.search(r"-v[ \t]+(\S+)", words)
+            words = pv.group(1) if pv else ""
+        exprs += [k.group(1) for k in _SUBSCRIPT_WORD.finditer(words)]
+    for m in _SUBSTRING.finditer(single):
+        exprs += m.group(1).split(":")
+    names, more = _name_targets(text, plain, single)
+    exprs += more
+    out = [h for h in names]
+    for e in exprs:
+        if e.strip() in ("", "@", "*"):
+            continue
+        out += [h for h in _arith_unsafe_names(e, text) if h not in out]
+    return out
+
+
+# the builtins that set a variable by a name they are given, and what follows them up to the command's end
+_NAME_CMD = re.compile(r"(?:^|[;&|\n({`])[ \t]*(?:(?:then|do|else|!|time)[ \t]+)*"
+                       r"(declare|typeset|local|readonly|export|printf|read|mapfile|readarray|getopts)[ \t]"
+                       r"([^;&|\n]{0,400})")
+_INDIRECT = re.compile(r"\$\{!([A-Za-z_]\w{0,80})(?=[}:#%/^,])")  # `${!n}`: the variable whose name n holds
+_READ_VALUE_OPTS = "dinNptu"  # read's options that take a value (-t's is a number zsh evaluates)
+
+
+def _name_safe(word: str, s: str) -> bool:
+    """True when command `s` gives name `word` only literal variable names as values (`n=out`, `for n in a b`) and
+    nothing else in `s` can bind it, so a name computed from it (`printf -v "$n"`, `declare "$n"=1`, `${!n}`) is a
+    plain name, never `a[$(cmd)]`, whose subscript bash and zsh evaluate."""
+    w = re.escape(word)
+    if re.search(_ARITH_BINDERS.pattern + r"[^;&|\n]*(?<![\w$])" + w + r"\b", s) or \
+            re.search(r"(?:^|[\s;&|(`{])(?:eval|source|\.)\s", s):
+        return False
+    values = [_unquote(re.match(r"\"[^\"]*\"|'[^']*'|[^\s;&|)]*", s[m.end():]).group(0))
+              for m in re.finditer(r"(?:^|[\s;&|(`{])" + w + r"\+?=(?!=)", s)]
+    loops = re.findall(r"(?:^|[\s;&|(`{])for\s+" + w + r"\s+in\s+([^;\n]*)", s)
+    ident = re.compile(r"[A-Za-z_]\w{0,80}")
+    return bool(values or loops) and all(ident.fullmatch(v) for v in values) and \
+        all(all(ident.fullmatch(_unquote(item)) for item in lst.split()) for lst in loops)
+
+
+def _name_targets(text: str, plain: str, single: str):
+    """-> (hazards, expressions) of the names a command's builtins set or read by a name they compute: a target of
+    declare, typeset, local, readonly, export, printf -v, read, mapfile or getopts, and `${!n}`, whose value is a name
+    the shell evaluates (bash and zsh run `a[$(cmd)]` there, as `declare "$x"=1` does). A hazard is `$n` for a name
+    the command does not give literal names only (_name_safe), or a substitution in the target; the expressions are a
+    literal target's subscript and zsh's `read -t` value, which the arithmetic reading judges."""
+    hazards, exprs = [], []
+
+    def computed(t):
+        if "$(" in t or "`" in t:
+            hazards.append(t)
+            return
+        for n in re.findall(r"\$\{?([A-Za-z_]\w{0,80})", t):
+            if not _name_safe(n, text) and "$" + n not in hazards:
+                hazards.append("$" + n)
+    if _NAME_CMD.search(plain):
+        for m in _NAME_CMD.finditer(plain):
+            name, words = m.group(1), text[m.start(2):m.end(2)]
+            try:
+                args = shlex.split(words)
+            except ValueError:
+                args = words.split()
+            targets, k = [], 0
+            if name == "printf":
+                for k, a in enumerate(args):
+                    if a == "-v" and k + 1 < len(args):
+                        targets.append(args[k + 1])
+                    elif a.startswith("-v") and len(a) > 2:
+                        targets.append(a[2:])
+            elif name == "getopts":
+                targets = args[1:2]
+            else:
+                while k < len(args):
+                    a = args[k]
+                    if re.fullmatch(r"[0-9]*(?:<|>|>>|<<<|<>|&>|>&|<&)[0-9-]*", a):  # a redirect and its target
+                        k += 2
+                        continue
+                    if re.match(r"[0-9]*[<>]", a):  # one glued to its target, `<f.txt`
+                        k += 1
+                        continue
+                    if name == "read" and a[:1] == "-" and len(a) > 1 and a[-1] in _READ_VALUE_OPTS:
+                        if a[-1] == "t" and k + 1 < len(args):
+                            exprs.append(args[k + 1])
+                        k += 2
+                        continue
+                    if a[:1] in ("-", "+") and len(a) > 1:
+                        k += 1
+                        continue
+                    targets.append(a.split("=", 1)[0] if name in ("declare", "typeset", "local", "readonly",
+                                                                  "export") else a)
+                    k += 1
+            for t in targets:
+                if "$" in t or "`" in t:
+                    computed(t)
+                elif "[" in t and t.endswith("]"):
+                    exprs.append(t[t.index("[") + 1:-1])
+    for m in _INDIRECT.finditer(single):
+        computed("$" + m.group(1))
+    return hazards, exprs
+
+
 def _subst(s: str, quotes: bool, procs: list | None = None) -> list:
     """The bodies of the substitutions the shell runs in `s`: `$(…)`, backticks, and with `quotes` (a command line,
     not a heredoc body) `<(…)`, `>(…)` and zsh's `=(…)` outside quotes. `procs`: a list that gets, for each body,
@@ -7485,6 +8710,18 @@ def _subst(s: str, quotes: bool, procs: list | None = None) -> list:
         elif quotes and q is None and c == "#" and parens.comment(i, False):
             j = s.find("\n", i)
             i = n if j < 0 else j
+            continue
+        elif s.startswith("$((", i) and (end := _arith_end(s, i + 3)) is not None:
+            # arithmetic: the shell runs only the substitutions inside it, and reads each name's value as an
+            # expression, so a name whose value may hold `a[$(cmd)]` runs cmd: it is judged as `$name`, a program
+            # known only when it runs (_arith_unsafe_names)
+            body = s[i + 3:end]
+            inner = _subst(body, False) + _arith_unsafe_names(body, s)
+            out += inner
+            if procs is not None:
+                procs += [False] * len(inner)
+            parens.close(end + 1, "w")  # `$((1))# <(…)`: a `#` glued to it starts no comment
+            i = end + 2
             continue
         elif s.startswith("$(", i) or (quotes and q is None and _proc_subst_at(s, i)):
             # `<(…)`, `>(…)` and zsh's `=(…)`: process substitutions, which the shell runs as `$(…)` (never in double
@@ -7536,6 +8773,11 @@ def _subst(s: str, quotes: bool, procs: list | None = None) -> list:
         elif quotes and q is None and c == ")":
             parens.close(i)
         i += 1
+    if quotes:  # the other places the shell reads a value as an arithmetic expression: a value that may be code
+        hazards = _arith_hazards(s)  # is judged as a program known only when it runs
+        out += hazards
+        if procs is not None:
+            procs += [False] * len(hazards)
     return out
 
 
@@ -7996,7 +9238,7 @@ TOOL_LEVELS = ("all", "build", "review", "read")  # least to most restrictive, a
 READONLY_REASON = ("read-only lane: {what}. Report the change with file:line and the fix, or ask the tech lead to run it "
                    "(`dev crew ask \"…\"`). Readers (cat, grep, rg, sed -n '1,20p', find, git log|diff|show, gh pr "
                    "view, dev status|grep|diff, …) and the project's checks (pytest, python3 -m unittest, ruff check, "
-                   "tsc --noEmit, …) run; redirects only to /dev/null or a temp folder.")
+                   "tsc --noEmit, …) run; redirects only to /dev/null or your own scratch folder.")
 _RO_READERS = frozenset({
     "cat", "head", "tail", "wc", "ls", "tree", "file", "stat", "du", "pwd", "basename", "dirname", "realpath",
     "readlink", "which", "type", "echo", "printf", "date", "diff", "cmp", "comm", "cut", "tr", "sort", "uniq",
@@ -8006,7 +9248,9 @@ _RO_READERS = frozenset({
     "ps", "pgrep", "sw_vers", "id", "whoami", "printenv", "uptime", "groups", "locale", "getconf", "sysctl", "seq",
     # shell builtins that change nothing outside the shell
     "cd", "pushd", "popd", "true", "false", "test", "[", "[[", "read", "set", "wait", "sleep", "export", "unset",
-    "local", "declare", "typeset", "readonly", "for", "select", "case", "in", "esac"})
+    "local", "declare", "typeset", "readonly", "for", "select", "case", "in", "esac", "break", "continue",
+    # more readers: a column joiner, a manual page and its filter, the open files of processes
+    "paste", "col", "man", "lsof"})
 # a reader's own flags that write a file or run a program
 _RO_FLAGS = {"rg": ("--pre",), "sort": ("-o", "--output"), "tree": ("-o",), "file": ("-C", "--compile"),
              "date": ("-s", "--set"), "yq": ("-i", "--inplace", "-s", "--split-exp")}
@@ -8022,7 +9266,8 @@ _RO_CHECKS = (
     ("mypy", (), ()), ("pyright", (), ()), ("tsc", (), ()), ("eslint", (), ("--fix",)), ("prettier", (), ("--write", "-w")),
     ("shellcheck", (), ()), ("markdownlint", (), ("--fix",)), ("markdownlint-cli2", (), ("--fix",)),
     ("semgrep", (), ("--autofix", "-o", "--output")), ("gitleaks", (), ("-r", "--report-path")),
-    ("osv-scanner", (), ("--output",)), ("trivy", (), ("-o", "--output")))
+    ("osv-scanner", (), ("--output",)), ("trivy", (), ("-o", "--output")),
+    ("node", ("--test",), ("--test-update-snapshots",)))
 _RO_RUNNERS = frozenset({"npx", "bunx", "uvx", "pnpx", "uv", "poetry", "pipenv", "pdm", "hatch", "rye", "pnpm"})
 _RO_ENV = re.compile(r"^(?:LC_[A-Z]+|LANG|LANGUAGE|TZ|NO_COLOR|FORCE_COLOR|CLICOLOR(?:_FORCE)?|TERM|COLUMNS|LINES|CI|"
                      r"PYTHONDONTWRITEBYTECODE|PYTHONUNBUFFERED|PYTHONHASHSEED|PYTHONIOENCODING)$")
@@ -8044,7 +9289,7 @@ _RO_DEV = {"status": None, "grep": None, "find": None, "files": None, "diff": No
            "delivery": ("", "show"), "audit": ("", "verify", "show", "stats", "config"), "completion": None,
            "__complete": None}
 _SED_ADDR = r"(?:\d+|\$|/(?:[^/\\\n]|\\.)*/I?)"
-_SED_PRINT = re.compile(rf"^(?:{_SED_ADDR}(?:\s*,\s*{_SED_ADDR})?)?\s*(?:p|q\d*)$")
+_SED_PRINT = re.compile(rf"^(?:{_SED_ADDR}(?:\s*,\s*(?:{_SED_ADDR}|[+~]\d+))?)?\s*(?:p|q\d*)$")  # N,+M: GNU
 
 
 def _readonly_config() -> list:
@@ -8364,6 +9609,8 @@ def _ro_dev(args, here=None, plans=None) -> str | None:
         return _ro_impeccable(args[args.index(sub) + 1:])
     if sub == "plan" and len(pos) > 1 and pos[1] in ("new", "revise"):
         return _ro_plan_write(args, pos, here, plans() if plans else None)
+    if sub == "watch":  # the caller's own wait (`--for` takes only `me`): it takes its own lane's events, as
+        return None  # `dev crew inbox` reads them
     if sub in _RO_DEV and (_RO_DEV[sub] is None or (pos[1] if len(pos) > 1 else "") in _RO_DEV[sub]):
         if sub == "ci" and _dev_sets(args, "--run", "--resume"):
             return "`dev ci --run` runs the pipeline's build and package steps"
@@ -8811,8 +10058,449 @@ def _own_scratch_script(argv, cwd, member) -> bool:
     return False
 
 
-def _ro_program(argv0, cwd, member=None, plans=None) -> str | None:
-    """Why one command of a read-only lane (its words, prefixes included) is refused, or None. `plans`: as _ro_dev."""
+# a mode that opens a file for writing
+_PY_WRITE_MODE = re.compile(r"[wax+]")
+
+
+def _py_path(node, cwd, names=None, depth=0):
+    """The path a Python expression names, when it is written out: a string, Path(…)/PurePath(…) of strings,
+    os.path.join of strings, a path joined with / to a string, or a name the program binds once, to one of those
+    (`names`: _py_once). None for anything computed at run time."""
+    import ast
+    if isinstance(node, ast.Name) and names and node.id in names and depth < 8:
+        return _py_path(names[node.id], cwd, names, depth + 1)
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.Call):
+        f = node.func
+        n = f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", "")
+        if n in ("Path", "PurePath", "PosixPath", "join", "expanduser") and node.args and not node.keywords:
+            parts = [_py_path(a, cwd, names, depth + 1) for a in node.args]
+            if all(isinstance(x, str) for x in parts):
+                joined = os.path.join(*parts) if n != "join" or \
+                    (isinstance(f, ast.Attribute) and getattr(f.value, "attr", "") == "path") else None
+                if joined is not None and n == "expanduser" and (joined == "~" or joined.startswith("~/")):
+                    joined = str(HOME) + joined[1:]  # the guard's own home, which its rules judge paths by
+                return joined
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+        left, right = _py_path(node.left, cwd, names, depth + 1), _py_path(node.right, cwd, names, depth + 1)
+        return os.path.join(left, right) if isinstance(left, str) and isinstance(right, str) else None
+    return None
+
+
+def _py_once(tree) -> dict:
+    """{name: value} for each name a Python program binds exactly once, by a plain `name = value`: any other binding
+    (a loop, with, a parameter, an import, unpacking, :=, +=, global, del) leaves the name out."""
+    import ast
+    stores, plain = {}, {}
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Name) and not isinstance(n.ctx, ast.Load):
+            stores[n.id] = stores.get(n.id, 0) + 1
+        elif isinstance(n, ast.arg):
+            stores[n.arg] = stores.get(n.arg, 0) + 2
+        elif isinstance(n, (ast.Import, ast.ImportFrom)):
+            for a in n.names:
+                k = (a.asname or a.name).split(".")[0]
+                stores[k] = stores.get(k, 0) + 2
+        elif isinstance(n, (ast.Global, ast.Nonlocal)):
+            for k in n.names:
+                stores[k] = stores.get(k, 0) + 2
+        elif isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            stores[n.name] = stores.get(n.name, 0) + 2
+        if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name):
+            plain[n.targets[0].id] = n.value
+    return {k: v for k, v in plain.items() if stores.get(k) == 1}
+
+
+# The one judge of the programs an agent types inline or writes in a scratch folder, by an allow list (fail closed):
+# a program counts as known only when every module it imports, every name it reads and every function it calls is one
+# that cannot start a process, run code it builds or load code, and every file it writes goes through a writer the
+# guard reads with a path written out in its code. Anything else is a program the guard cannot vouch for.
+_PY_SAFE_MODULES = frozenset("""json re pathlib collections collections.abc itertools functools math cmath statistics
+    datetime time zoneinfo textwrap difflib csv tomllib ast hashlib hmac base64 binascii unicodedata string
+    dataclasses typing enum fnmatch glob copy pprint reprlib random secrets decimal fractions numbers bisect heapq
+    struct uuid html html.parser configparser shlex argparse tempfile keyword tokenize token calendar abc contextlib
+    io os os.path posixpath sys urllib.parse xml.etree.ElementTree operator.itemgetter warnings errno stat
+    locale gettext graphlib array weakref types""".split())
+# the attributes a program may read of the vetted modules that also hold a way out (os.system, sys.modules, io.FileIO)
+_PY_MODULE_ATTRS = {
+    "os": frozenset("""path listdir walk scandir getcwd environ getenv sep altsep linesep pathsep stat lstat
+        cpu_count getpid getppid name fspath fsdecode fsencode access R_OK W_OK X_OK F_OK devnull curdir pardir extsep
+        get_terminal_size isatty getuid getgid getlogin umask""".split()),
+    "sys": frozenset("""argv stdin stdout stderr exit version version_info platform maxsize getsizeof byteorder
+        executable getrecursionlimit setrecursionlimit intern path float_info int_info hexversion implementation
+        getdefaultencoding getfilesystemencoding""".split()),
+    "io": frozenset({"StringIO", "BytesIO", "TextIOWrapper", "SEEK_SET", "SEEK_CUR", "SEEK_END",
+                     "UnsupportedOperation"}),
+    "tempfile": frozenset({"gettempdir", "gettempprefix", "mkdtemp", "mkstemp", "TemporaryDirectory",
+                           "NamedTemporaryFile", "TemporaryFile", "SpooledTemporaryFile"}),
+    "types": frozenset({"SimpleNamespace", "MappingProxyType"}),
+    "contextlib": frozenset({"contextmanager", "suppress", "redirect_stdout", "redirect_stderr", "closing",
+                             "nullcontext", "ExitStack"}),
+}
+_PY_SAFE_BUILTINS = frozenset("""print len range enumerate zip map filter sorted reversed min max sum any all abs round
+    int float complex str bool bytes bytearray list dict set frozenset tuple isinstance issubclass hasattr repr format
+    chr ord hex bin oct divmod pow hash id iter next slice callable ascii super object property staticmethod
+    classmethod memoryview input type True False None NotImplemented Ellipsis exit quit open getattr __name__ __file__
+    __doc__""".split())
+_PY_DIRECT_ONLY = frozenset({"open", "type", "hasattr", "getattr"})  # read only as the function a call names: never an alias
+# the methods that write what a path object names, and those that make a link or a mode no read needs
+_PY_PATH_WRITERS = frozenset({"write_text", "write_bytes", "touch", "mkdir", "unlink", "rmdir", "rename", "replace",
+                              "copy", "copy_into", "move", "move_into"})
+_PY_PATH_REFUSED = frozenset({"symlink_to", "hardlink_to", "link_to", "chmod", "lchmod", "chown", "lchown"})
+
+
+def _py_write_paths(code, cwd) -> tuple:
+    """The files a Python program writes, by the allow-list judge -> (paths, why): `paths`, each written out in its
+    code (_py_path), when `why` is ''; else why the guard cannot vouch for the program: it does not parse, imports a
+    module or reads a name or attribute outside the vetted lists, reaches a dunder attribute, refers to `open`
+    other than by calling it, calls getattr, eval, exec, compile or another builtin outside the list, writes through a
+    writer the guard does not read, makes a link, or writes a path built at run time."""
+    import ast
+    try:
+        tree = ast.parse(code)
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        return [], "the guard cannot parse this program"
+    parents, local, modules = {}, set(), {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parents[id(child)] = node
+        if isinstance(node, ast.Name) and not isinstance(node.ctx, ast.Load):
+            local.add(node.id)
+        elif isinstance(node, ast.arg):
+            local.add(node.arg)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            local.add(node.name)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            local.add(node.name)
+    paths, once, bound = [], _py_once(tree), set()
+
+    def module_ok(name):
+        return name in _PY_SAFE_MODULES
+
+    def place(node, what="writes"):
+        q = _py_path(node, cwd, once) if node is not None else None
+        if q is None:
+            return f"this program {what} a file the guard cannot place: write the path out"
+        paths.append(q)
+        return ""
+
+    def mode_writes(modes):
+        return any(not (isinstance(m, ast.Constant) and isinstance(m.value, (str, int))) or
+                   (isinstance(m.value, str) and _PY_WRITE_MODE.search(m.value)) for m in modes[:1])
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for a in node.names:
+                if not module_ok(a.name):
+                    return [], f"this program imports {_code(a.name)}, a module the guard does not vouch for"
+                modules[(a.asname or a.name).split(".")[0] if not a.asname else a.asname] = \
+                    a.name if a.asname else a.name.split(".")[0]
+        elif isinstance(node, ast.ImportFrom):
+            mod = node.module or ""
+            if node.level or not module_ok(mod):
+                return [], f"this program imports from {_code(mod or '.')}, a module the guard does not vouch for"
+            for a in node.names:
+                full = f"{mod}.{a.name}"
+                allowed = _PY_MODULE_ATTRS.get(mod)
+                if a.name == "*" or a.name.startswith("__") or (allowed is not None and a.name not in allowed and
+                                                                 not module_ok(full)):
+                    return [], f"this program imports {_code(full)}, which the guard does not vouch for"
+                if module_ok(full):
+                    modules[a.asname or a.name] = full
+                bound.add(a.asname or a.name)
+    for node in ast.walk(tree):
+        parent = parents.get(id(node))
+        if isinstance(node, ast.Attribute):
+            if node.attr.startswith("__"):
+                return [], f"this program reaches {_code(node.attr)}, the interpreter's internals"
+            base = node.value
+            mod = modules.get(base.id) if isinstance(base, ast.Name) and base.id not in (local - set(modules)) \
+                else None
+            if isinstance(base, ast.Attribute) and isinstance(base.value, ast.Name) and \
+                    modules.get(base.value.id) == "os" and base.attr == "path":
+                mod = "os.path"
+            if mod is not None:
+                allowed = _PY_MODULE_ATTRS.get(mod)
+                if not isinstance(node.ctx, ast.Load):
+                    return [], f"this program changes {_code(mod + '.' + node.attr)}"
+                if allowed is not None and node.attr not in allowed and not module_ok(f"{mod}.{node.attr}"):
+                    return [], f"this program uses {_code(mod + '.' + node.attr)}, which the guard does not vouch for"
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id not in local and \
+                node.id not in modules and node.id not in bound:
+            if node.id not in _PY_SAFE_BUILTINS and not re.fullmatch(r"\w*(?:Error|Exception|Warning|Exit|Interrupt|"
+                                                                     r"Iteration)", node.id):
+                return [], f"this program uses {_code(node.id)}, which the guard does not vouch for"
+            if node.id in _PY_DIRECT_ONLY and not (isinstance(parent, ast.Call) and parent.func is node):
+                return [], f"this program refers to {_code(node.id)} without calling it"
+        elif isinstance(node, ast.Subscript) and not isinstance(node.ctx, ast.Load):
+            base = node.value
+            if isinstance(base, ast.Attribute) and isinstance(base.value, ast.Name) and base.value.id in modules:
+                return [], f"this program changes {_code(modules[base.value.id] + '.' + base.attr)}"
+        if not isinstance(node, ast.Call):
+            continue
+        f, why = node.func, ""
+        name = f.attr if isinstance(f, ast.Attribute) else f.id if isinstance(f, ast.Name) else ""
+        if isinstance(f, ast.Name) and f.id not in local:
+            if name == "type" and len(node.args) != 1:
+                return [], "this program makes a class at run time"
+            if name in ("hasattr", "getattr") and (len(node.args) < 2 or not isinstance(node.args[1], ast.Constant)
+                                                   or str(node.args[1].value).startswith("__")):
+                return [], "this program looks an attribute up by a computed name"
+            if name == "open":
+                modes = list(node.args[1:2]) + [k.value for k in node.keywords if k.arg == "mode"]
+                if mode_writes(modes):
+                    why = place(node.args[0] if node.args else None)
+        elif isinstance(f, ast.Attribute):
+            mod = modules.get(f.value.id) if isinstance(f.value, ast.Name) else None
+            if isinstance(f.value, ast.Attribute) and f.value.attr == "environ" and \
+                    name not in ("get", "items", "keys", "values", "copy"):
+                return [], "this program changes the environment"
+            if mod is None:  # a method of a value the program made: a path's or a file's
+                if name in _PY_PATH_REFUSED:
+                    return [], f"this program calls {_code(name)}, a link or mode change"
+                if name == "open" and mode_writes(list(node.args[:1]) + [k.value for k in node.keywords
+                                                                          if k.arg == "mode"]):
+                    why = place(f.value)
+                elif name in _PY_PATH_WRITERS and not (name in ("replace", "rename") and len(node.args) != 1) and \
+                        not (name in ("copy", "move", "copy_into", "move_into") and not node.args):
+                    why = place(f.value)
+                    if not why and name in ("rename", "replace", "copy", "move", "copy_into", "move_into"):
+                        why = place(node.args[0])
+            elif mod == "tempfile":
+                pass  # it writes in the temporary folder
+        if why:
+            return [], why
+    return paths, ""
+
+
+_JS_SAFE_MODULES = frozenset({"fs", "fs/promises", "path", "url", "util", "assert", "assert/strict", "os", "crypto",
+                              "readline", "events", "string_decoder", "buffer", "timers", "timers/promises",
+                              "querystring", "stream", "zlib", "perf_hooks"})
+_JS_IMPORT = re.compile(r"""\brequire\s*\(\s*(?:'([^'\n]{0,200})'|"([^"\n]{0,200})"|`([^`\n]{0,200})`|([^)\n]{0,200}))\)|"""
+                        r"""\bimport\s*\(\s*([^)\n]{0,200})\)|\b(?:import|export)\b[^'"\n;]{0,400}\bfrom\s*['"]([^'"\n]{0,200})['"]|"""
+                        r"""\bimport\s*['"]([^'"\n]{0,200})['"]""")
+_JS_REFUSED = re.compile(r"(?<![.\w])(?:Function|eval|WebAssembly)\b|\bReflect\s*\.|\bglobalThis\b|\bglobal\s*\[|"
+                         r"\bprocess\s*\.\s*(?!(?:argv|env|exit|exitCode|stdout|stderr|stdin|cwd|platform|version|"
+                         r"versions|hrtime|memoryUsage|nextTick|on|arch|pid|uptime)\b)\w+|\]\s*\(|\bconstructor\b|"
+                         r"\b__proto__\b|\bprototype\b|\bwith\s*\(")
+_JS_WRITE_CALL = re.compile(r"\b(?:writeFile|appendFile|mkdir|mkdtemp|rm|rmdir|unlink|rename|copyFile|cp|symlink|"
+                            r"link|truncate|ftruncate|chmod|lchmod|chown|lchown|utimes|lutimes|createWriteStream|open|"
+                            r"WriteStream)(?:Sync)?\s*\(\s*(?:'([^'\n]{0,400})'|\"([^\"\n]{0,400})\")?")
+
+
+def _js_write_paths(code) -> tuple:
+    """The files a JavaScript program writes, by the allow-list judge -> (paths, why): only the vetted modules
+    (_JS_SAFE_MODULES, with or without `node:`), by a literal name; no Function, eval, Reflect, globalThis, process
+    beyond its plain reads, computed call, prototype or `with`; and a file system write only to a path written out
+    as its first argument."""
+    bare = _outside_strings(code)
+    for m in _JS_IMPORT.finditer(code):
+        literal = m.group(1) or m.group(2) or m.group(3) or m.group(6) or m.group(7)
+        if m.group(4) is not None or m.group(5) is not None or literal is None:
+            return [], "this program loads a module by a name it computes"
+        name = literal[5:] if literal.startswith("node:") else literal
+        if name not in _JS_SAFE_MODULES:
+            return [], f"this program loads {_code(literal)}, a module the guard does not vouch for"
+    m = _JS_REFUSED.search(bare)
+    if m:
+        return [], f"this program uses {_code(' '.join(m.group(0).split()))}, which the guard does not vouch for"
+    paths = []
+    for m in _JS_WRITE_CALL.finditer(bare):  # in the code outside strings; a literal path read from the code itself
+        k = 1 if m.group(1) is not None else 2 if m.group(2) is not None else 0
+        literal = code[m.start(k):m.end(k)] if k else None
+        if literal is None:
+            return [], f"this program writes ({_code(m.group(0).split('(')[0])}) a file the guard cannot place"
+        paths.append(literal)
+    return paths, ""
+
+
+def member_code_why(name, code, cwd) -> str:
+    """'' when a crew member's program (inline, its input, or a script outside the repository) is one the allow-list
+    judge vouches for; else why not, with the way. Its writes are judged by their paths with the other rules."""
+    fam = _family(name)
+    if fam in ("python", "pypy"):
+        why = _py_write_paths(code, cwd)[1]
+    elif fam in ("node", "nodejs", "deno", "bun"):
+        why = _js_write_paths(code)[1]
+    else:  # awk, sed, expect, Tcl, Ruby, Perl: their own rules read them
+        return ""
+    return (why + ": run the command it needs yourself, write the program with the vetted modules, or ask the tech "
+                  "lead (`dev crew ask \"…\"`)") if why else ""
+
+
+_MEMBER_JUDGE = contextvars.ContextVar("devkit_member_judge", default=False)
+WRITE_THEN_RUN_REASON = ("This command writes {what} and then runs it as a program: the guard judges a script by the "
+                         "file it reads before the command runs, which is not what this command runs. Write the "
+                         "script with the Write tool or one command, then run it in another call.")
+
+
+def _writes_then_runs(cmd: str, cwd) -> str | None:
+    """WRITE_THEN_RUN_REASON when a command writes a file (a redirect, tee, cp, mv, sed -i) that a later part of it
+    runs as an interpreter's or a shell's script, or by its path; None otherwise."""
+    segs = split_commands(cmd)
+    if not segs:
+        return None
+    written = set()
+    for argv0, redirs in segs:
+        argv = _unwrap(list(argv0))
+        name = os.path.basename(argv[0]) if argv else ""
+        script = None
+        if argv and (_INTERP.match(name) or name in _SHELLS):
+            script = next((a for a in argv[1:] if not a.startswith("-")), None)
+            if any(a in ("-c", "-e", "--eval", "-p", "-m") for a in argv[1:]):
+                script = None
+        elif argv and "/" in argv[0]:
+            script = argv[0]
+        if script:
+            p = resolve(script, cwd)
+            if p != UNKNOWN and str(p) in written:
+                return WRITE_THEN_RUN_REASON.format(what=_code(script))
+        if written and argv and _family(name) in ("node", "nodejs", "deno", "bun"):
+            # `require('./x')` of a file the command wrote: the module the guard read is not the one that loads
+            with _skipped_reads():
+                code = _program(argv, cwd, ())[0] or ""
+            base = os.path.dirname(str(resolve(script, cwd))) if script else str(cwd)
+            for m in re.finditer(r"\b(?:require|import)\s*\(?\s*['\"](\.{1,2}/[^'\"]+)['\"]", code):
+                for ext in ("", ".js", ".mjs", ".cjs", ".json", "/index.js"):
+                    if str(resolve(m.group(1) + ext, base)) in written:
+                        return WRITE_THEN_RUN_REASON.format(what=_code(m.group(1)))
+        for r in redirs:
+            p = resolve(r, cwd)
+            if p != UNKNOWN:
+                written.add(str(p))
+        if name in ("tee", "cp", "mv", "install", "ln") or (name == "sed" and any(a.startswith("-i") for a in argv)):
+            pos = [a for a in argv[1:] if not a.startswith("-")]
+            for a in (pos if name in ("tee", "sed") else pos[-1:]):
+                p = resolve(a, cwd)
+                if p != UNKNOWN:
+                    written.add(str(p))
+    return None
+
+
+RO_PROGRAM_REASON = ("a read-only lane runs no program of its own, typed inline or from its scratch folder (Python or "
+                     "JavaScript): no reading of a program's code can tell all the ways it may write. Run the "
+                     "repository's tracked tests and read files; for a probe, ask the tech lead to run it (`dev crew "
+                     "ask \"…\"`), or describe the change with file:line")
+# a read-only lane's test runs: the options each runner may take that load no code and write no file (flags, and
+# options with a value, in the spaced or the `=` form); any other option is refused
+_RO_TEST_FLAGS = {
+    "unittest": frozenset({"-v", "-q", "-f", "-b", "--verbose", "--quiet", "--failfast", "--buffer"}),
+    "pytest": frozenset({"-q", "-v", "-x", "-s", "--lf", "--ff", "--co", "--collect-only", "--last-failed",
+                         "--failed-first", "--exitfirst", "--quiet", "--verbose", "-l", "--showlocals"}),
+    "node": frozenset({"--test-only"})}
+_RO_TEST_VALUES = {
+    "unittest": frozenset({"-k", "-s", "-p", "-t", "--start-directory", "--pattern", "--top-level-directory"}),
+    "pytest": frozenset({"-k", "-m", "--tb", "-r", "--maxfail"}),
+    "node": frozenset({"--test-name-pattern", "--test-reporter"})}
+_NODE_REPORTERS = frozenset({"spec", "tap", "dot", "junit", "lcov"})
+
+
+def _ro_tracked_tests(argv, cwd) -> str | None:
+    """Why a read-only lane's test run is refused, or None: pytest, python3 -m pytest|unittest and node --test run
+    only the repository's tests, never the files a member wrote: no file, folder or module they are given (nor the
+    working folder when they are given none, nor a discovery's start and top folders) may lie in a temporary folder,
+    where the scratchpads are (_in_temp_folder); pytest's -p, -c, --rootdir, --confcutdir and --basetemp, which
+    load or write elsewhere, are refused."""
+    fam, rest = _family(argv[0]), [str(a) for a in argv[1:]]
+    if fam in ("python", "pypy") and rest[:2] in (["-m", "pytest"], ["-m", "unittest"]):
+        kind, rest = rest[1], rest[2:]
+    elif fam in ("pytest", "py.test"):
+        kind = "pytest"
+    elif fam == "node" and rest[:1] == ["--test"]:
+        kind, rest = "node", rest[1:]
+    else:
+        return None
+    paths, k = [], 0
+    discover = kind == "unittest" and rest[:1] == ["discover"]
+    if discover:
+        rest = rest[1:]
+    flags, values = _RO_TEST_FLAGS[kind], _RO_TEST_VALUES[kind]
+    while k < len(rest):
+        a = rest[k]
+        if a == "--":
+            paths += [x.split("::", 1)[0] for x in rest[k + 1:]]
+            break
+        if not a.startswith("-") or a == "-":
+            if discover:
+                paths.append(a if len(paths) != 1 else "")  # start folder, pattern, top folder
+            else:
+                paths.append(a.split("::", 1)[0])
+            k += 1
+            continue
+        flag, eq, val = a.partition("=")
+        if flag in values or (not a.startswith("--") and a[:2] in values and len(a) > 2):
+            name = flag if flag in values else a[:2]
+            val = val if eq else (a[2:] if name == a[:2] and len(a) > 2 and name != flag else
+                                  (rest[k + 1] if k + 1 < len(rest) else ""))
+            k += 1 if (eq or (name != flag)) else 2
+            if discover and name in ("-s", "--start-directory", "-t", "--top-level-directory"):
+                paths.append(val)
+            elif kind == "node" and name == "--test-reporter" and val not in _NODE_REPORTERS:
+                return f"{_code('--test-reporter=' + val)} loads a reporter module; use spec, tap, dot or junit"
+            continue
+        if a in flags or (not a.startswith("--") and len(a) > 2 and all(("-" + c) in flags for c in a[1:])):
+            k += 1
+            continue
+        return (f"{_code(a)} is no option a read-only lane's test run may take: it may load code or write a file; "
+                f"run the repository's tests with the plain options (-v, -q, -x, -k, …), or ask the tech lead to "
+                f"run it (`dev crew ask \"…\"`)")
+    paths = [x for x in paths if x] or ["."]
+    for x in paths:
+        cand = [x]
+        if kind == "unittest" and not discover and "/" not in x and not x.endswith(".py") and x != ".":
+            cand = [x.replace(".", "/") + ".py", x.replace(".", "/")]  # a module: its file or its package
+        if any(_in_temp_folder(resolve(c, cwd)) and not _in_work_tree(resolve(c, cwd)) for c in cand):
+            return (f"{_code(x)} is in a temporary or scratch folder, where a member writes its own files: a "
+                    f"read-only lane runs the repository's tests, never a program of its own; ask the tech lead to "
+                    f"run it (`dev crew ask \"…\"`)")
+    return None
+
+
+def _in_work_tree(path) -> bool:
+    """True when `path` (or the folder it would be in) lies in a git work tree: a repository's files, not a scratch
+    folder (a session scratchpad is none, and a read-only lane cannot make one)."""
+    p = Path(str(path))
+    while not p.exists() and p != p.parent:
+        p = p.parent
+    folder = p if p.is_dir() else p.parent
+    return bool(core.gitout(str(folder), "rev-parse", "--show-toplevel").strip())
+
+
+def _in_temp_folder(path) -> bool:
+    """True when `path` lies in a temporary folder (/tmp, the system's per-user one), where the session scratchpads
+    are: the only place a read-only lane writes."""
+    try:
+        real = os.path.realpath(str(path))
+    except (OSError, ValueError):
+        return True
+    roots = {"/tmp", "/private/tmp", "/var/folders", "/private/var/folders", os.path.realpath(tempfile.gettempdir())}
+    return any(real == r or real.startswith(r.rstrip("/") + "/") for r in roots)
+
+
+def _ro_inline(argv, cwd, member, bodies):
+    """For an interpreter of a read-only lane: '' when it runs a program typed in the command (-c, -e, -p, `-` or
+    its input), which a read-only lane may not (RO_PROGRAM_REASON); None when it runs a file or a module, which the
+    other rules judge."""
+    fam = _family(argv[0])
+    if fam not in ("python", "pypy", "node"):
+        return None
+    inline = False
+    for a in argv[1:]:
+        if a in ("-c", "-e", "--eval", "-p", "--print", "-") or (a.startswith("-") and not a.startswith("--") and
+                                                                  a[-1:] in ("c", "e", "p")):
+            inline = True
+            break
+        if a in ("-m",) or not a.startswith("-"):
+            return None
+    if not inline and not bodies:
+        return None
+    return "" if _program(argv, cwd, bodies)[0] else None
+
+
+def _ro_program(argv0, cwd, member=None, plans=None, bodies=()) -> str | None:
+    """Why one command of a read-only lane (its words, prefixes included) is refused, or None. `plans`: as _ro_dev;
+    `bodies`: the command's heredoc bodies, an inline program's input."""
     argv = _unwrap(argv0)
     pre = argv0[:len(argv0) - len(argv)]
     runner = False
@@ -8833,6 +10521,9 @@ def _ro_program(argv0, cwd, member=None, plans=None) -> str | None:
             return None  # `command -v gh dev`, `command -V x`: it only looks the names up and runs none of them
         elif n in _RO_RUNNERS:
             runner = True
+            if any(str(x).startswith(("--with", "--extra-index", "--index", "--find-links", "--script", "--env-file"))
+                   for x in pre[k + 1:]):
+                return f"{_code(n)} with an option that adds code or packages to the run"
     if not argv:
         return None
     why = input_command_refusal(argv)
@@ -8847,9 +10538,13 @@ def _ro_program(argv0, cwd, member=None, plans=None) -> str | None:
     if dev is not None:
         return _ro_dev(dev, cwd, plans)
     why = _check_refusal(argv)
+    if why is None:
+        return _ro_tracked_tests(argv, cwd)
     if why is not None:
         if not why and _INTERP.match(name) and not runner and _own_scratch_script(argv, cwd, member):
-            return None
+            return RO_PROGRAM_REASON
+        if not why and _INTERP.match(name) and not runner and _ro_inline(argv, cwd, member, bodies) is not None:
+            return RO_PROGRAM_REASON
         if not why and not runner and (_INTERP.match(name) or name in _SHELLS) and _version_only(name, args):
             return None
         if not why and not runner and name in _SHELLS and _shell_args(args, name)[2]:
@@ -8864,7 +10559,11 @@ def _ro_program(argv0, cwd, member=None, plans=None) -> str | None:
 # a shell variable a read-only lane may set alone (`S=/path; ls $S`): a lowercase name, or one capital letter with
 # digits, which no program reads from its environment; PATH, PAGER, IFS and the other known names stay refused
 _SHELL_VAR = re.compile(r"^(?!(?:path|fpath|cdpath|manpath|module_path|mailpath|histchars|fignore|psvar)$)"
-                        r"(?:[a-z_][a-z0-9_]*|[A-Z][0-9]*)$")  # zsh ties path to PATH, fpath to FPATH, …
+                        r"(?:[a-z_][a-z0-9_]*|[A-Z][0-9]*|"  # zsh ties path to PATH, fpath to FPATH, …
+                        # a short capital name (S, SP, OUT, LOG2) is no variable a program reads, unless the shell or
+                        # the system already exports it
+                        r"(?!(?:PATH|HOME|IFS|ENV|PS[0-9]|USER|PWD|TERM|LANG|MAIL|LESS|TMP|TEMP|BASH|ZSH|HOST|CI|TZ)$)"
+                        r"[A-Z][A-Z0-9_]{1,3})$")
 
 
 def _version_only(name: str, args) -> bool:
@@ -8995,9 +10694,109 @@ def _ro_mkdir(args, cwd, member) -> str | None:
     return None
 
 
+def _ro_scratch_target(a, cwd, member, deletes: bool = False) -> str | None:
+    """Why `a`, a path a read-only lane's command writes or deletes, is no place it may write, or None: a path in crew
+    member `member`'s own scratch folder, as its real path (a link there that points elsewhere resolves elsewhere),
+    named, for a delete (`deletes`), without a trailing slash (`rm -rf link/` deletes what the link points to), and
+    without a pattern that can match a dot entry."""
+    if not member:
+        return f"{_code(a)} is outside your scratch folder"
+    if _SUBST_WORD in a or "$" in a or "`" in a:
+        return f"{_code(a)} is known only when the command runs"
+    if (deletes and a.endswith(("/", "/.", "/.."))) or a in (".", "..") or a.endswith(("/.", "/..")):
+        return f"{_code(a)} ends with a slash or a dot, which follows a link or names a folder above"
+    if re.search(r"[{}*?\[\]]", a) or "/../" in f"/{a}/":
+        return (f"{_code(a)} holds a brace, a pattern or `..`, which the shell expands to paths the guard does not "
+                f"see: name each file")
+    p = resolve(a, cwd)
+    if p == UNKNOWN:
+        return f"{_code(a)} is known only when the command runs"
+    m = _SCRATCHPAD.match(str(p))
+    if _app_scratch_allows(p, member) or (m and m.group(2) and not scratch_refusal(p, member)):
+        return None
+    return f"{_code(a)} is outside your scratch folder, scratchpad/{member}/"
+
+
+# the writes a read-only lane may make in its own scratch folder, with the short flags each may take: no recursive or
+# link copy (a copied link, followed later, writes elsewhere), no flag that reads a reference file or follows links
+_RO_SCRATCH_WRITERS = {"rm": "rfvdiIP", "rmdir": "pv", "unlink": "", "cp": "fivnpX", "mv": "fivn", "chmod": "vfR",
+                       "touch": "acm", "tee": "ai"}
+
+
+def _ro_scratch_write(name, args, cwd, member) -> str | None:
+    """`rm`, `rmdir`, `unlink`, `cp`, `mv`, `chmod`, `touch` or `tee` of a read-only lane: every path it writes or
+    deletes in crew member `member`'s own scratch folder (_ro_scratch_target): what cp copies may come from anywhere,
+    what mv moves may not. Any other flag is refused."""
+    pos, ended = [], False
+    for a in args:
+        if ended or not a.startswith("-") or a == "-":
+            pos.append(a)
+        elif a == "--":
+            ended = True
+        elif a.startswith("--") or set(a[1:]) - set(_RO_SCRATCH_WRITERS[name]):
+            return f"{_code(f'{name} {a}')} copies links, reads another file or acts in a way the guard does not read"
+    if name == "chmod":
+        pos = pos[1:]
+    targets = pos[-1:] if name == "cp" and len(pos) > 1 else pos if name != "cp" else []
+    if not targets:
+        return f"{_code(name)} with no file to write"
+    for t in targets:
+        why = _ro_scratch_target(t, cwd, member, deletes=name in ("rm", "rmdir", "unlink"))
+        if why:
+            return f"{_code(name)} writes {why}"
+    return None
+
+
+# a sed edit a read-only lane may make in its own scratch file: an address and d, p, y or an s command with the flags
+# g, p, i, I or a number (no w, e or r command or flag, which write, run or read a file)
+# (matched against a stripped script, with one whitespace run per gap: runs side by side around an optional part
+# backtrack into each other, 55 s on 2.5 KB of spaces)
+_SED_EDIT = re.compile(rf"(?:{_SED_ADDR}(?:[ \t]*,[ \t]*{_SED_ADDR})?)?[ \t]*(?:![ \t]*)?(?:[dp]|"
+                       r"s([^\\\n\s])(?:(?!\1)[^\\\n]|\\.)*\1(?:(?!\1)[^\\\n]|\\.)*\1[gpiI0-9]*|"
+                       r"y([^\\\n\s])(?:(?!\2)[^\\\n]|\\.)*\2(?:(?!\2)[^\\\n]|\\.)*\2)\Z")
+
+
+def _ro_sed_inplace(args, cwd, member) -> str | None:
+    """`sed -i` of a read-only lane: each script an edit _SED_EDIT reads, each file in crew member `member`'s own
+    scratch folder. BSD sed takes the backup suffix as -i's own word ('' or .bak)."""
+    has_e = any(a in ("-e", "--expression") for a in args)
+    scripts, files, i = [], [], 0
+    while i < len(args):
+        a = args[i]
+        if a in ("-i", "--in-place"):
+            if i + 1 < len(args) and (args[i + 1] == "" or re.fullmatch(r"\.[\w.~-]+", args[i + 1])):
+                i += 1
+        elif a.startswith(("-i", "--in-place=")) or a in ("-E", "-r", "-n", "--regexp-extended", "-s", "-u", "-z"):
+            pass
+        elif a in ("-e", "--expression") and i + 1 < len(args):
+            scripts.append(args[i + 1])
+            i += 1
+        elif a.startswith("-"):
+            return f"{_code(f'sed {a}')} reads a script file or acts in a way the guard does not read"
+        elif not has_e and not scripts:
+            scripts.append(a)
+        else:
+            files.append(a)
+        i += 1
+    for sc in scripts:
+        if any(not _SED_EDIT.match(part.strip()) for part in re.split(r"[;\n]", sc) if part.strip()):
+            return f"the sed script {_code(sc)} can write, run or read a file, or is one the guard does not read"
+    if not files:
+        return "`sed -i` with no file to edit"
+    for f in files:
+        why = _ro_scratch_target(f, cwd, member)
+        if why:
+            return f"`sed -i` writes {why}"
+    return None
+
+
 def _ro_reader(name, args, cwd, member=None) -> str | None:
     if name == "mkdir":
         return _ro_mkdir(args, cwd, member)
+    if name in _RO_SCRATCH_WRITERS:
+        return _ro_scratch_write(name, args, cwd, member)
+    if name == "sed" and any(a.startswith("-i") or a.startswith("--in-place") for a in args):
+        return _ro_sed_inplace(args, cwd, member)
     if name not in _RO_READERS and name not in ("git", "gh", "xargs"):
         return f"{_code(name)} is not on the read-only allowlist"
     if name == "sysctl" and any("=" in a or a in ("-w", "-f", "-p", "--write", "--load", "--system") or
@@ -9036,11 +10835,17 @@ def _ro_reader(name, args, cwd, member=None) -> str | None:
     return None
 
 
-def _redirect_ok(target, cwd) -> bool:
+def _redirect_ok(target, cwd, member=None) -> bool:
+    """A read-only lane's redirect target: /dev/null and the standard streams, a registered Codex scratch folder, or
+    the member's own scratch folder by its real path, named without a brace or a pattern (_ro_scratch_target)."""
     if target in ("/dev/null", "/dev/stdout", "/dev/stderr", "-"):
         return True
     p = resolve(target, cwd)
-    return p != UNKNOWN and (_app_scratch_allows(p) or is_temp(p))
+    if p == UNKNOWN:
+        return False
+    if member is None:  # a caller with no lane (progress's attribution): a temporary folder holds no repository file
+        return _app_scratch_allows(p) or is_temp(p)
+    return _app_scratch_allows(p) or _ro_scratch_target(target, cwd, member) is None
 
 
 _SUBST_WORD = "/dev/fd/63"  # what a substitution stands for while the command around it is read
@@ -9072,8 +10877,10 @@ def _close_paren(s: str, j: int) -> int:
 
 def _mask_substitutions(s: str):
     """(the command with each `$(…)`, backtick and `<(…)`/`>(…)`/`=(…)` the shell runs replaced by a placeholder
-    word, the commands inside them), or None for an arithmetic `$((…))` (zsh evaluates the variables in it as code) or a
-    substitution that does not end. Single quotes and comments are text."""
+    word, the commands inside them), or None for a substitution that does not end, or an arithmetic `$((…))` that
+    reads a name whose value may be code (_arith_unsafe_names: the shells evaluate a name's value as an expression).
+    Arithmetic on numbers is the word 0, and the substitutions inside it are commands of their own. Single quotes and
+    comments are text."""
     out, inner, i, n, q, parens = [], [], 0, len(s), None, _Parens(s)
     while i < n:
         c = s[i]
@@ -9086,14 +10893,22 @@ def _mask_substitutions(s: str):
             out.append(s[i:i + 2])
             i += 2
             continue
-        if s.startswith("$((", i):
-            return None
+        if s.startswith("$((", i) and (end := _arith_end(s, i + 3)) is not None:
+            body = s[i + 3:end]
+            if _arith_unsafe_names(body, s):
+                return None
+            inner += _subst(body, False)
+            out.append("0")
+            parens.close(end + 1, "w")
+            i = end + 2
+            continue  # `$((date)|wc -c)` is no arithmetic: read below as the substitution it is
         if s.startswith("$(", i) or (q is None and _proc_subst_at(s, i)):
             j = _close_paren(s, i + 2)
             if j < 0:
                 return None
             inner.append(s[i + 2:j - 1])
-            out.append(_SUBST_WORD)
+            # a substitution that can only print a number (a line number for a sed address) stands as one
+            out.append("1" if _numeric_pipeline(s[i + 2:j - 1]) else _SUBST_WORD)
             parens.close(j - 1, "w")
             i = j
             continue
@@ -9150,7 +10965,8 @@ def _plan_write(argv0) -> bool:
 
 def readonly_refusal(cmd: str, cwd, member=None, depth: int = 0, plans=None) -> str | None:
     """Why a review or read-only lane may not run `cmd` (spec F7, consultation §4), or None when every segment is on
-    the read-only allowlist: a command that parses, redirects only to /dev/null or a temp folder, and each program a
+    the read-only allowlist: a command that parses, redirects only to /dev/null or the member's own scratch folder
+    (no other temporary folder: a task's output file there is evidence), and each program a
     reader, a read of git, gh or dev, one of the project's checks, or a script from crew member `member`'s own scratch
     folder. A command substitution (`$(…)`, backticks) or process substitution (`<(…)`, `>(…)`) passes when the
     command inside it does, by the same rules; never as the program a command runs, and never arithmetic. `plans`: a
@@ -9161,6 +10977,11 @@ def readonly_refusal(cmd: str, cwd, member=None, depth: int = 0, plans=None) -> 
     readings = _continued_readings(cmd)
     if readings:  # a backslash-newline: the readings shells use (joined; a comment ended at its newline), each judged
         return next((why for why in (readonly_refusal(r, cwd, member, depth, plans) for r in readings) if why), None)
+    hazards = _arith_hazards(cmd)
+    if hazards:
+        return READONLY_REASON.format(what=f"{_code(hazards[0])} is read as an arithmetic expression ((( )), let, "
+                                           f"[[ -eq ]], a subscript), and its value may hold code the shell runs: "
+                                           f"give it numbers in the command, or compare with [ or test")
     masked = _mask_substitutions(strip_heredocs(cmd)) if depth < 3 else None
     if masked is None:
         return READONLY_REASON.format(what="`$((…))` and substitutions nested deeper than three levels run code the "
@@ -9178,6 +10999,8 @@ def readonly_refusal(cmd: str, cwd, member=None, depth: int = 0, plans=None) -> 
     osegs = split_commands(text, ops=True, stripped=True)
     ops = [s[2] for s in osegs] if osegs is not None and len(osegs) == len(segs) else None
     moved = False  # an earlier part of the command changes folder, or may: a plan write then needs a command of its own
+    bodies = heredoc_bodies(cmd)
+    wrote = ran = wrote_or_ran = False  # a scratch write and a program run: the write first, in sequence
     for k, (argv0, redirs) in enumerate(segs):
         if moved and _plan_write(argv0):
             return READONLY_REASON.format(what=PLAN_AFTER_CD)
@@ -9187,16 +11010,32 @@ def readonly_refusal(cmd: str, cwd, member=None, depth: int = 0, plans=None) -> 
             k = next(j for j, t in enumerate(argv0) if t in (">|", ">>|"))
             extra += argv0[k + 1:k + 2] or [""]
             del argv0[k:k + 2]
-        bad = next((r for r in list(redirs) + extra if not _redirect_ok(r, here)), None)
+        bad = next((r for r in list(redirs) + extra if not _redirect_ok(r, here, member)), None)
         if bad is not None:
             return READONLY_REASON.format(what=f"the redirect to {_code(bad)} writes a file")
         argv = _unwrap(argv0)
         if argv and os.path.basename(argv[0]) in ("cd", "pushd") and len(argv) > 1 and argv[1] != "-":
             here = str(resolve(argv[1], here))
-        why = _ro_program(argv0, here, member, plans)
+        why = _ro_program(argv0, here, member, plans, bodies)
         if why:
             return READONLY_REASON.format(what=why)
+        name = os.path.basename(argv[0]) if argv else ""
+        writes = name in _RO_SCRATCH_WRITERS or \
+            (name == "sed" and any(a.startswith(("-i", "--in-place")) for a in argv[1:]))
+        runs = bool(_INTERP.match(name) or name in _SHELLS or (name and "/" in argv[0] and name not in
+                                                                _RO_READERS)) and not _version_only(name, argv[1:])
+        joined = ops is None or ops[k] in ("|", "&", "|&") or (k and ops[k - 1] in ("|", "&", "|&"))
+        # a write that runs after a program, or beside it (a pipeline, a background job), may follow a link the
+        # program made; one that ends before any program starts cannot
+        if (writes and (ran or joined and wrote_or_ran)) or (runs and wrote and joined):
+            return READONLY_REASON.format(what=_RO_WRITE_AND_RUN)
+        wrote, ran = wrote or writes, ran or runs
+        wrote_or_ran = wrote or ran
     return None
+
+
+_RO_WRITE_AND_RUN = ("a write in your scratch folder and a program in one command (the program could make a link the "
+                     "write then follows): run them as two commands")
 
 
 def member_level(member) -> str | None:
@@ -9229,9 +11068,22 @@ def failopen(where: str, exc: BaseException):
     _record("guard.failopen", where, f"{type(exc).__name__}: {exc}"[:300], "allow", rule=where)
 
 
+# a program's code that gives a process it starts an environment of its own: a `dev` call it starts may then run
+# without the DEVKIT_FROM_AGENT the hook exported for the member (env=, env:, the exec and spawn forms that take one)
+STAMP_LOST_CODE = re.compile(r"\benv\s*[=:]|\b(?:exec|spawn)[lv]p?e\b|\bposix_spawnp?\b|\bclearenv\b|\benviron\b|"
+                             r"\bENV\b|%ENV\b")
+
+
+def holds_lane_call(cmd: str, cwd) -> bool:
+    """True when a shell command runs a `dev progress` or `dev crew` lane call at any depth the guard reads (a
+    pipeline, a list, a loop, a nested shell, a substitution, a program's code)."""
+    calls = shell_calls(cmd, cwd)
+    return bool(calls) and any(kind == "lane" for argv, code in calls for kind, _ in _dev_calls(argv, code))
+
+
 @_in_time()
 def crew_shell_verdict(cmd: str, cwd, scope=None, member=None, level=None, base=None, *, lane=None, session: str = "",
-                       agent: str = "claude", grant=None, now=None, routed: bool = False):
+                       agent: str = "claude", grant=None, now=None, routed: bool = False, stamped: bool = False):
     """For a crew member's shell command that devkit did not route to its lane (or, with `routed`, one it did):
     ("deny", why) when it runs a `dev progress` or `dev crew` call that would act as Morpheus or change the team's crew, `dev crew sync` that
     writes outside the member's step scope, writes or deletes in the session scratchpad outside the member's own
@@ -9243,18 +11095,23 @@ def crew_shell_verdict(cmd: str, cwd, scope=None, member=None, level=None, base=
     it); `session`, `agent`: the session the lane runs in; `grant`: replaces progress.use_grant in tests.
     `routed`: devkit routes this command to the lane (hooks._route_subagent_progress, lane_route), so the lane calls
     the router marked pass, and everything else is judged as for any command: defense in depth if the router misreads
-    it."""
+    it. `stamped`: the hook runs the whole command with DEVKIT_FROM_AGENT exported (hooks._stamp_member), so every
+    lane call it runs acts as the member, at any depth; a lane call in a program's code that sets its child's
+    environment (STAMP_LOST_CODE) may drop the variable, and stays refused."""
     if not cmd or not str(cmd).strip():
         return None
     variants = literal_variants(cmd)
     if variants:  # a variable set from a literal: judged once per value it holds, the first refusal stands
         for text in variants:
             v = crew_shell_verdict(text, cwd, scope, member, level, base, lane=lane, session=session, agent=agent,
-                                   grant=grant, now=now, routed=routed)
+                                   grant=grant, now=now, routed=routed, stamped=stamped)
             if v:
                 return v
         return None
     cwd = cwd or os.getcwd()
+    why = _writes_then_runs(cmd, cwd)
+    if why:
+        return deny(why, key="write-then-run")
     if member:
         v = _ScratchShell(cmd, cwd, member).run()
         if v:
@@ -9299,8 +11156,11 @@ def crew_shell_verdict(cmd: str, cwd, scope=None, member=None, level=None, base=
             if sub:
                 return deny(SESSION_MEMBER_REASON.format(what=_code(f"dev session {sub}")), key="session-member")
         for kind, args in _dev_calls(argv, code):
-            if kind == "lane" and not one_routed:
-                return deny(_lane_reason(cmd), key="lane")
+            # stamped, a lane call passes unless its double-quoted message runs a substitution before devkit sees it
+            # (LANE_QUOTED_REASON says so), or a program's code may give it an environment without the variable
+            why = _lane_reason(cmd) if kind == "lane" and not one_routed else ""
+            if why and (not stamped or why != LANE_REASON or (code and STAMP_LOST_CODE.search(code))):
+                return deny(why, key="lane")
             if kind == "team":
                 sub = next((a for a in args[1:] if not a.startswith("-")), "")
                 if sub not in _CREW_TEAM:  # `dev crew messages`: no command at all
@@ -9822,21 +11682,264 @@ def _dynamic_code(name, code) -> bool:
 
 
 def _dynamic_match(name, code):
-    """The match of _dynamic_code in a program's code outside string literals, or None."""
+    """The match of _dynamic_code in a program's code outside string literals, or None. Python is read with its own
+    parser (_py_dynamic) and JavaScript by _js_dynamic; code that does not parse is matched by the patterns."""
+    if not code:
+        return None
     fam = re.sub(r"[0-9.]+$", "", os.path.basename(str(name or "")).casefold())
     fam = {"pypy": "python", "node": "js", "nodejs": "js", "deno": "js", "bun": "js"}.get(fam, fam)
-    return _DYNAMIC_CODE.get(fam, _DYNAMIC_CODE[""]).search(_outside_strings(code)) if code else None
+    if fam == "python":
+        found = _py_dynamic(code)
+        if found is not False:
+            return _Found(found) if found else None
+    if fam == "js":
+        return _js_dynamic(_outside_strings(code))
+    return _DYNAMIC_CODE.get(fam, _DYNAMIC_CODE[""]).search(_outside_strings(code))
+
+
+class _Found:
+    """A match-like result of _py_dynamic: group(0) is the code that names a function at run time."""
+
+    def __init__(self, text):
+        self.text = text
+
+    def group(self, _=0):
+        return self.text
+
+
+# The names of the Python functions and methods that start a process (subprocess, os, pty, asyncio): a lookup of one
+# by name reaches a spawn the guard does not see as a call
+_PY_SPAWN_NAMES = frozenset({
+    "run", "call", "check_call", "check_output", "Popen", "getoutput", "getstatusoutput", "system", "popen",
+    "startfile", "spawn", "fork", "forkpty", "create_subprocess_exec", "create_subprocess_shell", "run_path",
+    "run_module", "exec_module", "load_module", "CDLL", "cdll", "LoadLibrary", "dlopen"}) | frozenset(
+    f"{a}{b}" for a in ("exec", "spawn", "posix_spawn") for b in ("", "l", "le", "lp", "lpe", "v", "ve", "vp", "vpe", "p"))
+# the modules whose functions start a process or load code: a module named by a string is one of them only by name
+_PY_SPAWN_MODULES = frozenset({"subprocess", "os", "pty", "posix", "nt", "asyncio", "multiprocessing", "runpy",
+                               "importlib", "ctypes", "code", "codeop", "commands", "popen2", "platform", "shutil",
+                               "webbrowser", "pdb", "builtins", "__builtin__", "operator", "sys", "concurrent"})
+# attributes that reach the interpreter's internals: a sandbox escape, never a probe's need
+_PY_ESCAPES = frozenset({"__builtins__", "__getattribute__", "__globals__", "__subclasses__", "__bases__", "__mro__",
+                         "__code__", "__closure__", "f_globals", "f_builtins", "f_locals", "gi_frame", "__loader__",
+                         "__reduce__", "__reduce_ex__"})
+
+
+def _py_dynamic(code):
+    """What in a Python program calls a function by a name it builds at run time, read with Python's parser: '' for
+    nothing, the code text for the first such call, False when the code does not parse. Calls by a computed name:
+    eval, exec, compile, breakpoint; getattr with a name that is no literal, or that is a spawn function's name
+    (_PY_SPAWN_NAMES); __import__ and importlib.import_module of a name that is no literal, or of a module that can
+    start a process (_PY_SPAWN_MODULES); a subscript of globals(), locals(), vars() or __dict__ by a name that is no
+    literal; operator.attrgetter and methodcaller; and the interpreter's internals (_PY_ESCAPES). A lookup by a
+    literal name (getattr(r, 'returncode'), vars(r)['args']) names what it calls."""
+    import ast
+    try:
+        tree = ast.parse(code)
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        return False
+
+    def text(node):
+        try:
+            return ast.get_source_segment(code, node) or type(node).__name__
+        except Exception:
+            return type(node).__name__
+
+    def literal(node):
+        return isinstance(node, ast.Constant) and isinstance(node.value, str)
+
+    def fname(node):
+        f = node.func
+        return f.attr if isinstance(f, ast.Attribute) else f.id if isinstance(f, ast.Name) else ""
+
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Attribute) and n.attr in _PY_ESCAPES:
+            return text(n)
+        if isinstance(n, ast.Name) and n.id in _PY_ESCAPES:
+            return text(n)
+        if isinstance(n, ast.Subscript):
+            base = n.value
+            index = getattr(ast, "Index", None)  # Python 3.8 wraps a subscript's key; 3.9 and later do not
+            key = n.slice.value if index is not None and isinstance(n.slice, index) else n.slice
+            scoped = (isinstance(base, ast.Call) and fname(base) in ("globals", "locals", "vars")) or \
+                (isinstance(base, ast.Attribute) and base.attr == "__dict__")
+            if scoped and (not literal(key) or key.value in _PY_SPAWN_NAMES):
+                return text(n)
+        if not isinstance(n, ast.Call):
+            continue
+        name = fname(n)
+        args = n.args
+        if (name in ("eval", "exec", "compile", "breakpoint") and isinstance(n.func, ast.Name)) or \
+                name in ("attrgetter", "methodcaller"):  # a method of that name (re.compile, model.eval) is none
+            return text(n)
+        if name == "getattr" and isinstance(n.func, ast.Name) and \
+                (len(args) < 2 or not literal(args[1]) or args[1].value in _PY_SPAWN_NAMES):
+            return text(n)
+        if name == "__import__" or (name == "import_module" and isinstance(n.func, (ast.Attribute, ast.Name))):
+            if not args or not literal(args[0]) or args[0].value.split(".")[0] in _PY_SPAWN_MODULES:
+                return text(n)
+        if isinstance(n.func, ast.Attribute) and isinstance(n.func.value, ast.Call) and \
+                fname(n.func.value) in ("globals", "locals", "vars") and n.func.attr in ("get", "pop", "setdefault"):
+            if not args or not literal(args[0]) or args[0].value in _PY_SPAWN_NAMES:
+                return text(n)
+    return ""
+
+
+# JavaScript: code that runs a string or reaches the global scope by a computed name, always; a module loaded by a
+# name it computes, only with a call through a computed name (`m[k](…)`, `m[k].call(…)`), which may be a spawn
+_JS_ALWAYS = re.compile(r"(?<![.\w])(?:Function|eval)\s*\(|\bReflect\s*\.|\bglobalThis\s*\[|\bprocess\s*\.\s*"
+                        r"(?:binding|dlopen)\b|\bvm\s*\.\s*run\w*|\brunIn\w*Context\b")
+_JS_LOADS = re.compile(r"\brequire\s*\(\s*[^'\"\s)]|\bimport\s*\(\s*[^'\"\s)]")
+_JS_COMPUTED_CALL = re.compile(r"\]\s*(?:\(|\.\s*(?:call|apply|bind)\s*\()")
+# a module named by strings spliced together (require('child' + '_process'), a template literal): any module
+_JS_SPLICED = re.compile(r"""\b(?:require|import)\s*\(\s*(?:(['"])[^'"\n]{0,200}\1\s*\+|`)""")
+
+
+def _js_dynamic(bare):
+    """The match of a JavaScript program's code (outside string literals) that may call a function by a name it
+    builds at run time, or None (_JS_ALWAYS, _JS_LOADS with _JS_COMPUTED_CALL)."""
+    m = _JS_ALWAYS.search(bare) or _JS_SPLICED.search(bare)
+    if m:
+        return m
+    m = _JS_LOADS.search(bare)
+    return m if m and _JS_COMPUTED_CALL.search(bare) else None
 
 
 def _built_action(argv, name, code) -> tuple | None:
     """_unknown for an interpreter's program that may build what it runs: a function it calls by a name it builds at
-    run time (_dynamic_code), or a spawn whose command starts with what it fills in (_SPAWN_BUILT), with that code,
-    which the refusal names. None when the program has neither."""
+    run time (_dynamic_code), a spawn whose command starts with what it fills in (_SPAWN_BUILT), or a process it
+    starts with a command it does not write out (_py_built_start, _JS_BUILT_START), with that code, which the
+    refusal names. None when the program has none of them."""
     m = _dynamic_match(name, code) or _SPAWN_BUILT.search(code or "")
-    if not m:
+    what = " ".join(m.group(0).split()) if m else ""
+    fam = _family(name)
+    if not what and fam in ("python", "pypy"):
+        what = _py_built_start(code)
+    elif not what and fam in ("node", "nodejs", "deno", "bun"):
+        m = _JS_BUILT_START.search(_outside_strings(code or ""))
+        what = " ".join(m.group(0).split()) if m else ""
+    if not what:
         return None
     action, target = _unknown(" ".join(argv))
-    return action, target, "", ("built", " ".join(m.group(0).split()))
+    return action, target, "", ("built", what)
+
+
+# a JavaScript process started with a command that is no string literal (`execSync('g' + 'h pr merge 12')`,
+# `spawn(cmd, …)`), or a worker that runs a string as code (`new Worker(src, {eval: true})`); read with the program's
+# strings blanked, so a literal is a pair of quotes around blanks
+_JS_BUILT_START = re.compile(
+    r"""(?:\b(?:execSync|execFileSync|execFile|spawnSync|spawn|fork)|(?<![\w.$])exec|"""
+    r"""\b(?:cp|child_process|childProcess|proc)\s*\.\s*exec)\s*\(\s*"""
+    r"""(?!(['"])[^'"\n]*\1\s*[,)]|`[^`$]*`\s*[,)])[^\s)]|\beval\s*:\s*true\b""")
+# the Python functions that start a process, by module: their command is their first argument (os.exec* and
+# os.spawn* take the program, then its arguments)
+_PY_STARTERS = {
+    "subprocess": {"run", "call", "check_call", "check_output", "Popen", "getoutput", "getstatusoutput"},
+    "os": {"system", "popen", "execl", "execle", "execlp", "execlpe", "execv", "execve", "execvp", "execvpe", "spawnl",
+           "spawnle", "spawnlp", "spawnlpe", "spawnv", "spawnve", "spawnvp", "spawnvpe", "posix_spawn",
+           "posix_spawnp", "startfile"},
+    "pty": {"spawn"}, "asyncio": {"create_subprocess_exec", "create_subprocess_shell"},
+    "asyncio.subprocess": {"create_subprocess_exec", "create_subprocess_shell"}, "commands": {"getoutput"}}
+# the programs whose subcommand decides what a command does: their words must be written out too
+_PY_GATED = frozenset({"gh", "git", "dev", "devkit", "claude", "codex", "sh", "bash", "zsh", "env", "sudo", "xargs"})
+
+
+def _py_literal_command(node) -> bool:
+    """True when a process's command is written out: a string literal, or a list or tuple whose program is a string
+    literal, with every word a literal when that program's subcommand decides what it does (_PY_GATED, _GATE_CLIS)."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, (str, bytes)):
+        return True
+    if isinstance(node, (ast.List, ast.Tuple)) and node.elts:
+        words = node.elts
+        first = words[0]
+        if not (isinstance(first, ast.Constant) and isinstance(first.value, str)):
+            return False
+        prog = os.path.basename(first.value)
+        free = {"git": ("-C",), "gh": ("-R", "--repo")}.get(prog, ())  # a folder or a repository, not what it does
+        return prog not in _PY_GATED and prog not in _GATE_CLIS or \
+            all(isinstance(w, ast.Constant) and isinstance(w.value, str) or
+                k and isinstance(words[k - 1], ast.Constant) and words[k - 1].value in free
+                for k, w in enumerate(words))
+    return False
+
+
+def _py_built_start(code) -> str:
+    """The code of a Python program's first process start whose command the program does not write out
+    (_py_literal_command), or of a process function it names without calling it (an alias it may call with
+    anything); "" when every start is written out or the program does not parse (its text is read as before)."""
+    try:
+        tree = ast.parse(code or "")
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        return ""
+    mods, funcs = {}, {}  # a name bound to a module that starts processes, or to one of its starters
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for a in node.names:
+                if a.name in _PY_STARTERS:
+                    mods[a.asname or a.name.split(".")[0]] = a.name if a.asname else a.name.split(".")[0]
+        elif isinstance(node, ast.ImportFrom) and node.module in _PY_STARTERS:
+            for a in node.names:
+                if a.name in _PY_STARTERS[node.module]:
+                    funcs[a.asname or a.name] = node.module + "." + a.name
+                elif node.module == "asyncio" and a.name == "subprocess":
+                    mods[a.asname or a.name] = "asyncio.subprocess"
+
+    def starter(n) -> str:
+        if isinstance(n, ast.Name):
+            return funcs.get(n.id, "")
+        if isinstance(n, ast.Attribute):
+            base = n.value
+            path = mods.get(base.id) if isinstance(base, ast.Name) else (
+                mods.get(base.value.id, "") + "." + base.attr
+                if isinstance(base, ast.Attribute) and isinstance(base.value, ast.Name) and base.value.id in mods
+                else None)
+            if path and n.attr in _PY_STARTERS.get(path, ()):
+                return path + "." + n.attr
+        return ""
+    binds = {}  # a name the program binds once, to a command it writes out: it stands for that command
+    for node in ast.walk(tree):
+        targets = node.targets if isinstance(node, ast.Assign) else \
+            [node.target] if isinstance(node, (ast.AugAssign, ast.AnnAssign, ast.For, ast.comprehension,
+                                               ast.NamedExpr)) else []
+        for t in targets:
+            for n in ast.walk(t):
+                if isinstance(n, ast.Name):
+                    binds[n.id] = binds.get(n.id, 0) + 1 if n.id in binds or not isinstance(node, ast.Assign) or \
+                        len(node.targets) != 1 or not isinstance(t, ast.Name) or \
+                        not _py_literal_command(node.value) else 0
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            for a in ast.walk(node.args):
+                if isinstance(a, ast.arg):
+                    binds[a.arg] = 1  # a parameter is bound by each caller
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            for n in node.names:
+                binds[n] = 1
+    for node in ast.walk(tree):  # a list the program changes in place (cmd.append(x), cmd[1] = x) is built
+        if isinstance(node, (ast.Attribute, ast.Subscript)) and isinstance(node.value, ast.Name) and \
+                binds.get(node.value.id) == 0:
+            binds[node.value.id] = 1
+
+    def written(cmd) -> bool:
+        return _py_literal_command(cmd) or isinstance(cmd, ast.Name) and binds.get(cmd.id) == 0
+    called = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and (fn := starter(node.func)):
+            called.add(id(node.func))
+            if fn.startswith("os.") and fn[3:].startswith(("exec", "spawn", "posix_spawn")) or \
+                    fn.endswith("create_subprocess_exec"):
+                args = [a for a in node.args if not isinstance(a, ast.Constant) or not isinstance(a.value, int)]
+                ok = bool(args) and all(isinstance(a, ast.Constant) and isinstance(a.value, (str, bytes)) or
+                                        written(a) for a in args)
+            else:
+                cmd = node.args[0] if node.args else next((k.value for k in node.keywords
+                                                           if k.arg in ("args", "cmd", "program", "command")), None)
+                ok = cmd is not None and not isinstance(cmd, ast.Starred) and written(cmd)
+            if not ok:
+                return f"{fn}(…) with a command it builds when it runs"
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Name, ast.Attribute)) and id(node) not in called and (fn := starter(node)) and \
+                not isinstance(getattr(node, "ctx", None), ast.Store):
+            return f"{fn} passed or kept as a value, called with anything"
+    return ""
 
 
 # a module name is a string, and naming child_process is how JavaScript reaches its spawn functions
@@ -10795,6 +12898,26 @@ def _http_writes(name, argv) -> list:
     return []
 
 
+# the names test files take (test_deploy, deploy_test, deploy.test, deploy.spec): a script by such a name tests what its
+# name says, it does not do it. A make, just, task or package target keeps its class (deploy-test may deploy to a test
+# environment).
+_TEST_FILE = re.compile(r"^test_|_test$|\.(?:test|spec)$", re.I)
+
+
+def _test_named(argv) -> bool:
+    """True when an interpreter runs a script whose file name follows a test file convention (_TEST_FILE)."""
+    script = next((a for a in argv[1:] if not a.startswith("-")), "")
+    return bool(script) and bool(_TEST_FILE.search(os.path.splitext(os.path.basename(script))[0]))
+
+
+# find's tests and operators: a segment that starts with one is the rest of a find expression the tokenizer split at
+# an escaped parenthesis (`find . \\( -name a -o -name b \\)`)
+_FIND_PRIMARIES = frozenset("""-name -iname -path -ipath -wholename -iwholename -regex -iregex -type -newer -o -or -a
+    -and -not -print -print0 -prune -size -mtime -mmin -atime -amin -ctime -cmin -maxdepth -mindepth -empty -perm -user
+    -group -links -depth -follow -lname -ilname -uid -gid -nouser -nogroup -true -false -ls -quit -samefile -inum
+    -newermt -newerct""".split())
+
+
 def _opaque_actions(name, argv, cwd) -> list:
     """make, just and task targets, package scripts and scripts named release, publish, deploy, push or ship take that
     class (spec C6, opaque): what they run is not seen."""
@@ -10825,8 +12948,12 @@ def _opaque_actions(name, argv, cwd) -> list:
         if script and "-c" not in args and not any(a.startswith("-") and not a.startswith("--") and "c" in a[1:]
                                                    for a in args[:args.index(script)]):
             names = [os.path.splitext(os.path.basename(script))[0]]
+        if "--test" in args and _family(name) == "node":  # node's test runner: its files are tests
+            names = []
     elif "/" in argv[0]:
         names = [os.path.splitext(name)[0]]
+    if not (name in ("make", "gmake", "just", "task", "go-task", "npm", "pnpm", "yarn", "bun")):
+        names = [n for n in names if not _TEST_FILE.search(n)]  # a file a test runner names: test_deploy.py tests one
     out = []
     for n in names:
         m = _OPAQUE_NAME.search(n)
@@ -11081,7 +13208,9 @@ def _segment_actions(argv, cwd, bodies, depth) -> list:
         found = _publish_actions(name, argv, cwd) or _deploy_actions(name, argv, cwd) or _http_actions(name, argv)
         if not found and name in _GATE_CLIS and _filled_subcommand(argv[1:]):  # `xargs npm`, `parallel cargo`
             found = [_unknown(" ".join(argv))]
-        if not found and _INTERP.match(name) and not _repo_script(argv, cwd):
+        # a repository's own script is its code and is not read, except a file named like a test: the name says
+        # nothing of what it does (test_deploy.py may deploy), so it is read as any other script
+        if not found and _INTERP.match(name) and (not _repo_script(argv, cwd) or _test_named(argv)):
             with _skipped_reads() as unread:
                 code = _program(argv, cwd, bodies)[0]
             expand = not _py_argv_only(code, name)  # backticks in a string no shell reads are Markdown, not commands
@@ -11091,6 +13220,9 @@ def _segment_actions(argv, cwd, bodies, depth) -> list:
                 found = [_unread_action(argv, unread[0])]
             elif built := _built_action(argv, name, code):  # it may build what it runs
                 found = [built]
+            elif _MEMBER_JUDGE.get() and code and not _version_only(name, argv[1:]) and \
+                    (why := member_code_why(name, code, cwd)):
+                found = [_unsure_action(argv, f"a program the guard cannot vouch for, as {why}")]
         if not found and "/" in argv[0] and name not in _SHELLS and not _INTERP.match(name):
             found, more = _path_run_actions(argv, cwd, bodies, depth)
         found = found or _opaque_actions(name, argv, cwd)
@@ -11210,7 +13342,10 @@ def _argv_actions(argv, cwd, bodies, depth):
         if more is None:
             return None
         out += more
-    for line in _held_lines(argv):  # an alias body, hyperfine's lines
+    why = command_string_refusal(argv, cwd)
+    if why:  # at, crontab, launchctl load, awk with a built command: commands the guard cannot read
+        out += _found([_unsure_action(argv, why)], argv, cwd)
+    for line in _held_lines(argv, cwd):  # an alias body, hyperfine's lines, the strings awk, trap, vim run
         more = _text_actions(line, cwd, depth + 1)
         if more is None:
             return None
@@ -11586,12 +13721,82 @@ def _binds_names(s: str, kinds, words) -> bool:
                 re.search(r"\(\(|(?:\w[ \t]*|(?:^|[;&|\n{])[ \t]*)\(\s*\)", code))
 
 
+# a value chosen by a test between two literal echoes: PY=$( [ -x .venv/bin/python ] && echo .venv/bin/python || echo
+# python3 ). The test runs no command of its own (`[` or `test`, no substitution); the substitution is still judged as a
+# command with the others.
+_LIT_CHOICE = re.compile(r"\$\(\s*(?:\[\s[^`$()\];&|]*\]|test\s[^`$();&|]*?)\s*&&\s*echo\s+([A-Za-z0-9_./:@%+,=~-]+)\s*"
+                         r"\|\|\s*echo\s+([A-Za-z0-9_./:@%+,=~-]+)\s*\)\Z")
+
+
+def _literal_values(val: str) -> list:
+    """The values an assignment's word can give its name, when the guard can list them: a literal word, a `~` or
+    `~/…` path (the shell expands it in an assignment, so it is written out with the home folder), or a choice between
+    two literal echoes (_LIT_CHOICE). [] for anything else."""
+    m = _LIT_CHOICE.match(val)
+    words = list(m.groups()) if m else [val] if val else []
+    out = []
+    for w in words:
+        if w == "~" or w.startswith("~/"):
+            w = str(core.HOME) + w[1:]
+        if not _LIT_WORD.match(w):
+            return []
+        out.append(w)
+    return out
+
+
 def literal_variants(cmd: str) -> list:
     """The command written out once for each value its literal variables can hold where it uses them (see above),
-    [] when it uses no variable the guard can resolve, or more than MAX_VARIANTS combinations."""
+    [] when it uses no variable the guard can resolve, or more than MAX_VARIANTS combinations. A command with quoted
+    heredocs (`python3 - <<'EOF' … EOF` then `for py in …; do $py …; done`) is read with each body set aside: a
+    quoted body is text the shell never expands. An unquoted heredoc, whose body the shell expands, leaves the
+    command as it is."""
     s = str(cmd or "")
-    if "$" not in s or "<<" in s.replace("<<<", "") or len(s) > 20000:
+    if "$" not in s or len(s) > 20000:
         return []
+    if "<<" in s.replace("<<<", ""):
+        return _heredoc_variants(s)
+    return _literal_variants(s)
+
+
+_BODY_KEY = "__devkit_heredoc_body_{}__"
+
+
+def _heredoc_variants(s: str) -> list:
+    """literal_variants for a command with heredocs, each quoted: every body is replaced by one placeholder line,
+    the variables of the rest are resolved, and the bodies go back in their places. [] when a heredoc is unquoted, or
+    a body cannot be placed."""
+    try:
+        _, bodies = _split_heredocs(s)
+    except Exception:
+        return []
+    if not bodies or any(expands for _, expands in bodies) or "__devkit_heredoc_body_" in s:
+        return []
+    parts, cursor, keys = [], 0, []
+    for k, (body, _) in enumerate(bodies):
+        if not body:
+            continue
+        at = s.find("\n" + body + "\n", cursor)
+        if at < 0:
+            at = s.find("\n" + body, cursor)
+            if at < 0 or at + 1 + len(body) != len(s):
+                return []
+        key = _BODY_KEY.format(k)
+        parts += [s[cursor:at + 1], key]
+        cursor = at + 1 + len(body)
+        keys.append((key, body))
+    masked = "".join(parts) + s[cursor:]
+    out = []
+    for text in _literal_variants(masked):
+        for key, body in keys:
+            if text.count(key) != 1:
+                return []
+            text = text.replace(key, body)
+        out.append(text)
+    return out
+
+
+def _literal_variants(s: str) -> list:
+    """literal_variants for a command with no heredoc body left in it."""
     ck = _code_kinds(s)
     if ck is None:
         return []
@@ -11632,11 +13837,14 @@ def literal_variants(cmd: str) -> list:
         name, val = m.group(1), s[a + len(m.group(0)):b]
         touched.setdefault(name, []).append((a, a + len(m.group(1))))
         nxt = words[k + 1] if k + 1 < len(words) else None
+        if val == "$" and s.startswith("$(", b - 1) and (end := _close_paren(s, b + 1)) > 0:
+            val, b = s[a + len(m.group(0)):end], end  # `PY=$( … )`: the whole substitution is the value
+        values = _literal_values(val)
         definite = "+=" not in m.group(0) and not dep and not block and \
-            (words[k - 1][5] if exported else op) == ";" and bool(val) and bool(_LIT_WORD.match(val)) and \
+            (words[k - 1][5] if exported else op) == ";" and bool(values) and \
             (b == len(s) or s[b] in " \t\n;&|)") and (nxt is None or nxt[3]) and \
             not re.match(r"[ \t]*(?:\|(?!\|)|&(?!&))", code[b:])
-        events.setdefault(name, []).append((a, [val] if definite else None, "set", None))
+        events.setdefault(name, []).append((a, values if definite else None, "set", None))
     refs = {}
     for m in _VAR_REF.finditer(s):
         if kinds[m.start()] not in ("C", "D"):
@@ -12273,7 +14481,11 @@ def _member_gate(cmd, cwd, member, lane, agent, session, grant, now) -> str | No
     setting = irreversible_setting("member", now)
     who = str(member or lane or "member")
     try:
-        acts = irreversible_actions(cmd, cwd)
+        token = _MEMBER_JUDGE.set(True)  # a member's own programs meet the allow-list judge (member_code_why)
+        try:
+            acts = irreversible_actions(cmd, cwd)
+        finally:
+            _MEMBER_JUDGE.reset(token)
         if acts is None:
             text = _unescape(cmd)
             return UNPARSED_REASON if _DEV_ONLY_TEXT.search(text) or _embargo_in_place(text, cwd) or (

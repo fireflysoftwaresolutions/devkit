@@ -402,6 +402,20 @@ class CrewGateTests(GateCase):
         self.assertEqual(self.rules(self.gates("Sparks", roster={"members": [SCOUT, KID]})), [("skills", "docs")])
 
 
+class LessonOutputTimeTests(unittest.TestCase):
+    # a member's shell output is read for a recorded lesson at every SubagentStop: a long run of blank lines in it
+    # must not stall the gate (lesson L-g8lywzsgclv)
+    def test_a_lesson_after_many_blank_lines_is_found_in_bounded_time(self):
+        with tempfile.TemporaryDirectory() as d:
+            tx = Transcript(Path(d) / "member.jsonl")
+            tx.bash("dev test", "\n" * 30000 + "✓ 12 test(s) passed")  # no lesson: every line start is tried
+            tx.bash("dev lesson add x", "\n" * 3 + "✓ L-abcdef1234 recorded in acme/api → lessons/L-abcdef1234.md")
+            path = tx.save()
+            t0 = time.perf_counter()
+            self.assertEqual(gates._lessons_done(path), ["dev lesson add x"])
+            self.assertLess(time.perf_counter() - t0, 0.5)
+
+
 class RefusalAnswerTests(GateCase):
     # The lessons gate also accepts devkit's bug registry for a refusal (a report from the lane, or a workaround the
     # registry served for it) and a refusal an open lesson already covers: only refusals nothing answers owe a lesson.

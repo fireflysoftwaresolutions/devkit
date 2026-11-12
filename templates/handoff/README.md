@@ -18,7 +18,11 @@ any machine, starts from where the last one stopped.
 | `items/<scope>/<ID>.md` | Work items: one versioned file per task, feature, bug, or spike, which carries a lock and a changelog | `dev task` only |
 | `plans/<scope>/` | Plans, specs, spikes, bug-fix plans and ADRs, versioned with a changelog | `dev plan`, agents |
 | `sessions/<scope>/YYYY-MM.md` | Append-only session log: one line per session (who, machine, agent, branch, outcome) | hooks, `dev handoff --log` |
-| `presence/<user>@<host>.json` | What each machine is doing now: live sessions, progress, held locks | `dev sync` on that machine |
+| `presence/<user>@<machine id>.json` | What each machine is doing now: live sessions, progress, held locks | `dev sync` on that machine |
+| `policies/<scope>.json` | The delivery policy of a project, or the release train of an initiative, with its history | `dev delivery apply` only |
+| `lessons/<scope>/L-….md` | Lessons from mistakes, recalled before the work that could repeat them; `lessons/archive/` keeps forgotten ones | `dev lesson`, `dev sleep` |
+| `crew/crew.json` · `crew/README.md` | The team's changes to the crew's roster and RACI, each recorded with who made it and why | `dev crew set`, `dev crew raci --set` |
+| `audit/<user>@<machine id>/YYYY-MM.jsonl` | Each machine's audit trail | the `audit` job |
 | `log/YYYY-MM.md` | Append-only operations log: worktree removals, cleanups, adoptions, imports, restored settings | `dev` |
 
 A scope is a project id or `initiatives/<slug>`.

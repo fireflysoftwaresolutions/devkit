@@ -741,9 +741,11 @@ def _as_lane(from_agent, cwd: str | None = None):
     """The lane a command acts as: `from_agent` (DEVKIT_FROM_AGENT, as the command passes it), else the crew member
     identity.speaker names: its lane mark, or its open call in the ledger (Claude Code and Codex alike). Variables
     only narrow (spec C4): an empty or missing one grants nothing. None for Morpheus."""
-    if from_agent:
-        return from_agent
     from . import identity
+    if from_agent:  # the lane variable counts for a member whose call is open (identity.verified_lane): a command
+        # may have given it another member's id; a lane a caller in devkit's own code names is that caller's
+        return identity.verified_lane(from_agent, cwd) if from_agent == os.environ.get(identity.LANE_VAR) else \
+            from_agent
     lane = identity._find(cwd, None, None, settle=False).speaker.lane
     return lane if lane and lane not in NOT_A_LANE else None
 
@@ -1656,9 +1658,9 @@ def _route_to_lane(run: dict, s: dict, label: str, live: list, now: float):
     dependencies are done (its launch's lane first: a member resumed with SendMessage keeps its first launch's
     words). With one live lane that cannot take it yet (it works on another step, or the step's dependencies are
     open), the step is queued for that lane (`waits_lane`): the same agent takes it once its open step closes
-    (_bind_queued), and its scope with it; the member is told. With several live lanes devkit cannot tell, and the
-    step waits for a launch of its own. A closed step goes to no lane: reopening it gives it back. Morpheus is told
-    why it waits (lane_wait). -> the lane that took it, or None."""
+    (_bind_queued), and its scope with it; the member is told. With several live lanes that cannot take it yet, it is
+    queued for all of them, and the first that holds no open step takes it. A closed step goes to no lane: reopening
+    it gives it back. Morpheus is told why it waits (lane_wait). -> the lane that took it, or None."""
     from . import crew
     s.pop("waits_lane", None)  # assigned again: placed anew, at the end of the lane's queue
     working = [k for k, v in live if _label_matches(label, v)]
@@ -1685,6 +1687,8 @@ def _route_to_lane(run: dict, s: dict, label: str, live: list, now: float):
                   f"{_quoted_and(before)} close{'s' if len(before) == 1 else ''} (dev progress step \"…\" --step "
                   f"\"{before[0]}\" --check \"…\"), and its files become your scope then", now, from_name="devkit",
                   kind="notice")
+    else:  # the member works in several lanes: the first of them that holds no open step takes it (_bind_queued)
+        s["waits_lane"] = {"lanes": list(working), "ts": round(now, 3)}
     if not deps:
         _post(run, "devkit", "main", lane_wait(run, s, live), now, from_name="devkit")
     return None
@@ -1696,10 +1700,19 @@ def _quoted_and(names: list) -> str:
     return q[0] if len(q) == 1 else ", ".join(q[:-1]) + " and " + q[-1]
 
 
+def _queued_lanes(s: dict) -> list:
+    """The lanes step `s` is queued for (waits_lane): its member's one lane, or each of the member's lanes when it
+    works in several, where the first of them that holds no open step takes it."""
+    w = s.get("waits_lane")
+    if not isinstance(w, dict):
+        return []
+    return [str(x) for x in (w.get("lanes") or [w.get("lane")]) if x]
+
+
 def _queued_for(run: dict, aid: str) -> list:
     """The steps queued for lane `aid` (waits_lane), in the order they were assigned."""
     marks = [(((x.get("waits_lane") or {}).get("ts") or 0), i, x) for i, x in enumerate(run.get("plan") or [])
-             if isinstance(x.get("waits_lane"), dict) and x["waits_lane"].get("lane") == aid]
+             if aid in _queued_lanes(x)]
     return [x for _, _, x in sorted(marks, key=lambda t: t[:2])]
 
 
@@ -1717,18 +1730,29 @@ def lane_wait(run: dict, s: dict, live: list) -> str:
     advice `dev progress assign` and `dev progress reopen` post and `dev crew next` gives (dispatch._sorted). Queued
     for one of the member's lanes: it joins that lane once the steps before it close, and the member's own
     `dev progress step --step` closes it. One lane, not queued: assigning it again queues it there. Several lanes:
-    devkit cannot tell which would take it, so it waits for a launch of its own. '' when its member does not work."""
+    queued for all of them, the first that frees takes it, and assigning it with one lane's launch description gives
+    it to that lane. '' when its member does not work."""
     from . import crew
     label = s.get("label") or ""
     lanes = [k for k, v in live if _label_matches(label, v)]
     if not lanes:
         return ""
     who, name = crew.who(label), s["name"]
-    queued = next((k for k in lanes if k == (s.get("waits_lane") or {}).get("lane")), None)
+    queued_for = _queued_lanes(s)
+    queued = next((k for k in lanes if k in queued_for), None) if len(queued_for) == 1 else None
     aid = queued or (lanes[0] if len(lanes) == 1 else None)
     if not aid:
-        return (f"{who} works in {len(lanes)} lanes, so devkit cannot tell which one would take “{name}”: it waits "
-                f"for a launch of its own once they finish (dev crew next)")
+        agents = run.get("agents") or {}
+        busy = [x["name"] for x in (_open_step_of(run, k, s) for k in lanes) if x]
+        labels = [lab for lab in (agents[k].get("label") or "" for k in lanes)
+                  if lab and sum(1 for _, v in live if _label_matches(lab, v)) == 1]
+        one = ("; to give it to one of them, assign it with that lane's launch description: "
+               + " · ".join(f'dev progress assign "{name}" --to "{lab}"' for lab in labels)) if labels else ""
+        if any(k in queued_for for k in lanes):
+            return (f"{who} works in {len(lanes)} lanes: “{name}” joins the first of them whose step closes"
+                    + (f" ({_quoted_and(busy)})" if busy else "") + one)
+        return (f"{who} works in {len(lanes)} lanes: dev progress assign \"{name}\" --to \"{label}\" queues “{name}” "
+                f"for the first of them whose step closes" + one)
     cur = _open_step_of(run, aid, s)
     head = f"{who} works on “{cur['name']}”" if cur else f"{who} works with no step"
     if queued:
@@ -1754,25 +1778,33 @@ def _bind_queued(run: dict, now: float):
         w = s.get("waits_lane")
         if w is None:
             continue
-        aid = str((w or {}).get("lane") or "") if isinstance(w, dict) else ""
-        lane = agents.get(aid) or {}
-        life = lane.get("resumed_at") or lane.get("started") or 0
+        w = w if isinstance(w, dict) else {}
         mine = s.get("state") == "pending" and (s.get("owner") or "main") == "main"
-        if not mine or lane.get("state") != "running" or (w.get("ts") or 0) < life or \
-                not _label_matches(s.get("label") or "", lane):
+
+        def live(aid):
+            lane = agents.get(aid) or {}
+            life = lane.get("resumed_at") or lane.get("started") or 0
+            return lane.get("state") == "running" and (w.get("ts") or 0) >= life and \
+                _label_matches(s.get("label") or "", lane)
+        queued = _queued_lanes(s)
+        valid = [aid for aid in queued if live(aid)] if mine else []
+        if not valid:
             s.pop("waits_lane")
             if mine:
-                _log_change(run, s, "pending", "pending", "devkit", f"{crew.who(lane.get('persona') or s.get('label'))}"
-                            f"'s lane ended before it took this step: it waits for a launch of its own", now)
+                gone = agents.get(queued[0]) or {} if queued else {}
+                _log_change(run, s, "pending", "pending", "devkit", f"{crew.who(gone.get('persona') or s.get('label'))}"
+                            f"'s lane{'s' if len(queued) > 1 else ''} ended before {'one' if len(queued) > 1 else 'it'} "
+                            f"took this step: it waits for a launch of its own", now)
             continue
-        if aid not in lanes:
-            lanes.append(aid)
+        if w.get("lanes"):
+            w["lanes"] = valid  # the member's lanes that ended or began again since leave the queue
+        lanes += [aid for aid in valid if aid not in lanes]
     for aid in lanes:
         lane = agents[aid]
-        if lane.get("over_limit") or lane.get("waits_slot") or _open_step_of(run, aid):
+        if lane.get("over_limit") or lane.get("waits_slot"):
             continue
         nxt = next((x for x in _queued_for(run, aid) if not deps_open(run, x)), None)
-        if not nxt:
+        if not nxt or _open_step_of(run, aid, nxt):  # a review joins a lane that holds reviews only
             continue
         _take_step(run, aid, nxt, now)
         nxt["joined"] = aid  # its launch does not name it
@@ -1786,21 +1818,46 @@ def _bind_queued(run: dict, now: float):
               now, from_name="devkit", kind="notice")
 
 
-def _member_close_refused(run: dict, st: dict, aid: str, check: str) -> str:
+def _background_running(agent: str, sid: str, aid: str) -> list:
+    """The shell commands crew lane `aid` put in the background that have not ended (gates.background_work on the
+    member's transcript, which Claude Code keeps beside the session's) -> [{"id", "command"}]; [] when devkit cannot
+    read it (Codex, no transcript yet)."""
+    if agent != "claude" or not aid:
+        return []
+    try:
+        from . import continuity, gates
+        path = continuity.member_transcript((state.read(session_path(agent, sid)) or {}).get("transcript") or "", aid)
+        return gates.background_work(path) if path and os.path.isfile(path) else []
+    except Exception:
+        return []
+
+
+def _member_close_refused(run: dict, st: dict, aid: str, check: str, running=()) -> str:
     """Why a member's `dev progress step "…" --step <name>` cannot close that step, with what to do; '' when it can,
-    when the step is closed already, or when it is a review, which closes with the member's report. The command is
-    refused before anything is recorded, so the member runs it again once it can close the step."""
+    when the step is closed already, or when it is a review, which closes with the member's report. `running`: the
+    member's background commands that have not ended (_background_running): a step whose work may still run does
+    not close on a ✓. The command is refused before anything is recorded, so the member runs it again once it can
+    close the step."""
     from . import approvals
     name = st["name"]
     if st.get("state") in DONE:
         return ""
     if st.get("owner") == aid:
-        if str(check or "").strip() or approvals.is_review(st):
+        review = approvals.is_review(st)
+        if running and not review and str(check or "").strip():
+            n = len(running)
+            cmds = "; ".join(f"“{b.get('command')}”" for b in running[:3]) + (f" and {n - 3} more" if n > 3 else "")
+            return (f"“{name}” stays {st.get('state')}: {n} of your background commands {'have' if n > 1 else 'has'} "
+                    f"not ended ({cmds}), so its work may still run and devkit recorded nothing. Run this again once "
+                    f"{'they end' if n > 1 else 'it ends'} (its task notification), or stop {'them' if n > 1 else 'it'} "
+                    f"(TaskStop) if {'they are' if n > 1 else 'it is'} not this step's work; dev progress note \"…\" "
+                    f"--step \"{name}\" keeps partial evidence meanwhile")
+        if str(check or "").strip() or review:
             return ""
         return (f"“{name}” stays {st.get('state')}: a step closes on its evidence, so run this again with --check "
                 f"\"✓ <tests run, output>\" (dev progress note \"…\" --step \"{name}\" keeps partial evidence and "
                 f"leaves it open); devkit recorded nothing")
-    if (st.get("waits_lane") or {}).get("lane") == aid:
+    if aid in _queued_lanes(st):
         before = _closes_before(run, aid, st)
         if before:
             return (f"“{name}” joins your lane once {_quoted_and(before)} close{'s' if len(before) == 1 else ''}, so it "
@@ -1816,9 +1873,13 @@ def _member_close_refused(run: dict, st: dict, aid: str, check: str) -> str:
 
 def _open_step_of(run: dict, aid: str, s: dict | None = None):
     """The step lane `aid` still works on other than `s` (not done, skipped or unverified: a step that ended
-    unverified waits for the tech lead's evidence, not for the member), or None: a lane works one step at a time."""
+    unverified waits for the tech lead's evidence, not for the member), or None: a lane works one step at a time.
+    Reviews are the exception: a review step closes only with its reviewer's report (_member_close), so for a review
+    `s` the lane's open reviews do not count, and one report ends them all (_end_lane_steps)."""
+    from . import approvals
+    review = s is not None and approvals.is_review(s)
     return next((x for x in run.get("plan") or [] if x is not s and x.get("owner") == aid
-                 and x.get("state") not in DONE + ("unverified",)), None)
+                 and x.get("state") not in DONE + ("unverified",) and not (review and approvals.is_review(x))), None)
 
 
 def _take_step(run: dict, aid: str, s: dict, now: float):
@@ -1849,7 +1910,7 @@ def _take_waiting_step(run: dict, aid: str, now: float, sess=None):
         return None
     waiting = [x for x in run.get("plan") or [] if (x.get("owner") or "main") == "main" and x.get("state") == "pending"
                and x.get("label") and _label_matches(x["label"], lane) and not deps_open(run, x)
-               and (x.get("waits_lane") or {}).get("lane") in (None, aid)]  # never a step queued for another lane
+               and (not _queued_lanes(x) or aid in _queued_lanes(x))]  # never a step queued for another lane
     if len(waiting) != 1:
         return None
     s = waiting[0]
@@ -2829,19 +2890,38 @@ def crew_answer(msg_id: str, text: str, from_agent: str | None = None, cwd: str 
     return a
 
 
-def crew_inbox(from_agent: str | None = None, cwd: str | None = None, mark: bool = True) -> list:
-    """Messages for the caller (the main session, or the subagent whose lane this is) not delivered yet."""
+def crew_inbox(from_agent: str | None = None, cwd: str | None = None, mark: bool = True, all_: bool = False) -> list:
+    """Messages for the caller (the main session, or the subagent whose lane this is) not delivered yet; with `all_`,
+    every message the run keeps for the caller, delivered ones included, oldest first (the new ones are taken and
+    marked `new`): a wait or a hook that delivered a message leaves this the one command that prints it again."""
     from_agent = _as_lane(from_agent, cwd)
     agent, sid = current_session(cwd)
     run = load_run(agent, sid)
-    return _take_messages(agent, sid, from_agent or "main", mark) if run else []
+    if not run:
+        return []
+    me = from_agent or "main"
+    new = _take_messages(agent, sid, me, mark)
+    if not all_:
+        return new
+    fresh = {m["id"] for m in new}
+    run = normalize(load_run(agent, sid) or {})
+    lane = (run.get("agents") or {}).get(me) or {}
+    return [dict(m, new=m["id"] in fresh) for m in run.get("messages") or [] if _addressed_to(m, me, lane)]
+
+
+def _addressed_to(m: dict, me: str, lane: dict) -> bool:
+    """Is message `m` for `me` (the main session or a lane id, whose lane record is `lane`)? Its address, or a
+    member's name its lane answers to."""
+    to = m.get("to") or ""
+    return to == me or (to.startswith("name:") and me != "main" and _label_matches(to[5:], lane))
 
 
 def answered_by_sendmessage(agent: str, data: dict, now: float | None = None) -> list:
-    """PostToolUse of a SendMessage from the main session: its text answers the open questions that the member it went
-    to (a lane id, or a name its lanes answer to) asked the tech lead: the ones it names (M12), else all of them.
-    A name that fits several lanes with open questions answers none: SendMessage reached only one of them. Each is
-    marked answered via SendMessage, the text is kept as the answer (delivered already: SendMessage carried it), and
+    """PostToolUse of a SendMessage from the main session: its text answers the open questions it names (M12) that the
+    member it went to (a lane id, or a name its lanes answer to) asked the tech lead. A text that names none answers
+    none (a new work item is no answer), and a devkit notice tells the tech lead which still wait and how to close
+    them. A name that fits several lanes with open questions answers none: SendMessage reached only one of them. Each
+    is marked answered via SendMessage, the text is kept as the answer (delivered already: SendMessage carried it), and
     the audit trail records crew.message-answered with the channel. -> the ids answered"""
     inp = data.get("tool_input") or {}
     to, text = str(inp.get("to") or "").strip(), str(inp.get("message") or "").strip()
@@ -2863,8 +2943,20 @@ def answered_by_sendmessage(agent: str, data: dict, now: float | None = None) ->
         if len({m.get("from") for m in asked}) > 1:  # the name fits several lanes that asked: SendMessage reached one
             return []
         named = set(re.findall(r"\b(M\d+)(?:@[\w.:-]+)?\b", text))
-        if named:  # the questions it names, not every open one of that member
-            asked = [m for m in asked if m.get("id") in named]
+        if asked and not named:  # it may be a new work item: the questions stay open, and the tech lead hears so
+            from . import crew
+            ids = [m["id"] for m in asked]
+            one = len(ids) == 1
+            _post(run, "devkit", "main",
+                  f"devkit: your SendMessage to {crew.who(asked[0].get('from_name')) or to} named no question, so "
+                  f"{', '.join(ids)} still wait{'s' if one else ''} for an answer. If it answered "
+                  f"{'it' if one else 'them'}, close {'it' if one else 'each'}: "
+                  + " · ".join(f'dev crew answer {i} "…"' for i in ids)
+                  + f"; with SendMessage, name the question in the text (\"{ids[0]}: …\").",
+                  now, from_name="devkit", kind="notice")
+            _save(run, touch_session=False)
+            return []
+        asked = [m for m in asked if m.get("id") in named]  # the questions it names, not every open one
         if not asked:
             return []
         for q in asked:
@@ -2886,9 +2978,8 @@ def _take_messages(agent, sid, me: str, mark=True, select=None, limit=None) -> l
     def mine(run):
         run = normalize(run)
         lane = (run.get("agents") or {}).get(me) or {}
-        new = [m for m in run.get("messages") or [] if not m.get("delivered") and (
-            m.get("to") == me or ((m.get("to") or "").startswith("name:") and me != "main"
-                                  and _label_matches(m["to"][5:], lane))) and (select is None or select(run, m))]
+        new = [m for m in run.get("messages") or [] if not m.get("delivered") and _addressed_to(m, me, lane)
+               and (select is None or select(run, m))]
         return run, new[:limit] if limit is not None else new
     run = load_run(agent, sid)
     if not run or not mine(run)[1]:
@@ -4262,8 +4353,10 @@ def on_question(agent: str, data: dict, now: float | None = None) -> list:
         return []
     sess = state.read(session_path(agent, sid))
     run = load_run(agent, sid)
-    if sess is None or headless(sess) or not run or not run.get("decisions"):
+    if sess is None or headless(sess):
         return []
+    if not run or not run.get("decisions"):
+        return [] if member else _ungranted_notes(run, data)
     if _foreign_transcript(agent, sid, data.get("transcript_path")):
         _refuse_forged(agent, sid, data.get("transcript_path"), "a question tool answer")
         return []
@@ -4323,7 +4416,40 @@ def on_question(agent: str, data: dict, now: float | None = None) -> list:
                session=f"{agent}:{sid}"[:60])
     if new:
         new = _keep_human(agent, sid, new)
-    return new
+    return new + ([] if member or new or refused else _ungranted_notes(run, data))
+
+
+# a question that asks permission for an irreversible action ("May I push …?", "OK to merge …?", "Approve the
+# release?"), and that action; a question that only mentions one ("Should the release notes …?") asks no permission
+_ASKS_ACTION = re.compile(r"(?i)\b(?:(?:may|can|shall|should)\s+(?:i|we)\s+(?:now\s+)?|(?:ok|okay)\s+to\s+|"
+                          r"approve\s+(?:the\s+|this\s+)?|go\s+ahead\s+(?:and\s+|with\s+(?:the\s+)?)?)"
+                          r"(push|merge|release|deploy|publish|open\s+(?:a|the)\s+(?:pr|pull\s+request))\b")
+
+
+def _ungranted_notes(run, data: dict) -> list:
+    """The main session's question tool call answered a question about an irreversible action that names no decision
+    devkit recorded, so the answer grants nothing (only a typed grant line, or the answer to a recorded decision,
+    grants, and that rule stays). Without a word now, the developer learns it only when the guard refuses the action
+    and the tech lead asks again: [{"note": what to tell them, with the line to type}] for evidence_lines, or []. Never
+    stored as evidence."""
+    top = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
+    resp = data.get("tool_response") if isinstance(data.get("tool_response"), dict) else {}
+    answers = resp.get("answers") if isinstance(resp.get("answers"), dict) else {}
+    for q in top.get("questions") or []:
+        qt = str((q or {}).get("question") or "") if isinstance(q, dict) else ""
+        m, did = _ASKS_ACTION.search(qt), asked_decision(q)
+        if not m or not str(answers.get(qt) or "").strip() or (did and _decision(run or {}, did)):
+            continue
+        act = "pr" if m.group(1).lower().startswith("open") else m.group(1).lower()
+        shown = " ".join(qt.replace("`", "").split())
+        shown = shown if len(shown) <= 120 else shown[:119] + "…"
+        return [{"note": f"devkit · the developer's answer to “{shown}” grants nothing: devkit counts a dialog answer "
+                         f"only for a decision it recorded, so the {act} runs only on a line the developer types on its "
+                         f"own, `grant {act} <target>` with the exact target, or on their answer to that decision "
+                         f"recorded first (`dev crew ask --decision --irreversible {act} --target <target> \"…\"`, then "
+                         f"`dev crew decisions --ask`). Tell them in your reply, with the line to type, before you run "
+                         f"it."}]
+    return []
 
 
 def _mark_shown(agent: str, sid: str, ids, now: float):
@@ -4803,10 +4929,11 @@ def _when(ts) -> str:
 
 
 def evidence_lines(entries: list) -> str:
-    """The echo of what the developer just granted or approved, for the next context; a void entry approves nothing."""
-    out = []
+    """The echo of what the developer just granted or approved, for the next context; a void entry approves nothing,
+    and a note (_ungranted_notes) says on a line of its own what granted nothing."""
+    out, notes = [], [e["note"] for e in entries if e.get("note")]
     for e in entries:
-        if e.get("void"):
+        if e.get("void") or e.get("note"):
             continue
         how = "by your prompt" if e["channel"] == "E2" else "by your answer to the question tool"
         if e.get("expires"):
@@ -4814,7 +4941,7 @@ def evidence_lines(entries: list) -> str:
         else:
             out.append(f"approved: {e['covers']}{': ' + e['answer'] if e.get('answer') else ''} {how} at "
                        f"{_when(e['ts'])} (record it with dev crew decide {e['covers']} \"<the answer>\")")
-    return ("devkit · " + "; ".join(out)) if out else ""
+    return "\n".join((["devkit · " + "; ".join(out)] if out else []) + notes)
 
 
 def _live_grants(agent: str, sid: str, now: float) -> list:
@@ -5420,6 +5547,9 @@ def step(text: str, nxt: str = "", cwd: str | None = None, kind: str = "step", c
         from_agent_lane = False
     else:
         from_agent_lane = bool(from_agent)
+    # read before the lock: the member's transcript can be long
+    running = _background_running(agent, sid, from_agent) if from_agent_lane and kind == "step" and \
+        which not in (None, "") and str(check or "").strip() else []
     with _tx(agent, sid):
         run = load_run(agent, sid)
         if from_agent_lane:  # a subagent's update: its lane only
@@ -5428,7 +5558,8 @@ def step(text: str, nxt: str = "", cwd: str | None = None, kind: str = "step", c
             if which not in (None, "") and not named:
                 raise StepError(f"no step “{which}” in the plan: " + "; ".join(
                     f"{i}. {s['name']}" for i, s in enumerate(run.get("plan") or [], 1)))
-            refused = _member_close_refused(run, named, from_agent, check) if kind == "step" and named else ""
+            refused = _member_close_refused(run, named, from_agent, check, running) if kind == "step" and named \
+                else ""
             if refused:
                 raise StepError(refused)
             lane = _lane(run, from_agent, now)
@@ -6293,6 +6424,17 @@ def _bind_step(run: dict, aid: str, lane: dict, now: float):
     scored = [(_name_score(_task_text(label), st["name"]), st) for st in mine]
     best = max(sc for sc, _ in scored)
     top = [st for sc, st in scored if sc == best]
+    from . import approvals
+    if best[1] and len(top) > 1 and all(approvals.is_review(st) for st in top):
+        # one reviewer's launch for several reviews: each closes with its report, so the lane holds them together;
+        # one whose work is not finished yet joins once it is (_bind_queued)
+        rd = ready(run)
+        for st in top:
+            if any(x is st for x in rd):
+                _take_step(run, aid, st, now)
+            else:
+                st["waits_lane"] = {"lane": aid, "ts": round(now, 3)}
+        return
     if not best[1] or len(top) > 1:
         names = ", ".join(f"“{st['name']}”" for st in (top if best[1] else mine))
         what = f"names {names} equally" if best[1] else f"names none of {crew.who(mine[0]['label'])}'s steps ({names})"

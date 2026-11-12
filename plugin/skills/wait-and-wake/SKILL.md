@@ -32,7 +32,9 @@ A crew member arms one only when it is blocked on the answer to its own question
 
 **Whose wait it is.** devkit works out who runs the wait: the tech lead's own `dev watch --wait` is the main
 session's, and a member's is the member's, through its lane's mark or its own open call. When devkit cannot tell, it
-refuses the wait (exit 1) rather than guess: run `dev watch --wait` as a command of its own. The tech lead never adds
+refuses the wait (exit 1) rather than guess: run `dev watch --wait` as a command of its own. When two members' open
+calls typed the same wait and no lane mark reached them (a Codex crew), it belongs to neither: `dev watch`
+refuses it and says to read the answer with `dev crew inbox --all` or to wait again in a moment. The tech lead never adds
 `--for me` (it is refused); a crew member always does.
 
 ## 2. How each agent waits
@@ -41,8 +43,8 @@ refuses the wait (exit 1) rather than guess: run `dev watch --wait` as a command
 | --- | --- | --- |
 | Claude Code main session | `dev watch --wait` with Bash `run_in_background: true`; name its task id in your reply | Read what it printed, act on each line, then arm it again if events can still arrive |
 | Claude Code crew member | After `dev crew ask`, keep working on what does not need the answer. When blocked: `dev watch --wait --for me --timeout 9` in the foreground, as a command of its own, with the Bash `timeout` at 600000 | Continue with the answer. With none, wait again only while still blocked, or end with the question under "Needs from the tech lead" |
-| Codex main session | A bounded foreground wait, for example `dev watch --wait --timeout 0.1` (six seconds); resume the same command if the host yields. If ending the turn, say what still runs and when you check it next | Act on events; arm another wait only while waiting for a result |
-| Codex crew member | When blocked on its own question, `dev watch --wait --for me --timeout 0.1` (six seconds), as a command of its own | Continue on the answer, or report what still blocks the lane |
+| Codex main session | A bounded foreground wait: `dev watch --wait --timeout 10`, as devkit's hint prints it, or a shorter one the host allows, such as `--timeout 0.1` (six seconds); resume the same command if the host yields. If ending the turn, say what still runs and when you check it next | Act on events; arm another wait only while waiting for a result |
+| Codex crew member | When blocked on its own question, `dev watch --wait --for me --timeout 9`, or a shorter one the host allows, such as `--timeout 0.1`, as a command of its own | Continue on the answer, or report what still blocks the lane |
 
 - **Claude Code main session.** A background command sends one notification when it exits and has no time limit, so
   the wait runs up to 240 minutes by default. Keep the Monitor tool for following one CI run job by job
@@ -111,10 +113,11 @@ Codex treats the documented outcomes of a valid standalone wait as control flow,
 applies to timeout or no-run results from `dev ci watch --wait`; failed CI, invalid arguments, and failures in
 compound commands still count as failures. The original exit code remains available.
 
-Codex waits print each crew message's complete stored text up to the storage limit. They remove controls and redact
-secrets before output. Each message is acknowledged only after its output succeeds; a broken output pipe leaves that
-message and later ones pending. A delivered moot question still records its audit event. Claude keeps its existing
-message preview and delivery behavior.
+On Claude Code and Codex alike, a wait prints each crew message whole, up to the 1,500 characters a message holds.
+It removes controls and redacts secrets. Taking a message marks it delivered, so `dev crew inbox` lists only the
+new ones; `dev crew inbox --all` prints every message the run keeps for you in full, oldest first, the delivered
+ones too, with the new ones marked `· new`. On Codex, a message is acknowledged only after its output succeeds; a broken
+output pipe leaves that message and later ones pending. A delivered moot question still records its audit event.
 
 ## 5. What reaches you without a wait
 
@@ -128,9 +131,10 @@ and nothing is armed, naming the command for your agent.
 
 - Answer with `dev crew answer <id> "…"`: it closes the question in devkit's record and reaches the member at its
   next tool call or its wait.
-- In Claude Code, a `SendMessage` from the main session to a member answers that member's open questions to you too:
-  devkit records each as answered via SendMessage, with the text. Codex's `send_input` does not, so answer there with
-  `dev crew answer`, then resume the member.
+- In Claude Code, a `SendMessage` from the main session to a member answers the questions its text names (`M3: …`):
+  devkit records each as answered via SendMessage, with the text. One that names no question answers none, since it
+  may be a new work item, and a devkit notice lists the questions that still wait with the `dev crew answer` command
+  for each. Codex's `send_input` answers nothing, so answer there with `dev crew answer`, then resume the member.
 - A question whose member ended and holds no open step is **moot**: nobody waits for it, it wakes nobody, and
   `dev watch` shows it as moot with the reason. It needs no answer.
 

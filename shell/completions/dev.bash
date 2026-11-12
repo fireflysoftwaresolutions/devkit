@@ -393,7 +393,7 @@ _dev_spec() {
     'crew sync') o='-h --help --check' ;;
     'crew ask') o='-h --help --to --decision --options --recommend --irreversible --target --performs --approves' v='--to=l:crew:-:: --options=n --recommend=n --irreversible=n --target=n --performs=n --approves=l:steps:-::' p='*n' ;;
     'crew answer') o='-h --help' p='n *n' ;;
-    'crew inbox') o='-h --help' ;;
+    'crew inbox') o='-h --help --all' ;;
     'crew mode') o='-h --help --approve' v='--approve=n' p='c:guided,auto' ;;
     'crew decide') o='-h --help' p='n *n' ;;
     'crew withdraw') o='-h --help --why' v='--why=n' p='n' ;;

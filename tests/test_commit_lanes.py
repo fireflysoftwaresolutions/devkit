@@ -218,6 +218,67 @@ class LaneCommitTests(Lanes):
                                             ("A", "plugin/commands/new.md")})
         self.assertEqual(self.staged(), [])
 
+    # A commit while the checkout is in the middle of a revert, cherry-pick, merge or rebase finishes it: git drops
+    # REVERT_HEAD after any commit, makes a merge commit while MERGE_HEAD is there, and puts the commit inside the
+    # rebase. dev commit cannot tell who started it, so it refuses and leaves it, and what it staged, as it was.
+    def test_a_commit_refuses_while_a_revert_cherry_pick_or_merge_is_in_progress_and_leaves_it(self):
+        git(self.repo, "switch", "-q", "-c", "side")
+        self.write("plugin/commands/side.md", "# Side\n")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-q", "-m", "docs: add the side page")
+        git(self.repo, "switch", "-q", "-c", "pick", BRANCH)
+        self.write("plugin/commands/ship.md", "# Ship\n\nPick.\n")
+        git(self.repo, "commit", "-q", "-am", "docs: say pick")
+        git(self.repo, "switch", "-q", BRANCH)
+        self.write("plugin/commands/ship.md", "# Ship\n\nPush once.\n")
+        git(self.repo, "commit", "-q", "-am", "docs: say push once")
+        ops = {"revert": (["revert", "--no-commit", "HEAD"], "REVERT_HEAD"),
+               "cherry-pick": (["cherry-pick", "pick"], "CHERRY_PICK_HEAD"),  # stops on the ship.md conflict
+               "merge": (["merge", "--no-commit", "--no-ff", "-q", "side"], "MERGE_HEAD")}
+        commits = {"a lane": (KEY, []), "named paths": (KEY, ["lib/guard.py"]), "the main session": ("main", [])}
+        head = git(self.repo, "rev-parse", "HEAD")
+        for op, (start, marker) in ops.items():
+            for how, (who, paths) in commits.items():
+                with self.subTest(op=op, commit=how):
+                    core.sh(["git", "-C", str(self.repo), *start], timeout=60)  # the Technical writer's lane
+                    self.assertTrue((self.repo / ".git" / marker).exists(), f"git {op} left no {marker}")
+                    self.write("lib/guard.py", "RULES = 2\n")
+                    git(self.repo, "add", "lib/guard.py")
+                    staged = git(self.repo, "ls-files", "-s")
+                    try:
+                        rc, out, err = self.dev(who, "commit", "-m", "fix(guard): read the rules once", "--cause",
+                                                CAUSE, *paths)
+                        self.assertEqual(rc, 2, out + err)
+                        self.assertIn(f"{op} in progress", err)
+                        self.assertIn(f"git {op} --continue", err)  # how its owner finishes it
+                        self.assertEqual(git(self.repo, "rev-parse", "HEAD"), head)
+                        self.assertTrue((self.repo / ".git" / marker).exists(), f"{marker} was removed")
+                        self.assertEqual(git(self.repo, "ls-files", "-s"), staged)  # nothing staged or unstaged
+                    finally:
+                        core.sh(["git", "-C", str(self.repo), op, "--abort"], timeout=60)
+                        git(self.repo, "reset", "-q", "--hard", head)
+
+    def test_a_commit_or_a_wip_save_refuses_while_a_rebase_is_stopped(self):
+        git(self.repo, "switch", "-q", "main")
+        self.write("README.md", "# widget\n\nMain.\n")
+        git(self.repo, "commit", "-q", "-am", "docs: main's readme")
+        git(self.repo, "switch", "-q", BRANCH)
+        self.write("README.md", "# widget\n\nBranch.\n")
+        git(self.repo, "commit", "-q", "-am", "docs: the branch's readme")
+        rc, _, _ = core.sh(["git", "-C", str(self.repo), "rebase", "main"], timeout=60)
+        self.assertNotEqual(rc, 0)  # stopped on the README conflict
+        stopped = git(self.repo, "rev-parse", "HEAD")
+        self.write("lib/guard.py", "RULES = 2\n")
+        git(self.repo, "add", "lib/guard.py")
+        for argv in (["commit", "-m", "fix(guard): read the rules once", "--cause", CAUSE], ["commit", "--wip"]):
+            with self.subTest(argv=argv[:2]):
+                rc, out, err = self.dev(KEY, *argv)
+                self.assertEqual(rc, 2, out + err)
+                self.assertIn("rebase in progress", err)
+                self.assertIn("dev rebase --continue", err)
+                self.assertEqual(git(self.repo, "rev-parse", "HEAD"), stopped)
+                self.assertTrue((self.repo / ".git" / "rebase-merge").is_dir())
+
     def test_named_paths_in_a_lane_commit_exactly_those_paths_as_before(self):
         # unchanged behavior, kept by the change: named paths are committed even outside the lane's scope
         theirs = self.ghost_stages()

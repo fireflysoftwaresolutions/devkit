@@ -8,9 +8,17 @@ description: How to write to people—the developer and their teammates—plainl
 The developer should never have to ask "how is it going?" Tell them before they wonder. Everything you write, to
 them or for their team, follows the same rules:
 
-- **American English by default.** Use American spelling and conventions in replies, PRs, commits, docs, and messages. Write
-  in another language only when the developer asks for it (or devkit config `language` says so), and then only for
-  the content they asked for.
+- **Reply in the developer's language; record in American English.** Write what the developer reads from you (the
+  final message's prose, your questions and decision requests, and the status block's text) in the language of their
+  latest message. When that message is too short or unclear to tell (`ok`, `continue`, a command), use the language
+  of their earlier messages; with none, American English. devkit config `language` is `auto` by default, which is
+  this rule; a set locale (`es-ES`, `en-US`, …) fixes the reply language. The block's marker and labels never change
+  (`[Firefly> DevKit]`, Done, Check, Progress, Crew, You, Next); roles go in the reply language. Code, comments,
+  commits, PRs, docs, plans, task, lesson and progress records, crew briefs, and members' reports to the tech lead
+  stay in American English, with American spelling, unless the project's own rules or the developer say otherwise.
+  A decision that leads to an irreversible action keeps devkit's exact words (section 5); the prose around it follows
+  the reply language. A context line before the turn names the reply language, and the Stop hook sends a final
+  message in the wrong language back once.
 - **The status block first, then the answer.** A message that ends your turn starts with the status block (global
   instructions §0); nothing comes before it, not even a correction or a note about the last command. Right below the
   block, lead with the answer: the outcome, the verdict, or the question. Details come after. Every template

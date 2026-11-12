@@ -12,6 +12,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -39,11 +40,13 @@ def write(root, files):
 
 
 def edit(root, files):
-    """Change files after a run, the way an agent does seconds later (a same-second, same-size edit would leave
-    Python's bytecode cache looking fresh)."""
+    """Change files after a run, the way an agent does seconds later. Python's bytecode cache is fresh while a source
+    keeps its size and its modification time in whole seconds, so each edit moves the time whole seconds past the
+    file's last one: two quick edits (0 then 1) would otherwise share a second and run the first edit's bytecode."""
+    before = {rel: (Path(root) / rel).stat().st_mtime if (Path(root) / rel).exists() else 0 for rel in files}
     write(root, files)
-    later = time.time() + 2
     for rel in files:
+        later = max(time.time(), before[rel] + 1) + 2
         os.utime(Path(root) / rel, (later, later))
 
 
@@ -735,6 +738,20 @@ class ParseTests(unittest.TestCase):
                          {"tests/test_calc.py::test_add": "failed", "tests/test_calc.py::TestOps::test_sub": "passed",
                           "tests/test_calc.py::test_skip": "skipped"})
 
+    # a module pytest could not import is one case with no class, named by its dotted module (pytest 9 writes
+    # classname="" name="tests.test_calc"): it belongs to its file, and its message is the error, not
+    # "collection failure"
+    def test_a_pytest_collection_error_belongs_to_its_file_with_its_error(self):
+        xml = ('<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" '
+               'errors="1" failures="0" skipped="0" tests="1"><testcase classname="" name="tests.test_calc" '
+               'time="0.000"><error message="collection failure">ImportError while importing test module '
+               f"'{self.top}/tests/test_calc.py'.\nHint: make sure your test modules/packages have valid Python "
+               "names.\nTraceback:\ntests/test_calc.py:1: in &lt;module&gt;\n    import newmod\n"
+               "E   ModuleNotFoundError: No module named 'newmod'</error></testcase></testsuite></testsuites>")
+        cases = testx.parse_junit(xml, str(self.top), str(self.top), "pytest")
+        self.assertEqual(failures(cases), [("tests/test_calc.py", "tests/test_calc.py", 1,
+                                            "ModuleNotFoundError: No module named 'newmod'")])
+
     def test_surefire_and_gradle_junit(self):
         cases = testx.parse_junit(SUREFIRE_XML, str(self.top), str(self.top), "maven")
         self.assertEqual(failures(cases), [("com.acme.FooTest#adds", "src/test/java/com/acme/FooTest.java", 12,
@@ -789,6 +806,45 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(failures(cases), [("test_calc.CalcTests.test_add", "tests/test_calc.py", 9,
                                             "AssertionError: -1 != 3")])
         self.assertEqual(len(cases), 2)
+
+    # A test's own stderr lands between its name and its result (devkit reads stdout and stderr as one stream): a
+    # line written before the result moves the result to a line of its own, one without a newline glues it to the
+    # result ("no newlineok"), and text that looks like a result ("two ... ok") comes before the real one. The
+    # result is the last thing written for the test, so each test still has its own. As Python 3.15 and 3.9 print it.
+    def test_unittest_results_after_a_tests_own_stderr_are_read(self):
+        rn = {"name": "unittest", "root": ".", "start": "tests"}
+        write(self.top, {"tests/test_noise.py": ""})
+        new = ("test_before (test_noise.T.test_before) ... warming up\nok\ntest_doc (test_noise.T.test_doc)\n"
+               "A docstring. ... doc noise\nok\ntest_lines (test_noise.T.test_lines) ... one\ntwo ... ok\nFAIL\n"
+               "test_partial (test_noise.T.test_partial) ... no newlineok\n"
+               "test_skip (test_noise.T.test_skip) ... about to skip\nskipped 'not here'\n\n" + "=" * 70 + "\n"
+               "FAIL: test_lines (test_noise.T.test_lines)\n" + "-" * 70 + "\nTraceback (most recent call last):\n"
+               f'  File "{self.top}/tests/test_noise.py", line 16, in test_lines\n    self.assertEqual(1, 2)\n'
+               "AssertionError: 1 != 2\n\n" + "-" * 70 + "\nRan 5 tests in 0.001s\n\nFAILED (failures=1, skipped=1)\n")
+        old = re.sub(r" \(test_noise\.T\.\w+\)", " (test_noise.T)", new)
+        want = {"test_noise.T.test_before": "passed", "test_noise.T.test_doc": "passed",
+                "test_noise.T.test_lines": "failed", "test_noise.T.test_partial": "passed",
+                "test_noise.T.test_skip": "skipped"}
+        for label, text in (("3.12+", new), ("3.9", old)):
+            with self.subTest(label):
+                cases = testx.parse_unittest(text, str(self.top), rn)
+                self.assertEqual({c["id"]: c["status"] for c in cases}, want)
+                self.assertEqual(failures(cases), [("test_noise.T.test_lines", "tests/test_noise.py", 16,
+                                                    "AssertionError: 1 != 2")])
+
+    # Python 3.9 prints no result for a test whose subtests failed, so the next test starts on its line: each keeps
+    # its own result (the expected failure was read as the first test's, and the second test was lost)
+    def test_a_unittest_line_holding_two_tests_gives_each_its_result(self):
+        rn = {"name": "unittest", "root": ".", "start": "tests"}
+        write(self.top, {"tests/test_noise.py": ""})
+        text = ("test_fine (test_noise.S) ... ok\ntest_subs (test_noise.S) ... test_xf (test_noise.S) ... expected "
+                "failure\n\n" + "=" * 70 + "\nFAIL: test_subs (test_noise.S) (i=1)\n" + "-" * 70 + "\nTraceback (most "
+                f'recent call last):\n  File "{self.top}/tests/test_noise.py", line 8, in test_subs\n'
+                "    self.assertNotEqual(i, 1)\nAssertionError: 1 == 1\n\n" + "-" * 70 + "\nRan 3 tests in 0.001s\n\n"
+                "FAILED (failures=1, expected failures=1)\n")
+        cases = testx.parse_unittest(text, str(self.top), rn)
+        self.assertEqual({c["id"]: c["status"] for c in cases}, {
+            "test_noise.S.test_fine": "passed", "test_noise.S.test_subs": "failed", "test_noise.S.test_xf": "passed"})
 
     # a package run names its tests from the root (tests.test_calc.…): each maps to its file, passed ones included
     def test_unittest_output_of_a_package_run(self):
@@ -1164,6 +1220,32 @@ class StaleFailureTests(unittest.TestCase):
             self.assertEqual([s["kind"] for s in json.loads(out)["steps"]], ["failed", "affected"])
             self.assertEqual(recorded(e), [])
 
+    # A run that ends with a non-zero exit after its tests and no failure to name (the interpreter exited mid-run)
+    # is shown as `unittest:.`, the runner and its folder. No runner can load that name: recorded, it was rerun first
+    # on every `dev test`, crashed the same way, and the affected tests never ran. It is shown and never recorded.
+    def test_a_run_that_exits_without_a_failure_to_name_records_nothing_to_rerun(self):
+        with Env() as e:
+            r = e.repo(PKG)
+            write(r, {"tests/test_exit.py": "import os\nimport unittest\n\n\nclass ExitTests(unittest.TestCase):\n"
+                                            "    def test_exits(self):\n        os._exit(3)\n"})
+            rc, out, err = dev(r, "run", "--all", "--json")
+            run = json.loads(out)["steps"][0]["runs"][0]
+            self.assertEqual((rc, run["crash"], [f["id"] for f in run["failures"]]), (1, True, ["unittest:."]),
+                             out + err)
+            self.assertEqual(recorded(e), [])
+
+    # `unittest:.`, recorded by an older devkit, names no test: it is forgotten and named, and the affected tests run
+    def test_a_recorded_runner_label_is_forgotten_and_the_affected_tests_run(self):
+        with Env() as e:
+            r = e.repo(PKG)
+            edit(r, {"calc.py": CALC["calc.py"] + "\n\ndef mul(a, b):\n    return a * b\n"})
+            seed(r, ("unittest:.", ""))
+            rc, out, err = dev(r, "--json")
+            self.assertEqual(rc, 0, out + err)
+            self.assertEqual([s["kind"] for s in json.loads(out)["steps"]], ["affected"])
+            self.assertIn("unittest:.", err)
+            self.assertEqual(recorded(e), [])
+
     # a test module whose own import fails is a real failure: it stays recorded under the name it was run by
     def test_a_test_module_that_fails_to_import_stays_recorded(self):
         with Env() as e:
@@ -1380,8 +1462,16 @@ def with_tests(*extra):
 # A stand-in for pytest, so a parametrized test runs where pytest is not installed. `python -m pytest [-q]
 # [--junitxml=R] <file>[::<test>]…` runs the test functions, one case per @pytest.mark.parametrize value, named
 # name[value] as pytest names them, and writes pytest's JUnit report (classname and name, as pytest's xunit2 does).
+# A module it cannot import is a collection error, reported as pytest 9 reports it (no classname, the dotted module as
+# the name, "collection failure" and the error on an `E` line), and it stops the session before any test runs
+# unless --continue-on-collection-errors is given. As pytest's default import mode does, it imports a test file by its
+# name inside the packages that hold it, so two files of one session with the same such name fail to collect ("import
+# file mismatch"), unless importlib mode is on its command line or in its configuration's addopts (pytest.ini, else
+# pyproject.toml, as pytest picks them). Without file arguments it collects tests/**/test_*.py.
 STANDIN_PYTEST = '''
+import glob
 import importlib.util
+import os
 import sys
 import xml.etree.ElementTree as ET
 
@@ -1398,11 +1488,40 @@ class _Mark:
 mark = _Mark()
 
 
-def _cases(target):
-    path, _, name = target.partition("::")
+_SEEN = {}
+
+
+def _module_name(path):
+    parts = path[:-3].split("/")
+    i = len(parts) - 1
+    while i > 0 and os.path.isfile(os.path.join(*parts[:i], "__init__.py")):
+        i -= 1
+    return ".".join(parts[i:])
+
+
+def _importlib_mode():
+    if "--import-mode=importlib" in sys.argv:
+        return True
+    for f in ("pytest.ini", "pyproject.toml"):
+        if os.path.isfile(f):
+            text = open(f).read()
+            return "--import-mode" in text and "importlib" in text
+    return False
+
+
+def _load(path):
+    name = _module_name(path)
+    if not _importlib_mode() and _SEEN.setdefault(name, path) != path:
+        raise ImportError(f"import file mismatch: imported module '{name}' has this __file__ attribute: "
+                          f"{_SEEN[name]} which is not the same as the test file we want to collect: {path}")
     spec = importlib.util.spec_from_file_location(path[:-3].replace("/", "."), path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
+    return mod
+
+
+def _cases(target, mod):
+    path, _, name = target.partition("::")
     for n in [name] if name else [n for n in vars(mod) if n.startswith("test")]:
         fn = getattr(mod, n)
         for case, kw in getattr(fn, "cases", [(n, {})]):
@@ -1412,8 +1531,21 @@ def _cases(target):
 def main(argv):
     suite = ET.Element("testsuite", name="pytest")
     ran = failed = 0
-    for target in [a for a in argv if not a.startswith("-")]:
-        for cls, case, fn, kw in _cases(target):
+    loaded = []
+    targets = [a for a in argv if not a.startswith("-")] or sorted(glob.glob("tests/**/test_*.py", recursive=True))
+    for target in targets:
+        path = target.partition("::")[0]
+        try:
+            loaded.append((target, _load(path)))
+        except Exception as e:
+            failed += 1
+            tc = ET.SubElement(suite, "testcase", classname="", name=path[:-3].replace("/", "."), time="0")
+            ET.SubElement(tc, "error", message="collection failure").text = (
+                f"ImportError while importing test module '{path}'.\\nE   {type(e).__name__}: {e}")
+    if failed and "--continue-on-collection-errors" not in argv:
+        loaded = []
+    for target, mod in loaded:
+        for cls, case, fn, kw in _cases(target, mod):
             ran += 1
             tc = ET.SubElement(suite, "testcase", classname=cls, name=case, time="0.001")
             try:
@@ -1480,6 +1612,97 @@ NODE_CHANGE = {
     "test/page.mjs": 'import { check } from "./harness.mjs";\nimport { slug } from "../lib/slug.mjs";\n\n'
                      'check(slug("Two Words") === "two-words", "the page slug joins its words");\n',
 }
+
+
+# unit and integration tests with the same file name in folders that are no packages: pytest's default import mode
+# imports both as `test_api`, so one pytest process cannot collect both
+SAME_NAME_BASE = {
+    "pytest.ini": "[pytest]\n",
+    "pytest.py": STANDIN_PYTEST,
+    "api.py": "def version():\n    return 1\n",
+    "tests/unit/x/test_api.py": "import sys\nfrom pathlib import Path\n\n"
+                                "sys.path.insert(0, str(Path(__file__).resolve().parents[3]))\nimport api  # noqa: E402\n\n\n"
+                                "def test_unit_version():\n    assert api.version() >= 1\n",
+    "tests/integration/x/test_api.py": "import sys\nfrom pathlib import Path\n\n"
+                                       "sys.path.insert(0, str(Path(__file__).resolve().parents[3]))\n"
+                                       "import api  # noqa: E402\n\n\ndef test_integration_version():\n"
+                                       "    assert api.version() in (1, 2)\n",
+    ".gitignore": "__pycache__/\n",
+}
+
+
+class SameNameTestFileTests(unittest.TestCase):
+    # the two files named on the command line run in separate pytest processes, and both pass
+    def test_named_test_files_with_one_module_name_run_in_separate_processes(self):
+        with Env() as e:
+            r = e.repo(SAME_NAME_BASE)
+            rc, out, err = dev(r, "run", "tests/unit/x/test_api.py", "tests/integration/x/test_api.py", "--json")
+            run = json.loads(out)["steps"][0]["runs"][0]
+            self.assertEqual((rc, run["count"], run["failed"]), (0, 2, 0), out + err)
+            self.assertEqual(sorted(run["files"]), ["tests/integration/x/test_api.py", "tests/unit/x/test_api.py"])
+
+    # a change that every test depends on runs the whole suite: split the same way, and timed as the full suite
+    def test_the_whole_suite_with_one_module_name_twice_runs_in_separate_processes(self):
+        with Env() as e:
+            r = e.repo(SAME_NAME_BASE)
+            edit(r, {"api.py": "def version():\n    return 2\n"})
+            rc, out, err = dev(r, "--json")
+            run = json.loads(out)["steps"][0]["runs"][0]
+            self.assertEqual((rc, run["all"], run["count"], run["failed"]), (0, True, 2, 0), out + err)
+            self.assertEqual(state(e)["full"]["pytest:."]["count"], 2)
+
+    # a project that imports its tests with pytest's importlib mode has no clash between same-name files: named files
+    # run in one pytest process, as the project runs them
+    def test_named_same_name_files_run_in_one_process_in_importlib_mode(self):
+        with Env() as e:
+            r = e.repo({**SAME_NAME_BASE, "pytest.ini": "[pytest]\naddopts = --import-mode=importlib\n"})
+            rc, out, err = dev(r, "run", "tests/unit/x/test_api.py", "tests/integration/x/test_api.py", "--json")
+            run = json.loads(out)["steps"][0]["runs"][0]
+            self.assertEqual((rc, run["count"], run["failed"]), (0, 2, 0), out + err)
+            self.assertNotIn(";", run["argv"])
+
+    # in importlib mode the whole suite is one pytest run of its own collection (testpaths, norecursedirs), never a
+    # list of files
+    def test_the_whole_suite_is_one_pytest_run_in_importlib_mode(self):
+        with Env() as e:
+            base = {k: v for k, v in SAME_NAME_BASE.items() if k != "pytest.ini"}
+            r = e.repo({**base, "pyproject.toml": '[tool.pytest.ini_options]\naddopts = ["--import-mode", "importlib"]\n'})
+            rc, out, err = dev(r, "run", "--all", "--json")
+            run = json.loads(out)["steps"][0]["runs"][0]
+            self.assertEqual((rc, run["count"], run["failed"]), (0, 2, 0), out + err)
+            self.assertEqual([a for a in run["argv"] if a == ";" or a.endswith(".py")], [])
+
+    # importlib mode is read where pytest reads it: the first configuration file that configures pytest wins (a
+    # pytest.ini without it hides a pyproject.toml with it), then PYTEST_ADDOPTS adds to it
+    def test_importlib_mode_is_read_from_the_configuration_pytest_reads(self):
+        cases = [({"setup.cfg": "[tool:pytest]\naddopts = -q --import-mode importlib\n"}, {}, True),
+                 ({"tox.ini": "[tox]\nenvlist = py\n", "setup.cfg": "[tool:pytest]\naddopts = --import-mode=importlib\n"},
+                  {}, True),
+                 ({"pytest.ini": "[pytest]\n", "pyproject.toml": "[tool.pytest.ini_options]\n"
+                                                                 "addopts = '--import-mode=importlib'\n"}, {}, False),
+                 ({"pytest.ini": "[pytest]\naddopts = --import-mode=prepend\n"}, {}, False),
+                 ({"pytest.ini": "[pytest]\n"}, {"PYTEST_ADDOPTS": "--import-mode=importlib"}, True)]
+        for files, env, want in cases:
+            with self.subTest(files=sorted(files), env=env), tempfile.TemporaryDirectory() as d:
+                write(d, files)
+                runner = {"name": "pytest", "root": ".", "exec": [PY, "-m", "pytest"]}
+                with mock.patch.dict(os.environ, {"PYTEST_ADDOPTS": ""}):
+                    self.assertEqual(testx._pytest_importlib(d, runner, env), want)
+
+    # a recorded failure of each file reruns first, each in its own process
+    def test_recorded_failures_of_both_files_rerun_in_separate_processes(self):
+        with Env() as e:
+            r = e.repo(SAME_NAME_BASE)
+            edit(r, {"api.py": "def version():\n    return 0\n"})
+            rc, out, err = dev(r, "run", "tests/unit/x/test_api.py", "tests/integration/x/test_api.py")
+            self.assertEqual(rc, 1, out + err)
+            self.assertEqual(recorded(e), ["tests/integration/x/test_api.py::test_integration_version",
+                                           "tests/unit/x/test_api.py::test_unit_version"])
+            edit(r, {"api.py": "def version():\n    return 1\n"})
+            rc, out, err = dev(r, "run", "--failed", "--json")
+            run = json.loads(out)["steps"][0]["runs"][0]
+            self.assertEqual((rc, run["count"], run["failed"]), (0, 2, 0), out + err)
+            self.assertEqual(recorded(e), [])
 
 
 class ProveTests(unittest.TestCase):
@@ -1589,6 +1812,148 @@ class ProveTests(unittest.TestCase):
             self.assertEqual(self.snapshot(r), before)
             self.assertEqual(git(r, "rev-parse", "HEAD"), head)
             self.assertEqual(list((e.root / "devtmp").iterdir()), [])
+
+    # a new test that writes to stderr while it runs still has its result: it proves the change, and is never listed
+    # as failing with the change
+    def test_a_test_that_writes_to_stderr_while_it_runs_is_proven(self):
+        noisy_test = """
+    def test_mul_with_a_progress_line(self):
+        print("multiplying", file=sys.stderr)
+        self.assertEqual(calc.mul(2, 3), 6)
+"""
+        with Env() as e:
+            r = e.repo(PROVE_BASE)
+            (r / "tests" / "test_calc.py").write_text(with_tests(noisy_test))
+            (r / "calc.py").write_text(MUL)
+            rc, out, err = dev(r, "prove", "--json", "--runs", "2")
+            self.assertEqual(rc, 0, out + err)
+            self.assertEqual([(t["id"], t["with_change"], t["verdict"]) for t in json.loads(out)["tests"]],
+                             [("test_calc.CalcTests.test_mul_with_a_progress_line", "2/2", "proves the change")])
+
+    # a new test its runner skips (skipIf, pytest's skipif) ran neither with nor without the change: it is reported
+    # as skipped, neither proven nor failing, and the other new tests still prove the change
+    def test_a_skipped_test_is_reported_as_skipped_not_as_failing(self):
+        skipped_test = """
+    @unittest.skipIf(sys.platform != "no-such-platform", "runs only on a platform that does not exist")
+    def test_mul_elsewhere(self):
+        self.assertEqual(calc.mul(2, 3), 6)
+"""
+        with Env() as e:
+            r = e.repo(PROVE_BASE)
+            (r / "tests" / "test_calc.py").write_text(with_tests(TEST_MUL, skipped_test))
+            (r / "calc.py").write_text(MUL)
+            rc, out, err = dev(r, "prove", "--json", "--runs", "2")
+            self.assertEqual(rc, 0, out + err)
+            self.assertEqual([(t["id"], t["with_change"], t["verdict"]) for t in json.loads(out)["tests"]],
+                             [("test_calc.CalcTests.test_mul", "2/2", "proves the change"),
+                              ("test_calc.CalcTests.test_mul_elsewhere", "0/2", "skipped")])
+            rc, out, err = dev(r, "prove", "--runs", "1")
+            self.assertEqual(rc, 0, out + err)
+            self.assertNotIn("fail with your change present", out)
+            self.assertRegex(out, r"skipped[^\n]*:\n\s+tests/test_calc.py\s+test_calc.CalcTests.test_mul_elsewhere")
+
+    # a test helper the change adds is test code, not the change under test: it stays in the copy, so the new test
+    # runs against the old production code. Removed, every test that imports it failed on the import and was
+    # reported as proving the change, here a test the change does not touch at all.
+    def test_a_new_test_helper_stays_so_a_test_is_judged_on_its_assertion(self):
+        pair_test = """
+    def test_add_a_pair(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import _pairs
+        self.assertEqual(calc.add(*_pairs.one_and_two()), 3)
+"""
+        with Env() as e:
+            r = e.repo(PROVE_BASE)
+            write(r, {"tests/_pairs.py": "def one_and_two():\n    return 1, 2\n", "calc.py": MUL})
+            (r / "tests" / "test_calc.py").write_text(with_tests(TEST_MUL, pair_test))
+            rc, out, err = dev(r, "prove", "--json", "--runs", "1")
+            self.assertEqual(rc, 1, out + err)
+            data = json.loads(out)
+            self.assertEqual(data["helpers"], ["tests/_pairs.py"])
+            self.assertEqual([(t["id"], t["verdict"]) for t in data["tests"]],
+                             [("test_calc.CalcTests.test_add_a_pair", "does not test the change"),
+                              ("test_calc.CalcTests.test_mul", "proves the change")])
+
+    # when a new test helper is the whole change, it goes with the change, and a test that imports it cannot be
+    # proven: exit 2, nothing proven, never 0
+    def test_a_new_helper_that_is_the_whole_change_cannot_be_proven(self):
+        pair_test = """
+    def test_add_a_pair(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import _pairs
+        self.assertEqual(calc.add(*_pairs.one_and_two()), 3)
+"""
+        with Env() as e:
+            r = e.repo(PROVE_BASE)
+            write(r, {"tests/_pairs.py": "def one_and_two():\n    return 1, 2\n"})
+            (r / "tests" / "test_calc.py").write_text(with_tests(pair_test))
+            rc, out, err = dev(r, "prove", "--json", "--runs", "1")
+            self.assertEqual(rc, 2, out + err)
+            self.assertEqual([(t["id"], t["verdict"]) for t in json.loads(out)["tests"]],
+                             [("test_calc.CalcTests.test_add_a_pair", "cannot be proven: imports a file the change adds")])
+
+    # a test that imports a module the change adds cannot run without the change: its import fails before any
+    # assertion, which proves nothing about the test. It is reported as such, neither as proof nor as a failure.
+    def test_a_test_of_a_new_module_cannot_be_proven(self):
+        with Env() as e:
+            r = e.repo(PROVE_BASE)
+            write(r, {"calc.py": MUL, "stats.py": "def mean(xs):\n    return sum(xs) / len(xs)\n",
+                      "tests/test_stats.py": """
+                          import sys
+                          import unittest
+                          from pathlib import Path
+
+                          sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+                          import stats  # noqa: E402
+
+
+                          class StatsTests(unittest.TestCase):
+                              def test_mean(self):
+                                  self.assertEqual(stats.mean([1, 2, 3]), 2)
+                          """})
+            (r / "tests" / "test_calc.py").write_text(with_tests(TEST_MUL))
+            rc, out, err = dev(r, "prove", "--json", "--runs", "1")
+            self.assertEqual(rc, 0, out + err)
+            self.assertEqual([(t["id"], t["verdict"]) for t in json.loads(out)["tests"]],
+                             [("test_calc.CalcTests.test_mul", "proves the change"),
+                              ("test_stats.StatsTests.test_mean", "cannot be proven: imports a file the change adds")])
+            rc, out, err = dev(r, "prove", "--runs", "1", "tests/test_stats.py")
+            self.assertEqual(rc, 2, out + err)
+            self.assertRegex(out, r"cannot be proven: (they )?import a file the change adds[^\n]*\n\s+tests/test_stats")
+            self.assertNotIn("fail without the change, as expected", out)
+
+    # with pytest, a test module that imports a file the change adds is a collection error without the change: it
+    # cannot be proven, and the other new tests of the same run still run and prove the change (pytest stops the
+    # session at a collection error unless it is told to go on)
+    def test_a_pytest_module_of_a_new_file_cannot_be_proven_and_the_rest_still_runs(self):
+        with Env() as e:
+            r = e.repo(HOSTS_BASE)
+            write(r, {"hosts.py": HOSTS_CHANGE, "ports.py": "def default():\n    return 443\n",
+                      "tests/test_ports.py": "import sys\nfrom pathlib import Path\n\n"
+                                             "sys.path.insert(0, str(Path(__file__).resolve().parents[1]))\n"
+                                             "import ports  # noqa: E402\n\n\ndef test_default_is_https():\n"
+                                             "    assert ports.default() == 443\n"})
+            with open(r / "tests" / "test_hosts.py", "a") as fh:
+                fh.write("\n\ndef test_count_skips_empty_hosts():\n    assert hosts.count([None, 'a']) == 1\n")
+            rc, out, err = dev(r, "prove", "--json", "--runs", "1")
+            self.assertEqual(rc, 0, out + err)
+            self.assertEqual([(t["id"], t["without_change"], t["verdict"]) for t in json.loads(out)["tests"]],
+                             [("tests/test_hosts.py::test_count_skips_empty_hosts", "failed", "proves the change"),
+                              ("tests/test_ports.py::test_default_is_https", "failed",
+                               "cannot be proven: imports a file the change adds")])
+
+    # when every new test was skipped, nothing is proven: exit 2, as when no runner here can run them, never 0
+    def test_a_change_whose_only_new_test_is_skipped_proves_nothing(self):
+        with Env() as e:
+            r = e.repo(PROVE_BASE)
+            (r / "tests" / "test_calc.py").write_text(with_tests(
+                "\n    @unittest.skip('not on this machine')\n    def test_mul(self):\n"
+                "        self.assertEqual(calc.mul(2, 3), 6)\n"))
+            (r / "calc.py").write_text(MUL)
+            rc, out, err = dev(r, "prove", "--runs", "1")
+            self.assertEqual(rc, 2, out + err)
+            self.assertIn("nothing proven", out)
+            self.assertNotIn("fail with your change present", out)
 
     def test_needs_a_production_change_and_a_changed_test(self):
         with Env() as e:

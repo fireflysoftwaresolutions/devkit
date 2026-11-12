@@ -240,17 +240,15 @@ class CodexCrewDeliveryTests(WatchCase):
                 first = watch._collect(agent, "s1", "a1", True, only=["question"], limit=1)
                 line = first[0][0][0]["line"]
                 self.assertTrue(line.startswith("devkit · question M1 from Tech lead (Morpheus): “"), line)
-                if agent == "codex":
-                    self.assertIn('"Do not edit Claude." Keep the final constraint.', line)
-                    self.assertNotIn("sk-" + "a" * 40, line)
-                    self.assertNotIn("\x1b", line)
-                    self.assertNotIn("\u202e", line)
-                    self.assertNotIn("`", line)
-                    self.assertEqual(line.count("“"), 1)
-                    self.assertEqual(line.count("”"), 1)
-                else:
-                    self.assertNotIn("Keep the final constraint.", line)
-                    self.assertIn("…”", line)
+                # a crew message arrives whole on both agents (Claude Code too, since messages are no longer cut at
+                # 300 characters), and sanitized: no secret, no escape or bidi control, no backtick, one quote pair
+                self.assertIn('"Do not edit Claude." Keep the final constraint.', line)
+                self.assertNotIn("sk-" + "a" * 40, line)
+                self.assertNotIn("\x1b", line)
+                self.assertNotIn("\u202e", line)
+                self.assertNotIn("`", line)
+                self.assertEqual(line.count("“"), 1)
+                self.assertEqual(line.count("”"), 1)
                 stored = {m["id"]: m for m in pg.load_run(agent, "s1")["messages"]}
                 self.assertTrue(stored[question["id"]]["delivered"])
                 self.assertFalse(stored[answer["id"]].get("delivered"))
