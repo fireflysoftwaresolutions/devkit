@@ -199,7 +199,7 @@ class MarkdownTextTests(unittest.TestCase):
         self.assertEqual(re.findall(r"@\w|#\d|://|www\.", html.unescape(out)), [])
 
     def test_escaped_text_reads_as_the_reporters_words(self):
-        shown = html.unescape(bugs.md_text(self.HOSTILE)).replace("⁠", "")
+        shown = html.unescape(bugs.md_text(self.HOSTILE)).replace("\u2060", "")
         self.assertEqual(shown, " ".join(self.HOSTILE.split()))
 
 
@@ -422,7 +422,7 @@ class PayloadCommentTests(unittest.TestCase):
         step = bugs.render_comment(payload).split(" and later: ")[1].split(" The registry decides")[0]
         self.assertEqual(re.findall(r"[\[\]*~_]", step), [])
         self.assertEqual(re.findall(r"@\w|#\d", html.unescape(step)), [])
-        self.assertEqual(html.unescape(step).replace("⁠", ""), payload["steps"][0]["text"] + ".")
+        self.assertEqual(html.unescape(step).replace("\u2060", ""), payload["steps"][0]["text"] + ".")
         self.assertEqual(action._payload(bugs.render_comment(payload)), payload)
 
 
