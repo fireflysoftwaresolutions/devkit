@@ -77,8 +77,10 @@ class DetectTests(unittest.TestCase):
         self.assertEqual(language.detect('The Spanish label says "Guardar los cambios para el usuario de la '
                                          'cuenta", is that right?'), "en")
 
-    def test_a_spanish_reply_quoting_english_output_is_spanish(self):
-        self.assertEqual(language.detect(SPANISH_QUOTING_ENGLISH), "es")
+    def test_english_output_quoted_in_a_spanish_message_never_makes_it_english(self):
+        # what follows "termina con este error:" is introduced text; the words before it are Spanish or a close call
+        # with Catalan, so the answer is Spanish or unsure, never English
+        self.assertIn(language.detect(SPANISH_QUOTING_ENGLISH), ("es", None))
 
 
 class ProseTests(unittest.TestCase):

@@ -209,14 +209,24 @@ def _ranked(scores: dict) -> list:
 
 
 MIN_WORDS, MIN_SCORE, MARGIN = 3, 2.0, 1.8
-# "Please translate this email: Hola equipo, …": three or more words without a colon, then ": " (one pass per line)
-_INTRO = re.compile(r"([^\s:]+(?:[ \t]+[^\s:]+){2,}):[ \t]+(\S.*)")
+# "Translate this: Hola equipo, …": words without a colon, then ": " and the text they introduce (one pass per line)
+_INTRO = re.compile(r"([^\s:]+(?:[ \t]+[^\s:]+)*):[ \t]+(\S.*)")
+_PARAGRAPHS = re.compile(r"\n[ \t]*\n\s*")
+_SENTENCE_END = (".", ",", ";", "!", "¡", "…")
 
 
 def _own_and_introduced(body: str) -> tuple:
-    """(the developer's own words, the text they introduce with a colon): the rest of a line after "<three or more
-    words>: ", and every line after a line that ends with ":". A pasted email, log or string is what the message is
-    about, not what it is written in."""
+    """(the developer's own words, the text they bring to work on): a pasted email, log or strings is what the
+    message is about, not what it is written in. Introduced text is the rest of a line after "<words>: ", every line
+    after a line that ends with ":", and every paragraph after a first one that ends with ":" or "?" or is a bare
+    instruction of one to three words ("translate")."""
+    paragraphs = [x for x in _PARAGRAPHS.split(body.strip()) if x.strip()]
+    if len(paragraphs) > 1:
+        first = paragraphs[0].strip()
+        bare = len(_WORD.findall(first)) <= MIN_WORDS and not first.endswith(_SENTENCE_END)
+        if first.endswith((":", "?")) or bare:
+            own, _ = _own_and_introduced(first)
+            return own, "\n\n".join(paragraphs[1:])
     own, introduced, after = [], [], False
     for ln in body.split("\n"):
         if after:
@@ -243,17 +253,13 @@ def _decide(scores: dict, n: int):
 
 
 def detect(text: str):
-    """The language a developer's message is written in ("es"), or None when unsure. When the message introduces
-    text with a colon (an email to translate, strings to check), the developer's own words decide when they can on
-    their own; otherwise the whole message does. The leading language is the answer or nothing: English leading
-    never gives another language."""
+    """The language a developer's message is written in ("es"), or None when unsure. When it brings text to work on
+    (an email to translate, strings to check, output to read), only the developer's own words decide, and when they
+    are too few to tell the answer is None, so the earlier messages decide (wanted). The leading language is the
+    answer or nothing: English leading never gives another language."""
     body = prose(text)
     own, introduced = _own_and_introduced(body)
-    if introduced.strip():
-        lang = _decide(*_count(own))
-        if lang:
-            return lang
-    return _decide(*_count(body))
+    return _decide(*_count(own if introduced.strip() else body))
 
 
 SURE_WORDS, SURE_SCORE, SURE_SHARE = 12, 4.0, 0.2

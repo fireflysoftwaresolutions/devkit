@@ -174,7 +174,17 @@ def claude_transcript(path, prompts):
 
 # English requests that carry another language's text to work on: the reply is English, so the developer's language
 # is English or unsure, never the other one (a pasted or introduced block counts less than the developer's own words).
+SPANISH_EMAIL = ("Hola equipo, el informe de ventas no se puede abrir desde ayer por la tarde. Cuando hago clic en "
+                 "el enlace del correo me sale un error y no puedo ver los datos del mes, ni los de la semana pasada. "
+                 "He probado desde otro navegador y desde el móvil, pero el problema sigue igual. ¿Podéis revisarlo lo "
+                 "antes posible? Lo necesitamos para la reunión del jueves con los clientes de Valencia. Muchas "
+                 "gracias por la ayuda, Marta")
 ENGLISH_ABOUT_OTHER_TEXT = [
+    "Translate into English:\n" + SPANISH_EMAIL,
+    "Translate this: " + SPANISH_EMAIL,
+    "translate\n\n" + SPANISH_EMAIL,
+    "Can you put this in English for me?\n\n" + SPANISH_EMAIL,
+    "Can you translate this into English and keep it short?\n\n" + SPANISH_EMAIL,
     "Please translate this customer email into English: Hola equipo, el informe de ventas no se puede abrir desde "
     "ayer. Cuando hago clic en el enlace me sale un error y no puedo ver los datos del mes. ¿Podéis revisarlo? "
     "Gracias, Marta",
