@@ -626,6 +626,53 @@ class ReviewLaneTests(unittest.TestCase):
         self.assertEqual((self.held("review-api"), self.held("review-ui")), (("a_ser", "done"), ("a_ser", "done")))
 
 
+class BackgroundCloseTests(unittest.TestCase):
+    # kit-consulting: members closed review-suite-fixes and client-editor-build with ✓ while their own dev test prove
+    # and test script still ran in the background, so the steps after them started on work nobody had verified
+    PROVE = "dev test prove --runs 1 tests/test_api.py"
+
+    def setUp(self):
+        self.state = TempState().__enter__()
+        self.addCleanup(self.state.__exit__, None, None, None)
+        self.t0 = time.time() - 3600
+        pg.start("Hotfix", plan=["api=30m"], now=self.t0)
+        pg.assign("api", "Neo", why="test", now=self.t0)
+        launch("a_neo", "devkit:neo", "Neo: api", at=self.t0 + 60)
+        main = Path(self.state.tmp.name) / "session.jsonl"
+        main.write_text("")
+        pg.state.update(pg.session_path("claude", "s1"), lambda s: s.update(transcript=str(main)))
+        self.member = main.with_suffix("") / "subagents" / "agent-a_neo.jsonl"  # where Claude Code keeps it
+        self.member.parent.mkdir(parents=True)
+
+    def write(self, *records):
+        with self.member.open("a") as fh:
+            fh.write("".join(json.dumps(r) + "\n" for r in records))
+
+    def held(self):
+        st = pg.load_run("claude", "s1")["plan"][0]
+        return st.get("owner"), st.get("state")
+
+    def close(self, at):
+        return pg.step("api committed", which="api", check="✓ 12 tests pass", from_agent="a_neo", now=at)
+
+    def test_a_members_close_waits_until_its_background_work_ended(self):
+        self.write({"type": "assistant", "message": {"content": [
+                       {"type": "tool_use", "id": "toolu_bg", "name": "Bash",
+                        "input": {"command": self.PROVE, "run_in_background": True}}]}},
+                   {"type": "user", "message": {"content": [
+                       {"type": "tool_result", "tool_use_id": "toolu_bg",
+                        "content": "Command running in background with ID: b1. Output is being written to: /tmp/b1"}]}})
+        with self.assertRaises(pg.StepError) as e:
+            self.close(self.t0 + 600)
+        self.assertIn(self.PROVE, str(e.exception))
+        self.assertEqual(self.held(), ("a_neo", "running"))
+        self.write({"type": "user", "message": {"content": "<task-notification><task-id>b1</task-id><tool-use-id>"
+                                                           "toolu_bg</tool-use-id><status>completed</status>"
+                                                           "</task-notification>"}})
+        self.close(self.t0 + 700)
+        self.assertEqual(self.held(), ("a_neo", "done"))
+
+
 class SettingsTests(unittest.TestCase):
     def test_claude_settings_send_a_failed_agent_launch_to_devkit(self):
         entries = json.loads(SETTINGS.read_text())["hooks"].get("PostToolUseFailure") or []

@@ -1816,16 +1816,41 @@ def _bind_queued(run: dict, now: float):
               now, from_name="devkit", kind="notice")
 
 
-def _member_close_refused(run: dict, st: dict, aid: str, check: str) -> str:
+def _background_running(agent: str, sid: str, aid: str) -> list:
+    """The shell commands crew lane `aid` put in the background that have not ended (gates.background_work on the
+    member's transcript, which Claude Code keeps beside the session's) -> [{"id", "command"}]; [] when devkit cannot
+    read it (Codex, no transcript yet)."""
+    if agent != "claude" or not aid:
+        return []
+    try:
+        from . import continuity, gates
+        path = continuity.member_transcript((state.read(session_path(agent, sid)) or {}).get("transcript") or "", aid)
+        return gates.background_work(path) if path and os.path.isfile(path) else []
+    except Exception:
+        return []
+
+
+def _member_close_refused(run: dict, st: dict, aid: str, check: str, running=()) -> str:
     """Why a member's `dev progress step "…" --step <name>` cannot close that step, with what to do; '' when it can,
-    when the step is closed already, or when it is a review, which closes with the member's report. The command is
-    refused before anything is recorded, so the member runs it again once it can close the step."""
+    when the step is closed already, or when it is a review, which closes with the member's report. `running`: the
+    member's background commands that have not ended (_background_running): a step whose work may still run does
+    not close on a ✓. The command is refused before anything is recorded, so the member runs it again once it can
+    close the step."""
     from . import approvals
     name = st["name"]
     if st.get("state") in DONE:
         return ""
     if st.get("owner") == aid:
-        if str(check or "").strip() or approvals.is_review(st):
+        review = approvals.is_review(st)
+        if running and not review and str(check or "").strip():
+            n = len(running)
+            cmds = "; ".join(f"“{b.get('command')}”" for b in running[:3]) + (f" and {n - 3} more" if n > 3 else "")
+            return (f"“{name}” stays {st.get('state')}: {n} of your background commands {'have' if n > 1 else 'has'} "
+                    f"not ended ({cmds}), so its work may still run and devkit recorded nothing. Run this again once "
+                    f"{'they end' if n > 1 else 'it ends'} (its task notification), or stop {'them' if n > 1 else 'it'} "
+                    f"(TaskStop) if {'they are' if n > 1 else 'it is'} not this step's work; dev progress note \"…\" "
+                    f"--step \"{name}\" keeps partial evidence meanwhile")
+        if str(check or "").strip() or review:
             return ""
         return (f"“{name}” stays {st.get('state')}: a step closes on its evidence, so run this again with --check "
                 f"\"✓ <tests run, output>\" (dev progress note \"…\" --step \"{name}\" keeps partial evidence and "
@@ -5484,6 +5509,9 @@ def step(text: str, nxt: str = "", cwd: str | None = None, kind: str = "step", c
         from_agent_lane = False
     else:
         from_agent_lane = bool(from_agent)
+    # read before the lock: the member's transcript can be long
+    running = _background_running(agent, sid, from_agent) if from_agent_lane and kind == "step" and \
+        which not in (None, "") and str(check or "").strip() else []
     with _tx(agent, sid):
         run = load_run(agent, sid)
         if from_agent_lane:  # a subagent's update: its lane only
@@ -5492,7 +5520,8 @@ def step(text: str, nxt: str = "", cwd: str | None = None, kind: str = "step", c
             if which not in (None, "") and not named:
                 raise StepError(f"no step “{which}” in the plan: " + "; ".join(
                     f"{i}. {s['name']}" for i, s in enumerate(run.get("plan") or [], 1)))
-            refused = _member_close_refused(run, named, from_agent, check) if kind == "step" and named else ""
+            refused = _member_close_refused(run, named, from_agent, check, running) if kind == "step" and named \
+                else ""
             if refused:
                 raise StepError(refused)
             lane = _lane(run, from_agent, now)
