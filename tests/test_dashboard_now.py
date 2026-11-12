@@ -261,6 +261,17 @@ class NowScreenTests(unittest.TestCase):
         self.assertEqual(self.probe("""out.team = text($(".now-team"));""", change=on_mini)["team"],
                          "bob@mini works on widget")
 
+    # The team line is the other machines. Presence names a Mac by its machine id, so another user's sessions on this
+    # Mac (ci@<this Mac's id>) are this Mac's, as the page's own `who` names it, and stay off the line; this Mac's
+    # record from before the machine id (me@testmac, the page's hostname) stays off it too
+    def test_the_team_line_leaves_out_another_user_on_this_mac(self):
+        def ci_here(d):
+            here = d["who"].split("@")[1]
+            bob = next(x for x in d["people"] if x["who"] == "bob@studio")
+            d["people"].append(dict(json.loads(json.dumps(bob)), who="ci@" + here, user="ci", host=here, label=d["host"]))
+        self.assertEqual(self.probe("""out.team = text($(".now-team"));""", change=ci_here)["team"],
+                         "bob@studio works on widget")
+
     # AC-16 on Now: every crew member's name follows its role.
     def test_crew_members_read_role_first(self):
         out = self.probe("""const m = $("main").innerText, bad = [];
