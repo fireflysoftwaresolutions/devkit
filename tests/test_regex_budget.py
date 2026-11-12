@@ -5,10 +5,14 @@
 # a time budget: the guard's time limit refuses a call it could not judge within it (tests.test_guard_false_refusals,
 # StalledJudge), so one pattern that backtracks (a lazy match that ends on a back-reference, an unanchored \b[\w.]+
 # that restarts at every word boundary) turns honest work into a refusal, and a hook outside that limit would hang.
-# Each pattern runs over each input below, about 20 KB of what makes patterns backtrack, the way its module calls it
-# (a pattern the modules only call with .match or .fullmatch is timed that way; any other use, or none seen, is timed
-# with .search), and must finish within BOUND seconds. The runs happen in a worker process: one still running after
-# HARD seconds is stopped there (a cubic pattern on 20 KB runs for hours) and the worker goes on with the next pattern.
+# Each pattern runs over each input below, about 20 KB of what makes patterns backtrack, the way its modules call it,
+# and must finish within BOUND seconds. A pattern they run over the whole text (.sub, .finditer, .findall, .split) is
+# timed over the whole input, one they only .search with stops at its first match, and one they only .match or
+# .fullmatch is timed that way; a pattern whose use is not seen (one held in a tuple, or passed along) is timed over the
+# whole input. The inputs are runs of one character, alone and after the words that start what the patterns look for
+# ("- done", 'File "', "sed -i ", a crew name, …): a pattern that backtracks only after such a word never meets its
+# bad case on a bare run. The runs happen in worker processes: one still running after HARD seconds is stopped there
+# (a cubic pattern on 20 KB runs for hours) and its worker goes on with the next pattern.
 # Tests carry comments, not docstrings (`dev test prove` leaves out tests with one).
 # Run: python3 -m unittest tests.test_regex_budget
 import os
@@ -42,6 +46,14 @@ INPUTS = {
     "at signs": "a@" * (N // 2), "digits": "1" * N, "commas": "a," * (N // 2),
     "quoted words": '"a" ' * (N // 4), "paths": "a/b/" * (N // 4), "env assignments": "A=b " * (N // 4),
 }
+# the words that start what the patterns look for: status lines and labels, tracebacks, lesson output, sed scripts,
+# fences, the status marker, crew names, commands
+STARTERS = ("- done", "- **Done:**", 'File "', "✓ L-abcdef ", "sed ", "sed -i ", "Traceback", "```",
+            "[Firefly> DevKit]", "Senior engineer (Neo) ", "Needs from the tech lead:", "cd ", "python3 -c ",
+            "git commit -m ")
+RUNS = {"spaces": " ", "tabs": "\t", "newlines": "\n", "backticks": "`", "double quotes": '"', "dots": ".",
+        "dashes": "-", "stars": "*", "letters": "a", "slashes": "/"}
+INPUTS.update({f"{start!r} then {run}": start + ch * N for start in STARTERS for run, ch in RUNS.items()})
 
 def _walk(name, value, out, depth=0):
     if isinstance(value, re.Pattern):
@@ -73,18 +85,29 @@ def patterns() -> list:
     return out
 
 
+_SCANS = {"sub", "subn", "finditer", "findall", "split"}
+
+
 def _method(source, name) -> str:
-    """How the modules call pattern `name`: `match` or `fullmatch` when that is all they do with it, else `search`
-    (a pattern in a tuple or passed along is searched)."""
-    if "[" in name:
+    """How the modules call pattern `name`, the costliest way: `scan` (over the whole text) when they .sub, .finditer,
+    .findall or .split with it, or when no call is seen (a pattern in a tuple or passed along); else `search`; else
+    `match` or `fullmatch` when that is all they do with it."""
+    used = set() if "[" in name else set(re.findall(r"(?<![\w.])" + re.escape(name) + r"\.(\w+)\(", source))
+    if not used or used & _SCANS:
+        return "scan"
+    if "search" in used or not used <= {"match", "fullmatch"}:
         return "search"
-    used = set(re.findall(r"(?<![\w.])" + re.escape(name) + r"\.(\w+)\(", source))
-    return used.pop() if len(used) == 1 and used <= {"match", "fullmatch"} else "search"
+    return "match" if "match" in used else "fullmatch"
+
+
+def _scan(p, text) -> None:
+    for _ in p.finditer(text):
+        pass
 
 
 def _search_time(p, method, text) -> float:
     t = time.perf_counter()
-    run = {"search": p.search, "match": p.match, "fullmatch": p.fullmatch}[method]
+    run = {"search": p.search, "match": p.match, "fullmatch": p.fullmatch, "scan": lambda x: _scan(p, x)}[method]
     run(text if isinstance(p.pattern, str) else text.encode())
     return time.perf_counter() - t
 
