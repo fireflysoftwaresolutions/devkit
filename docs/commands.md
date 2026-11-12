@@ -334,6 +334,12 @@ Who is working on what: one entry per developer and machine (`user@host`) that p
 hours (default 24), with its live sessions (agent, project, branch, latest status) and the locks it holds. Each
 machine publishes its own presence file when it syncs.
 
+A presence file is another person's text. `dev team`, and `dev progress` when it lists another machine's run, print
+each of its fields as plain text on its own row: control characters (terminal escape sequences, carriage returns,
+DEL) and bidirectional controls are removed, and a tab or line break becomes a space. A field that looks garbled,
+such as `]0;owned`, is the visible rest of an escape sequence that was removed. To see the file as written, read
+`presence/<user>@<machine id>.json` in the handoff repository.
+
 ### `dev progress [start | step | add | assign | begin | reopen | skip | block | done | history | time]`
 
 Live progress of long agent work, with active time, a critical-path ETA and a plan that stays true. See

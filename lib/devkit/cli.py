@@ -2529,11 +2529,12 @@ def cmd_progress(a):
         print(f"  {mark} {ui.bold(r.get('goal', ''))}  {ui.dim(r.get('agent', '') + ' · ' + (r.get('project') or '-'))}")
         print(f"    {pg.headline(r)}" + (f" · last: {last.get('text')}" if last.get("text") else "")
               + (f" · next: {last.get('next')}" if last.get("next") else ""))
+    shown = _from_presence  # another machine's run, as its presence summarizes it
     for who, s_ in others:
         p_ = s_["progress"]
-        print(f"  {ui.ACTIVE} {who} · {s_.get('agent')} · {s_.get('project')} · {p_.get('goal')} — "
-              f"{p_.get('step')}/{p_.get('steps') or '?'}" + (f" · ETA ~{_about(p_['eta_min'])}" if p_.get("eta_min")
-                                                               else ""))
+        print(f"  {ui.ACTIVE} {who} · {shown(s_.get('agent'))} · {shown(s_.get('project'))} · {shown(p_.get('goal'))}"
+              f" — {shown(p_.get('step'))}/{shown(p_.get('steps') or '?')}"
+              + (f" · ETA ~{_about(p_['eta_min'])}" if p_.get("eta_min") else ""))
     print()
     return 0
 
@@ -3406,14 +3407,32 @@ def cmd_jobs(a):
     return 0
 
 
+# What a terminal must never receive from a presence file, which is another person's text: the C0 control characters
+# but tab and line feed (an escape sequence sets the window title, clears the screen or moves the cursor; a carriage
+# return overwrites the line), DEL, the C1 controls (a lone CSI or OSC byte acts as ESC [ or ESC ]), and the
+# bidirectional controls that reorder what the developer reads (the embeddings, overrides and isolates, and the
+# LRM, RLM and ALM marks).
+_PRESENCE_UNSAFE = re.compile("[\x00-\x08\x0b-\x1f\x7f-\x9f؜‎‏‪-‮⁦-⁩]")
+
+
+def _from_presence(value, width: int = 0) -> str:
+    """A field of a presence file as dev team and dev progress print it: the characters in _PRESENCE_UNSAFE go, and a
+    tab or line feed becomes a space, so the field stays on its row and cannot start one that reads as another
+    machine's. Cut to `width` characters when given. None prints as nothing. Every presence-derived string these
+    commands print goes through here."""
+    s = _PRESENCE_UNSAFE.sub("", "" if value is None else str(value)).replace("\t", " ").replace("\n", " ")
+    return s[:width] if width else s
+
+
 def _presence_name(rec: dict, team: list = None) -> str:
     """A machine as people read it: `ana@andress-mbp-2 (m-0a1b2c3d)`, the hostname from work.display (this Mac's own,
     or the label another Mac's presence publishes when it is a plain hostname) and the machine id beside it. A record
-    from before the machine id, or one whose label is not a plain hostname, shows as presence names it."""
+    from before the machine id, or one whose label is not a plain hostname, shows as presence names it, through
+    _from_presence."""
     from . import work
     who = f"{rec.get('user')}@{rec.get('host')}"
     shown = work.display(who, team)
-    return f"{shown} ({rec.get('host')})" if shown != who else who
+    return _from_presence(f"{shown} ({rec.get('host')})" if shown != who else who)
 
 
 def cmd_team(a):
@@ -3422,12 +3441,15 @@ def cmd_team(a):
     print(ui.section(f"Team · machines active in the last {a.hours} h"))
     if not t:
         print("  no presence yet (each machine publishes it on sync)")
+    shown = _from_presence  # every field below is another machine's text
     for m in t:
-        print(f"\n  {ui.bold(_presence_name(m, t))}  {ui.dim('updated ' + m.get('updated', ''))}")
+        print(f"\n  {ui.bold(_presence_name(m, t))}  {ui.dim('updated ' + shown(m.get('updated')))}")
         for s_ in m.get("sessions", []):
-            print(f"    {ui.ACTIVE} {s_.get('agent')} · {s_.get('project')}@{s_.get('branch')}  {ui.dim((s_.get('status') or '')[:80])}")
+            print(f"    {ui.ACTIVE} {shown(s_.get('agent'))} · {shown(s_.get('project'))}@{shown(s_.get('branch'))}"
+                  f"  {ui.dim(shown(s_.get('status'), 80))}")
         for l_ in m.get("locks", []):
-            print(f"    🔒 {l_['id']} {l_['title']}  {ui.dim(l_['scope'] + ' · until ' + l_['until'])}")
+            print(f"    🔒 {shown(l_.get('id'))} {shown(l_.get('title'))}"
+                  f"  {ui.dim(shown(l_.get('scope')) + ' · until ' + shown(l_.get('until')))}")
     print()
     return 0
 

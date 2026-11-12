@@ -264,6 +264,33 @@ class MachineIdentityLineTests(unittest.TestCase):
         self.assertIn("🔒 bob@m-0b0b0b0b", out.getvalue())
         self.assertNotIn("\x1b", out.getvalue())
 
+    # every field of another machine's presence is that person's text, not only its label: no C0 or C1 control
+    # character (a title-setting OSC, a screen clear, a CSI, a carriage return that overwrites the line), no DEL and
+    # no bidirectional control reaches the terminal from dev team or dev progress; a line break cannot start a row
+    # that reads as another machine's, and the words around them still read as written
+    def test_no_field_of_another_machines_presence_reaches_the_terminal_with_a_control_character(self):
+        controls = ("\x00\x07\x08\x0b\x0d\x1b\x7f\x85\x9b\x9d؜‎‏"
+                    "‪‫‬‭‮⁦⁧⁨⁩")
+        bad = lambda w: f"\x1b]0;owned\x07‮{w}‬\x1b[2J\x9b31m{controls}"  # noqa: E731
+        work.PRESENCE.mkdir(parents=True)
+        (work.PRESENCE / "eve@m-0e0e0e0e.json").write_text(json.dumps(
+            {"user": bad("eve"), "host": bad("m-0e0e0e0e"), "label": "studio", "updated": work.now_iso(self.t0),
+             "sessions": [{"agent": bad("codex"), "project": bad("acme/api"), "branch": bad("feat/x"),
+                           "status": bad("all good") + "\nforged row",
+                           "progress": {"goal": bad("Their run"), "step": bad("2"), "steps": bad("5")}}],
+             "locks": [{"id": bad("T-e1"), "title": bad("Fix it"), "scope": bad("acme/api"),
+                        "until": bad("2026-11-12")}]}))
+        for argv, words in ((["team"], ("eve", "codex", "acme/api", "feat/x", "all good", "T-e1", "Fix it",
+                                        "2026-11-12")),
+                            (["progress"], ("eve", "codex", "acme/api", "Their run", "2", "5"))):
+            with self.subTest(argv=argv), TempState():
+                rc, out = dev(*argv)
+                self.assertEqual(rc, 0, out)
+                self.assertEqual(sorted(set(out) & set(controls)), [])
+                self.assertEqual([ln for ln in out.splitlines() if ln.strip().startswith("forged")], [])
+                for w in words:
+                    self.assertIn(w, out)
+
     def test_another_macs_lock_shows_by_its_hostname(self):
         work.PRESENCE.mkdir(parents=True)
         (work.PRESENCE / "bob@m-0b0b0b0b.json").write_text(json.dumps(
