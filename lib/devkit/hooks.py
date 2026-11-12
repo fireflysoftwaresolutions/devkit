@@ -331,6 +331,14 @@ def context_for(cwd: str, agent: str) -> str:
                          "<id> --evidence …` if one happens again):")
             lines.append(lessons.ADVICE)
             lines += ["- " + x for x in known]
+        try:  # recall leaves out the lesson files it cannot read: name them, so they are repaired, not forgotten
+            bad = [x for sc in [p["id"], *(f"initiatives/{s}" for s in inits), "global"]
+                   for x in lessons.unreadable(sc) if not lessons.is_archived(x)]
+        except Exception as e:
+            bad = []
+            _swallowed("session-start", e)
+        if bad:
+            lines.append(_unreadable_lessons(bad))
     except Exception as e:
         _swallowed("session-start", e)
     try:
@@ -354,6 +362,13 @@ def context_for(cwd: str, agent: str) -> str:
                  f"skill before you finish or when the user says handoff/pause/wrap up.")
     lines += ["", "--- handoff note ---", _note_excerpt(ns)]
     return "\n".join(lines)
+
+
+def _unreadable_lessons(bad: list) -> str:
+    """The session start's line for the lesson files recall cannot read (lessons.unreadable's findings)."""
+    n, ids = len(bad), ", ".join(x["id"] for x in bad[:3]) + (" …" if len(bad) > 3 else "")
+    return (f"{n} lesson file{'s' if n != 1 else ''} cannot be read, so no recall shows "
+            f"{'them' if n != 1 else 'it'}: {ids} (`dev lesson lint` names each with its fix).")
 
 
 def _session_lessons_shown(data: dict, seen: dict):

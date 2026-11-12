@@ -278,13 +278,27 @@ class LessonNudgeTests(unittest.TestCase):
 
 
 class SessionStartTests(LessonHookCase):
-    def test_the_session_start_puts_the_branchs_files_first_as_advice_and_records_them_shown(self):
+    def checkout(self) -> Path:
         repo = (self.root / "work" / "api").resolve()
         repo.mkdir(parents=True)
         env = dict(os.environ, **GIT_ENV)
         for args in (["init", "-q", "-b", "main"], ["-c", "user.email=a@example.com", "-c", "user.name=a", "commit",
                                                      "-q", "--allow-empty", "-m", "init"]):
             subprocess.run(["git", "-C", str(repo), *args], check=True, env=env, capture_output=True)
+        return repo
+
+    def start(self, repo: Path) -> str:
+        # the session start's context in `repo`
+        with mock.patch.object(registry, "update_note", lambda *a, **k: False), \
+                mock.patch.object(core, "is_temp", lambda p, real=core.is_temp: False if str(p).startswith(
+                    str(repo)) else real(p)), \
+                mock.patch.object(hooks, "HANDOFF", self.root / "handoff"):
+            out = self.hook("session-start", {"session_id": "s9", "hook_event_name": "SessionStart",
+                                              "source": "startup", "cwd": str(repo)})
+        return json.loads(out)["hookSpecificOutput"]["additionalContext"] if out.startswith("{") else out
+
+    def test_the_session_start_puts_the_branchs_files_first_as_advice_and_records_them_shown(self):
+        repo = self.checkout()
         (repo / "src" / "billing").mkdir(parents=True)
         (repo / "src" / "billing" / "invoice.py").write_text("x = 1\n")  # the branch's change
         pid = core.project_identity(repo, "")[0]
@@ -294,19 +308,28 @@ class SessionStartTests(LessonHookCase):
             lessons.recur(les, "again", a=A)
         weak = lessons.add(pid, "Invoices round half-even", severity="low", files=["src/billing/**"],
                            cause="a cause", prevention="round half-even", happened="it happened", a=A)["meta"]["id"]
-        with mock.patch.object(registry, "update_note", lambda *a, **k: False), \
-                mock.patch.object(core, "is_temp", lambda p, real=core.is_temp: False if str(p).startswith(
-                    str(repo)) else real(p)), \
-                mock.patch.object(hooks, "HANDOFF", self.root / "handoff"):
-            out = self.hook("session-start", {"session_id": "s9", "hook_event_name": "SessionStart",
-                                              "source": "startup", "cwd": str(repo)})
-        text = json.loads(out)["hookSpecificOutput"]["additionalContext"] if out.startswith("{") else out
+        text = self.start(repo)
         head = text.index("Known pitfalls")
         self.assertEqual(text[head:].splitlines()[1], lessons.ADVICE)
         self.assertIn(weak, text[head:].splitlines()[2])
         shown = re.findall(r"Lesson (L-[0-9A-Za-z]+) \(recorded by", text[head:])
         self.assertEqual(len(shown), 3)
         self.assertEqual(lessonevents.shown_in("s9", "main"), shown)  # what it showed is pending for its main agent
+
+    def test_a_lesson_file_that_cannot_be_read_is_named_and_the_others_are_still_recalled(self):
+        # A file edited by hand or half-applied by a pull: recall leaves it out, and the session says so instead of
+        # keeping quiet about a lesson nobody sees
+        repo = self.checkout()
+        pid = core.project_identity(repo, "")[0]
+        good = lessons.add(pid, "Invoices round half-even", files=["src/billing/**"], cause="a cause",
+                           prevention="round half-even", happened="it happened", a=A)["meta"]["id"]
+        bad = Path(lessons.LESSONS) / pid / "L-latin10000.md"
+        bad.write_bytes(b"---\nid: L-latin10000\ntitle: caf\xe9\nscope: " + pid.encode() + b"\n---\n# caf\xe9\n")
+        text = self.start(repo)
+        self.assertIn(f"Lesson {good} (recorded by", text)
+        line = next((ln for ln in text.splitlines() if "L-latin10000" in ln), "")
+        self.assertIn("cannot be read", line, text)
+        self.assertIn("dev lesson lint", line)
 
 
 if __name__ == "__main__":
