@@ -306,7 +306,8 @@ class DispatchTests(unittest.TestCase):
         with State():
             _, waiting = dispatch._sorted(run)
         self.assertEqual([why for _, why in waiting],
-                         ["Senior engineer (Neo) is busy: send it to them (SendMessage / send_input)"])
+                         ['Senior engineer (Neo) works with no step: dev progress assign "docs" --to "Neo" gives '
+                          '“docs” to that lane'])
 
 
 class SessionContextTests(unittest.TestCase):

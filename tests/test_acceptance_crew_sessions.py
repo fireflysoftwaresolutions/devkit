@@ -673,7 +673,8 @@ class RunsAndLanes(Crew):
         a = self.claude(S1, self.api)
         self.staff(a, "Invoice export", "build=30m [backend]; review=20m after build [review]",
                    ("a1", "tank", "Tank", "build", "backend"))
-        r = a.sh("dev progress step 'review looks fine' --step review --check 'read it'", member="a1",
+        # it names no step: a --step for a step the member does not hold fails (tests/test_lane_binding.py)
+        r = a.sh("dev progress step 'review looks fine' --check 'read it'", member="a1",
                  member_type="devkit:tank", raw=True)
         self.assertEqual(r["rc"], 0, r)
         self.assertEqual(a.step_state("review"), "pending")  # the main plan's step never moved

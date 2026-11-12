@@ -2594,11 +2594,21 @@ class MemberOwnStepTests(KidSyncCase):
         self.assertEqual(run["plan"][0]["state"], "unverified")
         self.assertEqual(run["lane_outcome"]["state"], "unverified")
 
-    def test_a_member_naming_a_step_it_does_not_hold_only_records_its_evidence(self):
-        run = pg.step("docs look fine", which="docs", check="✓ read them", from_agent="k1", now=self.m(10))
+    def test_a_member_naming_a_step_it_does_not_hold_fails_and_records_nothing(self):
+        # M176-M177 of release 26.11.16's run: the member's close was kept in its lane with no error, so it reported
+        # the step closed while it stayed pending
+        with self.assertRaises(pg.StepError) as e:
+            pg.step("docs look fine", which="docs", check="✓ read them", from_agent="k1", now=self.m(10))
+        self.assertIn("“docs” is not your step (the tech lead's)", str(e.exception))
+        run = pg.load_run("claude", "s1")
         self.assertEqual([s["state"] for s in run["plan"]], ["running", "pending"])
-        self.assertEqual((run["lane_outcome"]["step"], run["lane_outcome"]["closed"]), ("docs", False))
-        self.assertIn("not your step", run["lane_outcome"]["why"])
+        self.assertEqual(run["agents"]["k1"].get("updates") or [], [])
+
+    def test_a_members_close_of_its_own_step_without_evidence_fails_and_says_how(self):
+        with self.assertRaises(pg.StepError) as e:
+            pg.step("sync rewritten", which="sync", from_agent="k1", now=self.m(10))
+        self.assertIn("--check", str(e.exception))
+        self.assertEqual(pg.load_run("claude", "s1")["plan"][0]["state"], "running")
 
 
 class ReviewCloseAfterGatesTests(unittest.TestCase):
@@ -2789,11 +2799,13 @@ class ProgressCommandLineTests(unittest.TestCase):
         self.assertEqual(rc, 0, err)
         self.assertIn("· sync rewritten · closed “sync” (done)", out)
 
-    def test_a_members_evidence_for_a_step_it_does_not_hold_says_why_it_stays_open(self):
+    def test_a_members_evidence_for_a_step_it_does_not_hold_fails_and_says_what_to_do(self):
+        # M176-M177: it printed ✓ and exited 0, so the member reported the step closed while it stayed pending
         with mock.patch.dict(os.environ, {"DEVKIT_FROM_AGENT": "k1"}):
             rc, out, err = progress_cli_out("step", "docs look fine", "--step", "docs", "--check", "✓ read them")
-        self.assertEqual(rc, 0, err)
-        self.assertIn("not your step", out)
+        self.assertEqual(rc, 2, out)
+        self.assertIn("“docs” is not your step", err)
+        self.assertIn("dev crew ask", err)
         self.assertEqual(pg.load_run("claude", "s1")["plan"][1]["state"], "pending")
 
     def test_the_listing_shows_this_sessions_run_before_a_newer_one(self):
