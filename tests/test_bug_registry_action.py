@@ -320,7 +320,7 @@ class FoldTests(unittest.TestCase):
         fake.add_issue(52, _body(guard("check_git:force-push")), _user(7))
         rc, _, err = _run(fake, "issues", 52)
         self.assertEqual(rc, 0, err)
-        self.assertEqual(fake.issues[52]["title"], "[bug] guard refusal check_git:force-push on git")
+        self.assertEqual(fake.issues[52]["title"], "Guard refuses a plain git push --force")
 
     def test_labels_and_record_follow_only_a_valid_first_payload(self):
         fake = FakeGitHub()
@@ -330,7 +330,7 @@ class FoldTests(unittest.TestCase):
         self.assertEqual(rc, 0, err)
         self.assertEqual(set(fake.issues[40]["labels"]), {"devkit-bug", "kind:crash"})
         self.assertEqual(set(fake.record(40)["voters"]), {_h(7)})
-        self.assertEqual(fake.issues[40]["title"], bugs.TITLE_PREFIX + bugs.title_for(_payload("report")))
+        self.assertEqual(fake.issues[40]["title"], "dev progress step crashes with KeyError")
 
         fake.add_issue(41, _body(_payload("report", extra="field")), _user(8))
         rc, _, _ = _run(fake, "issues", 41)
@@ -584,7 +584,7 @@ class HostileInputTests(unittest.TestCase):
         command = {**_payload("report", fingerprint="0123456789ab", exc_class="", frames=[]), "kind": "command"}
         fake.add_issue(82, _body(command), _user(7))
         self.assertEqual(_run(fake, "issues", 82)[0], 0)
-        self.assertEqual(fake.issues[82]["title"], "[bug] dev progress step misbehaves")
+        self.assertEqual(fake.issues[82]["title"], "dev progress step does not work as expected")
 
     def test_the_record_stays_within_one_github_comment(self):
         fake = FakeGitHub()

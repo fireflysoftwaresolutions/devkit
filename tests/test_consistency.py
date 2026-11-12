@@ -282,5 +282,64 @@ class ShellTools(unittest.TestCase):
         self.assertIn("Monitor", scope.REPO_TOOLS)
 
 
+class BugTitleTable(unittest.TestCase):
+    # config/bug-titles.json titles every registry issue: an entry for each refusal id the guard records, each kind
+    # of bug and each hook event, so a new deny call cannot merge without the words people read for it
+    def setUp(self):
+        from devkit import bugs
+        self.bugs, self.table = bugs, bugs.bug_titles()
+
+    def test_every_refusal_id_kind_and_hook_event_has_a_title_entry(self):
+        guard, events = self.table.get("guard") or {}, self.table.get("events") or {}
+        missing = [f"refusal id {i}" for i in sorted(self.bugs.guard_refusal_ids()) if i not in guard]
+        missing += [f"kind {k}" for k in self.bugs.KINDS if k != "guard" and not isinstance(self.table.get(k), dict)]
+        missing += [f"hook event {e}" for e in sorted(self.bugs._hook_events()) if e not in events]
+        missing += [f"fallback {name}['']" for name, part in (("guard", guard), ("events", events)) if "" not in part]
+        self.assertEqual(missing, [], "add each to config/bug-titles.json")
+
+    def test_no_title_entry_names_an_id_or_event_devkit_no_longer_has(self):
+        stale = [f"refusal id {i}" for i in sorted(set(self.table.get("guard") or {}) - {""})
+                 if i not in self.bugs.guard_refusal_ids()]
+        stale += [f"hook event {e}" for e in sorted(set(self.table.get("events") or {}) - {""})
+                  if e not in self.bugs._hook_events()]
+        self.assertEqual(stale, [], "take each out of config/bug-titles.json, or keep its text as a `before` variant")
+
+    def test_every_title_fits_the_title_rules_with_every_slot_value(self):
+        # at most 80 characters of letters, digits, spaces, `.`, `:` and `-` (what `dev bug ls` shows unchanged), for
+        # every entry and variant, filled with every command word phrase, the longest command word the guard knows,
+        # the longest `dev` command, every hook event name, and the longest built-in exception class
+        import builtins
+        bugs = self.bugs
+        words = self.table.get("words") or {}
+        longest = max(bugs._public_words(), key=len)
+        phrases = {v.replace("{word}", longest) for v in words.values() if isinstance(v, str)}
+        command = max((f"{name} {sub}" for name, (_, subs) in bugs._dev_tree().items() for sub in subs), key=len)
+        exc = max((n for n, v in vars(builtins).items() if isinstance(v, type) and issubclass(v, BaseException)),
+                  key=len)
+        entries = [(f"guard {i!r}", e) for i, e in (self.table.get("guard") or {}).items()]
+        entries += [(k, self.table.get(k)) for k in ("crash", "hook", "command")]
+        titles = []
+        for name, entry in entries:
+            titles.append((name, entry.get("title")))
+            for part in ("before", "without"):
+                titles += [(f"{name} {part} {k}", v.get("title")) for k, v in (entry.get(part) or {}).items()]
+        bad = []
+        for name, title in titles:
+            for phrase in phrases:
+                for event in (self.table.get("events") or {}).values():
+                    for exc_class in (exc, bugs.NO_CLASS):
+                        slots = {"word": phrase, "command": command, "event": event, "exc_class": exc_class}
+                        text = bugs._fill(title, slots)
+                        if not text or len(text) > bugs.TITLE_MAX or bugs._TITLE_SAFE.search(text):
+                            bad.append(f"{name}: {text!r}")
+        self.assertEqual(sorted(set(bad))[:10], [])
+
+    def test_every_word_phrase_and_event_name_is_title_text(self):
+        words = {k: v for k, v in (self.table.get("words") or {}).items() if k != "*"}
+        self.assertEqual({k: v for k, v in {**words, **(self.table.get("events") or {})}.items()
+                          if not isinstance(v, str) or self.bugs._TITLE_SAFE.search(v)}, {})
+        self.assertIn("{word}", (self.table.get("words") or {}).get("*", ""))
+
+
 if __name__ == "__main__":
     unittest.main()

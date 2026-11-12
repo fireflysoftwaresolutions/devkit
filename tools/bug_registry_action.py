@@ -372,7 +372,7 @@ def _fold_issue_once(client, key: bytes, number: int, now: float, sleep, maintai
     if missing:
         client.add_labels(number, missing)
     if rec is None:
-        title = bugs.TITLE_PREFIX + bugs.title_for(first)
+        title = bugs.title_for(first)
         if issue.get("title") != title:
             client.edit_issue(number, title=title)
     _regressed(client, number, rec, new, issue)

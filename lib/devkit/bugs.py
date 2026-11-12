@@ -1163,20 +1163,150 @@ def parse_payload(body: str):
     return obj if obj is not None and "devkit_bug" in obj else None
 
 
-def title_for(report: dict) -> str:
-    """The generated title of a bug, from its report's allowlisted fields only."""
-    kind, cmd = report.get("kind"), report.get("command")
-    exc = report.get("exc_class") or ""
-    if kind == "crash":
-        title = (f"crash in dev {cmd}" + (f": {exc}" if exc else "")) if cmd else f"crash: {exc or 'unknown'}"
-    elif kind == "hook":
-        title = f"hook {report.get('event') or 'unknown'}: {exc or 'timeout'}"
-    elif kind == "guard":
-        title = f"guard refusal {report.get('refusal_id') or 'unknown'}" + (
-            f" on {report['word']}" if report.get("word") else "")
+# --------------------------------------------------------------------------- what people read
+#
+# A registry issue's title comes from devkit's title table (config/bug-titles.json), by refusal id for a guard bug
+# and by kind otherwise, with slots filled only from allowlisted report fields. Free text never reaches a title.
+
+TITLES = core.DEVKIT_HOME / "config" / "bug-titles.json"
+TITLE_MAX = 80
+NO_CLASS = "an error"  # what readable text says for an exception class Python, its library and devkit do not define
+
+
+@functools.lru_cache(maxsize=1)
+def bug_titles() -> dict:
+    """The title table, config/bug-titles.json of the devkit copy that runs: "guard" {refusal id: entry, "": the
+    entry for an id this copy does not know}; "crash", "hook", "command": one entry each; "events" {hook event: its
+    name, "": the name for none}; "words" {command word: its phrase, "*": the phrase for any other word}. An entry
+    holds `title`, `what` and `reproduce`, with `before` {the last version an older meaning held for: entry} and
+    `without` {slot: the entry for a report whose slot is empty}. {} when the file cannot be read."""
+    data = core.read_json(TITLES, {})
+    return data if isinstance(data, dict) else {}
+
+
+def _stdlib_module(top: str) -> bool:
+    """Whether `top` is a module of Python's standard library: sys.stdlib_module_names (Python 3.10 and later), else
+    a module built into the interpreter or one that lives in the standard library's folder, outside site-packages."""
+    names = getattr(sys, "stdlib_module_names", None)
+    if names is not None:
+        return top in names
+    if top in sys.builtin_module_names:
+        return True
+    import importlib.util
+    import sysconfig
+    try:
+        origin = str(getattr(importlib.util.find_spec(top), "origin", "") or "")
+    except (ImportError, ValueError):
+        return False
+    return origin.startswith(sysconfig.get_paths()["stdlib"]) and "site-packages" not in origin
+
+
+@functools.lru_cache(maxsize=1)
+def _known_classes() -> frozenset:
+    """The exception classes readable text may name: Python's built-in ones, those of the standard-library modules
+    devkit imports, and every class devkit's own modules define, read from the copy that runs."""
+    import ast
+    import builtins
+    import importlib
+
+    def errors(namespace) -> set:
+        return {n for n, v in vars(namespace).items() if isinstance(v, type) and issubclass(v, BaseException)}
+    names, modules = errors(builtins), set()
+    for path in Path(__file__).parent.rglob("*.py"):
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except (OSError, SyntaxError, ValueError):
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef):
+                names.add(node.name)
+            elif isinstance(node, ast.Import):
+                modules.update(a.name for a in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+                modules.add(node.module)
+    for name in sorted(m for m in modules if _stdlib_module(m.split(".")[0])):
+        try:
+            names |= errors(importlib.import_module(name))
+        except Exception:  # noqa: BLE001 - a module this platform lacks names no class
+            continue
+    return frozenset(names)
+
+
+def readable_exc(value) -> str:
+    """An exception class as readable text names it: the class when Python, its standard library or devkit defines
+    it (`KeyError`, `JSONDecodeError`, `Duplicate`), else `an error`, so no class named after a project reaches a
+    title or an issue's text. The report's data keeps the class as it was sent."""
+    return value if isinstance(value, str) and value in _known_classes() else NO_CLASS
+
+
+def _facts(source: dict) -> dict:
+    """The report fields a title or a sentence may use, each checked again: a public command word, a `dev` command
+    as devkit's parser names it, an exception class of a report's form, a hook event devkit has; else empty."""
+    word = source.get("word") if isinstance(source.get("word"), str) else ""
+    cmd, event = source.get("command"), source.get("event")
+    return {"word": word if public_word(word) == word else "<program>",
+            "command": cmd if isinstance(cmd, str) and cmd and _public_command(cmd) == cmd else "",
+            "exc_class": _exc_class(source.get("exc_class")), "event": event if _one_of(event, _hook_events()) else "",
+            "refusal_id": source.get("refusal_id") if isinstance(source.get("refusal_id"), str) else ""}
+
+
+def _entry(kind, facts: dict, first_version) -> dict:
+    """The title table's entry for a bug: by refusal id for a guard bug, by kind otherwise; its `without` variant
+    for each slot the report leaves empty, then the `before` variant of the smallest version at or after the bug's
+    first version, so a bug keeps the meaning its refusal id had when it was first seen."""
+    table = bug_titles()
+    if kind == "guard":
+        ids = table.get("guard") if isinstance(table.get("guard"), dict) else {}
+        found = ids.get(facts["refusal_id"]) if facts["refusal_id"] else None
+        entry = found if isinstance(found, dict) else ids.get("")
     else:
-        title = f"dev {cmd} misbehaves" if cmd else "a dev command misbehaves"
-    return _TITLE_SAFE.sub("", title)[:100]
+        entry = table.get(kind) if _one_of(kind, KINDS) else None
+    entry = dict(entry) if isinstance(entry, dict) else {}
+    without = entry.get("without") if isinstance(entry.get("without"), dict) else {}
+    for slot, variant in without.items():
+        if isinstance(variant, dict) and not facts.get(slot):
+            entry.update(variant)
+    first = core.version_key(first_version)
+    before = entry.get("before") if isinstance(entry.get("before"), dict) else {}
+    held = sorted((core.version_key(v), x) for v, x in before.items() if core.version_key(v) and isinstance(x, dict))
+    variant = next((x for v, x in held if first and first <= v), None)
+    if variant:
+        entry.update(variant)
+    return entry
+
+
+def _slots(facts: dict) -> dict:
+    table = bug_titles()
+    words = table.get("words") if isinstance(table.get("words"), dict) else {}
+    events = table.get("events") if isinstance(table.get("events"), dict) else {}
+    word = facts["word"]
+    phrase = words.get(word) if isinstance(words.get(word), str) else str(words.get("*") or "{word}")
+    return {"word": phrase.replace("{word}", word), "command": facts["command"],
+            "exc_class": readable_exc(facts["exc_class"]),
+            "event": str(events.get(facts["event"]) or events.get("") or "")}
+
+
+def _fill(text, slots: dict) -> str:
+    return _SLOT_RE.sub(lambda m: slots.get(m.group(1), ""), text if isinstance(text, str) else "")
+
+
+def _title_text(kind, source: dict, first_version) -> str:
+    facts = _facts(source)
+    title = " ".join(_TITLE_SAFE.sub("", _fill(_entry(kind, facts, first_version).get("title"), _slots(facts))).split())
+    return title[:TITLE_MAX].rstrip() or "devkit bug"
+
+
+def title_for(report: dict) -> str:
+    """The title of a bug from its report's allowlisted fields only, as the title table words it for the report's
+    version: the title the client gives the issue it opens, and the record's."""
+    return _title_text(report.get("kind"), report, report.get("version"))
+
+
+def human_title(rec: dict) -> str:
+    """The title of a recorded bug: its title table entry as the bug's first version knew it, filled from the facts
+    the record keeps."""
+    facts = rec.get("report") if isinstance(rec.get("report"), dict) else {}
+    return _title_text(rec.get("kind"), facts, rec.get("first_version"))
 
 
 def component_of(report: dict) -> str:
@@ -1330,7 +1460,6 @@ def fold(rec: dict, payload: dict, *, author_hash: str, author_assoc: str, now: 
 # read. Hooks match failures against this cache and never call the network; a failed fetch keeps the old cache.
 
 LABEL = "devkit-bug"
-TITLE_PREFIX = "[bug] "
 CACHE_MAX = 500
 MAX_PER_OPENER = 25
 CLOSED_DAYS = 90
@@ -1754,7 +1883,7 @@ def flush(client=None, now: float = None) -> dict:
                     if report is None:
                         raise RuntimeError("this client cannot send private vulnerability reports")
                     title = title_for(p) if p.get("type") == "report" else f"{p['type']} for {p['fingerprint']}"
-                    report(TITLE_PREFIX + title, render_payload(p))
+                    report(title, render_payload(p))
                 except Exception as e:  # never falls back to Issues: the item waits for the developer
                     item["problem"] = f"private reporting failed: {_short(e)}"
                     _save_item(item)
@@ -1807,7 +1936,7 @@ def _send(client, p: dict, cache: dict):
         found = [n for n in map(registry_issue_number, (finder(p["fingerprint"]) if finder else None) or []) if n]
         number = min(found) if found else None
         if number is None:
-            number = client.create_issue(TITLE_PREFIX + title_for(p), render_payload(p))
+            number = client.create_issue(title_for(p), render_payload(p))
             created = core.read_json(BUGS / "created.json", {}) or {}
             created[p["fingerprint"]] = number
             _write_json(BUGS / "created.json", created)

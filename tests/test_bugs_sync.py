@@ -321,7 +321,7 @@ class OutboxTests(StateCase):
         self.assertEqual(len(client.created), 1)
         title, body = client.created[0]
         self.assertEqual(_sent(body)["fingerprint"], NEW_FP)
-        self.assertIn("crash in dev progress step: KeyError", title)
+        self.assertEqual(title, bugs.title_for(_payload("report", fp=NEW_FP)))
         bugs.queue({"payload": _payload("report", fp=NEW_FP, impact="detoured")})
         bugs.flush(client, now=NOW + 120)
         self.assertEqual(len(client.created), 1)  # the second report goes to the issue this machine filed
