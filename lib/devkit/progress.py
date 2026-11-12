@@ -2856,10 +2856,11 @@ def _addressed_to(m: dict, me: str, lane: dict) -> bool:
 
 
 def answered_by_sendmessage(agent: str, data: dict, now: float | None = None) -> list:
-    """PostToolUse of a SendMessage from the main session: its text answers the open questions that the member it went
-    to (a lane id, or a name its lanes answer to) asked the tech lead: the ones it names (M12), else all of them.
-    A name that fits several lanes with open questions answers none: SendMessage reached only one of them. Each is
-    marked answered via SendMessage, the text is kept as the answer (delivered already: SendMessage carried it), and
+    """PostToolUse of a SendMessage from the main session: its text answers the open questions it names (M12) that the
+    member it went to (a lane id, or a name its lanes answer to) asked the tech lead. A text that names none answers
+    none (a new work item is no answer), and a devkit notice tells the tech lead which still wait and how to close
+    them. A name that fits several lanes with open questions answers none: SendMessage reached only one of them. Each
+    is marked answered via SendMessage, the text is kept as the answer (delivered already: SendMessage carried it), and
     the audit trail records crew.message-answered with the channel. -> the ids answered"""
     inp = data.get("tool_input") or {}
     to, text = str(inp.get("to") or "").strip(), str(inp.get("message") or "").strip()
@@ -2881,8 +2882,20 @@ def answered_by_sendmessage(agent: str, data: dict, now: float | None = None) ->
         if len({m.get("from") for m in asked}) > 1:  # the name fits several lanes that asked: SendMessage reached one
             return []
         named = set(re.findall(r"\b(M\d+)(?:@[\w.:-]+)?\b", text))
-        if named:  # the questions it names, not every open one of that member
-            asked = [m for m in asked if m.get("id") in named]
+        if asked and not named:  # it may be a new work item: the questions stay open, and the tech lead hears so
+            from . import crew
+            ids = [m["id"] for m in asked]
+            one = len(ids) == 1
+            _post(run, "devkit", "main",
+                  f"devkit: your SendMessage to {crew.who(asked[0].get('from_name')) or to} named no question, so "
+                  f"{', '.join(ids)} still wait{'s' if one else ''} for an answer. If it answered "
+                  f"{'it' if one else 'them'}, close {'it' if one else 'each'}: "
+                  + " · ".join(f'dev crew answer {i} "…"' for i in ids)
+                  + f"; with SendMessage, name the question in the text (\"{ids[0]}: …\").",
+                  now, from_name="devkit", kind="notice")
+            _save(run, touch_session=False)
+            return []
+        asked = [m for m in asked if m.get("id") in named]  # the questions it names, not every open one
         if not asked:
             return []
         for q in asked:
