@@ -57,6 +57,9 @@ LABELS = {"proofs": "proof not run", "skills": "skill not loaded", "stubs": "unf
           "tests": "tests that cannot fail in", "lessons": "no lesson after repeated refusals:",
           "background": "still running in the background:"}
 MAX_BYTES = 8_000_000  # the end of a very long member transcript is enough
+# The session record's members whose latest stop the gates have not passed cleanly (check): progress reads it at the
+# lane's end, where such a member's review steps approve nothing.
+UNPASSED = "crew_unpassed"
 # A hook's denial as Claude Code writes it into the tool result: "PreToolUse:Bash hook error: <the guard's reason>".
 DENIAL_RE = re.compile(r"^\s*(?:PreToolUse|PermissionRequest)(?::[^\s:]+)? hook (?:blocking )?error\b", re.I)
 _SPLIT = re.compile(r"\|\||&&|\$\(|[;&|()`\n]")  # where a new simple command starts
@@ -876,6 +879,15 @@ def _keep_for_lead(sess: dict, key: str, who: str, tasks: list):
                                                                          for t in tasks]}
 
 
+def _passed(sess: dict, key: str):
+    """The gates passed this member's report cleanly: its UNPASSED mark goes (and the record's key with the last)."""
+    marks = sess.get(UNPASSED)
+    if isinstance(marks, dict):
+        marks.pop(key, None)
+        if not marks:
+            sess.pop(UNPASSED, None)
+
+
 def check(name, data: dict, sess: dict, pid: str = "", roster=None, lead_name: str = "", agent: str = ""):
     """The SubagentStop entry point. -> the hook's {"decision": "block", "reason": …} the first time a member stops
     with something missing, else None. Records each finding set as `crew.gate` in the audit trail ("blocked", or
@@ -884,9 +896,13 @@ def check(name, data: dict, sess: dict, pid: str = "", roster=None, lead_name: s
     audited and kept for the tech lead as `lead_name` (`_keep_for_lead`): the name devkit's launch records give it
     (`hooks._lead_name`), never `name`, which may come from a description a member wrote for its helper. Without
     one, nothing is kept. `lead_name` also says whether the tech lead wrote the brief (`_by_lead`), and a proof met
-    another way is audited as `crew.gate` with outcome "ok" and how it was met. Fails open."""
+    another way is audited as `crew.gate` with outcome "ok" and how it was met. Fails open: the member is never
+    held back by a gate that cannot judge. Before it judges, it marks the member in `sess[UNPASSED]`, and only a
+    clean pass (no findings) clears the mark: a stop let through after a send-back, findings only recorded, a missing
+    transcript or a crash keep it, so that member's review steps approve nothing (progress._end_member_step)."""
     try:
         key = data.get("agent_id") or str(name or "")
+        sess.setdefault(UNPASSED, {})[key] = str(name or "Agent")
         transcript = data.get("agent_transcript_path")
         if not transcript:
             return None
@@ -911,6 +927,7 @@ def check(name, data: dict, sess: dict, pid: str = "", roster=None, lead_name: s
                 f"proofs: {a['proof']} met instead by {a['how']}" for a in accepted), "ok", member=who,
                          rules=["proofs"])
         if not findings:
+            _passed(sess, key)
             return None
         sess.setdefault("crew_gated", {})[key] = who
         enforce = enforced()

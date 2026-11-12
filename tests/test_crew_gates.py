@@ -673,6 +673,28 @@ class SendBackTests(GateCase):
         self.assertIsNone(gates.check("Kid", data, {}, "owner/repo", roster={"members": [KID]}))
 
 
+class UnpassedMarkTests(GateCase):
+    # A review's Check approves the work it follows only when the gates passed its member's report. gates.check marks
+    # the member before it judges a stop and clears the mark only on a clean pass, so progress can tell a pass from
+    # a send-back, a let-through, a record-only run or a crash (none of which approves).
+    def test_a_clean_pass_clears_the_mark_an_earlier_stop_left(self):
+        self.complete()
+        data = {"agent_id": "a1", "agent_transcript_path": self.tx.save(), "cwd": str(self.repo)}
+        sess = {"crew_unpassed": {"a1": "Kid", "a9": "Neo"}}  # a1's earlier stop crashed the gates; a9 is another lane
+        self.assertIsNone(gates.check("Kid", data, sess, "owner/repo", roster={"members": [KID]}))
+        self.assertEqual(sess["crew_unpassed"], {"a9": "Neo"})
+
+    def test_a_stop_with_findings_keeps_its_mark_through_the_let_through(self):
+        self.tx.bash("dev test")  # no dev progress step: the gates send it back
+        data = {"agent_id": "a1", "agent_transcript_path": self.tx.save(), "cwd": str(self.repo)}
+        sess = {}
+        self.assertEqual(gates.check("Kid", data, sess, "owner/repo", roster={"members": [KID]})["decision"], "block")
+        self.assertIn("a1", sess["crew_unpassed"])
+        self.assertIsNone(gates.check("Kid", {**data, "stop_hook_active": True}, sess, "owner/repo",
+                                      roster={"members": [KID]}))
+        self.assertIn("a1", sess["crew_unpassed"])  # let through, not passed
+
+
 class BackgroundWorkTests(GateCase):
     # Claude Code keeps a member in its agent list while a background command it started still runs, though the
     # member reported and devkit closed its lane. The gate sends it back once to wait for the work or stop it.

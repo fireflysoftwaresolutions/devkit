@@ -2515,6 +2515,123 @@ class MemberOwnStepTests(KidSyncCase):
         self.assertIn("not your step", run["lane_outcome"]["why"])
 
 
+class ReviewCloseAfterGatesTests(unittest.TestCase):
+    # A review step's Check ✓ is its member's approval of the work it follows. A member that closed its review itself
+    # (`dev progress step --step review --check "✓ …"`) had that approval recorded at once, before the crew gates read
+    # its report at SubagentStop, so a report the gates sent back still approved the work and the run could end on it.
+    # The Backend engineer builds "api"; the Code reviewer approves it in "review".
+    REPORT = ("**[Firefly> DevKit · Code reviewer (Seraph)]** api · `main` · review\n- **Done:** read the diff\n"
+              "- **Check:** ✓ read the diff, 9 tests pass\n- **Next:** the tech lead merges")
+
+    def at(self, minutes):
+        return self.t0 + minutes * 60
+
+    def setUp(self):
+        self.state = TempState().__enter__()
+        self.addCleanup(self.state.__exit__, None, None, None)
+        self.t0 = time.time() - 3600  # the hook ends a lane at the real time, so the work comes before it
+        pg.start("Work", plan="api=10m; review=10m after api", now=self.at(0))
+        pg.assign("api", "Tank", now=self.at(0))
+        launch("a_tank", "devkit:tank", "Tank: api", self.at(1))
+        pg.step("api built", which="api", check="✓ 12 tests pass", from_agent="a_tank", now=self.at(10))
+        pg.assign("review", "Seraph", now=self.at(11))
+        launch("a_seraph", "devkit:seraph", "Code reviewer (Seraph): review", self.at(12))
+        self.closed = pg.step("review done", which="review", check="✓ read the diff, 9 tests pass",
+                              from_agent="a_seraph", now=self.at(20))
+
+    def plan(self):
+        return {s["name"]: s for s in pg.load_run("claude", "s1")["plan"]}
+
+    def transcript(self, *commands):
+        # the Code reviewer's own transcript: the shell commands it ran. Without `dev progress step` among them the
+        # crew gates send its report back once (the proof of its verdict phase), then let the next stop through
+        root = Path(self.state.tmp.name)
+        tr = root / "agent-a_seraph.jsonl"
+        records = []
+        for i, command in enumerate(commands, 1):
+            records += [{"type": "assistant", "isSidechain": True, "message": {"role": "assistant", "content": [
+                            {"type": "tool_use", "id": f"toolu_{i:04}", "name": "Bash", "input": {"command": command}}]}},
+                        {"type": "user", "isSidechain": True, "message": {"role": "user", "content": [
+                            {"type": "tool_result", "tool_use_id": f"toolu_{i:04}", "content": "ok"}]}}]
+        tr.write_text("".join(json.dumps(r) + "\n" for r in records))
+        return tr
+
+    def stop(self, tr=None, **extra):
+        # the Code reviewer's SubagentStop through the hook (canary, crew gates, then the lane's end)
+        import contextlib
+        import io
+        from devkit import hooks, lessonevents
+        root = Path(self.state.tmp.name)
+        tr = tr or self.transcript()
+        data = {"session_id": "s1", "agent_id": "a_seraph", "agent_type": "devkit:seraph",
+                "agent_transcript_path": str(tr), "last_assistant_message": self.REPORT, **extra}
+        out = io.StringIO()
+        with mock.patch.object(hooks, "STATE", root), mock.patch.object(canary, "LOG", root / "canary.jsonl"), \
+                mock.patch.object(lessonevents, "EVENTS", root / "lessons-events.jsonl"), \
+                mock.patch("sys.stdin", io.StringIO(json.dumps(data))), contextlib.redirect_stdout(out):
+            hooks.subagent_stop("claude")
+        return out.getvalue()
+
+    def assert_approves_nothing(self):
+        # the review ended without a clean pass of the gates: unverified, no approval, the work it follows still owed
+        run = pg.load_run("claude", "s1")
+        self.assertEqual(self.plan()["review"]["state"], "unverified")
+        why = [h for h in run["history"] if h["step"] == "review"][-1]["why"]
+        self.assertIn("crew gates did not pass its report", why)
+        self.assertEqual(run.get("approvals") or [], [])
+        self.assertEqual(pg.approvals_owed(run), [("seraph", ["api"])])
+        with self.assertRaises(pg.StepError):
+            pg.step("all done", kind="done")
+
+    def test_a_builders_own_close_lands_at_once_and_a_reviewers_waits_for_its_gates(self):
+        plan = self.plan()
+        self.assertEqual(plan["api"]["state"], "done")  # not a review: the member's own close lands at once
+        self.assertEqual(plan["review"]["state"], "running")  # its verdict waits for the report to pass the gates
+        run = pg.load_run("claude", "s1")
+        self.assertEqual(run.get("approvals") or [], [])
+        self.assertEqual(pg.approvals_owed(run), [("seraph", ["api"])])
+        out = self.closed["lane_outcome"]
+        self.assertEqual((out["step"], out["closed"]), ("review", False))
+        self.assertIn("crew gates", out["why"])
+
+    def test_a_review_the_gates_send_back_approves_nothing_even_when_let_through(self):
+        sent = json.loads(self.stop() or "{}")
+        self.assertEqual(sent.get("decision"), "block")
+        self.assertIn("crew gates", sent.get("reason", ""))
+        self.assertEqual(self.plan()["review"]["state"], "running")
+        self.assertEqual(pg.load_run("claude", "s1").get("approvals") or [], [])
+        with self.assertRaises(pg.StepError):  # the run cannot end on a review the gates sent back
+            pg.step("all done", kind="done")
+        # the next stop is let through without the gates judging it again: that is no pass, so no approval
+        self.assertEqual(self.stop(stop_hook_active=True), "")
+        self.assert_approves_nothing()
+
+    def test_a_review_whose_gates_crash_approves_nothing(self):
+        from devkit import gates
+        tr = self.transcript('dev progress step "review done" --step review --check "✓ read the diff, 9 tests pass"')
+        with mock.patch.object(gates, "crew_gates", side_effect=RuntimeError("the gates broke")):
+            self.assertEqual(self.stop(tr), "")  # the gates fail open: the member is not sent back
+        self.assert_approves_nothing()
+
+    def test_a_review_whose_findings_are_only_recorded_approves_nothing(self):
+        with mock.patch.dict(core.CFG, {"crew": {"gates": {"enforce": False}}}):
+            self.assertEqual(self.stop(), "")  # the gates record what is missing and let the report through
+        self.assert_approves_nothing()
+
+    def test_a_review_whose_report_passes_the_gates_approves_the_work_it_follows(self):
+        from devkit import gates
+        tr = self.transcript('dev progress step "review done" --step review --check "✓ read the diff, 9 tests pass"')
+        self.assertEqual(gates.crew_gates("seraph", str(tr), ""), [])  # the gates have nothing to send back
+        passed = time.time()
+        self.assertEqual(self.stop(tr), "")
+        self.assertEqual(self.plan()["review"]["state"], "done")
+        run = pg.load_run("claude", "s1")
+        self.assertEqual([(a["by"], a["steps"], a["verdict"]) for a in run.get("approvals") or []],
+                         [("seraph", ["api"], "approved")])
+        self.assertGreaterEqual(run["approvals"][0]["ts"], passed)  # recorded when the report passed, not before
+        self.assertEqual(pg.approvals_owed(run), [])
+
+
 class OwnRunFirstTests(unittest.TestCase):
     # part of B-g7g1e0a8l9g: dev progress listed the live runs newest first, so another session's run that started
     # later came first, and a status block once took that run's step counts
