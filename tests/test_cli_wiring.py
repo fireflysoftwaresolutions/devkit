@@ -11,7 +11,9 @@ import contextlib
 import io
 import json
 import os
+import subprocess
 import sys
+import tempfile
 import time
 import unittest
 from pathlib import Path
@@ -19,9 +21,12 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from devkit import audit, cli, core, progress as pg  # noqa: E402
+import _sandbox  # noqa: E402  (the environment of a devkit child: the suite's stand-ins first on PATH)
+from devkit import audit, bugs, cli, core, progress as pg  # noqa: E402
 from test_language_neutral_hooks import HookCase  # noqa: E402
 from test_progress import TempState, launch  # noqa: E402
+
+DEV = Path(__file__).resolve().parents[1] / "bin" / "dev"
 
 REPORT = ("**[Firefly> DevKit · Release engineer (Link)]** api · `main` · tag\n- **Done:** tagged v1\n"
           "- **Check:** ✓ the tag points at the verified commit\n- **Next:** Morpheus")
@@ -142,6 +147,44 @@ class ParserReadsFlagsAsTheGuardDoesTests(unittest.TestCase):
                 (flags if act.nargs == 0 else values).update(act.option_strings)
         self.assertEqual(sorted(values - guard._DEV_VALUES), [])  # a value it does not know reads as a word
         self.assertEqual(sorted(flags & guard._DEV_VALUES), [])  # a flag it reads as a value hides the next word
+
+
+class ClosedPipeTests(unittest.TestCase):
+    # `dev audit --json | head -c 100`: the reader closes the pipe before dev has written everything. dev stops
+    # quietly with the exit code of a program that a closed pipe stopped (128 + SIGPIPE, as `yes | head` reports it)
+    # and records no crash: a reader that has read enough is no devkit bug.
+
+    def test_a_write_to_a_closed_pipe_during_the_command_is_no_crash(self):
+        # what `print(json.dumps(recs))` in cmd_audit raised once its output passed the 128 KiB buffer
+        def write_to_a_closed_pipe(a):
+            raise BrokenPipeError(32, "Broken pipe")
+
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(bugs, "BUGS", Path(d) / "bugs"), \
+                mock.patch.object(bugs, "CRASHES", Path(d) / "crashes"), \
+                mock.patch.object(cli, "cmd_version", write_to_a_closed_pipe):
+            rc, out = dev("version")
+            self.assertEqual((rc, out), (141, ""))
+            self.assertFalse((Path(d) / "crashes").exists())
+            self.assertEqual(bugs.occurrences(""), [])
+
+    def test_a_closed_pipe_at_exit_ends_dev_quietly(self):
+        # the version line stays in the output buffer until the process exits; the pipe's reading end is closed
+        # before dev starts, so that flush meets a closed pipe
+        with tempfile.TemporaryDirectory() as d:
+            home = Path(d).resolve()
+            env = _sandbox.env(base={"HOME": str(home), "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+                                     "LANG": "en_US.UTF-8", "DEVKIT_NO_NOTIFY": "1"})
+            r, w = os.pipe()
+            os.close(r)
+            try:
+                p = subprocess.run([sys.executable, "-I", "-S", str(DEV), "version"], stdout=w, stderr=subprocess.PIPE,
+                                   stdin=subprocess.DEVNULL, env=env, cwd=str(home), timeout=60)
+            finally:
+                os.close(w)
+            self.assertEqual((p.returncode, p.stderr.decode(errors="replace")), (141, ""))
+            crashes = home / ".local" / "state" / "devkit" / "crashes"
+            self.assertEqual(sorted(f.name for f in crashes.iterdir()) if crashes.is_dir() else [], [])
 
 
 if __name__ == "__main__":

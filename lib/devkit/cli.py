@@ -4685,6 +4685,23 @@ def _crashed(argv, exc: BaseException) -> int:
     return bugs.handle_crash(argv, exc)
 
 
+def _closed_pipe() -> int:
+    """The reader of dev's output went away before dev finished writing (`dev audit --json | head -c 100`): that is
+    no devkit bug, so no crash record and no notice. What is left to write goes to /dev/null, so the flush at exit
+    cannot fail again, and dev exits as a program that SIGPIPE stopped (128 + 13 = 141), the code the shell and
+    `set -o pipefail` report for `yes | head`."""
+    import signal
+    try:
+        null = os.open(os.devnull, os.O_WRONLY)
+        try:
+            os.dup2(null, sys.stdout.fileno())
+        finally:
+            os.close(null)
+    except (OSError, ValueError):  # an output with no file descriptor (a test's StringIO): nothing to redirect
+        pass
+    return 128 + signal.SIGPIPE
+
+
 def main(argv=None) -> int:
     global _ARGV
     argv = sys.argv[1:] if argv is None else argv
@@ -4709,6 +4726,7 @@ def main(argv=None) -> int:
     rc = 1
     try:
         rc = a.fn(a) or 0
+        sys.stdout.flush()  # a reader that closed the pipe shows here, where it is handled, not in the flush at exit
         return rc
     except KeyboardInterrupt:
         rc = 130
@@ -4716,6 +4734,9 @@ def main(argv=None) -> int:
     except CodexSessionError as e:
         print(f"{a.cmd}: {e}")
         rc = 2
+        return rc
+    except BrokenPipeError:  # before Exception: a closed pipe is the reader's choice, not devkit's crash
+        rc = _closed_pipe()
         return rc
     except Exception as e:  # devkit's own bug: a notice with its marker and exit 70, never a traceback
         rc = _crashed(argv, e)
