@@ -1165,6 +1165,33 @@ def build_command(top, runner, files=(), ids=(), report=None, related=(), all_=F
 # --------------------------------------------------------------------------- results
 
 
+def _pytest_module(rootdir, rel) -> str:
+    """The name pytest's default import mode imports test file `rel` (relative to `rootdir`) by: its file name, after
+    the names of the packages (folders with an __init__.py) that hold it."""
+    parts = rel.replace("\\", "/").split("/")
+    i = len(parts) - 1
+    while i > 0 and os.path.isfile(os.path.join(rootdir, *parts[:i], "__init__.py")):
+        i -= 1
+    return ".".join(parts[i:-1] + [re.sub(r"\.py$", "", parts[-1])])
+
+
+def _pytest_buckets(top, runner, files, ids) -> list:
+    """Test files (relative to the top) and node ids -> [(files, ids)], as few sets as possible in which no two test
+    files share the name pytest imports them by."""
+    rootdir = _rootdir(top, runner)
+    buckets = []  # [({module name: its file}, files, ids)]
+    for kind, item, rel in [("f", f, _rel(top, runner, f)) for f in files] + \
+                           [("i", i, _id(i).split("::")[0]) for i in ids]:
+        mod = _pytest_module(rootdir, rel)
+        b = next((b for b in buckets if b[0].get(mod, rel) == rel), None)
+        if b is None:
+            b = ({}, [], [])
+            buckets.append(b)
+        b[0][mod] = rel
+        (b[1] if kind == "f" else b[2]).append(item)
+    return [(fs, i_s) for _, fs, i_s in buckets]
+
+
 def _case(id_, file, line, status, message="", secs=0.0, name=""):
     return {"id": id_, "file": file, "line": line, "status": status, "message": (message or "")[:300],
             "secs": round(float(secs or 0), 3), "name": name or id_}
@@ -1589,6 +1616,23 @@ def run_tests(top, runner, files=(), ids=(), related=(), all_=False, env=None, s
                                        [i for i in ids if _id(i).split("::")[0] == f], env=env, stream=stream,
                                        log=part_log, timeout=timeout))
             return _merged_runs(parts, files, ids, log)
+    if runner["name"] == "pytest" and not related:
+        # pytest's default import mode imports a test file by its name inside its packages: two test files of one
+        # process with the same such name (tests/unit/x/test_api.py, tests/integration/x/test_api.py, no
+        # __init__.py) fail to collect. Each set of files with distinct names runs in its own process.
+        if all_:
+            repo = _Repo(top)
+            picked = [t for t in repo.tests if (owner(repo.runners(), t) or {}).get("root") == runner["root"]
+                      and _lang(t) == "py"]
+        else:
+            picked = files
+        buckets = _pytest_buckets(top, runner, picked, [] if all_ else ids)
+        if len(buckets) > 1:
+            parts = [run_tests(top, runner, fs, i_s, env=env, stream=stream, log=f"{log}.{k}" if log else None,
+                               timeout=timeout) for k, (fs, i_s) in enumerate(buckets)]
+            merged = _merged_runs(parts, [] if all_ else files, [] if all_ else ids, log)
+            merged["all"] = bool(all_)
+            return merged
     tmpd = core.STATE / "tests" / "tmp"
     tmpd.mkdir(parents=True, exist_ok=True)
     work = Path(tempfile.mkdtemp(prefix="run-", dir=str(tmpd)))

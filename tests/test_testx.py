@@ -1422,9 +1422,13 @@ def with_tests(*extra):
 # name[value] as pytest names them, and writes pytest's JUnit report (classname and name, as pytest's xunit2 does).
 # A module it cannot import is a collection error, reported as pytest 9 reports it (no classname, the dotted module as
 # the name, "collection failure" and the error on an `E` line), and it stops the session before any test runs
-# unless --continue-on-collection-errors is given.
+# unless --continue-on-collection-errors is given. As pytest's default import mode does, it imports a test file by its
+# name inside the packages that hold it, so two files of one session with the same such name fail to collect ("import
+# file mismatch"). Without file arguments it collects tests/**/test_*.py.
 STANDIN_PYTEST = '''
+import glob
 import importlib.util
+import os
 import sys
 import xml.etree.ElementTree as ET
 
@@ -1441,7 +1445,22 @@ class _Mark:
 mark = _Mark()
 
 
+_SEEN = {}
+
+
+def _module_name(path):
+    parts = path[:-3].split("/")
+    i = len(parts) - 1
+    while i > 0 and os.path.isfile(os.path.join(*parts[:i], "__init__.py")):
+        i -= 1
+    return ".".join(parts[i:])
+
+
 def _load(path):
+    name = _module_name(path)
+    if _SEEN.setdefault(name, path) != path:
+        raise ImportError(f"import file mismatch: imported module '{name}' has this __file__ attribute: "
+                          f"{_SEEN[name]} which is not the same as the test file we want to collect: {path}")
     spec = importlib.util.spec_from_file_location(path[:-3].replace("/", "."), path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
@@ -1460,7 +1479,8 @@ def main(argv):
     suite = ET.Element("testsuite", name="pytest")
     ran = failed = 0
     loaded = []
-    for target in [a for a in argv if not a.startswith("-")]:
+    targets = [a for a in argv if not a.startswith("-")] or sorted(glob.glob("tests/**/test_*.py", recursive=True))
+    for target in targets:
         path = target.partition("::")[0]
         try:
             loaded.append((target, _load(path)))
@@ -1539,6 +1559,59 @@ NODE_CHANGE = {
     "test/page.mjs": 'import { check } from "./harness.mjs";\nimport { slug } from "../lib/slug.mjs";\n\n'
                      'check(slug("Two Words") === "two-words", "the page slug joins its words");\n',
 }
+
+
+# unit and integration tests with the same file name in folders that are no packages: pytest's default import mode
+# imports both as `test_api`, so one pytest process cannot collect both
+SAME_NAME_BASE = {
+    "pytest.ini": "[pytest]\n",
+    "pytest.py": STANDIN_PYTEST,
+    "api.py": "def version():\n    return 1\n",
+    "tests/unit/x/test_api.py": "import sys\nfrom pathlib import Path\n\n"
+                                "sys.path.insert(0, str(Path(__file__).resolve().parents[3]))\nimport api  # noqa: E402\n\n\n"
+                                "def test_unit_version():\n    assert api.version() >= 1\n",
+    "tests/integration/x/test_api.py": "import sys\nfrom pathlib import Path\n\n"
+                                       "sys.path.insert(0, str(Path(__file__).resolve().parents[3]))\n"
+                                       "import api  # noqa: E402\n\n\ndef test_integration_version():\n"
+                                       "    assert api.version() in (1, 2)\n",
+    ".gitignore": "__pycache__/\n",
+}
+
+
+class SameNameTestFileTests(unittest.TestCase):
+    # the two files named on the command line run in separate pytest processes, and both pass
+    def test_named_test_files_with_one_module_name_run_in_separate_processes(self):
+        with Env() as e:
+            r = e.repo(SAME_NAME_BASE)
+            rc, out, err = dev(r, "run", "tests/unit/x/test_api.py", "tests/integration/x/test_api.py", "--json")
+            run = json.loads(out)["steps"][0]["runs"][0]
+            self.assertEqual((rc, run["count"], run["failed"]), (0, 2, 0), out + err)
+            self.assertEqual(sorted(run["files"]), ["tests/integration/x/test_api.py", "tests/unit/x/test_api.py"])
+
+    # a change that every test depends on runs the whole suite: split the same way, and timed as the full suite
+    def test_the_whole_suite_with_one_module_name_twice_runs_in_separate_processes(self):
+        with Env() as e:
+            r = e.repo(SAME_NAME_BASE)
+            edit(r, {"api.py": "def version():\n    return 2\n"})
+            rc, out, err = dev(r, "--json")
+            run = json.loads(out)["steps"][0]["runs"][0]
+            self.assertEqual((rc, run["all"], run["count"], run["failed"]), (0, True, 2, 0), out + err)
+            self.assertEqual(state(e)["full"]["pytest:."]["count"], 2)
+
+    # a recorded failure of each file reruns first, each in its own process
+    def test_recorded_failures_of_both_files_rerun_in_separate_processes(self):
+        with Env() as e:
+            r = e.repo(SAME_NAME_BASE)
+            edit(r, {"api.py": "def version():\n    return 0\n"})
+            rc, out, err = dev(r, "run", "tests/unit/x/test_api.py", "tests/integration/x/test_api.py")
+            self.assertEqual(rc, 1, out + err)
+            self.assertEqual(recorded(e), ["tests/integration/x/test_api.py::test_integration_version",
+                                           "tests/unit/x/test_api.py::test_unit_version"])
+            edit(r, {"api.py": "def version():\n    return 1\n"})
+            rc, out, err = dev(r, "run", "--failed", "--json")
+            run = json.loads(out)["steps"][0]["runs"][0]
+            self.assertEqual((rc, run["count"], run["failed"]), (0, 2, 0), out + err)
+            self.assertEqual(recorded(e), [])
 
 
 class ProveTests(unittest.TestCase):
