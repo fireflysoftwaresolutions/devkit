@@ -57,9 +57,18 @@ class BuildMemberCredit(GateCase):
         guide = self.another_lane_writes_the_guide()
         pg.note_edit("claude", {"tool_name": "Write", "session_id": "s1", "agent_id": "a_ghost",
                                 "tool_input": {"file_path": str(guide)}}, now=time.time())
-        self.tx.bash("python3 - <<'EOF'\nprint(open('docs/guide.md').read().count('lane'))\nEOF")
+        # a program of the member that may write the doc: with the edit record, the other caller's edit is theirs;
+        # without it, the member may have written the doc and owes its proof and skill
+        self.tx.bash("python3 - <<'EOF'\nopen('docs/guide.md', 'a').write('')\nEOF")
         self.assertEqual(self.rules(self.gates_of_lane()), [])
         self.assertEqual(self.rules(self.gates(KID_DOCS)), [("proofs", "dev docs check"), ("skills", "docs")])
+
+    def test_a_doc_the_members_program_only_read_owes_it_nothing(self):
+        # the guard reads the program: it opens the doc to read and writes nothing, so the doc is not the member's
+        self.finished()
+        self.another_lane_writes_the_guide()
+        self.tx.bash("python3 - <<'EOF'\nprint(open('docs/guide.md').read().count('lane'))\nEOF")
+        self.assertEqual(self.rules(self.gates(KID_DOCS)), [])
 
     def test_the_edit_record_keeps_a_lanes_edits_for_its_whole_life(self):
         t0 = time.time() - 3 * 3600  # an edit three hours ago, then another one now

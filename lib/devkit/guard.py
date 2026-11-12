@@ -9164,9 +9164,13 @@ def _py_reader_why(code, cwd, member) -> str:
     paths, why = _py_write_paths(code, cwd)
     if why:
         return why + (", in your scratch folder" if why.endswith("write the path out") else "")
+    here = resolve(".", cwd) if cwd else UNKNOWN
     for q in paths:
         r = resolve(q, cwd)
-        if r != UNKNOWN and is_temp(r) and not _SCRATCHPAD.match(str(r)):
+        # a temporary folder, but not the folder the command runs in: a checkout copied to a temporary folder (a test
+        # repository, `dev test prove`'s copy) is still a repository
+        if r != UNKNOWN and is_temp(r) and not _SCRATCHPAD.match(str(r)) and \
+                (here == UNKNOWN or not is_under(r, here)):
             continue
         why = _ro_scratch_target(q, cwd, member)
         if why:
