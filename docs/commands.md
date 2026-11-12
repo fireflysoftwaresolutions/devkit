@@ -885,6 +885,9 @@ configuration files win over devkit's defaults.
 | `--fix` | Apply markdownlint's automatic fixes first |
 | `--no-prose` | Skip Vale |
 
+Vale's errors print first, every one of them; its warnings follow, up to 40, then a line with how many were left
+out, their files, and the `vale` command that lists them all.
+
 ### `dev diagram render | check | new`
 
 Branded, validated SVG diagrams from JSON specs. See [Diagrams](diagrams.md).
@@ -1144,8 +1147,9 @@ first error line, and the path to the full log.
 
 Exit codes: `0` when the tests pass or nothing needs to run, `1` when a test fails, and `2` when a selection ran no
 test at all (a mistyped path, a filter that matches nothing), no runner fits, or plain `dev test` did not start a wide
-branch's selection. `dev test prove` exits `1` unless every test it ran proves the change, and `2` when no test is left
-that a runner here can run; `dev test audit` exits `1` on a high finding.
+branch's selection. `dev test prove` exits `0` when every test that ran proves the change (a test skipped in every run is listed as
+skipped, neither proven nor failing), `1` when one does not, and `2` when none could be proven or no test is left that
+a runner here can run; `dev test audit` exits `1` on a high finding.
 
 ### `dev stubs [<paths>…] [--staged | --since REF | --all] [--json] [-p PROJECT]`
 

@@ -218,6 +218,10 @@ Refs: PROJ-142
 - **Not on the default branch.** In a repository with an `origin`, a commit on `main` is refused with
   `dev branch new`, which takes your changes along. A branch with a non-conforming name is refused with
   `dev branch rename`.
+- **Not in the middle of another git operation.** While git's own marks show a revert, cherry-pick, merge, rebase, or
+  `git am` stopped halfway, `dev commit` refuses before it stages anything, names the operation, and says how the one
+  who started it finishes it. A commit then would finish that operation for them, which matters in a checkout that
+  crew members share.
 - **No AI attribution.** `Co-Authored-By` and `Generated with` lines for Claude, Codex, ChatGPT, Copilot, Gemini,
   Cursor, and others are removed from the message, and the output says how many.
 - **No secrets.** The guard's gitleaks scan runs on what the commit records.
