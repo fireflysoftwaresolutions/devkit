@@ -425,6 +425,11 @@
       "what": "The guard refused a crew member's command or program that runs `dev session tell`, `ask`, `answer`, `claim`, `release`, or `escalate`. These act for the whole session, so only its tech lead runs them.",
       "reproduce": "As a crew member, run a Python program that calls `dev session tell` through `subprocess`."
     },
+    "crew_shell_verdict:write-then-run": {
+      "title": "Guard refuses a crew command that writes a script and then runs it",
+      "what": "The guard refused a crew member's command that writes a file and then runs it as a program in the same command, because the guard judges a script by the file it reads before the command runs, not by what the command writes into it.",
+      "reproduce": "As a crew member, run `echo 'print(1)' > probe.py && python3 probe.py`."
+    },
     "crew_shell_verdict:team": {
       "title": "Guard refuses a crew member dev crew command that changes the team",
       "what": "The guard refused a crew member's `dev crew` command that changes the team's crew or briefs a member, such as `dev crew set` or `dev crew brief`. The tech lead runs those.",
