@@ -13,6 +13,7 @@ errors, logs them to ~/.local/state/devkit/logs/hooks.log and exits 0.
 from __future__ import annotations
 
 import copy
+import functools
 import io
 import json
 import re
@@ -1656,6 +1657,22 @@ def identity_change(cmd: str, cwd=None) -> list:
     return sorted(set(found))
 
 
+def _in_guard_time(as_reason: bool = False):
+    """Decorator for the guard hook's own judges of a call (guard._in_time): each runs within the guard's time,
+    which in the hook's own process every judge of the call shares from the moment the guard loaded, check's
+    included. An agent that stops the hook at its timeout runs the call unjudged, so past that time the judge refuses
+    the call: ("deny", guard.judge_time_reason(…)), or the reason alone with `as_reason`. guard.py loads at the first
+    call, as each judge loads it."""
+    def wrap(fn):
+        @functools.wraps(fn)
+        def in_time(*args, **kwargs):
+            from . import guard
+            return guard._in_time(as_reason=as_reason)(fn)(*args, **kwargs)
+        return in_time
+    return wrap
+
+
+@_in_guard_time()
 def _identity_verdict(data: dict):
     """Inside a subagent: ("deny", why) for a shell command that changes who calls devkit; None otherwise."""
     if not data.get("agent_id") or data.get("tool_name") not in SHELL_TOOLS:
@@ -2608,6 +2625,7 @@ EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit", "apply_patch")
 COMMIT_RE = re.compile(r"\bgit\s+(?:-C\s+(\S+)\s+)?commit\b|\bdev\s+commit\b")
 
 
+@_in_guard_time()
 def _stub_commit_gate(data: dict):
     """A commit that would include unfinished work (stubs, placeholders, TODOs without a task) is refused.
     DEVKIT_ALLOW_STUBS=1 as the commit's own prefix, or `dev commit --wip`, when the developer accepts them (spec F8,
@@ -2637,6 +2655,7 @@ def _stub_commit_gate(data: dict):
     return None
 
 
+@_in_guard_time()
 def _crew_limits(agent: str, data: dict):
     """Coordination guardrails -> ("deny", reason) or None:
     - the crew's slots (progress.launch_verdict): `progress.max_parallel` (default 4) under the team's ceiling,
@@ -2721,13 +2740,15 @@ def _lane_scope_miss(path: str, cwd: str, top: str, layers: list):
     return None if holds(ap) else (rel, "")
 
 
+@_in_guard_time(as_reason=True)
 def _scope_violation(agent: str, data: dict):
     """A crew member assigned a scope (dev progress assign … --scope "globs") edits only those files, so parallel
     agents never write the same file, and review-only and read-only members edit nothing. A helper a member
     launches has the member's tool level and scope, never more (spec F3). Every subagent's file and MCP tools are
     judged by guard.member_tool_verdict (spec F8): no sending or publishing, no MCP writes from a review or read-only
     lane or outside the step's scope, no edit of the secret scan's ignore list. Scopes count from the run's
-    repository (spec F7, G13). -> the refusal, or None."""
+    repository (spec F7, G13). It judges within the guard's time, and a patch of more files than the guard judges is
+    refused. -> the refusal, or None."""
     aid, tool = data.get("agent_id"), str(data.get("tool_name") or "")
     if not aid or not (tool in EDIT_TOOLS or tool.startswith("mcp__")):
         return None
@@ -2771,6 +2792,8 @@ def _scope_violation(agent: str, data: dict):
             body = inp.get("input") or inp.get("patch") or inp.get("command") or ""
             paths = ([p for _, p in guard.parse_patch_paths(str(body))] if agent == "codex" else
                      re.findall(r"\*\*\* (?:Add|Update|Delete) File: (\S+)", str(body))) or paths
+        if len(paths) > guard._PATCH_PATHS:  # check refuses such a patch first; this holds for what only it reads
+            return guard.PATCH_PATHS_REASON
         name = _who(lane.get("persona") or lane.get("label") or "this crew member")
         head = _who(chain[-1].get("persona") or chain[-1].get("label") or "its crew member")
         if len(chain) > 1:  # a helper: the limits it inherits are its member's
@@ -2834,6 +2857,7 @@ def _guard_off(agent: str, data: dict):
                      "session", "allow", rule="guard-off", session=sid, tool=data.get("tool_name") or "")
 
 
+@_in_guard_time()
 def _irreversible_main(agent: str, data: dict):
     """The main session's irreversible-action gate (spec C6, F5 tiers): a shell command's tier-2 actions, and an MCP
     tool that sends or publishes outside this machine, need the developer's live grant while
@@ -2982,15 +3006,19 @@ def _guard_in_context(agent: str, data: dict, held: dict):
                 _swallowed("guard", e)
         why = _scope_violation(agent, data)
         if why:
-            held["verdict"], held["rule"] = ("deny", why), "crew-scope"
+            # the guard's time ran out during the scope check: recorded as the guard's own time refusal
+            late = why == g.judge_time_reason(g.judge_budget())
+            rule = "judge-time" if late else "crew-scope"
+            rid = (late and g.refusal_of(("deny", why))[0]) or "hooks:crew-scope"
+            held["verdict"], held["rule"] = ("deny", why), rule
             _log(f"guard {agent} deny: {why[:160]}")
             _close_call(data)
             from . import audit
             audit.record("guard.deny", (data.get("tool_input") or {}).get("file_path") or data.get("tool_name") or "",
-                         why[:400], "deny", tool=data.get("tool_name") or "", rule="crew-scope",
-                         agent_id=data.get("agent_id") or "", refusal_id="hooks:crew-scope")
+                         why[:400], "deny", tool=data.get("tool_name") or "", rule=rule,
+                         agent_id=data.get("agent_id") or "", refusal_id=rid)
             held["recorded"] = True  # a failure after this keeps the refusal, and records it no second time
-            told = _with_pitfalls(agent, data, _refusal_with_bug("hooks:crew-scope", "", why, data), why, skip)
+            told = _with_pitfalls(agent, data, _refusal_with_bug(rid, "", why, data), why, skip)
             print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
                                                      "permissionDecisionReason": told}}))
             return

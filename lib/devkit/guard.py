@@ -327,9 +327,11 @@ def _time_limit(seconds: float):
             signal.setitimer(signal.ITIMER_REAL, max(outer[0] - time.monotonic(), 0.001), period)
 
 
-def _in_time(judged: bool = False):
-    """Decorator: a judge of a call (check, a gate) runs within the guard's time; past it, its verdict refuses the
-    call with judge_time_reason, through _judged when `judged` (check's own verdicts do)."""
+def _in_time(judged: bool = False, as_reason: bool = False):
+    """Decorator: a judge of a call (check, a gate, the guard hook's own judges) runs within the guard's time; past
+    it, its verdict refuses the call with judge_time_reason, through _judged when `judged` (check's own verdicts do),
+    and as the reason alone when `as_reason` (a judge that returns only its refusal's reason). The outermost judge
+    opens the judgment that _once keeps git's answers for."""
     def wrap(fn):
         @functools.wraps(fn)
         def _judged_in_time(*args, **kwargs):
@@ -337,7 +339,7 @@ def _in_time(judged: bool = False):
                 return fn(*args, **kwargs)
             budget = judge_budget()
             left = budget - (time.monotonic() - _LOADED) if _IN_GUARD_HOOK else budget
-            token = _TIMED.set(True)
+            token, asked = _TIMED.set(True), _ASKED.set({})
             try:
                 if left <= 0:
                     raise _OutOfTime()
@@ -345,11 +347,32 @@ def _in_time(judged: bool = False):
                     return fn(*args, **kwargs)
             except _OutOfTime:
                 verdict = deny(judge_time_reason(budget), key="judge-time")
+                if as_reason:
+                    return verdict[1]
                 return _judged(verdict) if judged else verdict
             finally:
+                _ASKED.reset(asked)
                 _TIMED.reset(token)
         return _judged_in_time
     return wrap
+
+
+# What one judgment asks git about a folder (its project, whether it lies in a checkout), kept until the judgment
+# ends: a patch names up to _PATCH_PATHS files, often in a few folders, and asking git for each (6 ms in a temporary
+# repository, 20 ms and three git processes in a real one) outran the guard's time. A call may run after a checkout
+# changed, so nothing is kept from one judgment to the next.
+_ASKED = contextvars.ContextVar("devkit_guard_asked", default=None)
+
+
+def _once(kind: str, key: str, ask):
+    """ask()'s answer for (`kind`, `key`), asked once per judgment (_in_time) and kept until it ends; outside a
+    judgment, asked each time."""
+    asked = _ASKED.get()
+    if asked is None:
+        return ask()
+    if (kind, key) not in asked:
+        asked[(kind, key)] = ask()
+    return asked[(kind, key)]
 
 
 # The escape hatches a command's own prefix sets (DEVKIT_RAW_GH=1 gh pr merge …): the main session may use them, and
@@ -631,9 +654,14 @@ def session_project(cwd):
 
 
 def current_project(cwd):
-    """Project id of the session's working directory, or None for portfolio-level sessions."""
+    """Project id of the session's working directory, or None for portfolio-level sessions. Asked once per judgment
+    for each folder (_once)."""
     if not cwd or str(cwd) == str(UNKNOWN):
         return None
+    return _once("project", str(cwd), lambda: _project_at(cwd))
+
+
+def _project_at(cwd):
     top = core.gitout(cwd, "rev-parse", "--show-toplevel")
     if not top or is_temp(top) or real(top) == real(core.HANDOFF):
         return None
@@ -2787,6 +2815,22 @@ PATCH_HEADER_REASON = (
     "writes. Name the file without it.")
 
 
+# the files one apply_patch may name (its Add, Update, Delete and Move to headers). check judges each one, and a crew
+# lane's scope check judges each again; a patch of a few thousand files ran past the hook's timeout, so past the bound
+# the guard refuses the patch before it judges any of its files. Real patches stay far below it.
+_PATCH_PATHS = 1_000
+PATCH_PATHS_REASON = (
+    f"This patch names more than {_PATCH_PATHS:,} files, more than the guard judges in one call: it judges each file "
+    f"a patch adds, updates, moves or deletes, and refuses a patch it cannot judge in full within its time. Split it "
+    f"into patches of at most {_PATCH_PATHS:,} files each.")
+
+
+def patch_size_refusal(patch: str):
+    """("deny", PATCH_PATHS_REASON) when an apply_patch envelope names more files than _PATCH_PATHS; None
+    otherwise."""
+    return deny(PATCH_PATHS_REASON) if len(parse_patch_paths(patch)) > _PATCH_PATHS else None
+
+
 def patch_header_refusal(patch: str):
     """("deny", why) when an Add, Update, Delete or Move header of an apply_patch envelope holds a control character
     or a line separator in its path (_PATH_CONTROL); None otherwise."""
@@ -3946,7 +3990,7 @@ def patch_devkit_off(patch: str, cwd):
 def protected_patch(patch: str, cwd):
     """apply_patch: Add, Update, Delete and Move all count, and an added DEVKIT_* line in a settings or shell startup
     file."""
-    v = patch_header_refusal(patch) or patch_note_violation(patch, cwd)
+    v = patch_size_refusal(patch) or patch_header_refusal(patch) or patch_note_violation(patch, cwd)
     if v:
         return v
     added = _unescape("\n".join(ln[1:] for ln in _patch_lines(patch) if ln.startswith("+")))
@@ -12317,11 +12361,12 @@ def bulk_rewrite(cmd: str, cwd=None) -> bool:
 
 
 def _in_checkout(path) -> bool:
-    """True when `path` lies in a git checkout (a worktree or a repository in a temp folder keeps its scope)."""
+    """True when `path` lies in a git checkout (a worktree or a repository in a temp folder keeps its scope). Asked
+    once per judgment for each folder (_once)."""
     d = os.path.dirname(real(path))
     while d and not os.path.isdir(d):
         d = os.path.dirname(d)
-    return bool(d and core.gitout(d, "rev-parse", "--show-toplevel"))
+    return bool(d) and _once("checkout", d, lambda: bool(core.gitout(d, "rev-parse", "--show-toplevel")))
 
 
 def member_write_exempt(path, cwd, scope=None, member=None, base=None) -> bool:

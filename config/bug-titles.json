@@ -645,6 +645,11 @@
       "what": "The guard refused an `apply_patch` that changes or removes the embargo list or the backup policy of a project's handoff note.",
       "reproduce": "In Codex, apply a patch that removes the embargo list from a project's handoff note."
     },
+    "patch_size_refusal": {
+      "title": "Guard refuses a patch that names more files than it judges",
+      "what": "The guard refused an `apply_patch` that adds, updates, moves or deletes more than 1,000 files. It judges each file a patch names, so a patch this large could outrun the hook's timeout, which would let it run unjudged.",
+      "reproduce": "In Codex, apply one patch that adds 1,001 files."
+    },
     "protected_patch:dev-command": {
       "title": "Guard refuses a patch of the dev command a shell finds",
       "what": "The guard refused an `apply_patch` that writes or deletes the `dev` a shell finds on the PATH, such as `~/.local/bin/dev`. `dev install` links it to the pinned copy.",

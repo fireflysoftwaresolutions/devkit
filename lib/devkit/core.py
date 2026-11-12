@@ -857,7 +857,9 @@ def _flock_within(fd: int, wait: float) -> bool:
     """Take an exclusive flock on `fd` within `wait` seconds. -> whether it is held. On the main thread it waits in
     the kernel (a blocking flock, ended by a SIGALRM timer), where a waiter gets the lock when it is released, even
     from a process that takes it again at once; polling would rarely catch that moment. Other threads, which cannot
-    take signals, poll."""
+    take signals, poll. A timer the caller set (the guard's time to judge a call) keeps its deadline: when it is due
+    during the wait its handler runs then, and the guard's raises to end the judgment; a handler that returns lets
+    the wait go on. Afterwards the caller's timer has the time it has left and its repeat."""
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         return True
@@ -874,23 +876,50 @@ def _flock_within(fd: int, wait: float) -> bool:
                 pass
         return False
     import signal
+    started = time.monotonic()
+    deadline = started + wait
+    pending, period = signal.getitimer(signal.ITIMER_REAL)  # a timer the caller had set, such as the guard's
+    before = signal.getsignal(signal.SIGALRM)
+    before = signal.SIG_DFL if before is None else before  # None: a handler set outside Python
+    due = [started + pending if pending else None]  # when the caller's timer is due next
+
+    def next_tick():  # the end of the wait, or the caller's timer when its Python handler is due first
+        first = min(deadline, due[0]) if due[0] is not None and callable(before) else deadline
+        signal.setitimer(signal.ITIMER_REAL, max(first - time.monotonic(), 0.001))
 
     def ran_out(signum, frame):
-        raise _LockWait()
+        now = time.monotonic()
+        if due[0] is not None and now >= due[0] and callable(before):  # the caller's timer: its handler has it,
+            due[0] = now + period if period else None  # and its repeat goes on
+            next_tick()
+            before(signum, frame)  # the guard's handler raises here once its time is up
+        if now >= deadline:
+            raise _LockWait()
+        next_tick()
 
-    before = signal.signal(signal.SIGALRM, ran_out)
-    started = time.monotonic()
-    pending = signal.setitimer(signal.ITIMER_REAL, wait)[0]  # a timer the caller had set: restored below
+    signal.signal(signal.SIGALRM, ran_out)
+    next_tick()
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
         return True
     except _LockWait:
         return False
     finally:
+        late = None
+        while True:  # ignore our ticks first: one still on its way is dropped, and never runs ran_out after this
+            try:
+                signal.signal(signal.SIGALRM, signal.SIG_IGN)
+                break
+            except _LockWait:
+                pass
+            except BaseException as e:  # the caller's handler raised on that tick: raised once its timer is back
+                late = e
         signal.setitimer(signal.ITIMER_REAL, 0)
         signal.signal(signal.SIGALRM, before)
-        if pending:
-            signal.setitimer(signal.ITIMER_REAL, max(pending - (time.monotonic() - started), 0.001))
+        if due[0] is not None:  # the caller's timer, with the time it has left and its repeat
+            signal.setitimer(signal.ITIMER_REAL, max(due[0] - time.monotonic(), 0.001), period)
+        if late is not None:
+            raise late
 
 
 @contextlib.contextmanager
