@@ -4426,8 +4426,8 @@ _ASKS_ACTION = re.compile(r"(?i)\b(?:(?:may|can|shall|should)\s+(?:i|we)\s+(?:no
 
 def _ungranted_notes(run, data: dict) -> list:
     """The main session's question tool call answered a question about an irreversible action that names no decision
-    devkit recorded, so the answer grants nothing (spec C5: a typed grant line, or the answer to a recorded decision,
-    and the rule stays). Without a word now, the developer learns it only when the guard refuses the action and the
+    devkit recorded, so the answer grants nothing (only a typed grant line, or the answer to a recorded decision,
+    grants, and that rule stays). Without a word now, the developer learns it only when the guard refuses the action and the
     tech lead asks again: [{"note": what to tell them, with the line to type}] for evidence_lines, or []. Never
     stored as evidence."""
     top = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
