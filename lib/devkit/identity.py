@@ -164,6 +164,12 @@ def _find(cwd=None, argv=None, now=None, exact: bool = False, settle: bool = Tru
     def found(lane_, how_, verified):
         return _Found(Speaker(agent, sid, lane_, how_, verified), agent, how, calls, ledger, tuple(members))
     if lane:
+        # the hook's stamp names the member whose command it is; a command that gave the variable another lane's id
+        # before this call is told apart by the call ledger: the open calls that typed this command are other
+        # members' only, so the caller is the most restricted of them, never the lane the variable names (a lane
+        # with only the tech lead's call keeps the stamp, which narrows)
+        if members and lane not in members:
+            return found(ledger, "ledger", True) if ledger else found("", "unknown", False)
         return found(lane, "stamped", True)
     guessed = how == "recency"  # a session devkit only guessed never makes its caller the tech lead (rules 3 to 5)
     if os.environ.get(SPEAKER_VAR) == "main" and not guessed and not any(c.get("caller") != "main" for c in typed):
