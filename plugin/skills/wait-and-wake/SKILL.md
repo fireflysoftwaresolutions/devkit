@@ -41,8 +41,8 @@ refuses the wait (exit 1) rather than guess: run `dev watch --wait` as a command
 | --- | --- | --- |
 | Claude Code main session | `dev watch --wait` with Bash `run_in_background: true`; name its task id in your reply | Read what it printed, act on each line, then arm it again if events can still arrive |
 | Claude Code crew member | After `dev crew ask`, keep working on what does not need the answer. When blocked: `dev watch --wait --for me --timeout 9` in the foreground, as a command of its own, with the Bash `timeout` at 600000 | Continue with the answer. With none, wait again only while still blocked, or end with the question under "Needs from the tech lead" |
-| Codex main session | A bounded foreground wait, for example `dev watch --wait --timeout 0.1` (six seconds); resume the same command if the host yields. If ending the turn, say what still runs and when you check it next | Act on events; arm another wait only while waiting for a result |
-| Codex crew member | When blocked on its own question, `dev watch --wait --for me --timeout 0.1` (six seconds), as a command of its own | Continue on the answer, or report what still blocks the lane |
+| Codex main session | A bounded foreground wait: `dev watch --wait --timeout 10`, as devkit's hint prints it, or a shorter one the host allows, such as `--timeout 0.1` (six seconds); resume the same command if the host yields. If ending the turn, say what still runs and when you check it next | Act on events; arm another wait only while waiting for a result |
+| Codex crew member | When blocked on its own question, `dev watch --wait --for me --timeout 9`, or a shorter one the host allows, such as `--timeout 0.1`, as a command of its own | Continue on the answer, or report what still blocks the lane |
 
 - **Claude Code main session.** A background command sends one notification when it exits and has no time limit, so
   the wait runs up to 240 minutes by default. Keep the Monitor tool for following one CI run job by job

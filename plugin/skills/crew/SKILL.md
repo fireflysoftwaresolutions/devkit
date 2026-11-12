@@ -140,11 +140,12 @@ dev crew graph --global              # every live session on this Mac (the defau
   approver, and the skills, knowledge, and known pitfalls in the brief, whatever language the step is written in.
 - The plan's `after` dependencies and each lane (the main session, each member) give the ETA as a critical path:
   `api` and `ui` run in parallel, so the ETA counts the longer one, not both.
-- **A step binds only to the launch that names it.** `assign` links a step to a working lane only when that lane
-  holds no other open step and its launch description names the step; otherwise the step waits for a launch of its
-  own, and you are told why. Put the step's name in the launch description (`dev crew brief --step` does). A step
-  delegated into a working lane closes only on that lane's own evidence: the member names it with
-  `dev progress step "…" --step "<name>" --check "…"`.
+- **A step binds to the launch that names it.** A new launch takes the ready step its description names, so put the
+  step's name in the launch description (`dev crew brief --step` does). `assign` gives a step to a member's working
+  lane at once, when its dependencies are done, if that lane's launch names the step or the lane holds no other open
+  step; otherwise the step is queued for the member's lanes (next item), or, when the member does not work, waits
+  for a launch, and you are told why. A step delegated into a working lane closes only on that lane's own evidence:
+  the member names it with `dev progress step "…" --step "<name>" --check "…"`.
 - The step's time is its member's own time, and its `--scope` is the set of files the guard lets that member edit.
   It is also what the member commits: in a crew lane, `dev commit` commits only the staged files inside the scope and
   leaves the rest staged for their owner, so members who share one checkout never commit the files of another. A
@@ -161,9 +162,10 @@ dev crew graph --global              # every live session on this Mac (the defau
   report, done only when the crew gates pass it. A `--step` on a step the lane does not hold, or still queued for it,
   exits 2 and records nothing. For a long step that stays open, the member records partial evidence with
   `dev progress note "…" --step "<name>" --check "…"`, which the crew gate accepts as the step's record.
-- **A busy member's next step waits in its lane.** Assigning a step to a member whose one working lane holds another
-  open step queues it for that lane: it joins, with its scope, when that step closes, one at a time in the order you
-  assigned them. If the lane ends first, or the member has two working lanes, the step waits for a launch.
+- **A busy member's next step waits in its lanes.** Assigning a step to a member whose working lanes all hold another
+  open step queues it for them: it joins, with its scope, the first lane whose step closes, one at a time in the
+  order you assigned them. To give it to one lane, assign it with that lane's launch description
+  (`--to "<description>"`; the notice prints the line). If the lanes end first, the step waits for a launch.
 - **Check who holds the files first.** Before you assign a scope, or edit files outside your own lane, run
   `dev crew owner <paths>`: it names the member whose step holds each path. A member whose lane ended or went stale
   holds no files. When a step and its files go to another lane, a lane that kept those files may read but not write
@@ -172,7 +174,8 @@ dev crew graph --global              # every live session on this Mac (the defau
   time is its own; close a step only with its evidence and only the step it is about.
 - `dev crew brief` prints the brief and the exact spawn line. Launch every parallel member **in one message**. Then
   do non-overlapping work, and never poll. Before you end a turn while members work, arm `dev watch --wait` (in
-  Claude Code with Bash `run_in_background`, in Codex in the foreground with `--timeout 10`) and name its task id:
+  Claude Code with Bash `run_in_background`; in Codex as a bounded wait in the foreground, with the `--timeout` its
+  host allows: devkit's hint prints `10`, ten minutes, and `0.1` is six seconds) and name its task id:
   it wakes you for their questions, the decisions for the developer, steps that become ready, members that stop or
   are lost, and CI results. Arm it again after each wake while members still work (`wait-and-wake` skill).
 

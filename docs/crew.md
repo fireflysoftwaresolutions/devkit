@@ -249,12 +249,13 @@ that launch alone, so two members launched together never swap lanes:
 - **The step it names.** A bound lane takes the ready step its launch's description names, never just the member's
   first step. `dev progress assign` gives a step to the member's working lane at once when that lane's launch names
   the step or the lane holds no other open step.
-- **The steps queued for it.** When the member works in one lane that holds another open step, the step is queued
-  for that lane: once its open step closes, the lane takes the first queued step whose dependencies are done, the
-  step's scope becomes the lane's, and the member is told. Queued steps join one at a time, in the order they were
-  assigned. When that lane ends or is resumed first, or the member works in two or more lanes, the step waits for a
-  launch of its own, and the tech lead is told why. Reopening a step while its member works gives it back to that
-  lane the same way.
+- **The steps queued for it.** When every working lane of the member holds another open step, the step is queued
+  for those lanes: once a lane's open step closes, that lane takes the first queued step whose dependencies are done,
+  the step's scope becomes the lane's, and the member is told. With two or more lanes, the first lane whose step
+  closes takes it; the tech lead's notice gives the `dev progress assign "<step>" --to "<launch description>"` line
+  that gives it to one lane instead. Queued steps join one at a time, in the order they were assigned. When the lanes
+  end or are resumed first, the step waits for a launch of its own, and the tech lead is told why. Reopening a step
+  while its member works gives it back to that member's lanes the same way.
 - **The steps its evidence is about.** A member's `dev progress step "…" --step "<name>" --check "…"` on a step its
   lane holds ends that step at once, by the rules of the member's end (done with a ✓ Check, otherwise unverified),
   and the next steps start while the member works on; the command's line says the step closed, or why it stays open.
