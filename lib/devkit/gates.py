@@ -47,6 +47,7 @@ import json
 import os
 import re
 import shlex
+import time
 from pathlib import Path
 
 from . import core, skillguard
@@ -57,9 +58,10 @@ LABELS = {"proofs": "proof not run", "skills": "skill not loaded", "stubs": "unf
           "tests": "tests that cannot fail in", "lessons": "no lesson after repeated refusals:",
           "background": "still running in the background:"}
 MAX_BYTES = 8_000_000  # the end of a very long member transcript is enough
-# The session record's members whose latest stop the gates have not passed cleanly (check): progress reads it at the
-# lane's end, where such a member's review steps approve nothing.
-UNPASSED = "crew_unpassed"
+# The session record's pass tokens, {agent id: the time its stop passed}: check writes one only when it judged a stop
+# and found nothing missing. At the lane's end, a review step's Check or a member's --approves approves only with the
+# token of that stop (progress._passed_now); without one, nothing approves.
+PASSED = "crew_passed"
 # A hook's denial as Claude Code writes it into the tool result: "PreToolUse:Bash hook error: <the guard's reason>".
 DENIAL_RE = re.compile(r"^\s*(?:PreToolUse|PermissionRequest)(?::[^\s:]+)? hook (?:blocking )?error\b", re.I)
 _SPLIT = re.compile(r"\|\||&&|\$\(|[;&|()`\n]")  # where a new simple command starts
@@ -879,13 +881,16 @@ def _keep_for_lead(sess: dict, key: str, who: str, tasks: list):
                                                                          for t in tasks]}
 
 
-def _passed(sess: dict, key: str):
-    """The gates passed this member's report cleanly: its UNPASSED mark goes (and the record's key with the last)."""
-    marks = sess.get(UNPASSED)
-    if isinstance(marks, dict):
-        marks.pop(key, None)
-        if not marks:
-            sess.pop(UNPASSED, None)
+def _unpass(sess: dict, key: str):
+    """This member's pass token goes (and the record's key with the last), before its stop is judged: a pass of an
+    earlier stop never counts for this one."""
+    tokens = sess.get(PASSED)
+    if isinstance(tokens, dict):
+        tokens.pop(key, None)
+        if not tokens:
+            sess.pop(PASSED, None)
+    elif tokens is not None:
+        sess.pop(PASSED, None)  # not a record of tokens: none of it counts
 
 
 def check(name, data: dict, sess: dict, pid: str = "", roster=None, lead_name: str = "", agent: str = ""):
@@ -897,12 +902,15 @@ def check(name, data: dict, sess: dict, pid: str = "", roster=None, lead_name: s
     (`hooks._lead_name`), never `name`, which may come from a description a member wrote for its helper. Without
     one, nothing is kept. `lead_name` also says whether the tech lead wrote the brief (`_by_lead`), and a proof met
     another way is audited as `crew.gate` with outcome "ok" and how it was met. Fails open: the member is never
-    held back by a gate that cannot judge. Before it judges, it marks the member in `sess[UNPASSED]`, and only a
-    clean pass (no findings) clears the mark: a stop let through after a send-back, findings only recorded, a missing
-    transcript or a crash keep it, so that member's review steps approve nothing (progress._end_member_step)."""
+    held back by a gate that cannot judge. Approvals fail closed: only a clean pass (no findings) writes the member's
+    pass token, `sess[PASSED][agent id]` = the time it passed, in the session record the hook writes once this
+    returns. A stop let through after a send-back, findings only recorded, a missing transcript or agent id, or a
+    crash write none and drop the token an earlier stop left, so that member's review steps and --approves verdicts
+    approve nothing at its lane's end (progress._passed_now), and neither does a stop that never reaches this check
+    or whose record write is dropped."""
     try:
         key = data.get("agent_id") or str(name or "")
-        sess.setdefault(UNPASSED, {})[key] = str(name or "Agent")
+        _unpass(sess, key)
         transcript = data.get("agent_transcript_path")
         if not transcript:
             return None
@@ -927,7 +935,8 @@ def check(name, data: dict, sess: dict, pid: str = "", roster=None, lead_name: s
                 f"proofs: {a['proof']} met instead by {a['how']}" for a in accepted), "ok", member=who,
                          rules=["proofs"])
         if not findings:
-            _passed(sess, key)
+            if data.get("agent_id"):  # the token names the lane: without its id, nothing can be approved
+                sess.setdefault(PASSED, {})[key] = time.time()
             return None
         sess.setdefault("crew_gated", {})[key] = who
         enforce = enforced()

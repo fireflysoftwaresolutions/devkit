@@ -5339,8 +5339,9 @@ def approvals_owed(run: dict) -> list:
 
 
 def _approve(run: dict, by: str, approves: str, check: str, now: float):
-    """`dev progress step --approves "<steps>"`: `by`'s verdict on the named steps, from the step's Check (spec F6,
-    R2-3). ApprovalError becomes StepError."""
+    """The tech lead's `dev progress step --approves "<steps>"`: `by`'s verdict on the named steps, from the step's
+    Check (spec F6, R2-3), recorded at once; a member's waits in its lane (_approve_later). ApprovalError becomes
+    StepError."""
     from . import approvals
     try:
         approvals.record(run, by, approves, approvals.verdict_of(check), now, check=check,
@@ -5349,11 +5350,58 @@ def _approve(run: dict, by: str, approves: str, check: str, now: float):
         raise StepError(str(e))
 
 
+def _approve_later(run: dict, lane: dict, by: str, approves: str, check: str, now: float) -> str:
+    """A member's `dev progress step --approves "<steps>"` from its lane: checked now as approvals.record would record
+    it, so a verdict it could never give is refused at once, then kept in the lane (`verdicts`), where it counts only
+    at the lane's end, once the crew gates passed that stop cleanly (_lane_verdicts), as a review step's Check does.
+    -> the line the member hears."""
+    from . import approvals
+    try:  # on a copy: nothing is recorded yet
+        entry = approvals.record({**run, "approvals": list(run.get("approvals") or [])}, by, approves,
+                                 approvals.verdict_of(check), now, check=check, doer_of=lambda s: member_of_step(run, s))
+    except approvals.ApprovalError as e:
+        raise StepError(str(e))
+    lane["verdicts"] = (lane.get("verdicts") or [])[-19:] + [{"ts": now, "by": by, "steps": entry["steps"],
+                                                              "check": str(check)[:300]}]
+    names = ", ".join(f"“{n}”" for n in entry["steps"])
+    return f"your verdict on {names} counts once your report passes the crew gates"
+
+
+def _lane_verdicts(run: dict, lane: dict, aid: str, passed: bool, now: float):
+    """At a lane's end, the `--approves` verdicts its member gave (_approve_later): each is recorded as given, at the
+    time it was given (approvals.record), when the crew gates passed this stop cleanly (`passed`), and is not counted
+    otherwise, with the reason in the history of each step it named and in the audit trail, so that work stays owed
+    until a verdict the gates pass. A verdict the run no longer takes (the step was reopened since) is audited."""
+    from . import approvals
+    held = lane.pop("verdicts", None) or []
+    who = lane.get("persona") or "the member"
+    steps = {s.get("name"): s for s in run.get("plan") or []}
+    for v in held:
+        names = [n for n in v.get("steps") or [] if n in steps]
+        if not passed:
+            why = (f"{who}'s verdict on it (dev progress step --approves) is not counted: the crew gates did not pass "
+                   f"its report (sent back, only recorded, or not judged)")
+            for n in names:
+                st = steps[n]
+                run.setdefault("history", []).append({"ts": round(now), "step": n, "from": st.get("state") or "-",
+                                                      "to": st.get("state") or "-", "by": aid, "why": why})
+            run["history"] = (run.get("history") or [])[-200:]
+            _audit("crew.approval-refused", ", ".join(names) or "?", why, "refused", project=run.get("project") or "")
+            continue
+        try:
+            approvals.record(run, v["by"], names, approvals.verdict_of(v.get("check")), v["ts"], check=v.get("check"),
+                             doer_of=lambda s_: member_of_step(run, s_))
+        except (approvals.ApprovalError, KeyError, TypeError) as e:
+            _audit("crew.approval-refused", ", ".join(names) or "?", str(e)[:300], "refused",
+                   project=run.get("project") or "")
+
+
 def step(text: str, nxt: str = "", cwd: str | None = None, kind: str = "step", check: str = "", which=None,
          from_agent: str | None = None, now: float | None = None, force: bool = False, why: str = "",
          approves: str = "") -> dict:
     """Record a step of the run: Morpheus's closes a plan step, a member's goes to its lane; `approves` names the
-    finished steps the Check approves or sends back (approvals.record). kind "done" ends the run, refused while a
+    finished steps the Check approves or sends back (approvals.record): Morpheus's verdict counts at once, a member's
+    once the crew gates pass its report (_approve_later). kind "done" ends the run, refused while a
     crew member still works on a step (_refuse_members_working), while an approval is owed or a step is flagged
     recheck once the plan is closed, unless `why` (approvals.end_check), or while a decision still needs the
     developer, unless `force`; the decisions still pending (moot ones too) and the questions still waiting for an
@@ -5390,17 +5438,21 @@ def step(text: str, nxt: str = "", cwd: str | None = None, kind: str = "step", c
             lane["updates"] = (lane.get("updates") or [])[-19:] + [u]
             if kind == "step":
                 lane["done"] = (lane.get("done") or 0) + 1
+            held = ""
             if approves:
                 from . import crew
                 mem = crew._for_lane(lane)
                 if not mem:
                     raise StepError("this lane names no crew member, so it approves nothing: report the verdict, and "
                                     "the step's approver records it")
-                _approve(run, mem["id"], approves, check, now)
+                held = _approve_later(run, lane, mem["id"], approves, check, now)
             run["updates"].append({"ts": round(now), "kind": "agent", "agent": from_agent, "text": text, "check": check})
             run["updates"] = run["updates"][-40:]
             outcome = _member_close(run, named, lane, from_agent, u, now, agent, sid) if kind == "step" and named \
                 else None
+            if held:  # the command's line says why nothing is approved yet
+                outcome = dict(outcome or {"step": "", "state": "", "closed": False},
+                               why="; ".join(x for x in ((outcome or {}).get("why"), held) if x))
             _save(run)
             if outcome:
                 run["lane_outcome"] = outcome  # for the command's own line; never saved
@@ -7202,10 +7254,12 @@ def _on_subagent(agent: str, data: dict, started: bool, now: float | None = None
         if v:
             record("subagent", agent, sid, v.get("label") or v.get("type") or aid, now - v["started"],
                    s.get("project") or "")
-        # the crew gates did not pass this member's report cleanly (gates.check marks it before it judges, and only a
-        # clean pass clears the mark; the hook writes it before it reaches this stop)
+        # the crew gates' pass token for this agent (gates.check writes it only on a clean pass, in the session record
+        # the hook writes before it reaches this stop); it is spent on the stop it counts for
         from . import gates
-        unpassed = aid in (s.get(gates.UNPASSED) or {})
+        tokens = s.get(gates.PASSED)
+        token = tokens.get(aid) if isinstance(tokens, dict) else None
+        spent = []
 
         def finish(run, rsid=sid):
             _close(run, "agent", aid, now)
@@ -7226,13 +7280,31 @@ def _on_subagent(agent: str, data: dict, started: bool, now: float | None = None
                 _audit("crew.finish", lane.get("persona") or lane.get("label") or aid,
                        f"{active_minutes(run, lane.get('started'), now, now, aid):.1f} active minutes",
                        project=run.get("project") or "", agent_id=aid[:16])
-            _end_lane_steps(run, lane or {}, aid, report, now, agent, rsid, unpassed=unpassed)
+            passed = _passed_now(token, lane or {}, now)
+            spent.append(passed)
+            _end_lane_steps(run, lane or {}, aid, report, now, agent, rsid, passed=passed)
+            _lane_verdicts(run, lane or {}, aid, passed, now)
             run["step"] = sum(1 for x in run.get("plan") or [] if x.get("state") in ("done", "skipped"))
             _advance_main(run, now)
         _run_event(agent, sid, finish)
         for other in runs_listing(agent, aid, sid):  # every run that lists it frees its lane, whichever id it came under
             _run_event(agent, other, lambda run, o=other: finish(run, o))
+        if any(spent):
+            tokens.pop(aid, None)
+            if not tokens:
+                s.pop(gates.PASSED, None)
     state.replace(f, s)
+
+
+def _passed_now(token, lane: dict, now: float) -> bool:
+    """The crew gates passed the stop that ends this lane at `now` cleanly: their token (gates.PASSED, the time that
+    stop passed) was written during the lane's latest run, at or after its start or last resume, and no later than
+    this stop. A token of an earlier stop, or of a later one when this stop is applied late, does not count, nor does
+    any token for a lane with no start."""
+    if isinstance(token, bool) or not isinstance(token, (int, float)):
+        return False
+    since = lane.get("resumed_at") or lane.get("started")
+    return isinstance(since, (int, float)) and since <= token <= now
 
 
 def runs_listing(agent: str, aid: str, skip_sid: str) -> list:
@@ -7468,17 +7540,17 @@ def _steps_about(lane: dict, aid: str, report: str, mine: list) -> list:
 
 
 def _end_lane_steps(run: dict, lane: dict, aid: str, report: str, now: float, agent: str, sid: str,
-                    unpassed: bool = False):
+                    passed: bool = False):
     """A lane's end at its SubagentStop: the steps its evidence is about end as its report or its last Check says
     (_end_member_step); any other step it holds goes back to pending, still its member's, with the reason in its
-    history, so a lane's ✓ never closes work it did not do (B-fy9639hfz5t). `unpassed`: the crew gates did not pass
-    this member's report cleanly (gates.UNPASSED), so its review steps approve nothing (_end_member_step)."""
+    history, so a lane's ✓ never closes work it did not do (B-fy9639hfz5t). `passed`: the crew gates passed this
+    stop cleanly (their token, _passed_now); without it, its review steps approve nothing (_end_member_step)."""
     mine = [st for st in run.get("plan") or [] if st.get("owner") == aid and st.get("state") not in DONE]
     about = _steps_about(lane, aid, report, mine)
     who = lane.get("persona") or "the subagent"
     for st in mine:
         if any(st is x for x in about):
-            _end_member_step(run, st, lane, aid, report, now, agent, sid, unpassed=unpassed)
+            _end_member_step(run, st, lane, aid, report, now, agent, sid, passed=passed)
             continue
         old = st.get("state")
         st.update(owner="main", state="pending", started=None)
@@ -7488,23 +7560,24 @@ def _end_lane_steps(run: dict, lane: dict, aid: str, report: str, now: float, ag
 
 
 def _end_member_step(run: dict, st: dict, lane: dict, aid: str, report: str, now: float, agent: str, sid: str,
-                     closing: bool = False, unpassed: bool = False):
+                     closing: bool = False, passed: bool = False):
     """A member's step at its SubagentStop (spec F6, R2-4): done with the evidence of its report's Check or its last
     `dev progress step --check` (approvals.ending), and a review step's Check is its verdict on the work it follows
     (approvals.from_review), whose ✓ also ends done the unverified work it approves (_verified_by_review);
     otherwise unverified, for Morpheus to close with evidence or reopen. A review or read-only lane whose shell wrote
     files nobody else could have written (scope_writes, certain) ends unverified whatever it reports; a possible
-    write leaves its ending to its report. A review step whose member's report the crew gates did not pass cleanly
-    (`unpassed`: sent back and then let through unjudged, findings only recorded, or a gate that could not judge)
-    ends unverified too, since its Check is no approval. `closing`: the member closes it itself while it works on
-    (_member_close)."""
+    write leaves its ending to its report. A review step ends done only when the crew gates passed this stop cleanly
+    (`passed`, their token): sent back and then let through unjudged, findings only recorded, a gate that could not
+    judge, a stop that never reached them or whose token the session record did not take end it unverified, since
+    its Check is no approval. Other steps end as their evidence says. `closing`: the member closes it itself while
+    it works on (_member_close), which never happens to a review step."""
     from . import approvals
     old = st.get("state")
     state_, why, check = approvals.ending(lane, report)
     sure = _certain_writes(lane.get("scope_writes") or {})
     if state_ == "done" and sure:
         state_, why = "unverified", f"its shell call wrote {', '.join(sure[:3])} while no other writer was at work"
-    if state_ == "done" and unpassed and approvals.is_review(st):
+    if state_ == "done" and not passed and approvals.is_review(st):
         state_, why = "unverified", ("the crew gates did not pass its report (sent back, only recorded, or not "
                                      "judged), so its Check approves nothing: launch the review again for a verdict "
                                      "the gates pass")
@@ -7529,7 +7602,7 @@ def _member_close(run: dict, st: dict, lane: dict, aid: str, u: dict, now: float
     unverified), so the steps after it need not wait for the member's report while the lane works on. A review step
     (approvals.is_review) stays running: its Check is the member's approval of the work it follows, which counts only
     once the member's report passes the crew gates, so it ends at the lane's end (_end_lane_steps, which SubagentStop
-    reaches only after the gates let the report through; this update's step name binds it there). A step the lane
+    reaches after the gates judged the report; this update's step name binds it there). A step the lane
     does not hold, or one already done, keeps the evidence in the lane only. -> {step, state, closed, why}, which the
     command's line reports."""
     from . import approvals

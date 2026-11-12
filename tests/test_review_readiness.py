@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from devkit import crew, dispatch, progress as pg  # noqa: E402
 from test_language_neutral_hooks import HookCase  # noqa: E402
-from test_progress import launch  # noqa: E402
+from test_progress import gates_passed, launch  # noqa: E402
 
 REPORT = ("**[Firefly> DevKit · {who}]** api · `main` · {task}\n- **Done:** {task}\n- **Check:** {check}\n"
           "- **Next:** Morpheus")
@@ -80,6 +80,7 @@ class ReviewReadinessTests(HookCase):
         pg.assign("scope", "Hamann", activity="scope")
         self.assertEqual([s["name"] for s in pg.ready(self.run_())], ["scope"])
         launch("a_hamann", "devkit:hamann", "Hamann: scope")
+        gates_passed("a_hamann", at=self.t0 + 60)  # its report passes the crew gates
         plan = self.stop("a_hamann", "devkit:hamann", REPORT.format(who="Product owner (Councillor Hamann)",
                                                                     task="scope", check="✓ the three must-haves hold"),
                          later=60)
@@ -92,6 +93,7 @@ class ReviewReadinessTests(HookCase):
     def test_the_reviews_check_ends_the_work_it_approves_done(self):
         self.builder_plan()
         launch("a_seraph", "devkit:seraph", "Seraph: review")
+        gates_passed("a_seraph", at=self.t0 + 60)  # its report passes the crew gates
         plan = self.stop("a_seraph", "devkit:seraph", REPORT.format(who="Code reviewer (Seraph)", task="review",
                                                                     check="✓ read the diff, 9 tests pass"), later=60)
         self.assertEqual((plan["api"]["state"], plan["review"]["state"]), ("done", "done"))
@@ -118,6 +120,7 @@ class ReviewReadinessTests(HookCase):
         pg.assign("review", "Seraph")
         self.assertEqual([s["name"] for s in pg.ready(self.run_())], ["review"])
         launch("a_seraph", "devkit:seraph", "Seraph: review")
+        gates_passed("a_seraph", at=self.t0 + 60)  # its report passes the crew gates
         plan = self.stop("a_seraph", "devkit:seraph", REPORT.format(who="Code reviewer (Seraph)", task="review",
                                                                     check="✓ read the workflow"), later=60)
         self.assertEqual((plan["pipeline"]["state"], plan["review"]["state"]), ("unverified", "done"))

@@ -673,26 +673,38 @@ class SendBackTests(GateCase):
         self.assertIsNone(gates.check("Kid", data, {}, "owner/repo", roster={"members": [KID]}))
 
 
-class UnpassedMarkTests(GateCase):
-    # A review's Check approves the work it follows only when the gates passed its member's report. gates.check marks
-    # the member before it judges a stop and clears the mark only on a clean pass, so progress can tell a pass from
-    # a send-back, a let-through, a record-only run or a crash (none of which approves).
-    def test_a_clean_pass_clears_the_mark_an_earlier_stop_left(self):
-        self.complete()
-        data = {"agent_id": "a1", "agent_transcript_path": self.tx.save(), "cwd": str(self.repo)}
-        sess = {"crew_unpassed": {"a1": "Kid", "a9": "Neo"}}  # a1's earlier stop crashed the gates; a9 is another lane
-        self.assertIsNone(gates.check("Kid", data, sess, "owner/repo", roster={"members": [KID]}))
-        self.assertEqual(sess["crew_unpassed"], {"a9": "Neo"})
+class PassTokenTests(GateCase):
+    # gates.check writes a pass token, the agent id and the time its stop passed, only when it judged a stop and found
+    # nothing missing, and a stop never keeps the token an earlier stop of the same agent left: progress approves a
+    # review's Check or a member's --approves only with the token of that stop (tests/test_approvals_token.py)
+    def check(self, sess, **extra):
+        data = {"agent_id": "a1", "agent_transcript_path": self.tx.save(), "cwd": str(self.repo), **extra}
+        return gates.check("Kid", data, sess, "owner/repo", roster={"members": [KID]})
 
-    def test_a_stop_with_findings_keeps_its_mark_through_the_let_through(self):
+    def test_a_clean_pass_writes_the_agents_token_with_the_time_it_passed(self):
+        self.complete()
+        sess = {gates.PASSED: {"a9": 5.0}}  # another lane's pass stays
+        before = time.time()
+        self.assertIsNone(self.check(sess))
+        self.assertEqual(sorted(sess[gates.PASSED]), ["a1", "a9"])
+        self.assertTrue(before <= sess[gates.PASSED]["a1"] <= time.time())
+
+    def test_a_send_back_and_its_let_through_write_none_and_drop_an_earlier_token(self):
         self.tx.bash("dev test")  # no dev progress step: the gates send it back
-        data = {"agent_id": "a1", "agent_transcript_path": self.tx.save(), "cwd": str(self.repo)}
-        sess = {}
-        self.assertEqual(gates.check("Kid", data, sess, "owner/repo", roster={"members": [KID]})["decision"], "block")
-        self.assertIn("a1", sess["crew_unpassed"])
-        self.assertIsNone(gates.check("Kid", {**data, "stop_hook_active": True}, sess, "owner/repo",
-                                      roster={"members": [KID]}))
-        self.assertIn("a1", sess["crew_unpassed"])  # let through, not passed
+        sess = {gates.PASSED: {"a1": 5.0}}  # an earlier stop of a1 passed
+        self.assertEqual(self.check(sess)["decision"], "block")
+        self.assertNotIn("a1", sess.get(gates.PASSED) or {})
+        self.assertIsNone(self.check(sess, stop_hook_active=True))  # let through, not passed
+        self.assertNotIn("a1", sess.get(gates.PASSED) or {})
+
+    def test_a_gate_that_cannot_judge_writes_no_token(self):
+        self.complete()
+        sess = {gates.PASSED: {"a1": 5.0}}
+        with mock.patch.object(gates, "crew_gates", side_effect=RuntimeError("the gates broke")):
+            self.assertIsNone(self.check(sess))  # fails open: the member is not held back
+        self.assertNotIn("a1", sess.get(gates.PASSED) or {})
+        self.assertIsNone(self.check(sess, agent_transcript_path=""))  # no transcript: nothing judged
+        self.assertNotIn("a1", sess.get(gates.PASSED) or {})
 
 
 class BackgroundWorkTests(GateCase):

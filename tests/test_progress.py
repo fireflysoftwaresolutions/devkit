@@ -91,6 +91,15 @@ def launch(aid, kind, label, at=None, sid="s1"):
                      now=at)
 
 
+def gates_passed(aid, at=None, sid="s1"):
+    # the crew gates passed this agent's next stop cleanly: their pass token in the session record, as gates.check
+    # writes it at SubagentStop. A test that ends a lane with pg.on_subagent skips the hook and its gates, and without
+    # the token that lane's review step and --approves verdicts approve nothing
+    from devkit import gates, state
+    stamp = time.time() if at is None else at
+    state.update(pg.session_path("claude", sid), lambda s: s.setdefault(gates.PASSED, {}).update({aid: stamp}))
+
+
 def repo_with_worktrees(d, *paths):
     # a repository at <d>/api and a worktree of it at each path (<d>/wt by default) -> (main, *worktrees), built from
     # files: dev test prove runs the tests in a copy without .git
@@ -2087,6 +2096,7 @@ class ReaderWriteCreditTests(unittest.TestCase):
         (text,) = self.told()
         self.assertIn("tests/test_caller_identity.py (possibly written by Senior engineer (Neo))", text)
         self.assertNotIn("unverified", text)
+        gates_passed("a_seraph")  # the reviewer's report passes the crew gates
         self.assertEqual(self.review_ends()["state"], "done")
 
     def test_a_builders_scope_is_an_alibi_only_while_the_builder_is_at_work_on_the_file(self):

@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from devkit import cli, core, crew, dispatch, progress as pg, raci  # noqa: E402
-from test_progress import TempState, boundary, launch  # noqa: E402
+from test_progress import TempState, boundary, gates_passed, launch  # noqa: E402
 
 # Real tasks and the member who should do them (the misroutes the developer found are the first rows).
 GOLDEN = [
@@ -290,6 +290,7 @@ class AssignmentTests(unittest.TestCase):
         self.assertIn("Code reviewer (Seraph) approves “build the JSON API server”", str(e.exception))
         pg.assign("review", "Seraph", now=self.m(22))
         launch("a2", "devkit:seraph", "Seraph: review", self.m(23))
+        gates_passed("a2", at=self.m(30))  # the reviewer's report passes the crew gates
         pg.on_subagent("claude", {"session_id": "s1", "agent_id": "a2", "agent_type": "devkit:seraph",
                                   "last_assistant_message": DONE}, False, now=self.m(30))
         run = pg.step("API shipped", kind="done", now=self.m(31))

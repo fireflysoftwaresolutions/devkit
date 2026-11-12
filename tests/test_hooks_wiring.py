@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from devkit import audit, bugs, canary, core, guard, hooks, progress as pg, registry, stubs, work  # noqa: E402
 from test_language_neutral_hooks import HookCase  # noqa: E402
-from test_progress import launch  # noqa: E402
+from test_progress import gates_passed, launch  # noqa: E402
 import test_threaded_turn_endings as turns  # noqa: E402  (its TurnCase fixture; its tests run in their own module)
 from test_bugs_sync import FakeClient, _bot, _issue, _record  # noqa: E402
 
@@ -910,12 +910,20 @@ class StepEndingTests(WiringCase):
         self.assertIn("no evidence", pg.load_run("claude", "s1")["history"][-1]["why"])
 
     def test_a_review_step_that_checks_approves_the_work_it_follows(self):
+        # only once the crew gates passed the reviewer's report: a stop without their pass approves nothing
         self.stop("a_tank", "devkit:tank", REPORT.format(who="Backend engineer (Tank)", task="api", check="✓ 9 tests"))
         self.assertEqual(pg.approvals_owed(pg.load_run("claude", "s1")), [("seraph", ["api"])])
         pg.assign("review", "Seraph")
         launch("a_seraph", "devkit:seraph", "Seraph: review")
-        plan = self.stop("a_seraph", "devkit:seraph", REPORT.format(who="Code reviewer (Seraph)", task="review",
-                                                                    check="✓ read the diff, 9 tests pass"), later=60)
+        review = REPORT.format(who="Code reviewer (Seraph)", task="review", check="✓ read the diff, 9 tests pass")
+        plan = self.stop("a_seraph", "devkit:seraph", review, later=60)
+        self.assertEqual(plan["review"]["state"], "unverified")
+        self.assertEqual(pg.approvals_owed(pg.load_run("claude", "s1")), [("seraph", ["api"])])
+        pg.reopen("review", why="launch the review again for a verdict the gates pass")
+        pg.assign("review", "Seraph")
+        launch("a_seraph2", "devkit:seraph", "Seraph: review")
+        gates_passed("a_seraph2")  # this report passes the crew gates
+        plan = self.stop("a_seraph2", "devkit:seraph", review, later=120)
         self.assertEqual(plan["review"]["state"], "done")
         run = pg.load_run("claude", "s1")
         self.assertEqual([(a["by"], a["steps"], a["verdict"]) for a in run.get("approvals") or []],
@@ -936,6 +944,10 @@ class StepEndingTests(WiringCase):
         self.stop("a_tank", "devkit:tank", REPORT.format(who="Backend engineer (Tank)", task="api", check="✓ 9 tests"))
         launch("a_seraph", "devkit:seraph", "Seraph: a look at the api")
         pg.step("read the api diff", check="✓ the errors are problem details", approves="api", from_agent="a_seraph")
+        self.assertEqual(pg.load_run("claude", "s1").get("approvals") or [], [])  # held until its report passes
+        gates_passed("a_seraph")  # it does: its lane's end records the verdict
+        self.stop("a_seraph", "devkit:seraph", REPORT.format(who="Code reviewer (Seraph)", task="a look at the api",
+                                                             check="✓ the errors are problem details"), later=60)
         self.assertEqual([(a["by"], a["steps"]) for a in pg.load_run("claude", "s1")["approvals"]],
                          [("seraph", ["api"])])
         with self.assertRaises(pg.StepError):  # nobody approves their own work
