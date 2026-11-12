@@ -120,6 +120,21 @@ class LessonTests(unittest.TestCase):
         self.assertIn("reopened: its prevention by test (tests/test_clock.py) did not hold", les["changelog"][0])
         self.assertEqual([x["meta"]["id"] for x in lessons.relevant("acme/api")], [les["meta"]["id"]])
 
+    # Another session merges or archives a lesson (`dev sleep`, a pull) while this one lists them: a file listed a
+    # moment ago is gone when it is read. Every `dev lesson` command crashed on it; the listing goes on without it.
+    def test_a_lesson_file_gone_between_listing_and_reading_is_left_out(self):
+        kept = lessons.add("acme/api", "Kept lesson", cause="c", prevention="p", happened="h", a=A)
+        gone = lessons.add("acme/api", "Merged lesson", cause="c", prevention="p", happened="h", a=A)
+        real_load = lessons.load
+
+        def load_after_another_session_moved_one(path):
+            Path(gone["path"]).unlink(missing_ok=True)  # between the listing and this read
+            return real_load(path)
+
+        with mock.patch.object(lessons, "load", load_after_another_session_moved_one):
+            listed = lessons.all_lessons("acme/api")
+        self.assertEqual([x["meta"]["id"] for x in listed], [kept["meta"]["id"]])
+
     def test_recall_ranks_open_severe_repeated_and_includes_global(self):
         low = lessons.add("acme/api", "Typo in docs", severity="low", cause="c", prevention="p", happened="h",
                           files=["docs/**"], a=A)

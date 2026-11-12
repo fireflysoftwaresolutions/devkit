@@ -116,7 +116,13 @@ def all_lessons(scope: str = None, archived: bool = False) -> list:
     files = sorted(base.rglob("L-*.md"))
     if not archived:
         files = [f for f in files if "archive" not in f.relative_to(LESSONS).parts[:1]]
-    return [load(f) for f in files]
+    out = []
+    for f in files:
+        try:
+            out.append(load(f))
+        except FileNotFoundError:  # merged, archived or pulled away by another session since rglob listed it
+            continue
+    return out
 
 
 def is_archived(les: dict) -> bool:
