@@ -39,11 +39,13 @@ def write(root, files):
 
 
 def edit(root, files):
-    """Change files after a run, the way an agent does seconds later (a same-second, same-size edit would leave
-    Python's bytecode cache looking fresh)."""
+    """Change files after a run, the way an agent does seconds later. Python's bytecode cache is fresh while a source
+    keeps its size and its modification time in whole seconds, so each edit moves the time whole seconds past the
+    file's last one: two quick edits (0 then 1) would otherwise share a second and run the first edit's bytecode."""
+    before = {rel: (Path(root) / rel).stat().st_mtime if (Path(root) / rel).exists() else 0 for rel in files}
     write(root, files)
-    later = time.time() + 2
     for rel in files:
+        later = max(time.time(), before[rel] + 1) + 2
         os.utime(Path(root) / rel, (later, later))
 
 
