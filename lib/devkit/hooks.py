@@ -2686,6 +2686,33 @@ def _same_repository(a: str, b: str) -> bool:
     return bool(ca) and ca == common(b)
 
 
+def _lane_scope_miss(path: str, cwd: str, top: str, layers: list):
+    """Why a crew lane's step scope (`layers`, counted from its repository `top`) does not hold a file write to
+    `path`, or None when it does. Each layer must hold the path as written (guard.scope_holds) and the file the write
+    reaches, links resolved: a path that does not exist yet by its nearest existing folder, and a `..` after a link
+    from the link's target, as the system resolves it. So a link inside the scope that leads out of the repository,
+    or into its files that the scope does not name, holds nothing. A path in another checkout of the same repository
+    counts from that checkout. -> (the path relative to the repository, where it lands when a link takes it out of
+    the scope, else '')."""
+    from . import guard
+    raw = path if os.path.isabs(path) else os.path.join(cwd, path)
+    ap = os.path.normpath(raw)
+    base = top
+    if guard.scope_rel(ap, cwd, top).startswith(".."):  # a worktree of the same repository: the scope counts from it
+        wt = _repo_top_of(ap)
+        if wt and _same_repository(wt, top):
+            base = wt
+    rel = guard.scope_rel(ap, cwd, base)
+
+    def holds(p):
+        return all(guard.scope_holds(p, cwd, layer, base=base) for layer in layers if layer)
+    for lands in dict.fromkeys((os.path.realpath(raw), os.path.realpath(ap))):  # `..` read physically, then lexically
+        inside = os.path.relpath(lands, os.path.realpath(base))
+        if inside != rel and not holds(lands):  # a link takes the write out of the scope
+            return rel, (core.tilde(lands) if inside.startswith("..") else inside)
+    return None if holds(ap) else (rel, "")
+
+
 def _scope_violation(agent: str, data: dict):
     """A crew member assigned a scope (dev progress assign … --scope "globs") edits only those files, so parallel
     agents never write the same file, and review-only and read-only members edit nothing. A helper a member
@@ -2755,17 +2782,18 @@ def _scope_violation(agent: str, data: dict):
                     f"handoff repository when its step's scope names them.")
         if not layers:
             return None
+        where = " and ".join(", ".join(g) for g in layers)
         for p_ in paths:
-            ap = os.path.normpath(p_ if os.path.isabs(p_) else os.path.join(cwd, p_))
-            rel = guard.scope_rel(ap, cwd, top)
-            if rel.startswith(".."):  # a worktree of the same repository: the scope's paths are relative to it
-                wt = _repo_top_of(ap)
-                if wt and _same_repository(wt, top):
-                    rel = os.path.relpath(os.path.realpath(ap), wt)
-            if not progress.in_scope(rel, layers):
-                return (f"{rel} is outside {name}'s scope ({' and '.join(', '.join(g) for g in layers)}): another "
-                        f"crew member may own it. "
-                        f"Ask the tech lead to widen it: dev crew ask \"may I change {rel}? why: …\"")
+            miss = _lane_scope_miss(p_, cwd, top, layers)
+            if not miss:
+                continue
+            rel, lands = miss
+            if lands:
+                return (f"{rel} leads through a link to {lands}, which is outside {name}'s scope ({where}): the write "
+                        f"would land there. Write to a path in your scope that is not a link, or ask the tech lead: "
+                        f"dev crew ask \"may I change {lands}? why: …\"")
+            return (f"{rel} is outside {name}'s scope ({where}): another crew member may own it. "
+                    f"Ask the tech lead to widen it: dev crew ask \"may I change {rel}? why: …\"")
     except Exception as e:
         guard.failopen("crew-scope", e)
         return None
