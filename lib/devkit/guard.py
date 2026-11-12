@@ -4267,6 +4267,29 @@ _VENDOR_READ = {
                         ("mcp", "get", _NAME)}),
 }
 _VENDOR_FLAGS = frozenset({"-h", "--help", "--json"})  # none takes a value, so the words around them are plain
+_VENDOR_FORMS = ", ".join(_code(" ".join((cli, *f))) for cli in ("claude", "codex") for f in sorted(_VENDOR_READ[cli]))
+# EXT_REASON says a command changes the extensions; these say why the guard could not show that a command does not
+EXT_FORM_REASON = (
+    "This command is not one of the read-only forms the guard lets agents run for the plugins, skills and MCP servers "
+    "that run in every session on this Mac, so it may add, remove, switch or update one (spec P-fym583l7sg1, K1): it "
+    "calls `dev ext`, or claude or codex with a plugin, plugins, mcp or marketplace word. The read-only forms are "
+    f"exact: `dev ext ls`, `dev ext outdated`, {_VENDOR_FORMS}, with no option but -h, --help or --json and no word the "
+    "shell or xargs fills in. Run one of them as written. A change is the developer's, in a terminal, with `dev ext`, "
+    f"which audits it and records it in the lock: ask them, with the command and why. {_TAIL}")
+EXT_UNNAMED_REASON = (
+    "The guard cannot tell which program this command runs: a variable or a substitution names it, the same command "
+    "line sets PATH before a bare name, or its path does not exist yet. Its words include plugin, plugins, mcp or "
+    "marketplace, so it may be claude or codex adding, removing, switching or updating a plugin, a marketplace or an "
+    "MCP server that runs in every session on this Mac (spec P-fym583l7sg1, K1). Name the program by a path that "
+    "exists from the folder the command runs in (`./node_modules/.bin/ng mcp`, `~/.local/bin/claude mcp list`), and "
+    f"leave PATH as it is. {_TAIL}")
+EXT_DATA_REASON = (
+    "This program can start processes, and its code holds a command line for the plugins, skills or MCP servers that "
+    "run in every session on this Mac: a `dev ext` change, or claude or codex with a plugin, plugins, mcp or "
+    "marketplace word in a form that is not read-only. The guard cannot tell a line a program runs from one it only "
+    "keeps as data, so the line may add, remove, switch or update one of them (spec P-fym583l7sg1, K1). Keep command "
+    "lines a program only reads, such as test cases or probe inputs, in a data file it opens. A change is the "
+    f"developer's, in a terminal, with `dev ext`. {_TAIL}")
 
 
 def _vendor_word(word: str) -> bool:
@@ -4365,38 +4388,44 @@ def _vendor_read_only(cli: str, args) -> bool:
                for form in _VENDOR_READ[cli])
 
 
-def vendor_ext_refusal(argv, cwd=None, names=(), more=False) -> bool:
-    """True when a claude or codex call may add, remove, switch or update a plugin, a marketplace or an MCP server:
-    its words include a group word (_vendor_word) and its argv is not an exact read-only form. The program is read as
-    the shell finds it (agent_cli: a path from the folder the command runs in, a link on the PATH, the npm package a
-    runner starts); one the shell picks at run time (a variable, or a bare name with PATH set by the command or the
-    shell before it, `names`) may be claude, so a group word with it is refused as well (N3). With claude or codex, a
-    word the shell expands (_shell_made) may be a group word, and xargs adds words the guard cannot see (`more`), so
-    such a call is no read-only form either (F2 of re-review four)."""
+def vendor_ext_refusal(argv, cwd=None, names=(), more=False) -> str:
+    """Why a claude or codex call may add, remove, switch or update a plugin, a marketplace or an MCP server, or '':
+    "form" when its words include a group word (_vendor_word) and its argv is not an exact read-only form, "unnamed"
+    when the guard cannot tell which program it is. The program is read as the shell finds it (agent_cli: a path from
+    the folder the command runs in, a link on the PATH, the npm package a runner starts); one the shell picks at run
+    time (a variable, or a bare name with PATH set by the command or the shell before it, `names`) may be claude, so a
+    group word with it is refused as well (N3). With claude or codex, a word the shell expands (_shell_made) may be a
+    group word, and xargs adds words the guard cannot see (`more`), so such a call is no read-only form either (F2 of
+    re-review four)."""
     if not argv:
-        return False
+        return ""
     prog, args = str(argv[0]), [str(a) for a in argv[1:]]
     if os.path.basename(prog) == "xargs":
         inner = _unwrap(_xargs_command(args))
-        return bool(inner) and vendor_ext_refusal(inner, cwd, names, more=True)
+        return vendor_ext_refusal(inner, cwd, names, more=True) if inner else ""
     named = any(_vendor_word(a) for a in args)
     if not (named or more or any(_shell_made(a) for a in args)):
-        return False
+        return ""
     cli = agent_cli(prog, cwd, search=True)
     if not cli:
         cli, args = _agent_script(argv, cwd) or ("", args)
     if not cli:
         if not named:
-            return False
+            return ""
         if "$" in prog or "`" in prog or ("PATH" in set(names) and "/" not in prog):
-            return True
+            return "unnamed"
         if "/" not in prog or prog.startswith("@"):  # a bare name the PATH finds, or a scoped npm package
-            return False
+            return ""
         path = os.path.expanduser(prog)
         if not os.path.isabs(path):
             path = os.path.join(str(cwd), path) if cwd and str(cwd) != str(UNKNOWN) else ""
-        return not (path and os.path.exists(path))  # a copy or a link the command has yet to make
-    return more or any(_shell_made(a) for a in args) or not _vendor_read_only(cli, args)
+        return "" if path and os.path.exists(path) else "unnamed"  # a copy or a link the command has yet to make
+    return "form" if more or any(_shell_made(a) for a in args) or not _vendor_read_only(cli, args) else ""
+
+
+def _vendor_ext_reason(kind: str, code: str) -> str:
+    """The refusal for a vendor_ext_refusal kind; `code`: the line is a string of that interpreter's program."""
+    return EXT_DATA_REASON if code else EXT_UNNAMED_REASON if kind == "unnamed" else EXT_FORM_REASON
 
 
 _JS_RUNTIMES = frozenset({"node", "nodejs", "bun", "deno"})
@@ -4650,6 +4679,7 @@ class _Shell:
         self.unresolved = []
         self.exported = set(exported)
         self.typed = True  # the command holds this text (D10 refuses it unread); False for a file read from disk
+        self.code = ""  # the interpreter whose program's code holds this text (program_lines), which may only keep it
         self.stdin = None  # what the segment being walked reads from its input, when the command shows it
         self.written = {}  # agent settings file -> the texts this command has written to it so far
 
@@ -4826,22 +4856,23 @@ class _Shell:
     def child(self, text, cwd, names=()):
         inner = _Shell(text, cwd, self.mentions, self.depth + 1, self.exported | set(names))
         inner.note_mentions = inner.note_mentions or self.note_mentions
+        inner.code = self.code  # a shell line in a program's code is still that program's text
         return inner
 
-    def nested(self, text, cwd, same_shell=False, names=(), typed=True):
+    def nested(self, text, cwd, same_shell=False, names=(), typed=True, code=""):
         if not text:
             return None
         if self.depth >= 4:  # too deep to read is no "nothing found": refused
             return deny(NESTED_REASON)
         inner = self.child(text, cwd, names)
-        inner.typed = typed
+        inner.typed, inner.code = typed, code or inner.code
         v = inner.run()
         self.unresolved += inner.unresolved
         if same_shell:  # source and eval run in this shell: what they export stays set
             self.exported |= inner.exported
         for alt in () if v else _substitution_readings(text):  # `sh -c 'dev $(true) install'`: only adds a refusal
             other = self.child(alt, cwd, names)
-            other.typed = typed
+            other.typed, other.code = typed, code or other.code
             v = other.run()
             if v:
                 break
@@ -4899,7 +4930,7 @@ class _Shell:
             return None
         env = _code_env_sets(code, name)
         for text in _code_texts(code, name, lists_only=_py_argv_only(code, name)):
-            v = self.nested(text, cwd, names=env, typed=False)
+            v = self.nested(text, cwd, names=env, typed=False, code=name)
             if v:
                 return v
         return None
@@ -4916,8 +4947,9 @@ class _Shell:
         why = guardless_session(name, argv, set(names) | self.exported, cwd)
         if why:
             return deny(why, key="guardless-session")
-        if vendor_ext_refusal(argv, cwd, set(names) | self.exported):
-            return deny(EXT_REASON, key="vendor-ext")
+        kind = vendor_ext_refusal(argv, cwd, set(names) | self.exported)
+        if kind:
+            return deny(_vendor_ext_reason(kind, self.code), key="vendor-ext")
         if terminal_open_refusal(argv):
             return deny(TERMINAL_REASON, key="terminal-open")
         if terminal_typing_refusal(argv):
@@ -5030,8 +5062,9 @@ class _Shell:
             why = guardless_session(args[0], inner, names)
             if why:
                 return deny(why, key="guardless-session")
-            if vendor_ext_refusal(inner, cwd, names):
-                return deny(EXT_REASON, key="vendor-ext")
+            kind = vendor_ext_refusal(inner, cwd, names)
+            if kind:
+                return deny(_vendor_ext_reason(kind, self.code), key="vendor-ext")
         if words[:2] == ["config", "set"]:
             # dev config set drops empty key parts (core.config_set): .agents.codex and bugs..share name agents.codex
             # and bugs.share
@@ -5809,7 +5842,7 @@ def _xargs_dev_refusal(inner) -> str | None:
     if not dargs:
         return INSTALL_REASON
     if dargs == ["ext"]:
-        return EXT_REASON
+        return EXT_FORM_REASON  # its words come from the input: no read-only form the guard can see
     return None
 
 
@@ -10461,7 +10494,7 @@ def code_session_refusal(argv, cwd, bodies, depth: int = 0) -> str | None:
             dargs = _dev_args(inner)
             helps = dargs is not None and _dev_skips(dargs[1:], "-h", "--help")
             if vendor_ext_refusal(inner, cwd) or (dargs is not None and _ext_refusal(dargs) and not helps):
-                return EXT_REASON
+                return EXT_DATA_REASON
             if terminal_open_refusal(inner):
                 return TERMINAL_REASON
             if terminal_typing_refusal(inner):

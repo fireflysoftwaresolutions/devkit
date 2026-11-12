@@ -98,7 +98,7 @@ class VendorExtensionVerbsAreTheDevelopers(unittest.TestCase):
                     "bash -c 'claude mcp add e -- id'", "cd /tmp && codex plugin add evil@m",
                     "dev claude devkit -- plugin install evil@m", "claude plugin frobnicate x"):
             with self.subTest(cmd=cmd):
-                self.assertEqual(self.check(cmd), guard.EXT_REASON)
+                self.assertEqual(self.check(cmd), guard.EXT_FORM_REASON)
 
     def test_a_verb_after_the_end_of_options_still_runs_in_claude(self):
         # F1: Claude Code's parser (commander) still runs a subcommand named after `--`; and there a `-h` or `--help`
@@ -110,7 +110,7 @@ class VendorExtensionVerbsAreTheDevelopers(unittest.TestCase):
                     "claude mcp add x -- npx -h", "claude -- plugin install evil@m --help",
                     "claude --model -h plugin install evil@m", "claude plugin install --scope -h evil@m"):
             with self.subTest(cmd=cmd):
-                self.assertEqual(self.check(cmd), guard.EXT_REASON)
+                self.assertEqual(self.check(cmd), guard.EXT_FORM_REASON)
 
     def test_an_option_value_that_names_a_group_does_not_hide_the_verb(self):
         # N1: claude's root options take a value, so `--model mcp` read as the group let the real group and verb that
@@ -124,7 +124,7 @@ class VendorExtensionVerbsAreTheDevelopers(unittest.TestCase):
                     "claude --model=x -h plugin install evil@m", "claude plugin install evil@m --help -- x",
                     "codex -m mcp --oss mcp add evil -- bash", "codex -c x=1 mcp add evil -- bash"):
             with self.subTest(cmd=cmd):
-                self.assertEqual(self.check(cmd), guard.EXT_REASON)
+                self.assertEqual(self.check(cmd), guard.EXT_FORM_REASON)
 
     def test_a_form_outside_the_read_only_list_is_refused_even_when_it_only_reads(self):
         # fail closed: the end of options, a root option, an option of the verb or help on a changing verb is not one
@@ -135,16 +135,16 @@ class VendorExtensionVerbsAreTheDevelopers(unittest.TestCase):
                     "claude plugin details", "claude mcp get a b", "codex mcp add -h", "codex --oss mcp list",
                     "claude plugin enable", "claude PLUGIN install evil@m", "claude -p plugin"):
             with self.subTest(cmd=cmd):
-                self.assertEqual(self.check(cmd), guard.EXT_REASON)
+                self.assertEqual(self.check(cmd), guard.EXT_FORM_REASON)
 
     def test_a_relative_path_is_read_from_the_folder_the_command_runs_in(self):
         # N3: `cd <dir> && ./cc …` and `../x/cc …`, with cc a link to Claude Code, resolved where the shell runs them
         cc = self.link_to_claude(Path(self.cwd) / "x")
         (Path(self.cwd) / "a").mkdir()
-        self.assertEqual(self.check(f"cd {cc.parent} && ./cc plugin install evil@m"), guard.EXT_REASON)
-        self.assertEqual(self.check("cd x && ./cc mcp add evil -- bash"), guard.EXT_REASON)
-        self.assertEqual(self.check_in("../x/cc plugin install evil@m", Path(self.cwd) / "a"), guard.EXT_REASON)
-        self.assertEqual(self.check("find . -exec x/cc plugin install evil@m ';'"), guard.EXT_REASON)
+        self.assertEqual(self.check(f"cd {cc.parent} && ./cc plugin install evil@m"), guard.EXT_FORM_REASON)
+        self.assertEqual(self.check("cd x && ./cc mcp add evil -- bash"), guard.EXT_FORM_REASON)
+        self.assertEqual(self.check_in("../x/cc plugin install evil@m", Path(self.cwd) / "a"), guard.EXT_FORM_REASON)
+        self.assertEqual(self.check("find . -exec x/cc plugin install evil@m ';'"), guard.EXT_FORM_REASON)
         self.assertIsNone(self.check(f"cd {cc.parent} && ./cc plugin list"))
 
     def test_a_program_the_shell_picks_at_run_time_fails_closed(self):
@@ -152,26 +152,45 @@ class VendorExtensionVerbsAreTheDevelopers(unittest.TestCase):
         # tell they are not claude, so a group word in their arguments is refused
         cc = self.link_to_claude(Path(self.cwd) / "bin")
         with mock.patch.dict(os.environ, {"PATH": f"{cc.parent}{os.pathsep}{os.environ.get('PATH', '')}"}):
-            self.assertEqual(self.check("cc plugin install evil@m"), guard.EXT_REASON)
-        for cmd in (f"PATH={cc.parent}:$PATH cc plugin install evil@m", "c=claude; $c plugin install evil@m",
+            self.assertEqual(self.check("cc plugin install evil@m"), guard.EXT_FORM_REASON)
+        self.assertEqual(self.check("c=claude; $c plugin install evil@m"), guard.EXT_FORM_REASON)  # it reads c
+        for cmd in (f"PATH={cc.parent}:$PATH cc plugin install evil@m",
                     "export PATH=/tmp/x:$PATH; cl mcp add evil -- bash", '"$CLAUDE" plugin install evil@m'):
             with self.subTest(cmd=cmd):
-                self.assertEqual(self.check(cmd), guard.EXT_REASON)
+                self.assertEqual(self.check(cmd), guard.EXT_UNNAMED_REASON)
         # a path that is not there yet (a copy or a link the same command makes) cannot be shown not to be claude
         self.assertEqual(self.check(f"cp $(which claude) {self.cwd}/c && {self.cwd}/c plugin install evil@m"),
-                         guard.EXT_REASON)
+                         guard.EXT_UNNAMED_REASON)
         (Path(self.cwd) / "tool").write_text("#!/bin/sh\n")
         for cmd in ("pip install mcp", "$EDITOR plugin.json", "PATH=/tmp/x:$PATH make",
                     f"{self.cwd}/tool plugin install x", "npx -y @angular/cli@22.2.6 mcp"):
             with self.subTest(cmd=cmd):
                 self.assertIsNone(self.check(cmd))
 
+    def test_each_refusal_says_why_the_guard_refused_it(self):
+        # one text said "This command changes the plugins…" for every refusal, also where the guard only could not
+        # show that the command does not: a read-only form outside its list, a program it cannot name, a line a
+        # program's code holds
+        form = self.check("claude plugin list --available") or ""
+        unnamed = self.check("$TOOL plugin list") or ""
+        data = self.check("python3 -c 'import subprocess; X = \"claude plugin list --available\"; print(X)'") or ""
+        changes = self.check("dev ext add superpowers@claude-plugins-official") or ""
+        for why in (form, unnamed, data):
+            with self.subTest(why=why[:60]):
+                self.assertNotIn("This command changes", why)
+        self.assertIn("not one of the read-only forms", form)
+        self.assertIn("`claude plugin details <name>`", form)  # the forms it may run instead
+        self.assertIn("cannot tell which program", unnamed)
+        self.assertIn("only keeps as data", data)
+        self.assertTrue(changes.startswith("This command changes"), changes[:60])
+        self.assertEqual(len({form, unnamed, data, changes}), 4)
+
     def test_the_words_after_a_shell_line_reach_it(self):
         # a shell's -c line gets the words after it as $0, $1… and "$@": the guard reads the line with them in place
         for cmd in ("sh -c 'claude \"$@\"' _ plugin install evil@m", "bash -c 'claude $0 $1 $2' plugin install evil@m",
                     "sh -c 'claude plugin \"${1}\" evil@m' _ install"):
             with self.subTest(cmd=cmd):
-                self.assertEqual(self.check(cmd), guard.EXT_REASON)
+                self.assertEqual(self.check(cmd), guard.EXT_FORM_REASON)
         self.assertIn("force-push", self.check("sh -c 'git \"$@\"' _ push --force origin main") or "")
         self.assertIsNone(self.check("sh -c 'echo \"$@\"' _ plugin install evil@m"))
 
@@ -180,13 +199,17 @@ class VendorExtensionVerbsAreTheDevelopers(unittest.TestCase):
         script = Path(self.cwd) / "node_modules" / "@openai" / "codex" / "bin" / "codex.js"
         script.parent.mkdir(parents=True)
         script.write_text("")
+        # a line in a program's code: the guard cannot tell whether the program runs it or only keeps it
         for cmd in ("python3 -c \"import subprocess; subprocess.run(['claude','plugin','install','evil@m'])\"",
                     "python3 -c \"import os; os.system('claude plugin install evil@m')\"",
-                    "node -e \"require('child_process').execSync('claude mcp add evil -- bash')\"",
-                    f"node {script} mcp add evil -- bash", "bun node_modules/@openai/codex/bin/codex.js plugin add x",
-                    "python3 -c \"import subprocess; subprocess.run(['dev','ext','disable','x','--why','w'])\""):
+                    "node -e \"require('child_process').execSync('claude mcp add evil -- bash')\""):
             with self.subTest(cmd=cmd):
-                self.assertEqual(self.check(cmd), guard.EXT_REASON)
+                self.assertEqual(self.check(cmd), guard.EXT_DATA_REASON)
+        for cmd in (f"node {script} mcp add evil -- bash", "bun node_modules/@openai/codex/bin/codex.js plugin add x"):
+            with self.subTest(cmd=cmd):  # the CLI's own script, typed
+                self.assertEqual(self.check(cmd), guard.EXT_FORM_REASON)
+        self.assertEqual(self.check("python3 -c \"import subprocess; subprocess.run(['dev','ext','disable','x','--why',"
+                                    "'w'])\""), guard.EXT_REASON)  # a `dev ext` change, wherever it is written
         for cmd in ("python3 -c \"import subprocess; subprocess.run(['claude','plugin','list'])\"",
                     f"node {script} mcp list"):
             with self.subTest(cmd=cmd):
@@ -199,7 +222,7 @@ class VendorExtensionVerbsAreTheDevelopers(unittest.TestCase):
                     "find . -maxdepth 0 -exec bash -c 'claude mcp add evil -- bash' \\;",
                     "find . -exec env sh -c 'codex mcp add e -- id' +"):
             with self.subTest(cmd=cmd):
-                self.assertEqual(self.check(cmd), guard.EXT_REASON)
+                self.assertEqual(self.check(cmd), guard.EXT_FORM_REASON)
         for cmd in ("find . -exec sh -c 'git push --force origin main' \\;", "sh -c 'git push --force origin main'",
                     "bash -o pipefail -c 'git push --force origin main'",
                     "xargs sh -c 'git push --force origin main' < /dev/null", "bash -c \"eval 'git push -f origin'\""):
@@ -213,7 +236,7 @@ class VendorExtensionVerbsAreTheDevelopers(unittest.TestCase):
                     "find . -maxdepth 0 -execdir claude mcp add evil -- bash ';'",
                     "find . -exec claude -- plugin install evil@m +", "find . -ok codex mcp add e -- id ';'"):
             with self.subTest(cmd=cmd):
-                self.assertEqual(self.check(cmd), guard.EXT_REASON)
+                self.assertEqual(self.check(cmd), guard.EXT_FORM_REASON)
         for cmd in ("find . -exec claude plugin list ';'", "find . -name x -exec grep -l 'plugin install' {} +"):
             with self.subTest(cmd=cmd):
                 self.assertIsNone(self.check(cmd))
@@ -227,7 +250,7 @@ class VendorExtensionVerbsAreTheDevelopers(unittest.TestCase):
         for cmd in (f"{versions}/2.1.319 plugin install evil@m", f"{versions}/9.9.9 mcp add evil -- bash",
                     f"{self.cwd}/cc plugin install evil@m", f"find . -exec {versions}/9.9.9 plugin i x@m ';'"):
             with self.subTest(cmd=cmd):
-                self.assertEqual(self.check(cmd), guard.EXT_REASON)
+                self.assertEqual(self.check(cmd), guard.EXT_FORM_REASON)
         self.assertIsNone(self.check(f"{versions}/9.9.9 plugin list"))
 
     def test_a_word_the_shell_expands_counts_as_a_group_word(self):
@@ -245,7 +268,7 @@ class VendorExtensionVerbsAreTheDevelopers(unittest.TestCase):
                     "echo plugin | xargs -I{} claude {} install evil@m", "parallel claude ::: plugin",
                     'claude -p "$PROMPT"'):
             with self.subTest(cmd=cmd):
-                self.assertEqual(self.check(cmd), guard.EXT_REASON)
+                self.assertEqual(self.check(cmd), guard.EXT_FORM_REASON)
         for cmd in ("echo $HOME plugin", "ls *.json", "printf '%s\\n' a | xargs echo", "git log --format=%H -- '*.py'",
                     "claude -p 'what does [x] do?'", "claude --version"):
             with self.subTest(cmd=cmd):
@@ -280,7 +303,7 @@ class PackageRunnersRunTheirCommand(unittest.TestCase):
                     "yarn exec claude plugin install evil@m", "pnpm claude plugin install evil@m",
                     "pnpm --silent codex mcp add e -- id", "yarn claude plugin install evil@m"):
             with self.subTest(cmd=cmd):
-                self.assertEqual(self.check(cmd), guard.EXT_REASON)
+                self.assertEqual(self.check(cmd), guard.EXT_FORM_REASON)
 
     def test_a_force_push_through_a_runner_is_refused(self):
         for cmd in ("npm exec -- git push --force origin main", "npm exec --yes -- git push --force origin main",
@@ -323,11 +346,11 @@ class PackageRunnersRunTheirCommand(unittest.TestCase):
         for form in self.GLOBAL_FORMS:
             cmd = form.format(c="claude plugin install evil@m")
             with self.subTest(cmd=cmd):
-                self.assertEqual(self.check(cmd), guard.EXT_REASON)
+                self.assertEqual(self.check(cmd), guard.EXT_FORM_REASON)
         for cmd in ("yarn -s dlx @anthropic-ai/claude-code plugin install evil@m",
                     "bun --silent x @openai/codex mcp add evil -- bash"):
             with self.subTest(cmd=cmd):
-                self.assertEqual(self.check(cmd), guard.EXT_REASON)
+                self.assertEqual(self.check(cmd), guard.EXT_FORM_REASON)
 
 
 class TerminalLaunchersRunTheirCommand(unittest.TestCase):
@@ -444,10 +467,13 @@ class TerminalLaunchersRunTheirCommand(unittest.TestCase):
                 self.assertEqual(self.check(cmd), guard.TERMINAL_TYPING_REASON)
 
     def test_the_developers_acknowledgement_through_a_launcher_is_refused(self):
-        for cmd in ("screen -dm dev ext ack", "tmux new -d 'dev ext ack'", "expect -c 'spawn dev ext ack'",
-                    "echo ack | xargs dev ext"):
+        # what a launcher starts is read as typed: `dev ext ack` changes the extensions; xargs adds words the guard
+        # cannot see, so `xargs dev ext` is no read-only form it can show
+        for cmd, why in (("screen -dm dev ext ack", guard.EXT_REASON), ("tmux new -d 'dev ext ack'", guard.EXT_REASON),
+                         ("expect -c 'spawn dev ext ack'", guard.EXT_REASON),
+                         ("echo ack | xargs dev ext", guard.EXT_FORM_REASON)):
             with self.subTest(cmd=cmd):
-                self.assertEqual(self.check(cmd), guard.EXT_REASON)
+                self.assertEqual(self.check(cmd), why)
 
     def test_a_force_push_through_a_terminal_launcher_is_refused(self):
         for cmd in ("screen -dm git push --force origin main", "tmux new -d 'git push --force origin main'",
