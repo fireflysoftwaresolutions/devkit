@@ -2481,6 +2481,113 @@ STARTUP_REASON = ("This command sets {name}, which makes a shell or a pager run 
                   "that the guard does not read. Run the commands themselves instead.")
 
 
+SHADOW_REASON = ("This runs a Python program that imports {mod}, and {where} holds a file or folder of that name, "
+                 "which Python imports instead of the real module: a planted module runs whatever it holds. Run the "
+                 "program from another folder or with `python3 -I`, or rename that file.")
+
+
+def _py_program_parts(args):
+    """(code or None, script path or None, module or None, isolated) of a Python command's arguments: -c's code, -m's
+    module, the first operand as the script, and whether -I or -P keeps the script's folder and the working folder
+    off the import path."""
+    isolated, k = False, 0
+    while k < len(args):
+        a = args[k]
+        if a == "--":
+            k += 1
+            break
+        if not a.startswith("-") or a == "-":
+            break
+        if a.startswith("--"):
+            k += 1
+            continue
+        for j, ch in enumerate(a[1:], 1):
+            if ch in "IP":
+                isolated = True
+            elif ch in "cmWX":
+                val = a[j + 1:] or (args[k + 1] if k + 1 < len(args) else "")
+                if ch == "c":
+                    return val, None, None, isolated
+                if ch == "m":
+                    return None, None, val, isolated
+                k += 0 if a[j + 1:] else 1
+                break
+        k += 1
+    script = args[k] if k < len(args) and args[k] != "-" else None
+    return None, script, None, isolated
+
+
+def _imported_tops(code) -> set:
+    """The top-level names of the modules a Python program imports (absolute imports only)."""
+    try:
+        tree = ast.parse(code or "")
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        return set()
+    out = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            out |= {a.name.split(".")[0] for a in node.names}
+        elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+            out.add(node.module.split(".")[0])
+    return out
+
+
+# standard modules that other standard modules import, and that Python has not loaded at startup: a planted `re.py`
+# next to a script runs when its `import json` imports re
+_SHADOW_CORE = frozenset("""re enum functools collections types operator keyword warnings contextlib typing struct
+    string tokenize token linecache reprlib heapq numbers locale datetime inspect ast dis dataclasses copy traceback
+    textwrap json random bisect hashlib base64 binascii fnmatch glob shutil tempfile subprocess signal threading
+    selectors socket pathlib ntpath urllib weakref copyreg sre_compile sre_parse sre_constants""".split())
+
+
+@functools.lru_cache(maxsize=1)
+def _stdlib_names() -> frozenset:
+    """The top-level names of the standard library: sys.stdlib_module_names (3.10+), or on 3.9 the modules and
+    packages of its folder and the built-in ones."""
+    names = getattr(sys, "stdlib_module_names", None)
+    if names:
+        return frozenset(names)
+    out = set(sys.builtin_module_names)
+    try:
+        for n in os.listdir(os.path.dirname(os.__file__)):
+            out.add(n[:-3] if n.endswith(".py") else n)
+    except OSError:
+        pass
+    return frozenset(out)
+
+
+def module_shadow_refusal(argv, cwd) -> str | None:
+    """SHADOW_REASON when a Python command imports a module that a file or folder of the same name shadows: in the
+    script's folder (a script), in the working folder (-c, -m, its input), or in a folder the program writes into
+    sys.path as a literal; Python finds those before the standard library and the installed packages."""
+    if not argv or not re.match(r"(?:python|pypy)[0-9.]*$", os.path.basename(str(argv[0]))):
+        return None
+    code, script, module, isolated = _py_program_parts([str(a) for a in argv[1:]])
+    folders, tops = [], set()
+    if script:
+        path = resolve(script, cwd)
+        code = _read_small(path) if path is not None else ""
+        folders.append(os.path.dirname(str(path)) if path is not None else "")
+    else:
+        folders.append(str(cwd or os.getcwd()))
+    if module:
+        tops.add(module.split(".")[0])
+    tops |= _imported_tops(code)
+    if isolated:
+        folders = []
+    if code and "sys.path" in code:  # a folder the program puts on the path itself
+        folders += [m.group(2) for m in re.finditer(r"(['\"])([^'\"\n]{1,400})\1", code) if os.path.isdir(m.group(2))]
+    tops &= _stdlib_names()  # a sibling of its own name is the program's module; one of the standard library's is not
+    deep = _SHADOW_CORE if tops else frozenset()  # what those modules import in turn, as files only
+    for folder in folders:
+        for top in sorted(tops | deep):
+            if folder and (os.path.isfile(os.path.join(folder, top + ".py")) or
+                           top in tops and os.path.isdir(os.path.join(folder, top))) and \
+                    os.path.realpath(folder) != os.path.realpath(os.path.dirname(os.__file__)):
+                return SHADOW_REASON.format(mod=_code(top), where=_code(folder))
+    return None
+
+
 def startup_env_refusal(argv0, line: str = "") -> str | None:
     """STARTUP_REASON when segment `argv0` sets a variable of _STARTUP_VARS (an assignment before the program, or a
     word of export, declare, env and the other binders), or ENV while `line` starts an interactive shell."""
@@ -2813,6 +2920,9 @@ def _check_segments(cmd: str, segs, ecwd: str, agent: str, depth: int = 0, outer
         why = startup_env_refusal(argv0, cmd)
         if why:
             return deny(why, key="startup-env")
+        why = module_shadow_refusal(_strip_prefix(argv0), ecwd)
+        if why:
+            return deny(why, key="module-shadow")
         why = speaker_forgery(argv0)
         if why:
             return deny(why, key="speaker-stamp")
@@ -10303,6 +10413,15 @@ def _writes_then_runs(cmd: str, cwd) -> str | None:
             p = resolve(script, cwd)
             if p != UNKNOWN and str(p) in written:
                 return WRITE_THEN_RUN_REASON.format(what=_code(script))
+        if written and argv and _family(name) in ("node", "nodejs", "deno", "bun"):
+            # `require('./x')` of a file the command wrote: the module the guard read is not the one that loads
+            with _skipped_reads():
+                code = _program(argv, cwd, ())[0] or ""
+            base = os.path.dirname(str(resolve(script, cwd))) if script else str(cwd)
+            for m in re.finditer(r"\b(?:require|import)\s*\(?\s*['\"](\.{1,2}/[^'\"]+)['\"]", code):
+                for ext in ("", ".js", ".mjs", ".cjs", ".json", "/index.js"):
+                    if str(resolve(m.group(1) + ext, base)) in written:
+                        return WRITE_THEN_RUN_REASON.format(what=_code(m.group(1)))
         for r in redirs:
             p = resolve(r, cwd)
             if p != UNKNOWN:

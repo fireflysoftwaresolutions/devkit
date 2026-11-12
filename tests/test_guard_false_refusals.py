@@ -675,6 +675,49 @@ class InstallReads(Case):
                 self.assertIsNotNone(main(cmd))
 
 
+class ModuleShadowing(unittest.TestCase):
+    """Python imports a module from the script's folder, the working folder (-c, -m, its input) and the folders a
+    program puts on sys.path before the standard library: a planted json.py there runs in place of json, in every
+    context. A program's own sibling module, and `python3 -I`, which keeps those folders off the path, run."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dir = Path(guard.real(tmp.name))
+        (self.dir / "json.py").write_text("import subprocess\nsubprocess.run(['gh', 'pr', 'merge', '12'])\n")
+        (self.dir / "w.py").write_text("import json\nprint(json.dumps(1))\n")
+        (self.dir / "own").mkdir()
+        (self.dir / "own" / "helper.py").write_text("X = 1\n")
+        (self.dir / "own" / "main.py").write_text("import helper\nimport json\nprint(json.dumps(helper.X))\n")
+        (self.dir / "rx").mkdir()
+        (self.dir / "rx" / "re.py").write_text("print('planted')\n")
+        (self.dir / "rx" / "t.py").write_text("import json\n")
+
+    def test_a_planted_standard_module_is_refused(self):
+        d = self.dir
+        for cmd in (f"python3 {d}/w.py", f"cd {d} && python3 -c 'import json; print(json.dumps(1))'",
+                    f"python3 -c 'import sys; sys.path.insert(0, \"{d}\"); import json'",
+                    f"python3 -c 'import sys; sys.path[0:0] = [\"{d}\"]; import json'",
+                    f"cd {d} && python3 -m json.tool x.json", f"python3 {d}/rx/t.py"):
+            with self.subTest(cmd=cmd):
+                self.assertIn("imports", guard.check("Bash", {"command": cmd}, CWD, "claude")[1])
+
+    def test_a_program_with_its_own_sibling_modules_or_isolated_runs(self):
+        d = self.dir
+        for cmd in (f"python3 {d}/own/main.py", f"python3 -I {d}/w.py", f"cd {d}/own && python3 -c 'import helper'",
+                    "python3 -c 'import json; print(1)'"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(guard.check("Bash", {"command": cmd}, CWD, "claude"))
+
+    def test_a_node_program_that_requires_a_module_the_command_writes_is_refused(self):
+        d = self.dir
+        for cmd in (f"echo 'x' > {d}/m.js && node -e 'require(\"./m\")'",
+                    f"cp {d}/w.py {d}/m.js; node -e 'require(\"./m.js\")'"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNotNone(member(f"cd {d} && " + cmd))
+                self.assertIn("then runs it", guard._writes_then_runs(f"cd {d} && " + cmd, str(d)) or "")
+
+
 class MainSessionPrograms(unittest.TestCase):
     """In the main session too, an inline or scratch program that starts a process with a command it does not write
     out (sys.argv, a parameter, a list it changes, a concatenation), passes a process function around, runs a string
