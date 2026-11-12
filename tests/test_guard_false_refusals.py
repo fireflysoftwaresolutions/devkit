@@ -122,6 +122,33 @@ class LiteralValues(Case):
             self.refused(cmd)
 
 
+class PipeGate(unittest.TestCase):
+    """A commit, push or tag after a pipeline with `&&` is refused where the shell runs it; a message, note or evidence
+    that only quotes such a line is data, and `set -o pipefail` opens the gate for its own shell only."""
+
+    def verdict(self, cmd):
+        v = guard.check("Bash", {"command": cmd}, CWD, "claude")
+        return v[1] if v else None
+
+    def test_a_quoted_text_that_names_the_pattern_runs(self):
+        for cmd in ('dev lesson recur L-x --evidence "the lead chained pytest | tail -1 && git commit; tail hid it" '
+                    '2>&1 | tail -1', "dev progress step done --check 'ran x | tail && dev commit'",
+                    "set -o pipefail; python3 -m unittest x 2>&1 | tail -1 && git commit -m x",
+                    "wc -l <<'EOF'\nnever run pytest | tail -1 && git commit\nEOF"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(self.verdict(cmd))
+
+    def test_a_pipeline_before_a_commit_where_the_shell_runs_it_is_refused(self):
+        for cmd in ("python3 -m unittest x 2>&1 | tail -1 && git commit -m x",
+                    "bash -c 'python3 -m unittest x | tail -1 && git commit -m x'",
+                    "set -o pipefail; bash -c 'python3 -m unittest x | tail -1 && git commit -m x'",
+                    'echo "$(python3 -m unittest x | tail -1 && git push)"',
+                    "eval 'python3 -m unittest x | tail -1 && dev commit -m x'",
+                    "bash <<'EOF'\npython3 -m unittest x | tail -1 && git commit -m x\nEOF"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.verdict(cmd), guard.PIPE_REASON)
+
+
 class ScratchScripts(Case):
     """A program a member wrote in its own scratch folder is judged by what it can do: a name it computes reaches a
     process only through a function it looks up by that name, so a lookup by a literal name, a module loaded by a

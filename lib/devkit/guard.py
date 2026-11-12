@@ -2048,6 +2048,58 @@ def _pipe_gate_open(cmd) -> str:
     return "hatch" if "DEVKIT_PIPE_OK" in names else ""
 
 
+def _blank_quoted(cmd: str) -> str:
+    """`cmd` with the text inside its quotes blanked (the quotes stay): a quoted message, note or evidence is data,
+    whatever it says (`--evidence "pytest | tail -1 && git commit hid it"`). The substitutions a double-quoted
+    string runs are read on their own (_pipe_gate_closed)."""
+    out, q = [], None
+    i, n = 0, len(cmd)
+    while i < n:
+        c = cmd[i]
+        if c == "\\" and q != "'":
+            out.append("  " if q else cmd[i:i + 2])
+            i += 2
+            continue
+        if q:
+            if c == q:
+                q = None
+                out.append(c)
+            else:
+                out.append("\n" if c == "\n" else " ")
+        else:
+            if c in "'\"":
+                q = c
+            out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def _pipe_gate_closed(cmd: str, cwd: str, pipefail: bool = False, depth: int = 0) -> bool:
+    """True when a gated command (_gated) follows a pipeline with `&&` where the shell runs it and `pipefail` is off:
+    in the command's own words (outside quotes and heredoc bodies), in the substitutions it runs (which inherit the
+    option), and in the lines of the shells and evals it runs (a nested shell starts without it). A level deeper than
+    three, or one that cannot be parsed, is read by its text."""
+    if depth > 3:
+        return bool(PIPE_GATE.search(cmd))
+    opened = pipefail or _pipe_gate_open(cmd) == "pipefail"
+    segs = split_commands(cmd)
+    if segs is None:
+        return bool(PIPE_GATE.search(cmd)) and not opened
+    if PIPE_GATE.search(_blank_quoted(strip_heredocs(cmd))) and not opened:
+        return True
+    if any(_pipe_gate_closed(body, cwd, opened, depth + 1) for body in _subst(cmd, True)):
+        return True
+    bodies = heredoc_bodies(cmd)
+    for argv0, _ in segs:
+        argv = _unwrap(argv0)
+        name = os.path.basename(argv[0]) if argv else ""
+        texts = _shell_inputs(argv[1:], cwd, bodies, name) if name in _SHELLS else \
+            [" ".join(argv[1:])] if name == "eval" else []
+        if any(_pipe_gate_closed(t, cwd, opened and name == "eval", depth + 1) for t in texts):
+            return True
+    return False
+
+
 # A wait for devkit's events or a CI run wakes the session when its command ends; work joined after it in the same
 # command line delays that wake until the work ends too, and runs whatever the wait reported.
 WAIT_REASON = ("This command waits for an event (`dev watch --wait` or `dev ci watch --wait`) and then does more work "
@@ -2330,12 +2382,10 @@ def _check_bash_reading(cmd: str, cwd: str, agent: str):
     why = wait_then_work_refusal(cmd) or ungated_action_refusal(cmd)
     if why:
         return deny(why, key="wait-or-ungated")
-    if PIPE_GATE.search(cmd):
-        how = _pipe_gate_open(cmd)
-        if not how:
+    if PIPE_GATE.search(cmd) and _pipe_gate_closed(cmd, cwd or os.getcwd()):
+        if _pipe_gate_open(cmd) != "hatch":
             return deny(PIPE_REASON, key="pipe-gate")
-        if how == "hatch":
-            _hatch({"DEVKIT_PIPE_OK"}, "DEVKIT_PIPE_OK", "pipe-gate", PIPE_REASON)
+        _hatch({"DEVKIT_PIPE_OK"}, "DEVKIT_PIPE_OK", "pipe-gate", PIPE_REASON)
     segs = split_commands(cmd)
     if segs is None:  # D10: protected_bash's walker refuses it first; this keeps check_bash closed on its own
         return deny(UNREADABLE_REASON, key="unreadable")
