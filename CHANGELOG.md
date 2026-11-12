@@ -5,7 +5,7 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
 
 ## [Unreleased]
 
-## [26.11.16] - 2026-11-11
+## [26.11.16] - 2026-11-12
 
 This release makes the bug registry's issues readable by people, names each Mac by a stable machine id, tightens
 how lessons are recorded and counted, and closes gaps in how the guard reads commands.
