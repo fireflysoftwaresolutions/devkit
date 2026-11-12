@@ -3,18 +3,20 @@
 # SPDX-License-Identifier: Apache-2.0
 """The bug registry's workflow: keep one bot-written record per registry issue, and the issue's text written from it.
 
-`.github/workflows/bug-registry.yml` runs this on `issues: opened` and `labeled`, `issue_comment: created` and
-`release: published`, with two arguments, the event file GitHub writes and the event name. Event text is read from
-that file, never pasted into a command.
+`.github/workflows/bug-registry.yml` runs this on `issues: opened` and `labeled`, `issue_comment: created`,
+`release: published` and `workflow_dispatch`, with two arguments, the event file GitHub writes and the event name.
+Event text is read from that file, never pasted into a command.
 
 - An issue's first payload is its body. A valid report makes the issue a registry issue: it gets the labels and the
   record comment the bot writes. Anything else leaves the issue alone.
 - Every write of a record also writes the issue's title and body from it (bugs.human_title, bugs.render_issue) when
   their text differs: after a fold, on a release that marks the bug fixed, and on a maintainer's `verdict:*` label,
-  which the body states in one sentence. The record keeps the first report
-  without the reporter's free text; the body shows that text only while the issue's own body still carries it, so a
-  reporter who takes it out has it gone from the next render. A record also forgets the accounts quiet for 90 days
-  each time it is written (_pruned).
+  which the body states in one sentence. The record keeps the first report without the reporter's free text; the
+  body shows that text only while the issue's own body still carries it, so a reporter who takes it out has it gone
+  from the next render. A record also forgets the accounts quiet for 90 days each time it is written (_pruned).
+- A manual run (workflow_dispatch) rewrites every registry issue, open or closed in the last 90 days, without folding
+  anything: one request a second at most, and at most RERENDER_MAX issues rewritten, so a second run goes on where
+  the first stopped. It also creates the `verdict:*` labels maintainers apply.
 - Each run folds every payload comment it has not folded yet, oldest first, so a run cancelled by the concurrency
   group loses nothing. The record keeps `seen`, the highest comment id handled, and `folds`, today's folded payloads
   per account, which cap every account at DAILY_CAP payloads a day across the registry. Folded votes, confirmations
@@ -61,8 +63,12 @@ DAILY_CAP = 20  # folded payloads per account per day, across the registry
 DELETED = ("vote", "confirm", "failed")  # once folded these comments go; detours and reports stay on the issue
 REGRESSION = "regression"
 EXPIRED = "expired-"  # stands in for the account of a team mark older than VOTER_DAYS; a digest is 64 hex characters
-EVENTS = {"issues": ("opened", "labeled"), "issue_comment": ("created",), "release": ("published",)}
+EVENTS = {"issues": ("opened", "labeled"), "issue_comment": ("created",), "release": ("published",),
+          "workflow_dispatch": (None,)}  # the actions each event runs for; a manual run's event has none
 VERDICT = "verdict:"  # the labels maintainers give a bug, one for each of bugs.VERDICTS
+VERDICT_COLOR = "c5def5"
+RERENDER_MAX = 200  # issues one manual run rewrites; the next run goes on, skipping the ones already current
+RERENDER_PACE_S = 1.0  # seconds between two requests of a manual run, inside GitHub's limits for the workflow token
 TRIES = 3  # writes of one record that found it changed by another run, before the run gives up
 WAITS, WAIT_S = 4, 15  # a duplicate waits up to a minute for the first issue's own run to write its record
 MAINTAINERS = Path(__file__).resolve().parents[1] / ".github" / "bug-registry-maintainers"
@@ -575,6 +581,67 @@ def _release(client, event: dict, maintainers: frozenset, now: float) -> str:
         (" (" + ", ".join(f"#{n}" for n in marked) + ")" if marked else "")
 
 
+# --------------------------------------------------------------------------- the manual run
+
+def _rerender(client, issue: dict, now: float):
+    """Write one registry issue's record and text again without folding anything: `seen`, the fold counts of today
+    and the score stay as they are. -> whether it wrote, or None for an issue with no record of its own yet (its next
+    event folds it)."""
+    number = _number(issue.get("number"))
+    for _ in range(TRIES):
+        _, holder, rec = _read(client, number)
+        if rec is None or rec.get("status") == "duplicate":
+            return None
+        new = _prepared(rec, issue, now)
+        try:
+            wrote = _write(client, number, holder, new)
+        except Changed:
+            continue
+        return _write_text(client, number, new, issue, now) or wrote
+    raise RegistryError(f"the record of issue #{number} kept changing while this run wrote it")
+
+
+def _verdict_labels(client) -> list:
+    """Create the `verdict:*` labels the repository lacks, each described by the sentence the issue's text states.
+    -> the labels created."""
+    have = {lb.get("name") for lb in client.labels() or [] if isinstance(lb, dict)}
+    made = [VERDICT + v for v in bugs.VERDICTS if VERDICT + v not in have]
+    for name in made:
+        client.create_label(name, VERDICT_COLOR, bugs.VERDICTS[name[len(VERDICT):]][:100])
+    return made
+
+
+def _rerender_all(client, now: float) -> str:
+    """Rewrite every registry issue, open or closed in the last 90 days, oldest first, at one request a second at
+    most. It stops once it has rewritten RERENDER_MAX issues and says how many are left; issues whose text is already
+    current cost one read each, so running it again goes on where it stopped."""
+    client.pace(RERENDER_PACE_S)
+    made = _verdict_labels(client)
+    cut = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now - bugs.CLOSED_DAYS * 86400))
+    issues = sorted((i for i in client.registry_issues(cut) or [] if isinstance(i, dict) and _number(i.get("number"))
+                     and not i.get("pull_request") and bugs.LABEL in _labels(i)
+                     and (i.get("state") != "closed" or str(i.get("closed_at") or "") >= cut)),
+                    key=lambda i: i["number"])
+    issues = list({i["number"]: i for i in issues}.values())
+    counts = {"rewritten": 0, "current": 0, "no record": 0}
+    for n, issue in enumerate(issues):
+        if counts["rewritten"] >= RERENDER_MAX:
+            break
+        try:
+            wrote = _rerender(client, issue, now)
+        except (GitHubError, RegistryError) as e:
+            raise RegistryError(f"stopped at #{issue['number']} ({e}): {_tally(counts, made)}, "
+                                f"{len(issues) - n} left") from None
+        counts["rewritten" if wrote else "current" if wrote is False else "no record"] += 1
+    return f"{_tally(counts, made)}, {len(issues) - sum(counts.values())} left"
+
+
+def _tally(counts: dict, made: list) -> str:
+    return (f"created {len(made)} verdict label(s); " if made else "") + \
+        f"rewrote {counts['rewritten']} issue(s), {counts['current']} already current, " \
+        f"{counts['no record']} without a record of their own"
+
+
 # --------------------------------------------------------------------------- entry point
 
 def _fail(message: str, code: int) -> int:
@@ -608,7 +675,7 @@ def main(event_path: str, event_name: str, client, *, now: float = None, sleep=t
         if added not in bugs.VERDICTS:
             print("bug registry: not a verdict label: skipped")
             return 0
-    if event_name != "release" and bugs.LABEL not in _labels(issue) and _first_report(issue) is None:
+    if event_name in ("issues", "issue_comment") and bugs.LABEL not in _labels(issue) and _first_report(issue) is None:
         print("bug registry: not a registry issue: skipped")
         return 0
     key = (os.environ.get("BUG_REGISTRY_KEY") or "").strip()
@@ -620,6 +687,8 @@ def main(event_path: str, event_name: str, client, *, now: float = None, sleep=t
     try:
         if event_name == "release":
             message = _release(client, event, listed, now)
+        elif event_name == "workflow_dispatch":
+            message = _rerender_all(client, now)
         else:
             number = _number(issue.get("number"))
             if not number:
@@ -646,7 +715,8 @@ class GitHub:
 
     API = "https://api.github.com"
 
-    def __init__(self, repo: str = None, token: str = None, timeout: float = 30, opener=None):
+    def __init__(self, repo: str = None, token: str = None, timeout: float = 30, opener=None, sleep=time.sleep,
+                 clock=time.monotonic):
         self.repo = repo or os.environ.get("GITHUB_REPOSITORY", "")
         self.token = token or os.environ.get("GITHUB_TOKEN", "")
         if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", self.repo):
@@ -654,8 +724,19 @@ class GitHub:
         if not self.token:
             raise GitHubError("GITHUB_TOKEN is not set")
         self.timeout, self._open = timeout, opener or urllib.request.urlopen
+        self._sleep, self._clock, self._gap, self._last = sleep, clock, 0.0, None
+
+    def pace(self, seconds: float) -> None:
+        """Start every later request at least `seconds` after the one before it, pages of a listing included."""
+        self._gap = max(0.0, float(seconds))
+
+    def _wait(self) -> None:
+        if self._gap and self._last is not None and self._clock() - self._last < self._gap:
+            self._sleep(self._gap - (self._clock() - self._last))
+        self._last = self._clock()
 
     def _call(self, method: str, path: str, params: dict = None, body=None, missing_ok: bool = False):
+        self._wait()
         url = f"{self.API}/{path}" + (f"?{urllib.parse.urlencode(params)}" if params else "")
         data = None if body is None else json.dumps(body).encode("utf-8")
         headers = {"Accept": "application/vnd.github+json", "Authorization": f"Bearer {self.token}",
@@ -734,6 +815,19 @@ class GitHub:
     def closed_issues(self, label: str, since: str) -> list:
         params = {"labels": label, "state": "closed", **({"since": since} if since else {})}
         return self._pages(self._issues(), params)
+
+    def registry_issues(self, since: str) -> list:
+        """Every open issue labeled devkit-bug, then the closed ones updated since `since`: the API filters on the
+        update time, so the caller keeps those closed since then."""
+        return self._pages(self._issues(), {"labels": bugs.LABEL, "state": "open"}) + \
+            self.closed_issues(bugs.LABEL, since)
+
+    def labels(self) -> list:
+        return self._pages(f"repos/{self.repo}/labels")
+
+    def create_label(self, name: str, color: str, description: str) -> None:
+        self._call("POST", f"repos/{self.repo}/labels", body={"name": name, "color": color,
+                                                                "description": description})
 
     def closure(self, number: int) -> dict:
         """Who closed the issue last (login and account id), and whether a merged pull request closed it. REST issue

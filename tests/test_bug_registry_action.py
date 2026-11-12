@@ -99,8 +99,15 @@ EVENTS = {
         "repository": {"full_name": "owner/registry", "default_branch": "main"},
         "sender": {"login": "maint", "id": 9, "type": "User"},
     },
+    "workflow_dispatch": {  # a manual run: no action, no issue
+        "inputs": {}, "ref": "refs/heads/main", "workflow": ".github/workflows/bug-registry.yml",
+        "repository": {"full_name": "owner/registry", "default_branch": "main"},
+        "sender": {"login": "maint", "id": 9, "type": "User"},
+    },
 }
-REPORTED = "Steps close but the board still shows them running"  # a reporter's own words, in a command report
+VERDICT_LABELS = {f"verdict:{v}" for v in ("confirmed", "false-positive", "correct-refusal", "misleading-message",
+                                           "split", "needs-info", "not-planned")}
+REPORTED ="Steps close but the board still shows them running"  # a reporter's own words, in a command report
 OLD = NOW - 100 * DAY  # past the 90 days a record keeps an account
 
 
@@ -117,6 +124,7 @@ class FakeGitHub:
         self.on_reread = None  # plays another writer: changes a comment right before the workflow re-reads it
         self.after_record_write = None  # plays the reporter: edits the issue right after the bot writes its record
         self.max_body = 65536  # GitHub refuses a longer comment with HTTP 422
+        self.label_list, self.paced = [], 0.0
 
     # ---- set-up
     def add_issue(self, number, body, user, assoc="NONE", **fields):
@@ -247,6 +255,23 @@ class FakeGitHub:
     def is_member(self, login):
         self.calls.append(("is_member", login))
         return login in self.members
+
+    def registry_issues(self, since):
+        """Like the API: every open issue with the label, and the closed ones updated since `since`."""
+        self.calls.append(("registry_issues", since))
+        return [self._issue_view(i) for _, i in sorted(self.issues.items()) if "devkit-bug" in i["labels"]
+                and (i["state"] == "open" or i["updated_at"] >= since)]
+
+    def labels(self):
+        self.calls.append(("labels",))
+        return copy.deepcopy(self.label_list)
+
+    def create_label(self, name, color, description):
+        self.writes.append(("create_label", name))
+        self.label_list.append({"name": name, "color": color, "description": description})
+
+    def pace(self, seconds):
+        self.paced = seconds
 
 
 def _run(fake, event_name, number=None, comment=None, key=KEY, sleep=None, maintainers=None, label=None, **release):
@@ -985,6 +1010,63 @@ class VerdictTests(unittest.TestCase):
         self.assertIn("- **Status:** Open. Confirmed as a devkit bug.", fake.issues[12]["body"])
 
 
+class ManualRunTests(unittest.TestCase):
+    """A maintainer runs the workflow by hand once after a release that changes how issues read."""
+
+    def test_it_rewrites_every_registry_issue_and_folds_nothing(self):
+        fake = FakeGitHub()
+        for number in (17, 20, 21, 22):
+            fake.registry_issue(number)
+        unfolded = fake.add_comment(20, _body(_payload("vote")), _user(5))
+        fake.issues[21].update(state="closed", state_reason="completed", closed_at=_iso(NOW - 10 * DAY),
+                               updated_at=_iso(NOW - 10 * DAY))
+        fake.issues[22].update(state="closed", state_reason="completed", closed_at=_iso(OLD),
+                               updated_at=_iso(NOW - 2 * DAY))  # a later comment moved updated_at; closed_at decides
+        fake.add_issue(23, "A question about devkit.", _user(9))
+        before = {n: fake.record(n) for n in (17, 20, 21)}
+        untouched = {n: copy.deepcopy(fake.issues[n]) for n in (22, 23)}
+        rc, out, err = _run(fake, "workflow_dispatch")
+        self.assertEqual(rc, 0, err)
+        kept = ("seen", "folds", "score", "voters")
+        for n in (17, 20, 21):
+            self.assertEqual(fake.issues[n]["title"], "dev progress step crashes with KeyError", n)
+            self.assertIn("- **Workaround:** None known yet.", fake.issues[n]["body"], n)
+            self.assertEqual(action._first_report(fake.issue(n)), _payload("report"), n)
+            self.assertEqual({k: fake.record(n).get(k) for k in kept}, {k: before[n].get(k) for k in kept}, n)
+        self.assertIn(unfolded, fake.ids(20))
+        self.assertEqual({n: fake.issues[n] for n in (22, 23)}, untouched)
+        self.assertTrue(out.strip().endswith("0 left"), out)
+
+    def test_it_stops_at_its_cap_and_the_next_run_goes_on(self):
+        fake = FakeGitHub()
+        for number in (1, 2, 3):
+            fake.registry_issue(number)
+        with mock.patch.object(action, "RERENDER_MAX", 2):
+            rc, out, err = _run(fake, "workflow_dispatch")
+            self.assertEqual(rc, 0, err)
+            self.assertEqual(sorted(n for w, n in fake.writes if w == "edit_issue"), [1, 2])
+            self.assertTrue(out.strip().endswith("1 left"), out)
+            fake.writes.clear()
+            rc, out, err = _run(fake, "workflow_dispatch")
+            self.assertEqual(rc, 0, err)
+            self.assertEqual(sorted(n for w, n in fake.writes if w == "edit_issue"), [3])
+            self.assertIn("2 already current", out)
+            self.assertTrue(out.strip().endswith("0 left"), out)
+
+    def test_it_waits_a_second_between_requests_and_makes_the_verdict_labels(self):
+        fake = FakeGitHub()
+        fake.registry_issue(1)
+        fake.label_list = [{"name": "devkit-bug"}, {"name": "verdict:confirmed"}]
+        rc, _, err = _run(fake, "workflow_dispatch")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(fake.paced, 1.0)
+        self.assertEqual(sorted(n for w, n in fake.writes if w == "create_label"),
+                         sorted(VERDICT_LABELS - {"verdict:confirmed"}))
+        fake.writes.clear()
+        self.assertEqual(_run(fake, "workflow_dispatch")[0], 0)
+        self.assertEqual(fake.writes, [])
+
+
 class _Response:
     def __init__(self, status=200, data=None, link=""):
         self.status, self._raw, self.headers = status, b"" if data is None else json.dumps(data).encode(), {
@@ -1043,6 +1125,35 @@ class ClientTests(unittest.TestCase):
         query = urllib.parse.parse_qs(urllib.parse.urlsplit(seen[0].full_url).query)["q"][0]
         self.assertEqual(query, f"repo:owner/registry is:issue label:devkit-bug in:body {FP}")
 
+    def test_a_paced_client_starts_each_request_a_second_after_the_last(self):
+        clock, starts, slept = [100.0], [], []
+
+        def opener(req, timeout):
+            starts.append(clock[0])
+            return _Response(data={})
+
+        def sleep(seconds):
+            slept.append(seconds)
+            clock[0] += seconds
+        client = action.GitHub(repo="owner/registry", token="t0k3n-value", opener=opener, sleep=sleep,
+                               clock=lambda: clock[0])
+        client.issue(1)
+        client.issue(2)
+        self.assertEqual(slept, [])  # unpaced: no wait
+        client.pace(1.0)
+        client.issue(3)
+        clock[0] += 0.25
+        client.issue(4)
+        client.issue(5)
+        self.assertEqual(starts, [100.0, 100.0, 101.0, 102.0, 103.0])
+
+    def test_the_registry_listing_reads_open_and_recently_closed_issues(self):
+        client, seen = self._client([_Response(data=[{"number": 1}]), _Response(data=[{"number": 2}])])
+        self.assertEqual([i["number"] for i in client.registry_issues("2026-10-17T08:00:00Z")], [1, 2])
+        queries = [urllib.parse.parse_qs(urllib.parse.urlsplit(r.full_url).query) for r in seen]
+        self.assertEqual([(q["labels"], q["state"], q.get("since")) for q in queries],
+                         [(["devkit-bug"], ["open"], None), (["devkit-bug"], ["closed"], ["2026-10-17T08:00:00Z"])])
+
     def test_the_client_needs_a_token(self):
         with mock.patch.dict(os.environ, {}, clear=True):
             with self.assertRaises(action.GitHubError):
@@ -1056,11 +1167,13 @@ class WorkflowFileTests(unittest.TestCase):
     def test_event_text_reaches_no_command(self):
         exprs = sorted(" ".join(e.split()) for e in re.findall(r"\$\{\{(.*?)\}\}", self.text, re.S))
         self.assertEqual(exprs, sorted([
-            "!github.event.issue.pull_request && (github.event_name == 'release' || (github.event_name == 'issues' && "
-            "github.event.action == 'opened' && contains(github.event.issue.body, '```json')) || (github.event_name == "
-            "'issues' && github.event.action == 'labeled' && startsWith(github.event.label.name, 'verdict:')) || "
-            "(github.event_name == 'issue_comment' && contains(github.event.comment.body, '```json')))",  # compared only
-            "github.event.issue.number || github.event.release.id",  # the concurrency group: numbers only
+            "!github.event.issue.pull_request && (github.event_name == 'release' || github.event_name == "
+            "'workflow_dispatch' || (github.event_name == 'issues' && github.event.action == 'opened' && "
+            "contains(github.event.issue.body, '```json')) || (github.event_name == 'issues' && github.event.action == "
+            "'labeled' && startsWith(github.event.label.name, 'verdict:')) || (github.event_name == 'issue_comment' && "
+            "contains(github.event.comment.body, '```json')))",  # the job's condition: compared, never run
+            "github.event.issue.number || github.event.release.id || 'rerender'",  # the concurrency group: numbers
+            "github.event_name == 'workflow_dispatch' && 30 || 5",  # the job's timeout: longer for the manual run
             "github.token", "secrets.BUG_REGISTRY_KEY"]))
         self.assertNotIn("github.event", self.text[self.text.index("\n    steps:"):])
 
@@ -1086,7 +1199,8 @@ class WorkflowFileTests(unittest.TestCase):
         self.assertIn("persist-credentials: false", self.text)
         runs = [ln.strip() for ln in self.text.splitlines() if re.match(r"\s*(- )?run:", ln)]
         self.assertEqual(runs, ['run: python3 tools/bug_registry_action.py "$GITHUB_EVENT_PATH" "$GITHUB_EVENT_NAME"'])
-        for line in ("runs-on: ubuntu-24.04", "timeout-minutes: 5", "cancel-in-progress: false",
+        for line in ("runs-on: ubuntu-24.04", "cancel-in-progress: false",
+                     "timeout-minutes: ${{ github.event_name == 'workflow_dispatch' && 30 || 5 }}",
                      "GITHUB_TOKEN: ${{ github.token }}", "BUG_REGISTRY_KEY: ${{ secrets.BUG_REGISTRY_KEY }}"):
             self.assertIn(line, self.text)
         self.assertNotRegex(self.text, r"pull_request_target|workflow_run|pip install")
@@ -1095,8 +1209,9 @@ class WorkflowFileTests(unittest.TestCase):
     def test_triggers(self):
         for event, types in (("issues", "opened, labeled"), ("issue_comment", "created"), ("release", "published")):
             self.assertRegex(self.text, rf"\n  {event}:( #[^\n]*)?\n    types: \[{types}\]\n")
+        self.assertRegex(self.text, r"\n  workflow_dispatch:\n")  # by hand, with no inputs
         ons = re.findall(r"^  ([a-z_]+):", self.text.split("\npermissions:")[0], re.M)
-        self.assertEqual(ons, ["issues", "issue_comment", "release"])
+        self.assertEqual(ons, ["issues", "issue_comment", "release", "workflow_dispatch"])
 
 
 if __name__ == "__main__":
