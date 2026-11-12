@@ -4417,8 +4417,11 @@ def on_question(agent: str, data: dict, now: float | None = None) -> list:
     return new + ([] if member or new or refused else _ungranted_notes(run, data))
 
 
-# an irreversible action a question may ask about, and the action its grant line names
-_ASKS_ACTION = re.compile(r"(?i)\b(push|merge|release|deploy|publish|pull request|PR)\b")
+# a question that asks permission for an irreversible action ("May I push …?", "OK to merge …?", "Approve the
+# release?"), and that action; a question that only mentions one ("Should the release notes …?") asks no permission
+_ASKS_ACTION = re.compile(r"(?i)\b(?:(?:may|can|shall|should)\s+(?:i|we)\s+(?:now\s+)?|(?:ok|okay)\s+to\s+|"
+                          r"approve\s+(?:the\s+|this\s+)?|go\s+ahead\s+(?:and\s+|with\s+(?:the\s+)?)?)"
+                          r"(push|merge|release|deploy|publish|open\s+(?:a|the)\s+(?:pr|pull\s+request))\b")
 
 
 def _ungranted_notes(run, data: dict) -> list:
@@ -4435,7 +4438,7 @@ def _ungranted_notes(run, data: dict) -> list:
         m, did = _ASKS_ACTION.search(qt), asked_decision(q)
         if not m or not str(answers.get(qt) or "").strip() or (did and _decision(run or {}, did)):
             continue
-        act = "pr" if m.group(1).lower() in ("pr", "pull request") else m.group(1).lower()
+        act = "pr" if m.group(1).lower().startswith("open") else m.group(1).lower()
         shown = " ".join(qt.replace("`", "").split())
         shown = shown if len(shown) <= 120 else shown[:119] + "…"
         return [{"note": f"devkit · the developer's answer to “{shown}” grants nothing: devkit counts a dialog answer "

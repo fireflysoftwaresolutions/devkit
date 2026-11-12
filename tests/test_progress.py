@@ -1721,9 +1721,10 @@ class DialogApprovalTests(TranscriptCase):
     # so the developer learned only from the tech lead's second ask that a typed grant line was needed. The rule stays
     # (a dialog answer counts only for a decision devkit recorded); the context says so at once, with the line to type
     def test_an_approval_in_a_dialog_devkit_did_not_record_says_a_typed_grant_is_needed(self):
-        q = "May I push feat/x to origin now?"
-        result = {"questions": [{"question": q, "options": [{"label": "Yes, push"}, {"label": "Not yet"}]}],
-                  "answers": {q: "Yes, push"}}
+        q, notes = "May I push feat/x to origin now?", "Should the release notes mention the guard fix?"
+        result = {"questions": [{"question": notes, "options": [{"label": "Yes"}, {"label": "No"}]},
+                                {"question": q, "options": [{"label": "Yes, push"}, {"label": "Not yet"}]}],
+                  "answers": {notes: "Yes", q: "Yes, push"}}
         self.write({"type": "user", "uuid": "u-9", "isSidechain": False, "toolUseResult": result,
                     "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_q9",
                                                              "content": "answered"}]}})
@@ -1731,7 +1732,7 @@ class DialogApprovalTests(TranscriptCase):
             "session_id": "s1", "tool_name": "AskUserQuestion", "tool_use_id": "toolu_q9",
             "tool_input": {"questions": result["questions"]}, "tool_response": result,
             "transcript_path": str(self.transcript)}))
-        self.assertIn("grants nothing", line)
+        self.assertIn(f"answer to “{q}” grants nothing", line)
         self.assertIn("`grant push <target>`", line)
         self.assertIsNone(self.grant(consume=False))  # the rule is unchanged: no grant
 
@@ -1746,6 +1747,7 @@ class EvidenceReplayTests(TranscriptCase):
         self.assertIsNotNone(self.grant())  # the developer's push uses it
         self.assertEqual(self.prompt("grant push feat/x", "prompt-001"), [])  # replayed: nothing recorded
         self.assertIsNone(self.grant(consume=False))
+        self.assertNotIn("release notes", line)  # a question that asks no permission is no approval
         refused = [r for r in __import__("devkit.audit").audit.records(1, "crew.evidence-refused")]
         self.assertIn("prompt-001", " ".join(r["detail"] for r in refused))
 
