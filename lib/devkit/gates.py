@@ -9,7 +9,10 @@ agent (`agent_of`: a Claude Code transcript or a Codex rollout), whose commands 
 
   proofs   the `proof` of each procedure phase that applied ran as a shell command, not as text inside quotes or a
            heredoc. A proof about files applies only when the member changed files of its kind (`FILE_PROOFS`: no
-           `dev docs check` without a docs change, no test proof without a code change); the others always apply
+           `dev docs check` without a docs change, no test proof without a code change); the others always apply.
+           `dev ci --run`, which a brief or the project may forbid, can be met by the tech lead instead
+           (`_ci_instead`): a `Waived proof:` line in the brief, or a passed `dev ci --run` on exactly the tree the
+           member leaves, never the member's own `dev ci --mark-passed`; `check` audits each one it accepts
   skills   it loaded the skills of each procedure phase it worked in (a phase whose proof applied, or one whose
            devkit commands it ran) and the skills devkit's skill rules require for the files it changed: a Skill
            tool call, or a read of the skill's SKILL.md
@@ -491,6 +494,87 @@ def _ran(command: str, invocations) -> bool:
     return any(w[:len(want)] == want for w in invocations)
 
 
+# The full local CI run is the one proof the tech lead may meet for a member. A brief can forbid the run (in a shared
+# checkout, other members' uncommitted work fails the suite, which takes ~40 minutes), and so can a project (runner
+# preparation that must not run twice). In its place the gate accepts one of two records the member cannot write
+# itself (`_ci_instead`). The member's own `dev ci --mark-passed` is not one: it attests a run, and a member does not
+# attest its own proof (the escape-hatch rule of `--ci-passed`, gitx._evidence_or_attest).
+CI_PROOF = "dev ci --run"
+WAIVER_LINE = "Waived proof: dev ci --run — <why>"  # a line of the brief; <why> is a sentence, as a root cause is
+_WAIVER = re.compile(r"(?im)^[ \t>*-]*waived proof:[ \t]*`?dev[ \t]+ci[ \t]+--run`?"
+                     r"(?:[ \t]*[—–:,]|[ \t]+-|[ \t]+because)[ \t]+(\S[^\n]*?)[ \t]*$")
+_TEMPLATE = re.compile(r"<[^<>\n]+>")  # a <placeholder> left in the line: not a reason
+CI_FIX = (f"run `{CI_PROOF}`. If your brief or the project forbids that run, only the tech lead can meet the proof "
+          f"for you, with either of these: this line in your brief, `{WAIVER_LINE}`, or a passed `{CI_PROOF}` of "
+          "their own on exactly the tree you leave. Ask with `dev crew ask`; your own `dev ci --mark-passed` does not "
+          "meet it")
+
+
+def _brief(path) -> str:
+    """The member's brief: the launch's prompt, which Claude Code writes as the first record of the member's own
+    transcript, a user record with plain text. Read from the file's first line, since `_records` keeps only the end
+    of a very long transcript. '' for any other first record, such as a Codex rollout's session metadata."""
+    try:
+        with open(path, "rb") as fh:
+            rec = json.loads(fh.readline().decode("utf-8", "replace"))
+    except (OSError, TypeError, ValueError):
+        return ""
+    if not isinstance(rec, dict) or rec.get("type") != "user":
+        return ""
+    return _text((rec.get("message") or {}).get("content"))
+
+
+def brief_waiver(path) -> str:
+    """Why the member's brief waives `dev ci --run`: the reason of its first `Waived proof: dev ci --run — <why>` line
+    (WAIVER_LINE; a colon, a hyphen or "because" may stand for the dash) that gives one, a sentence of at least
+    gitx.CAUSE_MIN characters with no <placeholder> left; else ''. Nothing else in the brief waives it, and no other
+    proof can be waived."""
+    from . import gitx
+    for m in _WAIVER.finditer(_brief(path)):
+        why = " ".join(m.group(1).split())
+        if len(why) >= gitx.CAUSE_MIN and not _TEMPLATE.search(why):
+            return why
+    return ""
+
+
+def _by_lead(lead_name: str) -> bool:
+    """The main session launched the member, so the tech lead wrote its brief. `lead_name` is the name the hook
+    passes (hooks._lead_name): the member's own then, "a helper of <member>" when a member launched it, and '' when
+    devkit's records show neither, which counts as no (fail closed)."""
+    return bool(lead_name) and not lead_name.startswith("a helper of ")
+
+
+def _ci_markers(top) -> list:
+    """The local CI evidence markers of the repository at `top`, newest first: what `dev ci --run` and
+    `dev ci --mark-passed` record (gitx.record_evidence). [] when they cannot be read."""
+    try:
+        from . import gitx
+        c = gitx.ctx(top)
+        return gitx._markers(c) if c else []
+    except Exception:
+        return []
+
+
+def _ci_instead(transcript_path, top, by_lead: bool) -> str:
+    """How the tech lead met `dev ci --run` for the member, as the audit record says it, or '' (the gate refuses as
+    before): (1) the tech lead's brief waives it (`brief_waiver`; `by_lead`: the main session launched the member);
+    (2) a passed `dev ci --run` (or `--resume`) holds the checkout's tree as it is now (gitx.work_tree, computed only
+    when such a marker exists). A marker does not say who ran it, but devkit writes a `run` marker only after every
+    step passed, so a run on the same tree is the same evidence; a `marked` one only attests a run and never counts."""
+    if not top:
+        return ""
+    why = brief_waiver(transcript_path) if by_lead else ""
+    if why:
+        return f"a waiver in the tech lead's brief: {why}"
+    runs = [m for m in _ci_markers(top) if m.get("how") in ("run", "resumed")]
+    if not runs:
+        return ""
+    from . import gitx
+    tree = gitx.work_tree(top)
+    hit = next((m for m in runs if tree and m.get("tree") == tree), None)
+    return f"a passed `{CI_PROOF}` on the tree it leaves ({tree[:7]}: {gitx.describe_evidence(hit)})" if hit else ""
+
+
 # A lesson a refusal shows, in the two forms devkit writes: a lesson rule's refusal ("… from lesson L-…: <title>") and
 # a recalled pitfall ("Lesson L-… (recorded by …"). An id the refusal only quotes (`dev lesson release L-…`) is not one.
 _SHOWN_LESSON = re.compile(r"\bfrom lesson (L-[0-9A-Za-z]{6,40}):|\bLesson (L-[0-9A-Za-z]{6,40}) \(recorded by ")
@@ -692,12 +776,14 @@ def _test_findings(top, files, written=None) -> list:
 
 
 def crew_gates(member, transcript_path, cwd, roster=None, agent: str = "", session: str = "",
-               lane: str = "") -> list:
+               lane: str = "", by_lead: bool = False, accepted=None) -> list:
     """What a crew member still owes, from its own transcript: [{rule, item, evidence, fix}], in the order of
     RULES. `member` is a roster entry or a name (`Kid`, `DevEx engineer (Kid)`, `devkit:kid`); an unknown name
     still gets the gates that need no procedure. `agent`: the member's agent ("claude" or "codex"; default: the one
     that wrote the transcript), whose transcript format and installed skills the gates read. `session`, `lane`: the
-    session and the member's agent id, whose edit record tells which files other callers edited meanwhile."""
+    session and the member's agent id, whose edit record tells which files other callers edited meanwhile.
+    `by_lead`: the main session launched the member, so a waiver in its brief counts (`_ci_instead`). `accepted`: a
+    list that gets {proof, how} for each proof met another way, for the audit trail."""
     m = _member(member, roster)
     read_only = (m or {}).get("tools") == "read"
     agent = agent or agent_of(transcript_path)
@@ -726,9 +812,15 @@ def crew_gates(member, transcript_path, cwd, roster=None, agent: str = "", sessi
                 delivered = skillguard.delivered([os.path.realpath(f) for f in paths + touched])
                 proof_kinds = [_rel(f, top) for f in delivered]
             if proof and _proof_owed(x, proof_kinds) and not _ran(proof, inv):
+                ci = " ".join(str(proof).split()) == CI_PROOF
+                how = _ci_instead(transcript_path, top, by_lead) if ci else ""
+                if how:
+                    if accepted is not None:
+                        accepted.append({"proof": proof, "how": how})
+                    continue
                 found.append(_finding("proofs", proof, f"`{proof}` is not among your {len(commands)} shell commands "
                                       "(text inside quotes or a heredoc does not count)",
-                                      f"run `{proof}{PROOF_ARGS.get(proof, '')}`"))
+                                      CI_FIX if ci else f"run `{proof}{PROOF_ARGS.get(proof, '')}`"))
     # a member that never edits (tools review or read) wrote nothing through its shell: a file its commands name that
     # changed during its lane is another lane's, and owes it no skill
     edits = (m or {}).get("tools") not in ("review", "read")
@@ -791,7 +883,8 @@ def check(name, data: dict, sess: dict, pid: str = "", roster=None, lead_name: s
     only once. A member let through with background work still running (sent back once already, or not enforced) is
     audited and kept for the tech lead as `lead_name` (`_keep_for_lead`): the name devkit's launch records give it
     (`hooks._lead_name`), never `name`, which may come from a description a member wrote for its helper. Without
-    one, nothing is kept. Fails open."""
+    one, nothing is kept. `lead_name` also says whether the tech lead wrote the brief (`_by_lead`), and a proof met
+    another way is audited as `crew.gate` with outcome "ok" and how it was met. Fails open."""
     try:
         key = data.get("agent_id") or str(name or "")
         transcript = data.get("agent_transcript_path")
@@ -808,11 +901,17 @@ def check(name, data: dict, sess: dict, pid: str = "", roster=None, lead_name: s
                 _keep_for_lead(sess, key, lead_name, tasks)
             return None
         m = _member(name, roster)
+        accepted = []
         findings = crew_gates(m or name, transcript, data.get("cwd") or "", roster, agent,
-                              session=data.get("session_id") or "", lane=data.get("agent_id") or "")
+                              session=data.get("session_id") or "", lane=data.get("agent_id") or "",
+                              by_lead=_by_lead(lead_name), accepted=accepted)
+        who = crew.who(m) if m else str(name or "Agent")
+        if accepted:  # a proof met another way is a choice someone can review: `dev audit --action crew.gate`
+            audit.record("crew.gate", pid or "", f"{who}: " + "; ".join(
+                f"proofs: {a['proof']} met instead by {a['how']}" for a in accepted), "ok", member=who,
+                         rules=["proofs"])
         if not findings:
             return None
-        who = crew.who(m) if m else str(name or "Agent")
         sess.setdefault("crew_gated", {})[key] = who
         enforce = enforced()
         audit.record("crew.gate", pid or "", f"{who}: " + "; ".join(f"{f['rule']}: {f['item']}" for f in findings),

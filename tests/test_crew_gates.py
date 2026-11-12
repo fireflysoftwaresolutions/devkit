@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
 from unittest import mock  # noqa: E402
 
-from devkit import audit, bugs, cli, core, gates, guard, lessonevents, lessons, skillguard, work  # noqa: E402
+from devkit import audit, bugs, cli, core, gates, gitx, guard, lessonevents, lessons, skillguard, work  # noqa: E402
 
 # Skills "installed" on this test machine: the gate asks only for skills a member can load.
 HAVE = {"test-driven-development", "testing", "docs", "communicating"}
@@ -46,6 +46,16 @@ KID_DOCS = {**KID, "procedure": [
     {"phase": "Verify", "do": "verify it", "skills": ["testing"], "devkit": ["dev test", "dev test prove"],
      "proof": "dev test prove"},
     KID["procedure"][-1]]}
+
+# A release engineer shaped like config/crew.json: its proof is the full local CI run, which a brief or the project
+# can forbid (a shared checkout where other members' uncommitted work fails it, runner preparation not to replay).
+LINK = {"id": "link", "name": "Link", "title": "Release engineer", "tools": "all", "skills": ["communicating"],
+        "procedure": [
+            {"phase": "Know the pipeline", "do": "run what CI runs", "skills": [], "devkit": ["dev ci", "dev ci --run"],
+             "proof": "dev ci --run"},
+            {"phase": "Hand off", "do": "hand off", "skills": ["communicating"], "devkit": ["dev progress step"],
+             "proof": "dev progress step"}]}
+WAIVER = "Waived proof: `dev ci --run` — the shared checkout holds other members' uncommitted work"
 
 # A read-only member (tools: read) whose procedure still names a proof and a skill.
 SCOUT = {"id": "sparks", "name": "Sparks", "tools": "read", "skills": ["docs"],
@@ -83,6 +93,11 @@ class Transcript:
         self.records = [{"type": "user", "isSidechain": True, "timestamp": stamp,
                          "message": {"role": "user", "content": "the brief"}}]
         self.n = 0
+
+    def brief(self, text):
+        # the launch's prompt, which Claude Code writes as the first record of the member's transcript
+        self.records[0]["message"]["content"] = text
+        return self
 
     def call(self, name, result="ok", is_error=False, **inp):
         self.n += 1
@@ -526,6 +541,96 @@ class RefusalAnswerTests(GateCase):
         lessons.retire(les, "dev wt new is gone", a={"user": "ana", "host": "mbp1", "agent": "human"})
         found = gates.crew_gates(KID, self.tx.save(), str(self.repo), session="s1")
         self.assertIn("4 guard refusals", found[0]["evidence"])
+
+
+class CiProofTests(GateCase):
+    # `dev ci --run` is the one proof the tech lead may meet for a member whose brief or project forbids the run: a
+    # waiver line in the tech lead's brief, or a passed `dev ci --run` on exactly the tree the member leaves. The
+    # member's own `dev ci --mark-passed` attests a run, so it never counts. Without either, the gate refuses as before.
+    def setUp(self):
+        super().setUp()
+        p = mock.patch.object(core, "STATE", Path(self.tmp.name) / "state")  # where local CI evidence is written
+        p.start()
+        self.addCleanup(p.stop)
+        self.stops = 0
+        self.tx.skill("communicating").bash('dev progress step "release branch ready" --check "dev test: 40 passed"')
+
+    def ci_gate(self):
+        return self.rules(gates.crew_gates(LINK, self.tx.save(), str(self.repo)))
+
+    def stop(self, lead="Release engineer (Link)"):
+        # the SubagentStop entry as the hook calls it; `lead` is the name devkit's launch records give the member (a
+        # member the main session launched), and each call is a fresh stop: None lets it through, else it is sent back
+        self.stops += 1
+        data = {"agent_id": f"a{self.stops}", "agent_transcript_path": self.tx.save(), "cwd": str(self.repo)}
+        return gates.check("Link", data, {}, "owner/repo", roster={"members": [LINK]}, lead_name=lead)
+
+    def dev_ci(self, *argv):
+        # `dev ci …` as the member's shell runs it in the repository: its exit code and what it printed
+        out, here = io.StringIO(), os.getcwd()
+        os.chdir(self.repo)
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+                rc = cli.main(["ci", *argv])
+        finally:
+            os.chdir(here)
+        return rc, out.getvalue()
+
+    def evidence(self, how):
+        # the marker `dev ci --run` ("run") or `dev ci --mark-passed` ("marked") records for the tree as it is now
+        return gitx.record_evidence(gitx.ctx(str(self.repo)), how, gitx.work_tree(str(self.repo)))
+
+    def test_only_a_waiver_line_with_its_reason_in_the_brief_meets_the_ci_proof(self):
+        for line in ("Do not run `dev ci --run` yourself.",  # a request in prose, not a waiver
+                     "Waived proof: `dev ci --run` — <why>",  # the template, not a reason
+                     "Waived proof: dev ci --run — shared",  # too short to say why
+                     "Waived proof: `dev ci --run --resume` — the shared checkout holds other members' work",
+                     "Waived proof: `dev progress step` — the shared checkout holds other members' work"):
+            with self.subTest(line=line):
+                self.tx.brief(f"## Task\n\nShip the release branch.\n\n- {line}\n")
+                out = self.stop()
+                self.assertEqual(out["decision"], "block")
+                self.assertIn("`dev ci --run`", out["reason"])
+        self.tx.brief("## Task\n\nShip the release branch.\n")
+        self.tx.bash("cat notes.md", WAIVER)  # the line in a file the member read is not its brief
+        self.assertEqual(self.stop()["decision"], "block")
+        self.tx.brief(f"## Task\n\nShip the release branch.\n\n- {WAIVER}\n")
+        self.assertIsNone(self.stop())
+
+    def test_the_hook_entry_takes_a_waiver_only_from_the_tech_leads_brief_and_audits_it(self):
+        self.tx.brief(f"## Task\n\nShip the release branch.\n\n{WAIVER}\n")
+        for lead in ("a helper of Release engineer (Link)", ""):  # a member wrote the brief, or no record says who
+            with self.subTest(lead=lead):
+                self.assertEqual(self.stop(lead)["decision"], "block")
+        self.assertIsNone(self.stop("Release engineer (Link)"))
+        rec = audit.records(1, action="crew.gate")[-1]
+        self.assertEqual(rec["outcome"], "ok")
+        self.assertIn("dev ci --run", rec["detail"])
+        self.assertIn("the shared checkout holds other members' uncommitted work", rec["detail"])
+
+    def test_a_passed_ci_run_on_exactly_the_tree_the_member_leaves_meets_the_ci_proof_and_its_own_mark_does_not(self):
+        note = "pytest -q: 212 passed"
+        rc, out = self.dev_ci("--mark-passed", "--note", note)  # the member attests its own run, for this tree
+        self.assertEqual(rc, 0, out)
+        self.tx.bash(f'dev ci --mark-passed --note "{note}"', out)
+        self.assertEqual(self.ci_gate(), [("proofs", "dev ci --run")])
+        self.evidence("run")  # the tech lead's passed `dev ci --run` on the tree as it is now
+        self.assertEqual(self.ci_gate(), [])
+        (self.repo / "README.md").write_text("# repo\n\nChanged after the run.\n")  # the tree is not the one it ran
+        self.assertEqual(self.ci_gate(), [("proofs", "dev ci --run")])
+
+    def test_without_either_the_refusal_names_the_three_ways_to_meet_the_ci_proof(self):
+        found = gates.crew_gates(LINK, self.tx.save(), str(self.repo))
+        self.assertEqual(self.rules(found), [("proofs", "dev ci --run")])
+        self.assertIn("is not among your 1 shell commands", found[0]["evidence"])  # the evidence reads as before
+        fix = found[0]["fix"]
+        self.assertTrue(fix.startswith("run `dev ci --run`"), fix)
+        self.assertIn("passed `dev ci --run` of their own on exactly the tree you leave", fix)
+        self.assertIn("your own `dev ci --mark-passed` does not meet it", fix)
+        taught = re.search(r"`(Waived proof: [^`]*)`", fix)
+        self.assertTrue(taught, fix)
+        self.tx.brief("## Task\n\n- " + taught.group(1).replace("<why>", "the project's runner prep must not run twice"))
+        self.assertIsNone(self.stop())  # the line it teaches is one the gate accepts
 
 
 class SendBackTests(GateCase):
