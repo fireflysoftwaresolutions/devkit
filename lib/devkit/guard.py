@@ -7482,9 +7482,11 @@ def _layers(scope) -> list:
 
 
 def _glob_hit(path: str, g: str) -> bool:
-    g = g.rstrip("/") if g not in ("/", "") else g
-    return fnmatch.fnmatchcase(path, g) or fnmatch.fnmatchcase(path, g + "/**") or \
-        path.startswith(g.rstrip("*").rstrip("/") + "/") or path == g
+    """Does scope glob `g` hold `path`? By the lanes' own rules (progress.scope_match): `*` stays inside one segment,
+    so `src/pkg/*.py` holds no file of src/pkg/studio/, and a folder holds what lies below it. The edit check and
+    `dev commit` must read a scope the same way, or one lane commits another's file."""
+    from . import progress
+    return progress.scope_match(path, g)
 
 
 def scope_holds(path, cwd, globs, base=None) -> bool:

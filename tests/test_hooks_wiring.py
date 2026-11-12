@@ -135,6 +135,13 @@ class ScopeBaseTests(WiringCase):
         self.assertIsNone(hooks._scope_violation("claude", inside))
         self.assertIn("outside", hooks._scope_violation("claude", outside) or "")
 
+    def test_a_star_in_a_scope_holds_no_file_of_a_subfolder(self):
+        # Lanes may split a folder (`src/pkg/*.py` for one, `src/pkg/studio/host.py` for another): the check a lane's
+        # `dev commit` makes (gitx, guard.scope_holds) let `*` cross `/`, so one lane could commit the other's file
+        self.assertTrue(guard.scope_holds("src/pkg/a.py", self.repo, ["src/pkg/*.py"]))
+        self.assertFalse(guard.scope_holds("src/pkg/studio/host.py", self.repo, ["src/pkg/*.py"]))
+        self.assertTrue(guard.scope_holds("docs/guide/a.md", self.repo, ["docs/"]))  # a folder holds what lies below
+
 
 class FailOpenTests(WiringCase):
     def test_each_guard_rule_that_fails_lets_the_call_run_and_is_recorded(self):
