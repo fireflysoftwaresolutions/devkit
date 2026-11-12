@@ -1104,9 +1104,11 @@ class RunnerSetupNeverRunsAsRootTests(unittest.TestCase):
     """`dev ci --run` on macOS never replays a hosted runner's root setup: fake sudo, timeout and sleep commands on
     the PATH write down every call, and none may happen."""
 
-    def run_steps(self, s, steps: dict):
+    def run_steps(self, s, steps: dict, gradlew=False):
         s.write(".github/workflows/ci.yml", _workflow(steps))
         s.write(".github/scripts/apt-retry.sh", APT_RETRY)
+        if gradlew:  # installs only off CI, then passes its arguments on
+            (s.write("gradlew", '#!/bin/sh\n[ -n "$CI" ] || npm ci\nexec echo "$@"\n')).chmod(0o755)
         s.write("sub/marker.txt", "x")
         s.branch("feat/ci")
         s.commit("ci: add the workflow")
@@ -1143,20 +1145,14 @@ class RunnerSetupNeverRunsAsRootTests(unittest.TestCase):
                 "Chromium's system libraries": "bash .github/scripts/apt-retry.sh npx playwright install-deps chromium",
                 "LibreOffice": "bash .github/scripts/apt-retry.sh sh -c 'sudo apt-get update && sudo apt-get install "
                                "-y libreoffice-writer'",
-                "Unit": "test -f sub/marker.txt"})
+                "Unit": "test -f sub/marker.txt",
+                "Build": "./gradlew build"}, gradlew=True)
             self.assertEqual(rc, 0, out + err)
             self.assertEqual(called, [])
             self.assertRegex(out, r"Chromium's system libraries .*runner prep \(playwright install-deps")
             self.assertRegex(out, r"LibreOffice .*runner prep \(apt-get update")
-
-    def test_a_script_that_only_passes_its_arguments_on_is_not_read_as_a_wrapper(self):
-        with Sandbox() as s:
-            s.write("gradlew", '#!/bin/sh\npip install -r requirements.txt\nexec "$JAVACMD" "$@"\n')
-            s.write(".github/workflows/ci.yml", _workflow({"Build": "./gradlew build"}))
-            s.branch("feat/ci")
-            s.commit("ci: add the workflow")
-            [step] = [st for j in gitx.plan(str(s.repo)) for st in j["steps"]]
-            self.assertEqual((step["skip"], step["blocking"]), (None, False))
+            # a script that only passes its arguments on (gradlew's exec "$JAVACMD" "$@") is not read: it runs
+            self.assertRegex(out, r"(?m)^\s*✓ security › Build\s")
 
     def test_a_check_handed_to_a_retry_script_that_runs_sudo_blocks_the_evidence(self):
         with Sandbox() as s:
