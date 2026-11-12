@@ -558,6 +558,19 @@ class CrewSessionTests(unittest.TestCase):
             self.assertEqual(rc, 2)
             self.assertIn("no message M9", err)
 
+    def test_inbox_all_prints_messages_already_delivered_whole(self):
+        # a wait or a hook that delivered a question left `dev crew inbox` at "no new messages", and no command
+        # printed the delivered text again
+        with TempState() as t:
+            pg.start("Parser", plan=["parse", "review"])
+            t.launch()
+            question = "Should the parser accept empty lines? " + "Detail. " * 120 + "End of the question."
+            run_cli("crew", "ask", question, from_agent="a1")
+            run_cli("crew", "inbox")  # delivered to the tech lead
+            rc, out, _ = run_cli("crew", "inbox", "--all")
+            self.assertEqual(rc, 0)
+            self.assertIn(f"M1 from Senior engineer (Neo): {question}", out)
+
     def test_ask_tells_the_asker_the_wait_that_brings_the_answer(self):
         # it said the answer arrives "with their next tool call or prompt": nothing told a member how to wait for it
         with TempState() as t:

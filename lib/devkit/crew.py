@@ -1937,13 +1937,16 @@ def _messages(a, act) -> int:
             m = progress.crew_answer(a.id, " ".join(a.text), from_agent=me)
             print(f"{ui.OK} {m['id']} to {who(m.get('to_name')) or '?'}, the answer to {a.id}: {m['text']}")
         else:
-            msgs = progress.crew_inbox(from_agent=me)
+            every = bool(getattr(a, "all", False))
+            msgs = progress.crew_inbox(from_agent=me, all_=every)
             if not msgs:
-                print("  no new messages")
+                print("  no messages for you" if every else "  no new messages (dev crew inbox --all: the delivered "
+                                                              "ones, whole)")
                 return 0
             for m in msgs:
                 print(f"  {m['id']} from {who(m.get('from_name')) or '?'}: {m['text']}"
-                      + (f" (answer to {m['reply_to']})" if m.get("reply_to") else ""))
+                      + (f" (answer to {m['reply_to']})" if m.get("reply_to") else "")
+                      + (" · new" if every and m.get("new") else ""))
             print(ui.dim('  answer with: dev crew answer <id> "<text>"'))
     except ValueError as e:
         ui.err(str(e))
@@ -2283,7 +2286,9 @@ def register(add):
     x = sp.add_parser("answer", help="answer a crew message by its id")
     x.add_argument("id", help="the message id, e.g. M3")
     x.add_argument("text", nargs="+")
-    sp.add_parser("inbox", help="messages for you not delivered yet")
+    x = sp.add_parser("inbox", help="messages for you not delivered yet; --all: every one the run keeps, whole")
+    x.add_argument("--all", action="store_true", help="also the messages a wait or a hook delivered already, each "
+                                                      "whole, oldest first")
     x = sp.add_parser("mode", help="guided (the developer decides) or auto (the crew goes on and records); "
                                    "no argument: the current mode")
     x.add_argument("mode", nargs="?", choices=["guided", "auto"])

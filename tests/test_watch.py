@@ -98,6 +98,17 @@ class WaitWakesTests(WatchCase):
         self.assertIn("arm again: dev watch --wait", out.splitlines()[-1])
         self.assertNotIn("M1", self.post_tool_main())
 
+    def test_a_long_member_question_wakes_the_wait_whole(self):
+        # 26.11.16 cut a Claude member's question at 300 characters, and the wait had marked it delivered, so no
+        # devkit command printed the rest: the tech lead dug it out of the member's transcript
+        self.run_with_member()
+        question = "May I rename the column? " + "Context line. " * 80 + "Options: A or B; I recommend A."
+        self.world(lambda: pg.crew_ask(question, from_agent="a1", now=self.clock.t))
+        rc, out, err = dev("watch", "--wait", "--timeout", "5")
+        self.assertEqual(rc, 0, out + err)
+        line = next(ln for ln in out.splitlines() if "question M1" in ln)
+        self.assertIn(" ".join(question.split()), line)
+
     def test_a_wait_and_a_hook_racing_on_one_message_report_it_once(self):
         # the hook and the wait take through the same locked "delivered" flag: one of them reports the question,
         # never both, and a wait that lost the race keeps waiting to its timeout

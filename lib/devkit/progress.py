@@ -2829,12 +2829,30 @@ def crew_answer(msg_id: str, text: str, from_agent: str | None = None, cwd: str 
     return a
 
 
-def crew_inbox(from_agent: str | None = None, cwd: str | None = None, mark: bool = True) -> list:
-    """Messages for the caller (the main session, or the subagent whose lane this is) not delivered yet."""
+def crew_inbox(from_agent: str | None = None, cwd: str | None = None, mark: bool = True, all_: bool = False) -> list:
+    """Messages for the caller (the main session, or the subagent whose lane this is) not delivered yet; with `all_`,
+    every message the run keeps for the caller, delivered ones included, oldest first (the new ones are taken and
+    marked `new`): a wait or a hook that delivered a message leaves this the one command that prints it again."""
     from_agent = _as_lane(from_agent, cwd)
     agent, sid = current_session(cwd)
     run = load_run(agent, sid)
-    return _take_messages(agent, sid, from_agent or "main", mark) if run else []
+    if not run:
+        return []
+    me = from_agent or "main"
+    new = _take_messages(agent, sid, me, mark)
+    if not all_:
+        return new
+    fresh = {m["id"] for m in new}
+    run = normalize(load_run(agent, sid) or {})
+    lane = (run.get("agents") or {}).get(me) or {}
+    return [dict(m, new=m["id"] in fresh) for m in run.get("messages") or [] if _addressed_to(m, me, lane)]
+
+
+def _addressed_to(m: dict, me: str, lane: dict) -> bool:
+    """Is message `m` for `me` (the main session or a lane id, whose lane record is `lane`)? Its address, or a
+    member's name its lane answers to."""
+    to = m.get("to") or ""
+    return to == me or (to.startswith("name:") and me != "main" and _label_matches(to[5:], lane))
 
 
 def answered_by_sendmessage(agent: str, data: dict, now: float | None = None) -> list:
@@ -2886,9 +2904,8 @@ def _take_messages(agent, sid, me: str, mark=True, select=None, limit=None) -> l
     def mine(run):
         run = normalize(run)
         lane = (run.get("agents") or {}).get(me) or {}
-        new = [m for m in run.get("messages") or [] if not m.get("delivered") and (
-            m.get("to") == me or ((m.get("to") or "").startswith("name:") and me != "main"
-                                  and _label_matches(m["to"][5:], lane))) and (select is None or select(run, m))]
+        new = [m for m in run.get("messages") or [] if not m.get("delivered") and _addressed_to(m, me, lane)
+               and (select is None or select(run, m))]
         return run, new[:limit] if limit is not None else new
     run = load_run(agent, sid)
     if not run or not mine(run)[1]:
