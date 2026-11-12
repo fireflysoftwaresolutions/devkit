@@ -60,23 +60,42 @@ def _dir(scope: str) -> Path:
     return LESSONS / scope
 
 
+def _section_heads(lines: list) -> list:
+    """[(line index, section)] of the section headings devkit writes (render): `## <name>` for the names in SECTIONS,
+    outside fenced code, in SECTIONS order. Any other `## ` line is text of the section it is in. The first section
+    starts at its first heading (the title comes before it); each later one at the last heading of its name before
+    the next section's, as the record's changelog is its last `## Changelog` (work.split_changelog), so a section
+    that quotes the headings of a lesson keeps them."""
+    fenced = work._fenced(lines)
+    at = {}
+    for i, ln in enumerate(lines):
+        name = ln[3:].strip() if ln.startswith("## ") and i not in fenced else ""
+        if name in SECTIONS:
+            at.setdefault(name, []).append(i)
+    heads, bound = [], len(lines)
+    for name in reversed(SECTIONS[1:]):
+        before = [i for i in at.get(name, ()) if i < bound]
+        if before:
+            heads.append((before[-1], name))
+            bound = before[-1]
+    first = [i for i in at.get(SECTIONS[0], ()) if i < bound]
+    if first:
+        heads.append((first[0], SECTIONS[0]))
+    return sorted(heads)
+
+
 def parse(text: str) -> dict:
     """A lesson file -> {meta, extra, sections, changelog}. Only the anchor and tag fields are lists (a title in
-    brackets stays text); the record's changelog is the last `## Changelog` outside fenced code (work.split_changelog),
-    and a `## ` line inside fenced code belongs to its section. `extra`: front-matter lines devkit does not know,
-    kept as they are."""
+    brackets stays text); the record's changelog is the last `## Changelog` outside fenced code (work.split_changelog);
+    the sections start at the headings devkit writes (_section_heads), so a `## ` line inside a section, fenced or
+    not, stays in it. `extra`: front-matter lines devkit does not know, kept as they are."""
     front, body = work.split_frontmatter(text)
     meta, extra = work.read_frontmatter(front, FIELDS, LISTS)
     body, changelog = work.split_changelog(body)
     lines = body.split("\n")
-    fenced = work._fenced(lines)
-    sections, cur = {}, None
-    for i, ln in enumerate(lines):
-        if ln.startswith("## ") and i not in fenced:
-            cur = ln[3:].strip()
-            sections[cur] = []
-        elif cur:
-            sections[cur].append(ln)
+    heads = _section_heads(lines)
+    sections = {name: lines[i + 1:(heads[n + 1][0] if n + 1 < len(heads) else len(lines))]
+                for n, (i, name) in enumerate(heads)}
     meta["occurrences"] = int(meta.get("occurrences") or 1)
     meta["version"] = int(meta.get("version") or 1)
     for k in REFS + ("author",):
@@ -96,7 +115,8 @@ def render(lesson: dict) -> str:
         v = "[" + ", ".join(m.get(k) or []) + "]" if k in LISTS else _one_line(m.get(k, ""))
         head += f"{k}: {v}".rstrip() + "\n"
     head += "".join(ln + "\n" for ln in lesson.get("extra") or [])
-    others = [s for s in lesson["sections"] if s not in SECTIONS]  # a section written by hand stays
+    others = [s for s in lesson["sections"] if s not in SECTIONS]  # a caller's own section stays; parse reads it back
+    #                                                                as text of the section before it
     body = f"# {_one_line(m['title'])}\n\n" + "".join(f"## {s}\n\n{lesson['sections'].get(s) or '_—_'}\n\n"
                                                     for s in list(SECTIONS) + others)
     return "---\n" + head + "---\n" + body + "## Changelog\n\n" + "".join(f"- {c}\n" for c in lesson["changelog"])

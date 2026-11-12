@@ -58,6 +58,34 @@ class RecordTextTests(LessonCase):
         self.assertEqual(len(again["changelog"]), 2)
         self.assertIn("happened again (#2)", again["changelog"][0])
 
+    def test_an_unfenced_changelog_heading_inside_prevention_round_trips(self):
+        # a `## Changelog` line outside fenced code started a section of its own and cut the Prevention short
+        prevention = "Write the release notes with\n## Changelog\nat the end of the file"
+        les = self.add("Release notes lost their history", files=["CHANGELOG.md"], prevention=prevention)
+        les = lessons.recur(lessons.find(les["meta"]["id"]), "release 3", a=A)
+        again = lessons.load(les["path"])
+        self.assertEqual(again["sections"]["Prevention"], prevention)
+        self.assertEqual(len(again["changelog"]), 2)
+
+    def test_a_section_name_inside_what_happened_keeps_the_lesson_recurrable(self):
+        # a `## Fix` line inside What happened was read as the Fix section, which the real one then emptied: every
+        # later write refused to drop that text, so the lesson could never be recurred again
+        happened = "the first attempt\n## Fix\nthe second attempt"
+        les = self.add("Retry only idempotent calls", files=["billing/**"], happened=happened, fix="add a key")
+        les = lessons.recur(lessons.find(les["meta"]["id"]), "CI run 9", a=A)
+        again = lessons.load(les["path"])
+        self.assertEqual((again["sections"]["What happened"], again["sections"]["Fix"]), (happened, "add a key"))
+        self.assertEqual(again["meta"]["occurrences"], 2)
+
+    def test_a_lesson_quoted_inside_what_happened_stays_in_what_happened(self):
+        # text that quotes a whole lesson, its section names in order, belongs to the section it was written in
+        happened = "the agent wrote a lesson by hand:\n## What happened\nit broke\n## Root cause\nno test"
+        les = self.add("Record lessons with dev lesson add", files=["lessons/**"], happened=happened)
+        les = lessons.recur(lessons.find(les["meta"]["id"]), "again", a=A)
+        again = lessons.load(les["path"])
+        self.assertEqual(again["sections"]["What happened"], happened)
+        self.assertEqual(again["sections"]["Root cause"], "the cause of Record lessons with dev lesson add")
+
     def test_a_title_in_brackets_stays_text(self):
         les = self.add("Retries doubled the charge", files=["billing/**"])
         text = les["path"].read_text().replace("title: Retries doubled the charge",
