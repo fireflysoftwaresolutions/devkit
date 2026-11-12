@@ -2402,6 +2402,35 @@ IDENTITY_REASON = ("This command hides from what it runs that an agent runs it: 
                    "an agent, tell the developer.")
 
 
+# variables that make a shell or a pager run a command line or a file of commands: bash's BASH_ENV for every
+# non-interactive bash (scripts too), zsh's ZDOTDIR for every zsh, PROMPT_COMMAND before each interactive prompt,
+# less's LESSOPEN and LESSCLOSE for each file, and ENV for an interactive sh, bash or zsh
+_STARTUP_VARS = frozenset({"BASH_ENV", "ZDOTDIR", "PROMPT_COMMAND", "LESSOPEN", "LESSCLOSE"})
+_ENV_BINDERS = frozenset({"export", "declare", "typeset", "readonly", "local", "env", "setenv"})
+_INTERACTIVE_SHELL = re.compile(r"(?:^|[\s;&|(/])(?:ba|z|k|da|)sh\s+(?:-[A-Za-z]*i|--interactive|-o\s+interactive)")
+STARTUP_REASON = ("This command sets {name}, which makes a shell or a pager run a command line or a file of commands "
+                  "(bash's BASH_ENV, zsh's ZDOTDIR, PROMPT_COMMAND, less's LESSOPEN, ENV for an interactive shell) "
+                  "that the guard does not read. Run the commands themselves instead.")
+
+
+def startup_env_refusal(argv0, line: str = "") -> str | None:
+    """STARTUP_REASON when segment `argv0` sets a variable of _STARTUP_VARS (an assignment before the program, or a
+    word of export, declare, env and the other binders), or ENV while `line` starts an interactive shell."""
+    names = _STARTUP_VARS | ({"ENV"} if _INTERACTIVE_SHELL.search(line or "") else set())
+    words, k = list(argv0 or ()), 0
+    while k < len(words) and re.match(r"[A-Za-z_]\w*\+?=", words[k]):
+        k += 1
+    scan = words[:k]
+    if k < len(words) and os.path.basename(words[k]) in _ENV_BINDERS:
+        scan += words[k + 1:]
+    for w in scan:
+        name = re.match(r"[A-Za-z_]\w*", w)
+        if name and name.group(0) in names and (w[name.end():name.end() + 2] in ("=", "+=") or
+                                                 w[name.end():].startswith(("=", "+=")) or w == name.group(0)):
+            return STARTUP_REASON.format(name=_code(name.group(0)))
+    return None
+
+
 def identity_hiding(argv0) -> str | None:
     """IDENTITY_REASON for a segment (its words, prefixes included) that unsets or blanks an agent identity variable
     (core.AGENT_MARKERS): `unset NAME`, `env -u NAME …`, `env -i …`, an empty `NAME=` before a command, alone or
@@ -2652,7 +2681,7 @@ def _nested_lines(argv, cwd=None) -> list | None:
     launched = [shlex.join(r) for r in map(_unwrap, runs) if r]
     if launched:  # `op run -- git push --force …`: each command the launcher may start, read as a line
         return launched
-    held = _held_lines(argv)
+    held = _held_lines(argv, cwd)
     if held:  # an alias body, hyperfine's lines
         return held
     real = _as_run(argv, cwd)[1:]  # `./bash-link -c …`: the shell its file is
@@ -2713,6 +2742,9 @@ def _check_segments(cmd: str, segs, ecwd: str, agent: str, depth: int = 0, outer
         why = identity_hiding(argv0)
         if why:
             return deny(why, key="identity-hiding")
+        why = startup_env_refusal(argv0, cmd)
+        if why:
+            return deny(why, key="startup-env")
         why = speaker_forgery(argv0)
         if why:
             return deny(why, key="speaker-stamp")
@@ -5433,7 +5465,7 @@ class _Shell:
             v = self.segment(os.path.basename(run[0]), run, assigns, cwd, names) if run else None
             if v:
                 return v
-        for line in _held_lines(argv):  # an alias body, hyperfine's lines: what a shell runs from them
+        for line in _held_lines(argv, cwd):  # an alias body, hyperfine's lines: what a shell runs from them
             v = self.nested(line, cwd, names=names)
             if v:
                 return v
@@ -5862,18 +5894,240 @@ def _launched(argv):
 _HYPERFINE_LINES = frozenset({"-p", "--prepare", "-s", "--setup", "-c", "--cleanup", "--conclude"})
 
 
-def _held_lines(argv) -> list:
+_AWKS = frozenset({"awk", "gawk", "mawk", "nawk"})
+_VIMS = frozenset({"vim", "vi", "nvim", "view", "ex", "vimdiff", "gvim", "mvim", "rvim", "rview", "evim", "nview"})
+_AWK_VALUE_OPTS = frozenset({"-F", "-v", "-f", "-i", "-l", "-E", "--field-separator", "--assign", "--file",
+                             "--include", "--load", "--exec"})
+_VIM_CODE = re.compile(r"\b(?:system|systemlist|jobstart|termopen|libcall\w*)\s*\(|\b(?:ter(?:minal)?|exe(?:cute)?|"
+                       r"py(?:thon)?3?|pyx?|lua|perl|ruby|tcl|mz(?:scheme)?|so(?:urce)?|ru(?:ntime)?)\b")
+
+
+def _awk_program(args, cwd=None):
+    """(the awk program text, a reason it cannot be read or "") from awk's arguments: the first word that is no
+    option, or the files of -f (read when the guard can); -i, -l, -E and --exec name more program the guard does not
+    read."""
+    texts, k = [], 0
+    while k < len(args):
+        a = args[k]
+        if a == "--":
+            k += 1
+            break
+        if not a.startswith("-") or a == "-":
+            break
+        flag, eq, val = a.partition("=")
+        opt = flag if flag in _AWK_VALUE_OPTS else (a[:2] if a[:2] in _AWK_VALUE_OPTS else "")
+        if opt:
+            value = val if eq else (a[2:] if len(a) > 2 and not a.startswith("--") else
+                                    (args[k + 1] if k + 1 < len(args) else ""))
+            k += 1 if (eq or (len(a) > 2 and not a.startswith("--"))) else 2
+            if opt in ("-f", "--file", "-E", "--exec"):
+                text = _whole_text(Path(cwd or os.getcwd()) / os.path.expanduser(value)) if value else None
+                if not text:
+                    return "", f"the awk program file {_code(value)}, which the guard cannot read"
+                texts.append(text)
+            elif opt in ("-i", "-l", "--include", "--load"):
+                return "", "an awk source or extension it loads, which the guard does not read"
+            continue
+        k += 1
+    if not texts:
+        texts = args[k:k + 1]
+    return "\n".join(texts), ""
+
+
+def _awk_tokens(prog: str) -> list:
+    """awk's tokens, roughly: ("s", text) for a string literal (escapes decoded), ("r", "") for a regular
+    expression, ("|", op) for `|` and `|&`, ("w", word), and ("p", char) for any other character but blanks.
+    A `/` opens a regular expression where an operand comes; `#` starts a comment."""
+    out, i, n = [], 0, len(prog)
+    while i < n:
+        c = prog[i]
+        if c in " \t\r\\":
+            i += 1
+        elif c == "#":
+            j = prog.find("\n", i)
+            i = n if j < 0 else j
+        elif c == '"':
+            j, buf = i + 1, []
+            while j < n and prog[j] != '"':
+                if prog[j] == "\\" and j + 1 < n:
+                    buf.append({"n": "\n", "t": "\t"}.get(prog[j + 1], prog[j + 1]))
+                    j += 2
+                    continue
+                buf.append(prog[j])
+                j += 1
+            out.append(("s", "".join(buf)))
+            i = j + 1
+        elif c == "/" and (not out or out[-1][0] == "p" and out[-1][1] in "({,;!~&|\n=" or
+                           out[-1] == ("w", "return") or out[-1][0] == "|"):
+            j = i + 1
+            while j < n and prog[j] not in "/\n":
+                j += 2 if prog[j] == "\\" else 1
+            out.append(("r", ""))
+            i = j + 1
+        elif c == "|":
+            if prog.startswith("||", i):
+                out.append(("p", "&"))
+                i += 2
+            else:
+                amp = prog.startswith("|&", i)
+                out.append(("|", "|&" if amp else "|"))
+                i += 2 if amp else 1
+        elif c.isalnum() or c in "_@":
+            m = re.match(r"[@\w.]+", prog[i:])
+            out.append(("w", m.group(0)))
+            i += m.end()
+        else:
+            out.append(("p", c))
+            i += 1
+    return out
+
+
+def _awk_commands(prog: str):
+    """(the command lines an awk program hands to a shell, a reason it may run one the guard cannot read or ""):
+    system("…"), print … | "…" and "…" | getline, each with one string literal; a command built from anything else
+    (a variable, a concatenation), @include and @load are the reason."""
+    toks, lines = _awk_tokens(prog), []
+    end = {("p", c) for c in ";}\n)>,"}
+    for k, t in enumerate(toks):
+        if t[0] == "w" and t[1] in ("@include", "@load", "@namespace"):
+            return lines, f"its {_code(t[1])}, which loads code the guard does not read"
+        if t == ("w", "system"):
+            if toks[k + 1:k + 2] == [("p", "(")] and k + 3 < len(toks) and toks[k + 2][0] == "s" and \
+                    toks[k + 3] == ("p", ")"):
+                lines.append(toks[k + 2][1])
+            else:
+                return lines, "a system() call whose command is built when it runs"
+        elif t[0] == "|":
+            nxt = toks[k + 1] if k + 1 < len(toks) else ("p", "")
+            if nxt == ("w", "getline"):
+                prev, before = toks[k - 1] if k else ("p", ""), toks[k - 2] if k > 1 else ("p", "{")
+                if prev[0] == "s" and (before[0] == "p" and before[1] in "{;(\n,!" or before[0] == "|"):
+                    lines.append(prev[1])
+                else:
+                    return lines, "a getline from a command built when it runs"
+            elif nxt[0] == "s" and (k + 2 >= len(toks) or toks[k + 2] in end):
+                lines.append(nxt[1])
+            else:
+                return lines, "a pipe to a command built when it runs"
+    return lines, ""
+
+
+def _vim_lines(args):
+    """(the shell lines vim's startup commands run, a reason they may run code the guard cannot read or ""): each
+    -c, --cmd and +command, whose `!` (`:!cmd`, `silent !cmd`, `r !cmd`, `%!sort`) hands the rest to a shell, while
+    system(), :terminal, :execute, the script interfaces and :source run what the guard does not read, as -S, -s
+    and -u with a file do."""
+    cmds, k = [], 0
+    while k < len(args):
+        a = args[k]
+        if a in ("-c", "--cmd") and k + 1 < len(args):
+            cmds.append(args[k + 1])
+            k += 2
+            continue
+        if a.startswith("+") and len(a) > 1 and not a[1:].isdigit() and a[1] != "/":
+            cmds.append(a[1:])
+        elif a in ("-S", "-s", "-u", "-U", "-W", "-w") or (a[:2] in ("-S",) and len(a) > 2):
+            val = args[k + 1] if k + 1 < len(args) else ""
+            if a in ("-u", "-U") and val in ("NONE", "NORC", "DEFAULTS"):
+                k += 2
+                continue
+            if a in ("-W", "-w"):  # writes the keys typed; reads nothing
+                k += 2
+                continue
+            return [], f"vim {a} with a script the guard does not read"
+        k += 1
+    lines = []
+    for c in cmds:
+        if _VIM_CODE.search(c):
+            return lines, "a vim command that runs code the guard does not read (system(), :terminal, :execute, " \
+                          ":python, :source)"
+        m = re.search(r"(?:^|[\s:%.,$0-9'<>])!(.*)", c)
+        if m and m.group(1).strip():
+            lines.append(m.group(1).strip())
+    return lines, ""
+
+
+def _command_strings(argv, cwd=None):
+    """(the command lines a program runs from a string it is given, a reason it runs commands the guard cannot
+    read or ""): awk's system(), pipes and getline; trap's action; vim's and less's startup commands with `!`;
+    launchctl submit, asuser and bsexec; make's $(shell …) in its arguments; and at, batch, crontab, launchctl load
+    and bootstrap, and make -f from its input, whose commands come from where the guard does not read."""
+    if not argv:
+        return [], ""
+    name, args = os.path.basename(str(argv[0])), [str(a) for a in argv[1:]]
+    if name in _AWKS:
+        prog, why = _awk_program(args, cwd)
+        return _awk_commands(prog) if not why else ([], why)
+    if name == "trap":
+        rest = args[1:] if args[:1] == ["--"] else args
+        if not rest or rest[0] in ("-", "-p", "-l", "") or rest[0].isdigit() or rest[0].startswith("-"):
+            return [], ""
+        return [rest[0]], ""
+    if name in _VIMS:
+        return _vim_lines(args)
+    if name in ("less", "more", "most"):
+        lines = []
+        for a in args:
+            if a.startswith("+") and "!" in a:
+                lines.append(a.split("!", 1)[1])
+            elif a.startswith("+") and "|" in a:
+                return lines, "a less command that pipes text to a command the guard does not read"
+        return lines, ""
+    if name in ("at", "batch"):
+        if any(a in ("-l", "-r", "-d", "-c") or (a.startswith("-") and set(a[1:]) & set("lrdc")) for a in args):
+            return [], ""
+        return [], f"{name}, which runs the commands of its input or of a file (-f) later, where the guard does " \
+                   f"not read them"
+    if name == "crontab":
+        if any(a in ("-l", "-r", "-e", "-i") for a in args):
+            return [], ""
+        return [], "crontab, which installs the command lines of a file or of its input as jobs the guard does not read"
+    if name == "launchctl" and args:
+        sub, rest = args[0], args[1:]
+        if sub == "submit":
+            if "--" in rest:
+                return [shlex.join(rest[rest.index("--") + 1:])], ""
+            return [], "launchctl submit with a program the guard cannot find"
+        if sub in ("asuser", "bsexec") and len(rest) > 1:
+            return [shlex.join(rest[1:])], ""
+        if sub in ("load", "bootstrap", "enable", "kickstart", "start"):
+            return [], f"launchctl {sub}, which starts a job whose program a property list names"
+        return [], ""
+    if name in ("make", "gmake", "bmake"):
+        lines = []
+        for k, a in enumerate(args):
+            if a in ("-f", "--file", "--makefile") and k + 1 < len(args) and \
+                    (args[k + 1] == "-" or args[k + 1].startswith(("/dev/", "<("))):
+                return [], "make reading its makefile from its input, which the guard does not read"
+            if re.match(r"(?:-f|--file=|--makefile=)(?:-|/dev/)", a):
+                return [], "make reading its makefile from its input, which the guard does not read"
+            if re.match(r"(?:SHELL|\.SHELLFLAGS|MAKESHELL|MAKEFLAGS)[:+?]?=", a):
+                return [], f"make with {_code(a.split('=', 1)[0])} set, which changes how it runs its recipes"
+            for m in re.finditer(r"\$[({]shell[ \t]+", a):
+                close = _close_paren(a.replace("{", "(").replace("}", ")"), m.end())
+                lines.append(a[m.end():close - 1] if close > m.end() else a[m.end():])
+        return lines, ""
+    return [], ""
+
+
+def command_string_refusal(argv, cwd=None) -> str:
+    """The reason a command runs commands from a string or input the guard cannot read (_command_strings), or ""."""
+    return _command_strings(argv, cwd)[1]
+
+
+def _held_lines(argv, cwd=None) -> list:
     """The command lines a command holds as words for a shell to run: the body of each alias it defines (`alias
-    ng='claude mcp add …'` runs when `ng` does), and hyperfine's benchmarks and its --prepare, --setup, --cleanup and
-    --conclude lines. Each of hyperfine's other words that is no option is read as a line too (a value such as `10`
-    is a harmless one). [] for any other command."""
+    ng='claude mcp add …'` runs when `ng` does), hyperfine's benchmarks and its --prepare, --setup, --cleanup and
+    --conclude lines, and the command strings of awk, trap, vim, less, launchctl and make (_command_strings). Each of
+    hyperfine's other words that is no option is read as a line too (a value such as `10` is a harmless one). []
+    for any other command."""
     if not argv:
         return []
     name, args = os.path.basename(str(argv[0])), [str(a) for a in argv[1:]]
     if name == "alias":
         return [a.split("=", 1)[1] for a in args if "=" in a and not a.startswith("-")]
     if name != "hyperfine":
-        return []
+        return _command_strings(argv, cwd)[0]
     out, i = [], 0
     while i < len(args):
         key, eq, val = args[i].partition("=")
@@ -12562,7 +12816,10 @@ def _argv_actions(argv, cwd, bodies, depth):
         if more is None:
             return None
         out += more
-    for line in _held_lines(argv):  # an alias body, hyperfine's lines
+    why = command_string_refusal(argv, cwd)
+    if why:  # at, crontab, launchctl load, awk with a built command: commands the guard cannot read
+        out += _found([_unsure_action(argv, why)], argv, cwd)
+    for line in _held_lines(argv, cwd):  # an alias body, hyperfine's lines, the strings awk, trap, vim run
         more = _text_actions(line, cwd, depth + 1)
         if more is None:
             return None

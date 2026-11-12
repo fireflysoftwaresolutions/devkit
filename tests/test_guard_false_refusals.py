@@ -5,6 +5,7 @@
 # that carries the risk the refusing rule guards against and stays refused. tools/guard_replay.py measures the same
 # classes on this Mac's own transcripts.
 # Run: python3 -m unittest tests.test_guard_false_refusals -v
+import re
 import sys
 import tempfile
 import unittest
@@ -194,6 +195,51 @@ class CaseArms(Case):
                     "case $f in a | *) gh pr merge 12 ;; esac"):
             self.refused(cmd)
         self.refused('case $f in a) echo ";;"; touch ")" ;; esac', level="review", who="seraph")
+
+
+class CommandStrings(Case):
+    """A program that runs a command line it is given as a string (awk's system(), pipes and getline, trap, vim's and
+    less's `!`, launchctl submit, make's $(shell …)) is judged by that line; one that runs commands from its input or
+    a file the guard does not read (at, batch, crontab, launchctl load, make -f -, an awk command built at run time)
+    may run anything; a variable that makes a shell or a pager run a file or a line (BASH_ENV, ZDOTDIR,
+    PROMPT_COMMAND, LESSOPEN, ENV for an interactive shell) is refused."""
+
+    REFUSED = ("awk 'BEGIN{system(\"gh pr merge 12\")}'", "gawk 'BEGIN{print \"x\" | \"gh pr merge 12\"}'",
+               "awk 'BEGIN{\"gh pr merge 12\" | getline x}'", "awk 'BEGIN{c=\"gh pr merge 12\"; system(c)}'",
+               "awk '{print | $1}' f.txt", "awk -f missing.awk f.txt", "trap 'gh pr merge 12' EXIT; echo hi",
+               "trap -- \"gh pr merge 12\" INT", "vim -c '!gh pr merge 12' -c q x.txt", "vi +'!gh pr merge 12' x.txt",
+               "nvim --headless -c 'silent !gh pr merge 12' -c q", "vim -c 'call system(\"x\")' x.txt",
+               "vim -S s.vim x.txt", "less +'!gh pr merge 12' x.txt", "more +'!gh pr merge 12' x.txt",
+               "echo 'gh pr merge 12' | at now", "at now <<< 'gh pr merge 12'", "echo x | batch",
+               "launchctl submit -l x -- gh pr merge 12", "launchctl load ~/Library/LaunchAgents/x.plist",
+               "echo '* * * * * gh pr merge 12' | crontab -", "crontab f.txt",
+               "printf 'all:\\n\\tgh pr merge 12\\n' | make -f /dev/stdin", "make -f - <<< 'all: ; gh pr merge 12'",
+               "make X='$(shell gh pr merge 12)'", "make SHELL=/tmp/evil all",
+               "PROMPT_COMMAND='gh pr merge 12' bash -i -c true", "BASH_ENV=<(echo 'gh pr merge 12') bash -c true",
+               "ENV=f.sh sh -i -c true", "ZDOTDIR=/tmp/z zsh -c true", "export BASH_ENV=f.sh; ./x.sh",
+               "env LESSOPEN='|gh pr merge 12 %s' less f.txt")
+
+    def test_a_command_string_or_input_the_guard_cannot_read_is_refused(self):
+        for cmd in self.REFUSED:
+            with self.subTest(cmd=cmd):
+                self.assertIsNotNone(main(cmd))
+                # a startup variable is refused by the guard's rules for every caller (main covers it); the rest
+                # by the lane's gate too
+                if not re.search(r"\b(?:PROMPT_COMMAND|BASH_ENV|ENV|ZDOTDIR|LESSOPEN)=", cmd):
+                    self.assertIsNotNone(member(cmd))
+
+    def test_programs_that_run_no_command_string_run(self):
+        Path(CWD).mkdir(parents=True, exist_ok=True)
+        (Path(CWD) / "p.awk").write_text('{ n += $2 } END { print n }\n')
+        self.addCleanup((Path(CWD) / "p.awk").unlink)
+        for cmd in ("awk '{print $1}' f.txt", "awk -F: '/a|b/ {print $2 | \"sort\"}' f.txt", "awk -f p.awk f.txt",
+                    "awk 'BEGIN{while ((\"date\" | getline d) > 0) print d}'", "trap 'rm -f /tmp/x.$$' EXIT; echo hi",
+                    "trap - INT", "vim -c 'wq' x.txt", "vim -u NONE -c 'q!' x.txt", "less +G x.txt", "atq",
+                    "at -l", "crontab -l", "launchctl list", "make test", "make -C lib all",
+                    "ENV=staging npm test", 'git commit -m "doc: BASH_ENV=x"'):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(main(cmd))
+                self.assertIsNone(member(cmd))
 
 
 class LiteralValues(Case):

@@ -85,6 +85,11 @@
       "what": "The guard refused a command that unsets or blanks one of the variables that tell a project's tools an agent is at work, such as `CLAUDECODE` or `CODEX_SANDBOX`, with `unset`, `env -u`, `env -i`, or an empty assignment before the command.",
       "reproduce": "Ask an agent to run `env -i bash -c 'echo test'`."
     },
+    "_check_segments:startup-env": {
+      "title": "Guard refuses a command that sets a shell or pager startup variable",
+      "what": "The guard refused a command that sets BASH_ENV, ZDOTDIR, PROMPT_COMMAND, LESSOPEN or LESSCLOSE, or ENV for an interactive shell, which make a shell or a pager run a command line or a file of commands the guard does not read.",
+      "reproduce": "Ask an agent to run `BASH_ENV=setup.sh bash -c true`."
+    },
     "_check_segments:launcher-words": {
       "title": "Guard refuses {word} with a launcher it cannot read in full",
       "what": "The guard refused a command that gives a launcher such as `xcrun`, `op run`, `nix run`, or `mise exec` more words, more characters, or more launchers inside launchers than it reads. Any word of a launcher may name the program it starts, so the guard refuses what it cannot read in full.",
