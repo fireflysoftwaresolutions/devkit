@@ -2006,8 +2006,9 @@ _SETUP_SCRIPT = re.compile(r"(?i)install|setup|set-up|prepare|provision|bootstra
                            r"space)|clean|configure|init")
 _SERVICE_VERBS = frozenset({"install", "setup", "start", "stop", "restart", "reload", "enable", "disable"})
 # commands that only report or steer the shell: next to the runner's setup they do not make a step a check
+# (`source` and `.` run a script, so they are checks; a command or process substitution makes its piece one too)
 _INFO = frozenset({"echo", "printf", "true", ":", "cd", "pushd", "popd", "export", "set", "unset", "shopt", "alias",
-                   "source", ".", "sleep", "pwd", "ls", "df", "du", "free", "uname", "whoami", "id", "date", "env",
+                   "sleep", "pwd", "ls", "df", "du", "free", "uname", "whoami", "id", "date", "env",
                    "printenv", "nproc", "which", "type", "hash", "sw_vers", "lscpu", "ulimit", "umask", "test", "[",
                    "[[", "wait", "exit", "return", "local", "declare", "readonly", "trap", "cat"})
 _VERSION_ARGS = (["--version"], ["version"], ["-V"], ["-v"], ["--help"], ["-h"])
@@ -2023,6 +2024,53 @@ def _nested_script(argv):
         if os.path.basename(w) in _SHELLS and re.fullmatch(r"-[a-z]*c[a-z]*", argv[i + 1]):
             return argv[i + 2]
     return None
+
+
+def _substitutions(code: str) -> list:
+    """The scripts that the command and process substitutions in `code` run, nested ones too: `$(…)` and `…` outside
+    single quotes, `<(…)` and `>(…)` outside quotes. The guard's command reader keeps a quoted `$(…)`, backticks and
+    `<(…)` inside a word and drops `> >(…)`, so they are read from the text. An arithmetic `$((…))` runs none."""
+    out, stack, i, n = [], [], 0, len(code)  # stack: (what is open, where its script starts)
+    while i < n:
+        ch, top = code[i], (stack[-1][0] if stack else None)
+        if top in ("'", "$'"):
+            if ch == "\\" and top == "$'":
+                i += 1
+            elif ch == "'":
+                stack.pop()
+        elif ch == "\\":
+            i += 1
+        elif ch == "#" and top in (None, "sub", "(", "`") and (i == 0 or code[i - 1] in " \t\n;&|()"):
+            j = code.find("\n", i)  # a comment runs to the end of its line
+            i = n if j < 0 else j
+            continue
+        elif top == "`" and ch == "`":
+            out.append(code[stack.pop()[1]:i])
+        elif top == '"' and ch == '"':
+            stack.pop()
+        elif code.startswith("$((", i):
+            stack.append(("((", i))
+            i += 2
+        elif code.startswith("$(", i) or (top != '"' and code[i:i + 2] in ("<(", ">(")):
+            stack.append(("sub", i + 2))
+            i += 1
+        elif ch == "`":
+            stack.append(("`", i + 1))
+        elif top == '"':
+            pass
+        elif ch in "'\"":
+            stack.append(("$'" if ch == "'" and code[i - 1:i] == "$" else ch, i))
+        elif ch == "(":
+            stack.append(("(", i))
+        elif top == "((" and code.startswith("))", i):
+            stack.pop()
+            i += 1
+        elif ch == ")" and top in ("sub", "("):
+            start = stack.pop()[1]
+            if top == "sub":
+                out.append(code[start:i])
+        i += 1
+    return out + [code[start:] for what, start in stack if what in ("sub", "`")]  # unclosed: the rest runs
 
 
 def _commands(code: str, as_root: bool = False, depth: int = 0):
@@ -2143,7 +2191,7 @@ def _top_pieces(run: str):
             put(run[i:i + 2])
             i += 2
         elif ch == "(":
-            sub = sub or top is None
+            sub = sub or (top is None and run[i - 1:i] not in ("<", ">"))  # <(…) and >(…) are read as substitutions
             stack.append("(")
             put(ch)
             i += 1
@@ -2174,8 +2222,9 @@ def _top_pieces(run: str):
 
 def _classify(piece: dict, state: dict, installs: bool) -> dict:
     """What one top-level piece of a step's script does: its kind ("setup", "check", "root", "tangled" or "info") and
-    why. A pipeline or a command substitution that feeds the runner's setup is setup too; a subshell or a nested shell
-    that runs the setup and a check is tangled: the setup cannot be taken out without the check."""
+    why. A pipeline or a command substitution that feeds the runner's setup is setup too; a subshell, a nested shell or
+    a substitution that runs the setup, next to a check, is tangled: the setup cannot be taken out without the check.
+    `source`/`.` and a command or process substitution (see _substitutions) are checks."""
     code = piece["code"]
     piped = _PIPED_INSTALLER.search(code)
     setup = "runner prep (curl … | sh runs an installer downloaded from the internet)" if piped else None
@@ -2196,6 +2245,16 @@ def _classify(piece: dict, state: dict, installs: bool) -> dict:
             roots.append(got[1])
         elif not _informational(argv, words):
             checks.append(words)
+    for script in _substitutions(guard.strip_heredocs(code)):
+        # a substitution runs a command the reader keeps inside a word (`test -z "$(gofmt -l .)"`): a check. Setup it
+        # runs cannot be left out without the command that uses its output, so next to a check it is tangled; one
+        # that only feeds the setup (`apt-get install "linux-headers-$(uname -r)"`) leaves the piece setup.
+        checks.append([script])
+        inside = dict(state)  # it runs in a subshell of its own: a `cd` in it holds for the rest of it only
+        for argv, words, as_root, container in _commands(script):
+            got = None if container else _prep_one(argv, words, as_root, inside)
+            if got and got[0] == "setup":
+                setup, first, nested = setup or got[1], first or " ".join(words[:2]), True
     why = setup or install
     if why and (checks or roots) and (nested or piece["subshell"]):
         return {"kind": "tangled", "why": _TANGLED.format(f" ({first})")}

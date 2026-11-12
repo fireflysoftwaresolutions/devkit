@@ -965,6 +965,76 @@ class RunnerSetupInsideACheckTests(unittest.TestCase):
             self.assertIsNone(gitx.evidence(s.ctx()))
 
 
+class ChecksHiddenFromTheCommandReaderTests(unittest.TestCase):
+    """A check that runs through `source`/`.` or inside a command or process substitution, after the step installed
+    its tool: the guard's command reader sees only a reporting command (`test`, `[`, `cat`), so the whole step was
+    skipped as the runner's setup and the evidence recorded with no scan. The check now runs here without the setup."""
+
+    def plan_steps(self, s, steps: dict) -> dict:
+        s.write(".github/workflows/ci.yml", _workflow(steps))
+        s.branch("feat/ci")
+        s.commit("ci: add the workflow")
+        return {st["name"]: (st["skip"], st["blocking"], st["run"], st["dropped"])
+                for j in gitx.plan(str(s.repo)) for st in j["steps"]}
+
+    def test_a_scan_script_run_with_source_or_dot_after_its_install_is_a_check(self):
+        with Sandbox() as s:
+            got = self.plan_steps(s, {"Source": "brew install gitleaks && source scripts/scan.sh",
+                                      "Dot": "brew install gitleaks && . scripts/scan.sh"})
+        self.assertEqual(got["Source"], (None, False, "source scripts/scan.sh", ["brew install gitleaks"]))
+        self.assertEqual(got["Dot"], (None, False, ". scripts/scan.sh", ["brew install gitleaks"]))
+
+    def test_a_gofmt_check_in_a_command_substitution_after_its_install_is_a_check(self):
+        with Sandbox() as s:
+            got = self.plan_steps(s, {"Gofmt": 'sudo apt-get install -y golang && test -z "$(gofmt -l .)"',
+                                      "Backticks": 'sudo apt-get install -y golang && test -z "`gofmt -l .`"'})
+        self.assertEqual(got["Gofmt"], (None, False, 'test -z "$(gofmt -l .)"', ["sudo apt-get install -y golang"]))
+        self.assertEqual(got["Backticks"], (None, False, 'test -z "`gofmt -l .`"', ["sudo apt-get install -y golang"]))
+
+    def test_a_scan_in_a_bracket_test_after_its_install_is_a_check(self):
+        with Sandbox() as s:
+            got = self.plan_steps(s, {"Trivy": 'brew install trivy && [ -z "$(trivy fs --quiet .)" ]'})
+        self.assertEqual(got["Trivy"], (None, False, '[ -z "$(trivy fs --quiet .)" ]', ["brew install trivy"]))
+
+    # The command reader drops `> >(…)` from the words altogether, so the substitution is found in the script's text.
+    def test_a_scan_in_a_process_substitution_after_its_install_is_a_check(self):
+        with Sandbox() as s:
+            got = self.plan_steps(s, {"Input": "brew install gitleaks && cat <(gitleaks detect)",
+                                      "Output": "brew install gitleaks && cat .gitleaks.toml > >(gitleaks detect --pipe)"})
+        self.assertEqual(got["Input"], (None, False, "cat <(gitleaks detect)", ["brew install gitleaks"]))
+        self.assertEqual(got["Output"], (None, False, "cat .gitleaks.toml > >(gitleaks detect --pipe)",
+                                         ["brew install gitleaks"]))
+
+    # `found=$(…)` exits with the scan's status, and bare backticks are split across the reader's words.
+    def test_a_scan_kept_in_a_variable_or_bare_backticks_after_its_install_is_a_check(self):
+        with Sandbox() as s:
+            got = self.plan_steps(s, {"Assignment": 'brew install gitleaks && found="$(gitleaks detect)"',
+                                      "Bare backticks": "brew install gitleaks && echo `gitleaks detect`"})
+        self.assertEqual(got["Assignment"], (None, False, 'found="$(gitleaks detect)"', ["brew install gitleaks"]))
+        self.assertEqual(got["Bare backticks"], (None, False, "echo `gitleaks detect`", ["brew install gitleaks"]))
+
+    # Setup that runs inside a substitution cannot be left out without the command that uses its output, so next
+    # to a check it blocks the evidence. A substitution that only feeds the setup keeps a setup-only step skipped.
+    def test_setup_inside_a_substitution_next_to_a_check_blocks_the_evidence(self):
+        with Sandbox() as s:
+            tangled = {"Install in the check": 'test -z "$(brew install gofmt && gofmt -l .)"',
+                       "Install in the input": "cat <(sudo apt-get install -y trivy && trivy fs .)"}
+            setup = {"Kernel headers": 'sudo apt-get install -y "linux-headers-$(uname -r)"',
+                     "Docker repository": 'echo "deb [arch=$(dpkg --print-architecture)] https://download.docker.com/'
+                                          'linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/'
+                                          'docker.list',
+                     "Go cache": 'rm -rf "$(go env GOCACHE)"'}
+            got = self.plan_steps(s, {**tangled, **setup})
+        for name in tangled:
+            with self.subTest(step=name):
+                self.assertTrue(got[name][1], got[name][0])
+                self.assertRegex(got[name][0] or "", r"^a check and runner setup \(")
+        for name in setup:
+            with self.subTest(step=name):
+                self.assertRegex(got[name][0] or "", r"^runner prep \(")
+                self.assertFalse(got[name][1])
+
+
 # --------------------------------------------------------------------------- PR body template
 
 
