@@ -3113,19 +3113,20 @@ def _lesson_rule_hit(agent: str, data: dict) -> dict:
     (guard.lesson_rule_hit: a miss when that agent was shown the lesson earlier and it is still pending, the rule's
     hit and miss counted, and the lesson shown again; a miss never changes the rule's mode, since only the developer's
     typed `grant lesson-block <lesson>` with `dev lesson prevent --by guard … --block` in a terminal makes a rule
-    refuse), then counted as shown (`call` for a warning, `refusal` for a block). It runs before any other lesson
-    this call shows is recorded, or the rule's own lesson would count as a miss of this very call.
-    -> guard.lesson_rule_hit's {"rule", "lesson", "mode", "missed"}, {} for none."""
+    refuse), then counted as shown (`call` for a warning, `refusal` for a block) when it reaches the agent: a
+    warning goes in the call's context, which Codex does not read (_with_context), so on Codex only a block shows its
+    lesson. It runs before any other lesson this call shows is recorded, or the rule's own lesson would count as a
+    miss of this very call. -> guard.lesson_rule_hit's {"rule", "lesson", "mode", "missed", "shown"}, {} for none."""
     sid = str(data.get("session_id") or "")
     if not sid or _headless():
         return {}
     try:
         from . import guard as g, lessons
-        hit = g.lesson_rule_hit(sid, _lesson_agent(data)) or {}
+        hit = g.lesson_rule_hit(sid, _lesson_agent(data), reads_context=agent == "claude") or {}  # as _with_context
     except Exception as e:
         _swallowed("guard", e)
         return {}
-    if hit:
+    if hit.get("shown"):
         try:
             lessons.track([hit["lesson"]], "shown", "call" if hit["mode"] == "warn" else "refusal")
             if hit["mode"] == "warn":

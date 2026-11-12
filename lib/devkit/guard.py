@@ -12271,25 +12271,29 @@ def lesson_rule_context() -> str:
             f"{_code('grant lesson-block ' + str(rule['lesson']))} for {_code(block)}.")
 
 
-def lesson_rule_hit(session: str, agent: str) -> dict:
+def lesson_rule_hit(session: str, agent: str, reads_context: bool = True) -> dict:
     """Record the lesson rule check() just matched, for the hook that knows the session: a miss when the agent was
     shown the lesson earlier in this session and still pending (lessonevents.on_hit), the rule's hit
     (lessonrules.record_hit, which counts it; only the developer's grant makes a rule refuse), then the lesson as
-    shown on channel `call` (warn) or `refusal` (block). Call it before the hook records any other lesson it shows
-    for this call. -> {"rule", "lesson", "mode", "missed"}, {} when no rule matched. Never raises: a failure is
-    guard.failopen."""
+    shown on channel `call` (warn) or `refusal` (block). A warning reaches the agent only through the call's context:
+    with `reads_context` False (Codex reads no PreToolUse context) a warn rule's lesson is not shown, so it is not
+    recorded as shown either, and a later matching call is no miss of a text the agent never read. Call it before the
+    hook records any other lesson it shows for this call. -> {"rule", "lesson", "mode", "missed", "shown"}, {} when
+    no rule matched. Never raises: a failure is guard.failopen."""
     if not LAST_LESSON_RULE.get("rule"):
         return {}
     rule, mode = LAST_LESSON_RULE["rule"], LAST_LESSON_RULE["mode"]
+    shown = mode != "warn" or reads_context
     try:
         from . import lessonevents, lessonrules
         missed = rule["lesson"] in lessonevents.on_hit([rule["lesson"]], session, agent)
         lessonrules.record_hit(rule["id"], missed)
-        lessonevents.record("shown", rule["lesson"], "call" if mode == "warn" else "refusal", agent, session)
+        if shown:
+            lessonevents.record("shown", rule["lesson"], "call" if mode == "warn" else "refusal", agent, session)
     except Exception as e:
         failopen("lesson-rules", e)
         return {}
-    return {"rule": rule["id"], "lesson": rule["lesson"], "mode": mode, "missed": missed}
+    return {"rule": rule["id"], "lesson": rule["lesson"], "mode": mode, "missed": missed, "shown": shown}
 
 
 def _check(tool: str, tool_input: dict, cwd: str, agent: str):

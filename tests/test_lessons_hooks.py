@@ -7,6 +7,8 @@
 # and the high-trust channels (a refusal, a call's context) carry only a lesson's title and prevention, capped.
 # Tests carry comments, not docstrings (`dev test prove` leaves out tests with one).
 # Run: python3 -m unittest tests.test_lessons_hooks
+import contextlib
+import io
 import json
 import os
 import re
@@ -201,6 +203,29 @@ class RuleTests(LessonHookCase):
         denied = self.reason(self.hook("guard", self.bash("python3 -c 4", tid="t4"), real_guard=True))
         self.assertIn(lid, denied)
         self.assertEqual(self.events(lid)[-1], ("shown", "refusal", "main"))
+
+    def codex_call(self, cmd, tid):
+        # PreToolUse as Codex 0.167 sends it, judged by the real guard
+        payload = {"session_id": "c1", "turn_id": "t1", "hook_event_name": "PreToolUse", "tool_name": "Bash",
+                   "tool_use_id": tid, "cwd": str(self.root), "model": "gpt-6.1-sol", "tool_input": {"command": cmd}}
+        out = io.StringIO()
+        with mock.patch("sys.stdin", io.StringIO(json.dumps(payload))), contextlib.redirect_stdout(out):
+            hooks.run("guard", "codex")
+        return out.getvalue()
+
+    def test_a_warn_rule_codex_never_reads_is_not_counted_as_shown(self):
+        # Codex reads no PreToolUse context, so a warn rule's text never reaches it: counting it as shown made the next
+        # matching call a miss of a text the agent never read
+        les = self.global_lesson("Run probes as a script file, not python3 -c",
+                                 "Write the probe to the scratch folder and run it as a file.", commands=["python3 -c"])
+        lid, rule = les["meta"]["id"], lessonrules.propose(les, match="python3 -c")
+        lessons.shown([lid], "session", "c1", "main", count=False)  # the session start showed it: Codex read that
+        first = self.codex_call("python3 -c 1", "exec-1")
+        self.codex_call("python3 -c 2", "exec-2")
+        self.assertNotIn(rule["id"], first)  # nothing reaches Codex from an allowed call
+        self.assertEqual(self.events(lid), [("shown", "session", "main"), ("missed", "session", "main")])
+        self.assertIsNone(lessons.usage().get(lid, {}).get("shown_call"))
+        self.assertEqual(json.loads(lessonrules.HITS.read_text())[rule["id"]]["hits"], 2)  # the rule still counts
 
     def test_an_output_rule_names_its_lesson_when_the_output_shows_its_error(self):
         les = self.global_lesson("Import devkit from lib, not from the tests folder",
