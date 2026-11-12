@@ -1999,7 +1999,8 @@ def consent_text(login: str) -> str:
     """What the developer consents to, word for word, for the GitHub account `login`."""
     return (f"Reports, votes and workarounds are posted publicly on github.com/{core.DEVKIT_REPO} under your GitHub "
             f"account `{login}`. They are public and permanent: deleting a comment does not remove it from "
-            f"notification e-mails or public archives. Only devkit facts are sent, never anything about your projects.")
+            f"notification e-mails or public archives. devkit's workflow writes and updates the text of issues you "
+            f"open. Only devkit facts are sent, never anything about your projects.")
 
 
 def set_consent(share: str, login: str) -> None:

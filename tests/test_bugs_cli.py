@@ -33,7 +33,8 @@ PROPOSED = {"id": "d2", "steps": [{"text": "move the folder named zebra first"}]
             "until": ""}
 CONSENT = ("Reports, votes and workarounds are posted publicly on github.com/fireflysoftwaresolutions/devkit under "
            "your GitHub account `ana`. They are public and permanent: deleting a comment does not remove it from "
-           "notification e-mails or public archives. Only devkit facts are sent, never anything about your projects.")
+           "notification e-mails or public archives. devkit's workflow writes and updates the text of issues you open. "
+           "Only devkit facts are sent, never anything about your projects.")
 
 
 def voters(*impacts):
