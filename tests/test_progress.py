@@ -1734,6 +1734,7 @@ class DialogApprovalTests(TranscriptCase):
             "transcript_path": str(self.transcript)}))
         self.assertIn(f"answer to “{q}” grants nothing", line)
         self.assertIn("`grant push <target>`", line)
+        self.assertNotIn("release notes", line)  # a question that asks no permission is no approval
         self.assertIsNone(self.grant(consume=False))  # the rule is unchanged: no grant
 
 
@@ -1747,7 +1748,6 @@ class EvidenceReplayTests(TranscriptCase):
         self.assertIsNotNone(self.grant())  # the developer's push uses it
         self.assertEqual(self.prompt("grant push feat/x", "prompt-001"), [])  # replayed: nothing recorded
         self.assertIsNone(self.grant(consume=False))
-        self.assertNotIn("release notes", line)  # a question that asks no permission is no approval
         refused = [r for r in __import__("devkit.audit").audit.records(1, "crew.evidence-refused")]
         self.assertIn("prompt-001", " ".join(r["detail"] for r in refused))
 
