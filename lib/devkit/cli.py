@@ -2687,7 +2687,8 @@ def _lesson_root(scope: str):
     return path if path.is_dir() else None
 
 
-LINT_ORDER = ("no-cause", "missing", "quarantined", "broad", "wrong", "no-file")  # what recall cannot show comes first
+# what recall cannot show comes first: a lesson file no command can read, then the lessons it cannot use
+LINT_ORDER = ("unreadable", "no-cause", "missing", "quarantined", "broad", "wrong", "no-file")
 
 
 def _lesson_lint(a, lessons) -> int:
@@ -2695,11 +2696,13 @@ def _lesson_lint(a, lessons) -> int:
     anchors checked against its own checkout, printed by kind with the command that fixes each finding. Exit 1 when
     something needs fixing."""
     from . import lessonlint
-    items = lessons.all_lessons(_lesson_scope(a) if _lesson_scoped(a) else None)
+    scoped = _lesson_scope(a) if _lesson_scoped(a) else None
+    items = lessons.all_lessons(scoped)
     scopes = {}
     for x in items:
         scopes.setdefault(x["meta"].get("scope") or "", []).append(x)
-    found = [f for scope, group in scopes.items() for f in lessonlint.lint(group, _lesson_root(scope))]
+    found = lessons.unreadable(scoped) + [f for scope, group in scopes.items()
+                                          for f in lessonlint.lint(group, _lesson_root(scope))]
     if not found:
         print(f"{ui.OK} {len(items)} lesson{'s' if len(items) != 1 else ''}: nothing to fix")
         return 0
@@ -2994,6 +2997,9 @@ def cmd_lesson(a):
     if not a.all and not getattr(a, "search", None) and _lesson_scope(a) != "global":
         items += lessons.all_lessons("global")
     items = [x for x in items if a.all or x["meta"].get("status") != "retired"]
+    lag = lessons.sync_lag()
+    if lag:
+        ui.warn(lag)
     print(ui.section(f"Lessons · {len(items)}"))
     if not items:
         print("  none yet — record one after a fix, a revert or a repeated mistake: dev lesson add \"…\" --happened \"…\" "
