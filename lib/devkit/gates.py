@@ -21,7 +21,8 @@ the file, or a command naming it that the guard's read-only allowlist does not h
 file (cat, grep, sed -n, git diff) does not make it the member's, and neither does a file another caller edited with
 its own edit tool during the lane (the session's edit record, progress.edits_since), unless a redirection of the
 member wrote into it. Only its own lines are blamed on it (`_mine`).
-  lessons  two or more guard refusals are answered with `dev lesson add` or `dev lesson recur`, or with devkit's bug
+  lessons  two or more guard refusals are answered with a lesson that `dev lesson add` recorded or `dev lesson recur`
+           counted (its output shows it: a refused add answers nothing, `_lessons_done`), or with devkit's bug
            registry: a `dev bug report --guard …` from the lane, or a vote on the bug a refusal's marker names. A
            refusal the registry served a workaround for in this session (the session ledger, by the marker's
            fingerprint and code), or that an open lesson covers (it names the lesson, or shows its error signature),
@@ -494,11 +495,38 @@ def _markers(text: str) -> list:
     return [m.groups() for m in bugs.MARKER_RE.finditer(text)] if "devkit-bug:" in text else []
 
 
-def _answered(invocations, refusals) -> bool:
-    """The lane answered its refusals: a lesson recorded or counted, a refusal reported to devkit's bug registry
-    (`dev bug report --guard`, with an id or the session's last refusal), or a vote on a bug that a refusal's marker
-    names (what the refusal itself asks for)."""
-    if _ran("dev lesson add", invocations) or _ran("dev lesson recur", invocations):
+# What `dev lesson add` prints when it recorded a lesson and `dev lesson recur` when it counted one (cli.cmd_lesson):
+# the lesson's id after a check mark. A refused add or a recur of no lesson prints ✗ and its problems instead.
+_LESSON_DONE = re.compile(r"(?m)^\s*✓ L-[0-9A-Za-z]{6,40} (?:recorded in |happened \d+×)")
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _lessons_done(path) -> list:
+    """The shell commands of a member's transcript whose output shows a lesson recorded or counted (_LESSON_DONE), in
+    order. Neither the exit code nor the command alone tells: `dev lesson add … | tail` exits 0 when it is refused."""
+    shells, out = {}, []
+    for rec in _records(path):
+        content = (rec.get("message") or {}).get("content")
+        if not isinstance(content, list):
+            continue
+        for c in content:
+            if not isinstance(c, dict):
+                continue
+            if rec.get("type") == "assistant" and c.get("type") == "tool_use" and c.get("name") in SHELL_TOOLS:
+                cmd = (c.get("input") or {}).get("command") or (c.get("input") or {}).get("cmd") or ""
+                shells[c.get("id")] = " ".join(map(str, cmd)) if isinstance(cmd, list) else str(cmd)
+            elif rec.get("type") == "user" and c.get("type") == "tool_result" and c.get("tool_use_id") in shells:
+                if _LESSON_DONE.search(_ANSI.sub("", _text(c.get("content")))):
+                    out.append(shells[c["tool_use_id"]])
+    return out
+
+
+def _answered(invocations, refusals, done=()) -> bool:
+    """The lane answered its refusals: a lesson recorded or counted (`done`: the invocations of the commands whose
+    output shows it, _lessons_done), a refusal reported to devkit's bug registry (`dev bug report --guard`, with an
+    id or the session's last refusal), or a vote on a bug that a refusal's marker names (what the refusal itself asks
+    for)."""
+    if _ran("dev lesson add", done) or _ran("dev lesson recur", done):
         return True
     reports = [w[3:] for w in invocations if w[:3] == ["dev", "bug", "report"]]
     if any(a == "--guard" or a.startswith("--guard=") for args in reports for a in args):
@@ -702,7 +730,7 @@ def crew_gates(member, transcript_path, cwd, roster=None, agent: str = "", sessi
         found += _stub_findings(top, changed, written)
         found += _test_findings(top, changed, written)
     owed = _owed(refusals, session, top) if not read_only and len(refusals) >= 2 and \
-        not _answered(inv, refusals) else []
+        not _answered(inv, refusals, _invocations(_lessons_done(transcript_path), agent)) else []
     if len(owed) >= 2:
         first = (re.sub(r"^[:\s]+", "", DENIAL_RE.sub("", owed[0], 1)).splitlines() or [""])[0][:120]
         found.append(_finding("lessons", "dev lesson add",

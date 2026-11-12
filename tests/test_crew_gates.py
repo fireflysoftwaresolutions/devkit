@@ -3,8 +3,11 @@
 # devkit: allow-stub-words (fixtures with the markers the stub gate looks for)
 # The crew gates at SubagentStop: a member ran its proofs, loaded its skills, left no unfinished work or tests that
 # cannot fail, and recorded a lesson after repeated guard refusals. Run: python3 -m unittest tests.test_crew_gates
+import contextlib
+import io
 import json
 import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -16,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
 from unittest import mock  # noqa: E402
 
-from devkit import audit, bugs, core, gates, guard, lessons, skillguard  # noqa: E402
+from devkit import audit, bugs, cli, core, gates, guard, lessonevents, lessons, skillguard, work  # noqa: E402
 
 # Skills "installed" on this test machine: the gate asks only for skills a member can load.
 HAVE = {"test-driven-development", "testing", "docs", "communicating"}
@@ -49,6 +52,7 @@ SCOUT = {"id": "sparks", "name": "Sparks", "tools": "read", "skills": ["docs"],
                         "proof": "dev grep"}]}
 
 SKILL_MD = "/Users/dev/.claude/plugins/cache/official/superpowers/7.0.0/skills/{}/SKILL.md"
+LONG_TITLE = "In a crew lane, prove shell expansion of a program word with dev guard check, never by running it"
 DENIAL = ("PreToolUse:Bash hook error: Raw `git worktree add ../copy` would create an unmanaged worktree. "
           "Use `dev wt new <branch>`.")
 GOOD_TEST = ("import unittest\nfrom calc import add\n\n\nclass AddTests(unittest.TestCase):\n"
@@ -343,14 +347,6 @@ class CrewGateTests(GateCase):
         self.assertIn("2 guard refusals", found[0]["evidence"])
         self.assertIn("dev lesson add", found[0]["fix"])
 
-    def test_a_lesson_recurrence_answers_the_refusals(self):
-        self.complete()
-        self.tx.refused("git worktree add ../copy").refused("git worktree add ../copy2")
-        self.tx.bash('echo "dev lesson add later"')  # mentioned, not run
-        self.assertEqual([f["rule"] for f in self.gates()], ["lessons"])
-        self.tx.bash('bin/dev lesson recur L-fx1 --evidence "worktree refused twice"')
-        self.assertEqual(self.gates(), [])
-
     def test_a_read_only_member_skips_the_shell_checks(self):
         self.tx.call("Grep", "calc.py:1: def add", pattern="def add")
         self.tx.refused("ls").refused("ls -la")  # its tools hold no shell, so neither proof nor lesson is owed
@@ -371,9 +367,13 @@ class RefusalAnswerTests(GateCase):
     def setUp(self):
         super().setUp()
         root = Path(self.tmp.name)
-        for obj, name, value in ((lessons, "LESSONS", root / "handoff" / "lessons"),
-                                 (lessons, "USAGE_LOCAL", root / "state" / "lessons-usage.json"),
-                                 (lessons, "STATE", root / "state"), (bugs, "BUGS", root / "bugs")):
+        handoff, state = root / "handoff", root / "state"
+        for obj, name, value in ((lessons, "LESSONS", handoff / "lessons"), (lessons, "HANDOFF", handoff),
+                                 (lessons, "USAGE_LOCAL", state / "lessons-usage.json"),
+                                 (lessons, "STATE", state), (bugs, "BUGS", root / "bugs"),
+                                 (work, "HANDOFF", handoff), (work, "ITEMS", handoff / "items"),
+                                 (core, "HANDOFF", handoff), (core, "STATE", state),
+                                 (lessonevents, "EVENTS", state / "lessons-events.jsonl")):
             p = mock.patch.object(obj, name, value)
             p.start()
             self.addCleanup(p.stop)
@@ -386,6 +386,53 @@ class RefusalAnswerTests(GateCase):
 
     def owed(self):
         return [f["rule"] for f in gates.crew_gates(KID, self.tx.save(), str(self.repo), session="s1")]
+
+    def dev_lesson(self, *argv):
+        # `dev lesson …` as the member's shell runs it: its exit code and what it printed, both streams
+        out, here = io.StringIO(), os.getcwd()
+        os.chdir(self.repo)
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+                rc = cli.main(["lesson", *argv])
+        finally:
+            os.chdir(here)
+        return rc, out.getvalue()
+
+    def ran(self, command, rc, out):
+        # the member's Bash call and its result, as Claude Code writes a command that exited with `rc`
+        return self.tx.bash(command, out if rc == 0 else f"Exit code {rc}\n{out}", is_error=rc != 0)
+
+    def test_a_lesson_recurrence_answers_the_refusals_and_a_recurrence_of_no_lesson_does_not(self):
+        self.tx.refused("git worktree add ../copy").refused("git worktree add ../copy2")
+        self.tx.bash('echo "dev lesson recur later"')  # mentioned, not run
+        cmd = 'bin/dev lesson recur {} --evidence "worktree refused twice"'
+        self.ran(cmd.format("L-fx1"), *self.dev_lesson("recur", "L-fx1", "--evidence", "worktree refused twice"))
+        self.assertEqual(self.owed(), ["lessons"])  # it ran, and counted nothing: no such lesson
+        lid = self.lesson("Create worktrees with dev wt new", commands=["git worktree add"])["meta"]["id"]
+        rc, out = self.dev_lesson("recur", lid, "--evidence", "worktree refused twice")
+        self.assertEqual(rc, 0, out)
+        self.ran(cmd.format(lid), rc, out)
+        self.assertEqual(self.owed(), [])
+
+    def test_a_failed_lesson_add_does_not_answer_the_refusals(self):
+        # A lane passed the gate after four refused adds and a crashed recur, with no lesson recorded: an add that
+        # ran is not an add that recorded a lesson. Piped through tail, a refused add even exits 0.
+        self.tx.refused("git worktree add ../copy").refused("git worktree add ../copy2")
+        why = ["--global", "--happened", "git worktree add was refused", "--cause", "a raw worktree is unmanaged",
+               "--prevent", "use dev wt new", "--command", "git worktree add"]
+
+        def piped(argv):
+            return "bin/dev lesson " + " ".join(shlex.quote(a) for a in argv) + " 2>&1 | tail -5"
+        refused = ["add", LONG_TITLE, *why]
+        rc, out = self.dev_lesson(*refused)
+        self.assertEqual(rc, 2, out)
+        self.tx.bash(piped(refused), out)
+        self.assertEqual(self.owed(), ["lessons"])
+        recorded = ["add", "Create worktrees with dev wt new", *why]
+        rc, out = self.dev_lesson(*recorded)
+        self.assertEqual(rc, 0, out)
+        self.tx.bash(piped(recorded), out)
+        self.assertEqual(self.owed(), [])
 
     def test_a_bug_report_on_the_refusal_from_the_lane_answers_the_refusals(self):
         self.tx.refused("git worktree add ../copy").refused("git worktree add ../copy2")
