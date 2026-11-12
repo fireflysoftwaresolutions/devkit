@@ -1217,10 +1217,7 @@ def stop(agent: str):
                 fixes = lessons.fixed_in_session(sess["top"], sess.get("head"))
                 if fixes:
                     sess["lesson_nudged"] = True
-                    reasons.append(("lesson", "devkit: this session fixed or reverted something (" + "; ".join(fixes[:3]) +
-                                   "). If it was a mistake that could happen again, record a lesson: `dev lesson add "
-                                   "\"<title>\" --cause \"…\" --prevent \"…\" --evidence \"commit …\"` (or "
-                                   "`dev lesson recur <id>` if a known pitfall repeated). Skip it for a trivial fix."))
+                    reasons.append(("lesson", _lesson_nudge(fixes)))
             except Exception:
                 _log(f"stop lessons {agent}: {traceback.format_exc()[-300:]}")
         try:  # crew members may be writing plans right now; their own `dev plan revise` records them
@@ -1917,6 +1914,16 @@ def _lesson_hits(data: dict, ids: list):
     if ids and sid and not _headless():
         from . import lessonevents
         lessonevents.on_hit(ids, sid, _lesson_agent(data))
+
+
+def _lesson_nudge(fixes: list) -> str:
+    """The Stop hook's question, once per session, after a fix or revert commit (lessons.fixed_in_session): whether
+    the mistake deserves a lesson."""
+    return ("devkit: this session fixed or reverted something (" + "; ".join(fixes[:3]) + "). If it was a mistake "
+            "that could happen again, record a lesson: `dev lesson add \"<the rule>\" --happened \"…\" --cause \"…\" "
+            "--prevent \"…\" --file <glob> --command \"<command words>\" --error \"<output text>\" --evidence "
+            "\"commit …\"` (keep the anchors that say where it applies: a lesson with none is refused), or "
+            "`dev lesson recur <id> --evidence \"…\"` if a known pitfall repeated. Skip it for a trivial fix.")
 
 
 def _lessons_end(data: dict, who: str):

@@ -736,8 +736,10 @@ def crew_gates(member, transcript_path, cwd, roster=None, agent: str = "", sessi
         found.append(_finding("lessons", "dev lesson add",
                               f"{len(owed)} guard refusals and no dev lesson add or dev lesson recur; the first: "
                               f"\"{first}\"",
-                              'run `dev lesson add "<what the guard refused>" --happened "<what you ran and what the '
-                              'guard said>" --cause "<why it happened>" --prevent "<the rule for next time>"`, or '
+                              'run `dev lesson add "<the rule to follow>" --happened "<what you ran and what the '
+                              'guard said>" --cause "<why it happened>" --prevent "<the rule for next time>" '
+                              '--command "<the refused command words>" --error "<text of the refusal>"` (an anchor '
+                              'says where it applies: a lesson with none is refused), or '
                               '`dev lesson recur <id> --evidence "<what happened>"` for a known pitfall; when the guard '
                               'was wrong, `dev bug report --guard <refusal id>` instead'))
     for t in background_work(transcript_path):

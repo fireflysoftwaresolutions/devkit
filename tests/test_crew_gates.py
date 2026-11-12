@@ -7,6 +7,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -61,6 +62,15 @@ GOOD_TEST = ("import unittest\nfrom calc import add\n\n\nclass AddTests(unittest
 
 def git(cwd, *args):
     subprocess.run(["git", "-C", str(cwd), *args], check=True, capture_output=True)
+
+
+def taught_anchors(text: str) -> tuple:
+    # The `dev lesson add …` a hint teaches, as the CLI parses it: (its anchors, what the anchor gate says of them)
+    taught = re.search(r"`(dev lesson add [^`]*)`", text)
+    assert taught, f"no dev lesson add taught in: {text}"
+    a = cli.build_parser().parse_args(shlex.split(taught.group(1))[1:])
+    anchors = cli._lesson_anchors(a)
+    return anchors, [p for p, _ in lessons._anchor_problems(**anchors)[1]]
 
 
 class Transcript:
@@ -346,6 +356,14 @@ class CrewGateTests(GateCase):
         self.assertEqual([f["rule"] for f in found], ["lessons"])
         self.assertIn("2 guard refusals", found[0]["evidence"])
         self.assertIn("dev lesson add", found[0]["fix"])
+
+    def test_the_lessons_fix_teaches_an_add_with_an_anchor_the_gate_accepts(self):
+        # `dev lesson add` refuses a lesson with no anchor: a fix without one sends the member to a command that fails
+        self.complete()
+        self.tx.refused("git worktree add ../copy").refused("git worktree add ../copy2")
+        anchors, problems = taught_anchors(self.gates()[0]["fix"])
+        self.assertTrue(any(anchors.values()), anchors)
+        self.assertEqual(problems, [])
 
     def test_a_read_only_member_skips_the_shell_checks(self):
         self.tx.call("Grep", "calc.py:1: def add", pattern="def add")

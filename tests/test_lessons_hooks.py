@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from devkit import audit, core, guard, hooks, lessonevents, lessonrules, lessons  # noqa: E402
 from devkit import progress as pg, registry  # noqa: E402
+from test_crew_gates import taught_anchors  # noqa: E402
 from test_language_neutral_hooks import A, HookCase  # noqa: E402
 
 GIT_ENV = {"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"}
@@ -218,6 +219,14 @@ class HighTrustTextTests(LessonHookCase):
         self.assertNotIn("x" * 100, line)  # the title is cut
         for explanation in ("$(git push --force) ran", "ROOT-CAUSE-TEXT"):
             self.assertNotIn(explanation, reason)
+
+
+class LessonNudgeTests(unittest.TestCase):
+    def test_the_nudge_after_a_fix_teaches_an_add_with_an_anchor_the_gate_accepts(self):
+        # `dev lesson add` refuses a lesson with no anchor: a hint without one teaches a command that fails
+        anchors, problems = taught_anchors(hooks._lesson_nudge(["a1b2c3d fix(parser): keep quoted commas"]))
+        self.assertTrue(any(anchors.values()), anchors)
+        self.assertEqual(problems, [])
 
 
 class SessionStartTests(LessonHookCase):
