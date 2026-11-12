@@ -403,6 +403,21 @@ class Names(Case):
             with self.subTest(cmd=cmd):
                 self.assertIsNotNone(member(cmd))
 
+    def test_a_test_file_that_deploys_is_read_by_its_content(self):
+        # the Red team tester's: a name filter must not let a test file that really deploys through
+        repo = Path(CWD)
+        (repo / "tests").mkdir(parents=True, exist_ok=True)
+        (repo / "tests" / "test_deploy_live.py").write_text("import subprocess\nsubprocess.run(['vercel', '--prod'])\n")
+        self.addCleanup((repo / "tests" / "test_deploy_live.py").unlink)
+        self.refused("python3 tests/test_deploy_live.py")
+        self.assertIsNotNone(main("python3 tests/test_deploy_live.py"))
+
+    def test_a_module_named_by_spliced_strings_is_refused_in_the_main_session(self):
+        for cmd in ("node -e \"require('child' + '_process').execSync('gh pr merge 12')\"",
+                    "node -e \"require(`child_${'process'}`).execSync('gh pr merge 12')\""):
+            with self.subTest(cmd=cmd):
+                self.assertIsNotNone(main(cmd))
+
     def test_a_tracked_file_named_like_a_copy_is_written(self):
         import subprocess
         repo = Path(core.DEV) / "acme" / "studio"

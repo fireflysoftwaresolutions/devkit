@@ -10969,12 +10969,14 @@ _JS_ALWAYS = re.compile(r"(?<![.\w])(?:Function|eval)\s*\(|\bReflect\s*\.|\bglob
                         r"(?:binding|dlopen)\b|\bvm\s*\.\s*run\w*|\brunIn\w*Context\b")
 _JS_LOADS = re.compile(r"\brequire\s*\(\s*[^'\"\s)]|\bimport\s*\(\s*[^'\"\s)]")
 _JS_COMPUTED_CALL = re.compile(r"\]\s*(?:\(|\.\s*(?:call|apply|bind)\s*\()")
+# a module named by strings spliced together (require('child' + '_process'), a template literal): any module
+_JS_SPLICED = re.compile(r"""\b(?:require|import)\s*\(\s*(?:(['"])[^'"\n]{0,200}\1\s*\+|`)""")
 
 
 def _js_dynamic(bare):
     """The match of a JavaScript program's code (outside string literals) that may call a function by a name it
     builds at run time, or None (_JS_ALWAYS, _JS_LOADS with _JS_COMPUTED_CALL)."""
-    m = _JS_ALWAYS.search(bare)
+    m = _JS_ALWAYS.search(bare) or _JS_SPLICED.search(bare)
     if m:
         return m
     m = _JS_LOADS.search(bare)
@@ -11954,6 +11956,12 @@ def _http_writes(name, argv) -> list:
 _TEST_FILE = re.compile(r"^test_|_test$|\.(?:test|spec)$", re.I)
 
 
+def _test_named(argv) -> bool:
+    """True when an interpreter runs a script whose file name follows a test file convention (_TEST_FILE)."""
+    script = next((a for a in argv[1:] if not a.startswith("-")), "")
+    return bool(script) and bool(_TEST_FILE.search(os.path.splitext(os.path.basename(script))[0]))
+
+
 def _opaque_actions(name, argv, cwd) -> list:
     """make, just and task targets, package scripts and scripts named release, publish, deploy, push or ship take that
     class (spec C6, opaque): what they run is not seen."""
@@ -12244,7 +12252,9 @@ def _segment_actions(argv, cwd, bodies, depth) -> list:
         found = _publish_actions(name, argv, cwd) or _deploy_actions(name, argv, cwd) or _http_actions(name, argv)
         if not found and name in _GATE_CLIS and _filled_subcommand(argv[1:]):  # `xargs npm`, `parallel cargo`
             found = [_unknown(" ".join(argv))]
-        if not found and _INTERP.match(name) and not _repo_script(argv, cwd):
+        # a repository's own script is its code and is not read, except a file named like a test: the name says
+        # nothing of what it does (test_deploy.py may deploy), so it is read as any other script
+        if not found and _INTERP.match(name) and (not _repo_script(argv, cwd) or _test_named(argv)):
             with _skipped_reads() as unread:
                 code = _program(argv, cwd, bodies)[0]
             expand = not _py_argv_only(code, name)  # backticks in a string no shell reads are Markdown, not commands
