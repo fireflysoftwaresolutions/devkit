@@ -2265,14 +2265,17 @@ def _shell_line(args, name="bash"):
     return _with_positionals(args[k], args[k + 1:])
 
 
-def _nested_lines(argv, cwd=None) -> list:
+def _nested_lines(argv, cwd=None) -> list | None:
     run = _unwrap(argv)
     if not run:
         return []
     if run != list(argv):  # a runner (uv run, npx, npm exec, timeout, a wrapper): its command is read as a line (F3)
         return [shlex.join(run)]
     argv = run
-    launched = [shlex.join(r) for r in map(_unwrap, _launcher_suffixes(argv)) if r]
+    runs = _launched(argv)
+    if runs is None:  # more of what a launcher may start than the guard reads: the caller refuses it
+        return None
+    launched = [shlex.join(r) for r in map(_unwrap, runs) if r]
     if launched:  # `op run -- git push --force …`: each command the launcher may start, read as a line
         return launched
     held = _held_lines(argv)
@@ -2454,6 +2457,8 @@ def _check_segments(cmd: str, segs, ecwd: str, agent: str, depth: int = 0, outer
         if res:
             return res
         lines = _nested_lines(argv, ecwd)
+        if lines is None:  # a launcher with more words, or launchers deeper, than the guard reads
+            return deny(LAUNCH_REASON, key="launcher-words")
         if lines and depth >= 4:  # too deep to read is no "nothing found": refused
             return deny(NESTED_REASON, key="nested-depth")
         feeds = fed or _feeds_words(argv)
@@ -4432,7 +4437,10 @@ def vendor_ext_refusal(argv, cwd=None, names=(), more=False) -> str:
     braced = _brace_list(prog)
     if braced:  # `{claude,mcp} add …`: the shell expands the program word into words
         return vendor_ext_refusal([*braced, *args], cwd, names, more)
-    for sub in _launcher_suffixes(argv):  # `op run -- claude mcp add …`: the strictest reading stands
+    runs = _launched(argv)
+    if runs is None:  # more than the guard reads: any of its words may start claude with the words after it
+        return "unnamed"
+    for sub in runs:  # `op run -- claude mcp add …`: the strictest reading stands
         kind = vendor_ext_refusal(sub, cwd, names, more)
         if kind:
             return kind
@@ -4999,7 +5007,10 @@ class _Shell:
         return None
 
     def segment(self, name, argv, assigns, cwd, names=()):
-        for sub in _launcher_suffixes(argv):  # `op run -- git push --force …`: each command the launcher may start
+        runs = _launched(argv)
+        if runs is None:  # a launcher with more words, or launchers deeper, than the guard reads
+            return deny(LAUNCH_REASON, key="launcher-words")
+        for sub in runs:  # `op run -- git push --force …`: each command the launcher may start
             run = _unwrap(sub)
             v = self.segment(os.path.basename(run[0]), run, assigns, cwd, names) if run else None
             if v:
@@ -5368,23 +5379,68 @@ def _case_pattern(segs, k) -> bool:
 # (none: the program itself); _launcher_suffixes reads them without each one's option grammar
 _LAUNCHERS = {"taskpolicy": (), "sandbox-exec": (), "xcrun": (), "dotenv": (), "op": ("run",), "direnv": ("exec",),
               "mise": ("exec", "x"), "asdf": ("exec",), "nix": ("run", "shell", "develop"), "ccr": ("code",)}
+# what the guard reads of the commands a launcher may start (_launched), the launchers among them included: at most
+# this many commands, this many characters of their words in all, and launchers this many deep inside launchers. A
+# reading past the hook's timeout lets the command run unjudged, so past any of them the guard refuses. Real commands
+# stay far below: a commit with three 4000-character texts after `op run --` reads 6 commands of about 60,000 characters
+_LAUNCH_RUNS, _LAUNCH_TEXT, _LAUNCH_DEPTH = 64, 128_000, 4
+LAUNCH_REASON = (
+    "This command gives a launcher (`xcrun`, `op run`, `nix run`, `mise exec` and the like) more words than the guard "
+    "reads, or launchers inside launchers deeper than it reads. Any word of a launcher may name the program it "
+    f"starts, so the guard reads the command from each one, up to {_LAUNCH_RUNS} commands, {_LAUNCH_TEXT:,} "
+    f"characters and {_LAUNCH_DEPTH} launchers deep, and it refuses what it cannot read in full. Run the program "
+    "without the launcher, or hand the launcher a script file or an `sh -c '…'` line, which the guard reads as one "
+    f"command. {_TAIL}")
 
 
-def _launcher_suffixes(argv) -> list:
-    """The commands a launcher of _LAUNCHERS may start: each run of its words from a word that is no option on (the
-    first that names a program is the command, and the guard cannot tell which that is, so each is read, the
-    strictest verdict standing), a flake's `nixpkgs#claude-code` read as its package, and `ccr code …` as claude.
-    [] for any other command."""
+def _launcher_suffixes(argv):
+    """The commands a launcher of _LAUNCHERS may start, one at a time: each run of its words from a word that is no
+    option on (the first that names a program is the command, and the guard cannot tell which that is, so each is
+    read, the strictest verdict standing), a flake's `nixpkgs#claude-code` read as its package, and `ccr code …` as
+    claude. Nothing for any other command. One at a time, so _launched stops at its bound without building the rest."""
     if not argv:
-        return []
+        return
     name, args = os.path.basename(str(argv[0])), [str(a) for a in argv[1:]]
     verbs = _LAUNCHERS.get(name)
     if verbs is None or (verbs and args[:1] and args[0] not in verbs) or (verbs and not args):
-        return []
+        return
     if name == "ccr":  # Claude Code Router's `ccr code` starts claude with the words after it
-        return [["claude", *args[1:]]]
+        yield ["claude", *args[1:]]
+        return
     args = args[1:] if verbs else args
-    return [[a.rpartition("#")[2], *args[k + 1:]] for k, a in enumerate(args) if a and not a.startswith("-")]
+    for k, a in enumerate(args):
+        if a and not a.startswith("-"):
+            yield [a.rpartition("#")[2], *args[k + 1:]]
+
+
+def _launched(argv):
+    """Each command a launcher may start (_launcher_suffixes), once, with what each launcher among them starts in
+    turn: `xcrun xcrun git push` reads `git push` and `push` once each. Reading each launcher's commands again took
+    twice as long with every launcher in a chain, and past the hook's timeout the command ran unjudged. A launcher
+    among them is read for what it starts, not as a command of its own: no rule judges a launcher by its name. The
+    commands come as _launcher_suffixes gives them; the callers unwrap them. None when there is more to read than
+    _LAUNCH_RUNS, _LAUNCH_TEXT or _LAUNCH_DEPTH allow, which the callers refuse; [] for any other command."""
+    out, seen, size, todo, level = [], set(), 0, [argv], 0
+    while todo:
+        level += 1
+        if level > _LAUNCH_DEPTH:
+            return None
+        found, todo = todo, []
+        for cmd in found:
+            for sub in _launcher_suffixes(cmd):
+                key = tuple(sub)
+                if key in seen:
+                    continue
+                seen.add(key)
+                size += len(sub) + sum(map(len, sub))
+                if len(seen) > _LAUNCH_RUNS or size > _LAUNCH_TEXT:
+                    return None
+                run = _unwrap(sub)
+                if run and next(_launcher_suffixes(run), None) is not None:
+                    todo.append(run)  # a launcher in turn: read at the next level for what it starts
+                else:
+                    out.append(sub)
+    return out
 
 
 _HYPERFINE_LINES = frozenset({"-p", "--prepare", "-s", "--setup", "-c", "--cleanup", "--conclude"})
@@ -11195,7 +11251,12 @@ def _argv_actions(argv, cwd, bodies, depth):
     if _input_command(argv):
         return None
     out = _segment_actions(argv, cwd, bodies, depth)
-    for sub in _launcher_suffixes(argv):  # `op run -- gh pr merge 12`: each command the launcher may start
+    runs = _launched(argv)
+    if runs is None:  # more than the gate reads of what a launcher may start: it may start anything
+        out += _found([_unsure_action(argv, f"{_code(os.path.basename(argv[0]))} with more words than the guard "
+                                            f"reads, or launchers deeper inside it (any of its words may name the "
+                                            f"program it starts)")], argv, cwd)
+    for sub in runs or ():  # `op run -- gh pr merge 12`: each command the launcher may start
         run = _unwrap(sub)
         more = _argv_actions(run, cwd, bodies, depth) if run else []
         if more is None:
