@@ -152,11 +152,16 @@ def render(root: Path, ui) -> str:
 
 
 def local_commands(root: Path) -> list:
-    """Flat list of run commands (for agents / scripting)."""
+    """The run commands CI runs, in order, as a developer runs them here (`dev ci --commands`, the delivery policy's
+    test gate): without the steps that need CI secrets, and without a hosted runner's own setup (OS packages, browser
+    installs, sudo, housekeeping that deletes outside the checkout), which `dev ci --run` skips too: one classifier,
+    gitx.runner_setup."""
+    from . import gitx
     cmds = []
     for wf in workflows(root):
         for job in wf["jobs"]:
             for st in job["steps"]:
-                if st["run"] and not re.search(r"\$\{\{\s*secrets\.", st["run"]):
+                if st["run"] and not re.search(r"\$\{\{\s*secrets\.", st["run"]) and \
+                        not gitx.runner_setup(st["run"], root):
                     cmds.append(st["run"])
     return cmds

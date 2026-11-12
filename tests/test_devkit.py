@@ -355,6 +355,18 @@ jobs:
             (Path(d) / ".github" / "workflows" / "ci.yml").write_text(self.WF)
             self.assertEqual(ci.local_commands(Path(d))[0], "npm ci")
 
+    def test_local_commands_leave_out_runner_only_setup(self):
+        # what `dev ci --commands` lists is what a developer runs here; a hosted runner's own setup is not
+        prep = ("      - name: Free disk space\n        run: sudo rm -rf /usr/share/dotnet /opt/ghc\n"
+                "      - run: npx playwright install --with-deps chromium\n        working-directory: studio\n"
+                "      - run: apt-get update && apt-get install -y libsecret-tools\n"
+                "      - run: git config --global core.autocrlf false\n")
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / ".github" / "workflows").mkdir(parents=True)
+            (Path(d) / ".github" / "workflows" / "ci.yml").write_text(
+                self.WF.replace("      - name: Install\n", prep + "      - name: Install\n"))
+            self.assertEqual(ci.local_commands(Path(d)), ["npm ci", "npm run lint\nnpm test -- --coverage"])
+
 
 class CanaryTests(unittest.TestCase):
     def test_marker_detection(self):

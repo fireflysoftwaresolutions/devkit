@@ -64,6 +64,16 @@ class DetectTests(unittest.TestCase):
         r = repo_with({"README.md": "x"}, tags=["v1.2.0", "v1.3.0-rc.1"])
         self.assertEqual(delivery.detect(r)["versioning"], "semver")
 
+    def test_the_test_gate_leaves_out_runner_only_setup(self):
+        wf = ("on: [pull_request]\njobs:\n  t:\n    runs-on: ubuntu-24.04\n    steps:\n"
+              "      - run: sudo rm -rf /usr/share/dotnet /opt/hostedtoolcache/CodeQL\n"
+              "      - run: uv sync --locked\n"
+              "      - run: npx playwright install --with-deps chromium\n"
+              "      - run: sudo apt-get update && sudo apt-get install -y gnome-keyring\n"
+              "      - run: uv run python scripts/check.py\n")
+        d = delivery.detect(repo_with({".github/workflows/ci.yml": wf}))
+        self.assertEqual(d["test_gate"], ["uv sync --locked", "uv run python scripts/check.py"])
+
 
 class RecordTests(unittest.TestCase):
     def setUp(self):
