@@ -13,6 +13,7 @@ Pure functions; the hook wrapper fails open on any error.
 """
 from __future__ import annotations
 
+import ast
 import bisect
 import contextlib
 import contextvars
@@ -7692,6 +7693,7 @@ _SPAWNS = re.compile(
     r"\bsubprocess\b|\bos\.(?:system|popen|exec\w*|spawn\w*|posix_spawn\w*)\b|\bpty\.spawn\b|\bchild_process\b|"
     r"\b(?:execSync|spawnSync|execFile\w*|spawn|exec|system|popen|proc_open|shell_exec|passthru)\s*\(|"
     r"\bIO\.popen\b|\bOpen3\b|\bProcess\.(?:spawn|exec)\b|\bDeno\.(?:run|Command)\b|\bBun\.(?:spawn|\$)|"
+    r"\bcreate_subprocess_(?:shell|exec)\b|"
     # AppleScript: do shell script runs a line; Terminal's do script, iTerm's write text and keystroke type one into
     # a terminal (F1-R4 part 2)
     r"\bdo (?:shell )?script\b|\bwrite text\b|\bkeystroke\b")
@@ -11407,13 +11409,140 @@ def _js_dynamic(bare):
 
 def _built_action(argv, name, code) -> tuple | None:
     """_unknown for an interpreter's program that may build what it runs: a function it calls by a name it builds at
-    run time (_dynamic_code), or a spawn whose command starts with what it fills in (_SPAWN_BUILT), with that code,
-    which the refusal names. None when the program has neither."""
+    run time (_dynamic_code), a spawn whose command starts with what it fills in (_SPAWN_BUILT), or a process it
+    starts with a command it does not write out (_py_built_start, _JS_BUILT_START), with that code, which the
+    refusal names. None when the program has none of them."""
     m = _dynamic_match(name, code) or _SPAWN_BUILT.search(code or "")
-    if not m:
+    what = " ".join(m.group(0).split()) if m else ""
+    fam = _family(name)
+    if not what and fam in ("python", "pypy"):
+        what = _py_built_start(code)
+    elif not what and fam in ("node", "nodejs", "deno", "bun"):
+        m = _JS_BUILT_START.search(_outside_strings(code or ""))
+        what = " ".join(m.group(0).split()) if m else ""
+    if not what:
         return None
     action, target = _unknown(" ".join(argv))
-    return action, target, "", ("built", " ".join(m.group(0).split()))
+    return action, target, "", ("built", what)
+
+
+# a JavaScript process started with a command that is no string literal (`execSync('g' + 'h pr merge 12')`,
+# `spawn(cmd, …)`), or a worker that runs a string as code (`new Worker(src, {eval: true})`); read with the program's
+# strings blanked, so a literal is a pair of quotes around blanks
+_JS_BUILT_START = re.compile(
+    r"""(?:\b(?:execSync|execFileSync|execFile|spawnSync|spawn|fork)|(?<![\w.$])exec|"""
+    r"""\b(?:cp|child_process|childProcess|proc)\s*\.\s*exec)\s*\(\s*"""
+    r"""(?!(['"])[^'"\n]*\1\s*[,)]|`[^`$]*`\s*[,)])[^\s)]|\beval\s*:\s*true\b""")
+# the Python functions that start a process, by module: their command is their first argument (os.exec* and
+# os.spawn* take the program, then its arguments)
+_PY_STARTERS = {
+    "subprocess": {"run", "call", "check_call", "check_output", "Popen", "getoutput", "getstatusoutput"},
+    "os": {"system", "popen", "execl", "execle", "execlp", "execlpe", "execv", "execve", "execvp", "execvpe", "spawnl",
+           "spawnle", "spawnlp", "spawnlpe", "spawnv", "spawnve", "spawnvp", "spawnvpe", "posix_spawn",
+           "posix_spawnp", "startfile"},
+    "pty": {"spawn"}, "asyncio": {"create_subprocess_exec", "create_subprocess_shell"},
+    "asyncio.subprocess": {"create_subprocess_exec", "create_subprocess_shell"}, "commands": {"getoutput"}}
+# the programs whose subcommand decides what a command does: their words must be written out too
+_PY_GATED = frozenset({"gh", "git", "dev", "devkit", "claude", "codex", "sh", "bash", "zsh", "env", "sudo", "xargs"})
+
+
+def _py_literal_command(node) -> bool:
+    """True when a process's command is written out: a string literal, or a list or tuple whose program is a string
+    literal, with every word a literal when that program's subcommand decides what it does (_PY_GATED, _GATE_CLIS)."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, (str, bytes)):
+        return True
+    if isinstance(node, (ast.List, ast.Tuple)) and node.elts:
+        words = node.elts
+        first = words[0]
+        if not (isinstance(first, ast.Constant) and isinstance(first.value, str)):
+            return False
+        prog = os.path.basename(first.value)
+        free = {"git": ("-C",), "gh": ("-R", "--repo")}.get(prog, ())  # a folder or a repository, not what it does
+        return prog not in _PY_GATED and prog not in _GATE_CLIS or \
+            all(isinstance(w, ast.Constant) and isinstance(w.value, str) or
+                k and isinstance(words[k - 1], ast.Constant) and words[k - 1].value in free
+                for k, w in enumerate(words))
+    return False
+
+
+def _py_built_start(code) -> str:
+    """The code of a Python program's first process start whose command the program does not write out
+    (_py_literal_command), or of a process function it names without calling it (an alias it may call with
+    anything); "" when every start is written out or the program does not parse (its text is read as before)."""
+    try:
+        tree = ast.parse(code or "")
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        return ""
+    mods, funcs = {}, {}  # a name bound to a module that starts processes, or to one of its starters
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for a in node.names:
+                if a.name in _PY_STARTERS:
+                    mods[a.asname or a.name.split(".")[0]] = a.name if a.asname else a.name.split(".")[0]
+        elif isinstance(node, ast.ImportFrom) and node.module in _PY_STARTERS:
+            for a in node.names:
+                if a.name in _PY_STARTERS[node.module]:
+                    funcs[a.asname or a.name] = node.module + "." + a.name
+                elif node.module == "asyncio" and a.name == "subprocess":
+                    mods[a.asname or a.name] = "asyncio.subprocess"
+
+    def starter(n) -> str:
+        if isinstance(n, ast.Name):
+            return funcs.get(n.id, "")
+        if isinstance(n, ast.Attribute):
+            base = n.value
+            path = mods.get(base.id) if isinstance(base, ast.Name) else (
+                mods.get(base.value.id, "") + "." + base.attr
+                if isinstance(base, ast.Attribute) and isinstance(base.value, ast.Name) and base.value.id in mods
+                else None)
+            if path and n.attr in _PY_STARTERS.get(path, ()):
+                return path + "." + n.attr
+        return ""
+    binds = {}  # a name the program binds once, to a command it writes out: it stands for that command
+    for node in ast.walk(tree):
+        targets = node.targets if isinstance(node, ast.Assign) else \
+            [node.target] if isinstance(node, (ast.AugAssign, ast.AnnAssign, ast.For, ast.comprehension,
+                                               ast.NamedExpr)) else []
+        for t in targets:
+            for n in ast.walk(t):
+                if isinstance(n, ast.Name):
+                    binds[n.id] = binds.get(n.id, 0) + 1 if n.id in binds or not isinstance(node, ast.Assign) or \
+                        len(node.targets) != 1 or not isinstance(t, ast.Name) or \
+                        not _py_literal_command(node.value) else 0
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            for a in ast.walk(node.args):
+                if isinstance(a, ast.arg):
+                    binds[a.arg] = 1  # a parameter is bound by each caller
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            for n in node.names:
+                binds[n] = 1
+    for node in ast.walk(tree):  # a list the program changes in place (cmd.append(x), cmd[1] = x) is built
+        if isinstance(node, (ast.Attribute, ast.Subscript)) and isinstance(node.value, ast.Name) and \
+                binds.get(node.value.id) == 0:
+            binds[node.value.id] = 1
+
+    def written(cmd) -> bool:
+        return _py_literal_command(cmd) or isinstance(cmd, ast.Name) and binds.get(cmd.id) == 0
+    called = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and (fn := starter(node.func)):
+            called.add(id(node.func))
+            if fn.startswith("os.") and fn[3:].startswith(("exec", "spawn", "posix_spawn")) or \
+                    fn.endswith("create_subprocess_exec"):
+                args = [a for a in node.args if not isinstance(a, ast.Constant) or not isinstance(a.value, int)]
+                ok = bool(args) and all(isinstance(a, ast.Constant) and isinstance(a.value, (str, bytes)) or
+                                        written(a) for a in args)
+            else:
+                cmd = node.args[0] if node.args else next((k.value for k in node.keywords
+                                                           if k.arg in ("args", "cmd", "program", "command")), None)
+                ok = cmd is not None and not isinstance(cmd, ast.Starred) and written(cmd)
+            if not ok:
+                return f"{fn}(…) with a command it builds when it runs"
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Name, ast.Attribute)) and id(node) not in called and (fn := starter(node)) and \
+                not isinstance(getattr(node, "ctx", None), ast.Store):
+            return f"{fn} passed or kept as a value, called with anything"
+    return ""
 
 
 # a module name is a string, and naming child_process is how JavaScript reaches its spawn functions

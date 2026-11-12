@@ -578,6 +578,49 @@ class InstallReads(Case):
                 self.assertIsNotNone(main(cmd))
 
 
+class MainSessionPrograms(unittest.TestCase):
+    """In the main session too, an inline or scratch program that starts a process with a command it does not write
+    out (sys.argv, a parameter, a list it changes, a concatenation), passes a process function around, runs a string
+    as a worker's code or loads a module by a computed name may run any action: it is unknown. One whose commands
+    are written out, or bound once to a written-out command, is judged by those commands."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dir = Path(guard.real(tmp.name))
+
+    def script(self, name, text):
+        (self.dir / name).write_text(text)
+        return str(self.dir / name)
+
+    def test_a_process_with_a_command_built_at_run_time_is_unknown(self):
+        runner = self.script("runner.py", "import subprocess, sys\nsubprocess.run(sys.argv[1:])\n")
+        execs = self.script("runner2.py", "import os, sys\nos.execvp(sys.argv[1], sys.argv[1:])\n")
+        spliced = self.script("j1.js", "const m = 'child' + '_process';\nrequire(m).execSync('g' + 'h pr merge 12');\n")
+        for cmd in ("python3 -c 'import asyncio; asyncio.run(asyncio.create_subprocess_shell(\"gh pr merge 12\"))'",
+                    "python3 -c 'import asyncio; asyncio.run(asyncio.create_subprocess_exec(\"gh\", \"pr\", \"merge\", "
+                    "\"12\"))'", f"python3 {runner} gh pr merge 12", f"python3 {execs} gh pr merge 12",
+                    f"node {spliced}", "python3 -c 'import os; f = os.system; f(\"ls\")'",
+                    "python3 -c 'import subprocess; c = [\"gh\", \"pr\"]; c.append(\"merge\"); subprocess.run(c)'",
+                    "node -e \"const {Worker} = require('worker_threads'); new Worker(src, {eval: true})\"",
+                    "node -e \"require('child_process').execSync('g' + 'h pr merge 12')\""):
+            with self.subTest(cmd=cmd):
+                self.assertIsNotNone(main(cmd))
+
+    def test_a_process_with_a_written_out_command_runs(self):
+        ok = self.script("ok.py", "import subprocess\nprint(subprocess.run(['git', 'log', '-1'], capture_output=True, "
+                                  "text=True).stdout)\n")
+        for cmd in ("python3 -c 'import subprocess; subprocess.run([\"git\", \"status\"])'",
+                    "python3 -c 'import subprocess; c = [\"gh\", \"pr\", \"view\", \"12\"]; subprocess.run(c)'",
+                    "python3 -c 'import subprocess, sys; subprocess.run([\"git\", \"-C\", sys.argv[1], \"log\"])' .",
+                    "python3 -c 'import subprocess, sys; subprocess.run([\"ls\", sys.argv[1]])' .",
+                    "python3 -c 'import json, sys; print(json.load(sys.stdin))'", f"python3 {ok}",
+                    "node -e \"require('child_process').execSync('git status')\"",
+                    "node -e \"console.log(/a(b)/.exec('ab'))\""):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(main(cmd))
+
+
 class ProgramWrites(unittest.TestCase):
     """A Python program whose every write is a path its code writes out is judged by those paths: an edit of a
     repository file whose text names devkit's state or a handoff note runs; a write to devkit's state, a handoff note
