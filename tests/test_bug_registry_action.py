@@ -100,6 +100,7 @@ EVENTS = {
         "sender": {"login": "maint", "id": 9, "type": "User"},
     },
 }
+REPORTED = "Steps close but the board still shows them running"  # a reporter's own words, in a command report
 
 
 class FakeGitHub:
@@ -113,6 +114,7 @@ class FakeGitHub:
         self.members, self.closers, self.release_list = set(), {}, []
         self.calls, self.writes = [], []
         self.on_reread = None  # plays another writer: changes a comment right before the workflow re-reads it
+        self.after_record_write = None  # plays the reporter: edits the issue right after the bot writes its record
         self.max_body = 65536  # GitHub refuses a longer comment with HTTP 422
 
     # ---- set-up
@@ -151,6 +153,11 @@ class FakeGitHub:
         return next(c for c in self.notes.values()
                     if c["issue"] == number and c["user"]["login"] == BOT["login"] and bugs.RECORD_MARK in c["body"])
 
+    def _wrote_record(self, body):
+        if bugs.RECORD_MARK in body and self.after_record_write:
+            hook, self.after_record_write = self.after_record_write, None
+            hook(self)
+
     def ids(self, number):
         return {c["id"] for c in self.notes.values() if c["issue"] == number}
 
@@ -183,6 +190,7 @@ class FakeGitHub:
         self._check_size(body)
         self.writes.append(("create_comment", number))
         cid = self.add_comment(number, body, BOT, ts=NOW)
+        self._wrote_record(body)
         return {"id": cid}
 
     def edit_comment(self, cid, body):
@@ -190,6 +198,7 @@ class FakeGitHub:
         self.writes.append(("edit_comment", cid))
         self.notes[cid]["body"] = body
         self.notes[cid]["updated_at"] = _iso(NOW)
+        self._wrote_record(body)
 
     def delete_comment(self, cid):
         self.writes.append(("delete_comment", cid))
@@ -758,6 +767,120 @@ class MaintainersTests(unittest.TestCase):
         text = action.MAINTAINERS.read_text(encoding="utf-8")
         self.assertIn("pull request", text)
         self.assertNotIn("devkit", text.lower())  # no brand words: the rebrand rewrites one constant
+
+
+def _command_report(**fields):
+    """A command report with the reporter's own words; it hashes nothing, so its fingerprint is random."""
+    return {**_payload("report", fingerprint="0123456789ab", exc_class="", frames=[],
+                       title="dev progress forgets a step", text=REPORTED), "kind": "command", **fields}
+
+
+def _edit_report(body, drop):
+    """The issue body after its author edited the report in its data block by hand, taking out the fields `drop`."""
+    m = re.search(r"```json\n(.*?)\n```", body, re.S)
+    report = {k: v for k, v in json.loads(m.group(1)).items() if k not in drop}
+    return body[:m.start()] + bugs.render_payload(report) + body[m.end():]
+
+
+class IssueTextTests(unittest.TestCase):
+    """The workflow writes each registry issue's title and body from its record, whenever their text differs."""
+
+    def test_a_fold_writes_the_title_and_body_from_the_record(self):
+        fake = FakeGitHub()
+        fake.registry_issue(12)  # as an older workflow left it: a title someone typed, a body of data only
+        vote = fake.add_comment(12, _body(_payload("vote", version="26.11.8")), _user(2))
+        rc, _, err = _run(fake, "issue_comment", 12, comment=vote)
+        self.assertEqual(rc, 0, err)
+        issue = fake.issues[12]
+        self.assertEqual((issue["title"], fake.record(12)["title"]), ("dev progress step crashes with KeyError",) * 2)
+        self.assertIn("- **Impact:** Blocks work for everyone who hit it (2 people).", issue["body"])
+        self.assertIn("- **Versions:** seen on 26.11.7 and 26.11.8.", issue["body"])
+        self.assertEqual(action._first_report(fake.issue(12)), _payload("report"))  # its data reads as before
+        self.assertFalse({_h(1), _h(2)} & set(re.findall(r"[0-9a-f]{64}", issue["body"])))
+
+    def test_a_run_that_changes_no_text_writes_nothing(self):
+        fake = FakeGitHub()
+        fake.registry_issue(12)
+        chat = fake.add_comment(12, "Same here.", _user(3))
+        vote = fake.add_comment(12, _body(_payload("vote")), _user(2))
+        self.assertEqual(_run(fake, "issue_comment", 12, comment=vote)[0], 0)
+        self.assertIn(("edit_issue", 12), fake.writes)  # the text it wrote from the record
+        fake.writes.clear()
+        rc, _, err = _run(fake, "issue_comment", 12, comment=chat)  # an event that brings nothing new
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(fake.writes, [])
+
+    def test_a_body_edited_while_the_run_writes_is_read_again(self):
+        fake = FakeGitHub()
+        fake.add_issue(30, _body(_command_report()), _user(7))
+
+        def reporter_takes_out_their_text(f):
+            f.issues[30]["body"] = _edit_report(f.issues[30]["body"], ["text"])
+        fake.after_record_write = reporter_takes_out_their_text
+        rc, _, err = _run(fake, "issues", 30)
+        self.assertEqual(rc, 0, err)
+        body = fake.issues[30]["body"]
+        self.assertNotIn(REPORTED, body)
+        self.assertIn("The reporter's description: dev progress forgets a step", body)  # the words they kept
+        self.assertEqual(fake.writes.count(("edit_issue", 30)), 1)
+
+    def test_the_record_keeps_none_of_the_reporters_words_and_the_text_drops_what_they_take_out(self):
+        fake = FakeGitHub()
+        fake.add_issue(31, _body(_command_report()), _user(7))
+        self.assertEqual(_run(fake, "issues", 31)[0], 0)
+        self.assertIn(f"- The reporter's description: dev progress forgets a step — {REPORTED}",
+                      fake.issues[31]["body"])  # shown while the reporter's own issue carries it
+        self.assertNotIn(REPORTED, fake.record_comment(31)["body"])
+        self.assertFalse({"title", "text", "template"} & set(fake.record(31)["first"]))
+
+        fake.issues[31]["body"] = _edit_report(fake.issues[31]["body"], ["text"])
+        vote = fake.add_comment(31, _body(_payload("vote", fp="0123456789ab")), _user(8))
+        rc, _, err = _run(fake, "issue_comment", 31, comment=vote)
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn(REPORTED, fake.issues[31]["body"])
+        self.assertNotIn(REPORTED, fake.record_comment(31)["body"])
+
+    def test_an_older_record_gets_its_first_report_without_the_reporters_words(self):
+        fake = FakeGitHub()
+        fake.add_issue(32, _body(_command_report()), _user(7), labels=["devkit-bug", "kind:command"])
+        rec = bugs.fold({}, _command_report(), author_hash=_h(7), author_assoc="NONE", now=NOW - DAY)
+        older = {k: v for k, v in rec.items() if k not in ("first", "days_seen", "last_day")}
+        older["voters"][_h(8)] = {"impact": "minor", "ts": NOW - 3 * DAY}
+        cid = fake.add_comment(32, "", BOT, ts=NOW - DAY)
+        fake.notes[cid]["body"] = bugs.render_record({**older, "title": "dev progress step misbehaves", "seen": cid})
+        chat = fake.add_comment(32, "Same here.", _user(5))
+        rc, _, err = _run(fake, "issue_comment", 32, comment=chat)
+        self.assertEqual(rc, 0, err)
+        rec = fake.record(32)
+        self.assertEqual(rec["first"], {k: v for k, v in _command_report().items() if k not in ("title", "text")})
+        self.assertEqual((rec["title"], fake.issues[32]["title"]), ("dev progress step does not work as expected",) * 2)
+        self.assertNotIn(REPORTED, fake.record_comment(32)["body"])
+        self.assertEqual((rec["days_seen"], rec["last_day"]), (2, "2027-01-14"))  # the days its voters last voted
+        self.assertIn("- **How often:** 2 people in the last 30 days, on 2 days.", fake.issues[32]["body"])
+
+    def test_a_duplicate_reads_as_the_first_issues_bug_and_points_to_it(self):
+        fake = FakeGitHub()
+        fake.registry_issue(7)
+        fake.issues[7]["created_at"] = _iso(NOW - 5 * DAY)
+        fake.add_issue(9, _body(_payload("report")), _user(2))
+        rc, _, err = _run(fake, "issues", 9)
+        self.assertEqual(rc, 0, err)
+        dup = fake.issues[9]
+        self.assertEqual(dup["title"], "dev progress step crashes with KeyError")
+        self.assertIn("- **Status:** Duplicate of #7. Reports and votes for this bug count there.", dup["body"])
+        self.assertIn("2 people in the last 30 days", dup["body"])  # the first issue's count, which it joined
+        self.assertIn("First seen 2027-01-10", dup["body"])
+        self.assertEqual(action._first_report(fake.issue(9)), _payload("report"))  # its own report stays readable
+
+    def test_a_release_rewrites_the_text_of_the_bugs_it_marks_fixed(self):
+        fake = _released()
+        left = fake.issues[62]["body"]
+        rc, _, err = _run(fake, "release")
+        self.assertEqual(rc, 0, err)
+        body = fake.issues[60]["body"]
+        self.assertIn("- **Status:** Fixed in 26.11.8: run `dev update` to get it.", body)
+        self.assertIn("- `dev update` gets the fix, in 26.11.8.", body)
+        self.assertEqual(fake.issues[62]["body"], left)  # not fixed by this release: not rewritten by it
 
 
 class _Response:

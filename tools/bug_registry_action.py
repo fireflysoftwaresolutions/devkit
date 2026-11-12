@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 # Copyright (c) 2026 Firefly Software Solutions Inc.
 # SPDX-License-Identifier: Apache-2.0
-"""The bug registry's workflow: keep one bot-written record per registry issue.
+"""The bug registry's workflow: keep one bot-written record per registry issue, and the issue's text written from it.
 
 `.github/workflows/bug-registry.yml` runs this on `issues: opened`, `issue_comment: created` and `release: published`
 with two arguments, the event file GitHub writes and the event name. Event text is read from that file, never pasted
 into a command.
 
-- An issue's first payload is its body. A valid report makes the issue a registry issue: it gets the labels, a title
-  generated from the report, and the record comment the bot writes. Anything else leaves the issue alone.
+- An issue's first payload is its body. A valid report makes the issue a registry issue: it gets the labels and the
+  record comment the bot writes. Anything else leaves the issue alone.
+- Every write of a record also writes the issue's title and body from it (bugs.human_title, bugs.render_issue) when
+  their text differs: after a fold, and on a release that marks the bug fixed. The record keeps the first report
+  without the reporter's free text; the body shows that text only while the issue's own body still carries it, so a
+  reporter who takes it out has it gone from the next render.
 - Each run folds every payload comment it has not folded yet, oldest first, so a run cancelled by the concurrency
   group loses nothing. The record keeps `seen`, the highest comment id handled, and `folds`, today's folded payloads
   per account, which cap every account at DAILY_CAP payloads a day across the registry. Folded votes, confirmations
@@ -187,16 +191,76 @@ def _read(client, number: int):
     return comments, holder, (bugs.parse_record(holder.get("body")) if holder else None)
 
 
-def _write(client, number: int, holder, rec: dict):
+def _write(client, number: int, holder, rec: dict) -> bool:
     """Write the record when the comment's text differs from it: after a fold, or after a person edited the comment.
-    The comment is read again just before; if it changed since this run read it, Changed says to start over."""
+    The comment is read again just before; if it changed since this run read it, Changed says to start over.
+    -> whether it wrote."""
     body = bugs.render_record(rec)
     if holder is None:
         client.create_comment(number, body)
-    elif holder.get("body") != body:
-        if (client.comment(holder["id"]) or {}).get("body") != holder.get("body"):
-            raise Changed(number)
-        client.edit_comment(holder["id"], body)
+        return True
+    if holder.get("body") == body:
+        return False
+    if (client.comment(holder["id"]) or {}).get("body") != holder.get("body"):
+        raise Changed(number)
+    client.edit_comment(holder["id"], body)
+    return True
+
+
+# --------------------------------------------------------------------------- what the record keeps, and the issue's text
+
+def _first_reports(holder: dict, issue: dict) -> tuple:
+    """(the first report a record keeps, the first report the issue's text shows). The record keeps only the report's
+    closed-list fields, never the reporter's free text (bugs._FREE_FIELDS), so nothing the reporter typed lands in a
+    comment the bot writes; a record from before it kept one takes it from the issue's body. The text shows the free
+    text only while the issue's own body still carries it in a valid report of this bug: once the reporter takes it
+    out, the next render leaves it out. `holder` is the record whose report counts: a duplicate's own stub."""
+    free = bugs._FREE_FIELDS
+    body = _first_report(issue)
+    if body is not None and body.get("fingerprint") != holder.get("fingerprint"):
+        body = None
+    kept = holder.get("first") if isinstance(holder.get("first"), dict) else body or {}
+    kept = {k: v for k, v in kept.items() if k not in free}
+    return kept, {**kept, **{k: body[k] for k in free if body and k in body}}
+
+
+def _prepared(rec: dict, issue: dict, now: float) -> dict:
+    """The record as this run writes it: with the first report it keeps and the human title. A record from before the
+    days were counted starts at the days its voters last voted, which is never more than the days the bug was seen."""
+    rec = json.loads(json.dumps(rec))
+    kept, _ = _first_reports(rec, issue)
+    if kept:
+        rec["first"] = kept
+    if not isinstance(rec.get("days_seen"), int) or isinstance(rec.get("days_seen"), bool):
+        days = sorted({_today(v["ts"]) for v in (rec.get("voters") or {}).values() if isinstance(v, dict)
+                       and isinstance(v.get("ts"), (int, float)) and not isinstance(v.get("ts"), bool)})
+        if days:
+            rec["days_seen"], rec["last_day"] = len(days), days[-1]
+    rec["title"] = bugs.human_title(rec)
+    return rec
+
+
+def _write_text(client, number: int, rec: dict, issue: dict, now: float, holder: dict = None,
+                created: str = None) -> bool:
+    """Write the issue's title and body from the record when their text differs. Before writing a body the issue is
+    read again; when its body changed since this run read it (its author took out their own text, say), the text is
+    written from the body as it is now. `holder` keeps the first report (a duplicate's stub), `created` the day the
+    bug was first seen (the first issue's for a duplicate). -> whether it wrote."""
+    for _ in range(TRIES):
+        _, shown = _first_reports(holder or rec, issue)
+        day = created or str(issue.get("created_at") or "")[:10]
+        text = {"title": bugs.human_title(rec), "body": bugs.render_issue(rec, shown, created=day, now=now)}
+        fields = {k: v for k, v in text.items() if issue.get(k) != v}
+        if not fields:
+            return False
+        if "body" in fields:
+            fresh = client.issue(number) or {}
+            if fresh.get("body") != issue.get("body"):
+                issue = fresh
+                continue
+        client.edit_issue(number, **fields)
+        return True
+    raise RegistryError(f"the body of issue #{number} kept changing while this run wrote it")
 
 
 def _write_folded(client, number: int, holder, before, after: dict):
@@ -311,8 +375,9 @@ def _first_issue(client, fp: str, number: int, sleep):
                         f"the next event on #{number} folds it")
 
 
-def _fold_into(client, target: int, entries: list, now: float) -> list:
-    """Fold a duplicate's payloads into the first issue's record. -> the entries folded."""
+def _fold_into(client, target: int, entries: list, now: float) -> tuple:
+    """Fold a duplicate's payloads into the first issue's record. -> (the entries folded, the record written). The
+    first issue's text follows at its own next event."""
     for _ in range(TRIES):
         _, holder, rec = _read(client, target)
         if rec is None or rec.get("status") == "duplicate":
@@ -323,26 +388,33 @@ def _fold_into(client, target: int, entries: list, now: float) -> list:
         except Changed:
             continue
         _regressed(client, target, rec, new)
-        return done
+        return done, new
     raise RegistryError(f"the record of issue #{target} kept changing while this run wrote it")
 
 
 def _forward(client, number: int, issue: dict, holder, stub: dict, entries: list, seen: int, now: float) -> str:
     """A duplicate's payloads go to the first issue; the duplicate keeps its stub record, so nothing is folded twice,
-    has no labels, and is closed once with a pointer to the first issue."""
+    has no labels, and is closed once with a pointer to the first issue. Its text reads as the first issue's bug,
+    with "Duplicate of #n" for its status, and keeps its own first report."""
     target = _number(stub.get("duplicate_of"))
     if not target or target == number:
         raise RegistryError(f"the duplicate record of issue #{number} names no other issue")
+    kept, _ = _first_reports(stub, issue)
+    stub = {**stub, "seen": seen, **({"first": kept} if kept else {})}
     try:
-        done = _fold_into(client, target, entries, now) if entries else []
+        done, rec = _fold_into(client, target, entries, now) if entries else ([], None)
     except Refused:
-        _write(client, number, holder, {**stub, "seen": seen})  # counted on the first issue: not moved again
+        _write(client, number, holder, stub)  # counted on the first issue: not moved again
         raise
-    _write(client, number, holder, {**stub, "seen": seen})
+    _write(client, number, holder, stub)
     _delete(client, done)
     if issue.get("state") != "closed":
         client.edit_issue(number, state="closed", state_reason="not_planned")
         client.create_comment(number, f"Duplicate of #{target}. Reports and votes for this bug count there.")
+    rec = rec if rec is not None else _read(client, target)[2]
+    if rec is not None and rec.get("status") != "duplicate":
+        first = str((client.issue(target) or {}).get("created_at") or "")[:10]
+        _write_text(client, number, {**rec, "status": "duplicate", "duplicate_of": target}, issue, now, stub, first)
     return f"#{number} duplicates #{target}: {len(done)} payload(s) moved"
 
 
@@ -367,16 +439,14 @@ def _fold_issue_once(client, key: bytes, number: int, now: float, sleep, maintai
     if not new:
         return f"#{number}: its first payload is past its author's daily cap; the next event folds it"
     new["seen"] = seen
+    new = _prepared(new, issue, now)
     _write_folded(client, number, holder, rec, new)
     missing = [lb for lb in (bugs.LABEL, f"kind:{new['kind']}") if lb not in _labels(issue)]
     if missing:
         client.add_labels(number, missing)
-    if rec is None:
-        title = bugs.title_for(first)
-        if issue.get("title") != title:
-            client.edit_issue(number, title=title)
     _regressed(client, number, rec, new, issue)
     _delete(client, done)
+    _write_text(client, number, new, issue, now)
     return f"#{number}: {len(done)} payload(s) folded"
 
 
@@ -391,7 +461,9 @@ def _fold_issue(client, key: bytes, number: int, now: float, sleep, maintainers:
 
 # --------------------------------------------------------------------------- releases
 
-def _mark_fixed(client, number: int, version: str) -> bool:
+def _mark_fixed(client, number: int, version: str, issue: dict, now: float) -> bool:
+    """Set the version that fixes the bug, and write the issue's text with it, so "Fixed in" shows the day the
+    release is published."""
     for _ in range(TRIES):
         _, holder, rec = _read(client, number)
         if rec is None or rec.get("status") == "duplicate":
@@ -399,15 +471,17 @@ def _mark_fixed(client, number: int, version: str) -> bool:
         old = core.version_key(rec.get("fixed_in"))
         if old and old >= core.version_key(version) and rec.get("status") != "regressed":
             return False
+        new = _prepared({**rec, "fixed_in": version, "status": "fixed", "regression": []}, issue, now)
         try:
-            _write(client, number, holder, {**rec, "fixed_in": version, "status": "fixed", "regression": []})
+            _write(client, number, holder, new)
         except Changed:
             continue
+        _write_text(client, number, new, issue, now)
         return True
     raise RegistryError(f"the record of issue #{number} kept changing while this run wrote it")
 
 
-def _release(client, event: dict, maintainers: frozenset) -> str:
+def _release(client, event: dict, maintainers: frozenset, now: float) -> str:
     """Set `fixed_in` on the bugs closed as completed since the previous release by a merged pull request, a member
     or a listed maintainer. A draft or a prerelease marks nothing."""
     rel = event.get("release") if isinstance(event.get("release"), dict) else {}
@@ -433,7 +507,7 @@ def _release(client, event: dict, maintainers: frozenset) -> str:
         if not how.get("merged_pr") and not (actor and (_listed(actor, how.get("actor_id"), maintainers)
                                                         or client.is_member(actor))):
             continue
-        if _mark_fixed(client, number, version):
+        if _mark_fixed(client, number, version, issue, now):
             marked.append(number)
     return f"release {version}: {len(marked)} bug(s) marked fixed" + \
         (" (" + ", ".join(f"#{n}" for n in marked) + ")" if marked else "")
@@ -476,7 +550,7 @@ def main(event_path: str, event_name: str, client, *, now: float = None, sleep=t
     listed = read_maintainers(maintainers)
     try:
         if event_name == "release":
-            message = _release(client, event, listed)
+            message = _release(client, event, listed, now)
         else:
             number = _number(issue.get("number"))
             if not number:
