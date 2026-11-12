@@ -85,6 +85,11 @@
       "what": "The guard refused a command that unsets or blanks one of the variables that tell a project's tools an agent is at work, such as `CLAUDECODE` or `CODEX_SANDBOX`, with `unset`, `env -u`, `env -i`, or an empty assignment before the command.",
       "reproduce": "Ask an agent to run `env -i bash -c 'echo test'`."
     },
+    "_check_segments:launcher-words": {
+      "title": "Guard refuses {word} with a launcher it cannot read in full",
+      "what": "The guard refused a command that gives a launcher such as `xcrun`, `op run`, `nix run`, or `mise exec` more words, more characters, or more launchers inside launchers than it reads. Any word of a launcher may name the program it starts, so the guard refuses what it cannot read in full.",
+      "reproduce": "Ask an agent to run `xcrun` followed by a few thousand words, or five launchers nested inside each other."
+    },
     "_check_segments:nested-depth": {
       "title": "Guard refuses {word} nested too deep for its command rules",
       "what": "The guard refused a command that nests shells, `eval`, or wrappers four levels deep or more, such as `sh -c` inside `sh -c`, so its rules on deleting, git, and gh cannot judge what the innermost command does.",
@@ -164,6 +169,11 @@
       "title": "Guard refuses an irreversible command because its check failed",
       "what": "devkit's check of an irreversible action the command names, such as a push, a merge, or a release, failed with an error, so the guard refused the command rather than let it run unchecked.",
       "reproduce": "Happens only when the guard's own check raises an error on a command that names an irreversible action."
+    },
+    "_judged_in_time:judge-time": {
+      "title": "Guard refuses a call it could not judge within its time",
+      "what": "The guard refused a call because judging it took longer than the time it has for one call, which stays below the hook's timeout, so the call would otherwise have run unjudged. Very long words or command lines cause it; splitting the call into smaller ones avoids it.",
+      "reproduce": "Ask an agent to run `echo` followed by one quoted word of a few million characters."
     },
     "_lesson_rule_verdict": {
       "title": "Guard refuses {word} that a lesson rule blocks",
@@ -714,6 +724,11 @@
       "title": "Guard refuses a run of the devkit installer script",
       "what": "The guard refused running devkit's `install.sh`, which pins a devkit copy and rewrites the agents' settings. The developer runs it, in a terminal.",
       "reproduce": "Ask an agent to run `sh install.sh` in the devkit checkout."
+    },
+    "segment:launcher-words": {
+      "title": "Guard refuses {word} with a launcher it cannot read in full",
+      "what": "The guard refused a command that gives a launcher such as `xcrun`, `op run`, `nix run`, or `mise exec` more words, more characters, or more launchers inside launchers than it reads. Any word of a launcher may name the program it starts, so the guard refuses what it cannot read in full.",
+      "reproduce": "Ask an agent to run `xcrun` followed by a few thousand words, or five launchers nested inside each other."
     },
     "segment:terminal-open": {
       "title": "Guard refuses open of a Terminal window or a .command file",
