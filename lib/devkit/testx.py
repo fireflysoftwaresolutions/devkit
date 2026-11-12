@@ -2598,6 +2598,9 @@ def _no_runner(a, f) -> str:
     return "no runner here takes it (dev test plan lists the runners found)"
 
 
+_NOT_PROVEN = ("skipped",)  # verdicts that neither prove the change nor fail: listed, never red
+
+
 def _prove(a, top, runners) -> int:
     base, label = base_ref(top, a.since)
     if not base:
@@ -2680,8 +2683,10 @@ def _prove(a, top, runners) -> int:
                     break
                 first.setdefault(id(r), res)
                 for key, c in place(res, members):
-                    rec = found.setdefault(key, {"file": key[0], "id": key[1], "passes": 0, "message": ""})
+                    rec = found.setdefault(key, {"file": key[0], "id": key[1], "passes": 0, "skips": 0,
+                                                 "message": ""})
                     rec["passes"] += c["status"] == "passed"
+                    rec["skips"] += c["status"] == "skipped"
                     rec["message"] = rec["message"] or c["message"]
                 # a parametrized test answers by its cases (test_x[a], test_x[b]), never by its bare name
                 answered |= {(f, _id(i)) for c in res["cases"] for f, units, ids in members for i in ids or ()
@@ -2714,12 +2719,16 @@ def _prove(a, top, runners) -> int:
     for key, rec in sorted(found.items()):
         st, msg = without.get(key, ("not run", ""))
         p = rec["passes"]
-        verdict = ("flaky" if 0 < p < runs else "fails with the change" if p == 0 else
+        # a test its runner skipped in every run with the change ran neither way: it proves nothing and fails nothing
+        verdict = ("skipped" if rec.get("skips") == runs else "flaky" if 0 < p < runs else
+                   "fails with the change" if p == 0 else
                    "proves the change" if st == "failed" else
                    "does not test the change" if st == "passed" else "did not run without the change")
         rows.append({"id": rec["id"], "file": rec["file"], "with_change": f"{p}/{runs}", "without_change": st,
                      "verdict": verdict, "message": msg if st == "failed" else rec["message"]})
-    rc = 0 if rows and all(x["verdict"] == "proves the change" for x in rows) else 1
+    # 0: every test that ran proves the change; 1: one does not; 2: none could be proven (each was skipped)
+    red = [x for x in rows if x["verdict"] not in _NOT_PROVEN and x["verdict"] != "proves the change"]
+    rc = 1 if red or not rows else 0 if any(x["verdict"] == "proves the change" for x in rows) else 2
     if a.json:
         print(json.dumps({"base": label, "production": prod, "helpers": helpers,
                           "git": f"none: {gitless}" if gitless else "carried", "runs": runs, "tests": rows,
@@ -2731,9 +2740,10 @@ def _prove(a, top, runners) -> int:
                      f"{f' ({len(helpers)} in the tests)' if helpers else ''} (restored from {label} for the last run)"))
     if gitless:
         print(f"  {ui.WARN} the copy has no git repository ({gitless}): a test that runs git on its checkout fails there")
-    green = sum(1 for x in rows if x["with_change"] == f"{runs}/{runs}")
-    print(f"  {ui.OK if green == len(rows) else ui.FAIL} with the change: {green} of {len(rows)} test(s) passed "
-          f"{runs} of {runs} runs")
+    ran = [x for x in rows if x["verdict"] != "skipped"]
+    green = sum(1 for x in ran if x["with_change"] == f"{runs}/{runs}")
+    print(f"  {ui.OK if green == len(ran) else ui.FAIL} with the change: {green} of {len(ran)} test(s) passed "
+          f"{runs} of {runs} runs" + (f" · {len(rows) - len(ran)} skipped" if len(ran) < len(rows) else ""))
     if skipped:
         print(f"{ui.WARN} not proven, left out because they cannot run here:")
         for f, why in skipped:
@@ -2742,6 +2752,7 @@ def _prove(a, top, runners) -> int:
                 ("flaky", ui.FAIL, f"flaky with the change (not {runs} of {runs} green):"),
                 ("fails with the change", ui.FAIL, "fail with your change present (fix them first):"),
                 ("did not run without the change", ui.WARN, "did not run without the change:"),
+                ("skipped", ui.WARN, "skipped by their runner, so neither proven nor failing:"),
                 ("proves the change", ui.OK, "fail without the change, as expected:"))
     for verdict, mark, title in sections:
         mine = [x for x in rows if x["verdict"] == verdict]
@@ -2752,6 +2763,8 @@ def _prove(a, top, runners) -> int:
             extra = f"  passed {x['with_change'].replace('/', ' of ')} runs" if verdict == "flaky" else \
                 f"  · {x['message'][:120]}" if x["message"] and verdict != "does not test the change" else ""
             print(f"    {x['file']}{'' if x['id'] == x['file'] else '  ' + x['id']}{extra}")
+    if rc == 2:
+        print(f"{ui.WARN} nothing proven: no new or changed test here could be proven against the change")
     return rc
 
 

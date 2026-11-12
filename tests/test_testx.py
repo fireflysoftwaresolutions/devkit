@@ -1616,6 +1616,41 @@ class ProveTests(unittest.TestCase):
             self.assertEqual(git(r, "rev-parse", "HEAD"), head)
             self.assertEqual(list((e.root / "devtmp").iterdir()), [])
 
+    # a new test its runner skips (skipIf, pytest's skipif) ran neither with nor without the change: it is reported
+    # as skipped, neither proven nor failing, and the other new tests still prove the change
+    def test_a_skipped_test_is_reported_as_skipped_not_as_failing(self):
+        skipped_test = """
+    @unittest.skipIf(sys.platform != "no-such-platform", "runs only on a platform that does not exist")
+    def test_mul_elsewhere(self):
+        self.assertEqual(calc.mul(2, 3), 6)
+"""
+        with Env() as e:
+            r = e.repo(PROVE_BASE)
+            (r / "tests" / "test_calc.py").write_text(with_tests(TEST_MUL, skipped_test))
+            (r / "calc.py").write_text(MUL)
+            rc, out, err = dev(r, "prove", "--json", "--runs", "2")
+            self.assertEqual(rc, 0, out + err)
+            self.assertEqual([(t["id"], t["with_change"], t["verdict"]) for t in json.loads(out)["tests"]],
+                             [("test_calc.CalcTests.test_mul", "2/2", "proves the change"),
+                              ("test_calc.CalcTests.test_mul_elsewhere", "0/2", "skipped")])
+            rc, out, err = dev(r, "prove", "--runs", "1")
+            self.assertEqual(rc, 0, out + err)
+            self.assertNotIn("fail with your change present", out)
+            self.assertRegex(out, r"skipped[^\n]*:\n\s+tests/test_calc.py\s+test_calc.CalcTests.test_mul_elsewhere")
+
+    # when every new test was skipped, nothing is proven: exit 2, as when no runner here can run them, never 0
+    def test_a_change_whose_only_new_test_is_skipped_proves_nothing(self):
+        with Env() as e:
+            r = e.repo(PROVE_BASE)
+            (r / "tests" / "test_calc.py").write_text(with_tests(
+                "\n    @unittest.skip('not on this machine')\n    def test_mul(self):\n"
+                "        self.assertEqual(calc.mul(2, 3), 6)\n"))
+            (r / "calc.py").write_text(MUL)
+            rc, out, err = dev(r, "prove", "--runs", "1")
+            self.assertEqual(rc, 2, out + err)
+            self.assertIn("nothing proven", out)
+            self.assertNotIn("fail with your change present", out)
+
     def test_needs_a_production_change_and_a_changed_test(self):
         with Env() as e:
             r = e.repo(PROVE_BASE)
