@@ -21,12 +21,11 @@ import hashlib
 import json
 import os
 import re
-import socket
 import time
 from collections import Counter
 from pathlib import Path
 
-from . import core
+from . import core, identity
 from .core import HANDOFF
 
 ITEMS = HANDOFF / "items"
@@ -47,14 +46,35 @@ LIST_FIELDS = ("links",)  # written as `[a, b]`; every other value is text, even
 # --------------------------------------------------------------------------- identity
 
 def actor(agent: str = None, session: str = None, user: str = None) -> dict:
+    """Who acts: the GitHub user, this Mac (`host`), the agent and its session. `label` is the Mac's hostname, for
+    display only; every hostname devkit runs under is recorded as one this Mac carried (identity.machine)."""
     user = user or core.github_user() or os.environ.get("USER", "unknown")
-    host = socket.gethostname().split(".")[0].lower()
+    m = identity.machine()
+    host = m.label
     agent = agent or os.environ.get("DEVKIT_AGENT") or ("claude" if os.environ.get("CLAUDECODE") else
                                                         "codex" if os.environ.get("CODEX_SANDBOX") or
                                                         os.environ.get("CODEX_THREAD_ID") else "human")
     sid = session or os.environ.get("DEVKIT_SESSION", "")
     sid = sid.split(":", 1)[1] if ":" in sid else sid  # DEVKIT_SESSION is "<agent>:<session id>"
-    return {"user": user, "host": host, "agent": agent, "session": sid[:12]}
+    return {"user": user, "host": host, "label": m.label, "agent": agent, "session": sid[:12]}
+
+
+def mine(who: str, a: dict = None, at: float = None) -> bool:
+    """Is `who` this actor? `who` is a `user@machine` text or a lock holder (`user@machine (agent:session)`), and
+    `at` the time it was written (seconds; now when None). Yes for the same user on the same machine: the actor's
+    own `host`, this Mac's machine id, or a hostname this Mac carried at `at` (records from before the machine id,
+    identity.was_this_mac). An actor of another machine (or a test's) matches exactly. Another person, another
+    machine id, or a hostname this Mac did not carry at that time is never this actor."""
+    a = a or actor()
+    user, _, host = str(who or "").split(" ")[0].partition("@")
+    if not host or user != a.get("user"):
+        return False
+    if host == a.get("host"):
+        return True
+    m = identity.machine()
+    if a.get("host") not in (m.id, m.label):
+        return False
+    return host == m.id or identity.was_this_mac(host, at, m)
 
 
 def actor_str(a: dict) -> str:
@@ -1124,7 +1144,18 @@ def lock_holder(it: dict):
 
 def _owned_by(it: dict, a: dict) -> bool:
     holder, expired = lock_holder(it)
-    return not holder or expired or holder.split(" ")[0] == f"{a['user']}@{a['host']}"
+    return not holder or expired or mine(holder, a, _claimed_at(it))
+
+
+def _claimed_at(it: dict):
+    """When the item's lock was taken (seconds), or None when the item does not say."""
+    return parse_iso(it["meta"].get("claimed_at")) or None
+
+
+def _current_holder(holder: str, a: dict) -> str:
+    """A holder of this actor's, named as the actor is named now (`user@host`), its agent and session kept."""
+    _, sep, rest = str(holder).partition(" ")
+    return f"{a['user']}@{a['host']}" + (sep + rest if sep else "")
 
 
 def update(it: dict, op: str, why: str = "", a=None, **changes) -> dict:
@@ -1327,9 +1358,10 @@ def renew_locks(a=None, hours: float = None, sessions=None) -> int:
             continue
         holder, expired = lock_holder(it)
         working = any((it["scope"], ln[len("branch:"):]) in live for ln in _links(it) if ln.startswith("branch:"))
-        if holder and holder.startswith(me) and not expired and working:
+        if holder and not expired and working and mine(holder, a, _claimed_at(it)):
             if parse_iso(it["meta"]["lock_expires"]) - time.time() < hours * 1800:
                 it["meta"]["lock_expires"] = now_iso(time.time() + hours * 3600)
+                it["meta"]["claimed_by"] = _current_holder(holder, a)  # a lock under a former name moves to the new
                 try:
                     write_record(it["path"], render(it))
                 except RecordLossError as e:
@@ -1603,7 +1635,7 @@ def write_presence(sessions: list, a=None):
     me = f"{a['user']}@{a['host']}"
     held = [{"id": i["meta"]["id"], "title": i["meta"]["title"], "scope": i["scope"],
              "until": i["meta"]["lock_expires"]} for i in all_items()
-            if (i["meta"].get("claimed_by") or "").startswith(me) and not lock_holder(i)[1]]
+            if mine(i["meta"].get("claimed_by"), a, _claimed_at(i)) and not lock_holder(i)[1]]
     data = {"user": a["user"], "host": a["host"], "updated": now_iso(),
             "sessions": [dict({k: s.get(k) for k in ("agent", "project", "branch", "started", "status", "last_seen",
                                                      "subagents", "turn_started", "active")},

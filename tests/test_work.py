@@ -985,5 +985,85 @@ class IsolationTests(unittest.TestCase):
             self.assertEqual(bash("dev initiative add platform acme/one")[0], "deny")
 
 
+class MachineIdentityTests(unittest.TestCase):
+    # macOS renames the Mac with the network: devkit's records of this Mac (locks, presence) must stay this Mac's
+    # across a rename, and another Mac's must never become this one's
+    def setUp(self):
+        self.handoff = TempHandoff().__enter__()
+        self.addCleanup(self.handoff.__exit__, None, None, None)
+        state = mock.patch.object(core, "STATE", self.handoff.root.parent / "state")
+        state.start()
+        self.addCleanup(state.stop)
+        self.name = "Mac-158.lan"
+        host = mock.patch("socket.gethostname", side_effect=lambda: self.name)
+        host.start()
+        self.addCleanup(host.stop)
+
+    def me(self):
+        return work.actor("claude", "s1", user="ana")
+
+    def legacy_lock(self, holder: str, at: float):
+        # a lock as devkit wrote it before the machine id: the holder names the Mac by its hostname of the time
+        it = work.create("acme/api", "Fix login", a=B)
+        it["meta"].update(claimed_by=f"{holder} (codex)", claimed_at=work.now_iso(at), status="doing",
+                          lock_expires=work.now_iso(time.time() + 3600))
+        work.write_record(it["path"], work.render(it))
+        return work.load(it["path"])
+
+    def test_a_rename_between_two_calls_keeps_the_lock_this_mac_took(self):
+        it = work.claim(work.create("acme/api", "Fix login", a=self.me()), a=self.me())
+        self.name = "andress-mbp-2"
+        it = work.update(work.load(it["path"]), "edit", why="scope", a=self.me(), title="Fix the login")
+        self.assertEqual(it["meta"]["title"], "Fix the login")
+        it = work.release(work.load(it["path"]), a=self.me(), status="done")
+        self.assertEqual(it["meta"]["claimed_by"], "")
+
+    def test_a_lock_under_a_hostname_this_mac_carried_then_is_its_own(self):
+        self.me()  # devkit runs here as mac-158 ...
+        it = self.legacy_lock("ana@mac-158", time.time())
+        self.name = "andress-mbp-2"  # ... and the network renames the Mac
+        self.assertTrue(work.mine(it["meta"]["claimed_by"], self.me(), at=time.time()))
+        work.release(it, a=self.me())
+
+    def test_another_macs_lock_is_never_taken_over(self):
+        self.me()
+        self.name = "mac-55"
+        self.me()  # this Mac carries mac-55 from now on ...
+        self.name = "andress-mbp-2"
+        self.me()
+        # ... so a mac-55 lock from yesterday is another Mac's; so are another person's and another machine id's
+        for holder, at in (("ana@mac-55", time.time() - 86400), ("ana@mac-640", time.time()),
+                           ("bob@mac-158", time.time()), ("ana@m-0000aaaa", time.time())):
+            it = self.legacy_lock(holder, at)
+            self.assertFalse(work.mine(it["meta"]["claimed_by"], self.me(), at=at), holder)
+            with self.assertRaises(ValueError):
+                work.release(it, a=self.me())
+            with self.assertRaises(ValueError):
+                work.update(work.load(it["path"]), "edit", why="scope", a=self.me(), title="mine now")
+
+    def test_renewal_keeps_this_macs_lock_under_a_former_name_and_never_another_macs(self):
+        self.me()
+        ours, theirs = self.legacy_lock("ana@mac-158", time.time()), self.legacy_lock("ana@mac-55", time.time())
+        for it in (ours, theirs):
+            it["meta"].update(lock_expires=work.now_iso(time.time() + 60), links=["branch:feat/x"])
+            work.write_record(it["path"], work.render(it))
+        self.name = "andress-mbp-2"
+        live = [{"active": True, "project": "acme/api", "branch": "feat/x"}]
+        self.assertEqual(work.renew_locks(a=self.me(), sessions=live), 1)
+        ours, theirs = work.load(ours["path"]), work.load(theirs["path"])
+        self.assertEqual(ours["meta"]["claimed_by"], f"ana@{self.me()['host']} (codex)")
+        self.assertGreater(work.parse_iso(ours["meta"]["lock_expires"]), time.time() + 3600)
+        self.assertEqual(theirs["meta"]["claimed_by"], "ana@mac-55 (codex)")
+
+    def test_presence_lists_this_macs_locks_across_a_rename(self):
+        it = work.claim(work.create("acme/api", "Fix login", a=self.me()), a=self.me())
+        other = self.legacy_lock("ana@mac-55", time.time())
+        self.name = "andress-mbp-2"
+        work.write_presence([], a=work.actor("human", user="ana"))
+        held = [json.loads(f.read_text()) for f in self.handoff.root.glob("presence/*.json")][0]["locks"]
+        self.assertEqual([x["id"] for x in held], [it["meta"]["id"]])
+        self.assertNotIn(other["meta"]["id"], [x["id"] for x in held])
+
+
 if __name__ == "__main__":
     unittest.main()
