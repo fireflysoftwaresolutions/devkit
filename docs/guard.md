@@ -780,7 +780,9 @@ a pipeline, `bash -c`, a background job, a prefix such as `NO_COLOR=1`) runs wit
 `export DEVKIT_FROM_AGENT=<agent id>;` in front, so every `dev` call it starts acts as the member, when the lane
 allows everything else the command runs. Claude Code's rewrite approves nothing: its own permission check runs on the
 new command. These stay refused: a command that drops the variable (`unset`, `env -i`, `env -u`, an empty
-assignment, `exec -c`, refused by the identity gate before routing), a lane call in a program that gives the processes it starts
+assignment, `exec -c`, refused by the identity gate before routing) or gives it another value (`read`, a `for` or
+`select` loop, `printf -v`, `mapfile`, `getopts`, or any of them on a name computed at run time, also inside a
+function or a nested shell, and `typeset +r` or another option that lifts a readonly flag), a lane call in a program that gives the processes it starts
 an environment of its own (`env=` in Python, `env:` in Node, the `exec…e` and `spawn…e` forms), a lane call whose
 double-quoted message runs a substitution, a team command (`dev crew brief`, `dev crew set`), and any other action the
 lane refuses. Where the stamp was possible, the refusal names what kept the command back.
