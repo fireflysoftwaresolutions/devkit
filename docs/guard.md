@@ -291,7 +291,7 @@ If devkit really should be off somewhere, change devkit's own configuration (see
 | `git clean` with `-x` or `-X` | deny (it deletes `.env`, local config and caches) |
 | `git reset --hard` with uncommitted changes to tracked files | deny |
 | `git stash`, `git stash push`, `save`, `pop`, or `apply` (the stash is shared by every worktree) | deny → `dev commit --wip`, then `dev commit --unwip` |
-| A commit, push, or tag chained after a pipe without `pipefail` (`npm test \| tail -5 && git commit …`), and the same for `dev commit`, `dev push`, `dev release`, `gh pr create`, `gh pr merge`, and `gh release create`, where the shell runs it: the command's own words, the substitutions it runs (which inherit `pipefail`), the lines of the shells and `eval`s it starts (a nested shell starts without it), and the lines `source` and `.` run (a file, their input, a here-string, or the text an `echo`, `printf`, or `cat` substitution prints into them). A quoted message, note or evidence and a heredoc body are data | deny → run the check without the pipe, start with `set -o pipefail;`, or test the output |
+| A commit, push, or tag chained after a pipe without `pipefail` (`npm test \| tail -5 && git commit …`), and the same for `dev commit`, `dev push`, `dev release`, `gh pr create`, `gh pr merge`, and `gh release create`, where the shell runs it: the command's own words, the substitutions it runs (which inherit `pipefail`), the lines of the shells and `eval`s it starts (a nested shell starts without it), and the lines `source` and `.` run (a file, their input, a here-string, or the text an `echo`, `printf`, or `cat` substitution prints into them). The parsed command counts too: a commit in the body of an `if`, `while` or `until` whose condition ends with a pipeline, in `{ }` after one, after `\|&`, through a chain of `&&`, or with git run by its path. `set -o pipefail` counts only when it runs in the shell of the pipelines before the first of them: not in `( )`, `$(…)`, a pipeline, a background job, a branch or loop, after `&&` or `\|\|`, or undone by `set +o pipefail`, `setopt`, `shopt` or `emulate`. A quoted message, note or evidence and a heredoc body are data | deny → run the check without the pipe, start with `set -o pipefail;`, or test the output |
 | A wait (`dev watch --wait`, `dev ci watch --wait`) with more work after it in the same command line: after `;`, `&&`, `\|\|`, `&`, or a new line, or a pipe into anything but a read-only filter (`tail`, `head`, `grep`, `wc`, `jq`, …) | deny → run the wait alone and act after it wakes you: the wait wakes the session only when everything after it has ended |
 | An action that must depend on a check's result sequenced after it without depending on it: after `;`, `\|\|`, or `&`, or after the check piped into a filter and joined with `&&` without `set -o pipefail` (`npm test; npm run release`, `npm test \| tail -3 && npm run release`). Checks are a CI watch or run, `dev test`, test runners, linters, type checkers, and `test`, `lint`, `check`, `build` scripts; actions are commit, push, tag, merge, release, publish, and deploy, a project's `release`, `publish`, or `deploy` script included (`npm run release`, `make release`, `just release`) | deny → gate it on the real result: `check && action` without a pipe, `set -o pipefail;` first, or a separate call |
 | `git commit` when gitleaks finds a secret in what the commit is about to record: the staged changes, plus any `git add` earlier in the same command, or every tracked change with `commit -a` | deny, with the rule, file, and line of each finding |
@@ -525,6 +525,17 @@ action `unknown`, tier 2, with the target `cmd-<hash>` of that exact command tex
   command that begins with what it fills in at run time, such as ``execSync(`${tool} pr merge 12`)`` or
   `subprocess.run(f"{tool} …")`, or loads a module by a name it splices (`require('child' + '_process')`, a
   template literal);
+- an inline or scratch program, in the main session too, that starts a process with a command it does not write
+  out: `subprocess.run(sys.argv[1:])`, `os.execvp(sys.argv[1], …)`, a parameter, a list it changes in place, a
+  concatenation (`execSync('g' + 'h …')`), a process function it keeps in a variable, or a `worker_threads` Worker
+  that evaluates a string. A command written out, or a name bound once to a written-out list, is judged by its
+  words, and the value of `git -C` or `gh -R` may be a variable. `asyncio.create_subprocess_shell` and `_exec` are
+  read as the other spawns are;
+- a program that runs commands from its input or a file the guard does not read: `at` and `batch`, `crontab` with a
+  file or its input, `launchctl load`, `bootstrap`, `start`, `kickstart` and `enable`, `make -f -` or
+  `-f /dev/stdin`, `make SHELL=…`, an awk program that builds the command of its `system()`, pipe or `getline`,
+  `awk -f` with a file the guard cannot read, gawk's `@include` and `@load`, and vim's `system()`, `:terminal`,
+  `:execute`, `:source`, the script interfaces, and `-S`, `-s` or `-u` with a script;
 - a program or script the gate must read and cannot: larger than it reads (512 KB for a program an interpreter runs
   or a script a shell runs, 256 KB for a shell script run by its path) or unreadable, such as `python3 big.py` padded
   past 512 KB with a force push at its end. A program run by its path is read as the system runs it: with a python,
@@ -595,7 +606,12 @@ These are not `unknown`:
   `seq`, `date` with a numeric format (`date +%s`), `grep -c` on one file, `git rev-list --count`, or
   `grep -n … file | cut -d: -f1`. Anything else (a name the command reads, binds with `read` or `declare`, or sets
   from another program's output) is refused by the guard's own rules, in the main session and every lane, with
-  the way: give the name numbers, or compare text with `[` or `test`. `$((date)|wc -c)` is a command substitution, as
+  the way: give the name numbers, or compare text with `[` or `test`. A variable's name is evaluated the same way:
+  bash and zsh run the subscript of a name `declare`, `typeset`, `local`, `read` and, in zsh, `export` and
+  `printf -v` are given (`declare "$x"=1`, `export $x`), and of `${!x}`, and zsh evaluates `read -t`'s value, so a
+  name computed from a value counts only when the command gives that value literal names (`n=out; printf -v "$n"`).
+  `printf '%d'`, `shift`, `exit` and `return` take a number without evaluating it, in bash and zsh alike, so a name
+  there is text. `$((date)|wc -c)` is a command substitution, as
   the shells read it. A `case W in P)` header runs no command, and the patterns of its later arms (`*)`,
   `a|b)`, `(c)`) are words the shell matches, not programs. A quoted or escaped `;;` or `)` ends no arm or pattern,
   a quoted `case` opens no statement, and a pattern with a substitution (`"$(cmd)")`) still runs it, so each of those
@@ -639,6 +655,13 @@ Node's `child_process.exec` and `execSync`, Ruby's `system` and backticks, Perl'
 the same line typed in the shell, with the variables the program sets in its own environment counted as set:
 `os.system('HOME=/tmp/x dev status')` is refused as `HOME=/tmp/x dev status` is, and so is `os.environ["HOME"] = …`
 followed by `os.system('cd /tmp && dev status')`.
+
+A command line a program runs from a string it is given is judged the same way: awk's `system("…")`,
+`print … | "…"` and `"…" | getline`, trap's action (`trap 'gh pr merge 12' EXIT`), vim's `-c`, `--cmd` and `+`
+commands after `!` (`vim -c '!gh pr merge 12'`), less's and more's `+!…`, `launchctl submit … -- <command>`,
+`launchctl asuser` and `bsexec`, and make's `$(shell …)` in its arguments. Setting `BASH_ENV`, `ZDOTDIR`,
+`PROMPT_COMMAND`, `LESSOPEN` or `LESSCLOSE`, or `ENV` for an interactive shell, is refused for every agent, the
+main session included: each makes a shell or a pager run a file or a line the guard does not read.
 
 A pager is a command too: `git -c core.pager=…`, `-c pager.<command>=…`, `GIT_PAGER`, and `PAGER` for git, and
 `GH_PAGER` and `PAGER` for gh, are classified as the command they name, and so are `core.editor`,
@@ -777,7 +800,9 @@ another. A lane check that itself failed, and so refused the command unchecked, 
 
 In Claude Code, a member's command that holds lane calls anywhere the shell runs them (two steps in one list, a loop,
 a pipeline, `bash -c`, a background job, a prefix such as `NO_COLOR=1`) runs with
-`export DEVKIT_FROM_AGENT=<agent id>;` in front, so every `dev` call it starts acts as the member, when the lane
+`export DEVKIT_FROM_AGENT=<agent id>; readonly DEVKIT_FROM_AGENT;` in front, so every `dev` call it starts acts as
+the member and the rest of the command cannot give the variable another value (bash refuses it, zsh stops the
+command), when the lane
 allows everything else the command runs. Claude Code's rewrite approves nothing: its own permission check runs on the
 new command. These stay refused: a command that drops the variable (`unset`, `env -i`, `env -u`, an empty
 assignment, `exec -c`, refused by the identity gate before routing) or gives it another value (`read`, a `for` or
@@ -901,7 +926,9 @@ command must have a unique matching executable call; a quoted mention of a comma
 newest session is not enough. Conflicting or ambiguous identity is refused. These checks do not change Claude's
 caller selection.
 
-A member's mark wins over the main mark, so a member can never become the tech lead by a variable. Every hook drops
+A member's mark wins over the main mark, so a member can never become the tech lead by a variable. The call ledger
+checks a member's mark as well: when the open calls that typed this `dev` command are other members' only, the
+caller is the most restricted of them, never the lane the variable names. Every hook drops
 both marks before it acts, so a hook never takes a mark it inherited for its own. A process that carries
 `DEVKIT_SPEAKER` counts as an agent's, never as your own terminal, when devkit decides who set `DEVKIT_CONFIG` or
 `DEV_ROOT`.
