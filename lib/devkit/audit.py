@@ -551,7 +551,7 @@ PROGRAMS = frozenset((
     "cat head tail less more bat ls stat file wc grep egrep fgrep rg ag ack jq yq diff diff3 cmp comm patch md5 md5sum "
     "shasum sha1sum sha256sum cksum du df realpath readlink basename dirname hexdump xxd od strings column cut tr nl "
     "fold paste tree lsof whoami id uname printenv date sort uniq find sed awk gawk mawk nawk seq expr bc tee base64 "
-    "mdfind mdls plutil uptime groups locale getconf sysctl "
+    "col mdfind mdls plutil uptime groups locale getconf sysctl "
     # files
     "touch mkdir mkfifo truncate rm rmdir unlink shred srm ln chmod chown chgrp chflags xattr setfacl cp gcp mv gmv "
     "install ditto rsync scp sftp tar zip unzip gzip gunzip bzip2 xz zstd open "
