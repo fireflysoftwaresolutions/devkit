@@ -13,8 +13,15 @@
 # ("- done", 'File "', "sed -i ", a crew name, …): a pattern that backtracks only after such a word never meets its
 # bad case on a bare run. The runs happen in worker processes: one still running after HARD seconds is stopped there
 # (a cubic pattern on 20 KB runs for hours) and its worker goes on with the next pattern.
+# The workers start clean, whatever ran before in this process: isolated Python (-I), the environment this module
+# found at import (the run's temporary home, tests/_hermetic.py) with the run's stand-ins (tests/_sandbox.py), the
+# repository as their folder, no stdin. The list of patterns comes from a worker too, so the patterns the earlier tests
+# changed, patched or compiled in this process never shift it, and a pattern is one entry per source and flags
+# (re.compile returns its cached object for the same source, or a new one once other compiles pushed it out of the
+# cache, so object identity depended on what ran before).
 # Tests carry comments, not docstrings (`dev test prove` leaves out tests with one).
 # Run: python3 -m unittest tests.test_regex_budget
+import json
 import os
 import queue
 import re
@@ -27,6 +34,9 @@ from pathlib import Path
 
 LIB = Path(__file__).resolve().parents[1] / "lib"
 sys.path.insert(0, str(LIB))
+# read at import, before any test could patch the interpreter or change the environment
+PYTHON = sys.executable
+START_ENV = dict(os.environ)
 
 MODULES = ("guard", "hooks", "canary", "language", "identity", "scope", "gates")
 BOUND = 0.2  # seconds for one search over one input
@@ -67,8 +77,8 @@ def _walk(name, value, out, depth=0):
 
 
 def patterns() -> list:
-    """[(module, name, pattern, method)]: each module-level pattern once, under the first module that holds it, in a
-    fixed order (the worker and the test count them the same way), with the method it is timed by."""
+    """[(module, name, pattern, method)]: each module-level pattern once (one per source and flags), under the first
+    module that holds it, in a fixed order, with the method it is timed by. Called in a fresh worker only."""
     from devkit import canary, gates, guard, hooks, identity, language, scope
     mods = {"guard": guard, "hooks": hooks, "canary": canary, "language": language, "identity": identity,
             "scope": scope, "gates": gates}
@@ -79,8 +89,9 @@ def patterns() -> list:
         for name, value in list(vars(mods[m]).items()):
             _walk(name, value, found)
         for name, p in found:
-            if id(p) not in seen:
-                seen.add(id(p))
+            key = (type(p.pattern), p.pattern, p.flags)
+            if key not in seen:
+                seen.add(key)
                 out.append((m, name, p, _method(source, name)))
     return out
 
@@ -112,32 +123,69 @@ def _search_time(p, method, text) -> float:
     return time.perf_counter() - t
 
 
-def _worker(indices) -> None:
-    """Run each pattern of `indices` over each input; print `B <i> <input>` before and `T <i> <input> <seconds>`
-    after, so the parent knows which run did not end."""
+LABELS = list(INPUTS)
+
+
+def _lister() -> None:
+    """Print the patterns, one JSON line each: module, name, method and the start of the pattern."""
+    for m, name, p, method in patterns():
+        shown = p.pattern if isinstance(p.pattern, str) else p.pattern.decode("utf-8", "replace")
+        print(json.dumps({"module": m, "name": name, "method": method, "pattern": shown[:100]}), flush=True)
+    print("D", flush=True)
+
+
+def _worker(count, indices) -> None:
+    """Run each pattern of `indices` over each input; print `B <i> <k>` before and `T <i> <k> <seconds>` after (k, the
+    input's place in INPUTS), so the parent knows which run did not end. A worker that collects another number of
+    patterns than the list the parent holds says so and stops."""
     found = patterns()
+    if len(found) != count:
+        sys.exit(f"this worker collected {len(found)} patterns, the list has {count}")
     for i in indices:
         p, method = found[i][2], found[i][3]
-        for label, text in INPUTS.items():
-            print(f"B {i} {label}", flush=True)
+        for k, label in enumerate(LABELS):
+            print(f"B {i} {k}", flush=True)
+            text = INPUTS[label]
             secs = _search_time(p, method, text)
             for _ in range(2):  # a pause of a busy machine is not the pattern's: the fastest of three
                 if secs <= BOUND:
                     break
                 secs = min(secs, _search_time(p, method, text))
-            print(f"T {i} {label}\t{secs:.4f}", flush=True)
+            print(f"T {i} {k} {secs:.4f}", flush=True)
     print("D", flush=True)
+
+
+def _start(*args):
+    """A worker process that starts clean: isolated Python, the environment found at import with the run's stand-ins,
+    the repository as its folder."""
+    import _sandbox  # tests/: the parent's only (a worker runs isolated, without the tests folder on its path)
+    return subprocess.Popen([PYTHON, "-I", str(Path(__file__).resolve()), *args], cwd=str(LIB.parent),
+                            env=_sandbox.env(START_ENV), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True, errors="replace")
+
+
+def _listing() -> list:
+    """[(module, name, method, pattern text)] as a fresh worker collects them."""
+    proc = _start("--list")
+    try:
+        out, _ = proc.communicate(timeout=120)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        raise AssertionError("the pattern list took more than 120 s")
+    rows = [json.loads(ln) for ln in out.splitlines() if ln.startswith("{")]
+    if proc.returncode != 0 or not out.rstrip().endswith("D"):
+        raise AssertionError(f"the pattern list ended early (exit {proc.returncode}): {out[-1500:]}")
+    return [(r["module"], r["name"], r["method"], r["pattern"]) for r in rows]
 
 
 WORKERS = 4  # the patterns within budget are shared among this many workers that run at the same time
 
 
-def _measure(found) -> dict:
+def _measure(total: int) -> dict:
     """-> {(index, input): seconds} for every pattern, a stopped run counted as HARD."""
-    total = len(found)
     groups = [list(range(total))[k::WORKERS] for k in range(WORKERS)]
     times = {}
-    threads = [threading.Thread(target=_measure_group, args=(g, times)) for g in groups if g]
+    threads = [threading.Thread(target=_measure_group, args=(g, total, times)) for g in groups if g]
     for t in threads:
         t.start()
     for t in threads:
@@ -155,16 +203,14 @@ def _pump(stream, lines) -> None:
     lines.put(None)
 
 
-def _measure_group(indices, times: dict) -> None:
+def _measure_group(indices, total: int, times: dict) -> None:
     while indices:
         start = indices[0]
-        proc = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--worker",
-                                 ",".join(str(i) for i in indices)],
-                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        proc = _start("--worker", str(total), ",".join(str(i) for i in indices))
         lines = queue.Queue()
         pump = threading.Thread(target=_pump, args=(proc.stdout, lines), daemon=True)
         pump.start()
-        running, nxt = None, None
+        running, nxt, said = None, None, []
         while True:
             try:
                 ln = lines.get(timeout=60 if running is None else HARD)
@@ -182,21 +228,23 @@ def _measure_group(indices, times: dict) -> None:
             if ln is None:
                 proc.wait()
                 if nxt is None:
-                    times[("error", start)] = f"the pattern worker ended early (exit {proc.returncode})"
+                    times[("error", start)] = (f"the pattern worker ended early (exit {proc.returncode}): "
+                                               + " | ".join(said[-12:]))
                     proc.stdout.close()
                     return
                 break
             kind, _, rest = ln.rstrip("\n").partition(" ")
             if kind == "B":
-                i, _, label = rest.partition(" ")
-                running = (int(i), label)
+                i, k = rest.split()
+                running = (int(i), LABELS[int(k)])
             elif kind == "T":
-                head, _, secs = rest.partition("\t")
-                i, _, label = head.partition(" ")
-                times[(int(i), label)] = float(secs)
+                i, k, secs = rest.split()
+                times[(int(i), LABELS[int(k)])] = float(secs)
                 running = None
             elif kind == "D":
                 nxt = []
+            else:
+                said.append(ln.rstrip("\n"))
         pump.join(5)
         proc.stdout.close()
         indices = nxt
@@ -206,9 +254,10 @@ _RESULT = {}
 
 
 def result():
+    """(the pattern list, the times), measured once for the module's tests."""
     if not _RESULT:
-        _RESULT["patterns"] = patterns()
-        _RESULT["times"] = _measure(_RESULT["patterns"])
+        found = _listing()
+        _RESULT.update(patterns=found, times=_measure(len(found)))
     return _RESULT["patterns"], _RESULT["times"]
 
 
@@ -216,9 +265,8 @@ def _over() -> list:
     found, times = result()
     out = []
     for (i, label), secs in sorted(times.items()):
-        m, name, p, method = found[i]
+        m, name, method, shown = found[i]
         if secs > BOUND:
-            shown = p.pattern if isinstance(p.pattern, str) else p.pattern.decode("utf-8", "replace")
             out.append(f"{m}.{name}.{method}() on {label} ({len(INPUTS[label])} characters): "
                        f"{'stopped after ' if secs >= HARD else ''}{secs:.2f} s, pattern {shown[:100]!r}")
     return out
@@ -238,5 +286,7 @@ class RegexBudgetTests(unittest.TestCase):
                                    "call run unjudged:\n  " + "\n  ".join(over))
 
 
-if __name__ == "__main__" and sys.argv[1:2] == ["--worker"]:
-    _worker([int(i) for i in sys.argv[2].split(",")])
+if __name__ == "__main__" and sys.argv[1:2] == ["--list"]:
+    _lister()
+elif __name__ == "__main__" and sys.argv[1:2] == ["--worker"]:
+    _worker(int(sys.argv[2]), [int(i) for i in sys.argv[3].split(",")])
