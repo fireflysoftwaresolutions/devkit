@@ -291,7 +291,7 @@ If devkit really should be off somewhere, change devkit's own configuration (see
 | `git clean` with `-x` or `-X` | deny (it deletes `.env`, local config and caches) |
 | `git reset --hard` with uncommitted changes to tracked files | deny |
 | `git stash`, `git stash push`, `save`, `pop`, or `apply` (the stash is shared by every worktree) | deny → `dev commit --wip`, then `dev commit --unwip` |
-| A commit, push, or tag chained after a pipe without `pipefail` (`npm test \| tail -5 && git commit …`), and the same for `dev commit`, `dev push`, `dev release`, `gh pr create`, `gh pr merge`, and `gh release create`, where the shell runs it: the command's own words, the substitutions it runs (which inherit `pipefail`), the lines of the shells and `eval`s it starts (a nested shell starts without it), and the lines `source` and `.` run (a file, their input, a here-string, or the text an `echo`, `printf`, or `cat` substitution prints into them). The parsed command counts too: a commit in the body of an `if`, `while` or `until` whose condition ends with a pipeline, in `{ }` after one, after `\|&`, through a chain of `&&`, or with git run by its path. `set -o pipefail` counts only when it runs in the shell of the pipelines before the first of them: not in `( )`, `$(…)`, a pipeline, a background job, a branch or loop, after `&&` or `\|\|`, or undone by `set +o pipefail`, `setopt`, `shopt` or `emulate`. A quoted message, note or evidence and a heredoc body are data | deny → run the check without the pipe, start with `set -o pipefail;`, or test the output |
+| A commit, push, or tag chained after a pipe without `pipefail` (`npm test \| tail -5 && git commit …`), and the same for `dev commit`, `dev push`, `dev release`, `gh pr create`, `gh pr merge`, and `gh release create`, where the shell runs it: the command's own words, the substitutions it runs (which inherit `pipefail`), the lines of the shells and `eval`s it starts (a nested shell starts without it), and the lines `source` and `.` run (a file, their input, a here-string, or the text an `echo`, `printf`, or `cat` substitution prints into them). The parsed command counts too: a commit in the body of an `if`, `while` or `until` whose condition ends with a pipeline, in `{ }` after one, after `\|&`, through a chain of `&&`, or with git run by its path. `set -o pipefail` counts only as a top-level simple command of the list before the first pipeline: not in a function body, `{ }`, `( )`, `$(…)`, a pipeline, a background job, a branch, a loop or a case arm, not after `&&` or `\|\|`, with no function definition, `eval`, `source`, `.`, `set`, `setopt`, `unsetopt`, `shopt` or `emulate` between it and the pipeline, and no `+o pipefail` anywhere. A negated pipeline before a commit (`! check \| tail && git commit`) is refused whatever pipefail says. A quoted message, note or evidence and a heredoc body are data | deny → run the check without the pipe, start with `set -o pipefail;`, or test the output |
 | A wait (`dev watch --wait`, `dev ci watch --wait`) with more work after it in the same command line: after `;`, `&&`, `\|\|`, `&`, or a new line, or a pipe into anything but a read-only filter (`tail`, `head`, `grep`, `wc`, `jq`, …) | deny → run the wait alone and act after it wakes you: the wait wakes the session only when everything after it has ended |
 | An action that must depend on a check's result sequenced after it without depending on it: after `;`, `\|\|`, or `&`, or after the check piped into a filter and joined with `&&` without `set -o pipefail` (`npm test; npm run release`, `npm test \| tail -3 && npm run release`). Checks are a CI watch or run, `dev test`, test runners, linters, type checkers, and `test`, `lint`, `check`, `build` scripts; actions are commit, push, tag, merge, release, publish, and deploy, a project's `release`, `publish`, or `deploy` script included (`npm run release`, `make release`, `just release`) | deny → gate it on the real result: `check && action` without a pipe, `set -o pipefail;` first, or a separate call |
 | `git commit` when gitleaks finds a secret in what the commit is about to record: the staged changes, plus any `git add` earlier in the same command, or every tracked change with `commit -a` | deny, with the rule, file, and line of each finding |
@@ -535,7 +535,8 @@ action `unknown`, tier 2, with the target `cmd-<hash>` of that exact command tex
   file or its input, `launchctl load`, `bootstrap`, `start`, `kickstart` and `enable`, `make -f -` or
   `-f /dev/stdin`, `make SHELL=…`, an awk program that builds the command of its `system()`, pipe or `getline`,
   `awk -f` with a file the guard cannot read, gawk's `@include` and `@load`, and vim's `system()`, `:terminal`,
-  `:execute`, `:source`, the script interfaces, and `-S`, `-s` or `-u` with a script;
+  `:execute`, `:source`, the script interfaces, and `-S`, `-s` or `-u` with a script, and a sed script with GNU's
+  `e` command or the `e` flag of `s`, or `sed -f` with a script file (`--sandbox` turns them off);
 - a program or script the gate must read and cannot: larger than it reads (512 KB for a program an interpreter runs
   or a script a shell runs, 256 KB for a shell script run by its path) or unreadable, such as `python3 big.py` padded
   past 512 KB with a force push at its end. A program run by its path is read as the system runs it: with a python,
@@ -662,6 +663,12 @@ commands after `!` (`vim -c '!gh pr merge 12'`), less's and more's `+!…`, `lau
 `launchctl asuser` and `bsexec`, and make's `$(shell …)` in its arguments. Setting `BASH_ENV`, `ZDOTDIR`,
 `PROMPT_COMMAND`, `LESSOPEN` or `LESSCLOSE`, or `ENV` for an interactive shell, is refused for every agent, the
 main session included: each makes a shell or a pager run a file or a line the guard does not read.
+
+A Python program next to a planted module is refused in every context: when its script's folder, the working
+folder of `python3 -c` or `-m`, or a folder it puts on `sys.path` holds a file or folder named like a standard
+module it imports (`json.py`), or a file named like a standard module those import (`re.py`), Python imports that
+instead of the real one. `python3 -I` and `-P` keep those folders off the path and run; a program's own sibling
+modules run.
 
 A pager is a command too: `git -c core.pager=…`, `-c pager.<command>=…`, `GIT_PAGER`, and `PAGER` for git, and
 `GH_PAGER` and `PAGER` for gh, are classified as the command they name, and so are `core.editor`,
@@ -891,15 +898,27 @@ checks. These run as well:
   refuses it. When devkit cannot look up the member's kinds of work or the project, it refuses.
 - A command continued with a backslash-newline, read as the shell joins it.
 
-A script from the member's own scratch folder runs when an interpreter names it directly:
-`python3 scratchpad/<member id>/probe.py`, when the allow-list judge vouches for it (see
-[Commands the guard cannot name](#commands-the-guard-cannot-name)) and every file it writes is a path written out in
-its code inside the member's own scratch folder or a temporary folder outside the session scratchpad and outside
-the folder the command runs in. A Python or JavaScript program typed in the command (`python3 -c '…'`,
-`python3 - <<'EOF'`, `node -e '…'`) runs on the same terms. A script the guard cannot read, or one the same command
-writes first, stays refused.
+A script from the member's own scratch folder runs when an interpreter names it directly
+(`python3 scratchpad/<member id>/probe.py`) and it only reads; a Python or JavaScript program typed in the command
+(`python3 -c '…'`, `python3 - <<'EOF'`, `node -e '…'`) runs on the same terms. Such a program writes nothing at all:
+the member writes its scratch files with the shell (`cat > <scratch>/f <<'EOF'`), whose literal path the guard
+judges. Python may import only reading modules (`json`, `re`, `ast`, `difflib`, `textwrap`, `collections`,
+`itertools`, `functools`' pure helpers, `math`, `statistics`, `string`, `unicodedata`, `pathlib`, `os.path`, and
+`sys`'s arguments and output), call only reading builtins, its own functions, those modules' reads and the reading
+methods of strings, lists, dicts, matches, paths and files, and open files only with a literal read mode. A call
+through a name bound to another value (`w = p.write_text`), `**`, a dunder name, a change to a module's state
+(`os.environ[…] = …`, `sys.path.insert`), and any other module are refused. JavaScript may require only `fs` and
+`path`, bound whole or used in place, and use only their reads (`readFileSync`, `existsSync`, `readdirSync`,
+`statSync`), `JSON`, `console` and `process.argv`; destructuring a module, `.call`, `.apply`, `.bind`, `promisify`,
+a computed member and passing a module as a value are refused. A script the guard cannot read, or one the same
+command writes first, stays refused.
 A script in another member's folder stays refused, and so do the same script under a runner (`uv run`, `npx`), a
 shell line or script (`bash -c '…'`, `bash x.sh`), and a `PYTHONPATH=` prefix.
+
+**Not covered yet.** In the main session, a command that writes a script and runs it in the same call (`cat > x.py
+<<'EOF' … EOF; python3 x.py`), or a script another process changes after the guard read it, is judged by the file
+as it was before the command ran (B-g8vi3yz3h2h). Crew lanes refuse a write followed by a run of the same file; the
+main session gets that rule, or an OS sandbox, in a later release.
 
 ### Who runs a `dev` call: the session marks
 
@@ -927,7 +946,10 @@ newest session is not enough. Conflicting or ambiguous identity is refused. Thes
 caller selection.
 
 A member's mark wins over the main mark, so a member can never become the tech lead by a variable. The call ledger
-checks a member's mark as well: when the open calls that typed this `dev` command are other members' only, the
+checks a member's mark as well. A `dev progress` or `dev crew` call takes the lane the variable names only while an
+open call of this session belongs to that lane: a command can give the variable another member's id in a child
+shell, where readonly does not hold (zsh's `print -v` or `${(P)v::=…}`, bash's `declare -n`), and such a call has no
+lane identity and is refused. When the open calls that typed this `dev` command are other members' only, the
 caller is the most restricted of them, never the lane the variable names. Every hook drops
 both marks before it acts, so a hook never takes a mark it inherited for its own. A process that carries
 `DEVKIT_SPEAKER` counts as an agent's, never as your own terminal, when devkit decides who set `DEVKIT_CONFIG` or
