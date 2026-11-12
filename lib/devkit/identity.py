@@ -25,7 +25,8 @@ rule that applies (speaker):
 
 A wait (consumer) reads the ledger more strictly: a call counts only when it typed this very `dev` command, nothing
 more, so the tech lead's `dev watch --wait` never becomes a member's because the member's open
-`dev watch --wait --timeout 9` holds the same words.
+`dev watch --wait --timeout 9` holds the same words; and when two members' open calls typed it alike, it is neither's
+(a Codex crew, whose rewrite may carry no lane mark, waits with one command for every member).
 
 Codex marks a spawned agent's hooks with its agent_id, but the main thread's hooks carry none, so a Codex speaker that
 devkit takes for main is not verified (`verified` False); progress.caller keeps reporting Codex as `unverified`.
@@ -71,6 +72,7 @@ class _Found:
     session_how: str  # resolve_session's how: ancestry, ledger, env, recency, shell
     calls: tuple  # tool_use_ids of the session's open calls whose text holds this command
     ledger: str  # who the ledger names: "main", a member's agent id, or "" (nobody, or main in a guessed session)
+    members: tuple = ()  # the members whose open calls hold this command
 
 
 def from_hook(agent: str, data: dict) -> Speaker:
@@ -107,10 +109,16 @@ def consumer(for_me: bool, cwd: str | None = None) -> str:
     """Whose wait `dev watch` is: "main" or a crew member's lane. `--for me` is a member's own wait, refused when it
     resolves to the main session; without it, the speaker's own (a member's call makes it the member's). A speaker
     devkit cannot name is refused: guessing would let one wait take the other's events."""
-    sp = _find(cwd, None, None, exact=True).speaker
+    got = _find(cwd, None, None, exact=True)
+    sp = got.speaker
     if sp.how == "human":
         raise IdentityError("no agent session here: dev watch runs in the agent session that waits (Claude Code, "
                             "Codex)")
+    if not sp.lane and len(got.members) > 1:
+        raise IdentityError(f"several crew members ({len(got.members)}) run this very wait at once and no lane mark "
+                            "says which one calls, so devkit gives it to none of them (it would take one member's "
+                            "events for another). Read your answer with dev crew inbox --all, or wait again in a "
+                            "moment")
     if for_me:
         if sp.lane == "main":
             raise IdentityError("--for me is for a crew member's own wait, and this call is the tech lead's: run "
@@ -143,15 +151,18 @@ def _find(cwd=None, argv=None, now=None, exact: bool = False, settle: bool = Tru
     run = None
     if members:
         run = progress.load_run(agent, sid) or {}
-        ledger = max(members, key=lambda m: (progress.TOOL_LEVELS.index(progress.lane_tools(run, m) or "read"),
-                                             ((run.get("agents") or {}).get(m) or {}).get("depth") or 0))
+        # a wait two members typed alike is neither's: the most restricted one is right for a permission, but a wait
+        # given to it would take that member's events and leave the other's waiting for nobody
+        ledger = "" if exact and len(members) > 1 else max(
+            members, key=lambda m: (progress.TOOL_LEVELS.index(progress.lane_tools(run, m) or "read"),
+                                    ((run.get("agents") or {}).get(m) or {}).get("depth") or 0))
     else:
         ledger = "main" if hits and how != "recency" else ""
     calls = tuple(c.get("tool_use_id") for c in hits)
     lane = (os.environ.get(LANE_VAR) or "").strip()[:80]
 
     def found(lane_, how_, verified):
-        return _Found(Speaker(agent, sid, lane_, how_, verified), agent, how, calls, ledger)
+        return _Found(Speaker(agent, sid, lane_, how_, verified), agent, how, calls, ledger, tuple(members))
     if lane:
         return found(lane, "stamped", True)
     guessed = how == "recency"  # a session devkit only guessed never makes its caller the tech lead (rules 3 to 5)
