@@ -10564,9 +10564,66 @@ def _http_writes(name, argv) -> list:
     return []
 
 
+# The standard modules a Python program may import and still be judged by what it does rather than by its file's name
+# (_py_inert). They read and write files and text and compute; none reaches the network, loads native code or runs
+# code it is handed (pickle, timeit, unittest.mock, runpy and inspect can, and importlib is _DYNAMIC_CODE). `os` counts
+# only without its process functions (_PY_RUNS). Exact names: urllib.parse is one, urllib.request is not.
+_PY_INERT_MODULES = frozenset({
+    "__future__", "abc", "argparse", "array", "ast", "base64", "binascii", "bisect", "bz2", "calendar", "cmath",
+    "codecs", "collections", "collections.abc", "colorsys", "configparser", "contextlib", "copy", "csv", "dataclasses",
+    "datetime", "decimal", "difflib", "enum", "errno", "filecmp", "fileinput", "fnmatch", "fractions", "functools",
+    "getopt", "gettext", "glob", "graphlib", "gzip", "hashlib", "heapq", "hmac", "html", "html.parser", "io",
+    "ipaddress", "itertools", "json", "keyword", "linecache", "locale", "logging", "lzma", "math", "mimetypes",
+    "numbers", "operator", "optparse", "os", "os.path", "pathlib", "platform", "pprint", "random", "re", "reprlib",
+    "secrets", "shlex", "shutil", "stat", "statistics", "string", "struct", "sys", "tarfile", "tempfile", "textwrap",
+    "time", "tokenize", "tomllib", "traceback", "types", "typing", "unicodedata", "urllib.parse", "uuid", "warnings",
+    "xml.etree.ElementTree", "zipfile", "zlib", "zoneinfo"})
+# the names that start a process (os's, by any spelling), reach a module through another one (shutil.os,
+# os.path.os, sys.modules), or run or look up code (the builtins _DYNAMIC_CODE and _SPAWNS name, also when only
+# referenced: `e = exec`)
+_PY_RUNS = re.compile(r"^(?:system|popen|startfile|exec\w*|spawn\w*|posix_spawn\w*|fork\w*|os|posix|subprocess|"
+                      r"modules|builtins|eval|compile|getattr|setattr|delattr|vars|globals|locals|breakpoint)$")
+
+
+def _py_inert(code) -> bool:
+    """True when a Python program provably releases, publishes, deploys and pushes nothing, whatever its file is
+    called: it parses, starts no process and builds no call (_code_spawns), imports only _PY_INERT_MODULES (no relative
+    import: a module beside it is code the guard does not read), and names nothing _PY_RUNS names nor any attribute
+    that starts with `_` (a dunder leads back to the interpreter's internals). Such a program can only read, compute
+    and write files: it cannot reach the network or start what would."""
+    import ast
+    if not code or not code.strip() or _code_spawns(code, "python3"):
+        return False
+    try:
+        tree = ast.parse(code)
+    except (SyntaxError, ValueError, RecursionError, MemoryError):  # a program the guard cannot parse may do anything
+        return False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import) and any(a.name not in _PY_INERT_MODULES for a in node.names):
+            return False
+        if isinstance(node, ast.ImportFrom) and (node.level or node.module not in _PY_INERT_MODULES or any(
+                a.name == "*" or a.name.startswith("_") or _PY_RUNS.match(a.name) for a in node.names)):
+            return False
+        if isinstance(node, ast.Attribute) and (node.attr.startswith("_") or _PY_RUNS.match(node.attr)):
+            return False
+        if isinstance(node, ast.Name) and (node.id.startswith("__") or _PY_RUNS.match(node.id)):
+            return False
+    return True
+
+
+def _inert_python_script(interp, path) -> bool:
+    """True when `interp` is Python and the script at `path` is a file the guard reads in full and _py_inert."""
+    if _program_family(interp) != "python" or path == UNKNOWN:
+        return False
+    with _skipped_reads() as unread:
+        code = _read_small(path)
+    return not unread and _py_inert(code)
+
+
 def _opaque_actions(name, argv, cwd) -> list:
     """make, just and task targets, package scripts and scripts named release, publish, deploy, push or ship take that
-    class (spec C6, opaque): what they run is not seen."""
+    class (spec C6, opaque): what they run is not seen. A Python script the guard reads in full and finds inert
+    (_py_inert) is judged by what it does instead, so its name does not decide."""
     args = argv[1:]
     names = []
     if name in ("make", "gmake"):
@@ -10592,10 +10649,14 @@ def _opaque_actions(name, argv, cwd) -> list:
     elif _INTERP.match(name):  # before the path test: /usr/bin/python3 scripts/deploy.py
         script = next((a for a in args if not a.startswith("-")), "")
         if script and "-c" not in args and not any(a.startswith("-") and not a.startswith("--") and "c" in a[1:]
-                                                   for a in args[:args.index(script)]):
+                                                   for a in args[:args.index(script)]) and \
+                not _inert_python_script(name, resolve(script, cwd)):
             names = [os.path.splitext(os.path.basename(script))[0]]
     elif "/" in argv[0]:
-        names = [os.path.splitext(name)[0]]
+        path = resolve(argv[0], cwd)
+        kind, interp = _run_by_path(path) if path != UNKNOWN else ("", "")
+        if not (kind == "interp" and _inert_python_script(interp, path)):  # `./notes.py` with a python shebang
+            names = [os.path.splitext(name)[0]]
     out = []
     for n in names:
         m = _OPAQUE_NAME.search(n)

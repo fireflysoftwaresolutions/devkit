@@ -301,6 +301,37 @@ class ClassifyTests(GateCase):
             with self.subTest(cmd=cmd):
                 self.assertEqual(self.acts(cmd), [])
 
+    def test_a_python_script_is_judged_by_what_it_can_do_and_its_name_only_when_it_can_act_unseen(self):
+        # a Release engineer's scratch release_notes_a17.py, which reads CHANGELOG.md and writes the notes, was refused
+        # as "it releases release_notes_a17": the name decided although the guard had read the whole program
+        d = Path(self.tmp.name) / "scratch"
+        d.mkdir()
+        notes = d / "release_notes_a17.py"
+        notes.write_text("import re\nimport sys\nfrom pathlib import Path\nfrom urllib.parse import quote\n"
+                         "text = Path(sys.argv[1]).read_text()\n"
+                         "Path(sys.argv[2]).write_text(re.sub(r'x', 'y', text) + quote('https://example.com/a b'))\n")
+        runnable = d / "publish_check.py"  # run by its path, through its shebang
+        runnable.write_text("#!/usr/bin/env python3\nimport json, sys\nprint(json.dumps(sys.argv))\n")
+        runnable.chmod(0o755)
+        for cmd in (f"python3 -I {notes} CHANGELOG.md out.md", f"/usr/bin/python3 -I {notes} CHANGELOG.md out.md",
+                    f"cd {d} && python3 release_notes_a17.py CHANGELOG.md out.md", str(runnable)):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.acts(cmd), [])
+                self.assertIsNone(self.member(cmd))
+        # the name still decides for a program that may act where the guard cannot see: it reaches the network itself,
+        # starts a process it names at run time, imports code the guard does not read, takes a process function by
+        # another name, or does not parse
+        kept = {"publish_pkg.py": ("import urllib.request\nurllib.request.urlopen(urllib.request.Request("
+                                   "'https://upload.example.com/', data=b'x', method='POST'))\n", "publish", "publish_pkg"),
+                "deploy.py": ("import subprocess, sys\nsubprocess.run([sys.argv[1], 'apply'])\n", "deploy", "deploy"),
+                "release_notes.py": ("import helpers\nhelpers.main()\n", "release", "release_notes"),
+                "push_tags.py": ("from os import system as run_it\nrun_it('git ' + 'push --tags')\n", "push", "feat/x"),
+                "ship_it.py": ("print 'python 2'\n", "release", "ship_it")}
+        for file, (code, action, target) in kept.items():
+            (d / file).write_text(code)
+            with self.subTest(file=file):
+                self.assertEqual(self.acts(f"python3 {d / file}"), [(action, guard.TIERS[action], target)])
+
     def test_every_shell_form_that_runs_an_action_is_classified(self):
         for cmd in ("bash -c 'gh pr merge 12'", "sh -c \"gh pr merge 12\"", "eval 'gh pr merge 12'",
                     "printf 'gh pr merge 12' | sh", "echo \"gh pr merge 12\" | bash", "bash <<< 'gh pr merge 12'",
