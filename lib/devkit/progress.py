@@ -449,11 +449,30 @@ def call_opened(agent: str, data: dict, now: float | None = None):
     cut = len(text) > CALL_TEXT
     if cut:
         text = text[:CALL_TEXT // 2] + " … " + text[-CALL_TEXT // 2:]
+    dev_args = _dev_arg_hashes(cmd, data.get("cwd")) if cut and not edit_paths else []
     _write_private(CALLS / sid / f"{tid}.json", {
         "tool_use_id": tid, "session": sid, "agent": agent, "caller": aid or "main", "depth": depth,
         "ts": round(now, 3), "ttl": ttl, "cmd_sha256": hashlib.sha256(cmd.encode()).hexdigest(), "cmd": text,
-        "cut": cut, **({"edit_paths": edit_paths} if edit_paths else
-                       {"reads": True} if call_reads(cmd, data.get("cwd")) else {})})
+        "cut": cut, **({"dev_args": dev_args} if dev_args else {}),
+        **({"edit_paths": edit_paths} if edit_paths else
+           {"reads": True} if call_reads(cmd, data.get("cwd")) else {})})
+
+
+def args_hash(args) -> str:
+    """The sha256 of a `dev` invocation's exact argument list, every word in order (never a prefix)."""
+    return hashlib.sha256(json.dumps([str(a) for a in args]).encode()).hexdigest()
+
+
+def _dev_arg_hashes(cmd: str, cwd) -> list:
+    """args_hash of each `dev` invocation a command runs, as the shell splits its words (guard.shell_calls): what a
+    call whose text the ledger cuts keeps of its `dev` commands, so a long command is still matched by its own words,
+    whole (a 7 KB `dev progress assign --scope …` lost the middle of its scope to the cut)."""
+    try:
+        from . import guard
+        found = [guard._dev_args(argv) for argv, _ in guard.shell_calls(cmd, cwd) or []]
+    except Exception:
+        return []
+    return list(dict.fromkeys(args_hash(d) for d in found if d))
 
 
 def call_entry(data: dict) -> dict:
@@ -621,6 +640,8 @@ def _names_args(entry: dict, args: list) -> bool:
     if entry.get("agent") == "codex" and "edit_paths" in entry:
         return False
     if entry.get("cut") and entry.get("caller") != "main":
+        return True
+    if args and args_hash(args) in (entry.get("dev_args") or []):  # a cut call's own dev command, word for word
         return True
     args = [a for a in args if a]
     if not args:

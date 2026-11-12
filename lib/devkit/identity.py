@@ -186,7 +186,11 @@ _END = r"(?=\s*(?:$|[;&|(){}<>`'\"]|\d*[<>]))"  # what may follow the last argum
 def _typed_exactly(entry: dict, args: list) -> bool:
     """Does the call's text run `dev` with exactly these arguments, each as typed or in quotes, followed by nothing
     but the end of that command (a pipe, a redirection, `;`, `&&`, a closing quote)? A longer `dev` call with the same
-    words is another command. A cut text counts by what it kept."""
+    words is another command. A cut text counts by what it kept, or by the exact argument list of a `dev` command it
+    ran (progress.args_hash, recorded before the cut)."""
+    from . import progress
+    if args and progress.args_hash(args) in (entry.get("dev_args") or []):
+        return True
     args = [a for a in args if a]
     if not args:
         return False
