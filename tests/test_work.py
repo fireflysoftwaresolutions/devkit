@@ -1091,9 +1091,22 @@ class MachineIdentityTests(unittest.TestCase):
         data = json.loads((self.handoff.root / "presence" / files[0]).read_text())
         self.assertEqual((data["host"], data["label"]), (after["host"], "andress-mbp-2"))
 
+    def test_an_older_session_still_writing_this_macs_old_presence_file_is_hidden_and_never_flaps(self):
+        # an older devkit session on this Mac rewrites ana@mac-158.json; deleting it on every write made each sync
+        # commit, so the file stays while it is written, and this Mac shows once in the team
+        a = work.actor("human", user="ana")
+        work.write_presence([], a=a)
+        legacy = work.PRESENCE / "ana@mac-158.json"
+        legacy.write_text(json.dumps({"user": "ana", "host": "mac-158", "updated": work.now_iso(), "sessions": [],
+                                      "locks": []}))
+        self.assertFalse(work.write_presence([], a=a))  # nothing changed: nothing for the sync to commit
+        self.assertTrue(legacy.is_file())
+        self.assertEqual([t["host"] for t in work.team()], [a["host"]])
+
     def test_this_macs_old_presence_file_goes_and_another_macs_stays(self):
         self.me()
-        legacy = {"user": "ana", "updated": work.now_iso(), "sessions": [], "locks": []}
+        # last written 31 minutes ago: no older session of this Mac writes it any more
+        legacy = {"user": "ana", "updated": work.now_iso(time.time() - 31 * 60), "sessions": [], "locks": []}
         work.PRESENCE.mkdir(parents=True, exist_ok=True)
         for host in ("mac-158", "mac-55"):  # mac-158 is this Mac's name now; mac-55 another Mac's
             (work.PRESENCE / f"ana@{host}.json").write_text(json.dumps(dict(legacy, host=host)))

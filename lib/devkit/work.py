@@ -1648,11 +1648,25 @@ def write_presence(sessions: list, a=None):
     return dropped
 
 
+FORMER_PRESENCE_IDLE = 1800  # seconds without an update before this Mac's presence file under a hostname goes
+
+
+def _former_presence(d, user: str, m) -> bool:
+    """Is `d` a presence record of `user` that this Mac wrote under a hostname (before the machine id, or by an older
+    devkit session still running here)? Its `host` is a name this Mac carried when the record was last written."""
+    if not isinstance(d, dict) or d.get("user") != user:
+        return False
+    host = str(d.get("host") or "")
+    return host != m.id and identity.was_this_mac(host, parse_iso(d.get("updated")) or None, m)
+
+
 def _drop_former_presence(a: dict) -> bool:
     """Remove this Mac's presence files from before the machine id: presence/<user>@<hostname>.json for a hostname
-    this Mac carried when the file was last written (its `updated`), so `dev team` shows this Mac once. A file of
-    another person, or one written under a name this Mac did not carry then (another Mac's), stays. Only for this
-    Mac's own actor. -> whether a file went (the sync commits the removal)."""
+    this Mac carried when the file was last written (its `updated`), once nothing has written it for
+    FORMER_PRESENCE_IDLE. While an older devkit session on this Mac still rewrites it, it stays (deleting it on every
+    write made every sync commit), and team() hides it. A file of another person, or one written under a name this
+    Mac did not carry then (another Mac's), stays. Only for this Mac's own actor. -> whether a file went (the sync
+    commits the removal)."""
     m = identity.machine()
     if a.get("host") != m.id:
         return False
@@ -1662,8 +1676,8 @@ def _drop_former_presence(a: dict) -> bool:
         if name == m.id or not f.is_file():
             continue
         d = core.read_json(f, None)
-        if isinstance(d, dict) and d.get("user") == a["user"] and \
-                identity.was_this_mac(name, parse_iso(d.get("updated")) or None, m):
+        if _former_presence(d, a["user"], m) and \
+                time.time() - parse_iso(d.get("updated")) >= FORMER_PRESENCE_IDLE:
             f.unlink()
             gone = True
     return gone
@@ -1671,10 +1685,17 @@ def _drop_former_presence(a: dict) -> bool:
 
 def team(max_age_h: float = 24) -> list:
     """The machines that published presence in the last `max_age_h` hours, each with its live sessions only: a
-    session marked not active has ended (presence from an older devkit has no flag, and its sessions stay)."""
+    session marked not active has ended (presence from an older devkit has no flag, and its sessions stay). This
+    Mac's own presence files under a former hostname are left out when it publishes under its machine id, so it shows
+    once (another Mac cannot tell them apart and lists both until the old file goes)."""
     out = []
-    for f in sorted(PRESENCE.glob("*.json")) if PRESENCE.exists() else []:
+    files = sorted(PRESENCE.glob("*.json")) if PRESENCE.exists() else []
+    m = identity.machine() if files else None
+    for f in files:
         d = core.read_json(f, None)
+        user = str(d.get("user") or "") if isinstance(d, dict) else ""
+        if user and (PRESENCE / f"{user}@{m.id}.json").is_file() and _former_presence(d, user, m):
+            continue
         if d and time.time() - parse_iso(d.get("updated")) < max_age_h * 3600:
             if isinstance(d, dict) and isinstance(d.get("sessions"), list):
                 d["sessions"] = [s for s in d["sessions"] if not (isinstance(s, dict) and s.get("active") is False)]
