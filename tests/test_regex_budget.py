@@ -159,6 +159,7 @@ def _start(*args):
     """A worker process that starts clean: isolated Python, the environment found at import with the run's stand-ins,
     the repository as its folder."""
     import _sandbox  # tests/: the parent's only (a worker runs isolated, without the tests folder on its path)
+    # nosemgrep: python36-compatibility-Popen1 -- errors= exists since Python 3.6, and devkit needs 3.9
     return subprocess.Popen([PYTHON, "-I", str(Path(__file__).resolve()), *args], cwd=str(LIB.parent),
                             env=_sandbox.env(START_ENV), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, text=True, errors="replace")
