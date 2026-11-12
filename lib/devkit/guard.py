@@ -6233,6 +6233,8 @@ def _command_strings(argv, cwd=None):
     if not argv:
         return [], ""
     name, args = os.path.basename(str(argv[0])), [str(a) for a in argv[1:]]
+    if name in ("sed", "gsed"):
+        return [], _sed_command_reason(args)
     if name in _AWKS:
         prog, why = _awk_program(args, cwd)
         return _awk_commands(prog) if not why else ([], why)
@@ -6286,6 +6288,94 @@ def _command_strings(argv, cwd=None):
                 lines.append(a[m.end():close - 1] if close > m.end() else a[m.end():])
         return lines, ""
     return [], ""
+
+
+def _sed_runs(script: str) -> bool:
+    """True when a sed script runs a command: GNU sed's `e` command or the `e` flag of `s`, which runs the pattern
+    space; a script the walk cannot read counts as one that may."""
+    s, i, n = script, 0, len(script)
+    while i < n:
+        if s[i] in " \t\n;{}!":
+            i += 1
+            continue
+        if s[i] == "#":
+            j = s.find("\n", i)
+            i = n if j < 0 else j
+            continue
+        j = _sed_address(s, i)
+        if j < 0:
+            return True
+        if j > i and j < n and s[j] == ",":
+            j = _sed_address(s, j + 1)
+            if j < 0:
+                return True
+        while j < n and s[j] in " \t!":
+            j += 1
+        if j >= n:
+            return False
+        c, i = s[j], j + 1
+        if c == "e":
+            return True
+        if c in "aicrRwWbtTvF:":  # text, a file name or a label: up to the line's end (a branch also to `;`)
+            stop = "\n" if c in "aicrRwWF" else ";\n}"
+            while i < n and s[i] not in stop:
+                i += 2 if s[i] == "\\" else 1
+            continue
+        if c in "sy":
+            if i >= n:
+                return True
+            d = s[i]
+            i = _sed_part(s, i + 1, d)
+            i = _sed_part(s, i, d) if i > 0 else -1
+            if i < 0:
+                return True
+            while c == "s" and i < n and (s[i] in _SED_FLAGS or s[i] in "ew"):
+                if s[i] == "e":
+                    return True
+                if s[i] == "w":
+                    j = s.find("\n", i)
+                    i = n if j < 0 else j
+                    break
+                i += 1
+            continue
+        while c in "qQlL" and i < n and s[i].isdigit():
+            i += 1
+    return False
+
+
+def _sed_command_reason(args) -> str:
+    """Why a sed command runs a command the guard does not read (_sed_runs, or a script file it does not read), or
+    ""; --sandbox turns e, r and w off."""
+    if "--sandbox" in args:
+        return ""
+    scripts, files, k = [], [], 0
+    while k < len(args):
+        a = args[k]
+        if a in ("-e", "--expression") and k + 1 < len(args):
+            scripts.append(args[k + 1])
+            k += 2
+            continue
+        if a.startswith("--expression="):
+            scripts.append(a.split("=", 1)[1])
+        elif a in ("-i", "-I") and k + 1 < len(args) and (args[k + 1] == "" or args[k + 1].startswith(".")):
+            k += 2  # BSD sed's -i takes the backup suffix as its own word
+            continue
+        elif a in ("-f", "--file") or a.startswith("--file=") or (a.startswith("-") and not a.startswith("--") and
+                                                                    "f" in a[1:] and "e" not in a[1:a.find("f")]):
+            return "a sed script file, which the guard does not read for its e command"
+        elif a.startswith("-") and not a.startswith("--") and "e" in a[1:]:
+            tail = a[a.index("e", 1) + 1:]
+            scripts.append(tail or (args[k + 1] if k + 1 < len(args) else ""))
+            k += 1 if tail else 2
+            continue
+        elif not a.startswith("-"):
+            files.append(a)
+        k += 1
+    if not scripts and files:
+        scripts = files[:1]
+    if any(_sed_runs(x) for x in scripts):
+        return "a sed script with an e command or flag, which runs a command it builds (GNU sed)"
+    return ""
 
 
 def command_string_refusal(argv, cwd=None) -> str:

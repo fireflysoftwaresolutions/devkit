@@ -217,7 +217,9 @@ class CommandStrings(Case):
                "make X='$(shell gh pr merge 12)'", "make SHELL=/tmp/evil all",
                "PROMPT_COMMAND='gh pr merge 12' bash -i -c true", "BASH_ENV=<(echo 'gh pr merge 12') bash -c true",
                "ENV=f.sh sh -i -c true", "ZDOTDIR=/tmp/z zsh -c true", "export BASH_ENV=f.sh; ./x.sh",
-               "env LESSOPEN='|gh pr merge 12 %s' less f.txt")
+               "env LESSOPEN='|gh pr merge 12 %s' less f.txt",
+               # GNU sed's e command and s///e flag run a command the script builds; a script file is not read
+               "sed '1e date' f.txt", "sed -i '' 's/a/b/e' f.txt", "sed -e 's/x/y/;e' f.txt", "sed -f s.sed f.txt")
 
     def test_a_command_string_or_input_the_guard_cannot_read_is_refused(self):
         for cmd in self.REFUSED:
@@ -236,7 +238,8 @@ class CommandStrings(Case):
                     "awk 'BEGIN{while ((\"date\" | getline d) > 0) print d}'", "trap 'rm -f /tmp/x.$$' EXIT; echo hi",
                     "trap - INT", "vim -c 'wq' x.txt", "vim -u NONE -c 'q!' x.txt", "less +G x.txt", "atq",
                     "at -l", "crontab -l", "launchctl list", "make test", "make -C lib all",
-                    "ENV=staging npm test", 'git commit -m "doc: BASH_ENV=x"'):
+                    "ENV=staging npm test", 'git commit -m "doc: BASH_ENV=x"', "sed -i '' 's/a/b/g' f.txt",
+                    "sed -n '1,5p' f.txt", "sed '/^#/d; s/e/E/w out.txt' f.txt", "sed --sandbox '1e date' f.txt"):
             with self.subTest(cmd=cmd):
                 self.assertIsNone(main(cmd))
                 self.assertIsNone(member(cmd))
