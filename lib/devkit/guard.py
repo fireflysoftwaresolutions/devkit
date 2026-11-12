@@ -2212,6 +2212,11 @@ def _pipefail_on(cmd: str) -> bool:
         return False
     if _UNSET_PIPEFAIL.search(text):
         return False
+    for t in re.finditer(r"(?<![\w./-])trap\b", text):  # a trap's body may turn it off when the trap fires
+        end = re.search(r"[;&|\n]", text[t.end():])
+        body = cmd[t.start():t.end() + (end.start() if end else len(text))] if len(cmd) == len(text) else cmd
+        if re.search(r"\b(?:set|setopt|unsetopt|shopt|emulate)\b", body):
+            return False
     m = _SET_PIPEFAIL.search(text)
     if not m:
         return False
@@ -2540,6 +2545,21 @@ _SHADOW_CORE = frozenset("""re enum functools collections types operator keyword
     selectors socket pathlib ntpath urllib weakref copyreg sre_compile sre_parse sre_constants""".split())
 
 
+# what Python imports a module from: source, a compiled file without its source, an extension (`json.so`,
+# `json.abi3.so`, `json.cpython-312-darwin.so`), on any version, not only the running one's suffixes
+_MODULE_SUFFIXES = (".py", ".pyc", ".pyw", ".so", ".pyd")
+
+
+def _module_file_in(folder, top) -> bool:
+    """True when `folder` holds a file Python may import as module `top`: `top.py`, `top.pyc`, or `top.<tag>.so`."""
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return False
+    return any(n.startswith(top + ".") and n.endswith(_MODULE_SUFFIXES) and os.path.isfile(os.path.join(folder, n))
+               for n in names)
+
+
 @functools.lru_cache(maxsize=1)
 def _stdlib_names() -> frozenset:
     """The top-level names of the standard library: sys.stdlib_module_names (3.10+), or on 3.9 the modules and
@@ -2581,7 +2601,7 @@ def module_shadow_refusal(argv, cwd) -> str | None:
     deep = _SHADOW_CORE if tops else frozenset()  # what those modules import in turn, as files only
     for folder in folders:
         for top in sorted(tops | deep):
-            if folder and (os.path.isfile(os.path.join(folder, top + ".py")) or
+            if folder and (_module_file_in(folder, top) or
                            top in tops and os.path.isdir(os.path.join(folder, top))) and \
                     os.path.realpath(folder) != os.path.realpath(os.path.dirname(os.__file__)):
                 return SHADOW_REASON.format(mod=_code(top), where=_code(folder))
@@ -7481,11 +7501,53 @@ def _program(argv, cwd, bodies):
     rest = args[i:]
     if script and script != "-" and _reads_input(script, cwd):  # its input, as `-` is
         script = "-"
+    if fam in ("node", "nodejs", "bun", "deno"):  # the code node preloads (-r, --require=, --import=): read as its own
+        for k, a in enumerate(args[:i]):
+            flag, eq, val = a.partition("=")
+            if flag in ("-r", "--require", "--import", "--loader", "--experimental-loader", "--preload"):
+                val = val if eq else (args[k + 1] if k + 1 < len(args) else "")
+                if val.startswith((".", "/", "~")) or os.sep in val:
+                    code.append(_read_small(_run_target(resolve(val, cwd), fam)))
     if script and script != "-":
-        code.append(_read_small(resolve(script, cwd)))
+        code.append(_read_small(_run_target(resolve(script, cwd), fam)))
+    elif module and fam in ("python", "pypy") and not any(re.fullmatch(r"-[A-Za-z]*[IP][A-Za-z]*", a)
+                                                          for a in args[:i]):
+        code.append(_read_small(_module_file(module, cwd)))  # `python3 -m pkg.run` from the working folder
     elif not code and module is None:
         code += list(bodies)
     return "\n".join(code), rest, module, inplace
+
+
+def _run_target(path, fam):
+    """The file an interpreter runs for `path`: for a folder, Python's `__main__.py`, or node's package.json main
+    (else index.js); the path itself otherwise."""
+    try:
+        p = Path(str(path))
+        if not p.is_dir():
+            return path
+        if fam in ("python", "pypy"):
+            return p / "__main__.py"
+        try:
+            main = json.loads((p / "package.json").read_text()).get("main") or ""
+        except (OSError, ValueError, AttributeError):
+            main = ""
+        for c in ([main, main + ".js"] if main else []) + ["index.js", "index.mjs", "index.cjs"]:
+            if (p / c).is_file():
+                return p / c
+        return p / "index.js"
+    except (OSError, ValueError):
+        return path
+
+
+def _module_file(module, cwd):
+    """The file `python3 -m module` runs from the working folder, which comes first on its path: `a/b.py`, or
+    `a/b/__main__.py` for a package; UNKNOWN when the working folder holds neither (the standard library's or an
+    installed one, judged by its name)."""
+    base = Path(str(cwd or os.getcwd())).joinpath(*module.split("."))
+    for c in (base.with_name(base.name + ".py"), base / "__main__.py"):
+        if c.is_file():
+            return c
+    return UNKNOWN
 
 
 def protected_bash(cmd: str, cwd):

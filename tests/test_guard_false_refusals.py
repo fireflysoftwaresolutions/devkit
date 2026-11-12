@@ -746,6 +746,63 @@ class ModuleShadowing(unittest.TestCase):
                 self.assertIn("then runs it", guard._writes_then_runs(f"cd {d} && " + cmd, str(d)) or "")
 
 
+class UnreadPrograms(unittest.TestCase):
+    """The Red team tester's verify round: code an interpreter runs that the guard did not read is read: node's
+    preloads given with `=` (--require=f, --import=f), a folder Python or node runs (__main__.py, package.json's main
+    or index.js), and `python3 -m pkg.mod` from the working folder; a planted standard module counts in every form
+    Python imports (.pyc, .so, .abi3.so, .cpython-312-darwin.so); a trap that may turn pipefail off keeps the
+    commit gate closed."""
+
+    MERGE_PY = "import os\nos.system('gh pr merge 12')\n"
+    MERGE_JS = "require('child_process').execSync('gh pr merge 12');\n"
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        d = self.dir = Path(guard.real(tmp.name))
+        for rel, text in (("app/__main__.py", self.MERGE_PY), ("pre.js", self.MERGE_JS),
+                          ("pre.mjs", "import { execSync } from 'node:child_process';\nexecSync('gh pr merge 12');\n"),
+                          ("nd/index.js", self.MERGE_JS), ("nd2/package.json", '{"main": "lib.js"}'),
+                          ("nd2/lib.js", self.MERGE_JS), ("pk/__init__.py", ""), ("pk/run.py", self.MERGE_PY),
+                          ("mm.py", self.MERGE_PY), ("w.py", "import json\nprint(json.dumps(1))\n")):
+            (d / rel).parent.mkdir(parents=True, exist_ok=True)
+            (d / rel).write_text(text)
+
+    def test_code_an_interpreter_runs_from_a_folder_a_module_or_a_preload_is_read(self):
+        d = self.dir
+        for cmd in (f"python3 {d}/app", f"node --require={d}/pre.js -e 'console.log(1)'",
+                    f"node -r {d}/pre.js -e 'console.log(1)'", f"node --import={d}/pre.mjs -e 'console.log(1)'",
+                    f"node --import {d}/pre.mjs -e 'console.log(1)'", f"node {d}/nd", f"node {d}/nd2",
+                    f"cd {d} && python3 -m pk.run", f"cd {d} && python3 -m mm"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNotNone(main(cmd))
+                self.assertIsNotNone(member(cmd))
+        self.assertIsNone(main(f"cd {d} && python3 -I -m json.tool --help"))
+
+    def test_a_planted_compiled_standard_module_is_refused(self):
+        for name in ("json.pyc", "json.so", "json.abi3.so", "json.cpython-312-darwin.so"):
+            planted = self.dir / name
+            planted.write_text("xx")
+            try:
+                with self.subTest(name=name):
+                    v = guard.check("Bash", {"command": f"python3 {self.dir}/w.py"}, CWD, "claude")
+                    self.assertIn("imports", (v or ("", ""))[1])
+            finally:
+                planted.unlink()
+        self.assertIsNone(guard.check("Bash", {"command": f"python3 {self.dir}/w.py"}, CWD, "claude"))
+
+    def test_a_trap_that_may_turn_pipefail_off_keeps_the_gate_closed(self):
+        for pre in ("set -o pipefail; trap 'set +o pipefail' DEBUG; ",
+                    'set -o pipefail; trap "set +o pipefail" RETURN; f() { :; }; f; ',
+                    "set -o pipefail; trap 'setopt no_pipe_fail' DEBUG; ", "trap 'shopt -u x' ERR; set -o pipefail; "):
+            cmd = pre + "python3 -m unittest x | tail -1 && git commit -m x"
+            with self.subTest(cmd=cmd):
+                v = guard.check("Bash", {"command": cmd}, CWD, "claude")
+                self.assertEqual((v or ("", ""))[1], guard.PIPE_REASON)
+        cmd = "set -o pipefail; trap 'rm -f /tmp/x' EXIT; python3 -m unittest x | tail -1 && git commit -m x"
+        self.assertIsNone(guard.check("Bash", {"command": cmd}, CWD, "claude"))
+
+
 class MainSessionPrograms(unittest.TestCase):
     """In the main session too, an inline or scratch program that starts a process with a command it does not write
     out (sys.argv, a parameter, a list it changes, a concatenation), passes a process function around, runs a string
