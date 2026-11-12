@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tests"))
@@ -54,7 +55,8 @@ class ReadOnlyLanes(unittest.TestCase):
         self.assert_runs("python3 --version && python3 -m unittest tests.test_guard",
                          "/usr/bin/python3 --version && /usr/bin/python3 -m unittest tests.test_guard",
                          "which -a bash; bash --version", "zsh --version", "node --version", "python3 -V")
-        self.assert_refused('python3 -c "print(1)"', "bash -c 'echo x'", "python3 --version x.py",
+        # a shell line runs when every command in it reads (test_a_shell_line_…); inline Python never does
+        self.assert_refused('python3 -c "print(1)"', "bash -c 'touch x'", "python3 --version x.py",
                             "bash --version; bash", "node -v -e 1")
 
     def test_command_v_only_looks_names_up(self):
@@ -126,6 +128,66 @@ class ReadOnlyLanes(unittest.TestCase):
         self.assert_runs(f"python3 {self.pad}/seraph/probe.py", f"cd {self.pad}/seraph && python3 probe.py data.json")
         self.assert_refused(f"python3 {self.pad}/tank/probe.py", f"python3 -c 'x' {self.pad}/seraph/p.py",
                             f"python3 -m http.server {self.pad}/seraph/p.py")
+
+    # Lesson L-g1g11708knd (17 repeats in a day): read-only lanes refused helpers that only read or that touch only
+    # the member's own scratch folder. Each twin below writes elsewhere, runs a program, or is something the guard
+    # cannot read in full, and stays refused.
+
+    def test_a_scratch_script_runs_with_options_that_take_a_value_and_through_a_project_runner(self):
+        s = self.pad / "seraph" / "probe.py"
+        s.write_text("print(1)\n")
+        self.assert_runs(f"python3 -W ignore {s}", f"python3 -X dev {s} data.json", f"uv run python {s}",
+                         f"uv run --no-sync python {s}", f"poetry run python {s}")
+        self.assert_refused(f"python3 -W ignore {self.pad}/tank/probe.py", f"npx python {s}", f"uvx python {s}",
+                            f"$PY {s}", f"python3 -W {s} {self.pad}/tank/probe.py")
+
+    def test_a_shell_line_or_script_runs_when_every_command_in_it_is_a_read(self):
+        reads = self.pad / "seraph" / "reads.sh"
+        reads.write_text("set -eu\ncat README.md\ngrep -n x README.md | head -3\n")
+        writes = self.pad / "seraph" / "writes.sh"
+        writes.write_text("cat README.md\nrm -rf build\n")
+        self.assert_runs(f"bash {reads}", f"sh {reads} README.md", f"bash -euo pipefail {reads}",
+                         "bash -c 'cat README.md | wc -l'", "zsh -c 'git log --oneline -3'",
+                         "bash <<'EOF'\nls\nEOF", "bash -c 'cat \"$1\"' _ README.md")
+        self.assert_refused(f"bash {writes}", "bash -c 'touch x'", "bash -c '\"$@\"' _ rm x", f"bash -i {reads}",
+                            "bash -l -c ls", f"bash {self.pad}/seraph/missing.sh", "bash <<EOF\n$X\nEOF",
+                            f"fish {reads}", f"bash --rcfile {reads} -c ls")
+
+    def test_sed_in_place_edits_only_real_files_in_the_members_own_scratch_folder(self):
+        notes = self.pad / "seraph" / "notes.txt"
+        notes.write_text("one\n")
+        (self.pad / "tank" / "notes.txt").write_text("one\n")
+        outside = Path(tempfile.mkdtemp()) / "kept.txt"
+        self.addCleanup(outside.unlink)
+        outside.write_text("one\n")
+        link = self.pad / "seraph" / "link.txt"
+        link.symlink_to(outside)
+        # BSD sed (macOS) takes the word after a lone -i as the backup suffix, GNU sed as the script: the guard reads
+        # the command as the sed it runs does, so each case is judged for both
+        for flavor, runs in (("bsd", (f"sed -i '' 's/one/two/' {notes}", f"sed -i -e 's/one/two/' {notes}",
+                                      f"cd {self.pad}/seraph && sed -i '' -E 's/o+/0/g' notes.txt")),
+                             ("gnu", (f"sed -i 's/one/two/' {notes}", f"sed --in-place -e 's/one/two/' {notes}",
+                                      f"cd {self.pad}/seraph && sed -i -E 's/o+/0/g' notes.txt"))):
+            with self.subTest(flavor=flavor), mock.patch.object(guard, "_sed_flavor", return_value=flavor):
+                self.assert_runs(f"sed -i.bak 's/one/two/' {notes}", *runs)
+                self.assert_refused(f"sed -i.bak 's/one/two/' {CWD}/README.md",
+                                    f"sed -i.bak 's/one/two/' {self.pad}/tank/notes.txt",
+                                    f"sed -i.bak 's/one/two/' {link}", f"sed -i.bak 's/one/two/w /tmp/out' {notes}",
+                                    f"sed -i'../../x*' 's/one/two/' {notes}", f"sed -i.bak '1e date' {notes}",
+                                    f"sed --in-place=/x 's/one/two/' {notes}", "sed -n -i '1p' f",
+                                    f"find {self.pad}/seraph -name '*.txt' -exec sed -i.bak s/a/b/ {{}} +",
+                                    f"ls {notes} | xargs sed -i.bak s/a/b/")
+        with mock.patch.object(guard, "_sed_flavor", return_value="bsd"):  # the suffix would be s/one/two/
+            self.assert_refused(f"sed -i 's/one/two/' {notes} {notes}")
+        with mock.patch.object(guard, "_sed_flavor", return_value="gnu"):  # it edits a file named s/one/two/
+            self.assert_refused(f"sed -i '' 's/one/two/' {notes}")
+
+    def test_a_pythonpath_inside_the_workspace_or_the_scratch_folder_runs_a_check(self):
+        self.assert_runs("PYTHONPATH=lib python3 -m unittest tests.test_x", "PYTHONPATH=lib:tests python3 -m pytest -q",
+                         f"PYTHONPATH={self.pad}/seraph python3 {self.pad}/seraph/probe.py")
+        self.assert_refused("PYTHONPATH=/tmp/elsewhere python3 -m pytest", f"PYTHONPATH={self.pad}/tank python3 -m pytest",
+                            "PYTHONPATH=lib:/tmp/x python3 -m pytest", "UPDATE_SNAPSHOTS=1 python3 -m pytest",
+                            "export PYTHONPATH=lib; python3 -m pytest", "PYTHONPATH=$X python3 -m pytest")
 
 
 def verdict(cmd, member, level="review", cwd=CWD, base=None):

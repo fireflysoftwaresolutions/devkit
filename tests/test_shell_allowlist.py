@@ -51,7 +51,7 @@ WRITERS = [
     "sed -i '' 's/a/b/' src/a.py", "python3 -c \"open('src/a.py', 'w').write('x')\"",
     "python3 - <<'EOF'\nprint(1)\nEOF", "node -e \"require('fs').writeFileSync('x', '')\"",
     "ruby -e 'File.write(%q(x), %q(y))'", "perl -e 'print 1'", "php -r 'file_put_contents(\"x\", \"y\");'",
-    "osascript -e 'do shell script \"touch x\"'", "bash -c 'cat src/a.py'", "sh -c 'echo x > f'", "zsh -c ls",
+    "osascript -e 'do shell script \"touch x\"'", "bash -c 'touch src/a.py'", "sh -c 'echo x > f'", "zsh -c 'rm -rf build'",
     "eval 'ls'", "source ./env.sh", "ls | xargs touch", "find . -name '*.py' -exec sed -i s/a/b/ {} +",
     "find . -fprint out.txt", "fd -e py -x sed -i s/a/b/", "rg --pre ./decode.sh secret", "git apply fix.patch",
     "git am fix.patch", "git cherry-pick abc123", "git merge main", "git rebase main", "git pull",
@@ -94,6 +94,12 @@ class AllowlistTests(unittest.TestCase):
         for cmd in MAIN_REFUSES:
             with self.subTest(cmd=cmd):
                 self.assertIsNotNone(lane(cmd))
+
+    def test_shell_lines_the_guard_proves_only_read_run_in_a_review_lane(self):
+        # their twins in WRITERS (bash -c 'touch …', zsh -c 'rm -rf …') stay refused
+        for cmd in ("bash -c 'cat src/a.py'", "zsh -c ls"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(lane(cmd))
 
     def test_a_substitution_whose_command_only_reads_runs_in_a_review_lane(self):
         # its twins in WRITERS (cat $(touch a), diff <(touch a) <(ls b)) stay refused
