@@ -2551,5 +2551,57 @@ class PartialEvidenceTests(KidSyncCase):
         self.assertIn("1. sync; 2. docs", str(e.exception))
 
 
+def progress_cli_out(*argv):
+    """`dev progress …` through the real parser and handler -> (exit code, stdout, stderr)."""
+    import contextlib
+    import io
+    from devkit import cli
+    a = cli.build_parser().parse_args(["progress", *argv])
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        rc = a.fn(a) or 0
+    return rc, out.getvalue(), err.getvalue()
+
+
+class ProgressCommandLineTests(unittest.TestCase):
+    # progress.py kept partial evidence on an open step, closed a member's own step at once and put the caller's run
+    # first, but the command line had no --step or --check on `note`, printed a member's close without saying whether
+    # the step closed, and listed the live runs without the caller
+    def setUp(self):
+        self.state = TempState().__enter__()
+        self.addCleanup(self.state.__exit__, None, None, None)
+        pg.start("Hotfix", plan=["sync=30m", "docs=20m after sync"])
+        pg.assign("sync", "Kid", why="test")
+        launch("k1", "devkit:kid", "Kid: sync")
+
+    def test_a_note_keeps_partial_evidence_on_the_step_it_names(self):
+        rc, _, err = progress_cli_out("note", "docs drafted", "--step", "docs", "--check", "✓ dev docs check clean")
+        self.assertEqual(rc, 0, err)
+        docs = pg.load_run("claude", "s1")["plan"][1]
+        self.assertEqual((docs["state"], docs["partial"][-1]["check"]), ("pending", "✓ dev docs check clean"))
+
+    def test_a_members_close_of_its_own_step_says_it_closed(self):
+        with mock.patch.dict(os.environ, {"DEVKIT_FROM_AGENT": "k1"}):
+            rc, out, err = progress_cli_out("step", "sync rewritten", "--step", "sync", "--check", "✓ 14 tests pass")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("· sync rewritten · closed “sync” (done)", out)
+
+    def test_a_members_evidence_for_a_step_it_does_not_hold_says_why_it_stays_open(self):
+        with mock.patch.dict(os.environ, {"DEVKIT_FROM_AGENT": "k1"}):
+            rc, out, err = progress_cli_out("step", "docs look fine", "--step", "docs", "--check", "✓ read them")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("not your step", out)
+        self.assertEqual(pg.load_run("claude", "s1")["plan"][1]["state"], "pending")
+
+    def test_the_listing_shows_this_sessions_run_before_a_newer_one(self):
+        (pg.SESSIONS / "claude-s2.json").write_text(json.dumps(
+            {"agent": "claude", "session": "s2", "started": time.time(), "project": "acme/api"}))
+        with mock.patch.dict(os.environ, {"DEVKIT_SESSION": "claude:s2"}):
+            pg.start("Theirs", plan=["b"], now=time.time() + 60)
+        rc, out, err = progress_cli_out()
+        self.assertEqual(rc, 0, err)
+        self.assertLess(out.index("Hotfix"), out.index("Theirs"))
+
+
 if __name__ == "__main__":
     unittest.main()

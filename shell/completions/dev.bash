@@ -252,7 +252,7 @@ _dev_spec() {
     'plan ls') o='-h --help -p --project -i --initiative' v='-p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' ;;
     'progress') c='start note step block done assign begin add reopen skip confirm history time' o='-h --help' ;;
     'progress start') o='-h --help --steps --estimate --mode --plan --replace --why' v='--steps=n --estimate=n --mode=c:guided,auto --plan=n --why=n' p='*n' ;;
-    'progress note') o='-h --help --next' v='--next=n' p='*n' ;;
+    'progress note') o='-h --help --next --step --check' v='--next=n --step=l:steps:-:: --check=n' p='*n' ;;
     'progress step') o='-h --help --next --check --step --force --no-check --approves' v='--next=n --check=n --step=l:steps:-:: --approves=l:steps:-::' p='*n' ;;
     'progress block') o='-h --help --next --check --step --force' v='--next=n --check=n --step=l:steps:-::' p='*n' ;;
     'progress done') o='-h --help --next --check --step --force --why' v='--next=n --check=n --step=l:steps:-:: --why=n' p='*n' ;;

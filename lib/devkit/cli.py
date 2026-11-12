@@ -2437,7 +2437,8 @@ def cmd_progress(a):
         return 0
     if act == "note":
         try:
-            run = pg.note(" ".join(a.text), a.next or "", from_agent=from_agent)
+            run = pg.note(" ".join(a.text), a.next or "", from_agent=from_agent,
+                          which=getattr(a, "step", None), check=getattr(a, "check", "") or "")
         except ValueError as e:
             ui.err(str(e))
             return 2
@@ -2464,7 +2465,10 @@ def cmd_progress(a):
             return 2
         if from_agent:
             lane = (run.get("agents") or {}).get(from_agent) or {}
-            print(f"{ui.OK} {lane.get('persona') or lane.get('label') or 'lane'} · {' '.join(a.text)}")
+            out = run.get("lane_outcome") or {}
+            tail = (f" · closed “{out['step']}” ({out['state']})" if out.get("closed")
+                    else f" · {out['why']}" if out.get("why") else "")
+            print(f"{ui.OK} {lane.get('persona') or lane.get('label') or 'lane'} · {' '.join(a.text)}{tail}")
             return 0
         print(pg.render_update(run))
         changed = [(i, s) for i, s in enumerate(run.get("plan") or [], 1) if before.get(s["name"]) != s.get("state")]
@@ -2506,7 +2510,7 @@ def cmd_progress(a):
     if act == "time":
         print(pg.report(a.days, a.project))
         return 0
-    runs = pg.active_runs()
+    runs = pg.active_runs(first=pg.current_session())
     from . import work
     others = [(t["user"] + "@" + t["host"], s_) for t in work.team() for s_ in t.get("sessions", [])
               if s_.get("progress") and not (t["user"] == work.actor()["user"] and t["host"] == work.actor()["host"])]
@@ -4287,6 +4291,8 @@ def build_parser():
     x = gsp.add_parser("note", help="an update while a step is still running: no step changes state")
     x.add_argument("text", nargs="+")
     x.add_argument("--next", help="what comes next")
+    x.add_argument("--step", help="the plan step this partial evidence is about (number or part of its name)")
+    x.add_argument("--check", help="partial evidence for that step: kept on it, and the step stays open")
     for verb, h_ in (("step", "a step finished"), ("block", "blocked: why and what is needed"),
                      ("done", "finished: the outcome")):
         x = gsp.add_parser(verb, help=h_)

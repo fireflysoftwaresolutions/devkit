@@ -803,6 +803,8 @@ _dev__progress__note() {
   _arguments -s -S : \
     '(- *)'{-h,--help}'[show this help message and exit]' \
     '--next=[what comes next]:next: ' \
+    '--step=[the plan step this partial evidence is about]:plan step: _dev_live steps -' \
+    '--check=[partial evidence for that step]:check: ' \
     '*:text: '
 }
 
