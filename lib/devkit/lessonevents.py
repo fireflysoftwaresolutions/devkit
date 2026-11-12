@@ -8,7 +8,8 @@ The log is STATE/lessons-events.jsonl, local to this machine and append-only, on
 
     shown    the hook showed the lesson to an agent, after its filters; channel: session, brief, call, output or refusal
     missed   the same agent, in the same session, then hit the lesson's refusal, command or error anchor (on_hit)
-    heeded   the session or the crew lane ended without that (on_end)
+    heeded   the session or the crew lane ended without that (on_end), or the session has been idle for IDLE_END
+             (fold: a session that ends without SessionEnd, after a crash or a closed terminal, resolves no lesson)
 
 A lesson shown to an agent is pending until one of the two resolves it; shown again later, it is pending again.
 The resolution's channel is the one of the latest show; rates() credits every channel that showed it.
@@ -17,7 +18,8 @@ The resolution's channel is the one of the latest show; rates() credits every ch
     shown_in(session, agent, now=None) -> [id]                     shown and not yet resolved, in order of first show
     on_hit(lesson_ids, session, agent, now=None) -> [id]           record `missed` for the ones pending; return them
     on_end(session, agent, now=None) -> [id]                       record `heeded` for the rest; return them
-    fold(now=None) -> {heeded, missed, lessons}                    add heeded and missed to the usage counts
+    fold(now=None) -> {heeded, missed, lessons}                    resolve idle sessions, then add heeded and missed
+                                                                   to the usage counts
     prune(days=45, now=None) -> int                                remove the events older than the window, but the
                                                                    outcomes fold has not counted; the lines removed
     rates(days=30) -> {days, channels, most_missed}                heeded rate per channel; the most missed lessons
@@ -50,9 +52,14 @@ from . import state
 from .core import STATE
 
 EVENTS = STATE / "lessons-events.jsonl"
+SESSIONS = STATE / "sessions"  # the hooks' session records (progress.SESSIONS): their last write is the last activity
 EVENT_KINDS = ("shown", "heeded", "missed")
 CHANNELS = ("session", "brief", "call", "output", "refusal")
 FOLD_GRACE = 60
+# A session idle this long ended without SessionEnd (a crash, a closed terminal, a killed process): fold marks the
+# lessons still pending in it heeded. A day, because a session resumed the next morning keeps its id and a miss there
+# still counts, while the nightly fold resolves a forgotten one within two nights.
+IDLE_END = 86400
 TEXT_CUT = 200  # characters kept of an agent or session id
 _ID = re.compile(r"L-[0-9A-Za-z]{1,40}")
 _RECUR = re.compile(r"\s*recur\s+(L-[0-9A-Za-z]{1,40})\b")
@@ -171,11 +178,47 @@ def _int(value) -> int:
         return 0
 
 
+def _last_written(session: str) -> float:
+    """When the hooks last wrote this session's record (SESSIONS/<agent>-<session>.json, any agent), or 0."""
+    import glob
+    try:
+        return max((p.stat().st_mtime for p in Path(SESSIONS).glob(f"*-{glob.escape(session)}.json")), default=0)
+    except (OSError, ValueError):
+        return 0
+
+
+def _idle_ends(now: float, through: int) -> int:
+    """Record `heeded` for the lessons still pending in each session idle for IDLE_END: no lesson event of it, and no
+    write of its record, since then. The resolution is dated `through`, so this fold counts it, and carries the
+    channel of the latest show, as on_end's does. -> how many it recorded."""
+    try:
+        with state.hold(EVENTS):
+            events = _events(until=now)
+            last, pairs = {}, {}
+            for e in events:
+                s = e.get("session") or ""
+                last[s] = max(last.get(s, 0), e["ts"])
+                pairs.setdefault((s, e.get("agent") or ""), None)
+            n = 0
+            for session, agent in pairs:
+                if not session or now - max(last[session], _last_written(session)) < IDLE_END:
+                    continue
+                for lid, chans in _pending(events, session, agent).items():
+                    record("heeded", lid, chans[-1], agent, session, through)
+                    n += 1
+            return n
+    except state.StateBusy:
+        return 0
+
+
 def fold(now: float = None) -> dict:
     """Add the heeded and missed events older than FOLD_GRACE seconds to the usage counts (lessons.USAGE_LOCAL),
-    each event once. -> {"heeded": n, "missed": n, "lessons": lessons changed}. Nothing to add writes nothing."""
+    each event once, after the lessons pending in sessions idle for IDLE_END are resolved as heeded (_idle_ends).
+    -> {"heeded": n, "missed": n, "lessons": lessons changed}. Nothing to add writes nothing."""
     from . import lessons
-    through = int((time.time() if now is None else now) - FOLD_GRACE)
+    now = time.time() if now is None else now
+    through = int(now - FOLD_GRACE)
+    _idle_ends(now, through)
     events = [e for e in _events(until=through) if e["event"] in ("heeded", "missed") and _ID.fullmatch(e["id"])]
     totals = {"heeded": 0, "missed": 0, "lessons": 0}
     if not events:

@@ -207,6 +207,40 @@ class FoldTests(EventsTestCase):
         self.assertEqual(self.usage()[L1]["missed"], 1)
 
 
+class IdleSessionTests(EventsTestCase):
+    # a session that ends without SessionEnd (a crash, a closed terminal, a killed process) left the lessons shown in
+    # it pending forever, so they never counted as heeded; fold resolves them once the session has been idle a day
+
+    def setUp(self):
+        super().setUp()
+        saved = lessonevents.SESSIONS
+        lessonevents.SESSIONS = Path(self.tmp.name) / "state" / "sessions"
+        lessonevents.SESSIONS.mkdir(parents=True)
+        self.addCleanup(setattr, lessonevents, "SESSIONS", saved)
+
+    def test_fold_heeds_the_lessons_of_a_session_idle_a_day_once_and_not_of_one_still_working(self):
+        lessonevents.record("shown", L1, "session", "main", SID, now=T)
+        lessonevents.record("shown", L1, "call", "main", SID, now=T + 2)
+        lessonevents.record("shown", L2, "brief", "a_tank", SID, now=T + 5)
+        self.assertEqual(lessonevents.fold(now=T + 5 + lessonevents.IDLE_END - 120)["heeded"], 0)
+        later = T + 5 + lessonevents.IDLE_END + 60
+        self.assertEqual(lessonevents.fold(now=later), {"heeded": 2, "missed": 0, "lessons": 2})
+        self.assertEqual([(e["id"], e["event"], e["channel"], e["agent"]) for e in self.lines()[3:]],
+                         [(L1, "heeded", "call", "main"), (L2, "heeded", "brief", "a_tank")])
+        self.assertEqual(lessonevents.shown_in(SID, "main", now=later), [])
+        self.assertEqual(lessonevents.fold(now=later + 3 * DAY), {"heeded": 0, "missed": 0, "lessons": 0})
+        self.assertEqual((self.usage()[L1]["heeded"], self.usage()[L2]["heeded"]), (1, 1))
+        # a session whose hooks still write its record is working, however old its last lesson event: its miss counts
+        other = "c1f0e3aa-0000-4000-8000-000000000001"
+        lessonevents.record("shown", L3, "call", "main", other, now=T)
+        record = lessonevents.SESSIONS / f"claude-{other}.json"
+        record.write_text("{}")
+        os.utime(record, (later + 2 * DAY, later + 2 * DAY))
+        self.assertEqual(lessonevents.fold(now=later + 2 * DAY + 3600)["heeded"], 0)
+        lessonevents.on_hit([L3], other, "main", now=later + 2 * DAY + 3700)
+        self.assertEqual(lessonevents.fold(now=later + 2 * DAY + 7200), {"heeded": 0, "missed": 1, "lessons": 1})
+
+
 class PruneTests(EventsTestCase):
     def rec(self, event, lid, at, channel="call", agent="claude", session="s1"):
         lessonevents.record(event, lid, channel, agent, session, now=at)
@@ -219,9 +253,11 @@ class PruneTests(EventsTestCase):
         lessonevents.on_end("s1", "claude", now=T - 50 * DAY + 5)
         self.rec("shown", L2, T - 45 * DAY, session="s2")  # on the window's edge: kept
         self.rec("shown", L3, T - 2 * DAY, session="s3")
-        lessonevents.fold(now=T)
+        lessonevents.fold(now=T)  # s2 and s3 are idle for more than a day: their lessons are heeded, dated the fold
         self.assertEqual(lessonevents.prune(45, now=T), 2)
-        self.assertEqual(self.kept(), [(L2, "shown", int(T) - 45 * DAY), (L3, "shown", int(T) - 2 * DAY)])
+        self.assertEqual(self.kept(), [(L2, "shown", int(T) - 45 * DAY), (L3, "shown", int(T) - 2 * DAY),
+                                       (L2, "heeded", int(T) - lessonevents.FOLD_GRACE),
+                                       (L3, "heeded", int(T) - lessonevents.FOLD_GRACE)])
 
     def test_an_outcome_the_fold_has_not_counted_is_kept_however_old(self):
         self.rec("shown", L1, T - 60 * DAY)
