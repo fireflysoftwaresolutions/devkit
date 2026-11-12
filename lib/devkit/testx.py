@@ -1710,9 +1710,22 @@ def _update_state(top, change) -> dict:
     return st
 
 
+_UT_DOTTED = re.compile(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*")
+
+
+def _loadable(runner, root, id_) -> bool:
+    """Can `runner` load the test named `id_` again? Not the label of a run that failed with no test to name
+    (`unittest:.`, the runner and its folder), and for unittest only a dotted name or a test file."""
+    if not id_ or id_ == f"{runner}:{root}":
+        return False
+    return runner != "unittest" or bool(_UT_DOTTED.fullmatch(id_)) or id_.endswith(".py")
+
+
 def _rerunnable(res, case) -> bool:
-    """A failure can be recorded only with its module or file: a bare unittest name would rerun as a module."""
-    return bool(case["file"]) or res["runner"] != "unittest" or "." in case["id"]
+    """A failure can be recorded only with its module or file (a bare unittest name would rerun as a module), and
+    only by a name its runner can load."""
+    return _loadable(res["runner"], res["root"], case["id"]) and \
+        (bool(case["file"]) or res["runner"] != "unittest" or "." in case["id"])
 
 
 def record(top, results, kind="run") -> dict:
@@ -1895,9 +1908,16 @@ def _group_tests(top, runners, tests, changed=()):
     return out, orphans
 
 
+def _unloadable(top, st) -> list:
+    """Recorded failures whose names no runner can load (an older devkit recorded them): [(runner, root, id)]."""
+    return [(f.get("runner"), f.get("root"), f.get("id")) for f in (st.get("failures") or {}).get(top) or []
+            if not _loadable(f.get("runner"), f.get("root"), f.get("id"))]
+
+
 def _failed_groups(top, runners, st):
     fails = [f for f in (st.get("failures") or {}).get(top) or []
-             if not f.get("file") or os.path.exists(os.path.join(top, f["file"]))]
+             if (not f.get("file") or os.path.exists(os.path.join(top, f["file"])))
+             and _loadable(f.get("runner"), f.get("root"), f.get("id"))]
     out = []
     for r in runners:
         mine = [f for f in fails if f.get("runner") == r["name"] and f.get("root") == r["root"]]
@@ -2091,6 +2111,12 @@ def _flow(a, top, runners):
 
     only_failed, only_affected = a.failed and not a.affected, a.affected and not a.failed
     if not only_affected:
+        bad = _unloadable(top, st)
+        if bad:
+            _forget(top, set(bad))
+            print(f"{ui.WARN} {len(bad)} recorded failure(s) name no test a runner can load: forgotten: "
+                  f"{', '.join(i for _, _, i in bad[:5])}" + (f" and {len(bad) - 5} more" if len(bad) > 5 else ""),
+                  file=sys.stderr)
         groups = _failed_groups(top, runners, st)
         if not groups and only_failed:
             if not json_out:

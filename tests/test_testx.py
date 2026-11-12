@@ -1164,6 +1164,32 @@ class StaleFailureTests(unittest.TestCase):
             self.assertEqual([s["kind"] for s in json.loads(out)["steps"]], ["failed", "affected"])
             self.assertEqual(recorded(e), [])
 
+    # A run that ends with a non-zero exit after its tests and no failure to name (the interpreter exited mid-run)
+    # is shown as `unittest:.`, the runner and its folder. No runner can load that name: recorded, it was rerun first
+    # on every `dev test`, crashed the same way, and the affected tests never ran. It is shown and never recorded.
+    def test_a_run_that_exits_without_a_failure_to_name_records_nothing_to_rerun(self):
+        with Env() as e:
+            r = e.repo(PKG)
+            write(r, {"tests/test_exit.py": "import os\nimport unittest\n\n\nclass ExitTests(unittest.TestCase):\n"
+                                            "    def test_exits(self):\n        os._exit(3)\n"})
+            rc, out, err = dev(r, "run", "--all", "--json")
+            run = json.loads(out)["steps"][0]["runs"][0]
+            self.assertEqual((rc, run["crash"], [f["id"] for f in run["failures"]]), (1, True, ["unittest:."]),
+                             out + err)
+            self.assertEqual(recorded(e), [])
+
+    # `unittest:.`, recorded by an older devkit, names no test: it is forgotten and named, and the affected tests run
+    def test_a_recorded_runner_label_is_forgotten_and_the_affected_tests_run(self):
+        with Env() as e:
+            r = e.repo(PKG)
+            edit(r, {"calc.py": CALC["calc.py"] + "\n\ndef mul(a, b):\n    return a * b\n"})
+            seed(r, ("unittest:.", ""))
+            rc, out, err = dev(r, "--json")
+            self.assertEqual(rc, 0, out + err)
+            self.assertEqual([s["kind"] for s in json.loads(out)["steps"]], ["affected"])
+            self.assertIn("unittest:.", err)
+            self.assertEqual(recorded(e), [])
+
     # a test module whose own import fails is a real failure: it stays recorded under the name it was run by
     def test_a_test_module_that_fails_to_import_stays_recorded(self):
         with Env() as e:
