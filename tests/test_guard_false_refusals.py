@@ -95,5 +95,32 @@ class CaseArms(Case):
             self.refused(cmd)
 
 
+class LiteralValues(Case):
+    """A variable the command sets from a literal, a `~` path or a choice between two literal echoes names a program
+    the guard reads before it runs."""
+
+    def test_a_home_path_or_a_choice_of_literals_runs(self):
+        for cmd in ("D=~/Development/x/bin/dev; $D bug --help 2>&1 | head -30",
+                    "PY=$( [ -x .venv/bin/python ] && echo .venv/bin/python || echo python3 ); $PY -m unittest x",
+                    "PY=$(test -x .venv/bin/python && echo .venv/bin/python || echo python3); $PY --version"):
+            self.runs(cmd)
+
+    def test_a_loop_next_to_a_quoted_heredoc_runs(self):
+        edit = "python3 - <<'EOF'\nfrom pathlib import Path\nprint('do $py and $x')\nEOF\n"
+        self.runs(edit + "for py in python3 /usr/bin/python3; do $py -m unittest tests.test_x; done")
+        self.runs("cat > notes.txt <<'EOF'\n$py here\nEOF\npy=python3; $py --version")
+        self.refused(edit + "for g in gh; do $g pr merge 12; done")
+        # the shell expands an unquoted heredoc's body: the variables stay unknown
+        self.refused("cat <<EOF\n$py\nEOF\nfor py in python3; do $py -c 1; done; $py -c 2")
+        self.assertEqual([], guard.literal_variants("bash <<EOF\n$g pr merge 12\nEOF\ng=gh"))
+
+    def test_a_value_that_names_an_irreversible_program_is_refused(self):
+        for cmd in ("G=~/bin/gh; $G pr merge 12", "G=$( [ -x x ] && echo gh || echo python3 ); $G pr merge 12",
+                    "G=$( [ -x x ] && echo python3 || echo gh ); $G pr merge 12",
+                    "G=$( [ -x x ] && echo $(cat f) || echo python3 ); $G -c 1",
+                    "G=$( [ -x x ] && gh pr merge 1 || echo python3 ); $G -c 1"):
+            self.refused(cmd)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -11708,12 +11708,82 @@ def _binds_names(s: str, kinds, words) -> bool:
                 re.search(r"\(\(|(?:\w[ \t]*|(?:^|[;&|\n{])[ \t]*)\(\s*\)", code))
 
 
+# a value chosen by a test between two literal echoes: PY=$( [ -x .venv/bin/python ] && echo .venv/bin/python || echo
+# python3 ). The test runs no command of its own (`[` or `test`, no substitution); the substitution is still judged as a
+# command with the others.
+_LIT_CHOICE = re.compile(r"\$\(\s*(?:\[\s[^`$()\];&|]*\]|test\s[^`$();&|]*?)\s*&&\s*echo\s+([A-Za-z0-9_./:@%+,=~-]+)\s*"
+                         r"\|\|\s*echo\s+([A-Za-z0-9_./:@%+,=~-]+)\s*\)\Z")
+
+
+def _literal_values(val: str) -> list:
+    """The values an assignment's word can give its name, when the guard can list them: a literal word, a `~` or
+    `~/…` path (the shell expands it in an assignment, so it is written out with the home folder), or a choice between
+    two literal echoes (_LIT_CHOICE). [] for anything else."""
+    m = _LIT_CHOICE.match(val)
+    words = list(m.groups()) if m else [val] if val else []
+    out = []
+    for w in words:
+        if w == "~" or w.startswith("~/"):
+            w = str(core.HOME) + w[1:]
+        if not _LIT_WORD.match(w):
+            return []
+        out.append(w)
+    return out
+
+
 def literal_variants(cmd: str) -> list:
     """The command written out once for each value its literal variables can hold where it uses them (see above),
-    [] when it uses no variable the guard can resolve, or more than MAX_VARIANTS combinations."""
+    [] when it uses no variable the guard can resolve, or more than MAX_VARIANTS combinations. A command with quoted
+    heredocs (`python3 - <<'EOF' … EOF` then `for py in …; do $py …; done`) is read with each body set aside: a
+    quoted body is text the shell never expands. An unquoted heredoc, whose body the shell expands, leaves the
+    command as it is."""
     s = str(cmd or "")
-    if "$" not in s or "<<" in s.replace("<<<", "") or len(s) > 20000:
+    if "$" not in s or len(s) > 20000:
         return []
+    if "<<" in s.replace("<<<", ""):
+        return _heredoc_variants(s)
+    return _literal_variants(s)
+
+
+_BODY_KEY = "__devkit_heredoc_body_{}__"
+
+
+def _heredoc_variants(s: str) -> list:
+    """literal_variants for a command with heredocs, each quoted: every body is replaced by one placeholder line,
+    the variables of the rest are resolved, and the bodies go back in their places. [] when a heredoc is unquoted, or
+    a body cannot be placed."""
+    try:
+        _, bodies = _split_heredocs(s)
+    except Exception:
+        return []
+    if not bodies or any(expands for _, expands in bodies) or "__devkit_heredoc_body_" in s:
+        return []
+    parts, cursor, keys = [], 0, []
+    for k, (body, _) in enumerate(bodies):
+        if not body:
+            continue
+        at = s.find("\n" + body + "\n", cursor)
+        if at < 0:
+            at = s.find("\n" + body, cursor)
+            if at < 0 or at + 1 + len(body) != len(s):
+                return []
+        key = _BODY_KEY.format(k)
+        parts += [s[cursor:at + 1], key]
+        cursor = at + 1 + len(body)
+        keys.append((key, body))
+    masked = "".join(parts) + s[cursor:]
+    out = []
+    for text in _literal_variants(masked):
+        for key, body in keys:
+            if text.count(key) != 1:
+                return []
+            text = text.replace(key, body)
+        out.append(text)
+    return out
+
+
+def _literal_variants(s: str) -> list:
+    """literal_variants for a command with no heredoc body left in it."""
     ck = _code_kinds(s)
     if ck is None:
         return []
@@ -11754,11 +11824,14 @@ def literal_variants(cmd: str) -> list:
         name, val = m.group(1), s[a + len(m.group(0)):b]
         touched.setdefault(name, []).append((a, a + len(m.group(1))))
         nxt = words[k + 1] if k + 1 < len(words) else None
+        if val == "$" and s.startswith("$(", b - 1) and (end := _close_paren(s, b + 1)) > 0:
+            val, b = s[a + len(m.group(0)):end], end  # `PY=$( … )`: the whole substitution is the value
+        values = _literal_values(val)
         definite = "+=" not in m.group(0) and not dep and not block and \
-            (words[k - 1][5] if exported else op) == ";" and bool(val) and bool(_LIT_WORD.match(val)) and \
+            (words[k - 1][5] if exported else op) == ";" and bool(values) and \
             (b == len(s) or s[b] in " \t\n;&|)") and (nxt is None or nxt[3]) and \
             not re.match(r"[ \t]*(?:\|(?!\|)|&(?!&))", code[b:])
-        events.setdefault(name, []).append((a, [val] if definite else None, "set", None))
+        events.setdefault(name, []).append((a, values if definite else None, "set", None))
     refs = {}
     for m in _VAR_REF.finditer(s):
         if kinds[m.start()] not in ("C", "D"):
