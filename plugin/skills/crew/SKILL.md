@@ -210,13 +210,23 @@ files.
   write, and you are told once.
 - **Who is calling:** devkit records every shell call with the agent that made it. Your own plan commands
   (`dev progress start|assign|begin|reopen|skip|done`, `dev crew decide|mode`, `dev crew route --plan --apply`) count
-  as yours only when you type them: run through a script or `bash -c`, they are refused. A member runs its lane
-  commands on their own (not inside `&&`, a pipe, or `$(…)`; a message from a quoted heredoc is fine); read-only crew
-  commands run anywhere: `dev crew graph`, `show`, `rules`, `history`, `next`, and `dev crew raci` without `--set`.
+  as yours only when you type them: run through a script or `bash -c`, they are refused. A member's lane calls
+  (`dev progress …`, `dev crew ask|answer|inbox|…`) go to its own lane. On Claude Code they work inside any command
+  the lane allows (a list, a loop, a pipe, `bash -c`): devkit runs it with the member's lane variable exported, and
+  refuses only what drops that variable, a lane call in a program that sets its children's environment, a
+  double-quoted message that runs a substitution, or anything else the lane refuses. On Codex, a lane call runs as
+  the whole command, or joined to `cd` and reads with `&&` or `;` and piped into a read-only filter (`| tail -5`).
+  Read-only crew commands run anywhere: `dev crew graph`, `show`, `rules`, `history`, `next`, `owner`, and
+  `dev crew raci` without `--set`.
   After a compaction, Claude Code gives your conversation a new session id; devkit moves your open run and its
   working lanes to it (`session.adopt`), so your plan commands keep working.
-- **Read-only members** may run the reads of work state (`dev overview`, `dev standup`, `dev team`,
-  `dev initiative ls|show`, `dev report` without `-o`, `dev plan ls`). A member Responsible for requirements,
+- **Read-only members** (the Code reviewer and the other review-only members) may run the reads of work state
+  (`dev overview`, `dev standup`, `dev team`, `dev initiative ls|show`, `dev report` without `-o`, `dev plan ls`), the
+  probes a review needs, and writes in their own scratch folder: a Python or JavaScript program typed in the command
+  (`python3 -c`, `python3 - <<'EOF'`, `node -e`) or a script in their scratch folder when it only reads, test runs
+  such as `node --test`, arithmetic on numbers, their own `dev watch --wait --for me`, and `rm`, `cp`, `mv`, `touch`,
+  `tee`, or `sed -i` when every path written resolves inside `scratchpad/<member id>/`. A recursive copy, a link, or
+  such a write next to a program run stays refused (`docs/guard.md`, "What read-only lanes may run"). A member Responsible for requirements,
   architecture, research, UX, or docs also records its plan from its review lane with `dev plan new` (in the run's
   project checkout, without `-p` or `-i`) and `dev plan revise <file>` (a plan below that project's plans folder).
 - **Helpers:** a member may launch a helper for a narrow lookup or a slice of its own files. The helper gets the

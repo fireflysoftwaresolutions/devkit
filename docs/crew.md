@@ -351,9 +351,22 @@ Claude Code and Codex pass `agent_id` to every hook fired inside a subagent, and
 
 **A member's commands go to its lane.** devkit sends a member's `dev progress` and `dev crew` commands to that member's
 lane, so a subagent can never advance the main plan by mistake. From a lane, `dev progress start`, `step`, `note`, and
-`add` change the member's own lane. A member runs these commands on their own: inside a compound command (`&&`, a
-pipe, `$(…)`, a redirect) the guard refuses them. Quoted text, such as a plan with `;` between its steps, a commit
-message that mentions a command, or a message passed from a quoted heredoc, is fine. Read-only crew commands run
+`add` change the member's own lane. How a member may combine them with other commands depends on the agent:
+
+- **Claude Code.** A member's command that holds lane calls anywhere the shell runs them (two steps in one list, a
+  loop, a pipeline, `bash -c`, a background job, a prefix such as `NO_COLOR=1`) runs with
+  `export DEVKIT_FROM_AGENT=<agent id>;` in front, so every `dev` call it starts acts as the member, when the lane
+  allows everything else the command runs. Claude Code's own permission check still runs on the new command. These
+  stay refused: a command that drops that variable (`unset`, `env -i`, `env -u`, an empty assignment), a lane call
+  inside a program that gives the processes it starts an environment of its own, a lane call whose double-quoted
+  message runs a substitution, a team command, and anything else the lane refuses. The refusal names what kept the
+  command back.
+- **Codex.** Only the router places a lane call: the member runs it as the whole command, or joins it to `cd` and
+  reads with `&&`, `||`, `;`, or a newline and pipes it into a read-only filter (`| tail -5`). Anything else that
+  holds a lane call is refused (see [Guard rules › Lane calls in a list](guard.md#lane-calls-in-a-list)).
+
+Quoted text, such as a plan with `;` between its steps, a commit message that mentions a command, or a message passed
+from a quoted heredoc, is fine on both. Read-only crew commands run
 anywhere, alone or in a compound command: `dev crew` with no subcommand, `graph`, `show`, `rules`, `history`, `next`,
 `raci` without `--set`, `sync --check`, and any `--help`. Commands that change the team's crew or brief a member
 (`dev crew set`, `raci --set`, `brief`) are the tech lead's, and `dev crew sync` is refused outside the member's step
@@ -405,8 +418,9 @@ folder. The shared top level and the other members' folders hold their work, so 
 delete another's files.
 
 Each brief names the member's folder in its Scope section and tells the member to keep logs, probes, and temporary
-files there. devkit creates the folder when the member's lane opens (SubagentStart), so a read-only member, which may
-not create folders, has one too. Nothing is created when the session has no scratchpad, or for a helper that names no
+files there. devkit creates the folder when the member's lane opens (SubagentStart), so a read-only member has one too. A
+read-only member may write, copy, and delete only inside its own folder, and run the read-only probes a review needs
+there (see [Guard rules › What read-only lanes may run](guard.md#what-read-only-lanes-may-run)). Nothing is created when the session has no scratchpad, or for a helper that names no
 crew member.
 
 ### Messages
@@ -737,7 +751,7 @@ Each guardrail cites the rule of `dev crew rules` that enforces it. A rule marke
 | --- | --- |
 | Limited parallel members | a launch that does not fit its session's crew [slots](#slots) is refused with who is working: `progress.max_parallel` (4 by default) per session, lowered by your account's usage in every session, a slot kept for your own request, review and read-only members at half a slot, and resumed agents and helpers counted (`E-parallel`, `E-resumed`) |
 | Separate files for parallel members | `assign` refuses a scope that overlaps a working member's scope (`E-separate-files`) |
-| A member stays in its scope | the guard refuses its edits outside the files it was assigned (`E-scope`); a review-only or read-only member's shell runs only the read-only allowlist and its writes are detected, while a builder's shell is not checked against its scope (`E-shell-scope`) |
+| A member stays in its scope | the guard refuses its edits outside the files it was assigned (`E-scope`); a review-only or read-only member's shell runs only what a read-only lane may run (reads, probes that only read, tests, and writes inside its own scratch folder) and its other writes are detected, while a builder's shell is not checked against its scope (`E-shell-scope`) |
 | The main session respects a member's files | the guard refuses the main session's edits inside a working member's scope; `DEVKIT_SCOPE_OVERRIDE=1` for an emergency (`E-main-scope`) |
 | An ended or stale member | holds no file and no slot in any session's run and is not counted as working: `dev progress`, the Crew line, `dev crew next`, the continuity brief, and the dashboard read each lane as `dev crew owner <path>` does, and the scheduled sweep closes its lane with the reason; `dev crew delegate` and `dev progress assign` give it no new step (`E-owner`) |
 | Read-only members never edit | the Code reviewer, the Red team tester, the Performance analyst, the Compliance reviewer, the Business analyst, the Product owner, and the Lookup scout (Sparks) have no edit tools, and their helpers have none either (`E-read-only`) |
