@@ -67,6 +67,9 @@ When the failure is security-sensitive, a line says its report goes only to priv
 - **The exit code is 70.** If reporting the crash fails too, the command prints one plain line that starts with
   `devkit bug: internal error while reporting` and names both errors, and still exits with 70, never with a second
   traceback.
+- **A closed output pipe is not a crash.** When the program that reads a `dev` command's output stops early, as in
+  `dev audit --json | head -c 100`, devkit drops the rest of the output and exits with 141 (128 plus SIGPIPE, the
+  code the shell reports for `yes | head`). It prints no notice and records nothing.
 
 Security-sensitive failures always take a private path; see
 [Security reports stay private](#security-reports-stay-private).
@@ -120,7 +123,7 @@ devkit builds each report from fields it produces itself. A report is never a co
 | --- | --- |
 | **Sent, once you consent** | The devkit version and install channel (a release or a source checkout), the macOS major version, Python's major and minor version, the agent (Claude Code or Codex) and its surface, the `dev` command (its first one or two words, as devkit's own parser names them), the exception class, devkit's stack frames as `module.function`, the refusal id, the command word, the hook event name, the exit code, a duration range, the fingerprint, and the impact |
 | **Held for your review first** | Anything with free text: a title or description you or the agent wrote, the free part of a detour, and the template of an exception message |
-| **Never sent** | Paths, file names, project, owner, repository, and branch names, arguments, code, tool output, environment variables, host and user names, the handoff repository's content, the crash file, and the ledger |
+| **Never sent** | Paths, file names, project, owner, repository, and branch names, arguments, code, tool output, environment variables, host and user names, this Mac's machine id, the handoff repository's content, the crash file, and the ledger |
 
 - **Stack frames** are devkit's own, at most five, innermost first. In a source checkout, a frame whose function the
   latest release tag did not define is sent as `<local>`, so the functions you add never leave your Mac. A frame that
@@ -137,10 +140,11 @@ devkit builds each report from fields it produces itself. A report is never a co
   and long hex or base64 runs become placeholders. A template that still contains a word from this Mac's deny list is
   dropped. devkit builds the deny list from this Mac each time it needs one: every project id, owner, and repository
   name in the projects map, local branch and worktree names, git remote URLs, the handoff repository's project ids and
-  initiative slugs, git's user name and email, the user and host names, and the home folder. When it sends, it adds
-  the GitHub login that posts. A deny-list word counts however it is written: in any case; with spaces, `_`, `-`, or
-  camelCase between its parts; in fullwidth or accented letters; with look-alike Cyrillic, Greek, or Armenian
-  letters; or with zero-width characters inside it.
+  initiative slugs, git's user name and email, the user and host names, this Mac's machine id and the hostnames it
+  had before (see [Teams and machines › Machine identity](teams.md#machine-identity)), and the home folder. When it
+  sends, it adds the GitHub login that posts. A deny-list word counts however it is written: in any case; with
+  spaces, `_`, `-`, or camelCase between its parts; in fullwidth or accented letters; with look-alike Cyrillic,
+  Greek, or Armenian letters; or with zero-width characters inside it.
 - **Votes** carry only the fingerprint, the version, the impact, and the time window of their batch.
 
 ### Review held items
@@ -150,6 +154,15 @@ dev bug pending        # items held for review, printed exactly as they would be
 dev bug send 7         # send item 7 as printed (developer only)
 dev bug drop 7         # drop it (developer only)
 ```
+
+`dev bug pending` prints the exact text each item posts, rendered the same way the sender renders it:
+
+- a new bug: the issue's title and body, and the comment it becomes instead when the registry has an issue for it
+  by the time it is sent;
+- a known bug: the comment on its issue;
+- a security item: the title and text that go to private vulnerability reporting.
+
+[What a registry issue looks like](#what-a-registry-issue-looks-like) shows the format.
 
 Sending approves the exact payload: devkit stores its hash, and an item that changed after you approved it is not
 sent. Before it sends, devkit checks every field again, not only free text. An item where any field names a deny-list
@@ -195,7 +208,10 @@ A detour is one to five steps. Each step is one of:
   | `sync-retry` | `dev` | Run `` `dev bug sync` ``, then retry `` `dev <dev>` ``. |
   | `ask-update` | `version` | Ask the developer to run `` `dev update` ``: the fix is in `<version>`. |
 
-- **A `dev` command** made only of devkit's own subcommands and flags that take no value.
+- **A `dev` command** made only of devkit's own subcommands and flags that take no value, such as `test --failed`:
+  no values, arguments, or paths. A leading `dev` is accepted, so `--dev "dev push"` records the step `push`. A
+  refused step says, word by word, which word is a value or an argument and which flag takes a value or is not one
+  of that command.
 - **Free text** of at most 200 characters. A detour with free text is held for review on its author's Mac and never
   reaches agents until a maintainer confirms it. Free text that names something of this Mac (a project, a path, a
   URL, an email address, or a token) is refused, not scrubbed: a placeholder would help no other agent.
@@ -209,7 +225,8 @@ dev bug detour 3f9a1c2e7b10 --dev "bug sync" --text "Retry once the cache is fre
 ```
 
 Both devkit and the registry's workflow reject any step with a URL, a pipe, a redirect, `;`, `&&`, `$(`, a backtick,
-non-printable or right-to-left characters, or a path under devkit's or the agents' configuration folders.
+non-printable or right-to-left characters, or a path under devkit's or the agents' configuration folders. Free text
+is never run as a command: these forms are refused so that no step can read as one.
 
 A **member** below is an account GitHub shows as an owner or member of the organization, or a maintainer listed in
 `.github/bug-registry-maintainers` (see [Maintainers](#maintainers)).
@@ -242,8 +259,14 @@ and records it for the GitHub account `gh` is signed in with:
 ```text
 Reports, votes and workarounds are posted publicly on github.com/fireflysoftwaresolutions/devkit under your GitHub
 account `<login>`. They are public and permanent: deleting a comment does not remove it from notification e-mails or
-public archives. Only devkit facts are sent, never anything about your projects.
+public archives. devkit's workflow writes and updates the text of issues you open. Only devkit facts are sent, never
+anything about your projects.
 ```
+
+GitHub shows an issue as opened by the account that filed it, while the registry's workflow writes and rewrites its
+title and text (see [What a registry issue looks like](#what-a-registry-issue-looks-like)); the issue's edit history
+shows the bot's edits. [Your data in the registry](#your-data-in-the-registry) says what stays public and for how
+long.
 
 Give or change it with `dev bug share`, which is yours alone (see [Developer-only commands](#developer-only-commands)):
 
@@ -268,10 +291,10 @@ Give or change it with `dev bug share`, which is yours alone (see [Developer-onl
 | `dev bug show <number\|fingerprint>` | One bug: versions, votes, detours with their trust, related lessons | Anyone |
 | `dev bug search <words\|fingerprint>` | Finds bugs by generated title or fingerprint | Anyone |
 | `dev bug report [fingerprint] [--title "…"] [--guard [refusal id]] [--security]` | Files a bug, or votes on a known one. `--guard` with no id takes this session's last refusal | Anyone |
-| `dev bug detour <fingerprint> --hint "…"\|--dev "…"\|--text "…"` | Records a detour of one to five steps, after the evidence check | Anyone |
+| `dev bug detour <fingerprint> --hint "…"\|--dev "…"\|--text "…"` | Records a detour of one to five steps, after the evidence check. A `--dev` step may start with `dev` | Anyone |
 | `dev bug top [--task]` | Hotfix recommendations | Anyone |
 | `dev bug sync` | Refreshes the cache and sends what waits in the outbox | Anyone |
-| `dev bug pending` | Items held for review, printed exactly as they would be sent | Anyone |
+| `dev bug pending` | Items held for review, with the exact issue title, body, or comment each would post | Anyone |
 | `dev bug send <id>` · `dev bug drop <id>` | Sends or drops a held item | Developer only |
 | `dev bug confirm <bug> <detour>` | Confirms a detour (maintainers) | Developer only |
 | `dev bug share on\|reports\|off` | Your consent to post (see [Consent and identity](#consent-and-identity)) | Developer only |
@@ -324,8 +347,11 @@ seen again on a fixed version is sent as a vote with the newer version, which th
   are batched into at most one comment per issue a day, sent after a random delay of up to an hour.
 - **One record per bug, written by the bot.** The registry's workflow folds the payloads into a single comment written
   by `github-actions[bot]`: a short summary for people, then one block of data with the fingerprint, kind, versions,
-  distinct voters, impact counts, score, status, fix version, and detours. devkit reads only that comment. Issue
-  titles and bodies are written by people, so devkit never parses them and never shows them to agents.
+  distinct voters, impact counts, score, status, fix version, and detours. devkit reads only that comment.
+- **Issue text people can read, written from the record.** The workflow writes each issue's title and body from the
+  record and the first report (see [What a registry issue looks like](#what-a-registry-issue-looks-like)). devkit
+  never parses an issue's title or body. Agents see only the record's fields and its title, which comes from
+  devkit's own title table, never from a person.
 - **Reading.** `dev bug sync`, and the hourly `sync` job, fetch the issues labeled `devkit-bug` (open ones, and those
   closed in the last 90 days) with their bot records, through `gh` when you are signed in and anonymously otherwise
   (GitHub allows 60 anonymous requests an hour). The cache keeps the 500 highest-scored bugs, at most 25 opened by any
@@ -340,6 +366,119 @@ seen again on a fixed version is sent as a vote with the newer version, which th
   `dev bug report` or `dev bug detour`: devkit checks what leaves this machine. A comment on a pull request goes
   through `gh pr comment` or `dev pr comment`." No grant opens it.
 
+### What a registry issue looks like
+
+Each issue says what broke, how much it hurts, and what to do, before any data. devkit writes the first version when
+it files the bug, and the workflow writes the same text from then on, so the two never disagree.
+
+**The title** comes from devkit's title table, `config/bug-titles.json`: one entry for each guard refusal id, and one
+for each other kind. It says what the reader saw, with devkit's part as the subject, in at most 80 characters, with
+no backticks, quotes, or fingerprints:
+
+| Kind | Title |
+| --- | --- |
+| `guard` | The refusal id's own title, such as `Guard refuses a crew member command when its lane check fails` |
+| `crash` | `dev <command> crashes with <error>`, or `devkit crashes with <error>` when no command is known |
+| `hook` | `<Event> hook fails with <error>`, or `<Event> hook runs out of time` |
+| `command` | `dev <command> does not work as expected` |
+
+Only allowlisted report fields fill a title: the public command word, the `dev` command, the hook event, and the
+exception class. Free text never does. A refusal id keeps the title of the meaning it had when the bug was first
+seen, so an id whose meaning changed later does not rename an older bug. The `[bug]` prefix of earlier titles is
+gone; the `devkit-bug` and `kind:*` labels say it.
+
+**The body** opens with a sentence from the title table and five facts, then sections in a fixed order. For a crash
+of `dev progress step` that three people hit, it reads:
+
+```markdown
+`dev progress step` stopped with an error devkit does not handle (KeyError). devkit printed a short notice instead of a traceback and exited with code 70.
+
+- **Status:** Open. Not triaged yet.
+- **Impact:** Blocks work for 2 of 3 people; 1 got around it with a workaround.
+- **How often:** 3 people in the last 30 days, on 3 days. First seen 2027-01-15, last seen 2027-01-17.
+- **Versions:** seen on 26.11.16.
+- **Workaround:** None known yet.
+
+## How to reproduce
+
+Run `dev progress step`.
+
+- Command: `dev progress step`
+- Error: `KeyError`
+- devkit's stack, innermost first: `progress.step`, `work.actor_str`
+- First report: Claude Code, macOS 27, Python 3.15, a release install, devkit 26.11.16
+
+## If you hit this bug
+
+This is a bug in devkit, not in your project. In a terminal:
+
+- `dev bug show fa07ec67c27c` shows this bug and its workarounds.
+- `dev bug report fa07ec67c27c` counts you in, so the bug ranks higher for the next fix. devkit sends devkit facts only, never anything about your projects.
+- `dev bug detour fa07ec67c27c` records a workaround you found. devkit checks its evidence before it reaches anyone else.
+
+## For maintainers
+
+- Fingerprint `fa07ec67c27c`, kind `crash`, component `progress`, score 10.0 (`dev bug top` ranks it).
+- The workflow's record of this bug is its first comment. This text is written from it.
+
+<details>
+<summary>Report data for devkit's registry (do not edit)</summary>
+
+(the first report, as one JSON block)
+
+</details>
+
+_devkit's registry workflow writes this text from the reports and rewrites it after each report, vote, or release. Write in a comment instead. …_
+```
+
+- **Status** says `Open.`, `Fixed in <version>: run dev update to get it.`, `Regressed: …`, or `Duplicate of #<n>.`,
+  followed by the maintainer's verdict (see [Labels](#labels)) or `Not triaged yet.`
+- **Workaround** says whether a maintainer confirmed one, a team agent found one, or proposals wait for review. A
+  `## Workaround` section lists the detours agents are served, and only those: a proposed detour shows only as a
+  count. When the served detours would push the body past 60,000 characters, the section shows the ones that fit and
+  one line says how many more `dev bug show` lists. The report data block is never cut.
+- **How to reproduce** asks an agent to run the command, because the guard judges only an agent's calls; a command
+  that deletes or rewrites runs in a throwaway repository. A guard bug adds its refusal id and command word, a crash
+  or hook its error, stack, and error message template, and a `command` report the reporter's own description.
+- **The report data** sits in a collapsed `<details>` block, the body's only fenced block, which the workflow reads
+  while the issue has no record yet.
+
+Free text (a reporter's description, an error message template, the free part of a confirmed detour) appears only in
+the reporter's own issue or comment, only after the reporter reviewed it, and only escaped: no mention, issue
+reference, link, HTML tag, table cell, or code fence can start in it. The record keeps the first report without its
+free text, so when a reporter removes that text from the issue's report block, the next rewrite leaves it out.
+
+**Comments** open with one plain line, and keep their data in a collapsed block:
+
+| Comment | Plain line |
+| --- | --- |
+| Record (by the workflow) | `**Bug <fingerprint>** · <kind> · <component> · <n> people · score <score> · <status>`, then one sentence; the component is left out when it equals the kind |
+| Report | `**devkit report** · <impact> · devkit <version> · <agent>, macOS <n>` |
+| Vote | `**devkit vote** · <impact> · devkit <version> · <day>. The workflow counts it and deletes this comment.` |
+| Detour | `**Workaround proposed** for devkit <version> and later: <the steps> The registry decides how far it is trusted; see the issue text.` |
+| Confirmation · failure mark | `**Workaround <id> confirmed** on devkit <version>.` · `**Workaround <id> failed** on devkit <version>.` |
+
+The data blocks parse exactly as before, so every released client reads the new records.
+
+### Your data in the registry
+
+The registry is public: anyone can read its issues and comments on GitHub.
+
+| What | Where it shows | How long |
+| --- | --- | --- |
+| Your GitHub login | On each issue you opened and each comment devkit posted for you | Until you delete the comment; votes, confirmations, and failure marks are deleted by the workflow once it folds them |
+| The devkit facts of a report (see [What is sent, and what never is](#what-is-sent-and-what-never-is)) | Your report comment, or the issue you opened | Until the issue or comment is deleted |
+| Free text you approved | Escaped, and only in your own issue or your own comment | Until you remove it; the next rewrite of the issue follows |
+| Your account in the record | A keyed hash of your account id, never your login, inside the record's collapsed block | Every write of the record drops accounts quiet for 90 days: their votes, regression marks, and detour marks. A team member's older confirmation or failure mark stays as a placeholder without the account's hash, so a detour's trust does not change |
+
+- **Stop posting.** `dev bug share off` stops all posting from this Mac; everything else keeps working locally (see
+  [Consent and identity](#consent-and-identity)).
+- **Remove what you posted.** Delete your own comments on GitHub, or edit the report block of an issue you opened to
+  take out your free text. GitHub's notification e-mails and public archives may keep a copy, as the consent says.
+- **Ask for removal.** The repository's maintainers handle removal requests. Ask in a comment on the issue, or
+  through [private vulnerability reporting](../SECURITY.md#report-a-vulnerability) when the request itself names
+  something private.
+
 ## For maintainers
 
 ### The registry workflow
@@ -347,8 +486,10 @@ seen again on a fixed version is sent as a vote with the newer version, which th
 `.github/workflows/bug-registry.yml` runs `tools/bug_registry_action.py`, which uses the same parsing, validation, and
 scoring code as the client (`lib/devkit/bugs.py`), so the two cannot disagree.
 
-- **Triggers:** an issue opened, a comment created, a release published. A pull request comment, or an issue or
-  comment without a fenced `json` block, starts no job, so comment spam queues nothing.
+- **Triggers:** an issue opened, a comment created, a label added, a release published, and a manual run
+  (`workflow_dispatch`, see [Rewrite every issue](#rewrite-every-issue)). No job starts for a pull request comment, for an
+  issue or a comment without a fenced `json` block, or for a label other than a `verdict:*` label, so spam queues
+  nothing.
 - **Folding:** each run reads every payload comment on the issue that is not folded yet, in comment order, so a run
   the concurrency group cancels loses nothing. It validates each payload, folds it into the record, recomputes the
   score, and deletes the vote, confirmation, and failure comments it folded. Report and detour comments stay. An
@@ -356,10 +497,16 @@ scoring code as the client (`lib/devkit/bugs.py`), so the two cannot disagree.
   too deep): any error while checking a payload marks it invalid, and folding goes on. A report counts only when its
   fingerprint is the one its kind, exception class, frames, refusal id, and command word give; the workflow
   recomputes it. A record a maintainer edited by hand is rewritten on the next fold.
-- **Labels and titles:** the workflow applies the labels after it validates the issue's first payload, because GitHub
-  drops labels set by people without push access, and it replaces the title with one generated from the report, such
-  as `[bug] crash in dev progress step: KeyError`. An issue whose first payload fails validation gets no label, and
-  devkit ignores it.
+- **Labels:** the workflow applies the labels after it validates the issue's first payload, because GitHub drops
+  labels set by people without push access. An issue whose first payload fails validation gets no label, and devkit
+  ignores it.
+- **Title and text:** every write of a record also writes the issue's title and body from it when their text
+  differs: after each fold, on a release that marks the bug fixed, on a verdict label, on a duplicate (which reads as
+  the first issue's bug, with `Duplicate of #<n>`), and in the manual run. The body is read again just before it is
+  written, so an edit made meanwhile is written from as it is then. A body edited by hand is overwritten on the next
+  event; the footer asks people to comment instead. The record keeps `first` (the first report without its free
+  text), so the body renders from the record alone, and counts `days_seen` with `last_day`, the days the bug was
+  seen. A record from an earlier release takes `first` from its issue body on its first rewrite.
 - **Distinct voters** are counted by GitHub account, stored as an HMAC of the account id keyed with the
   `BUG_REGISTRY_KEY` secret, never as the login.
 - **Abuse limits:** at most 20 folded payloads per account per day across the registry; failure marks from
@@ -370,15 +517,22 @@ scoring code as the client (`lib/devkit/bugs.py`), so the two cannot disagree.
   the previous release, by a merged pull request, by a member, or by hand by a listed maintainer. A draft or a
   prerelease marks nothing.
 - **Output:** the record escapes backticks, angle brackets, and `@`, so no value can close the data block or the
-  comment marker, mention someone, or add a second block.
-- **Record size:** a record stays under 60,000 characters, because GitHub refuses a comment over 65,536. When it
-  would grow past that, voters quiet for 90 days go first, then all but the newest 100 voters of each impact become
-  per-impact totals that the score and the count of people still include. If GitHub still refuses a record, the run
-  keeps the old record with this run's progress and fails.
+  comment marker, mention someone, or add a second block. The issue text escapes free text with HTML entities, with
+  a zero-width word joiner after `@` and `#` and inside `://` and `www.`, so no mention, issue reference, or link
+  forms.
+- **Accounts quiet for 90 days:** every write of a record (a fold, a release, a label, or the manual run) drops the
+  voters and voter totals older than 90 days, the regression marks of voters it no longer names, a fold count of a
+  day that long ago, and the detour marks of accounts outside the team. A team member's older confirmation or
+  failure mark stays as a placeholder, so a confirmed workaround stays served and a retired one stays retired.
+- **Size:** a record and an issue body each stay under 60,000 characters, because GitHub refuses a comment or a body
+  over 65,536. When a record would grow past that, all but the newest 100 voters of each impact become per-impact
+  totals that the score and the count of people still include. If GitHub still refuses a record, the run keeps the
+  old record with this run's progress and fails.
 - **Hardening:** no permissions at the top, and `issues: write` and `contents: read` on its one job; the default
   branch checked out without persisted credentials, by GitHub's own checkout action pinned to a commit; no
   third-party actions and no package installs; event text read from the event file, never placed in a `run:` line; a
-  5-minute timeout; one concurrency group per issue or release that cancels no running job.
+  5-minute timeout, or 30 minutes for the manual run; one concurrency group per issue, per release, and for the
+  manual run, that cancels no running job.
 - **Without the key** the run folds nothing and fails with a message that says how to create it.
 
 ### Maintainers
@@ -421,8 +575,39 @@ Changing the key later splits every bug's voter count into old and new voters, s
 | `kind:crash` · `kind:hook` · `kind:guard` · `kind:command` | Its kind |
 | `regression` | Seen again on a version at or after its fix |
 
-The workflow creates and applies them; nobody sets them by hand. To cut notification noise, unsubscribe from the
+The workflow creates and applies these; nobody sets them by hand. To cut notification noise, unsubscribe from the
 issues of the `devkit-bug` label.
+
+**Verdict labels** are the one label a maintainer with triage access sets. Add one to say what a bug is, and the
+issue's Status line states its sentence:
+
+| Label | Sentence in the issue |
+| --- | --- |
+| `verdict:confirmed` | Confirmed as a devkit bug. |
+| `verdict:false-positive` | Confirmed: the guard refused a command it should allow. |
+| `verdict:correct-refusal` | The refusal is right, and the guard keeps refusing this. |
+| `verdict:misleading-message` | The refusal is right, but its message was misleading. |
+| `verdict:split` | Split: the refusals this issue collected now report under ids of their own. |
+| `verdict:needs-info` | Needs more reports to find the cause. |
+| `verdict:not-planned` | Not planned: devkit keeps this behavior. |
+
+With more than one verdict label, the one added last counts; when it is taken off, the next event uses one that is left.
+The verdict goes into the record's `triage` and changes the issue's text only: agents are served nothing new.
+
+### Rewrite every issue
+
+Issues get the current format at their next event. After a release that changes how registry issues read, rewrite
+them all at once, from an account with write access:
+
+```bash
+gh workflow run bug-registry.yml --repo fireflysoftwaresolutions/devkit
+```
+
+The run creates the verdict labels the repository lacks, then rewrites the title, body, and record of every registry
+issue, open or closed in the last 90 days, without folding anything: the score and what each bug has seen stay as
+they are, and accounts quiet for 90 days go, as on any write. It waits at least a second between requests and stops
+after 200 issues, printing how many are left. An issue whose text is current costs one read, so running it again
+goes on where it stopped.
 
 ### Plan a hotfix
 
@@ -431,7 +616,8 @@ issues of the `devkit-bug` label.
 3. Review the proposed detours in `dev bug show <number>`, in your terminal, and confirm the good ones with
    `dev bug confirm <bug> <detour>`. Your confirmation counts only for a detour someone else wrote, and only when you
    are a member or a listed maintainer.
-4. Fix each bug in a pull request that says `Fixes #<n>`, and release by the delivery policy; the release sets
+4. Give each bug you triaged a `verdict:*` label (see [Labels](#labels)), so its issue says what it is.
+5. Fix each bug in a pull request that says `Fixes #<n>`, and release by the delivery policy; the release sets
    `fixed_in`.
 
 ## Local files
