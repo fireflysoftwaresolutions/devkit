@@ -20,7 +20,9 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from devkit import bugs, cli, core, progress, work  # noqa: E402
+from devkit import bugs, cli, core, identity, progress, work  # noqa: E402
+
+DENY_WORDS = bugs.deny_words  # the real one: BugCLI replaces it with a fixed list
 from test_bugs_sync import FakeClient, _bot, _issue, _record  # noqa: E402
 
 NOW = time.time()
@@ -192,6 +194,38 @@ class ReportTests(BugCLI):
         self.assertEqual(rc, 1)
         self.assertIn("dev bug ls --local", out)
         self.assertEqual(self.outbox(), [])
+
+
+class MachineNameTests(BugCLI):
+    # The machine id and the hostnames this Mac carried before name it as surely as its hostname now, but this Mac's
+    # private words left them out, so a detour's free text could carry them into the public registry
+    def setUp(self):
+        super().setUp()
+        self.name = "Mac-158.lan"
+        for p in (mock.patch.object(bugs, "deny_words", DENY_WORDS),
+                  mock.patch.object(bugs, "_git_identity", lambda: ("", "")),
+                  mock.patch.object(bugs, "_host_names", lambda: [self.name]),
+                  mock.patch.object(core, "STATE", self.root / "state"),
+                  mock.patch("socket.gethostname", side_effect=lambda: self.name)):
+            p.start()
+            self.addCleanup(p.stop)
+        identity.machine()  # devkit ran here as mac-158 ...
+        self.name = "andress-mbp-2"  # ... and the network renamed the Mac
+        bugs.note_refusal("s1", "_check_sed", "sed")
+        bugs.ledger_append("s1", "Edit", True, "", [])
+
+    def detour(self, text):
+        return self.dev("detour", bugs.guard_fingerprint("_check_sed", "sed"), "--hint", "use-tool tool=Edit word=sed",
+                        "--text", text)
+
+    def test_a_detour_never_carries_the_machine_id_or_a_former_hostname(self):
+        for text in (f"then rerun the tests on {identity.machine().id}", "then rerun the tests on mac-158"):
+            with self.subTest(text=text):
+                rc, out = self.detour(text)
+                self.assertEqual(rc, 1, out)
+                self.assertIn("names something of this Mac", out)
+        rc, out = self.detour("then rerun the tests")
+        self.assertEqual(rc, 0, out)
 
 
 class DetourTests(BugCLI):

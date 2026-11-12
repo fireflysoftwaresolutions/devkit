@@ -666,8 +666,9 @@ def private_words(login: str) -> frozenset:
 def deny_words() -> frozenset:
     """This machine's private words, in lower case: project ids (whole and their parts), owners and repository
     names of the projects map, their local branch names, worktree folder names and remote URLs, the handoff
-    repository's project ids and initiative slugs, git's user name and e-mail, the user and host names and the home
-    folder. Words shorter than 3 characters, devkit's own repository, public hosts,
+    repository's project ids and initiative slugs, git's user name and e-mail, the user and host names, this Mac's
+    machine id and the hostnames it carried before (identity.machine), and the home folder. Words shorter than 3
+    characters, devkit's own repository, public hosts,
     default branches and branch type prefixes are left out. A backstop: what a report carries is decided by its
     allowlist."""
     import getpass
@@ -728,6 +729,11 @@ def deny_words() -> frozenset:
         add(domain, ".")
     for i, host in enumerate(_host_names()):
         add(host, "." if i == 0 else "")  # the computer names stay whole: their parts are words like "pro"
+    from . import identity
+    m = identity.machine()
+    add(m.id)  # the handoff names this Mac by it
+    for former in m.aliases:  # the hostnames this Mac carried name it as surely as the one it carries now
+        add(former)
     home = Path.home()
     add(str(home))
     add(home.name)
