@@ -2531,5 +2531,25 @@ class OwnRunFirstTests(unittest.TestCase):
             self.assertEqual([r["goal"] for r in pg.active_runs(first=("claude", "s1"))], ["Mine", "Theirs"])
 
 
+class PartialEvidenceTests(KidSyncCase):
+    # part of B-g7g1e0a8l9g: `dev progress step` could not record a long step's proof without closing it, and the
+    # crew gate wanted a step record; partial evidence goes on the step while it stays open
+    def test_a_members_partial_evidence_keeps_its_step_running(self):
+        check = "⚠ 9 unit tests pass; the PostgreSQL tests are written, not run"
+        run = pg.note("PostgreSQL tests written", which="sync", check=check, from_agent="k1", now=self.m(10))
+        sync = run["plan"][0]
+        self.assertEqual(sync["state"], "running")
+        self.assertEqual((sync["partial"][-1]["check"], sync["partial"][-1]["by"]), (check, "k1"))
+        up = run["agents"]["k1"]["updates"][-1]
+        self.assertEqual((up["kind"], up["step"], up["check"]), ("note", "sync", check))
+
+    def test_the_tech_leads_partial_evidence_names_a_step_of_the_plan(self):
+        run = pg.note("docs drafted", which="docs", check="✓ dev docs check clean", now=self.m(10))
+        self.assertEqual((run["plan"][1]["state"], run["plan"][1]["partial"][-1]["by"]), ("pending", "main"))
+        with self.assertRaises(pg.StepError) as e:
+            pg.note("half done", which="release", check="✓ x", now=self.m(11))
+        self.assertIn("1. sync; 2. docs", str(e.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

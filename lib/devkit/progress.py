@@ -5055,9 +5055,12 @@ def _recheck_dependents(run, s, now):
 
 
 def note(text: str, nxt: str = "", cwd: str | None = None, from_agent: str | None = None,
-         now: float | None = None) -> dict:
+         now: float | None = None, which=None, check: str = "") -> dict:
     """An update while a step is still running: recorded and shown (it resets the silence timer), and no step
-    changes state. `dev progress step` is for a step that is finished."""
+    changes state. `dev progress step` is for a step that is finished. `which` and `check`: partial evidence for a
+    step that is not finished (`dev progress note "…" --step <name> --check "…"`, part of B-g7g1e0a8l9g), kept on
+    that step (`partial`, its last 5) and in the update, while the step stays as it is; a member's goes on a step its
+    lane holds, and stays in its lane for any other step."""
     now = now or time.time()
     from_agent = _as_lane(from_agent, cwd)
     if not (text or "").strip():
@@ -5067,7 +5070,16 @@ def note(text: str, nxt: str = "", cwd: str | None = None, from_agent: str | Non
         run = normalize(load_run(agent, sid) or {})
         if not run.get("goal"):
             raise StepError("no progress run in this session: dev progress start \"<goal>\" --plan \"…\"")
-        u = {"ts": round(now), "kind": "note", "text": text.strip(), "next": nxt, "check": ""}
+        named = _find_step(run, which) if which not in (None, "") else None
+        if which not in (None, "") and not named:
+            raise StepError(f"no step “{which}” in the plan: " + "; ".join(
+                f"{i}. {s['name']}" for i, s in enumerate(run.get("plan") or [], 1)))
+        u = {"ts": round(now), "kind": "note", "text": text.strip(), "next": nxt, "check": (check or "").strip()}
+        if named:
+            u["step"] = named["name"]
+            if u["check"] and (not from_agent or named.get("owner") == from_agent):
+                named["partial"] = (named.get("partial") or [])[-4:] + [
+                    {"ts": u["ts"], "by": from_agent or "main", "text": u["text"], "check": u["check"]}]
         if from_agent:  # a member's note stays in its lane
             lane = _lane(run, from_agent, now)
             lane["updates"] = (lane.get("updates") or [])[-19:] + [u]
