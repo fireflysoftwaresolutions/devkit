@@ -521,11 +521,77 @@ class ReadOnlyLanes(Case):
 
     def test_an_inline_program_that_only_reads_runs(self):
         for cmd in ("python3 -c 'import json; print(json.load(open(\"p.json\")))'",
-                    "python3 - <<'EOF'\nimport ast\nprint(len(ast.parse(open('lib/a.py').read()).body))\n"
-                    "open('@P/out.txt', 'w').write('x')\nEOF",
+                    "python3 - <<'EOF'\nimport ast\nprint(len(ast.parse(open('lib/a.py').read()).body))\nEOF",
+                    "python3 -c 'from pathlib import Path; print(sorted(p.name for p in Path(\"lib\").glob(\"*.py\")))'",
+                    "python3 -c 'import re, sys; print(re.sub(\"a\", \"b\", open(sys.argv[1], \"rb\").read().decode()))' f",
+                    "node -e 'const fs = require(\"fs\"); console.log(fs.readdirSync(\"lib\").filter(f => f.endsWith(\".js\")))'",
                     "node -e 'console.log(require(\"fs\").readFileSync(\"package.json\", \"utf8\").length)'"):
             with self.subTest(cmd=cmd):
                 self.assertIsNone(self.ro(cmd))
+
+    # the Red team tester's second round: a read-only lane's program writes nothing, whatever module, alias, mode or
+    # path it uses; the member writes its scratch files with the shell
+    WRITERS = (
+        'python3 -c \'import tempfile; f = tempfile.NamedTemporaryFile(dir="lib", suffix=".py", delete=False); f.write(b"x")\'',
+        'python3 -c \'import tempfile; tempfile.mkstemp(dir="@C/lib")\'',
+        'python3 -c \'import tempfile; tempfile.mkdtemp(prefix="../../../../../tmp/esc", dir="@P")\'',
+        'python3 -c \'import argparse; argparse.FileType("w")("lib/a.py").write("x")\'',
+        'python3 -c \'import xml.etree.ElementTree as ET; ET.ElementTree(ET.Element("a")).write("lib/a.py")\'',
+        'python3 -c \'from xml.etree.ElementTree import ElementTree, Element; ElementTree(Element("a")).write("lib/a.py")\'',
+        'python3 -c \'from pathlib import Path; p = Path("lib/a.py"); w = p.write_text; w("x")\'',
+        'python3 -c \'from pathlib import Path; [Path("lib/a.py")][0].write_text("x")\'',
+        'python3 -c \'from pathlib import Path; Path("lib", "a.py").write_text("x")\'',
+        'python3 -c \'from pathlib import Path; (Path("lib") / "a.py").write_text("x")\'',
+        'python3 -c \'from pathlib import Path; Path("@P/out/sub/f").write_text("x")\'',
+        'python3 -c \'from pathlib import Path; Path("@P").joinpath("../kid/x").write_text("x")\'',
+        'python3 -c \'from pathlib import Path; Path("@P/a").with_name("../../kid/x").write_text("x")\'',
+        'python3 -c \'from pathlib import Path; Path("@P/a").parent.parent.joinpath("kid", "x").write_text("x")\'',
+        'python3 -c \'import os; e = os.environ; e["PATH"] = "/x"\'',
+        'python3 -c \'import contextlib; print("x", file=contextlib.closing(open("lib/a.py", "w")).thing)\'',
+        "python3 -c 'import csv, sys; csv.writer(sys.stdout).writerow([1])' > lib/a.py",
+        'python3 -c \'import sys; sys.stdout.reconfigure(errors="x"); f = sys.stdout; f.write("x")\'',
+        'python3 -c \'import io; io.TextIOWrapper(open("lib/a.py", "rb+")).write("x")\'',
+        'python3 -c \'open("lib/a.py", "rb+").write(b"x")\'',
+        'python3 -c \'open("lib/a.py", mode="r+").write("x")\'',
+        'python3 -c \'open(file="lib/a.py", mode="w").write("x")\'',
+        'python3 -c \'open("lib/a.py", "r", opener=None, newline=None).write("x")\'',
+        'python3 -c \'open("lib/a.py", *["w"]).write("x")\'',
+        'python3 -c \'open("lib/a.py", **{"mode": "w"}).write("x")\'',
+        'python3 -c \'m = "w"; open("lib/a.py", m).write("x")\'',
+        'python3 -c \'open("lib/a.py", "w" if True else "r").write("x")\'',
+        'node -e \'require("fs").copyFileSync("@P/a", "lib/a.py")\'',
+        'node -e \'require("fs").renameSync("@P/a", "lib/a.py")\'',
+        'node -e \'require("fs").cpSync("@P/a", "lib/", {recursive: true})\'',
+        'node -e \'require("fs").linkSync("lib/a.py", "@P/h")\'',
+        'node -e \'require("fs").symlinkSync("/Users", "@P/l")\'',
+        'node -e \'const { writeFileSync: w } = require("fs"); w("lib/a.py", "x")\'',
+        'node -e \'const fs = require("fs"); const w = fs.writeFileSync; w("lib/a.py", "x")\'',
+        'node -e \'require("fs").writeFileSync.call(null, "lib/a.py", "x")\'',
+        'node -e \'require("fs").writeFileSync.apply(null, ["lib/a.py", "x"])\'',
+        'node -e \'require("fs").writeFileSync(`lib/a.py`, "x")\'',
+        'node -e \'require("fs").writeFileSync("@P/" + "../kid/x", "x")\'',
+        'node -e \'require("fs").writeFileSync("@P/x", "x"); require("fs").writeFileSync(process.argv[1], "x")\' lib/a.py',
+        'node -e \'const fs = require("fs"); fs.promises.writeFile("lib/a.py", "x")\'',
+        'node -e \'const s = require("stream"); const fs = require("fs"); fs.writeSync(fs.openSync("@P/x", "w"), "x"); fs.writeSync(1, "x")\'',
+        'node -e \'const fs = require("fs"); const fd = fs.openSync("@P/x", "w"); fs.closeSync(fd); fs.truncateSync("lib/a.py")\'',
+        'node -e \'const fs = require("fs"); fs.rmSync("lib", {recursive: true, force: true})\'',
+        'node -e \'const fs = require("fs"); fs.rmSync("@P/x"); fs.rmdirSync("lib")\'',
+        'node -e \'const fs = require("fs"); fs.utimesSync("lib/a.py", 0, 0)\'',
+        'node -e \'const fs = require("fs"); fs.appendFileSync("lib/a.py", "x")\'',
+        'node -e \'const fs = require("fs"); fs.writeSync(fs.openSync("lib/a.py", "r+"), "x")\'',
+        'node -e \'const {open} = require("fs/promises"); open("lib/a.py", "w")\'',
+        'node -e \'const fs = require("fs"); fs.createWriteStream("@P/x"); new fs.WriteStream("lib/a.py")\'',
+        'node -e \'const z = require("zlib"); const fs = require("fs"); fs.writeFileSync("@P/x", z.gzipSync("x"))\'',
+        'node -e \'process.chdir("lib"); require("fs").writeFileSync("@P/../../../../../../../../..@C/lib/a.py", "x")\'',
+        'node -e \'process.env.NODE_OPTIONS = "--require=/x"; require("os").setPriority(0)\'',
+        'node -e \'require("util").promisify(require("fs").writeFile)("lib/a.py", "x")\'',
+        "python3 -c 'open(\"@P/out.txt\", \"w\").write(\"x\")'",
+        "node -e 'require(\"fs\").writeFileSync(\"@P/x\", \"x\")'")
+
+    def test_a_program_writes_nothing_in_a_read_only_lane(self):
+        for cmd in self.WRITERS:
+            with self.subTest(cmd=cmd):
+                self.assertIsNotNone(self.ro(cmd.replace("@C", CWD)))
 
     def test_an_inline_program_that_writes_links_or_starts_a_process_stays_refused(self):
         for cmd in ("python3 -c 'open(\"lib/a.py\", \"w\").write(\"x\")'",

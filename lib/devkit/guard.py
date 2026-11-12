@@ -10054,15 +10054,55 @@ def _js_write_paths(code) -> tuple:
 
 
 def _js_reader_why(code, cwd=None, member=None) -> str:
-    """'' when a JavaScript program a read-only lane runs only reads, or writes paths written out inside crew member
-    `member`'s own scratch folder; else why not."""
-    paths, why = _js_write_paths(code)
-    if why:
-        return why
-    for q in paths:
-        why = _ro_scratch_target(q, cwd, member) if cwd else "a file"
-        if why:
-            return f"this program writes {why}"
+    """'' when a JavaScript program a read-only lane runs only reads (_js_strict_reader), else why not. A read-only
+    lane's program writes nothing at all: the member writes its scratch files with the shell."""
+    return _js_strict_reader(code)
+
+
+# what a read-only lane's JavaScript program may name after a dot: fs's and path's reads, JSON, console, process's
+# arguments and output, and the methods of strings, arrays, maps, sets, numbers, regular expressions and stats
+_JS_READ_MEMBERS = frozenset("""readFileSync existsSync readdirSync statSync lstatSync realpathSync join resolve
+    dirname basename extname relative sep normalize isAbsolute parse format posix log error warn info table dir argv
+    env cwd exit exitCode stdout stderr parse stringify length split map filter forEach reduce reduceRight slice
+    splice trim trimStart trimEnd includes startsWith endsWith replace replaceAll toString keys values entries push
+    pop shift unshift sort reverse indexOf lastIndexOf match matchAll test exec padStart padEnd toFixed some every
+    find findIndex findLast concat flat flatMap toLowerCase toUpperCase repeat size has get set add delete clear
+    isFile isDirectory isSymbolicLink mtimeMs mtime ctimeMs birthtimeMs mode charAt charCodeAt codePointAt at fill
+    from isArray assign freeze max min abs floor ceil round sqrt pow random now localeCompare toISOString getTime
+    lastIndex source flags groups index input name message stack""".split())
+_JS_READ_MODULES = frozenset({"fs", "node:fs", "path", "node:path"})
+
+
+def _js_strict_reader(code) -> str:
+    """'' when a JavaScript program only reads: it requires only fs and path by a literal name, each bound whole to a
+    plain name (no destructuring) or used in place, names after a dot only members of _JS_READ_MEMBERS (`write`
+    only as process.stdout.write and process.stderr.write), indexes a module with no computed member, passes no
+    module as a value, and uses no import, eval, Function, .call, .apply, .bind, promisify or globalThis. Else why
+    not."""
+    bare = _outside_strings(code or "")
+    for m in re.finditer(r"\brequire\s*\(\s*(['\"])([^'\"]*)\1\s*\)", code or ""):
+        if m.group(2) not in _JS_READ_MODULES:
+            return f"this program loads {_code(m.group(2))}, and a read-only lane's program uses only fs and path reads"
+    if re.search(r"\brequire\s*\(\s*(?!['\"][^'\"]*['\"]\s*\))", code or "") or \
+            re.search(r"\bimport\b|\beval\b|\bFunction\b|\bglobalThis\b|\.\s*(?:call|apply|bind)\s*\(|"
+                      r"\bpromisify\b|\bconstructor\b|\bmodule\b|\bprocess\s*\.\s*(?:binding|mainModule|dlopen)", bare):
+        return "this program loads code, or calls a function, in a way a read-only lane's reader may not"
+    if re.search(r"[{,]\s*[^=;]*\}\s*=\s*require\b", bare):
+        return "this program takes functions out of a module by destructuring; use `fs.readFileSync(…)` in place"
+    mods = set(re.findall(r"\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*require\s*\(", bare))
+    for name in mods:
+        rest = re.sub(r"\b(?:const|let|var)\s+" + re.escape(name) + r"\s*=", " ", bare)
+        if re.search(r"(?<![\w$.])" + re.escape(name) + r"(?![\w$])(?!\s*\.\s*[A-Za-z_$])", rest):
+            return f"this program passes the module {_code(name)} as a value; call its reads in place"
+    for m in re.finditer(r"\.\s*([A-Za-z_$][\w$]*)", bare):
+        member, before = m.group(1), bare[:m.start()].rstrip()
+        if member == "write" and re.search(r"\bprocess\s*\.\s*(?:stdout|stderr)$", before):
+            continue
+        if member not in _JS_READ_MEMBERS and not re.search(r"[0-9]$", before):
+            return f"this program uses {_code('.' + member)}, which is no read a read-only lane's program may use"
+    if re.search(r"\]\s*\(", bare) or re.search(r"\brequire\s*\([^)]*\)\s*\[", bare) or \
+            any(re.search(r"(?<![\w$.])" + re.escape(n) + r"\s*\[", bare) for n in mods):
+        return "this program calls a member by a name it computes"
     return ""
 
 
@@ -10081,17 +10121,159 @@ def member_code_why(name, code, cwd) -> str:
 
 
 def _py_reader_why(code, cwd, member) -> str:
-    """'' when a Python program a read-only lane types inline only reads: _py_write_paths knows every file it writes,
-    and each is inside crew member `member`'s own scratch folder (a temporary folder is no scratch: a task's output
-    there is evidence the tech lead reads, a checkout there is a repository); else why not."""
-    paths, why = _py_write_paths(code, cwd)
-    if why:
-        return why + (", in your scratch folder" if why.endswith("write the path out") else "")
-    for q in paths:
-        why = _ro_scratch_target(q, cwd, member)
-        if why:
-            return f"this program writes {why}"
+    """'' when a Python program a read-only lane types inline or runs from its scratch folder only reads
+    (_py_strict_reader), else why not. A read-only lane's program writes nothing at all: the member writes its
+    scratch files with the shell (`cat > <scratch>/f <<'EOF'`), which the guard judges by the literal path."""
+    return _py_strict_reader(code)
+
+
+# a read-only lane's Python program: the modules it may import, and per module the names it may call or read
+_PY_READ_MODULES = {
+    "json": {"loads", "load", "dumps", "JSONDecodeError"}, "re": None, "ast": None, "difflib": None,
+    "textwrap": None, "collections": None, "itertools": None, "math": None, "statistics": None, "string": None,
+    "unicodedata": None, "typing": None, "operator": None, "fnmatch": None, "glob": {"glob", "iglob", "escape"},
+    "hashlib": None, "base64": None, "shlex": {"split", "quote", "join"}, "datetime": None, "time": {"time",
+    "monotonic", "perf_counter", "strftime", "localtime", "gmtime"},
+    "csv": {"reader", "DictReader", "Sniffer", "field_size_limit"},
+    "functools": {"reduce", "lru_cache", "cache", "cmp_to_key", "total_ordering", "wraps"},
+    "pathlib": {"Path", "PurePath", "PurePosixPath", "PosixPath"},
+    "os": {"path", "getcwd", "listdir", "walk", "scandir", "stat", "lstat", "fspath", "getenv", "environ", "sep",
+           "linesep", "cpu_count"},
+    "os.path": None, "sys": {"argv", "stdin", "stdout", "stderr", "exit", "version", "version_info", "maxsize",
+                             "platform", "getsizeof"}}
+# the methods any object's value may be called with: reads of strings, lists, dicts, sets, matches, paths, files,
+# stats, counters, AST nodes, hashes and dates; `replace` only with two arguments (str.replace; Path.replace moves)
+_PY_READ_METHODS = frozenset("""split rsplit join strip lstrip rstrip startswith endswith lower upper title capitalize
+    casefold find rfind index rindex count format format_map partition rpartition splitlines encode decode ljust
+    rjust center zfill isdigit isalpha isalnum isspace islower isupper isidentifier isnumeric expandtabs removeprefix
+    removesuffix translate maketrans append extend insert pop remove sort reverse copy clear get items keys values
+    setdefault update popitem add discard union intersection difference symmetric_difference issubset issuperset
+    isdisjoint match search fullmatch findall finditer sub subn compile group groups groupdict start end span
+    escape read readline readlines close read_text read_bytes exists is_file is_dir is_symlink iterdir glob rglob
+    resolve absolute stat lstat joinpath with_suffix with_name with_stem relative_to as_posix expanduser samefile
+    is_relative_to most_common elements total subtract appendleft popleft extendleft rotate hexdigest digest
+    isoformat strftime timestamp date now today fromtimestamp fromisoformat utcnow total_seconds weekday
+    to_bytes from_bytes bit_length conjugate is_integer as_integer_ratio visit generic_visit iter_fields
+    iter_child_nodes walk parse dump literal_eval unparse get_source_segment get_docstring increment_lineno
+    ratio quick_ratio get_opcodes get_matching_blocks get_close_matches unified_diff context_diff ndiff
+    set_seqs dedent fill wrap indent shorten fnmatch fnmatchcase filter""".split())
+_PY_READ_BUILTINS = frozenset("""print len range sorted enumerate zip map filter list dict set tuple frozenset str int
+    float bool bytes bytearray min max sum any all abs round divmod pow repr isinstance issubclass hasattr hash id
+    iter next reversed chr ord hex oct bin format type slice super object property staticmethod classmethod
+    Exception ValueError KeyError TypeError IndexError StopIteration RuntimeError OSError FileNotFoundError
+    UnicodeDecodeError SystemExit NotImplementedError AttributeError AssertionError input callable ascii complex
+    memoryview open""".split())
+_READ_MODES = frozenset({"r", "rb", "rt", "br", "tr"})
+# the methods that change a list, dict or set in place: on a module's own object (sys.path, os.environ) a change
+_PY_MUTATORS = frozenset({"insert", "append", "extend", "update", "setdefault", "pop", "popitem", "clear",
+                          "remove", "add", "discard", "sort", "reverse"})
+
+
+def _py_strict_reader(code) -> str:
+    """'' when a Python program only reads: it imports only _PY_READ_MODULES (a module's own names from its set),
+    calls only builtins of _PY_READ_BUILTINS, functions and classes it defines (or lambdas it binds), its imports'
+    allowed names, and methods of _PY_READ_METHODS; opens files only with a literal read mode; uses no `**`, no
+    `*` in open, no dunder name, and calls no name it bound to anything else (an alias of a callable, such as
+    `w = p.write_text`). Else why not."""
+    try:
+        tree = ast.parse(code or "")
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        return "the guard cannot parse this program"
+    mods, funcs, defined, bound = {}, set(), set(), {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for a in node.names:
+                if a.name not in _PY_READ_MODULES:
+                    return f"this program imports {_code(a.name)}, and a read-only lane's program imports only reading modules"
+                mods[a.asname or a.name.split(".")[0]] = a.name if a.asname else a.name.split(".")[0]
+        elif isinstance(node, ast.ImportFrom):
+            allowed = _PY_READ_MODULES.get(node.module or "", False)
+            if allowed is False or node.level:
+                return f"this program imports from {_code(node.module or '.')}, which is no reading module"
+            for a in node.names:
+                if a.name == "*" or (allowed is not None and a.name not in allowed):
+                    return f"this program imports {_code(a.name)} from {_code(node.module)}, which is no read"
+                if (node.module or "") + "." + a.name in _PY_READ_MODULES or (node.module, a.name) == ("os", "path"):
+                    mods[a.asname or a.name] = "os.path"
+                else:
+                    funcs.add(a.asname or a.name)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            defined.add(node.name)
+        elif isinstance(node, ast.Assign):
+            for t in node.targets:
+                if isinstance(t, ast.Name):
+                    bound[t.id] = bound.get(t.id, []) + [node.value]
+        elif isinstance(node, ast.Name) and node.id.startswith("__") or \
+                isinstance(node, ast.Attribute) and node.attr.startswith("__"):
+            return "this program uses a dunder name"
+        elif isinstance(node, ast.keyword) and node.arg is None:
+            return "this program passes arguments with `**`, which the guard cannot read"
+    lambdas = {n for n, vals in bound.items() if all(isinstance(v, ast.Lambda) for v in vals)}
+
+    def root(n):
+        while isinstance(n, (ast.Attribute, ast.Subscript)):
+            n = n.value
+        return n.id if isinstance(n, ast.Name) else ""
+    held = set(mods) | {n for n, vals in bound.items() if any(root(v) in mods for v in vals)}
+    for node in ast.walk(tree):  # os.environ[...] = …, e = os.environ; e[...] = …, sys.path[0:0] = …
+        targets = node.targets if isinstance(node, ast.Assign) else \
+            [node.target] if isinstance(node, (ast.AugAssign, ast.AnnAssign)) else \
+            node.targets if isinstance(node, ast.Delete) else []
+        if any(isinstance(t, (ast.Attribute, ast.Subscript)) and root(t) in held for t in targets):
+            return "this program changes a module's state (its attributes, os.environ, sys.path)"
+
+    def module_of(n):
+        if isinstance(n, ast.Name):
+            return mods.get(n.id)
+        if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and mods.get(n.value.id) == "os" and \
+                n.attr == "path":
+            return "os.path"
+        return None
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        f = node.func
+        if isinstance(f, ast.Name):
+            if f.id in bound and f.id not in lambdas and f.id not in defined:
+                return f"this program calls {_code(f.id)}, a name it bound to another value"
+            if f.id not in _PY_READ_BUILTINS and f.id not in defined and f.id not in funcs and f.id not in lambdas:
+                return f"this program calls {_code(f.id)}, which is no read a read-only lane's program may use"
+            if f.id == "open" and not _py_read_open(node, 1):
+                return "this program opens a file for writing, or with a mode the guard cannot read"
+        elif isinstance(f, ast.Attribute):
+            mod = module_of(f.value)
+            if mod is not None:
+                allowed = _PY_READ_MODULES.get(mod)
+                if allowed is not None and f.attr not in allowed:
+                    return f"this program calls {_code(mod + '.' + f.attr)}, which is no read"
+            elif f.attr == "write" and isinstance(f.value, ast.Attribute) and f.value.attr in ("stdout", "stderr") \
+                    and module_of(f.value.value) == "sys":
+                pass
+            elif f.attr not in _PY_READ_METHODS:
+                return f"this program calls {_code('.' + f.attr)}, which is no read a read-only lane's program may use"
+            elif root(f.value) in held and f.attr in _PY_MUTATORS:
+                return "this program changes a module's state (its attributes, os.environ, sys.path)"
+            elif f.attr == "replace" and len(node.args) < 2:
+                return "this program calls `.replace` with one argument, which moves a file (Path.replace)"
+            elif f.attr == "open" and not _py_read_open(node, 0):
+                return "this program opens a file for writing, or with a mode the guard cannot read"
+        else:
+            return "this program calls something it computes, which the guard cannot read"
     return ""
+
+
+def _py_read_open(call, mode_at: int) -> bool:
+    """True when an open() call (mode_at 1) or a Path's .open() (mode_at 0) reads: no `*` or `**`, a mode that is a
+    literal read mode or none, and no opener."""
+    if any(isinstance(a, ast.Starred) for a in call.args):
+        return False
+    mode = call.args[mode_at] if len(call.args) > mode_at else None
+    for k in call.keywords:
+        if k.arg == "mode":
+            mode = k.value
+        elif k.arg in ("opener", "closefd") or k.arg is None:
+            return False
+    return mode is None or isinstance(mode, ast.Constant) and mode.value in _READ_MODES
 
 
 _MEMBER_JUDGE = contextvars.ContextVar("devkit_member_judge", default=False)
