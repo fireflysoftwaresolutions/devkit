@@ -7526,17 +7526,25 @@ def _glob_hit(path: str, g: str) -> bool:
 def scope_holds(path, cwd, globs, base=None) -> bool:
     """True when `path` is in one of `globs`, by the crew scope rules: a glob relative to the lane's repository
     (`base`, from scope_base; without it the repository of `cwd`) such as `lib/**`, `docs/` or a file never reaches
-    outside it; an absolute or ~ glob names a folder anywhere, such as the project's plans in the handoff repository."""
+    outside it, also through a link (`shared/**` where shared leads elsewhere: the write lands where it leads); an
+    absolute or ~ glob names a folder anywhere, such as the project's plans in the handoff repository."""
     ap = os.path.normpath(os.path.join(str(cwd), str(path)))
-    rel = scope_rel(ap, cwd, base)
+    top = _scope_top(cwd, base)
+    rel = scope_rel(ap, cwd, top)
+    inside = not rel.startswith("..") and not os.path.relpath(real(ap), real(top)).startswith("..")
     for g in globs or []:
         if g.startswith(("/", "~")):
             ga = os.path.expanduser(g)
             if _glob_hit(ap, ga) or _glob_hit(real(ap), ga) or _glob_hit(real(ap), _real_glob(ga)):
                 return True
-        elif not rel.startswith("..") and _glob_hit(rel, g):
+        elif inside and _glob_hit(rel, g):
             return True
     return False
+
+
+def _scope_top(cwd, base=None) -> str:
+    """The folder a lane's scope globs count from: `base`, else the repository of `cwd`, else `cwd`."""
+    return str(base) if base else (core.gitout(cwd, "rev-parse", "--show-toplevel") or str(cwd))
 
 
 def _real_glob(g: str) -> str:
@@ -7550,7 +7558,7 @@ def scope_rel(path, cwd, base=None) -> str:
     """`path` relative to the folder a lane's scope globs count from (`base`, else the repository of `cwd`); it
     starts with '..' outside it. Symbolic links are resolved when the plain paths disagree (/var and /private/var)."""
     ap = os.path.normpath(os.path.join(str(cwd), str(path)))
-    top = str(base) if base else (core.gitout(cwd, "rev-parse", "--show-toplevel") or str(cwd))
+    top = _scope_top(cwd, base)
     rel = os.path.relpath(ap, top)
     return os.path.relpath(real(ap), real(top)) if rel.startswith("..") else rel
 

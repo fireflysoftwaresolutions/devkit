@@ -314,6 +314,19 @@ class ScopeBaseTests(unittest.TestCase):
             self.assertEqual(os.path.realpath(guard.scope_base(project, str(main / "lib"))), os.path.realpath(main))
             self.assertEqual(os.path.realpath(guard.scope_base(project, str(wt / "lib"))), os.path.realpath(wt))
 
+    def test_a_relative_scope_never_holds_a_file_a_link_takes_out_of_the_repository(self):
+        # the Security engineer's review of 26.11.16: a whole-checkout scope lists the checkout's top-level entries,
+        # and a top-level link among them (shared/** for `shared -> elsewhere`) held the files outside it
+        with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as away:
+            repo = Path(os.path.realpath(_repo(d)))  # as git names it: /var/folders is /private/var/folders
+            (repo / "shared").symlink_to(away)
+            (repo / "latest").symlink_to(repo / "src")  # a link that stays inside the repository
+            for path in ("shared/notes.md", "shared/new/x.py"):
+                with self.subTest(path=path):
+                    self.assertFalse(guard.scope_holds(path, str(repo), ["shared/**", "**"]))
+            self.assertTrue(guard.scope_holds("src/a.py", str(repo), ["src/**"]))
+            self.assertTrue(guard.scope_holds("latest/a.py", str(repo), ["latest/**"]))
+
     def test_a_session_in_a_worktree_of_the_runs_repository_counts_from_that_worktree(self):
         with tempfile.TemporaryDirectory() as d:
             repo = _repo(d)
