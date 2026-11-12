@@ -438,6 +438,16 @@ class LaneStamp(unittest.TestCase):
         why = hooks._unroutable_lane_command(self.data(cmd)) or ""
         self.assertIn("read-only lane", why)  # the real reason, not "run it as a command of its own"
 
+    def test_a_review_member_waits_and_reads_its_inbox(self):
+        # the wait every member is told to run when it is blocked on an answer, and its inbox, in a review lane
+        from devkit import hooks
+        self.lane("Seraph", "review")
+        for cmd in ("dev watch --wait --for me --timeout 5", "dev crew inbox", "dev crew inbox --all"):
+            with self.subTest(cmd=cmd):
+                routed = hooks._route_subagent_progress(self.data(cmd))
+                self.assertEqual((routed or {}).get("command"), "DEVKIT_FROM_AGENT=a1 " + cmd)
+                self.assertIsNone(hooks._unroutable_lane_command(self.data(cmd)))
+
     def test_the_stamp_approves_nothing(self):
         # the hook routes only a call guard.check allowed; Claude Code's rewrite adds the variable and no permission
         # decision, so the harness's own permission check runs on the stamped command
