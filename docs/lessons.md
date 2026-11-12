@@ -32,7 +32,9 @@ adds nothing. If the lesson already exists, count the repeat with `dev lesson re
 devkit helps you notice the moments that deserve one:
 
 - **After a fix.** When a session made a `fix:` or revert commit, the Stop hook asks the agent once, at the end of a
-  turn, whether it was a mistake worth a lesson (or a known pitfall that repeated).
+  turn, whether it was a mistake worth a lesson (or a known pitfall that repeated). Its hint, like the crew gate's
+  for repeated refusals, gives the anchor flags (`--file`, `--command`, `--error`), since a lesson with none is
+  refused.
 - **`dev lesson scan`** lists the signals of the last 14 days (`--days N`) that have no lesson yet, each with the
   command to record one.
 
@@ -80,14 +82,22 @@ dev lesson add "Never gate a push on a piped test run without pipefail" \
 - **Optional:** `--fix`, `--detect`, `--evidence` (repeat it: commits, PRs, CI runs, tasks), `--tag`, `--why`, and
   `--retire-when` for an outside change that makes the lesson obsolete (a library version or an upstream fix).
 - **Anchor it:** say where it applies with `--file`, `--command`, `--activity`, `--error`, or `--stack` (see
-  [Anchors](#anchors-where-a-lesson-applies)). A lesson without a root cause and at least one anchor is never
-  recalled.
+  [Anchors](#anchors-where-a-lesson-applies)). `dev lesson add` refuses a lesson with no anchor and names the flags
+  that give one (`--file`, `--command`, `--error`, or `--activity`), because recall never shows a lesson without one.
 - **Never put secrets or personal data in a lesson.**
 
+**Every problem at once.** When `dev lesson add` refuses, it lists every problem it found, one per line: the anchors,
+the kind and severity, the cause and prevention, the shape of the title, and a duplicate. Fix them all and run it
+once more. Each refusal is recorded in the [audit trail](audit.md) as `dev.lesson.refused`, with its problems and
+without the lesson's title or error text.
+
 **One lesson per mistake.** `dev lesson add` checks the open and the archived lessons of the scope and the global ones
-first. When one shares an error or command anchor with the new lesson, it refuses with
+first. When one shares an error anchor with the new lesson (in any case), it refuses with
 ``looks like L-… (“<its title>”): run `dev lesson recur L-… --evidence …`, or add `--new --why …` if it is another
-mistake``. Count the repeat on the existing lesson, or add `--new` with the reason the mistake is a different one.
+mistake``. Count the repeat on the existing lesson, or add `--new` with the reason the mistake is a different one. A
+shared command, file, or kind of work alone is another mistake, because one command goes wrong in many ways, each
+with its own error; the nightly merge still joins lessons that share at least 60% of their anchors (see
+[Sleep](#sleep)).
 
 **Who wrote it.** Every lesson records its author: the crew member whose lane ran `dev lesson add`, as
 `<Role> (<Name>)` (for example DevEx engineer (Kid)); the Tech lead (Morpheus) in an agent's main session; or the
@@ -153,9 +163,11 @@ language:
 An anchor that matches everything recalls the lesson everywhere, which is the same as nowhere, so devkit refuses
 broad ones:
 
-- **A command anchor** that is one bare common program (`python3`, `python`, `git`, `dev`, `cp`, `mkdir`, `sed`, `cat`,
-  `cd`, `ls`, `echo`, `bash`, `sh`, `node`, `npm`) needs a second word: `--command "python3 -c"`, not
-  `--command python3`.
+- **A one-word command anchor** needs a second word when it is a common program or shell, such as `python3`, `git`,
+  `dev`, `sed`, `zsh`, `rm`, `grep`, `find`, `make`, `docker`, `pytest`, `gh`, or `curl`: write
+  `--command "python3 -c"`, not `--command python3`. A shell keyword or builtin alone (`for`, `if`, `do`), and a
+  variable's name or assignment (`PYTHONPATH`, `X=1`), are refused too. A distinct tool alone, such as `tmux`, passes.
+- **A file anchor** that matches every file (`**`, `*`, `**/*`, `./**`, or `.`) is refused.
 - **An error anchor** needs at least 12 characters, and generic text that ordinary output shows is refused: `error`,
   `failed`, `not found`, `permission denied`, `file(s)`, `still fail`, `no such file or directory`,
   `command not found`, `operation not permitted`, and `traceback (most recent call last)`.
@@ -168,10 +180,17 @@ dev lesson anchor L-fwqyx0ywj1x --command "git push" --activity cicd --why "reca
 ```
 
 An anchor cannot contain a comma: give each one on its own flag. Older lessons with broad anchors still load.
-`dev lesson lint` lists what recall cannot show first (lessons without a root cause, without anchors, or held), then
-broad and wrong anchors, and file anchors that match no file in the project's checkout or the handoff repository
-(scratch patterns aside), each with the command that fixes it. Without `-p`, `-i`, or `--global` it checks every
-scope. It exits with 1 when it finds something, so a script or CI job can gate on it.
+`dev lesson lint` lists what recall cannot show first: lesson files no `dev lesson` command can read (not UTF-8, or
+without an id, a title, or a scope), each with the git command that shows its last good version; then lessons
+without a root cause, without anchors, or held. Then come broad and wrong anchors, and file anchors that match no
+file in the project's checkout or the handoff repository (scratch patterns aside), each with the command that fixes
+it. Without `-p`, `-i`, or `--global` it checks every scope. It exits with 1 when it finds something, so a script or
+CI job can gate on it.
+
+An unreadable lesson file no longer stops the other lessons: every listing and recall leaves it out, and the session
+start names it after the known pitfalls (up to three ids and the count), with a pointer to `dev lesson lint`. When
+the handoff repository has stopped syncing, `dev lesson` warns that lessons recorded on other machines may be
+missing, with how many commits of the remote this Mac has not applied.
 
 ## Recall
 
@@ -184,6 +203,10 @@ devkit shows a lesson before the work it applies to, at most three at a time in 
 | A tool call | The lessons anchored on the command the call runs or the file it writes, each at most once an hour per agent; a refusal names the lessons of the call it refuses |
 | Tool output | The lessons whose error signature the output shows, each at most once an hour per agent |
 | The same failure twice | When one agent's shell command fails twice in a row with the same error (paths, numbers and hashes aside), the failure hook stops it once per command. Below the stop text it lists up to three lessons matched on the error, counted as shown on the output channel, and the devkit bugs the registry knows. A crew member's third identical failure sends the tech lead one notice |
+
+Every place draws from the same lessons: the project's own, those of each initiative whose README lists the
+project, and the global ones. A README devkit cannot read is skipped, so one bad initiative hides no other lessons.
+The crew's lessons gate does too: an initiative's open lesson covers a refusal as a project lesson does.
 
 The stop text reads:
 
@@ -225,14 +248,23 @@ devkit counts what actually reached the agent and what happened next, not whethe
 
 - **Shown** counts a lesson only after the hook's filters let it through, with the place it came through: `session`,
   `brief`, `call`, `output`, or `refusal`.
-- **Missed** means the same agent hit the lesson's refusal, command, or error anchor later in the same session, after
-  the lesson was shown.
-- **Heeded** means the agent's turn in the main session, or the crew member's lane, ended without that.
+- **Missed** means that, after the lesson was shown, a refusal or a tool's output in the same session showed the
+  lesson's error anchor again: its mistake came back. Running the lesson's command again, the right way, only shows
+  the lesson. A [lesson rule](guard.md#lesson-rules) still counts its own match as a miss, because its pattern is the
+  mistaken form.
+- **Heeded** means the session ended without that: the main session at SessionEnd (an exit, a `/clear`, or a
+  logout), and a crew member at the end of its lane. A session that dies without SessionEnd, such as a closed
+  terminal, is resolved as heeded by the nightly fold once it has been idle for a day, so a session resumed the next
+  morning can still miss.
+- On Codex, a lesson rule's `warn` counts as shown only where the agent reads the call's context; Codex does not, so
+  only a `block`, which shows the lesson in the refusal, counts there.
 
 These outcomes go to a local, append-only log, `~/.local/state/devkit/lessons-events.jsonl`. Every night `dev sleep`
 folds them into the lesson's usage counts (`heeded`, `missed`, and `shown_<place>`), which each machine publishes to
-`lessons/usage/<user>@<host>.json` in the handoff repository, so the team's counts add up. Events older than 45 days
-then leave the log, once a fold has counted them.
+`lessons/usage/<user>@<machine id>.json` in the handoff repository, so the team's counts add up. Usage files this
+Mac published under a hostname it had before are folded into its id file once, by the larger value of each count,
+and then deleted, so a renamed Mac counts once. Events older than 45 days then leave the log, once a fold has counted
+them.
 
 A lesson's **strength** combines its severity, how often the mistake happened, and its uses: heeded, missed, opened
 with `dev lesson show`, `prevent`, or `retire`, or named by id in an agent's final message. It halves every 45 days since the lesson

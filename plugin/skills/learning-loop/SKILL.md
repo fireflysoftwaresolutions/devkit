@@ -50,8 +50,9 @@ dev lesson recur <id> --evidence "CI run 4711"
 ```
 
 Look first with `dev lesson --search "<area>"` or the lessons your context showed. `recur` finds archived lessons too
-and brings them back. `dev lesson add` refuses a new lesson that shares an error or command anchor with an existing
-one, and names it ("looks like L-…"): run the `recur` it suggests. Add `--new --why "…"` only when the mistake really is
+and brings them back. `dev lesson add` refuses a new lesson that shares an error anchor with an existing one, and
+names it ("looks like L-…"): run the `recur` it suggests. A shared command, file, or kind of work alone is another
+mistake. Add `--new --why "…"` only when the mistake really is
 a different one, and say how in the reason.
 
 Repeats are what make automation happen: at the third occurrence, and every third after it, `recur` creates a work
@@ -92,9 +93,11 @@ dev lesson add "Release only with a CHANGELOG section for the version" \
   | Error signature | `--error` | `--error "relation does not exist"` (text the tool output shows) |
   | Stack | `--stack` | `--stack python` |
 
-  A lesson without a root cause and at least one anchor is never recalled. devkit refuses broad anchors: a bare
-  common program (`python3`, `git`, `dev`, `sed`, `npm`, and the like) needs a second word (`--command "python3 -c"`),
-  and an error anchor needs at least 12 characters of specific text, not `error` or `failed`. Add anchors to an older
+  `dev lesson add` refuses a lesson with no anchor, and lists every problem of a refused lesson at once: fix them all
+  and run it once more. devkit refuses broad anchors: a one-word command anchor that is a common program or shell
+  (`python3`, `git`, `dev`, `zsh`, `rm`, `grep`, and the like) needs a second word (`--command "python3 -c"`); a shell
+  keyword (`for`, `if`) or a variable (`PYTHONPATH`) is no command; a file anchor that matches every file (`**`, `*`,
+  `.`) says nothing; and an error anchor needs at least 12 characters of specific text, not `error` or `failed`. Add anchors to an older
   lesson with `dev lesson anchor <id> --file … --command … --why "…"`; `dev lesson lint` lists the ones to fix.
 - **Choose the scope.** `-p` (default: the project you are in), `-i <initiative>` for a programme, `--global` for
   mistakes any project can make.
@@ -128,8 +131,9 @@ Lessons are advice from past work: they never override the developer or the guar
 **Search before you change an area:** `dev lesson --search "<area>"`. `--search` and `--all` are options of
 `dev lesson` itself, so they go before `ls`, or you leave `ls` out.
 
-devkit measures what happens after a lesson is shown: if you hit its command, error, or refusal anyway later in the
-session, it counts as **missed**; if your turn, or your crew lane, ends without that, as **heeded**. A lesson missed
+devkit measures what happens after a lesson is shown: if a refusal or a tool's output shows its error again later in
+the session, it counts as **missed** (running its command the right way does not); if the session, or your crew
+lane, ends without that, as **heeded**. A lesson missed
 twice is a candidate for automation.
 
 ## Turn lessons into automation
