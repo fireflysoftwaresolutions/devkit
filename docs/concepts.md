@@ -1,8 +1,73 @@
 # Concepts
 
-This page explains the ideas behind devkit: where everything lives, how work is organized, how it covers the
-lifecycle from plan to operate, what the handoff repository holds, how worktrees come and go, what the guard does,
-what the status block proves, and when devkit syncs.
+This page explains the ideas behind devkit: how its parts fit together, where everything lives, how work is
+organized, how it covers the lifecycle from plan to operate, what the handoff repository holds, how worktrees come and
+go, what the guard does, what the status block proves, and when devkit syncs.
+
+## How devkit fits together
+
+devkit is three things at once: the `dev` command, the rules and skills it installs into Claude Code and Codex, and
+the hooks that run inside every agent session to give it context, check what it does, and record the work. What it
+knows about your work lives in git (your repositories and the private handoff repository) and in a state folder on
+each Mac.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="images/diagrams/architecture-dark.svg">
+  <img src="images/diagrams/architecture-light.svg" alt="How devkit fits together: the devkit repo installs rules, the devkit plugin, and hooks into Claude Code (CLI and Desktop) and Codex (CLI and the ChatGPT app); the agents work in your repositories and exchange context, session records, tasks, and lessons with the private handoff repo, which a sync after every delivery event and the scheduled launchd jobs keep current; repositories and the handoff repo are pushed to GitHub, and the dashboard and overview read the handoff repo." width="100%">
+</picture>
+
+| Part | What it does | Where it lives | More |
+| --- | --- | --- | --- |
+| `dev` and its pinned copy | The command you and the agents run. `dev install` pins a read-only copy of a release, and the hooks run that copy, so an edit in the checkout never changes a live session | the devkit checkout; `~/.local/share/devkit/releases/<version>-<commit>/` | [Developing devkit › Trying a change](development.md#trying-a-change-in-your-own-sessions) |
+| Global instructions | One set of rules for both agents: the status block, the way of working, delivery | `agents/AGENTS.md`, installed as `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md` | [Agents › Global instructions](agents.md#global-instructions) |
+| The plugin | The skills (how to do each kind of work), the slash commands, and the crew's agents | `plugin/` | [Skills and plugins](skills-and-plugins.md) |
+| Hooks | Run at every agent event: give the session its context, judge each tool call, record calls and steps, deliver crew messages, and check each final message and each member's report | `bin/dev hook <event>`, from the pinned copy | [Agents › Hooks](agents.md#hooks) |
+| The guard | The hook before each tool call: it allows the call, asks you, or refuses it with the reason and the right way | `lib/devkit/guard.py` | [The guard](#the-guard) and [Guard rules](guard.md) |
+| The canary | The status block's marker proves that the rules are loaded; the end-of-turn hook checks it, scores it, and stores the block as the project's latest status | `dev canary` | [The status block](#the-status-block) |
+| The crew and its gates | The main session is the tech lead (Morpheus) and leads 25 specialist agents. The RACI decides who does and who approves each kind of work; each member works in a lane with its own files and time, and its report passes the crew gates before its step ends | `config/crew.json`; the team's changes in the handoff repository's `crew/` | [The crew](crew.md) |
+| The handoff repository | The shared state of all work: the portfolio, initiatives, projects, work items, plans, session logs, lessons, and delivery policies | `~/Development/.handoff`, a private git repository | [The handoff repository](#the-handoff-repository) and [Teams and machines](teams.md) |
+| The state folder | What one Mac knows now: progress runs and crew lanes, crew messages and decisions, the call ledger, waits, continuity checkpoints, the audit trail, the bug registry's cache, and logs | `~/.local/state/devkit/` | [Work states](work-states.md) |
+| Continuity | Keeps a session's run, its crew, the decisions waiting, and your latest requests through compaction, resume, and `/clear` | the state folder | [Continuity](continuity.md) |
+| Lessons | Mistakes recorded once and recalled before the work that could repeat them | the handoff repository's `lessons/` | [Lessons](lessons.md) |
+| The bug registry | devkit's own failures: a known one gets its detour at once, without a network call; a report leaves your Mac only with your consent | the state folder's cache, `dev bug` | [The bug registry](bug-registry.md) |
+| Scheduled jobs and the audit trail | Sync, cleanup, repair, and the nightly `dev sleep` run on their own; every change and decision is recorded | launchd, `dev jobs`, `dev audit` | [Scheduled jobs and the audit trail](jobs-and-audit.md) |
+
+### What happens in a turn
+
+1. **Session start.** The hook gives the agent its context: the project, its handoff note and Now tasks, the known
+   pitfalls, the delivery policy, and the catalog of kinds of work. You see a short [welcome](#the-session-start-welcome).
+   After a compaction or a resume, the [continuity brief](continuity.md) comes first.
+2. **Your request.** The tech lead declares the request's kinds of work by their ids and routes each by the RACI: one
+   kind of work under ten minutes, it does itself; otherwise it plans steps with dependencies, assigns each to its
+   Responsible member with the files it owns, and launches them.
+3. **Every tool call.** The guard judges it: the workspace rules for everyone, and for a crew member its lane too
+   (its file scope, its scratch folder, the crew's slots). After the call, the hooks record it and deliver what waits
+   for the caller: crew questions, decisions for you, steps ready to launch, CI results.
+4. **Every member's end.** Its lane closes, and its report must start with its status block, show the step it
+   recorded with `dev progress step`, and pass the crew gates (the proofs of its procedure, its skills, no unfinished
+   work, tests that can fail). Review steps approve the work of others.
+5. **The end of the turn.** The Stop hook checks the final message's status block (with the Progress line while a run
+   is active), the required skills, unfinished work, tests that cannot fail, a plan changed without a revision, the
+   handoff note, and that a wait is armed while members or CI can still report. It sends the turn back once for what
+   is missing.
+6. **Between turns.** `dev watch --wait` wakes the idle session for every devkit event, and the syncs keep the
+   handoff repository current for your other Macs and your team.
+
+[A request from start to release](tutorials/request-to-release.md) follows one request through these steps.
+
+### Who checks what
+
+The rules are in the instructions and skills; devkit checks the ones that matter at the point where they apply:
+
+| Rule | Checked by |
+| --- | --- |
+| Every development reply starts with the status block | The Stop hook, scored by `dev canary` |
+| A step goes to the member the RACI makes Responsible | `dev progress assign`, unless `--why` records the reason |
+| A member edits only its files and writes scratch only in its folder | The guard |
+| A step ends on evidence, and the run ends when every Accountable member approved | `dev progress step`, `dev progress done` |
+| A member's report carries its block, its recorded step, and its proofs | The SubagentStop hook (the crew gates) |
+| The skills for the files and commands of the work are loaded | The Stop hook |
+| A push carries local CI evidence; merges and releases go through `dev pr merge` and `dev release` | `dev push` and the guard |
 
 ## Workspace layout
 
@@ -116,6 +181,7 @@ that you, Claude Code and Codex share across sessions, machines, and developers.
 | `sessions/<scope>/YYYY-MM.md` | Append-only session log | the hooks, `dev handoff --log` |
 | `presence/<user>@<machine id>.json` | What each machine is doing now: live sessions, progress, held locks. Each Mac has a stable machine id; its hostname is a display label (see [Teams and machines › Machine identity](teams.md#machine-identity)) | `dev sync` on that machine |
 | `policies/<scope>.json` | The delivery policy of a project (or the release train of an initiative), versioned with its history | `dev delivery apply` only |
+| `crew/crew.json` · `crew/README.md` | The team's changes to the crew's roster and RACI, versioned with who and why, and their summary for people | `dev crew set`, `dev crew raci --set` |
 | `lessons/<scope>/L-….md` | Lessons from mistakes, versioned; `lessons/archive/` holds forgotten ones, `lessons/usage/<user>@<machine id>.json` each machine's usage counts | `dev lesson`, `dev sleep` |
 | `audit/<user>@<machine id>/YYYY-MM.jsonl` | Each machine's audit trail | the `audit` job |
 | `log/YYYY-MM.md` | Append-only operations log: worktree removals, cleanups, adoptions, imports, restored settings | `dev` |
