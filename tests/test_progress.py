@@ -2474,5 +2474,46 @@ class WholeCheckoutScopeTests(unittest.TestCase):
                 "tool_input": {"file_path": other}}))
 
 
+class KidSyncCase(unittest.TestCase):
+    # the DevEx engineer works on "sync"; "docs" comes after it
+    T0 = 1_800_000_000.0
+
+    def m(self, minutes):
+        return self.T0 + minutes * 60
+
+    def setUp(self):
+        self.state = TempState().__enter__()
+        self.addCleanup(self.state.__exit__, None, None, None)
+        pg.start("Hotfix", plan=["sync=30m", "docs=20m after sync"], now=self.m(0))
+        pg.assign("sync", "Kid", why="test", now=self.m(0))
+        launch("k1", "devkit:kid", "Kid: sync", self.m(1))
+
+
+class MemberOwnStepTests(KidSyncCase):
+    # B-g7a562x5pyi: a member's `dev progress step "…" --step <its step> --check "…"` printed ✓ but recorded only a
+    # note in its lane, so its step stayed running, and the steps after it waited, until the member's report
+    def test_a_members_close_of_its_own_step_closes_it_at_once(self):
+        run = pg.step("handoff sync rewritten", which="sync", check="✓ 14 tests pass", from_agent="k1",
+                      now=self.m(10))
+        self.assertEqual([s["state"] for s in run["plan"]], ["done", "running"])  # the next step need not wait
+        self.assertEqual(run["agents"]["k1"]["state"], "running")  # the member still works: its lane stays open
+        self.assertEqual((run["lane_outcome"]["step"], run["lane_outcome"]["closed"]), ("sync", True))
+        last = [h for h in run["history"] if h["step"] == "sync"][-1]
+        self.assertEqual((last["from"], last["to"], last["by"]), ("running", "done", "k1"))
+        self.assertIn("14 tests pass", last["why"])
+
+    def test_a_members_close_with_a_warning_ends_its_step_unverified(self):
+        run = pg.step("sync rewritten", which="sync", check="⚠ the PostgreSQL tests did not run", from_agent="k1",
+                      now=self.m(10))
+        self.assertEqual(run["plan"][0]["state"], "unverified")
+        self.assertEqual(run["lane_outcome"]["state"], "unverified")
+
+    def test_a_member_naming_a_step_it_does_not_hold_only_records_its_evidence(self):
+        run = pg.step("docs look fine", which="docs", check="✓ read them", from_agent="k1", now=self.m(10))
+        self.assertEqual([s["state"] for s in run["plan"]], ["running", "pending"])
+        self.assertEqual((run["lane_outcome"]["step"], run["lane_outcome"]["closed"]), ("docs", False))
+        self.assertIn("not your step", run["lane_outcome"]["why"])
+
+
 if __name__ == "__main__":
     unittest.main()

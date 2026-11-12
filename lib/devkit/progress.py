@@ -5155,7 +5155,11 @@ def step(text: str, nxt: str = "", cwd: str | None = None, kind: str = "step", c
                 _approve(run, mem["id"], approves, check, now)
             run["updates"].append({"ts": round(now), "kind": "agent", "agent": from_agent, "text": text, "check": check})
             run["updates"] = run["updates"][-40:]
+            outcome = _member_close(run, named, lane, from_agent, u, now, agent, sid) if kind == "step" and named \
+                else None
             _save(run)
+            if outcome:
+                run["lane_outcome"] = outcome  # for the command's own line; never saved
             return run
         run = normalize(run or {})
         plan = run["plan"]
@@ -7219,13 +7223,14 @@ def _end_lane_steps(run: dict, lane: dict, aid: str, report: str, now: float, ag
                     f"progress step names this step: it waits for a launch of its own", now)
 
 
-def _end_member_step(run: dict, st: dict, lane: dict, aid: str, report: str, now: float, agent: str, sid: str):
+def _end_member_step(run: dict, st: dict, lane: dict, aid: str, report: str, now: float, agent: str, sid: str,
+                     closing: bool = False):
     """A member's step at its SubagentStop (spec F6, R2-4): done with the evidence of its report's Check or its last
     `dev progress step --check` (approvals.ending), and a review step's Check is its verdict on the work it follows
     (approvals.from_review), whose ✓ also ends done the unverified work it approves (_verified_by_review);
     otherwise unverified, for Morpheus to close with evidence or reopen. A review or read-only lane whose shell wrote
     files nobody else could have written (scope_writes, certain) ends unverified whatever it reports; a possible
-    write leaves its ending to its report."""
+    write leaves its ending to its report. `closing`: the member closes it itself while it works on (_member_close)."""
     from . import approvals
     old = st.get("state")
     state_, why, check = approvals.ending(lane, report)
@@ -7235,15 +7240,38 @@ def _end_member_step(run: dict, st: dict, lane: dict, aid: str, report: str, now
     who = lane.get("persona") or "subagent"
     if state_ != "done":
         st["state"] = "unverified"
-        _log_change(run, st, old, "unverified", aid, f"{who} stopped; unverified: {why}", now)
+        _log_change(run, st, old, "unverified", aid, f"{who} {'closed it' if closing else 'stopped'}; unverified: "
+                    f"{why}", now)
         return
     _finish_step(run, st, now, agent, sid)
-    _log_change(run, st, old, "done", aid, f"{who} finished; {why}", now)
+    _log_change(run, st, old, "done", aid, f"{who} {'closed it' if closing else 'finished'}; {why}", now)
     try:
         _verified_by_review(run, st, check, now, agent, sid, aid)
         approvals.from_review(run, st, check, now, doer_of=lambda s_: member_of_step(run, s_))
     except approvals.ApprovalError as e:  # a review that may approve nothing: its step still ends
         _audit("crew.approval-refused", st.get("name") or "", str(e)[:300], "refused", project=run.get("project") or "")
+
+
+def _member_close(run: dict, st: dict, lane: dict, aid: str, u: dict, now: float, agent: str, sid: str) -> dict:
+    """A member's `dev progress step "…" --step <name> --check "…"` (B-g7a562x5pyi): when its lane holds that step,
+    the step ends now, by the rules of the member's end (_end_member_step on this update's Check: done with a ✓, else
+    unverified), so the steps after it need not wait for the member's report while the lane works on. A step the lane
+    does not hold, or one already done, keeps the evidence in the lane only. -> {step, state, closed, why}, which the
+    command's line reports."""
+    name, state_ = st["name"], st.get("state")
+    if st.get("owner") != aid:
+        holder = "the tech lead's" if (st.get("owner") or "main") == "main" else f"{_name_of(run, st['owner'])}'s"
+        return {"step": name, "state": state_, "closed": False,
+                "why": f"“{name}” is not your step ({holder}), so it stays {state_}; your evidence is in your lane"}
+    if state_ in DONE:
+        return {"step": name, "state": state_, "closed": False, "why": f"“{name}” is {state_} already"}
+    if not str(u.get("check") or "").strip():
+        return {"step": name, "state": state_, "closed": False,
+                "why": f"“{name}” stays {state_}: a step closes on its evidence, --check \"✓ <tests run, output>\""}
+    _end_member_step(run, st, dict(lane, updates=[u]), aid, "", now, agent, sid, closing=True)
+    run["step"] = sum(1 for x in run.get("plan") or [] if x.get("state") in DONE)
+    _advance_main(run, now)
+    return {"step": name, "state": st.get("state"), "closed": True, "why": ""}
 
 
 def crew_working(run: dict) -> list:
