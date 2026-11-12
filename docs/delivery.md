@@ -45,7 +45,7 @@ Then it recommends, keeping what works:
 
 | Situation | Versioning |
 | --- | --- |
-| The repository already has a consistent scheme | Keep it |
+| The repository already has a consistent scheme | Keep it. PEP 440 versions with pre, post, or dev releases (`0.1.0a16`, `1.0.0.post1`, `2.0.0.dev3`, `1.1.0rc1`) are their own scheme, `pep440`, with the tag format `vMAJOR.MINOR.MICRO[{a\|b\|rc}N][.postN][.devN]` and PEP 440's bump rule; plain `vX.Y.Z` and SemVer pre-release tags stay SemVer |
 | A library others depend on (it publishes to Maven, npm, PyPI, or Packagist) | SemVer, `vMAJOR.MINOR.PATCH`, bumped from Conventional Commits |
 | An app, service, platform, or internal tool | CalVer, `vYY.MM.PATCH` (`dev calver --next`) |
 | Projects that release together as one set | A release train on their initiative (`-i <slug>`) |
@@ -81,7 +81,8 @@ dev delivery apply --set job_timeout_minutes=45 --why "integration tests take 35
 - **Every session sees it.** The session context shows the policy in one line: versioning and tag format, release
   flow, and test gate. A project without one gets a reminder to run `dev delivery` before its first release.
 - **The guard refuses tags that break it.** In a CalVer project, `git tag v2.0.0` is refused with the next version
-  to use (`dev calver --next`); in a SemVer project, a tag that is not `vMAJOR.MINOR.PATCH` is refused. Prefix the
+  to use (`dev calver --next`); in a SemVer project, a tag that is not `vMAJOR.MINOR.PATCH` is refused, and in a
+  `pep440` project, a tag that is not a PEP 440 version. Prefix the
   command with `DEVKIT_TAG_ANY=1` to tag anyway, or change the policy.
 - **Release work requires the `release-policy` skill.** Tags and releases (`git tag`, `dev release`, `gh release`),
   `release` work, and changes to `VERSION` or release-tool configuration require the `delivery` and `release-policy`
@@ -124,7 +125,9 @@ with the command you ran and its result (see [Git and GitHub › Commits](git-an
 The pull request description follows the template in [Templates › Pull request
 description](templates.md#pull-request-description): what and why, changes, how to verify (with the local results),
 risk and rollback, links. `dev pr create` fills the changes, the local CI result, and the links, and refuses a PR
-whose "What and why" or "How to verify" is still empty. The title is a Conventional Commit.
+whose "What and why" or "How to verify" is still empty. The title follows the repository's own convention: a
+Conventional Commit, or a plain imperative sentence where the recent pull request titles are sentences (see
+[Git and GitHub › Create](git-and-github.md#create)).
 
 ### When only a CI host setting changed
 

@@ -48,8 +48,10 @@ Every plan item has one of three safety words, and they always mean the same thi
 
 | Kind | Safety | What happens afterwards |
 | --- | --- | --- |
-| Build output in a checkout | `safe` | The next build makes it again; a Rust build takes a few minutes. Changed files stay |
+| Dependency folders and tool caches in a checkout (`node_modules`, `.venv`, `.next`, `__pycache__`, …) | `safe` | A tool fills them again on its own; a Rust or Next.js build takes a few minutes. Changed files stay |
+| Generic build output (`build`, `dist`, `target`, `out`, `coverage`, …) | `check first` | It may hold files no build step wrote, such as release evidence. Look inside, then delete it yourself; `dev free --safe` skips it |
 | A merged worktree or copy with no changes and nothing to push | `safe` | It is removed with `git worktree remove`; its branch stays on the remote |
+| A merged worktree with ignored files that no tool rebuilds | `check first` | It is kept whole; the reason names those paths with their sizes. Move them out or delete them, then `dev wt rm <path>` |
 | A Claude Code worktree that is merged | `safe` | Its chats stay, but those sessions cannot continue in that folder |
 | Docker images that no container uses | `safe` | A tool that needs one downloads it again |
 | Homebrew downloads, npm cache, pnpm store, uv cache, Playwright browsers | `safe` | Downloaded again when needed |

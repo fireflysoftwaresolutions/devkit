@@ -93,7 +93,8 @@ sections are the ones the `communicating` skill asks agents to fill:
 the file with `--body-file`, or use `--edit` to fill them in your editor. When neither the repository nor devkit has a
 template, a built-in copy of the English one is used.
 
-The PR title is a Conventional Commit (`feat(invoices): export invoices as CSV`, at most 72 characters), and the
+The PR title is a Conventional Commit (`feat(invoices): export invoices as CSV`, at most 72 characters), or a plain
+imperative sentence in a repository whose recent PR titles are sentences, and the
 squash-merge message repeats it with the "What and why" in one or two sentences and no attribution lines.
 
 ## Handoff repository README

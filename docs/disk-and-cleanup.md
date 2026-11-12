@@ -20,15 +20,28 @@ dev gc --apply    # reclaim it (asks for confirmation in a terminal; -y to skip)
 | --- | --- |
 | Remove worktree | Linked worktree, not a Codex app worktree, clean, idle longer than `gc.grace_hours` (24), and either its branch is merged (see [Merged branches](#merged-branches)), or nothing is unpushed and its PR is merged or closed or its branch has no commits beyond `origin/<default>` |
 | Delete merged branch | A merged local branch without a worktree that has not moved for `gc.grace_hours`, and a merged remote branch whose PR merged or that devkit pushed as a backup (see [Merged branches](#merged-branches)) |
-| Prune build output | Worktree idle longer than `gc.idle_artefact_days` (7) and clean: deletes regenerable folders that git reports as ignored |
+| Prune dependency folders and caches | Worktree idle longer than `gc.idle_artefact_days` (7) and clean: deletes the ignored folders a tool fills again on its own (see below). Generic build output is listed as check first instead, and only `dev gc --apply` deletes it; the nightly job leaves it |
 | Purge temp | Entries in Claude Code's temp root (`/tmp/claude-<uid>/`) and `~/Development/.tmp` untouched for `gc.temp_days` (7), except folders of projects where a process is working |
 | Prune metadata | A registered worktree whose folder no longer exists (`git worktree prune`) |
 | Docker | Dangling images and build cache older than 7 days, when Docker is running and `gc.docker` is on |
 
-Build output folder names: `node_modules`, `.venv`, `venv`, `dist`, `build`, `target`, `.next`, `.nuxt`, `.angular`,
-`.turbo`, `.parcel-cache`, `.cache`, `coverage`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`, `__pycache__`,
-`.gradle`, `.build`, `DerivedData`, `.output`, `.svelte-kit`, `storybook-static`, `.nx`, and `vendor` when a
-`composer.json` sits next to it. Only folders that git lists as ignored are considered.
+Only folders that git lists as ignored are considered, and they fall in two groups:
+
+- **A tool fills them again without a person:** `node_modules`, `.venv`, `venv`, `__pycache__`, `.pytest_cache`,
+  `.mypy_cache`, `.ruff_cache`, `.hypothesis`, `.tox`, `.nox`, `.gradle`, `.next`, `.nuxt`, `.angular`,
+  `.svelte-kit`, `.turbo`, `.nx`, `.parcel-cache`, `DerivedData`, `.DS_Store`, and `vendor` when a `composer.json`
+  sits next to it. The cleanup deletes these automatically.
+- **Generic build output may hold work:** `build`, `dist`, `target`, `out`, `coverage`, and the like can hold files no
+  build step wrote, such as release evidence. The cleanup lists each folder with its
+  size as check first and deletes it only when you run `dev gc --apply`.
+
+**A merged worktree with ignored files that no tool rebuilds is kept whole.** `git worktree remove` deletes ignored
+files without asking, so before `dev pr merge`, `dev wt rm`, `dev branch prune`, the nightly job, or `dev free`
+removes a worktree, devkit lists its ignored files. Dependency folders, caches, and files identical to the main
+checkout's may go; anything else keeps the worktree, and the message names those paths with their sizes:
+`removing it would delete ignored files that are not known to be regenerable: build/ (3.6 GB); move them out or
+delete them, then dev wt rm <worktree>`. The dry run lists such worktrees under Kept, with the reason, so its
+reclaimable total counts only what goes.
 
 ### Merged branches
 
