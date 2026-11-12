@@ -330,9 +330,11 @@ Versioned plans and specs in `plans/<scope>/`. See [Templates](templates.md#plan
 
 ### `dev team [--hours N]`
 
-Who is working on what: one entry per developer and machine (`user@host`) that published presence in the last `N`
-hours (default 24), with its live sessions (agent, project, branch, latest status) and the locks it holds. Each
-machine publishes its own presence file when it syncs.
+Who is working on what: one entry per developer and machine that published presence in the last `N` hours (default
+24), with its live sessions (agent, project, branch, latest status) and the locks it holds. A machine shows as
+`user@hostname (machine id)`, such as `ana@ana-mbp (m-0a1b2c3d)`, and a Mac renamed by macOS shows once (see
+[Teams and machines › Machine identity](teams.md#machine-identity)). Each machine publishes its own presence file
+when it syncs.
 
 A presence file is another person's text. `dev team`, and `dev progress` when it lists another machine's run, print
 each of its fields as plain text on its own row: control characters (terminal escape sequences, carriage returns,
