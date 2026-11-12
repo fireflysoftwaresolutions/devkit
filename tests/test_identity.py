@@ -459,5 +459,75 @@ class ClaimBreakGrantTests(EvidenceCase):
         self.assertEqual(self.breaks("release:acme/api"), "E2")
 
 
+class MachineTests(unittest.TestCase):
+    # this Mac's identity: a random id created once in devkit's local state, the hostname as a label for display,
+    # and the hostnames this Mac carried, each with the periods it carried them (aliases)
+    def setUp(self):
+        import tempfile
+        from devkit import core
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.state = Path(self.tmp.name) / "state"
+        patch = mock.patch.object(core, "STATE", self.state)
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.name = "Mac-158.lan"
+        host = mock.patch("socket.gethostname", side_effect=lambda: self.name)
+        host.start()
+        self.addCleanup(host.stop)
+
+    def audit_log(self, *records):
+        d = self.state / "audit"
+        d.mkdir(parents=True, exist_ok=True)
+        with (d / "2026-11.jsonl").open("a") as fh:
+            for ts, host in records:
+                fh.write(json.dumps({"v": 2, "ts": ts, "actor": {"user": "ana", "host": host, "agent": "claude"},
+                                     "action": "guard.allow"}) + "\n")
+
+    def test_the_id_stays_when_the_hostname_changes(self):
+        first = identity.machine(now=T0)
+        self.name = "andress-mbp-2"
+        second = identity.machine(now=T0 + 60)
+        self.assertEqual(second.id, first.id)
+        self.assertEqual((first.label, second.label), ("mac-158", "andress-mbp-2"))
+        self.assertTrue(identity.was_this_mac("mac-158", T0 + 30, second))
+        self.assertTrue(identity.was_this_mac("Andress-MBP-2.local", T0 + 61, second))
+
+    def test_a_new_id_is_random_and_names_neither_the_mac_nor_its_user(self):
+        m = identity.machine(now=T0)
+        self.assertRegex(m.id, r"^m-[0-9a-z]{8}$")
+        self.assertNotIn("158", m.id)
+        f = self.state / "machine.json"
+        self.assertEqual(f.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(json.loads(f.read_text())["id"], m.id)
+        import tempfile
+        from devkit import core
+        with tempfile.TemporaryDirectory() as other, mock.patch.object(core, "STATE", Path(other)):
+            self.assertNotEqual(identity.machine(now=T0).id, m.id)  # another Mac (another state) gets its own
+
+    def test_former_hostnames_come_from_this_macs_own_audit_log(self):
+        self.audit_log((T0 - 7200, "mac-55"), (T0 - 3600, "mac-55"), (T0 - 1800, "mac-158"), (T0 - 600, "mac-55"))
+        self.name = "andress-mbp-2"
+        m = identity.machine(now=T0)
+        self.assertTrue(identity.was_this_mac("mac-55", T0 - 5000, m))
+        self.assertTrue(identity.was_this_mac("mac-158", T0 - 1800, m))
+        # between its two periods mac-55 was another Mac's name as far as this Mac knows
+        self.assertFalse(identity.was_this_mac("mac-55", T0 - 2400, m))
+        self.assertFalse(identity.was_this_mac("mac-55", T0 - 9 * 3600, m))  # before this Mac carried it
+
+    def test_a_name_or_id_this_mac_never_carried_is_not_its(self):
+        m = identity.machine(now=T0)
+        self.assertFalse(identity.was_this_mac("mac-640", T0, m))
+        self.assertFalse(identity.was_this_mac(m.id, T0, m))  # ids match exactly, never as a former name
+        self.assertFalse(identity.was_this_mac("", T0, m))
+
+    def test_a_damaged_record_gets_a_new_id_instead_of_failing(self):
+        (self.state).mkdir(parents=True)
+        (self.state / "machine.json").write_text("{not json")
+        m = identity.machine(now=T0)
+        self.assertRegex(m.id, r"^m-[0-9a-z]{8}$")
+        self.assertEqual(identity.machine(now=T0 + 1).id, m.id)
+
+
 if __name__ == "__main__":
     unittest.main()

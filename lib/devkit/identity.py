@@ -191,3 +191,149 @@ def _typed_exactly(entry: dict, args: list) -> bool:
         return False
     words = r"\s+".join(f"(?:{re.escape(a)}|'{re.escape(a)}'|\"{re.escape(a)}\")" for a in args)
     return re.search(_DEV + r"\s+" + words + _END, str(entry.get("cmd") or "")) is not None
+
+
+# --------------------------------------------------------------------------- this Mac
+# macOS changes the hostname with the network (`mac-158`, `Mac-158.lan`, `andress-mbp-2` in one day), so devkit names
+# a Mac by a random id created once in its local state (STATE/machine.json, 0600) and keeps the hostname as a label
+# for display only. The id is independent of the bug registry's install id (bugs.install_id), which never leaves the
+# Mac, while this one is published in the handoff; it holds nothing about the hardware or the person.
+#
+# Records written before the id existed name the Mac by its hostname of the time (`ana@mac-158`). The record keeps
+# each hostname this Mac carried with the periods it carried it (aliases): seeded once from this Mac's own audit
+# log, whose every record was written here with its time, then extended whenever devkit runs. was_this_mac reads a
+# legacy name as this Mac's only for a record written while this Mac carried it, so a DHCP name that another Mac
+# carries later or carried before (`mac-55`) never makes that Mac's records this one's.
+
+MACHINE_ID = re.compile(r"m-[0-9a-z]{8}")
+ALIAS_MARGIN = 900  # seconds around a period: the record's clock and the last refresh of the period may differ
+_REFRESH = 300  # seconds between two writes of the same period's end
+_PERIODS_KEPT = 200  # periods kept per hostname; older ones merge, so a name never loses its whole history
+
+
+@dataclass(frozen=True)
+class Machine:
+    id: str  # "m-" and 8 random base36 characters, stable for this Mac's devkit state
+    label: str  # the current short hostname, lowercase: for display only
+    aliases: dict  # hostname -> [[first, last], …] seconds since the epoch: when this Mac carried that name
+
+
+def short_host(name) -> str:
+    """A hostname as devkit compares it: the first label, lowercase (`Mac-158.lan` -> `mac-158`)."""
+    return str(name or "").strip().split(".")[0].lower()
+
+
+def hostname() -> str:
+    import socket
+    return short_host(socket.gethostname())
+
+
+def _machine_file():
+    from . import core
+    return core.STATE / "machine.json"
+
+
+def _new_id() -> str:
+    import secrets
+    return "m-" + "".join(secrets.choice("0123456789abcdefghijklmnopqrstuvwxyz") for _ in range(8))
+
+
+_HOST_RX = re.compile(r'"host":\s*"([^"\\]*)"')
+_TS_RX = re.compile(r'"ts":\s*([0-9]+(?:\.[0-9]+)?)')
+
+
+def _seen_in_audit() -> dict:
+    """The hostnames in this Mac's own audit log (STATE/audit/*.jsonl), each with the periods it ran under it: a run
+    of consecutive records under one name is one period."""
+    from . import core
+    out, last = {}, None
+    files = sorted((core.STATE / "audit").glob("*.jsonl")) if (core.STATE / "audit").is_dir() else []
+    for f in files:
+        try:
+            fh = f.open("r", errors="replace")
+        except OSError:
+            continue
+        with fh:
+            for line in fh:
+                h, t = _HOST_RX.search(line), _TS_RX.search(line)
+                name = short_host(h.group(1)) if h else ""
+                if not name or not t or name in ("?", "localhost"):
+                    continue
+                ts = float(t.group(1))
+                if name == last and out[name]:
+                    out[name][-1][1] = max(out[name][-1][1], ts)
+                else:
+                    out.setdefault(name, []).append([ts, ts])
+                last = name
+    return out
+
+
+def _valid(doc) -> bool:
+    return isinstance(doc, dict) and isinstance(doc.get("id"), str) and MACHINE_ID.fullmatch(doc["id"]) is not None \
+        and isinstance(doc.get("aliases"), dict)
+
+
+def _record_name(doc: dict, name: str, now: float) -> None:
+    periods = doc["aliases"].setdefault(name, [])
+    if doc.get("current") == name and periods:
+        periods[-1][1] = max(periods[-1][1], now)
+    else:
+        periods.append([now, now])
+        if len(periods) > _PERIODS_KEPT:
+            periods[:2] = [[periods[0][0], periods[1][1]]]
+    doc["current"] = name
+
+
+def _created(now: float, name: str) -> dict:
+    """A new record: a fresh id, the names the audit log shows, and the hostname of this moment counted from the
+    start, as devkit read it until now (a record that named this Mac by it was this Mac's)."""
+    doc = {"version": 1, "id": _new_id(), "created": int(now), "aliases": _seen_in_audit()}
+    doc["aliases"].setdefault(name, []).insert(0, [0, now])
+    doc["current"] = name
+    return doc
+
+
+def _fresh(doc, name: str, now: float) -> bool:
+    periods = (doc.get("aliases") or {}).get(name) or []
+    return doc.get("current") == name and bool(periods) and now - periods[-1][1] < _REFRESH
+
+
+def machine(now: float | None = None) -> Machine:
+    """This Mac: its stable id, the hostname as label, and the hostnames it carried (aliases). The first call creates
+    the record; a call under a new hostname adds it to the aliases. A record that does not parse is replaced whole
+    (a new id). When the state cannot be written (a busy lock, a read-only folder), the record read stands, and with
+    none the hostname itself is the id, as devkit named a Mac before."""
+    from . import state
+    now = time.time() if now is None else now
+    name = hostname() or "localhost"
+    path = _machine_file()
+    doc = state.read(path)
+    if not (_valid(doc) and _fresh(doc, name, now)):
+        def put(d):
+            if not _valid(d):
+                return _created(now, name)
+            _record_name(d, name, now)
+            return d
+        try:
+            if path.exists() and not _valid(state.read(path)):
+                with state.hold(path):
+                    if not _valid(state.read(path)):
+                        state.replace(path, _created(now, name), indent=1)
+            doc = state.update(path, put, indent=1)
+        except (state.StateBusy, OSError):
+            if not _valid(doc):
+                return Machine(id=name, label=name, aliases={name: [[0, now]]})
+    return Machine(id=doc["id"], label=name, aliases={k: [list(p) for p in v] for k, v in doc["aliases"].items()
+                                                      if isinstance(v, list)})
+
+
+def was_this_mac(name: str, at: float | None = None, m: Machine | None = None) -> bool:
+    """Was a record that names its machine `name` (a hostname, as records before the machine id did), written at
+    `at` (seconds; now when None), written by this Mac? Yes when this Mac carried that hostname then. A machine id is
+    never a former name: ids are compared exactly by the caller."""
+    name = short_host(name)
+    if not name or MACHINE_ID.fullmatch(name):
+        return False
+    m = m or machine()
+    at = time.time() if at is None else float(at)
+    return any(p[0] - ALIAS_MARGIN <= at <= p[1] + ALIAS_MARGIN for p in m.aliases.get(name) or [] if len(p) == 2)
