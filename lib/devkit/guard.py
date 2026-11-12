@@ -8061,101 +8061,7 @@ def _ro_env(name: str, value: str = "") -> str | None:
     return f"setting {name} makes the command run another program or act differently"
 
 
-@functools.lru_cache(maxsize=4)
-def _sed_flavor(path: str = "") -> str:
-    """'gnu' when the sed a command runs (`path`, else the one on the PATH) is GNU sed, else 'bsd' (macOS's): it
-    decides how `-i` reads the word after it. Read from the binary's own bytes, 4 MB at most."""
-    p = path or shutil.which("sed") or "/usr/bin/sed"
-    try:
-        with open(os.path.realpath(p), "rb") as f:
-            return "gnu" if b"GNU sed" in f.read(1 << 22) else "bsd"
-    except (OSError, ValueError):
-        return "bsd"
-
-
-_SED_SUFFIX = re.compile(r"[A-Za-z0-9._~-]*\Z")  # a backup suffix that keeps the backup beside its file
-
-
-def _ro_sed_inplace(args, cwd, member) -> str | None:
-    """Why `sed -i …` of a read-only lane is refused, or None: read as the installed sed reads it (_sed_flavor: BSD
-    sed takes the word after a lone -i as the suffix, GNU sed none), its backup suffix has no `/` or `*`, every script
-    only prints (_sed_prints_only: no w, r or e), and every file it edits is, links resolved, a regular file with one
-    link inside the member's own scratch folder, at least one. A file named `{}` is one find or xargs fills in."""
-    bsd = _sed_flavor() == "bsd"
-    scripts, files, suffix, i = [], [], None, 0
-    while i < len(args):
-        a, nxt = args[i], args[i + 1] if i + 1 < len(args) else None
-        if a in ("-n", "--quiet", "--silent", "-E", "-r", "--regexp-extended", "-s", "--separate", "-u",
-                 "--unbuffered", "-z", "--null-data", "--posix"):
-            pass
-        elif a in ("-e", "--expression"):
-            scripts.append(nxt or "")
-            i += 1
-        elif a.startswith("--expression="):
-            scripts.append(a.split("=", 1)[1])
-        elif a == "--in-place" or a.startswith("--in-place="):
-            if bsd:
-                return f"{_code(f'sed {a}')} is not an option of this sed (macOS's); use `sed -i ''`"
-            suffix = a.split("=", 1)[1] if "=" in a else ""
-        elif a.startswith("-") and not a.startswith("--") and len(a) > 1:
-            for k, ch in enumerate(a[1:]):
-                if ch in "nErsuz":
-                    continue
-                tail = a[k + 2:]
-                if ch == "e":
-                    scripts.append(tail or nxt or "")
-                    i += 0 if tail else 1
-                elif ch == "i":
-                    suffix = tail if tail or not bsd else (nxt if nxt is not None else "")
-                    i += 1 if not tail and bsd else 0
-                else:
-                    return f"{_code(f'sed -{ch}')} writes files or reads a script file"
-                break
-        elif a.startswith("-"):
-            return f"{_code(f'sed {a}')} writes files or reads a script file"
-        else:
-            files.append(a)
-        i += 1
-    if not scripts and files:
-        scripts, files = files[:1], files[1:]
-    if not files:  # under find -exec or xargs the files are added when it runs
-        return f"{_code('sed -i')} names no file of your scratch folder to edit"
-    if not _SED_SUFFIX.match(suffix or ""):
-        return f"the backup suffix {_code(suffix)} puts the backups in another folder"
-    bad = next((s for s in scripts if not _sed_prints_only(s)), None)
-    if bad is not None:
-        return f"the sed script {_code(bad.strip())} can write or run a file (its w, r or e command)"
-    for f in files:
-        p = resolve(f, cwd)
-        rp = Path(real(str(p))) if p != UNKNOWN else UNKNOWN
-        try:
-            st = os.stat(rp) if rp != UNKNOWN and rp.exists() else None
-        except (OSError, ValueError):
-            st = None
-        if not _own_scratch(p, member) or (st is not None and (not rp.is_file() or st.st_nlink > 1)):
-            return (f"{_code(f'sed -i')} edits {_code(f)}, which is not a file of its own in your scratch folder "
-                    f"(scratchpad/{member or '<you>'}/), links resolved")
-    return None
-
-
-def _sed_in_place(args) -> bool:
-    """True when sed's words edit files in place: --in-place, or an i in a cluster of short options before an e
-    (after `-e` the rest of the word is the script)."""
-    for a in args:
-        if a.startswith("--in-place"):
-            return True
-        if a.startswith("-") and not a.startswith("--"):
-            for ch in a[1:]:
-                if ch == "i":
-                    return True
-                if ch == "e":
-                    break
-    return False
-
-
-def _ro_sed(args, cwd=None, member=None) -> str | None:
-    if _sed_in_place(args):
-        return _ro_sed_inplace(args, cwd, member)
+def _ro_sed(args) -> str | None:
     scripts, files, quiet, i = [], [], False, 0
     while i < len(args):
         a = args[i]
@@ -8846,24 +8752,13 @@ def _ro_impeccable(args) -> str | None:
     return None
 
 
-_PY_VALUE_OPTS = frozenset({"-W", "-X", "--check-hash-based-pycs"})  # Python's options whose value is the next word
-
-
 def _own_scratch_script(argv, cwd, member) -> bool:
     """True when an interpreter runs a script file from crew member `member`'s own scratch folder (a probe it wrote
-    with the Write tool), not inline code or its input. Python's -W, -X and --check-hash-based-pycs take the next
-    word as their value, so `python3 -W ignore x.py` runs x.py."""
-    python, skip = _family(argv[0]) in ("python", "pypy") if argv else False, False
+    with the Write tool), not inline code or its input."""
     for a in argv[1:]:
-        if skip:
-            skip = False
-            continue
         if a in ("-", "--", "-c", "-e", "-E", "--eval", "-p", "--print", "-r", "-m") or \
                 (a.startswith("-") and not a.startswith("--") and a[-1:] in ("c", "e", "m")):
             return False
-        if python and a in _PY_VALUE_OPTS:
-            skip = True
-            continue
         if a.startswith("-"):
             continue
         p = resolve(a, cwd)
@@ -8872,96 +8767,17 @@ def _own_scratch_script(argv, cwd, member) -> bool:
     return False
 
 
-# the runners that fetch a package and run it (npx, uvx, …): what they run is a download, never a scratch script;
-# uv, poetry, pdm, hatch, rye and pipenv run the project's own environment
-_RO_FETCHERS = frozenset({"npx", "bunx", "uvx", "pnpx", "pnpm"})
-_RO_SHELLS = frozenset({"bash", "sh", "dash", "zsh"})  # the shells whose lines the read-only rules read
-_RO_SHELL_SETS = frozenset({"pipefail", "errexit", "nounset", "xtrace", "verbose", "noglob", "posix"})
-
-
-def _own_scratch(path, member) -> bool:
-    """True when `path`, links resolved, is inside crew member `member`'s own scratch folder."""
-    if not member or path == UNKNOWN:
-        return False
-    p = Path(real(str(path)))
-    m = _SCRATCHPAD.match(str(p))
-    return bool(_app_scratch_allows(p, member) or (m and m.group(2) and not scratch_refusal(p, member)))
-
-
-def _ro_pythonpath(value, cwd, member) -> str | None:
-    """Why a read-only lane may not set PYTHONPATH=`value` for a command, or None: every entry, links resolved, is in
-    the workspace (no temp folder, which a read-only lane can write) or the member's own scratch folder, so Python
-    imports only the projects' code, which their checks run anyway, or the member's own probes."""
-    if re.search(r"[$`*?\[{~]", value):
-        return f"PYTHONPATH={value} names a path only known when it runs"
-    for entry in value.split(":"):
-        p = resolve(entry or ".", cwd)
-        if p == UNKNOWN or not (_workspace_file(Path(real(str(p)))) or _own_scratch(p, member)):
-            return (f"PYTHONPATH entry {_code(entry or '.')} is outside the workspace and your scratch folder, so Python "
-                    f"may import code from a folder a lane can write")
-    return None
-
-
-def _ro_shell(argv, cwd, member, docs, depth) -> str | None:
-    """Why a shell call of a read-only lane is refused, or None: its program is a -c line, a script file the guard
-    reads in full, or a quoted heredoc, and every command in it passes the read-only rules (_ro_what, one level
-    deeper; $1… stay words a command reads, never a program). Options: e, u, x, v, f, s, -o with one of
-    _RO_SHELL_SETS, --norc, --noprofile and --posix; an interactive or login shell, an rc file or any other option runs
-    code the guard does not read."""
-    name, args, i, line, stdin = os.path.basename(argv[0]), argv[1:], 0, False, False
-    if depth >= 2:
-        return f"{_code(name)} inside a shell inside a shell, deeper than the guard reads"
-    while i < len(args):
-        a = args[i]
-        if a in ("-", "--"):
-            i += 1
-            break
-        if a in ("--norc", "--noprofile", "--posix"):
-            i += 1
-            continue
-        if not re.fullmatch(r"[-+][euxvfsco]+", a):
-            if a[:1] in "-+":
-                return f"{_code(f'{name} {a}')} runs startup files or code the guard does not read"
-            break
-        opts = [args[i + 1 + k] if i + 1 + k < len(args) else "" for k in range(a.count("o"))]
-        bad = next((o for o in opts if o not in _RO_SHELL_SETS), None)
-        if bad is not None:
-            return f"{_code(f'{name} -o {bad}')} is not an option the guard knows runs nothing"
-        line, stdin = line or "c" in a, stdin or "s" in a
-        i += 1 + len(opts)
-    rest = args[i:]
-    if line:
-        text, what = (rest[0] if rest else ""), "its -c line"
-    elif rest and not stdin:
-        path = resolve(rest[0], cwd)
-        with _skipped_reads() as unread:
-            text = _read_small(path, 1 << 18) if path != UNKNOWN and path.is_file() else None
-        if text is None or unread:
-            return f"it runs {_code(rest[0])}, which the guard cannot read"
-        what = _code(rest[0])
-    elif not docs:
-        return f"{_code(name)} reads its commands from its input, which the guard cannot read"
-    elif any(expands for _, expands in docs):
-        return "the heredoc's delimiter is unquoted, so the shell changes its commands before it reads them (`<<'EOF'`)"
-    else:
-        text, what = "\n".join(body for body, _ in docs), "its heredoc"
-    why = _ro_what(text, cwd, member, depth + 1)
-    return f"{what}: {why}" if why else None
-
-
-def _ro_program(argv0, cwd, member=None, plans=None, docs=(), depth=0) -> str | None:
-    """Why one command of a read-only lane (its words, prefixes included) is refused, or None. `plans`: as _ro_dev;
-    `docs`: the command's heredocs, [(body, expands)]; `depth`: how many shells deep the command is."""
+def _ro_program(argv0, cwd, member=None, plans=None) -> str | None:
+    """Why one command of a read-only lane (its words, prefixes included) is refused, or None. `plans`: as _ro_dev."""
     argv = _unwrap(argv0)
     pre = argv0[:len(argv0) - len(argv)]
-    runner = fetcher = False
+    runner = False
     for k, a in enumerate(pre):
         n = os.path.basename(a)
         if _ASSIGN.match(a):
             if not argv and _SHELL_VAR.match(a.split("=", 1)[0]):
                 continue  # `S=/path` alone sets a shell variable no program reads (not exported, no known name)
-            var, value = a.split("=", 1)
-            why = _ro_pythonpath(value, cwd, member) if var == "PYTHONPATH" and argv else _ro_env(var, value)
+            why = _ro_env(*a.split("=", 1))
             if why:
                 return why
         elif n == "sudo":
@@ -8972,7 +8788,7 @@ def _ro_program(argv0, cwd, member=None, plans=None, docs=(), depth=0) -> str | 
                                     itertools.takewhile(lambda x: x.startswith("-") and x != "--", pre[k + 1:])):
             return None  # `command -v gh dev`, `command -V x`: it only looks the names up and runs none of them
         elif n in _RO_RUNNERS:
-            runner, fetcher = True, fetcher or n in _RO_FETCHERS
+            runner = True
     if not argv:
         return None
     why = input_command_refusal(argv)
@@ -8988,9 +8804,7 @@ def _ro_program(argv0, cwd, member=None, plans=None, docs=(), depth=0) -> str | 
         return _ro_dev(dev, cwd, plans)
     why = _check_refusal(argv)
     if why is not None:
-        # a project runner (uv run, poetry run) runs the project's environment, as it does for the checks; a fetching
-        # runner (npx, uvx) runs a download
-        if not why and _INTERP.match(name) and not fetcher and _own_scratch_script(argv, cwd, member):
+        if not why and _INTERP.match(name) and not runner and _own_scratch_script(argv, cwd, member):
             return None
         if not why and not runner and (_INTERP.match(name) or name in _SHELLS) and _version_only(name, args):
             return None
@@ -8998,8 +8812,6 @@ def _ro_program(argv0, cwd, member=None, plans=None, docs=(), depth=0) -> str | 
             return None  # `bash -n x.sh`, `zsh -n -c '…'`: it reads and parses, and runs nothing
         if not why and not runner and _family(name) in ("awk", "gawk", "mawk", "nawk"):
             return _ro_awk(args)
-        if not why and not fetcher and name in _RO_SHELLS:
-            return _ro_shell(argv, cwd, member, list(docs), depth)
         return why or (f"{_code(name)} is not on the read-only allowlist" if runner or _INTERP.match(name) or
                        name in _SHELLS or name in ("eval", "source", ".") else _ro_reader(name, args, cwd, member))
     return None
@@ -9157,7 +8969,7 @@ def _ro_reader(name, args, cwd, member=None) -> str | None:
                 if why:
                     return why
     if name == "sed":
-        return _ro_sed(args, cwd, member)
+        return _ro_sed(args)
     if name == "git":
         return _ro_git(args)
     if name == "gh":
@@ -9171,20 +8983,12 @@ def _ro_reader(name, args, cwd, member=None) -> str | None:
             if a in ("-exec", "-execdir", "-ok", "-okdir"):
                 inner = args[k + 1:]
                 inner = inner[:next((j for j, x in enumerate(inner) if x in (";", "+")), len(inner))]
-                why = _ro_filled_sed(inner) or (_ro_program(inner, cwd, member) if inner else None)
+                why = _ro_program(inner, cwd, member) if inner else None
                 if why:
                     return why
     if name == "xargs":
         cmd = _xargs_command(args)
-        return (_ro_filled_sed(cmd) or _ro_program(cmd, cwd, member)) if cmd else None
-    return None
-
-
-def _ro_filled_sed(argv) -> str | None:
-    """`find … -exec sed -i …` and `xargs sed -i …` edit the files they add when they run, which the guard cannot see."""
-    argv = _unwrap(list(argv or []))
-    if argv and os.path.basename(argv[0]) == "sed" and _sed_in_place(argv[1:]):
-        return f"{_code('sed -i')} under find or xargs edits the files they add when it runs, which the guard cannot see"
+        return _ro_program(cmd, cwd, member) if cmd else None
     return None
 
 
@@ -9307,39 +9111,32 @@ def readonly_refusal(cmd: str, cwd, member=None, depth: int = 0, plans=None) -> 
     folder. A command substitution (`$(…)`, backticks) or process substitution (`<(…)`, `>(…)`) passes when the
     command inside it does, by the same rules; never as the program a command runs, and never arithmetic. `plans`: a
     call that gives the project whose plans the lane may write with `dev plan new|revise` (lane_plans_project); a
-    substitution never writes one. A shell's line, script or heredoc, and sed -i, run when the guard proves them
-    read-only or confined to the member's own scratch folder (_ro_shell, _ro_sed)."""
-    what = _ro_what(cmd, cwd, member, depth, plans)
-    return READONLY_REASON.format(what=what) if what else None
-
-
-def _ro_what(cmd: str, cwd, member=None, depth: int = 0, plans=None) -> str | None:
-    """readonly_refusal's reason without its advice, or None; a shell's commands are judged here one level deeper."""
+    substitution never writes one."""
     if not cmd or not str(cmd).strip():
         return None
     readings = _continued_readings(cmd)
     if readings:  # a backslash-newline: the readings shells use (joined; a comment ended at its newline), each judged
-        return next((why for why in (_ro_what(r, cwd, member, depth, plans) for r in readings) if why), None)
+        return next((why for why in (readonly_refusal(r, cwd, member, depth, plans) for r in readings) if why), None)
     masked = _mask_substitutions(strip_heredocs(cmd)) if depth < 3 else None
     if masked is None:
-        return "`$((…))` and substitutions nested deeper than three levels run code the guard cannot judge"
+        return READONLY_REASON.format(what="`$((…))` and substitutions nested deeper than three levels run code the "
+                                           "guard cannot judge")
     text, inner = masked
-    docs = _split_heredocs(cmd)[1]
-    inner += [t for body, expands in docs if expands for t in _subst(body, False)]
+    inner += [t for body, expands in _split_heredocs(cmd)[1] if expands for t in _subst(body, False)]
     for sub in inner:
-        why = _ro_what(sub, cwd, member, depth + 1)
+        why = readonly_refusal(sub, cwd, member, depth + 1)
         if why:
             return why
     segs = split_commands(text, stripped=True)
     if segs is None:
-        return "the guard cannot parse this command, so it cannot tell what it writes"
+        return READONLY_REASON.format(what="the guard cannot parse this command, so it cannot tell what it writes")
     here = str(cwd or os.getcwd())
     osegs = split_commands(text, ops=True, stripped=True)
     ops = [s[2] for s in osegs] if osegs is not None and len(osegs) == len(segs) else None
     moved = False  # an earlier part of the command changes folder, or may: a plan write then needs a command of its own
     for k, (argv0, redirs) in enumerate(segs):
         if moved and _plan_write(argv0):
-            return PLAN_AFTER_CD
+            return READONLY_REASON.format(what=PLAN_AFTER_CD)
         moved = moved or ops is None or any(c in ops[k] for c in "()") or _changes_folder(argv0)
         argv0, extra = list(argv0), []
         while any(t in (">|", ">>|") for t in argv0):  # `>|` reaches argv as a token; its target follows it
@@ -9348,13 +9145,13 @@ def _ro_what(cmd: str, cwd, member=None, depth: int = 0, plans=None) -> str | No
             del argv0[k:k + 2]
         bad = next((r for r in list(redirs) + extra if not _redirect_ok(r, here)), None)
         if bad is not None:
-            return f"the redirect to {_code(bad)} writes a file"
+            return READONLY_REASON.format(what=f"the redirect to {_code(bad)} writes a file")
         argv = _unwrap(argv0)
         if argv and os.path.basename(argv[0]) in ("cd", "pushd") and len(argv) > 1 and argv[1] != "-":
             here = str(resolve(argv[1], here))
-        why = _ro_program(argv0, here, member, plans, docs=docs, depth=depth)
+        why = _ro_program(argv0, here, member, plans)
         if why:
-            return why
+            return READONLY_REASON.format(what=why)
     return None
 
 
