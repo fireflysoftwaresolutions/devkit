@@ -530,6 +530,24 @@ def initiative_members(slug: str) -> list:
     return notes.summarize(f.read_text())["projects"]
 
 
+def initiatives_of(project: str, handoff=None) -> list:
+    """The initiatives `project` is a member of: the slugs whose README lists it, sorted. `handoff`: the handoff
+    repository to read (core.HANDOFF when None). A README that cannot be read lists no member, so one bad initiative
+    never hides the others."""
+    base = Path(handoff or core.HANDOFF) / "initiatives"
+    if not project or not base.is_dir():
+        return []
+    from . import notes
+    out = []
+    for d in sorted(base.iterdir()):
+        try:
+            if project in notes.summarize((d / "README.md").read_text(encoding="utf-8"))["projects"]:
+                out.append(d.name)
+        except (OSError, ValueError):  # no README, or one that is not UTF-8 text
+            continue
+    return out
+
+
 def handoff_violation(rel: str, cwd, envs=frozenset()):
     """Isolation in the handoff repo: a project session writes only its own note, plans and initiatives. `rel` is read
     as the file system reads it, without case: macOS folders are case-insensitive, so projects/other/repo.MD is the

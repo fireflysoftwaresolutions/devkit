@@ -20,8 +20,8 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from devkit import audit, core, guard, hooks, lessonevents, lessonrules, lessons  # noqa: E402
-from devkit import progress as pg, registry  # noqa: E402
+from devkit import audit, core, crew, guard, hooks, lessonevents, lessonrules, lessons  # noqa: E402
+from devkit import progress as pg, registry, skillguard, work  # noqa: E402
 from test_crew_gates import taught_anchors  # noqa: E402
 from test_language_neutral_hooks import A, HookCase  # noqa: E402
 
@@ -174,6 +174,53 @@ class BriefTests(LessonHookCase):
         self.assertIn(lid, brief)
         self.assertEqual(lessons.usage().get(lid, {}).get("shown_brief"), 1)
         self.assertEqual(self.events(lid), [("shown", "brief", "a_tank")])
+
+
+class InitiativeRecallTests(LessonHookCase):
+    # An initiative's lessons belong to each of its member projects: they reach the project's tool calls, outputs and
+    # briefs, not only its session start
+    def setUp(self):
+        super().setUp()
+        h = Path(work.HANDOFF)
+        (h / "initiatives" / "payments").mkdir(parents=True)
+        (h / "initiatives" / "payments" / "README.md").write_text(
+            "---\nkind: initiative\ntitle: Payments\nprojects: [acme/api]\n---\n# Payments\n")
+        for obj in (hooks, core):  # the hooks read the initiatives in their handoff, the briefs in core's
+            p = mock.patch.object(obj, "HANDOFF", h)
+            p.start()
+            self.addCleanup(p.stop)
+
+    def initiative_lesson(self, title, **anchors):
+        return lessons.add("initiatives/payments", title, cause="cause of " + title, prevention="prevention of " + title,
+                           happened="it happened: " + title, a=A, **anchors)["meta"]["id"]
+
+    def test_an_initiatives_lesson_reaches_a_tool_call_of_a_member_project(self):
+        lid = self.initiative_lesson("Never force-push a release branch", commands=["git push --force"])
+        out = self.hook("guard", self.bash("git push --force origin release/1.2", tid="t1"))
+        self.assertIn(lid, self.context(out))
+
+    def test_an_initiatives_lesson_reaches_the_output_of_a_member_projects_call(self):
+        lid = self.initiative_lesson("Settle a payment once", errors=["duplicate settlement for payment"])
+        out = self.hook("post-tool", self.output("t1", "[ERROR] duplicate settlement for payment 42"))
+        self.assertIn(lid, self.context(out))
+
+    def test_an_initiatives_lesson_reaches_a_launch_brief_for_a_member_project(self):
+        lid = self.initiative_lesson("Keep payment amounts in minor units", activities=["backend"])
+        out = skillguard.on_agent_brief("claude", {"description": "Tank: the payments API",
+                                                   "prompt": "Build the payments API."}, "acme/api", activity="backend")
+        self.assertIn(lid, out["prompt"])
+
+    def test_an_initiatives_lesson_reaches_a_dev_crew_brief_for_a_member_project(self):
+        lid = self.initiative_lesson("Keep payment amounts in minor units", activities=["backend"])
+        repo = self.root / "src" / "api"
+        repo.mkdir(parents=True)
+        for args in (("init", "-q"), ("remote", "add", "origin", "https://github.com/acme/api.git")):
+            subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, env=dict(os.environ,
+                                                                                                    **GIT_ENV))
+        roster = crew.load(team=False)
+        text = crew.brief_text(crew.member("tank", roster), "Build the payments API.", roster=roster, cwd=str(repo),
+                               activity="backend")
+        self.assertIn(lid, text)
 
 
 class RuleTests(LessonHookCase):

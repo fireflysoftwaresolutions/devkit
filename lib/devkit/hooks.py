@@ -317,9 +317,7 @@ def context_for(cwd: str, agent: str) -> str:
         _swallowed("session-start", e)
     try:
         from . import lessons
-        inits = [d.name for d in (HANDOFF / "initiatives").glob("*") if (d / "README.md").exists() and
-                 p["id"] in notesmod.summarize((d / "README.md").read_text())["projects"]] \
-            if (HANDOFF / "initiatives").exists() else []
+        inits = _initiatives(p["id"])
         try:  # the lessons of the files this branch changes come first
             from . import testx
             changed = testx.changed_files(top)
@@ -380,6 +378,13 @@ def _session_lessons_shown(data: dict, seen: dict):
         _shown(data, (seen or {}).get("lessons") or [], "session", count=False)
     except Exception as e:
         _swallowed("session-start", e)
+
+
+def _initiatives(project: str) -> list:
+    """The initiatives `project` is a member of, in the handoff the hooks read: their lessons are the project's too,
+    at the session start and on every call and output (guard.initiatives_of)."""
+    from . import guard
+    return guard.initiatives_of(project, HANDOFF)
 
 
 def _note_excerpt(ns) -> str:
@@ -2028,7 +2033,7 @@ def _call_pitfalls(agent: str, data: dict, remember: bool = True, channel: str =
         files = [x for x in (inp.get("file_path"), inp.get("notebook_path")) if x]
         if not (cmd or files or refused):
             return ""
-        pool = lessons.recall_pool(project)  # loaded once for both questions
+        pool = lessons.recall_pool(project, _initiatives(project))  # loaded once for both questions
         found = lessons.for_call(project, files=files, command=cmd, limit=LESSON_HITS_MAX, pool=pool) \
             if cmd or files else []
         by_refusal = lessons.for_output(project, refused, limit=LESSON_HITS_MAX, pool=pool) if refused else []
@@ -2330,7 +2335,8 @@ def _recall_quietly(agent: str, data: dict) -> list:
     try:
         project = str(_session_record(agent, data).get("project") or "")
         from . import lessons
-        return lessons.for_output(project, _output_text(data), limit=LOOP_SHOW) if project else []
+        return lessons.for_output(project, _output_text(data), limit=LOOP_SHOW, initiatives=_initiatives(project)) \
+            if project else []
     except Exception:
         _log(f"settle recall {agent}: {traceback.format_exc()[-300:]}")
         return []
@@ -2343,7 +2349,7 @@ def _recalled(agent: str, data: dict, ids: list) -> list:
     try:
         project = str(_session_record(agent, data).get("project") or "")
         from . import lessons
-        pool = {x["meta"]["id"]: x for x in lessons.recall_pool(project)} if project else {}
+        pool = {x["meta"]["id"]: x for x in lessons.recall_pool(project, _initiatives(project))} if project else {}
     except Exception:
         _log(f"settle lessons {agent}: {traceback.format_exc()[-300:]}")
         return []
@@ -2363,7 +2369,8 @@ def _output_pitfalls(agent: str, data: dict, take: int = 0, taken: list = None) 
         from . import lessons
         same_call = set((sess.get("lessons_by_call") or {}).get(str(data.get("tool_use_id") or "")) or [])
         rules, said = _output_rules(data, project, text, same_call)
-        found = [x for x in lessons.for_output(project, text, limit=LESSON_HITS_MAX) if x["meta"]["id"] not in said]
+        found = [x for x in lessons.for_output(project, text, limit=LESSON_HITS_MAX, initiatives=_initiatives(project))
+                 if x["meta"]["id"] not in said]
         _lesson_hits(data, [x["meta"]["id"] for x in found if x["meta"]["id"] not in same_call])
         if take and taken is not None:
             taken.extend(found[:take])

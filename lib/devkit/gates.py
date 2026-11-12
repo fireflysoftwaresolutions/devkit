@@ -555,7 +555,7 @@ def _owed(refusals, session: str, top: str) -> list:
     except Exception:
         served = set()
     open_ids = None
-    project = "global"
+    project, inits = "global", []
     out = []
     for text in refusals:
         if any(m in served for m in _markers(text)):
@@ -568,8 +568,10 @@ def _owed(refusals, session: str, top: str) -> list:
                 if top:
                     from . import delivery
                     project = delivery.scope_for(top) or "global"
+                from . import guard
+                inits = guard.initiatives_of(project) if project != "global" else []
             shown = {i for pair in _SHOWN_LESSON.findall(text) for i in pair if i}
-            if open_ids & shown or lessons.for_output(project, text, limit=1):
+            if open_ids & shown or lessons.for_output(project, text, limit=1, initiatives=inits):
                 continue
         except Exception:
             pass

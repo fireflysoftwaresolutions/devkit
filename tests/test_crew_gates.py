@@ -494,6 +494,19 @@ class RefusalAnswerTests(GateCase):
         lessons.retire(covering, "dev wt new is gone", a={"user": "ana", "host": "mbp1", "agent": "human"})
         self.assertEqual(self.owed(), ["lessons"])
 
+    def test_a_refusal_an_open_lesson_of_the_projects_initiative_covers_owes_no_lesson(self):
+        # an initiative's lessons are each member project's own: one that covers the refusal answers it
+        from devkit import delivery
+        project = delivery.scope_for(str(self.repo))
+        readme = core.HANDOFF / "initiatives" / "platform" / "README.md"
+        readme.parent.mkdir(parents=True)
+        readme.write_text(f"---\nkind: initiative\ntitle: Platform\nprojects: [{project}]\n---\n# Platform\n")
+        self.tx.refused("git worktree add ../copy").refused("git worktree add ../copy2")
+        lessons.add("initiatives/platform", "Create worktrees with dev wt new", happened="the guard refused it",
+                    cause="no managed worktree", prevention="use dev wt new", errors=["would create an unmanaged worktree"],
+                    a={"user": "ana", "host": "mbp1", "agent": "claude", "session": "s1"})
+        self.assertEqual(self.owed(), [])
+
     def test_a_refusal_that_names_an_open_lesson_owes_none_and_one_that_only_quotes_its_id_still_does(self):
         les = self.lesson("Create worktrees with dev wt new", commands=["git worktree add"])
         lid = les["meta"]["id"]
