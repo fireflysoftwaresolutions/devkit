@@ -56,9 +56,12 @@ The guard also reads the command lines a command holds or starts: a launcher's c
 `xcrun`, `op run`, `direnv exec`, `mise exec`, `asdf exec`, `dotenv`, `nix run`, and `ccr code`, which starts
 `claude`), each alias body an `alias` defines, and hyperfine's benchmark, `--prepare`, `--setup`, `--cleanup`, and
 `--conclude` lines. Every rule judges each of them, and the strictest verdict stands:
-`taskpolicy -b git push --force origin main` is refused as the push is. A `NAME+=value` prefix is an assignment, so
-the command after it is the one the rules read. The words right after a `$(…)` belong to the same command
-(`ls $(echo x)/*`, `git push $(echo origin) --force`), and a `case` statement's word and patterns name no program.
+`taskpolicy -b git push --force origin main` is refused as the push is. Any word of a launcher may name the program
+it starts, so the guard reads the command from each one, at most 64 commands, 128,000 characters, and 4 launchers
+deep. A launcher call past those bounds is refused, because the guard cannot read it in full: run the program
+without the launcher, or hand the launcher a script file or an `sh -c '…'` line, which the guard reads as one
+command. A `NAME+=value` prefix is an assignment, so the command after it is the one the rules read. The words right
+after a `$(…)` belong to the same command (`ls $(echo x)/*`, `git push $(echo origin) --force`).
 
 ## What the guard is and is not
 
@@ -769,20 +772,8 @@ checks. These run as well:
 - A command substitution or process substitution whose own command is on the allowlist:
   `git diff $(git merge-base HEAD main) HEAD`, `diff <(git show a:f) <(git show b:f)`. Arithmetic `$((…))` and a
   substitution used as the program stay refused.
-- `sed` whose script only prints, with or without `-n`: `sed 's/a/b/g' f`, `sed '/^#/d' f`. `-f`, and the `w`, `r`,
-  and `e` commands stay refused.
-- `sed -i` on the member's own scratch files: every file it edits, links resolved, is a regular file with one link
-  inside `scratchpad/<member id>/`, and its script has no `w`, `r`, or `e`. The guard reads `-i` as the installed sed
-  reads it (BSD or GNU), and a backup suffix must keep the backup beside its file. `sed -i` under `find -exec` or
-  `xargs` stays refused, because the files are added when it runs.
-- A shell (`bash`, `sh`, `dash`, `zsh`) whose `-c` line, script file, or quoted heredoc holds only commands this list
-  allows, judged again one shell deeper and at most two shells deep: `bash -c 'git log -1 && wc -l README.md'`,
-  `bash scratchpad/<member id>/read.sh`. The guard must read the script whole (256 KB at most). The options it allows
-  are `-e`, `-u`, `-x`, `-v`, `-f`, `-s`, `-o` with `pipefail`, `errexit`, `nounset`, `xtrace`, `verbose`,
-  `noglob`, or `posix`, and `--norc`, `--noprofile`, and `--posix`. An interactive or login shell, an rc file, any
-  other option, a heredoc with an unquoted delimiter, and a shell that reads its commands from a pipe stay refused.
-- A `PYTHONPATH=` prefix whose every entry, links resolved, is a workspace folder or the member's own scratch folder:
-  `PYTHONPATH=lib python3 -m pytest tests/test_x.py`. A temporary folder, a variable, or a glob in it stays refused.
+- `sed` whose script only prints, with or without `-n`: `sed 's/a/b/g' f`, `sed '/^#/d' f`. `-i`, `-f`, and the `w`,
+  `r`, and `e` commands stay refused.
 - `awk` whose program prints to standard output only. A program with `>`, `|`, `system()`, `getline`, `@load`, or a
   program file stays refused; compare with `<` instead of `>`.
 - `mkdir -p` inside the member's own scratch folder, `scratchpad/<member id>/`.
@@ -803,13 +794,10 @@ checks. These run as well:
   refuses it. When devkit cannot look up the member's kinds of work or the project, it refuses.
 - A command continued with a backslash-newline, read as the shell joins it.
 
-A script from the member's own scratch folder runs: `python3 scratchpad/<member id>/probe.py`, also after Python's
-`-W`, `-X`, or `--check-hash-based-pycs` value (`python3 -W ignore scratchpad/<member id>/probe.py`) and under a
-project runner (`uv run`, `poetry run`, `pdm run`, `hatch run`, `rye run`, `pipenv run`), which runs the project's own
-environment. A runner that fetches a package (`npx`, `uvx`, `bunx`, `pnpx`, `pnpm`) runs a download, so it stays
-refused, and so does a script in another member's folder. Inline Python (`python3 -c`) and Python heredocs stay
-refused, and so do a program named by a variable, `"$@"`, or a function, and an environment variable the guard does
-not know.
+A script from the member's own scratch folder runs when an interpreter names it directly:
+`python3 scratchpad/<member id>/probe.py`. A script in another member's folder stays refused, and so do the same
+script under a runner (`uv run`, `npx`), inline code (`python3 -c`), a shell line or script (`bash -c '…'`,
+`bash x.sh`), `sed -i`, and a `PYTHONPATH=` prefix.
 
 ### Who runs a `dev` call: the session marks
 
@@ -910,6 +898,16 @@ DEVKIT_LOCAL_CI_PASSED=1.
   reached also stands when a later part of the hook fails, recorded once, under its own rule. The agent rewrites the command more simply or stops and
   tells the developer, who can run it in their own terminal (hooks run only in agent sessions) or start the session
   with `DEVKIT_GUARD=off`, which the hook reads before any rule runs.
+- A call the guard cannot judge within its time is refused with the reason "devkit's guard could not judge this call
+  within the 10 s it has for one." The agents stop the guard hook at its timeout (15 s, the shortest guard hook
+  timeout devkit installs) and then run the call unjudged, so the guard keeps 5 s of that timeout in reserve and
+  refuses a call it has not judged by then. Every judge of one call shares that time from the moment the guard hook
+  starts: the guard's rules, the irreversible-action gate, the crew-member checks, and a crew lane's edit-scope
+  check. A lock wait inside a judgment ends at the same deadline. The refusal is recorded as `guard.deny` with
+  refusal id `_judged_in_time:judge-time`. Split the call into smaller ones: one command per call, with a long text
+  or program in a file the command reads.
+- An `apply_patch` that names more than 1,000 files (its Add File, Update File, Delete File, and Move to headers) is
+  refused before any of its files is judged. Split it into patches of at most 1,000 files.
 - Other exceptions in the guard are logged there and the call is allowed, with a `guard.failopen` record: a call that
   only reads or launches (`Read`, `Grep`, `Glob`, `WebSearch`, and `Agent`, `Task`, and Codex's `spawn_agent`, whose
   subagent's calls each pass the guard again), and a call every rule has already allowed when only the context the hook

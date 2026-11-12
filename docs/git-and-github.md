@@ -303,12 +303,15 @@ devkit cuts the step's script at its top-level commands (`&&`, `||`, `;`, `&`, a
 setup commands (the ones in the table, a download piped into a shell such as `curl … | sh`, and dependency installs),
 and runs the rest as if the setup had succeeded. In `brew install gitleaks && gitleaks detect`, `gitleaks detect`
 runs. When gitleaks is not installed on your Mac, the step fails with exit code 127, so the missing tool fails the
-evidence instead of passing unseen.
+evidence instead of passing unseen. A script run with `source` or `.` is a check, and so is a command or process
+substitution (`test -z "$(gofmt -l .)"`, `cat <(gitleaks detect)`), so it runs here without the install. A
+substitution that only feeds a setup command (`apt-get install "linux-headers-$(uname -r)"`) stays setup.
 
 A step that could be a real check but cannot run here (an unknown condition, an unresolved `${{ }}` expression, a
 shell other than bash, a reusable workflow, a missing working directory) means no evidence is recorded. So does a
-check that devkit cannot separate from its setup, because both sit inside a nested shell, a subshell, a heredoc, or a
-`case` statement (`bash -c 'brew install gitleaks && gitleaks detect'`), and a check that runs as root with `sudo`.
+check that devkit cannot separate from its setup, because both sit inside a nested shell, a subshell, a substitution,
+a heredoc, or a `case` statement (`bash -c 'brew install gitleaks && gitleaks detect'`), and a check that runs as
+root with `sudo`.
 Run it yourself, then record the result with `dev ci --mark-passed --note "<command>: <result>"`.
 
 A step that names a Docker context (`DOCKER_CONTEXT=`, `docker --context`, `docker context use`, or a program's
