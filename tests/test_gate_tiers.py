@@ -427,7 +427,7 @@ class MemberTests(GateCase):
     def test_member_push_without_grant_is_denied(self):
         why = self.member("git push origin feat/x", grant=Store())
         self.assertIn("step grant", why or "")
-        self.assertIn("--allow push", why or "")
+        self.assertIn("grant push feat/x", why or "")  # the line the developer types, which --allow needs
         self.assertIn("step grant", self.member("gh pr create --fill", grant=Store()) or "")
 
     def test_a_member_push_refusal_names_the_missing_grant_and_what_to_ask_for(self):
