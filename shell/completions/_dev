@@ -1236,8 +1236,8 @@ _dev__bug__detour() {
   _arguments -s -S : \
     '(- *)'{-h,--help}'[show this help message and exit]' \
     '*--hint=[a hint template]:'\''name slot=value …'\'': ' \
-    '*--dev=[a dev command of devkit'\''s own subcommands and flags]:'\''command'\'': ' \
-    '*--text=[free text, at most 200 characters]:'\''text'\'': ' \
+    '*--dev=[a dev subcommand and only its flags that take no value, such as '\''test…]:'\''command'\'': ' \
+    '*--text=[free text, at most 200 characters, held for review]:'\''text'\'': ' \
     ':fingerprint: '
 }
 

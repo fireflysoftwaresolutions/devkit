@@ -794,7 +794,11 @@ def _text_problems(value: str) -> list:
     out = []
     if _URLISH.search(value):
         out.append("a URL")
-    out += [f"`{f}`" for f in _SHELL_FORMS if f in value]
+    found = [f"`{f}`" for f in _SHELL_FORMS if f in value]
+    if found:  # the rule with the forms found: the text is checked for them, never run or parsed as a command
+        rule = ", ".join(f"`{f}`" for f in _SHELL_FORMS if f != "`") + " or a backtick"
+        out.append(f"{', '.join(found)} {'is a shell form' if len(found) == 1 else 'are shell forms'}: a step may "
+                   f"not contain {rule}")
     if _PROTECTED_PATH.search(value):
         out.append("a path under an agent's or devkit's configuration folder")
     bad = next((p for p in map(_char_problem, value) if p), "")
@@ -818,11 +822,14 @@ def _dev_step_problems(value: str) -> list:
     if not words or words[0] not in tree:
         return ["not a dev subcommand"]
     parser, subs = tree[words[0]]
-    rest = words[1:]
+    rest, name = words[1:], words[0]
     if rest and rest[0] in subs:
-        parser, rest = subs[rest[0]], rest[1:]
+        parser, rest, name = subs[rest[0]], rest[1:], f"{name} {rest[0]}"
     flags = _value_free_flags(parser)
-    return [f"`{w}` is not a flag of this command that takes no value" for w in rest if w not in flags]
+    valued = {o for act in parser._actions if act.option_strings and act.nargs != 0 for o in act.option_strings}
+    what = [f"`{w}` takes a value" if w in valued else f"`{w}` is not a flag of `dev {name}`" if w.startswith("-")
+            else f"`{w}` is a value or an argument" for w in rest if w not in flags]
+    return [", ".join(what) + ": a dev step is a dev subcommand and only its flags that take no value"] if what else []
 
 
 _SLOT_CHECKS = {

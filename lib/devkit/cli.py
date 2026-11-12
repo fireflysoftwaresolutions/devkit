@@ -4411,9 +4411,11 @@ def build_parser():
     x.add_argument("--hint", dest="steps", action="append", type=lambda v: ("hint", v), metavar="'NAME SLOT=VALUE …'",
                    help="a hint template: use-tool, from-root, one-at-a-time, scratch-tool, sync-retry, ask-update")
     x.add_argument("--dev", dest="steps", action="append", type=lambda v: ("dev", v), metavar="'COMMAND'",
-                   help="a dev command of devkit's own subcommands and flags")
+                   help="a dev subcommand and only its flags that take no value, such as 'test --failed' (no "
+                        "values, arguments or paths)")
     x.add_argument("--text", dest="steps", action="append", type=lambda v: ("text", v), metavar="'TEXT'",
-                   help="free text, at most 200 characters (held for review)")
+                   help="free text, at most 200 characters, held for review: no URL, no path of this Mac and none "
+                        "of the shell forms |, >, <, ;, &&, $( or a backtick")
     x = bsp.add_parser("top", help="hotfix recommendations: open bugs by score, with a reason each")
     x.add_argument("--task", action="store_true", help="add the suggested bugs as work items with the issue link")
     bsp.add_parser("sync", help="refresh the cache and send the outbox")

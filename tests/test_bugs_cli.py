@@ -235,6 +235,31 @@ class DetourTests(BugCLI):
         self.assertIn("`|`", out)
         self.assertEqual(self.outbox(), [])
 
+    # An agent read --dev as any dev command line (`--dev "test --since main"`) and the refusal of `;` in its free
+    # text as devkit parsing the text as a command: the refusal names each word's problem and the rule it breaks.
+    def test_a_refused_step_says_which_rule_its_words_break(self):
+        self.crash()
+        bugs.ledger_append("s1", "Bash", True, "progress step", [])
+        rc, out = self.dev("detour", FP_A, "--dev", "test --since main --nope")
+        self.assertEqual(rc, 1)
+        line = " ".join(out.split())
+        self.assertIn("`--since` takes a value, `main` is a value or an argument, `--nope` is not a flag of "
+                      "`dev test`: a dev step is a dev subcommand and only its flags that take no value", line)
+        rc, out = self.dev("detour", FP_A, "--text", "run the tests; then retry")
+        self.assertEqual(rc, 1)
+        self.assertIn("`;` is a shell form: a step may not contain `|`, `>`, `<`, `;`, `&&`, `$(` or a backtick",
+                      " ".join(out.split()))
+        self.assertEqual(self.outbox(), [])
+
+    def test_detour_help_says_what_a_dev_step_and_free_text_may_hold(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit):
+            cli.main(["bug", "detour", "--help"])
+        # each flag's help follows its last mention (the first is the usage line)
+        dev_help, _, text_help = " ".join(out.getvalue().split()).rpartition("--text 'TEXT'")
+        self.assertIn("only its flags that take no value", dev_help.rpartition("--dev 'COMMAND'")[2])
+        self.assertIn("none of the shell forms |, >, <, ;, &&, $( or a backtick", text_help)
+
 
 class RankTests(BugCLI):
     def test_top_gives_reasons_and_skips_closed_bugs(self):
