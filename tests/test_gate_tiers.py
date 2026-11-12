@@ -27,7 +27,7 @@ import _hermetic  # noqa: E402
 _hermetic.activate()  # run alone, this module gets the suite's temporary home too (tests/_hermetic.py)
 sys.path.insert(0, str(ROOT / "lib"))
 
-from devkit import audit, core, guard  # noqa: E402
+from devkit import audit, core, guard, progress  # noqa: E402
 
 DAY = 86400.0
 
@@ -439,8 +439,29 @@ class MemberTests(GateCase):
     def test_member_push_without_grant_is_denied(self):
         why = self.member("git push origin feat/x", grant=Store())
         self.assertIn("step grant", why or "")
-        self.assertIn("--allow push,pr", why or "")
+        self.assertIn("--allow push", why or "")
         self.assertIn("step grant", self.member("gh pr create --fill", grant=Store()) or "")
+
+    def test_a_member_push_refusal_names_the_missing_grant_and_what_to_ask_for(self):
+        # B-g7g18niqtw4: after `dev progress assign … --allow push,pr` with no grant typed by the developer, the step
+        # allowed nothing (assign keeps an action only with the developer's evidence), and four refusals in a day said
+        # only "crew members push only with a step grant", so the member could not tell what to ask for
+        def run(**step):
+            return {"goal": "g", "project": "o/r",
+                    "plan": [{"name": "ship", "owner": "a1", "state": "running", **step}]}
+        cases = {"no run": (None, ["owns no running step", "grant push feat/x", "--allow push"]),
+                 "another lane's step": (run(owner="a2"), ["owns no running step", "grant push feat/x"]),
+                 "allow dropped": (run(allow=[]), ["step ship does not allow push", "grant push feat/x",
+                                                   "dev progress assign ship --to tank --allow push"]),
+                 "another branch": (run(allow=["push"], allow_evidence={"push": {"target": "feat/old", "repo": "o/r"}}),
+                                    ["covers push feat/old, not feat/x", "grant push feat/x",
+                                     "dev progress assign ship --to tank --allow push"])}
+        for case, (r, parts) in cases.items():
+            with self.subTest(case=case), mock.patch.object(progress, "load_run", return_value=r):
+                why = self.member("git push origin feat/x", grant=Store()) or ""
+                for part in parts:
+                    self.assertIn(part, why)
+                self.assertIn("typed by the developer", why)
 
     def test_a_member_push_with_a_step_grant_runs_and_uses_it(self):
         store = Store({"push feat/x": 2, "pr feat/x": 1})

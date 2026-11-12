@@ -12049,6 +12049,50 @@ def _mcp_registry_write(tool, tool_input) -> bool:
     return _names_registry(repo if "/" in repo else f"{owner}/{repo}" if owner and repo else "")
 
 
+def _step_grant_gap(run, lane, member, a) -> str:
+    """What keeps crew member `member`'s tier-1 action `a` from a step grant, read from the run as progress.use_grant
+    reads it, and what the member asks for (B-g7g18niqtw4): the developer's own grant line for that target, typed
+    before the step is assigned, and the tech lead's `dev progress assign <step> --allow <action>` after it, because
+    assign keeps an action only with the developer's evidence."""
+    act, t, who = a["action"], str(a["target"]), member or "<you>"
+    typed = (f"the developer types {_code(f'grant {act} {t}')} on a line of its own (only a grant typed by the "
+             f"developer opens it; `--allow` alone does not)")
+    if _UNKNOWABLE.search(t):
+        return (f"Its target ({_code(t)}) is only known when it runs, so no grant typed by the developer can cover it: "
+                f"write the branch out (`git push origin <branch>`, `gh pr create -H <branch>`).")
+    live = run if isinstance(run, dict) and run.get("goal") and run.get("state") != "done" else None
+    step = next((s for s in (live or {}).get("plan") or [] if isinstance(s, dict) and s.get("owner") == lane
+                 and s.get("state") == "running"), None)
+    if not step:
+        return (f"Your lane owns no running step of the plan, and a step grant belongs to the step it runs. Ask for: "
+                f"{typed}, then the tech lead assigns your step with "
+                f"{_code(f'dev progress assign <step> --to {who} --allow {act}')}.")
+    name = step.get("name") or "<step>"
+    assign = _code(f"dev progress assign {name} --to {who} --allow {act}")
+    ev = (step.get("allow_evidence") or {}).get(act) or {}
+    if act not in (step.get("allow") or []) or not ev.get("target"):
+        return (f"Your step {name} does not allow {act}: it was assigned without {_code(f'--allow {act}')}, or while "
+                f"no grant typed by the developer was live, and `--allow` keeps an action only then. Ask for: {typed}, "
+                f"then the tech lead runs {assign} again.")
+    if not target_matches(act, ev["target"], t):
+        return (f"Your step {name}'s grant covers {act} {ev['target']}, not {t}. Ask for: {typed}, then the tech "
+                f"lead runs {assign} again.")
+    if str(ev.get("repo") or "").lower() != str(a.get("repo") or "").lower():
+        return (f"Your step {name}'s grant holds in {ev.get('repo') or 'no known repository'}, and this acts on "
+                f"{a.get('repo') or 'a repository devkit cannot name'}. Ask for: {typed} in that repository, then the "
+                f"tech lead runs {assign} again.")
+    return f"Ask for: {typed}, then the tech lead runs {assign} again."
+
+
+def _lane_run(agent, session):
+    """The run of the session a lane works in, for the refusal's explanation only; None when it cannot be read."""
+    try:
+        from . import progress
+        return progress.load_run(agent, session)
+    except Exception:
+        return None
+
+
 def _member_gate(cmd, cwd, member, lane, agent, session, grant, now) -> str | None:
     """Why a crew member may not run this command's irreversible actions (spec C6), or None: tier 2 never; tier 1 only
     with a step grant of its lane; any failure to check denies (grants fail closed, P4)."""
@@ -12080,10 +12124,10 @@ def _member_gate(cmd, cwd, member, lane, agent, session, grant, now) -> str | No
         missing = next((a for a, g in found if not g), None)
         if missing and setting == "enforce":
             _gate_record(missing, "deny", who, setting, lane, session)
+            gap = _step_grant_gap(_lane_run(agent, session) if lane else None, lane, member, missing)
             return (f"{_code(missing['words'])} {_what(missing)}, and crew members push and open PRs only with a step "
-                    f"grant (spec C6, tier 1). Ask the tech lead with `dev crew ask \"…\"`: once the developer agrees, "
-                    f"the tech lead assigns your step with `dev progress assign <step> --to <you> --allow push,pr`, or "
-                    f"pushes it.")
+                    f"grant (spec C6, tier 1). {gap} Ask the tech lead with `dev crew ask \"…\"`, or ask them to "
+                    f"push it.")
         for a, g in found:
             used = look(a["action"], a["target"], a["repo"], True) if g else None
             if g and not used and setting == "enforce":
