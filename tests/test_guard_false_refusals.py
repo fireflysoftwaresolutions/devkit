@@ -367,6 +367,23 @@ class ReadOnlyLanes(Case):
             with self.subTest(cmd=cmd):
                 self.assertIsNotNone(self.ro(cmd))
 
+    def test_find_groups_numbered_sed_addresses_and_a_write_before_a_probe_run(self):
+        (Path(self.pad) / "probe.py").write_text("import json\nprint(json.dumps([1]))\n")
+        for cmd in ("find lib \\( -name '*.py' -o -name '*.md' \\) -print",
+                    "find . \\( -type f -newer x \\) -o -name y",
+                    "sed -n \"$(grep -n 'def x' lib/a.py | cut -d: -f1),+14p\" lib/a.py",
+                    "sed -n \"$(grep -n 'def x' lib/a.py | head -1 | cut -d: -f1),+5p\" lib/a.py",
+                    "rm -rf @P/res && mkdir -p @P/res && python3 @P/probe.py",
+                    "touch @P/n; python3 @P/probe.py > @P/out.txt"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(self.ro(cmd))
+        for cmd in ("sed -n \"$(cat f),+14p\" lib/a.py", "sed -n \"$(grep -n x a b | cut -d: -f1)p\" lib/a.py",
+                    "find lib \\( -name x -o -exec rm {} \\; \\)",
+                    "python3 @P/probe.py; rm -rf @P/res", "python3 @P/probe.py & rm -rf @P/res",
+                    "python3 @P/probe.py | tee @P/out.txt"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNotNone(self.ro(cmd))
+
     def test_an_inline_program_that_only_reads_runs(self):
         for cmd in ("python3 -c 'import json; print(json.load(open(\"p.json\")))'",
                     "python3 - <<'EOF'\nimport ast\nprint(len(ast.parse(open('lib/a.py').read()).body))\n"

@@ -5872,7 +5872,8 @@ def _unwrap(argv, more: bool = False, stop=()):
             return [argv[0], *rest[i:]]
         elif n == "yarn" and argv[1:2] == ["workspace"] and len(argv) > 2:  # `yarn workspace <name> <command>`
             return [argv[0], *argv[3:]]
-        elif (n == "," or (n.startswith("-") and len(n) > 1)) and any(a in _FIND_RUNS for a in argv):
+        elif (n == "," or (n.startswith("-") and len(n) > 1)) and (any(a in _FIND_RUNS for a in argv) or
+                                                                   argv[0] in _FIND_PRIMARIES):
             return ["find", *argv]
         else:
             return argv
@@ -8542,7 +8543,7 @@ _RO_DEV = {"status": None, "grep": None, "find": None, "files": None, "diff": No
            "delivery": ("", "show"), "audit": ("", "verify", "show", "stats", "config"), "completion": None,
            "__complete": None}
 _SED_ADDR = r"(?:\d+|\$|/(?:[^/\\\n]|\\.)*/I?)"
-_SED_PRINT = re.compile(rf"^(?:{_SED_ADDR}(?:\s*,\s*{_SED_ADDR})?)?\s*(?:p|q\d*)$")
+_SED_PRINT = re.compile(rf"^(?:{_SED_ADDR}(?:\s*,\s*(?:{_SED_ADDR}|[+~]\d+))?)?\s*(?:p|q\d*)$")  # N,+M: GNU
 
 
 def _readonly_config() -> list:
@@ -10092,7 +10093,8 @@ def _mask_substitutions(s: str):
             if j < 0:
                 return None
             inner.append(s[i + 2:j - 1])
-            out.append(_SUBST_WORD)
+            # a substitution that can only print a number (a line number for a sed address) stands as one
+            out.append("1" if _numeric_pipeline(s[i + 2:j - 1]) else _SUBST_WORD)
             parens.close(j - 1, "w")
             i = j
             continue
@@ -10184,7 +10186,7 @@ def readonly_refusal(cmd: str, cwd, member=None, depth: int = 0, plans=None) -> 
     ops = [s[2] for s in osegs] if osegs is not None and len(osegs) == len(segs) else None
     moved = False  # an earlier part of the command changes folder, or may: a plan write then needs a command of its own
     bodies = heredoc_bodies(cmd)
-    wrote = ran = False  # a write in the scratch folder, a program run: never in one command (_RO_WRITE_AND_RUN)
+    wrote = ran = wrote_or_ran = False  # a scratch write and a program run: the write first, in sequence
     for k, (argv0, redirs) in enumerate(segs):
         if moved and _plan_write(argv0):
             return READONLY_REASON.format(what=PLAN_AFTER_CD)
@@ -10204,12 +10206,17 @@ def readonly_refusal(cmd: str, cwd, member=None, depth: int = 0, plans=None) -> 
         if why:
             return READONLY_REASON.format(what=why)
         name = os.path.basename(argv[0]) if argv else ""
-        wrote = wrote or name in _RO_SCRATCH_WRITERS or \
+        writes = name in _RO_SCRATCH_WRITERS or \
             (name == "sed" and any(a.startswith(("-i", "--in-place")) for a in argv[1:]))
-        ran = ran or bool(_INTERP.match(name) or name in _SHELLS or (name and "/" in argv[0] and name not in
-                                                                         _RO_READERS)) and not _version_only(name, argv[1:])
-        if wrote and ran:
+        runs = bool(_INTERP.match(name) or name in _SHELLS or (name and "/" in argv[0] and name not in
+                                                                _RO_READERS)) and not _version_only(name, argv[1:])
+        joined = ops is None or ops[k] in ("|", "&", "|&") or (k and ops[k - 1] in ("|", "&", "|&"))
+        # a write that runs after a program, or beside it (a pipeline, a background job), may follow a link the
+        # program made; one that ends before any program starts cannot
+        if (writes and (ran or joined and wrote_or_ran)) or (runs and wrote and joined):
             return READONLY_REASON.format(what=_RO_WRITE_AND_RUN)
+        wrote, ran = wrote or writes, ran or runs
+        wrote_or_ran = wrote or ran
     return None
 
 
@@ -11960,6 +11967,14 @@ def _test_named(argv) -> bool:
     """True when an interpreter runs a script whose file name follows a test file convention (_TEST_FILE)."""
     script = next((a for a in argv[1:] if not a.startswith("-")), "")
     return bool(script) and bool(_TEST_FILE.search(os.path.splitext(os.path.basename(script))[0]))
+
+
+# find's tests and operators: a segment that starts with one is the rest of a find expression the tokenizer split at
+# an escaped parenthesis (`find . \\( -name a -o -name b \\)`)
+_FIND_PRIMARIES = frozenset("""-name -iname -path -ipath -wholename -iwholename -regex -iregex -type -newer -o -or -a
+    -and -not -print -print0 -prune -size -mtime -mmin -atime -amin -ctime -cmin -maxdepth -mindepth -empty -perm -user
+    -group -links -depth -follow -lname -ilname -uid -gid -nouser -nogroup -true -false -ls -quit -samefile -inum
+    -newermt -newerct""".split())
 
 
 def _opaque_actions(name, argv, cwd) -> list:
