@@ -473,9 +473,9 @@ class BusyLaneQueueTests(unittest.TestCase):
 
     def test_the_members_command_for_a_step_its_lane_cannot_close_exits_2_and_says_what_to_do(self):
         # M176-M177: the command printed ✓ and exited 0, so the member reported case-revert closed
-        from test_progress import progress_cli_out
+        from test_progress import member_call, progress_cli_out
         self.assign("case-revert", "tests/test_gate_tiers.py", self.m(5))
-        with mock.patch.dict(os.environ, {"DEVKIT_FROM_AGENT": "a_neo"}):
+        with member_call("a_neo"):  # the member's own call is open, as when its command runs
             rc, out, err = progress_cli_out("step", "case-revert committed", "--step", "case-revert", "--check",
                                             "✓ 67 tests pass")
         self.assertEqual(rc, 2, out)
