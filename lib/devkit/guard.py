@@ -641,25 +641,23 @@ def _newlines_to_semicolons(cmd: str, op: str = ";") -> str:
     would hide the next line. `#` is an ordinary character (round ten): the words after one are read as more
     commands, which can only add a refusal, and a quote in a comment makes a line the guard cannot read
     (UNREADABLE_REASON). A backslash-newline is read as given here; check_bash reads it as bash does too."""
-    out, q, i, n, last = [], None, 0, len(cmd), ""  # last: the last character out holds that is no blank
+    out, q, i, n = [], None, 0, len(cmd)
     while i < n:
         ch = cmd[i]
         if ch == "\\" and q != "'" and i + 1 < n and cmd[i + 1] != "\n":
             out.append(cmd[i:i + 2])
-            i, last = i + 2, cmd[i + 1] if not cmd[i + 1].isspace() else "\\"
+            i += 2
             continue
         if q:
             if ch == q:
                 q = None
         elif ch in ("'", '"'):
             q = ch
-        elif ch == "\n":  # a newline after a `;` (a blank line too) adds no other: `;;` would end a case arm
-            ch = " " if q is None and (not last or last == op) else op
+        elif ch == "\n":
+            ch = op
         elif ch == "=" and _proc_subst_at(cmd, i):  # zsh's `=(…)` is read as the `<(…)` it runs as
             ch = "<"
         out.append(ch)
-        if ch not in (" ", "\t"):
-            last = ch
         i += 1
     return "".join(out)
 
@@ -5341,40 +5339,6 @@ class _Shell:
 _FIND_RUNS = frozenset({"-exec", "-execdir", "-ok", "-okdir"})  # find's primaries that run a command
 
 
-def _case_head(argv) -> bool:
-    """True when a segment's words are the head of a case statement: `case WORD in` with the first pattern when the
-    tokenizer ended the segment at its `)` or `|` (`case "$x" in a) …`), or `case WORD` before a newline (`case
-    $(…)` too, cut at its `(`). The shell matches WORD and runs nothing there; a substitution in WORD is read as one
-    (_expansions)."""
-    return argv[:1] == ["case"] and (len(argv) == 2 or (len(argv) in (3, 4) and argv[2] == "in"))
-
-
-def _case_open(segs, k) -> bool:
-    """True when a case statement is open before segment k: more heads (`case WORD …`, after any keywords) than
-    `esac`s. Only there can a one-word segment be an arm's pattern."""
-    depth = 0
-    for seg in segs[:k]:
-        words = list(itertools.dropwhile(lambda w: w in _RESERVED - {"case", "esac"}, seg[0]))
-        if words[:1] == ["case"]:
-            depth += 1
-        elif words[:1] == ["esac"]:
-            depth = max(0, depth - 1)
-    return depth > 0
-
-
-def _case_pattern(segs, k) -> bool:
-    """True when segment k of split_commands(ops=True) is a pattern of a case arm, which the shell matches and never
-    runs: one word that ends at `)` or `|`, right after the statement's head, an arm's end (`;;`, `;&`, `;;&`) or
-    another pattern (`b|$y)`, `*.md)`). A segment of more words is never a pattern, so no command is read as one."""
-    if not k or len(segs[k][0]) != 1 or not (segs[k][2] == "|" or segs[k][2].startswith(")")) or \
-            not _case_open(segs, k):
-        return False
-    prev, op = segs[k - 1][0], segs[k - 1][2]
-    head = "case" in prev and not _unwrap(prev)
-    return ";;" in op or ";&" in op or (op == "|" and (head or _case_pattern(segs, k - 1))) or \
-        (head and op in ("(", ";") and prev[-1] == "in")
-
-
 # launchers that run a command their words name, after options the guard does not parse, with the verb that does it
 # (none: the program itself); _launcher_suffixes reads them without each one's option grammar
 _LAUNCHERS = {"taskpolicy": (), "sandbox-exec": (), "xcrun": (), "dotenv": (), "op": ("run",), "direnv": ("exec",),
@@ -5488,8 +5452,6 @@ def _unwrap(argv, more: bool = False, stop=()):
             argv = argv[3:]
         elif argv[0] == "function" and len(argv) > 2:  # `function f { gh …; }`: the body's first command
             argv = argv[2:]
-        elif _case_head(argv):  # `case "$x" in a)`: the shell matches the word, it runs no program
-            return []
         elif argv[0] in _RESERVED:
             argv = argv[1:]
         elif n in ("timeout", "gtimeout"):
@@ -11792,8 +11754,6 @@ def _text_actions(text, cwd, depth=0, from_code=False, expand=True):
     for k, (argv0, _, op, herestrs) in enumerate(segs):
         if k and segs[k - 1][2] == "(" and segs[k - 1][0] and _ARRAY_OPEN.match(segs[k - 1][0][-1]):
             continue  # the elements of `arr=( … )` or `arr+=( … )` are words, not a command
-        if _case_pattern(segs, k):
-            continue  # `*.md)`, `a|$y)`: a case arm's pattern is matched, not run
         argv = _unwrap(argv0)
         # a program the shell names only when it runs (RT1): `env -S '…'` splits a string into a command, `$(…)` or
         # backticks in the command word print its name, a variable or a glob expands to it

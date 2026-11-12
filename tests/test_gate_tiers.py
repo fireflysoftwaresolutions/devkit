@@ -702,36 +702,6 @@ class UnknownProgramTests(GateCase):
                 self.assertEqual(self.acts(cmd), [])
         self.assertEqual(self.acts("a=($(gh pr merge 12))"), [("merge", 2, "12")])  # what it runs still counts
 
-    def test_a_case_statements_word_and_patterns_are_no_program(self):
-        # the tokenizer splits `case "$x" in a) …` at `)`, which left `case $x in a` as a segment and `$x` as its
-        # program; a later arm's pattern (`*.md)`, `$y)`) became a segment too. The shell only matches them.
-        for cmd in ('case "$x" in a) echo a;; esac',
-                    'case "$f" in *.py) echo p;; *.md|$y) echo m;; esac',
-                    'for f in a b; do case "$f" in a) echo a;; esac; done',
-                    'case $x in\n  (a) echo a ;;\n  b|c) echo b ;;\nesac',
-                    'case $(git rev-parse --abbrev-ref HEAD) in main) echo m;; esac'):
-            with self.subTest(cmd=cmd):
-                self.assertEqual(self.acts(cmd), [])
-                self.assertIsNone(self.member(cmd))
-        # what an arm runs still counts, and so do a program an arm names at run time and the word's substitution
-        self.assertEqual(self.acts('case "$x" in a) echo a;; b) gh pr merge 12;; esac'), [("merge", 2, "12")])
-        self.assertEqual([a for a, _, _ in self.acts('case "$x" in a) $y pr merge 12;; esac')], ["unknown"])
-        self.assertEqual(self.acts('case "$(gh pr merge 12)" in a) echo a;; esac'), [("merge", 2, "12")])
-        force = 'case "$x" in a) git push --force;; esac'
-        self.assertIn("push-destructive", [a for a, _, _ in self.acts(force)])
-        self.assertIn("git push --force", self.member(force) or "")
-
-    def test_a_blank_line_never_makes_the_next_command_a_case_pattern(self):
-        # each newline became `;`, so a blank line was `;;`, an arm's end, and the one-word command after it was
-        # skipped as a pattern though no case statement was open (the Security engineer's review of 26.11.16)
-        for line in ("gh pr merge 12 --admin", "gh release create v1", "git push --force origin main"):
-            cmd = f"X='{line}'\n\n$X | cat"
-            with self.subTest(cmd=cmd):
-                self.assertTrue(self.acts(cmd))
-                self.assertIsNotNone(self.member(cmd, setting="enforce"))
-        # a case statement's patterns after a blank line stay patterns
-        self.assertEqual(self.acts('case "$x" in\n  a) echo a ;;\n\n  b|c) echo b ;;\nesac'), [])
-
     def test_the_words_after_a_substitution_belong_to_the_command_around_it(self):
         # the tokenizer ended a segment at the `)` of `$(…)`, so the rest of the word (`/*` in `ls $(echo x)/*`) was a
         # command of its own, and its glob read as a program named at run time
@@ -841,6 +811,20 @@ class GrantRuleTests(unittest.TestCase):
                                ("merge", "12"), ("pr", "feat/x")):
             with self.subTest(action=action, target=target):
                 self.assertIsNone(guard.preapproval_problem(action, target))
+
+
+class NoLineAfterACaseWordIsSkipped(GateCase):
+    # the guard does not parse case statements: it once skipped a one-word piped segment as an arm's pattern after
+    # text that only looked like a case (`#;case z in` in a comment, or a blank line read as `;;`), so a variable that
+    # held an irreversible command ran in a lane with no action found
+
+    def test_a_variable_run_after_a_case_comment_or_a_blank_line_is_still_judged(self):
+        for head in ("#;case z in\n", "#case z in\n", "#;case z in\n\n", "\n"):
+            for run in ("$X | cat", "${=X} | cat"):
+                cmd = f"X='gh release create v1'\n{head}{run}"
+                with self.subTest(cmd=cmd):
+                    self.assertTrue(self.acts(cmd))
+                    self.assertIsNotNone(self.member(cmd, setting="enforce"))
 
 
 if __name__ == "__main__":
