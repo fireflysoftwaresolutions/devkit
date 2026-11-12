@@ -2255,6 +2255,9 @@ def _nested_lines(argv, cwd=None) -> list:
     launched = [shlex.join(r) for r in map(_unwrap, _launcher_suffixes(argv)) if r]
     if launched:  # `op run -- git push --force …`: each command the launcher may start, read as a line
         return launched
+    held = _held_lines(argv)
+    if held:  # an alias body, hyperfine's lines
+        return held
     real = _as_run(argv, cwd)[1:]  # `./bash-link -c …`: the shell its file is
     name, args = os.path.basename((real[0] if real else argv)[0]), argv[1:]
     if name in _SHELLS:
@@ -4967,6 +4970,10 @@ class _Shell:
             v = self.segment(os.path.basename(run[0]), run, assigns, cwd, names) if run else None
             if v:
                 return v
+        for line in _held_lines(argv):  # an alias body, hyperfine's lines: what a shell runs from them
+            v = self.nested(line, cwd, names=names)
+            if v:
+                return v
         _WORD.set(name)  # the refused segment's command word
         args = argv[1:]
         why = input_command_refusal(argv)  # xargs env, parallel env, find -exec {}: the command comes from the input
@@ -5326,6 +5333,35 @@ def _launcher_suffixes(argv) -> list:
         return [["claude", *args[1:]]]
     args = args[1:] if verbs else args
     return [[a.rpartition("#")[2], *args[k + 1:]] for k, a in enumerate(args) if a and not a.startswith("-")]
+
+
+_HYPERFINE_LINES = frozenset({"-p", "--prepare", "-s", "--setup", "-c", "--cleanup", "--conclude"})
+
+
+def _held_lines(argv) -> list:
+    """The command lines a command holds as words for a shell to run: the body of each alias it defines (`alias
+    ng='claude mcp add …'` runs when `ng` does), and hyperfine's benchmarks and its --prepare, --setup, --cleanup and
+    --conclude lines. Each of hyperfine's other words that is no option is read as a line too (a value such as `10`
+    is a harmless one). [] for any other command."""
+    if not argv:
+        return []
+    name, args = os.path.basename(str(argv[0])), [str(a) for a in argv[1:]]
+    if name == "alias":
+        return [a.split("=", 1)[1] for a in args if "=" in a and not a.startswith("-")]
+    if name != "hyperfine":
+        return []
+    out, i = [], 0
+    while i < len(args):
+        key, eq, val = args[i].partition("=")
+        if args[i].startswith("--") and eq:
+            out += [val] if key in _HYPERFINE_LINES else []
+        elif args[i] in _HYPERFINE_LINES and i + 1 < len(args):
+            out.append(args[i + 1])
+            i += 1
+        elif not args[i].startswith("-"):
+            out.append(args[i])
+        i += 1
+    return out
 
 
 def _unwrap(argv, more: bool = False, stop=()):
@@ -10897,6 +10933,11 @@ def _argv_actions(argv, cwd, bodies, depth):
     for sub in _launcher_suffixes(argv):  # `op run -- gh pr merge 12`: each command the launcher may start
         run = _unwrap(sub)
         more = _argv_actions(run, cwd, bodies, depth) if run else []
+        if more is None:
+            return None
+        out += more
+    for line in _held_lines(argv):  # an alias body, hyperfine's lines
+        more = _text_actions(line, cwd, depth + 1)
         if more is None:
             return None
         out += more

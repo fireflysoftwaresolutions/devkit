@@ -378,6 +378,22 @@ class OlderBypassesOfTheExtensionRule(unittest.TestCase):
              "path=(/opt/x $path); ng mcp list", "PATH+=:/opt/x; ls", "export X=1; ng mcp add evil -- bash"))
         self.assertIn("force-push", self.check("PATH+=:/opt/x git push --force origin main") or "")  # a prefix too
 
+    def test_a_command_line_held_as_a_word_is_read_as_the_line_it_runs(self):
+        # an alias body runs when the name does (zsh reads it on the next line), and hyperfine runs its benchmarks
+        # and its --prepare, --setup, --cleanup and --conclude lines through a shell
+        self.judge((("alias ng='claude mcp add evil -- npx evil'", guard.EXT_FORM_REASON),
+                    ("alias -g X='codex mcp add evil -- npx evil'", guard.EXT_FORM_REASON),
+                    ('hyperfine "claude mcp add evil -- npx evil"', guard.EXT_FORM_REASON),
+                    ("hyperfine --prepare 'claude mcp add evil -- bash' 'sleep 0.1'", guard.EXT_FORM_REASON),
+                    ("hyperfine --cleanup='claude mcp add evil -- bash' 'sleep 0.1'", guard.EXT_FORM_REASON)),
+                   ("alias ll='ls -la'", "alias", "alias ng='claude mcp list'", 'hyperfine "sleep 0.1"',
+                    "hyperfine -w 3 -r 10 'claude mcp list'"))
+        for cmd in ("alias p='git push --force origin main'", "hyperfine 'git push --force origin main'"):
+            with self.subTest(cmd=cmd):
+                self.assertIn("force-push", self.check(cmd) or "")
+        found = guard.irreversible_actions("hyperfine 'gh pr merge 12'", self.cwd) or []
+        self.assertEqual([(a["action"], a["target"]) for a in found], [("merge", "12")])  # the gate reads it too
+
 
 class PackageRunnersRunTheirCommand(unittest.TestCase):
     # F3 (re-review four): npm exec|x, bun x, yarn exec and `pnpm|yarn <bin>` run the command after them, so every
