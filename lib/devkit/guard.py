@@ -9944,10 +9944,124 @@ def _dynamic_code(name, code) -> bool:
 
 
 def _dynamic_match(name, code):
-    """The match of _dynamic_code in a program's code outside string literals, or None."""
+    """The match of _dynamic_code in a program's code outside string literals, or None. Python is read with its own
+    parser (_py_dynamic) and JavaScript by _js_dynamic; code that does not parse is matched by the patterns."""
+    if not code:
+        return None
     fam = re.sub(r"[0-9.]+$", "", os.path.basename(str(name or "")).casefold())
     fam = {"pypy": "python", "node": "js", "nodejs": "js", "deno": "js", "bun": "js"}.get(fam, fam)
-    return _DYNAMIC_CODE.get(fam, _DYNAMIC_CODE[""]).search(_outside_strings(code)) if code else None
+    if fam == "python":
+        found = _py_dynamic(code)
+        if found is not False:
+            return _Found(found) if found else None
+    if fam == "js":
+        return _js_dynamic(_outside_strings(code))
+    return _DYNAMIC_CODE.get(fam, _DYNAMIC_CODE[""]).search(_outside_strings(code))
+
+
+class _Found:
+    """A match-like result of _py_dynamic: group(0) is the code that names a function at run time."""
+
+    def __init__(self, text):
+        self.text = text
+
+    def group(self, _=0):
+        return self.text
+
+
+# The names of the Python functions and methods that start a process (subprocess, os, pty, asyncio): a lookup of one
+# by name reaches a spawn the guard does not see as a call
+_PY_SPAWN_NAMES = frozenset({
+    "run", "call", "check_call", "check_output", "Popen", "getoutput", "getstatusoutput", "system", "popen",
+    "startfile", "spawn", "fork", "forkpty", "create_subprocess_exec", "create_subprocess_shell", "run_path",
+    "run_module", "exec_module", "load_module", "CDLL", "cdll", "LoadLibrary", "dlopen"}) | frozenset(
+    f"{a}{b}" for a in ("exec", "spawn", "posix_spawn") for b in ("", "l", "le", "lp", "lpe", "v", "ve", "vp", "vpe", "p"))
+# the modules whose functions start a process or load code: a module named by a string is one of them only by name
+_PY_SPAWN_MODULES = frozenset({"subprocess", "os", "pty", "posix", "nt", "asyncio", "multiprocessing", "runpy",
+                               "importlib", "ctypes", "code", "codeop", "commands", "popen2", "platform", "shutil",
+                               "webbrowser", "pdb", "builtins", "__builtin__", "operator", "sys", "concurrent"})
+# attributes that reach the interpreter's internals: a sandbox escape, never a probe's need
+_PY_ESCAPES = frozenset({"__builtins__", "__getattribute__", "__globals__", "__subclasses__", "__bases__", "__mro__",
+                         "__code__", "__closure__", "f_globals", "f_builtins", "f_locals", "gi_frame", "__loader__",
+                         "__reduce__", "__reduce_ex__"})
+
+
+def _py_dynamic(code):
+    """What in a Python program calls a function by a name it builds at run time, read with Python's parser: '' for
+    nothing, the code text for the first such call, False when the code does not parse. Calls by a computed name:
+    eval, exec, compile, breakpoint; getattr with a name that is no literal, or that is a spawn function's name
+    (_PY_SPAWN_NAMES); __import__ and importlib.import_module of a name that is no literal, or of a module that can
+    start a process (_PY_SPAWN_MODULES); a subscript of globals(), locals(), vars() or __dict__ by a name that is no
+    literal; operator.attrgetter and methodcaller; and the interpreter's internals (_PY_ESCAPES). A lookup by a
+    literal name (getattr(r, 'returncode'), vars(r)['args']) names what it calls."""
+    import ast
+    try:
+        tree = ast.parse(code)
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        return False
+
+    def text(node):
+        try:
+            return ast.get_source_segment(code, node) or type(node).__name__
+        except Exception:
+            return type(node).__name__
+
+    def literal(node):
+        return isinstance(node, ast.Constant) and isinstance(node.value, str)
+
+    def fname(node):
+        f = node.func
+        return f.attr if isinstance(f, ast.Attribute) else f.id if isinstance(f, ast.Name) else ""
+
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Attribute) and n.attr in _PY_ESCAPES:
+            return text(n)
+        if isinstance(n, ast.Name) and n.id in _PY_ESCAPES:
+            return text(n)
+        if isinstance(n, ast.Subscript):
+            base = n.value
+            index = getattr(ast, "Index", None)  # Python 3.8 wraps a subscript's key; 3.9 and later do not
+            key = n.slice.value if index is not None and isinstance(n.slice, index) else n.slice
+            scoped = (isinstance(base, ast.Call) and fname(base) in ("globals", "locals", "vars")) or \
+                (isinstance(base, ast.Attribute) and base.attr == "__dict__")
+            if scoped and (not literal(key) or key.value in _PY_SPAWN_NAMES):
+                return text(n)
+        if not isinstance(n, ast.Call):
+            continue
+        name = fname(n)
+        args = n.args
+        if (name in ("eval", "exec", "compile", "breakpoint") and isinstance(n.func, ast.Name)) or \
+                name in ("attrgetter", "methodcaller"):  # a method of that name (re.compile, model.eval) is none
+            return text(n)
+        if name == "getattr" and isinstance(n.func, ast.Name) and \
+                (len(args) < 2 or not literal(args[1]) or args[1].value in _PY_SPAWN_NAMES):
+            return text(n)
+        if name == "__import__" or (name == "import_module" and isinstance(n.func, (ast.Attribute, ast.Name))):
+            if not args or not literal(args[0]) or args[0].value.split(".")[0] in _PY_SPAWN_MODULES:
+                return text(n)
+        if isinstance(n.func, ast.Attribute) and isinstance(n.func.value, ast.Call) and \
+                fname(n.func.value) in ("globals", "locals", "vars") and n.func.attr in ("get", "pop", "setdefault"):
+            if not args or not literal(args[0]) or args[0].value in _PY_SPAWN_NAMES:
+                return text(n)
+    return ""
+
+
+# JavaScript: code that runs a string or reaches the global scope by a computed name, always; a module loaded by a
+# name it computes, only with a call through a computed name (`m[k](…)`, `m[k].call(…)`), which may be a spawn
+_JS_ALWAYS = re.compile(r"(?<![.\w])(?:Function|eval)\s*\(|\bReflect\s*\.|\bglobalThis\s*\[|\bprocess\s*\.\s*"
+                        r"(?:binding|dlopen)\b|\bvm\s*\.\s*run\w*|\brunIn\w*Context\b")
+_JS_LOADS = re.compile(r"\brequire\s*\(\s*[^'\"\s)]|\bimport\s*\(\s*[^'\"\s)]")
+_JS_COMPUTED_CALL = re.compile(r"\]\s*(?:\(|\.\s*(?:call|apply|bind)\s*\()")
+
+
+def _js_dynamic(bare):
+    """The match of a JavaScript program's code (outside string literals) that may call a function by a name it
+    builds at run time, or None (_JS_ALWAYS, _JS_LOADS with _JS_COMPUTED_CALL)."""
+    m = _JS_ALWAYS.search(bare)
+    if m:
+        return m
+    m = _JS_LOADS.search(bare)
+    return m if m and _JS_COMPUTED_CALL.search(bare) else None
 
 
 def _built_action(argv, name, code) -> tuple | None:

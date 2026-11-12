@@ -122,5 +122,59 @@ class LiteralValues(Case):
             self.refused(cmd)
 
 
+class ScratchScripts(Case):
+    """A program a member wrote in its own scratch folder is judged by what it can do: a name it computes reaches a
+    process only through a function it looks up by that name, so a lookup by a literal name, a module loaded by a
+    name it computes and never called through a computed name, and a string it only prints run; a spawn of an
+    irreversible command, a lookup of a spawn function by a computed name, and code it evaluates stay refused."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.pad = Path(guard.real(tmp.name)) / "claude-501" / "-x" / "962d6aba-c6a8-44ab-9e02-1d15272468e1" / \
+            "scratchpad" / "kid"
+        self.pad.mkdir(parents=True)
+
+    def script(self, name, text):
+        p = self.pad / name
+        p.write_text(text)
+        return str(p)
+
+    def test_a_python_probe_that_looks_up_attributes_by_literal_names_runs(self):
+        p = self.script("probe.py", "import json, subprocess\nr = subprocess.run(['python3', '-m', 'unittest', "
+                                    "'tests.test_x'], capture_output=True)\nprint(getattr(r, 'returncode'))\n"
+                                    "print('$HOME is', json.dumps(vars(r).get('args')))\n"
+                                    "m = __import__('json')\nprint(m.dumps(1))\n")
+        self.runs(f"python3 {p}")
+        self.runs(f"timeout 1500 python3 {p} 2>&1 | tail -5")
+
+    def test_a_python_program_that_reaches_a_spawn_by_a_computed_name_is_refused(self):
+        for text in ("import subprocess\nsubprocess.run(['gh', 'pr', 'merge', '12'])\n",
+                     "import subprocess, sys\ngetattr(subprocess, sys.argv[1])(['ls'])\n",
+                     "import os\ngetattr(os, 'system')('true')\n",
+                     "import sys\nm = __import__(sys.argv[1])\nm.run(['ls'])\n",
+                     "import importlib\nimportlib.import_module('subprocess').run(['ls'])\n",
+                     "exec(open('x.py').read())\n", "f = globals()[input()]\nf()\n",
+                     "print(().__class__.__bases__[0].__subclasses__())\n"):
+            with self.subTest(text=text):
+                self.refused(f"python3 {self.script('p.py', text)}")
+
+    def test_a_javascript_probe_that_loads_a_module_by_a_computed_name_runs(self):
+        p = self.script("probe.mjs", "import { readFileSync } from 'node:fs';\nconst mod = process.argv[2] || "
+                                     "'./x.mjs';\nconst m = await import(mod);\nconst o = {a: 1};\nconst k = 'a';\n"
+                                     "console.log(o[k], JSON.stringify(m), readFileSync('in.json', 'utf8'));\n")
+        self.runs(f"node {p}")
+        self.runs(f"timeout 1500 node {p} 2>&1 | tail -8")
+
+    def test_a_javascript_program_that_calls_through_a_computed_name_is_refused(self):
+        for text in ("const m = await import(process.argv[2]);\nm[process.argv[3]]('gh pr merge 12');\n",
+                     "const cp = require(process.argv[2]);\ncp[process.argv[3]].call(null, 'x');\n",
+                     "require('child_process').execSync('git push --force origin main');\n",
+                     "const cp = require('child_process');\ncp.execSync(`${process.argv[2]} pr merge 12`);\n",
+                     "new Function(process.argv[2])();\n", "Reflect.apply(globalThis[process.argv[2]], null, []);\n"):
+            with self.subTest(text=text):
+                self.refused(f"node {self.script('p.mjs', text)}")
+
+
 if __name__ == "__main__":
     unittest.main()

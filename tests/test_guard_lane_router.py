@@ -136,8 +136,8 @@ class TheRefusalSaysWhatKeptTheCallBack(unittest.TestCase):
 
     def test_a_program_names_the_construct_that_makes_it_unknown(self):
         why = self.verdict("python3 - <<'PY'\nimport argparse\np = argparse.ArgumentParser()\n"
-                           "print(vars(p.parse_args([])))\nPY") or ""
-        self.assertIn("`vars(`", why)
+                           "print(vars(p.parse_args([]))[input()])\nPY") or ""
+        self.assertIn("`vars(p.parse_args([]))[input()]`", why)
         self.assertNotIn("whose name is only known", why)
         self.assertIn("whose name is only known", self.verdict("$X pr merge 12") or "")  # a name the shell builds
 
