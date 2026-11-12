@@ -295,9 +295,34 @@ class PipeGate(unittest.TestCase):
                     # the Red team tester's: text that source runs from a substitution, also after a heredoc
                     "source <(echo 'python3 -m unittest x | tail -1 && git commit -m x')",
                     "cat <<'EOF'\nnote\nEOF\nsource <(echo 'python3 -m unittest x | tail -1 && git commit -m x')",
-                    ". /dev/stdin <<< 'python3 -m unittest x | tail -1 && git commit -m x'"):
+                    ". /dev/stdin <<< 'python3 -m unittest x | tail -1 && git commit -m x'",
+                    # the forms the text pattern missed: a branch or a loop on a pipeline, a group, `|&`, a path
+                    "if python3 -m unittest x | tail -1; then git commit -m x; fi",
+                    "while python3 -m unittest x | tail -1; do git commit -m x; break; done",
+                    "python3 -m unittest x | tail -1 && { git commit -m x; }",
+                    "python3 -m unittest x |& tail -1 && git commit -m x",
+                    "python3 -m unittest x | tail -1 && /usr/bin/git commit -m x",
+                    "python3 -m unittest x | tail -1 && true && git push"):
             with self.subTest(cmd=cmd):
                 self.assertEqual(self.verdict(cmd), guard.PIPE_REASON)
+
+    def test_pipefail_counts_only_where_it_holds_for_the_pipeline(self):
+        # a subshell, a background job, a pipeline, a branch that may skip it, or a later +o leaves the gate closed
+        for pre in ("(set -o pipefail); ", "set -o pipefail & ", "true | set -o pipefail; ",
+                    "false || set -o pipefail; ", "false && set -o pipefail; ", "set -o pipefail; set +o pipefail; ",
+                    "bash -c 'set -o pipefail'; ", "if false; then set -o pipefail; fi; ",
+                    "echo $(set -o pipefail); ", "git log | head -1; set -o pipefail; "):
+            cmd = pre + "python3 -m unittest x | tail -1 && git commit -m x"
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.verdict(cmd), guard.PIPE_REASON)
+        for pre in ("set -o pipefail; ", "set -euo pipefail; ", "set -e -o pipefail\n", "{ set -o pipefail; }; "):
+            cmd = pre + "python3 -m unittest x | tail -1 && git commit -m x"
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(self.verdict(cmd))
+        for cmd in ("python3 -m unittest x && git commit -m x", "git log | head -1; git status",
+                    "if python3 -m unittest x; then git commit -m x; fi", "git commit -m 'fix a | b && c'"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(self.verdict(cmd))
 
 
 class ScratchScripts(Case):

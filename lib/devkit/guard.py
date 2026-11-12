@@ -2163,6 +2163,9 @@ PIPE_REASON = ("This commits, pushes or tags after a pipeline (`… | … && git
                "…`). Lesson: gate on the real result.")
 
 
+_GATED_WORD = re.compile(r"\b(?:commit|push|tag|release|create|merge)\b")  # a word a gated command needs
+
+
 def _gated(argv) -> bool:
     """A command the pipe gate protects: git commit|push|tag, dev commit|push|release, gh pr create|merge, gh release
     create."""
@@ -2179,17 +2182,70 @@ def _gated(argv) -> bool:
 
 def _pipe_gate_open(cmd) -> str:
     """How the parsed command opens the pipe gate (spec F8, rule 3: parse, do not search the text): 'pipefail' for a
-    `set -o pipefail` (or `set -euo pipefail`) before the gated command, 'hatch' for DEVKIT_PIPE_OK as the prefix of a
-    segment, else ''."""
+    `set -o pipefail` (or `set -euo pipefail`) that holds for the command's pipelines (_pipefail_on), 'hatch' for
+    DEVKIT_PIPE_OK as the prefix of a segment, else ''."""
+    if _pipefail_on(cmd):
+        return "pipefail"
     segs = split_commands(cmd) or []
     argvs = [(argv0, _strip_prefix(argv0)) for argv0, _ in segs]
-    first = next((k for k, (_, argv) in enumerate(argvs) if _gated(argv)), len(argvs))
-    for _, argv in argvs[:first]:
-        if argv[:1] == ["set"] and any(a.startswith("-") and not a.startswith("--") and a.endswith("o") and
-                                       argv[k + 2:k + 3] == ["pipefail"] for k, a in enumerate(argv[1:])):
-            return "pipefail"
     names = {a.split("=", 1)[0] for argv0, argv in argvs for a in argv0[:len(argv0) - len(argv)] if _ASSIGN.match(a)}
     return "hatch" if "DEVKIT_PIPE_OK" in names else ""
+
+
+_SET_PIPEFAIL = re.compile(r"(?<![\w./-])set((?:[ \t]+-[A-Za-z]+)*)[ \t]+-[A-Za-z]*o[ \t]+pipefail\b")
+_UNSET_PIPEFAIL = re.compile(r"(?<![\w./-])set\b[^;&|\n]*\+[A-Za-z]*o[ \t]+pipefail\b|\+o[ \t]*pipefail|"
+                             r"(?<![\w./-])(?:shopt|setopt|unsetopt|emulate)\b")
+_OPENS = re.compile(r"(?:^|[;&|\n({]|\b(?:then|do|else))[ \t]*(if|while|until|for|case|select)\b")
+_CLOSES = re.compile(r"(?:^|[;&|\n]|\b(?:then|do|else))[ \t]*(fi|done|esac)\b")
+
+
+def _pipefail_on(cmd: str) -> bool:
+    """True when `set -o pipefail` holds for every pipeline of the command: it comes before the first pipe, in the
+    shell that runs them (not in a subshell, a `$(…)`, a pipeline, a background job, or a branch or loop that may
+    skip it), after nothing but the start, `;`, a new line or `{`, and nothing turns it off (`set +o pipefail`,
+    setopt, shopt, emulate)."""
+    try:
+        text = _blank_quoted(strip_heredocs(cmd))
+    except Exception:
+        return False
+    if _UNSET_PIPEFAIL.search(text):
+        return False
+    m = _SET_PIPEFAIL.search(text)
+    if not m:
+        return False
+    before, after = text[:m.start()], text[m.end():]
+    if re.search(r"(?<!\|)\|(?!\|)", before):
+        return False  # a pipeline before it runs without it
+    if not re.search(r"(?:^|[;\n{])[ \t]*$", before):
+        return False  # after `&&`, `||`, `!`, `then`, … it may not run
+    if re.match(r"[ \t]*(?:\|(?!\|)|&(?![&>]))", after):
+        return False  # in a pipeline or a background job: a subshell's option
+    if before.count("(") > before.count(")"):
+        return False  # in a subshell or a substitution: another shell's option
+    return len(_OPENS.findall(before)) <= len(_CLOSES.findall(before))
+
+
+def _pipe_feeds(segs, k) -> bool:
+    """True when segment k's command runs on a pipeline's exit status, which is its last filter's: after `&&`
+    following a pipeline, through a chain of `&&`, inside `{ }` or `( )` after one, or as the body of an `if`,
+    `elif`, `while` or `until` whose condition ends with a pipeline."""
+    def pipeline_start(j):
+        while j > 0 and segs[j - 1][2] in ("|", "|&"):
+            j -= 1
+        return j
+    lead = next((w for w in segs[k][0] if w not in ("{", "(", "!")), "")
+    if lead in ("then", "do"):
+        last = k - 1
+        j = last
+        while j >= 0 and not set(segs[j][0][:1]) & {"if", "elif", "while", "until"}:
+            j -= 1
+        return j >= 0 and last > 0 and segs[last - 1][2] in ("|", "|&") and pipeline_start(last) >= j
+    j = k - 1
+    while j >= 0 and segs[j][2] == "&&":
+        if j > 0 and segs[j - 1][2] in ("|", "|&"):
+            return True
+        j = pipeline_start(j) - 1
+    return False
 
 
 def _blank_quoted(cmd: str) -> str:
@@ -2226,11 +2282,14 @@ def _pipe_gate_closed(cmd: str, cwd: str, pipefail: bool = False, depth: int = 0
     if depth > 3:
         return bool(PIPE_GATE.search(cmd))
     opened = pipefail or _pipe_gate_open(cmd) == "pipefail"
-    segs = split_commands(cmd)
+    segs = split_commands(cmd, ops=True)
     if segs is None:
         return bool(PIPE_GATE.search(cmd)) and not opened
     if PIPE_GATE.search(_blank_quoted(strip_heredocs(cmd))) and not opened:
         return True
+    if not opened and any(_gated(_unwrap(argv0)) and _pipe_feeds(segs, k) for k, (argv0, *_) in enumerate(segs)):
+        return True
+    segs = [(argv0, redirs) for argv0, redirs, *_ in segs]
     if any(_pipe_gate_closed(body, cwd, opened, depth + 1) for body in _subst(cmd, True)):
         return True
     bodies = heredoc_bodies(cmd)
@@ -2363,12 +2422,9 @@ def ungated_action_refusal(cmd: str) -> str | None:
     segs = split_commands(cmd, ops=True)
     if not segs:
         return None
-    pipefail = False
+    pipefail = _pipefail_on(cmd)
     for k, (argv0, _, _, _) in enumerate(segs):
         argv = _unwrap(argv0)
-        if argv[:1] == ["set"] and any(re.fullmatch(r"-[A-Za-z]*o", a) and argv[i + 2:i + 3] == ["pipefail"]
-                                       for i, a in enumerate(argv[1:])):
-            pipefail = True
         what = _dependent_action(argv)
         if not what:
             continue
@@ -2562,7 +2618,7 @@ def _check_bash_reading(cmd: str, cwd: str, agent: str):
     why = wait_then_work_refusal(cmd) or ungated_action_refusal(cmd)
     if why:
         return deny(why, key="wait-or-ungated")
-    if PIPE_GATE.search(cmd) and _pipe_gate_closed(cmd, cwd or os.getcwd()):
+    if "|" in cmd and _GATED_WORD.search(cmd) and _pipe_gate_closed(cmd, cwd or os.getcwd()):
         if _pipe_gate_open(cmd) != "hatch":
             return deny(PIPE_REASON, key="pipe-gate")
         _hatch({"DEVKIT_PIPE_OK"}, "DEVKIT_PIPE_OK", "pipe-gate", PIPE_REASON)
