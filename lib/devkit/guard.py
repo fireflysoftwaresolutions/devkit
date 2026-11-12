@@ -4412,6 +4412,10 @@ def vendor_ext_refusal(argv, cwd=None, names=(), more=False) -> str:
     if not cli:
         if not named:
             return ""
+        if not more and not _shell_made(prog) and not prog.startswith("=") and \
+                not any(_shell_made(a) for a in args) and _vendor_read_only("claude", args) and \
+                _vendor_read_only("codex", args):
+            return ""  # whatever program it is, claude and codex both only read these words (issue 21)
         if "$" in prog or "`" in prog or ("PATH" in set(names) and "/" not in prog):
             return "unnamed"
         if "/" not in prog or prog.startswith("@"):  # a bare name the PATH finds, or a scoped npm package

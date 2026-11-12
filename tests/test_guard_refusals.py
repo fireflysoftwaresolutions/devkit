@@ -167,6 +167,40 @@ class VendorExtensionVerbsAreTheDevelopers(unittest.TestCase):
             with self.subTest(cmd=cmd):
                 self.assertIsNone(self.check(cmd))
 
+    # issue 21, with the Security engineer's conditions: a program the guard cannot name runs only when its words are
+    # a form both claude and codex only read, as typed, with no xargs and no word or program name the shell makes
+    STAYS_REFUSED = (
+        # a changing verb
+        "PATH=/opt/x ng mcp add evil -- npx evil", "PATH=/opt/x ng plugin install evil@m",
+        "PATH=/opt/x ng plugins install evil@m", "PATH=/opt/x ng plugin marketplace add o/r",
+        "export PATH=/opt/x; ng mcp list; ng mcp add evil -- bash",
+        'cd "$PWD/x" && ./node_modules/.bin/ng mcp add evil -- bash',
+        "ln -s ~/.local/bin/claude ./ng && ./ng plugin install evil@m",
+        # a read-only shape with a word the shell makes
+        "PATH=/opt/x ng mcp $X", "PATH=/opt/x ng mcp list *", "PATH=/opt/x ng mcp get $(cat f)",
+        'PATH=/opt/x ng mcp list "$@"',
+        # a program name the shell makes
+        "$CLI mcp list", '"$CLAUDE" plugin list', "`which claude` mcp list", "PATH=/opt/x =ng mcp list",
+        "PATH=/opt/x n[g] mcp list",
+        # xargs adds words
+        "echo add | PATH=/opt/x xargs ng mcp", "echo x | PATH=/opt/x xargs ng mcp list",
+        # read-only for claude only
+        "PATH=/opt/x ng plugin details x", "PATH=/opt/x ng plugin validate ./x",
+        # options, the end of options, case
+        "PATH=/opt/x ng mcp list -s user", "PATH=/opt/x ng mcp list --scope=user", "PATH=/opt/x ng mcp -- list",
+        "PATH=/opt/x ng mcp get -- x", "PATH=/opt/x ng MCP list", "PATH=/opt/x ng --model mcp list")
+    RUNS = ("export PATH=/opt/x:$PATH; ng mcp", "PATH=/opt/x helm plugin list", "PATH=/opt/x helm plugin list --json",
+            "PATH=/opt/x ng mcp get my-server", 'cd "$PWD/x" && ./node_modules/.bin/ng mcp',
+            'cd "$PWD/x" && ./ng plugin marketplace list')
+
+    def test_an_unnamed_program_runs_only_with_a_form_both_clis_only_read(self):
+        for cmd in self.RUNS:
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(self.check(cmd))
+        for cmd in self.STAYS_REFUSED:
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.check(cmd), guard.EXT_UNNAMED_REASON)
+
     def test_each_refusal_says_why_the_guard_refused_it(self):
         # one text said "This command changes the plugins…" for every refusal, also where the guard only could not
         # show that the command does not: a read-only form outside its list, a program it cannot name, a line a
