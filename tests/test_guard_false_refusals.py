@@ -628,6 +628,31 @@ class LaneStamp(unittest.TestCase):
             with self.subTest(cmd=cmd):  # the identity gate refuses it before the lane is routed
                 self.assertIsNotNone(hooks._identity_verdict(self.data(cmd)))
 
+    def test_a_command_that_can_reassign_the_lane_variable_is_refused(self):
+        # the Red team tester's: after the hook exports the member's lane variable, a command could give it another
+        # lane's id (read, a loop, printf -v, directly or through a name computed at run time) and speak as that lane
+        from devkit import hooks
+        self.lane("Kid", "all")
+        for cmd in ("read DEVKIT_FROM_AGENT <<< a2; dev progress note x",
+                    "IFS= read -r DEVKIT_FROM_AGENT < f.txt; dev crew inbox",
+                    "while read DEVKIT_FROM_AGENT; do dev progress note x; done < ids.txt",
+                    "for DEVKIT_FROM_AGENT in a2; do dev progress note x; done",
+                    "select DEVKIT_FROM_AGENT in a2; do dev crew inbox; break; done <<< 1",
+                    "printf -v DEVKIT_FROM_AGENT %s a2; dev progress note x",
+                    "v=DEVKIT_FROM_AGENT; printf -v \"$v\" %s a2; dev progress note x",
+                    "v=DEVKIT_FROM_AGENT; read \"$v\" <<< a2; dev crew inbox",
+                    "f() { read DEVKIT_FROM_AGENT; }; f <<< a2; dev crew inbox",
+                    "typeset +r DEVKIT_FROM_AGENT; DEVKIT_FROM_AGENT=a2 dev crew inbox",
+                    "mapfile -t DEVKIT_FROM_AGENT < ids.txt; dev crew inbox",
+                    "getopts a DEVKIT_FROM_AGENT; dev crew inbox",
+                    "bash -c 'read DEVKIT_FROM_AGENT <<< a2; dev crew inbox'"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNotNone(hooks._identity_verdict(self.data(cmd)))
+        for cmd in ("read -r line < f.txt; dev progress note x", "for f in a b; do dev progress note $f; done",
+                    "printf -v out %s x; echo $out", "echo $DEVKIT_FROM_AGENT"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(hooks._identity_verdict(self.data(cmd)))
+
     def test_a_write_outside_the_scratch_folder_from_a_read_only_lane_stays_refused(self):
         from devkit import hooks
         self.lane("Seraph", "review")

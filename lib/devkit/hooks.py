@@ -1644,6 +1644,49 @@ def _prefix_identity(argv0) -> list:
     return found
 
 
+_VALUE_OPTS = {"read": "dinNptu", "mapfile": "dnOsuCc", "readarray": "dnOsuCc"}  # options that take the next word
+
+
+def _binder_identity(argv) -> list:
+    """The names a shell builtin that sets a variable by its name would set, when one is a DEVKIT_* name or a name
+    computed at run time (`read "$v"`): read, mapfile, readarray, getopts, printf -v, for and select, and a
+    declare, typeset, local, readonly or export that lifts a readonly flag (+r)."""
+    if not argv:
+        return []
+    name, args = os.path.basename(argv[0]), list(argv[1:])
+    targets = []
+    if name in ("read", "mapfile", "readarray"):
+        k, takes = 0, _VALUE_OPTS[name]
+        while k < len(args):
+            a = args[k]
+            if a.startswith("-") and len(a) > 1:
+                if a[-1] in takes and len(a) == 2:
+                    k += 1  # its value
+                elif a[1:2] == "a" or (len(a) > 2 and a[-1] == "a"):  # read -a NAME: an array
+                    if k + 1 < len(args):
+                        targets.append(args[k + 1])
+                    k += 1
+            else:
+                targets.append(a)
+            k += 1
+    elif name == "getopts" and len(args) >= 2:
+        targets = [args[1]]
+    elif name == "printf":
+        for k, a in enumerate(args):
+            if a == "-v" and k + 1 < len(args):
+                targets.append(args[k + 1])
+            elif a.startswith("-v") and len(a) > 2:
+                targets.append(a[2:])
+    elif name in ("for", "select") and args:
+        targets = [args[0]]
+    elif name in ("declare", "typeset", "local", "readonly", "export"):
+        if any(a.startswith("+") and "r" in a for a in args):
+            return ["a readonly flag (+r)"]
+        targets = [a.split("=", 1)[0] for a in args if not a.startswith(("-", "+"))]
+    return [t if t.startswith("DEVKIT_") else "a name computed at run time" for t in targets
+            if t.startswith("DEVKIT_") or "$" in t or "`" in t]
+
+
 def identity_change(cmd: str, cwd=None) -> list:
     """The DEVKIT_* identity changes a shell command makes, where the shell runs them -> names ([] when none)."""
     from . import guard as g
@@ -1659,6 +1702,7 @@ def identity_change(cmd: str, cwd=None) -> list:
             continue
         if name == "unset":
             found += [a for a in argv[1:] if a.startswith("DEVKIT_") or "$" in a]
+        found += _binder_identity(argv)
         found += [x for x in g._exports(name, argv[1:]) if x.startswith("DEVKIT_") or x == "?"]
         if name in g._SHELLS:  # the script of -c, and of +c, which bash 3.2 (macOS's /bin/bash) runs the same way
             texts += [argv[k + 1] for k in range(1, len(argv) - 1)
@@ -1672,7 +1716,8 @@ def identity_change(cmd: str, cwd=None) -> list:
             continue
         seen.add(t)
         for argv0, _ in g.split_commands(t) or []:
-            found += _prefix_identity(argv0)
+            found += _prefix_identity(argv0) + _binder_identity(list(argv0)) + \
+                _binder_identity(g._unwrap(list(argv0)) or [])
         texts += g._expansions(t)
     return sorted(set(found))
 
