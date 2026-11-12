@@ -358,7 +358,7 @@ def context_for(cwd: str, agent: str) -> str:
 
 def _session_lessons_shown(data: dict, seen: dict):
     """The known pitfalls the session's context showed (context_for, which counted them) are pending for its main
-    agent until a refusal or an output shows their error again (missed) or its turn ends (heeded)."""
+    agent until a refusal or an output shows their error again (missed) or the session ends (heeded)."""
     try:
         _shown(data, (seen or {}).get("lessons") or [], "session", count=False)
     except Exception as e:
@@ -1246,7 +1246,6 @@ def stop(agent: str):
         _patch_quietly(sf, before, sess)  # a subagent that started meanwhile stays; an ended session stays ended
         if ended:  # the turn is not sent back: keep its prompts only for development work, refresh the checkpoint
             _continuity("on_stop", agent, data, sess=sess, dev_turn=classed)
-            _lessons_end(data, "main")  # what the turn was shown and did not hit again was heeded
     if out:
         print(json.dumps(out))
     if sid == "-":
@@ -1377,6 +1376,7 @@ def session_end(agent: str):
     data = _stdin_json()
     sid = data.get("session_id") or ""
     _continuity("on_session_end", agent, data)  # /clear: the clear link, and the old checkpoint's prompts go
+    _lessons_end(data, "main")  # what the session was shown and did not hit again was heeded, in any of its turns
     if sid:
         _spawn_sync(["--session", f"{agent}:{sid}", "--finish"])
 
@@ -1890,7 +1890,7 @@ def _pitfalls(agent: str, data: dict, found: list, remember: bool = True, channe
 
 def _shown(data: dict, ids: list, channel: str, count: bool = True):
     """Lessons that reached the agent of this hook event: counted on `channel`, and pending for that agent until a
-    refusal or an output shows their error again (missed) or its turn or lane ends (heeded). devkit's own
+    refusal or an output shows their error again (missed) or the session or its lane ends (heeded). devkit's own
     headless calls record nothing."""
     if ids and not _headless():
         from . import lessons
@@ -1928,8 +1928,9 @@ def _lesson_nudge(fixes: list) -> str:
 
 
 def _lessons_end(data: dict, who: str):
-    """The turn of the main session, or a member's lane, ended without a send-back: the lessons still pending for
-    that agent were heeded (lessonevents.on_end)."""
+    """The main session ended (SessionEnd: an exit, a /clear, a logout), or a member's lane did: the lessons still
+    pending for that agent were heeded (lessonevents.on_end). A turn's end resolves nothing: a lesson shown in turn
+    one is missed when its mistake comes back in turn five."""
     sid = str(data.get("session_id") or "")
     if not sid or not who or _headless():
         return

@@ -69,6 +69,10 @@ class LessonHookCase(HookCase):
         with mock.patch("devkit.scope.decide", lambda *a: False), mock.patch.object(hooks, "_audit_turn_end", gates):
             return self.hook("stop", {"session_id": "s1", "hook_event_name": "Stop", "cwd": str(self.root)})
 
+    def end_session(self):
+        return self.hook("session-end", {"session_id": "s1", "hook_event_name": "SessionEnd", "reason": "exit",
+                                         "cwd": str(self.root)})
+
     def path_of(self, lid) -> Path:
         return next(Path(lessons.LESSONS).rglob(f"{lid}.md"))
 
@@ -85,7 +89,7 @@ class ShownTests(LessonHookCase):
 
 
 class OutcomeTests(LessonHookCase):
-    def test_a_lesson_hit_again_is_missed_and_one_not_hit_is_heeded_when_the_turn_ends(self):
+    def test_a_lesson_hit_again_is_missed_and_one_not_hit_is_heeded_when_the_session_ends(self):
         hit = self.lesson("Validated the migrations without the database", errors=["checksum mismatch for migration"])
         calm = self.lesson("Repaired the schema history instead of fixing the migration",
                            commands=["./mvnw flyway:repair"])
@@ -93,9 +97,9 @@ class OutcomeTests(LessonHookCase):
         self.hook("post-tool", self.output("t1", failed))
         self.hook("guard", self.bash("./mvnw flyway:repair", tid="t2"))
         self.hook("post-tool", self.output("t3", failed))
-        self.stop(sent_back=True)
-        self.assertEqual(self.events(calm), [("shown", "call", "main")])  # a turn sent back has not ended
         self.stop()
+        self.assertEqual(self.events(calm), [("shown", "call", "main")])  # a turn ended; the session goes on
+        self.end_session()
         self.assertEqual(self.events(hit), [("shown", "output", "main"), ("missed", "output", "main")])
         self.assertEqual(self.events(calm), [("shown", "call", "main"), ("heeded", "call", "main")])
 
@@ -107,6 +111,16 @@ class OutcomeTests(LessonHookCase):
         self.hook("guard", self.bash('dev progress step "built it" --check "12 tests pass"', tid="t1"))
         self.hook("guard", self.bash('dev progress step "tested it" --check "dev test: 3 passed"', tid="t2"))
         self.assertNotIn("missed", [e[0] for e in self.events(lid)], self.events(lid))
+
+    def test_a_session_start_lesson_hit_in_a_later_turn_counts_as_missed(self):
+        # A lesson the session start showed stays pending for the whole session, not one turn: a mistake in turn two
+        # is a miss
+        lid = self.lesson("Fix the migration, never repair the history", errors=["checksum mismatch for migration"])
+        lessons.shown([lid], "session", "s1", "main", count=False)
+        self.stop()  # turn one ends
+        self.hook("post-tool", self.output("t9", "[ERROR] Validate failed: checksum mismatch for migration 3"))
+        self.assertEqual(self.events(lid), [("shown", "session", "main"), ("missed", "session", "main"),
+                                            ("shown", "output", "main")])
 
     def test_the_output_of_the_call_that_showed_a_lesson_is_no_miss(self):
         lid = self.lesson("Ran the integration tests without Docker", commands=["./mvnw verify"],
