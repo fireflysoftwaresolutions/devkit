@@ -116,11 +116,37 @@ handoff sync pushing through any conflict, and corrects the docs where they had 
 
 ### Security
 
-- **Guard.** Arithmetic on a variable whose value may hold code is refused: the shell evaluates a name's value as an
-  expression, so `x='a[$(cmd)]'; echo $((x))` runs `cmd`.
-- **Guard.** Scripts are judged by what they can call: a lookup by a name written out in the code passes, while
-  `exec`, `eval`, computed lookups, and the interpreter's internals are refused. `exec(open(f).read())` and an escape
-  through `__subclasses__` used to pass.
+- **Guard.** Any value the shell reads as arithmetic and that is not proven a number is refused everywhere, the main
+  session included: the shell evaluates a name's value as an expression, so `x='a[$(cmd)]'; echo $((x))`, `((x))`,
+  `let x` and `[[ $x -eq 1 ]]` run `cmd`. Output of `date`, `seq` or `wc` with a format argument is not trusted as a
+  number. Names built from values that may hold code are refused too (`declare "$x"=1`, `${!x}`, zsh's `export $x`,
+  `printf -v "$x"`, `read -t "$x"`).
+- **Guard.** Crew members' Python and JavaScript programs (scripts, `-c` and heredocs) are judged against an allow
+  list: a module or call outside a small set that cannot start a process, run code, or write where it should not
+  makes the program unknown, as before this release. Review lanes may only read and write literal paths in their own
+  scratch folder. A list of forbidden calls is never complete: aliases, `io.FileIO`, `fileinput`, `pydoc.pipepager`,
+  `timeit`, `pdb.run` and `pickle.loads` got through it. `exec(open(f).read())` and an escape through
+  `__subclasses__` used to pass.
+- **Guard.** A program's writes into devkit's state or the handoff repository are judged by the same allow list, in
+  the main session too, so `o = open; o(path, 'w')` no longer gets past the path check.
+- **Guard.** A heredoc whose delimiter mixes quotes (`<<E\OF`, `<<E''OF`, `<<"E"OF`) no longer hides the commands
+  after it: the guard reads the whole delimiter word with its quotes removed, as the shells do.
+- **Guard.** `--config F` drops only the option's own value, so `curl --config X -o X` is judged as the write it is.
+- **Guard.** The guard reads the command strings that awk (`system()`, `print |`, `| getline`), `trap`, vim's `!`
+  commands, `less +!`, `launchctl submit` and make's `$(shell …)` run. `at`, `batch`, `crontab`, `launchctl load`,
+  `make -f -` and an awk program built at run time are unknown actions, and setting `BASH_ENV`, `ZDOTDIR`,
+  `PROMPT_COMMAND`, `LESSOPEN` or `LESSCLOSE` is refused.
+- **Guard.** In the main session, a program that starts a process with a command it builds at run time is an unknown
+  action.
+- **Guard.** `set -o pipefail` opens the commit-after-pipeline gate only where it holds (the same shell, before the
+  first pipeline, never turned off), and the gate reads commits inside `if` and `while` bodies, groups, after `|&`,
+  after `source <(…)`, and through `/usr/bin/git`.
+- **Crew.** A member's lane stamp is readonly; a command that rebinds it (`read`, `for`, `select`, `printf -v`,
+  `mapfile`, `getopts`, a computed name, `exec -c`) is refused; and the call ledger overrules a lane variable that
+  another member's open call contradicts. Review lanes write only inside their own scratch folder, never through
+  braces, patterns, `..` or a link.
+- **Pull requests.** `dev pr create --lang` keeps only a locale, so its value never names a file outside the
+  templates folder.
 
 ## [26.11.16] - 2026-11-12
 
