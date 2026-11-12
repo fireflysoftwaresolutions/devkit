@@ -228,6 +228,15 @@ class DetourTests(BugCLI):
         self.assertEqual(item["payload"]["steps"][1], {"text": "then rerun the tests"})
         self.assertTrue(item["held"])  # free text waits for the developer
 
+    # An agent wrote the step as it types the command, `--dev "dev push"`, and was refused with "not a dev
+    # subcommand": the leading `dev` is the command's own name, so the step keeps the subcommand after it
+    def test_a_dev_step_written_with_its_leading_dev_keeps_the_subcommand(self):
+        self.crash()
+        bugs.ledger_append("s1", "Bash", True, "progress step", [])
+        rc, out = self.dev("detour", FP_A, "--dev", "dev progress step")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.outbox()[-1]["payload"]["steps"], [{"dev": "progress step"}])
+
     def test_detour_with_an_invalid_step_says_what_is_wrong(self):
         self.crash()
         bugs.ledger_append("s1", "Bash", True, "progress step", [])

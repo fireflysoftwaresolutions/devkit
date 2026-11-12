@@ -463,7 +463,7 @@ project data, and hotfix rankings. The guide is [The bug registry](bug-registry.
 | `dev bug show <number\|fingerprint>` | One bug: versions, votes, detours with their trust, related lessons. In an agent session, only the registry's bot-written fields; proposed detours as a count |
 | `dev bug search <words\|fingerprint>` | Bugs by generated title or fingerprint |
 | `dev bug report [fingerprint] [--title "…"] [--guard [refusal id]] [--security]` | Files a bug, or votes on a known one. `--guard` flags a wrong refusal, this session's last one when no id is given; `--security` holds the report for private vulnerability reporting |
-| `dev bug detour <fingerprint> --hint "<name> <slot>=<value> …"\|--dev "<subcommand>"\|--text "…"` | Records a detour of one to five steps, each flag one step in order, once the session ledger shows it worked. Free text that names something of this Mac is refused |
+| `dev bug detour <fingerprint> --hint "<name> <slot>=<value> …"\|--dev "<subcommand>"\|--text "…"` | Records a detour of one to five steps, each flag one step in order, once the session ledger shows it worked. A `--dev` step names a subcommand and its flags that take no value, with or without the leading `dev` (`--dev "dev push"` is `--dev "push"`). Free text that names something of this Mac is refused |
 | `dev bug top [--task]` | Up to 10 open bugs by score, each with its reason, and the five highest as the suggested hotfix scope; `--task` adds those five as work items with their issue links |
 | `dev bug sync` | Refreshes the cache and sends the outbox; the hourly sync job does the same |
 | `dev bug pending` | Items held for review, printed exactly as they would be sent |

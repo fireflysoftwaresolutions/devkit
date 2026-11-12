@@ -2944,12 +2944,24 @@ def _kind_of(fp: str, session: str) -> str:
     return str((entry.get("record") or {}).get("kind") or "")
 
 
+def _as_typed(step):
+    """A `dev` step as an agent types the command, `{"dev": "dev push"}`: the leading `dev` is the command's own name,
+    so the step keeps the subcommand after it (`{"dev": "push"}`). Any other step is returned as it is."""
+    if isinstance(step, dict) and set(step) == {"dev"} and isinstance(step["dev"], str):
+        words = step["dev"].split()
+        if len(words) > 1 and words[0] == "dev":
+            return {"dev": " ".join(words[1:])}
+    return step
+
+
 def file_detour(fp: str, steps: list, session: str) -> dict:
     """Queue a detour for `fp` once its steps pass the validator and the session ledger shows it worked. Free text
     that names something of this Mac is refused, not scrubbed (a placeholder helps no other agent); other free text
-    makes the item wait for the developer. -> {"id", "held", "security", "why"}; ValueError says what is missing."""
+    makes the item wait for the developer. A `dev` step may start with `dev`, as the command is typed (_as_typed).
+    -> {"id", "held", "security", "why"}; ValueError says what is missing."""
     if not _fits(fp, _FP_RE):
         raise ValueError("a fingerprint is 12 lowercase hex characters (`dev bug ls --local` lists them)")
+    steps = [_as_typed(s) for s in steps]
     for s in steps:
         if set(s) == {"text"} and isinstance(s["text"], str) and scrub_text(s["text"], deny_words())[0] != s["text"]:
             raise ValueError("the free text names something of this Mac (a project, a path, a URL, an e-mail address "
