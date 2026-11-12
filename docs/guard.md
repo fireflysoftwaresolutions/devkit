@@ -905,8 +905,12 @@ so until an OS sandbox holds the lane, the refusal names the way: ask the tech l
 change with file:line. The member writes its scratch files with the shell (`cat > <scratch>/f <<'EOF'`), whose
 literal path the guard judges. Its test runs (`pytest`, `python3 -m pytest`, `python3 -m unittest`, `node --test`)
 run the repository's tests: a file, folder or module they name, a discovery's folders, or the working folder when
-they name none, in a temporary folder outside a git work tree (where the scratchpads are) is refused, and so are
-pytest's `-p`, `-c`, `--rootdir`, `--confcutdir` and `--basetemp`.
+they name none, in a temporary folder outside a git work tree (where the scratchpads are) is refused. They take
+only options that load no code and write no file, in the spaced or the `=` form: unittest's `-v`, `-q`, `-f`, `-b`,
+`-k` and discover's `-s`, `-p`, `-t`; pytest's `-q`, `-v`, `-x`, `-s`, `-k`, `-m`, `--tb`, `--lf`, `--ff`, `-r`,
+`--maxfail` and `--co`; node's `--test-name-pattern`, `--test-only` and `--test-reporter` with a built-in reporter;
+and `uv run` without `--with`. Any other option (`-o`, `-p`, `--junitxml`, `--log-file`, `--cov-report`,
+`--import=`, `--require=`, `--test-reporter-destination`, …) is refused, as is a variable such as `PYTHONPATH`.
 A script in another member's folder stays refused, and so do the same script under a runner (`uv run`, `npx`), a
 shell line or script (`bash -c '…'`, `bash x.sh`), and a `PYTHONPATH=` prefix.
 
