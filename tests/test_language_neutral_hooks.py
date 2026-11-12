@@ -186,10 +186,14 @@ class RefusalRecordTests(HookCase):
     def test_guard_refusals_name_the_crew_member(self):
         pg.start("Work", plan=["parser"])
         self.hook("guard", self.bash("echo '{}' | dev hook prompt --agent claude", aid="a_tank"), real_guard=True)
-        # a lane call inside a substitution, which the lane router never routes, stays refused for a crew member
-        self.hook("guard", self.bash('echo "$(dev progress step x --check y)"', aid="a_neo", tid="toolu_2"))
+        # a lane call that drops the member's lane variable stays refused for a crew member, and its refusal names
+        # the member's lane; a lane call inside a substitution runs with the lane stamped (Claude Code) since the
+        # stamp exists, so it records no refusal
+        self.hook("guard", self.bash("env -i dev progress step x --check y", aid="a_neo", tid="toolu_2"))
+        self.hook("guard", self.bash('echo "$(dev progress step x --check y)"', aid="a_mouse", tid="toolu_3"))
         lanes = {(r.get("crew") or {}).get("lane") for r in audit.records(1, action="guard.deny")}
         self.assertTrue({"a_tank", "a_neo"} <= lanes, lanes)
+        self.assertNotIn("a_mouse", lanes)
 
 
 class RouteHintTests(HookCase):

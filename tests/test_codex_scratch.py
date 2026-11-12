@@ -115,12 +115,14 @@ class CodexScratchTests(unittest.TestCase):
             (f"echo notes > {own}/notes.md", ["/bin/sh", "-c", 'printf "%s\\n" notes > "$1"',
                                              "scratch-write", str(own / "notes.md")]),
             (f"mkdir -p {own}/nested", ["mkdir", "-p", str(own / "nested")]),
-            (f"python3 {script}", ["python3", str(script)]),
+            (f"cp {own}/notes.md {own}/copy.md", ["cp", str(own / "notes.md"), str(own / "copy.md")]),
         )
         for cmd, argv in commands:
             self.assertIsNone(self.hook(cmd=cmd), cmd)
-            result = subprocess.run(argv, cwd=self.host, check=True, capture_output=True, text=True)
-        self.assertEqual(result.stdout, "probe\n")
+            subprocess.run(argv, cwd=self.host, check=True, capture_output=True, text=True)
+        # a read-only lane runs no program of its own (its scratch script included): the shell writes there
+        self.assertEqual(self.hook(cmd=f"python3 {script}")[0], "deny")
+        self.assertEqual((own / "copy.md").read_text(), "notes\n")
         self.assertEqual((own / "notes.md").read_text(), "notes\n")
         self.assertTrue((own / "nested").is_dir())
         self.assertEqual(self.hook(cmd="python3 -c 'print(1)'")[0], "deny")
