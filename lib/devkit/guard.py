@@ -13,6 +13,7 @@ Pure functions; the hook wrapper fails open on any error.
 """
 from __future__ import annotations
 
+import bisect
 import contextlib
 import contextvars
 import filecmp
@@ -3908,9 +3909,25 @@ def dev_command_reason(p, verb="replace") -> str:
 # only as the pinned release (core.runtime_home, core.release_home) or a file in it; any other copy, the folder
 # itself (a find, a glob or a cd chooses a copy from it) or a pattern is refused, however the path is written.
 
-_RELEASES_TEXT = re.compile(r"(?P<pre>[^\s;|&<>()`=]*?)\.local/+share/+devkit/+releases(?![\w.-])"
-                            r"(?:/+(?P<name>[^/\s;|&<>()`'\"]*))?")
-_WORD_ENDS = frozenset(" \t\n;|&<>()`'\"=")
+# the releases folder and the copy named after it; the path written before it is found by _releases_mentions
+_RELEASES_FOLDER = re.compile(r"\.local/+share/+devkit/+releases(?![\w.-])(?:/+(?P<name>[^/\s;|&<>()`'\"]*))?")
+_PATH_ENDS = re.compile(r"[\s;|&<>()`=]")  # what ends the path written before the releases folder
+_WORDS = re.compile(r"[^ \t\n;|&<>()`'\"=]+")  # the words a copy's name is looked for in
+
+
+def _releases_mentions(text) -> list:
+    """(mention, path before the folder, copy name) for each mention of the releases folder in `text`, in order. The
+    path before it runs back to the word's start, or to the end of the mention before it in the same word. Found
+    from the folder's name, in time linear in the text: a pattern that opened with that path tried each start of a
+    word without separators, quadratic in its length, and past the hook's timeout the command ran unjudged."""
+    ends = [m.start() for m in _PATH_ENDS.finditer(text)]
+    out, done = [], 0
+    for m in _RELEASES_FOLDER.finditer(text):
+        k = bisect.bisect_left(ends, m.start())
+        start = max(done, ends[k - 1] + 1 if k else 0)
+        out.append((text[start:m.end()], text[start:m.start()], m.group("name") or ""))
+        done = m.end()
+    return out
 
 
 def _pinned_names() -> set:
@@ -3945,24 +3962,32 @@ def other_release(cmd: str, cwd):
     allowed = _pinned_names()
     flat = re.sub(r"[\\'\"]", "", cmd)  # quotes and escapes do not change the path the shell builds
     for text in dict.fromkeys((cmd, flat)):
-        for m in _RELEASES_TEXT.finditer(text):
-            base = resolve(m.group("pre") + ".local/share/devkit/releases", cwd)
+        for mention, pre, name in _releases_mentions(text):
+            base = resolve(pre + ".local/share/devkit/releases", cwd)
             if base != UNKNOWN and real(base) != real(core.pin_root()):
                 continue  # another HOME's releases folder (a test's sandbox), not this install
-            name = (m.group("name") or "").casefold()
-            if not name or name not in allowed:
-                return deny(other_release_reason(m.group(0)), key="named-copy")
+            if not name or name.casefold() not in allowed:
+                return deny(other_release_reason(mention), key="named-copy")
     root = core.pin_root()
     others = [d.name for d in root.iterdir() if not d.name.startswith(".") and d.name.casefold() not in allowed] \
         if root.is_dir() else []
     for name in others:  # a copy's name with the path built some other way ($R/<name>/bin/dev)
-        for m in re.finditer(re.escape(name), flat, re.I):
-            start = m.start()
-            while start and flat[start - 1] not in _WORD_ENDS:
-                start -= 1
-            if not _RELEASES_TEXT.search(flat[start:m.end()]):  # with the folder written out, the loop above judged it
-                return deny(other_release_reason(name), key="releases-folder")
+        if _copy_named(flat, name):
+            return deny(other_release_reason(name), key="releases-folder")
     return None
+
+
+def _copy_named(flat, name) -> bool:
+    """True when the command text `flat` names the copy `name` (in any case) in a word that does not write the
+    releases folder out before it, as `$R/<name>/bin/dev` does; with the folder written out, other_release's first
+    loop judged it. Each word is read once, up to the copy's first name in it (a later one has more before it), so
+    the time is linear in the text, where reading from each name back to its word's start was quadratic."""
+    named = re.compile(re.escape(name), re.I)
+    for word in _WORDS.finditer(flat) if named.search(flat) else ():
+        m = named.search(flat, word.start(), word.end())
+        if m and not _RELEASES_FOLDER.search(flat, word.start(), m.end()):
+            return True
+    return False
 
 
 def other_release_word(word: str, cwd):

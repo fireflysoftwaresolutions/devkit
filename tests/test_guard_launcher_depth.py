@@ -1,7 +1,8 @@
 # Copyright (c) 2026 Firefly Software Solutions Inc.
 # SPDX-License-Identifier: Apache-2.0
-# The guard reads what a launcher (xcrun, op run, nix run, mise exec …) may start once per command, within a bound:
-# a hook past its 15 s timeout lets the command run unjudged, so a slow reading is a way around the guard.
+# The guard judges a command in time: a hook past its 15 s timeout lets the command run unjudged, so a slow reading is
+# a way around the guard. It reads what a launcher (xcrun, op run, nix run, mise exec …) may start once per command,
+# within a bound, and its pattern scans are linear in the length of a word.
 # Run: python3 -m unittest tests.test_guard_launcher_depth -v
 import os
 import signal
@@ -20,6 +21,7 @@ _hermetic.activate()  # run alone, this module gets the suite's temporary home t
 sys.path.insert(0, str(ROOT / "lib"))
 
 from devkit import audit, core, guard  # noqa: E402
+import test_guard_old_copies as copies  # noqa: E402  (its releases folder: an older copy and the pinned one)
 
 # a long message, as `dev crew ask` and `dev commit` take: 4000 characters of plain sentences
 TEXT = ("The guard read each command a launcher may start in full, so the hook ran past its timeout. " * 45)[:4000]
@@ -108,3 +110,37 @@ class LaunchersAreReadOnceInTime(unittest.TestCase):
             self.assertIsNone(self.check("xcrun git status"))  # one launcher deep: read
             self.assertEqual(self.check("xcrun xcrun git status"), guard.LAUNCH_REASON)
             self.assertEqual([(a, t) for a, t, _ in self.gate("xcrun xcrun git status")], [("unknown", 2)])
+
+
+class LongWordsAreJudgedInTime(unittest.TestCase):
+    # the check for other devkit copies tried every start of a word without separators (a pattern that opened with a
+    # lazy path) and scanned back to the word's start at each copy name in it: 18.7 s for one word of 40,000 characters
+
+    setUp = copies.OtherReleaseTests.setUp
+    within = LaunchersAreReadOnceInTime.within
+
+    def check(self, cmd):
+        v = self.within(lambda: guard.check("Bash", {"command": cmd}, str(self.cwd), "claude"))
+        return v[1] if v else None
+
+    def copy_named(self, cmd):
+        v = self.within(lambda: guard.other_release(cmd, str(self.cwd)))
+        return v[1] if v else None
+
+    def test_a_word_without_separators_is_judged_in_time(self):
+        self.assertIsNone(self.check("echo '" + "x" * 40_000 + "'"))  # the whole check
+        for size in (40_000, 200_000):  # the check for other copies, which a longer word reaches first
+            word = "x" * size
+            with self.subTest(size=size):
+                self.assertIsNone(self.copy_named(f"echo '{word}'"))
+                # another copy named after it is still refused, and so is one written after a long path
+                self.assertIn(copies.OLD, self.copy_named(f"echo {word} ~/.local/share/devkit/releases/{copies.OLD}/"
+                                                          f"bin/dev") or "")
+                self.assertIn(copies.OLD, self.copy_named(f"~/{word}/../.local/share/devkit/releases/{copies.OLD}/"
+                                                          f"bin/dev") or "")
+
+    def test_a_word_that_names_a_copy_many_times_is_judged_in_time(self):
+        # after the pinned copy's folder every name of another copy was judged with it, each from the word's start
+        pinned = f"~/.local/share/devkit/releases/{copies.NEW}/"
+        self.assertIsNone(self.copy_named(f"echo {pinned}{copies.OLD * 5000}"))
+        self.assertIn(copies.OLD, self.check(f"R=~/.local/share/devkit; $R/releases/{copies.OLD}/bin/dev status") or "")
