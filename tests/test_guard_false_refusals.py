@@ -477,7 +477,9 @@ class LaneStamp(unittest.TestCase):
                 self.assertIsNone(hooks._route_subagent_progress(self.data(cmd)))
                 self.assertIsNotNone(hooks._unroutable_lane_command(self.data(cmd)))
         for cmd in ("env -u DEVKIT_FROM_AGENT dev progress step x; true", "unset DEVKIT_FROM_AGENT; dev progress note x",
-                    "DEVKIT_FROM_AGENT= dev progress step x | tail -1", "env -i PATH=/usr/bin dev progress step x; true"):
+                    "DEVKIT_FROM_AGENT= dev progress step x | tail -1", "env -i PATH=/usr/bin dev progress step x; true",
+                    "dev progress step x; exec -c dev crew decide D1 A", "exec -cl dev progress note x",
+                    "exec -a x -c dev progress note x"):
             with self.subTest(cmd=cmd):  # the identity gate refuses it before the lane is routed
                 self.assertIsNotNone(hooks._identity_verdict(self.data(cmd)))
 

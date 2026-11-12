@@ -1631,6 +1631,13 @@ def _prefix_identity(argv0) -> list:
                     unset = after if u else ""
                 if unset.startswith("DEVKIT_"):
                     found.append(unset)
+        elif name == "exec":  # `exec -c` runs the command with an empty environment, alone or with -l or -a NAME
+            while i + 1 < len(words) and words[i + 1].startswith("-") and words[i + 1] != "--":
+                i += 1
+                if "c" in words[i][1:]:
+                    found.append("env -i")
+                if words[i].endswith("a"):  # -a NAME: the name the command runs as
+                    i += 1
         elif name not in _PREFIX_WORDS:
             break
         i += 1
