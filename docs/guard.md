@@ -915,10 +915,16 @@ command writes first, stays refused.
 A script in another member's folder stays refused, and so do the same script under a runner (`uv run`, `npx`), a
 shell line or script (`bash -c '…'`, `bash x.sh`), and a `PYTHONPATH=` prefix.
 
-**Not covered yet.** In the main session, a command that writes a script and runs it in the same call (`cat > x.py
-<<'EOF' … EOF; python3 x.py`), or a script another process changes after the guard read it, is judged by the file
-as it was before the command ran (B-g8vi3yz3h2h). Crew lanes refuse a write followed by a run of the same file; the
-main session gets that rule, or an OS sandbox, in a later release.
+**Not covered yet.** In the main session, a program that hands a refused action to a code runner or a process
+starter the spawn list does not name (`pydoc.pipepager('', 'git push --force origin main')`, `timeit.timeit` or
+`code.InteractiveInterpreter().runsource` with a string it builds at run time, `pdb`, `cProfile`) is not classified
+as an action, so the main session allows it, while `exec` of the same string is unknown (B-g8vi3yz3h2h). Crew lanes
+refuse such programs through the allow-list judge.
+
+**Not covered yet.** In the main session, a command that writes a script and runs it in the same call
+(`cat > x.py <<'EOF' … EOF; python3 x.py`), or a script another process changes after the guard read it, is judged
+by the file as it was before the command ran. Crew lanes refuse a write followed by a run of the same file; the main
+session gets that rule, or an OS sandbox, in a later release.
 
 ### Who runs a `dev` call: the session marks
 
