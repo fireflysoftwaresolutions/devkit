@@ -305,6 +305,17 @@ def _run(fake, event_name, number=None, comment=None, key=KEY, sleep=None, maint
     return rc, out.getvalue(), err.getvalue()
 
 
+class PublicNameTests(unittest.TestCase):
+    # The workflow runs the default branch's lib/devkit/bugs.py and reads its names as a contract: a private name
+    # (one that starts with _) can change without notice and break the registry's workflow, so it reads public ones
+    def test_the_workflow_reads_only_public_names_of_bugs(self):
+        import ast
+        tree = ast.parse((ROOT / "tools" / "bug_registry_action.py").read_text(encoding="utf-8"))
+        private = sorted({n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)
+                          and isinstance(n.value, ast.Name) and n.value.id == "bugs" and n.attr.startswith("_")})
+        self.assertEqual(private, [])
+
+
 class FoldTests(unittest.TestCase):
     def test_folds_every_unfolded_payload_in_comment_id_order(self):
         fake = FakeGitHub()

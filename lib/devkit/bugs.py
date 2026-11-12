@@ -892,9 +892,9 @@ _OTHER_TOOLS = ("Edit", "Write", "Read", "Grep", "Glob", "MultiEdit", "NotebookE
                 "Task", "apply_patch", "write_stdin")
 EVIDENCE_COUNTS = ("successes", "failures", "attempts")
 _COMMON_FIELDS = {"devkit_bug", "type", "fingerprint", "version"}
-_FREE_FIELDS = ("title", "text", "template")
+FREE_FIELDS = ("title", "text", "template")  # the reporter's free text: never in a record the bot writes
 _FIELDS = {
-    "report": _COMMON_FIELDS | set(REPORT_KEYS) | set(_FREE_FIELDS),
+    "report": _COMMON_FIELDS | set(REPORT_KEYS) | set(FREE_FIELDS),
     "vote": _COMMON_FIELDS | {"impact", "window"},
     "detour": _COMMON_FIELDS | {"impact", "steps", "evidence"},
     "confirm": _COMMON_FIELDS | {"detour_id"},
@@ -1619,7 +1619,7 @@ def _new_record(report: dict, now: float) -> dict:
             "component": component_of(report), "title": title_for(report), "first_version": report["version"],
             "versions": [], "voters": {}, "impacts": {k: 0 for k in IMPACT}, "score": 0.0, "last_seen": now,
             "status": "open", "fixed_in": "", "detours": [], "report": {k: report[k] for k in facts if report.get(k)},
-            "first": {k: v for k, v in report.items() if k not in _FREE_FIELDS}, "days_seen": 0}
+            "first": {k: v for k, v in report.items() if k not in FREE_FIELDS}, "days_seen": 0}
 
 
 def _add_vote(rec: dict, who: str, impact: str, version: str, trusted: bool, now: float):
@@ -1874,7 +1874,7 @@ def _item_ids() -> list:
 
 
 def _free_texts(p: dict) -> list:
-    out = [p[k] for k in _FREE_FIELDS if isinstance(p.get(k), str)]
+    out = [p[k] for k in FREE_FIELDS if isinstance(p.get(k), str)]
     return out + [s["text"] for s in p.get("steps") or [] if isinstance(s, dict) and isinstance(s.get("text"), str)]
 
 
@@ -2022,7 +2022,7 @@ def _recheck(item: dict, deny) -> str:
     problems = validate_payload(p)
     if problems:
         return problems[0]
-    for k in _FREE_FIELDS:
+    for k in FREE_FIELDS:
         if isinstance(p.get(k), str):
             clean = template_message(p[k], deny=deny()) if k == "template" else scrub_text(p[k], deny())[0]
             if clean != p[k]:

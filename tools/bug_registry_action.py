@@ -261,11 +261,11 @@ def _pruned(rec: dict, now: float) -> dict:
 
 def _first_reports(holder: dict, issue: dict) -> tuple:
     """(the first report a record keeps, the first report the issue's text shows). The record keeps only the report's
-    closed-list fields, never the reporter's free text (bugs._FREE_FIELDS), so nothing the reporter typed lands in a
+    closed-list fields, never the reporter's free text (bugs.FREE_FIELDS), so nothing the reporter typed lands in a
     comment the bot writes; a record from before it kept one takes it from the issue's body. The text shows the free
     text only while the issue's own body still carries it in a valid report of this bug: once the reporter takes it
     out, the next render leaves it out. `holder` is the record whose report counts: a duplicate's own stub."""
-    free = bugs._FREE_FIELDS
+    free = bugs.FREE_FIELDS
     body = _first_report(issue)
     if body is not None and body.get("fingerprint") != holder.get("fingerprint"):
         body = None
