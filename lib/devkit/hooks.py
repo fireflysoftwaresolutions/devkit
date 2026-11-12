@@ -311,9 +311,8 @@ def context_for(cwd: str, agent: str) -> str:
         from . import work
         me = work.actor(agent)
         mine, theirs = [], []
-        scopes = [p["id"]] + [f"initiatives/{d.name}" for d in (HANDOFF / "initiatives").glob("*")
-                              if p["id"] in notesmod.summarize((d / "README.md").read_text())["projects"]] \
-            if (HANDOFF / "initiatives").exists() else [p["id"]]
+        # an initiative folder whose README cannot be read lists no member (guard.initiatives_of), and hides nothing
+        scopes = [p["id"]] + [f"initiatives/{slug}" for slug in _initiatives(p["id"])]
         for sc in scopes:
             for it in work.all_items(sc):
                 holder, expired = work.lock_holder(it)

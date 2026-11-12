@@ -181,6 +181,21 @@ class ClaimedTaskTests(WiringCase):
         self.assertIn(f"Your claimed tasks: {it['meta']['id']}", text)
         self.assertNotIn("Claimed by others", text)
 
+    def test_an_initiative_folder_without_its_readme_hides_no_claimed_task_at_the_session_start(self):
+        # a sync or a test left initiatives/<slug>/ without its README.md: reading it raised inside the block that
+        # names the claimed tasks and the people working on the project, so both lines left the session start
+        handoff = self.root / "handoff"
+        handoff_of(self, handoff)
+        (handoff / "initiatives" / "half-synced").mkdir(parents=True)
+        it = claimed_as_mac_158(core.project_identity(self.repo, "")[0])
+        repo = os.path.realpath(self.repo)
+        with mock.patch.object(hooks, "HANDOFF", handoff), mock.patch("socket.gethostname", return_value="andress-mbp-2"), \
+                mock.patch.object(registry, "update_note", lambda *a, **k: False), \
+                mock.patch.object(core, "is_temp", lambda p, real=core.is_temp: False if os.path.realpath(
+                    str(p)).startswith(repo) else real(p)):
+            text = hooks.context_for(repo, "claude")
+        self.assertIn(f"Your claimed tasks: {it['meta']['id']}", text)
+
     def test_this_macs_presence_under_its_former_hostname_is_not_another_machine_at_the_session_start(self):
         # presence this Mac wrote as mac-158 is its own, not someone "also working on this project"; another Mac is
         # named by its hostname, the label of its machine id
