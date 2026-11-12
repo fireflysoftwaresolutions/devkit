@@ -1376,10 +1376,55 @@ def _lane_refusal(layers, left) -> int:
                   'stage and commit your files in one step: dev commit -m "type(scope): summary" <paths>')
 
 
+# git's marks of an operation that stopped half way, in the checkout's own git folder (a worktree has its own): the
+# next commit finishes it (git drops REVERT_HEAD and CHERRY_PICK_HEAD after any commit), turns into its merge commit
+# (MERGE_HEAD), or lands inside it (a rebase). -> (mark, operation, how the one who started it finishes it)
+_STOPPED_OPERATIONS = (
+    ("rebase-merge", "rebase", "dev rebase --continue (or dev rebase --abort)"),
+    ("rebase-apply", "rebase", "dev rebase --continue (or dev rebase --abort)"),
+    ("MERGE_HEAD", "merge", "git merge --continue (or git merge --abort)"),
+    ("CHERRY_PICK_HEAD", "cherry-pick", "git cherry-pick --continue (or git cherry-pick --abort)"),
+    ("REVERT_HEAD", "revert", "git revert --continue (or git revert --abort)"),
+)
+
+
+def operation_in_progress(top):
+    """The revert, cherry-pick, merge, rebase or `git am` this checkout is in the middle of -> (operation, its mark,
+    how to finish it), or None."""
+    out = core.gitout(top, "rev-parse", *[w for m, _, _ in _STOPPED_OPERATIONS for w in ("--git-path", m)])
+    paths = out.splitlines()
+    if len(paths) != len(_STOPPED_OPERATIONS):
+        return None
+    for (mark, op, how), p in zip(_STOPPED_OPERATIONS, paths):
+        p = os.path.join(str(top), p)
+        if not os.path.exists(p):
+            continue
+        if mark == "rebase-apply" and os.path.exists(os.path.join(p, "applying")):
+            return "git am", mark, "git am --continue (or git am --abort)"
+        return op, mark, how
+    return None
+
+
+def _operation_refusal(top):
+    """dev commit never finishes or ends an operation that stopped half way: in a shared checkout another lane may own
+    it, and devkit cannot tell who started it."""
+    got = operation_in_progress(top)
+    if not got:
+        return None
+    op, mark, how = got
+    return refuse(f"a {op} in progress in this checkout ({mark}): a commit now would finish it or end it with your "
+                  f"files, and devkit cannot tell who started it; nothing was staged or committed",
+                  f"if you started it: {how}; if another lane did, wait until it is done, then run the same "
+                  f"dev commit")
+
+
 def cmd_commit(a) -> int:
     c = ctx()
     if c is None:
         return _need_repo(c)
+    stopped = _operation_refusal(c.top)
+    if stopped is not None:
+        return stopped
     if a.unwip:
         return _unwip(c)
     if a.wip:
