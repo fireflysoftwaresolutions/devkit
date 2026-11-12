@@ -1104,6 +1104,58 @@ def strip_heredocs(cmd: str) -> str:
 _PUNCT = ";&|()<>"  # the characters the tokenizer cuts words at
 
 
+def _bare_tokens(line: str, tokens: list):
+    """For each token of `line` (as split_commands' tokenizer reads it), whether it is written without quotes or
+    escapes: `case`, `in`, `esac`, `;;` and `)` are the shell's own only then, and `";;"` or `\\)` are words. Each
+    quoted or escaped character is read again as `x`, which cuts no word, so the tokens line up one to one. None
+    when they do not."""
+    out, q, i, n = [], None, 0, len(line)
+    while i < n:
+        c = line[i]
+        if q is None and c == "\\" and i + 1 < n:
+            out.append("\\x")
+            i += 2
+            continue
+        if q is None:
+            q = c if c in ("'", '"') else None
+            out.append(c)
+        elif c == q:
+            q = None
+            out.append(c)
+        elif q == '"' and c == "\\" and i + 1 < n:
+            out.append("xx")
+            i += 2
+            continue
+        else:
+            out.append("x")
+        i += 1
+    try:
+        lex = shlex.shlex("".join(out), posix=True, punctuation_chars=_PUNCT)
+        lex.whitespace_split = True
+        lex.commenters = ""
+        masked = list(lex)
+    except ValueError:
+        return None
+    return [a == b for a, b in zip(tokens, masked)] if len(masked) == len(tokens) else None
+
+
+def _case_pattern(tokens: list, bare: list, k: int):
+    """The index of the `)` that ends the case pattern starting at word k (`a|b)`, `*.py)`), or None when the words
+    from k are not one: a pattern is words joined by a bare `|` and ended by a bare `)`. A word with a substitution
+    (`$(…)`, a backquote, `<(…)`) is never one, so the command the shell runs to read it stays in sight."""
+    j, n = k, len(tokens)
+    while j < n:
+        w = tokens[j]
+        if bare[j] and set(w) <= set(_PUNCT) or "$(" in w or "`" in w or "<(" in w or ">(" in w:
+            return None
+        j += 1
+        if j < n and bare[j] and tokens[j] == "|":
+            j += 1
+            continue
+        return j if j < n and bare[j] and tokens[j].startswith(")") and set(tokens[j]) <= set(_PUNCT) else None
+    return None
+
+
 def _paren_step(frames: list, t: str, argv, glued: bool):
     """Read the parentheses of punctuation token `t` into `frames`, the open `$(…)`, groups, `<(…)`/`>(…)` and case
     statements (_case_word) of a command line. `argv`: the words of the command so far when its last word is the token
@@ -1214,8 +1266,22 @@ def split_commands(cmd: str, ops: bool = False, newline: str = ";", inputs: list
     # frames: _paren_step's; into: [the words of the command a `$(…)` that just ended is a word of, whether the next
     # word is glued to it, whether words went there]; cur: the words the word at token `last` went to
     frames, into, cur, last = [], None, None, -1
+    # bare: _bare_tokens', read only for a case statement, whose patterns (`*)`, `a|b)`) are words the shell matches
+    # and never runs; skip: the index of the `)` that ends the pattern being passed over
+    bare = _bare_tokens(line, tokens) if "case" in tokens else None
+    skip = -1
     for k, t in enumerate(tokens):
         ended = None
+        if k < skip:
+            continue
+        if bare is not None and frames and frames[-1][0] == "case" and expect_redir is False:
+            top = frames[-1]
+            if top[1] == "body" and bare[k] and set(t) <= set(";&") and (";;" in t or ";&" in t):
+                top[1] = "pattern"  # an arm's end, `;;`, `;&` or `;;&`: a pattern or `esac` comes next
+            elif top[1] == "pattern" and not (bare[k] and t == "esac") and \
+                    (end := _case_pattern(tokens, bare, k)) is not None:
+                skip = end
+                continue
         if set(t) <= set(_PUNCT) and ("(" in t or ")" in t):
             ended = _paren_step(frames, t, cur if last == k - 1 else None, glued[k])
         nxt = tokens[k + 1] if k + 1 < len(tokens) else ""
@@ -1264,14 +1330,16 @@ def split_commands(cmd: str, ops: bool = False, newline: str = ";", inputs: list
             continue
         if into is not None and not argv:  # `ls $(echo x)/*`: the rest of the word, and the words after it, are the
             outer = into[0]                  # command's the `$(…)` is a word of, as the shell reads them
-            _case_word(frames, t, outer)
+            if bare is None or bare[k]:  # a quoted `"in"` or `"esac"` is a word
+                _case_word(frames, t, outer)
             if into[1] and not into[2]:
                 outer[-1] += t
             else:
                 outer.append(t)
             into[2], cur = True, outer
         else:
-            _case_word(frames, t, argv)
+            if bare is None or bare[k]:
+                _case_word(frames, t, argv)
             argv.append(t)
             cur = argv
         last = k

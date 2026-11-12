@@ -145,6 +145,26 @@ class CaseArms(Case):
                     "for f in a; do case $f in a) git push --force origin main;; esac; done"):
             self.refused(cmd)
 
+    def test_the_patterns_of_later_arms_are_words_not_programs(self):
+        # a launcher script's `case "$entry" in /*) ;; *) entry="$parent/$entry" ;; esac` read in a review lane
+        for cmd in ('case "$e" in /*) ;; *) e="$p/$e" ;; esac; echo "$e"',
+                    "case $f in a|b) echo AB;; (c) echo C;; *.py | *.md ) echo doc;; esac",
+                    "case $f in\n  *.py) wc -l $f ;;\n  *) echo other ;;\nesac",
+                    'case $f in a) echo A ;& "esac") echo B ;;& *) echo C ;; esac'):
+            self.runs(cmd, level="review", who="seraph")
+            self.runs(cmd)
+
+    def test_a_command_that_only_looks_like_a_later_pattern_is_judged(self):
+        # a quoted or escaped `;;` ends no arm, a quoted `)` ends no pattern, a quoted `case` opens no statement, and
+        # a pattern with a substitution runs it
+        for cmd in ('case $f in a) echo ";;"; gh pr merge 12 ;; esac', "case $f in a) echo \\;\\; ; gh pr merge 12 ;; esac",
+                    'case $f in a) ;; "$(gh pr merge 12)") ;; esac',
+                    "case $f in a) ;; `gh pr merge 12`) ;; esac", "case $f in a) ;; $(gh pr merge 12)) ;; esac",
+                    '"case" $f in a) gh pr merge 12 ;; esac', "case $f in a) ;; *) gh pr merge 12 ;; esac",
+                    "case $f in a | *) gh pr merge 12 ;; esac"):
+            self.refused(cmd)
+        self.refused('case $f in a) echo ";;"; touch ")" ;; esac', level="review", who="seraph")
+
 
 class LiteralValues(Case):
     """A variable the command sets from a literal, a `~` path or a choice between two literal echoes names a program
