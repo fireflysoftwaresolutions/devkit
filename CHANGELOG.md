@@ -5,6 +5,125 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
 
 ## [Unreleased]
 
+## [26.11.16] - 2026-11-11
+
+This release makes the bug registry's issues readable by people, names each Mac by a stable machine id, tightens
+how lessons are recorded and counted, and closes gaps in how the guard reads commands.
+
+### Added
+
+- **Bug registry.** Registry issues people can read. Each has a title from devkit's title table, such as
+  `dev progress step crashes with KeyError`, and a body that says what broke, how much it hurts, the workaround, and
+  what to do, with the report data in a collapsed block. The workflow rewrites the text whenever the record changes.
+- **Bug registry.** Seven `verdict:*` labels let a maintainer say what a bug is, and the issue states the verdict in
+  one sentence.
+- **Bug registry.** A manual run of the registry workflow (`gh workflow run bug-registry.yml`) creates the verdict
+  labels and rewrites every registry issue, open or closed in the last 90 days.
+- **Bug registry.** The bug registry guide explains what a registry issue looks like and what stays public about
+  you, for how long, and how to stop posting or ask the maintainers to remove something.
+- **Machines.** Each Mac has a stable machine id, and its hostname becomes a display label. Locks, presence, lesson
+  usage, and the audit trail follow the id, so a Mac that macOS renames keeps its locks and shows once in `dev team`.
+- **Progress.** `dev progress note "…" --step <step> --check "…"` keeps partial evidence on a step that stays open,
+  and the crew gate accepts it as the step's record.
+- **Delivery.** PEP 440 versions (`0.1.0a16`, `1.0.0.post1`) are a scheme of their own: `dev delivery` keeps it
+  instead of recommending CalVer, and the guard refuses a tag that is not a PEP 440 version in such a project.
+- **Dashboard.** `tools/dashboard_shots.py --page` takes screenshots of a dashboard page built elsewhere, and
+  `--help` prints the tool's whole guide.
+
+### Changed
+
+- **Bug registry.** The consent text that `dev bug share on` prints now says that devkit's workflow writes and
+  updates the text of issues you open.
+- **Bug registry.** `dev bug pending` prints the exact issue title and body, comment, or private report each held item
+  would post.
+- **Bug registry.** Every write of a registry record drops what it kept about accounts quiet for 90 days.
+- **Bug registry.** Each lane refusal reports under the refusal id of the guard rule that made it, and a lane check
+  that failed reports as `hooks:lane-check`, so one issue no longer collects unrelated causes (#20).
+- **Lessons.** `dev lesson add` refuses a lesson with no anchor, lists every problem of a refused lesson at once, and
+  records each refusal in the audit trail as `dev.lesson.refused`.
+- **Lessons.** A new lesson is a duplicate only when it shares an error anchor with one on record. A shared command,
+  file, or kind of work alone is another mistake.
+- **Lessons.** Anchors that match almost everything are refused: one word that is a common program or shell, a shell
+  keyword, or a variable, and a file anchor that matches every file.
+- **Lessons.** A shown lesson counts as missed only when its mistake comes back, in a refusal or a tool's output, and
+  as heeded when the session or the crew lane ends, or at the nightly fold after a day idle.
+- **Lessons.** Recall, crew briefs, the lessons gate, and `dev lesson` include the lessons of the project's
+  initiatives.
+- **Crew.** Lane scopes match folder by folder: `*` stays inside one folder, `**` spans folders, no relative glob
+  reaches outside the repository, and two members can split one folder. `*.md` means root-level Markdown only.
+- **Crew.** A member's `dev progress step --step <its step> --check "…"` closes that step at once, so the next steps
+  start while the member works on.
+- **Crew.** The lessons gate counts only a lesson that was recorded or counted, never a refused `dev lesson add`.
+- **CI.** `dev ci --run` skips a hosted runner's own setup: deletions outside the checkout, Docker prunes, `sudo`,
+  OS package installs, `playwright install`, and `git config --global`. A step that names a Docker context this Mac
+  lacks blocks the evidence. `dev ci --commands` and the delivery test gate leave out the same steps.
+- **Pull requests.** `dev pr create`, `dev pr ready`, and the squash check follow the repository's own title
+  convention: a plain imperative sentence where recent pull request titles are sentences, a Conventional Commit
+  otherwise.
+- **Cleanup.** The nightly cleanup and `dev free --safe` delete only folders a tool fills again, such as
+  `node_modules` and caches. Generic build output such as `build`, `dist`, and `target` is check first.
+- **Plans.** A new plan keeps its title only in the front matter, and a revision line reads `<change>—why: <reason>`,
+  so plans pass `dev docs check`.
+- **Dashboard and `dev team`.** People show as `user@hostname`, with the machine id beside it.
+
+### Fixed
+
+- **Worktrees.** `dev pr merge`, `dev wt rm`, `dev branch prune`, `dev free`, and the nightly cleanup removed a merged
+  worktree together with ignored files no tool rebuilds, such as 3.6 GB of release evidence under `build/`. They keep
+  such a worktree now and name those paths with their sizes; `dev pr merge` prints the reason on a line of its own.
+- **Handoff sync.** A pull stopped on every sync after two Macs wrote the monthly operations log or recorded a repeat
+  of the same lesson. Append-only logs merge as a union, a lesson's repeats add up, and `dev update` adds the missing
+  merge rules to an existing handoff repository.
+- **Guard.** An unnamed program that runs a read-only `plugin` or `mcp` form claude and codex share, such as
+  `./node_modules/.bin/ng mcp`, is no longer refused (#21).
+- **Guard.** An extension refusal now says which case it found: a form that is not read-only, with the list of
+  forms; a program the guard cannot name, with how to name it; or a command line a program keeps as data (#17).
+- **Guard.** A crew member's `case` statement, or words right after a `$(…)` (`ls $(echo x)/*`), were refused as a
+  program named at run time.
+- **Guard.** A lane call with a substitution in its double-quoted message, and a `dev crew` word that is no command,
+  got refusals that pointed the wrong way. Each now says what to change.
+- **Guard.** A Python script was refused for a filename such as `release_notes.py`. A script that provably cannot
+  act is now judged by its content.
+- **Guard.** A member's refused push now names the grant that is missing and what to ask the developer and the tech
+  lead.
+- **Progress.** `dev progress` lists the calling session's run first, and a long `dev progress assign` typed by the
+  tech lead is recognized as its own command.
+- **CLI.** A `dev` command whose reader closed the pipe (`dev audit --json | head`) reported a devkit crash. It now
+  exits quietly with 141.
+- **Bug registry.** `dev bug detour --dev "dev push"` was refused; a leading `dev` is accepted, and the help says what
+  a step and free text may hold.
+- **Lessons.** One unreadable lesson file stopped every `dev lesson` command. Such files are left out,
+  `dev lesson lint` lists them first, the session start names them, and `dev lesson` warns when the handoff stopped
+  syncing.
+- **Lessons.** A lesson whose text held a `##` line lost part of a section or could no longer be updated.
+- **Lessons.** On Codex, a lesson rule's warning counted as shown although Codex never reads it.
+- **Lessons.** A Mac's lesson usage counted once for each hostname macOS gave it.
+- **Testing.** `dev test prove` called real tests "does not test the change" in a Python project installed in
+  editable mode with a `src` layout.
+- **Skills.** The UI rule asked for the UI skills after changes to scratch probes, JUnit XML with `classname=`, or a
+  Python list named `styled`.
+- **Dashboard.** The 390-pixel screenshots were a wider page cropped; they are taken at a true viewport, and the Now
+  screenshots were retaken from the current page.
+- **Brand.** The hero banners' text is set in Manrope again.
+
+### Security
+
+- **Guard.** The guard reads commands that ran past it: what a launcher starts (`taskpolicy`, `sandbox-exec`,
+  `xcrun`, `op run`, `direnv exec`, `mise exec`, `asdf exec`, `dotenv`, `nix run`, `ccr code`), alias bodies,
+  hyperfine's command lines, and a command after a `PATH+=` prefix.
+- **Guard.** The extension rule reads claude calls hidden by zsh's `=claude`, a brace list, a glob, `$X` word
+  splitting, `hash -p`, or zsh's `path` array.
+- **Guard.** A lane's `dev commit` and the MCP scope check keep `*` inside one folder, so one lane cannot commit
+  another lane's staged file in the same folder.
+- **Machines.** A lock that another Mac took under a network hostname this Mac carried at another time does not count
+  as this Mac's, so this Mac cannot release, edit, or renew it.
+- **Presence.** `dev team`, `dev progress`, and the session context show another machine's presence fields only as
+  plain text, so control characters or planted sentences in a presence file reach neither your terminal nor the
+  model.
+- **Bug registry.** Reports keep this Mac's machine id and former hostnames out, as they keep its hostname.
+- **Bug registry.** Free text appears in issue text only escaped and only in the reporter's own issue or comment, so
+  no mention, link, HTML, or code fence can start in it.
+
 ## [26.11.15] - 2026-11-11
 
 ### Added
