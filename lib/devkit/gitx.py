@@ -2972,11 +2972,14 @@ def _pr_merge(c, a) -> int:
     if a.auto:
         ok(f"auto-merge ({method}) enabled for #{n}: GitHub merges it when the checks pass")
         return 0
-    tail = [f"merged #{n} ({method}) into {p.get('baseRefName')}"]
+    tail, kept = [f"merged #{n} ({method}) into {p.get('baseRefName')}"], ""
     if not a.keep_branch:
         tail.append("remote branch deleted")
-        tail.append(_after_merge(c, p.get("headRefName"), p))
+        note, kept = _after_merge(c, p.get("headRefName"), p)
+        tail.append(note)
     ok(" · ".join(x for x in tail if x))
+    if kept:
+        ui.warn(kept)
     _refresh_prs(c)
     _close_merged_items(c, p.get("headRefName"), n)
     return 0
@@ -3130,10 +3133,18 @@ def _merged_pr(c, p: dict):
     return [dict(pm, state="MERGED")] if isinstance(pm, dict) else None
 
 
-def _after_merge(c, head: str, p: dict = None) -> str:
+def _after_merge(c, head: str, p: dict = None) -> tuple:
     """Local clean-up after a merge, when the merge test finds the branch merged (it says how): the branch's clean
     worktree goes with the local branch (gc.remove_worktree checks it again), or this checkout leaves the branch for
-    an updated default branch and deletes it. A branch with work the default branch lacks stays, with the reason."""
+    an updated default branch and deletes it. A branch with work the default branch lacks stays, with the reason.
+    -> (a note for the merge's success line, a warning of its own or ''): a worktree gc.remove_worktree kept holds
+    work, so it is a warning, never part of the success line."""
+    note = _after_merge_note(c, head, p)
+    return ("", note[1]) if isinstance(note, tuple) else (note, "")
+
+
+def _after_merge_note(c, head: str, p: dict = None):
+    """_after_merge's clean-up: its note, or (False, the reason) when gc.remove_worktree kept the worktree."""
     _fetch(c)
     if not head or not _ref_sha(c.top, f"refs/heads/{head}"):
         return ""
@@ -3149,7 +3160,8 @@ def _after_merge(c, head: str, p: dict = None) -> str:
         if core.real(wts[head]) == core.real(c.main):
             return f"the main checkout has {head}: switch it to {c.default}, then dev branch prune --apply"
         from . import gc
-        return gc.remove_worktree(c.main, wts[head], head, merged={"base": base, "sha": m["sha"], "prs": prs})[1]
+        removed, msg = gc.remove_worktree(c.main, wts[head], head, merged={"base": base, "sha": m["sha"], "prs": prs})
+        return msg if removed else (False, msg)
     if c.branch == head:
         if core.real(c.top) != core.real(c.main):
             return f"this worktree's branch is merged: dev wt rm {head} when you are done here"

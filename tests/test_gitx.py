@@ -10,6 +10,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import sys
 import tempfile
 import time
@@ -19,7 +20,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
-from devkit import audit, cistatus, core, delivery, gitx, guard, registry, work  # noqa: E402
+from devkit import audit, cistatus, core, delivery, gitx, guard, registry, ui, work  # noqa: E402
 
 GITHUB_URL = "https://github.com/acme/widget.git"
 ISOLATE = {"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1", "GIT_AUTHOR_NAME": "Ana Dev",
@@ -1125,7 +1126,10 @@ class PrTests(unittest.TestCase):
             rc, out, err = dev("pr", "merge", "7")
             self.assertEqual(rc, 0, err)
             self.assertTrue((wt / "notes.txt").exists())
-            self.assertIn("uncommitted", out)
+            # the kept worktree is a warning of its own, never part of the merge's success line
+            self.assertIn("merged #7", out)
+            self.assertNotIn("kept", out)
+            self.assertRegex(err, rf"(?m)^{re.escape(ui.WARN)} kept .*wt-invoice: it has uncommitted")
 
     def test_merge_closes_the_open_items_linked_to_the_merged_branch(self):
         with Sandbox() as s:
