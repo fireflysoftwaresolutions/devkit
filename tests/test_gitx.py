@@ -852,6 +852,119 @@ class LocalCiTests(unittest.TestCase):
             self.assertEqual(dev("ci", "--evidence")[0], 2)
 
 
+def _workflow(steps: dict) -> str:
+    """A pull-request workflow with one job whose steps are {name: script}, each script a `run: |` block."""
+    body = "".join(f"      - name: {n}\n        run: |\n" + "".join(f"          {ln}\n" for ln in r.splitlines())
+                   for n, r in steps.items())
+    return "name: CI\non: [pull_request]\njobs:\n  security:\n    runs-on: ubuntu-latest\n    steps:\n" + body
+
+
+class RunnerSetupInsideACheckTests(unittest.TestCase):
+    """A step that installs its scanner and runs it: the scan is a check, only the install is the runner's setup."""
+
+    def plan_steps(self, s, steps: dict) -> dict:
+        s.write(".github/workflows/ci.yml", _workflow(steps))
+        s.branch("feat/ci")
+        s.commit("ci: add the workflow")
+        return {st["name"]: st for j in gitx.plan(str(s.repo)) for st in j["steps"]}
+
+    # The scan still runs on this Mac with the setup commands left out: the tools installed here are used.
+    def test_a_step_that_installs_its_scanner_keeps_the_scan_without_the_setup(self):
+        with Sandbox() as s:
+            got = self.plan_steps(s, {
+                "Gitleaks": "brew install gitleaks && gitleaks detect --no-git --exit-code 1",
+                "Trivy": "sudo apt-get install -y trivy\ntrivy fs --exit-code 1 --severity HIGH,CRITICAL .",
+                "Shellcheck": "apt-get update && apt-get install -y shellcheck && shellcheck scripts/*.sh",
+                "Browser tests": "npx playwright install --with-deps chromium && npx playwright test",
+                "Semgrep": 'git config --global --add safe.directory "$PWD" && semgrep scan --error --config p/default',
+                "Fallback": "command -v osv-scanner || brew install osv-scanner  # the runner lacks it\n"
+                            "osv-scanner --lockfile=package-lock.json",
+                "Installer": "curl -sSfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh"
+                             " | sudo sh -s -- -b /usr/local/bin\ntrivy fs .",
+                "Pip scanner": "pip install semgrep && semgrep scan --error",
+                "Install only": "brew install gitleaks && gitleaks version"})
+            kept = {n: (st["skip"], st["blocking"], st["run"], st["dropped"]) for n, st in got.items()}
+            self.assertEqual(kept["Gitleaks"], (None, False, "gitleaks detect --no-git --exit-code 1",
+                                                ["brew install gitleaks"]))
+            self.assertEqual(kept["Trivy"], (None, False, "trivy fs --exit-code 1 --severity HIGH,CRITICAL .",
+                                             ["sudo apt-get install -y trivy"]))
+            self.assertEqual(kept["Shellcheck"], (None, False, "shellcheck scripts/*.sh",
+                                                  ["apt-get update", "apt-get install -y shellcheck"]))
+            self.assertEqual(kept["Browser tests"][:3], (None, False, "npx playwright test"))
+            self.assertEqual(kept["Semgrep"][:3], (None, False, "semgrep scan --error --config p/default"))
+            # a fallback install becomes `true`, so the scan after it still runs and fails when the tool is missing
+            self.assertEqual(kept["Fallback"][:3], (None, False, "command -v osv-scanner || true\n"
+                                                                 "osv-scanner --lockfile=package-lock.json"))
+            self.assertEqual(kept["Installer"][:3], (None, False, "trivy fs ."))
+            self.assertEqual(kept["Pip scanner"][:3], (None, False, "semgrep scan --error"))
+            # a step that only installs (and prints the version) is still the runner's setup
+            self.assertRegex(kept["Install only"][0] or "", r"^runner prep \(brew install ")
+            self.assertFalse(kept["Install only"][1])
+
+    # When devkit cannot take the setup out without taking the scan too, the scan is a check that could not run
+    # here: it blocks the evidence instead of being skipped as setup.
+    def test_a_scan_tangled_with_its_setup_or_run_as_root_blocks_the_evidence(self):
+        with Sandbox() as s:
+            got = self.plan_steps(s, {
+                "Nested": "bash -c 'brew install gitleaks && gitleaks detect --no-git'",
+                "Subshell": "(sudo apt-get install -y trivy && trivy fs .)",
+                "Heredoc": "brew install gitleaks\ncat > .gitleaks.toml <<'EOF'\ntitle = \"widget\"\nEOF\n"
+                           "gitleaks detect --config .gitleaks.toml",
+                "Root scan": 'sudo -E env PATH="$PATH" ./scripts/security-scan.sh'})
+            for name, st in got.items():
+                with self.subTest(step=name):
+                    self.assertTrue(st["blocking"], st["skip"])
+                    self.assertNotRegex(st["skip"] or "", r"^runner prep")
+            self.assertIn("as root", got["Root scan"]["skip"])
+            rc, out, err = dev("ci", "--run")
+            self.assertEqual(rc, 1)
+            self.assertIn("4 check(s) could not run here", err)
+            self.assertIsNone(gitx.evidence(s.ctx()))
+
+    def fake_tools(self, d: Path) -> Path:
+        """A bin folder with a `brew` that leaves a marker when it runs and a `fakescan` that records its arguments
+        and exits with the code in fakescan.rc."""
+        (d / "bin").mkdir()
+        (d / "bin" / "brew").write_text(f"#!/bin/sh\ntouch '{d / 'brew-ran'}'\n")
+        (d / "bin" / "fakescan").write_text(f"#!/bin/sh\necho \"$@\" > '{d / 'fakescan.args'}'\n"
+                                            f"exit \"$(cat '{d / 'fakescan.rc'}')\"\n")
+        for f in (d / "bin").iterdir():
+            f.chmod(0o755)
+        return d / "bin"
+
+    def test_the_scan_runs_without_its_setup_and_a_finding_fails_the_evidence(self):
+        with Sandbox() as s, tempfile.TemporaryDirectory() as t:
+            d = Path(t)
+            path = f"{self.fake_tools(d)}{os.pathsep}{os.environ.get('PATH', '')}"
+            self.plan_steps(s, {"Gitleaks": "brew install fakescan && fakescan detect --exit-code 1"})
+            with mock.patch.dict(os.environ, {"PATH": path}):
+                (d / "fakescan.rc").write_text("1")
+                rc, out, err = dev("ci", "--run")
+                self.assertEqual(rc, 1, out + err)
+                self.assertIsNone(gitx.evidence(s.ctx()))
+                (d / "fakescan.rc").write_text("0")
+                rc, out, err = dev("ci", "--run")
+            self.assertEqual(rc, 0, out + err)
+            self.assertEqual((d / "fakescan.args").read_text().strip(), "detect --exit-code 1")
+            self.assertFalse((d / "brew-ran").exists(), "the runner's setup ran on this Mac")
+            self.assertIn("brew install fakescan", out)
+            self.assertEqual([x["step"] for x in gitx.evidence(s.ctx())["steps"]], ["Gitleaks"])
+
+    def test_a_scanner_missing_here_fails_the_evidence(self):
+        with Sandbox() as s, tempfile.TemporaryDirectory() as t:
+            d = Path(t)
+            path = f"{self.fake_tools(d)}{os.pathsep}{os.environ.get('PATH', '')}"
+            self.plan_steps(s, {"Gitleaks": "brew install devkit-absent-scanner && devkit-absent-scanner detect"})
+            with mock.patch.dict(os.environ, {"PATH": path}):
+                rc, out, err = dev("ci", "--run")
+            self.assertEqual(rc, 1, out + err)
+            self.assertIn("local CI failed", err)
+            self.assertIn("exit 127", out)
+            self.assertIn("brew install devkit-absent-scanner", out)
+            self.assertFalse((d / "brew-ran").exists())
+            self.assertIsNone(gitx.evidence(s.ctx()))
+
+
 # --------------------------------------------------------------------------- PR body template
 
 

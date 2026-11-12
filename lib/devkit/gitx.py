@@ -1894,7 +1894,8 @@ def plan_workflow(text: str, fname: str, root: str) -> list:
             continue
         for item in _sequence(lines, steps_entry[1], steps_entry[2]):
             sm = _mapping(item, 0, len(item))
-            st = {"job": jname, "name": "", "run": None, "cwd": root, "env": {}, "skip": None, "blocking": False}
+            st = {"job": jname, "name": "", "run": None, "cwd": root, "env": {}, "skip": None, "blocking": False,
+                  "dropped": []}
             if "uses" in sm:
                 st.update(name=_scalar(sm["uses"][0]), skip="setup")
                 job["steps"].append(st)
@@ -1908,10 +1909,10 @@ def plan_workflow(text: str, fname: str, root: str) -> list:
             shell = _scalar(sm["shell"][0]) if "shell" in sm else ""
             scond = _scalar(sm["if"][0]) if "if" in sm else ""
             wd = _scalar(sm["working-directory"][0]) if "working-directory" in sm else job_wd
-            st["skip"], st["blocking"] = _step_skip(run, shell, scond, wd, root, st["env"])
+            st["skip"], st["blocking"], here, st["dropped"] = _step_plan(run, shell, scond, wd, root, st["env"])
             if not st["skip"] and wd:
                 st["cwd"] = str(Path(root) / wd)
-            st["run"] = _expand(run, root)
+            st["run"] = _expand(here, root)
             job["steps"].append(st)
     return jobs
 
@@ -1991,61 +1992,305 @@ def _as_root(argv) -> bool:
     return False
 
 
+# what a hosted runner runs as root to set itself up: services, kernel settings, system files and folders
+_ROOT_SETUP = frozenset({"systemctl", "service", "sysctl", "chown", "chmod", "chgrp", "chattr", "setfacl", "mkdir", "ln",
+                         "tee", "cp", "mv", "install", "touch", "truncate", "sed", "dd", "tar", "unzip", "curl", "wget",
+                         "mount", "umount", "swapoff", "swapon", "fallocate", "mkswap", "modprobe", "usermod",
+                         "useradd", "groupadd", "update-alternatives", "update-ca-certificates", "xcode-select",
+                         "locale-gen", "update-locale", "dpkg", "dpkg-reconfigure", "rpm", "ldconfig", "timedatectl",
+                         "hostnamectl", "launchctl", "killall", "pkill", "kill", "add-apt-repository", "apt-key",
+                         "debconf-set-selections", "gpg", "snap", "rm", "rmdir", "unlink", "ufw", "iptables",
+                         "defaults", "installer", "hdiutil", "spctl", "pmset", "scutil", "dscl", "Xvfb", "psql",
+                         "createuser", "createdb", "mysql", "mysqladmin"})
+_SETUP_SCRIPT = re.compile(r"(?i)install|setup|set-up|prepare|provision|bootstrap|deps|dependencies|free[-_]?(?:disk|"
+                           r"space)|clean|configure|init")
+_SERVICE_VERBS = frozenset({"install", "setup", "start", "stop", "restart", "reload", "enable", "disable"})
+# commands that only report or steer the shell: next to the runner's setup they do not make a step a check
+_INFO = frozenset({"echo", "printf", "true", ":", "cd", "pushd", "popd", "export", "set", "unset", "shopt", "alias",
+                   "source", ".", "sleep", "pwd", "ls", "df", "du", "free", "uname", "whoami", "id", "date", "env",
+                   "printenv", "nproc", "which", "type", "hash", "sw_vers", "lscpu", "ulimit", "umask", "test", "[",
+                   "[[", "wait", "exit", "return", "local", "declare", "readonly", "trap", "cat"})
+_VERSION_ARGS = (["--version"], ["version"], ["-V"], ["-v"], ["--help"], ["-h"])
+# a download piped into a shell: the installer scripts of trivy, syft, grype, gitleaks, rustup and the like
+_PIPED_INSTALLER = re.compile(r"\b(?:curl|wget)\b[^|\n]*\|\s*(?:sudo\s+(?:-\S+\s+)*)?(?:ba|z|da|k)?sh\b")
+_LEAD_WORDS = re.compile(r"^(\s*)((?:(?:then|do|else|elif|if|while|until|time|!|\{)\s+)*)")
+_TANGLED = "a check and runner setup{} that devkit cannot separate: the check cannot run here without the setup"
+
+
+def _nested_script(argv):
+    """The script the words hand to a shell (`bash -c '…'`, `xvfb-run sh -c '…'`), or None."""
+    for i, w in enumerate(argv[:-2]):
+        if os.path.basename(w) in _SHELLS and re.fullmatch(r"-[a-z]*c[a-z]*", argv[i + 1]):
+            return argv[i + 2]
+    return None
+
+
+def _commands(code: str, as_root: bool = False, depth: int = 0):
+    """(the words as written, the command they run, whether it runs as root, whether it is a shell on a script of its
+    own) for each command of `code`, with the commands of the scripts such shells run (see _segments)."""
+    for argv, _ in guard.split_commands(code) or []:
+        argv = list(argv)
+        root = as_root or _as_root(argv)
+        script = _nested_script(argv)
+        yield argv, guard._unwrap(argv), root, script is not None
+        if script is not None and depth < 3:
+            yield from _commands(script, root, depth + 1)
+
+
+def _informational(argv, words) -> bool:
+    """The command only reports or steers the shell (echo, cd, `command -v`, a tool's --version, a test)."""
+    if not words or words[0].startswith("#"):
+        return True
+    plain = guard._strip_prefix(list(argv))
+    if plain[:1] in (["for"], ["select"]) or (plain[:1] == ["command"] and plain[1:2] in (["-v"], ["-V"])):
+        return True  # a loop's header only names its values: its body decides
+    return os.path.basename(words[0]) in _INFO or words[1:] in _VERSION_ARGS
+
+
+def _prep_one(argv, words, as_root: bool, state: dict):
+    """("setup", why) when this one command only sets up a hosted runner, ("root", why) when it is a check that runs
+    as root, or None. `state` carries the folder `cd` went to ("here"), the checkout ("top") and the variables."""
+    if not words:
+        return None
+    env, top = state["env"], state["top"]
+    name = os.path.basename(words[0])
+    if re.fullmatch(r"python[\d.]*", name) and words[1:3] == ["-m", "playwright"]:
+        words, name = words[2:], "playwright"
+    pos = [w for w in words[1:] if not w.startswith("-")]
+    if name == "cd":
+        state["here"] = _shell_path(words[1], state["here"], env) if len(words) > 1 and words[1] != "-" else None
+    elif name in ("docker", "podman"):
+        if pos[:1] and pos[0] in _PRUNABLE and pos[1:2] == ["prune"]:
+            return "setup", f"runner prep ({name} {pos[0]} prune deletes Docker data on this Mac)"
+    elif name in _OS_PACKAGERS and pos[:1] and pos[0] in _PACKAGER_VERBS:
+        return "setup", f"runner prep ({name} {pos[0]} changes the runner's OS packages)"
+    elif name == "playwright" and pos[:1] in (["install"], ["install-deps"]):
+        if pos[0] == "install-deps" or "--with-deps" in words:
+            return "setup", f"runner prep (playwright {pos[0]}{' --with-deps' if pos[0] == 'install' else ''} " \
+                            f"installs OS packages for the browsers)"
+        return "setup", "runner prep (playwright install writes the shared Playwright browser cache; the browsers " \
+                        "installed here are used)"
+    elif name == "git" and "config" in words[1:3] and {"--global", "--system"} & set(words) and \
+            not _GIT_CONFIG_READS & set(words):
+        return "setup", "runner prep (git config --global changes this Mac's git settings)"
+    elif name in ("rm", "rmdir", "unlink"):
+        ops, opts = [], True
+        for w in words[1:]:
+            if opts and w == "--":
+                opts = False
+            elif not (opts and w.startswith("-") and w != "-"):
+                ops.append(w)
+        for w in ops:
+            p = _shell_path(w, state["here"], env)
+            if p is None or not p.startswith(top + os.sep):
+                return "setup", f"runner prep (deletes {w}, which is not inside the checkout)"
+    if as_root:  # setup the runner does as root, or a check that runs as root, which cannot run here
+        if name in _ROOT_SETUP or _informational(argv, words) or _SERVICE_VERBS & set(pos) or \
+                _SETUP_SCRIPT.search(name) or re.match(r"/(?:etc|sbin|usr/sbin)/", words[0]):
+            return "setup", f"runner prep (sudo {' '.join(words[:2])} runs as root on the runner's machine)"
+        return "root", f"runs {' '.join(words[:2])} as root (sudo), which dev ci --run does not do on this Mac"
+    return None
+
+
+def _top_pieces(run: str):
+    """A step's script cut at its top-level separators (&&, ||, ;, &, a newline), outside quotes, substitutions,
+    subshells and comments: [{"raw", "code" (without comments, line continuations joined), "sep" (the separator
+    after it), "subshell" (it holds a `( … )` of its own)}]. A pipeline stays one piece. None when the script cannot
+    be cut safely: a heredoc, a `case` arm, or unbalanced quotes or brackets."""
+    pieces, raw, code, stack, sub, i, n = [], [], [], [], False, 0, len(run)
+
+    def put(text):
+        raw.append(text)
+        code.append(text)
+
+    while i < n:
+        ch, top = run[i], (stack[-1] if stack else None)
+        start = not raw or raw[-1][-1:].isspace() or raw[-1][-1:] in ";&|()"
+        if top == "'":
+            put(ch)
+            stack.pop() if ch == "'" else None
+            i += 1
+        elif ch == "\\":
+            if run[i + 1:i + 2] == "\n" and top is None:
+                raw.append(run[i:i + 2])
+                code.append(" ")
+            else:
+                put(run[i:i + 2])
+            i += 2
+        elif top in ('"', "`", "${"):
+            if ch == {'"': '"', "`": "`", "${": "}"}[top]:
+                stack.pop()
+            elif ch == "$" and run[i + 1:i + 2] in ("(", "{"):
+                stack.append("$" + run[i + 1])
+                put(run[i:i + 2])
+                i += 2
+                continue
+            elif ch == "`" or (ch == '"' and top == "${"):
+                stack.append(ch)
+            put(ch)
+            i += 1
+        elif ch == "#" and start:
+            j = run.find("\n", i)
+            j = n if j < 0 else j
+            raw.append(run[i:j])
+            i = j
+        elif ch in "'\"`":
+            stack.append(ch)
+            put(ch)
+            i += 1
+        elif ch == "$" and run[i + 1:i + 2] in ("(", "{"):
+            stack.append("$" + run[i + 1])
+            put(run[i:i + 2])
+            i += 2
+        elif ch == "(":
+            sub = sub or top is None
+            stack.append("(")
+            put(ch)
+            i += 1
+        elif ch == ")":
+            if top not in ("(", "$("):
+                return None
+            stack.pop()
+            put(ch)
+            i += 1
+        elif ch == "<" and run.startswith("<<", i) and not run.startswith("<<<", i):
+            return None
+        elif top is None and (run.startswith(";;", i) or run.startswith(";&", i)):
+            return None
+        elif top is None and (run.startswith("&&", i) or run.startswith("||", i) or ch in ";\n" or
+                              (ch == "&" and run[i - 1:i] not in ("<", ">", "|") and run[i + 1:i + 2] != ">")):
+            sep = run[i:i + 2] if run[i:i + 2] in ("&&", "||") else ch
+            pieces.append({"raw": "".join(raw), "code": "".join(code), "sep": sep, "subshell": sub})
+            raw, code, sub = [], [], False
+            i += len(sep)
+        else:
+            put(ch)
+            i += 1
+    if stack:
+        return None
+    pieces.append({"raw": "".join(raw), "code": "".join(code), "sep": "", "subshell": sub})
+    return pieces
+
+
+def _classify(piece: dict, state: dict, installs: bool) -> dict:
+    """What one top-level piece of a step's script does: its kind ("setup", "check", "root", "tangled" or "info") and
+    why. A pipeline or a command substitution that feeds the runner's setup is setup too; a subshell or a nested shell
+    that runs the setup and a check is tangled: the setup cannot be taken out without the check."""
+    code = piece["code"]
+    piped = _PIPED_INSTALLER.search(code)
+    setup = "runner prep (curl … | sh runs an installer downloaded from the internet)" if piped else None
+    first = "curl … | sh" if piped else None
+    install, checks, roots, nested = None, [], [], False
+    for argv, words, as_root, container in _commands(code):
+        nested = nested or container
+        if container:
+            continue
+        got = _prep_one(argv, words, as_root, state)
+        if got and got[0] == "setup":
+            setup = setup or got[1]
+            first = first or " ".join(words[:2])
+        elif installs and words and _INSTALL.search(" ".join(words)):
+            install = install or "dependency install (your local environment is used)"
+            first = first or " ".join(words[:2])
+        elif got:
+            roots.append(got[1])
+        elif not _informational(argv, words):
+            checks.append(words)
+    why = setup or install
+    if why and (checks or roots) and (nested or piece["subshell"]):
+        return {"kind": "tangled", "why": _TANGLED.format(f" ({first})")}
+    if why:
+        return {"kind": "setup", "why": why, "prep": bool(setup)}
+    if roots:
+        return {"kind": "root", "why": roots[0]}
+    return {"kind": "check" if checks else "info"}
+
+
+def _separate(run: str, cwd: str, root: str, env: dict, installs: bool = False) -> dict:
+    """A step's script split into the hosted runner's own setup and the check it runs: {"kind", "why", "run",
+    "dropped"}. kind None: no setup, run as it is. "setup": only setup (and commands that report), skipped. "check":
+    `run` is the script without its setup commands (a leading one is left out, a later one becomes `true`, as if it
+    had succeeded: the tools installed here are used, and a missing one fails the step), "dropped" lists them.
+    "tangled": setup and a check that cannot be separated (a nested shell, a subshell, a heredoc). "root": the check
+    itself runs as root. `installs`: dependency installs (npm ci, pip install) count as setup too, as for dev ci --run."""
+    state = {"here": os.path.realpath(cwd), "top": os.path.realpath(root), "env": env}
+    pieces = _top_pieces(run)
+    whole = pieces is None
+    if whole:  # the guard's reader leaves heredoc bodies out
+        pieces = [{"raw": run, "code": run, "sep": "", "subshell": True}]
+    for p in pieces:
+        p.update(_classify(p, state, installs))
+    kinds = [p["kind"] for p in pieces]
+    out = {"kind": None, "why": None, "run": run, "dropped": []}
+    for k in ("tangled", "root"):
+        if k in kinds:
+            return dict(out, kind=k, why=next(p["why"] for p in pieces if p["kind"] == k))
+    if "setup" not in kinds:
+        return out
+    if "check" not in kinds:
+        setup = [p for p in pieces if p["kind"] == "setup"]
+        return dict(out, kind="setup", why=next((p["why"] for p in setup if p["prep"]), setup[0]["why"]))
+    if whole:
+        return dict(out, kind="tangled", why=_TANGLED.format(""))
+    kept, dropped, lead = [], [], True
+    for p in pieces:
+        if p["kind"] != "setup":
+            lead = lead and not p["code"].strip()
+            kept.append(p["raw"] + p["sep"])
+            continue
+        indent, words = _LEAD_WORDS.match(p["code"]).groups()
+        dropped.append(" ".join(p["code"][len(indent + words):].split()))
+        if lead and not words and p["sep"] in ("&&", ";", "\n"):
+            continue
+        kept.append(indent + words + "true" + (" " if p["sep"] in ("&&", "||", "&") else "") + p["sep"])
+    script = "".join(kept).strip()
+    try:
+        parses = subprocess.run(["bash", "-n", "-c", script], capture_output=True, timeout=10).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        parses = False
+    if not parses:
+        return dict(out, kind="tangled", why=_TANGLED.format(""))
+    return dict(out, kind="check", run=script, dropped=dropped)
+
+
 def _runner_prep(run: str, cwd: str, root: str, env: dict):
     """Why a step only sets up a hosted runner, which on this Mac would change the developer's own machine, or None:
     it deletes a path that is not inside the checkout (`rm -rf /opt/hostedtoolcache/CodeQL`, a `~` path, a variable
-    unset here, a command's output, `cd /opt && rm -rf ghc`), prunes Docker (`docker system prune -af`), runs a command
-    as root (`sudo …`), installs OS packages (`apt-get update`, `brew install`, `playwright install --with-deps`),
-    installs browsers into the shared Playwright cache (`npx playwright install chromium`; the tests then use the
-    browsers installed here), or changes the global git config (`git config --global …`). The one classifier for
-    runner-only setup: `dev ci --run` skips these steps and `dev ci --commands` leaves them out."""
-    top = os.path.realpath(root)
-    here = os.path.realpath(cwd)
-    for argv, words in _segments(run):
-        if not words:
-            continue
-        name = os.path.basename(words[0])
-        if re.fullmatch(r"python[\d.]*", name) and words[1:3] == ["-m", "playwright"]:
-            words, name = words[2:], "playwright"
-        pos = [w for w in words[1:] if not w.startswith("-")]
-        if name == "cd":
-            here = _shell_path(words[1], here, env) if len(words) > 1 and words[1] != "-" else None
-        elif name in ("docker", "podman"):
-            if pos[:1] and pos[0] in _PRUNABLE and pos[1:2] == ["prune"]:
-                return f"runner prep ({name} {pos[0]} prune deletes Docker data on this Mac)"
-        elif name in _OS_PACKAGERS and pos[:1] and pos[0] in _PACKAGER_VERBS:
-            return f"runner prep ({name} {pos[0]} changes the runner's OS packages)"
-        elif name == "playwright" and pos[:1] in (["install"], ["install-deps"]):
-            if pos[0] == "install-deps" or "--with-deps" in words:
-                return f"runner prep (playwright {pos[0]}{' --with-deps' if pos[0] == 'install' else ''} installs " \
-                       f"OS packages for the browsers)"
-            return "runner prep (playwright install writes the shared Playwright browser cache; the browsers " \
-                   "installed here are used)"
-        elif name == "git" and "config" in words[1:3] and {"--global", "--system"} & set(words) and \
-                not _GIT_CONFIG_READS & set(words):
-            return "runner prep (git config --global changes this Mac's git settings)"
-        elif name in ("rm", "rmdir", "unlink"):
-            ops, opts = [], True
-            for w in words[1:]:
-                if opts and w == "--":
-                    opts = False
-                elif not (opts and w.startswith("-") and w != "-"):
-                    ops.append(w)
-            for w in ops:
-                p = _shell_path(w, here, env)
-                if p is None or not p.startswith(top + os.sep):
-                    return f"runner prep (deletes {w}, which is not inside the checkout)"
-        if _as_root(argv):
-            return f"runner prep (sudo {' '.join(words[:2])} runs as root on the runner's machine)"
-    return None
+    unset here, a command's output, `cd /opt && rm -rf ghc`), prunes Docker (`docker system prune -af`), runs a setup
+    command as root (`sudo systemctl …`), installs OS packages (`apt-get update`, `brew install`, `playwright install
+    --with-deps`, `curl … | sh`), installs browsers into the shared Playwright cache (`npx playwright install
+    chromium`; the tests then use the browsers installed here), or changes the global git config (`git config
+    --global …`), and does nothing else but report. The one classifier for runner-only setup: `dev ci --run` skips
+    these steps and `dev ci --commands` leaves them out. A step that also runs a check is not runner-only setup:
+    _separate keeps its check without the setup."""
+    got = _separate(run, cwd, root, env)
+    return got["why"] if got["kind"] == "setup" else None
+
+
+def _local_env(env) -> dict:
+    step_env = dict(os.environ, CI="true")
+    step_env.update({k: v for k, v in (env or {}).items() if "${{" not in str(v)})
+    return step_env
 
 
 def runner_setup(run: str, root, cwd=None, env=None):
     """Why a step's script only sets up a hosted runner (see _runner_prep), or None. `cwd`: its working directory
     (the checkout by default); `env`: its variables over this Mac's, as `dev ci --run` gives them."""
-    step_env = dict(os.environ, CI="true")
-    step_env.update({k: v for k, v in (env or {}).items() if "${{" not in str(v)})
-    return _runner_prep(_expand(run, str(root)), str(cwd or root), str(root), step_env)
+    return _runner_prep(_expand(run, str(root)), str(cwd or root), str(root), _local_env(env))
+
+
+def local_step(run: str, root, cwd=None, env=None):
+    """The command a developer runs here for a step's script: None when it only sets up a hosted runner, the script
+    without the runner's setup when it also runs a check (`brew install gitleaks && gitleaks detect` is `gitleaks
+    detect`), and the script as it is otherwise (a check devkit cannot separate from its setup is still a check)."""
+    where, step_env = str(cwd or root), _local_env(env)
+    got = _separate(_expand(run, str(root)), where, str(root), step_env)
+    if got["kind"] == "setup":
+        return None
+    if got["kind"] != "check":
+        return run
+    as_written = _separate(run, where, str(root), step_env)  # keeps ${{ github.workspace }} out of the listing
+    return as_written["run"] if as_written["kind"] == "check" else got["run"]
 
 
 _DOCKER_VALUE_OPTS = frozenset({"-H", "--host", "--config", "-l", "--log-level", "--tlscacert", "--tlscert",
@@ -2131,20 +2376,37 @@ def _foreign_context(run: str, env: dict):
 
 def _step_skip(run: str, shell: str, cond: str, wd, root, env=None):
     """-> (reason or None, blocking). Blocking: a real check that could not run here. `env`: the step's variables."""
+    return _step_plan(run, shell, cond, wd, root, env)[:2]
+
+
+def _step_plan(run: str, shell: str, cond: str, wd, root, env=None):
+    """-> (reason or None, blocking, the script to run here, the runner's setup commands left out of it). A step
+    that installs its tools and runs a check (`brew install gitleaks && gitleaks detect`) runs the check without the
+    setup (see _separate); one whose check cannot be separated from its setup, or runs as root, blocks."""
     if cond:
         verdict = _condition(cond)
         if verdict == "never":
-            return f"conditional (if: {cond[:40]})", False
+            return f"conditional (if: {cond[:40]})", False, run, []
         if verdict == "unknown":
-            return f"conditional (if: {cond[:40]})", True
+            return f"conditional (if: {cond[:40]})", True, run, []
     if re.search(r"\$\{\{\s*secrets\.", run) or re.search(r"\bsecrets\.", cond or ""):
-        return "needs CI secrets", False
+        return "needs CI secrets", False, run, []
     here = Path(root) / wd if wd and not os.path.isabs(wd) and "${{" not in wd else Path(root)
-    step_env = dict(os.environ, CI="true")  # what run_local_ci gives the step
-    step_env.update({k: v for k, v in (env or {}).items() if "${{" not in str(v)})
-    prep = _runner_prep(_expand(run, root), str(here), root, step_env)
-    if prep:
-        return prep, False
+    step_env = _local_env(env)  # what run_local_ci gives the step
+    got = _separate(_expand(run, root), str(here), root, step_env, installs=True)
+    if got["kind"] == "setup":
+        return got["why"], False, run, []
+    if got["kind"] in ("tangled", "root"):
+        return got["why"], True, run, []
+    dropped = got["dropped"]
+    if dropped:
+        run = got["run"]
+    reason, blocking = _check_skip(run, shell, wd, root, step_env)
+    return reason, blocking, run, dropped
+
+
+def _check_skip(run: str, shell: str, wd, root, step_env: dict):
+    """-> (reason or None, blocking) for a step's script without the runner's setup."""
     if _SIDE_EFFECT.search(run):
         return "side effect (publish, deploy, push, system install)", False
     foreign = _foreign_context(_expand(run, root), step_env)
@@ -2331,7 +2593,8 @@ def run_local_ci(c, dry_run=False, keep_going=False, step_timeout=30, resume=Fal
                 d, detail = _resume_plan(c, s, records.get(_step_key(s)), tree, cache)
                 how = f"  resume: {d}" + (f" ({detail})" if isinstance(detail, str) else
                                           " (failed and affected tests; whole step if the change is global)")
-            print(f"  $ {s['job']} › {s['name']}{ui.dim(cwd + how)}")
+            left = f"  setup left out: {'; '.join(s['dropped'])}" if s.get("dropped") else ""
+            print(f"  $ {s['job']} › {s['name']}{ui.dim(cwd + how + left)}")
         for job, step, why, blk in skipped:
             print(f"  {ui.WARN if blk else '–'} {job} › {step}  {ui.dim(why)}")
         return 0
@@ -2424,11 +2687,16 @@ def run_local_ci(c, dry_run=False, keep_going=False, step_timeout=30, resume=Fal
             results.append({"job": s["job"], "step": s["name"], "rc": rc, "secs": round(secs, 1), "command": command,
                             "how": "full", "sha": sha, "tree": tree})
             print(f"  {ui.OK if rc == 0 else ui.FAIL} {label}  {ui.dim(_fmt_secs(secs))}")
+            if s.get("dropped"):
+                print(f"      {ui.dim('setup left out here: ' + '; '.join(s['dropped']))}")
             if rc != 0:
                 tail = [ln.rstrip()[:200] for ln in log.read_text(errors="replace").splitlines() if ln.strip()][-20:]
                 for ln in tail:
                     print(f"      {ui.dim(ui.ANSI_RE.sub('', ln))}")
                 print(f"      {ui.dim('exit ' + str(rc) + ' · full log: ' + core.tilde(log))}")
+                if rc == 127 and s.get("dropped"):
+                    print("      " + ui.dim("a tool this step installs on the runner is missing here: install it on "
+                                            "this Mac, then dev ci --run --resume"))
         if tree:
             _save_step(c, key, new)
         if rc != 0:

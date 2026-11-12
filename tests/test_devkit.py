@@ -368,6 +368,22 @@ jobs:
             self.assertEqual(ci.local_commands(Path(d)), ["npm ci", "npm run lint\nnpm test -- --coverage"])
 
 
+class LocalScanCommandTests(unittest.TestCase):
+    """`dev ci --commands` and the delivery test gate keep a scan whose step also installs it."""
+
+    def test_local_commands_keep_a_scan_without_the_setup_in_its_step(self):
+        steps = ("      - name: Gitleaks\n        run: brew install gitleaks && gitleaks detect --no-git --exit-code 1\n"
+                 "      - name: Trivy\n        run: |\n          sudo apt-get install -y trivy\n          trivy fs .\n"
+                 "      - name: Root scan\n        run: sudo -E env PATH=\"$PATH\" ./scripts/security-scan.sh\n")
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / ".github" / "workflows").mkdir(parents=True)
+            (Path(d) / ".github" / "workflows" / "ci.yml").write_text(
+                CiTests.WF.replace("      - name: Install\n", steps + "      - name: Install\n"))
+            self.assertEqual(ci.local_commands(Path(d)), [
+                "gitleaks detect --no-git --exit-code 1", "trivy fs .",
+                'sudo -E env PATH="$PATH" ./scripts/security-scan.sh', "npm ci", "npm run lint\nnpm test -- --coverage"])
+
+
 class CanaryTests(unittest.TestCase):
     def test_marker_detection(self):
         self.assertTrue(canary.has_marker("[Firefly> DevKit] kit@main · done"))
