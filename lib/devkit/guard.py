@@ -4403,10 +4403,13 @@ def vendor_ext_refusal(argv, cwd=None, names=(), more=False) -> str:
     if os.path.basename(prog) == "xargs":
         inner = _unwrap(_xargs_command(args))
         return vendor_ext_refusal(inner, cwd, names, more=True) if inner else ""
+    braced = _brace_list(prog)
+    if braced:  # `{claude,mcp} add …`: the shell expands the program word into words
+        return vendor_ext_refusal([*braced, *args], cwd, names, more)
     named = any(_vendor_word(a) for a in args)
     if not (named or more or any(_shell_made(a) for a in args)):
         return ""
-    cli = agent_cli(prog, cwd, search=True)
+    cli = agent_cli(prog[1:] if prog.startswith("=") else prog, cwd, search=True)  # zsh: `=claude` is the PATH's
     if not cli:
         cli, args = _agent_script(argv, cwd) or ("", args)
     if not cli:
@@ -4416,7 +4419,7 @@ def vendor_ext_refusal(argv, cwd=None, names=(), more=False) -> str:
                 not any(_shell_made(a) for a in args) and _vendor_read_only("claude", args) and \
                 _vendor_read_only("codex", args):
             return ""  # whatever program it is, claude and codex both only read these words (issue 21)
-        if "$" in prog or "`" in prog or ("PATH" in set(names) and "/" not in prog):
+        if _shell_made(prog) or ("PATH" in set(names) and "/" not in prog):  # a variable, a substitution, a glob
             return "unnamed"
         if "/" not in prog or prog.startswith("@"):  # a bare name the PATH finds, or a scoped npm package
             return ""
@@ -4425,6 +4428,13 @@ def vendor_ext_refusal(argv, cwd=None, names=(), more=False) -> str:
             path = os.path.join(str(cwd), path) if cwd and str(cwd) != str(UNKNOWN) else ""
         return "" if path and os.path.exists(path) else "unnamed"  # a copy or a link the command has yet to make
     return "form" if more or any(_shell_made(a) for a in args) or not _vendor_read_only(cli, args) else ""
+
+
+def _brace_list(word) -> list:
+    """The words bash makes of a word with one brace list (`{claude,mcp}`, `cl{a,}ude`), or [] for none; a word with
+    more braces than one list is left to _shell_made, which counts it as a word the shell makes."""
+    m = re.fullmatch(r"([^{}]*)\{([^{}]*,[^{}]*)\}([^{}]*)", str(word))
+    return [m.group(1) + w + m.group(3) for w in m.group(2).split(",")] if m else []
 
 
 def _vendor_ext_reason(kind: str, code: str) -> str:
