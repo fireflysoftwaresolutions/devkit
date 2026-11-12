@@ -1175,6 +1175,27 @@ def _pytest_module(rootdir, rel) -> str:
     return ".".join(parts[i:-1] + [re.sub(r"\.py$", "", parts[-1])])
 
 
+_IMPORTLIB = re.compile(r"--import-mode(?:=|[\s\"',]+)importlib\b")
+# pytest's configuration files in the order it picks the first one, each with the section that makes it pytest's
+_PYTEST_CONFIGS = (("pytest.ini", ""), (".pytest.ini", ""), ("pyproject.toml", "[tool.pytest"), ("tox.ini", "[pytest]"),
+                   ("setup.cfg", "[tool:pytest]"))
+
+
+def _pytest_importlib(top, runner, env=None) -> bool:
+    """Does pytest import this runner's tests in importlib mode: on its command, in PYTEST_ADDOPTS, or in the addopts
+    of the configuration file pytest reads (the first of pytest.ini, .pytest.ini, pyproject.toml, tox.ini and
+    setup.cfg that configures pytest, in the runner's folder)?"""
+    if _IMPORTLIB.search(" ".join(str(x) for x in runner.get("exec") or ())) or \
+            _IMPORTLIB.search((env or {}).get("PYTEST_ADDOPTS") or os.environ.get("PYTEST_ADDOPTS") or ""):
+        return True
+    root = _rootdir(top, runner)
+    for name, section in _PYTEST_CONFIGS:
+        text = _read(os.path.join(root, name))
+        if text and (not section or section in text):
+            return bool(_IMPORTLIB.search(text))
+    return False
+
+
 def _pytest_buckets(top, runner, files, ids) -> list:
     """Test files (relative to the top) and node ids -> [(files, ids)], as few sets as possible in which no two test
     files share the name pytest imports them by."""
@@ -1642,10 +1663,11 @@ def run_tests(top, runner, files=(), ids=(), related=(), all_=False, env=None, s
                                        [i for i in ids if _id(i).split("::")[0] == f], env=env, stream=stream,
                                        log=part_log, timeout=timeout))
             return _merged_runs(parts, files, ids, log)
-    if runner["name"] == "pytest" and not related:
+    if runner["name"] == "pytest" and not related and not _pytest_importlib(top, runner, env):
         # pytest's default import mode imports a test file by its name inside its packages: two test files of one
         # process with the same such name (tests/unit/x/test_api.py, tests/integration/x/test_api.py, no
-        # __init__.py) fail to collect. Each set of files with distinct names runs in its own process.
+        # __init__.py) fail to collect. Each set of files with distinct names runs in its own process. In importlib
+        # mode no such names clash, and the run stays one, with pytest's own collection for the whole suite.
         if all_:
             repo = _Repo(top)
             picked = [t for t in repo.tests if (owner(repo.runners(), t) or {}).get("root") == runner["root"]

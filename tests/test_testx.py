@@ -1466,7 +1466,8 @@ def with_tests(*extra):
 # the name, "collection failure" and the error on an `E` line), and it stops the session before any test runs
 # unless --continue-on-collection-errors is given. As pytest's default import mode does, it imports a test file by its
 # name inside the packages that hold it, so two files of one session with the same such name fail to collect ("import
-# file mismatch"). Without file arguments it collects tests/**/test_*.py.
+# file mismatch"), unless importlib mode is on its command line or in its configuration's addopts (pytest.ini, else
+# pyproject.toml, as pytest picks them). Without file arguments it collects tests/**/test_*.py.
 STANDIN_PYTEST = '''
 import glob
 import importlib.util
@@ -1498,9 +1499,19 @@ def _module_name(path):
     return ".".join(parts[i:])
 
 
+def _importlib_mode():
+    if "--import-mode=importlib" in sys.argv:
+        return True
+    for f in ("pytest.ini", "pyproject.toml"):
+        if os.path.isfile(f):
+            text = open(f).read()
+            return "--import-mode" in text and "importlib" in text
+    return False
+
+
 def _load(path):
     name = _module_name(path)
-    if _SEEN.setdefault(name, path) != path:
+    if not _importlib_mode() and _SEEN.setdefault(name, path) != path:
         raise ImportError(f"import file mismatch: imported module '{name}' has this __file__ attribute: "
                           f"{_SEEN[name]} which is not the same as the test file we want to collect: {path}")
     spec = importlib.util.spec_from_file_location(path[:-3].replace("/", "."), path)
@@ -1639,6 +1650,44 @@ class SameNameTestFileTests(unittest.TestCase):
             run = json.loads(out)["steps"][0]["runs"][0]
             self.assertEqual((rc, run["all"], run["count"], run["failed"]), (0, True, 2, 0), out + err)
             self.assertEqual(state(e)["full"]["pytest:."]["count"], 2)
+
+    # a project that imports its tests with pytest's importlib mode has no clash between same-name files: named files
+    # run in one pytest process, as the project runs them
+    def test_named_same_name_files_run_in_one_process_in_importlib_mode(self):
+        with Env() as e:
+            r = e.repo({**SAME_NAME_BASE, "pytest.ini": "[pytest]\naddopts = --import-mode=importlib\n"})
+            rc, out, err = dev(r, "run", "tests/unit/x/test_api.py", "tests/integration/x/test_api.py", "--json")
+            run = json.loads(out)["steps"][0]["runs"][0]
+            self.assertEqual((rc, run["count"], run["failed"]), (0, 2, 0), out + err)
+            self.assertNotIn(";", run["argv"])
+
+    # in importlib mode the whole suite is one pytest run of its own collection (testpaths, norecursedirs), never a
+    # list of files
+    def test_the_whole_suite_is_one_pytest_run_in_importlib_mode(self):
+        with Env() as e:
+            base = {k: v for k, v in SAME_NAME_BASE.items() if k != "pytest.ini"}
+            r = e.repo({**base, "pyproject.toml": '[tool.pytest.ini_options]\naddopts = ["--import-mode", "importlib"]\n'})
+            rc, out, err = dev(r, "run", "--all", "--json")
+            run = json.loads(out)["steps"][0]["runs"][0]
+            self.assertEqual((rc, run["count"], run["failed"]), (0, 2, 0), out + err)
+            self.assertEqual([a for a in run["argv"] if a == ";" or a.endswith(".py")], [])
+
+    # importlib mode is read where pytest reads it: the first configuration file that configures pytest wins (a
+    # pytest.ini without it hides a pyproject.toml with it), then PYTEST_ADDOPTS adds to it
+    def test_importlib_mode_is_read_from_the_configuration_pytest_reads(self):
+        cases = [({"setup.cfg": "[tool:pytest]\naddopts = -q --import-mode importlib\n"}, {}, True),
+                 ({"tox.ini": "[tox]\nenvlist = py\n", "setup.cfg": "[tool:pytest]\naddopts = --import-mode=importlib\n"},
+                  {}, True),
+                 ({"pytest.ini": "[pytest]\n", "pyproject.toml": "[tool.pytest.ini_options]\n"
+                                                                 "addopts = '--import-mode=importlib'\n"}, {}, False),
+                 ({"pytest.ini": "[pytest]\naddopts = --import-mode=prepend\n"}, {}, False),
+                 ({"pytest.ini": "[pytest]\n"}, {"PYTEST_ADDOPTS": "--import-mode=importlib"}, True)]
+        for files, env, want in cases:
+            with self.subTest(files=sorted(files), env=env), tempfile.TemporaryDirectory() as d:
+                write(d, files)
+                runner = {"name": "pytest", "root": ".", "exec": [PY, "-m", "pytest"]}
+                with mock.patch.dict(os.environ, {"PYTEST_ADDOPTS": ""}):
+                    self.assertEqual(testx._pytest_importlib(d, runner, env), want)
 
     # a recorded failure of each file reruns first, each in its own process
     def test_recorded_failures_of_both_files_rerun_in_separate_processes(self):
