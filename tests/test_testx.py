@@ -12,6 +12,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -805,6 +806,45 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(failures(cases), [("test_calc.CalcTests.test_add", "tests/test_calc.py", 9,
                                             "AssertionError: -1 != 3")])
         self.assertEqual(len(cases), 2)
+
+    # A test's own stderr lands between its name and its result (devkit reads stdout and stderr as one stream): a
+    # line written before the result moves the result to a line of its own, one without a newline glues it to the
+    # result ("no newlineok"), and text that looks like a result ("two ... ok") comes before the real one. The
+    # result is the last thing written for the test, so each test still has its own. As Python 3.15 and 3.9 print it.
+    def test_unittest_results_after_a_tests_own_stderr_are_read(self):
+        rn = {"name": "unittest", "root": ".", "start": "tests"}
+        write(self.top, {"tests/test_noise.py": ""})
+        new = ("test_before (test_noise.T.test_before) ... warming up\nok\ntest_doc (test_noise.T.test_doc)\n"
+               "A docstring. ... doc noise\nok\ntest_lines (test_noise.T.test_lines) ... one\ntwo ... ok\nFAIL\n"
+               "test_partial (test_noise.T.test_partial) ... no newlineok\n"
+               "test_skip (test_noise.T.test_skip) ... about to skip\nskipped 'not here'\n\n" + "=" * 70 + "\n"
+               "FAIL: test_lines (test_noise.T.test_lines)\n" + "-" * 70 + "\nTraceback (most recent call last):\n"
+               f'  File "{self.top}/tests/test_noise.py", line 16, in test_lines\n    self.assertEqual(1, 2)\n'
+               "AssertionError: 1 != 2\n\n" + "-" * 70 + "\nRan 5 tests in 0.001s\n\nFAILED (failures=1, skipped=1)\n")
+        old = re.sub(r" \(test_noise\.T\.\w+\)", " (test_noise.T)", new)
+        want = {"test_noise.T.test_before": "passed", "test_noise.T.test_doc": "passed",
+                "test_noise.T.test_lines": "failed", "test_noise.T.test_partial": "passed",
+                "test_noise.T.test_skip": "skipped"}
+        for label, text in (("3.12+", new), ("3.9", old)):
+            with self.subTest(label):
+                cases = testx.parse_unittest(text, str(self.top), rn)
+                self.assertEqual({c["id"]: c["status"] for c in cases}, want)
+                self.assertEqual(failures(cases), [("test_noise.T.test_lines", "tests/test_noise.py", 16,
+                                                    "AssertionError: 1 != 2")])
+
+    # Python 3.9 prints no result for a test whose subtests failed, so the next test starts on its line: each keeps
+    # its own result (the expected failure was read as the first test's, and the second test was lost)
+    def test_a_unittest_line_holding_two_tests_gives_each_its_result(self):
+        rn = {"name": "unittest", "root": ".", "start": "tests"}
+        write(self.top, {"tests/test_noise.py": ""})
+        text = ("test_fine (test_noise.S) ... ok\ntest_subs (test_noise.S) ... test_xf (test_noise.S) ... expected "
+                "failure\n\n" + "=" * 70 + "\nFAIL: test_subs (test_noise.S) (i=1)\n" + "-" * 70 + "\nTraceback (most "
+                f'recent call last):\n  File "{self.top}/tests/test_noise.py", line 8, in test_subs\n'
+                "    self.assertNotEqual(i, 1)\nAssertionError: 1 == 1\n\n" + "-" * 70 + "\nRan 3 tests in 0.001s\n\n"
+                "FAILED (failures=1, expected failures=1)\n")
+        cases = testx.parse_unittest(text, str(self.top), rn)
+        self.assertEqual({c["id"]: c["status"] for c in cases}, {
+            "test_noise.S.test_fine": "passed", "test_noise.S.test_subs": "failed", "test_noise.S.test_xf": "passed"})
 
     # a package run names its tests from the root (tests.test_calc.…): each maps to its file, passed ones included
     def test_unittest_output_of_a_package_run(self):
@@ -1723,6 +1763,23 @@ class ProveTests(unittest.TestCase):
             self.assertEqual(self.snapshot(r), before)
             self.assertEqual(git(r, "rev-parse", "HEAD"), head)
             self.assertEqual(list((e.root / "devtmp").iterdir()), [])
+
+    # a new test that writes to stderr while it runs still has its result: it proves the change, and is never listed
+    # as failing with the change
+    def test_a_test_that_writes_to_stderr_while_it_runs_is_proven(self):
+        noisy_test = """
+    def test_mul_with_a_progress_line(self):
+        print("multiplying", file=sys.stderr)
+        self.assertEqual(calc.mul(2, 3), 6)
+"""
+        with Env() as e:
+            r = e.repo(PROVE_BASE)
+            (r / "tests" / "test_calc.py").write_text(with_tests(noisy_test))
+            (r / "calc.py").write_text(MUL)
+            rc, out, err = dev(r, "prove", "--json", "--runs", "2")
+            self.assertEqual(rc, 0, out + err)
+            self.assertEqual([(t["id"], t["with_change"], t["verdict"]) for t in json.loads(out)["tests"]],
+                             [("test_calc.CalcTests.test_mul_with_a_progress_line", "2/2", "proves the change")])
 
     # a new test its runner skips (skipIf, pytest's skipif) ran neither with nor without the change: it is reported
     # as skipped, neither proven nor failing, and the other new tests still prove the change

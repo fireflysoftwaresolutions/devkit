@@ -1441,10 +1441,14 @@ def parse_jest_json(text, top) -> list:
 
 
 _UT_HEAD = re.compile(r"^(FAIL|ERROR|UNEXPECTED SUCCESS): (\S+) \(([\w.]+)\)(.*)$")
-_UT_RESULT = r" \.\.\. (ok|FAIL|ERROR|skipped.*|expected failure|unexpected success)\s*$"
-_UT_LINE = re.compile(r"^(\S+) \(([\w.]+)\)(?:[^\n]*?)?" + _UT_RESULT)
-_UT_NAME = re.compile(r"^(\S+) \(([\w.]+)\)\s*$")  # a test with a docstring: the result follows on the next line
-_UT_DOC = re.compile(r"^.*?" + _UT_RESULT)
+# A test's line in the verbose list: `name (id) ... `, then what the test itself writes to stderr, then its result;
+# alone on its line when a docstring line follows (`Its docstring. ... `)
+_UT_START = re.compile(r"^(\S+) \(([\w.]+)\)(?:(?: [^\n]*?)?? \.\.\. (.*)|\s*)$")
+# a test that starts right after one that wrote no result (Python 3.9 prints none for a test whose subtests failed)
+_UT_NEXT = re.compile(r"^([A-Za-z_]\w*) \(([\w.]+)\) \.\.\. (.*)$")
+# the result, the last thing written for a test, glued to its stderr when that ends without a newline
+_UT_STATUS = re.compile(r"(ok|FAIL|ERROR|expected failure|unexpected success|skipped(?: '.*'| \".*\")?)\s*$")
+_UT_STOP = re.compile(r"^(?:[=-]{20,}\s*$|Ran \d+ tests? in )")
 _UT_FRAME = re.compile(r'^\s*File "(.+?)", line (\d+), in ')
 _UT_LOADER = ("unittest.loader._FailedTest", "unittest.loader.ModuleImportFailure")
 
@@ -1486,23 +1490,45 @@ def _ut_file(top, runner, id_: str) -> str:
     return ""
 
 
+def _ut_results(lines) -> list:
+    """The verbose list of a unittest run -> [(name, id in parentheses, result)]. Everything a test writes between its
+    name and its result (its own stderr, which devkit reads with stdout) belongs to it; the result is what ends it."""
+    out, cur, body, doc = [], None, [], False
+
+    def close():
+        said = [b for b in body if b.strip()]
+        m = _UT_STATUS.search(said[-1]) if cur and said else None
+        if m:
+            out.append((cur[0], cur[1], m.group(1)))
+
+    for ln in lines:
+        m = _UT_START.match(ln)
+        if m:
+            close()
+            cur, rest = (m.group(1), m.group(2)), m.group(3)
+            while rest is not None and (n := _UT_NEXT.match(rest)):
+                cur, rest = (n.group(1), n.group(2)), n.group(3)
+            body, doc = ([] if rest is None else [rest]), rest is None
+        elif _UT_STOP.match(ln):
+            close()
+            cur, body, doc = None, [], False
+        elif cur:
+            body.append(ln.split(" ... ", 1)[1] if doc and " ... " in ln else ln)
+            doc = False
+    close()
+    return out
+
+
 def parse_unittest(text, top, runner, names=()) -> list:
     """unittest's verbose output (3.9 and 3.11+ formats) -> cases, failures with file:line and the error line.
     `names` are the test names the command asked for: a test unittest could not load is reported by one of them,
     and marked `not_found` when the name itself no longer exists (renamed or deleted)."""
     lines = (text or "").splitlines()
     cases, pending = {}, list(names)
-    for k, ln in enumerate(lines):
-        m = _UT_LINE.match(ln)
-        name, paren, st = (m.group(1), m.group(2), m.group(3)) if m else (None, None, None)
-        if not m and (n := _UT_NAME.match(ln)) and k + 1 < len(lines) and (d := _UT_DOC.match(lines[k + 1])) \
-                and not _UT_LINE.match(lines[k + 1]):
-            name, paren, st = n.group(1), n.group(2), d.group(1)
-        if name:
-            id_ = _ut_id(name, paren, pending)
-            status = "passed" if st in ("ok", "expected failure") else "skipped" if st.startswith("skipped") \
-                else "failed"
-            cases[id_] = _case(id_, _ut_file(top, runner, id_), None, status, "", 0, name)
+    for name, paren, st in _ut_results(lines):
+        id_ = _ut_id(name, paren, pending)
+        status = "passed" if st in ("ok", "expected failure") else "skipped" if st.startswith("skipped") else "failed"
+        cases[id_] = _case(id_, _ut_file(top, runner, id_), None, status, "", 0, name)
     i, pending = 0, list(names)
     while i < len(lines):
         m = _UT_HEAD.match(lines[i])
