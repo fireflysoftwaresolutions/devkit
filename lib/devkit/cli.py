@@ -183,7 +183,7 @@ def commit_push(push=True, quiet=False):
     settles conflicts in items and stops cleanly on any other (work.rebase_fetched), and every failure is recorded in
     handoff-push-failed.json, which `dev status` shows until a push succeeds. The commit, the fetch and the push hold
     work._repo_lock; the rebase holds the notes lock first, so it runs after that lock is released."""
-    from . import audit, work
+    from . import audit, identity, work
     root = work.HANDOFF  # the repository work.pull_rebase works on, read now (tests point it elsewhere)
     if not (root / ".git").exists():
         return
@@ -198,7 +198,9 @@ def commit_push(push=True, quiet=False):
         rc, _, _ = core.git(root, "diff", "--cached", "--quiet")
         if rc != 0:
             n = len(core.gitout(root, "diff", "--cached", "--name-only").splitlines())
-            core.git(root, "commit", "-q", "-m", f"sync: {n} file(s) from {os.uname().nodename.split('.')[0]}")
+            m = identity.machine()  # the hostname a person knows, and the id presence and locks name the Mac by
+            core.git(root, "commit", "-q", "-m", f"sync: {n} file(s) from " +
+                     (m.label if m.label == m.id else f"{m.label} ({m.id})"))
         if not push or not core.gitout(root, "remote"):
             return
         core.git(root, "fetch", "-q", "origin", timeout=60)
@@ -2125,13 +2127,14 @@ def _print_items(scope, label, show_all=False, rebind=True):
         hint = 'no tasks yet — dev task add "…" --now'
         print(f"  {ui.dim(hint)}")
         return
-    me = f"{work.actor()['user']}@{work.actor()['host']}"
+    me = work.actor()
     for n, it in enumerate(ordered, 1):
         m = it["meta"]
         holder, expired = work.lock_holder(it)
         lock = ""
-        if holder and not expired:
-            lock = ui.green(" 🔒 you") if holder.startswith(me) else ui.yellow(f" 🔒 {holder.split(' ')[0]}")
+        if holder and not expired:  # this Mac's lock, also one taken under a hostname it carried then (work.mine)
+            mine = work.mine(holder, me, at=work.parse_iso(m.get("claimed_at")) or None)
+            lock = ui.green(" 🔒 you") if mine else ui.yellow(f" 🔒 {holder.split(' ')[0]}")
         st = {"doing": ui.cyan("doing"), "blocked": ui.red("blocked")}.get(m.get("status"), ui.dim(m.get("bucket", "")))
         pr = ui.yellow(" !") if m.get("priority") == "high" else ""
         num = str(n).rjust(2) if numbered else " ·"
@@ -2512,8 +2515,10 @@ def cmd_progress(a):
         return 0
     runs = pg.active_runs(first=pg.current_session())
     from . import work
-    others = [(t["user"] + "@" + t["host"], s_) for t in work.team() for s_ in t.get("sessions", [])
-              if s_.get("progress") and not (t["user"] == work.actor()["user"] and t["host"] == work.actor()["host"])]
+    me = work.actor()  # this Mac's presence, also a file under a hostname it carried then, is not another machine's
+    others = [(_presence_name(t), s_) for t in work.team() for s_ in t.get("sessions", [])
+              if s_.get("progress") and not work.mine(f"{t['user']}@{t['host']}", me,
+                                                       at=work.parse_iso(t.get("updated")) or None)]
     print(ui.section("Progress"))
     if not runs and not others:
         print("  no runs — agents start one with dev progress start \"<goal>\" --steps N --estimate 30m")
@@ -3398,6 +3403,14 @@ def cmd_jobs(a):
     return 0
 
 
+def _presence_name(rec: dict) -> str:
+    """A machine as presence names it, `user@machine id`, with the hostname it carries beside the id for people:
+    `ana@m-0a1b2c3d (andress-mbp-2)`. A record from before the machine id names the hostname itself."""
+    host, label = rec.get("host") or "", rec.get("label") or ""
+    who = f"{rec.get('user')}@{host}"
+    return f"{who} ({label})" if label and label != host else who
+
+
 def cmd_team(a):
     from . import work
     t = work.team(max_age_h=a.hours)
@@ -3405,7 +3418,7 @@ def cmd_team(a):
     if not t:
         print("  no presence yet (each machine publishes it on sync)")
     for m in t:
-        print(f"\n  {ui.bold(m['user'] + '@' + m['host'])}  {ui.dim('updated ' + m.get('updated', ''))}")
+        print(f"\n  {ui.bold(_presence_name(m))}  {ui.dim('updated ' + m.get('updated', ''))}")
         for s_ in m.get("sessions", []):
             print(f"    {ui.ACTIVE} {s_.get('agent')} · {s_.get('project')}@{s_.get('branch')}  {ui.dim((s_.get('status') or '')[:80])}")
         for l_ in m.get("locks", []):
