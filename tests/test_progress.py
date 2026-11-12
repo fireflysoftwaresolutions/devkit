@@ -1716,6 +1716,26 @@ class TranscriptCase(unittest.TestCase):
                                          "transcript_path": str(self.transcript)})
 
 
+class DialogApprovalTests(TranscriptCase):
+    # the developer approved a push in a question dialog the tech lead wrote; devkit recorded nothing and said nothing,
+    # so the developer learned only from the tech lead's second ask that a typed grant line was needed. The rule stays
+    # (a dialog answer counts only for a decision devkit recorded); the context says so at once, with the line to type
+    def test_an_approval_in_a_dialog_devkit_did_not_record_says_a_typed_grant_is_needed(self):
+        q = "May I push feat/x to origin now?"
+        result = {"questions": [{"question": q, "options": [{"label": "Yes, push"}, {"label": "Not yet"}]}],
+                  "answers": {q: "Yes, push"}}
+        self.write({"type": "user", "uuid": "u-9", "isSidechain": False, "toolUseResult": result,
+                    "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_q9",
+                                                             "content": "answered"}]}})
+        line = pg.evidence_lines(pg.on_question("claude", {
+            "session_id": "s1", "tool_name": "AskUserQuestion", "tool_use_id": "toolu_q9",
+            "tool_input": {"questions": result["questions"]}, "tool_response": result,
+            "transcript_path": str(self.transcript)}))
+        self.assertIn("grants nothing", line)
+        self.assertIn("`grant push <target>`", line)
+        self.assertIsNone(self.grant(consume=False))  # the rule is unchanged: no grant
+
+
 class EvidenceReplayTests(TranscriptCase):
     # B3 (B-fy1q867o3pp, Seraph's batch 4): an agent pipes the developer's original prompt or question tool answer into
     # `dev hook prompt` again. The transcript still holds the real record, so only the id it carries can tell a replay

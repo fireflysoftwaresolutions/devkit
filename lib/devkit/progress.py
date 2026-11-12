@@ -4351,8 +4351,10 @@ def on_question(agent: str, data: dict, now: float | None = None) -> list:
         return []
     sess = state.read(session_path(agent, sid))
     run = load_run(agent, sid)
-    if sess is None or headless(sess) or not run or not run.get("decisions"):
+    if sess is None or headless(sess):
         return []
+    if not run or not run.get("decisions"):
+        return [] if member else _ungranted_notes(run, data)
     if _foreign_transcript(agent, sid, data.get("transcript_path")):
         _refuse_forged(agent, sid, data.get("transcript_path"), "a question tool answer")
         return []
@@ -4412,7 +4414,37 @@ def on_question(agent: str, data: dict, now: float | None = None) -> list:
                session=f"{agent}:{sid}"[:60])
     if new:
         new = _keep_human(agent, sid, new)
-    return new
+    return new + ([] if member or new or refused else _ungranted_notes(run, data))
+
+
+# an irreversible action a question may ask about, and the action its grant line names
+_ASKS_ACTION = re.compile(r"(?i)\b(push|merge|release|deploy|publish|pull request|PR)\b")
+
+
+def _ungranted_notes(run, data: dict) -> list:
+    """The main session's question tool call answered a question about an irreversible action that names no decision
+    devkit recorded, so the answer grants nothing (spec C5: a typed grant line, or the answer to a recorded decision,
+    and the rule stays). Without a word now, the developer learns it only when the guard refuses the action and the
+    tech lead asks again: [{"note": what to tell them, with the line to type}] for evidence_lines, or []. Never
+    stored as evidence."""
+    top = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
+    resp = data.get("tool_response") if isinstance(data.get("tool_response"), dict) else {}
+    answers = resp.get("answers") if isinstance(resp.get("answers"), dict) else {}
+    for q in top.get("questions") or []:
+        qt = str((q or {}).get("question") or "") if isinstance(q, dict) else ""
+        m, did = _ASKS_ACTION.search(qt), asked_decision(q)
+        if not m or not str(answers.get(qt) or "").strip() or (did and _decision(run or {}, did)):
+            continue
+        act = "pr" if m.group(1).lower() in ("pr", "pull request") else m.group(1).lower()
+        shown = " ".join(qt.replace("`", "").split())
+        shown = shown if len(shown) <= 120 else shown[:119] + "…"
+        return [{"note": f"devkit · the developer's answer to “{shown}” grants nothing: devkit counts a dialog answer "
+                         f"only for a decision it recorded, so the {act} runs only on a line the developer types on its "
+                         f"own, `grant {act} <target>` with the exact target, or on their answer to that decision "
+                         f"recorded first (`dev crew ask --decision --irreversible {act} --target <target> \"…\"`, then "
+                         f"`dev crew decisions --ask`). Tell them in your reply, with the line to type, before you run "
+                         f"it."}]
+    return []
 
 
 def _mark_shown(agent: str, sid: str, ids, now: float):
@@ -4892,10 +4924,11 @@ def _when(ts) -> str:
 
 
 def evidence_lines(entries: list) -> str:
-    """The echo of what the developer just granted or approved, for the next context; a void entry approves nothing."""
-    out = []
+    """The echo of what the developer just granted or approved, for the next context; a void entry approves nothing,
+    and a note (_ungranted_notes) says on a line of its own what granted nothing."""
+    out, notes = [], [e["note"] for e in entries if e.get("note")]
     for e in entries:
-        if e.get("void"):
+        if e.get("void") or e.get("note"):
             continue
         how = "by your prompt" if e["channel"] == "E2" else "by your answer to the question tool"
         if e.get("expires"):
@@ -4903,7 +4936,7 @@ def evidence_lines(entries: list) -> str:
         else:
             out.append(f"approved: {e['covers']}{': ' + e['answer'] if e.get('answer') else ''} {how} at "
                        f"{_when(e['ts'])} (record it with dev crew decide {e['covers']} \"<the answer>\")")
-    return ("devkit · " + "; ".join(out)) if out else ""
+    return "\n".join((["devkit · " + "; ".join(out)] if out else []) + notes)
 
 
 def _live_grants(agent: str, sid: str, now: float) -> list:
