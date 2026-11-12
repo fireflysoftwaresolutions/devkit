@@ -288,12 +288,31 @@ class DetourTests(BugCLI):
         self.assertEqual(rc, 1)
         line = " ".join(out.split())
         self.assertIn("`--since` takes a value, `main` is a value or an argument, `--nope` is not a flag of "
-                      "`dev test`: a dev step is a dev subcommand and only its flags that take no value", line)
+                      "`dev test`: a dev step is a dev subcommand and its flags, a flag's value only a number or "
+                      "one of its listed choices", line)
         rc, out = self.dev("detour", FP_A, "--text", "run the tests; then retry")
         self.assertEqual(rc, 1)
         self.assertIn("`;` is a shell form: a step may not contain `|`, `>`, `<`, `;`, `&&`, `$(` or a backtick",
                       " ".join(out.split()))
         self.assertEqual(self.outbox(), [])
+
+    # The wait an agent is told to run, `dev watch --wait --for me --timeout 9`, was refused as a detour step because
+    # its `--for` and `--timeout` take values. A number for a numeric flag, or one of a flag's listed choices, names
+    # nothing of this Mac, so a step keeps it, written either way; any other value is still refused.
+    def test_a_dev_step_keeps_a_number_or_a_listed_choice_as_its_flags_value(self):
+        self.crash()
+        bugs.ledger_append("s1", "Bash", True, "progress step", [])
+        for step in ("watch --wait --for me --timeout 9", "dev watch --wait --timeout=0.1"):
+            rc, out = self.dev("detour", FP_A, "--dev", step)
+            self.assertEqual(rc, 0, out)
+        self.assertEqual([x["payload"]["steps"] for x in self.outbox()],
+                         [[{"dev": "watch --wait --for me --timeout 9"}], [{"dev": "watch --wait --timeout=0.1"}]])
+        for step, word in (("watch --wait --timeout soon", "soon"), ("watch --for everyone", "everyone"),
+                           ("watch --timeout 1e9", "1e9"), ("watch --timeout=-5", "--timeout=-5")):
+            rc, out = self.dev("detour", FP_A, "--dev", step)
+            self.assertEqual(rc, 1, step)
+            self.assertIn(f"`{word}`", out)
+        self.assertEqual(len(self.outbox()), 2)
 
     def test_detour_help_says_what_a_dev_step_and_free_text_may_hold(self):
         out = io.StringIO()
@@ -301,7 +320,8 @@ class DetourTests(BugCLI):
             cli.main(["bug", "detour", "--help"])
         # each flag's help follows its last mention (the first is the usage line)
         dev_help, _, text_help = " ".join(out.getvalue().split()).rpartition("--text 'TEXT'")
-        self.assertIn("only its flags that take no value", dev_help.rpartition("--dev 'COMMAND'")[2])
+        self.assertIn("a flag's value only a number or one of its listed choices",
+                      dev_help.rpartition("--dev 'COMMAND'")[2])
         self.assertIn("none of the shell forms |, >, <, ;, &&, $( or a backtick", text_help)
 
 

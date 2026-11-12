@@ -4472,8 +4472,8 @@ def build_parser():
     x.add_argument("--hint", dest="steps", action="append", type=lambda v: ("hint", v), metavar="'NAME SLOT=VALUE …'",
                    help="a hint template: use-tool, from-root, one-at-a-time, scratch-tool, sync-retry, ask-update")
     x.add_argument("--dev", dest="steps", action="append", type=lambda v: ("dev", v), metavar="'COMMAND'",
-                   help="a dev subcommand and only its flags that take no value, such as 'test --failed' (no "
-                        "values, arguments or paths)")
+                   help="a dev subcommand and its flags, such as 'test --failed' or 'watch --wait --timeout 9': a "
+                        "flag's value only a number or one of its listed choices (no other values, arguments or paths)")
     x.add_argument("--text", dest="steps", action="append", type=lambda v: ("text", v), metavar="'TEXT'",
                    help="free text, at most 200 characters, held for review: no URL, no path of this Mac and none "
                         "of the shell forms |, >, <, ;, &&, $( or a backtick")
