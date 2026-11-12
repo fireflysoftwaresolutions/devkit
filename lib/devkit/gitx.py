@@ -2118,16 +2118,68 @@ def _substitutions(code: str) -> list:
     return out + [code[start:] for what, start in stack if what in ("sub", "`")]  # unclosed: the rest runs
 
 
-def _commands(code: str, as_root: bool = False, depth: int = 0):
-    """(the words as written, the command they run, whether it runs as root, whether it is a shell on a script of its
-    own) for each command of `code`, with the commands of the scripts such shells run (see _segments)."""
+_WRAPPED = "__devkit_wrapped__"  # where a wrapper script runs the command it was given
+_RUNS_ITS_ARGUMENTS = re.compile(r'"\$(?:@|\{@\})"|\$(?:@|\{@\})')
+
+
+def _wrapper_script(words, state):
+    """A script of the checkout that the words run with a command as its arguments, and that runs them as a command
+    ("$@" first: `timeout 900 "$@"`, `exec "$@"`), as retry wrappers do (`bash .github/scripts/apt-retry.sh npx
+    playwright install-deps chromium`) -> (its text with each place it runs them marked, the command), or None. A
+    script that only passes its arguments on (`pytest "$@"`, gradlew's `exec "$JAVACMD" "$@"`) is not one."""
+    if not state or not words:
+        return None
+    i = 0
+    if os.path.basename(words[0]) in _SHELLS:
+        i = 1
+        while i < len(words) and words[i].startswith("-") and words[i] != "--":
+            if re.fullmatch(r"-[a-z]*c[a-z]*", words[i]):
+                return None  # `bash -c '…'`: _nested_script reads it
+            i += 1
+        i += words[i:i + 1] == ["--"]
+    elif "/" not in words[0]:
+        return None  # a command on the PATH, not a script of the checkout
+    args = words[i + 1:]
+    path = _shell_path(words[i], state["here"], state["env"]) if i < len(words) else None
+    if not args or not path or not path.startswith(state["top"] + os.sep) or not os.path.isfile(path):
+        return None
+    try:
+        with open(path, errors="replace") as fh:
+            text = fh.read(65536)
+    except OSError:
+        return None
+    if not _RUNS_ITS_ARGUMENTS.search(text):
+        return None
+    pieces = _top_pieces(text)  # without its comments: the command reader takes a quote in a comment for code
+    code = "".join(p["code"] + p["sep"] for p in pieces) if pieces is not None else \
+        re.sub(r"(?m)^\s*#.*$", "", text)
+    code = _RUNS_ITS_ARGUMENTS.sub(_WRAPPED, code)
+    cmds = guard.split_commands(code)
+    if not cmds or not any(guard._unwrap(list(argv))[:1] == [_WRAPPED] for argv, _ in cmds):
+        return None
+    return code, args
+
+
+def _commands(code: str, as_root: bool = False, depth: int = 0, state=None, wrapped=None):
+    """(the words as written, the command they run, whether it runs as root, whether it holds a script of its own)
+    for each command of `code`, with the commands of the scripts it holds: the one a shell runs with `-c` (see
+    _segments), and, with `state` (the step's folder and variables), a wrapper script of the checkout that runs the
+    command it is given (see _wrapper_script), with that command where the script runs it (`wrapped`)."""
     for argv, _ in guard.split_commands(code) or []:
         argv = list(argv)
+        if wrapped and _WRAPPED in argv:
+            k = argv.index(_WRAPPED)
+            argv = argv[:k] + list(wrapped) + argv[k + 1:]
         root = as_root or _as_root(argv)
+        words = guard._unwrap(argv)
         script = _nested_script(argv)
-        yield argv, guard._unwrap(argv), root, script is not None
+        wrapper = _wrapper_script(words, state) if script is None and depth < 3 else None
+        yield argv, words, root, script is not None or wrapper is not None
         if script is not None and depth < 3:
-            yield from _commands(script, root, depth + 1)
+            yield from _commands(script, root, depth + 1, state, wrapped)
+        elif wrapper:  # the command it is given first, so a skip names it; then the script around it
+            yield from _commands(" ".join(shlex.quote(w) for w in wrapper[1]), root, depth + 1, state)
+            yield from _commands(wrapper[0], root, depth + 1, state, wrapper[1])
 
 
 def _informational(argv, words) -> bool:
@@ -2155,8 +2207,9 @@ def _prep_one(argv, words, as_root: bool, state: dict):
     elif name in ("docker", "podman"):
         if pos[:1] and pos[0] in _PRUNABLE and pos[1:2] == ["prune"]:
             return "setup", f"runner prep ({name} {pos[0]} prune deletes Docker data on this Mac)"
-    elif name in _OS_PACKAGERS and pos[:1] and pos[0] in _PACKAGER_VERBS:
-        return "setup", f"runner prep ({name} {pos[0]} changes the runner's OS packages)"
+    elif name in _OS_PACKAGERS and any(w in _PACKAGER_VERBS for w in pos):  # past values: apt-get -o A::B=3 update
+        verb = next(w for w in pos if w in _PACKAGER_VERBS)
+        return "setup", f"runner prep ({name} {verb} changes the runner's OS packages)"
     elif name == "playwright" and pos[:1] in (["install"], ["install-deps"]):
         if pos[0] == "install-deps" or "--with-deps" in words:
             return "setup", f"runner prep (playwright {pos[0]}{' --with-deps' if pos[0] == 'install' else ''} " \
@@ -2275,7 +2328,7 @@ def _classify(piece: dict, state: dict, installs: bool) -> dict:
     setup = "runner prep (curl … | sh runs an installer downloaded from the internet)" if piped else None
     first = "curl … | sh" if piped else None
     install, checks, roots, nested = None, [], [], False
-    for argv, words, as_root, container in _commands(code):
+    for argv, words, as_root, container in _commands(code, state=state):
         nested = nested or container
         if container:
             continue
@@ -2296,7 +2349,7 @@ def _classify(piece: dict, state: dict, installs: bool) -> dict:
         # that only feeds the setup (`apt-get install "linux-headers-$(uname -r)"`) leaves the piece setup.
         checks.append([script])
         inside = dict(state)  # it runs in a subshell of its own: a `cd` in it holds for the rest of it only
-        for argv, words, as_root, container in _commands(script):
+        for argv, words, as_root, container in _commands(script, state=inside):
             got = None if container else _prep_one(argv, words, as_root, inside)
             if got and got[0] == "setup":
                 setup, first, nested = setup or got[1], first or " ".join(words[:2]), True

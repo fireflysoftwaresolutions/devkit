@@ -965,6 +965,90 @@ class RunnerSetupInsideACheckTests(unittest.TestCase):
             self.assertIsNone(gitx.evidence(s.ctx()))
 
 
+# A retry wrapper the way workflows keep it: it runs the command it is given, and before a second try it repairs the
+# runner's package manager as root.
+APT_RETRY = """#!/usr/bin/env bash
+# Run an install that uses apt again when a mirror is slow: the runner's dpkg is repaired first.
+set -u
+for try in 1 2; do
+  if [ "$try" -gt 1 ]; then
+    sudo dpkg --configure -a || true
+  fi
+  timeout 900 "$@" && exit 0
+  echo "apt-retry: try $try of '$*' did not finish"
+  sleep 20
+done
+exit 1
+"""
+
+
+class RunnerSetupNeverRunsAsRootTests(unittest.TestCase):
+    """`dev ci --run` on macOS never replays a hosted runner's root setup: fake sudo, timeout and sleep commands on
+    the PATH write down every call, and none may happen."""
+
+    def run_steps(self, s, steps: dict):
+        s.write(".github/workflows/ci.yml", _workflow(steps))
+        s.write(".github/scripts/apt-retry.sh", APT_RETRY)
+        s.write("sub/marker.txt", "x")
+        s.branch("feat/ci")
+        s.commit("ci: add the workflow")
+        fake, called = s.root / "fakebin", s.root / "called.log"
+        fake.mkdir()
+        for tool, rc in (("sudo", 0), ("timeout", 1), ("sleep", 0)):
+            (fake / tool).write_text(f'#!/bin/sh\necho "{tool} $*" >> "$CALLED_LOG"\nexit {rc}\n')
+            (fake / tool).chmod(0o755)
+        path = f"{fake}{os.pathsep}{os.environ.get('PATH', '')}"
+        with mock.patch.dict(os.environ, {"PATH": path, "CALLED_LOG": str(called)}):
+            rc, out, err = dev("ci", "--run")
+        return rc, out, err, called.read_text().splitlines() if called.exists() else []
+
+    # 3fa845cc7d63: dev ci --run ran `sudo rm -rf` and `sudo apt-get` from a runner's free-disk and package steps
+    def test_inline_sudo_rm_and_sudo_apt_get_are_skipped_and_never_run(self):
+        with Sandbox() as s:
+            rc, out, err, called = self.run_steps(s, {
+                "Free disk": "sudo rm -rf /usr/share/dotnet /opt/ghc \"$AGENT_TOOLSDIRECTORY\"",
+                "Packages": "sudo apt-get update\nsudo apt-get install -y --no-install-recommends libvips-dev",
+                "Packages from a mirror": "sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update && "
+                                          "sudo apt-get -o Acquire::Retries=3 install -y libreoffice-writer",
+                "Unit": "test -f sub/marker.txt"})
+            self.assertEqual(rc, 0, out + err)
+            self.assertEqual(called, [])
+            self.assertRegex(out, r"security › Free disk .*runner prep \(")
+            self.assertRegex(out, r"security › Packages .*runner prep \(")
+            self.assertRegex(out, r"security › Packages from a mirror .*runner prep \(apt-get update")
+
+    # A step that hands its install to a retry script: on a Mac without `timeout` the first try fails and the second
+    # runs `sudo dpkg` before it. The install it hands over is the runner's setup, so the step is skipped whole.
+    def test_an_install_handed_to_a_retry_script_is_skipped_and_its_sudo_never_runs(self):
+        with Sandbox() as s:
+            rc, out, err, called = self.run_steps(s, {
+                "Chromium's system libraries": "bash .github/scripts/apt-retry.sh npx playwright install-deps chromium",
+                "LibreOffice": "bash .github/scripts/apt-retry.sh sh -c 'sudo apt-get update && sudo apt-get install "
+                               "-y libreoffice-writer'",
+                "Unit": "test -f sub/marker.txt"})
+            self.assertEqual(rc, 0, out + err)
+            self.assertEqual(called, [])
+            self.assertRegex(out, r"Chromium's system libraries .*runner prep \(playwright install-deps")
+            self.assertRegex(out, r"LibreOffice .*runner prep \(apt-get update")
+
+    def test_a_script_that_only_passes_its_arguments_on_is_not_read_as_a_wrapper(self):
+        with Sandbox() as s:
+            s.write("gradlew", '#!/bin/sh\npip install -r requirements.txt\nexec "$JAVACMD" "$@"\n')
+            s.write(".github/workflows/ci.yml", _workflow({"Build": "./gradlew build"}))
+            s.branch("feat/ci")
+            s.commit("ci: add the workflow")
+            [step] = [st for j in gitx.plan(str(s.repo)) for st in j["steps"]]
+            self.assertEqual((step["skip"], step["blocking"]), (None, False))
+
+    def test_a_check_handed_to_a_retry_script_that_runs_sudo_blocks_the_evidence(self):
+        with Sandbox() as s:
+            rc, out, err, called = self.run_steps(s, {"Unit": "bash .github/scripts/apt-retry.sh grep -q x sub/marker.txt"})
+            self.assertEqual(rc, 1, out + err)
+            self.assertIn("could not run here", err)
+            self.assertEqual(called, [])
+            self.assertIsNone(gitx.evidence(s.ctx()))
+
+
 class ChecksHiddenFromTheCommandReaderTests(unittest.TestCase):
     """A check that runs through `source`/`.` or inside a command or process substitution, after the step installed
     its tool: the guard's command reader sees only a reporting command (`test`, `[`, `cat`), so the whole step was
