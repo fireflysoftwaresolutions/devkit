@@ -252,6 +252,48 @@ def progress_gate(agent: str, data: dict, sess: dict, now=None) -> str:
     return why
 
 
+# The reply-language rule (the developer, 2026-11-12: "if the user speaks English you should speak English, Spanish
+# Spanish, etc. By default American English"): the final message's prose is in the developer's language, or in the
+# locale devkit's `language` is set to. Only the main session's final message is checked: a crew member reports to
+# the tech lead in American English (SubagentStop has no such check, and a Codex member's rollout is skipped).
+def language_reason(want: str, got: str, how: str) -> str:
+    """What to fix when the final message is in `got` but the developer's language is `want` (language.wanted)."""
+    from . import language
+    w, g = language.name(want), language.name(got)
+    cause = (f"devkit's language is set to {w}" if how == "set" else
+             f"the developer {'wrote' if how == 'latest' else 'has been writing'} in {w}")
+    return (f"devkit: {cause}, but your final message is in {g}: reply in {w}. Keep the status block's marker and "
+            f"labels as they are (**[Firefly> DevKit]**, Done, Check, Progress, Crew, You, Next); code, commands, "
+            f"commits, PRs, docs and devkit's records stay in American English. Reply again with the message fixed.")
+
+
+def language_gate(agent: str, data: dict, sess: dict) -> str:
+    """Stop, main session: language_reason when the developer's language is known (their latest message, an
+    earlier one when it is unclear, or a set locale) and the final message's prose is surely in another one; once per
+    turn (`sess["language_told"]`) and never on the reply to a send-back. '' when nothing is wrong, with
+    canary.enforce or canary.language off, or on any error (fails open)."""
+    if data.get("stop_hook_active") or sess.get("language_told", _UNTOLD) == sess.get("turn_started"):
+        return ""
+    cfg = core.CFG.get("canary") or {}
+    if not (cfg.get("enforce", True) and cfg.get("language", True)):
+        return ""
+    try:
+        from . import language
+        transcript = data.get("transcript_path")
+        want, how = language.wanted(None, transcript)
+        if not want:
+            return ""
+        text = data.get("last_assistant_message") or last_assistant_text(transcript) or ""
+        got = language.other_language(text, want)
+        if not got or (agent == "codex" and language.member_rollout(transcript)):
+            return ""
+        why = language_reason(want, got, how)
+    except Exception:
+        return ""
+    sess["language_told"] = sess.get("turn_started")
+    return why
+
+
 STATUS_RE = re.compile(r"^[*`_\s]*" + _MARK + r"[*`\s]*[·:—-]?\s*(.*)$", re.I)
 
 
