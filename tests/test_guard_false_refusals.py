@@ -297,6 +297,27 @@ class Names(Case):
         self.assertIn("backup copies", (v or ("", ""))[1])
 
 
+class InstallReads(Case):
+    """Reading a file of devkit's installed copy (vale --config=<it>) is no write; a write into it stays refused."""
+
+    def test_reading_an_installed_file_is_no_write(self):
+        rel = core.HOME / ".local" / "share" / "devkit" / "releases" / "26.11.16-a13e187" / "config" / "docs"
+        rel.mkdir(parents=True, exist_ok=True)
+        for name in ("vale.ini", ".markdownlint.jsonc"):
+            (rel / name).write_text("x\n")
+        p = mock.patch.object(guard, "_pinned_names", lambda: {"26.11.16-a13e187"})  # the release `dev install` pinned
+        p.start()
+        self.addCleanup(p.stop)
+        for cmd in (f"vale --config={rel}/vale.ini docs/guard.md", f"vale --config {rel}/vale.ini docs/guard.md",
+                    f"markdownlint-cli2 --config {rel}/.markdownlint.jsonc docs/x.md"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(main(cmd))
+        for cmd in (f"vale --output={rel}/x docs/guard.md", f"cp docs/x.md {rel}/vale.ini",
+                    f"echo x > {rel}/vale.ini"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNotNone(main(cmd))
+
+
 class LaneStamp(unittest.TestCase):
     """A member's command that holds lane calls the router cannot place one by one is run with the member's lane
     variable exported, so every dev call in it acts as the member (Claude Code, whose rewrite approves nothing); a

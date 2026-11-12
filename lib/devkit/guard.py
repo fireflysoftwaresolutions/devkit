@@ -5013,6 +5013,9 @@ def _pathlike(a: str) -> bool:
     return "/" in a or a.startswith(("~", ".")) or bool(_VARPATH.match(a))
 
 
+_CONFIG_OPTS = ("--config", "--config-file", "--rcfile", "--settings")  # the options that name a file a program reads
+
+
 class _Shell:
     """Walks one shell command for writes to protected paths; `unresolved` collects targets it cannot resolve, and
     `exported` the variables the shell has set so far (export, bare assignments: they reach later commands)."""
@@ -5390,6 +5393,10 @@ class _Shell:
         reads = _git_text_free(argv) if name == "git" else \
             _check_only(argv[0], args) and not {"PATH", "?"} & (set(names) | self.exported)
         words = [c for c in _candidates(args) if inside or _pathlike(c)]
+        # an existing file a program is given as its configuration is read (vale --config=<devkit's vale.ini>)
+        read_cfg = {v for v in _dev_values(args, _CONFIG_OPTS) if resolve(v, cwd) != UNKNOWN and
+                    resolve(v, cwd).is_file()}
+        words = [w for w in words if w not in read_cfg]
         if name == "gh":  # its words are titles and bodies, except the file a download writes (-O, --output)
             outs = _dev_values(args, ("-O", "--output"))
             v = self.targets(outs, cwd, text=None)
