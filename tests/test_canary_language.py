@@ -26,7 +26,7 @@ import _sandbox  # noqa: E402,F401
 from devkit import canary, core, hooks, scope  # noqa: E402
 from devkit import progress as pg  # noqa: E402
 from test_progress import TempState  # noqa: E402
-from test_language_samples import PROMPTS, REPLIES, claude_transcript  # noqa: E402
+from test_language_samples import ENGLISH_ABOUT_OTHER_TEXT, PROMPTS, REPLIES, claude_transcript  # noqa: E402
 
 T0 = 1_800_000_000.0
 
@@ -67,6 +67,13 @@ class LanguageGateTests(unittest.TestCase):
         self.assertEqual(self.gate(REPLIES["en"], sess), "")  # the same turn: never a second time
         sess["turn_started"] = T0 + 60  # the next turn is checked again
         self.assertIn("reply in Spanish", self.gate(REPLIES["en"], sess))
+
+    def test_an_english_reply_to_an_english_request_about_spanish_text_passes(self):
+        # "Please translate this customer email into English: Hola equipo, …": the reply is rightly in English
+        for prompt in ENGLISH_ABOUT_OTHER_TEXT:
+            claude_transcript(self.transcript, [prompt])
+            with self.subTest(prompt=prompt[:50]):
+                self.assertEqual(self.gate(REPLIES["en"], {"turn_started": T0}), "")
 
     def test_a_spanish_reply_passes(self):
         self.assertEqual(self.gate(REPLIES["es"], {"turn_started": T0}), "")

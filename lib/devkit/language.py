@@ -114,11 +114,14 @@ _COMMAND = re.compile(r"(?m)^[ \t]*[$%][ \t].*$")
 # lines of tool output: tracebacks, stack frames, test results, log records. Within one line only ([ \t], never \s),
 # so a run of blank lines costs one pass
 _LOGLINE = re.compile(r"(?m)^.*(?:Traceback \(most recent call last\)|^[ \t]+at [\w$.<>]+\(|"
+                      r"The above exception was the direct cause of the following exception|"
+                      r"During handling of the above exception, another exception occurred|"
                       r"File \"[^\"\n]+\", line \d+|^[ \t]*(?:ERROR|WARN(?:ING)?|INFO|DEBUG|FATAL|FAILED|PASSED|E  )\b|"
                       r"^[ \t]*\d{4}-\d\d-\d\d[T ]\d\d:\d\d|^[ \t]*\w+(?:\.\w+)*(?:Error|Exception|Warning):[ \t]).*$")
 _MARKER = re.compile(r"(?i)\[\s*firefly\s*>\s*devkit(?:\s*·[^\]\n]*)?\]")
-_LABEL = re.compile(r"(?im)^([ \t]*[-*•][ \t]+)\**[ \t]*(?:done|check|progress|crew|you|next)[ \t]*\**[ \t]*:"
-                    r"[ \t]*\**|needs from the tech lead[ \t]*:")
+# one character class per gap: two runs side by side ([ \t]* \** [ \t]*) trade characters when no star is there
+_LABEL = re.compile(r"(?im)^([ \t]*[-*•][ \t]+)(?:\*+[ \t]*)?(?:done|check|progress|crew|you|next)[ \t*]*:[ \t*]*|"
+                    r"needs from the tech lead[ \t]*:")
 _WORD = re.compile(r"[^\W\d_]+(?:'[^\W\d_]+)*")
 
 
@@ -159,14 +162,18 @@ def _without_tagged(text: str) -> str:
 def prose(text: str) -> str:
     """The text without what is not the writer's own prose."""
     text = _without_tagged(_without_fences((text or "")[:MAX_TEXT].replace("’", "'")))
-    for pat in (_SPAN, _URL, _PATH, _QUOTED, _BLOCKQUOTE, _COMMAND, _LOGLINE, _MARKER, _TAG):
+    for pat in (_LOGLINE, _SPAN, _URL, _PATH, _QUOTED, _BLOCKQUOTE, _COMMAND, _MARKER, _TAG):  # whole log lines first
         text = pat.sub(" ", text)
     return _LABEL.sub(lambda m: m.group(1) or " ", text)
 
 
 def _scores(text: str) -> tuple:
     """(scores by language, words read) over the prose of `text`."""
-    body = prose(text)
+    return _count(prose(text))
+
+
+def _count(body: str) -> tuple:
+    """(scores by language, words read) over prose."""
     scores = {}
 
     def add(langs, weight):
@@ -202,30 +209,51 @@ def _ranked(scores: dict) -> list:
 
 
 MIN_WORDS, MIN_SCORE, MARGIN = 3, 2.0, 1.8
+# "Please translate this email: Hola equipo, …": three or more words without a colon, then ": " (one pass per line)
+_INTRO = re.compile(r"([^\s:]+(?:[ \t]+[^\s:]+){2,}):[ \t]+(\S.*)")
 
 
-def detect(text: str):
-    """The language a developer's message is written in ("es"), or None when unsure.
+def _own_and_introduced(body: str) -> tuple:
+    """(the developer's own words, the text they introduce with a colon): the rest of a line after "<three or more
+    words>: ", and every line after a line that ends with ":". A pasted email, log or string is what the message is
+    about, not what it is written in."""
+    own, introduced, after = [], [], False
+    for ln in body.split("\n"):
+        if after:
+            introduced.append(ln)
+            continue
+        m = _INTRO.match(ln.strip())
+        if m:
+            own.append(m.group(1))
+            introduced.append(m.group(2))
+        else:
+            own.append(ln)
+        after = ln.rstrip().endswith(":")
+    return "\n".join(own), "\n".join(introduced)
 
-    English is the language of tools, logs and errors, so a non-English writer often pastes English while an
-    English writer seldom writes whole phrases of another language: when English leads but another language is
-    clearly there too, that one is the writer's."""
-    scores, n = _scores(text)
+
+def _decide(scores: dict, n: int):
+    """The leading language when it leads clearly, else None (few words, a close call)."""
     ranked = _ranked(scores)
     if n < MIN_WORDS or not ranked:
         return None
     best, top = ranked[0]
     second = ranked[1][1] if len(ranked) > 1 else 0.0
-    if best == "en":
-        others = [kv for kv in ranked if kv[0] != "en"]
-        if others:
-            lang, s = others[0]
-            rest = others[1][1] if len(others) > 1 else 0.0
-            if s >= 2.5 and s >= MARGIN * rest and s >= 0.25 * top:
-                return lang
-    if top < MIN_SCORE or top < MARGIN * second:
-        return None
-    return best
+    return best if top >= MIN_SCORE and top >= MARGIN * second else None
+
+
+def detect(text: str):
+    """The language a developer's message is written in ("es"), or None when unsure. When the message introduces
+    text with a colon (an email to translate, strings to check), the developer's own words decide when they can on
+    their own; otherwise the whole message does. The leading language is the answer or nothing: English leading
+    never gives another language."""
+    body = prose(text)
+    own, introduced = _own_and_introduced(body)
+    if introduced.strip():
+        lang = _decide(*_count(own))
+        if lang:
+            return lang
+    return _decide(*_count(body))
 
 
 SURE_WORDS, SURE_SCORE, SURE_SHARE = 12, 4.0, 0.2

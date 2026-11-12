@@ -72,14 +72,27 @@ class RoleFormTests(unittest.TestCase):
 
 class RoleCheckTimeTests(unittest.TestCase):
     # the role check runs at every Stop: a final message built to be slow must not stall it (lesson L-g8lywzsgclv)
-    # sizes where a pattern that rescans the text takes seconds and a one-pass one takes a few milliseconds
+    # sizes where a pattern that rescans the text takes seconds and a one-pass one takes a few milliseconds; the
+    # fastest of three runs, so a loaded machine does not fail it
+    def fastest(self, call):
+        best = None
+        for _ in range(3):
+            t0 = time.perf_counter()
+            call()
+            best = min(best or 1e9, time.perf_counter() - t0)
+        return best
+
     def test_a_pathological_final_message_is_read_in_bounded_time(self):
         for text in ("x " + "`" * 8000, "a." * 40000, "Tank " * 8000, "Backend engineer (Tank) " * 3000,
                      "```a\n" * 40000):
             with self.subTest(text=text[:24]):
-                t0 = time.perf_counter()
-                bare(text)
-                self.assertLess(time.perf_counter() - t0, 0.5)
+                self.assertLess(self.fastest(lambda: bare(text)), 0.5)
+
+    def test_a_status_bullet_with_a_long_run_of_spaces_is_parsed_in_bounded_time(self):
+        head = "**[Firefly> DevKit]** api · `main` · Export\n"
+        for bullet in ("- done" + " " * 30000, "- ** done" + " " * 30000 + "x", "- **Done** " + " \t" * 15000):
+            with self.subTest(bullet=bullet[:12]):
+                self.assertLess(self.fastest(lambda: canary.parse_status(head + bullet)), 0.5)
 
 
 class MemberHeaderTests(unittest.TestCase):

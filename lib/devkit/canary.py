@@ -313,7 +313,8 @@ STATUS_RE = re.compile(r"^[*`_\s]*" + _MARK + r"[*`\s]*[·:—-]?\s*(.*)$", re.I
 
 SEP = " ❯ "
 GLYPHS = "✓⚠✗–"
-BULLET_RE = re.compile(r"^\s*[-*•]\s+\**\s*(done|check|progress|crew|you|next)\s*\**\s*:\s*\**\s*(.*)$", re.I)
+# one character class per gap: \s* \** \s* side by side trade characters when no star or colon is there
+BULLET_RE = re.compile(r"^\s*[-*•][ \t]+(?:\*+[ \t]*)?(done|check|progress|crew|you|next)[ \t*]*:[ \t*]*(.*)$", re.I)
 
 
 def _clean(s: str) -> str:

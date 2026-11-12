@@ -23,8 +23,19 @@ sys.path.insert(0, str(TESTS))
 import _sandbox  # noqa: E402,F401
 
 from devkit import language  # noqa: E402
-from test_language_samples import (ENGLISH_WITH_SPANISH_NAMES, PROMPTS, REPLIES,  # noqa: E402
-                                   SPANISH_QUOTING_ENGLISH, UNSURE, claude_transcript, reply)
+from test_language_samples import (ENGLISH_ABOUT_OTHER_TEXT, ENGLISH_WITH_SPANISH_NAMES, PROMPTS,  # noqa: E402
+                                   REPLIES, SPANISH_QUOTING_ENGLISH, UNSURE, claude_transcript, reply)
+
+
+def fastest(call, runs=3):
+    # the fastest of a few runs: a loaded machine slows one run, never all of them
+    best = None
+    for _ in range(runs):
+        t0 = time.perf_counter()
+        call()
+        took = time.perf_counter() - t0
+        best = took if best is None else min(best, took)
+    return best
 
 
 class DetectTests(unittest.TestCase):
@@ -56,6 +67,11 @@ class DetectTests(unittest.TestCase):
         self.assertEqual(language.detect("Ask María José de la Fuente from the Ciudad de México office whether "
                                          "the export works for them"), "en")
         self.assertEqual(language.detect(ENGLISH_WITH_SPANISH_NAMES), "en")
+
+    def test_an_english_request_about_another_languages_text_is_never_that_language(self):
+        for text in ENGLISH_ABOUT_OTHER_TEXT:
+            with self.subTest(text=text[:50]):
+                self.assertIn(language.detect(text), ("en", None))
 
     def test_a_quoted_spanish_label_in_an_english_message_keeps_it_english(self):
         self.assertEqual(language.detect('The Spanish label says "Guardar los cambios para el usuario de la '
@@ -244,21 +260,17 @@ class AbuseTests(unittest.TestCase):
     def test_a_huge_or_pathological_message_is_read_in_bounded_time(self):
         for text in ("```\n" * 40000, "\"" + "a " * 200000, ("the " * 50000) + "```", "> " * 100000,
                      "<system-reminder>" * 20000, "a." * 100000, "a/" * 100000, "`" * 100000, "x " + "`" * 100000,
-                     "\n" * 10000, "- " + "\n" * 10000):
-            t0 = time.perf_counter()
-            language.detect(text)
-            language.other_language(text, "es")
-            self.assertLess(time.perf_counter() - t0, 0.5, repr(text[:20]))
+                     "\n" * 10000, "- " + "\n" * 10000, "- done" + " " * 60000, "- ** done" + " " * 60000 + "x",
+                     "- **Done** " + " \t" * 30000):
+            with self.subTest(text=repr(text[:20])):
+                self.assertLess(fastest(lambda: (language.detect(text), language.other_language(text, "es"))), 0.5)
 
 
 class SpeedTests(unittest.TestCase):
     def test_a_long_reply_is_read_in_well_under_the_hooks_budget(self):
         text = (REPLIES["es"] + "\n\n") * 8  # about 4 KB, longer than most final messages
         language.detect(text)
-        t0 = time.perf_counter()
-        for _ in range(50):
-            language.other_language(text, "en")
-        each = (time.perf_counter() - t0) / 50
+        each = fastest(lambda: [language.other_language(text, "en") for _ in range(50)]) / 50
         self.assertLess(each, 0.02, f"{each * 1000:.2f} ms per call")  # the bound is loose; the measure is ~1 ms
 
 

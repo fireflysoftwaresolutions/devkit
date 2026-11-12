@@ -170,3 +170,17 @@ def claude_transcript(path, prompts):
         rows.append({"type": "user", "message": {"content": [{"type": "tool_result", "content":
                                                                "The tests passed and the build is green now."}]}})
     Path(path).write_text("".join(json.dumps(r) + "\n" for r in rows))
+
+
+# English requests that carry another language's text to work on: the reply is English, so the developer's language
+# is English or unsure, never the other one (a pasted or introduced block counts less than the developer's own words).
+ENGLISH_ABOUT_OTHER_TEXT = [
+    "Please translate this customer email into English: Hola equipo, el informe de ventas no se puede abrir desde "
+    "ayer. Cuando hago clic en el enlace me sale un error y no puedo ver los datos del mes. ¿Podéis revisarlo? "
+    "Gracias, Marta",
+    "Can you translate this into English and keep it short?\n\nHola equipo, el informe de ventas no se puede abrir "
+    "desde ayer. Cuando hago clic en el enlace me sale un error y no puedo ver los datos del mes. ¿Podéis revisarlo "
+    "lo antes posible? Muchas gracias por la ayuda, Marta",
+    "Check the German strings in the onboarding screen:\nWillkommen bei Acme! Bitte gib deine E-Mail-Adresse ein, "
+    "damit wir dir einen Link senden können. Wenn du noch kein Konto hast, kannst du es hier erstellen.",
+]
