@@ -172,5 +172,19 @@ class PlanCommandTests(unittest.TestCase):
                     self.assertFalse(missing.exists())
 
 
+class NewPlanMarkdownTests(unittest.TestCase):
+    # `dev docs check` runs markdownlint on plans, and a fresh plan of any kind failed it three times. markdownlint
+    # reads the front-matter title as the document's top-level heading, so a `# title` in the body is a second one
+    # (MD025); the record's changelog heading and its list need a blank line between them (MD022, MD032).
+    def test_a_new_plan_of_each_kind_has_one_title_and_a_set_off_changelog(self):
+        for kind in plans.KINDS:
+            with self.subTest(kind=kind), TempPlans():
+                text = plans.new("acme/api", "Invoice export", a=A, kind=kind).read_text()
+                front, body = work.split_frontmatter(text)
+                self.assertIn("title: Invoice export", front.splitlines())
+                self.assertEqual([ln for ln in body.splitlines() if ln.startswith("# ")], [])
+                self.assertRegex(body, r"\S\n\n## Changelog\n\n- v1 · .* · created from the " + kind + r" template\n$")
+
+
 if __name__ == "__main__":
     unittest.main()

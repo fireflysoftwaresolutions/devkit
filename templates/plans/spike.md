@@ -1,5 +1,3 @@
-# {{title}}
-
 ## Question
 
 _The single question this spike answers, and the decision it unblocks._

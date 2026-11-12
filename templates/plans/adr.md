@@ -1,5 +1,3 @@
-# {{title}}
-
 - Status: _proposed | accepted | superseded by …_
 - Deciders: _@login, @login_
 - Date: {{date}}

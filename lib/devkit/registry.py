@@ -753,12 +753,12 @@ def status_line(pid: str):
 
 
 def plans_for(pid: str) -> list:
+    from . import plans as plansmod
     d = HANDOFF / "plans" / pid
     out = []
     if d.is_dir():
         for f in sorted(d.rglob("*.md"), key=lambda x: -x.stat().st_mtime):
-            title = next((ln[2:].strip() for ln in f.read_text(errors="ignore").splitlines() if ln.startswith("# ")),
-                         f.stem)
+            title = plansmod.title_of(f.read_text(errors="ignore"), f.stem)
             out.append({"title": title, "path": str(f.relative_to(HANDOFF)), "mtime": int(f.stat().st_mtime)})
     return out[:20]
 

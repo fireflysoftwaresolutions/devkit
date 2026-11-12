@@ -968,6 +968,9 @@ class DetailTests(unittest.TestCase):
         f = h / "items/acme/widget/T-big.md"
         f.write_text(f.read_text().replace("Body " + EVIL, "x" * 10_000))
         (h / "plans/acme/widget/export.md").write_text("# Export plan\n\nCovers T-big.\n")
+        # a plan `dev plan new` writes holds its title in the front matter only
+        (h / "plans/acme/widget/2026-11-11-import.md").write_text(
+            "---\nid: P-x\ntitle: Import plan\nkind: plan\n---\n## Summary\n\nFollows T-big.\n\n## Changelog\n\n- v1\n")
         (h / "sessions/acme/widget/2026-11.md").write_text(f"# Sessions\n\n- {time.strftime('%Y-%m-%d %H:%M', time.localtime(NOW))} · me@testmac · claude · `main` · worked on T-big\n")
         (self.st / "sessions").mkdir()
         (self.st / "sessions" / "claude-sess12345678-rest.json").write_text(json.dumps({"branch": "feat/export", "top": "/w/export"}))
@@ -982,7 +985,8 @@ class DetailTests(unittest.TestCase):
         self.assertEqual((len(d["body"]), len(d["changelog"])), (10_000, 100))
         self.assertEqual(d["links"], [{"kind": "initiative", "target": "lending", "text": "initiative:lending"}])
         self.assertEqual((d["lock"]["state"], d["lock"]["session"]), ("held", "sess12345678"))
-        self.assertEqual(d["plans"], [{"path": "plans/acme/widget/export.md", "title": "Export plan"}])
+        self.assertEqual(d["plans"], [{"path": "plans/acme/widget/2026-11-11-import.md", "title": "Import plan"},
+                                      {"path": "plans/acme/widget/export.md", "title": "Export plan"}])
         self.assertEqual(len(d["sessions"]), 1)
         self.assertEqual(d["branches"], [{"branch": "feat/export", "worktree": "/w/export", "match": "the holder's session works on it"}])
         self.assertEqual([(p["number"], p["match"]) for p in d["prs"]], [(40, "the PR's branch is linked")])

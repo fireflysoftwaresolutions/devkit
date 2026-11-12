@@ -1,5 +1,3 @@
-# {{title}}
-
 ## Summary
 
 _One paragraph: what this plan builds or changes, for whom, and why now._

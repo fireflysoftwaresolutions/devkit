@@ -1189,8 +1189,8 @@ def item_detail(item_id: str, handoff: Path = None, reg: dict = None, now: float
         except OSError:
             continue
         if item_id in text:
-            title = next((ln[2:].strip() for ln in text.splitlines() if ln.startswith("# ")), p.stem)
-            plans.append({"path": str(p.relative_to(base)), "title": title})
+            from . import plans as plansmod
+            plans.append({"path": str(p.relative_to(base)), "title": plansmod.title_of(text, p.stem)})
     sessions = [s for s in read_session_log(base, months=12, limit=100_000) if item_id in s.get("text", "")]
     reg = reg or {}
     proj = next((p for p in reg.get("projects") or [] if isinstance(p, dict) and p.get("id") == scope), None) or {}

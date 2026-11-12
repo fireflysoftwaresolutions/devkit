@@ -1,5 +1,3 @@
-# {{title}}
-
 ## Summary
 
 _One paragraph: the feature, who it is for, and the outcome it creates._

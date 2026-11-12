@@ -867,13 +867,14 @@ class TemplateTests(unittest.TestCase):
                               ("spike", "## Recommendation"), ("bugfix", "## Root cause"), ("adr", "## Consequences")):
             with self.subTest(kind=kind):
                 text = plans.template(kind, "Invoice export")
-                self.assertTrue(text.startswith("# Invoice export"))
+                self.assertNotRegex(text, r"(?m)^# ")  # the front-matter title is the plan's one title (MD025)
                 self.assertIn(section, text)
         with self.assertRaises(ValueError):
             plans.template("novel", "x")
         with TempHandoff():
             path = plans.new("acme/api", "Event store", a=A, kind="adr")
             self.assertIn("kind: adr", path.read_text())
+            self.assertIn("title: Event store", path.read_text().splitlines())  # where the title now lives
             self.assertFalse(plans.needs_revision(path))
 
     def test_delegate_message(self):

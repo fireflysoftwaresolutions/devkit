@@ -37,13 +37,20 @@ def _split(text: str):
     return meta, body, changelog
 
 
+def title_of(text: str, fallback: str) -> str:
+    """A plan's title: its front-matter title (`dev plan new` writes it there only, as the document's one title),
+    else its first `# ` heading (a plan another tool wrote), else `fallback` (the file name)."""
+    meta, body, _ = _split(text)
+    return meta.get("title") or next((ln[2:].strip() for ln in body.splitlines() if ln.startswith("# ")), fallback)
+
+
 def _sha(body: str) -> str:
     return hashlib.sha256(re.sub(r"\s+", " ", body).strip().encode()).hexdigest()[:16]
 
 
 def _render(meta: dict, body: str, changelog: list, extra=()) -> str:
     head = "---\n" + "\n".join([f"{k}: {meta.get(k, '')}".rstrip() for k in FIELDS] + list(extra)) + "\n---\n"
-    return head + body.rstrip() + "\n\n## Changelog\n" + "".join(f"- {c}\n" for c in changelog)
+    return head + body.rstrip() + "\n\n## Changelog\n\n" + "".join(f"- {c}\n" for c in changelog)
 
 
 def needs_revision(path: Path) -> bool:
