@@ -349,7 +349,7 @@ class Plans(Shared):
                                      for n, s in enumerate(sessions)])
             told += [f"{rnd}.{n}" for n, r in enumerate(res) if r.returncode == 0 and re.search(r"\bv\d+ ·", r.stdout)]
             text = plan.read_text()
-            kept = re.findall(r"(?m)^- v\d+ · .* · revised.* — why: round (\d+) by (\d)$", text)
+            kept = re.findall(r"(?m)^- v\d+ · .* · revised.*—why: round (\d+) by (\d)$", text)
             versions = re.findall(r"(?m)^- v(\d+) · .* · revised", text)
             self.assertEqual(len(versions), len(set(versions)), f"two revisions share a version:\n{text}")
             self.assertEqual(sorted(told), sorted(f"{r}.{n}" for r, n in kept),
