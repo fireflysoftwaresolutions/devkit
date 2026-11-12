@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """dev docs check never reports success when it cannot read a checker's output (lesson: hidden failures)."""
 import io
+import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -51,6 +53,25 @@ class ValeOutputTests(unittest.TestCase):
         rc, out = self.run_check(alert, "")
         self.assertNotEqual(rc, 0)
         self.assertIn("Google.Latin", out)
+
+    # 192 findings with 22 errors listed 40 warnings and none of the errors: the list was sorted by file and cut at 40
+    def test_every_error_is_listed_before_the_warnings_and_left_out_warnings_are_counted(self):
+        def alert(line, severity, check):
+            return {"Line": line, "Span": [1, 4], "Severity": severity, "Check": check, "Message": "m"}
+        data = {"A.md": [alert(n, "warning", "Google.Will") for n in range(1, 61)],
+                "B.md": [alert(n, "error", f"Google.Err{n}") for n in range(1, 23)],
+                "C.md": [alert(1, "warning", "Google.Late")]}
+        rc, out = self.run_check(json.dumps(data), "")
+        self.assertNotEqual(rc, 0)
+        self.assertIn("83 finding(s), 22 error(s)", out)
+        listed = [ln.strip() for ln in out.splitlines() if re.match(r"\s{4}\S+\.md:\d+:\d+: ", ln)]
+        errors = [ln for ln in listed if ": error " in ln]
+        self.assertEqual(len(errors), 22)
+        first_warning = next(k for k, ln in enumerate(listed) if ": warning " in ln)
+        self.assertTrue(all(listed.index(e) < first_warning for e in errors), listed[:25])
+        self.assertEqual(sum(1 for ln in listed if ": warning " in ln), 40)
+        self.assertRegex(out, r"21 more warning\(s\) in 2 file\(s\) not listed: vale --config \S+ "
+                              r"--minAlertLevel warning A\.md C\.md")
 
 
 if __name__ == "__main__":

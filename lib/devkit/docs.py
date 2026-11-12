@@ -19,6 +19,7 @@ from .core import DEVKIT_HOME, HOME
 VALE_STYLES = HOME / ".local" / "share" / "devkit" / "vale" / "styles"
 VALE_INI = HOME / ".local" / "share" / "devkit" / "vale" / ".vale.ini"
 MD_SKIP = ("node_modules", ".venv", "vendor", "dist", ".git", "build", "target", ".worktrees")
+VALE_WARNINGS_SHOWN = 40  # Vale's errors are all listed; its warnings up to this many, then a count and the command
 
 
 def ensure_vale() -> bool:
@@ -96,27 +97,30 @@ def check(root: Path, paths=None, online=False, fix=False, prose=True) -> int:
             cfg = str(own_ini if own_ini.exists() else VALE_INI)
             p = subprocess.run(["vale", "--config", cfg, "--output", "JSON", "--minAlertLevel", "warning"] + rel,
                                cwd=root, capture_output=True, text=True)
-            lines, errors = [], []
+            errors, warnings = [], []  # (file, line) each; the tool's own errors have no file
             try:
                 data = json.loads(p.stdout or "{}")
             except ValueError:
                 data = {}
-                errors.append("vale output could not be read: " + (p.stdout or p.stderr).strip()[:200])
+                errors.append(("", "vale output could not be read: " + (p.stdout or p.stderr).strip()[:200]))
             for ln in (p.stderr or "").splitlines():  # e.g. E201 invalid front matter: Vale skipped that file
                 if ln.strip() and ("E1" in ln or "E2" in ln or "Error" in ln):
-                    errors.append("vale: " + ln.strip()[:200])
+                    errors.append(("", "vale: " + ln.strip()[:200]))
             for f, alerts in sorted(data.items()) if isinstance(data, dict) else []:
                 for al in alerts:
                     ln = f"{f}:{al.get('Line')}:{al.get('Span', [0])[0]}: {al.get('Severity')} {al.get('Check')}: " \
                          f"{al.get('Message')}"
-                    lines.append(ln)
-                    if al.get("Severity") == "error":
-                        errors.append(ln)
-            lines += [e for e in errors if e.startswith("vale")]
-            print(f"  {ui.OK if not lines else (ui.FAIL if errors else ui.WARN)} {len(lines)} finding(s)"
+                    (errors if al.get("Severity") == "error" else warnings).append((f, ln))
+            total = len(errors) + len(warnings)
+            print(f"  {ui.OK if not total else (ui.FAIL if errors else ui.WARN)} {total} finding(s)"
                   f"{f', {len(errors)} error(s)' if errors else ''}")
-            for ln in lines[:40]:
+            for _, ln in errors + warnings[:VALE_WARNINGS_SHOWN]:  # every error, then the first warnings
                 print(f"    {ui.dim(ln)}")
+            rest = warnings[VALE_WARNINGS_SHOWN:]
+            if rest:
+                where = list(dict.fromkeys(f for f, _ in rest))
+                print(f"    {len(rest)} more warning(s) in {len(where)} file(s) not listed: "
+                      f"vale --config {core.tilde(cfg)} --minAlertLevel warning {' '.join(where)}")
             failed |= bool(errors)
         else:
             print(f"  {ui.WARN} vale not available (brew install vale)")
