@@ -25,7 +25,10 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import sys
+import threading
+import time
 from pathlib import Path
 
 from . import core
@@ -231,6 +234,122 @@ def _judged(verdict):
     global LAST_REFUSAL, LAST_REFUSAL_WORD
     LAST_REFUSAL, LAST_REFUSAL_WORD = refusal_of(verdict)
     return verdict
+
+
+# The guard's time to judge one call. The agents stop the guard hook at the timeout devkit installs for it
+# (_hook_timeout) and then run the call unjudged, so a slow judgment would be a way around every rule: past its time
+# the guard refuses the call instead. In the guard hook's own process (`dev hook guard`) the time runs from the moment
+# the guard loaded, for all its judges of the call together (check, then the gates after it); anywhere else (`dev guard
+# check`, tests) for each call. JUDGE_MARGIN leaves the hook time to start and to report its verdict.
+JUDGE_MARGIN = 5.0
+_LOADED = time.monotonic()
+_IN_GUARD_HOOK = sys.argv[1:3] == ["hook", "guard"]
+_TIMED = contextvars.ContextVar("devkit_guard_timed", default=False)  # a judge inside another runs on the outer's time
+
+
+@functools.lru_cache(maxsize=4)
+def _hook_timeout_at(home: str) -> float:
+    found = []
+    for rel in ("config/claude/settings.json", "config/codex/hooks.json"):
+        data = core.read_json(Path(home) / rel, {}) or {}
+        events = data.get("hooks") if isinstance(data, dict) and isinstance(data.get("hooks"), dict) else {}
+        for group in (g for gs in events.values() if isinstance(gs, list) for g in gs if isinstance(g, dict)):
+            for h in (h for h in group.get("hooks") or [] if isinstance(h, dict)):
+                limit = h.get("timeout")
+                if re.search(r"\bhook\s+guard\b", str(h.get("command") or "")) and \
+                        isinstance(limit, (int, float)) and not isinstance(limit, bool) and limit > 0:
+                    found.append(float(limit))
+    return min(found) if found else 15.0
+
+
+def _hook_timeout() -> float:
+    """The guard hook's timeout in seconds as devkit installs it into the agents' settings (config/claude/settings.json
+    and config/codex/hooks.json of the copy that runs): the shortest they give, so the guard ends before either agent
+    stops it; 15, what devkit installs, when none can be read."""
+    return _hook_timeout_at(str(core.DEVKIT_HOME))
+
+
+def judge_budget() -> float:
+    """The seconds the guard may spend judging one call: the guard hook's timeout less JUDGE_MARGIN, at least 1."""
+    return max(1.0, _hook_timeout() - JUDGE_MARGIN)
+
+
+def judge_time_reason(budget: float) -> str:
+    return (f"devkit's guard could not judge this call within the {budget:g} s it has for one, so it refuses it rather "
+            f"than let the hook's timeout run it unjudged. Split it into smaller calls: one command per call, with a "
+            f"long text or program in a file the command reads rather than in the command line.")
+
+
+class _OutOfTime(BaseException):
+    """The guard's time to judge a call ran out: a BaseException, so no rule's `except Exception` swallows it."""
+
+
+@contextlib.contextmanager
+def _time_limit(seconds: float):
+    """Raise _OutOfTime in the main thread once `seconds` have passed, and again every 50 ms until the block ends, so
+    a handler that swallowed one cannot keep the judgment going. Python's regular-expression engine checks for
+    signals while it matches, so a pattern scan in C stops too. An outer timer (a lock wait's, a test's) keeps its
+    handler and the time it had left, and fires first when it is due first. Off the main thread, which takes no
+    signals, the block runs without a limit."""
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    started = time.monotonic()
+    left, period = signal.getitimer(signal.ITIMER_REAL)
+    before, due = signal.getsignal(signal.SIGALRM), started + seconds
+    before = signal.SIG_DFL if before is None else before  # None: a handler set outside Python
+    outer = [started + left if left else None]  # when the outer timer is due, until it is handed to its handler
+
+    def ran_out(signum, frame):
+        now = time.monotonic()
+        if outer[0] is not None and now >= outer[0]:
+            outer[0] = None
+            signal.setitimer(signal.ITIMER_REAL, max(due - now, 0.001), 0.05)
+            if callable(before):
+                before(signum, frame)
+        if now >= due:
+            raise _OutOfTime()
+
+    signal.signal(signal.SIGALRM, ran_out)
+    signal.setitimer(signal.ITIMER_REAL, max(min(due, outer[0] or due) - started, 0.001), 0.05)
+    try:
+        yield
+    finally:
+        while True:  # ignore our ticks first: one still on its way is dropped, and never leaves ran_out in place
+            try:
+                signal.signal(signal.SIGALRM, signal.SIG_IGN)
+                break
+            except _OutOfTime:
+                pass
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, before)
+        if outer[0] is not None:
+            signal.setitimer(signal.ITIMER_REAL, max(outer[0] - time.monotonic(), 0.001), period)
+
+
+def _in_time(judged: bool = False):
+    """Decorator: a judge of a call (check, a gate) runs within the guard's time; past it, its verdict refuses the
+    call with judge_time_reason, through _judged when `judged` (check's own verdicts do)."""
+    def wrap(fn):
+        @functools.wraps(fn)
+        def _judged_in_time(*args, **kwargs):
+            if _TIMED.get():
+                return fn(*args, **kwargs)
+            budget = judge_budget()
+            left = budget - (time.monotonic() - _LOADED) if _IN_GUARD_HOOK else budget
+            token = _TIMED.set(True)
+            try:
+                if left <= 0:
+                    raise _OutOfTime()
+                with _time_limit(left):
+                    return fn(*args, **kwargs)
+            except _OutOfTime:
+                verdict = deny(judge_time_reason(budget), key="judge-time")
+                return _judged(verdict) if judged else verdict
+            finally:
+                _TIMED.reset(token)
+        return _judged_in_time
+    return wrap
 
 
 # The escape hatches a command's own prefix sets (DEVKIT_RAW_GH=1 gh pr merge …): the main session may use them, and
@@ -9269,6 +9388,7 @@ def failopen(where: str, exc: BaseException):
     _record("guard.failopen", where, f"{type(exc).__name__}: {exc}"[:300], "allow", rule=where)
 
 
+@_in_time()
 def crew_shell_verdict(cmd: str, cwd, scope=None, member=None, level=None, base=None, *, lane=None, session: str = "",
                        agent: str = "claude", grant=None, now=None, routed: bool = False):
     """For a crew member's shell command that devkit did not route to its lane (or, with `routed`, one it did):
@@ -12175,6 +12295,7 @@ def _main_gate(acts, agent, session, grant, now):
     return None
 
 
+@_in_time()
 def irreversible_verdict(cmd: str, cwd, *, agent: str = "claude", session: str = "", grant=None, now=None):
     """The irreversible-action gate for a shell command of the main session (spec C6): ("deny", why) for a tier-2
     action no live grant covers while safeguards.irreversible_main enforces; None otherwise. Every action is recorded
@@ -12458,6 +12579,7 @@ _SHELL = _Judged(None)  # the call is a shell command: check_bash judges it
 _TILDE_READINGS = (_EXPAND, _AS_IS)
 
 
+@_in_time(judged=True)
 def check(tool: str, tool_input: dict, cwd: str, agent: str, call: dict | None = None):
     """The guard's verdict on one tool call: ("deny", why), ("ask", why) or None. It begins a judgment: the refusal
     ids of what it and the gates after it refuse are kept for refusal_of, and LAST_REFUSAL names its own refusal.

@@ -4,11 +4,14 @@
 # a way around the guard. It reads what a launcher (xcrun, op run, nix run, mise exec …) may start once per command,
 # within a bound, and its pattern scans are linear in the length of a word.
 # Run: python3 -m unittest tests.test_guard_launcher_depth -v
+import json
 import os
+import re
 import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -144,3 +147,75 @@ class LongWordsAreJudgedInTime(unittest.TestCase):
         pinned = f"~/.local/share/devkit/releases/{copies.NEW}/"
         self.assertIsNone(self.copy_named(f"echo {pinned}{copies.OLD * 5000}"))
         self.assertIn(copies.OLD, self.check(f"R=~/.local/share/devkit; $R/releases/{copies.OLD}/bin/dev status") or "")
+
+
+class _Outer(BaseException):
+    pass
+
+
+class JudgingStopsAtTheGuardsTime(unittest.TestCase):
+    # whatever is slow in judging a call (a rule, a pattern the regular-expression engine runs in C, a long token),
+    # the guard stops at its time and refuses the call, before the hook's timeout would let it run unjudged
+
+    setUp = LaunchersAreReadOnceInTime.setUp
+    within = LaunchersAreReadOnceInTime.within
+    check = LaunchersAreReadOnceInTime.check
+
+    def refused_in_time(self, slow, cmd="ls", budget=0.3):
+        """The verdict of `cmd` while the releases rule runs `slow` and the guard has `budget` seconds."""
+        started = time.monotonic()
+        with mock.patch.object(guard, "judge_budget", return_value=budget), \
+                mock.patch.object(guard, "other_release", side_effect=lambda *a, **k: slow()):
+            why = self.check(cmd)
+        self.assertLess(time.monotonic() - started, budget + 0.5)
+        return why
+
+    def test_a_judgment_past_its_time_is_refused_and_an_earlier_outer_timer_still_fires(self):
+        self.assertEqual(self.refused_in_time(lambda: time.sleep(5)), guard.judge_time_reason(0.3))
+        # a pattern the engine runs in C, with no Python between its steps: (x+x+)+y backtracks for minutes
+        self.assertEqual(self.refused_in_time(lambda: re.match(r"(x+x+)+y", "x" * 40)), guard.judge_time_reason(0.3))
+        # a timer around the judgment (a lock wait's, a test's) that is due first keeps its time and its handler
+
+        def outer(*_):
+            raise _Outer()
+        before = signal.signal(signal.SIGALRM, outer)
+        signal.setitimer(signal.ITIMER_REAL, 0.2)
+        try:
+            with mock.patch.object(guard, "judge_budget", return_value=2.0), \
+                    mock.patch.object(guard, "other_release", side_effect=lambda *a, **k: time.sleep(3)), \
+                    self.assertRaises(_Outer):
+                guard.check("Bash", {"command": "ls"}, self.repo, "claude")
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, before)
+
+    def test_a_long_token_past_its_time_is_refused(self):
+        # the shell tokenizer copies a token at each of its characters: one word of 200,000 takes seconds
+        with mock.patch.object(guard, "judge_budget", return_value=0.5):
+            started = time.monotonic()
+            self.assertEqual(self.check("echo '" + "x" * 200_000 + "'"), guard.judge_time_reason(0.5))
+            self.assertLess(time.monotonic() - started, 1.0)
+
+    def test_the_gates_after_check_share_the_hooks_time(self):
+        # in the guard hook the time runs from the guard's start for all its judges of the call; elsewhere per call
+        long_ago = time.monotonic() - guard.judge_budget() - 1
+        with mock.patch.object(guard, "_LOADED", long_ago):
+            self.assertIsNone(self.check("ls"))
+            with mock.patch.object(guard, "_IN_GUARD_HOOK", True):
+                self.assertEqual(self.check("ls"), guard.judge_time_reason(guard.judge_budget()))
+                v = guard.irreversible_verdict("ls", self.repo, session="s1", grant=lambda *a, **k: None)
+                self.assertEqual(v, ("deny", guard.judge_time_reason(guard.judge_budget())))
+                v = guard.crew_shell_verdict("ls", self.repo, None, "tank", lane="a1", session="s1",
+                                             grant=lambda *a, **k: None)
+                self.assertEqual(v, ("deny", guard.judge_time_reason(guard.judge_budget())))
+
+    def test_the_budget_is_the_shortest_guard_hook_timeout_devkit_installs_less_its_margin(self):
+        self.assertEqual(guard.judge_budget(), 15 - guard.JUDGE_MARGIN)  # both agents' configs give the guard 15 s
+        home = Path(tempfile.mkdtemp(dir=self.repo))
+        for rel, limit in (("config/claude/settings.json", 40), ("config/codex/hooks.json", 30)):
+            (home / rel).parent.mkdir(parents=True)
+            hooks = [{"type": "command", "command": "'{{DEVKIT}}/bin/dev' hook prompt", "timeout": 5},
+                     {"type": "command", "command": "'{{DEVKIT}}/bin/dev' hook guard --agent x", "timeout": limit}]
+            (home / rel).write_text(json.dumps({"hooks": {"PreToolUse": [{"matcher": "*", "hooks": hooks}]}}))
+        with mock.patch.object(core, "DEVKIT_HOME", home):
+            self.assertEqual(guard.judge_budget(), 30 - guard.JUDGE_MARGIN)
