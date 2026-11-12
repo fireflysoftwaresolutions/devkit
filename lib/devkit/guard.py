@@ -1048,7 +1048,7 @@ def _strip_prefix(argv):
     i = 0
     while i < len(argv):
         a = argv[i]
-        if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", a) or a == _DASH_PRECOMMAND:
+        if re.match(r"^[A-Za-z_][A-Za-z0-9_]*\+?=", a) or a == _DASH_PRECOMMAND:  # `X=1`, and `PATH+=:/x` appends
             i += 1
         elif os.path.basename(a) in PREFIX_CMDS:
             i = _prefix_opts(os.path.basename(a), argv, i + 1)[1]
@@ -4426,7 +4426,9 @@ def vendor_ext_refusal(argv, cwd=None, names=(), more=False) -> str:
                 not any(_shell_made(a) for a in args) and _vendor_read_only("claude", args) and \
                 _vendor_read_only("codex", args):
             return ""  # whatever program it is, claude and codex both only read these words (issue 21)
-        if _shell_made(prog) or ("PATH" in set(names) and "/" not in prog):  # a variable, a substitution, a glob
+        # a variable, a substitution or a glob; or a bare name after PATH changed: zsh's path array or an export the
+        # guard cannot read (`export $(cat f)`) may set it too
+        if _shell_made(prog) or ({"PATH", "path", "?"} & set(names) and "/" not in prog):
             return "unnamed"
         if "/" not in prog or prog.startswith("@"):  # a bare name the PATH finds, or a scoped npm package
             return ""
@@ -4588,12 +4590,15 @@ def _env_split(argv0):
     """-> (names, argv): the variables a segment sets for the command it runs (VAR=…, env VAR=…, sudo VAR=…, also
     after timeout or uv run), and that command."""
     argv = _unwrap(argv0)
-    return {a.split("=", 1)[0] for a in argv0[:len(argv0) - len(argv)] if _ASSIGN.match(a)}, argv
+    return {m.group(1) for a in argv0[:len(argv0) - len(argv)] if (m := re.match(r"([A-Za-z_][A-Za-z0-9_]*)\+?=", a))}, \
+        argv
 
 
 def _exports(name, args) -> set:
     """The variables `export`, `declare`, `setenv` or fish's `set -x` set in the shell; '?' for one the guard cannot
     see (`export $(cat file)`)."""
+    if name == "hash" and any(a == "-p" or (not a.startswith("-") and "=" in a) for a in args):
+        return {"PATH"}  # `hash -p /x/claude ng` (bash), `hash ng=/x/claude` (zsh): a name runs another program
     if name in _EXPORTERS:
         pos = [a for a in args if not a.startswith(("-", "+"))]
     elif name == "setenv" or (name == "set" and any(a.startswith("-") and "x" in a for a in args)):

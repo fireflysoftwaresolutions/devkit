@@ -366,6 +366,18 @@ class OlderBypassesOfTheExtensionRule(unittest.TestCase):
         found = guard.irreversible_actions("op run -- gh pr merge 12", self.cwd) or []
         self.assertEqual([(a["action"], a["target"]) for a in found], [("merge", "12")])  # the gate reads it too
 
+    def test_what_changes_the_program_a_bare_name_runs_counts_as_a_path_set(self):
+        # `hash -p` (bash) and `hash name=` (zsh) point a name elsewhere; zsh's path array, an append assignment and
+        # an export the guard cannot read may put another claude first on the PATH
+        self.judge(tuple((c, guard.EXT_UNNAMED_REASON) for c in (
+            "hash -p ~/.local/bin/claude ng; ng mcp add evil -- npx evil",
+            "hash ng=~/.local/bin/claude; ng mcp add evil -- npx evil",
+            "path=(/opt/x $path); ng mcp add evil -- npx evil", "PATH+=:/opt/x; ng mcp add evil -- npx evil",
+            "export $(cat f); ng mcp add evil -- npx evil")),
+            ("hash -r; ng mcp add evil -- npx evil", "hash -p ~/.local/bin/claude ng; ng mcp list",
+             "path=(/opt/x $path); ng mcp list", "PATH+=:/opt/x; ls", "export X=1; ng mcp add evil -- bash"))
+        self.assertIn("force-push", self.check("PATH+=:/opt/x git push --force origin main") or "")  # a prefix too
+
 
 class PackageRunnersRunTheirCommand(unittest.TestCase):
     # F3 (re-review four): npm exec|x, bun x, yarn exec and `pnpm|yarn <bin>` run the command after them, so every
