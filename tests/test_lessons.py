@@ -1,15 +1,17 @@
 # Copyright (c) 2026 Firefly Software Solutions Inc.
 # SPDX-License-Identifier: Apache-2.0
 """Lessons: record, recall, recur, prevent, review, signals; the pipe-gate guard rule."""
+import json
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
-from devkit import core, guard, lessons, work  # noqa: E402
+from devkit import core, guard, identity, lessons, work  # noqa: E402
 
 A = {"user": "ana", "host": "mbp1", "agent": "claude", "session": "s1"}
 IDENT = ["-c", "user.email=t@example.com", "-c", "user.name=t"]
@@ -178,6 +180,61 @@ class PipeGateTests(unittest.TestCase):
             with self.subTest(cmd=ok):
                 v = guard.check("Bash", {"command": ok}, cwd, "claude")
                 self.assertTrue(v is None or v[0] != "deny" or "pipeline" not in v[1])
+
+
+class FormerUsageFileTests(unittest.TestCase):
+    # Lesson usage was published under each hostname macOS gave the Mac, and usage() summed every file, so one Mac's
+    # counts added up once per name. Each file of one Mac is a snapshot of the same counter: this Mac counts once,
+    # by the larger value of each field, and another person's or another Mac's file is never folded in.
+    DAY = 86400
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        self.name = "mac-158"
+        for p in (mock.patch.object(lessons, "LESSONS", root / "handoff" / "lessons"),
+                  mock.patch.object(work, "HANDOFF", root / "handoff"),
+                  mock.patch.object(lessons, "USAGE_LOCAL", root / "state" / "lessons-usage.json"),
+                  mock.patch.object(core, "STATE", root / "state"),
+                  mock.patch.dict(core.CFG, {"github_user": "ana"}),
+                  mock.patch("socket.gethostname", side_effect=lambda: self.name)):
+            p.start()
+            self.addCleanup(p.stop)
+        t0 = time.time()
+        # this Mac carried mac-158, then mac-55 for a moment, then andress-mbp-2 for a day; it is mac-9 now
+        for name, days in (("mac-158", 5), ("mac-55", 4), ("andress-mbp-2", 3), ("andress-mbp-2", 2)):
+            self.name = name
+            identity.machine(now=t0 - days * self.DAY)
+        self.name = "mac-9"
+        self.folder = lessons.LESSONS / "usage"
+        self.folder.mkdir(parents=True)
+        ago = lambda days: int(t0 - days * self.DAY)  # noqa: E731
+        for who, counts in (("ana@mac-158", {"shown": 5, "shown_last": ago(5) - 60}),
+                            ("ana@andress-mbp-2", {"shown": 6, "shown_last": ago(2.5), "applied": 2,
+                                                   "applied_last": ago(2.6)}),
+                            ("ana@mac-55", {"shown": 3, "shown_last": ago(10)}),  # mac-55 then was another Mac
+                            ("bob@andress-mbp-2", {"shown": 1, "shown_last": ago(2.5)})):  # another person
+            (self.folder / f"{who}.json").write_text(json.dumps({"L-one": counts}))
+        lessons.USAGE_LOCAL.parent.mkdir(parents=True, exist_ok=True)
+        lessons.USAGE_LOCAL.write_text(json.dumps({"L-one": {"shown": 4, "shown_last": int(t0) - 60}}))  # state reset
+
+    def test_this_macs_files_from_former_hostnames_count_once_by_the_larger_value(self):
+        u = lessons.usage()["L-one"]
+        self.assertEqual((u["shown"], u["applied"]), (6 + 3 + 1, 2))
+
+    def test_publishing_folds_them_into_this_macs_counts_once_and_keeps_other_macs_files(self):
+        me = work.actor("human")
+        self.assertTrue(lessons.publish_usage())
+        self.assertEqual(sorted(f.name for f in self.folder.glob("*.json")),
+                         sorted([f"ana@{me['host']}.json", "ana@mac-55.json", "bob@andress-mbp-2.json"]))
+        own = json.loads((self.folder / f"ana@{me['host']}.json").read_text())["L-one"]
+        self.assertEqual((own["shown"], own["applied"]), (6, 2))
+        self.assertEqual(lessons.usage()["L-one"]["shown"], 10)
+        self.assertFalse(lessons.publish_usage())  # nothing left to fold, nothing changed
+        lessons.track(["L-one"], "shown")  # the local counts kept the larger values: the next use counts from 6
+        self.assertTrue(lessons.publish_usage())
+        self.assertEqual(lessons.usage()["L-one"]["shown"], 11)
 
 
 if __name__ == "__main__":

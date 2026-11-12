@@ -19,7 +19,7 @@ The loop:
   prevent   `dev lesson prevent --by test|lint|guard|skill|ci|rule --ref …`: automation beats prose
   review    `dev lesson review` lists recurring, unprevented and stale lessons
   use       every time a lesson is shown in a session, applied (named in a reply), repeated or looked up, its usage is
-            counted (per machine: lessons/usage/<user>@<host>.json, summed across the team)
+            counted (per machine: lessons/usage/<user>@<machine id>.json, summed across the team)
   sleep     `dev sleep` (nightly, the `sleep` job) consolidates like a brain at night: strength decays unless
             a lesson is seen again; near-duplicates are merged; lessons are archived into lessons/archive/
             (restorable) only by the archive policy (`consolidate`), never to fit a count: storage is unbounded and
@@ -36,7 +36,7 @@ import time
 import unicodedata
 from pathlib import Path
 
-from . import core, state, work
+from . import core, identity, state, work
 from .core import HANDOFF, STATE
 
 LESSONS = HANDOFF / "lessons"
@@ -741,27 +741,97 @@ def track(ids, kind: str, channel: str = "") -> None:
         pass
 
 
+def _larger(into: dict, snapshot: dict) -> dict:
+    """Fold a snapshot of one machine's counter into another by the larger value of each field: the files one Mac
+    published are snapshots of the same cumulative counter, so adding them would count an event once per file."""
+    for lid, e in snapshot.items():
+        if isinstance(e, dict):
+            t = into.setdefault(lid, {})
+            for k, v in e.items():
+                t[k] = max(int(t.get(k) or 0), int(v))
+    return into
+
+
+def _newest_use(counts: dict) -> float:
+    return max((float(v) for e in counts.values() if isinstance(e, dict) for k, v in e.items()
+                if k.endswith("_last") and isinstance(v, (int, float))), default=0.0)
+
+
+def former_usage(a=None) -> list:
+    """This Mac's usage files from before its machine id: lessons/usage/<user>@<hostname>.json of this actor, for a
+    hostname this Mac carried when the file's newest use was counted (identity.was_this_mac at its newest `*_last`).
+    Another person's file, or one written under a name this Mac did not carry then (another Mac's), is never among
+    them, and neither is anything for an actor of another machine. -> [(path, counts)], oldest name first."""
+    folder = LESSONS / "usage"
+    named = [(f, *f.stem.rpartition("@")[::2]) for f in sorted(folder.glob("*.json"))] if folder.is_dir() else []
+    named = [(f, user, host) for f, user, host in named if user and host and not identity.MACHINE_ID.fullmatch(host)]
+    if not named:
+        return []
+    m = identity.machine()
+    named = [(f, user, host) for f, user, host in named if host in m.aliases]
+    if not named:
+        return []
+    a = a or work.actor("human")
+    if a.get("host") != m.id:
+        return []
+    out = []
+    for f, user, host in named:
+        counts = core.read_json(f, None) if user == a.get("user") else None
+        newest = _newest_use(counts) if isinstance(counts, dict) else 0.0
+        if newest and identity.was_this_mac(host, newest, m):
+            out.append((f, counts, newest))
+    return [(f, counts) for f, counts, _ in sorted(out, key=lambda x: x[2])]
+
+
 def publish_usage(a=None) -> bool:
-    """lessons/usage/<user>@<host>.json: this machine's counts, so the team's usage can be summed (written by sync)."""
+    """lessons/usage/<user>@<machine id>.json: this machine's counts, so the team's usage can be summed (written by
+    sync). This Mac's files from before its machine id (former_usage) are folded into its local counts first, by the
+    larger value of each field, and deleted, so the team counts this Mac once. -> whether a file changed or went."""
     a = a or work.actor("human")
     f = LESSONS / "usage" / f"{a['user']}@{a['host']}.json"
+    former = former_usage(a)
+    if former:
+        def fold(u):
+            for _, counts in former:
+                _larger(u, counts)
+        try:
+            state.update(USAGE_LOCAL, fold, indent=1)
+        except (state.StateBusy, OSError):
+            former = []  # the counts stay where they are; the next publish folds them
     data = _usage_local()
     if not data:
         return False
-    old = core.read_json(f, None)
-    if old == data:
-        return False
-    f.parent.mkdir(parents=True, exist_ok=True)
-    f.write_text(json.dumps(data, indent=1, sort_keys=True) + "\n")
-    return True
+    changed = core.read_json(f, None) != data
+    if changed:
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(json.dumps(data, indent=1, sort_keys=True) + "\n")
+    gone = False
+    for path, _ in former:
+        try:
+            path.unlink()
+            gone = True
+        except OSError:
+            pass
+    return changed or gone
 
 
 def usage() -> dict:
-    """Team-wide usage: counts summed over machines, latest timestamps kept."""
+    """Team-wide usage: counts summed over machines, latest timestamps kept. This Mac counts once: its own file and
+    its files from before the machine id (former_usage) are snapshots of one counter, taken by the larger value of
+    each field until publish_usage folds them in and deletes them."""
     total = {}
-    files = list((LESSONS / "usage").glob("*.json")) if (LESSONS / "usage").exists() else []
-    mine = _usage_local()
-    sources = [core.read_json(f, {}) or {} for f in files] or [mine]
+    files = sorted((LESSONS / "usage").glob("*.json")) if (LESSONS / "usage").exists() else []
+    former = former_usage() if files else []
+    if former:
+        user = former[0][0].stem.rpartition("@")[0]
+        own = LESSONS / "usage" / f"{user}@{identity.machine().id}.json"
+        skip = {own} | {f for f, _ in former}
+        share = _larger({}, core.read_json(own, {}) or {})
+        for _, counts in former:
+            _larger(share, counts)
+        sources = [core.read_json(f, {}) or {} for f in files if f not in skip] + [share]
+    else:
+        sources = [core.read_json(f, {}) or {} for f in files] or [_usage_local()]
     for src in sources:
         for lid, e in src.items():
             t = total.setdefault(lid, {})
