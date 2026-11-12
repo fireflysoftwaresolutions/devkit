@@ -3571,6 +3571,13 @@ class _Expr:
         if name in ("startswith", "endswith", "contains") and len(args) == 2 and all(isinstance(x, str) for x in args):
             a, b = args[0].lower(), args[1].lower()
             return a.startswith(b) if name == "startswith" else a.endswith(b) if name == "endswith" else b in a
+        if name == "fromjson" and len(args) == 1 and isinstance(args[0], str):
+            try:
+                return json.loads(args[0])
+            except ValueError:
+                return UNKNOWN
+        if name == "tojson" and len(args) == 1 and args[0] is not UNKNOWN:
+            return json.dumps(args[0], indent=2)
         return UNKNOWN
 
 
@@ -3598,6 +3605,32 @@ def eval_if(cond, ctx: dict, funcs: dict = None):
     except (ValueError, IndexError):
         return None
     return None if t is UNKNOWN else t
+
+
+def eval_value(expr: str, ctx: dict, funcs: dict = None):
+    """The value of one expression, the text inside `${{ }}`, under the context values devkit knows; UNKNOWN when it
+    reads a value devkit does not know or uses syntax it does not read."""
+    toks = _tokens(str(expr).strip())
+    if not toks:
+        return UNKNOWN
+    try:
+        return _Expr(toks, ctx, dict(funcs or {})).parse()
+    except (ValueError, IndexError):
+        return UNKNOWN
+
+
+def as_text(v) -> str:
+    """A value as GitHub writes it into a string: null is empty, booleans are lowercase, a whole number has no
+    decimals, an object or array is JSON."""
+    if v is None:
+        return ""
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, float) and v == v and v.is_integer():
+        return str(int(v))
+    if isinstance(v, (dict, list)):
+        return json.dumps(v)
+    return str(v)
 
 
 def job_results(tree, ctx: dict) -> dict:

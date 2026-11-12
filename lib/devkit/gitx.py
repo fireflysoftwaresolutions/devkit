@@ -1895,12 +1895,35 @@ def _defaults_wd(lines, entry):
     return _scalar(wd[0]) if wd else None
 
 
+# Values the local run produces itself, which later jobs and steps read: needs.<job>.outputs.<name> and
+# needs.<job>.result, steps.<id>.outputs.<name>, .outcome and .conclusion, and matrix.<key> in a matrix that an
+# expression gives (fromJSON(needs.plan.outputs.…)). run_local_ci evaluates them as the run gets there; an expression
+# on any other context keeps its old treatment, and a fixed matrix still runs once.
+_RUN_VALUES = re.compile(r"(?<![\w.-])(?:needs|steps|matrix)\.")
+_NEEDS_OR_STEPS = re.compile(r"(?<![\w.-])(?:needs|steps)\.")
+_RUN_NAME = re.compile(r"(?<![\w.-])(?:needs|steps|matrix)(?:\.[\w-]+)+")
+_EXPR = re.compile(r"\$\{\{(.*?)\}\}", re.S)
+
+
+def _reads(text, which=_RUN_VALUES) -> bool:
+    """Does an expression in `text` (inside `${{ }}`) read one of the run's own values?"""
+    return any(which.search(m.group(1)) for m in _EXPR.finditer(text or ""))
+
+
 def plan_workflow(text: str, fname: str, root: str) -> list:
-    """-> jobs [{workflow, job, steps: [{name, run, cwd, env, skip, blocking}], skip, blocking}] for one workflow."""
-    from . import ci
+    """-> jobs [{workflow, file, job, id, needs, cond, decide, outputs, matrix, title, never, steps: [{name, run, cwd,
+    env, skip, blocking, id, dynamic, never, outputs_read}], skip, blocking}] for one workflow. A job whose `if:` reads
+    needs (decide) or whose matrix is an expression, and a step whose script, variables, `if:` or folder read needs,
+    steps or such a matrix (dynamic), are settled by run_local_ci when the run gets there."""
+    from . import ci, pipelines
     wf = ci.parse_workflow(text)
     lines = text.splitlines()
     top = _mapping(lines, 0, len(lines))
+    try:
+        tree = pipelines.load_yaml(text)
+    except Exception:  # noqa: BLE001 - a file the reader cannot parse keeps the line reading below
+        tree = None
+    trees = tree.get("jobs") if isinstance(tree, dict) and isinstance(tree.get("jobs"), dict) else {}
     name = wf.get("name") or fname
     triggers = set(wf.get("on") or [])
     wf_env = _env(lines, top.get("env"))
@@ -1911,13 +1934,21 @@ def plan_workflow(text: str, fname: str, root: str) -> list:
     jobs = []
     for jid, (_, js, je) in _mapping(lines, jobs_entry[1], jobs_entry[2]).items():
         jm = _mapping(lines, js, je)
-        jname = _scalar(jm["name"][0]) if "name" in jm else jid
-        jname = re.sub(r"\$\{\{[^}]*\}\}", "", re.sub(r"\s*\([^()]*\$\{\{[^}]*\}\}[^()]*\)", "", jname)).strip()
+        jt = trees.get(jid) if isinstance(trees.get(jid), dict) else {}
+        title = _scalar(jm["name"][0]) if "name" in jm else ""
+        jname = re.sub(r"\$\{\{[^}]*\}\}", "", re.sub(r"\s*\([^()]*\$\{\{[^}]*\}\}[^()]*\)", "", title or jid)).strip()
         jname = jname or jid
-        job = {"workflow": name, "file": fname, "job": jname, "steps": [], "skip": None, "blocking": False}
+        strategy = jt.get("strategy") if isinstance(jt.get("strategy"), dict) else {}
+        matrix = strategy.get("matrix")
+        outputs = jt.get("outputs") if isinstance(jt.get("outputs"), dict) else {}
+        cond = _scalar(jm["if"][0]) if "if" in jm else ""
+        job = {"workflow": name, "file": fname, "job": jname, "steps": [], "skip": None, "blocking": False,
+               "id": jid, "needs": [str(n) for n in pipelines._as_list(jt.get("needs"))], "cond": cond,
+               "decide": False, "never": False, "outputs": {str(k): str(v) for k, v in outputs.items()},
+               "matrix": matrix.strip() if isinstance(matrix, str) and "${{" in matrix else None,
+               "title": title if "${{" in title else ""}
         jobs.append(job)
         runs_on = _scalar(jm["runs-on"][0]) if "runs-on" in jm else ""
-        cond = _scalar(jm["if"][0]) if "if" in jm else ""
         if not triggers & CI_TRIGGERS:
             job["skip"] = f"workflow runs on {', '.join(sorted(triggers)) or '?'}, not on push or pull requests"
         elif "uses" in jm:
@@ -1926,10 +1957,13 @@ def plan_workflow(text: str, fname: str, root: str) -> list:
             job["skip"] = "deploy/publish job"
         elif "windows" in runs_on.lower():
             job["skip"] = "Windows runner (not reproducible on macOS)"
+        elif cond and _NEEDS_OR_STEPS.search(cond):
+            job["decide"] = True  # it reads what the jobs it needs produced: settled when the run gets there
         elif cond:
             verdict = _condition(cond)
             if verdict != "run":
-                job.update(skip=f"conditional job (if: {cond[:50]})", blocking=verdict == "unknown")
+                job.update(skip=f"conditional job (if: {cond[:50]})", blocking=verdict == "unknown",
+                           never=verdict == "never")
         if job["skip"]:
             continue
         job_env = dict(wf_env, **_env(lines, jm.get("env")))
@@ -1937,10 +1971,13 @@ def plan_workflow(text: str, fname: str, root: str) -> list:
         steps_entry = jm.get("steps")
         if not steps_entry:
             continue
+        dynamic = _RUN_VALUES if job["matrix"] else _NEEDS_OR_STEPS
+        read = set(re.findall(r"(?<![\w.-])steps\.([\w-]+)\.outputs\b", "\n".join(lines[js:je])))
         for item in _sequence(lines, steps_entry[1], steps_entry[2]):
             sm = _mapping(item, 0, len(item))
+            sid = _scalar(sm["id"][0]) if "id" in sm else ""
             st = {"job": jname, "name": "", "run": None, "cwd": root, "env": {}, "skip": None, "blocking": False,
-                  "dropped": []}
+                  "dropped": [], "id": sid, "dynamic": False, "never": False, "outputs_read": sid in read}
             if "uses" in sm:
                 st.update(name=_scalar(sm["uses"][0]), skip="setup")
                 job["steps"].append(st)
@@ -1954,7 +1991,13 @@ def plan_workflow(text: str, fname: str, root: str) -> list:
             shell = _scalar(sm["shell"][0]) if "shell" in sm else ""
             scond = _scalar(sm["if"][0]) if "if" in sm else ""
             wd = _scalar(sm["working-directory"][0]) if "working-directory" in sm else job_wd
-            st["skip"], st["blocking"], here, st["dropped"] = _step_plan(run, shell, scond, wd, root, st["env"])
+            if (scond and dynamic.search(scond)) or any(_reads(v, dynamic) for v in [run, wd, *st["env"].values()]):
+                st.update(dynamic=True, raw={"run": run, "shell": shell, "if": scond, "wd": wd})
+                job["steps"].append(st)
+                continue
+            st["skip"], st["blocking"], here, st["dropped"] = _step_plan(run, shell, scond, wd, root, st["env"],
+                                                                         outputs_read=st["outputs_read"])
+            st["never"] = bool(st["skip"]) and bool(scond) and _condition(scond) == "never"
             if not st["skip"] and wd:
                 st["cwd"] = str(Path(root) / wd)
             st["run"] = _expand(here, root)
@@ -2536,10 +2579,12 @@ def _step_skip(run: str, shell: str, cond: str, wd, root, env=None):
     return _step_plan(run, shell, cond, wd, root, env)[:2]
 
 
-def _step_plan(run: str, shell: str, cond: str, wd, root, env=None):
+def _step_plan(run: str, shell: str, cond: str, wd, root, env=None, outputs_read=False):
     """-> (reason or None, blocking, the script to run here, the runner's setup commands left out of it). A step
     that installs its tools and runs a check (`brew install gitleaks && gitleaks detect`) runs the check without the
-    setup (see _separate); one whose check cannot be separated from its setup, or runs as root, blocks."""
+    setup (see _separate); one whose check cannot be separated from its setup, or runs as root, blocks.
+    `outputs_read`: a later step or the job's outputs read this step's outputs, so a step that writes only
+    $GITHUB_OUTPUT (or its summary) runs: run_local_ci gives it the file and reads it."""
     if cond:
         verdict = _condition(cond)
         if verdict == "never":
@@ -2558,18 +2603,19 @@ def _step_plan(run: str, shell: str, cond: str, wd, root, env=None):
     dropped = got["dropped"]
     if dropped:
         run = got["run"]
-    reason, blocking = _check_skip(run, shell, wd, root, step_env)
+    reason, blocking = _check_skip(run, shell, wd, root, step_env, outputs_read)
     return reason, blocking, run, dropped
 
 
-def _check_skip(run: str, shell: str, wd, root, step_env: dict):
+def _check_skip(run: str, shell: str, wd, root, step_env: dict, outputs_read=False):
     """-> (reason or None, blocking) for a step's script without the runner's setup."""
     if _SIDE_EFFECT.search(run):
         return "side effect (publish, deploy, push, system install)", False
     foreign = _foreign_context(_expand(run, root), step_env)
     if foreign:
         return foreign, True
-    if _PLUMBING.search(run):
+    plumbing = set(_PLUMBING.findall(run))
+    if plumbing and not (outputs_read and plumbing <= {"OUTPUT", "STEP_SUMMARY"}):
         return "CI plumbing ($GITHUB_ENV/OUTPUT)", False
     if _INSTALL.search(run):
         return "dependency install (your local environment is used)", False
@@ -2696,6 +2742,20 @@ def _reads_every_file(cmd: str) -> bool:
 
 
 def _resume_plan(c, s, rec, tree, cache):
+    """-> ("kept" | "partial" | "full", detail) for one step on `tree`, from its last recorded result. A step whose
+    outputs are read later runs whole, or is kept with the outputs it recorded; a step that reads values from earlier
+    jobs or steps runs again when they changed."""
+    if rec and s.get("inputs") is not None and rec.get("inputs") != s["inputs"]:
+        return "full", "the values it reads from earlier jobs or steps changed"
+    how, detail = _resume_decision(c, s, rec, tree, cache)
+    if s.get("outputs_read") and how == "partial":
+        return "full", "later steps read its outputs"
+    if s.get("outputs_read") and how == "kept" and not isinstance(rec.get("outputs"), dict):
+        return "full", "its outputs were not recorded"
+    return how, detail
+
+
+def _resume_decision(c, s, rec, tree, cache):
     """-> ("kept" | "partial" | "full", detail) for one step on `tree`, from its last recorded result."""
     from . import testx
     if not rec or rec.get("command") != s["run"] or not rec.get("tree"):
@@ -2725,8 +2785,242 @@ def _resume_plan(c, s, rec, tree, cache):
     return "full", f"{len(changed)} file(s) changed since"
 
 
+# The run's own values while run_local_ci replays it: each step writes its outputs to a $GITHUB_OUTPUT file of its
+# own; the job's `outputs:` read them as steps.<id>.outputs.<name>; the jobs after it read those and its result as
+# needs.<job>.outputs.<name> and needs.<job>.result. A value this Mac cannot know (a job or step that did not run
+# here) stays UNKNOWN, and whatever reads it is not run: devkit says which value and why instead of failing a check.
+
+
+def _read_outputs(path) -> dict:
+    """A step's $GITHUB_OUTPUT file -> {name: value}, read as the runner reads it: `name=value` lines and
+    `name<<DELIMITER` blocks."""
+    try:
+        lines = Path(path).read_text(errors="replace").splitlines()
+    except OSError:
+        return {}
+    out, i = {}, 0
+    while i < len(lines):
+        ln = lines[i]
+        i += 1
+        eq, hd = ln.find("="), ln.find("<<")
+        if hd > 0 and (eq < 0 or hd < eq):
+            name, delim, body = ln[:hd], ln[hd + 2:], []
+            while i < len(lines) and lines[i] != delim:
+                body.append(lines[i])
+                i += 1
+            i += 1
+            out[name] = "\n".join(body)
+        elif eq > 0:
+            out[ln[:eq]] = ln[eq + 1:]
+    return out
+
+
+def _flatten(prefix: str, v) -> dict:
+    """An object under the dotted names expressions read: matrix, matrix.shard, matrix.config.arch …"""
+    out = {prefix: v}
+    if isinstance(v, dict):
+        for k, x in v.items():
+            out.update(_flatten(f"{prefix}.{k}", x))
+    return out
+
+
+def _matrix_legs(m) -> list:
+    """GitHub's combinations of a matrix object: the product of its keys' values without the `exclude`d ones; each
+    `include` entry extends every combination whose original values it keeps, or is a combination of its own."""
+    if not isinstance(m, dict):
+        return []
+    keys = {str(k): (v if isinstance(v, list) else [v]) for k, v in m.items() if k not in ("include", "exclude")}
+    combos = [{}] if keys else []
+    for k, vals in keys.items():
+        combos = [dict(c, **{k: v}) for c in combos for v in vals]
+    excluded = [e for e in (m.get("exclude") or []) if isinstance(e, dict)]
+    combos = [c for c in combos if not any(all(c.get(k) == v for k, v in e.items()) for e in excluded)]
+    originals, extra = [dict(c) for c in combos], []
+    for inc in m.get("include") or []:
+        if not isinstance(inc, dict):
+            continue
+        hit = False
+        for c, o in zip(combos, originals):
+            if all(o[k] == v for k, v in inc.items() if k in o):
+                c.update(inc)
+                hit = True
+        if not hit:
+            extra.append(dict(inc))
+    return combos + extra
+
+
+def _status_fns(failed: bool, skipped: bool = False) -> dict:
+    return {"always": True, "success": not (failed or skipped), "failure": failed, "cancelled": False}
+
+
+def _interpolate(text, ctx: dict):
+    """The run's own values put into the `${{ }}` expressions of `text` that read needs, steps or matrix -> (text, the
+    expressions it could not evaluate). Expressions on other contexts stay as written."""
+    from . import pipelines
+    missing = []
+
+    def put(m):
+        if not _RUN_VALUES.search(m.group(1)):
+            return m.group(0)
+        v = pipelines.eval_value(m.group(1), ctx)
+        if v is pipelines.UNKNOWN:
+            missing.append(m.group(1).strip())
+            return m.group(0)
+        return pipelines.as_text(v)
+    return _EXPR.sub(put, text or ""), missing
+
+
+def _not_known(texts, ctx: dict, why: dict) -> str:
+    """The run's own values that `texts` read and this Mac does not know, and why."""
+    from . import pipelines
+    names = [n for t in texts for n in _RUN_NAME.findall(t or "")]
+    names = [n for n in dict.fromkeys(names) if pipelines._lookup(ctx, n) is pipelines.UNKNOWN] or ["a value"]
+    whys = [why[k] for k in dict.fromkeys(".".join(n.split(".")[:2]) for n in names) if k in why]
+    return f"reads {', '.join(names[:3])}, not known here" + (f" ({'; '.join(whys[:2])})" if whys else "")
+
+
+def _needs_ctx(j, done: dict):
+    """What job `j` knows of the jobs it needs, and of a ready pull request on macOS -> (context, why each needed job
+    left something unknown)."""
+    ctx = {"github.event_name": "pull_request", "github.event.pull_request.draft": False, "runner.os": "macOS"}
+    why = {}
+    for n in j["needs"]:
+        r = done.get((j["file"], n))
+        if r is None:
+            continue
+        ctx[f"needs.{n}.result"] = r["result"]
+        if r["outputs"] is not None:
+            ctx[f"needs.{n}.outputs."] = ""  # a name the job did not set is empty, as on GitHub
+            ctx.update({f"needs.{n}.outputs.{k}": v for k, v in r["outputs"].items()})
+        if r.get("why"):
+            why[f"needs.{n}"] = f"{n}: {r['why']}"
+    return ctx, why
+
+
+def _job_verdict(j, ctx: dict, why: dict, done: dict):
+    """Does job `j` run at this point of the run? -> None, or (reason, blocking, its result). As on GitHub, a job
+    whose `if:` calls no status function is skipped when a job it needs failed or was skipped."""
+    from . import pipelines
+    got = {n: done[(j["file"], n)]["result"] for n in j["needs"] if (j["file"], n) in done}
+    failed = [n for n, r in got.items() if r == "failure"]
+    skipped = [n for n, r in got.items() if r == "skipped"]
+    if (failed or skipped) and not pipelines._STATUS_FN.search(j["cond"] or ""):
+        return f"needs {(failed or skipped)[0]}, which {'failed' if failed else 'was skipped'}", False, "skipped"
+    if not j["decide"]:
+        return None
+    v = pipelines.eval_if(j["cond"], ctx, _status_fns(bool(failed), bool(skipped)))
+    if v is True:
+        return None
+    if v is False:
+        return f"if: {j['cond'][:50]} is false here", False, "skipped"
+    return f"conditional job (if: {j['cond'][:50]}): {_not_known([j['cond']], ctx, why)}", True, pipelines.UNKNOWN
+
+
+def _job_legs(j, ctx: dict, why: dict):
+    """The combinations of a matrix an expression gives -> (legs, "") or (None, why there are none here)."""
+    from . import pipelines
+    m = re.fullmatch(r"\$\{\{(.*)\}\}", j["matrix"], re.S)
+    v = pipelines.eval_value(m.group(1), ctx) if m else pipelines.UNKNOWN
+    if not isinstance(v, dict):
+        return None, f"matrix {j['matrix'][:60]}: " + (_not_known([j["matrix"]], ctx, why)
+                                                        if v is pipelines.UNKNOWN else "not an object")
+    legs = _matrix_legs(v)
+    if not legs:
+        return None, f"matrix {j['matrix'][:60]} has no combinations (GitHub fails such a job)"
+    return legs, ""
+
+
+def _leg_label(j, leg: dict) -> str:
+    """One combination's job name, as GitHub shows it: the `name:` with the matrix values put in, or the job and
+    the values."""
+    from . import pipelines
+    if j["title"]:
+        name, missing = _interpolate(j["title"], _flatten("matrix", leg))
+        if not missing and "${{" not in name and name.strip():
+            return name.strip()
+    return f"{j['job']} ({', '.join(pipelines.as_text(v) for v in leg.values())})"
+
+
+def _resolve_step(st, ctx: dict, why: dict, root, failed: bool):
+    """A step that reads the run's own values, with the values of this point of the run: ready to run, or skipped with
+    the reason (blocking when a value it reads is not known here)."""
+    from . import pipelines
+    raw, s = st["raw"], dict(st)
+    cond = raw["if"]
+    if cond and _RUN_VALUES.search(cond):
+        v = pipelines.eval_if(cond, ctx, _status_fns(failed))
+        if v is False:
+            s.update(skip=f"if: {cond[:50]} is false here", blocking=False, never=True)
+            return s
+        if v is None:
+            s.update(skip=f"conditional (if: {cond[:40]}): {_not_known([cond], ctx, why)}", blocking=True)
+            return s
+        cond = ""
+    env, inputs, missing = {}, {}, []
+    for k, val in st["env"].items():
+        env[k], miss = _interpolate(val, ctx)
+        missing += miss
+        if _reads(val):
+            inputs[k] = env[k]
+    run, miss = _interpolate(raw["run"], ctx)
+    wd, miss_wd = _interpolate(raw["wd"] or "", ctx)
+    missing += miss + miss_wd
+    if missing:
+        s.update(skip=_not_known(missing, ctx, why), blocking=True)
+        return s
+    s["skip"], s["blocking"], here, s["dropped"] = _step_plan(run, raw["shell"], cond, wd or None, root, env,
+                                                              outputs_read=st["outputs_read"])
+    s["never"] = bool(s["skip"]) and bool(cond) and _condition(cond) == "never"
+    if not s["skip"] and wd:
+        s["cwd"] = str(Path(root) / wd)
+    s["run"], s["env"], s["inputs"] = _expand(here, root), env, inputs
+    return s
+
+
+def _record_step(ctx: dict, why: dict, s, outcome, outputs) -> None:
+    """A step's outcome and outputs, for the steps after it and the job's outputs. outcome None: it did not run here,
+    so neither is known; outputs None: it ran, but its outputs are not known."""
+    sid = s.get("id")
+    if not sid:
+        return
+    if outcome is None:
+        why[f"steps.{sid}"] = f"step {sid}: {s.get('skip') or 'did not run here'}"
+        return
+    ctx[f"steps.{sid}.outcome"] = ctx[f"steps.{sid}.conclusion"] = outcome
+    if outputs is None:
+        why[f"steps.{sid}"] = f"step {sid}: its outputs were not recorded"
+        return
+    ctx[f"steps.{sid}.outputs."] = ""  # a name the step did not write is empty, as on GitHub
+    ctx.update({f"steps.{sid}.outputs.{k}": v for k, v in outputs.items()})
+
+
+def _job_outputs(j, ctx: dict) -> dict:
+    """The job's `outputs:` at its end; one devkit cannot evaluate here is UNKNOWN."""
+    from . import pipelines
+    out = {}
+    for k, v in j["outputs"].items():
+        text, missing = _interpolate(v, ctx)
+        out[k] = pipelines.UNKNOWN if missing or "${{" in text else text
+    return out
+
+
+def _job_order(jobs) -> list:
+    """Each workflow's jobs in an order their needs allow, the file's order where they leave a choice."""
+    out, files = [], list(dict.fromkeys(j["file"] for j in jobs))
+    for f in files:
+        left = [j for j in jobs if j["file"] == f]
+        ids, done = {j["id"] for j in left}, set()
+        while left:  # a cycle (GitHub refuses the workflow) keeps the file's order
+            j = next((x for x in left if all(n in done or n not in ids for n in x["needs"])), left[0])
+            left.remove(j)
+            done.add(j["id"])
+            out.append(j)
+    return out
+
+
 def run_local_ci(c, dry_run=False, keep_going=False, step_timeout=30, resume=False) -> int:
-    jobs = plan(c.top)
+    from . import pipelines
+    jobs = _job_order(plan(c.top))
     if not jobs:
         return fail("no GitHub Actions workflows to run here",
                     'run your local suite, then: dev ci --mark-passed --note "<command>: <result>"')
@@ -2735,7 +3029,6 @@ def run_local_ci(c, dry_run=False, keep_going=False, step_timeout=30, resume=Fal
               [(s["job"], s["name"], s["skip"], s["blocking"]) for j in jobs if not j["skip"] for s in j["steps"]
                if s["skip"] and s["skip"] != "setup"]
     setup = sum(1 for j in jobs for s in j["steps"] if s["skip"] == "setup")
-    blocking = [x for x in skipped if x[3]]
     records = step_records(c) if resume else {}
     if resume and not records:
         info("nothing recorded yet: --resume runs every step")
@@ -2746,12 +3039,19 @@ def run_local_ci(c, dry_run=False, keep_going=False, step_timeout=30, resume=Fal
         for s in runnable:
             cwd = "" if s["cwd"] == c.top else f"  (in {os.path.relpath(s['cwd'], c.top)})"
             how = ""
-            if resume and tree:
+            if s.get("dynamic"):
+                how = "  settled when the run gets there: it reads needs, steps or matrix values"
+            elif resume and tree:
                 d, detail = _resume_plan(c, s, records.get(_step_key(s)), tree, cache)
                 how = f"  resume: {d}" + (f" ({detail})" if isinstance(detail, str) else
                                           " (failed and affected tests; whole step if the change is global)")
             left = f"  setup left out: {'; '.join(s['dropped'])}" if s.get("dropped") else ""
             print(f"  $ {s['job']} › {s['name']}{ui.dim(cwd + how + left)}")
+        for j in jobs:
+            if not j["skip"] and (j["decide"] or j["matrix"]):
+                what = [f"if: {j['cond'][:50]}"] if j["decide"] else []
+                what += [f"one run per combination of {j['matrix'][:60]}"] if j["matrix"] else []
+                print(f"  {ui.INFO} {j['job']}  {ui.dim('settled when the run gets there: ' + '; '.join(what))}")
         for job, step, why, blk in skipped:
             print(f"  {ui.WARN if blk else '–'} {job} › {step}  {ui.dim(why)}")
         return 0
@@ -2769,13 +3069,22 @@ def run_local_ci(c, dry_run=False, keep_going=False, step_timeout=30, resume=Fal
     logs.mkdir(parents=True, exist_ok=True)
     for f in logs.glob("*.log"):
         f.unlink()
-    results, failed, t_all, cache = [], [], time.time(), {}
-    for n, s in enumerate(runnable, 1):
+    outdir = Path(tempfile.mkdtemp(prefix="devkit-ci-outputs-"))  # each step's $GITHUB_OUTPUT and summary
+    results, failed, t_all, cache, count = [], [], time.time(), {}, [0]
+
+    def run_step(s):
+        """Run one step: whole, its failed and affected tests, or kept from its last pass -> (rc, its outputs, or
+        None when they are not known)."""
+        count[0] += 1
+        n = count[0]
         key = _step_key(s)
         env = dict(os.environ, CI="true")
         env.update({k: v for k, v in s["env"].items() if "${{" not in v})
         if shim:
             env["PATH"] = shim + os.pathsep + env.get("PATH", "")
+        output = outdir / f"{n:02d}.output"
+        output.write_text("")
+        env.update(GITHUB_OUTPUT=str(output), GITHUB_STEP_SUMMARY=str(outdir / f"{n:02d}.summary"))
         log = logs / f"{n:02d}-{_slug(s['job'] + '-' + s['name'])[:50]}.log"
         label = f"{s['job']} › {s['name']}"
         command = s["run"].splitlines()[0][:120] if s["run"] else ""
@@ -2800,7 +3109,8 @@ def run_local_ci(c, dry_run=False, keep_going=False, step_timeout=30, resume=Fal
                             "sha": rec.get("sha"), "tree": rec.get("tree"), "base_sha": base.get("sha"),
                             "partials": rec.get("partials") or []})
             print(f"  {ui.OK} {label}  {ui.dim('kept: passed on ' + (rec.get('sha') or '?')[:7] + ' · ' + detail)}")
-            continue
+            return 0, (rec["outputs"] if isinstance(rec.get("outputs"), dict) else None)
+        outputs = None
         if res is not None:
             rc, secs, n_tests = (1 if res["failures"] else 0), res["secs"], res["count"]
             base = rec.get("base") or {"sha": rec.get("sha"), "tree": rec.get("tree")}
@@ -2833,6 +3143,7 @@ def run_local_ci(c, dry_run=False, keep_going=False, step_timeout=30, resume=Fal
                 log.write_text(str(e))
                 rc = 127
             secs = time.time() - t0
+            outputs = _read_outputs(output)
             runner = testx.recognize(s["run"], s["cwd"], c.top)
             fails = testx.step_failures(runner, log.read_text(errors="replace"), c.top, t0) \
                 if rc != 0 and runner else None
@@ -2840,7 +3151,7 @@ def run_local_ci(c, dry_run=False, keep_going=False, step_timeout=30, resume=Fal
                    "clean": tree == head_tree, "secs": round(secs, 1), "ts": int(time.time()), "how": "full",
                    "runner": runner["name"] if runner else None,
                    "failed_tests": [fx["id"] for fx in fails] if fails else None, "failed": fails,
-                   "base": {"sha": sha, "tree": tree}, "partials": []}
+                   "base": {"sha": sha, "tree": tree}, "partials": [], "outputs": outputs}
             results.append({"job": s["job"], "step": s["name"], "rc": rc, "secs": round(secs, 1), "command": command,
                             "how": "full", "sha": sha, "tree": tree})
             print(f"  {ui.OK if rc == 0 else ui.FAIL} {label}  {ui.dim(_fmt_secs(secs))}")
@@ -2854,17 +3165,71 @@ def run_local_ci(c, dry_run=False, keep_going=False, step_timeout=30, resume=Fal
                 if rc == 127 and s.get("dropped"):
                     print("      " + ui.dim("a tool this step installs on the runner is missing here: install it on "
                                             "this Mac, then dev ci --run --resume"))
+        if s.get("inputs") is not None:
+            new["inputs"] = s["inputs"]
         if tree:
             _save_step(c, key, new)
-        if rc != 0:
-            failed.append(s)
-            if not keep_going:
+        return rc, outputs
+
+    done, stop = {}, False  # (workflow file, job id) -> {result, outputs, why}
+    for j in jobs:
+        if stop:
+            break
+        jkey = (j["file"], j["id"])
+        if j["skip"]:  # listed already; skipped on GitHub too when only its condition said so
+            done[jkey] = {"result": "skipped" if j["never"] else pipelines.UNKNOWN,
+                          "outputs": {} if j["never"] else None, "why": j["skip"]}
+            continue
+        ctx, unknown = _needs_ctx(j, done)
+        verdict, legs = _job_verdict(j, ctx, unknown, done), [None]
+        if verdict is None and j["matrix"]:
+            legs, reason = _job_legs(j, ctx, unknown)
+            verdict = (reason, True, pipelines.UNKNOWN) if reason else None
+        if verdict:
+            reason, blk, result = verdict
+            skipped.append((j["job"], j["workflow"], reason, blk))
+            done[jkey] = {"result": result, "outputs": {} if result == "skipped" else None, "why": reason}
+            continue
+        ends, outputs = [], {}
+        for leg in legs:
+            label = j["job"] if leg is None else _leg_label(j, leg)
+            lctx = dict(ctx, **_flatten("matrix", leg)) if leg is not None else dict(ctx)
+            lwhy = dict(unknown)
+            broke, blocked = False, any(st["skip"] and st["blocking"] for st in j["steps"])
+            for st in j["steps"]:
+                if st["skip"]:
+                    _record_step(lctx, lwhy, st, "skipped" if st["never"] else None, {})
+                    continue
+                s = dict(st, job=label)
+                if st["dynamic"]:
+                    s = _resolve_step(s, lctx, lwhy, c.top, broke)
+                    if s["skip"]:
+                        skipped.append((label, s["name"], s["skip"], s["blocking"]))
+                        blocked |= s["blocking"]
+                        _record_step(lctx, lwhy, s, "skipped" if s["never"] else None, {})
+                        continue
+                rc, outs = run_step(s)
+                _record_step(lctx, lwhy, s, "success" if rc == 0 else "failure", outs)
+                if rc != 0:
+                    broke = True
+                    failed.append(s)
+                    if not keep_going:
+                        stop = True
+                        break
+            ends.append("failure" if broke else pipelines.UNKNOWN if blocked else "success")
+            outputs = _job_outputs(j, lctx)  # a matrix job's outputs: its last combination's, as on GitHub
+            if stop:
                 break
+        result = "failure" if "failure" in ends else pipelines.UNKNOWN if pipelines.UNKNOWN in ends else "success"
+        done[jkey] = {"result": result, "outputs": outputs,
+                      "why": "a check in it could not run here" if result is pipelines.UNKNOWN else ""}
+    shutil.rmtree(outdir, ignore_errors=True)
     took = _fmt_secs(time.time() - t_all)
     if shim:
         shutil.rmtree(shim, ignore_errors=True)
     for job, step, why, blk in skipped:
         print(f"  {ui.WARN if blk else '–'} {job} › {step}  {ui.dim(why)}")
+    blocking = [x for x in skipped if x[3]]
     again = "dev ci --run --resume again (it re-runs only what failed or changed)" if resume else \
         "fix it, then dev ci --run --resume (only what failed or changed)"
     if failed:

@@ -852,6 +852,124 @@ class LocalCiTests(unittest.TestCase):
             self.assertEqual(dev("ci", "--evidence")[0], 2)
 
 
+# A plan job writes the work to do to $GITHUB_OUTPUT, a matrix job runs one leg per planned part, and a gate job checks
+# every result. `dev ci --run` skipped the plan's output step as plumbing, judged `if: needs.…` unknown, and ran the
+# gate with its needs.* variables empty, so it failed in 0 s.
+PLANNED = """name: CI
+on: [pull_request]
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      jobs: ${{ steps.parts.outputs.jobs }}
+      plan: ${{ steps.parts.outputs.plan }}
+      skip: ${{ steps.tested.outputs.skip }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Already tested on its pull request?
+        id: tested
+        if: github.event_name == 'push'
+        run: echo "skip=true" >> "$GITHUB_OUTPUT"
+      - name: Parts
+        id: parts
+        run: |
+          echo "jobs=unit docs" >> "$GITHUB_OUTPUT"
+          {
+            echo "plan<<EOF"
+            echo '{"include": [{"name": "part one", "shard": "1/2"}, {"name": "part two", "shard": "2/2"}]}'
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+      - name: Say the plan
+        env:
+          PARTS: ${{ steps.parts.outputs.jobs }}
+        run: echo "planned $PARTS" >> "$SHARDS_LOG"
+  run:
+    needs: plan
+    if: needs.plan.outputs.jobs != '' && needs.plan.outputs.skip != 'true'
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.plan) }}
+    steps:
+      - name: Check
+        env:
+          JOBS: ${{ needs.plan.outputs.jobs }}
+        run: echo "${{ matrix.shard }} $JOBS" >> "$SHARDS_LOG"
+  check:
+    needs: [plan, run]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every job passed
+        env:
+          PLAN: ${{ needs.plan.result }}
+          RUN: ${{ needs.run.result }}
+          SKIP: ${{ needs.plan.outputs.skip }}
+        run: |
+          echo "plan: $PLAN, jobs: $RUN, skip: ${SKIP:-false}" >> "$SHARDS_LOG"
+          [ "$PLAN" = "success" ] && { [ "$RUN" = "success" ] || { [ "$SKIP" = "true" ] && [ "$RUN" = "skipped" ]; }; }
+"""
+
+
+class JobOutputsTests(unittest.TestCase):
+    def run_ci(self, s, workflow):
+        s.write(".github/workflows/ci.yml", workflow)
+        s.branch("feat/planned")
+        s.commit("ci: plan the jobs")
+        log = s.root / "shards.log"
+        with mock.patch.dict(os.environ, {"SHARDS_LOG": str(log)}):
+            rc, out, err = dev("ci", "--run")
+        return rc, out, err, log.read_text().splitlines() if log.exists() else []
+
+    def test_a_plan_jobs_outputs_drive_the_if_the_matrix_and_the_gate_of_the_jobs_after_it(self):
+        with Sandbox() as s:
+            rc, out, err, log = self.run_ci(s, PLANNED)
+            self.assertEqual(rc, 0, out + err)
+            self.assertEqual(log, ["planned unit docs", "1/2 unit docs", "2/2 unit docs",
+                                   "plan: success, jobs: success, skip: false"])
+            steps = [(x["job"], x["step"]) for x in gitx.evidence(s.ctx())["steps"]]
+            self.assertEqual(steps, [("plan", "Parts"), ("plan", "Say the plan"), ("part one", "Check"),
+                                     ("part two", "Check"), ("check", "Every job passed")])
+
+    def test_a_job_whose_if_on_a_plan_output_is_false_is_skipped_and_the_gate_sees_it_skipped(self):
+        with Sandbox() as s:
+            skipping = PLANNED.replace("        if: github.event_name == 'push'\n", "")  # already tested: skip=true
+            rc, out, err, log = self.run_ci(s, skipping)
+            self.assertEqual(rc, 0, out + err)
+            self.assertEqual(log, ["planned unit docs", "plan: success, jobs: skipped, skip: true"])
+            self.assertIn("run", out)
+            self.assertIn("is false here", out)
+
+    def test_a_needs_value_that_cannot_be_known_here_blocks_the_evidence_and_says_which(self):
+        # the matrix job runs on Windows, so its result is not known on this Mac: the gate that reads it is not run
+        with Sandbox() as s:
+            windows = PLANNED.replace("    name: ${{ matrix.name }}\n    runs-on: ubuntu-latest",
+                                      "    name: ${{ matrix.name }}\n    runs-on: windows-latest")
+            rc, out, err, log = self.run_ci(s, windows)
+            self.assertEqual(rc, 1, out + err)
+            self.assertIn("could not run here", err)
+            self.assertNotIn("local CI failed", err)
+            self.assertEqual(log, ["planned unit docs"])  # the gate did not run with an empty RUN
+            self.assertRegex(out, r"check › Every job passed .*needs\.run\.result")
+            self.assertIsNone(gitx.evidence(s.ctx()))
+
+    def test_a_resumed_run_keeps_the_plan_step_with_the_outputs_it_recorded(self):
+        with Sandbox() as s:
+            self.assertEqual(self.run_ci(s, PLANNED)[0], 0)
+            rc, out, err = dev("ci", "--run", "--resume")
+            self.assertEqual(rc, 0, out + err)
+            self.assertIn("plan › Parts  kept: passed on", out)
+            self.assertIn("part two › Check  kept: passed on", out)  # the legs come from the recorded plan
+            self.assertEqual(gitx.evidence(s.ctx())["how"], "resumed")
+
+    def test_a_matrix_from_an_expression_follows_githubs_include_and_exclude(self):
+        legs = gitx._matrix_legs({"os": ["mac", "linux"], "py": [9, 13], "exclude": [{"os": "linux", "py": 13}],
+                                  "include": [{"os": "mac", "arch": "arm"}, {"os": "bsd"}, {"py": 9, "os": "x"}]})
+        self.assertEqual(legs, [{"os": "mac", "py": 9, "arch": "arm"}, {"os": "mac", "py": 13, "arch": "arm"},
+                                {"os": "linux", "py": 9}, {"os": "bsd"}, {"py": 9, "os": "x"}])
+
+
 def _workflow(steps: dict) -> str:
     """A pull-request workflow with one job whose steps are {name: script}, each script a `run: |` block."""
     body = "".join(f"      - name: {n}\n        run: |\n" + "".join(f"          {ln}\n" for ln in r.splitlines())
