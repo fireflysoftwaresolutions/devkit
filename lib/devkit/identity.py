@@ -330,9 +330,11 @@ def machine(now: float | None = None) -> Machine:
     if not (_valid(doc) and _fresh(doc, name, now)) and not getattr(_WRITING, "on", False):
         _WRITING.on = True
         try:
-            doc = _write_machine(state, path, name, now) or doc
+            written = _write_machine(state, path, name, now)
         finally:
             _WRITING.on = False
+        # a busy lock: another devkit process may have created the record meanwhile; its id beats the hostname
+        doc = written or (doc if _valid(doc) else state.read(path))
     if not _valid(doc):
         return Machine(id=name, label=name, aliases={name: [[0, now]]})
     return Machine(id=doc["id"], label=name, aliases={k: [list(p) for p in v] for k, v in doc["aliases"].items()

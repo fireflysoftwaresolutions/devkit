@@ -554,6 +554,20 @@ class MachineTests(unittest.TestCase):
             m = identity.machine(now=T0)
         self.assertEqual((m.id, calls), ("mac-158", ["mac-158"]))  # no record: the hostname stands in, once
 
+    def test_a_record_another_process_created_while_the_lock_was_busy_is_read_not_replaced_by_the_hostname(self):
+        # another devkit process creates the record and still holds its lock when this one gives up waiting
+        from devkit import state
+        theirs = {"version": 1, "id": "m-0000beef", "created": int(T0), "aliases": {"mac-158": [[0, T0]]},
+                  "current": "mac-158"}
+
+        def busy(path, fn, **kw):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(theirs))
+            raise state.StateBusy("busy")
+        with mock.patch.object(state, "update", busy):
+            m = identity.machine(now=T0)
+        self.assertEqual(m.id, "m-0000beef")
+
     def test_a_damaged_record_gets_a_new_id_instead_of_failing(self):
         (self.state).mkdir(parents=True)
         (self.state / "machine.json").write_text("{not json")
