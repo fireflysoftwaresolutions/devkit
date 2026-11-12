@@ -540,6 +540,7 @@ def shells_since(sid: str, since: float, now: float | None = None) -> list:
 
 
 EDIT_TOOLS = ("Write", "Edit", "MultiEdit")  # the tools that name the one file they change (tool_input.file_path)
+_EDIT_TEMP = re.compile(r"\.tmp\.\d+\.[0-9a-f]+$")  # the temporary file an edit tool writes, then renames into place
 EDIT_SLACK = 2.0  # seconds an edit may precede a shell call's start and still fall in its window (hook ordering)
 EDIT_KEEP = 12 * 3600  # seconds the edit record keeps a call: a lane's whole life, which the crew gates read
 EDIT_MAX = 1000  # edit calls the record keeps at most, newest last
@@ -583,14 +584,64 @@ def note_edit(agent: str, data: dict, now: float | None = None):
         return
     now = now or time.time()
     who = str(data.get("agent_id") or "main")[:80]
+    tid = _safe_name(data.get("tool_use_id"))
 
     def add(doc):
         kept = [e for e in doc.get("edits") or [] if isinstance(e, dict) and now - (e.get("ts") or 0) <= EDIT_KEEP]
         doc["edits"] = (kept + [{"ts": round(now, 3), "caller": who, "path": p[:1024]} for p in paths])[-EDIT_MAX:]
+        if tid:  # the record of the call in flight gives way to the record of its result
+            doc["open"] = [e for e in doc.get("open") or [] if isinstance(e, dict) and e.get("tid") != tid]
     try:
         state.update(_edits_path(sid), add)
     except state.StateBusy:
         pass
+
+
+def edit_opened(agent: str, data: dict, now: float | None = None):
+    """PreToolUse of a Write, Edit or MultiEdit the guard allowed: its file and who changes it, as an edit in flight
+    {tid, ts, caller, path} (edits_open). The tool writes the file before its PostToolUse records the result
+    (note_edit, which takes this record's place), and a reading lane's check that runs in between must see that
+    another writer was at work (scope_written). A refused call never opens one; a call that failed drops it
+    (edit_dropped). Under the record's lock; a busy lock drops this one record."""
+    if data.get("tool_name") not in EDIT_TOOLS:
+        return
+    paths, sid, tid = _edit_paths(data), _safe_name(data.get("session_id")), _safe_name(data.get("tool_use_id"))
+    if not (sid and tid and paths):
+        return
+    now = now or time.time()
+    who = str(data.get("agent_id") or "main")[:80]
+
+    def add(doc):
+        kept = [e for e in doc.get("open") or [] if isinstance(e, dict) and now - (e.get("ts") or 0) <= CALL_TTL
+                and e.get("tid") != tid]
+        doc["open"] = (kept + [{"tid": tid, "ts": round(now, 3), "caller": who, "path": p[:1024]}
+                               for p in paths])[-EDIT_MAX:]
+    try:
+        state.update(_edits_path(sid), add)
+    except state.StateBusy:
+        pass
+
+
+def edit_dropped(data: dict):
+    """An edit call in flight that will not write: refused, or it failed (PostToolUseFailure). Its record goes."""
+    sid, tid = _safe_name(data.get("session_id")), _safe_name(data.get("tool_use_id"))
+    if not (sid and tid) or not _edits_path(sid).exists():
+        return
+
+    def drop(doc):
+        doc["open"] = [e for e in doc.get("open") or [] if isinstance(e, dict) and e.get("tid") != tid]
+    try:
+        state.update(_edits_path(sid), drop)
+    except state.StateBusy:
+        pass
+
+
+def edits_open(sid: str, now: float | None = None) -> list:
+    """The session's edit calls in flight (edit_opened): [{tid, ts, caller, path}], none older than CALL_TTL, the
+    longest a call waits for its result."""
+    now = now or time.time()
+    doc = core.read_json(_edits_path(sid), {}) or {}
+    return [e for e in doc.get("open") or [] if isinstance(e, dict) and now - (e.get("ts") or 0) <= CALL_TTL]
 
 
 def edits_since(sid: str, since: float, now: float | None = None) -> list:
@@ -7075,17 +7126,18 @@ def scope_written(agent: str, sid: str, aid: str, paths: list, now: float | None
     """A review or read-only lane's shell call wrote these files (write detection). A file is credited to whoever's
     own edit call (Write, Edit, MultiEdit, Codex apply_patch) touched that path during the call (note_edit: a build
     lane, its helper or the tech lead, never the reading lane itself): devkit audits it as attributed and flags
-    nothing, since the edit record is exact. Every other file is held against the reading lane in `scope_writes`. It
-    is "possible" when another writer had a shell call that overlapped the reading lane's call, still open or already
-    closed (open_calls, shells_since). Codex also keeps accepted patch calls pending or closed, as possible writers
-    only of their declared paths. A writer is the tech lead, or a build lane, which for a file in a working build lane's
-    scope must be that lane. A call that writes no file (call_reads: `git status`, `dev watch --wait`) makes nobody a
-    writer. With no such writer it is "certain": a script of the reading lane can write into a
-    working member's scope, so a scope alone is no alibi. Only a certain file makes the lane's report unverified
-    (_end_member_step). An open step whose scope holds a held file keeps it (`other_writes`), which the review step
-    after it lists; Morpheus gets one short crew notice naming the files and the possible writers; and the audit
-    trail a scope.write record per certainty. -> the lane's scope_writes, or None without a lane or when it has
-    none."""
+    nothing, since the edit record is exact. An edit tool's temporary file (<file>.tmp.<pid>.<hex>) counts as its
+    file. Every other file is held against the reading lane in `scope_writes`. It is "possible" when another writer
+    could have made it: a working build lane whose scope holds it; an edit call of that file still in flight
+    (edits_open: the tool writes before its result is recorded); or a shell call that overlapped the reading lane's
+    call, still open or already closed (open_calls, shells_since), whose caller, for a file in a working build lane's
+    scope, must be that lane or the tech lead. Codex also keeps accepted patch calls pending or closed, as possible
+    writers only of their declared paths. A call that writes no file (call_reads: `git status`, `dev watch --wait`)
+    makes nobody a writer. With no such writer it is "certain", and only a certain file makes the lane's report
+    unverified (_end_member_step). An open step whose scope holds a held file keeps it (`other_writes`), which the
+    review step after it lists; Morpheus gets one short crew notice naming the files and the possible writers; and
+    the audit trail a scope.write record per certainty. -> the lane's scope_writes, or None without a lane or when
+    it has none."""
     from . import crew
     now = now or time.time()
     paths = sorted({str(p) for p in paths or [] if p})
@@ -7109,6 +7161,7 @@ def scope_written(agent: str, sid: str, aid: str, paths: list, now: float | None
         overlap = calls + shells_since(sid, start, now)
         shells = _shell_writers(run, overlap, chain)  # who else had a writing shell call
         edits = [e for e in edits_since(sid, start, now) if str(e.get("caller") or "") not in chain]
+        inflight = [e for e in edits_open(sid, now) if str(e.get("caller") or "") not in chain]
         base = current.get("wt_base")
 
         def matches(path, rel):
@@ -7116,20 +7169,24 @@ def scope_written(agent: str, sid: str, aid: str, paths: list, now: float | None
 
         owned, held, maybe_by = {}, {}, {}  # credited by edit; held against the reading lane; possible files by writers
         for p in paths:
-            by = next((str(e.get("caller")) for e in edits if matches(e.get("path"), p)), None)
+            names = {p, _EDIT_TEMP.sub("", p)}  # an edit tool writes <file>.tmp.<pid>.<hex>, then renames it
+            by = next((str(e.get("caller")) for e in edits for n in names if matches(e.get("path"), n)), None)
             if by:
                 owned.setdefault(by, []).append(p)
                 continue
-            holders = {k for k in builders if layers[k] and in_scope(p, layers[k])}
+            holders = {k for k in builders for n in names if layers[k] and in_scope(n, layers[k])}
+            editing = {str(e.get("caller")) for e in inflight for n in names if matches(e.get("path"), n)}
             pending = _shell_writers(run, [{k: v for k, v in e.items() if k != "edit_paths"} for e in overlap
                                           if agent == "codex" and base and
                                           any(matches(path, p) for path in e.get("edit_paths") or [])], chain)
             candidates = shells | pending
-            writers = sorted((candidates & holders) if holders else candidates - {"main"}) + \
-                sorted(candidates & {"main"})
+            by_shell = ((candidates & holders) if holders else candidates - {"main"}) | (candidates & {"main"})
+            writers = sorted((by_shell | holders | editing) - {"main"}) + \
+                sorted((by_shell | editing) & {"main"})
             held.setdefault("possible" if writers else "certain", []).append(p)
             if writers:
-                maybe_by.setdefault(tuple(writers), []).append(p)
+                how = "the shell call of" if set(writers) <= by_shell else "written by"
+                maybe_by.setdefault((tuple(writers), how), []).append(p)
         who = lane.get("persona") or lane.get("label") or aid
         name = crew.who(who)
         loose = sorted(p for files in held.values() for p in files)
@@ -7142,8 +7199,8 @@ def scope_written(agent: str, sid: str, aid: str, paths: list, now: float | None
             for c, files in held.items():
                 marked += [n for n in _mark_other_writes(run, files, chain, aid, name, c, now) if n not in marked]
             level = "review-only" if lane_tools(run, aid) == "review" else "read-only"
-            maybe = [f"{_shown(files)} (possibly the shell call of {_or_names(run, list(ks))})"
-                     for ks, files in maybe_by.items()]
+            maybe = [f"{_shown(files)} (possibly {how} {_or_names(run, list(ks))})"
+                     for (ks, how), files in maybe_by.items()]
             if held.get("certain"):
                 text = (f"devkit: {name} works {level}, and its shell call wrote {_shown(held['certain'])} while no "
                         "other writer was at work. Its report counts as unverified: check the change (git diff), keep "
@@ -7162,7 +7219,7 @@ def scope_written(agent: str, sid: str, aid: str, paths: list, now: float | None
                why=f"edited by {_name_of(run, k)} with its own edit tool during {who}'s shell call")
     for c, files in held.items():
         extra = {"severity": "warning"} if c == "certain" else \
-            {"writers": sorted({_name_of(run, k) for ks in maybe_by for k in ks})}
+            {"writers": sorted({_name_of(run, k) for ks, _ in maybe_by for k in ks})}
         _audit("scope.write", who, f"{c}: {', '.join(files[:20])}"[:600], "detected", lane=aid[:16],
                paths=files[:20], certainty=c, count=len(files), project=run.get("project") or "", **extra)
     return writes

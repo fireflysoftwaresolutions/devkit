@@ -5,8 +5,8 @@
 A review lane's shell call is a window: every file `git status` shows changed during it is judged. A file is
 another writer's when its own edit tool touched it then (the edit record). Otherwise it is "possible" when another
 writer, a builder lane or the tech lead, had a shell call that overlapped the reviewer's call, still open or already
-closed, and "certain" when nobody else could have written it. Only "certain" makes the review unverified. A builder's
-scope alone is no alibi (tests/test_progress.py ScopeWriteTests keeps that case).
+closed, and "certain" when nobody else could have written it. Only "certain" makes the review unverified. A working
+builder's scope is an alibi for the files in it (tests/test_progress.py ReaderWriteCreditTests).
 
 Seen live in one run: about 15 notices held the Security engineer's `python3 - <<'EOF'` rewrites of guard.py, and
 the tech lead's own heredoc and `sed -i` edits, against the Code reviewer, because those calls had closed before the
@@ -116,11 +116,13 @@ class ClaudeShellOverlapTests(ShellOverlap, unittest.TestCase):
         self.assertEqual(self.written(["lib/x.py"])["certainty"], "possible")
 
     def test_only_a_shell_call_that_ran_counts_as_another_writer(self):
-        # the guard refused the Backend engineer's call: it never ran, so api/x.py stays the reviewer's
+        # the guard refused the Backend engineer's call: it never ran, so lib/x.py, outside every scope, stays the
+        # reviewer's; its next call ran, so lib/y.py, judged after it, is possible
         self.closed(self.call("a_tank", "toolu_tank_refused", self.t0 + 5), self.t0 + 5, event="PreToolUse")
-        self.ran("a_neo", "toolu_neo_heredoc", self.t0 + 6, self.t0 + 9)
-        self.written(["api/x.py", "docs/audit.md"])
-        self.assertEqual(self.scope_audit(), [("Seraph", "certain: api/x.py"), ("Seraph", "possible: docs/audit.md")])
+        self.written(["lib/x.py"])
+        self.ran("a_tank", "toolu_tank_ran", self.t0 + 6, self.t0 + 9)
+        self.written(["lib/y.py"])
+        self.assertEqual(self.scope_audit(), [("Seraph", "certain: lib/x.py"), ("Seraph", "possible: lib/y.py")])
 
 
 class CodexOverlap(ShellOverlap):
@@ -228,9 +230,10 @@ class ReaderCallTests(CodexOverlap, unittest.TestCase):
         self.assertEqual(self.judged("main", list(rows), "lib/x"), rows)
 
     def test_a_builders_call_is_an_alibi_only_when_it_can_write(self):
-        # api/** is the Backend engineer's scope; its call is still open when the reviewer's write is judged
+        # its call is still open when the reviewer's write is judged; lib/x is outside every scope, so the Backend
+        # engineer's scope (api/**) is no alibi for it and only its call can be
         rows = {"python3 -m unittest tests.test_api": "possible", "git status --short": "certain"}
-        self.assertEqual(self.judged(TANK, list(rows), "api/x", open_while_judged=True), rows)
+        self.assertEqual(self.judged(TANK, list(rows), "lib/x", open_while_judged=True), rows)
 
 
 class CodexReviewerHookTests(CodexCrew):

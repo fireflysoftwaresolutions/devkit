@@ -1543,7 +1543,15 @@ def _reconcile(agent: str, data: dict):
 
 
 def _close_call(data: dict):
-    """The call's entry leaves the ledger: it ran (PostToolUse, PostToolUseFailure) or never will (refused)."""
+    """The call's entry leaves the ledger: it ran (PostToolUse, PostToolUseFailure) or never will (refused). An edit
+    call in flight that failed or was refused writes nothing, so its record goes; one that ran gives way to the
+    record of its result at the end of its PostToolUse (progress.note_edit)."""
+    if data.get("tool_name") in ("Write", "Edit", "MultiEdit") and data.get("hook_event_name") != "PostToolUse":
+        try:
+            from . import progress
+            progress.edit_dropped(data)
+        except Exception:
+            _log(f"edit record drop: {traceback.format_exc()[-300:]}")
     if data.get("tool_name") in SHELL_TOOLS or data.get("tool_name") == "apply_patch":
         try:
             from . import progress
@@ -3051,6 +3059,9 @@ def _guard_in_context(agent: str, data: dict, held: dict):
         try:
             _record_bypasses(agent, data)
             _watch_writes(agent, data)
+            if not headless:  # an allowed edit writes before its result: a reading lane's check meanwhile sees it
+                from . import progress
+                progress.edit_opened(agent, data)
         except Exception as e:
             g.failopen("guard-allow", e)
         out = _with_context(agent, {"hookEventName": "PreToolUse"}, data, skip)
