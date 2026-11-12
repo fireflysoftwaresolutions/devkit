@@ -118,6 +118,36 @@ class ArithmeticContexts(Case):
                 self.assertIsNone(main(cmd))
                 self.assertIsNone(member(cmd))
 
+    def test_a_name_computed_from_a_value_that_may_hold_code_is_refused(self):
+        # bash and zsh evaluate the subscript of a name a builtin is given (declare, local, typeset, export in zsh,
+        # printf -v in zsh, read) and of `${!n}`, and zsh evaluates read -t's value: each runs `a[$(cmd)]`
+        for tail in ('declare "$x"=1', 'f() { local "$x"=1; }; f', 'typeset "$x"=1', 'export "$x"=1', "export $x",
+                     'printf -v "$x" %s 1', 'read "$x" <<< 1', "echo ${!x}", 'read -t "$x" v', "getopts a \"$x\""):
+            cmd = self.X + tail
+            with self.subTest(cmd=cmd):
+                self.assertIsNotNone(main(cmd))
+                self.assertIsNotNone(member(cmd))
+                self.assertIsNotNone(member(cmd, level="review", who="seraph"))
+        for cmd in ("printf -v 'a[$(gh pr merge 12)]' %s 1", "declare 'a[$(gh pr merge 12)]=1'",
+                    "read 'a[$(gh pr merge 12)]' <<< 1", "x=$(cat f.txt); echo ${!x}",
+                    "export $(grep -v '^#' .env | xargs)"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNotNone(main(cmd))
+                self.assertIsNotNone(member(cmd))
+
+    def test_literal_names_and_numeric_builtins_run(self):
+        # printf's %d, shift, exit and return take a number without evaluating it (bash 3.2 and 5, zsh 5.9), so a
+        # name there is text; a name the command gives literal names is a plain name
+        for cmd in (self.X + "printf -v n '%d' x", self.X + "set -- a b; shift x", self.X + "(exit x)",
+                    self.X + "f() { return x; }; f", "n=out; printf -v \"$n\" %s 1; echo $out",
+                    "for v in HOME USER; do echo ${!v}; done", 'read x < "$file"; echo $x',
+                    'while IFS= read -r line; do echo "$line"; done < "$1"', 'export PATH="$HOME/bin:$PATH"',
+                    "mapfile -t lines < <(git ls-files); echo ${#lines[@]}", 'read -p "Name: " name',
+                    'getopts "ab:" opt', "read -t 5 v < f.txt", "declare -a arr; arr=(1 2); echo ${!arr[@]}"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(main(cmd))
+                self.assertIsNone(member(cmd))
+
     def test_numbers_counters_and_tests_run(self):
         for cmd in ("for ((i=0; i<3; i++)); do echo $i; done", "i=0; while [[ $i -lt 3 ]]; do let i++; done",
                     "i=0; let \"i=i+1\"; echo $i", "n=0; ((n++)); echo $n", "n=0; (( n += 2 ))",

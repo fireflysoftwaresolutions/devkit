@@ -201,8 +201,8 @@
       "reproduce": "As a crew member whose scope leaves out `plugin/agents/**`, run `dev crew sync`."
     },
     "check_bash:arith": {
-      "title": "Guard refuses a value read as arithmetic that is not a proven number",
-      "what": "The guard refused a command that reads a name or a substitution as an arithmetic expression ($((…)), ((…)), let, [[ -eq ]], declare -i, a subscript or a substring offset) when the command does not prove its value a number, because the shell runs a `$(…)` such a value holds.",
+      "title": "Guard refuses a value read as arithmetic or as a name that is not proven safe",
+      "what": "The guard refused a command that reads a name or a substitution as an arithmetic expression ($((…)), ((…)), let, [[ -eq ]], declare -i, a subscript or a substring offset) or as a variable's name (declare, local, export, printf -v, read, ${!n}, zsh's read -t) when the command does not prove its value a number or a literal name, because the shell runs a `$(…)` such a value holds.",
       "reproduce": "Ask an agent to run `read x < f.txt; echo $((x + 1))`."
     },
     "check_clone:canonical": {

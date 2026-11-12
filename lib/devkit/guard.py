@@ -2500,11 +2500,11 @@ def check_bash(cmd: str, cwd: str, agent: str):
     try:
         cmd = _quote_cd_git(cmd or "")
         hazards = arithmetic_hazards(cmd)  # on the command as typed: its readings mask the values it gives names
-        if hazards:
-            return deny(ARITH_REASON.format(what=_code(hazards[0])), key="arith")
         v = _check_bash_reading(cmd, cwd, agent)
         if v and v[0] == "deny":
-            return v
+            return v  # a rule's own reason first: it says what the command would do
+        if hazards:
+            return deny(ARITH_REASON.format(what=_code(hazards[0])), key="arith")
         first = v
         hatches = list(_BYPASSES)
         for alt in _continued_readings(cmd) + _substitution_readings(cmd, top=True):
@@ -7905,21 +7905,27 @@ _SUBSTRING = re.compile(r"\$\{[A-Za-z_]\w{0,80}:(?![-=+?])([^}\n]{0,400})\}")
 _DOLLAR_BRACKET = re.compile(r"\$\[([^\]\n]{0,400})\]")
 
 
+# a builtin that sets a variable by a name it is given, or `${!n}`: _name_targets reads them
+_NAME_HINT = re.compile(r"\$\{!|\b(?:declare|typeset|local|readonly|export|printf|read|mapfile|readarray|getopts)\b")
+
+
 def _unquote(w: str) -> str:
     return w[1:-1] if len(w) > 1 and w[0] == w[-1] and w[0] in "'\"" else w
 
 
 ARITH_REASON = ("This command reads {what} as an arithmetic expression ($((…)), ((…)), let, [[ … -eq … ]], declare -i, "
-                "a subscript or a substring offset), and its value is not a number the command gives it: the shell "
+                "a subscript or a substring offset) or as a variable's name (declare, export, printf -v, read, "
+                "${{!n}}), and its value is not a number or a name the command gives it: the shell "
                 "runs a `$(…)` such a value holds, as `x='a[$(cmd)]'; echo $((x))` runs cmd. Give the name numbers "
-                "in the command (a literal, a counter, wc -l < file, grep -c, date +%s), compare text with `[` or "
-                "`test`, or use the value as text.")
+                "or a literal name in the command (a literal, a counter, wc -l < file, grep -c, date +%s), compare "
+                "text with `[` or `test`, or use the value as text.")
 
 
 def arithmetic_hazards(s: str) -> list:
     """Every value command `s` reads as an arithmetic expression that may be code (_arith_unsafe_names): in its
     `$((…))` outside single quotes, and in the other places _arith_hazards reads."""
-    if "((" not in s and "[" not in s and "let" not in s and "-i" not in s and ":" not in s:
+    if "((" not in s and "[" not in s and "let" not in s and "-i" not in s and ":" not in s and \
+            not _NAME_HINT.search(s):
         return []
     try:
         text = strip_heredocs(s)
@@ -7942,7 +7948,7 @@ def _arith_hazards(s: str) -> list:
     code (_arith_unsafe_names): `((…))` and `for ((…))`, `let`, the operands of [[ … -eq … ]] and the other integer
     comparisons, `$[…]`, the values of an integer declaration and of the names it declares, a substring's offset and
     length, and an array subscript (also in zsh). `test` and `[` compare integers without evaluating them."""
-    if not any(t in s for t in ("((", "let", "[[", "$[", "[", "-i", ":")):
+    if not any(t in s for t in ("((", "let", "[[", "$[", "[", "-i", ":")) and not _NAME_HINT.search(s):
         return []
     try:
         text = strip_heredocs(s)
@@ -8003,12 +8009,99 @@ def _arith_hazards(s: str) -> list:
         exprs += [k.group(1) for k in _SUBSCRIPT_WORD.finditer(words)]
     for m in _SUBSTRING.finditer(single):
         exprs += m.group(1).split(":")
-    out = []
+    names, more = _name_targets(text, plain, single)
+    exprs += more
+    out = [h for h in names]
     for e in exprs:
         if e.strip() in ("", "@", "*"):
             continue
         out += [h for h in _arith_unsafe_names(e, text) if h not in out]
     return out
+
+
+# the builtins that set a variable by a name they are given, and what follows them up to the command's end
+_NAME_CMD = re.compile(r"(?:^|[;&|\n({`])[ \t]*(?:(?:then|do|else|!|time)[ \t]+)*"
+                       r"(declare|typeset|local|readonly|export|printf|read|mapfile|readarray|getopts)[ \t]"
+                       r"([^;&|\n]{0,400})")
+_INDIRECT = re.compile(r"\$\{!([A-Za-z_]\w{0,80})(?=[}:#%/^,])")  # `${!n}`: the variable whose name n holds
+_READ_VALUE_OPTS = "dinNptu"  # read's options that take a value (-t's is a number zsh evaluates)
+
+
+def _name_safe(word: str, s: str) -> bool:
+    """True when command `s` gives name `word` only literal variable names as values (`n=out`, `for n in a b`) and
+    nothing else in `s` can bind it, so a name computed from it (`printf -v "$n"`, `declare "$n"=1`, `${!n}`) is a
+    plain name, never `a[$(cmd)]`, whose subscript bash and zsh evaluate."""
+    w = re.escape(word)
+    if re.search(_ARITH_BINDERS.pattern + r"[^;&|\n]*(?<![\w$])" + w + r"\b", s) or \
+            re.search(r"(?:^|[\s;&|(`{])(?:eval|source|\.)\s", s):
+        return False
+    values = [_unquote(re.match(r"\"[^\"]*\"|'[^']*'|[^\s;&|)]*", s[m.end():]).group(0))
+              for m in re.finditer(r"(?:^|[\s;&|(`{])" + w + r"\+?=(?!=)", s)]
+    loops = re.findall(r"(?:^|[\s;&|(`{])for\s+" + w + r"\s+in\s+([^;\n]*)", s)
+    ident = re.compile(r"[A-Za-z_]\w{0,80}")
+    return bool(values or loops) and all(ident.fullmatch(v) for v in values) and \
+        all(all(ident.fullmatch(_unquote(item)) for item in lst.split()) for lst in loops)
+
+
+def _name_targets(text: str, plain: str, single: str):
+    """-> (hazards, expressions) of the names a command's builtins set or read by a name they compute: a target of
+    declare, typeset, local, readonly, export, printf -v, read, mapfile or getopts, and `${!n}`, whose value is a name
+    the shell evaluates (bash and zsh run `a[$(cmd)]` there, as `declare "$x"=1` does). A hazard is `$n` for a name
+    the command does not give literal names only (_name_safe), or a substitution in the target; the expressions are a
+    literal target's subscript and zsh's `read -t` value, which the arithmetic reading judges."""
+    hazards, exprs = [], []
+
+    def computed(t):
+        if "$(" in t or "`" in t:
+            hazards.append(t)
+            return
+        for n in re.findall(r"\$\{?([A-Za-z_]\w{0,80})", t):
+            if not _name_safe(n, text) and "$" + n not in hazards:
+                hazards.append("$" + n)
+    if _NAME_CMD.search(plain):
+        for m in _NAME_CMD.finditer(plain):
+            name, words = m.group(1), text[m.start(2):m.end(2)]
+            try:
+                args = shlex.split(words)
+            except ValueError:
+                args = words.split()
+            targets, k = [], 0
+            if name == "printf":
+                for k, a in enumerate(args):
+                    if a == "-v" and k + 1 < len(args):
+                        targets.append(args[k + 1])
+                    elif a.startswith("-v") and len(a) > 2:
+                        targets.append(a[2:])
+            elif name == "getopts":
+                targets = args[1:2]
+            else:
+                while k < len(args):
+                    a = args[k]
+                    if re.fullmatch(r"[0-9]*(?:<|>|>>|<<<|<>|&>|>&|<&)[0-9-]*", a):  # a redirect and its target
+                        k += 2
+                        continue
+                    if re.match(r"[0-9]*[<>]", a):  # one glued to its target, `<f.txt`
+                        k += 1
+                        continue
+                    if name == "read" and a[:1] == "-" and len(a) > 1 and a[-1] in _READ_VALUE_OPTS:
+                        if a[-1] == "t" and k + 1 < len(args):
+                            exprs.append(args[k + 1])
+                        k += 2
+                        continue
+                    if a[:1] in ("-", "+") and len(a) > 1:
+                        k += 1
+                        continue
+                    targets.append(a.split("=", 1)[0] if name in ("declare", "typeset", "local", "readonly",
+                                                                  "export") else a)
+                    k += 1
+            for t in targets:
+                if "$" in t or "`" in t:
+                    computed(t)
+                elif "[" in t and t.endswith("]"):
+                    exprs.append(t[t.index("[") + 1:-1])
+    for m in _INDIRECT.finditer(single):
+        computed("$" + m.group(1))
+    return hazards, exprs
 
 
 def _subst(s: str, quotes: bool, procs: list | None = None) -> list:
