@@ -1875,24 +1875,72 @@ def _shell_path(word: str, cwd, env: dict):
     return os.path.realpath(os.path.join(cwd or "/", word))
 
 
+_SHELLS = frozenset({"bash", "sh", "zsh", "dash", "ksh"})
+_OS_PACKAGERS = frozenset({"apt-get", "apt", "aptitude", "yum", "dnf", "microdnf", "apk", "zypper", "snap", "brew",
+                           "port", "choco", "winget", "scoop"})
+_PACKAGER_VERBS = frozenset({"install", "reinstall", "upgrade", "update", "dist-upgrade", "full-upgrade", "add",
+                             "remove", "uninstall", "purge", "autoremove", "del", "tap", "bundle", "link"})
+_GIT_CONFIG_READS = frozenset({"--get", "--get-all", "--get-regexp", "--get-urlmatch", "--list", "-l", "get", "list"})
+
+
+def _segments(run: str, depth: int = 0):
+    """(the words as written, the command they run) for each command of a step's script, read by the guard's command
+    reader (read-only use: it unwraps env, sudo, nice, npx, uv run, if/then and the like). The script a shell runs
+    with `-c` is read too, wherever it sits (`xvfb-run bash -c '…'`, `dbus-run-session -- bash -c '…'`)."""
+    for argv, _ in guard.split_commands(run) or []:
+        argv = list(argv)
+        yield argv, guard._unwrap(argv)
+        if depth < 3:
+            for i, w in enumerate(argv[:-2]):
+                if os.path.basename(w) in _SHELLS and re.fullmatch(r"-[a-z]*c[a-z]*", argv[i + 1]):
+                    yield from _segments(argv[i + 2], depth + 1)
+                    break
+
+
+def _as_root(argv) -> bool:
+    """The words run their command with sudo or doas, after any VAR=value assignments and env."""
+    for w in argv:
+        b = os.path.basename(w)
+        if b in ("sudo", "doas"):
+            return True
+        if not (b == "env" or (re.match(r"[A-Za-z_]\w*=", w))):
+            return False
+    return False
+
+
 def _runner_prep(run: str, cwd: str, root: str, env: dict):
-    """Why a step is a hosted runner's housekeeping, which on this Mac would delete the developer's own files, or None:
+    """Why a step only sets up a hosted runner, which on this Mac would change the developer's own machine, or None:
     it deletes a path that is not inside the checkout (`rm -rf /opt/hostedtoolcache/CodeQL`, a `~` path, a variable
-    unset here, a command's output, `cd /opt && rm -rf ghc`) or prunes Docker (`docker system prune -af`). The script is
-    read by the guard's own command reader, which unwraps env, nice, if/then and the like (read-only use)."""
+    unset here, a command's output, `cd /opt && rm -rf ghc`), prunes Docker (`docker system prune -af`), runs a command
+    as root (`sudo …`), installs OS packages (`apt-get update`, `brew install`, `playwright install --with-deps`),
+    installs browsers into the shared Playwright cache (`npx playwright install chromium`; the tests then use the
+    browsers installed here), or changes the global git config (`git config --global …`). The one classifier for
+    runner-only setup: `dev ci --run` skips these steps and `dev ci --commands` leaves them out."""
     top = os.path.realpath(root)
     here = os.path.realpath(cwd)
-    for argv, _ in guard.split_commands(run) or []:
-        words = guard._unwrap(list(argv))
+    for argv, words in _segments(run):
         if not words:
             continue
         name = os.path.basename(words[0])
+        if re.fullmatch(r"python[\d.]*", name) and words[1:3] == ["-m", "playwright"]:
+            words, name = words[2:], "playwright"
+        pos = [w for w in words[1:] if not w.startswith("-")]
         if name == "cd":
             here = _shell_path(words[1], here, env) if len(words) > 1 and words[1] != "-" else None
         elif name in ("docker", "podman"):
-            pos = [w for w in words[1:] if not w.startswith("-")]
             if pos[:1] and pos[0] in _PRUNABLE and pos[1:2] == ["prune"]:
                 return f"runner prep ({name} {pos[0]} prune deletes Docker data on this Mac)"
+        elif name in _OS_PACKAGERS and pos[:1] and pos[0] in _PACKAGER_VERBS:
+            return f"runner prep ({name} {pos[0]} changes the runner's OS packages)"
+        elif name == "playwright" and pos[:1] in (["install"], ["install-deps"]):
+            if pos[0] == "install-deps" or "--with-deps" in words:
+                return f"runner prep (playwright {pos[0]}{' --with-deps' if pos[0] == 'install' else ''} installs " \
+                       f"OS packages for the browsers)"
+            return "runner prep (playwright install writes the shared Playwright browser cache; the browsers " \
+                   "installed here are used)"
+        elif name == "git" and "config" in words[1:3] and {"--global", "--system"} & set(words) and \
+                not _GIT_CONFIG_READS & set(words):
+            return "runner prep (git config --global changes this Mac's git settings)"
         elif name in ("rm", "rmdir", "unlink"):
             ops, opts = [], True
             for w in words[1:]:
@@ -1904,6 +1952,97 @@ def _runner_prep(run: str, cwd: str, root: str, env: dict):
                 p = _shell_path(w, here, env)
                 if p is None or not p.startswith(top + os.sep):
                     return f"runner prep (deletes {w}, which is not inside the checkout)"
+        if _as_root(argv):
+            return f"runner prep (sudo {' '.join(words[:2])} runs as root on the runner's machine)"
+    return None
+
+
+def runner_setup(run: str, root, cwd=None, env=None):
+    """Why a step's script only sets up a hosted runner (see _runner_prep), or None. `cwd`: its working directory
+    (the checkout by default); `env`: its variables over this Mac's, as `dev ci --run` gives them."""
+    step_env = dict(os.environ, CI="true")
+    step_env.update({k: v for k, v in (env or {}).items() if "${{" not in str(v)})
+    return _runner_prep(_expand(run, str(root)), str(cwd or root), str(root), step_env)
+
+
+_DOCKER_VALUE_OPTS = frozenset({"-H", "--host", "--config", "-l", "--log-level", "--tlscacert", "--tlscert",
+                                "--tlskey"})
+
+
+def _docker_contexts(env: dict) -> set:
+    """The Docker contexts this Mac's Docker CLI has set up by name (its context store under $DOCKER_CONFIG or
+    ~/.docker); the built-in `default` is never in it."""
+    meta = Path(env.get("DOCKER_CONFIG") or os.path.expanduser("~/.docker")) / "contexts" / "meta"
+    names = set()
+    for f in meta.glob("*/meta.json"):
+        try:
+            n = json.loads(f.read_text()).get("Name")
+        except (OSError, ValueError, AttributeError):
+            continue
+        if isinstance(n, str) and n:
+            names.add(n)
+    return names
+
+
+def _named_contexts(run: str, env: dict) -> list:
+    """The Docker contexts a step's script chooses: DOCKER_CONTEXT=…, `docker --context …` / `-c …`,
+    `docker context use …`, and a program's `--docker-context …`. A value this Mac cannot tell (a command's output, a
+    variable unset here) names none."""
+    out = []
+
+    def add(v):
+        v = _SHELL_VAR.sub(lambda m: env.get(m.group(1) or m.group(2)) or "", v or "")
+        if v and "$" not in v and "`" not in v and v not in out:
+            out.append(v)
+
+    for argv, words in _segments(run):
+        for w in argv:
+            if w.startswith("DOCKER_CONTEXT="):
+                add(w.split("=", 1)[1])
+            elif not re.match(r"[A-Za-z_]\w*=", w):
+                break
+        if not words:
+            continue
+        name = os.path.basename(words[0])
+        if name == "export":
+            for w in words[1:]:
+                if w.startswith("DOCKER_CONTEXT="):
+                    add(w.split("=", 1)[1])
+        if name == "docker":
+            rest = words[1:]
+            while rest and rest[0].startswith("-"):
+                flag = rest.pop(0)
+                if flag in ("-c", "--context") and rest:
+                    add(rest.pop(0))
+                elif flag.startswith("--context="):
+                    add(flag.split("=", 1)[1])
+                elif flag in _DOCKER_VALUE_OPTS and rest:
+                    rest.pop(0)
+            if rest[:2] == ["context", "use"] and len(rest) > 2:
+                add(rest[2])
+        for i, w in enumerate(words):
+            if w == "--docker-context" and i + 1 < len(words):
+                add(words[i + 1])
+            elif w.startswith("--docker-context="):
+                add(w.split("=", 1)[1])
+    return out
+
+
+def _foreign_context(run: str, env: dict):
+    """Why a step cannot run against this Mac's Docker, or None: it names a Docker context that is not set up here
+    (a hosted or self-hosted runner's), or the built-in `default`, a hosted runner's own engine, which on this Mac is
+    whatever DOCKER_HOST or /var/run/docker.sock points to. It is not run against the current context instead: that
+    is another engine (another architecture, the developer's own containers and networks), not the one CI uses."""
+    named = _named_contexts(run, env)
+    if not named:
+        return None
+    here = _docker_contexts(env)
+    for n in named:
+        if n not in here:
+            where = f"contexts here: {', '.join(sorted(here)) or 'none'}"
+            if n == "default":
+                return f"Docker context default is a hosted runner's own engine ({where})"
+            return f"Docker context {n} is not set up here ({where})"
     return None
 
 
@@ -1917,14 +2056,17 @@ def _step_skip(run: str, shell: str, cond: str, wd, root, env=None):
             return f"conditional (if: {cond[:40]})", True
     if re.search(r"\$\{\{\s*secrets\.", run) or re.search(r"\bsecrets\.", cond or ""):
         return "needs CI secrets", False
-    if _SIDE_EFFECT.search(run):
-        return "side effect (publish, deploy, push, system install)", False
     here = Path(root) / wd if wd and not os.path.isabs(wd) and "${{" not in wd else Path(root)
     step_env = dict(os.environ, CI="true")  # what run_local_ci gives the step
     step_env.update({k: v for k, v in (env or {}).items() if "${{" not in str(v)})
     prep = _runner_prep(_expand(run, root), str(here), root, step_env)
     if prep:
         return prep, False
+    if _SIDE_EFFECT.search(run):
+        return "side effect (publish, deploy, push, system install)", False
+    foreign = _foreign_context(_expand(run, root), step_env)
+    if foreign:
+        return foreign, True
     if _PLUMBING.search(run):
         return "CI plumbing ($GITHUB_ENV/OUTPUT)", False
     if _INSTALL.search(run):

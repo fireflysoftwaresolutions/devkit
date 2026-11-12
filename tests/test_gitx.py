@@ -771,6 +771,78 @@ class LocalCiTests(unittest.TestCase):
             self.assertIn("docker system prune", got["Docker"][0])
             self.assertEqual({n: got[n] for n in kept}, {n: (None, False) for n in kept})
 
+    # A hosted runner installs its OS packages and browsers; on this Mac the same steps install into the developer's
+    # Homebrew, rewrite the shared Playwright browser cache or change the global git config. They are skipped like the
+    # housekeeping above, without blocking the evidence; the tests that use the browsers still run.
+    def test_os_package_browser_and_global_config_setup_is_runner_prep(self):
+        with Sandbox() as s:
+            prep = {"Browsers with OS deps": "npx playwright install --with-deps chromium",
+                    "Browsers": "npx playwright install chromium",
+                    "Python browsers": "uv run python -m playwright install --with-deps",
+                    "Browser OS deps": "pnpm exec playwright install-deps",
+                    "Apt": "apt-get update",
+                    "Brew": "brew install librsvg",
+                    "Root": "sudo systemctl start postgresql",
+                    "Nested": "xvfb-run bash -c 'npx playwright install chromium && echo ready'",
+                    "Line endings": "git config --global core.autocrlf false"}
+            kept = {"Browser tests": "npx playwright test --grep @xplat", "Versions": "npx playwright --version",
+                    "Brew prefix": "brew --prefix openssl"}
+            steps = "".join(f"      - name: {n}\n        run: {r}\n" for n, r in {**prep, **kept}.items())
+            s.write(".github/workflows/ci.yml", "name: CI\non: [pull_request]\njobs:\n  test:\n    runs-on: ubuntu-latest\n"
+                                                "    steps:\n" + steps)
+            s.branch("feat/ci")
+            s.commit("ci: add the workflow")
+            got = {st["name"]: (st["skip"], st["blocking"]) for j in gitx.plan(str(s.repo)) for st in j["steps"]}
+            for name in prep:
+                with self.subTest(step=name):
+                    self.assertRegex(got[name][0] or "", r"^runner prep \(")
+                    self.assertFalse(got[name][1])
+            self.assertIn("OS packages", got["Browsers with OS deps"][0])
+            self.assertIn("shared Playwright browser cache", got["Browsers"][0])
+            self.assertIn("apt-get update", got["Apt"][0])
+            self.assertIn("sudo", got["Root"][0])
+            self.assertIn("git config --global", got["Line endings"][0])
+            self.assertEqual({n: got[n] for n in kept}, {n: (None, False) for n in kept})
+            self.assertIsNone(gitx.runner_setup("git config --global --get core.autocrlf", s.repo))  # a read
+
+    # A step that names a Docker context runs only when this Mac's Docker has a context of that name. The built-in
+    # `default` is a hosted runner's own engine: here it is whatever DOCKER_HOST points to, which the workflow never
+    # chose. Such a step is a real check that could not run here, so it blocks the evidence.
+    def test_a_step_that_names_a_docker_context_this_mac_lacks_blocks_the_evidence(self):
+        with Sandbox() as s, tempfile.TemporaryDirectory() as cfg:
+            meta = Path(cfg) / "contexts" / "meta" / "0f3a"
+            meta.mkdir(parents=True)
+            (meta / "meta.json").write_text(json.dumps({"Name": "colima", "Endpoints": {"docker": {
+                "Host": "unix:///Users/ana/.colima/default/docker.sock"}}}))
+            (Path(cfg) / "contexts" / "meta" / "broken").mkdir()
+            (Path(cfg) / "contexts" / "meta" / "broken" / "meta.json").write_text("{not json")
+            elsewhere = {"Acceptance": "dbus-run-session -- bash -c 'uv run python scripts/acceptance.py --profile pr "
+                                       "--docker-context default --block-egress'",
+                         "Compose": "DOCKER_CONTEXT=ci-runner docker compose up -d",
+                         "Exported": "export DOCKER_CONTEXT=ci-runner",
+                         "Use": "docker context use ci-runner",
+                         "Flag": "docker --context=ci-runner ps",
+                         "Short flag": "docker -c ci-runner ps",
+                         "Equals": "python scripts/check.py --docker-context=default"}
+            here = {"Mine": "python scripts/check.py --docker-context colima", "Mine too": "docker --context colima ps",
+                    "Current": "docker compose up -d", "Unset": 'python scripts/check.py --docker-context "$NO_CTX_SET"'}
+            steps = "".join(f"      - name: {n}\n        run: {r}\n" for n, r in {**elsewhere, **here}.items())
+            s.write(".github/workflows/ci.yml", "name: CI\non: [pull_request]\njobs:\n  test:\n    runs-on: ubuntu-latest\n"
+                                                "    steps:\n" + steps)
+            s.branch("feat/ci")
+            s.commit("ci: add the workflow")
+            with mock.patch.dict(os.environ, {"DOCKER_CONFIG": cfg}):
+                os.environ.pop("NO_CTX_SET", None)
+                got = {st["name"]: (st["skip"], st["blocking"]) for j in gitx.plan(str(s.repo)) for st in j["steps"]}
+            for name in elsewhere:
+                with self.subTest(step=name):
+                    self.assertRegex(got[name][0] or "", r"^Docker context \S+ ")
+                    self.assertTrue(got[name][1])
+            self.assertEqual(got["Acceptance"][0],
+                             "Docker context default is a hosted runner's own engine (contexts here: colima)")
+            self.assertEqual(got["Compose"][0], "Docker context ci-runner is not set up here (contexts here: colima)")
+            self.assertEqual({n: got[n] for n in here}, {n: (None, False) for n in here})
+
     def test_no_workflows(self):
         with Sandbox() as s:
             s.branch("feat/none")
