@@ -705,7 +705,9 @@ def live_sessions_of(person: dict, now: float, max_idle_s: float = 2 * 3600) -> 
 
 
 def collisions(team: list, items: list, now: float = None) -> list:
-    """Two people or sessions on the same project and branch; locks that expired but are still held."""
+    """Two people or sessions on the same project and branch; locks that expired but are still held. The texts name
+    a Mac by its hostname (work.display); the `who` lists keep the ids."""
+    from . import work
     now = now or time.time()
     by = {}
     for person in team:
@@ -719,17 +721,19 @@ def collisions(team: list, items: list, now: float = None) -> list:
     out = []
     for (proj, br), found in sorted(by.items()):
         if len(found) > 1:
-            labels = {}
+            labels, shown = {}, {}
             for w, a, _sid in found:
                 labels[f"{w} ({a})"] = labels.get(f"{w} ({a})", 0) + 1
-            named = sorted(f"{lb} ×{n}" if n > 1 else lb for lb, n in labels.items())
+                shown[f"{w} ({a})"] = f"{work.display(w, team)} ({a})"
+            named = sorted(f"{shown[lb]} ×{n}" if n > 1 else shown[lb] for lb, n in labels.items())
             out.append({"kind": "same-branch", "project": proj, "branch": br, "who": sorted(labels),
                         "sessions": len(found), "text": f"{len(found)} sessions on {proj}@{br or '?'}: " + ", ".join(named)})
     for it in items:
         if it.get("lock") == "expired" and it.get("status") not in ("done", "cancelled"):
             out.append({"kind": "expired-lock", "id": it["id"], "scope": it["scope"], "holder": it["claimed_by"],
                         "until": it["lock_expires"],
-                        "text": f"{it['id']} “{it['title'][:60]}” is still claimed by {_who(it['claimed_by'])}, "
+                        "text": f"{it['id']} “{it['title'][:60]}” is still claimed by "
+                                f"{work.display(_who(it['claimed_by']), team)}, "
                                 f"lock expired {it['lock_expires'][:16].replace('T', ' ')}"})
     return out
 
@@ -768,7 +772,16 @@ def people(team: list, items: list, slog: list, now: float = None, local: list =
         if ln.get("who") and ln["who"] not in out:
             e = get(ln["who"])
             e["recent"].append(ln)
+    for e in out.values():  # `who` and `host` stay the keys people are matched by; `label` is what the page shows
+        e["label"] = _host_label(e["who"], team)
+        e["recent"] = [dict(ln, label=_host_label(ln.get("who") or "", team)) for ln in e["recent"]]
     return sorted(out.values(), key=lambda e: (-len(e["sessions"]), -len(e["claimed"]), -e["updated"], e["who"]))
+
+
+def _host_label(who: str, team: list) -> str:
+    """The hostname part of `who` as a person reads it (work.display): `mac-158` for `ana@m-…`."""
+    from . import work
+    return work.display(who, team).partition("@")[2]
 
 
 def linked_items(items: list, slug: str, members: list) -> list:

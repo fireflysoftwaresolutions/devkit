@@ -78,6 +78,30 @@ def mine(who: str, a: dict = None, at: float = None) -> bool:
     return host == m.id or identity.was_this_mac(host, at, m)
 
 
+_LABEL = re.compile(r"[a-z0-9][a-z0-9-]{0,62}")  # a short hostname: what a label must look like to be shown
+
+
+def display(who: str, team: list = None) -> str:
+    """`who` as a person reads it: `user@<machine id>` (or a lock holder `user@<id> (agent:session)`) becomes
+    `user@<hostname>`. This Mac's id shows its hostname now; another Mac's the `label` its presence publishes (from
+    `team` when given, else its presence file). A label that is not a plain hostname (presence is another person's
+    text), an id with no presence, and a record that names a hostname already stay as they are. For display only:
+    compare people with mine() and the id."""
+    head, sep, rest = str(who or "").partition(" ")
+    user, at, host = head.partition("@")
+    if not at or not identity.MACHINE_ID.fullmatch(host) or not re.fullmatch(r"[A-Za-z0-9._-]+", user):
+        return str(who or "")
+    m = identity.machine()
+    label = m.label if host == m.id else ""
+    if not label:
+        found = [t for t in team if isinstance(t, dict) and t.get("user") == user and t.get("host") == host] \
+            if team is not None else [core.read_json(PRESENCE / f"{user}@{host}.json", None)]
+        label = next((str(t.get("label") or "") for t in found if isinstance(t, dict)), "")
+    if not _LABEL.fullmatch(label):
+        return str(who)
+    return f"{user}@{label}" + (sep + rest if sep else "")
+
+
 def actor_str(a: dict) -> str:
     return f"{a['user']}@{a['host']} ({a['agent']}{':' + a['session'] if a.get('session') else ''})"
 

@@ -1202,7 +1202,7 @@ def render_tasks_block(scope: str) -> str:
         its = [i for i in s["open"] if i["bucket"] == b]
         lines.append(f"### {b.capitalize()}")
         for i in its:
-            lock = f" · 🔒 {i['claimed_by'].split(' ')[0]}" if i["claimed_by"] else ""
+            lock = f" · 🔒 {work.display(i['claimed_by'].split(' ')[0])}" if i["claimed_by"] else ""
             st = "" if i["status"] in ("todo", "doing") else f" · {i['status']}"
             lines.append(f"- [ ] `{i['id']}` {i['title']}{st}{lock}")
     lines.append("### Done")

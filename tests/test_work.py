@@ -1128,6 +1128,27 @@ class MachineIdentityTests(unittest.TestCase):
             self.assertEqual(len(list((self.handoff.root / "lessons" / "usage").glob("*.json"))), 1)
             self.assertEqual(lessons.usage()["L-1"]["shown"], 2)
 
+    def test_a_person_is_shown_by_the_hostname_label_of_their_machine(self):
+        a = self.me()
+        work.PRESENCE.mkdir(parents=True, exist_ok=True)
+        for user, host, label in (("bob", "m-0000beef", "mini"), ("eve", "m-0000dead", "<b>x</b>")):
+            (work.PRESENCE / f"{user}@{host}.json").write_text(json.dumps({"user": user, "host": host, "label": label,
+                                                                          "updated": work.now_iso()}))
+        self.assertEqual(work.display(f"ana@{a['host']}"), "ana@mac-158")  # this Mac: its hostname now
+        self.assertEqual(work.display(f"ana@{a['host']} (codex:s1)"), "ana@mac-158 (codex:s1)")  # a lock holder
+        self.assertEqual(work.display("bob@m-0000beef"), "bob@mini")  # another Mac: the label its presence publishes
+        self.assertEqual(work.display("bob@m-0000beef", team=[{"user": "bob", "host": "m-0000beef",
+                                                               "label": "studio"}]), "bob@studio")
+        self.assertEqual(work.display("eve@m-0000dead"), "eve@m-0000dead")  # a label that is no hostname: the id
+        self.assertEqual(work.display("cy@m-00000000"), "cy@m-00000000")  # no presence: the id
+        self.assertEqual(work.display("ana@mac-55"), "ana@mac-55")  # a record from before the id names its host
+        self.assertEqual(work.display(""), "")
+
+    def test_the_notes_task_list_shows_a_lock_by_the_holders_hostname(self):
+        from devkit import registry
+        work.claim(work.create("acme/api", "Fix login", a=self.me()), a=self.me())
+        self.assertIn("🔒 ana@mac-158", registry.render_tasks_block("acme/api"))
+
     def test_presence_lists_this_macs_locks_across_a_rename(self):
         it = work.claim(work.create("acme/api", "Fix login", a=self.me()), a=self.me())
         other = self.legacy_lock("ana@mac-55", time.time())
