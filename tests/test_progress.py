@@ -422,7 +422,7 @@ class TimeModelTests(unittest.TestCase):
         compound = dict(sub, tool_input={"command": "dev progress step x && rm -rf build"})
         # Claude Code stamps the whole command and approves nothing; Codex, whose rewrite approves, never stamps
         self.assertEqual(hooks._route_subagent_progress(compound)["command"],
-                         "export DEVKIT_FROM_AGENT=a1b2; " + compound["tool_input"]["command"])
+                         "export DEVKIT_FROM_AGENT=a1b2; readonly DEVKIT_FROM_AGENT; " + compound["tool_input"]["command"])
         self.assertIsNone(hooks._route_subagent_progress(compound, "codex"))
         self.assertIsNone(hooks._route_subagent_progress(dict(sub, tool_input={"command": "git status"})))
 
@@ -1618,7 +1618,7 @@ class CrewSafetyTests(unittest.TestCase):
             with self.subTest(cmd=cmd):
                 call = dict(sub, tool_input={"command": cmd})
                 self.assertEqual((hooks._route_subagent_progress(call) or {}).get("command"),
-                                 "export DEVKIT_FROM_AGENT=a1; " + cmd)
+                                 "export DEVKIT_FROM_AGENT=a1; readonly DEVKIT_FROM_AGENT; " + cmd)
                 self.assertIsNone(hooks._unroutable_lane_command(call))
                 self.assertIsNone(hooks._route_subagent_progress(call, "codex"))
                 self.assertIn("command of its own", hooks._unroutable_lane_command(call, "codex"))
@@ -1654,7 +1654,8 @@ class CrewSafetyTests(unittest.TestCase):
         for cmd in ("dev progress step x\nrm -rf b", 'dev progress step "x" > /etc/passwd'):
             with self.subTest(cmd=cmd):  # a newline separates commands; the delete and the write meet guard.check
                 call = dict(sub, tool_input={"command": cmd})
-                self.assertEqual(hooks._route_subagent_progress(call)["command"], "export DEVKIT_FROM_AGENT=a1; " + cmd)
+                self.assertEqual(hooks._route_subagent_progress(call)["command"],
+                                 "export DEVKIT_FROM_AGENT=a1; readonly DEVKIT_FROM_AGENT; " + cmd)
                 self.assertIsNone(hooks._route_subagent_progress(call, "codex"))
         self.assertIsNone(hooks._unroutable_lane_command(dict(sub, tool_input={"command": "dev progress"})))
 

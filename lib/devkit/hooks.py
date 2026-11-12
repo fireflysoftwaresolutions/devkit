@@ -1828,7 +1828,10 @@ def _stamp_member(data: dict, agent: str, key: str, cmd: str):
     if _lane_verdict(data, agent, cmd, stamped=True):
         return None  # _unroutable_lane_command gives the refusal
     inp = data.get("tool_input") or {}
-    return {**inp, key: f"export {identity.LANE_VAR}={data['agent_id']}; {cmd}"}
+    # readonly: no read, loop, printf -v or assignment of the command reassigns it in this shell (zsh's typeset +r
+    # and a child shell's assignment are refused by _identity_verdict)
+    var = identity.LANE_VAR
+    return {**inp, key: f"export {var}={data['agent_id']}; readonly {var}; {cmd}"}
 
 
 def _watch_route(cmd: str, aid: str):

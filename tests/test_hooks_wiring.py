@@ -654,7 +654,7 @@ class CommandTextRecordTests(WiringCase):
         # fed by a pipe, the hook stamps the whole command for the member: no refusal, nothing recorded as refused
         out = self.hook("guard", self.bash(f'echo y | dev crew ask "{self.MESSAGE}"', aid="a_tank"))
         self.assertIsNone(self.deny(out))
-        self.assertIn("export DEVKIT_FROM_AGENT=a_tank; echo y | dev crew ask", out)
+        self.assertIn("export DEVKIT_FROM_AGENT=a_tank; readonly DEVKIT_FROM_AGENT; echo y | dev crew ask", out)
         # a lane refusal that remains: the message runs a substitution before devkit reads it
         why = self.deny(self.hook("guard", self.bash(f'echo y | dev crew ask "{self.MESSAGE} `date`"', aid="a_tank")))
         self.assertIn("backticks", why or "")

@@ -604,7 +604,7 @@ class LaneStamp(unittest.TestCase):
                         "dev progress note x &") + (("bash -c 'dev crew inbox'",) if level == "all" else ()):
                 with self.subTest(cmd=cmd, persona=persona):
                     routed = hooks._route_subagent_progress(self.data(cmd))
-                    self.assertEqual((routed or {}).get("command"), "export DEVKIT_FROM_AGENT=a1; " + cmd)
+                    self.assertEqual((routed or {}).get("command"), "export DEVKIT_FROM_AGENT=a1; readonly DEVKIT_FROM_AGENT; " + cmd)
                     self.assertIsNone(hooks._unroutable_lane_command(self.data(cmd)))
 
     def test_what_drops_the_stamp_or_acts_beyond_the_lane_stays_refused(self):
@@ -653,6 +653,13 @@ class LaneStamp(unittest.TestCase):
             with self.subTest(cmd=cmd):
                 self.assertIsNone(hooks._identity_verdict(self.data(cmd)))
 
+    def test_the_stamp_cannot_be_reassigned_in_the_shell(self):
+        from devkit import hooks
+        self.lane("Kid", "all")
+        routed = hooks._route_subagent_progress(self.data("dev progress step x; dev progress note y"))
+        self.assertTrue(routed["command"].startswith(
+            "export DEVKIT_FROM_AGENT=a1; readonly DEVKIT_FROM_AGENT; "), routed)
+
     def test_a_write_outside_the_scratch_folder_from_a_read_only_lane_stays_refused(self):
         from devkit import hooks
         self.lane("Seraph", "review")
@@ -680,7 +687,7 @@ class LaneStamp(unittest.TestCase):
                     "NO_COLOR=1 dev crew inbox"):
             with self.subTest(cmd=cmd):
                 routed = hooks._route_subagent_progress(self.data(cmd))
-                self.assertEqual(routed["command"], "export DEVKIT_FROM_AGENT=a1; " + cmd)
+                self.assertEqual(routed["command"], "export DEVKIT_FROM_AGENT=a1; readonly DEVKIT_FROM_AGENT; " + cmd)
                 self.assertNotIn("permissionDecision", hooks._rewrite("claude", routed))
                 self.assertIsNone(hooks._route_subagent_progress(self.data(cmd), "codex"))
 
