@@ -344,7 +344,7 @@ class ReadOnlyLanes(Case):
     process, its own wait, and writes whose every target is in that folder. A write anywhere else, a link, a
     recursive copy, a delete through a trailing slash, and a program that starts a process stay refused."""
 
-    def setUp(self):  # the folder, a file, and a link from the folder to a folder outside it
+    def setUp(self):  # the folder, a file, and links from the folder to a folder and a file outside it
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.pad = str(Path(guard.real(tmp.name)) / "claude-501" / "-x" / "962d6aba-c6a8-44ab-9e02-1d15272468e1" /
@@ -353,6 +353,7 @@ class ReadOnlyLanes(Case):
         (Path(self.pad) / "a").write_text("x")
         (Path(guard.real(tmp.name)) / "outside" / "sub").mkdir(parents=True)
         (Path(self.pad) / "out").symlink_to(Path(guard.real(tmp.name)) / "outside")
+        (Path(self.pad) / "lf").symlink_to(Path(guard.real(tmp.name)) / "outside" / "f")  # a file link out of it
 
     def ro(self, cmd):
         return member(cmd.replace("@P", self.pad), level="review", who="seraph")
@@ -383,7 +384,14 @@ class ReadOnlyLanes(Case):
                     # a task's output file among them, is no scratch folder
                     "rm -rf @P/{x,../kid}", "rm -rf @P/o*/sub", "touch @P/[o]ut/x", "rm -f @P/?ut/sub",
                     "rm -rf @P/../kid", "echo x > /tmp/forged.txt", "echo x > @P/../../tasks/b1.output",
-                    "python3 -c \"open('/tmp/forged.txt', 'w').write('x')\""):
+                    "python3 -c \"open('/tmp/forged.txt', 'w').write('x')\"",
+                    # every writer, a redirect too, with braces (zsh writes each word of a brace redirect), patterns,
+                    # `..`, or through a link that points out of the folder
+                    "touch @P/{a,../kid/b}", "touch @P/*/x", "touch @P/../kid/x", "cp README.md @P/{a,../kid/}",
+                    "cp README.md @P/../kid/a", "echo x > @P/{a,../kid/a}", "echo x > @P/a{,.bak}",
+                    "echo x > @P/../kid/a", "echo x > @P/*", "echo x >> @P/?", "echo x > @P/out/f",
+                    "cp README.md @P/out/f", "touch @P/out/f", "echo x | tee @P/out/f", "mv @P/a @P/out/f",
+                    "echo x > @P/lf", "sed -i '' s/a/b/ @P/lf", "chmod 777 @P/lf", "cp README.md @P/lf"):
             with self.subTest(cmd=cmd):
                 self.assertIsNotNone(self.ro(cmd))
 
