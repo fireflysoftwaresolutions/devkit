@@ -33,16 +33,16 @@ class CodexPatchAttributionTests(CodexCrew):
         self.assertNotEqual(verdict.get("permissionDecision"), "deny", verdict)
         # The external file tool writes after its guard and before its PostToolUse, while the reader finishes.
         (self.api / "api" / "x.py").write_text("value = 1\n")
-        (self.api / "unexplained.py").write_text("unknown = 1\n")  # outside every scope: no builder's alibi
+        (self.api / "api" / "unexplained.py").write_text("unknown = 1\n")
         s.finish(s.execute(review))
-        self.assertEqual(self.writes(s).get("certain"), ["unexplained.py"])
-        self.assertEqual(self.writes(s).get("paths"), ["api/x.py", "unexplained.py"])
+        self.assertEqual(self.writes(s).get("certain"), ["api/unexplained.py"])
+        self.assertEqual(self.writes(s).get("paths"), ["api/unexplained.py", "api/x.py"])
         s.hook("post-tool", s.payload("PostToolUse", tool_response={"success": True}, **patch))
         edits = json.loads((self.state / "calls" / s.sid / ".edits.json").read_text())["edits"]
         self.assertEqual([(e["caller"], e["path"]) for e in edits], [(TANK, str(self.api / "api" / "x.py"))])
         again = s.begin("git status --short", REVIEWER, "seraph")
         s.finish(s.execute(again))
-        self.assertEqual(self.writes(s).get("certain"), ["unexplained.py"])
+        self.assertEqual(self.writes(s).get("certain"), ["api/unexplained.py"])
 
     def test_denied_patch_supplies_no_writer_and_failed_patch_supplies_no_exact_edit(self):
         s = self.setup_lanes()
@@ -66,30 +66,28 @@ class CodexPatchAttributionTests(CodexCrew):
         patch, verdict = self.patch_call(s)
         self.assertNotEqual(verdict.get("permissionDecision"), "deny", verdict)
         (self.api / "api" / "x.py").write_text("partial = 1\n")
-        (self.api / "unexplained.py").write_text("unknown = 1\n")  # outside every scope: no builder's alibi
+        (self.api / "api" / "unexplained.py").write_text("unknown = 1\n")
         s.hook("post-tool", s.payload("PostToolUse", tool_response={"success": False}, **patch))
         s.finish(s.execute(review))
         writes = self.writes(s)
-        self.assertEqual(writes.get("paths"), ["api/x.py", "unexplained.py"])
-        self.assertEqual(writes.get("certain"), ["unexplained.py"])
+        self.assertEqual(writes.get("paths"), ["api/unexplained.py", "api/x.py"])
+        self.assertEqual(writes.get("certain"), ["api/unexplained.py"])
 
     def test_a_successful_patch_in_another_repository_does_not_clear_an_unknown_writer(self):
         s = self.setup_lanes()
         review = s.begin("git status --short", REVIEWER, "seraph")
-        # A successful edit with the same relative path belongs to a different repository; lib/x.py is outside
-        # every scope, so no builder's scope is its alibi.
+        # A successful edit with the same relative path belongs to a different repository.
         call = dict(tool_name="apply_patch", tool_use_id="foreign-patch",
-                    tool_input={"input": "*** Begin Patch\n*** Add File: lib/x.py\n+value = 1\n*** End Patch\n",
+                    tool_input={"input": "*** Begin Patch\n*** Add File: api/x.py\n+value = 1\n*** End Patch\n",
                                 "workdir": str(self.kit)})
         guard = s.hook("guard", s.payload("PreToolUse", **call))
         self.assertNotEqual((guard.get("hookSpecificOutput") or {}).get("permissionDecision"), "deny", guard)
-        (self.kit / "lib").mkdir(exist_ok=True)
-        (self.kit / "lib" / "x.py").write_text("value = 1\n")
+        (self.kit / "api").mkdir(exist_ok=True)
+        (self.kit / "api" / "x.py").write_text("value = 1\n")
         s.hook("post-tool", s.payload("PostToolUse", tool_response={"success": True}, **call))
-        (self.api / "lib").mkdir(exist_ok=True)
-        (self.api / "lib" / "x.py").write_text("unknown = 1\n")
+        (self.api / "api" / "x.py").write_text("unknown = 1\n")
         s.finish(s.execute(review))
-        self.assertEqual(self.writes(s).get("certain"), ["lib/x.py"])
+        self.assertEqual(self.writes(s).get("certain"), ["api/x.py"])
 
 
 if __name__ == "__main__":

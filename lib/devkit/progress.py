@@ -7290,16 +7290,16 @@ def scope_written(agent: str, sid: str, aid: str, paths: list, now: float | None
     lane, its helper or the tech lead, never the reading lane itself): devkit audits it as attributed and flags
     nothing, since the edit record is exact. An edit tool's temporary file (<file>.tmp.<pid>.<hex>) counts as its
     file. Every other file is held against the reading lane in `scope_writes`. It is "possible" when another writer
-    could have made it: a working build lane whose scope holds it; an edit call of that file still in flight
-    (edits_open: the tool writes before its result is recorded); or a shell call that overlapped the reading lane's
-    call, still open or already closed (open_calls, shells_since), whose caller, for a file in a working build lane's
-    scope, must be that lane or the tech lead. Codex also keeps accepted patch calls pending or closed, as possible
-    writers only of their declared paths. A call that writes no file (call_reads: `git status`, `dev watch --wait`)
-    makes nobody a writer. With no such writer it is "certain", and only a certain file makes the lane's report
-    unverified (_end_member_step). An open step whose scope holds a held file keeps it (`other_writes`), which the
-    review step after it lists; Morpheus gets one short crew notice naming the files and the possible writers; and
-    the audit trail a scope.write record per certainty. -> the lane's scope_writes, or None without a lane or when
-    it has none."""
+    was at work on it: an edit call of that file still in flight (edits_open: the tool writes before its result is
+    recorded), or a shell call that overlapped the reading lane's call, still open or already closed (open_calls,
+    shells_since), whose caller, for a file in a working build lane's scope, must be that lane or the tech lead.
+    Codex also keeps accepted patch calls pending or closed, as possible writers only of their declared paths. A call
+    that writes no file (call_reads: `git status`, `dev watch --wait`) makes nobody a writer. With no such writer it
+    is "certain": a script of the reading lane can write into a working member's scope, so a scope alone is no alibi.
+    Only a certain file makes the lane's report unverified (_end_member_step). An open step whose scope holds a held
+    file keeps it (`other_writes`), which the review step after it lists; Morpheus gets one short crew notice naming
+    the files and the possible writers; and the audit trail a scope.write record per certainty. -> the lane's
+    scope_writes, or None without a lane or when it has none."""
     from . import crew
     now = now or time.time()
     paths = sorted({str(p) for p in paths or [] if p})
@@ -7343,8 +7343,7 @@ def scope_written(agent: str, sid: str, aid: str, paths: list, now: float | None
                                           any(matches(path, p) for path in e.get("edit_paths") or [])], chain)
             candidates = shells | pending
             by_shell = ((candidates & holders) if holders else candidates - {"main"}) | (candidates & {"main"})
-            writers = sorted((by_shell | holders | editing) - {"main"}) + \
-                sorted((by_shell | editing) & {"main"})
+            writers = sorted((by_shell | editing) - {"main"}) + sorted((by_shell | editing) & {"main"})
             held.setdefault("possible" if writers else "certain", []).append(p)
             if writers:
                 how = "the shell call of" if set(writers) <= by_shell else "written by"

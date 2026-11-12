@@ -1941,8 +1941,8 @@ class ScopeWriteTests(unittest.TestCase):
     # The Code reviewer works review-only while the Senior engineer's step scope holds docs/audit.md. A file that
     # changed during the reviewer's shell call is the write of whoever's own Write, Edit or MultiEdit touched it
     # during that call (B-fy1ae3k2ao6: the Security engineer's and the QA engineer's edits were held against the
-    # Business analyst). Every other file is held against the reviewer: possible when another writer could have made
-    # it (ReaderWriteCreditTests), certain otherwise
+    # Business analyst). Every other file is the reviewer's, even inside a working member's scope: a script of the
+    # reviewer can write there, so a scope is no alibi
     def setUp(self):
         self.state = TempState().__enter__()
         self.addCleanup(self.state.__exit__, None, None, None)
@@ -1996,6 +1996,17 @@ class ScopeWriteTests(unittest.TestCase):
         self.assertEqual(self.told(), [])
         self.assertNotIn("scope_writes", pg.load_run("claude", "s1")["agents"]["a_seraph"])
 
+    def test_a_readers_write_into_a_working_members_scope_with_no_edit_of_theirs_is_held(self):
+        # the hiding case: the reader's script writes docs/audit.md; the Senior engineer edited it before the call
+        from devkit import audit
+        self.edited("a_neo", "docs/audit.md", self.t0 - 60)
+        flagged = self.written(["docs/audit.md"])
+        self.assertEqual((flagged["paths"], flagged["certainty"]), (["docs/audit.md"], "certain"))
+        (text,) = self.told()
+        self.assertIn("Code reviewer (Seraph)", text)
+        self.assertEqual([(r["target"], r["detail"]) for r in audit.query(action="scope.write")],
+                         [("Seraph", "certain: docs/audit.md")])
+
     def test_a_file_in_the_scope_of_a_member_whose_shell_call_was_open_is_held_as_possible(self):
         pg.call_opened("claude", {"session_id": "s1", "tool_use_id": "toolu_neo_sh", "agent_id": "a_neo",
                                   "tool_input": {"command": "python3 -m unittest tests.test_audit"}}, now=self.t0 + 1)
@@ -2008,16 +2019,16 @@ class ScopeWriteTests(unittest.TestCase):
         self.written(["docs/audit.md"])
         lines = pg.render_update(pg.load_run("claude", "s1"), branch="b").splitlines()
         review = next(ln for ln in lines if " 2. review" in ln)
-        self.assertIn("changed by another lane: docs/audit.md (Code reviewer (Seraph), possible)", review)
+        self.assertIn("changed by another lane: docs/audit.md (Code reviewer (Seraph), certain)", review)
 
 
 class ReaderWriteCreditTests(unittest.TestCase):
     # M138 and M146 of release 26.11.16's run: while the review-only Code reviewer's test run was open, the Senior
     # engineer's Edit of a file in his own step's scope reached the disk before its PostToolUse recorded it (the
     # record came 0.2 s after the reviewer's check), and the reviewer was held to have written it "while no other
-    # writer was at work", its report unverified. A file a reading lane's call changed is credited to the working
-    # build lane whose scope holds it, or to whoever's Write, Edit or shell call overlapped the call, still open or
-    # closed, the tech lead's included; only a change nobody else could have made is the reader's, as certain
+    # writer was at work", its report unverified. An allowed edit is on record from its PreToolUse, so a reading
+    # lane's check meanwhile credits its caller, the tech lead's included; a builder's scope alone is still no alibi
+    # (ScopeWriteTests): only a change nobody else was at work on is the reader's, as certain
     def setUp(self):
         from devkit import hooks
         self.hooks = hooks
@@ -2066,14 +2077,29 @@ class ReaderWriteCreditTests(unittest.TestCase):
                                   "last_assistant_message": report}, False, now=time.time())
         return next(st for st in pg.load_run("claude", "s1")["plan"] if st["name"] == "review")
 
-    def test_a_file_in_a_working_builders_scope_is_that_builders_possible_write(self):
-        # M138: the Senior engineer's step holds the file, and none of his calls is on record yet
+    def test_a_builders_edit_in_flight_when_the_reviewer_is_judged_is_its_possible_write(self):
+        # M138: the Senior engineer's Edit of a file in his scope is allowed, and the reviewer's check runs before
+        # the Edit's PostToolUse
+        self.hook("guard", dict(self.edit("a_neo", "tests/test_caller_identity.py", "toolu_neo_edit"),
+                                hook_event_name="PreToolUse"))
         flagged = self.written(["tests/test_caller_identity.py"])
         self.assertEqual((flagged["paths"], flagged["certainty"]), (["tests/test_caller_identity.py"], "possible"))
         (text,) = self.told()
         self.assertIn("tests/test_caller_identity.py (possibly written by Senior engineer (Neo))", text)
         self.assertNotIn("unverified", text)
         self.assertEqual(self.review_ends()["state"], "done")
+
+    def test_a_builders_scope_is_an_alibi_only_while_the_builder_is_at_work_on_the_file(self):
+        # the Code reviewer's finding L1: the same write into the Senior engineer's scope is the reviewer's while he
+        # is idle, and his possible write while his Edit of it is open
+        from devkit import audit
+        self.written(["tests/test_caller_identity.py"])
+        self.hook("guard", dict(self.edit("a_neo", "tests/test_caller_identity.py", "toolu_neo_edit"),
+                                hook_event_name="PreToolUse"))
+        self.written(["tests/test_caller_identity.py"])
+        self.assertEqual([(r["target"], r["detail"]) for r in audit.query(action="scope.write")],
+                         [("Seraph", "certain: tests/test_caller_identity.py"),
+                          ("Seraph", "possible: tests/test_caller_identity.py")])
 
     def test_the_tech_leads_edit_reaches_the_record_before_its_result_so_a_check_meanwhile_credits_it(self):
         # the tech lead's Edit of a file no lane holds: the guard allowed it, the file is written, and the reviewer's
