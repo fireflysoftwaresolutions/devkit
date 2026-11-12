@@ -282,8 +282,13 @@ class SessionWriteTests(ClaimCase):
         v = guard.crew_shell_verdict(sends, str(self.checkout), lane="a_tank", session=CLAUDE_A)
         self.assert_refused(v, "dev crew ask")
         self.assertIsNone(guard.crew_shell_verdict(mentions, str(self.checkout), lane="a_tank", session=CLAUDE_A))
+        # a member's program that starts a process is one the allow-list judge does not vouch for, a read included;
+        # the read itself, typed as a command, runs
         reads = "python3 -c \"import subprocess; subprocess.run(['dev', 'session', 'ls'])\""
-        self.assertIsNone(guard.crew_shell_verdict(reads, str(self.checkout), lane="a_tank", session=CLAUDE_A))
+        why = guard.crew_shell_verdict(reads, str(self.checkout), lane="a_tank", session=CLAUDE_A)
+        self.assertIn("run the command it needs yourself", (why or ("", ""))[1])
+        self.assertIsNone(guard.crew_shell_verdict("dev session ls", str(self.checkout), lane="a_tank",
+                                                   session=CLAUDE_A))
 
     def test_member_cannot_set_devkit_speaker(self):
         sets = ("DEVKIT_SPEAKER=main dev session tell all hi", "DEVKIT_SPEAKER=main make release",

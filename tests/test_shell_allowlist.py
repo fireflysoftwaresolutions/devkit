@@ -130,12 +130,14 @@ class AllowlistTests(unittest.TestCase):
         pad = "/private/tmp/claude-501/-Users-x/962d6aba-c6a8-44ab-9e02-1d15272468e1/scratchpad"
         # dev test prove runs the tests in a temporary copy of the checkout, restores the base there and removes it:
         # the checkout stays as it was, so a reviewer can check that new tests fail without the change (Seraph, B3)
-        for cmd in ("bin/dev test", "dev test run --failed", f"python3 {pad}/seraph/probe.py",
-                    f"python3 -u {pad}/seraph-f7/probe.py --verbose", "dev test prove", "bin/dev test prove --since main",
+        for cmd in ("bin/dev test", "dev test run --failed", "dev test prove", "bin/dev test prove --since main",
                     "dev test prove tests/test_gate_tiers.py --json"):
             with self.subTest(cmd=cmd):
                 self.assertIsNone(lane(cmd))
-        for cmd in (f"python3 {pad}/tank/probe.py", f"python3 {pad}/probe.py",
+        # a probe of its own runs when the allow-list judge reads it (tests.test_guard_readonly_lanes); one the guard
+        # cannot read, as these paths that do not exist, may have been written a moment before and stays refused
+        for cmd in (f"python3 {pad}/seraph/probe.py", f"python3 -u {pad}/seraph-f7/probe.py --verbose",
+                    f"python3 {pad}/tank/probe.py", f"python3 {pad}/probe.py",
                     f"python3 -c 'import runpy; runpy.run_path(\"{pad}/seraph/probe.py\")'"):
             with self.subTest(cmd=cmd):
                 self.assertIsNotNone(lane(cmd))

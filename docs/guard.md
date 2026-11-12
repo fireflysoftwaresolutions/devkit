@@ -383,7 +383,7 @@ three folders readable and writable by your account only (`0700`) every time it 
 | Action of an agent | Decision |
 | --- | --- |
 | A file write (Write, Edit, `apply_patch`) in those three folders, or in a subagent's meta file | deny, with the `dev` command that owns the record |
-| A shell write there: a redirect, `tee`, `cp`, `mv`, `ln`, `rm`, `dev rm`, `sed -i`, an interpreter that writes files, also inside `sh -c`, `eval`, `xargs`, or `find -exec` | deny. A Python program whose every write is a path written out in its code (a string, `Path(…)` or `os.path.join` of strings, `~` expanded, or a name bound once to one of those) is judged by those paths, as a redirect is, so an edit of a repository file whose text names devkit's state or a handoff note runs; a written path that names one of them in its text counts as one, and a program that writes a path built at run time, starts a process, or loads code is judged by its text, as before. An existing file given as a program's configuration (`--config`, `--config-file`, `--rcfile`, `--settings`) is read: `vale --config=<devkit's vale.ini>` runs |
+| A shell write there: a redirect, `tee`, `cp`, `mv`, `ln`, `rm`, `dev rm`, `sed -i`, an interpreter that writes files, also inside `sh -c`, `eval`, `xargs`, or `find -exec` | deny. A Python program the allow-list judge vouches for (see [Commands the guard cannot name](#commands-the-guard-cannot-name)), whose every write goes through `open` with a literal mode or a path's own writer to a path written out in its code (a string, `Path(…)` or `os.path.join` of strings, `~` expanded, or a name bound once to one of those), is judged by those paths, as a redirect is, so an edit of a repository file whose text names devkit's state or a handoff note runs; a written path that names one of them in its text counts as one. Any other program that names them (an alias of `open`, `io.FileIO`, `fileinput`, a module outside the vetted list) is judged by its text, as before, and counts as one that writes. An existing file given as a program's configuration (`--config`, `--config-file`, `--rcfile`, `--settings`) is read: `vale --config=<devkit's vale.ini>` runs |
 | `dev config set safeguards.*`, `audit.*`, `bugs.share`, or `agents.*`, also spelled with leading or doubled dots (`.agents.codex`, `bugs..share`), which `dev config set` reads as the same key; `dev config edit`; or a `DEVKIT_*` or `DEV_ROOT` value added to the `env` block of an agent settings file or to a shell startup file such as `~/.zshrc` | deny: `bugs.share` decides whether devkit posts under your GitHub account, so only you set it, with `dev bug share` in a terminal. `agents.*` turns devkit on or off for an agent, and the next `dev install` or `dev setup` takes devkit's hooks and rules out of an agent turned off, so only you set it, in your terminal |
 | `dev setup`, except `dev setup --preview` and `dev setup --help` | deny: it decides which agents devkit sets up and rewrites their settings, hooks, and instructions, so you run it in your own terminal. `--preview` only draws the setup's screens with sample data and changes nothing |
 | Replacing, writing, or deleting a `dev` that a shell finds: `~/.local/bin/dev` (the link itself) or another `dev` earlier on `PATH` | deny → the developer runs `dev install --only cli` |
@@ -597,13 +597,20 @@ These are not `unknown`:
   every option word must be one the guard knows runs nothing (`-norc`, `-noprofile`, `-posix`, set's letters and
   `-o` names, and `-O extglob` or another globbing option); `-login`, `-rcfile`, `-debugger`, `-O extdebug`, `-D`, an
   unknown option, or `-posix` after a short option (which bash reads as `-p -o … -s -i -x`) make it run;
-- a lookup by a name written out in the code. Python is read with its own parser: `getattr(r, 'returncode')`,
-  `vars(r)['args']` and `__import__('json')` name what they call; `getattr` with a computed name or a spawn
-  function's name, `__import__` or `import_module` of a computed name or of a module that can start a process,
-  `globals()[name]`, `eval`, `exec`, `compile`, `operator.attrgetter`, and the interpreter's internals
-  (`__subclasses__`, `__globals__`, `f_globals`, …) still make a program unknown. In JavaScript, `Function`, `eval`,
-  `Reflect`, `globalThis[…]` and `vm` still do, and a module loaded by a computed name (`await import(mod)`) does only
-  with a call through a computed name (`m[k](…)`);
+- a crew member's own Python or JavaScript program (typed with `-c`, `-e` or a heredoc, or a script outside the
+  repository) that the allow-list judge vouches for. The judge passes a program only when every module it imports
+  is a vetted one that cannot start a process, run code or load code (`json`, `re`, `pathlib`, `collections`,
+  `itertools`, `math`, `datetime`, `csv`, `ast`, `difflib`, `hashlib`, `textwrap`, `tempfile`, and the like; `os`,
+  `sys` and `io` only for their reads), every builtin it uses is a vetted one, a lookup names its attribute as a
+  literal (`getattr(r, 'returncode')`), `open` is only called (never aliased, passed or partially applied), and every
+  file it writes goes through `open` with a literal mode or a path's own writer, to a path written out in its code.
+  In JavaScript, only `fs`, `path`, `url`, `util`, `os`, `crypto` and other vetted modules by a literal name, no
+  `Function`, `eval`, `vm`, `Reflect`, `globalThis`, `child_process` or `worker_threads`, no computed call, and file
+  writes only to literal paths. Anything else (`subprocess`, `pydoc`, `timeit`, `code`, `pdb`, `pickle`, `runpy`, a
+  computed import, `eval`, a dunder attribute, a module of the project) is a program the guard cannot vouch for:
+  tier 2 for a member, as before devkit 26.11.17, with the way: run the command it needs yourself, or ask the tech
+  lead. A command that writes a file and then runs it as a script is refused: the judge reads the file as it is
+  before the command runs. Awk, sed, expect, Tcl, Ruby and Perl programs keep their own rules;
 - text inside an interpreter's string literals: `${…}`, `{…}`, `[…]` and `*` there belong to the language (a
   template literal, an f-string, a list), and the guard looks for spawn calls in the program's code, not in the
   text it carries. A program named in such a string (`os.system('gh pr merge 12')`) is still classified;
@@ -842,10 +849,12 @@ checks. These run as well:
 - A command continued with a backslash-newline, read as the shell joins it.
 
 A script from the member's own scratch folder runs when an interpreter names it directly:
-`python3 scratchpad/<member id>/probe.py`. A Python or JavaScript program typed in the command runs too
-(`python3 -c '…'`, `python3 - <<'EOF'`, `node -e '…'`) when it only reads: it starts no process, calls nothing by a
-name it builds, makes no link, loads no code from a file (`runpy`, `exec_module`), and every file it writes is a path
-written out in its code inside the member's own scratch folder or a temporary folder outside the session scratchpad.
+`python3 scratchpad/<member id>/probe.py`, when the allow-list judge vouches for it (see
+[Commands the guard cannot name](#commands-the-guard-cannot-name)) and every file it writes is a path written out in
+its code inside the member's own scratch folder or a temporary folder outside the session scratchpad and outside
+the folder the command runs in. A Python or JavaScript program typed in the command (`python3 -c '…'`,
+`python3 - <<'EOF'`, `node -e '…'`) runs on the same terms. A script the guard cannot read, or one the same command
+writes first, stays refused.
 A script in another member's folder stays refused, and so do the same script under a runner (`uv run`, `npx`), a
 shell line or script (`bash -c '…'`, `bash x.sh`), and a `PYTHONPATH=` prefix.
 

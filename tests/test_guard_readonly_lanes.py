@@ -124,8 +124,13 @@ class ReadOnlyLanes(unittest.TestCase):
                             "dev plan revise x.md --why y")
 
     def test_a_script_from_the_members_own_scratch_folder_runs_and_another_members_does_not(self):
+        # the allow-list judge reads the member's own script: one that reads runs, one that starts a process or that
+        # the guard cannot read (it may have been written a moment before) does not
+        (self.pad / "seraph" / "probe.py").write_text("import json, sys\nprint(json.dumps(sys.argv))\n")
+        (self.pad / "seraph" / "spawn.py").write_text("import subprocess\nsubprocess.run(['git', 'status'])\n")
         self.assert_runs(f"python3 {self.pad}/seraph/probe.py", f"cd {self.pad}/seraph && python3 probe.py data.json")
-        self.assert_refused(f"python3 {self.pad}/tank/probe.py",
+        self.assert_refused(f"python3 {self.pad}/seraph/spawn.py", f"python3 {self.pad}/seraph/missing.py",
+                            f"python3 {self.pad}/tank/probe.py",
                             f"python3 -c 'import runpy, sys; runpy.run_path(sys.argv[1])' {self.pad}/tank/p.py",
                             f"python3 -m http.server {self.pad}/seraph/p.py")
 

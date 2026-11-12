@@ -5601,10 +5601,13 @@ class _Shell:
         # which hold everything), its relative paths can land in them
         in_handoff = bool(here) and _under_ci(real(here), real(core.HANDOFF)) and \
             (handoff_record(here) or holds_handoff_record(here))
-        if code and seen and not inside and not in_handoff and _family(name) in ("python", "pypy"):
+        unvouched = False  # a Python program the allow-list judge cannot vouch for may write anything it names
+        if code and _family(name) in ("python", "pypy"):
             # every file the program writes is a path its code writes out: judged by those paths, as a redirect or
             # the Write tool is, whatever else its text names (an edit of devkit's own tests names devkit's state)
             paths, why = _py_write_paths(code, cwd)
+            unvouched = bool(why)
+        if code and seen and not inside and not in_handoff and _family(name) in ("python", "pypy") and not unvouched:
             if not why:
                 # a written path that names a note or devkit's state in its text counts as one, wherever the
                 # configured roots are (`~/Development/.handoff/projects/…` with the handoff repository elsewhere)
@@ -5617,14 +5620,15 @@ class _Shell:
                                 f"install (spec C11). For a devkit record, use the `dev` command that owns it. {_TAIL}",
                                 key="state-writes-path")
                 return self.targets(paths, cwd)
-        if code and (_CODE_WRITES.search(code) or _ANY_WRITE.search(code)) and (
+        writes = bool(code) and (unvouched or _CODE_WRITES.search(code) or _ANY_WRITE.search(code))
+        if writes and (
                 in_handoff or _note_text().search(code) or
                 any(handoff_record(resolve(c, cwd)) for c in named)):  # B2a: a path built by calls counts too
             return deny(f"This {name} program writes files and names a project's handoff note or the team's records "
                         f"in the handoff repository, and the guard cannot see what it changes (B2a: the note's embargo "
                         f"list and backup policy decide what devkit pushes). Edit a note with the Edit or Write tool; "
                         f"use the dev command that owns a record.", key="handoff-writes")
-        if not code or not (_CODE_WRITES.search(code) or _ANY_WRITE.search(code)):  # a path from nested calls too
+        if not writes:  # a path from nested calls too
             return None
         if (_SETTINGS_TEXT.search(code) and _SETTINGS_FILE_TEXT.search(code)) or \
                 any(agent_settings(q) for c in named for q in (_lexical(c, cwd), resolve(c, cwd))):
@@ -9238,27 +9242,8 @@ def _own_scratch_script(argv, cwd, member) -> bool:
     return False
 
 
-_PY_LINKS = frozenset({"symlink", "symlink_to", "link", "hardlink_to", "link_to"})
-# the calls that run the code of a file or module the program names (runpy, importlib): what that code does is unread
-_PY_LOADS = frozenset({"run_path", "run_module", "exec_module", "load_module", "load_source", "load_compiled",
-                       "spec_from_file_location", "reload", "load_dynamic"})
-# the Python calls that write, move or delete what their path arguments name, and the index of the first such argument
-_PY_WRITES = {"remove": 0, "unlink": 0, "rmdir": 0, "removedirs": 0, "rmtree": 0, "mkdir": 0, "makedirs": 0,
-              "chmod": 0, "lchmod": 0, "chown": 0, "lchown": 0, "truncate": 0, "utime": 0, "mkfifo": 0, "mknod": 0,
-              "rename": 0, "renames": 0, "replace": 0, "move": 0, "copy": 1, "copy2": 1, "copyfile": 1,
-              "copytree": 1, "copymode": 1, "copystat": 1, "make_archive": 0, "unpack_archive": 1, "extract": 0,
-              "extractall": 0, "connect": 0, "FileHandler": 0, "savefig": 0, "to_csv": 0, "to_json": 0, "save": 0}
-# the modules whose functions of _PY_WRITES write files (os.remove, shutil.copy, sqlite3.connect), and the method names
-# that write a file whatever object has them; any other method of those names (d.copy(), sock.connect()) is no write
-_PY_FILE_MODULES = frozenset({"os", "shutil", "sqlite3", "tarfile", "zipfile", "logging", "posix", "dbm", "shelve"})
-_PY_METHOD_WRITES = frozenset({"extractall", "extract", "savefig", "to_csv", "to_json", "make_archive",
-                               "unpack_archive", "copytree", "rmtree", "makedirs"})
-# the methods of a path object that write what it names
-_PY_PATH_WRITES = frozenset({"write_text", "write_bytes", "touch", "mkdir", "unlink", "rmdir", "rename", "replace",
-                             "chmod", "lchmod"})
-# a mode that opens for writing; os.open's flags that do
+# a mode that opens a file for writing
 _PY_WRITE_MODE = re.compile(r"[wax+]")
-_PY_WRITE_FLAGS = re.compile(r"\bO_(?:WRONLY|RDWR|CREAT|APPEND|TRUNC)\b")
 
 
 def _py_path(node, cwd, names=None, depth=0):
@@ -9311,64 +9296,234 @@ def _py_once(tree) -> dict:
     return {k: v for k, v in plain.items() if stores.get(k) == 1}
 
 
+# The one judge of the programs an agent types inline or writes in a scratch folder, by an allow list (fail closed):
+# a program counts as known only when every module it imports, every name it reads and every function it calls is one
+# that cannot start a process, run code it builds or load code, and every file it writes goes through a writer the
+# guard reads with a path written out in its code. Anything else is a program the guard cannot vouch for.
+_PY_SAFE_MODULES = frozenset("""json re pathlib collections collections.abc itertools functools math cmath statistics
+    datetime time zoneinfo textwrap difflib csv tomllib ast hashlib hmac base64 binascii unicodedata string
+    dataclasses typing enum fnmatch glob copy pprint reprlib random secrets decimal fractions numbers bisect heapq
+    struct uuid html html.parser configparser shlex argparse tempfile keyword tokenize token calendar abc contextlib
+    io os os.path posixpath sys urllib.parse xml.etree.ElementTree operator.itemgetter warnings errno stat
+    locale gettext graphlib array weakref types""".split())
+# the attributes a program may read of the vetted modules that also hold a way out (os.system, sys.modules, io.FileIO)
+_PY_MODULE_ATTRS = {
+    "os": frozenset("""path listdir walk scandir getcwd environ getenv sep altsep linesep pathsep stat lstat
+        cpu_count getpid getppid name fspath fsdecode fsencode access R_OK W_OK X_OK F_OK devnull curdir pardir extsep
+        get_terminal_size isatty getuid getgid getlogin umask""".split()),
+    "sys": frozenset("""argv stdin stdout stderr exit version version_info platform maxsize getsizeof byteorder
+        executable getrecursionlimit setrecursionlimit intern path float_info int_info hexversion implementation
+        getdefaultencoding getfilesystemencoding""".split()),
+    "io": frozenset({"StringIO", "BytesIO", "TextIOWrapper", "SEEK_SET", "SEEK_CUR", "SEEK_END",
+                     "UnsupportedOperation"}),
+    "tempfile": frozenset({"gettempdir", "gettempprefix", "mkdtemp", "mkstemp", "TemporaryDirectory",
+                           "NamedTemporaryFile", "TemporaryFile", "SpooledTemporaryFile"}),
+    "types": frozenset({"SimpleNamespace", "MappingProxyType"}),
+    "contextlib": frozenset({"contextmanager", "suppress", "redirect_stdout", "redirect_stderr", "closing",
+                             "nullcontext", "ExitStack"}),
+}
+_PY_SAFE_BUILTINS = frozenset("""print len range enumerate zip map filter sorted reversed min max sum any all abs round
+    int float complex str bool bytes bytearray list dict set frozenset tuple isinstance issubclass hasattr repr format
+    chr ord hex bin oct divmod pow hash id iter next slice callable ascii super object property staticmethod
+    classmethod memoryview input type True False None NotImplemented Ellipsis exit quit open getattr __name__ __file__
+    __doc__""".split())
+_PY_DIRECT_ONLY = frozenset({"open", "type", "hasattr", "getattr"})  # read only as the function a call names: never an alias
+# the methods that write what a path object names, and those that make a link or a mode no read needs
+_PY_PATH_WRITERS = frozenset({"write_text", "write_bytes", "touch", "mkdir", "unlink", "rmdir", "rename", "replace",
+                              "copy", "copy_into", "move", "move_into"})
+_PY_PATH_REFUSED = frozenset({"symlink_to", "hardlink_to", "link_to", "chmod", "lchmod", "chown", "lchown"})
+
+
 def _py_write_paths(code, cwd) -> tuple:
-    """The files a Python program writes, moves or deletes, read with Python's parser -> (paths, why): `paths`, each
-    written out in its code (_py_path), when `why` is ''; else why the guard cannot know them: the program does not
-    parse, can start a process, calls a function by a name it builds, makes a link, loads code from a file, or writes
-    a path computed at run time."""
+    """The files a Python program writes, by the allow-list judge -> (paths, why): `paths`, each written out in its
+    code (_py_path), when `why` is ''; else why the guard cannot vouch for the program: it does not parse, imports a
+    module or reads a name or attribute outside the vetted lists, reaches a dunder attribute, refers to `open`
+    other than by calling it, calls getattr, eval, exec, compile or another builtin outside the list, writes through a
+    writer the guard does not read, makes a link, or writes a path built at run time."""
     import ast
     try:
         tree = ast.parse(code)
     except (SyntaxError, ValueError, RecursionError, MemoryError):
         return [], "the guard cannot parse this program"
-    if _code_spawns(code, "python3"):
-        return [], "this program can start a process: run that command itself"
-    found = _py_dynamic(code)
-    if found:
-        return [], f"this program calls a function by a name it builds ({_code(found)})"
-    paths, once = [], _py_once(tree)
+    parents, local, modules = {}, set(), {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parents[id(child)] = node
+        if isinstance(node, ast.Name) and not isinstance(node.ctx, ast.Load):
+            local.add(node.id)
+        elif isinstance(node, ast.arg):
+            local.add(node.arg)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            local.add(node.name)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            local.add(node.name)
+    paths, once, bound = [], _py_once(tree), set()
 
-    def place(node):
+    def module_ok(name):
+        return name in _PY_SAFE_MODULES
+
+    def place(node, what="writes"):
         q = _py_path(node, cwd, once) if node is not None else None
         if q is None:
-            return "this program writes a file the guard cannot place: write the path out"
+            return f"this program {what} a file the guard cannot place: write the path out"
         paths.append(q)
         return ""
 
-    for n in ast.walk(tree):
-        if not isinstance(n, ast.Call):
+    def mode_writes(modes):
+        return any(not (isinstance(m, ast.Constant) and isinstance(m.value, (str, int))) or
+                   (isinstance(m.value, str) and _PY_WRITE_MODE.search(m.value)) for m in modes[:1])
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for a in node.names:
+                if not module_ok(a.name):
+                    return [], f"this program imports {_code(a.name)}, a module the guard does not vouch for"
+                modules[(a.asname or a.name).split(".")[0] if not a.asname else a.asname] = \
+                    a.name if a.asname else a.name.split(".")[0]
+        elif isinstance(node, ast.ImportFrom):
+            mod = node.module or ""
+            if node.level or not module_ok(mod):
+                return [], f"this program imports from {_code(mod or '.')}, a module the guard does not vouch for"
+            for a in node.names:
+                full = f"{mod}.{a.name}"
+                allowed = _PY_MODULE_ATTRS.get(mod)
+                if a.name == "*" or a.name.startswith("__") or (allowed is not None and a.name not in allowed and
+                                                                 not module_ok(full)):
+                    return [], f"this program imports {_code(full)}, which the guard does not vouch for"
+                if module_ok(full):
+                    modules[a.asname or a.name] = full
+                bound.add(a.asname or a.name)
+    for node in ast.walk(tree):
+        parent = parents.get(id(node))
+        if isinstance(node, ast.Attribute):
+            if node.attr.startswith("__"):
+                return [], f"this program reaches {_code(node.attr)}, the interpreter's internals"
+            base = node.value
+            mod = modules.get(base.id) if isinstance(base, ast.Name) and base.id not in (local - set(modules)) \
+                else None
+            if isinstance(base, ast.Attribute) and isinstance(base.value, ast.Name) and \
+                    modules.get(base.value.id) == "os" and base.attr == "path":
+                mod = "os.path"
+            if mod is not None:
+                allowed = _PY_MODULE_ATTRS.get(mod)
+                if not isinstance(node.ctx, ast.Load):
+                    return [], f"this program changes {_code(mod + '.' + node.attr)}"
+                if allowed is not None and node.attr not in allowed and not module_ok(f"{mod}.{node.attr}"):
+                    return [], f"this program uses {_code(mod + '.' + node.attr)}, which the guard does not vouch for"
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id not in local and \
+                node.id not in modules and node.id not in bound:
+            if node.id not in _PY_SAFE_BUILTINS and not re.fullmatch(r"\w*(?:Error|Exception|Warning|Exit|Interrupt|"
+                                                                     r"Iteration)", node.id):
+                return [], f"this program uses {_code(node.id)}, which the guard does not vouch for"
+            if node.id in _PY_DIRECT_ONLY and not (isinstance(parent, ast.Call) and parent.func is node):
+                return [], f"this program refers to {_code(node.id)} without calling it"
+        elif isinstance(node, ast.Subscript) and not isinstance(node.ctx, ast.Load):
+            base = node.value
+            if isinstance(base, ast.Attribute) and isinstance(base.value, ast.Name) and base.value.id in modules:
+                return [], f"this program changes {_code(modules[base.value.id] + '.' + base.attr)}"
+        if not isinstance(node, ast.Call):
             continue
-        f = n.func
-        name = f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", "")
-        if name in _PY_LINKS:
-            return [], "this program makes a link"
-        if name in _PY_LOADS:
-            return [], f"this program loads code from a file ({_code(name)}), which the guard does not read"
-        on_path = isinstance(f, ast.Attribute) and not (isinstance(f.value, ast.Name) and
-                                                        f.value.id in ("os", "shutil", "io", "codecs", "gzip", "bz2",
-                                                                       "lzma", "tarfile", "zipfile", "sqlite3"))
-        why = ""
-        if name in ("open", "ZipFile", "TarFile", "GzipFile"):
-            modes = (list(n.args) if on_path and name == "open" else list(n.args[1:])) + \
-                [k.value for k in n.keywords if k.arg in ("mode", "flags")]
-            writes = any(not (isinstance(m, ast.Constant) and isinstance(m.value, (str, int))) or
-                         (isinstance(m.value, str) and _PY_WRITE_MODE.search(m.value)) for m in modes[:1]) or \
-                any(_PY_WRITE_FLAGS.search(ast.dump(m)) for m in modes)
-            if writes:
-                why = place(f.value if on_path and name == "open" else (n.args[0] if n.args else None))
-        elif on_path and name in _PY_PATH_WRITES and not (name in ("replace", "rename") and len(n.args) != 1):
-            why = place(f.value)  # str.replace(old, new) takes two words: no path's
-        elif name in _PY_WRITES and (isinstance(f, ast.Name) or name in _PY_METHOD_WRITES or
-                                     (isinstance(f.value, ast.Name) and f.value.id in _PY_FILE_MODULES)):
-            k = _PY_WRITES[name]
-            if name == "connect" and n.args and isinstance(n.args[0], ast.Constant) and n.args[0].value == ":memory:":
-                continue
-            for arg in (n.args[k:k + 1] + (n.args[:1] if name in ("rename", "renames", "replace", "move") else [])
-                        or [None]):
-                why = why or place(arg)
+        f, why = node.func, ""
+        name = f.attr if isinstance(f, ast.Attribute) else f.id if isinstance(f, ast.Name) else ""
+        if isinstance(f, ast.Name) and f.id not in local:
+            if name == "type" and len(node.args) != 1:
+                return [], "this program makes a class at run time"
+            if name in ("hasattr", "getattr") and (len(node.args) < 2 or not isinstance(node.args[1], ast.Constant)
+                                                   or str(node.args[1].value).startswith("__")):
+                return [], "this program looks an attribute up by a computed name"
+            if name == "open":
+                modes = list(node.args[1:2]) + [k.value for k in node.keywords if k.arg == "mode"]
+                if mode_writes(modes):
+                    why = place(node.args[0] if node.args else None)
+        elif isinstance(f, ast.Attribute):
+            mod = modules.get(f.value.id) if isinstance(f.value, ast.Name) else None
+            if isinstance(f.value, ast.Attribute) and f.value.attr == "environ" and \
+                    name not in ("get", "items", "keys", "values", "copy"):
+                return [], "this program changes the environment"
+            if mod is None:  # a method of a value the program made: a path's or a file's
+                if name in _PY_PATH_REFUSED:
+                    return [], f"this program calls {_code(name)}, a link or mode change"
+                if name == "open" and mode_writes(list(node.args[:1]) + [k.value for k in node.keywords
+                                                                          if k.arg == "mode"]):
+                    why = place(f.value)
+                elif name in _PY_PATH_WRITERS and not (name in ("replace", "rename") and len(node.args) != 1) and \
+                        not (name in ("copy", "move", "copy_into", "move_into") and not node.args):
+                    why = place(f.value)
+                    if not why and name in ("rename", "replace", "copy", "move", "copy_into", "move_into"):
+                        why = place(node.args[0])
+            elif mod == "tempfile":
+                pass  # it writes in the temporary folder
         if why:
             return [], why
     return paths, ""
+
+
+_JS_SAFE_MODULES = frozenset({"fs", "fs/promises", "path", "url", "util", "assert", "assert/strict", "os", "crypto",
+                              "readline", "events", "string_decoder", "buffer", "timers", "timers/promises",
+                              "querystring", "stream", "zlib", "perf_hooks"})
+_JS_IMPORT = re.compile(r"""\brequire\s*\(\s*(?:'([^'\n]{0,200})'|"([^"\n]{0,200})"|`([^`\n]{0,200})`|([^)\n]{0,200}))\)|"""
+                        r"""\bimport\s*\(\s*([^)\n]{0,200})\)|\b(?:import|export)\b[^'"\n;]{0,400}\bfrom\s*['"]([^'"\n]{0,200})['"]|"""
+                        r"""\bimport\s*['"]([^'"\n]{0,200})['"]""")
+_JS_REFUSED = re.compile(r"(?<![.\w])(?:Function|eval|WebAssembly)\b|\bReflect\s*\.|\bglobalThis\b|\bglobal\s*\[|"
+                         r"\bprocess\s*\.\s*(?!(?:argv|env|exit|exitCode|stdout|stderr|stdin|cwd|platform|version|"
+                         r"versions|hrtime|memoryUsage|nextTick|on|arch|pid|uptime)\b)\w+|\]\s*\(|\bconstructor\b|"
+                         r"\b__proto__\b|\bprototype\b|\bwith\s*\(")
+_JS_WRITE_CALL = re.compile(r"\b(?:writeFile|appendFile|mkdir|mkdtemp|rm|rmdir|unlink|rename|copyFile|cp|symlink|"
+                            r"link|truncate|ftruncate|chmod|lchmod|chown|lchown|utimes|lutimes|createWriteStream|open|"
+                            r"WriteStream)(?:Sync)?\s*\(\s*(?:'([^'\n]{0,400})'|\"([^\"\n]{0,400})\")?")
+
+
+def _js_write_paths(code) -> tuple:
+    """The files a JavaScript program writes, by the allow-list judge -> (paths, why): only the vetted modules
+    (_JS_SAFE_MODULES, with or without `node:`), by a literal name; no Function, eval, Reflect, globalThis, process
+    beyond its plain reads, computed call, prototype or `with`; and a file system write only to a path written out
+    as its first argument."""
+    bare = _outside_strings(code)
+    for m in _JS_IMPORT.finditer(code):
+        literal = m.group(1) or m.group(2) or m.group(3) or m.group(6) or m.group(7)
+        if m.group(4) is not None or m.group(5) is not None or literal is None:
+            return [], "this program loads a module by a name it computes"
+        name = literal[5:] if literal.startswith("node:") else literal
+        if name not in _JS_SAFE_MODULES:
+            return [], f"this program loads {_code(literal)}, a module the guard does not vouch for"
+    m = _JS_REFUSED.search(bare)
+    if m:
+        return [], f"this program uses {_code(' '.join(m.group(0).split()))}, which the guard does not vouch for"
+    paths = []
+    for m in _JS_WRITE_CALL.finditer(bare):  # in the code outside strings; a literal path read from the code itself
+        k = 1 if m.group(1) is not None else 2 if m.group(2) is not None else 0
+        literal = code[m.start(k):m.end(k)] if k else None
+        if literal is None:
+            return [], f"this program writes ({_code(m.group(0).split('(')[0])}) a file the guard cannot place"
+        paths.append(literal)
+    return paths, ""
+
+
+def _js_reader_why(code, cwd=None, member=None) -> str:
+    """'' when a JavaScript program a read-only lane runs only reads, or writes paths written out inside crew member
+    `member`'s own scratch folder; else why not."""
+    paths, why = _js_write_paths(code)
+    if why:
+        return why
+    for q in paths:
+        why = _ro_scratch_target(q, cwd, member) if cwd else "a file"
+        if why:
+            return f"this program writes {why}"
+    return ""
+
+
+def member_code_why(name, code, cwd) -> str:
+    """'' when a crew member's program (inline, its input, or a script outside the repository) is one the allow-list
+    judge vouches for; else why not, with the way. Its writes are judged by their paths with the other rules."""
+    fam = _family(name)
+    if fam in ("python", "pypy"):
+        why = _py_write_paths(code, cwd)[1]
+    elif fam in ("node", "nodejs", "deno", "bun"):
+        why = _js_write_paths(code)[1]
+    else:  # awk, sed, expect, Tcl, Ruby, Perl: their own rules read them
+        return ""
+    return (why + ": run the command it needs yourself, write the program with the vetted modules, or ask the tech "
+                  "lead (`dev crew ask \"…\"`)") if why else ""
 
 
 def _py_reader_why(code, cwd, member) -> str:
@@ -9392,23 +9547,58 @@ def _py_reader_why(code, cwd, member) -> str:
     return ""
 
 
-_JS_WRITES = re.compile(r"\b(?:writeFile|appendFile|mkdir|mkdtemp|rm|rmdir|unlink|rename|copyFile|cp|symlink|link|"
-                        r"truncate|ftruncate|chmod|lchmod|chown|lchown|utimes|lutimes|createWriteStream|open|"
-                        r"opendir)(?:Sync)?\s*\(|\bDeno\s*\.\s*\w*(?:write|remove|rename|mkdir|create|link|chmod|"
-                        r"truncate)\w*|\bBun\s*\.\s*write\b")
+_MEMBER_JUDGE = contextvars.ContextVar("devkit_member_judge", default=False)
+WRITE_THEN_RUN_REASON = ("This command writes {what} and then runs it as a program: the guard judges a script by the "
+                         "file it reads before the command runs, which is not what this command runs. Write the "
+                         "script with the Write tool or one command, then run it in another call.")
 
 
-def _js_reader_why(code) -> str:
-    """'' when a JavaScript program a read-only lane types inline only reads: it starts no process, calls no
-    function by a name it builds, and calls none of the file system's writes; else why not."""
-    bare = _outside_strings(code)
-    if _code_spawns(code, "node"):
-        return "this program can start a process: run that command itself"
-    m = _js_dynamic(bare)
-    if m:
-        return f"this program calls a function by a name it builds ({_code(' '.join(m.group(0).split()))})"
-    m = _JS_WRITES.search(bare)
-    return f"this program writes files ({_code(' '.join(m.group(0).split()))})" if m else ""
+def _writes_then_runs(cmd: str, cwd) -> str | None:
+    """WRITE_THEN_RUN_REASON when a command writes a file (a redirect, tee, cp, mv, sed -i) that a later part of it
+    runs as an interpreter's or a shell's script, or by its path; None otherwise."""
+    segs = split_commands(cmd)
+    if not segs:
+        return None
+    written = set()
+    for argv0, redirs in segs:
+        argv = _unwrap(list(argv0))
+        name = os.path.basename(argv[0]) if argv else ""
+        script = None
+        if argv and (_INTERP.match(name) or name in _SHELLS):
+            script = next((a for a in argv[1:] if not a.startswith("-")), None)
+            if any(a in ("-c", "-e", "--eval", "-p", "-m") for a in argv[1:]):
+                script = None
+        elif argv and "/" in argv[0]:
+            script = argv[0]
+        if script:
+            p = resolve(script, cwd)
+            if p != UNKNOWN and str(p) in written:
+                return WRITE_THEN_RUN_REASON.format(what=_code(script))
+        for r in redirs:
+            p = resolve(r, cwd)
+            if p != UNKNOWN:
+                written.add(str(p))
+        if name in ("tee", "cp", "mv", "install", "ln") or (name == "sed" and any(a.startswith("-i") for a in argv)):
+            pos = [a for a in argv[1:] if not a.startswith("-")]
+            for a in (pos if name in ("tee", "sed") else pos[-1:]):
+                p = resolve(a, cwd)
+                if p != UNKNOWN:
+                    written.add(str(p))
+    return None
+
+
+def _ro_script(argv, cwd, member) -> str | None:
+    """A script from the member's own scratch folder, in a read-only lane: None when the allow-list judge vouches for
+    it as a reader (_py_reader_why, _js_reader_why), else why not."""
+    fam = _family(argv[0])
+    if fam not in ("python", "pypy", "node"):
+        return f"{_code(os.path.basename(argv[0]))} scripts: the guard reads only Python and JavaScript programs"
+    with _skipped_reads() as unread:
+        code = _program(argv, cwd, ())[0]
+    if unread or not code:
+        return "the guard cannot read this script"
+    why = _js_reader_why(code, cwd, member) if fam == "node" else _py_reader_why(code, cwd, member)
+    return (why + ": run the command it needs yourself, or ask the tech lead") if why else None
 
 
 def _ro_inline(argv, cwd, member, bodies):
@@ -9431,7 +9621,7 @@ def _ro_inline(argv, cwd, member, bodies):
     code = _program(argv, cwd, bodies)[0]
     if not code:
         return None
-    return _js_reader_why(code) if fam == "node" else _py_reader_why(code, cwd, member)
+    return _js_reader_why(code, cwd, member) if fam == "node" else _py_reader_why(code, cwd, member)
 
 
 def _ro_program(argv0, cwd, member=None, plans=None, bodies=()) -> str | None:
@@ -9473,7 +9663,7 @@ def _ro_program(argv0, cwd, member=None, plans=None, bodies=()) -> str | None:
     why = _check_refusal(argv)
     if why is not None:
         if not why and _INTERP.match(name) and not runner and _own_scratch_script(argv, cwd, member):
-            return None
+            return _ro_script(argv, cwd, member)
         if not why and _INTERP.match(name) and not runner:
             inline = _ro_inline(argv, cwd, member, bodies)
             if inline is not None:
@@ -10028,6 +10218,9 @@ def crew_shell_verdict(cmd: str, cwd, scope=None, member=None, level=None, base=
                 return v
         return None
     cwd = cwd or os.getcwd()
+    why = _writes_then_runs(cmd, cwd)
+    if why:
+        return deny(why, key="write-then-run")
     if member:
         v = _ScratchShell(cmd, cwd, member).run()
         if v:
@@ -11991,6 +12184,9 @@ def _segment_actions(argv, cwd, bodies, depth) -> list:
                 found = [_unread_action(argv, unread[0])]
             elif built := _built_action(argv, name, code):  # it may build what it runs
                 found = [built]
+            elif _MEMBER_JUDGE.get() and code and not _version_only(name, argv[1:]) and \
+                    (why := member_code_why(name, code, cwd)):
+                found = [_unsure_action(argv, f"a program the guard cannot vouch for, as {why}")]
         if not found and "/" in argv[0] and name not in _SHELLS and not _INTERP.match(name):
             found, more = _path_run_actions(argv, cwd, bodies, depth)
         found = found or _opaque_actions(name, argv, cwd)
@@ -13246,7 +13442,11 @@ def _member_gate(cmd, cwd, member, lane, agent, session, grant, now) -> str | No
     setting = irreversible_setting("member", now)
     who = str(member or lane or "member")
     try:
-        acts = irreversible_actions(cmd, cwd)
+        token = _MEMBER_JUDGE.set(True)  # a member's own programs meet the allow-list judge (member_code_why)
+        try:
+            acts = irreversible_actions(cmd, cwd)
+        finally:
+            _MEMBER_JUDGE.reset(token)
         if acts is None:
             text = _unescape(cmd)
             return UNPARSED_REASON if _DEV_ONLY_TEXT.search(text) or _embargo_in_place(text, cwd) or (

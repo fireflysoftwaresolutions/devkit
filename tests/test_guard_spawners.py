@@ -71,7 +71,10 @@ class SpawnedAgentSessions(unittest.TestCase):
                 self.assertIn("nested", self.member(bad_cmd) or "")
             with self.subTest(twin=twin):
                 self.assertIsNone(self.main(twin))
-                self.assertIsNone(self.member(twin))
+                if "python3" in twin:  # pexpect: a member's program the allow-list judge does not vouch for
+                    self.assertIn("run the command it needs yourself", self.member(twin) or "")
+                else:
+                    self.assertIsNone(self.member(twin))
 
 
 if __name__ == "__main__":

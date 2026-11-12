@@ -201,10 +201,11 @@ class PipeGate(unittest.TestCase):
 
 
 class ScratchScripts(Case):
-    """A program a member wrote in its own scratch folder is judged by what it can do: a name it computes reaches a
-    process only through a function it looks up by that name, so a lookup by a literal name, a module loaded by a
-    name it computes and never called through a computed name, and a string it only prints run; a spawn of an
-    irreversible command, a lookup of a spawn function by a computed name, and code it evaluates stay refused."""
+    """A program a member types inline or writes in its own scratch folder runs when the allow-list judge vouches for
+    it: vetted modules only, a lookup by a literal name, writes through readers of literal paths. A program that
+    imports anything else (subprocess, pydoc, timeit, code, pdb, pickle, child_process, …), computes a name it calls
+    or a module it loads, evaluates code, or reaches the interpreter's internals is a program the guard cannot vouch
+    for, tier 2 for a member, as before this hotfix."""
 
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
@@ -218,40 +219,99 @@ class ScratchScripts(Case):
         p.write_text(text)
         return str(p)
 
-    def test_a_python_probe_that_looks_up_attributes_by_literal_names_runs(self):
-        p = self.script("probe.py", "import json, subprocess\nr = subprocess.run(['python3', '-m', 'unittest', "
-                                    "'tests.test_x'], capture_output=True)\nprint(getattr(r, 'returncode'))\n"
-                                    "print('$HOME is', json.dumps(vars(r).get('args')))\n"
-                                    "m = __import__('json')\nprint(m.dumps(1))\n")
+    def test_a_python_probe_of_vetted_modules_runs(self):
+        p = self.script("probe.py", "import json, re, sys\nfrom pathlib import Path\nd = {'a': 1}\n"
+                                    "print(getattr(d, 'get')('a'), '$HOME is', json.dumps(d), sys.argv[1:])\n"
+                                    "text = Path('README.md').read_text() if Path('README.md').exists() else ''\n"
+                                    "print(len(re.findall('x', text)))\n"
+                                    f"Path('{self.pad}/out.txt').write_text(text)\n")
         self.runs(f"python3 {p}")
         self.runs(f"timeout 1500 python3 {p} 2>&1 | tail -5")
+        self.runs("python3 -c 'import json; print(json.dumps({\"a\": 1}))'")
 
-    def test_a_python_program_that_reaches_a_spawn_by_a_computed_name_is_refused(self):
-        for text in ("import subprocess\nsubprocess.run(['gh', 'pr', 'merge', '12'])\n",
+    def test_a_python_program_outside_the_vetted_lists_is_refused(self):
+        hidden = "\"__imp\" + \"ort__('o' + 's').sys\" + \"tem('gh pr mer' + 'ge 12 --admin')\""
+        for text in ("import subprocess\nsubprocess.run(['python3', '-m', 'unittest', 'tests.test_x'])\n",
+                     "import subprocess\nsubprocess.run(['gh', 'pr', 'merge', '12'])\n",
                      "import subprocess, sys\ngetattr(subprocess, sys.argv[1])(['ls'])\n",
-                     "import os\ngetattr(os, 'system')('true')\n",
+                     "import os\ngetattr(os, 'system')('true')\n", "import os\nos.system('true')\n",
                      "import sys\nm = __import__(sys.argv[1])\nm.run(['ls'])\n",
                      "import importlib\nimportlib.import_module('subprocess').run(['ls'])\n",
                      "exec(open('x.py').read())\n", "f = globals()[input()]\nf()\n",
-                     "print(().__class__.__bases__[0].__subclasses__())\n"):
+                     "print(().__class__.__bases__[0].__subclasses__())\n",
+                     "import pydoc\npydoc.pipepager('', 'gh pr merge 12 --admin')\n",
+                     f"import timeit\ntimeit.timeit({hidden}, number=1)\n", f"import cProfile\ncProfile.run({hidden})\n",
+                     f"import code\ncode.InteractiveInterpreter().runsource({hidden})\n", f"import pdb\npdb.run({hidden})\n",
+                     "import pickle\npickle.loads(bytes.fromhex('80049500'))\n", "help('modules')\n",
+                     "import sys\nsys.modules['os'].system('true')\n", "x = vars(object)\n"):
             with self.subTest(text=text):
                 self.refused(f"python3 {self.script('p.py', text)}")
+                self.refused(f"python3 - <<'EOF'\n{text}EOF")
 
-    def test_a_javascript_probe_that_loads_a_module_by_a_computed_name_runs(self):
-        p = self.script("probe.mjs", "import { readFileSync } from 'node:fs';\nconst mod = process.argv[2] || "
-                                     "'./x.mjs';\nconst m = await import(mod);\nconst o = {a: 1};\nconst k = 'a';\n"
-                                     "console.log(o[k], JSON.stringify(m), readFileSync('in.json', 'utf8'));\n")
+    def test_a_script_written_and_run_in_one_command_is_refused(self):
+        # the judge reads the file before the command runs: one the same command writes first is not what it read
+        p = self.script("probe.py", "print(1)\n")
+        for level, who in (("all", "kid"), ("review", "kid")):
+            for cmd in (f"cat > {p} <<'EOF'\nimport os\nos.system('gh pr merge 12')\nEOF\npython3 {p}",
+                        f"echo 'import os' > {p}; python3 {p}", f"cp /tmp/x.py {p} && python3 {p}",
+                        f"printf x | tee {p} >/dev/null; node {p}"):
+                with self.subTest(cmd=cmd, level=level):
+                    self.assertIn("run it in another call", member(cmd, level=level, who=who) or "")
+        self.runs(f"python3 {p} > {self.pad}/out.txt")
+
+    def test_a_javascript_probe_of_vetted_modules_runs(self):
+        p = self.script("probe.mjs", "import { readFileSync } from 'node:fs';\nimport path from 'path';\n"
+                                     "const o = {a: 1};\nconst k = 'a';\n"
+                                     "console.log(o[k], path.join('a', 'b'), readFileSync('in.json', 'utf8'));\n"
+                                     "process.stdout.write('done');\n")
         self.runs(f"node {p}")
         self.runs(f"timeout 1500 node {p} 2>&1 | tail -8")
 
-    def test_a_javascript_program_that_calls_through_a_computed_name_is_refused(self):
-        for text in ("const m = await import(process.argv[2]);\nm[process.argv[3]]('gh pr merge 12');\n",
+    def test_a_javascript_program_outside_the_vetted_lists_is_refused(self):
+        for text in ("const m = await import(process.argv[2]);\nconsole.log(m);\n",
+                     "const m = await import(process.argv[2]);\nm[process.argv[3]]('gh pr merge 12');\n",
                      "const cp = require(process.argv[2]);\ncp[process.argv[3]].call(null, 'x');\n",
                      "require('child_process').execSync('git push --force origin main');\n",
                      "const cp = require('child_process');\ncp.execSync(`${process.argv[2]} pr merge 12`);\n",
-                     "new Function(process.argv[2])();\n", "Reflect.apply(globalThis[process.argv[2]], null, []);\n"):
+                     "new Function(process.argv[2])();\n", "Reflect.apply(globalThis[process.argv[2]], null, []);\n",
+                     "import vm from 'vm';\nvm.runInThisContext(process.argv[2]);\n",
+                     "import { Worker } from 'worker_threads';\nnew Worker(process.argv[2]);\n",
+                     "''.constructor.constructor(process.argv[2])();\n", "process.binding('spawn_sync');\n"):
             with self.subTest(text=text):
                 self.refused(f"node {self.script('p.mjs', text)}")
+
+
+class ReviewerWriteProbes(Case):
+    """The Code reviewer's probes: a read-only member's inline program that writes a repository file through a
+    writer the old deny list missed, and a program of any session that writes devkit's state the same way, are
+    refused; the reviewer's gates attribute such a write to it."""
+
+    WRITES = ("open('{f}','w').write('x')", "import builtins; builtins.open('{f}','w').write('x')",
+              "o = open; o('{f}','w').write('x')", "import io; io.FileIO('{f}','w').write(b'x')",
+              "import fileinput\nfor l in fileinput.input('{f}', inplace=True): print(l, end='')",
+              "import logging; logging.basicConfig(filename='{f}')",
+              "from urllib.request import urlretrieve; urlretrieve('http://x', '{f}')",
+              "import dbm; dbm.open('{f}', 'c')", "import py_compile; py_compile.compile('a.py', cfile='{f}')",
+              "from functools import partial; partial(open, '{f}', 'w')().write('x')",
+              "list(map(open, ['{f}'], ['w']))")
+
+    def test_a_read_only_inline_program_that_writes_a_repository_file_is_refused(self):
+        for prog in self.WRITES:
+            code = prog.format(f="lib/devkit/guard.py")
+            for cmd in (f"python3 -c \"{code}\"", f"python3 - <<'EOF'\n{code}\nEOF"):
+                for level, who in (("review", "seraph"), ("read", "oracle")):
+                    with self.subTest(cmd=cmd, level=level):
+                        self.assertIsNotNone(member(cmd, level=level, who=who))
+        self.assertIsNotNone(member("node -e \"const fs = require('fs'); new fs.WriteStream('lib/x.js')\"",
+                                    level="review", who="seraph"))
+
+    def test_a_program_that_writes_devkit_state_is_refused_in_the_main_session_and_a_build_lane(self):
+        state = str(core.STATE / "progress" / "probe.json")
+        for prog in self.WRITES[:5]:
+            cmd = f"python3 - <<'EOF'\n{prog.format(f=state)}\nEOF"
+            with self.subTest(cmd=cmd):
+                self.assertIsNotNone(guard.check("Bash", {"command": cmd}, CWD, "claude"))
+                self.assertIsNotNone(member(cmd, level="build", who="neo"))
 
 
 class ReadOnlyLanes(Case):

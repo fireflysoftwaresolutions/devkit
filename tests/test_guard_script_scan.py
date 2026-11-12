@@ -51,9 +51,12 @@ class ProgramScan(unittest.TestCase):
     def test_backticks_in_a_program_that_runs_argument_lists_are_text(self):
         body = "import re\nimport subprocess\n" + REGEX + NOTE + \
             'print(CODE.sub("<code>\\\\1</code>", NOTE))\nsubprocess.run(["git", "status", "--short"], check=False)\n'
-        self.assertIsNone(self.member(self.script("guide.py", body)))
+        # the main session reads the backticks as text; a member's program that starts a process is unvouched
+        self.assertIsNone(self.main(self.script("guide.py", body)))
+        self.assertIn("cannot vouch", self.member(self.script("guide.py", body)) or "")
         heredoc = "python3 - <<'PY'\n" + body + "PY"
-        self.assertIsNone(self.member(heredoc))
+        self.assertIsNone(self.main(heredoc))
+        self.assertIn("cannot vouch", self.member(heredoc) or "")
 
     def test_a_string_the_program_hands_to_a_shell_is_still_read(self):
         lines = "import re\nimport os\nimport subprocess\n" + REGEX + NOTE
@@ -69,7 +72,8 @@ class ProgramScan(unittest.TestCase):
                 "GUIDE = HOME / 'Development/.handoff/plans/acme/devkit/guide.md'\nprint(GUIDE.name)\n"
                 "subprocess.run(['git', 'status', '--short'], check=False)\n")
         self.assertIsNone(self.main(self.script("guide.py", body)))
-        self.assertIsNone(self.member(self.script("guide.py", body)))
+        # a member's program that starts a process is one the allow-list judge does not vouch for (subprocess)
+        self.assertIn("cannot vouch", self.member(self.script("guide.py", body)) or "")
 
     def test_a_program_that_sets_home_for_devkit_is_still_refused(self):
         for body in ('import os, subprocess\nos.environ["HOME"] = "/tmp/x"\nsubprocess.run(["dev", "status"])\n',
@@ -101,12 +105,15 @@ class ProgramScan(unittest.TestCase):
                 "export HOME=/tmp/x; ", "").replace("os.environ['HOME'] = '/tmp/x'; ", "")
             with self.subTest(twin=twin):
                 self.assertIsNone(self.main(twin))
-                self.assertIsNone(self.member(twin))
+                if twin.startswith(("python3", "node")):  # a member's program that starts a process: unvouched
+                    self.assertIn("cannot vouch", self.member(twin) or "")
+                else:
+                    self.assertIsNone(self.member(twin))
         # a program that starts processes only with argument lists hands no string to a shell: the line it holds is
         # data (a probe's table of commands), while the same words as its argument list run and are refused
         data = 'import subprocess\nCASES = ["HOME=/tmp/x dev status"]\nsubprocess.run(["git", "status"])\n'
         self.assertIsNone(self.main(self.script("probe.py", data)))
-        self.assertIsNone(self.member(self.script("probe.py", data)))
+        self.assertIn("cannot vouch", self.member(self.script("probe.py", data)) or "")  # a member's: unvouched
         listed = 'import subprocess\nsubprocess.run(["env", "HOME=/tmp/x", "dev", "status"])\n'
         self.assertIn("sets", self.main(self.script("run.py", listed)) or "")
 

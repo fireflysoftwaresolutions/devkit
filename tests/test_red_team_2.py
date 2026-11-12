@@ -171,7 +171,11 @@ class RedTeam2(unittest.TestCase):
                     "node -e \"require('child_process').spawn('dev',['status'])\""):
             with self.subTest(cmd=cmd):
                 self.assertIsNone(self.check(cmd))
-                self.assertIsNone(self.member(cmd))
+                if "subprocess" in cmd or "child_process" in cmd:
+                    # a member's program that starts a process is unvouched; the reason names the way
+                    self.assertIn("run the command it needs yourself", self.member(cmd) or "")
+                else:
+                    self.assertIsNone(self.member(cmd))
 
     # ---- RT9
     def test_rt9_command_executing_git_config_keys_are_refused(self):
