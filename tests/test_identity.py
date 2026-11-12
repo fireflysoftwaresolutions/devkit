@@ -521,6 +521,18 @@ class MachineTests(unittest.TestCase):
         self.assertFalse(identity.was_this_mac(m.id, T0, m))  # ids match exactly, never as a former name
         self.assertFalse(identity.was_this_mac("", T0, m))
 
+    def test_a_busy_record_that_is_audited_does_not_call_itself_without_end(self):
+        # state audits a busy lock, and the audit's actor asks for this Mac again while the first call writes
+        from devkit import state
+        calls = []
+
+        def busy(path, fn, **kw):
+            calls.append(identity.machine(now=T0).id)
+            raise state.StateBusy("busy")
+        with mock.patch.object(state, "update", busy):
+            m = identity.machine(now=T0)
+        self.assertEqual((m.id, calls), ("mac-158", ["mac-158"]))  # no record: the hostname stands in, once
+
     def test_a_damaged_record_gets_a_new_id_instead_of_failing(self):
         (self.state).mkdir(parents=True)
         (self.state / "machine.json").write_text("{not json")

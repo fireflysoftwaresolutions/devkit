@@ -39,7 +39,6 @@ import json
 import os
 import re
 import shlex
-import socket
 import subprocess
 import time
 from pathlib import Path
@@ -424,13 +423,24 @@ def build_actions(reg: dict, now: float = None, items: list = None, colls: list 
     return acts
 
 
+def _machine_id() -> str:
+    """This Mac as presence and locks name it: its machine id, the same whatever the hostname (identity.machine)."""
+    from . import identity
+    return identity.machine().id
+
+
+def _me(reg: dict) -> str:
+    """This Mac's person, `user@machine id`, as the presence and session records of this Mac name it."""
+    return f"{reg.get('github_user') or os.environ.get('USER', '')}@{_machine_id()}"
+
+
 def since_yesterday(reg: dict, cache: dict, now: float = None, items: list = None, slog: list = None, me: str = "") -> dict:
     """What happened since the start of yesterday: sessions, commits, merged PRs, completed tasks.
 
     This machine's live sessions (reg["sessions"]) are `me`'s; a logged line of the same session is not repeated."""
     from . import work
     now = now or time.time()
-    me = me or f"{reg.get('github_user') or os.environ.get('USER', '')}@{socket.gethostname().split('.')[0].lower()}"
+    me = me or _me(reg)
     y0 = _midnight(now, 1)
     yday = time.strftime("%Y-%m-%d", time.localtime(y0))
     sessions = []
@@ -1554,7 +1564,7 @@ def collect(reg: dict, handoff: Path = None, now: float = None) -> dict:
     items = read_items(handoff, now)
     team = read_presence(handoff, reg, now=now)
     slog = read_session_log(handoff)
-    me = f"{reg.get('github_user') or os.environ.get('USER', '')}@{socket.gethostname().split('.')[0].lower()}"
+    me = _me(reg)
     ppl = people(team, items, slog, now, local=reg.get("sessions") or [], me=me)
     colls = collisions(ppl, items, now)
     acts = build_actions(reg, now, items, colls)
@@ -1566,7 +1576,7 @@ def collect(reg: dict, handoff: Path = None, now: float = None) -> dict:
     from . import dashnow  # Now's areas (contract P-fyli4qqn0y7): computed from what was read above, no other read
     peer_view = peer_sessions(now)  # the agent sessions on this Mac; their open escalations count in the headline
     now_areas = dashnow.areas(reg, raw, _runs(now, host, raw), acts, ci, jobs, items,
-                              since_yesterday(reg, cache, now, items, slog, me), team, now, host,
+                              since_yesterday(reg, cache, now, items, slog, me), team, now, _machine_id(),
                               roster=_roster(), prs_at=_prs_at(), escalations=peer_view.get("escalations"))
     return {
         "v": 3,

@@ -46,11 +46,12 @@ LIST_FIELDS = ("links",)  # written as `[a, b]`; every other value is text, even
 # --------------------------------------------------------------------------- identity
 
 def actor(agent: str = None, session: str = None, user: str = None) -> dict:
-    """Who acts: the GitHub user, this Mac (`host`), the agent and its session. `label` is the Mac's hostname, for
-    display only; every hostname devkit runs under is recorded as one this Mac carried (identity.machine)."""
+    """Who acts: the GitHub user, this Mac (`host`: its machine id, the same whatever the hostname), the agent and its
+    session. `label` is the Mac's hostname, for display only; every hostname devkit runs under is recorded as one this
+    Mac carried (identity.machine), so records that name the Mac by a former hostname stay its own (mine)."""
     user = user or core.github_user() or os.environ.get("USER", "unknown")
     m = identity.machine()
-    host = m.label
+    host = m.id
     agent = agent or os.environ.get("DEVKIT_AGENT") or ("claude" if os.environ.get("CLAUDECODE") else
                                                         "codex" if os.environ.get("CODEX_SANDBOX") or
                                                         os.environ.get("CODEX_THREAD_ID") else "human")
@@ -1630,13 +1631,15 @@ def run_summary(brief):
 def write_presence(sessions: list, a=None):
     """presence/<user>@<host>.json: this machine's tracked sessions, each with its `active` flag (a session still
     tracked a while after its agent stopped is not active) and a summary of its run (run_summary), and held locks
-    (written only by this machine)."""
+    (written only by this machine). `host` is the machine id and `label` the hostname, for display. This Mac's
+    presence files from before the machine id go (_drop_former_presence)."""
     a = a or actor("human")
     me = f"{a['user']}@{a['host']}"
+    dropped = _drop_former_presence(a)
     held = [{"id": i["meta"]["id"], "title": i["meta"]["title"], "scope": i["scope"],
              "until": i["meta"]["lock_expires"]} for i in all_items()
             if mine(i["meta"].get("claimed_by"), a, _claimed_at(i)) and not lock_holder(i)[1]]
-    data = {"user": a["user"], "host": a["host"], "updated": now_iso(),
+    data = {"user": a["user"], "host": a["host"], "label": a.get("label") or a["host"], "updated": now_iso(),
             "sessions": [dict({k: s.get(k) for k in ("agent", "project", "branch", "started", "status", "last_seen",
                                                      "subagents", "turn_started", "active")},
                               progress=run_summary(s.get("progress")))
@@ -1647,7 +1650,28 @@ def write_presence(sessions: list, a=None):
     if {k: v for k, v in old.items() if k != "updated"} != {k: v for k, v in data.items() if k != "updated"}:
         f.write_text(json.dumps(data, indent=1) + "\n")
         return True
-    return False
+    return dropped
+
+
+def _drop_former_presence(a: dict) -> bool:
+    """Remove this Mac's presence files from before the machine id: presence/<user>@<hostname>.json for a hostname
+    this Mac carried when the file was last written (its `updated`), so `dev team` shows this Mac once. A file of
+    another person, or one written under a name this Mac did not carry then (another Mac's), stays. Only for this
+    Mac's own actor. -> whether a file went (the sync commits the removal)."""
+    m = identity.machine()
+    if a.get("host") != m.id:
+        return False
+    gone = False
+    for name in m.aliases:
+        f = PRESENCE / f"{a['user']}@{name}.json"
+        if name == m.id or not f.is_file():
+            continue
+        d = core.read_json(f, None)
+        if isinstance(d, dict) and d.get("user") == a["user"] and \
+                identity.was_this_mac(name, parse_iso(d.get("updated")) or None, m):
+            f.unlink()
+            gone = True
+    return gone
 
 
 def team(max_age_h: float = 24) -> list:

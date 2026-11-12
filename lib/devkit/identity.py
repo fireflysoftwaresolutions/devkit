@@ -35,6 +35,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+import threading
 import time
 from dataclasses import dataclass
 
@@ -257,8 +258,8 @@ def _seen_in_audit() -> dict:
             for line in fh:
                 h, t = _HOST_RX.search(line), _TS_RX.search(line)
                 name = short_host(h.group(1)) if h else ""
-                if not name or not t or name in ("?", "localhost"):
-                    continue
+                if not name or not t or name in ("?", "localhost") or MACHINE_ID.fullmatch(name):
+                    continue  # a record that names this Mac by its machine id says nothing about its hostnames
                 ts = float(t.group(1))
                 if name == last and out[name]:
                     out[name][-1][1] = max(out[name][-1][1], ts)
@@ -302,29 +303,44 @@ def machine(now: float | None = None) -> Machine:
     """This Mac: its stable id, the hostname as label, and the hostnames it carried (aliases). The first call creates
     the record; a call under a new hostname adds it to the aliases. A record that does not parse is replaced whole
     (a new id). When the state cannot be written (a busy lock, a read-only folder), the record read stands, and with
-    none the hostname itself is the id, as devkit named a Mac before."""
+    none the hostname itself is the id, as devkit named a Mac before. A call made while this thread already writes
+    the record (the state module audits a busy lock, and the audit names this Mac) only reads it."""
     from . import state
     now = time.time() if now is None else now
     name = hostname() or "localhost"
     path = _machine_file()
     doc = state.read(path)
-    if not (_valid(doc) and _fresh(doc, name, now)):
-        def put(d):
-            if not _valid(d):
-                return _created(now, name)
-            _record_name(d, name, now)
-            return d
+    if not (_valid(doc) and _fresh(doc, name, now)) and not getattr(_WRITING, "on", False):
+        _WRITING.on = True
         try:
-            if path.exists() and not _valid(state.read(path)):
-                with state.hold(path):
-                    if not _valid(state.read(path)):
-                        state.replace(path, _created(now, name), indent=1)
-            doc = state.update(path, put, indent=1)
-        except (state.StateBusy, OSError):
-            if not _valid(doc):
-                return Machine(id=name, label=name, aliases={name: [[0, now]]})
+            doc = _write_machine(state, path, name, now) or doc
+        finally:
+            _WRITING.on = False
+    if not _valid(doc):
+        return Machine(id=name, label=name, aliases={name: [[0, now]]})
     return Machine(id=doc["id"], label=name, aliases={k: [list(p) for p in v] for k, v in doc["aliases"].items()
                                                       if isinstance(v, list)})
+
+
+_WRITING = threading.local()  # set while this thread writes the machine record
+
+
+def _write_machine(state, path, name: str, now: float):
+    """Record `name` as this Mac's hostname now, creating the record (or replacing a damaged one) first. -> the record
+    written, or None when the state cannot be written."""
+    def put(d):
+        if not _valid(d):
+            return _created(now, name)
+        _record_name(d, name, now)
+        return d
+    try:
+        if path.exists() and not _valid(state.read(path)):
+            with state.hold(path):
+                if not _valid(state.read(path)):
+                    state.replace(path, _created(now, name), indent=1)
+        return state.update(path, put, indent=1)
+    except (state.StateBusy, OSError):
+        return None
 
 
 def was_this_mac(name: str, at: float | None = None, m: Machine | None = None) -> bool:

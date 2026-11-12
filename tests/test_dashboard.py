@@ -8,7 +8,6 @@ import json
 import os
 import re
 import shutil
-import socket
 import subprocess
 import sys
 import tempfile
@@ -20,7 +19,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
-from devkit import core, dashboard, plans, work  # noqa: E402
+from devkit import core, dashboard, identity, plans, work  # noqa: E402
 
 EVIL = "<img src=x onerror=alert(1)>"
 BREAKOUT = "</script><script>alert('pwned')</script>"
@@ -36,7 +35,17 @@ LONG_MILESTONE = "Business-first journey delivery across the experience, domain 
 LONG_GOAL = "Deliver working banking and insurance operations through Experience, Domain and Core services, with verified artefacts and consumer adoption."
 LEGACY = "DevKit ·"                  # the legacy marker, still accepted
 SAVED = "widget · main ❯ Ship export ❯ export endpoint done ❯ ✓ 31 tests green ❯ ▸ 3/7 ❯ next → contract test"   # what devkit saves
-ME = f"me@{socket.gethostname().split('.')[0].lower()}"
+ME = "me@m-thismac1"  # this Mac in the fixtures: its machine id (setUpModule), whatever the hostname is
+REAL_MACHINE = identity.machine
+_MACHINE = mock.patch.object(identity, "machine", lambda now=None: identity.Machine("m-thismac1", "mac-158", {}))
+
+
+def setUpModule():
+    _MACHINE.start()
+
+
+def tearDownModule():
+    _MACHINE.stop()
 
 
 def iso(t):
@@ -166,6 +175,21 @@ class TempState:
     def __exit__(self, *exc):
         core.STATE = self.old
         self.tmp.cleanup()
+
+
+class HostnameChangeTests(unittest.TestCase):
+    # macOS renames the Mac with the network; the dashboard names this Mac by its machine id, so "me" and this Mac's
+    # own presence stay this Mac's when the hostname changes between two renders
+    def test_who_stays_the_same_when_the_hostname_changes(self):
+        with tempfile.TemporaryDirectory() as tmp, TempState(), mock.patch.object(identity, "machine", REAL_MACHINE):
+            handoff = Path(tmp) / "handoff"
+            make_handoff(handoff)
+            seen = []
+            for name in ("Mac-158.lan", "mac-55"):
+                with mock.patch("socket.gethostname", return_value=name):
+                    seen.append(embedded(dashboard.render(registry(), handoff=handoff, now=NOW))["who"])
+        self.assertEqual(seen[0], seen[1])
+        self.assertRegex(seen[0], r"^me@m-[0-9a-z]{8}$")
 
 
 class RenderTests(unittest.TestCase):

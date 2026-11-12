@@ -1055,6 +1055,44 @@ class MachineIdentityTests(unittest.TestCase):
         self.assertGreater(work.parse_iso(ours["meta"]["lock_expires"]), time.time() + 3600)
         self.assertEqual(theirs["meta"]["claimed_by"], "ana@mac-55 (codex)")
 
+    def test_a_rename_between_two_calls_keeps_the_machine_and_its_presence_file(self):
+        before = self.me()
+        work.write_presence([], a=work.actor("human", user="ana"))
+        self.name = "andress-mbp-2"
+        after = self.me()
+        work.write_presence([], a=work.actor("human", user="ana"))
+        self.assertEqual(after["host"], before["host"])
+        self.assertRegex(after["host"], r"^m-[0-9a-z]{8}$")
+        self.assertEqual((before["label"], after["label"]), ("mac-158", "andress-mbp-2"))
+        files = sorted(f.name for f in self.handoff.root.glob("presence/*.json"))
+        self.assertEqual(files, [f"ana@{after['host']}.json"])
+        data = json.loads((self.handoff.root / "presence" / files[0]).read_text())
+        self.assertEqual((data["host"], data["label"]), (after["host"], "andress-mbp-2"))
+
+    def test_this_macs_old_presence_file_goes_and_another_macs_stays(self):
+        self.me()
+        legacy = {"user": "ana", "updated": work.now_iso(), "sessions": [], "locks": []}
+        work.PRESENCE.mkdir(parents=True, exist_ok=True)
+        for host in ("mac-158", "mac-55"):  # mac-158 is this Mac's name now; mac-55 another Mac's
+            (work.PRESENCE / f"ana@{host}.json").write_text(json.dumps(dict(legacy, host=host)))
+        self.name = "andress-mbp-2"
+        work.write_presence([], a=work.actor("human", user="ana"))
+        files = sorted(f.name for f in work.PRESENCE.glob("*.json"))
+        self.assertEqual(files, sorted([f"ana@{self.me()['host']}.json", "ana@mac-55.json"]))
+        self.assertEqual(sorted(m["host"] for m in work.team()), sorted([self.me()["host"], "mac-55"]))
+
+    def test_a_rename_between_two_calls_keeps_the_lesson_usage_counted_once(self):
+        from devkit import lessons
+        with mock.patch.object(lessons, "LESSONS", self.handoff.root / "lessons"), \
+                mock.patch.object(lessons, "USAGE_LOCAL", core.STATE / "lessons-usage.json"):
+            lessons.track(["L-1"], "shown")
+            lessons.publish_usage(a=work.actor("human", user="ana"))
+            self.name = "andress-mbp-2"
+            lessons.track(["L-1"], "shown")
+            lessons.publish_usage(a=work.actor("human", user="ana"))
+            self.assertEqual(len(list((self.handoff.root / "lessons" / "usage").glob("*.json"))), 1)
+            self.assertEqual(lessons.usage()["L-1"]["shown"], 2)
+
     def test_presence_lists_this_macs_locks_across_a_rename(self):
         it = work.claim(work.create("acme/api", "Fix login", a=self.me()), a=self.me())
         other = self.legacy_lock("ana@mac-55", time.time())

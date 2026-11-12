@@ -1775,7 +1775,9 @@ def _codex_identity():
 
 def actor() -> dict:
     """The hook's explicit identity, the native Codex command's metadata, or the existing shell/process identity.
-    This label does not change the caller identity used by command restriction checks."""
+    This label does not change the caller identity used by command restriction checks. `host` is this Mac's machine
+    id (identity.machine), the same whatever the hostname, so this Mac's records stay in one team folder."""
+    from . import identity
     sess = os.environ.get("DEVKIT_SESSION", "")
     agent = os.environ.get("DEVKIT_AGENT") or ("claude" if os.environ.get("CLAUDECODE") else "")
     codex = _codex_identity()
@@ -1784,7 +1786,7 @@ def actor() -> dict:
     elif not sess:
         agent, sess = _found_session() or (agent, "")
     return {"user": core.CFG.get("github_user") or os.environ.get("USER", "?"),
-            "host": socket.gethostname().split(".")[0].lower(), "agent": agent or "human",
+            "host": identity.machine().id, "agent": agent or "human",
             "session": sess.split(":", 1)[-1][:12] if sess else ""}
 
 
