@@ -1372,6 +1372,15 @@ class PrTests(unittest.TestCase):
             self.pushed(s)
             self.assertIn("## Qué y por qué", body("--lang", "es"))
 
+    def test_a_lang_that_is_not_a_locale_never_names_a_template_file(self):
+        # --lang becomes part of the template's file name (pull_request.<lang>.md): a path never reaches it
+        for given in ("../../x", "es/../../etc", "es-ES.md", "", "auto"):
+            with self.subTest(given=given):
+                self.assertEqual(gitx.lang_of(argparse.Namespace(lang=given)), "en-US")
+        for given in ("es", "es-ES", "pt_BR", "fr-FR"):
+            with self.subTest(given=given):
+                self.assertEqual(gitx.lang_of(argparse.Namespace(lang=given)), given)
+
     def test_create_with_a_body_file_is_checked_and_cleaned(self):
         with Sandbox() as s:
             self.pushed(s)

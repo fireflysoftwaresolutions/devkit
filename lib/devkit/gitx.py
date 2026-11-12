@@ -3335,8 +3335,10 @@ _JIRA = re.compile(r"\b([A-Z][A-Z0-9]+-\d+)\b")
 
 def lang_of(a=None) -> str:
     """The language of the text devkit writes for the repository host (PR bodies, titles): --lang, else American
-    English. devkit's `language` setting is the language of its replies to the developer, never of a PR."""
-    return str((getattr(a, "lang", None) if a is not None else None) or "en-US")
+    English. devkit's `language` setting is the language of its replies to the developer, never of a PR. Only a
+    locale (`es`, `es-ES`, `pt_BR`) is kept: the value names the template's file, so a path never reaches it."""
+    given = str((getattr(a, "lang", None) if a is not None else None) or "")
+    return given if core.LOCALE_RE.fullmatch(given) and given.lower() != "auto" else "en-US"
 
 
 def _lang_base(lang: str) -> str:
