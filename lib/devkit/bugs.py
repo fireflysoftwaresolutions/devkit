@@ -1227,34 +1227,49 @@ def _stdlib_module(top: str) -> bool:
     return origin.startswith(sysconfig.get_paths()["stdlib"]) and "site-packages" not in origin
 
 
+def stdlib_namespaces() -> list:
+    """The standard-library modules devkit's source imports, each by its literal name, never by a computed one:
+    readable text may name the exception classes they define (_known_classes). tests/test_bugs_render.py fails when
+    devkit's source imports a module this list leaves out. tomllib joins on Python 3.11 and later."""
+    import __future__, _thread, argparse, ast, base64, bisect, builtins, calendar, collections  # noqa: E401
+    import contextlib, contextvars, copy, csv, dataclasses, datetime, fcntl, filecmp, fnmatch  # noqa: E401
+    import functools, getpass, glob, gzip, hashlib, hmac, importlib, io, itertools, json, math  # noqa: E401
+    import os, pathlib, platform, plistlib, posixpath, pty, py_compile, random, re, secrets, select  # noqa: E401
+    import selectors, shlex, shutil, signal, socket, stat, statistics, string, subprocess, sys  # noqa: E401
+    import sysconfig, tarfile, tempfile, termios, textwrap, threading, time, traceback, types  # noqa: E401
+    import unicodedata, warnings, zipfile, zlib  # noqa: E401
+    import concurrent.futures, http.client, http.server, importlib.util, urllib.error, urllib.parse  # noqa: E401
+    import urllib.request, xml.etree.ElementTree  # noqa: E401
+    bound = dict(locals())
+    found = [v for v in bound.values() if isinstance(v, types.ModuleType)] + [
+        concurrent.futures, http.client, http.server, importlib.util, urllib.error, urllib.parse, urllib.request,
+        xml.etree, xml.etree.ElementTree]
+    try:
+        import tomllib
+        found.append(tomllib)
+    except ImportError:  # Python 3.10 and older have no tomllib
+        pass
+    return found
+
+
 @functools.lru_cache(maxsize=1)
 def _known_classes() -> frozenset:
     """The exception classes readable text may name: Python's built-in ones, those of the standard-library modules
-    devkit imports, and every class devkit's own modules define, read from the copy that runs."""
+    devkit imports (stdlib_namespaces), and every class devkit's own modules define, read from the copy that runs."""
     import ast
     import builtins
-    import importlib
 
     def errors(namespace) -> set:
         return {n for n, v in vars(namespace).items() if isinstance(v, type) and issubclass(v, BaseException)}
-    names, modules = errors(builtins), set()
+    names = errors(builtins)
     for path in Path(__file__).parent.rglob("*.py"):
         try:
             tree = ast.parse(path.read_text(encoding="utf-8"))
         except (OSError, SyntaxError, ValueError):
             continue
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ClassDef):
-                names.add(node.name)
-            elif isinstance(node, ast.Import):
-                modules.update(a.name for a in node.names)
-            elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
-                modules.add(node.module)
-    for name in sorted(m for m in modules if _stdlib_module(m.split(".")[0])):
-        try:
-            names |= errors(importlib.import_module(name))
-        except Exception:  # noqa: BLE001 - a module this platform lacks names no class
-            continue
+        names.update(node.name for node in ast.walk(tree) if isinstance(node, ast.ClassDef))
+    for module in stdlib_namespaces():
+        names |= errors(module)
     return frozenset(names)
 
 

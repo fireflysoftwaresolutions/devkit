@@ -169,6 +169,23 @@ class ExceptionNameTests(unittest.TestCase):
             with self.subTest(exc_class=value):
                 self.assertEqual(bugs.readable_exc(value), shown)
 
+    # The standard-library classes come from the modules devkit's source imports. bugs.py imported each by a name it
+    # computed, which the scanners flag as a dynamic import; it imports them by their literal names now, so a module
+    # devkit starts to import must join that list, or readable text stops naming its classes
+    def test_every_standard_library_module_devkit_imports_is_one_whose_classes_are_named(self):
+        import ast
+        imported = set()
+        for path in (ROOT / "lib" / "devkit").rglob("*.py"):
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+                if isinstance(node, ast.Import):
+                    imported.update(a.name for a in node.names)
+                elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+                    imported.add(node.module)
+        standard = {m for m in imported if bugs._stdlib_module(m.split(".")[0])}
+        listed = {m.__name__ for m in bugs.stdlib_namespaces()}
+        missing = sorted(m for m in standard - listed if importlib.util.find_spec(m) is not None)
+        self.assertEqual(missing, [], "add them to bugs.stdlib_namespaces")
+
 
 class MarkdownTextTests(unittest.TestCase):
     HOSTILE = ("```js\nrun()``` @someone [x](https://evil.example) <img src=x onerror=a()> ![i](u) | a | ~~s~~ "
