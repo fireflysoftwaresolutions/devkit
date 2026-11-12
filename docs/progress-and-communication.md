@@ -94,6 +94,12 @@ The status, the dashboard, the handoff and the next session all read the plan, s
   step is running, name it with `--step`.
 - **Not someone else's step,** while the crew member who owns it is still working, and **not before its
   dependencies** are done.
+- **Not over a member's running background work.** On Claude Code, a member's `dev progress step "…" --step <name>
+  --check "…"` is refused, with nothing recorded, while a background command the member started has not ended. The
+  refusal names the commands: run it again once they end, or stop the ones that are not the step's work with
+  TaskStop. `dev progress note "…" --step <name>` keeps partial evidence meanwhile.
+- **Reviews close with the report.** A review step ends with its reviewer's report, once the crew gates pass it, so
+  a reviewer's lane may hold more than one review at once, and the report ends every review the lane holds.
 - **Not finished with open steps:** `dev progress done` refuses while steps are pending; close or skip each one.
 - **Not finished over working members:** `dev progress done` refuses while a crew member owns a running step, and
   names each member and step. Wait for the reports, or skip a step on purpose with `dev progress skip`; neither
@@ -267,8 +273,9 @@ one message, never two.
 ### Questions nobody waits on
 
 A question to the tech lead closes when it is answered: with `dev crew answer`, or, on Claude Code, with a
-`SendMessage` from the main session to the member who asked, which devkit records as answered via SendMessage, with
-the text, in the inbox and the audit trail (`crew.message-answered`). A question whose member ended and holds no
+`SendMessage` from the main session to the member who asked that names the question (`M3: …`), which devkit records
+as answered via SendMessage, with the text, in the inbox and the audit trail (`crew.message-answered`). A
+`SendMessage` that names no question answers none, and a devkit notice lists the questions that still wait. A question whose member ended and holds no
 open step is **moot**: nobody waits for it, it wakes nobody, and `dev watch` shows it as moot with the reason (see
 [Work states › Crew messages](work-states.md#crew-messages)).
 

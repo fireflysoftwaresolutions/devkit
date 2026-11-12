@@ -260,7 +260,11 @@ that launch alone, so two members launched together never swap lanes:
   lane holds ends that step at once, by the rules of the member's end (done with a ✓ Check, otherwise unverified),
   and the next steps start while the member works on; the command's line says the step closed, or why it stays open.
   A review step is the exception: it stays running and ends with the member's report, done only when the crew gates
-  pass it. A `--step` the lane cannot close exits 2, records nothing, and says what to do: for a step that is not its
+  pass it, so a reviewer's lane may hold more than one review step at once: a review assigned to a reviewer who holds only
+  reviews joins its lane at once, one launch that names more than one review binds them all, and the report ends every
+  review the lane holds. On Claude Code, the member's close is refused, with nothing recorded, while a background
+  command it started has not ended: the refusal names the commands, so the member runs it again once they end (their
+  task notification) or stops the ones that are not the step's work with TaskStop. A `--step` the lane cannot close exits 2, records nothing, and says what to do: for a step that is not its
   own, ask the tech lead to assign it; for a queued step, close the step ahead of it or wait for its dependencies;
   for its own step, add `--check`.
   `dev progress note "…" --step "<name>" --check "…"` keeps partial evidence on the step (its last five) and leaves
@@ -413,7 +417,7 @@ Any member can ask anything, of the tech lead (the default) or of another member
 dev crew ask "Should the export include voided invoices?"           # to the tech lead
 dev crew ask --to Seraph "Please look at the rounding in total()"   # to another member
 dev crew answer M3 "No: only issued and paid ones"
-dev crew inbox
+dev crew inbox                                                      # messages not delivered yet; --all: every one, whole
 dev watch --wait --for me --timeout 9                               # a member blocked on the answer, in the foreground
 ```
 
@@ -431,6 +435,13 @@ while its member works; once that lane ended or went stale, it goes to the membe
 next launch, like any other message. A message to the tech lead by role, such as `--to "Tech lead"` or
 `--to Morpheus`, reaches the main session.
 
+On Claude Code and Codex alike, `dev watch --wait` and the hooks print each crew message whole, up to the 1,500
+characters a message holds. Taking a message marks it delivered, so `dev crew inbox` lists only the new ones;
+`dev crew inbox --all` prints every message the run keeps for you in full, oldest first, the delivered ones too, with
+the new ones marked `· new`. A wait belongs to the member whose lane mark or open call names it. When two members' open
+calls typed the same wait and no lane mark reached them (a Codex crew), it belongs to neither: `dev watch`
+refuses it and says to read the answer with `dev crew inbox --all` or to wait again in a moment.
+
 Each message has a kind, and only a question waits:
 
 | Kind | Sent by | Waits |
@@ -442,9 +453,11 @@ Each message has a kind, and only a question waits:
 `dev status` and the dashboard list the questions to the tech lead that nobody answered, each with its
 `dev crew answer` command; a notice or an answer is never listed as open.
 
-On Claude Code, a `SendMessage` from the tech lead to the member who asked answers that member's open questions to
-the tech lead: devkit marks each answered via SendMessage, keeps the text as the answer, and records
-`crew.message-answered`. Codex's `send_input` does not, so answer there with `dev crew answer` before you resume the
+On Claude Code, a `SendMessage` from the tech lead to the member who asked answers the questions its text names
+(`M3: …`): devkit marks each answered via SendMessage, keeps the text as the answer, and records
+`crew.message-answered`. A `SendMessage` that names no question answers none, since it may be a new work item: the
+questions stay open, and a devkit notice tells the tech lead which still wait and the `dev crew answer` command that
+closes each. Codex's `send_input` answers nothing, so answer there with `dev crew answer` before you resume the
 member. A question whose member ended and holds no running or blocked step is **moot**: nobody waits for it, it is
 never listed as open and wakes nobody, and `dev watch` shows it as moot with the reason.
 
@@ -543,8 +556,9 @@ follows that its member approves, once the crew gates pass the member's report. 
 unverified or an approval is owed.
 
 `dev canary` and `dev doctor` count the crew's reports apart from the main sessions' (`crew 12/13`), so you can always
-see that the kit's rules still hold inside every agent. On Codex these checks do not run yet, because devkit records
-no Codex launch (see [Surfaces](surfaces.md#what-was-verified-on-codex)).
+see that the kit's rules still hold inside every agent. On Codex, devkit records a launch when its agent starts, and
+a Codex member's report gets the same checks at its end (see [Agents › Hooks](agents.md#hooks) and
+[Surfaces](surfaces.md#what-was-verified-on-codex) for what was verified live).
 
 ### CI failures go to the Release engineer
 
@@ -702,6 +716,12 @@ earlier yes. These end it too:
 
 The decision waits until you answer again in devkit's exact call or type `approve D<n>: <option>`.
 
+An answer in the question dialog approves an irreversible action only when the question is a decision devkit
+recorded (`dev crew ask --decision --irreversible <action> --target <target> "…"`, asked with
+`dev crew decisions --ask`). Right after an answer that approves a push, PR, merge, release, deploy, or publish in a
+dialog devkit did not record, the context says it grants nothing and gives the line you type instead:
+`grant <action> <target>`.
+
 `dev audit verify` applies the same rule to the call in the transcript, so evidence recorded before it is reported
 when its call breaks it.
 
@@ -751,7 +771,7 @@ dashboard and the handoff read, and devkit's audit trail (`dev audit`), publishe
 | `crew.decision`, `crew.decided`, `crew.mode` | a decision point, its answer (and by whom), a change of mode |
 | `crew.withdrawn`, `crew.decision-closed` | the tech lead withdrew a decision, or its run ended or was replaced, each with the reason |
 | `crew.message-closed` | a question that still waited for an answer closed because its run ended or was replaced, with the reason (never its text) |
-| `crew.message-answered`, `crew.message-moot` | a question answered via SendMessage (with the channel), or one nobody waits on any more because its member ended and holds no open step (with the reason) |
+| `crew.message-answered`, `crew.message-moot` | a question answered by a SendMessage that names it (with the channel), or one nobody waits on any more because its member ended and holds no open step (with the reason) |
 | `watch.wake` | a `dev watch --wait` woke its agent: the kinds of events, how many, and the time from the oldest event to the wake |
 | `scope.write` | a file a read-only member's shell call changed, counted for whoever's own edit call touched it during that call, otherwise flagged for the read-only member |
 | `crew.delegate`, `crew.decline` | work handed to another member, or handed back |

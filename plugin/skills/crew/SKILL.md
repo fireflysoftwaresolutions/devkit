@@ -159,7 +159,9 @@ dev crew graph --global              # every live session on this Mac (the defau
   (`src/pkg/*.py` and `src/pkg/studio/host.py`).
 - **A member's own close lands at once.** `dev progress step "…" --step "<name>" --check "…"` from the member ends
   that step right away, and the steps after it start. A review step is the exception: it ends with the member's
-  report, done only when the crew gates pass it. A `--step` on a step the lane does not hold, or still queued for it,
+  report, done only when the crew gates pass it, so a reviewer's lane may hold more than one review (one launch can
+  name them all). On Claude Code, a member's close is refused while a background command it started has not ended: run it
+  again once they end, or stop the ones that are not the step's work with TaskStop. A `--step` on a step the lane does not hold, or still queued for it,
   exits 2 and records nothing. For a long step that stays open, the member records partial evidence with
   `dev progress note "…" --step "<name>" --check "…"`, which the crew gate accepts as the step's record.
 - **A busy member's next step waits in its lanes.** Assigning a step to a member whose working lanes all hold another
@@ -234,8 +236,9 @@ files.
 - **Waiting for an answer:** a member keeps working on what does not need the answer. When it is blocked, it waits
   with `dev watch --wait --for me --timeout 9` in the foreground, as a command of its own, and continues with what
   it prints; with no answer, it ends with the question under "Needs from the tech lead." In Claude Code, your
-  `SendMessage` to the member who asked also answers its open questions (devkit records them as answered via
-  SendMessage, with your text); Codex's `send_input` does not, so answer with `dev crew answer` first. A question
+  `SendMessage` to the member who asked answers the questions its text names (`M3: …`; devkit records them as
+  answered via SendMessage, with your text); one that names none answers none, and a notice lists the questions that
+  still wait. Codex's `send_input` answers nothing, so answer with `dev crew answer` first. A question
   whose member ended and holds no open step is **moot**: nobody waits for it, and it needs no answer.
 - **Other agent sessions on this Mac** (another Claude Code or Codex session, any project): talk to them only through
   `dev session` (`ls`, `tell`, `ask`, `answer`, `inbox`, `claim`, `release`, `escalate`), never by editing their

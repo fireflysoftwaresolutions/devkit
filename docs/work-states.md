@@ -28,7 +28,7 @@ devkit closes that gap in three ways:
 | [Step](#steps) | pending, running, blocked, done, skipped, unverified | `dev progress`, crew reports | `dev progress reopen`, `skip`, `confirm` |
 | [Crew lane](#crew-lanes) | running, done, unverified, stopped, lost | SubagentStart, SubagentStop, TaskStop | a new launch from `dev crew next` |
 | [Decision](#decisions) | pending (or moot), decided, withdrawn, closed | `dev crew ask --decision`, `decide`, `withdraw`, the run's end | `dev crew withdraw` |
-| [Crew message](#crew-messages) | question (or moot), notice, answer | `dev crew ask`, `dev crew answer`, a `SendMessage` to the member who asked, devkit | `dev crew answer` |
+| [Crew message](#crew-messages) | question (or moot), notice, answer | `dev crew ask`, `dev crew answer`, a `SendMessage` to the member who asked that names the question, devkit | `dev crew answer` |
 | [Wait](#waits) | live, ended, expired, superseded | `dev watch --wait`, its timeout, a newer wait | the arm-again command `dev watches` prints |
 | [CI watch](#ci-watches) | live, expired, ended | a push, a pull request, a merge, a release, `dev ci watch --wait` | the re-arm command `dev ci watches` prints |
 | [Install](#the-install-pin) | pinned release, older session | `dev install`, `dev update` | restart the session |
@@ -212,9 +212,11 @@ Every crew message has a kind:
 A message to the tech lead by role, such as `--to "Tech lead"` or `--to Morpheus`, reaches the main session.
 
 A question closes when someone answers it with `dev crew answer`. On Claude Code, a `SendMessage` from the main
-session to the member who asked also answers that member's open questions to the tech lead: devkit marks each as
-answered via SendMessage, keeps the text as the answer, and records `crew.message-answered` in the audit trail.
-Codex's `send_input` does not, so the tech lead answers there with `dev crew answer`.
+session to the member who asked answers the questions its text names (`M3: …`): devkit marks each as answered via
+SendMessage, keeps the text as the answer, and records `crew.message-answered` in the audit trail. A `SendMessage`
+that names no question answers none, since it may be a new work item: the questions stay open, and a devkit notice
+tells the tech lead which still wait. Codex's `send_input` answers nothing, so the tech lead answers there with
+`dev crew answer`.
 
 A question to the tech lead is **moot** when the member that asked it has ended (done, stopped, lost, or unverified)
 and holds no running or blocked step: nobody waits for the answer. It is never listed as waiting, it wakes nobody,
