@@ -12,7 +12,8 @@ into a command.
 - Every write of a record also writes the issue's title and body from it (bugs.human_title, bugs.render_issue) when
   their text differs: after a fold, and on a release that marks the bug fixed. The record keeps the first report
   without the reporter's free text; the body shows that text only while the issue's own body still carries it, so a
-  reporter who takes it out has it gone from the next render.
+  reporter who takes it out has it gone from the next render. A record also forgets the accounts quiet for 90 days
+  each time it is written (_pruned).
 - Each run folds every payload comment it has not folded yet, oldest first, so a run cancelled by the concurrency
   group loses nothing. The record keeps `seen`, the highest comment id handled, and `folds`, today's folded payloads
   per account, which cap every account at DAILY_CAP payloads a day across the registry. Folded votes, confirmations
@@ -58,7 +59,8 @@ from devkit import bugs, core  # noqa: E402
 DAILY_CAP = 20  # folded payloads per account per day, across the registry
 DELETED = ("vote", "confirm", "failed")  # once folded these comments go; detours and reports stay on the issue
 REGRESSION = "regression"
-EVENTS = {"issues": "opened", "issue_comment": "created", "release": "published"}
+EXPIRED = "expired-"  # stands in for the account of a team mark older than VOTER_DAYS; a digest is 64 hex characters
+EVENTS ={"issues": "opened", "issue_comment": "created", "release": "published"}
 TRIES = 3  # writes of one record that found it changed by another run, before the run gives up
 WAITS, WAIT_S = 4, 15  # a duplicate waits up to a minute for the first issue's own run to write its record
 MAINTAINERS = Path(__file__).resolve().parents[1] / ".github" / "bug-registry-maintainers"
@@ -209,6 +211,46 @@ def _write(client, number: int, holder, rec: dict) -> bool:
 
 # --------------------------------------------------------------------------- what the record keeps, and the issue's text
 
+def _pruned(rec: dict, now: float) -> dict:
+    """The record without what it keeps about accounts quiet for bugs.VOTER_DAYS: their voter entries and totals, the
+    regression marks of voters it no longer names (a mark has no time of its own), a daily fold count of a day that
+    long ago, and the detour marks of accounts outside the team. A team member's older mark keeps its place under a
+    placeholder instead of the account's digest: clients count a detour's marks to decide its trust, so a confirmed
+    workaround stays served and a retired one stays retired."""
+    rec = json.loads(json.dumps(rec))
+    cut = now - bugs.VOTER_DAYS * 86400
+
+    def recent(entry) -> bool:
+        ts = entry.get("ts") if isinstance(entry, dict) else None
+        return isinstance(ts, (int, float)) and not isinstance(ts, bool) and ts >= cut
+    if isinstance(rec.get("voters"), dict):
+        rec["voters"] = {h: v for h, v in rec["voters"].items() if recent(v)}
+    if isinstance(rec.get("older_voters"), dict):
+        rec["older_voters"] = {k: t for k, t in rec["older_voters"].items() if recent(t)}
+        if not rec["older_voters"]:
+            del rec["older_voters"]
+    if isinstance(rec.get("regression"), list):
+        rec["regression"] = [h for h in rec["regression"] if h in (rec.get("voters") or {})]
+    folds = rec.get("folds")
+    if isinstance(folds, dict) and not (isinstance(folds.get("day"), str) and folds["day"] >= _today(cut)):
+        del rec["folds"]
+    for d in rec.get("detours") if isinstance(rec.get("detours"), list) else []:
+        for key in ("confirmations", "failures"):
+            marks = d.get(key) if isinstance(d, dict) else None
+            if not isinstance(marks, list):
+                continue
+            used, kept = {m.get("author_hash") for m in marks if isinstance(m, dict)}, []
+            for m in marks:
+                if not isinstance(m, dict) or recent(m) or str(m.get("author_hash") or "").startswith(EXPIRED):
+                    kept.append(m)
+                elif m.get("author_assoc") in bugs.TRUSTED:
+                    n = next(n for n in range(1, len(used) + 2) if f"{EXPIRED}{n}" not in used)
+                    used.add(f"{EXPIRED}{n}")
+                    kept.append({**m, "author_hash": f"{EXPIRED}{n}"})
+            d[key] = kept
+    return rec
+
+
 def _first_reports(holder: dict, issue: dict) -> tuple:
     """(the first report a record keeps, the first report the issue's text shows). The record keeps only the report's
     closed-list fields, never the reporter's free text (bugs._FREE_FIELDS), so nothing the reporter typed lands in a
@@ -225,9 +267,10 @@ def _first_reports(holder: dict, issue: dict) -> tuple:
 
 
 def _prepared(rec: dict, issue: dict, now: float) -> dict:
-    """The record as this run writes it: with the first report it keeps and the human title. A record from before the
-    days were counted starts at the days its voters last voted, which is never more than the days the bug was seen."""
-    rec = json.loads(json.dumps(rec))
+    """The record as this run writes it: pruned, with the first report it keeps and the human title. A record from
+    before the days were counted starts at the days its voters last voted, which is never more than the days the bug
+    was seen."""
+    rec = _pruned(rec, now)
     kept, _ = _first_reports(rec, issue)
     if kept:
         rec["first"] = kept

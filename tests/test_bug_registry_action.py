@@ -101,6 +101,7 @@ EVENTS = {
     },
 }
 REPORTED = "Steps close but the board still shows them running"  # a reporter's own words, in a command report
+OLD = NOW - 100 * DAY  # past the 90 days a record keeps an account
 
 
 class FakeGitHub:
@@ -152,6 +153,10 @@ class FakeGitHub:
     def record_comment(self, number):
         return next(c for c in self.notes.values()
                     if c["issue"] == number and c["user"]["login"] == BOT["login"] and bugs.RECORD_MARK in c["body"])
+
+    def set_record(self, number, rec):
+        """Write a record by hand, as an older run of the workflow left it."""
+        self.record_comment(number)["body"] = bugs.render_record(rec)
 
     def _wrote_record(self, body):
         if bugs.RECORD_MARK in body and self.after_record_write:
@@ -881,6 +886,64 @@ class IssueTextTests(unittest.TestCase):
         self.assertIn("- **Status:** Fixed in 26.11.8: run `dev update` to get it.", body)
         self.assertIn("- `dev update` gets the fix, in 26.11.8.", body)
         self.assertEqual(fake.issues[62]["body"], left)  # not fixed by this release: not rewritten by it
+
+
+def _mark(account, assoc, ts):
+    return {"author_hash": _h(account), "author_assoc": assoc, "ts": ts}
+
+
+def _detour(n, confirmations, failures):
+    return {"id": f"d{n}", "steps": [{"hint": "scratch-tool", "tool": "Write"}], "since": "26.11.7", "until": "",
+            "author_hash": _h(2), "author_assoc": "NONE", "author_kind": "other", "evidence": {"successes": 1},
+            "confirmations": confirmations, "failures": failures, "flagged": True, "ts": OLD}
+
+
+class RetentionTests(unittest.TestCase):
+    """Every write of a record forgets the accounts that have been quiet for 90 days."""
+
+    def test_voters_regression_marks_and_fold_counts_of_quiet_accounts_go(self):
+        fake = _fixed(70)
+        rec = fake.record(70)
+        rec["voters"].update({_h(2): {"impact": "blocked", "ts": OLD}, _h(3): {"impact": "minor", "ts": NOW - 2 * DAY}})
+        rec.update(older_voters={"minor": {"n": 4, "ts": OLD}}, regression=[_h(2), _h(3)],
+                   folds={"day": "2026-10-07", "by": {_h(2): 1}})
+        fake.set_record(70, rec)
+        chat = fake.add_comment(70, "Same here.", _user(5))
+        rc, _, err = _run(fake, "issue_comment", 70, comment=chat)
+        self.assertEqual(rc, 0, err)
+        after = fake.record(70)
+        self.assertEqual((set(after["voters"]), after["regression"]), ({_h(1), _h(3)}, [_h(3)]))
+        self.assertFalse({"older_voters", "folds"} & set(after))
+        self.assertNotIn(_h(2), fake.record_comment(70)["body"])
+        self.assertEqual(after["score"], rec["score"])  # a quiet account never counted in the score
+
+    def test_old_team_marks_keep_their_count_so_what_agents_are_served_holds(self):
+        fake = FakeGitHub()
+        fake.registry_issue(12)
+        rec = fake.record(12)
+        rec["detours"] = [  # d1 verified only by old team marks; d2 retired only by old team failures
+            _detour(1, [_mark(3, "MEMBER", OLD), _mark(4, "OWNER", OLD)],
+                    [_mark(5, "NONE", OLD), _mark(6, "NONE", NOW - DAY)]),
+            _detour(2, [_mark(7, "MEMBER", NOW - DAY)], [_mark(8, "MEMBER", OLD), _mark(9, "MEMBER", OLD)])]
+        fake.set_record(12, rec)
+
+        def served(r):
+            return [(d["id"], d["trust"]) for d in bugs.agent_view(r)["detours"]]
+        self.assertEqual(served(rec), [("d1", "verified")])
+        chat = fake.add_comment(12, "Same here.", _user(5))
+        rc, _, err = _run(fake, "issue_comment", 12, comment=chat)
+        self.assertEqual(rc, 0, err)
+        after = fake.record(12)
+        self.assertEqual(served(after), [("d1", "verified")])
+        self.assertEqual([bugs.trust_of(d, d["confirmations"]) for d in after["detours"]], ["verified", "retired"])
+        d1 = after["detours"][0]
+        self.assertEqual((len(d1["confirmations"]), [m["author_hash"] for m in d1["failures"]], d1["flagged"]),
+                         (2, [_h(6)], True))
+        body = fake.record_comment(12)["body"]
+        for account in (3, 4, 5, 8, 9):
+            self.assertNotIn(_h(account), body, account)
+        for account in (6, 7):
+            self.assertIn(_h(account), body, account)
 
 
 class _Response:
