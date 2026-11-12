@@ -166,13 +166,15 @@ class TheHookRoutesItToTheLane(unittest.TestCase):
                     self.assertIn(where, (routed or {}).get("command", ""))
                     self.assertIsNone(hooks._unroutable_lane_command(self.data(cmd)))
 
-    def test_a_compound_call_with_a_write_stays_refused_with_the_lane_reason(self):
+    def test_a_compound_call_with_a_write_stays_refused_with_the_lane_reason_on_codex(self):
+        # Codex's rewrite approves what it rewrites, so only the router's placement is used there; Claude Code's
+        # approves nothing, and the hook exports the lane variable for the whole command (test_guard_false_refusals)
         self.lane("Kid", "all")
         for cmd in ("cd lib && dev progress step x && rm -rf build", "echo y | dev crew decide D1 A",
                     "cd lib && dev progress step x | tee /tmp/out", "cd lib && env dev crew decide D1 A"):
             with self.subTest(cmd=cmd):
-                self.assertIsNone(hooks._route_subagent_progress(self.data(cmd)))
-                self.assertIn("command of its own", hooks._unroutable_lane_command(self.data(cmd)) or "")
+                self.assertIsNone(hooks._route_subagent_progress(self.data(cmd), "codex"))
+                self.assertIn("command of its own", hooks._unroutable_lane_command(self.data(cmd), "codex") or "")
 
     def test_a_routed_compound_call_still_meets_the_lane_rules(self):
         # a read the router accepts is judged again by the lane: here an irreversible push in a review lane

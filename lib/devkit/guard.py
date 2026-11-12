@@ -9401,9 +9401,22 @@ def failopen(where: str, exc: BaseException):
     _record("guard.failopen", where, f"{type(exc).__name__}: {exc}"[:300], "allow", rule=where)
 
 
+# a program's code that gives a process it starts an environment of its own: a `dev` call it starts may then run
+# without the DEVKIT_FROM_AGENT the hook exported for the member (env=, env:, the exec and spawn forms that take one)
+STAMP_LOST_CODE = re.compile(r"\benv\s*[=:]|\b(?:exec|spawn)[lv]p?e\b|\bposix_spawnp?\b|\bclearenv\b|\benviron\b|"
+                             r"\bENV\b|%ENV\b")
+
+
+def holds_lane_call(cmd: str, cwd) -> bool:
+    """True when a shell command runs a `dev progress` or `dev crew` lane call at any depth the guard reads (a
+    pipeline, a list, a loop, a nested shell, a substitution, a program's code)."""
+    calls = shell_calls(cmd, cwd)
+    return bool(calls) and any(kind == "lane" for argv, code in calls for kind, _ in _dev_calls(argv, code))
+
+
 @_in_time()
 def crew_shell_verdict(cmd: str, cwd, scope=None, member=None, level=None, base=None, *, lane=None, session: str = "",
-                       agent: str = "claude", grant=None, now=None, routed: bool = False):
+                       agent: str = "claude", grant=None, now=None, routed: bool = False, stamped: bool = False):
     """For a crew member's shell command that devkit did not route to its lane (or, with `routed`, one it did):
     ("deny", why) when it runs a `dev progress` or `dev crew` call that would act as Morpheus or change the team's crew, `dev crew sync` that
     writes outside the member's step scope, writes or deletes in the session scratchpad outside the member's own
@@ -9415,14 +9428,16 @@ def crew_shell_verdict(cmd: str, cwd, scope=None, member=None, level=None, base=
     it); `session`, `agent`: the session the lane runs in; `grant`: replaces progress.use_grant in tests.
     `routed`: devkit routes this command to the lane (hooks._route_subagent_progress, lane_route), so the lane calls
     the router marked pass, and everything else is judged as for any command: defense in depth if the router misreads
-    it."""
+    it. `stamped`: the hook runs the whole command with DEVKIT_FROM_AGENT exported (hooks._stamp_member), so every
+    lane call it runs acts as the member, at any depth; a lane call in a program's code that sets its child's
+    environment (STAMP_LOST_CODE) may drop the variable, and stays refused."""
     if not cmd or not str(cmd).strip():
         return None
     variants = literal_variants(cmd)
     if variants:  # a variable set from a literal: judged once per value it holds, the first refusal stands
         for text in variants:
             v = crew_shell_verdict(text, cwd, scope, member, level, base, lane=lane, session=session, agent=agent,
-                                   grant=grant, now=now, routed=routed)
+                                   grant=grant, now=now, routed=routed, stamped=stamped)
             if v:
                 return v
         return None
@@ -9471,8 +9486,11 @@ def crew_shell_verdict(cmd: str, cwd, scope=None, member=None, level=None, base=
             if sub:
                 return deny(SESSION_MEMBER_REASON.format(what=_code(f"dev session {sub}")), key="session-member")
         for kind, args in _dev_calls(argv, code):
-            if kind == "lane" and not one_routed:
-                return deny(_lane_reason(cmd), key="lane")
+            # stamped, a lane call passes unless its double-quoted message runs a substitution before devkit sees it
+            # (LANE_QUOTED_REASON says so), or a program's code may give it an environment without the variable
+            why = _lane_reason(cmd) if kind == "lane" and not one_routed else ""
+            if why and (not stamped or why != LANE_REASON or (code and STAMP_LOST_CODE.search(code))):
+                return deny(why, key="lane")
             if kind == "team":
                 sub = next((a for a in args[1:] if not a.startswith("-")), "")
                 if sub not in _CREW_TEAM:  # `dev crew messages`: no command at all

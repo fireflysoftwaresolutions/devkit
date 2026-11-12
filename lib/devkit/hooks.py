@@ -1442,15 +1442,19 @@ def _unroutable_lane_command(data: dict, agent: str = "claude"):
     cmds = _shell_inputs(data)
     for key, cmd in cmds or [("", "")]:  # each command the call carries (Bash's command, Codex's cmd)
         routed = bool(key) and len(cmds) == 1 and guard.lane_route(cmd, data["agent_id"]) is not None
-        why = _lane_verdict(data, agent, cmd, routed)
+        # where the hook could have stamped the whole command, what kept it back is the reason a member needs; the
+        # unstamped verdict stands behind it, so a call the stamp did not reach is never passed
+        stampable = bool(key) and len(cmds) == 1 and _can_stamp(data, agent)
+        why = (stampable and _lane_verdict(data, agent, cmd, stamped=True)) or _lane_verdict(data, agent, cmd, routed)
         if why:
             return why
     return None
 
 
-def _lane_verdict(data: dict, agent: str, cmd: str, routed: bool = False):
+def _lane_verdict(data: dict, agent: str, cmd: str, routed: bool = False, stamped: bool = False):
     """guard.crew_shell_verdict for a subagent's shell command, with its lane's scope, member, tool level and
-    repository: the refusal, or None. `routed`: the lane router gives the command's lane calls to the lane."""
+    repository: the refusal, or None. `routed`: the lane router gives the command's lane calls to the lane;
+    `stamped`: the hook exports the lane's variable for the whole command (_stamp_member)."""
     from . import guard
     aid, sid, cwd = data["agent_id"], data.get("session_id") or "-", _shell_cwd(data)  # Codex's workdir, if any
     scope = member = level = base = None  # no lane names no member, so no member folder applies (M124)
@@ -1463,7 +1467,7 @@ def _lane_verdict(data: dict, agent: str, cmd: str, routed: bool = False):
             base = guard.scope_base((run or {}).get("project"), cwd)
         # the lane's id finds its step grant for a tier-1 push or PR (spec C6, M180)
         v = guard.crew_shell_verdict(cmd, cwd, scope, member, level=level, base=base, lane=aid, session=sid,
-                                     agent=agent, routed=routed)
+                                     agent=agent, routed=routed, stamped=stamped)
     except Exception as e:  # unchecked is not allowed: the member's command fails closed (the Keymaker's review)
         _log(f"crew-lane {agent} {aid}: {traceback.format_exc()[-300:]}")
         return (f"{_LANE_CHECK_FAILED} ({type(e).__name__}), so it is refused "
@@ -1731,7 +1735,7 @@ def _route_subagent_progress(data: dict, agent: str = "claude"):
     from . import guard
     new = guard.lane_route(cmd, str(aid)) or _watch_route(cmd, str(aid))
     if new is None:
-        return None
+        return _stamp_member(data, agent, key, cmd)
     if not guard.runs_one_command(cmd) and _lane_verdict(data, agent, cmd, routed=True):
         return None  # _unroutable_lane_command gives the refusal
     stamp = _codex_session_assignment(agent, data)
@@ -1740,6 +1744,30 @@ def _route_subagent_progress(data: dict, agent: str = "claude"):
     if stamp:
         new = f"{stamp} {new}" if guard.runs_one_command(cmd) else f"export {stamp}; {new}"
     return {**inp, key: new}
+
+
+def _can_stamp(data: dict, agent: str) -> bool:
+    """True when the hook may export a member's lane variable for its whole command: Claude Code, whose rewrite
+    approves nothing (its own permission check runs on the new command), and an agent id the shell reads as a plain
+    word. Codex's rewrite carries an explicit allow, so there a compound command gets only the router's placement."""
+    return agent == "claude" and bool(re.fullmatch(r"[A-Za-z0-9_.:-]{1,80}", str(data.get("agent_id") or "")))
+
+
+def _stamp_member(data: dict, agent: str, key: str, cmd: str):
+    """A member's command that runs lane calls the router cannot place one by one (`dev crew inbox 2>&1 | tail`, two
+    steps in a list, a loop, `NO_COLOR=1 dev crew rules`, a lane call next to a write in the member's scratch folder)
+    gets the lane variable exported in front (`export <LANE_VAR>=<agent id>; …`), so every dev call it starts, at any
+    depth and in the background, acts as the member, when the lane allows everything it runs
+    (guard.crew_shell_verdict, stamped). What removes the variable (unset, env -i, env -u, an empty assignment) is
+    refused before (_identity_verdict), and a lane call in a program that sets its child's environment stays
+    refused. -> the new tool input, or None."""
+    from . import guard, identity
+    if not _can_stamp(data, agent) or not guard.holds_lane_call(cmd, _shell_cwd(data)):
+        return None
+    if _lane_verdict(data, agent, cmd, stamped=True):
+        return None  # _unroutable_lane_command gives the refusal
+    inp = data.get("tool_input") or {}
+    return {**inp, key: f"export {identity.LANE_VAR}={data['agent_id']}; {cmd}"}
 
 
 def _watch_route(cmd: str, aid: str):

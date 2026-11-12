@@ -203,5 +203,87 @@ class ScratchScripts(Case):
                 self.refused(f"node {self.script('p.mjs', text)}")
 
 
+class LaneStamp(unittest.TestCase):
+    """A member's command that holds lane calls the router cannot place one by one is run with the member's lane
+    variable exported, so every dev call in it acts as the member (Claude Code, whose rewrite approves nothing); a
+    command that drops the variable, runs a team command or an irreversible action, or writes from a read-only lane
+    stays refused, and Codex, whose rewrite approves, keeps the router's placement."""
+
+    def lane(self, persona, level):
+        from devkit import progress
+        run = {"agents": {"a1": {"persona": persona}}}
+        for name, value in (("lane_of", lambda *a: (run, run["agents"]["a1"])), ("lane_chain", lambda r, a: [a]),
+                            ("lane_tools", lambda r, a: level), ("lane_scope", lambda r, a: None)):
+            p = mock.patch.object(progress, name, value)
+            p.start()
+            self.addCleanup(p.stop)
+        p = mock.patch.object(core, "load_config", return_value=ENFORCE)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def data(self, cmd):
+        return {"agent_id": "a1", "tool_name": "Bash", "session_id": "s", "cwd": CWD, "tool_input": {"command": cmd}}
+
+    def test_a_compound_command_with_lane_calls_is_stamped_for_the_member(self):
+        from devkit import hooks
+        for persona, level in (("Kid", "all"), ("Seraph", "review")):
+            self.lane(persona, level)
+            for cmd in ('dev progress step "a" --check "x"; dev progress step "b" --check "y"',
+                        "NO_COLOR=1 dev crew inbox", "for s in a b; do dev progress note \"$s\"; done",
+                        "dev crew inbox 2>&1 | tail -15; dev progress note y", "(cd lib && dev progress note x)",
+                        "dev progress note x &") + (("bash -c 'dev crew inbox'",) if level == "all" else ()):
+                with self.subTest(cmd=cmd, persona=persona):
+                    routed = hooks._route_subagent_progress(self.data(cmd))
+                    self.assertEqual((routed or {}).get("command"), "export DEVKIT_FROM_AGENT=a1; " + cmd)
+                    self.assertIsNone(hooks._unroutable_lane_command(self.data(cmd)))
+
+    def test_what_drops_the_stamp_or_acts_beyond_the_lane_stays_refused(self):
+        from devkit import hooks
+        self.lane("Kid", "all")
+        for cmd in ("python3 -c \"import subprocess; subprocess.run(['dev', 'progress', 'step', 'x'], "
+                    "env={'PATH': '/usr/bin'})\"",
+                    "node -e \"require('child_process').execFileSync('dev', ['progress', 'step', 'x'], "
+                    "{env: {}})\"",
+                    "dev progress step x; dev crew brief tank --step api", "dev progress step x && gh pr merge 12",
+                    "dev progress note x; git push --force origin main",
+                    'dev crew ask "Should I run `dev push` now?"; dev crew inbox',
+                    'dev progress step "$(gh pr merge 12)"; dev progress note y'):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(hooks._route_subagent_progress(self.data(cmd)))
+                self.assertIsNotNone(hooks._unroutable_lane_command(self.data(cmd)))
+        for cmd in ("env -u DEVKIT_FROM_AGENT dev progress step x; true", "unset DEVKIT_FROM_AGENT; dev progress note x",
+                    "DEVKIT_FROM_AGENT= dev progress step x | tail -1", "env -i PATH=/usr/bin dev progress step x; true"):
+            with self.subTest(cmd=cmd):  # the identity gate refuses it before the lane is routed
+                self.assertIsNotNone(hooks._identity_verdict(self.data(cmd)))
+
+    def test_a_write_outside_the_scratch_folder_from_a_read_only_lane_stays_refused(self):
+        from devkit import hooks
+        self.lane("Seraph", "review")
+        cmd = "dev progress step x && sed -i '' s/a/b/ lib/x.py"
+        self.assertIsNone(hooks._route_subagent_progress(self.data(cmd)))
+        why = hooks._unroutable_lane_command(self.data(cmd)) or ""
+        self.assertIn("read-only lane", why)  # the real reason, not "run it as a command of its own"
+
+    def test_the_stamp_approves_nothing(self):
+        # the hook routes only a call guard.check allowed; Claude Code's rewrite adds the variable and no permission
+        # decision, so the harness's own permission check runs on the stamped command
+        from devkit import hooks
+        self.lane("Kid", "all")
+        for cmd in ("dev progress step x; dev progress note y", "for s in a b; do dev progress note $s; done",
+                    "NO_COLOR=1 dev crew inbox"):
+            with self.subTest(cmd=cmd):
+                routed = hooks._route_subagent_progress(self.data(cmd))
+                self.assertEqual(routed["command"], "export DEVKIT_FROM_AGENT=a1; " + cmd)
+                self.assertNotIn("permissionDecision", hooks._rewrite("claude", routed))
+                self.assertIsNone(hooks._route_subagent_progress(self.data(cmd), "codex"))
+
+    def test_codex_keeps_the_routers_placement(self):
+        from devkit import hooks
+        self.lane("Kid", "all")
+        cmd = "dev progress step x; dev progress step y"
+        self.assertIsNone(hooks._route_subagent_progress(self.data(cmd), "codex"))
+        self.assertIn("command of its own", hooks._unroutable_lane_command(self.data(cmd), "codex") or "")
+
+
 if __name__ == "__main__":
     unittest.main()

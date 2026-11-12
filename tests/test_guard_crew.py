@@ -322,7 +322,8 @@ class HookWiringTests(unittest.TestCase):
             with self.subTest(cmd=cmd):
                 self.assertIsNone(self.lane(cmd))
         self.assertIsNone(self.lane("cd lib && dev progress step x"))  # routed to the lane (guard.lane_route)
-        self.assertIn("command of its own", self.lane("cd lib && dev progress step x && rm -rf build") or "")
+        # the hook could stamp the lane call for the member; what keeps the command back is the delete, named as such
+        self.assertIn("read-only lane: `rm`", self.lane("cd lib && dev progress step x && rm -rf build") or "")
         self.assertIn("command of its own", self.lane(["bash", "-lc", "dev crew decide D1 A"], "exec_command") or "")
         self.assertIn("scratchpad/oracle/", self.lane(f"rm {self.pad}/tank/f3.py") or "")
 
