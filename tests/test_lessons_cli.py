@@ -321,15 +321,13 @@ class ReadTests(LessonCLI):
         self.assertIn("has not synced", out)
         self.assertIn("1 commit", out)
 
-    def test_dev_lesson_warns_while_the_handoff_has_stopped_syncing(self):
+    def test_dev_lesson_warns_only_while_the_handoff_has_stopped_syncing(self):
         self.stalled_handoff()
         rc, out = self.dev()
         self.assertEqual(rc, 0, out)
         self.assertIn("has not synced", out)
         self.assertIn("1 commit from other machines", out)
-
-    def test_dev_lesson_says_nothing_of_syncing_while_the_handoff_syncs(self):
-        self.add("Wait for the input before the step", commands=["make deploy"])
+        work.push_failed_file().unlink()  # a push succeeded: the sync works again
         rc, out = self.dev()
         self.assertEqual(rc, 0, out)
         self.assertNotIn("synced", out)
