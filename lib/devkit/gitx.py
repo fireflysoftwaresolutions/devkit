@@ -293,6 +293,89 @@ def message_violation(header: str, what: str = "Commit message"):
     return None
 
 
+TITLE_SAMPLE = 20  # the merged pull requests, or default-branch commits, a title convention is read from
+TITLE_MIN_SEEN = 5  # fewer titles than this show no convention: Conventional Commits stay the default
+TITLE_PLAIN_SHARE = 0.8  # plain sentences in at least this share of the titles are the repository's convention
+
+
+def _conventional(title: str) -> bool:
+    m = CC_RE.match((title or "").strip())
+    return bool(m) and m.group("type").lower() in _cc_types()
+
+
+def _sentence_of(desc: str) -> str:
+    d = (desc or "").strip().rstrip(".")
+    return d[:1].upper() + d[1:]
+
+
+def title_convention(c) -> dict:
+    """How this repository titles its pull requests, read from its own history: the titles of its last merged pull
+    requests on GitHub (bots left out: their prefix is their own configuration), or, when GitHub lists fewer than
+    five, the subjects of the default branch's last commits (merges, reverts, WIP and bots left out). Plain sentences
+    in at least 80% of five or more titles are the repository's convention, `sentence` (firefly-weave); anything else
+    keeps devkit's default, `conventional` (Conventional Commits, as devkit's own repository uses).
+    -> {"style", "seen": titles read, "plain": plain sentences among them, "source": where they come from}"""
+    titles, source = [], "merged PRs"
+    if c.provider == "github" and c.slug:
+        prs, _ = gh_json(["pr", "list", "-R", c.slug, "--state", "merged", "--limit", str(TITLE_SAMPLE),
+                          "--json", "title,author"], c)
+        for p in prs if isinstance(prs, list) else []:
+            who = p.get("author") or {}
+            login = str(who.get("login") or "")
+            if not (who.get("is_bot") or login.endswith("[bot]") or login.startswith("app/")):
+                titles.append(str(p.get("title") or "").strip())
+    titles = [t for t in titles if t]
+    if len(titles) < TITLE_MIN_SEEN:
+        ref = f"origin/{c.default}" if _ref_sha(c.top, f"refs/remotes/origin/{c.default}") else c.default
+        out = core.gitout(c.top, "log", "--no-merges", f"-{TITLE_SAMPLE * 2}", "--format=%s%x1f%an%x1f%ae", ref)
+        titles, source = [], f"commits on {c.default}"
+        for line in out.splitlines():
+            subject, _, who = line.partition("\x1f")
+            if subject.strip() and "[bot]" not in who and not re.match(r"(Merge |Revert \")", subject) and \
+                    not _WIP_RE.match(subject):
+                titles.append(subject.strip())
+        titles = titles[:TITLE_SAMPLE]
+    plain = sum(1 for t in titles if not _conventional(t))
+    style = "sentence" if len(titles) >= TITLE_MIN_SEEN and plain >= TITLE_PLAIN_SHARE * len(titles) else "conventional"
+    return {"style": style, "seen": len(titles), "plain": plain, "source": source}
+
+
+def _sentence_violation(title: str, conv=None, what: str = "PR title"):
+    """Reason when `title` is not a plain imperative sentence (a capital first letter, no Conventional Commit prefix,
+    no period, no WIP marker), the convention `conv` found; None when it is one. No length rule: such a repository's
+    own titles run past 72 characters."""
+    h = (title or "").strip()
+    rule = "this repository titles its pull requests as plain imperative sentences" + (
+        f" ({conv['plain']} of the last {conv['seen']} {conv['source']})" if conv else "")
+    if not h:
+        return f"{what} is empty: {rule}, for example `Handle expired tokens`."
+    if _WIP_RE.match(h):
+        return f"{what} `{h}` is a WIP marker: {rule}; say what the change does."
+    m = CC_RE.match(h)
+    if m and m.group("type").lower() in _cc_types():
+        return f"{what} `{h}` is a Conventional Commit, but {rule}: write `{_sentence_of(m.group('desc'))}`."
+    if h[0].isalpha() and h[0].islower():
+        return f"{what} `{h}`: start with a capital letter (`{_sentence_of(h)}`), as {rule}."
+    if h.endswith("."):
+        return f"{what} `{h}` ends with a period: drop it."
+    w = _non_imperative(h)
+    if w:
+        return f"{what} `{h}` starts with `{w}`: use the imperative mood (`Add`, not `Added`, `Adds` or `Adding`)."
+    return None
+
+
+def pr_title_violation(c, title: str, conv=None):
+    """Reason when a pull request title breaks this repository's title convention (title_convention), else None."""
+    conv = conv or title_convention(c)
+    if conv["style"] == "sentence":
+        return _sentence_violation(title, conv)
+    return message_violation(title, "PR title")
+
+
+def _title_hint(conv) -> str:
+    return '"<an imperative sentence>"' if conv and conv.get("style") == "sentence" else '"type(scope): summary"'
+
+
 def strip_attribution(text: str):
     """-> (text without AI-attribution lines, number of lines removed)."""
     pats = [p.lower() for p in guard.ATTRIBUTION] + list(_ATTRIBUTION_EXTRA)
@@ -2648,13 +2731,24 @@ def branch_commits(c, base: str) -> list:
     return commits
 
 
-def derive_title(branch: str, commits: list) -> str:
+def derive_title(branch: str, commits: list, style: str = "conventional") -> str:
+    """The default PR title: the branch's first real commit, else its name; `style` is the repository's title
+    convention (title_convention): a plain sentence there, made from a Conventional Commit's summary if need be."""
     real = [x for x in commits if not _WIP_RE.match(x["subject"])]
-    if real and not message_violation(real[0]["subject"]):
-        return real[0]["subject"]
     head, _, rest = (branch or "").partition("/")
     rest = _JIRA.sub("", rest).strip("-_ ")
     words = re.sub(r"[-_]+", " ", rest).strip()
+    if style == "sentence":
+        if real:
+            m = CC_RE.match(real[0]["subject"])
+            cand = _sentence_of(m.group("desc")) if _conventional(real[0]["subject"]) else real[0]["subject"]
+            if not _sentence_violation(cand):
+                return cand
+        verb = {"fix": "Fix", "hotfix": "Fix", "release": "Release", "integration": "Integrate",
+                "revert": "Revert"}.get(head)
+        return f"{verb} {words}" if verb else _sentence_of(words)
+    if real and not message_violation(real[0]["subject"]):
+        return real[0]["subject"]
     if head == "release":
         return f"chore(release): {words}"
     if head == "integration":
@@ -2756,10 +2850,11 @@ def _pr_create(c, a) -> int:
         if not draft or why:
             return no_evidence(c, "pr create", draft_ci=why)
     commits = branch_commits(c, f"origin/{base}" if _ref_sha(c.top, f"refs/remotes/origin/{base}") else base)
-    title = (a.title or derive_title(b, commits)).strip()
-    v = message_violation(title, "PR title")
+    conv = title_convention(c)
+    title = (a.title or derive_title(b, commits, conv["style"])).strip()
+    v = pr_title_violation(c, title, conv)
     if v:
-        return refuse(v, 'dev pr create --title "type(scope): summary"')
+        return refuse(v, f"dev pr create --title {_title_hint(conv)}")
     template, source = pr_template(c.top, lang)
     if a.body_file:
         try:
@@ -3092,10 +3187,11 @@ def _pr_merge(c, a) -> int:
         return refuse(err)
     args = ["pr", "merge", str(n), "-R", c.slug, f"--{method}", "--match-head-commit", p.get("headRefOid", "")]
     if method == "squash":
-        v = message_violation(p.get("title", ""), "PR title")
+        conv = title_convention(c)
+        v = pr_title_violation(c, p.get("title", ""), conv)
         if v:
             return refuse(v + " It becomes the squash commit on " + p.get("baseRefName", c.default) + ".",
-                          f'dev gh pr edit {n} --title "type(scope): summary"')
+                          f"dev gh pr edit {n} --title {_title_hint(conv)}")
         subject, body = squash_message(p["title"], p.get("body") or "")
         args += ["--subject", subject, "--body", body]
     if a.auto:
@@ -3326,9 +3422,10 @@ def _pr_ready(c, a) -> int:
                       "number,title,body,isDraft,url,headRefName,headRefOid"], c)
     if p is None:
         return fail(f"no PR for {sel}: {err}")
-    v = message_violation(p.get("title", ""), "PR title")
+    conv = title_convention(c)
+    v = pr_title_violation(c, p.get("title", ""), conv)
     if v:
-        return refuse(v, f'dev gh pr edit {p["number"]} --title "type(scope): summary"')
+        return refuse(v, f'dev gh pr edit {p["number"]} --title {_title_hint(conv)}')
     template, _ = pr_template(c.top, lang_of(a))
     missing = body_problems(p.get("body") or "", template)
     if missing:
@@ -4219,8 +4316,9 @@ def cmd_gh(a) -> int:
                 if not draft or why:
                     return no_evidence(c, "pr create", draft_ci=why)
             t = guard._opt_value(args[2:], ("--title", "-t"))
-            if t and message_violation(t, "PR title"):
-                return refuse(message_violation(t, "PR title"))
+            v = pr_title_violation(c, t) if t else None
+            if v:
+                return refuse(v)
             body = guard._opt_value(args[2:], ("--body", "-b"))
             bf = guard._opt_value(args[2:], ("--body-file", "-F"))
             if bf and bf != "-":
@@ -4246,8 +4344,9 @@ def cmd_gh(a) -> int:
             why = merge_gate(c, p, auto="--auto" in args)
             if why:
                 return refuse(f"not merging #{p['number']}: " + "; ".join(why))
-            if ("--squash" in args or "-s" in args) and message_violation(p.get("title", ""), "PR title"):
-                return refuse(message_violation(p.get("title", ""), "PR title"))
+            v = pr_title_violation(c, p.get("title", "")) if "--squash" in args or "-s" in args else None
+            if v:
+                return refuse(v)
         elif head == ["release", "create"]:
             if c.branch != c.default or _dirty(c.top, untracked=False):
                 return refuse(f"release from a clean `{c.default}`", "dev release (checks, tag, notes)")

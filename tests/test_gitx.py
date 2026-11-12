@@ -1327,6 +1327,99 @@ class PrTests(unittest.TestCase):
             self.assertEqual(s.gh.calls, [])
 
 
+class PrTitleConventionTests(unittest.TestCase):
+    # firefly-weave titles its PRs as plain imperative sentences; the repository's convention wins over devkit's
+    # Conventional Commit default. Bots do not count: dependabot's prefix is its own configuration.
+    WEAVE_TITLES = ("Keep run statistics and chart them in Studio", "Execute steps in Studio without a platform",
+                    "test(agentic): count lease expiry from the observed capacity retry",
+                    "Run workflow transactions: settle, undo in reverse and never lose an outcome",
+                    "Keep test data in the editor: test input, pinned output and out-of-date marks",
+                    "Run local operations out of the box and review every infrastructure change",
+                    "Make Studio's CI reliable: start the test host before use, cache contract schemas, retry a busy "
+                    "DMG step")
+
+    def sentence_repo(self, s, subject="Export invoices as CSV"):
+        merged = [{"title": t, "author": {"login": "ana", "is_bot": False}} for t in self.WEAVE_TITLES]
+        merged += [{"title": f"chore(deps): bump {p} from 1.0 to 1.1", "author": {"login": "app/dependabot",
+                                                                                  "is_bot": True}}
+                   for p in ("certifi", "authlib")]
+        s.gh.on(["pr", "list"], merged, when=lambda a: "merged" in a)
+        s.branch("feat/invoice-export")
+        s.commit(subject, {"inv.py": "x\n"})
+        dev("ci", "--mark-passed", "--note", "python3 -m unittest: 42 passed")
+        self.assertEqual(dev("push")[0], 0)
+        s.gh.on(["pr", "create"], "https://github.com/acme/widget/pull/7\n")
+
+    def test_create_takes_a_plain_sentence_title_where_the_repository_uses_them(self):
+        with Sandbox() as s:
+            self.sentence_repo(s)
+            rc, out, err = dev("pr", "create", "--draft")
+            self.assertEqual(rc, 0, err)
+            call = s.gh.called("pr", "create")[0]
+            self.assertEqual(call[call.index("--title") + 1], "Export invoices as CSV")
+            self.assertEqual(gitx.title_convention(s.ctx())["seen"], 7)  # the bots' two are not counted
+
+    def test_create_checks_a_title_against_the_plain_sentence_convention(self):
+        with Sandbox() as s:
+            self.sentence_repo(s)
+            for t, why in (("feat(invoice): add csv export", "plain imperative sentences (6 of the last 7 merged"),
+                           ("Added a CSV export", "imperative"), ("export invoices as CSV", "capital letter"),
+                           ("Export invoices as CSV.", "period"), ("WIP export", "WIP")):
+                with self.subTest(title=t):
+                    rc, _, err = dev("pr", "create", "--draft", "--title", t)
+                    self.assertEqual(rc, 2, err)
+                    self.assertIn(why, err)
+            self.assertIn("`Add csv export`", dev("pr", "create", "--draft", "--title", "feat(invoice): add csv export")[2])
+            self.assertEqual(s.gh.called("pr", "create"), [])
+
+    def test_a_conventional_commit_on_the_branch_becomes_a_sentence_title_there(self):
+        with Sandbox() as s:
+            self.sentence_repo(s, subject="feat(invoice): export invoices as CSV")
+            rc, _, err = dev("pr", "create", "--draft")
+            self.assertEqual(rc, 0, err)
+            call = s.gh.called("pr", "create")[0]
+            self.assertEqual(call[call.index("--title") + 1], "Export invoices as CSV")
+
+    def test_ready_follows_the_same_title_convention(self):
+        with Sandbox() as s:
+            self.sentence_repo(s)
+            text, _ = gitx.pr_template(s.repo)
+            body = text.replace("## Changes", "Exports invoices.\n\n## Changes").replace(
+                "## Risk and rollback", "- Ran python3 -m unittest: 42 passed\n\n## Risk and rollback")
+            s.gh.on(["pr", "view"], _pr(isDraft=True, title="Export invoices as CSV", headRefName="feat/invoice-export",
+                                        headRefOid=s.head(), body=body))
+            s.gh.on(["pr", "ready"], "")
+            rc, _, err = dev("pr", "ready")
+            self.assertEqual(rc, 0, err)
+            self.assertEqual(len(s.gh.called("pr", "ready")), 1)
+
+    def test_the_default_branch_history_decides_when_github_lists_no_merged_prs(self):
+        with Sandbox() as s:
+            for subject in ("Add the widget", "Render the widget's frame", "Fix the frame's border",
+                            "Document the widget", "Merge branch 'feat/frame'", "Release 0.1.0a1"):
+                s.commit(subject)
+            git(s.repo, "push", "-q", "origin", "main")
+            got = gitx.title_convention(s.ctx())
+            self.assertEqual((got["style"], got["source"], got["seen"], got["plain"]),
+                             ("sentence", "commits on main", 6, 5))  # the start commit is conventional; merges skip
+
+    def test_conventional_commits_stay_the_default_without_a_consistent_convention(self):
+        with Sandbox() as s:
+            ctx = s.ctx()
+            self.assertEqual(gitx.title_convention(ctx)["style"], "conventional")  # one commit, no merged PR
+            mixed = ["feat: add a", "fix: repair b", "Add c", "Render d", "docs: explain e", "Fix f"]
+            s.gh.on(["pr", "list"], [{"title": t, "author": {"login": "ana"}} for t in mixed],
+                    when=lambda a: "merged" in a)
+            self.assertEqual(gitx.title_convention(ctx)["style"], "conventional")
+            devkit_like = ["fix(setup): align saved profiles", "chore(release): 26.11.10",
+                           "docs: add a security policy and a contributing guide", "fix: hotfix 26.11.7, nothing waits",
+                           "fix(agents): read the self-test's log from its byte offset"]
+            s.gh.on(["pr", "list"], [{"title": t, "author": {"login": "ana"}} for t in devkit_like],
+                    when=lambda a: "merged" in a)
+            self.assertEqual(gitx.title_convention(ctx)["style"], "conventional")
+            self.assertIn("is not a Conventional Commit", gitx.pr_title_violation(ctx, "Add c") or "")
+
+
 # --------------------------------------------------------------------------- dev run
 
 
