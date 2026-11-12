@@ -1153,12 +1153,6 @@ def _claimed_at(it: dict):
     return parse_iso(it["meta"].get("claimed_at")) or None
 
 
-def _current_holder(holder: str, a: dict) -> str:
-    """A holder of this actor's, named as the actor is named now (`user@host`), its agent and session kept."""
-    _, sep, rest = str(holder).partition(" ")
-    return f"{a['user']}@{a['host']}" + (sep + rest if sep else "")
-
-
 def update(it: dict, op: str, why: str = "", a=None, **changes) -> dict:
     a = a or actor()
     if op in NEEDS_WHY and not why.strip():
@@ -1361,8 +1355,9 @@ def renew_locks(a=None, hours: float = None, sessions=None) -> int:
         working = any((it["scope"], ln[len("branch:"):]) in live for ln in _links(it) if ln.startswith("branch:"))
         if holder and not expired and working and mine(holder, a, _claimed_at(it)):
             if parse_iso(it["meta"]["lock_expires"]) - time.time() < hours * 1800:
+                # only the expiry: a holder under a former name stays as written, so an older devkit session still
+                # running on this Mac keeps its own lock (the rename waits for the contract step)
                 it["meta"]["lock_expires"] = now_iso(time.time() + hours * 3600)
-                it["meta"]["claimed_by"] = _current_holder(holder, a)  # a lock under a former name moves to the new
                 try:
                     write_record(it["path"], render(it))
                 except RecordLossError as e:

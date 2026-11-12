@@ -1061,7 +1061,9 @@ class MachineIdentityTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 work.update(work.load(it["path"]), "edit", why="scope", a=self.me(), title="mine now")
 
-    def test_renewal_keeps_this_macs_lock_under_a_former_name_and_never_another_macs(self):
+    def test_renewal_extends_this_macs_lock_under_a_former_name_keeps_its_holder_and_never_another_macs(self):
+        # the holder stays as written: an older devkit session still on this Mac keeps its own lock, and a lock read
+        # as this Mac's by mistake is never renamed for good (the rename waits for the contract step)
         self.me()
         ours, theirs = self.legacy_lock("ana@mac-158", time.time()), self.legacy_lock("ana@mac-55", time.time())
         for it in (ours, theirs):
@@ -1071,7 +1073,7 @@ class MachineIdentityTests(unittest.TestCase):
         live = [{"active": True, "project": "acme/api", "branch": "feat/x"}]
         self.assertEqual(work.renew_locks(a=self.me(), sessions=live), 1)
         ours, theirs = work.load(ours["path"]), work.load(theirs["path"])
-        self.assertEqual(ours["meta"]["claimed_by"], f"ana@{self.me()['host']} (codex)")
+        self.assertEqual(ours["meta"]["claimed_by"], "ana@mac-158 (codex)")
         self.assertGreater(work.parse_iso(ours["meta"]["lock_expires"]), time.time() + 3600)
         self.assertEqual(theirs["meta"]["claimed_by"], "ana@mac-55 (codex)")
 
