@@ -1358,6 +1358,24 @@ class PrTests(unittest.TestCase):
             self.assertIn("- Local CI: python3 -m unittest: 42 passed", body)
             self.assertIn("PR #7 opened as draft", out)
 
+    # devkit's `language` setting is the language of its replies (default auto); pull requests stay in American
+    # English unless --lang names another
+    def test_create_fills_the_english_template_whatever_the_reply_language_unless_lang_names_one(self):
+        def body(*argv):
+            rc, out, err = dev("pr", "create", "--draft", *argv)
+            self.assertEqual(rc, 0, out + err)
+            call = s.gh.called("pr", "create")[0]
+            return call[call.index("--body") + 1]
+        for language in ("es-ES", "auto"):
+            with self.subTest(language=language), Sandbox() as s, mock.patch.dict(core.CFG, {"language": language}):
+                self.pushed(s)
+                sent = body()
+                self.assertIn("## What and why", sent)
+                self.assertNotIn("Qué y por qué", sent)
+        with Sandbox() as s, mock.patch.dict(core.CFG, {"language": "auto"}):
+            self.pushed(s)
+            self.assertIn("## Qué y por qué", body("--lang", "es"))
+
     def test_create_with_a_body_file_is_checked_and_cleaned(self):
         with Sandbox() as s:
             self.pushed(s)

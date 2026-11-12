@@ -3334,8 +3334,9 @@ _JIRA = re.compile(r"\b([A-Z][A-Z0-9]+-\d+)\b")
 
 
 def lang_of(a=None) -> str:
-    lang = (getattr(a, "lang", None) if a is not None else None) or core.CFG.get("language") or "en-US"
-    return str(lang)
+    """The language of the text devkit writes for the repository host (PR bodies, titles): --lang, else American
+    English. devkit's `language` setting is the language of its replies to the developer, never of a PR."""
+    return str((getattr(a, "lang", None) if a is not None else None) or "en-US")
 
 
 def _lang_base(lang: str) -> str:
@@ -5164,7 +5165,7 @@ HELP = ("Git and GitHub", [
 
 
 def _lang_arg(p):
-    p.add_argument("--lang", help="language of generated text (default: devkit config `language`, else en-US)")
+    p.add_argument("--lang", help="language of the pull request text devkit writes (default: en-US)")
 
 
 def register(add):
