@@ -578,12 +578,18 @@ These are not `unknown`:
   between two literal echoes, `PY=$( [ -x .venv/bin/python ] && echo .venv/bin/python || echo python3 )`, gives both
   values (the substitution is still judged as a command); and a command with quoted heredocs
   (`python3 - <<'EOF' … EOF`, then a loop) is read with each body set aside;
-- arithmetic `$((…))` on numbers: the shell runs only the substitutions inside it, which are judged as commands. It
-  reads each name's value as an expression, though, and `x='a[$(cmd)]'; echo $((x))` runs `cmd`, so a name counts as
-  a number only when the command gives it numbers alone (digits, another arithmetic, `date`, `wc`, `expr`, `seq`,
-  `stat`, `grep -c`, a loop over numbers) and nothing else can bind it; any other name is a program known only when
-  it runs. `$((date)|wc -c)` is a command substitution, as the shells read it. A `case W in P)` header runs no
-  command;
+- arithmetic on numbers. bash and sh read a value as an arithmetic expression in `$((…))`, `$[…]`, `((…))`,
+  `for ((…))`, `let`, the operands of `[[ … -eq … ]]` and the other integer comparisons, an integer declaration
+  (`declare -i`, `typeset -i`) and later values of its names, a substring's offset and length (`${s:x}`), and an array
+  subscript (`${a[x]}`, `a[x]=…`, `unset 'a[x]'`, `read 'a[x]'`); zsh reads subscripts that way too. `test` and `[`
+  compare integers without evaluating them. In each of those places the shell runs a `$(…)` that a value holds
+  (`x='a[$(cmd)]'; echo $((x))` runs `cmd`), so a name or a substitution there counts only when the command proves it
+  a number: digits, a counter or an expression of such names (`i=i+1`), a loop over numbers, `wc` reading its input,
+  `seq`, `date` with a numeric format (`date +%s`), `grep -c` on one file, `git rev-list --count`, or
+  `grep -n … file | cut -d: -f1`. Anything else (a name the command reads, binds with `read` or `declare`, or sets
+  from another program's output) is refused by the guard's own rules, in the main session and every lane, with
+  the way: give the name numbers, or compare text with `[` or `test`. `$((date)|wc -c)` is a command substitution, as
+  the shells read it. A `case W in P)` header runs no command;
 - a shell that only parses its program: `bash -n x.sh`, `sh -n`, `zsh -n` or `--noexec`, `bash -o noexec`, with a
   script, a `-c` line, or its input. It runs nothing, neither its startup files nor `BASH_ENV`, so it is a read of the
   file. `+n` or `+o noexec` after it, `-i`, `-l`, or `--login` (where `-n` does not hold), or `-n` after the script

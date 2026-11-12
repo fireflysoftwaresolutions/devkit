@@ -200,6 +200,11 @@
       "what": "The guard refused `dev crew sync` from a crew member whose step scope does not hold `plugin/agents/`, the generated files the command rewrites and removes.",
       "reproduce": "As a crew member whose scope leaves out `plugin/agents/**`, run `dev crew sync`."
     },
+    "check_bash:arith": {
+      "title": "Guard refuses a value read as arithmetic that is not a proven number",
+      "what": "The guard refused a command that reads a name or a substitution as an arithmetic expression ($((…)), ((…)), let, [[ -eq ]], declare -i, a subscript or a substring offset) when the command does not prove its value a number, because the shell runs a `$(…)` such a value holds.",
+      "reproduce": "Ask an agent to run `read x < f.txt; echo $((x + 1))`."
+    },
     "check_clone:canonical": {
       "title": "Guard refuses a clone outside the canonical path",
       "what": "The guard refused a clone into a folder other than the repository's canonical path in `~/Development`, by host, owner, and name, which is where `dev clone` places it.",
@@ -554,6 +559,16 @@
       "title": "Guard refuses a program that writes files and names a handoff note",
       "what": "The guard refused an interpreter program that writes files and names a project's handoff note or the team's records in the handoff repository, because it cannot see what the program changes there.",
       "reproduce": "Ask an agent to run a Python program that opens a file in `~/Development/.handoff/projects/` for writing."
+    },
+    "interpreter:handoff-writes-path": {
+      "title": "Guard refuses a program that writes a path naming a handoff note",
+      "what": "The guard refused an interpreter program whose writes are paths written out in its code, because one of those paths names a project's handoff note or the team's records, wherever the handoff repository is configured.",
+      "reproduce": "Ask an agent to run a Python program that opens `~/Development/.handoff/projects/<owner>/<repo>.md` for writing."
+    },
+    "interpreter:state-writes-path": {
+      "title": "Guard refuses a program that writes a path naming devkit state",
+      "what": "The guard refused an interpreter program whose writes are paths written out in its code, because one of those paths names devkit's state, configuration, or install.",
+      "reproduce": "Ask an agent to run a Python program that opens a file in `~/.local/state/devkit/` for writing."
     },
     "interpreter:note-calls": {
       "title": "Guard refuses a program that calls devkit code for embargoes or backups",

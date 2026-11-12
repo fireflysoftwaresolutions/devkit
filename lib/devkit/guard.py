@@ -1098,8 +1098,9 @@ def _case_word(frames: list, t: str, before: list):
 def _arith_words(line: str) -> str:
     """`line` with each arithmetic expansion `$((…))` outside single quotes written as `0`, the one word the shell
     makes of it: its body is an expression, never a command (`$((n*2))`, `$((a > b))`), and the substitutions in it
-    are read by _subst with the other expansions. A `$((date)|wc -c)` is a command substitution and stays."""
-    if "$((" not in line:
+    are read by _subst with the other expansions. A `$((date)|wc -c)` is a command substitution and stays. An
+    arithmetic command `((…))` (also a for loop's header) is `((0))`: its body is an expression too."""
+    if "((" not in line:
         return line
     out, i, n, q = [], 0, len(line), None
     while i < n:
@@ -1116,6 +1117,12 @@ def _arith_words(line: str) -> str:
             q = None if q == '"' else '"'
         elif line.startswith("$((", i) and (end := _arith_end(line, i + 3)) is not None:
             out.append("0")
+            i = end + 2
+            continue
+        elif line.startswith("((", i) and q is None and (not i or line[i - 1] not in "$<>=" and
+                                                         not line[i - 1].isalnum()) and \
+                (end := _arith_end(line, i + 2)) is not None:
+            out.append("((0))")  # `((n > 2))`, `for ((i=0; i<3; i++))`: an expression, no redirect, no list
             i = end + 2
             continue
         out.append(c)
@@ -2363,6 +2370,9 @@ def check_bash(cmd: str, cwd: str, agent: str):
     token = _COMMAND_TEXT.set(cmd or "")
     try:
         cmd = _quote_cd_git(cmd or "")
+        hazards = arithmetic_hazards(cmd)  # on the command as typed: its readings mask the values it gives names
+        if hazards:
+            return deny(ARITH_REASON.format(what=_code(hazards[0])), key="arith")
         v = _check_bash_reading(cmd, cwd, agent)
         if v and v[0] == "deny":
             return v
@@ -7604,59 +7614,258 @@ def _arith_end(s: str, j: int):
 
 
 # the programs whose output is a number: a name the command sets from one of them is a number in arithmetic
-_NUMBER_PROGRAMS = frozenset({"date", "wc", "expr", "seq", "stat"})
 _ARITH_BINDERS = re.compile(r"(?:^|[\s;&|(`{])(?:read|mapfile|readarray|printf|declare|typeset|local|readonly|export|"
-                            r"getopts|let|unset|select|eval|source|\.)(?=\s)")
+                            r"getopts|unset|select|eval|source|\.)(?=\s)")
+# an integer declaration (declare -i, typeset -i, local -i): its names take the arithmetic value of what they are
+# given, so they bind no text; -n (a name reference) binds another name and stays a binder
+_INT_DECL = re.compile(r"\b(?:declare|typeset|local|readonly|export)((?:[ \t]+-[A-Za-z]{1,8}){1,4})")
 
 
-def _number_value(value: str) -> bool:
-    """True when an assignment's value (its text up to the end of the word) is a number: digits, an arithmetic
-    `$((…))`, or a substitution whose pipeline ends in a program that prints a number (_NUMBER_PROGRAMS, grep -c)."""
-    v = value[1:] if value.startswith('"') else value
-    if re.match(r"-?[0-9]+(?:[\s;&|)\"]|$)", v):
-        return True
-    if v.startswith("$((") and _arith_end(v, 3) is not None:
-        return True
-    if v.startswith("$("):
-        end = _close_paren(v, 2)
-        body = v[2:end - 1] if end > 2 else ""
-        last = re.split(r"(?<!\|)\|(?!\|)", body)[-1].split() if body and "$(" not in body and "`" not in body else []
-        return bool(last) and (os.path.basename(last[0]) in _NUMBER_PROGRAMS or
-                               (os.path.basename(last[0]) == "grep" and "-c" in last))
+def _numeric_pipeline(body: str) -> bool:
+    """True when a substitution's command prints only a number: `wc` reading its input, `seq`, `date +%s`-like formats,
+    `grep -c` on one file, `git rev-list --count`, or `grep -n … <one file> | cut -d: -f1`, any of them followed by
+    head, tail, sort or uniq. Its output is spliced into an arithmetic expression, so any other output may be code."""
+    if not body or re.search(r"[;&\n`]|\$\(", body):
+        return False
+    try:
+        stages = [shlex.split(st) for st in re.split(r"(?<!\|)\|(?!\|)", body)]
+    except ValueError:
+        return False
+    if not stages or any(not st for st in stages):
+        return False
+    while len(stages) > 1 and os.path.basename(stages[-1][0]) in ("head", "tail", "sort", "uniq"):
+        stages.pop()
+
+    def operands(words):
+        out, skip = [], False
+        for w in words:
+            if skip:
+                skip = False
+            elif w == "<":
+                skip = True
+            elif not w.startswith(("-", "<")):
+                out.append(w)
+        return out
+    last = stages[-1]
+    name, args = os.path.basename(last[0]), last[1:]
+    opts = [a for a in args if a.startswith("-") and not a.startswith("--")]
+    if name == "wc":
+        return not operands(args)
+    if name == "seq":
+        return not any(a.startswith(("-f", "-s")) for a in args)
+    if name == "date":
+        return any(re.fullmatch(r"\+(?:%[sYmdHMSjuwNyCVUW]|[0-9 :._-])+", a) for a in args)
+    if name == "grep":
+        return any("c" in o[1:] for o in opts) and not any(set(o[1:]) & set("rRH") for o in opts) and \
+            len(operands(args)) <= 2
+    if name == "git":
+        return args[:1] == ["rev-list"] and "--count" in args
+    if name == "cut" and "".join(args) in ("-d:-f1", "-f1-d:", "-d:-f1-1") and len(stages) >= 2:
+        first = stages[0]
+        fopts = [a for a in first[1:] if a.startswith("-") and not a.startswith("--")]
+        return os.path.basename(first[0]) == "grep" and any("n" in o[1:] for o in fopts) and \
+            not any(set(o[1:]) & set("rRHc") for o in fopts) and len(operands(first[1:])) == 2 and \
+            all(os.path.basename(st[0]) in ("head", "tail", "sort", "uniq") for st in stages[1:-1])
     return False
 
 
+def _number_value(value: str, s: str = "", seen=frozenset()) -> bool:
+    """True when an assignment's value is a number: digits, an arithmetic `$((…))` (its own names are judged where it
+    stands), a substitution that prints only a number (_numeric_pipeline), or an expression of numbers and names
+    that are numbers themselves (`i=i+1`, judged in command `s`)."""
+    v = value
+    if v.startswith("$((") and _arith_end(v, 3) is not None:
+        return True
+    if v.startswith(("$(", '"$(')):
+        k = 2 if v[0] == "$" else 3
+        end = _close_paren(v, k)
+        return end > k and _numeric_pipeline(v[k:end - 1])
+    if v[:1] in ("'", '"'):
+        close = v.find(v[0], 1)
+        v = v[1:close] if close > 0 else ""
+    else:
+        v = re.match(r"[^\s;&|)]*", v).group(0)
+    if re.fullmatch(r"-?[0-9]+", v):
+        return True
+    if not re.fullmatch(r"[A-Za-z0-9_+*/%()-]{1,200}", v):
+        return False
+    names = set(re.findall(r"(?<![0-9A-Za-z_#])[A-Za-z_][A-Za-z0-9_]*", v))
+    return all(_arith_name_safe(n, s, seen) for n in names)
+
+
+def _arith_name_safe(word: str, s: str, seen=frozenset()) -> bool:
+    """True when command `s` gives name `word` numbers only: it sets it, every value it gives it is a number
+    (_number_value, a name built from itself counting as its other values do), a `for` loop over numbers sets it
+    otherwise, and nothing else in `s` can bind it (read, printf -v, declare without -i, eval, source, …)."""
+    if word in seen:
+        return True
+    seen = seen | {word}
+    w = re.escape(word)
+    plain = _INT_DECL.sub(lambda m: m.group(0) if ("i" not in m.group(1) or "n" in m.group(1)) else
+                          " " * len(m.group(0)), s)  # an integer declaration binds no text
+    if re.search(_ARITH_BINDERS.pattern + r"[^;&|\n]*(?<![\w$])" + w + r"\b", plain) or \
+            re.search(r"(?:^|[\s;&|(`{])(?:eval|source|\.)\s", s):
+        return False
+    values = [s[m.end():] for m in re.finditer(r"(?:^|[\s;&|(`{])" + w + r"\+?=(?!=)", s)]
+    loops = re.findall(r"(?:^|[\s;&|(`{])for\s+" + w + r"\s+in\s+([^;\n]*)", s)
+    return bool(values or loops) and all(_number_value(v, s, seen) for v in values) and \
+        all(re.fullmatch(r"\s*\$\(seq(?:\s+-?[0-9]+){1,3}\)\s*", lst) or
+            all(re.fullmatch(r"-?[0-9]+|\{-?[0-9]+\.\.-?[0-9]+\}", item) for item in lst.split()) for lst in loops)
+
+
 def _arith_unsafe_names(body: str, s: str) -> list:
-    """The names an arithmetic body reads whose value may be code: the shell reads each name's value as an
-    expression, and `x='a[$(cmd)]'; echo $((x))` runs cmd. A name is safe only when command `s` sets it, and every
-    value it gives it is a number (_number_value; a `for` loop over numbers), and nothing else in `s` can bind it
-    (read, printf -v, declare, eval, source, …)."""
-    bare = body
-    for _ in range(8):  # the substitutions inside are judged as commands of their own; their text is no name
+    """What an arithmetic expression reads whose value may be code, as words a command would run: `$name` for a name
+    command `s` does not give numbers only (_arith_name_safe), `$(…)` for a substitution whose output may be any text
+    (_numeric_pipeline). The shell reads each value as an expression, and `x='a[$(cmd)]'; echo $((x))` runs cmd."""
+    bare, out = body, []
+    for _ in range(8):  # each substitution is a command of its own; its output is spliced into the expression
         m = re.search(r"\$\(|`", bare)
         if not m:
             break
         if m.group(0) == "`":
             k = bare.find("`", m.end())
+            inner = bare[m.end():k] if k >= 0 else bare[m.end():]
             bare = bare[:m.start()] + " 0 " + (bare[k + 1:] if k >= 0 else "")
         else:
             k = _close_paren(bare, m.end())
+            inner = bare[m.end():k - 1] if k > m.end() else bare[m.end():]
             bare = bare[:m.start()] + " 0 " + (bare[k:] if k > m.end() else "")
+        if not _numeric_pipeline(inner):
+            out.append("$(" + inner + ")")
     names = sorted(set(re.findall(r"(?<![0-9A-Za-z_#])[A-Za-z_][A-Za-z0-9_]*", bare)))
+    return out + ["$" + w for w in names if not _arith_name_safe(w, s)]
+
+
+def _blank_single(s: str) -> str:
+    """`s` with the text inside its single quotes blanked: the shell expands nothing there, while it expands
+    `${…}` inside double quotes."""
+    out, q = [], None
+    for c in s:
+        if q == "'":
+            q = None if c == "'" else q
+            out.append(c if c in "'\n" else " ")
+        else:
+            if c == '"':
+                q = None if q == '"' else '"'
+            elif c == "'" and q is None:
+                q = "'"
+            out.append(c)
+    return "".join(out)
+
+
+_LET = re.compile(r"(?:^|[;&|(\n{])[ \t]*(?:(?:then|do|else|!)[ \t]+)?let[ \t]+([^;&|\n)]{1,400})")
+_TEST_ARITH = re.compile(r"(?<!\S)(\S{1,400})[ \t]+-(?:eq|ne|lt|le|gt|ge)[ \t]+(\S{1,400})")
+_SUBSCRIPT_EXPAND = re.compile(r"\$\{[#!]?[A-Za-z_]\w{0,80}\[([^\]\n]{0,200})\]")
+_SUBSCRIPT_SET = re.compile(r"(?:^|[;&|\s(])[A-Za-z_]\w{0,80}\[([^\]\n]{0,200})\]\+?=")
+_SUBSCRIPT_WORD = re.compile(r"(?:^|[\s'\"])[A-Za-z_]\w{0,80}\[([^\]\n]{0,200})\]")
+_SUBSCRIPT_CMD = re.compile(r"(?:^|[;&|\n(])[ \t]*(unset|read|printf)\b([^;&|\n]{0,400})")
+_SUBSTRING = re.compile(r"\$\{[A-Za-z_]\w{0,80}:(?![-=+?])([^}\n]{0,400})\}")
+_DOLLAR_BRACKET = re.compile(r"\$\[([^\]\n]{0,400})\]")
+
+
+def _unquote(w: str) -> str:
+    return w[1:-1] if len(w) > 1 and w[0] == w[-1] and w[0] in "'\"" else w
+
+
+ARITH_REASON = ("This command reads {what} as an arithmetic expression ($((…)), ((…)), let, [[ … -eq … ]], declare -i, "
+                "a subscript or a substring offset), and its value is not a number the command gives it: the shell "
+                "runs a `$(…)` such a value holds, as `x='a[$(cmd)]'; echo $((x))` runs cmd. Give the name numbers "
+                "in the command (a literal, a counter, wc -l < file, grep -c, date +%s), compare text with `[` or "
+                "`test`, or use the value as text.")
+
+
+def arithmetic_hazards(s: str) -> list:
+    """Every value command `s` reads as an arithmetic expression that may be code (_arith_unsafe_names): in its
+    `$((…))` outside single quotes, and in the other places _arith_hazards reads."""
+    if "((" not in s and "[" not in s and "let" not in s and "-i" not in s and ":" not in s:
+        return []
+    try:
+        text = strip_heredocs(s)
+    except Exception:
+        text = s
+    single, out, i = _blank_single(text), [], 0
+    while True:
+        i = single.find("$((", i)
+        if i < 0:
+            break
+        end = _arith_end(text, i + 3)
+        if end is not None:
+            out += [h for h in _arith_unsafe_names(text[i + 3:end], text) if h not in out]
+        i += 3
+    return out + [h for h in _arith_hazards(s) if h not in out]
+
+
+def _arith_hazards(s: str) -> list:
+    """What a command line reads as an arithmetic expression outside `$((…))` (read in _subst) and whose value may be
+    code (_arith_unsafe_names): `((…))` and `for ((…))`, `let`, the operands of [[ … -eq … ]] and the other integer
+    comparisons, `$[…]`, the values of an integer declaration and of the names it declares, a substring's offset and
+    length, and an array subscript (also in zsh). `test` and `[` compare integers without evaluating them."""
+    if not any(t in s for t in ("((", "let", "[[", "$[", "[", "-i", ":")):
+        return []
+    try:
+        text = strip_heredocs(s)
+    except Exception:
+        text = s
+    plain, single = _blank_quoted(text), _blank_single(text)
+    exprs = []
+    i = 0
+    while True:
+        i = plain.find("((", i)
+        if i < 0:
+            break
+        if i == 0 or plain[i - 1] not in "$<>=" and not plain[i - 1].isalnum():
+            end = _arith_end(text, i + 2)
+            if end is not None:
+                exprs.append(text[i + 2:end])
+        i += 2
+    for m in _LET.finditer(plain):
+        exprs += [_unquote(w) for w in text[m.start(1):m.end(1)].split()]
+    i = 0
+    while True:
+        i = plain.find("[[", i)
+        if i < 0:
+            break
+        j = plain.find("]]", i + 2)
+        span, held = text[i + 2:j if j > 0 else len(text)], []
+        for _ in range(16):  # each substitution is one operand, whatever spaces it holds
+            k = span.find("$(")
+            if k < 0:
+                break
+            e = _close_paren(span, k + 2)
+            if e <= k:
+                break
+            held.append(span[k:e])
+            span = span[:k] + f"\0{len(held) - 1}\0" + span[e:]
+        for m in _TEST_ARITH.finditer(span):
+            exprs += [re.sub(r"\0(\d+)\0", lambda h: held[int(h.group(1))], _unquote(g)) for g in m.groups()]
+        i = j if j > 0 else len(text)
+    ints = set()
+    for m in _INT_DECL.finditer(plain):
+        if "i" in m.group(1) and "n" not in m.group(1):
+            rest = re.match(r"[^;&|\n]*", text[m.end():]).group(0)
+            for w in rest.split():
+                name, eq, val = w.partition("=")
+                if re.fullmatch(r"[A-Za-z_]\w*", name):
+                    ints.add(name)
+    for name in ints:
+        for m in re.finditer(r"(?:^|[\s;&|(`{])" + re.escape(name) + r"\+?=(?!=)", text):
+            exprs.append(_unquote(re.match(r"\"[^\"]*\"|'[^']*'|[^\s;&|)]*", text[m.end():]).group(0)))
+    exprs += [m.group(1) for m in _DOLLAR_BRACKET.finditer(single)]
+    exprs += [m.group(1) for m in _SUBSCRIPT_EXPAND.finditer(single)]
+    exprs += [text[m.start(1):m.end(1)] for m in _SUBSCRIPT_SET.finditer(plain)]
+    for m in _SUBSCRIPT_CMD.finditer(plain):
+        words = text[m.start(2):m.end(2)]
+        if m.group(1) == "printf":
+            pv = re.search(r"-v[ \t]+(\S+)", words)
+            words = pv.group(1) if pv else ""
+        exprs += [k.group(1) for k in _SUBSCRIPT_WORD.finditer(words)]
+    for m in _SUBSTRING.finditer(single):
+        exprs += m.group(1).split(":")
     out = []
-    for word in names:
-        w = re.escape(word)
-        if re.search(_ARITH_BINDERS.pattern + r"[^;&|\n]*(?<![\w$])" + w + r"\b", s) or \
-                re.search(r"(?:^|[\s;&|(`{])(?:eval|source|\.)\s", s):
-            out.append(word)
+    for e in exprs:
+        if e.strip() in ("", "@", "*"):
             continue
-        values = [s[m.end():] for m in re.finditer(r"(?:^|[\s;&|(`{])" + w + r"\+?=(?!=)", s)]
-        loops = re.findall(r"(?:^|[\s;&|(`{])for\s+" + w + r"\s+in\s+([^;\n]*)", s)
-        safe = bool(values or loops) and all(_number_value(v) for v in values) and \
-            all(re.fullmatch(r"\s*\$\(seq(?:\s+-?[0-9]+){1,3}\)\s*", lst) or
-                all(re.fullmatch(r"-?[0-9]+|\{-?[0-9]+\.\.-?[0-9]+\}", item) for item in lst.split()) for lst in loops)
-        if not safe:
-            out.append(word)
+        out += [h for h in _arith_unsafe_names(e, text) if h not in out]
     return out
 
 
@@ -7687,7 +7896,7 @@ def _subst(s: str, quotes: bool, procs: list | None = None) -> list:
             # expression, so a name whose value may hold `a[$(cmd)]` runs cmd: it is judged as `$name`, a program
             # known only when it runs (_arith_unsafe_names)
             body = s[i + 3:end]
-            inner = _subst(body, False) + ["$" + name for name in _arith_unsafe_names(body, s)]
+            inner = _subst(body, False) + _arith_unsafe_names(body, s)
             out += inner
             if procs is not None:
                 procs += [False] * len(inner)
@@ -7744,6 +7953,11 @@ def _subst(s: str, quotes: bool, procs: list | None = None) -> list:
         elif quotes and q is None and c == ")":
             parens.close(i)
         i += 1
+    if quotes:  # the other places the shell reads a value as an arithmetic expression: a value that may be code
+        hazards = _arith_hazards(s)  # is judged as a program known only when it runs
+        out += hazards
+        if procs is not None:
+            procs += [False] * len(hazards)
     return out
 
 
@@ -9687,6 +9901,11 @@ def readonly_refusal(cmd: str, cwd, member=None, depth: int = 0, plans=None) -> 
     readings = _continued_readings(cmd)
     if readings:  # a backslash-newline: the readings shells use (joined; a comment ended at its newline), each judged
         return next((why for why in (readonly_refusal(r, cwd, member, depth, plans) for r in readings) if why), None)
+    hazards = _arith_hazards(cmd)
+    if hazards:
+        return READONLY_REASON.format(what=f"{_code(hazards[0])} is read as an arithmetic expression ((( )), let, "
+                                           f"[[ -eq ]], a subscript), and its value may hold code the shell runs: "
+                                           f"give it numbers in the command, or compare with [ or test")
     masked = _mask_substitutions(strip_heredocs(cmd)) if depth < 3 else None
     if masked is None:
         return READONLY_REASON.format(what="`$((…))` and substitutions nested deeper than three levels run code the "

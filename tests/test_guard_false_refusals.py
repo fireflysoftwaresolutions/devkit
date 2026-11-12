@@ -79,6 +79,57 @@ class Arithmetic(Case):
         self.refused("echo $((gh pr merge 12)|wc -c)")
 
 
+class ArithmeticContexts(Case):
+    """Every place bash, sh or zsh evaluates a value as an arithmetic expression runs `a[$(cmd)]` in it: (( )), for
+    (( )), let, [[ -eq ]] and the other comparisons, $[ ], declare -i, a substring's offset, and an array subscript
+    (also in zsh). A name or a substitution there counts only when its value is a number; test and [ never evaluate."""
+
+    X = "x='a[$(gh pr merge 12)]'; "
+
+    def test_a_value_that_may_hold_code_is_refused_in_every_arithmetic_context(self):
+        for tail in ("((x))", "(( x + 1 ))", "for ((i=x; i<3; i++)); do :; done", "let x", "let 'y=x+1'",
+                     "[[ $x -eq 1 ]]", "[[ x -lt 1 ]]", "if [[ 1 -ne $x ]]; then :; fi", "echo $[x]",
+                     "declare -i n=$x", "declare -i n; n=$x", "typeset -i n=x", "echo ${s:x}", "echo ${s:0:$x}",
+                     "a=(1 2); echo ${a[x]}", "a=(1 2); echo \"${a[$x]}\"", "a[x]=1", "unset 'a[x]'",
+                     "read 'b[x]' <<< 1"):
+            self.refused(self.X + tail)
+        for cmd in ("echo $(( $(cat f.txt) + 1 ))", "((n = $(cat f.txt)))", "[[ $(cat f.txt) -gt 1 ]]",
+                    "a=(1 2); echo ${a[$(cat f.txt)]}", "read x < f.txt; ((x))", "x=$1; let x"):
+            self.refused(cmd)
+
+    def test_the_guards_own_rules_refuse_a_value_that_is_not_a_proven_number(self):
+        # the Code reviewer's probes: a refused command hidden in a value, written out or built at run time by a
+        # program that prints what its format says; the guard's rules refuse it in the main session and every lane
+        values = ("x='a[$(git push --force origin main)]'; ",
+                  "x=$(date +$'a[\\x24(git push --force origin main)]'); ",
+                  "d='$'; x=$(date +\"a[${d}(git push --force origin main)]\"); ",
+                  "x=$(date +\"a[\\$(touch README.md)]\"); ", "x=$(seq -f 'a[%g]' 1 1); ",
+                  "x=$(expr substr abc 1 1); ", "x=$(stat -f %N README.md); ", "x=$(wc -l README.md); ")
+        for value in values:
+            for use in ("echo $((x))", "((x))", "let x", "[[ $x -eq 1 ]]", "declare -i n=$x", "a=(1); echo ${a[$x]}"):
+                with self.subTest(cmd=value + use):
+                    v = guard.check("Bash", {"command": value + use}, CWD, "claude")  # the rules alone, no gate
+                    self.assertIn("arithmetic expression", (v or ("", ""))[1])
+                    self.assertIsNotNone(main(value + use))
+                    self.assertIsNotNone(member(value + use, level="review", who="seraph"))
+        for cmd in ("n=$(date +%s); echo $((n+1))", "n=$(wc -l < README.md); ((n > 2))",
+                    "c=$(grep -c x README.md); [[ $c -gt 0 ]]"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(main(cmd))
+                self.assertIsNone(member(cmd))
+
+    def test_numbers_counters_and_tests_run(self):
+        for cmd in ("for ((i=0; i<3; i++)); do echo $i; done", "i=0; while [[ $i -lt 3 ]]; do let i++; done",
+                    "i=0; let \"i=i+1\"; echo $i", "n=0; ((n++)); echo $n", "n=0; (( n += 2 ))",
+                    "a=(1 2 3); echo ${a[0]} ${a[@]} ${#a[@]} ${a[*]}", "a=(1 2); for i in 0 1; do echo ${a[$i]}; done",
+                    "s=abcdef; echo ${s:1:2} ${s:0:3}", "declare -i n=5; n=n+1; echo $n", "[ \"$x\" -eq 1 ]",
+                    "test \"$y\" -gt 2", "[[ $(wc -l < f.txt) -gt 3 ]]", "c=$(grep -c x f.txt); [[ $c -eq 0 ]]",
+                    "echo ${PIPESTATUS[0]} ${BASH_SOURCE[0]}", "echo $(( $(date +%s) - 5 ))",
+                    "sed -n \"$(( $(grep -n x lib/a.py | cut -d: -f1) + 2 )),+3p\" lib/a.py",
+                    'git commit -m "fix the ((x)) check and [[ y -eq z ]] text"', "echo 'let x; ((y))'"):
+            self.runs(cmd)
+
+
 class CaseArms(Case):
     """A `case W in P)` header runs no command; its subject is data, and the substitutions in it are judged."""
 
