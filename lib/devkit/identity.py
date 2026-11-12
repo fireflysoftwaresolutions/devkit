@@ -243,8 +243,22 @@ def _new_id() -> str:
     return "m-" + "".join(secrets.choice("0123456789abcdefghijklmnopqrstuvwxyz") for _ in range(8))
 
 
+_ACTOR_RX = re.compile(r'"actor":\s*\{([^{}]*)\}')  # a record's actor: a flat object
 _HOST_RX = re.compile(r'"host":\s*"([^"\\]*)"')
+_LABEL_RX = re.compile(r'"label":\s*"([^"\\]*)"')
 _TS_RX = re.compile(r'"ts":\s*([0-9]+(?:\.[0-9]+)?)')
+
+
+def _audit_name(line: str) -> str:
+    """The hostname an audit record names its Mac by: the actor's `host`, or its `label` when `host` is the machine
+    id (records since the id). Read inside the actor only, so a `label` elsewhere (a decision's) is never a name."""
+    a = _ACTOR_RX.search(line)
+    h = _HOST_RX.search(a.group(1)) if a else None
+    name = short_host(h.group(1)) if h else ""
+    if MACHINE_ID.fullmatch(name):
+        lb = _LABEL_RX.search(a.group(1))
+        name = short_host(lb.group(1)) if lb else ""
+    return name
 
 
 def _seen_in_audit() -> dict:
@@ -260,10 +274,9 @@ def _seen_in_audit() -> dict:
             continue
         with fh:
             for line in fh:
-                h, t = _HOST_RX.search(line), _TS_RX.search(line)
-                name = short_host(h.group(1)) if h else ""
+                name, t = _audit_name(line), _TS_RX.search(line)
                 if not name or not t or name in ("?", "localhost") or MACHINE_ID.fullmatch(name):
-                    continue  # a record that names this Mac by its machine id says nothing about its hostnames
+                    continue  # a record with neither a hostname nor a label says nothing about this Mac's names
                 ts = float(t.group(1))
                 if name == last and out[name]:
                     out[name][-1][1] = max(out[name][-1][1], ts)

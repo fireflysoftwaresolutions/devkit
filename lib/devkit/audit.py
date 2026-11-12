@@ -1776,8 +1776,10 @@ def _codex_identity():
 def actor() -> dict:
     """The hook's explicit identity, the native Codex command's metadata, or the existing shell/process identity.
     This label does not change the caller identity used by command restriction checks. `host` is this Mac's machine
-    id (identity.machine), the same whatever the hostname, so this Mac's records stay in one team folder."""
+    id (identity.machine), the same whatever the hostname, so this Mac's records stay in one team folder; `label` is
+    the hostname of the moment, which the SIEM exports name as the host (_hostname)."""
     from . import identity
+    m = identity.machine()
     sess = os.environ.get("DEVKIT_SESSION", "")
     agent = os.environ.get("DEVKIT_AGENT") or ("claude" if os.environ.get("CLAUDECODE") else "")
     codex = _codex_identity()
@@ -1786,7 +1788,7 @@ def actor() -> dict:
     elif not sess:
         agent, sess = _found_session() or (agent, "")
     return {"user": core.CFG.get("github_user") or os.environ.get("USER", "?"),
-            "host": identity.machine().id, "agent": agent or "human",
+            "host": m.id, "label": m.label, "agent": agent or "human",
             "session": sess.split(":", 1)[-1][:12] if sess else ""}
 
 
@@ -2597,7 +2599,37 @@ def _plan_prune(now: float, cfg: dict) -> dict:
     mine = team_dir()
     team = [f for f in sorted(mine.glob("*.jsonl")) if month.fullmatch(f.stem) and f.stem < tcut] \
         if mine.exists() and not cfg["hold"] else []
+    if not cfg["hold"]:
+        team += [f for d in _former_team_dirs() for f in sorted(d.glob("*.jsonl"))
+                 if month.fullmatch(f.stem) and f.stem < tcut and _this_macs_copy(f)]
     return {"keeps_from": cut, "team_keeps_from": tcut, "local": local, "team": team}
+
+
+def _former_team_dirs() -> list:
+    """This user's handoff folders under the hostnames this Mac carried (audit/<user>@<hostname>/), where devkit
+    published before the machine id. A DHCP name (`mac-55`) may also be another Mac's folder: _this_macs_copy
+    decides per file."""
+    from . import identity
+    a, m = actor(), identity.machine()
+    root = core.HANDOFF / "audit"
+    return [root / f"{a['user']}@{name}" for name in sorted(m.aliases)
+            if name != m.id and (root / f"{a['user']}@{name}").is_dir()]
+
+
+def _this_macs_copy(f: Path) -> bool:
+    """Was this published month file this Mac's? A copy is a prefix of one Mac's own month file, so its last record
+    tells: written under this Mac's id, or under a hostname this Mac carried at that time."""
+    from . import identity
+    try:
+        lines = [ln for ln in f.read_bytes().splitlines() if ln.strip()]
+        last = json.loads(lines[-1]) if lines else {}
+    except (OSError, ValueError):
+        return False
+    a = last.get("actor") if isinstance(last, dict) else None
+    if not isinstance(a, dict) or not isinstance(last.get("ts"), (int, float)):
+        return False
+    host = str(a.get("host") or "")
+    return host == identity.machine().id or identity.was_this_mac(host, float(last["ts"]))
 
 
 def prune(now: float = None) -> dict:
@@ -2710,11 +2742,28 @@ def to_csv(recs: list) -> str:
     return buf.getvalue()
 
 
+def _hostname(a: dict) -> str:
+    """The host a SIEM shows for a record's actor: its hostname of the time (`label`), or `host` for a record from
+    before the machine id, which named the Mac by its hostname."""
+    return str(a.get("label") or a.get("host") or "")
+
+
+def _device_id(a: dict) -> str:
+    """The record's machine id, for the SIEM's device id field; "" for a record that names a hostname only."""
+    from . import identity
+    host = str(a.get("host") or "")
+    return host if identity.MACHINE_ID.fullmatch(host) else ""
+
+
 def to_ocsf(r: dict) -> dict:
-    """One record as an OCSF Base Event (class 0, activity Other); devkit's own fields are under `unmapped`."""
+    """One record as an OCSF Base Event (class 0, activity Other); devkit's own fields are under `unmapped`. The
+    device is the hostname of the time, and its uid the machine id when the record has one."""
     sid, sname = _OCSF_STATUS.get(r.get("outcome"), (0, "Unknown"))
     a = r.get("actor") or {}
     sev = r.get("severity", "info")
+    device = {"hostname": _hostname(a), "type_id": 0}
+    if _device_id(a):
+        device["uid"] = _device_id(a)
     return {"activity_id": 99, "activity_name": r.get("action"), "category_uid": 0, "category_name": "Uncategorized",
             "class_uid": 0, "class_name": "Base Event", "type_uid": 99, "type_name": "Base Event: Other",
             "severity_id": _OCSF_SEVERITY.get(sev, 0), "severity": sev.capitalize(), "status_id": sid,
@@ -2725,7 +2774,7 @@ def to_ocsf(r: dict) -> dict:
                          "product": {"name": "devkit", "vendor_name": VENDOR, "version": core.VERSION}},
             "actor": {"user": {"name": a.get("user") or ""}, "session": {"uid": a.get("session") or ""},
                       "app_name": a.get("agent") or ""},
-            "device": {"hostname": a.get("host") or "", "type_id": 0},
+            "device": device,
             "unmapped": {k: r[k] for k in ("category", "project", "branch", "run", "step", "crew", "target", "detail",
                                            "why", "evidence", "ref", "prev", "hash", "v", "cleaned")
                          if r.get(k) not in (None, "")}}
@@ -2741,7 +2790,8 @@ def _cef_ext(s) -> str:
 
 def to_cef(r: dict) -> str:
     a, c = r.get("actor") or {}, r.get("crew") or {}
-    ext = [("rt", int(round((r.get("ts") or 0) * 1000))), ("suser", a.get("user")), ("shost", a.get("host")),
+    ext = [("rt", int(round((r.get("ts") or 0) * 1000))), ("suser", a.get("user")), ("shost", _hostname(a)),
+           ("deviceExternalId", _device_id(a)),
            ("act", r.get("action")), ("cat", r.get("category")), ("outcome", r.get("outcome")),
            ("msg", r.get("detail")), ("cs1Label", "id"), ("cs1", r.get("id")), ("cs2Label", "project"),
            ("cs2", r.get("project")), ("cs3Label", "member"), ("cs3", c.get("member")), ("cs4Label", "step"),
@@ -2756,7 +2806,7 @@ def to_cef(r: dict) -> str:
 def _syslog_line(r: dict) -> bytes:
     pri = 13 * 8 + _SYSLOG_SEVERITY.get(r.get("severity"), 6)  # facility 13: log audit
     stamp = time.strftime("%b %d %H:%M:%S", time.localtime(r.get("ts") or time.time()))
-    return f"<{pri}>{stamp} {(r.get('actor') or {}).get('host') or 'localhost'} devkit: {to_cef(r)}".encode("utf-8")
+    return f"<{pri}>{stamp} {_hostname(r.get('actor') or {}) or 'localhost'} devkit: {to_cef(r)}".encode("utf-8")
 
 
 def export(fmt: str = "jsonl", **filters) -> str:

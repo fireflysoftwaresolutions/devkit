@@ -536,6 +536,20 @@ class MachineTests(unittest.TestCase):
         self.assertTrue(identity.was_this_mac("mac-640", T0 - 3 * 3600 - 30, m))  # a clock a few seconds apart
         self.assertFalse(identity.was_this_mac("mac-640", T0 - 3 * 3600 - 120, m))  # before this Mac took it
 
+    def test_a_record_created_again_finds_the_hostnames_in_audit_records_that_name_the_machine_id(self):
+        # after the cut-over the audit log names this Mac by its id and keeps the hostname as `label`; a record
+        # lost and created again still learns the names from it (and a decision's label in `ref` is no hostname)
+        d = self.state / "audit"
+        d.mkdir(parents=True)
+        (d / "2026-11.jsonl").write_text("".join(json.dumps(r) + "\n" for r in (
+            {"ts": T0 - 3600, "actor": {"user": "ana", "host": "m-0000aaaa", "label": "mac-640", "agent": "claude"},
+             "ref": {"label": "a-yes"}},
+            {"ts": T0 - 1800, "actor": {"user": "ana", "host": "m-0000aaaa", "label": "mac-640", "agent": "claude"}})))
+        self.name = "andress-mbp-2"
+        m = identity.machine(now=T0)
+        self.assertTrue(identity.was_this_mac("mac-640", T0 - 2400, m))
+        self.assertNotIn("a-yes", m.aliases)
+
     def test_a_name_or_id_this_mac_never_carried_is_not_its(self):
         m = identity.machine(now=T0)
         self.assertFalse(identity.was_this_mac("mac-640", T0, m))
