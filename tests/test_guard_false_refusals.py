@@ -354,6 +354,29 @@ class ProgramWrites(unittest.TestCase):
                 self.assertIsNotNone(lane_why or main_why)  # the lane runs the guard's rules first
 
 
+class StalledJudge(unittest.TestCase):
+    """A command built to make a pattern backtrack is refused within the guard's time for one call, never let
+    through by the hook's timeout: the time limit interrupts a pattern while it matches."""
+
+    def test_a_command_built_to_stall_the_judge_is_refused_in_time(self):
+        import time
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        pad = Path(guard.real(tmp.name)) / "claude-501" / "-x" / "962d6aba-c6a8-44ab-9e02-1d15272468e1" / \
+            "scratchpad" / "seraph"
+        pad.mkdir(parents=True)
+        stall = {"sed": f"sed -i '' '1{' ' * 3000}!x' {pad}/f.txt",  # whitespace runs around an optional address
+                 "expect": "expect -c '" + "\n" * 20000 + "x'",  # whitespace after a separator, per line
+                 "hook": "echo " + "`" * 20000}  # a path prefix rescanned from each backtick
+        with mock.patch.object(guard, "judge_budget", lambda: 1.0):
+            for what, cmd in stall.items():
+                with self.subTest(what=what):
+                    started = time.monotonic()
+                    member(cmd, level="review", who="seraph")
+                    guard.check("Bash", {"command": cmd}, CWD, "claude")
+                    self.assertLess(time.monotonic() - started, 2.5)  # each verdict within the 1 s budget, or refused
+
+
 class LaneStamp(unittest.TestCase):
     """A member's command that holds lane calls the router cannot place one by one is run with the member's lane
     variable exported, so every dev call in it acts as the member (Claude Code, whose rewrite approves nothing); a

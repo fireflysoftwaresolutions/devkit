@@ -6227,7 +6227,8 @@ def terminal_typing_refusal(argv, more: bool = False) -> bool:
     return False
 
 
-_EXPECT_RUN = re.compile(r"(?:^|[;\n\[{]|\bthen\b)\s*(?:spawn|exec|system)\s+([^;\n\]}]*)")
+# whitespace within the line only: a newline is a separator itself (\s* after one spanned every line after it)
+_EXPECT_RUN = re.compile(r"(?:^|[;\n\[{]|\bthen\b)[ \t]*(?:spawn|exec|system)[ \t]+([^;\n\]}]*)")
 _TCL = frozenset({"tclsh", "expect", "wish"})
 _EXPECT_SPAWN_OPTS = frozenset({"-noecho", "-console", "-nottycopy", "-nottyinit", "-pty", "-ignore", "-open",
                                 "-leaveopen"})
@@ -9462,9 +9463,11 @@ def _ro_scratch_write(name, args, cwd, member) -> str | None:
 
 # a sed edit a read-only lane may make in its own scratch file: an address and d, p, y or an s command with the flags
 # g, p, i, I or a number (no w, e or r command or flag, which write, run or read a file)
-_SED_EDIT = re.compile(rf"^\s*(?:{_SED_ADDR}(?:\s*,\s*{_SED_ADDR})?)?\s*!?\s*(?:[dp]|"
+# (matched against a stripped script, with one whitespace run per gap: runs side by side around an optional part
+# backtrack into each other, 55 s on 2.5 KB of spaces)
+_SED_EDIT = re.compile(rf"(?:{_SED_ADDR}(?:[ \t]*,[ \t]*{_SED_ADDR})?)?[ \t]*(?:![ \t]*)?(?:[dp]|"
                        r"s([^\\\n\s])(?:(?!\1)[^\\\n]|\\.)*\1(?:(?!\1)[^\\\n]|\\.)*\1[gpiI0-9]*|"
-                       r"y([^\\\n\s])(?:(?!\2)[^\\\n]|\\.)*\2(?:(?!\2)[^\\\n]|\\.)*\2)\s*$")
+                       r"y([^\\\n\s])(?:(?!\2)[^\\\n]|\\.)*\2(?:(?!\2)[^\\\n]|\\.)*\2)\Z")
 
 
 def _ro_sed_inplace(args, cwd, member) -> str | None:
@@ -9490,7 +9493,7 @@ def _ro_sed_inplace(args, cwd, member) -> str | None:
             files.append(a)
         i += 1
     for sc in scripts:
-        if any(not _SED_EDIT.match(part) for part in re.split(r"[;\n]", sc) if part.strip()):
+        if any(not _SED_EDIT.match(part.strip()) for part in re.split(r"[;\n]", sc) if part.strip()):
             return f"the sed script {_code(sc)} can write, run or read a file, or is one the guard does not read"
     if not files:
         return "`sed -i` with no file to edit"

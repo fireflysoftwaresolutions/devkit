@@ -1889,8 +1889,10 @@ def _speaker_route(data: dict, agent: str = "claude"):
     return {**inp, key: f"export {assignments}; {cmd}"}
 
 
-_HOOK_TEXT = re.compile(r"\bdevkit\.hooks\b|\bfrom\s+devkit\s+import\b[^\n]*\bhooks\b|(?:^|[\s;&|(`'\"])(?:\S*/)?dev\s+"
-                        r"hook\s")
+# a path prefix (~/bin/, "$HOME"/bin/) cannot start inside a run of quotes, backticks or parentheses: \S*/ rescanned to
+# the end from each of them
+_HOOK_TEXT = re.compile(r"\bdevkit\.hooks\b|\bfrom\s+devkit\s+import\b[^\n]*\bhooks\b|(?:^|[\s;&|(`'\"])"
+                        r"(?:[^\s;&|(`'\"/]*/)*dev\s+hook\s")
 _RUNNERS = ("run", "Popen", "call", "check_call", "check_output", "system", "popen", "spawn", "spawnv", "spawnvp",
             "execv", "execvp", "execl", "execlp", "getoutput", "getstatusoutput", "main")
 
