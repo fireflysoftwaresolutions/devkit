@@ -137,7 +137,8 @@ def _revise_locked(path: Path, why: str, a: dict, status) -> dict:
     meta["updated"], meta["updated_by"] = work.now_iso(), f"{a['user']}@{a['host']}"
     change = "adopted into devkit format" if adopted else (status or "revised") + unapproved
     detail = f" ({stat.strip()})" if stat.strip() else ""
-    log.insert(0, f"v{meta['version']} · {work.now_iso()} · {work.actor_str(a)} · {change}{detail} — why: {why}")
+    # a closed em dash: the docs check's prose rules (Google.EmDash) refuse spaces around it in a plan's changelog
+    log.insert(0, f"v{meta['version']} · {work.now_iso()} · {work.actor_str(a)} · {change}{detail}—why: {why}")
     work.write_record(path, _render(meta, body, log, extra))
     return dict(meta, _change=change)
 

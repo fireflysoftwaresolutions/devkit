@@ -143,7 +143,7 @@ class ReviseTests(unittest.TestCase):
             self.assertEqual((meta["status"], meta["version"]), ("draft", 4))
             again, _, log = plans._split(path.read_text())
             self.assertEqual(again["status"], "draft")
-            self.assertIn("revised; back to draft: the approval covered v3 — why: customer asked for XLSX too", log[0])
+            self.assertIn("revised; back to draft: the approval covered v3—why: customer asked for XLSX too", log[0])
             self.assertEqual(plans.revise(path, "approved again", a=A, status="approved")["status"], "approved")
 
     def test_revise_keeps_the_frontmatter_lines_devkit_does_not_know(self):
@@ -184,6 +184,16 @@ class NewPlanMarkdownTests(unittest.TestCase):
                 self.assertIn("title: Invoice export", front.splitlines())
                 self.assertEqual([ln for ln in body.splitlines() if ln.startswith("# ")], [])
                 self.assertRegex(body, r"\S\n\n## Changelog\n\n- v1 · .* · created from the " + kind + r" template\n$")
+
+    # Each revision adds a changelog line with its reason; the docs check's prose rules (Google.EmDash) refused the
+    # spaced dash before "why", so every revised plan failed `dev docs check`.
+    def test_a_revision_line_sets_its_reason_off_with_a_closed_dash(self):
+        with TempPlans() as t:
+            path = t.raw(record("## Summary\n\nShip CSV."))
+            plans.revise(path, "customer asked for XLSX too", a=A)
+            log = plans._split(path.read_text())[2]
+        self.assertRegex(log[0], r"^v2 · .* · revised\S*—why: customer asked for XLSX too$")
+        self.assertNotRegex(log[0], r"\s—|—\s")
 
 
 if __name__ == "__main__":
