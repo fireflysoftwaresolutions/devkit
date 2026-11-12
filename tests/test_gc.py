@@ -10,6 +10,7 @@
 # Offline: the sandbox of tests/test_branches.py (a bare "origin", devkit's state, handoff repository and audit trail
 # in a temp folder, gh answering with self.prs). gc's scan of the real temp folders and its Docker prune are replaced,
 # so nothing outside the sandbox is read or deleted. Run: python3 -m unittest tests.test_gc -v
+import os
 import sys
 import time
 import unittest
@@ -21,6 +22,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
 from test_branches import HOUR, PID, PruneCase, git  # noqa: E402
 from devkit import audit, branches, core, gc, gitx, registry  # noqa: E402
+
+DAY = 24 * HOUR
 
 
 class GcCase(PruneCase):
@@ -143,6 +146,58 @@ class GcIgnoredFilesTests(GcCase):
         self.assertIn(f"then dev wt rm {core.tilde(str(self.wt))} (merged by content", out)
         self.assertTrue((self.wt / "evidence" / "run.json").exists())
         self.assertTrue(self.local("fix/picked"))
+
+    def test_the_dry_run_lists_a_worktree_kept_for_its_ignored_files_under_kept_and_out_of_the_total(self):
+        # dev gc counted it as "remove worktree" in the reclaimable total, and the apply then kept it
+        self.put("build/a16-predecessor/asset.bin", "the predecessor's assets")
+
+        def reg(**_):
+            r = self.reg()
+            for w in r["projects"][0]["worktrees"]:
+                w["size_kb"] = 3 * 1024 * 1024
+            return r
+        with mock.patch.object(registry, "build", reg):
+            rc, out = self.dev("gc", "-v")
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn("remove worktree", out)
+        self.assertNotIn("3.0 GB", out)
+        self.assertIn(f"fix/picked · {core.tilde(str(self.wt))} — removing it would delete ignored files that are "
+                      f"not known to be regenerable: build/ (", out)
+
+
+class GcBuildOutputTests(GcCase):
+    # The nightly job prunes ignored folders in a worktree idle for idle_artefact_days. Only what a tool fills again
+    # goes without a person; a generic output name (build, dist, target, coverage, .cache) can hold files no build
+    # step wrote, such as a release's evidence or a predecessor's assets.
+    def setUp(self):
+        super().setUp()
+        (self.repo / ".git" / "info" / "exclude").write_text("build/\nnode_modules/\n")
+        self.feature("feat/wip", "feat: add the unfinished thing", push=True)
+        self.wt = self.worktree("feat/wip")
+        self.asset = self.wt / "build" / "a16-predecessor" / "asset.bin"
+        self.asset.parent.mkdir(parents=True)
+        self.asset.write_bytes(b"the predecessor's assets" * 512)
+        self.deps = self.wt / "node_modules" / "pkg" / "index.js"
+        self.deps.parent.mkdir(parents=True)
+        self.deps.write_text("module.exports = 1\n")
+
+    def test_the_nightly_cleanup_keeps_build_output_no_tool_fills_again_and_prunes_what_one_does(self):
+        results = gc.apply(self.plan(idle=8 * DAY), only_auto=True, remote=True)
+        self.assertTrue(self.asset.is_file(), results)
+        self.assertEqual(self.asset.read_bytes(), b"the predecessor's assets" * 512)
+        self.assertFalse((self.wt / "node_modules").exists(), results)
+
+    def test_build_output_no_tool_fills_again_is_a_check_first_action_only_an_explicit_apply_deletes(self):
+        pl = gc.plan(self.reg(idle=8 * DAY), with_sizes=True)
+        prunes = self.actions(pl, "prune-artefacts")
+        self.assertEqual(sorted((bool(a.get("auto")), [os.path.basename(i) for i in a["items"]]) for a in prunes),
+                         [(False, ["build"]), (True, ["node_modules"])])
+        [check] = [a for a in prunes if not a.get("auto")]
+        self.assertTrue(check["reason"].startswith("check first: "), check["reason"])
+        self.assertIn(f"build/ ({core.human_kb(check['kb'])})", check["reason"])
+        self.assertIn("dev gc --apply deletes it", check["reason"])
+        gc.apply(pl, only_auto=False, remote=True)  # dev gc --apply, after the person saw the plan
+        self.assertFalse(self.asset.exists())
 
 
 class GcBranchTests(GcCase):

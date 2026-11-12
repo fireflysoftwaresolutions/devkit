@@ -539,6 +539,30 @@ class FreeTests(Sandbox):
         self.assertTrue((copy / "dist" / "big.js").exists())
         self.assertIn("dist holds files git tracks", " ".join(out.split()))
 
+    # Only build output a tool fills again (.next here) is safe; a generic output name (dist, build, target) can hold
+    # files no build step wrote, so it is its own item, check first, with its folders and sizes, and dev free --safe
+    # leaves it. A release worktree lost 3.6 GB of evidence under its ignored build/.
+    def test_build_output_no_tool_fills_again_is_check_first_and_free_safe_leaves_it(self):
+        r = self.repo()
+        (r / ".git" / "info" / "exclude").write_text(".next/\n")
+        copy = self.worktree(r, r.parent / "kit-consulting-ci", "fix/chat")
+        asset = copy / "dist" / "a16-predecessor" / "asset.bin"
+        write(asset, 60)
+        write(copy / ".next" / "cache" / "x", 30)
+        rep = self.measure(self.project("acme/kit-consulting", r,
+                                        [self.wt(copy, "stray", "fix/chat", ahead_default=2)]))
+        disk.save(rep)
+        disk.mark_seen(rep)
+        builds = sorted((i for i in rep["plan"] if i["kind"] == "build"), key=lambda i: i["safety"])
+        self.assertEqual([(i["safety"], i["targets"][0]["folders"]) for i in builds],
+                         [("check first", ["dist"]), ("safe", [".next"])])
+        dist_kb = next(f["kb"] for f in rep["projects"][0]["checkouts"][1]["folders"] if f["rel"] == "dist")
+        self.assertIn(f"dist ({ui.size_text(dist_kb)})", builds[0]["risk"])
+        rc, out = self.free(safe_all=True)
+        self.assertEqual(rc, 0, out)
+        self.assertTrue(asset.exists(), out)
+        self.assertFalse((copy / ".next").exists(), out)
+
     # dev free asks first: any answer but yes deletes nothing.
     def test_free_asks_first_and_no_deletes_nothing(self):
         r, copy, rep = self.setup_copy()

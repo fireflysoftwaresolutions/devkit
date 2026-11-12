@@ -373,20 +373,37 @@ def blocker_from(c: dict):
     return None
 
 
-def _build_item(p: dict, c: dict) -> dict:
+def _build_items(p: dict, c: dict) -> list:
+    """A checkout's build output as plan items. What its tool fills again (gc.tool_owned: .next, .nuxt, .svelte-kit,
+    DerivedData) is safe. Generic output names (dist, build, target, out, .output) can hold files no build step wrote,
+    so they are their own item, check first, naming each folder with its size: only its number frees it, never
+    dev free --safe."""
     folders = [f for f in c["folders"] if f["kind"] == "build"]
-    kb = sum(f["kb"] for f in folders)
     where = {"main": f"{p['alias']}'s main checkout", "copy": f"the {c['name']} copy",
              "claude": f"the Claude Code worktree {c['name']}", "codex": f"the Codex worktree {c['name']}"}.get(
         c["kind"], f"the {c['name']} worktree")
     n = _changed(c)
-    risk = "Rebuilt by the next build" + ("; the Rust part takes a few minutes." if any(
-        f.get("rust") for f in folders) else ".") + (f" Your {_plural(n, 'changed file')} stay." if n else "")
-    safety, why = ("check first", f"a program is working in {c['name']}. Close it first.") if c["active"] \
-        else ("safe", risk)
-    return {"key": f"build:{c['path']}", "kind": "build", "kb": kb, "what": f"Build output in {where}",
-            "safety": safety, "risk": why, "runs": None, "project": p["alias"],
-            "targets": [{"path": c["path"], "name": c["name"], "folders": [f["rel"] for f in folders], "kb": kb}]}
+    stay = f" Your {_plural(n, 'changed file')} stay." if n else ""
+    busy = f"a program is working in {c['name']}. Close it first." if c["active"] else ""
+    rebuilt = [f for f in folders if gc.tool_owned(os.path.join(c["path"], f["rel"]))]
+    other = [f for f in folders if f not in rebuilt]
+    shown = ", ".join(f"{ui.short_path(f['rel'], 40)} ({ui.size_text(f['kb'])})" for f in other[:5]) + (
+        f" and {len(other) - 5} more" if len(other) > 5 else "")
+    rust = " Cargo builds the Rust part again in a few minutes." if any(f.get("rust") for f in other) else ""
+    check = f"No tool is known to fill {shown} again, and people keep files there too: look inside first."
+    items = []
+    for key, what, fs, safety, risk in (
+            ("build", f"Build output in {where}", other, "check first", f"{check}{rust}{stay}"),
+            ("build-rebuilt", f"Regenerable build output in {where}", rebuilt, "safe",
+             f"Rebuilt by the next build.{stay}")):
+        if fs:
+            kb = sum(f["kb"] for f in fs)
+            items.append({"key": f"{key}:{c['path']}", "kind": "build", "kb": kb, "what": what,
+                          "safety": "check first" if busy else safety, "risk": busy or risk, "runs": None,
+                          "project": p["alias"],
+                          "targets": [{"path": c["path"], "name": c["name"], "folders": [f["rel"] for f in fs],
+                                       "kb": kb}]})
+    return items
 
 
 def _removal(p: dict, c: dict) -> dict:
@@ -399,12 +416,12 @@ def _project_items(p: dict) -> list:
     for c in p["checkouts"]:
         if c["kind"] == "main":
             if not c["active"]:
-                items.append(_build_item(p, c))
+                items += _build_items(p, c)
             continue
         removable = c["merged"] and c["kind"] not in ("codex",) and not c["locked"]
         if not removable:
             if c["kind"] != "codex":
-                items.append(_build_item(p, c))
+                items += _build_items(p, c)
             continue
         if c["kind"] == "copy":
             why = blocker_from(c)
