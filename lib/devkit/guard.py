@@ -822,7 +822,6 @@ def _newlines_to_semicolons(cmd: str, op: str = ";") -> str:
     return "".join(out)
 
 
-HEREDOC_RE = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
 class _HeredocMatch:
     """What _HEREDOC_AT.match finds: group(0) the operator and its delimiter word as written; group(1) the delimiter
     when any part of the word is quoted (the body is text), group(3) when none is (the shell expands the body)."""
