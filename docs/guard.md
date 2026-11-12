@@ -45,6 +45,10 @@ runs, and the irreversible-action gate counts it as `unknown`, because the guard
 text a command only carries, such as a `dev crew ask` message, is data and never read as a command. A heredoc body
 ends at its tag line, and also at a line that starts with the tag and `)`: macOS `/bin/bash` 3.2 ends a heredoc there
 inside `$(…)` and runs what follows, while zsh reads on, so the guard reads it the way that shows what bash runs.
+The tag is the whole word after `<<` with its quotes and backslashes removed, as the shells read it: `<<E\OF`,
+`<<E''OF`, and `<<"E"OF` all end at a line `EOF`, and a quoted part makes the body text the shell does not expand. A
+tag the shell would expand (one with `$` or a backtick) opens no heredoc the guard reads, so the lines after it stay
+commands.
 A `<<WORD` inside `${…}`, `$[…]`, or `$((…))` is part of the expansion and opens no heredoc, so in
 `echo ${x/<<E/}` the next line is a command. A `#` starts a comment only at the start of a word, as bash and zsh read it: after a blank, a new line, an operator,
 or a redirection. A `#` right after the `)` that ends a substitution is part of the word, so in
@@ -287,7 +291,7 @@ If devkit really should be off somewhere, change devkit's own configuration (see
 | `git clean` with `-x` or `-X` | deny (it deletes `.env`, local config and caches) |
 | `git reset --hard` with uncommitted changes to tracked files | deny |
 | `git stash`, `git stash push`, `save`, `pop`, or `apply` (the stash is shared by every worktree) | deny → `dev commit --wip`, then `dev commit --unwip` |
-| A commit, push, or tag chained after a pipe without `pipefail` (`npm test \| tail -5 && git commit …`), and the same for `dev commit`, `dev push`, `dev release`, `gh pr create`, `gh pr merge`, and `gh release create`, where the shell runs it: the command's own words, the substitutions it runs (which inherit `pipefail`), and the lines of the shells and `eval`s it starts (a nested shell starts without it). A quoted message, note or evidence and a heredoc body are data | deny → run the check without the pipe, start with `set -o pipefail;`, or test the output |
+| A commit, push, or tag chained after a pipe without `pipefail` (`npm test \| tail -5 && git commit …`), and the same for `dev commit`, `dev push`, `dev release`, `gh pr create`, `gh pr merge`, and `gh release create`, where the shell runs it: the command's own words, the substitutions it runs (which inherit `pipefail`), the lines of the shells and `eval`s it starts (a nested shell starts without it), and the lines `source` and `.` run (a file, their input, a here-string, or the text an `echo`, `printf`, or `cat` substitution prints into them). A quoted message, note or evidence and a heredoc body are data | deny → run the check without the pipe, start with `set -o pipefail;`, or test the output |
 | A wait (`dev watch --wait`, `dev ci watch --wait`) with more work after it in the same command line: after `;`, `&&`, `\|\|`, `&`, or a new line, or a pipe into anything but a read-only filter (`tail`, `head`, `grep`, `wc`, `jq`, …) | deny → run the wait alone and act after it wakes you: the wait wakes the session only when everything after it has ended |
 | An action that must depend on a check's result sequenced after it without depending on it: after `;`, `\|\|`, or `&`, or after the check piped into a filter and joined with `&&` without `set -o pipefail` (`npm test; npm run release`, `npm test \| tail -3 && npm run release`). Checks are a CI watch or run, `dev test`, test runners, linters, type checkers, and `test`, `lint`, `check`, `build` scripts; actions are commit, push, tag, merge, release, publish, and deploy, a project's `release`, `publish`, or `deploy` script included (`npm run release`, `make release`, `just release`) | deny → gate it on the real result: `check && action` without a pipe, `set -o pipefail;` first, or a separate call |
 | `git commit` when gitleaks finds a secret in what the commit is about to record: the staged changes, plus any `git add` earlier in the same command, or every tracked change with `commit -a` | deny, with the rule, file, and line of each finding |
@@ -383,7 +387,7 @@ three folders readable and writable by your account only (`0700`) every time it 
 | Action of an agent | Decision |
 | --- | --- |
 | A file write (Write, Edit, `apply_patch`) in those three folders, or in a subagent's meta file | deny, with the `dev` command that owns the record |
-| A shell write there: a redirect, `tee`, `cp`, `mv`, `ln`, `rm`, `dev rm`, `sed -i`, an interpreter that writes files, also inside `sh -c`, `eval`, `xargs`, or `find -exec` | deny. A Python program the allow-list judge vouches for (see [Commands the guard cannot name](#commands-the-guard-cannot-name)), whose every write goes through `open` with a literal mode or a path's own writer to a path written out in its code (a string, `Path(…)` or `os.path.join` of strings, `~` expanded, or a name bound once to one of those), is judged by those paths, as a redirect is, so an edit of a repository file whose text names devkit's state or a handoff note runs; a written path that names one of them in its text counts as one. Any other program that names them (an alias of `open`, `io.FileIO`, `fileinput`, a module outside the vetted list) is judged by its text, as before, and counts as one that writes. An existing file given as a program's configuration (`--config`, `--config-file`, `--rcfile`, `--settings`) is read: `vale --config=<devkit's vale.ini>` runs |
+| A shell write there: a redirect, `tee`, `cp`, `mv`, `ln`, `rm`, `dev rm`, `sed -i`, an interpreter that writes files, also inside `sh -c`, `eval`, `xargs`, or `find -exec` | deny. A Python program the allow-list judge vouches for (see [Commands the guard cannot name](#commands-the-guard-cannot-name)), whose every write goes through `open` with a literal mode or a path's own writer to a path written out in its code (a string, `Path(…)` or `os.path.join` of strings, `~` expanded, or a name bound once to one of those), is judged by those paths, as a redirect is, so an edit of a repository file whose text names devkit's state or a handoff note runs; a written path that names one of them in its text counts as one. Any other program that names them (an alias of `open`, `io.FileIO`, `fileinput`, a module outside the vetted list) is judged by its text, as before, and counts as one that writes. An existing file given as a program's configuration (`--config`, `--config-file`, `--rcfile`, `--settings`) is read: `vale --config=<devkit's vale.ini>` runs. Only the word right after the option (or its `=value`) counts: the same path given to `-o` or `--output` (`curl --config F -o F`) is still a write |
 | `dev config set safeguards.*`, `audit.*`, `bugs.share`, or `agents.*`, also spelled with leading or doubled dots (`.agents.codex`, `bugs..share`), which `dev config set` reads as the same key; `dev config edit`; or a `DEVKIT_*` or `DEV_ROOT` value added to the `env` block of an agent settings file or to a shell startup file such as `~/.zshrc` | deny: `bugs.share` decides whether devkit posts under your GitHub account, so only you set it, with `dev bug share` in a terminal. `agents.*` turns devkit on or off for an agent, and the next `dev install` or `dev setup` takes devkit's hooks and rules out of an agent turned off, so only you set it, in your terminal |
 | `dev setup`, except `dev setup --preview` and `dev setup --help` | deny: it decides which agents devkit sets up and rewrites their settings, hooks, and instructions, so you run it in your own terminal. `--preview` only draws the setup's screens with sample data and changes nothing |
 | Replacing, writing, or deleting a `dev` that a shell finds: `~/.local/bin/dev` (the link itself) or another `dev` earlier on `PATH` | deny → the developer runs `dev install --only cli` |
@@ -519,7 +523,8 @@ action `unknown`, tier 2, with the target `cmd-<hash>` of that exact command tex
   names git's;
 - a program that builds the name of what it calls, such as `getattr(__import__('os'), 'sys' + 'tem')`, or starts a
   command that begins with what it fills in at run time, such as ``execSync(`${tool} pr merge 12`)`` or
-  `subprocess.run(f"{tool} …")`;
+  `subprocess.run(f"{tool} …")`, or loads a module by a name it splices (`require('child' + '_process')`, a
+  template literal);
 - a program or script the gate must read and cannot: larger than it reads (512 KB for a program an interpreter runs
   or a script a shell runs, 256 KB for a shell script run by its path) or unreadable, such as `python3 big.py` padded
   past 512 KB with a force push at its end. A program run by its path is read as the system runs it: with a python,
@@ -552,8 +557,10 @@ decides whatever the script's code holds, read or not, whether an interpreter ru
 or its path does (`./release_notes.py`): code that imports only standard modules can still reach a process or run
 code it builds in ways the guard does not read. A crew member that needs such a script asks the tech lead to run it.
 A file named like a test (`test_deploy.py`, `deploy_test.py`, `deploy.test.mjs`, `deploy.spec.ts`) and any file
-`node --test` runs test what their names say rather than do it; a `make`, `just`, `task` or package target keeps its
-class (`make deploy-test` may deploy to a test environment).
+`node --test` runs take no class from their names, because they test what their names say rather than do it. The
+guard reads such a file by its content instead, also inside the repository, so a test file that deploys or merges is
+judged by what it runs. A `make`, `just`, `task` or package target keeps its class (`make deploy-test` may deploy to
+a test environment).
 
 These are not `unknown`:
 
@@ -589,7 +596,10 @@ These are not `unknown`:
   `grep -n … file | cut -d: -f1`. Anything else (a name the command reads, binds with `read` or `declare`, or sets
   from another program's output) is refused by the guard's own rules, in the main session and every lane, with
   the way: give the name numbers, or compare text with `[` or `test`. `$((date)|wc -c)` is a command substitution, as
-  the shells read it. A `case W in P)` header runs no command;
+  the shells read it. A `case W in P)` header runs no command, and the patterns of its later arms (`*)`,
+  `a|b)`, `(c)`) are words the shell matches, not programs. A quoted or escaped `;;` or `)` ends no arm or pattern,
+  a quoted `case` opens no statement, and a pattern with a substitution (`"$(cmd)")`) still runs it, so each of those
+  is judged as a command;
 - a shell that only parses its program: `bash -n x.sh`, `sh -n`, `zsh -n` or `--noexec`, `bash -o noexec`, with a
   script, a `-c` line, or its input. It runs nothing, neither its startup files nor `BASH_ENV`, so it is a read of the
   file. `+n` or `+o noexec` after it, `-i`, `-l`, or `--login` (where `-n` does not hold), or `-n` after the script
@@ -770,7 +780,7 @@ a pipeline, `bash -c`, a background job, a prefix such as `NO_COLOR=1`) runs wit
 `export DEVKIT_FROM_AGENT=<agent id>;` in front, so every `dev` call it starts acts as the member, when the lane
 allows everything else the command runs. Claude Code's rewrite approves nothing: its own permission check runs on the
 new command. These stay refused: a command that drops the variable (`unset`, `env -i`, `env -u`, an empty
-assignment, refused by the identity gate before routing), a lane call in a program that gives the processes it starts
+assignment, `exec -c`, refused by the identity gate before routing), a lane call in a program that gives the processes it starts
 an environment of its own (`env=` in Python, `env:` in Node, the `exec…e` and `spawn…e` forms), a lane call whose
 double-quoted message runs a substitution, a team command (`dev crew brief`, `dev crew set`), and any other action the
 lane refuses. Where the stamp was possible, the refusal names what kept the command back.
@@ -820,16 +830,22 @@ checks. These run as well:
   [Commands the guard cannot name](#commands-the-guard-cannot-name)); a name whose value may hold code stays refused.
 - Test runners and reads: `node --test`, `paste`, `col`, `man`, `lsof`, `break`, `continue`, and the member's own
   wait, `dev watch --wait --for me`.
-- `sed` whose script only prints, with or without `-n`: `sed 's/a/b/g' f`, `sed '/^#/d' f`. `-i`, `-f`, and the `w`,
-  `r`, and `e` commands stay refused.
+- `sed` whose script only prints, with or without `-n`: `sed 's/a/b/g' f`, `sed '/^#/d' f`. A substitution that can
+  only print a number stands as a line number in the script (`sed -n "$(grep -n x f | cut -d: -f1),+14p" f`), and
+  GNU's `N,+M` range prints. `-i`, `-f`, and the `w`, `r`, and `e` commands stay refused.
+- `find` with its tests grouped in escaped parentheses: `find lib \( -name '*.py' -o -name '*.md' \) -print`.
 - `awk` whose program prints to standard output only. A program with `>`, `|`, `system()`, `getline`, `@load`, or a
   program file stays refused; compare with `<` instead of `>`.
 - `mkdir -p` inside the member's own scratch folder, `scratchpad/<member id>/`, and these writes when every path they
   write or delete resolves inside it, with links resolved: `rm`, `rmdir`, `unlink`, `cp` (what it copies may come
-  from anywhere), `mv`, `chmod`, `touch`, `tee`, and `sed -i` with an edit that has no `w`, `e`, or `r`. A recursive
-  or link copy (`cp -R`, `-a`), `ln`, a delete through a trailing slash (`rm -rf link/` deletes what a link points
-  to), a path known only when the command runs, and such a write in the same command as a program it runs (which
-  could plant a link first) stay refused.
+  from anywhere), `mv`, `chmod`, `touch`, `tee`, and `sed -i` with an edit that has no `w`, `e`, or `r`. A redirect
+  and a program's writes go to `/dev/null`, a registered Codex scratch folder, or that folder, never another
+  temporary folder (a background task's output file, `~/Development/.tmp`, a checkout under `/tmp`). A recursive or
+  link copy (`cp -R`, `-a`), `ln`, a delete through a trailing slash (`rm -rf link/` deletes what a link points to),
+  a path known only when the command runs, a path with a brace, a pattern, or `..` (the shell expands them after the
+  guard reads the path), and such a write after a program the command runs, or beside it in a pipeline or a
+  background job (the program could plant a link first), stay refused. A write that ends before any program starts
+  runs: `mkdir -p <scratch>/x && cp lib/a.py <scratch>/x/ && python3 <scratch>/probe.py`.
 - A shell variable set on its own, when its name is lowercase, one capital letter, or two to four capitals and digits
   (`S=/path; ls $S`, `OUT=…`). `PATH`, `PAGER`, `IFS`, `ENV`, `HOME`, the other names the shell or the system export,
   and zsh's tied names (`path`, `fpath`, …) stay refused.
