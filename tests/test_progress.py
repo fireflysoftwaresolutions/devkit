@@ -2363,5 +2363,116 @@ class RunEndTests(unittest.TestCase):
         self.assertEqual((run["state"], run["plan"][0]["state"]), ("running", "running"))
 
 
+class ScopeMatchTests(unittest.TestCase):
+    # B-g7g0pps6sve: lane scopes were matched with fnmatch, whose * crosses /, so src/pkg/*.py held
+    # src/pkg/studio/host.py, and ** held paths outside the repository: the handoff plans and the tech lead's own
+    # scratchpad, which deadlocked the tech lead. A glob holds the paths it matches segment by segment, and everything
+    # under a folder it matches, never a path outside its repository
+    def held(self, path, glob):
+        return pg.in_scope(path, [[glob]])
+
+    def test_a_star_stays_inside_one_folder_and_a_folder_holds_every_file_under_it(self):
+        self.assertTrue(self.held("src/pkg/app.py", "src/pkg/*.py"))
+        self.assertFalse(self.held("src/pkg/studio/host.py", "src/pkg/*.py"))
+        self.assertFalse(self.held("docs/guide.md", "*.md"))
+        self.assertTrue(self.held("docs/a/b/guide.md", "docs/**/*.md"))
+        self.assertTrue(self.held("docs/guide.md", "docs/**/*.md"))  # ** spans no folder too
+        for g in ("lib/parser", "lib/parser/", "lib/parser/**", "lib/pars*"):
+            self.assertTrue(self.held("lib/parser/core/x.py", g), g)
+        self.assertFalse(self.held("lib/parser_test.py", "lib/parser"))
+
+    def test_no_glob_holds_a_path_outside_its_repository(self):
+        for g in ("**", "*", "../**", "*/**"):
+            self.assertFalse(self.held("../../.handoff/plans/acme/api/plan.md", g), g)
+        self.assertTrue(self.held("lib/x.py", "**"))
+
+
+class ScopeOverlapTests(unittest.TestCase):
+    # B-g7g0pps6sve: the overlap check compared the globs' fixed prefixes, so two members could not split one folder.
+    # Two scopes overlap when at least one real path matches both, by the same rules the edit check matches with
+    T0 = 1_800_000_000.0
+
+    def m(self, minutes):
+        return self.T0 + minutes * 60
+
+    def test_two_globs_overlap_only_when_one_real_path_matches_both(self):
+        apart = (("src/firefly_weave/*.py", "src/firefly_weave/studio/host.py"),
+                 ("migrations/versions/*_editor_step_tests.py", "migrations/versions/0039_transactions_reserve.py"),
+                 ("tests/unit/test_parser*.py", "tests/unit/test_cli*.py"),
+                 ("tests/unit/**", "tests/integration/test_a.py"),
+                 ("docs/*.md", "docs/images/**"),
+                 ("lib/**", "/tmp/scratch/kid/**"))  # a relative glob never reaches a folder outside the repository
+        together = (("tests/unit/**", "tests/unit/test_a.py"),
+                    ("lib/**", "lib/devkit/install.py"),
+                    ("src/*/host.py", "src/studio/*.py"),
+                    ("a/**/z.py", "a/b/c/*.py"),
+                    ("**", "README.md"),
+                    ("docs/", "docs/guide.md"),
+                    ("src/*", "src/studio/host.py"),  # src/* matches the folder src/studio, which holds host.py
+                    ("Docs/**", "docs/guide.md"),  # one file on macOS's case-insensitive disk
+                    ("/tmp/scratch/**", "/tmp/scratch/kid/*.md"))
+        for a, b in apart:
+            self.assertFalse(pg._globs_overlap(a, b) or pg._globs_overlap(b, a), (a, b))
+        for a, b in together:
+            self.assertTrue(pg._globs_overlap(a, b) and pg._globs_overlap(b, a), (a, b))
+
+    def test_two_members_split_one_folder_and_each_writes_only_its_own_files(self):
+        from devkit import hooks
+        with TempState(), tempfile.TemporaryDirectory() as repo:
+            pg.start("Feature", plan=["parser", "studio", "everything"], now=self.m(0))
+            pg.assign("parser", "Tank", scope="src/pkg/*.py,tests/unit/test_parser*.py", why="test", now=self.m(0))
+            launch("t1", "devkit:tank", "Tank: parser", self.m(1))
+            run = pg.assign("studio", "Neo", scope="src/pkg/studio/host.py,tests/unit/test_cli*.py", why="test",
+                            now=self.m(2))
+            self.assertEqual(run["plan"][1]["scope"], ["src/pkg/studio/host.py", "tests/unit/test_cli*.py"])
+            with self.assertRaises(pg.StepError) as e:
+                pg.assign("everything", "Neo", scope="tests/unit/**", why="test", now=self.m(3))
+            self.assertIn("tests/unit/** overlaps the files Backend engineer (Tank) owns", str(e.exception))
+            edit = lambda p: {"session_id": "s1", "agent_id": "t1", "tool_name": "Edit", "cwd": repo,  # noqa: E731
+                              "tool_input": {"file_path": os.path.join(repo, p)}}
+            self.assertIsNone(hooks._scope_violation("claude", edit("src/pkg/app.py")))
+            self.assertIn("outside Backend engineer (Tank)'s scope",
+                          hooks._scope_violation("claude", edit("src/pkg/studio/host.py")))
+
+
+class WholeCheckoutScopeTests(unittest.TestCase):
+    # B-g7g0pps6sve: --scope '<worktree>/**' was rewritten to a bare **, which then held the handoff plans folder and
+    # the tech lead's scratchpad; the tech lead could not write his own plan while the member worked
+    T0 = 1_800_000_000.0
+
+    def m(self, minutes):
+        return self.T0 + minutes * 60
+
+    def test_a_scope_naming_a_whole_checkout_becomes_its_top_level_entries(self):
+        with TempState(), tempfile.TemporaryDirectory() as d:
+            main, wt = repo_with_worktrees(d)
+            for rel, text in (("lib/devkit/a.py", "x"), ("tests/test_a.py", "x"), ("README.md", "x"),
+                              (".gitignore", "build/\n"), ("build/out.bin", "x")):
+                (wt / rel).parent.mkdir(parents=True, exist_ok=True)
+                (wt / rel).write_text(text)
+            pg.start("Feature", plan=["sweep"], now=self.m(0))
+            for scope in (f"{wt}/**", f"{wt}/", str(wt)):
+                run = pg.assign("sweep", "Kid", scope=scope, cwd=str(main), why="test", now=self.m(0))
+                self.assertEqual(run["plan"][0]["scope"], [".gitignore", "README.md", "lib/**", "tests/**"], scope)
+            told = [x["text"] for x in run.get("messages") or [] if x["from"] == "devkit"]
+            self.assertIn(f"{wt}/** → .gitignore, README.md, lib/**, tests/**", told[0])
+
+    def test_a_member_holding_every_file_holds_nothing_outside_the_repository(self):
+        from devkit import hooks
+        with TempState(), tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as lead:
+            (main,) = repo_with_worktrees(d)[:1]
+            pg.start("Feature", plan=["sweep"], now=self.m(0))
+            pg.assign("sweep", "Kid", scope="**", cwd=str(main), why="test", now=self.m(0))
+            launch("k1", "devkit:kid", "Kid: sweep", self.m(1))
+            for outside in (os.path.join(lead, "plans", "acme", "api", "plan.md"), os.path.join(lead, "notes.md")):
+                self.assertEqual(pg.scope_holders(outside, "claude", "s1", cwd=str(main)), [], outside)
+            inside = pg.scope_holders(str(main / "lib" / "x.py"), "claude", "s1", cwd=str(main))
+            self.assertEqual([h["who"] for h in inside], ["DevEx engineer (Kid)"])
+            other = os.path.expanduser("~/Development/acme/billing/src/app.py")  # another repository
+            self.assertIn("outside DevEx engineer (Kid)'s scope", hooks._scope_violation("claude", {
+                "session_id": "s1", "agent_id": "k1", "tool_name": "Edit", "cwd": str(main),
+                "tool_input": {"file_path": other}}))
+
+
 if __name__ == "__main__":
     unittest.main()

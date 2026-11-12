@@ -1666,8 +1666,10 @@ def _scope_globs(globs: list, project: str, cwd: str | None) -> tuple:
     """Step scopes count from the run's repository: the Edit guard matches a member's file by its path relative to
     the checkout that holds it (hooks._scope_violation), so an absolute or ~ glob inside a checkout never matched
     (L-fzi4pkv6bbh). -> (globs, rewrites): such a glob in its repository-relative form, with "old → new" for the
-    tech lead; absolute globs outside the repository (a scratch folder, the project's plans) as given. A glob is
-    rewritten only when that is exact: its fixed folder (the part before the first wildcard) lies in one checkout.
+    tech lead; absolute globs outside the repository (a scratch folder, the project's plans) as given; a glob that
+    names a whole checkout (`<worktree>/**`, `<worktree>/`) as that checkout's top-level entries (_checkout_entries),
+    never a bare `**`. A glob is rewritten only when that is exact: its fixed folder (the part before the first
+    wildcard) lies in one checkout.
     Raises StepError when it is not: the fixed folder holds checkouts (a wildcard or the folder spans several), or it
     is a managed worktree folder of the project with no checkout there (a removed worktree, a typo). A guess there
     could cover files the tech lead did not name, or keep a scope that never matches."""
@@ -1692,7 +1694,14 @@ def _scope_globs(globs: list, project: str, cwd: str | None) -> tuple:
         if top:
             rel = os.path.relpath(fixed, top)
             new = "/".join(x for x in (rel if rel != "." else "", rest) if x) or "**"
-            new += "/" if ga.endswith("/") and not rest and new != "**" else ""
+            if new == "**":  # the whole checkout: the entries it holds, never a bare ** (B-g7g0pps6sve)
+                entries = _checkout_entries(top)
+                if not entries:
+                    raise StepError(f"--scope {g} names {core.tilde(top)}, which holds no file git knows. {fix}")
+                out.extend(entries)
+                rewrites.append(f"{g} → {', '.join(entries)}")
+                continue
+            new += "/" if ga.endswith("/") and not rest else ""
             out.append(new)
             rewrites.append(f"{g} → {new}")
             continue
@@ -1705,7 +1714,19 @@ def _scope_globs(globs: list, project: str, cwd: str | None) -> tuple:
             raise StepError(f"--scope {g} points into {core.tilde(managed)}, but no checkout of {project} is there "
                             f"(git worktree list). {fix}")
         out.append(g)
-    return out, rewrites
+    return list(dict.fromkeys(out)), rewrites
+
+
+def _checkout_entries(top: str) -> list:
+    """The repository-relative globs that hold every file of the checkout at `top`: each top-level folder as
+    `<name>/**` and each top-level file by its name, from git's own list (tracked files and the untracked ones it
+    does not ignore). A scope that names a whole checkout becomes these, so it reads as the files it holds."""
+    heads = {}
+    for p in core.gitout(top, "ls-files", "-z", "--cached", "--others", "--exclude-standard").split("\0"):
+        head, sep, _ = p.partition("/")
+        if head:
+            heads[head] = heads.get(head, False) or bool(sep)
+    return sorted(f"{h}/**" if folder else h for h, folder in heads.items())
 
 
 def _tell_rewrites(run: dict, step: str, rewrites: list, now: float):
@@ -1716,20 +1737,146 @@ def _tell_rewrites(run: dict, step: str, rewrites: list, now: float):
               f"{run.get('project') or 'the repository'}.", now, from_name="devkit")
 
 
-def _globs_overlap(a: str, b: str) -> bool:
-    """Could two path globs match the same file? (conservative: compares the fixed prefixes)"""
+# How a lane's scope glob holds a path. The edit check (in_scope), the holders of a path (scope_holders) and the
+# overlap check that keeps two working lanes apart (_globs_overlap) read globs by the same rules, so two lanes whose
+# scopes do not overlap never write the same file (B-g7g0pps6sve):
+#   - a glob is matched segment by segment: `*`, `?` and `[…]` match inside one segment and never cross `/`, and `**`
+#     as a whole segment matches any number of segments, none included (`docs/**/*.md` holds docs/guide.md);
+#   - a glob holds everything under a folder it matches: `docs/`, `lib/parser`, `lib/parser/**` and `src/*` hold the
+#     files below those folders, `src/pkg/*.py` holds no file of src/pkg/studio/;
+#   - a relative glob counts from its repository and holds no path outside it (a `..` segment), `**` included; an
+#     absolute or ~ glob names a folder anywhere (a scratch folder, the project's plans) and holds absolute paths.
+
+def _glob_segments(glob: str) -> list:
+    """A scope glob as its segments, ending with the "**" that holds what lies under a folder it matches."""
+    segs = [s for s in glob.split("/") if s not in ("", ".")]
+    return segs if segs and segs[-1] == "**" else segs + ["**"]
+
+
+def _segments_match(segs: list, pat: list) -> bool:
     import fnmatch
-    pa, pb = re.split(r"[*?\[]", a, maxsplit=1)[0], re.split(r"[*?\[]", b, maxsplit=1)[0]
-    if fnmatch.fnmatch(a, b) or fnmatch.fnmatch(b, a):
+    memo = {}
+
+    def go(i, j):
+        if (i, j) not in memo:
+            if j == len(pat):
+                memo[(i, j)] = i == len(segs)
+            elif pat[j] == "**":
+                memo[(i, j)] = go(i, j + 1) or (i < len(segs) and go(i + 1, j))
+            else:
+                memo[(i, j)] = i < len(segs) and fnmatch.fnmatchcase(segs[i], pat[j]) and go(i + 1, j + 1)
+        return memo[(i, j)]
+    return go(0, 0)
+
+
+def scope_match(path, glob) -> bool:
+    """Does scope glob `glob` hold `path` (the rules above)? A relative glob holds a path relative to the lane's
+    repository, an absolute or ~ one an absolute path; a path with a `..` segment lies outside and is held by none."""
+    g, p = str(glob or ""), str(path or "")
+    g = os.path.expanduser(g) if g.startswith("~") else g
+    if not g or not p or g.startswith("/") != p.startswith("/"):
+        return False
+    segs = [s for s in p.split("/") if s not in ("", ".")]
+    return bool(segs) and ".." not in segs and _segments_match(segs, _glob_segments(g))
+
+
+def _glob_tokens(seg: str) -> list:
+    """One segment of a glob as fnmatch reads it: "*", "?", ("set", "[…]") or ("lit", <one character>)."""
+    out, i, n = [], 0, len(seg)
+    while i < n:
+        c = seg[i]
+        if c in "*?":
+            if not (c == "*" and out and out[-1] == "*"):
+                out.append(c)
+            i += 1
+            continue
+        if c == "[":
+            j = i + 1 + (seg[i + 1:i + 2] == "!")
+            j += seg[j:j + 1] == "]"  # a ] first in the set is one of its characters
+            end = seg.find("]", j)
+            if end >= 0:
+                out.append(("set", seg[i:end + 1]))
+                i = end + 1
+                continue
+        out.append(("lit", c))  # an unclosed [ is a literal, as fnmatch reads it
+        i += 1
+    return out
+
+
+def _one_char_both(x, y) -> bool:
+    """Can one character match glob tokens x and y (neither "*")? Two sets count as sharing one: an overlap is the
+    answer that keeps two lanes apart."""
+    import fnmatch
+    if "?" in (x, y):
         return True
-    return pa.startswith(pb) or pb.startswith(pa)
+    if x[0] == "lit" and y[0] == "lit":
+        return x[1] == y[1]
+    if x[0] == "lit" or y[0] == "lit":
+        lit, other = (x, y) if x[0] == "lit" else (y, x)
+        return fnmatch.fnmatchcase(lit[1], other[1])
+    return True
+
+
+def _segment_overlap(p: str, q: str) -> bool:
+    """Can one path segment match both segment patterns p and q?"""
+    a, b, memo = _glob_tokens(p), _glob_tokens(q), {}
+
+    def go(i, j):
+        if (i, j) not in memo:
+            r = i == len(a) and j == len(b)
+            if not r and i < len(a) and a[i] == "*":  # it matches nothing, or one more character of q's
+                r = go(i + 1, j) or (j < len(b) and b[j] != "*" and go(i, j + 1))
+            if not r and j < len(b) and b[j] == "*":
+                r = go(i, j + 1) or (i < len(a) and a[i] != "*" and go(i + 1, j))
+            if not r and i < len(a) and j < len(b) and "*" not in (a[i], b[j]):
+                r = _one_char_both(a[i], b[j]) and go(i + 1, j + 1)
+            memo[(i, j)] = r
+        return memo[(i, j)]
+    return go(0, 0)
+
+
+def _segments_overlap(a: list, b: list) -> bool:
+    """Can one path match both glob segment lists?"""
+    memo = {}
+
+    def go(i, j):
+        if (i, j) not in memo:
+            r = i == len(a) and j == len(b)
+            if not r and i < len(a) and a[i] == "**":  # it spans nothing, or one more segment of b's
+                r = go(i + 1, j) or (j < len(b) and go(i, j + 1))
+            if not r and j < len(b) and b[j] == "**":
+                r = go(i, j + 1) or (i < len(a) and go(i + 1, j))
+            if not r and i < len(a) and j < len(b) and "**" not in (a[i], b[j]):
+                r = _segment_overlap(a[i], b[j]) and go(i + 1, j + 1)
+            memo[(i, j)] = r
+        return memo[(i, j)]
+    return go(0, 0)
+
+
+def _glob_real(g: str) -> str:
+    """An absolute or ~ glob with its literal folders resolved (/tmp/x/** → /private/tmp/x/**)."""
+    parts = os.path.expanduser(g).split("/")
+    k = next((i for i, p in enumerate(parts) if re.search(r"[*?\[]", p)), len(parts))
+    return "/".join([core.real("/".join(parts[:k]) or "/")] + parts[k:])
+
+
+def _globs_overlap(a: str, b: str) -> bool:
+    """Could two scope globs hold the same file? True when at least one path matches both by scope_match's rules,
+    compared without case, since macOS's disk ignores it. `src/pkg/*.py` and `src/pkg/studio/host.py` do not
+    overlap, nor do `tests/unit/test_parser*.py` and `tests/unit/test_cli*.py`, so two lanes can split one folder;
+    `tests/unit/**` overlaps every file under tests/unit/. A relative glob never overlaps an absolute one: the
+    absolute globs a step keeps lie outside its repository (_scope_globs)."""
+    a, b = str(a or ""), str(b or "")
+    if not a or not b or a.startswith(("/", "~")) != b.startswith(("/", "~")):
+        return False
+    if a.startswith(("/", "~")):
+        a, b = _glob_real(a), _glob_real(b)
+    return _segments_overlap(_glob_segments(a.casefold()), _glob_segments(b.casefold()))
 
 
 def _in_globs(rel_path: str, globs) -> bool:
-    """A repo-relative path matches one of a scope's globs ("lib/parser/**", "docs/", "README.md")."""
-    import fnmatch
-    return any(fnmatch.fnmatch(rel_path, g) or fnmatch.fnmatch(rel_path, g.rstrip("/") + "/**") or
-               rel_path.startswith(g.rstrip("*").rstrip("/") + "/") or rel_path == g for g in globs)
+    """A repo-relative path is held by one of a scope's globs ("lib/parser/**", "docs/", "README.md"): scope_match."""
+    return any(scope_match(rel_path, g) for g in globs or [] if isinstance(g, str))
 
 
 def running_agents(run) -> list:
