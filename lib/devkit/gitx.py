@@ -1825,7 +1825,7 @@ def plan_workflow(text: str, fname: str, root: str) -> list:
             shell = _scalar(sm["shell"][0]) if "shell" in sm else ""
             scond = _scalar(sm["if"][0]) if "if" in sm else ""
             wd = _scalar(sm["working-directory"][0]) if "working-directory" in sm else job_wd
-            st["skip"], st["blocking"] = _step_skip(run, shell, scond, wd, root)
+            st["skip"], st["blocking"] = _step_skip(run, shell, scond, wd, root, st["env"])
             if not st["skip"] and wd:
                 st["cwd"] = str(Path(root) / wd)
             st["run"] = _expand(run, root)
@@ -1859,8 +1859,56 @@ def _expand(run: str, root: str) -> str:
     return re.sub(r"\$\{\{\s*([\w.]+)\s*\}\}", lambda m: vals.get(m.group(1), m.group(0)), run)
 
 
-def _step_skip(run: str, shell: str, cond: str, wd, root):
-    """-> (reason or None, blocking). Blocking: a real check that could not run here."""
+_PRUNABLE = frozenset({"system", "image", "container", "volume", "network", "builder", "buildx"})
+_SHELL_VAR = re.compile(r"\$(?:\{([A-Za-z_]\w*)\}|([A-Za-z_]\w*))")
+
+
+def _shell_path(word: str, cwd, env: dict):
+    """The absolute path a shell word names, as the shell expands it here: `~`, and `$VAR` / `${VAR}` from `env`
+    (an unset variable is empty, so `"$UNSET/"` is `/`). None when this Mac cannot tell: a command's output (the
+    guard's reader leaves a `$` for `$(…)`), another expansion, or a folder `cd` went to that is not known."""
+    if word == "~" or word.startswith("~/"):
+        word = os.path.expanduser("~") + word[1:]
+    word = _SHELL_VAR.sub(lambda m: env.get(m.group(1) or m.group(2)) or "", word)
+    if "$" in word or "`" in word or word.startswith("~") or (cwd is None and not os.path.isabs(word)):
+        return None
+    return os.path.realpath(os.path.join(cwd or "/", word))
+
+
+def _runner_prep(run: str, cwd: str, root: str, env: dict):
+    """Why a step is a hosted runner's housekeeping, which on this Mac would delete the developer's own files, or None:
+    it deletes a path that is not inside the checkout (`rm -rf /opt/hostedtoolcache/CodeQL`, a `~` path, a variable
+    unset here, a command's output, `cd /opt && rm -rf ghc`) or prunes Docker (`docker system prune -af`). The script is
+    read by the guard's own command reader, which unwraps env, nice, if/then and the like (read-only use)."""
+    top = os.path.realpath(root)
+    here = os.path.realpath(cwd)
+    for argv, _ in guard.split_commands(run) or []:
+        words = guard._unwrap(list(argv))
+        if not words:
+            continue
+        name = os.path.basename(words[0])
+        if name == "cd":
+            here = _shell_path(words[1], here, env) if len(words) > 1 and words[1] != "-" else None
+        elif name in ("docker", "podman"):
+            pos = [w for w in words[1:] if not w.startswith("-")]
+            if pos[:1] and pos[0] in _PRUNABLE and pos[1:2] == ["prune"]:
+                return f"runner prep ({name} {pos[0]} prune deletes Docker data on this Mac)"
+        elif name in ("rm", "rmdir", "unlink"):
+            ops, opts = [], True
+            for w in words[1:]:
+                if opts and w == "--":
+                    opts = False
+                elif not (opts and w.startswith("-") and w != "-"):
+                    ops.append(w)
+            for w in ops:
+                p = _shell_path(w, here, env)
+                if p is None or not p.startswith(top + os.sep):
+                    return f"runner prep (deletes {w}, which is not inside the checkout)"
+    return None
+
+
+def _step_skip(run: str, shell: str, cond: str, wd, root, env=None):
+    """-> (reason or None, blocking). Blocking: a real check that could not run here. `env`: the step's variables."""
     if cond:
         verdict = _condition(cond)
         if verdict == "never":
@@ -1871,6 +1919,12 @@ def _step_skip(run: str, shell: str, cond: str, wd, root):
         return "needs CI secrets", False
     if _SIDE_EFFECT.search(run):
         return "side effect (publish, deploy, push, system install)", False
+    here = Path(root) / wd if wd and not os.path.isabs(wd) and "${{" not in wd else Path(root)
+    step_env = dict(os.environ, CI="true")  # what run_local_ci gives the step
+    step_env.update({k: v for k, v in (env or {}).items() if "${{" not in str(v)})
+    prep = _runner_prep(_expand(run, root), str(here), root, step_env)
+    if prep:
+        return prep, False
     if _PLUMBING.search(run):
         return "CI plumbing ($GITHUB_ENV/OUTPUT)", False
     if _INSTALL.search(run):

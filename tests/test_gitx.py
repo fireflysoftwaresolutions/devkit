@@ -738,6 +738,38 @@ class LocalCiTests(unittest.TestCase):
             self.assertIn("exit 3", out)
             self.assertIsNone(gitx.evidence(s.ctx()))
 
+    # A hosted runner's housekeeping frees disk on a throwaway machine; on this Mac it deletes the developer's files.
+    # Steps that delete a path not inside the checkout (literal, ~, a variable that is unset here, a command's output)
+    # or prune Docker are skipped, without sudo too; a deletion inside the checkout still runs.
+    def test_runner_prep_that_deletes_outside_the_checkout_or_prunes_docker_is_skipped(self):
+        with Sandbox() as s:
+            prep = {"Free disk": "rm -rf /opt/hostedtoolcache/CodeQL",
+                    "Tool cache": 'if [ -d "$AGENT_TOOLSDIRECTORY_UNSET" ]; then\n  rm -rf "$AGENT_TOOLSDIRECTORY_UNSET/"\n'
+                                  'fi',
+                    "Pip cache": "env FOO=1 nice -n 5 rm -rf ~/.cache/pip",
+                    "Go cache": "rm -rf $(go env GOCACHE)",
+                    "Elsewhere": "cd /opt && rm -rf ghc",
+                    "Up a level": "rm -f ../sibling.txt",
+                    "Docker": "docker system prune -af",
+                    "Images": "docker image prune --all --force"}
+            kept = {"Clean build": "rm -rf build dist *.egg-info", "Workspace": "rm -rf ${{ github.workspace }}/out",
+                    "Unit": "test -f sub/marker.txt"}
+            steps = "".join(f"      - name: {n}\n        run: |\n" + "".join(f"          {ln}\n" for ln in r.splitlines())
+                            for n, r in {**prep, **kept}.items())
+            s.write(".github/workflows/ci.yml", "name: CI\non: [pull_request]\njobs:\n  test:\n    runs-on: ubuntu-latest\n"
+                                                "    steps:\n" + steps)
+            s.write("sub/marker.txt", "x")
+            s.branch("feat/ci")
+            s.commit("ci: add the workflow")
+            got = {st["name"]: (st["skip"], st["blocking"]) for j in gitx.plan(str(s.repo)) for st in j["steps"]}
+            for name in prep:
+                with self.subTest(step=name):
+                    self.assertRegex(got[name][0] or "", r"^runner prep \(")
+                    self.assertFalse(got[name][1])
+            self.assertIn("/opt/hostedtoolcache/CodeQL", got["Free disk"][0])
+            self.assertIn("docker system prune", got["Docker"][0])
+            self.assertEqual({n: got[n] for n in kept}, {n: (None, False) for n in kept})
+
     def test_no_workflows(self):
         with Sandbox() as s:
             s.branch("feat/none")
