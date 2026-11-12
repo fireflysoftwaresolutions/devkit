@@ -31,7 +31,8 @@ class CrewPitfallTests(unittest.TestCase):
                                 cause="speculative CI fixes", prevention="reproduce locally, push once", a=A,
                                 happened="three pushes to try CI fixes", commands=["git push"])
         self.other = lessons.add("global", "The status block came after text", cause="a note before the block",
-                                 prevention="write the block first", a=A, happened="a reply began with a note")
+                                 prevention="write the block first", a=A, happened="a reply began with a note",
+                                 files=["docs/replies/**"])
 
     def tearDown(self):
         lessons.LESSONS, work.HANDOFF, lessons.USAGE_LOCAL = self.saved
@@ -85,9 +86,10 @@ class LessonTests(unittest.TestCase):
 
     def test_record_needs_cause_and_prevention(self):
         with self.assertRaises(ValueError):
-            lessons.add("acme/api", "x", cause="", prevention="p", happened="h", a=A)
+            lessons.add("acme/api", "x", cause="", prevention="p", happened="h", a=A, files=["CHANGELOG.md"])
         les = lessons.add("acme/api", "Tag before CHANGELOG", kind="process", cause="checklist in a wiki",
-                          prevention="release only with dev release", evidence=["PR #212"], a=A)
+                          prevention="release only with dev release", evidence=["PR #212"], a=A,
+                          files=["CHANGELOG.md"])
         again = lessons.load(les["path"])
         self.assertEqual((again["meta"]["status"], again["meta"]["occurrences"]), ("open", 1))
         self.assertIn("- PR #212", again["sections"]["Evidence"])
@@ -95,7 +97,7 @@ class LessonTests(unittest.TestCase):
 
     def test_recur_prevent_retire_and_review(self):
         les = lessons.add("acme/api", "Flaky clock test", kind="bug", cause="real clock", prevention="fixed clock",
-                          happened="the clock test failed at midnight", a=A)
+                          happened="the clock test failed at midnight", files=["tests/test_clock.py"], a=A)
         les = lessons.recur(les, "CI run 77", a=A)
         self.assertEqual(les["meta"]["occurrences"], 2)
         self.assertEqual([x["meta"]["id"] for x in lessons.review()["recurring"]], [les["meta"]["id"]])
@@ -123,8 +125,10 @@ class LessonTests(unittest.TestCase):
     # Another session merges or archives a lesson (`dev sleep`, a pull) while this one lists them: a file listed a
     # moment ago is gone when it is read. Every `dev lesson` command crashed on it; the listing goes on without it.
     def test_a_lesson_file_gone_between_listing_and_reading_is_left_out(self):
-        kept = lessons.add("acme/api", "Kept lesson", cause="c", prevention="p", happened="h", a=A)
-        gone = lessons.add("acme/api", "Merged lesson", cause="c", prevention="p", happened="h", a=A)
+        kept = lessons.add("acme/api", "Kept lesson", cause="c", prevention="p", happened="h", a=A,
+                           files=["src/kept/**"])
+        gone = lessons.add("acme/api", "Merged lesson", cause="c", prevention="p", happened="h", a=A,
+                           files=["src/gone/**"])
         real_load = lessons.load
 
         def load_after_another_session_moved_one(path):

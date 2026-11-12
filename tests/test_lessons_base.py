@@ -43,6 +43,11 @@ class LessonCase(unittest.TestCase):
         kw.setdefault("prevention", "the prevention of " + title)
         return lessons.add(scope, title, a=kw.pop("a", A), **kw)
 
+    def unanchored(self, title, scope="acme/api", **kw):
+        # A lesson as devkit wrote it before anchors existed: add refuses one with no anchor now, but such files are
+        # still in the handoff, and recall and lint must handle them
+        return unanchor(self.add(title, scope, activities=["testing"], **kw))
+
     def backdate(self, les, days: float):
         """Move a lesson's first and last sighting `days` into the past (as if recorded then)."""
         day = time.strftime("%Y-%m-%d", time.localtime(time.time() - days * DAY))
@@ -61,6 +66,17 @@ class LessonCase(unittest.TestCase):
 
     def archived_ids(self):
         return sorted(self.ids(lessons.all_lessons(archived=True)))
+
+
+def unanchor(les: dict) -> dict:
+    """Rewrite a recorded lesson's file as devkit wrote it before anchors existed: every anchor list empty."""
+    path = Path(les["path"])
+    text = path.read_text()
+    end = text.index("\n---\n", 4)
+    front = "\n".join(f"{ln.split(':')[0]}: []" if ln.split(":")[0] in lessons.ANCHORS else ln
+                      for ln in text[:end].split("\n"))
+    path.write_text(front + text[end:])
+    return lessons.load(path)
 
 
 def tz(test: unittest.TestCase, zone: str):

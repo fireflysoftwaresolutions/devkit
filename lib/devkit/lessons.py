@@ -380,18 +380,26 @@ def _screen(fields: dict) -> str:
     return _lint().screen({k: v for k, v in fields.items() if v}) if fields else ""
 
 
+NO_ANCHOR = ("a lesson with no anchor is never recalled: say where it applies with --file \"<glob>\", --command "
+             "\"<command words>\", --error \"<text the output shows>\" or --activity <a kind of work from dev crew "
+             "raci> (each repeatable)")
+
+
 def add(scope: str, title: str, kind: str = "mistake", severity: str = "medium", happened: str = "", cause: str = "",
         fix: str = "", prevention: str = "", detection: str = "", evidence=None, tags=None, why: str = "",
         a=None, retire_when: str = "", files=None, commands=None, activities=None, errors=None, stack=None,
         new: bool = False, author: str = "") -> dict:
-    """Record a lesson. Refused (Refused, a ValueError, with every problem at once) by the anchor gate, the capture
-    shape (lessonlint.check_shape), a missing root cause or prevention, or a lesson of this scope or the global ones,
-    active or archived, that shares an error anchor (Duplicate, same_record; `new=True` with a `why` records it
-    anyway). A refusal is recorded in the audit trail with its problems (`dev.lesson.refused`). Text the screen
-    judges unsafe is recorded but held: `quarantine` says why, and recall leaves it out until the developer releases
-    it. `author`: the writer's role (an agent) or name; the agent, session and machine are added."""
+    """Record a lesson. Refused (Refused, a ValueError, with every problem at once) by the anchor gate, no anchor at
+    all (recall shows only anchored lessons: _usable), the capture shape (lessonlint.check_shape), a missing root
+    cause or prevention, or a lesson of this scope or the global ones, active or archived, that shares an error
+    anchor (Duplicate, same_record; `new=True` with a `why` records it anyway). A refusal is recorded in the audit
+    trail with its problems (`dev.lesson.refused`). Text the screen judges unsafe is recorded but held: `quarantine`
+    says why, and recall leaves it out until the developer releases it. `author`: the writer's role (an agent) or
+    name; the agent, session and machine are added."""
     anchored, found = _anchor_problems(files=files, commands=commands, activities=activities, errors=errors,
                                        stack=stack)
+    if not (any(anchored.values()) or found):  # an anchor that was refused is already one of the problems
+        found.append((NO_ANCHOR,) * 2)
     if kind not in KINDS:
         found.append((f"kind must be one of {', '.join(KINDS)}",) * 2)
     if severity not in SEVERITIES:

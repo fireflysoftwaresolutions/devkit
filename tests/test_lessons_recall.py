@@ -65,7 +65,7 @@ class SessionStartTests(LessonCase):
 
     def test_only_lessons_with_a_root_cause_and_an_anchor_are_recalled(self):
         good = self.add("Never edit an applied migration", files=["db/**"])
-        self.add("A lesson with nowhere to apply")
+        self.unanchored("A lesson with nowhere to apply")
         causeless = self.add("A lesson with no cause on record", files=["web/**"])
         text = causeless["path"].read_text().replace("the cause of A lesson with no cause on record", "_—_")
         causeless["path"].write_text(text)

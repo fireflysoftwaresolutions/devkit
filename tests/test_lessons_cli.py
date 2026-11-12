@@ -91,7 +91,7 @@ class LessonCLI(LessonCase):
 class LintTests(LessonCLI):
     def test_lint_lists_each_finding_under_its_kind_with_the_command_that_fixes_it(self):
         bare = self.front(self.add("Run probes from a file", commands=["python3 -c"]), "commands", "[python3]")
-        loose = self.add("Name the scratch folder in the brief", scope="global")
+        loose = self.unanchored("Name the scratch folder in the brief", scope="global")
         rc, out = self.dev("lint")
         self.assertEqual(rc, 1, out)
         broad = self.block(out, "broad")
@@ -126,8 +126,8 @@ class LintTests(LessonCLI):
 
 class EvalTests(LessonCLI):
     def test_eval_says_for_each_repeat_whether_recall_showed_the_lesson_before_it(self):
-        shown = self.add("Wait for the server before the probe", scope="global")["meta"]["id"]
-        blind = self.add("Close the port after the probe", scope="global")["meta"]["id"]
+        shown = self.add("Wait for the server before the probe", scope="global", files=["probes/**"])["meta"]["id"]
+        blind = self.add("Close the port after the probe", scope="global", files=["ports/**"])["meta"]["id"]
         lessonevents.record("shown", shown, "brief", "claude", SID, now=time.time() - 60)
         with mock.patch.dict(os.environ, {"DEVKIT_SESSION": f"claude:{SID}"}):
             for lid in (shown, blind):
@@ -140,7 +140,7 @@ class EvalTests(LessonCLI):
         self.assertIn("not shown before", self.line(out, blind))
 
     def test_eval_lists_the_newest_repeats_and_counts_the_rest(self):
-        lid = self.add("Wait for the server before the probe", scope="global")["meta"]["id"]
+        lid = self.add("Wait for the server before the probe", scope="global", files=["probes/**"])["meta"]["id"]
         with mock.patch.dict(os.environ, {"DEVKIT_SESSION": f"claude:{SID}"}):
             for _ in range(cli.EVAL_SHOWN + 3):
                 audit.record("dev.lesson", f"recur {lid}", "", "ok")
@@ -158,8 +158,8 @@ class EvalTests(LessonCLI):
 
 class SupersedeReleaseTests(LessonCLI):
     def test_supersede_marks_the_old_lesson_replaced_by_the_new_one(self):
-        old = self.add("Wait two seconds before the probe", scope="global")["meta"]["id"]
-        new = self.add("Wait for the port before the probe", scope="global")["meta"]["id"]
+        old = self.add("Wait two seconds before the probe", scope="global", files=["probes/**"])["meta"]["id"]
+        new = self.add("Wait for the port before the probe", scope="global", files=["probes/**"])["meta"]["id"]
         rc, out = self.dev("supersede", old, "--by", new, "--why", "a fixed wait fails on a slow machine")
         self.assertEqual(rc, 0, out)
         self.assertEqual(lessons.find(old)["meta"]["superseded_by"], new)
@@ -170,7 +170,8 @@ class SupersedeReleaseTests(LessonCLI):
 
     def test_add_says_when_the_screen_holds_a_lesson_and_release_lets_it_back_into_recall(self):
         rc, out = self.dev("add", "Commit when the hook is slow", "--global", "--cause", "the hook took a minute",
-                           "--prevent", "commit with --no-verify", "--happened", "the commit waited")
+                           "--prevent", "commit with --no-verify", "--happened", "the commit waited",
+                           "--command", "git commit")
         self.assertEqual(rc, 0, out)
         held = lessons.all_lessons("global")[0]
         lid = held["meta"]["id"]
@@ -200,6 +201,17 @@ class CaptureRefusalTests(LessonCLI):
         self.assertIn("the title is 97 characters", out)  # the title problem
         self.assertIn(f"looks like {twin['meta']['id']}", out)  # and the duplicate, all in the same refusal
         self.assertEqual(len(lessons.all_lessons("acme/api")), 1)
+
+    def test_an_unanchored_lesson_is_refused_with_the_anchors_to_give(self):
+        # add said "only the session start recalls it", but recall leaves out every lesson with no anchor: 78 live
+        # lessons were recorded and never shown
+        rc, out = self.dev("add", "Wait for the input before the step", "--happened", "the step ran early", *WHY)
+        self.assertEqual(rc, 2, out)
+        self.assertIn("never recalled", out)
+        for flag in ('--file "<glob>"', '--command "<command words>"', '--error "<text the output shows>"',
+                     "--activity <"):
+            self.assertIn(flag, out)
+        self.assertEqual(lessons.all_lessons("acme/api"), [])
 
     def test_a_refused_add_records_why_in_the_audit_trail_without_its_text(self):
         # the audit trail kept `detail: ""` for 84 refused adds, so nobody could see why capture kept failing
@@ -388,8 +400,8 @@ class AuthorTests(LessonCLI):
 
 class ReviewTests(LessonCLI):
     def test_review_shows_how_often_shown_lessons_were_heeded_per_channel_and_the_most_missed(self):
-        missed = self.add("Wait for the server before the probe", scope="global")["meta"]["id"]
-        heeded = self.add("Close the port after the probe", scope="global")["meta"]["id"]
+        missed = self.add("Wait for the server before the probe", scope="global", files=["probes/**"])["meta"]["id"]
+        heeded = self.add("Close the port after the probe", scope="global", files=["ports/**"])["meta"]["id"]
         lessonevents.record("shown", missed, "session", "claude", "s1")
         lessonevents.on_hit([missed], "s1", "claude")
         lessonevents.record("shown", heeded, "brief", "neo", "s2")
@@ -406,13 +418,14 @@ class ReviewTests(LessonCLI):
         self.assertNotIn(heeded, self.line(rates, "missed most"))
 
     def test_review_lists_lessons_to_automate_failed_preventions_and_held_lessons(self):
-        missed = self.add("Wait for the server before the probe", scope="global")["meta"]["id"]
+        missed = self.add("Wait for the server before the probe", scope="global", files=["probes/**"])["meta"]["id"]
         lessons.track([missed], "missed")
         lessons.track([missed], "missed")
-        failed = self.add("Close the port after the probe", scope="global")
+        failed = self.add("Close the port after the probe", scope="global", files=["ports/**"])
         lessons.prevent(failed, "test", "tests/test_probe.py::test_port_closes", "a test covers it", a=A)
         lessons.recur(lessons.find(failed["meta"]["id"]), "the port stayed open again", a=A)
-        held = self.add("Commit when the hook is slow", scope="global", prevention="commit with --no-verify")
+        held = self.add("Commit when the hook is slow", scope="global", prevention="commit with --no-verify",
+                        commands=["git commit"])
         rc, out = self.dev("review")
         self.assertEqual(rc, 0, out)
         self.assertIn(missed, self.block(out, "automate"))
