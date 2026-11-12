@@ -1,16 +1,19 @@
 # The bug registry: folds the payload comments of each registry issue into the one record comment the bot writes,
-# and sets the fixed version of bugs when a release is published (tools/bug_registry_action.py).
-# The script reads the event from the file GitHub writes. No expression here reads event text: the concurrency group
-# uses only the numeric issue or release id, so the runs of one issue wait for each other and none is cancelled.
+# writes the issue's title and text from that record, and sets the fixed version of bugs when a release is published
+# (tools/bug_registry_action.py).
+# The script reads the event from the file GitHub writes. No expression here puts event text into a command: the
+# condition only compares, and the concurrency group uses only the numeric issue or release id, so the runs of one
+# issue wait for each other and none is cancelled.
 # The repository secret BUG_REGISTRY_KEY keys the digests that count distinct voters; without it the run folds nothing.
 name: bug registry
 
 on:
   # Reports open issues and payloads arrive as comments, from any account: these triggers are the registry's input.
-  # The job checks out the default branch (never pull request code), passes the script only the runner's event file
-  # path and event name, writes nothing to GITHUB_ENV or GITHUB_OUTPUT, and holds issues: write and contents: read.
+  # A maintainer's verdict label rewrites the issue's status. The job checks out the default branch (never pull
+  # request code), passes the script only the runner's event file path and event name, writes nothing to GITHUB_ENV
+  # or GITHUB_OUTPUT, and holds issues: write and contents: read.
   issues: # zizmor: ignore[dangerous-triggers] reviewed: the issue body is read as data by the script, never run
-    types: [opened]
+    types: [opened, labeled]
   issue_comment: # zizmor: ignore[dangerous-triggers] reviewed: comments are read as data by the script, never run
     types: [created]
   release:
@@ -21,16 +24,17 @@ permissions: {}
 jobs:
   fold:
     name: Fold registry payloads
-    # A pull request comment, or an issue or comment without a payload block, starts no job, so comment spam queues
-    # nothing. The condition only compares text; nothing from the event reaches a command.
+    # A pull request comment, an issue or comment without a payload block, or a label other than a verdict starts no
+    # job, so spam queues nothing. The condition only compares text; nothing from the event reaches a command.
     if: >-
       ${{ !github.event.issue.pull_request && (github.event_name == 'release'
-      || (github.event_name == 'issues' && contains(github.event.issue.body, '```json'))
+      || (github.event_name == 'issues' && github.event.action == 'opened' && contains(github.event.issue.body, '```json'))
+      || (github.event_name == 'issues' && github.event.action == 'labeled' && startsWith(github.event.label.name, 'verdict:'))
       || (github.event_name == 'issue_comment' && contains(github.event.comment.body, '```json'))) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
-      issues: write # the record comment, labels, titles, closing duplicates and reopening regressions
+      issues: write # the record comment, the issue's title and text, labels, closing duplicates and reopening regressions
       contents: read # the checkout of the script, and the list of releases
     concurrency:
       group: bug-registry-${{ github.event.issue.number || github.event.release.id }}

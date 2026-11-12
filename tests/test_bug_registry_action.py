@@ -249,14 +249,17 @@ class FakeGitHub:
         return login in self.members
 
 
-def _run(fake, event_name, number=None, comment=None, key=KEY, sleep=None, maintainers=None, **release):
+def _run(fake, event_name, number=None, comment=None, key=KEY, sleep=None, maintainers=None, label=None, **release):
     """Run the workflow's script on one event, as the runner would: the event JSON in a file, the secret in the
     environment. `maintainers` is the maintainers file's text, a path to read instead, or None for no file, so the
-    repository's own list never changes what a test sees. -> (exit code, stdout, stderr)."""
+    repository's own list never changes what a test sees. `label` makes an issues event the label a person added.
+    -> (exit code, stdout, stderr)."""
     event = copy.deepcopy(EVENTS[event_name])
     if number is not None:
         event["issue"] = fake.issue(number)
         fake.calls.clear()
+    if label is not None:
+        event.update(action="labeled", label={"name": label, "color": "ededed"})
     if comment is not None:
         event["comment"] = copy.deepcopy(fake.notes[comment])
     if event_name == "release":
@@ -946,6 +949,42 @@ class RetentionTests(unittest.TestCase):
             self.assertIn(_h(account), body, account)
 
 
+class VerdictTests(unittest.TestCase):
+    """A maintainer gives a verdict with one verdict:* label; the issue's text states it."""
+
+    def test_a_verdict_label_states_its_sentence_and_changes_nothing_agents_see(self):
+        fake = FakeGitHub()
+        fake.registry_issue(12)
+        chat = fake.add_comment(12, "Same here.", _user(5))
+        self.assertEqual(_run(fake, "issue_comment", 12, comment=chat)[0], 0)
+        seen_by_agents = bugs.agent_view(fake.record(12))
+        fake.issues[12]["labels"].append("verdict:false-positive")
+        rc, _, err = _run(fake, "issues", 12, label="verdict:false-positive")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("- **Status:** Open. Confirmed: the guard refused a command it should allow.",
+                      fake.issues[12]["body"])
+        self.assertEqual(fake.record(12)["triage"], {"verdict": "false-positive"})
+        self.assertEqual(bugs.agent_view(fake.record(12)), seen_by_agents)
+
+    def test_the_verdict_added_last_counts_and_other_labels_change_nothing(self):
+        fake = FakeGitHub()
+        fake.registry_issue(12)
+        for name in ("verdict:confirmed", "verdict:not-planned"):
+            fake.issues[12]["labels"].append(name)
+            self.assertEqual(_run(fake, "issues", 12, label=name)[0], 0)
+        self.assertIn("- **Status:** Open. Not planned: devkit keeps this behavior.", fake.issues[12]["body"])
+        fake.writes.clear()
+        for name in ("verdict:wontfix", "help wanted"):
+            fake.issues[12]["labels"].append(name)
+            rc, _, err = _run(fake, "issues", 12, label=name)
+            self.assertEqual(rc, 0, err)
+        self.assertEqual(fake.writes, [])
+        fake.issues[12]["labels"].remove("verdict:not-planned")  # taken back: the next event uses the one left
+        chat = fake.add_comment(12, "Same here.", _user(5))
+        self.assertEqual(_run(fake, "issue_comment", 12, comment=chat)[0], 0)
+        self.assertIn("- **Status:** Open. Confirmed as a devkit bug.", fake.issues[12]["body"])
+
+
 class _Response:
     def __init__(self, status=200, data=None, link=""):
         self.status, self._raw, self.headers = status, b"" if data is None else json.dumps(data).encode(), {
@@ -1018,8 +1057,9 @@ class WorkflowFileTests(unittest.TestCase):
         exprs = sorted(" ".join(e.split()) for e in re.findall(r"\$\{\{(.*?)\}\}", self.text, re.S))
         self.assertEqual(exprs, sorted([
             "!github.event.issue.pull_request && (github.event_name == 'release' || (github.event_name == 'issues' && "
-            "contains(github.event.issue.body, '```json')) || (github.event_name == 'issue_comment' && "
-            "contains(github.event.comment.body, '```json')))",  # the job's condition: compared, never run
+            "github.event.action == 'opened' && contains(github.event.issue.body, '```json')) || (github.event_name == "
+            "'issues' && github.event.action == 'labeled' && startsWith(github.event.label.name, 'verdict:')) || "
+            "(github.event_name == 'issue_comment' && contains(github.event.comment.body, '```json')))",  # compared only
             "github.event.issue.number || github.event.release.id",  # the concurrency group: numbers only
             "github.token", "secrets.BUG_REGISTRY_KEY"]))
         self.assertNotIn("github.event", self.text[self.text.index("\n    steps:"):])
@@ -1053,8 +1093,8 @@ class WorkflowFileTests(unittest.TestCase):
         self.assertNotIn("devkit", self.text.lower())  # no brand words: the rebrand rewrites one constant
 
     def test_triggers(self):
-        for event, action_ in (("issues", "opened"), ("issue_comment", "created"), ("release", "published")):
-            self.assertRegex(self.text, rf"\n  {event}:( #[^\n]*)?\n    types: \[{action_}\]\n")
+        for event, types in (("issues", "opened, labeled"), ("issue_comment", "created"), ("release", "published")):
+            self.assertRegex(self.text, rf"\n  {event}:( #[^\n]*)?\n    types: \[{types}\]\n")
         ons = re.findall(r"^  ([a-z_]+):", self.text.split("\npermissions:")[0], re.M)
         self.assertEqual(ons, ["issues", "issue_comment", "release"])
 
