@@ -105,6 +105,23 @@ def require(sp: Speaker, *, main: bool = False, what: str = "") -> Speaker:
     return sp
 
 
+def verified_lane(lane: str, cwd: str | None = None, now: float | None = None) -> str:
+    """`lane` (a lane variable a `dev progress` or `dev crew` call passes) when an open call of this session belongs
+    to that same lane, or IdentityError. A command can give the variable another member's id where the guard does not
+    read it (a child shell's `print -v`, `${(P)v::=…}`, `declare -n`), and a variable only narrows when the call
+    ledger shows that member at work: without one of its calls open, the call has no lane identity and acts as no
+    one. Codex selects its session by the lane and refuses one that belongs to none (progress.resolve_session)."""
+    from . import progress
+    agent, sid, how = progress.resolve_session(cwd, sys.argv[1:])
+    if agent == "codex":
+        return lane
+    if how != "shell" and any(str(c.get("caller")) == lane for c in progress.open_calls(sid, now)):
+        return lane
+    raise IdentityError(f"the lane variable names {lane[:40]}, and no open call of this session is that crew "
+                        "member's, so devkit cannot tell who runs this command: run the dev command as a command of "
+                        "your own, in your lane")
+
+
 def consumer(for_me: bool, cwd: str | None = None) -> str:
     """Whose wait `dev watch` is: "main" or a crew member's lane. `--for me` is a member's own wait, refused when it
     resolves to the main session; without it, the speaker's own (a member's call makes it the member's). A speaker

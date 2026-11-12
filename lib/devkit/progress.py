@@ -741,9 +741,11 @@ def _as_lane(from_agent, cwd: str | None = None):
     """The lane a command acts as: `from_agent` (DEVKIT_FROM_AGENT, as the command passes it), else the crew member
     identity.speaker names: its lane mark, or its open call in the ledger (Claude Code and Codex alike). Variables
     only narrow (spec C4): an empty or missing one grants nothing. None for Morpheus."""
-    if from_agent:
-        return from_agent
     from . import identity
+    if from_agent:  # the lane variable counts for a member whose call is open (identity.verified_lane): a command
+        # may have given it another member's id; a lane a caller in devkit's own code names is that caller's
+        return identity.verified_lane(from_agent, cwd) if from_agent == os.environ.get(identity.LANE_VAR) else \
+            from_agent
     lane = identity._find(cwd, None, None, settle=False).speaker.lane
     return lane if lane and lane not in NOT_A_LANE else None
 

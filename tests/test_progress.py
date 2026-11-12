@@ -1,6 +1,7 @@
 # Copyright (c) 2026 Firefly Software Solutions Inc.
 # SPDX-License-Identifier: Apache-2.0
 """Progress, timing and predictability. Run: python3 -m unittest discover -s tests -v"""
+import contextlib
 import json
 import os
 import sys
@@ -89,6 +90,21 @@ def launch(aid, kind, label, at=None, sid="s1"):
     pg.on_subagent("claude", {"session_id": sid, "agent_id": aid, "agent_type": kind}, True, now=at)
     pg.launch_result("claude", {"session_id": sid, "tool_use_id": f"toolu_{aid}", "tool_response": {"agentId": aid}},
                      now=at)
+
+
+@contextlib.contextmanager
+def member_call(aid, cmd="dev progress"):
+    """A crew member's shell call, open in the call ledger of the session the command resolves to, with its lane
+    variable set: what a member's stamped `dev` command runs inside (identity.verified_lane)."""
+    agent, sid, _ = pg.resolve_session()
+    data = {"session_id": sid, "tool_use_id": f"toolu_call_{aid}", "tool_name": "Bash", "agent_id": aid,
+            "tool_input": {"command": cmd}}
+    pg.call_opened(agent, data)
+    try:
+        with mock.patch.dict(os.environ, {"DEVKIT_FROM_AGENT": aid}):
+            yield
+    finally:
+        pg.call_closed(data)
 
 
 def gates_passed(aid, at=None, sid="s1"):
@@ -2866,14 +2882,14 @@ class ProgressCommandLineTests(unittest.TestCase):
         self.assertEqual((docs["state"], docs["partial"][-1]["check"]), ("pending", "✓ dev docs check clean"))
 
     def test_a_members_close_of_its_own_step_says_it_closed(self):
-        with mock.patch.dict(os.environ, {"DEVKIT_FROM_AGENT": "k1"}):
+        with member_call("k1"):
             rc, out, err = progress_cli_out("step", "sync rewritten", "--step", "sync", "--check", "✓ 14 tests pass")
         self.assertEqual(rc, 0, err)
         self.assertIn("· sync rewritten · closed “sync” (done)", out)
 
     def test_a_members_evidence_for_a_step_it_does_not_hold_fails_and_says_what_to_do(self):
         # M176-M177: it printed ✓ and exited 0, so the member reported the step closed while it stayed pending
-        with mock.patch.dict(os.environ, {"DEVKIT_FROM_AGENT": "k1"}):
+        with member_call("k1"):
             rc, out, err = progress_cli_out("step", "docs look fine", "--step", "docs", "--check", "✓ read them")
         self.assertEqual(rc, 2, out)
         self.assertIn("“docs” is not your step", err)

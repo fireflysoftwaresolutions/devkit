@@ -21,7 +21,7 @@ sys.path.insert(0, str(ROOT / "tests"))
 
 from devkit import audit, canary, cli, core, crew, hooks, mcp, selfcheck, ui  # noqa: E402
 from devkit import progress as pg  # noqa: E402
-from test_progress import TempState as ProgressState  # noqa: E402
+from test_progress import TempState as ProgressState, member_call  # noqa: E402
 
 try:
     import tomllib  # Python 3.11+
@@ -60,10 +60,9 @@ def run_cli(*argv, from_agent=None):
     a = cli.build_parser().parse_args(list(argv))
     out, err = io.StringIO(), io.StringIO()
     saved = os.environ.pop("DEVKIT_FROM_AGENT", None)
-    if from_agent:
-        os.environ["DEVKIT_FROM_AGENT"] = from_agent
     try:
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        with (member_call(from_agent, "dev crew") if from_agent else contextlib.nullcontext()), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             rc = a.fn(a) or 0
     finally:
         os.environ.pop("DEVKIT_FROM_AGENT", None)
