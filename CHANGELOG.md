@@ -54,9 +54,12 @@ how lessons are recorded and counted, and closes gaps in how the guard reads com
 - **Crew.** A member's `dev progress step --step <its step> --check "…"` closes that step at once, so the next steps
   start while the member works on.
 - **Crew.** The lessons gate counts only a lesson that was recorded or counted, never a refused `dev lesson add`.
-- **CI.** `dev ci --run` skips a hosted runner's own setup: deletions outside the checkout, Docker prunes, `sudo`,
-  OS package installs, `playwright install`, and `git config --global`. A step that names a Docker context this Mac
-  lacks blocks the evidence. `dev ci --commands` and the delivery test gate leave out the same steps.
+- **CI.** `dev ci --run` skips a hosted runner's own setup: deletions outside the checkout, Docker prunes, setup run
+  with `sudo`, OS package installs, `playwright install`, and `git config --global`. In a step that installs a tool
+  and runs it (`brew install gitleaks && gitleaks detect`), only the setup is left out, so the check runs and a tool
+  missing on this Mac fails the evidence. A check that cannot be separated from its setup, a check run with `sudo`,
+  and a step that names a Docker context this Mac lacks block the evidence. `dev ci --commands` and the delivery test
+  gate leave out the same setup.
 - **Pull requests.** `dev pr create`, `dev pr ready`, and the squash check follow the repository's own title
   convention: a plain imperative sentence where recent pull request titles are sentences, a Conventional Commit
   otherwise.
@@ -82,12 +85,18 @@ how lessons are recorded and counted, and closes gaps in how the guard reads com
   program named at run time.
 - **Guard.** A lane call with a substitution in its double-quoted message, and a `dev crew` word that is no command,
   got refusals that pointed the wrong way. Each now says what to change.
-- **Guard.** A Python script was refused for a filename such as `release_notes.py`. A script that provably cannot
-  act is now judged by its content.
+- **Guard.** Review and read-only crew members can run shell lines and scripts whose every command reads, `sed -i` on
+  their own scratch files, their scratch scripts under `uv run` or after Python's `-W` and `-X`, and a `PYTHONPATH=`
+  prefix that names only workspace folders and their own scratch folder. Inline Python stays refused.
 - **Guard.** A member's refused push now names the grant that is missing and what to ask the developer and the tech
   lead.
 - **Progress.** `dev progress` lists the calling session's run first, and a long `dev progress assign` typed by the
   tech lead is recognized as its own command.
+- **Crew.** A member whose brief or project forbids `dev ci --run` was sent back for the missing proof and ended
+  unverified. The tech lead now meets that proof with a `Waived proof: dev ci --run — <why>` line in the brief, or a
+  passed `dev ci --run` on the tree the member leaves; the member's own `dev ci --mark-passed` does not count.
+- **Session start.** One initiative folder without its `README.md` made the session context drop both lists of
+  claimed tasks, so a session could start on a task someone else holds. Such a folder now hides nothing.
 - **CLI.** A `dev` command whose reader closed the pipe (`dev audit --json | head`) reported a devkit crash. It now
   exits quietly with 141.
 - **Bug registry.** `dev bug detour --dev "dev push"` was refused; a leading `dev` is accepted, and the help says what
@@ -115,6 +124,8 @@ how lessons are recorded and counted, and closes gaps in how the guard reads com
   splitting, `hash -p`, or zsh's `path` array.
 - **Guard.** A lane's `dev commit` and the MCP scope check keep `*` inside one folder, so one lane cannot commit
   another lane's staged file in the same folder.
+- **Crew.** A lane's relative scope glob holds a path only when its real path, links resolved, is inside the
+  repository, so a tracked link that leads out of the repository no longer lets a member write there.
 - **Machines.** A lock that another Mac took under a network hostname this Mac carried at another time does not count
   as this Mac's, so this Mac cannot release, edit, or renew it.
 - **Presence.** `dev team`, `dev progress`, and the session context show another machine's presence fields only as
