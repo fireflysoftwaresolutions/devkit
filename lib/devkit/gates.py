@@ -593,7 +593,7 @@ def _markers(text: str) -> list:
 
 # What `dev lesson add` prints when it recorded a lesson and `dev lesson recur` when it counted one (cli.cmd_lesson):
 # the lesson's id after a check mark. A refused add or a recur of no lesson prints ✗ and its problems instead.
-_LESSON_DONE = re.compile(r"(?m)^\s*✓ L-[0-9A-Za-z]{6,40} (?:recorded in |happened \d+×)")
+_LESSON_DONE = re.compile(r"(?m)^[ \t]*✓ L-[0-9A-Za-z]{6,40} (?:recorded in |happened \d+×)")  # one line: one pass
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
 

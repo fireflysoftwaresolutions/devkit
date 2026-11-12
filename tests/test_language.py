@@ -243,7 +243,8 @@ class AbuseTests(unittest.TestCase):
 
     def test_a_huge_or_pathological_message_is_read_in_bounded_time(self):
         for text in ("```\n" * 40000, "\"" + "a " * 200000, ("the " * 50000) + "```", "> " * 100000,
-                     "<system-reminder>" * 20000, "a." * 100000, "a/" * 100000, "`" * 100000, "x " + "`" * 100000):
+                     "<system-reminder>" * 20000, "a." * 100000, "a/" * 100000, "`" * 100000, "x " + "`" * 100000,
+                     "\n" * 10000, "- " + "\n" * 10000):
             t0 = time.perf_counter()
             language.detect(text)
             language.other_language(text, "es")

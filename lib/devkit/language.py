@@ -111,13 +111,14 @@ _PATH = re.compile(r"(?:~|\.{1,2})?/[^\s,;:()\"']+|(?<![\w.-])[\w.-]+(?:/[\w.-]+
 _QUOTED = re.compile(r"\"[^\"\n]{0,400}\"|“[^”\n]{0,400}”|«[^»\n]{0,400}»|„[^“”\n]{0,400}[“”]")
 _BLOCKQUOTE = re.compile(r"(?m)^[ \t]*>.*$")
 _COMMAND = re.compile(r"(?m)^[ \t]*[$%][ \t].*$")
-# lines of tool output: tracebacks, stack frames, test results, log records
-_LOGLINE = re.compile(r"(?m)^.*(?:Traceback \(most recent call last\)|^\s+at [\w$.<>]+\(|File \"[^\"]+\", line \d+|"
-                      r"^\s*(?:ERROR|WARN(?:ING)?|INFO|DEBUG|FATAL|FAILED|PASSED|E  )\b|"
-                      r"^\s*\d{4}-\d\d-\d\d[T ]\d\d:\d\d|^\s*\w+(?:\.\w+)*(?:Error|Exception|Warning):\s).*$")
+# lines of tool output: tracebacks, stack frames, test results, log records. Within one line only ([ \t], never \s),
+# so a run of blank lines costs one pass
+_LOGLINE = re.compile(r"(?m)^.*(?:Traceback \(most recent call last\)|^[ \t]+at [\w$.<>]+\(|"
+                      r"File \"[^\"\n]+\", line \d+|^[ \t]*(?:ERROR|WARN(?:ING)?|INFO|DEBUG|FATAL|FAILED|PASSED|E  )\b|"
+                      r"^[ \t]*\d{4}-\d\d-\d\d[T ]\d\d:\d\d|^[ \t]*\w+(?:\.\w+)*(?:Error|Exception|Warning):[ \t]).*$")
 _MARKER = re.compile(r"(?i)\[\s*firefly\s*>\s*devkit(?:\s*·[^\]\n]*)?\]")
-_LABEL = re.compile(r"(?im)^(\s*[-*•]\s+)\**\s*(?:done|check|progress|crew|you|next)\s*\**\s*:\s*\**|"
-                    r"needs from the tech lead\s*:")
+_LABEL = re.compile(r"(?im)^([ \t]*[-*•][ \t]+)\**[ \t]*(?:done|check|progress|crew|you|next)[ \t]*\**[ \t]*:"
+                    r"[ \t]*\**|needs from the tech lead[ \t]*:")
 _WORD = re.compile(r"[^\W\d_]+(?:'[^\W\d_]+)*")
 
 
