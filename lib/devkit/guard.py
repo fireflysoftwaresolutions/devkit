@@ -2169,8 +2169,12 @@ def _pipe_gate_closed(cmd: str, cwd: str, pipefail: bool = False, depth: int = 0
         argv = _unwrap(argv0)
         name = os.path.basename(argv[0]) if argv else ""
         texts = _shell_inputs(argv[1:], cwd, bodies, name) if name in _SHELLS else \
-            [" ".join(argv[1:])] if name == "eval" else []
-        if any(_pipe_gate_closed(t, cwd, opened and name == "eval", depth + 1) for t in texts):
+            [" ".join(argv[1:])] if name == "eval" else \
+            [t for t, _, _ in _sourced(argv[1:], cwd, bodies)] if name in ("source", ".") and argv[1:] else []
+        if any(_pipe_gate_closed(t, cwd, opened and name in ("eval", "source", "."), depth + 1) for t in texts):
+            return True
+    for body in _process_substitutions(cmd):  # `source <(echo '…')`: what the substitution prints is run
+        if re.match(r"\s*(?:echo|printf|cat)\b", body) and PIPE_GATE.search(body) and not opened:
             return True
     return False
 

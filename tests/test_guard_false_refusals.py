@@ -195,7 +195,11 @@ class PipeGate(unittest.TestCase):
                     "set -o pipefail; bash -c 'python3 -m unittest x | tail -1 && git commit -m x'",
                     'echo "$(python3 -m unittest x | tail -1 && git push)"',
                     "eval 'python3 -m unittest x | tail -1 && dev commit -m x'",
-                    "bash <<'EOF'\npython3 -m unittest x | tail -1 && git commit -m x\nEOF"):
+                    "bash <<'EOF'\npython3 -m unittest x | tail -1 && git commit -m x\nEOF",
+                    # the Red team tester's: text that source runs from a substitution, also after a heredoc
+                    "source <(echo 'python3 -m unittest x | tail -1 && git commit -m x')",
+                    "cat <<'EOF'\nnote\nEOF\nsource <(echo 'python3 -m unittest x | tail -1 && git commit -m x')",
+                    ". /dev/stdin <<< 'python3 -m unittest x | tail -1 && git commit -m x'"):
             with self.subTest(cmd=cmd):
                 self.assertEqual(self.verdict(cmd), guard.PIPE_REASON)
 
