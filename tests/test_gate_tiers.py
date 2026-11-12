@@ -721,6 +721,17 @@ class UnknownProgramTests(GateCase):
         self.assertIn("push-destructive", [a for a, _, _ in self.acts(force)])
         self.assertIn("git push --force", self.member(force) or "")
 
+    def test_a_blank_line_never_makes_the_next_command_a_case_pattern(self):
+        # each newline became `;`, so a blank line was `;;`, an arm's end, and the one-word command after it was
+        # skipped as a pattern though no case statement was open (the Security engineer's review of 26.11.16)
+        for line in ("gh pr merge 12 --admin", "gh release create v1", "git push --force origin main"):
+            cmd = f"X='{line}'\n\n$X | cat"
+            with self.subTest(cmd=cmd):
+                self.assertTrue(self.acts(cmd))
+                self.assertIsNotNone(self.member(cmd, setting="enforce"))
+        # a case statement's patterns after a blank line stay patterns
+        self.assertEqual(self.acts('case "$x" in\n  a) echo a ;;\n\n  b|c) echo b ;;\nesac'), [])
+
     def test_the_words_after_a_substitution_belong_to_the_command_around_it(self):
         # the tokenizer ended a segment at the `)` of `$(…)`, so the rest of the word (`/*` in `ls $(echo x)/*`) was a
         # command of its own, and its glob read as a program named at run time

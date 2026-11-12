@@ -641,23 +641,25 @@ def _newlines_to_semicolons(cmd: str, op: str = ";") -> str:
     would hide the next line. `#` is an ordinary character (round ten): the words after one are read as more
     commands, which can only add a refusal, and a quote in a comment makes a line the guard cannot read
     (UNREADABLE_REASON). A backslash-newline is read as given here; check_bash reads it as bash does too."""
-    out, q, i, n = [], None, 0, len(cmd)
+    out, q, i, n, last = [], None, 0, len(cmd), ""  # last: the last character out holds that is no blank
     while i < n:
         ch = cmd[i]
         if ch == "\\" and q != "'" and i + 1 < n and cmd[i + 1] != "\n":
             out.append(cmd[i:i + 2])
-            i += 2
+            i, last = i + 2, cmd[i + 1] if not cmd[i + 1].isspace() else "\\"
             continue
         if q:
             if ch == q:
                 q = None
         elif ch in ("'", '"'):
             q = ch
-        elif ch == "\n":
-            ch = op
+        elif ch == "\n":  # a newline after a `;` (a blank line too) adds no other: `;;` would end a case arm
+            ch = " " if q is None and (not last or last == op) else op
         elif ch == "=" and _proc_subst_at(cmd, i):  # zsh's `=(…)` is read as the `<(…)` it runs as
             ch = "<"
         out.append(ch)
+        if ch not in (" ", "\t"):
+            last = ch
         i += 1
     return "".join(out)
 
@@ -5336,11 +5338,25 @@ def _case_head(argv) -> bool:
     return argv[:1] == ["case"] and (len(argv) == 2 or (len(argv) in (3, 4) and argv[2] == "in"))
 
 
+def _case_open(segs, k) -> bool:
+    """True when a case statement is open before segment k: more heads (`case WORD …`, after any keywords) than
+    `esac`s. Only there can a one-word segment be an arm's pattern."""
+    depth = 0
+    for seg in segs[:k]:
+        words = list(itertools.dropwhile(lambda w: w in _RESERVED - {"case", "esac"}, seg[0]))
+        if words[:1] == ["case"]:
+            depth += 1
+        elif words[:1] == ["esac"]:
+            depth = max(0, depth - 1)
+    return depth > 0
+
+
 def _case_pattern(segs, k) -> bool:
     """True when segment k of split_commands(ops=True) is a pattern of a case arm, which the shell matches and never
     runs: one word that ends at `)` or `|`, right after the statement's head, an arm's end (`;;`, `;&`, `;;&`) or
     another pattern (`b|$y)`, `*.md)`). A segment of more words is never a pattern, so no command is read as one."""
-    if not k or len(segs[k][0]) != 1 or not (segs[k][2] == "|" or segs[k][2].startswith(")")):
+    if not k or len(segs[k][0]) != 1 or not (segs[k][2] == "|" or segs[k][2].startswith(")")) or \
+            not _case_open(segs, k):
         return False
     prev, op = segs[k - 1][0], segs[k - 1][2]
     head = "case" in prev and not _unwrap(prev)
