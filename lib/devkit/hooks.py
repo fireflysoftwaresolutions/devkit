@@ -300,13 +300,15 @@ def context_for(cwd: str, agent: str) -> str:
                 holder, expired = work.lock_holder(it)
                 if holder and not expired:
                     entry = f"{it['meta']['id']} “{it['meta']['title']}” ({sc})"
-                    (mine if holder.startswith(f"{me['user']}@{me['host']}") else theirs).append(f"{entry} — {holder}")
+                    at = work.parse_iso(it["meta"].get("claimed_at")) or None  # a former hostname of this Mac's
+                    (mine if work.mine(holder, me, at=at) else theirs).append(f"{entry} — {holder}")
         if mine:
             lines.append("Your claimed tasks: " + "; ".join(x.rsplit(" — ", 1)[0] for x in mine[:6]))
         if theirs:
             lines.append("Claimed by others — do NOT work on these: " + "; ".join(theirs[:6]))
-        others = [t for t in work.team() if not (t["user"] == me["user"] and t["host"] == me["host"])]
-        busy = [f"{t['user']}@{t['host']} ({s_.get('agent')}, {s_.get('branch')})" for t in others
+        others = [t for t in work.team()  # this Mac's presence under a former hostname is still its own
+                  if not work.mine(f"{t['user']}@{t['host']}", me, at=work.parse_iso(t.get("updated")) or None)]
+        busy = [f"{t['user']}@{t.get('label') or t['host']} ({s_.get('agent')}, {s_.get('branch')})" for t in others
                 for s_ in t.get("sessions", []) if s_.get("project") == p["id"]]
         if busy:
             lines.append("Also working on this project right now: " + ", ".join(busy[:5]) +
@@ -859,7 +861,7 @@ def _handoff_nudge(agent: str, data: dict, sess: dict, now=None):
     from . import work
     a = work.actor(agent, sess.get("session") or "")
     mine = [i["meta"]["id"] for i in work.all_items(pid) if i["meta"].get("status") == "doing" and
-            str(i["meta"].get("claimed_by") or "").startswith(f"{a['user']}@{a['host']}")]
+            work.mine(i["meta"].get("claimed_by") or "", a, at=work.parse_iso(i["meta"].get("claimed_at")) or None)]
     tasks = (f"Tasks: keep {', '.join(mine)} current (`dev task done <id>` once verified; `dev task add \"…\" --why "
              f"\"…\"` for follow-ups)." if mine else
              "Tasks: claim the work item for this work (`dev task start <id>`) or add it (`dev task add \"…\" --now`).")

@@ -21,9 +21,10 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from devkit import audit, bugs, canary, core, guard, hooks, progress as pg, stubs  # noqa: E402
+from devkit import audit, bugs, canary, core, guard, hooks, progress as pg, registry, stubs, work  # noqa: E402
 from test_language_neutral_hooks import HookCase  # noqa: E402
 from test_progress import launch  # noqa: E402
+import test_threaded_turn_endings as turns  # noqa: E402  (its TurnCase fixture; its tests run in their own module)
 from test_bugs_sync import FakeClient, _bot, _issue, _record  # noqa: E402
 
 HOME = Path(__file__).resolve().parents[1]
@@ -141,6 +142,77 @@ class ScopeBaseTests(WiringCase):
         self.assertTrue(guard.scope_holds("src/pkg/a.py", self.repo, ["src/pkg/*.py"]))
         self.assertFalse(guard.scope_holds("src/pkg/studio/host.py", self.repo, ["src/pkg/*.py"]))
         self.assertTrue(guard.scope_holds("docs/guide/a.md", self.repo, ["docs/"]))  # a folder holds what lies below
+
+
+def handoff_of(case, handoff: Path):
+    # the work items, the registry and its notes in the test's own handoff
+    for obj, name, value in ((work, "HANDOFF", handoff), (work, "ITEMS", handoff / "items"),
+                             (work, "PRESENCE", handoff / "presence"),
+                             (registry, "HANDOFF", handoff), (registry, "NOTES", handoff / "projects")):
+        p = mock.patch.object(obj, name, value)
+        p.start()
+        case.addCleanup(p.stop)
+
+
+def claimed_as_mac_158(scope: str) -> dict:
+    # a task this Mac claimed while macOS named it mac-158: the lock names the Mac by that hostname, as locks did
+    # before the machine id; the caller then renames the Mac
+    with mock.patch("socket.gethostname", return_value="Mac-158.lan"):
+        me = work.actor("claude")
+        it = work.create(scope, "Fix the login", a=me)
+    it["meta"].update(claimed_by=f"{me['user']}@mac-158 (claude)", claimed_at=work.now_iso(), status="doing",
+                      lock_expires=work.now_iso(time.time() + 3600))
+    work.write_record(it["path"], work.render(it))
+    return it
+
+
+class ClaimedTaskTests(WiringCase):
+    def test_a_task_this_mac_claimed_under_its_former_hostname_is_its_own_at_the_session_start(self):
+        # macOS renames the Mac with the network: a task this Mac claimed as mac-158 is still its own, never one
+        # "claimed by others — do NOT work on these"
+        handoff_of(self, self.root / "handoff")
+        it = claimed_as_mac_158(core.project_identity(self.repo, "")[0])
+        repo = os.path.realpath(self.repo)
+        with mock.patch("socket.gethostname", return_value="andress-mbp-2"), \
+                mock.patch.object(registry, "update_note", lambda *a, **k: False), \
+                mock.patch.object(core, "is_temp", lambda p, real=core.is_temp: False if os.path.realpath(
+                    str(p)).startswith(repo) else real(p)):  # ... and the network renamed it
+            text = hooks.context_for(repo, "claude")
+        self.assertIn(f"Your claimed tasks: {it['meta']['id']}", text)
+        self.assertNotIn("Claimed by others", text)
+
+    def test_this_macs_presence_under_its_former_hostname_is_not_another_machine_at_the_session_start(self):
+        # presence this Mac wrote as mac-158 is its own, not someone "also working on this project"; another Mac is
+        # named by its hostname, the label of its machine id
+        handoff_of(self, self.root / "handoff")
+        pid = core.project_identity(self.repo, "")[0]
+        with mock.patch("socket.gethostname", return_value="Mac-158.lan"):
+            me = work.actor("claude")
+        live = [{"agent": "claude", "project": pid, "branch": "main", "active": True}]
+        for user, host, label in ((me["user"], "mac-158", "mac-158"), ("bob", "m-0b0b0b0b0b0b", "bob-mbp")):
+            work.PRESENCE.mkdir(parents=True, exist_ok=True)
+            (work.PRESENCE / f"{user}@{host}.json").write_text(json.dumps(
+                {"user": user, "host": host, "label": label, "updated": work.now_iso(), "sessions": live}))
+        repo = os.path.realpath(self.repo)
+        with mock.patch("socket.gethostname", return_value="andress-mbp-2"), \
+                mock.patch.object(registry, "update_note", lambda *a, **k: False), \
+                mock.patch.object(core, "is_temp", lambda p, real=core.is_temp: False if os.path.realpath(
+                    str(p)).startswith(repo) else real(p)):  # the network renamed the Mac
+            text = hooks.context_for(repo, "claude")
+        busy = next((ln for ln in text.splitlines() if ln.startswith("Also working on this project")), "")
+        self.assertIn("bob@bob-mbp (claude, main)", busy)
+        self.assertNotIn("mac-158", busy)
+
+
+class HandoffNudgeClaimTests(turns.TurnCase):
+    def test_the_handoff_nudge_names_a_task_this_mac_claimed_under_its_former_hostname(self):
+        # the turn's commits are newer than the note: the nudge names the tasks to keep current, this Mac's own
+        handoff_of(self, Path(self.tmp.name) / "handoff")
+        it = claimed_as_mac_158("acme/api")
+        self.commits(5)
+        with mock.patch("socket.gethostname", return_value="andress-mbp-2"):  # the network renamed the Mac
+            nudge = hooks._handoff_nudge("claude", self.data, self.sess, now=self.now)
+        self.assertIn(f"Tasks: keep {it['meta']['id']} current", nudge or "")
 
 
 class FailOpenTests(WiringCase):
