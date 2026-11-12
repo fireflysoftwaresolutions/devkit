@@ -70,6 +70,18 @@ class RoleFormTests(unittest.TestCase):
         self.assertEqual(bare("Tanks, Linked, Kidney, Neon and Sparkle are not crew names."), [])
 
 
+class RoleCheckTimeTests(unittest.TestCase):
+    # the role check runs at every Stop: a final message built to be slow must not stall it (lesson L-g8lywzsgclv)
+    # sizes where a pattern that rescans the text takes seconds and a one-pass one takes a few milliseconds
+    def test_a_pathological_final_message_is_read_in_bounded_time(self):
+        for text in ("x " + "`" * 8000, "a." * 40000, "Tank " * 8000, "Backend engineer (Tank) " * 3000,
+                     "```a\n" * 40000):
+            with self.subTest(text=text[:24]):
+                t0 = time.perf_counter()
+                bare(text)
+                self.assertLess(time.perf_counter() - t0, 0.5)
+
+
 class MemberHeaderTests(unittest.TestCase):
     # a member's header carries its role now, in the message's language: a long one is still the status block
     def test_a_header_with_a_long_role_in_another_language_is_the_status_block(self):

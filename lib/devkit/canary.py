@@ -105,12 +105,26 @@ def has_marker(text: str) -> bool:
 
 # The role check (the developer, M346; lesson L-fy2lfvacp64): a final message names a crew member as
 # `<role> (<Name>)`, the role in any language, so the Matrix names never stand alone. It reads the structure only: the
-# roster's name inside parentheses right after other words. Code blocks, code spans and links are not prose.
+# roster's name inside parentheses right after other words. Code blocks, code spans and links are not prose. It runs
+# at every Stop, so each pattern costs one pass whatever the message holds (lesson L-g8lywzsgclv): a fence always ends
+# (at its closing line or the text's end), a code span is at most three backticks around 400 characters without one,
+# and a link starts only where a run of its characters starts.
 _NOT_PROSE = (re.compile(r"(?ms)^[ \t]*(`{3,}|~{3,}).*?(?:^[ \t]*\1[ \t]*$|\Z)"),  # fenced code blocks
-              re.compile(r"(`+)[^\n]*?\1"),  # code spans, commands among them
-              re.compile(r"\b[a-z][a-z0-9+.-]*://\S+"))  # links
-_ROLE_BEFORE = re.compile(r"[\w)\]*]\s*[(（]$")  # "Backend engineer (", "バックエンドエンジニア（"
+              re.compile(r"(`{1,3})[^`\n]{1,400}\1"),  # code spans, commands among them
+              re.compile(r"(?<![a-z0-9+.-])[a-z][a-z0-9+.-]*://\S+"))  # links
 _ROLE_AFTER = re.compile(r"[)）]")
+
+
+def _role_before(prose: str, at: int) -> bool:
+    """Does a role end right before `at`: a word character, `)`, `]` or `*`, optional spaces, then `(` or `（`
+    ("Backend engineer (", "バックエンドエンジニア（")? Read backward from `at`, never the whole text before it."""
+    j = at - 1
+    if j < 0 or prose[j] not in "(（":
+        return False
+    j -= 1
+    while j >= 0 and prose[j].isspace():
+        j -= 1
+    return j >= 0 and (prose[j].isalnum() or prose[j] in "_)]*")
 
 
 def _prose(text: str) -> str:
@@ -155,7 +169,7 @@ def bare_names(text: str, roster=None) -> list:
     found = []
     for pat, name in pats:
         for hit in pat.finditer(prose):
-            if _ROLE_BEFORE.search(prose[:hit.start()]) and _ROLE_AFTER.match(prose, hit.end()):
+            if _role_before(prose, hit.start()) and _ROLE_AFTER.match(prose, hit.end()):
                 continue
             found.append((hit.start(), name))
     return list(dict.fromkeys(name for _, name in sorted(found)))
