@@ -4442,6 +4442,20 @@ def vendor_ext_refusal(argv, cwd=None, names=(), more=False) -> str:
     return "form" if more or any(_shell_made(a) for a in args) or not _vendor_read_only(cli, args) else ""
 
 
+def _split_values(word, text) -> list:
+    """The words bash makes of an unquoted `$X` program word (zsh: `${=X}`), for each literal value of more than one
+    word the command line `text` gives X: `X="claude mcp"; $X add …` runs claude. [] for any other word.
+    literal_variants already reads a value of one word."""
+    m = re.fullmatch(r"\$(?:\{=?([A-Za-z_]\w*)\}|([A-Za-z_]\w*))", str(word))
+    if not m:
+        return []
+    out = []
+    for v in re.finditer(rf"(?<![\w$]){m.group(1) or m.group(2)}\+?=(\"[^\"]*\"|'[^']*'|[^\s;&|]*)", text or ""):
+        value = v.group(1)[1:-1] if v.group(1)[:1] in "'\"" else v.group(1)
+        out += [value.split()] if len(value.split()) > 1 else []
+    return out
+
+
 def _brace_list(word) -> list:
     """The words bash makes of a word with one brace list (`{claude,mcp}`, `cl{a,}ude`), or [] for none; a word with
     more braces than one list is left to _shell_made, which counts it as a word the shell makes."""
@@ -4986,6 +5000,10 @@ class _Shell:
         if why:
             return deny(why, key="guardless-session")
         kind = vendor_ext_refusal(argv, cwd, set(names) | self.exported)
+        for words in [] if kind else _split_values(argv[0], self.cmd):  # `X="claude mcp"; $X add …`
+            kind = vendor_ext_refusal([*words, *argv[1:]], cwd, set(names) | self.exported)
+            if kind:
+                break
         if kind:
             return deny(_vendor_ext_reason(kind, self.code), key="vendor-ext")
         if terminal_open_refusal(argv):

@@ -394,6 +394,13 @@ class OlderBypassesOfTheExtensionRule(unittest.TestCase):
         found = guard.irreversible_actions("hyperfine 'gh pr merge 12'", self.cwd) or []
         self.assertEqual([(a["action"], a["target"]) for a in found], [("merge", "12")])  # the gate reads it too
 
+    def test_a_program_word_split_from_a_variable_is_read_as_its_words(self):
+        # bash splits an unquoted `$X`, zsh a `${=X}`: the words the command line gives X are the call's
+        self.judge((('X="claude mcp"; $X add evil -- npx evil', guard.EXT_FORM_REASON),
+                    ('X="claude mcp"; ${=X} add evil -- npx evil', guard.EXT_FORM_REASON),
+                    ("X='codex mcp add'; $X evil -- npx evil", guard.EXT_FORM_REASON)),
+                   ('X="claude mcp"; $X list', "$EDITOR plugin.json", 'X="ls -la"; $X', 'X="a b"; echo $X'))
+
 
 class PackageRunnersRunTheirCommand(unittest.TestCase):
     # F3 (re-review four): npm exec|x, bun x, yarn exec and `pnpm|yarn <bin>` run the command after them, so every
