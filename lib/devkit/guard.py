@@ -8178,7 +8178,9 @@ _RO_READERS = frozenset({
     "ps", "pgrep", "sw_vers", "id", "whoami", "printenv", "uptime", "groups", "locale", "getconf", "sysctl", "seq",
     # shell builtins that change nothing outside the shell
     "cd", "pushd", "popd", "true", "false", "test", "[", "[[", "read", "set", "wait", "sleep", "export", "unset",
-    "local", "declare", "typeset", "readonly", "for", "select", "case", "in", "esac"})
+    "local", "declare", "typeset", "readonly", "for", "select", "case", "in", "esac", "break", "continue",
+    # more readers: a column joiner, a manual page and its filter, the open files of processes
+    "paste", "col", "man", "lsof"})
 # a reader's own flags that write a file or run a program
 _RO_FLAGS = {"rg": ("--pre",), "sort": ("-o", "--output"), "tree": ("-o",), "file": ("-C", "--compile"),
              "date": ("-s", "--set"), "yq": ("-i", "--inplace", "-s", "--split-exp")}
@@ -8194,7 +8196,8 @@ _RO_CHECKS = (
     ("mypy", (), ()), ("pyright", (), ()), ("tsc", (), ()), ("eslint", (), ("--fix",)), ("prettier", (), ("--write", "-w")),
     ("shellcheck", (), ()), ("markdownlint", (), ("--fix",)), ("markdownlint-cli2", (), ("--fix",)),
     ("semgrep", (), ("--autofix", "-o", "--output")), ("gitleaks", (), ("-r", "--report-path")),
-    ("osv-scanner", (), ("--output",)), ("trivy", (), ("-o", "--output")))
+    ("osv-scanner", (), ("--output",)), ("trivy", (), ("-o", "--output")),
+    ("node", ("--test",), ("--test-update-snapshots",)))
 _RO_RUNNERS = frozenset({"npx", "bunx", "uvx", "pnpx", "uv", "poetry", "pipenv", "pdm", "hatch", "rye", "pnpm"})
 _RO_ENV = re.compile(r"^(?:LC_[A-Z]+|LANG|LANGUAGE|TZ|NO_COLOR|FORCE_COLOR|CLICOLOR(?:_FORCE)?|TERM|COLUMNS|LINES|CI|"
                      r"PYTHONDONTWRITEBYTECODE|PYTHONUNBUFFERED|PYTHONHASHSEED|PYTHONIOENCODING)$")
@@ -8536,6 +8539,8 @@ def _ro_dev(args, here=None, plans=None) -> str | None:
         return _ro_impeccable(args[args.index(sub) + 1:])
     if sub == "plan" and len(pos) > 1 and pos[1] in ("new", "revise"):
         return _ro_plan_write(args, pos, here, plans() if plans else None)
+    if sub == "watch":  # the caller's own wait (`--for` takes only `me`): it takes its own lane's events, as
+        return None  # `dev crew inbox` reads them
     if sub in _RO_DEV and (_RO_DEV[sub] is None or (pos[1] if len(pos) > 1 else "") in _RO_DEV[sub]):
         if sub == "ci" and _dev_sets(args, "--run", "--resume"):
             return "`dev ci --run` runs the pipeline's build and package steps"
@@ -8983,8 +8988,153 @@ def _own_scratch_script(argv, cwd, member) -> bool:
     return False
 
 
-def _ro_program(argv0, cwd, member=None, plans=None) -> str | None:
-    """Why one command of a read-only lane (its words, prefixes included) is refused, or None. `plans`: as _ro_dev."""
+_PY_LINKS = frozenset({"symlink", "symlink_to", "link", "hardlink_to", "link_to"})
+# the calls that run the code of a file or module the program names (runpy, importlib): what that code does is unread
+_PY_LOADS = frozenset({"run_path", "run_module", "exec_module", "load_module", "load_source", "load_compiled",
+                       "spec_from_file_location", "reload", "load_dynamic"})
+# the Python calls that write, move or delete what their path arguments name, and the index of the first such argument
+_PY_WRITES = {"remove": 0, "unlink": 0, "rmdir": 0, "removedirs": 0, "rmtree": 0, "mkdir": 0, "makedirs": 0,
+              "chmod": 0, "lchmod": 0, "chown": 0, "lchown": 0, "truncate": 0, "utime": 0, "mkfifo": 0, "mknod": 0,
+              "rename": 0, "renames": 0, "replace": 0, "move": 0, "copy": 1, "copy2": 1, "copyfile": 1,
+              "copytree": 1, "copymode": 1, "copystat": 1, "make_archive": 0, "unpack_archive": 1, "extract": 0,
+              "extractall": 0, "connect": 0, "FileHandler": 0, "savefig": 0, "to_csv": 0, "to_json": 0, "save": 0}
+# the methods of a path object that write what it names
+_PY_PATH_WRITES = frozenset({"write_text", "write_bytes", "touch", "mkdir", "unlink", "rmdir", "rename", "replace",
+                             "chmod", "lchmod"})
+# a mode that opens for writing; os.open's flags that do
+_PY_WRITE_MODE = re.compile(r"[wax+]")
+_PY_WRITE_FLAGS = re.compile(r"\bO_(?:WRONLY|RDWR|CREAT|APPEND|TRUNC)\b")
+
+
+def _py_path(node, cwd):
+    """The path a Python expression names, when it is written out: a string, Path(…)/PurePath(…) of strings,
+    os.path.join of strings, a path joined with / to a string. None for anything computed at run time."""
+    import ast
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.Call):
+        f = node.func
+        n = f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", "")
+        if n in ("Path", "PurePath", "PosixPath", "join", "expanduser") and node.args and not node.keywords:
+            parts = [_py_path(a, cwd) for a in node.args]
+            if all(isinstance(x, str) for x in parts):
+                return os.path.expanduser(os.path.join(*parts)) if n != "join" or \
+                    (isinstance(f, ast.Attribute) and getattr(f.value, "attr", "") == "path") else None
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+        left, right = _py_path(node.left, cwd), _py_path(node.right, cwd)
+        return os.path.join(left, right) if isinstance(left, str) and isinstance(right, str) else None
+    return None
+
+
+def _py_reader_why(code, cwd, member) -> str:
+    """'' when a Python program a read-only lane types inline only reads: it starts no process, calls no function by
+    a name it builds, makes no link, and every file it writes, moves or deletes is a path written out in its code
+    inside crew member `member`'s own scratch folder or a temporary folder outside the session scratchpad; else why
+    not."""
+    import ast
+    try:
+        tree = ast.parse(code)
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        return "the guard cannot parse this program"
+    if _code_spawns(code, "python3"):
+        return "this program can start a process: run that command itself"
+    found = _py_dynamic(code)
+    if found:
+        return f"this program calls a function by a name it builds ({_code(found)})"
+
+    def place(node, what):
+        p = _py_path(node, cwd) if node is not None else None
+        if p is None:
+            return f"this program {what} a file the guard cannot place: write the path out, in your scratch folder"
+        r = resolve(p, cwd)
+        if r != UNKNOWN and is_temp(r) and not _SCRATCHPAD.match(str(r)):
+            return ""
+        why = _ro_scratch_target(p, cwd, member)
+        return f"this program {what} {why}" if why else ""
+
+    for n in ast.walk(tree):
+        if not isinstance(n, ast.Call):
+            continue
+        f = n.func
+        name = f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", "")
+        if name in _PY_LINKS:
+            return "this program makes a link"
+        if name in _PY_LOADS:
+            return f"this program loads code from a file ({_code(name)}), which the guard does not read"
+        on_path = isinstance(f, ast.Attribute) and not (isinstance(f.value, ast.Name) and
+                                                        f.value.id in ("os", "shutil", "io", "codecs", "gzip", "bz2",
+                                                                       "lzma", "tarfile", "zipfile", "sqlite3"))
+        if name in ("open", "ZipFile", "TarFile", "GzipFile"):
+            modes = (list(n.args) if on_path and name == "open" else list(n.args[1:])) + \
+                [k.value for k in n.keywords if k.arg in ("mode", "flags")]
+            writes = any(not (isinstance(m, ast.Constant) and isinstance(m.value, (str, int))) or
+                         (isinstance(m.value, str) and _PY_WRITE_MODE.search(m.value)) for m in modes[:1]) or \
+                any(_PY_WRITE_FLAGS.search(ast.dump(m)) for m in modes)
+            if writes:
+                why = place(f.value if on_path and name == "open" else (n.args[0] if n.args else None), "writes")
+                if why:
+                    return why
+        elif on_path and name in _PY_PATH_WRITES:
+            why = place(f.value, "writes")
+            if why:
+                return why
+        elif name in _PY_WRITES:
+            k = _PY_WRITES[name]
+            if name == "connect" and n.args and isinstance(n.args[0], ast.Constant) and n.args[0].value == ":memory:":
+                continue
+            for arg in (n.args[k:k + 1] + (n.args[:1] if name in ("rename", "renames", "replace", "move") else [])
+                        or [None]):
+                why = place(arg, "writes")
+                if why:
+                    return why
+    return ""
+
+
+_JS_WRITES = re.compile(r"\b(?:writeFile|appendFile|mkdir|mkdtemp|rm|rmdir|unlink|rename|copyFile|cp|symlink|link|"
+                        r"truncate|ftruncate|chmod|lchmod|chown|lchown|utimes|lutimes|createWriteStream|open|"
+                        r"opendir)(?:Sync)?\s*\(|\bDeno\s*\.\s*\w*(?:write|remove|rename|mkdir|create|link|chmod|"
+                        r"truncate)\w*|\bBun\s*\.\s*write\b")
+
+
+def _js_reader_why(code) -> str:
+    """'' when a JavaScript program a read-only lane types inline only reads: it starts no process, calls no
+    function by a name it builds, and calls none of the file system's writes; else why not."""
+    bare = _outside_strings(code)
+    if _code_spawns(code, "node"):
+        return "this program can start a process: run that command itself"
+    m = _js_dynamic(bare)
+    if m:
+        return f"this program calls a function by a name it builds ({_code(' '.join(m.group(0).split()))})"
+    m = _JS_WRITES.search(bare)
+    return f"this program writes files ({_code(' '.join(m.group(0).split()))})" if m else ""
+
+
+def _ro_inline(argv, cwd, member, bodies):
+    """For an interpreter of a read-only lane that runs a program typed in the command (-c, -e, -p, `-` or its
+    input): '' when the program only reads (_py_reader_why, _js_reader_why), else why not; None when it runs a file
+    or a module, which the other rules judge."""
+    fam = _family(argv[0])
+    if fam not in ("python", "pypy", "node"):
+        return None
+    inline = False
+    for a in argv[1:]:
+        if a in ("-c", "-e", "--eval", "-p", "--print", "-") or (a.startswith("-") and not a.startswith("--") and
+                                                                  a[-1:] in ("c", "e", "p")):
+            inline = True
+            break
+        if a in ("-m",) or not a.startswith("-"):
+            return None
+    if not inline and not bodies:
+        return None
+    code = _program(argv, cwd, bodies)[0]
+    if not code:
+        return None
+    return _js_reader_why(code) if fam == "node" else _py_reader_why(code, cwd, member)
+
+
+def _ro_program(argv0, cwd, member=None, plans=None, bodies=()) -> str | None:
+    """Why one command of a read-only lane (its words, prefixes included) is refused, or None. `plans`: as _ro_dev;
+    `bodies`: the command's heredoc bodies, an inline program's input."""
     argv = _unwrap(argv0)
     pre = argv0[:len(argv0) - len(argv)]
     runner = False
@@ -9022,6 +9172,10 @@ def _ro_program(argv0, cwd, member=None, plans=None) -> str | None:
     if why is not None:
         if not why and _INTERP.match(name) and not runner and _own_scratch_script(argv, cwd, member):
             return None
+        if not why and _INTERP.match(name) and not runner:
+            inline = _ro_inline(argv, cwd, member, bodies)
+            if inline is not None:
+                return inline or None
         if not why and not runner and (_INTERP.match(name) or name in _SHELLS) and _version_only(name, args):
             return None
         if not why and not runner and name in _SHELLS and _shell_args(args, name)[2]:
@@ -9036,7 +9190,11 @@ def _ro_program(argv0, cwd, member=None, plans=None) -> str | None:
 # a shell variable a read-only lane may set alone (`S=/path; ls $S`): a lowercase name, or one capital letter with
 # digits, which no program reads from its environment; PATH, PAGER, IFS and the other known names stay refused
 _SHELL_VAR = re.compile(r"^(?!(?:path|fpath|cdpath|manpath|module_path|mailpath|histchars|fignore|psvar)$)"
-                        r"(?:[a-z_][a-z0-9_]*|[A-Z][0-9]*)$")  # zsh ties path to PATH, fpath to FPATH, …
+                        r"(?:[a-z_][a-z0-9_]*|[A-Z][0-9]*|"  # zsh ties path to PATH, fpath to FPATH, …
+                        # a short capital name (S, SP, OUT, LOG2) is no variable a program reads, unless the shell or
+                        # the system already exports it
+                        r"(?!(?:PATH|HOME|IFS|ENV|PS[0-9]|USER|PWD|TERM|LANG|MAIL|LESS|TMP|TEMP|BASH|ZSH|HOST|CI|TZ)$)"
+                        r"[A-Z][A-Z0-9_]{1,3})$")
 
 
 def _version_only(name: str, args) -> bool:
@@ -9167,9 +9325,106 @@ def _ro_mkdir(args, cwd, member) -> str | None:
     return None
 
 
+def _ro_scratch_target(a, cwd, member, deletes: bool = False) -> str | None:
+    """Why `a`, a path a read-only lane's command writes or deletes, is no place it may write, or None: a path in crew
+    member `member`'s own scratch folder, as its real path (a link there that points elsewhere resolves elsewhere),
+    named, for a delete (`deletes`), without a trailing slash (`rm -rf link/` deletes what the link points to), and
+    without a pattern that can match a dot entry."""
+    if not member:
+        return f"{_code(a)} is outside your scratch folder"
+    if _SUBST_WORD in a or "$" in a or "`" in a:
+        return f"{_code(a)} is known only when the command runs"
+    if (deletes and a.endswith(("/", "/.", "/.."))) or a in (".", "..") or a.endswith(("/.", "/..")):
+        return f"{_code(a)} ends with a slash or a dot, which follows a link or names a folder above"
+    if os.path.basename(a).startswith(".") and _GLOB.search(os.path.basename(a)):
+        return f"{_code(a)} is a pattern that can match `..`"
+    p = resolve(a, cwd)
+    if p == UNKNOWN:
+        return f"{_code(a)} is known only when the command runs"
+    m = _SCRATCHPAD.match(str(p))
+    if _app_scratch_allows(p, member) or (m and m.group(2) and not scratch_refusal(p, member)):
+        return None
+    return f"{_code(a)} is outside your scratch folder, scratchpad/{member}/"
+
+
+# the writes a read-only lane may make in its own scratch folder, with the short flags each may take: no recursive or
+# link copy (a copied link, followed later, writes elsewhere), no flag that reads a reference file or follows links
+_RO_SCRATCH_WRITERS = {"rm": "rfvdiIP", "rmdir": "pv", "unlink": "", "cp": "fivnpX", "mv": "fivn", "chmod": "vfR",
+                       "touch": "acm", "tee": "ai"}
+
+
+def _ro_scratch_write(name, args, cwd, member) -> str | None:
+    """`rm`, `rmdir`, `unlink`, `cp`, `mv`, `chmod`, `touch` or `tee` of a read-only lane: every path it writes or
+    deletes in crew member `member`'s own scratch folder (_ro_scratch_target): what cp copies may come from anywhere,
+    what mv moves may not. Any other flag is refused."""
+    pos, ended = [], False
+    for a in args:
+        if ended or not a.startswith("-") or a == "-":
+            pos.append(a)
+        elif a == "--":
+            ended = True
+        elif a.startswith("--") or set(a[1:]) - set(_RO_SCRATCH_WRITERS[name]):
+            return f"{_code(f'{name} {a}')} copies links, reads another file or acts in a way the guard does not read"
+    if name == "chmod":
+        pos = pos[1:]
+    targets = pos[-1:] if name == "cp" and len(pos) > 1 else pos if name != "cp" else []
+    if not targets:
+        return f"{_code(name)} with no file to write"
+    for t in targets:
+        why = _ro_scratch_target(t, cwd, member, deletes=name in ("rm", "rmdir", "unlink"))
+        if why:
+            return f"{_code(name)} writes {why}"
+    return None
+
+
+# a sed edit a read-only lane may make in its own scratch file: an address and d, p, y or an s command with the flags
+# g, p, i, I or a number (no w, e or r command or flag, which write, run or read a file)
+_SED_EDIT = re.compile(rf"^\s*(?:{_SED_ADDR}(?:\s*,\s*{_SED_ADDR})?)?\s*!?\s*(?:[dp]|"
+                       r"s([^\\\n\s])(?:(?!\1)[^\\\n]|\\.)*\1(?:(?!\1)[^\\\n]|\\.)*\1[gpiI0-9]*|"
+                       r"y([^\\\n\s])(?:(?!\2)[^\\\n]|\\.)*\2(?:(?!\2)[^\\\n]|\\.)*\2)\s*$")
+
+
+def _ro_sed_inplace(args, cwd, member) -> str | None:
+    """`sed -i` of a read-only lane: each script an edit _SED_EDIT reads, each file in crew member `member`'s own
+    scratch folder. BSD sed takes the backup suffix as -i's own word ('' or .bak)."""
+    has_e = any(a in ("-e", "--expression") for a in args)
+    scripts, files, i = [], [], 0
+    while i < len(args):
+        a = args[i]
+        if a in ("-i", "--in-place"):
+            if i + 1 < len(args) and (args[i + 1] == "" or re.fullmatch(r"\.[\w.~-]+", args[i + 1])):
+                i += 1
+        elif a.startswith(("-i", "--in-place=")) or a in ("-E", "-r", "-n", "--regexp-extended", "-s", "-u", "-z"):
+            pass
+        elif a in ("-e", "--expression") and i + 1 < len(args):
+            scripts.append(args[i + 1])
+            i += 1
+        elif a.startswith("-"):
+            return f"{_code(f'sed {a}')} reads a script file or acts in a way the guard does not read"
+        elif not has_e and not scripts:
+            scripts.append(a)
+        else:
+            files.append(a)
+        i += 1
+    for sc in scripts:
+        if any(not _SED_EDIT.match(part) for part in re.split(r"[;\n]", sc) if part.strip()):
+            return f"the sed script {_code(sc)} can write, run or read a file, or is one the guard does not read"
+    if not files:
+        return "`sed -i` with no file to edit"
+    for f in files:
+        why = _ro_scratch_target(f, cwd, member)
+        if why:
+            return f"`sed -i` writes {why}"
+    return None
+
+
 def _ro_reader(name, args, cwd, member=None) -> str | None:
     if name == "mkdir":
         return _ro_mkdir(args, cwd, member)
+    if name in _RO_SCRATCH_WRITERS:
+        return _ro_scratch_write(name, args, cwd, member)
+    if name == "sed" and any(a.startswith("-i") or a.startswith("--in-place") for a in args):
+        return _ro_sed_inplace(args, cwd, member)
     if name not in _RO_READERS and name not in ("git", "gh", "xargs"):
         return f"{_code(name)} is not on the read-only allowlist"
     if name == "sysctl" and any("=" in a or a in ("-w", "-f", "-p", "--write", "--load", "--system") or
@@ -9244,8 +9499,10 @@ def _close_paren(s: str, j: int) -> int:
 
 def _mask_substitutions(s: str):
     """(the command with each `$(…)`, backtick and `<(…)`/`>(…)`/`=(…)` the shell runs replaced by a placeholder
-    word, the commands inside them), or None for an arithmetic `$((…))` (zsh evaluates the variables in it as code) or a
-    substitution that does not end. Single quotes and comments are text."""
+    word, the commands inside them), or None for a substitution that does not end, or an arithmetic `$((…))` that
+    reads a name whose value may be code (_arith_unsafe_names: the shells evaluate a name's value as an expression).
+    Arithmetic on numbers is the word 0, and the substitutions inside it are commands of their own. Single quotes and
+    comments are text."""
     out, inner, i, n, q, parens = [], [], 0, len(s), None, _Parens(s)
     while i < n:
         c = s[i]
@@ -9258,8 +9515,15 @@ def _mask_substitutions(s: str):
             out.append(s[i:i + 2])
             i += 2
             continue
-        if s.startswith("$((", i):
-            return None
+        if s.startswith("$((", i) and (end := _arith_end(s, i + 3)) is not None:
+            body = s[i + 3:end]
+            if _arith_unsafe_names(body, s):
+                return None
+            inner += _subst(body, False)
+            out.append("0")
+            parens.close(end + 1, "w")
+            i = end + 2
+            continue  # `$((date)|wc -c)` is no arithmetic: read below as the substitution it is
         if s.startswith("$(", i) or (q is None and _proc_subst_at(s, i)):
             j = _close_paren(s, i + 2)
             if j < 0:
@@ -9350,6 +9614,8 @@ def readonly_refusal(cmd: str, cwd, member=None, depth: int = 0, plans=None) -> 
     osegs = split_commands(text, ops=True, stripped=True)
     ops = [s[2] for s in osegs] if osegs is not None and len(osegs) == len(segs) else None
     moved = False  # an earlier part of the command changes folder, or may: a plan write then needs a command of its own
+    bodies = heredoc_bodies(cmd)
+    wrote = ran = False  # a write in the scratch folder, a program run: never in one command (_RO_WRITE_AND_RUN)
     for k, (argv0, redirs) in enumerate(segs):
         if moved and _plan_write(argv0):
             return READONLY_REASON.format(what=PLAN_AFTER_CD)
@@ -9365,10 +9631,21 @@ def readonly_refusal(cmd: str, cwd, member=None, depth: int = 0, plans=None) -> 
         argv = _unwrap(argv0)
         if argv and os.path.basename(argv[0]) in ("cd", "pushd") and len(argv) > 1 and argv[1] != "-":
             here = str(resolve(argv[1], here))
-        why = _ro_program(argv0, here, member, plans)
+        why = _ro_program(argv0, here, member, plans, bodies)
         if why:
             return READONLY_REASON.format(what=why)
+        name = os.path.basename(argv[0]) if argv else ""
+        wrote = wrote or name in _RO_SCRATCH_WRITERS or \
+            (name == "sed" and any(a.startswith(("-i", "--in-place")) for a in argv[1:]))
+        ran = ran or bool(_INTERP.match(name) or name in _SHELLS or (name and "/" in argv[0] and name not in
+                                                                         _RO_READERS)) and not _version_only(name, argv[1:])
+        if wrote and ran:
+            return READONLY_REASON.format(what=_RO_WRITE_AND_RUN)
     return None
+
+
+_RO_WRITE_AND_RUN = ("a write in your scratch folder and a program in one command (the program could make a link the "
+                     "write then follows): run them as two commands")
 
 
 def member_level(member) -> str | None:

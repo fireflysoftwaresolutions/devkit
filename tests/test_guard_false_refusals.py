@@ -203,6 +203,72 @@ class ScratchScripts(Case):
                 self.refused(f"node {self.script('p.mjs', text)}")
 
 
+class ReadOnlyLanes(Case):
+    """A review or read-only lane runs the tests, reads and probes a review needs, and writes only in its own scratch
+    folder: arithmetic on numbers, a program it types inline when it writes nothing outside that folder and starts no
+    process, its own wait, and writes whose every target is in that folder. A write anywhere else, a link, a
+    recursive copy, a delete through a trailing slash, and a program that starts a process stay refused."""
+
+    def setUp(self):  # the folder, a file, and a link from the folder to a folder outside it
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.pad = str(Path(guard.real(tmp.name)) / "claude-501" / "-x" / "962d6aba-c6a8-44ab-9e02-1d15272468e1" /
+                       "scratchpad" / "seraph")
+        Path(self.pad).mkdir(parents=True)
+        (Path(self.pad) / "a").write_text("x")
+        (Path(guard.real(tmp.name)) / "outside" / "sub").mkdir(parents=True)
+        (Path(self.pad) / "out").symlink_to(Path(guard.real(tmp.name)) / "outside")
+
+    def ro(self, cmd):
+        return member(cmd.replace("@P", self.pad), level="review", who="seraph")
+
+    def test_reviews_run_their_checks_reads_and_waits(self):
+        for cmd in ("node --test tests/x.test.mjs", "lsof -i :8080", "paste -sd, a.txt", "man git | col -b | head",
+                    "for i in 1 2 3; do [ -s x ] && break; done", "echo $((3 + 4))", "n=2; echo $((n * 3))",
+                    "dev watch --wait --for me --timeout 3 2>&1 | tail -5", "SP=@P; ls $SP",
+                    "OUT=@P/o.txt; grep -c x lib/a.py > $OUT"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(self.ro(cmd))
+
+    def test_writes_inside_the_own_scratch_folder_run(self):
+        for cmd in ("SP=@P; mkdir -p $SP/x && cp lib/a.py $SP/x/ && sed -i '' s/a/b/ $SP/x/a.py && rm -f $SP/x/a.py",
+                    "chmod +x @P/t.sh", "touch @P/n", "echo x | tee @P/o.txt", "mv @P/a @P/b", "rm -rf @P/x"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(self.ro(cmd))
+
+    def test_a_write_outside_it_a_link_or_a_recursive_copy_stays_refused(self):
+        for cmd in ("rm -rf lib/build", "rm -rf @P/../tank/x", "rm -rf @P/x/", "cp -R lib @P/", "ln -s /x @P/l",
+                    "mv lib/a.py @P/", "sed -i '' s/a/b/ lib/a.py", "echo x | tee lib/a.py", "chmod +x lib/a.py",
+                    "cp lib/a.py lib/b.py", "rm -rf $X", "PATH=/tmp/evil; ls", "IFS=x; ls",
+                    "PYTHONPATH=/tmp/x; python3 -m pytest", "x=$(cat f); echo $((x))",
+                    # a link in the scratch folder that points elsewhere, one a program may make, a computed target
+                    "rm -rf @P/out/sub", "cp lib/a.py @P/out/", "rm -rf @P/x && python3 @P/p.py",
+                    "python3 @P/mklink.py; rm -rf @P/l/x", "rm -rf @P/x$(cat f)"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNotNone(self.ro(cmd))
+
+    def test_an_inline_program_that_only_reads_runs(self):
+        for cmd in ("python3 -c 'import json; print(json.load(open(\"p.json\")))'",
+                    "python3 - <<'EOF'\nimport ast\nprint(len(ast.parse(open('lib/a.py').read()).body))\n"
+                    "open('@P/out.txt', 'w').write('x')\nEOF",
+                    "node -e 'console.log(require(\"fs\").readFileSync(\"package.json\", \"utf8\").length)'"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(self.ro(cmd))
+
+    def test_an_inline_program_that_writes_links_or_starts_a_process_stays_refused(self):
+        for cmd in ("python3 -c 'open(\"lib/a.py\", \"w\").write(\"x\")'",
+                    "python3 -c 'import os; os.symlink(\"/x\", \"@P/l\")'",
+                    "python3 -c 'import subprocess; subprocess.run([\"git\", \"log\"])'",
+                    "python3 -c 'from pathlib import Path; Path(\"lib/a.py\").write_text(\"x\")'",
+                    "python3 -c 'import shutil; shutil.rmtree(\"lib\")'",
+                    "python3 -c 'import sys; open(sys.argv[1], \"w\").write(\"x\")' lib/a.py",
+                    "python3 -c 'import sqlite3; sqlite3.connect(\"lib/x.db\")'",
+                    "node -e 'require(\"fs\").writeFileSync(\"lib/a.js\", \"x\")'",
+                    "node -e 'require(\"child_process\").execSync(\"ls\")'"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNotNone(self.ro(cmd))
+
+
 class LaneStamp(unittest.TestCase):
     """A member's command that holds lane calls the router cannot place one by one is run with the member's lane
     variable exported, so every dev call in it acts as the member (Claude Code, whose rewrite approves nothing); a

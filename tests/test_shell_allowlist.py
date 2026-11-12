@@ -49,7 +49,7 @@ WRITERS = [
     "gawk -i inplace '{print}' src/a.py", "awk '{print > \"out.txt\"}' src/a.py", "awk 'BEGIN {system(\"touch x\")}'",
     "sed -n '1w out.txt' src/a.py", "sed -n '/x/W out.txt' src/a.py", "sed -n '1e touch x' src/a.py",
     "sed -i '' 's/a/b/' src/a.py", "python3 -c \"open('src/a.py', 'w').write('x')\"",
-    "python3 - <<'EOF'\nprint(1)\nEOF", "node -e \"require('fs').writeFileSync('x', '')\"",
+    "python3 - <<'EOF'\nopen('src/a.py', 'w').write('x')\nEOF", "node -e \"require('fs').writeFileSync('x', '')\"",
     "ruby -e 'File.write(%q(x), %q(y))'", "perl -e 'print 1'", "php -r 'file_put_contents(\"x\", \"y\");'",
     "osascript -e 'do shell script \"touch x\"'", "bash -c 'cat src/a.py'", "sh -c 'echo x > f'", "zsh -c ls",
     "eval 'ls'", "source ./env.sh", "ls | xargs touch", "find . -name '*.py' -exec sed -i s/a/b/ {} +",

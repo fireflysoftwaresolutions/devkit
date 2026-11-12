@@ -365,7 +365,7 @@ class RedTeam2(unittest.TestCase):
     # roster cannot be read, a crew member's lane kept the level it was given, while docs/guard.md says the lane check
     # fails closed. It now works at the strictest of that level and review.
     def test_a_roster_devkit_cannot_read_makes_the_lane_read_only(self):
-        cmd = "python3 -c \"print(1)\""
+        cmd = "python3 -c \"open('/etc/notes.txt', 'w').write('1')\""  # a write outside any scratch folder
         self.assertIsNone(self.member(cmd))  # baseline: an `all` lane runs it
         with mock.patch.object(guard, "member_level", side_effect=RuntimeError("crew.json unreadable")):
             self.assertIn("read-only lane", self.member(cmd) or "")
