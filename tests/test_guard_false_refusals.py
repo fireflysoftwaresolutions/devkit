@@ -511,8 +511,7 @@ class ReadOnlyLanes(Case):
                     "find . \\( -type f -newer x \\) -o -name y",
                     "sed -n \"$(grep -n 'def x' lib/a.py | cut -d: -f1),+14p\" lib/a.py",
                     "sed -n \"$(grep -n 'def x' lib/a.py | head -1 | cut -d: -f1),+5p\" lib/a.py",
-                    "rm -rf @P/res && mkdir -p @P/res && python3 @P/probe.py",
-                    "touch @P/n; python3 @P/probe.py > @P/out.txt"):
+                    "rm -rf @P/res && mkdir -p @P/res && ls @P/res", "touch @P/n; ls @P > @P/out.txt"):
             with self.subTest(cmd=cmd):
                 self.assertIsNone(self.ro(cmd))
         for cmd in ("sed -n \"$(cat f),+14p\" lib/a.py", "sed -n \"$(grep -n x a b | cut -d: -f1)p\" lib/a.py",
@@ -522,15 +521,41 @@ class ReadOnlyLanes(Case):
             with self.subTest(cmd=cmd):
                 self.assertIsNotNone(self.ro(cmd))
 
-    def test_an_inline_program_that_only_reads_runs(self):
+    def test_no_program_of_its_own_runs_in_a_read_only_lane(self):
+        # no reading of a program's code tells every way it may write (the Code reviewer's third round: functions
+        # passed as values, Path.copy, methodcaller, map(open, …, ['w'])): a read-only lane runs no program of its
+        # own, inline or from its scratch folder, Python or JavaScript, even one that only reads
+        (Path(self.pad) / "probe.py").write_text("import json\nprint(json.dumps([1]))\n")
         for cmd in ("python3 -c 'import json; print(json.load(open(\"p.json\")))'",
                     "python3 - <<'EOF'\nimport ast\nprint(len(ast.parse(open('lib/a.py').read()).body))\nEOF",
-                    "python3 -c 'from pathlib import Path; print(sorted(p.name for p in Path(\"lib\").glob(\"*.py\")))'",
-                    "python3 -c 'import re, sys; print(re.sub(\"a\", \"b\", open(sys.argv[1], \"rb\").read().decode()))' f",
-                    "node -e 'const fs = require(\"fs\"); console.log(fs.readdirSync(\"lib\").filter(f => f.endsWith(\".js\")))'",
-                    "node -e 'console.log(require(\"fs\").readFileSync(\"package.json\", \"utf8\").length)'"):
+                    "node -e 'console.log(require(\"fs\").readFileSync(\"package.json\", \"utf8\").length)'",
+                    "python3 @P/probe.py", "cd @P && python3 probe.py",
+                    "python3 - <<'EOF'\nfrom pathlib import Path\nPath('/etc/hosts').copy('README.md')\nEOF",
+                    "python3 - <<'EOF'\nfrom pathlib import Path\nlist(map(Path.write_text, [Path('README.md')], "
+                    "['x']))\nEOF",
+                    "python3 - <<'EOF'\nfrom pathlib import Path\nsorted([Path('README.md')], key=Path.unlink)\nEOF",
+                    "python3 - <<'EOF'\nimport operator\nfrom pathlib import Path\nlist(map(operator.methodcaller("
+                    "'write_text', 'x'), [Path('README.md')]))\nEOF",
+                    "python3 - <<'EOF'\nlist(map(open, ['README.md'], ['w']))\nEOF",
+                    "python3 - <<'EOF'\nimport functools\nfunctools.reduce(open, ['w'], 'README.md')\nEOF"):
+            with self.subTest(cmd=cmd):
+                why = self.ro(cmd)
+                self.assertIsNotNone(why)
+                self.assertIn("ask the tech lead", why)
+
+    def test_the_repositorys_tests_run_and_a_members_own_do_not(self):
+        (Path(self.pad) / "test_w.py").write_text("import unittest\n")
+        for cmd in ("python3 -m unittest tests.test_guard", "python3 -m unittest tests/test_guard.py", "pytest -q",
+                    "pytest tests", "python3 -m pytest tests/test_x.py::T::test_a", "node --test tests/x.test.mjs",
+                    "python3 -m unittest discover -s tests", "dev test"):
             with self.subTest(cmd=cmd):
                 self.assertIsNone(self.ro(cmd))
+        for cmd in ("python3 -m unittest discover -s @P", "python3 -m unittest @P/test_w.py",
+                    "python3 -m pytest @P/test_w.py", "pytest @P", "cd @P && python3 -m unittest test_w",
+                    "cd @P && pytest -q", "node --test @P/w.test.mjs", "pytest -p evil tests",
+                    "pytest --rootdir @P tests", "python3 -m unittest discover tests -t @P"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNotNone(self.ro(cmd))
 
     # the Red team tester's second round: a read-only lane's program writes nothing, whatever module, alias, mode or
     # path it uses; the member writes its scratch files with the shell
