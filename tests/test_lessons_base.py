@@ -12,7 +12,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
-from devkit import core, lessonlint, lessons, work  # noqa: E402
+from devkit import audit, core, lessonlint, lessons, work  # noqa: E402
 
 A = {"user": "ana", "host": "mbp1", "agent": "claude", "session": "s1"}
 DAY = 86400
@@ -27,7 +27,8 @@ class LessonCase(unittest.TestCase):
         for obj, name, value in ((lessons, "LESSONS", handoff / "lessons"), (lessons, "HANDOFF", handoff),
                                  (lessons, "STATE", state), (lessons, "USAGE_LOCAL", state / "lessons-usage.json"),
                                  (work, "HANDOFF", handoff), (work, "ITEMS", handoff / "items"),
-                                 (core, "HANDOFF", handoff), (core, "STATE", state)):
+                                 (core, "HANDOFF", handoff), (core, "STATE", state),
+                                 (audit, "AUDIT", self.root / "audit")):
             p = mock.patch.object(obj, name, value)
             p.start()
             self.addCleanup(p.stop)

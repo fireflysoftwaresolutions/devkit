@@ -277,11 +277,11 @@ def _refuse(errors: list) -> None:
         raise ValueError("; ".join(errors))
 
 
-def _clean_anchors(**given) -> dict:
-    """The anchors given, validated: one line each, no commas (the front matter's list separator), activity ids the
-    crew's RACI knows, and the anchor gate (lessonlint.check_anchors: no bare common program as a command, no short or
-    stoplisted error). Only anchors being added are judged: a lesson written before the gate still loads."""
-    out = {}
+def _anchor_problems(**given) -> tuple:
+    """The anchors given, cleaned (one line each), and every problem with them: a comma (the front matter's list
+    separator), a kind of work the crew's RACI does not know, and what the anchor gate refuses
+    (lessonlint.check_anchors). -> (anchors, [(problem, the same problem without output text, for the audit)])."""
+    out, problems = {}, []
     for k in ANCHORS:
         items = []
         for x in given.get(k) or []:
@@ -289,27 +289,58 @@ def _clean_anchors(**given) -> dict:
             if not x:
                 continue
             if "," in x:
-                raise ValueError(f"an anchor cannot contain a comma: {x!r} (give each one on its own flag)")
+                problems.append((f"the anchor `{x}` contains a comma: give each one on its own flag",
+                                 f"a {k[:-1] if k != 'activities' else 'activity'} anchor contains a comma"))
+                continue
             if k == "activities":
                 from . import raci
-                x = raci.resolve_activity(x)["id"]
+                try:
+                    x = raci.resolve_activity(x)["id"]
+                except ValueError as e:
+                    problems.append((str(e), f"no kind of work `{x}` in the crew's RACI"))
+                    continue
             if x not in items:
                 items.append(x)
         out[k] = items
-    _refuse(_lint().check_anchors(out))
+    for k in ANCHORS:
+        for x in out[k]:
+            for p in _lint().check_anchors({k: [x]}):
+                # an error anchor is the tool's output: the audit leaves it out, as it does on the command line
+                problems.append((p, p.replace(f" `{x}`", "") if k == "errors" else p))
+    return out, problems
+
+
+def _clean_anchors(**given) -> dict:
+    """The anchors given, validated (_anchor_problems), every problem refused at once. Only anchors being added are
+    judged: a lesson written before the gate still loads."""
+    out, problems = _anchor_problems(**given)
+    _refuse([p for p, _ in problems])
     return out
 
 
-class Duplicate(ValueError):
-    """`add` found a lesson, active or archived, that records the same mistake: an error or command anchor in common.
+class Refused(ValueError):
+    """`add` refused a lesson, with every problem it found at once (`problems`), so one corrected command records
+    it; `audit`: the same problems as the audit trail keeps them, without titles or output text."""
+
+    def __init__(self, problems: list, audit: list = None):
+        self.problems, self.audit = list(problems), list(audit or problems)
+        super().__init__(self.problems[0] if len(self.problems) == 1 else
+                         f"{len(self.problems)} problems: correct them all, then run it once more\n" +
+                         "\n".join(f"  - {p}" for p in self.problems))
+
+
+class Duplicate(Refused):
+    """`add` found a lesson, active or archived, that records the same mistake, among the problems it refuses.
     `lesson`: that lesson."""
 
-    def __init__(self, les: dict):
+    def __init__(self, les: dict, problems: list = (), audit: list = ()):
         self.lesson = les
         lid = les["meta"]["id"]
         where = ", archived" if is_archived(les) else ""
-        super().__init__(f"looks like {lid} (“{les['meta']['title'][:80]}”{where}): run `dev lesson recur {lid} "
-                         f"--evidence …`, or add `--new --why …` if it is another mistake")
+        mine = f"looks like {lid} (“{les['meta']['title'][:80]}”{where}): run `dev lesson recur {lid} --evidence " \
+               f"…`, or add `--new --why …` if it is another mistake"
+        super().__init__(list(problems) + [mine],
+                         list(audit) + [f"looks like {lid}{where}: recur it, or add --new --why"])
 
 
 def same_record(scope: str, anchored: dict) -> list:
@@ -352,26 +383,33 @@ def add(scope: str, title: str, kind: str = "mistake", severity: str = "medium",
         fix: str = "", prevention: str = "", detection: str = "", evidence=None, tags=None, why: str = "",
         a=None, retire_when: str = "", files=None, commands=None, activities=None, errors=None, stack=None,
         new: bool = False, author: str = "") -> dict:
-    """Record a lesson. Refused (ValueError) by the anchor gate, the capture shape (lessonlint.check_shape), or a
-    lesson of this scope or the global ones, active or archived, that shares an error or command anchor (Duplicate;
-    `new=True` with a `why` records it anyway). Text the screen judges unsafe is recorded but held: `quarantine`
-    says why, and recall leaves it out until the developer releases it. `author`: the writer's role (an agent) or
-    name; the agent, session and machine are added."""
-    anchored = _clean_anchors(files=files, commands=commands, activities=activities, errors=errors, stack=stack)
+    """Record a lesson. Refused (Refused, a ValueError, with every problem at once) by the anchor gate, the capture
+    shape (lessonlint.check_shape), a missing root cause or prevention, or a lesson of this scope or the global ones,
+    active or archived, that shares an error or command anchor (Duplicate; `new=True` with a `why` records it
+    anyway). A refusal is recorded in the audit trail with its problems (`dev.lesson.refused`). Text the screen
+    judges unsafe is recorded but held: `quarantine` says why, and recall leaves it out until the developer releases
+    it. `author`: the writer's role (an agent) or name; the agent, session and machine are added."""
+    anchored, found = _anchor_problems(files=files, commands=commands, activities=activities, errors=errors,
+                                       stack=stack)
     if kind not in KINDS:
-        raise ValueError(f"kind must be one of {', '.join(KINDS)}")
+        found.append((f"kind must be one of {', '.join(KINDS)}",) * 2)
     if severity not in SEVERITIES:
-        raise ValueError(f"severity must be one of {', '.join(SEVERITIES)}")
+        found.append((f"severity must be one of {', '.join(SEVERITIES)}",) * 2)
     if not (cause.strip() and prevention.strip()):
-        raise ValueError("a lesson needs the root cause (--cause) and the prevention (--prevent): what makes it not "
-                         "happen again")
+        found.append(("a lesson needs the root cause (--cause) and the prevention (--prevent): what makes it not "
+                      "happen again",) * 2)
     evidence = [str(e) for e in evidence or []]
-    _refuse(_lint().check_shape(title, happened, evidence))
+    found += [(p, p) for p in _lint().check_shape(title, happened, evidence)]  # no title text: only its length
     twins = same_record(scope, anchored)
-    if twins and not new:
-        raise Duplicate(twins[0])
-    if twins and not why.strip():
-        raise ValueError(f"it looks like {twins[0]['meta']['id']}: say why it is another mistake (--why \"…\")")
+    if twins and new and not why.strip():
+        found.append((f"it looks like {twins[0]['meta']['id']}: say why it is another mistake (--why \"…\")",) * 2)
+    problems, safe = [p for p, _ in found], [s for _, s in found]
+    if found or (twins and not new):
+        refusal = Duplicate(twins[0], problems, safe) if twins and not new else Refused(problems, safe)
+        from . import audit
+        audit.record("dev.lesson.refused", scope, "; ".join(refusal.audit), "blocked", category="refusal",
+                     severity="notice", count=len(refusal.problems))
+        raise refusal
     a = a or work.actor()
     lid = "L-" + work.new_id("task")[2:]
     now, day = work.now_iso(), today()

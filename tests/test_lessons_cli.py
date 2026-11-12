@@ -185,6 +185,36 @@ class SupersedeReleaseTests(LessonCLI):
         self.assertIn("is not held", out)
 
 
+LONG = "In a crew lane, prove shell expansion of a program word with dev guard check, never by running it"  # 97
+
+
+class CaptureRefusalTests(LessonCLI):
+    def test_add_reports_every_capture_problem_in_one_refusal(self):
+        # each refusal named one problem (the checks stopped at the first), so the Security engineer's lane needed
+        # four tries, titles of 97, 83 and 82 characters and then a duplicate, and gave up
+        twin = self.add("Prove expansion with dev guard check", errors=["zsh: no matches found: ./lib/*"])
+        rc, out = self.dev("add", LONG, "--happened", "a zsh probe was refused", *WHY, "--command", "python3",
+                           "--error", "zsh: no matches found: ./lib/*")
+        self.assertEqual(rc, 2, out)
+        self.assertIn("`python3` alone matches every python3 call", out)  # the anchor problem
+        self.assertIn("the title is 97 characters", out)  # the title problem
+        self.assertIn(f"looks like {twin['meta']['id']}", out)  # and the duplicate, all in the same refusal
+        self.assertEqual(len(lessons.all_lessons("acme/api")), 1)
+
+    def test_a_refused_add_records_why_in_the_audit_trail_without_its_text(self):
+        # the audit trail kept `detail: ""` for 84 refused adds, so nobody could see why capture kept failing
+        rc, out = self.dev("add", LONG, "--happened", "a zsh probe was refused", *WHY, "--command", "python3",
+                           "--error", "oops boom")
+        self.assertEqual(rc, 2, out)
+        rec = audit.query(action="dev.lesson.refused")[-1]
+        self.assertEqual((rec["outcome"], rec["category"], rec["target"]), ("blocked", "refusal", "acme/api"))
+        self.assertIn("the title is 97 characters", rec["detail"])
+        self.assertIn("`python3` alone", rec["detail"])
+        self.assertIn("the error anchor is 9 characters", rec["detail"])
+        self.assertNotIn("oops boom", json.dumps(audit.query()))  # output text and titles stay out, as for the
+        self.assertNotIn("prove shell expansion", json.dumps(audit.query()).lower())  # command line itself
+
+
 class AddTests(LessonCLI):
     def test_a_second_lesson_for_the_same_mistake_is_refused_unless_new_says_why(self):
         first = self.add("Wait for the server before the probe", errors=["connection refused on 8080"])
