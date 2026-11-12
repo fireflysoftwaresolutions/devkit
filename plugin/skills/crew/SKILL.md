@@ -222,9 +222,10 @@ files.
   working lanes to it (`session.adopt`), so your plan commands keep working.
 - **Read-only members** (the Code reviewer and the other review-only members) may run the reads of work state
   (`dev overview`, `dev standup`, `dev team`, `dev initiative ls|show`, `dev report` without `-o`, `dev plan ls`), the
-  probes a review needs, and writes in their own scratch folder: a Python or JavaScript program typed in the command
-  (`python3 -c`, `python3 - <<'EOF'`, `node -e`) or a script in their scratch folder when it only reads, test runs
-  such as `node --test`, arithmetic on numbers, their own `dev watch --wait --for me`, and `rm`, `cp`, `mv`, `touch`,
+  repository's tests, and writes in their own scratch folder. They run no program of their own (`python3 -c`,
+  `python3 - <<'EOF'`, `node -e`, or a script in their scratch folder): for a probe, they ask the tech lead to run it,
+  or describe the change with file:line. They may run test runs such as `node --test` on the repository's tests (never
+  a test file in a scratch or temporary folder), arithmetic on numbers, their own `dev watch --wait --for me`, and `rm`, `cp`, `mv`, `touch`,
   `tee`, or `sed -i` when every path written resolves inside `scratchpad/<member id>/`. A recursive copy, a link, or
   such a write next to a program run stays refused (`docs/guard.md`, "What read-only lanes may run"). A member Responsible for requirements,
   architecture, research, UX, or docs also records its plan from its review lane with `dev plan new` (in the run's

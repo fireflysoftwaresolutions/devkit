@@ -898,20 +898,15 @@ checks. These run as well:
   refuses it. When devkit cannot look up the member's kinds of work or the project, it refuses.
 - A command continued with a backslash-newline, read as the shell joins it.
 
-A script from the member's own scratch folder runs when an interpreter names it directly
-(`python3 scratchpad/<member id>/probe.py`) and it only reads; a Python or JavaScript program typed in the command
-(`python3 -c '…'`, `python3 - <<'EOF'`, `node -e '…'`) runs on the same terms. Such a program writes nothing at all:
-the member writes its scratch files with the shell (`cat > <scratch>/f <<'EOF'`), whose literal path the guard
-judges. Python may import only reading modules (`json`, `re`, `ast`, `difflib`, `textwrap`, `collections`,
-`itertools`, `functools`' pure helpers, `math`, `statistics`, `string`, `unicodedata`, `pathlib`, `os.path`, and
-`sys`'s arguments and output), call only reading builtins, its own functions, those modules' reads and the reading
-methods of strings, lists, dicts, matches, paths and files, and open files only with a literal read mode. A call
-through a name bound to another value (`w = p.write_text`), `**`, a dunder name, a change to a module's state
-(`os.environ[…] = …`, `sys.path.insert`), and any other module are refused. JavaScript may require only `fs` and
-`path`, bound whole or used in place, and use only their reads (`readFileSync`, `existsSync`, `readdirSync`,
-`statSync`), `JSON`, `console` and `process.argv`; destructuring a module, `.call`, `.apply`, `.bind`, `promisify`,
-a computed member and passing a module as a value are refused. A script the guard cannot read, or one the same
-command writes first, stays refused.
+A read-only lane runs no program of its own: no Python or JavaScript typed in the command (`python3 -c '…'`,
+`python3 - <<'EOF'`, `node -e '…'`) and no script from its scratch folder, as in devkit 26.11.16. No reading of a
+program's code can tell every way it may write (a function passed as a value, `operator.methodcaller`, `Path.copy`),
+so until an OS sandbox holds the lane, the refusal names the way: ask the tech lead to run the probe, or describe the
+change with file:line. The member writes its scratch files with the shell (`cat > <scratch>/f <<'EOF'`), whose
+literal path the guard judges. Its test runs (`pytest`, `python3 -m pytest`, `python3 -m unittest`, `node --test`)
+run the repository's tests: a file, folder or module they name, a discovery's folders, or the working folder when
+they name none, in a temporary folder outside a git work tree (where the scratchpads are) is refused, and so are
+pytest's `-p`, `-c`, `--rootdir`, `--confcutdir` and `--basetemp`.
 A script in another member's folder stays refused, and so do the same script under a runner (`uv run`, `npx`), a
 shell line or script (`bash -c '…'`, `bash x.sh`), and a `PYTHONPATH=` prefix.
 

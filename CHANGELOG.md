@@ -5,8 +5,8 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
 
 ## [Unreleased]
 
-This release lets crew members combine their lane commands with other commands on Claude Code and gives review lanes
-the probes a review needs, makes agents reply in the developer's language, delivers crew messages whole, keeps the
+This release lets crew members combine their lane commands with other commands on Claude Code, keeps review lanes
+to reads, the repository's tests and their own scratch files, makes agents reply in the developer's language, delivers crew messages whole, keeps the
 handoff sync pushing through any conflict, and corrects the docs where they had drifted from the code.
 
 ### Added
@@ -38,10 +38,11 @@ handoff sync pushing through any conflict, and corrects the docs where they had 
   member's lane exported for the whole command, so those calls work inside lists, loops, pipes, and `bash -c`. A
   refusal names what kept the command back. Codex keeps the narrow form: a lane call as the whole command, or joined
   to `cd` and reads.
-- **Crew.** Review lanes may run the probes a review needs: Python or JavaScript typed in the command, or a script in
-  their scratch folder, when it only reads; `node --test`; arithmetic on numbers; their own
-  `dev watch --wait --for me`; and writes, copies, and deletes inside their own scratch folder. A checkout inside a
-  temporary folder counts as a repository, not scratch.
+- **Crew.** Review lanes run the repository's tests (never a test file in a scratch or temporary folder),
+  `node --test`, arithmetic on numbers, their own `dev watch --wait --for me`, and writes, copies, and deletes inside
+  their own scratch folder. They run no program of their own, typed in the command or from their scratch folder,
+  as in 26.11.16: no reading of a program's code can tell every way it may write. For a probe, a reviewer asks the
+  tech lead to run it. A checkout inside a temporary folder counts as a repository, not scratch.
 - **Crew.** A crew message arrives whole in `dev watch --wait` and the hooks, up to the 1,500 characters a message
   holds. In one recorded run, 91% of members' questions had arrived cut at 300 characters.
 - **Crew.** A SendMessage answers only the crew questions its text names (`M3: …`). One that names none, such as a
@@ -123,8 +124,7 @@ handoff sync pushing through any conflict, and corrects the docs where they had 
   `printf -v "$x"`, `read -t "$x"`).
 - **Guard.** Crew members' Python and JavaScript programs (scripts, `-c` and heredocs) are judged against an allow
   list: a module or call outside a small set that cannot start a process, run code, or write where it should not
-  makes the program unknown, as before this release. Review lanes may only read and write literal paths in their own
-  scratch folder. A list of forbidden calls is never complete: aliases, `io.FileIO`, `fileinput`, `pydoc.pipepager`,
+  makes the program unknown, as before this release. Review lanes run no program of their own. A list of forbidden calls is never complete: aliases, `io.FileIO`, `fileinput`, `pydoc.pipepager`,
   `timeit`, `pdb.run` and `pickle.loads` got through it. `exec(open(f).read())` and an escape through
   `__subclasses__` used to pass.
 - **Guard.** A program's writes into devkit's state or the handoff repository are judged by the same allow list, in
