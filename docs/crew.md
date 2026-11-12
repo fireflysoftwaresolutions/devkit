@@ -244,10 +244,13 @@ that launch alone, so two members launched together never swap lanes:
   first step. `dev progress assign` binds a step to a lane that is already working only when that lane holds no other
   open step and its launch names the step; otherwise the step waits for a launch of its own, and the tech lead is
   told why.
-- **The steps its evidence is about.** When a lane ends, it closes the step its launch names, a step its
-  `dev progress step "…" --step "<name>"` names, and a step its report names. Any other step it held goes back to
-  pending, still its member's, with the reason in the step's history. A step delegated into a working lane closes only
-  on that lane's own evidence.
+- **The steps its evidence is about.** A member's `dev progress step "…" --step "<name>" --check "…"` on a step its
+  lane holds ends that step at once, by the rules of the member's end (done with a ✓ Check, otherwise unverified),
+  and the next steps start while the member works on; the command's line says the step closed, or why it stays open.
+  `dev progress note "…" --step "<name>" --check "…"` keeps partial evidence on the step (its last five) and leaves
+  it open: use it for a long or paused step. When a lane ends, it closes the step its launch names, a step it named with
+  `--step`, and a step its report names. Any other step it held goes back to pending, still its member's, with the
+  reason in the step's history. A step delegated into a working lane closes only on that lane's own evidence.
 - **A launch that failed** (an unknown agent type, an interrupt) starts no agent, so its record goes at once: it
   never labels another agent or holds a slot.
 - **A resumed agent** keeps its own lane and takes no other member's step or label. When it holds no open step, it
@@ -268,6 +271,24 @@ that launch alone, so two members launched together never swap lanes:
   applies it at the next hook, so no report is dropped (`crew.stop-deferred` in the audit trail).
 
 [Work states](work-states.md#crew-lanes) explains every state of a lane and what moves it.
+
+### File scopes
+
+A step's `--scope` is a list of globs, relative to the repository. The edit check, `dev commit` in a lane, the MCP
+scope check, `dev crew owner`, and the overlap check of `assign` all read it the same way, folder by folder:
+
+| Glob | Holds |
+| --- | --- |
+| `*`, `?`, `[…]` | Characters inside one folder name or filename, never across `/`: `src/pkg/*.py` holds `src/pkg/a.py`, not `src/pkg/studio/host.py` |
+| `**` | Any number of folders: `src/**` holds everything under `src/` |
+| A folder, or a glob that matches one | Everything under that folder |
+| `*.md` | Markdown files at the repository's root only; write `**/*.md` for every Markdown file |
+
+- A relative glob never holds a path outside its repository, such as the handoff plans or the tech lead's
+  scratchpad, so `**` alone holds the repository and nothing else.
+- A scope that names a whole checkout (`<worktree>/**`) becomes that checkout's top-level entries.
+- Two scopes overlap only when one path matches both, compared without case, so two members can split one folder:
+  `src/pkg/*.py` for one and `src/pkg/studio/host.py` for the other.
 
 ### Slots
 

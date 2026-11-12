@@ -149,6 +149,14 @@ dev crew graph --global              # every live session on this Mac (the defau
   member that needs more asks you. Write scopes repository-relative (`lib/**`): they match in every checkout of the
   repository. `assign` and `dev crew delegate --scope` rewrite an absolute or `~` path inside one checkout to that
   form and tell you, and refuse one that spans checkouts or names a worktree that is not there (deleted included).
+- **Scopes match folder by folder.** `*`, `?`, and `[…]` stay inside one folder name; `**` spans folders; a glob
+  holds everything under a folder it matches. `*.md` means root-level Markdown only: write `**/*.md` for all of it.
+  A relative glob never holds a path outside the repository, and a whole-checkout scope becomes its top-level
+  entries. Two scopes overlap only when one path matches both (without case), so two members can split one folder
+  (`src/pkg/*.py` and `src/pkg/studio/host.py`).
+- **A member's own close lands at once.** `dev progress step "…" --step "<name>" --check "…"` from the member ends
+  that step right away, and the steps after it start. For a long step that stays open, the member records partial
+  evidence with `dev progress note "…" --step "<name>" --check "…"`, which the crew gate accepts as the step's record.
 - **Check who holds the files first.** Before you assign a scope, or edit files outside your own lane, run
   `dev crew owner <paths>`: it names the member whose step holds each path. A member whose lane ended or went stale
   holds no files. When a step and its files go to another lane, a lane that kept those files may read but not write
