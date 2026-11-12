@@ -391,8 +391,8 @@ class PlanTests(Sandbox):
     # merged one: the registry's merge test says so, and its commits on no remote are in main, not work to push.
     def test_a_copy_merged_by_content_is_offered_like_a_merged_one(self):
         r = self.repo()
-        copy = r.parent / "kit-consulting-picked"
-        write(copy / "f", 30)
+        copy = self.worktree(r, r.parent / "kit-consulting-picked", "fix/picked")  # git reads it, as gc.remove_worktree
+        write(copy / "node_modules" / "f", 30)
         rep = self.measure(self.project("acme/kit-consulting", r, [
             self.wt(copy, "stray", "fix/picked", ahead_default=2, unpushed=2, landed=2, merged="content")]))
         offered = [i for i in rep["plan"] if i["kind"] == "copy"]
@@ -556,7 +556,7 @@ class FreeTests(Sandbox):
     def test_free_rechecks_safety_and_refuses_new_changes(self):
         r = self.repo()
         copy = self.worktree(r, r.parent / "kit-consulting-pr12", "claude/vigilant")
-        write(copy / "dist" / "x.js", 20)
+        write(copy / "node_modules" / "x.js", 20)
         rep = self.measure(self.project("acme/kit-consulting", r, [
             self.wt(copy, "stray", "claude/vigilant", pr={"number": 12, "state": "MERGED"})]))
         disk.save(rep)
@@ -569,11 +569,27 @@ class FreeTests(Sandbox):
         self.assertIn("Not freed: kit-consulting-pr12 has 1 changed file. Commit or discard it first.", out)
         self.assertTrue(copy.exists())
 
+    # A merged copy whose ignored files hold what no tool rebuilds (models/ here; a release worktree lost 3.6 GB of
+    # evidence under its ignored build/) is not offered as safe: the plan names those files with their size, as
+    # gc.remove_worktree would when it keeps the copy, and dev free --safe leaves it whole.
+    def test_free_offers_a_merged_copy_with_ignored_files_no_tool_rebuilds_only_as_check_first(self):
+        r = self.repo()
+        copy = self.worktree(r, r.parent / "kit-consulting-pr12", "claude/vigilant")
+        write(copy / "models" / "weights.bin", 20)
+        write(copy / "node_modules" / "x.js", 20)
+        rep = self.measure(self.project("acme/kit-consulting", r, [
+            self.wt(copy, "stray", "claude/vigilant", pr={"number": 12, "state": "MERGED"})]))
+        it = item(rep, "copy")
+        self.assertEqual(it["safety"], "check first")
+        self.assertIn("kit-consulting-pr12 stays: removing it would delete ignored files that are not known to be "
+                      "regenerable: models/ (20 KB); move them out or delete them, then dev wt rm", it["risk"])
+        self.assertNotIn("node_modules", it["risk"])
+
     # A merged, clean, pushed copy is removed with git worktree remove, so git forgets it too.
     def test_free_removes_a_merged_copy_with_git_worktree_remove(self):
         r = self.repo()
         copy = self.worktree(r, r.parent / "kit-consulting-pr12", "claude/vigilant")
-        write(copy / "dist" / "x.js", 20)
+        write(copy / "node_modules" / "x.js", 20)
         rep = self.measure(self.project("acme/kit-consulting", r, [
             self.wt(copy, "stray", "claude/vigilant", pr={"number": 12, "state": "MERGED"})]))
         disk.save(rep)

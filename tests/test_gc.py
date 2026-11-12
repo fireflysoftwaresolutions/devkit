@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
 from test_branches import HOUR, PID, PruneCase, git  # noqa: E402
-from devkit import audit, core, gc, registry  # noqa: E402
+from devkit import audit, branches, core, gc, gitx, registry  # noqa: E402
 
 
 class GcCase(PruneCase):
@@ -78,6 +78,71 @@ class GcWorktreeTests(GcCase):
         self.assertTrue(any("feat/wip" in n and "not on any remote" in n for n in pl["notes"]), pl["notes"])
         gc.apply(pl, remote=True)
         self.assertTrue(wt.is_dir())
+
+
+class GcIgnoredFilesTests(GcCase):
+    # `git worktree remove` refuses modified and untracked files but deletes ignored ones without asking: a merged
+    # release worktree lost 3.6 GB of evidence kept under its ignored build/. A worktree goes only when each ignored
+    # entry is a dependency folder or cache a tool rebuilds, or a byte-for-byte copy of the main checkout's file.
+    def setUp(self):
+        super().setUp()
+        (self.repo / ".git" / "info" / "exclude").write_text("evidence/\nbuild/\nnode_modules/\n__pycache__/\n.env\n")
+        self.land(*self.feature("fix/picked", "fix: keep the picked thing"))
+        self.wt = self.worktree("fix/picked")
+        (self.repo / ".env").write_text("TOKEN=main\n")
+
+    def put(self, rel, text="x"):
+        f = self.wt / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(text)
+        return f
+
+    def remove(self):
+        m = branches.merge_test(str(self.repo), "fix/picked", "origin/main")
+        return gc.remove_worktree(str(self.repo), str(self.wt), "fix/picked",
+                                  merged={"base": "origin/main", "sha": m["sha"], "prs": None})
+
+    def test_a_merged_worktree_with_ignored_files_no_tool_rebuilds_stays_whole_and_names_them(self):
+        evidence = self.put("evidence/run.json", "release proof")
+        asset = self.put("build/a16-predecessor/asset.bin", "the predecessor's assets")
+        env = self.put(".env", "TOKEN=changed here\n")
+        deps = self.put("node_modules/pkg/index.js")
+        ok, msg = self.remove()
+        self.assertFalse(ok, msg)
+        self.assertEqual([evidence.read_text(), asset.read_text(), env.read_text()],
+                         ["release proof", "the predecessor's assets", "TOKEN=changed here\n"])
+        self.assertTrue(deps.exists())
+        self.assertTrue(self.local("fix/picked"))
+        for named in ("build/ (", "evidence/ (", ".env (", f"then dev wt rm {core.tilde(str(self.wt))}"):
+            self.assertIn(named, msg)
+        self.assertNotIn("node_modules", msg)
+        self.assertNotIn("\n", msg)  # dev branch prune shows the last line of it
+
+    def test_a_merged_worktree_whose_ignored_files_are_caches_or_copies_goes_and_says_what_went_with_it(self):
+        self.put(".env", "TOKEN=main\n")  # .worktreeinclude copied it: the main checkout has the same bytes
+        self.put("node_modules/pkg/index.js")
+        self.put("src/__pycache__/m.pyc")
+        ok, msg = self.remove()
+        self.assertTrue(ok, msg)
+        self.assertFalse(self.wt.exists())
+        self.assertIn("went with it: .env, node_modules/, src/__pycache__/", msg)
+
+    def test_dev_pr_merge_says_it_kept_the_merged_branchs_worktree_for_its_ignored_files(self):
+        evidence = self.put("evidence/run.json", "release proof")
+        note, said = gitx._after_merge(gitx.ctx(self.repo), "fix/picked")  # a warning line, never the success line
+        self.assertEqual(note, "")
+        self.assertTrue(said.startswith(f"kept {core.tilde(str(self.wt))}: "), said)
+        self.assertIn("evidence/ (", said)
+        self.assertEqual(evidence.read_text(), "release proof")
+        self.assertTrue(self.local("fix/picked"))
+
+    def test_dev_branch_prune_says_it_kept_the_worktree_down_to_how_to_remove_it(self):
+        self.put("evidence/run.json", "release proof")
+        rc, out = self.dev("branch", "prune", "--local", "--apply")
+        self.assertIn(f"not deleted local fix/picked: kept {core.tilde(str(self.wt))}: ", out)
+        self.assertIn(f"then dev wt rm {core.tilde(str(self.wt))} (merged by content", out)
+        self.assertTrue((self.wt / "evidence" / "run.json").exists())
+        self.assertTrue(self.local("fix/picked"))
 
 
 class GcBranchTests(GcCase):

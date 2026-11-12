@@ -128,15 +128,21 @@ def ignored_folders(path: str, skip=()) -> list:
     return sorted(found, key=lambda f: -f["kb"])
 
 
-def _checkout(kind: str, info: dict, kb, folders: list, has_remote: bool) -> dict:
-    # merged: its pull request, or the registry's merge test (registry.merge_states: an ancestor of origin/<default>,
-    # its own merged pull request, or merged by content); unpushed: only the commits with no equivalent there
-    # (registry.unpushed_work)
+def _merged(kind: str, info: dict, has_remote: bool) -> bool:
+    # its pull request, or the registry's merge test (registry.merge_states: an ancestor of origin/<default>, its own
+    # merged pull request, or merged by content)
+    pr = info.get("pr") or None
+    return kind != "main" and has_remote and (bool(pr and pr.get("state") in ("MERGED", "CLOSED"))
+                                              or info.get("ahead_default") == 0
+                                              or info.get("merged") in ("ancestor", "pr", "content"))
+
+
+def _checkout(kind: str, info: dict, kb, folders: list, has_remote: bool, held: str = "") -> dict:
+    # unpushed: only the commits with no equivalent in origin/<default> (registry.unpushed_work); held: why
+    # gc.remove_worktree keeps a merged checkout for its ignored files (gc.ignored_hold), or ""
     pr = info.get("pr") or None
     how = info.get("merged")
-    merged = kind != "main" and has_remote and (bool(pr and pr.get("state") in ("MERGED", "CLOSED"))
-                                                or info.get("ahead_default") == 0
-                                                or how in ("ancestor", "pr", "content"))
+    merged = _merged(kind, info, has_remote)
     return {"kind": kind, "path": info["path"], "name": os.path.basename(info["path"]), "kb": kb or 0,
             "branch": info.get("branch"), "pr": {"number": pr["number"], "state": pr["state"]} if pr else None,
             "merged": merged, "how": how if merged else None, "ahead_default": info.get("ahead_default") or 0,
@@ -144,7 +150,7 @@ def _checkout(kind: str, info: dict, kb, folders: list, has_remote: bool) -> dic
             "unpushed": registry.unpushed_work(info),
             "modified": info.get("modified") or 0, "untracked": info.get("untracked") or 0,
             "active": bool(info.get("active")), "locked": bool(info.get("locked")),
-            "last_activity": info.get("last_activity") or 0, "folders": folders}
+            "last_activity": info.get("last_activity") or 0, "folders": folders, "held": held if merged else ""}
 
 
 def measure_projects(reg: dict, workers: int = WORKERS):
@@ -162,17 +168,19 @@ def measure_projects(reg: dict, workers: int = WORKERS):
                 jobs.append((i, LOCATION.get(w.get("location"), "copy"), w, []))
 
     def one(job):
-        _, kind, info, nested = job
+        i, kind, info, nested = job
         kb = core.du_kb(info["path"], timeout=900, exclude="worktrees" if kind == "main" else None)
-        return kb, ignored_folders(info["path"], nested)
+        removable = kind != "codex" and _merged(kind, info, bool(here[i].get("remote")))
+        held = gc.ignored_hold(here[i]["path"], info["path"])[1] if removable else ""  # remove_worktree's own check
+        return kb, ignored_folders(info["path"], nested), held
 
     with concurrent.futures.ThreadPoolExecutor(max(1, workers)) as ex:
         results = list(ex.map(one, jobs))
     out = []
     for i, p in enumerate(here):
         has_remote = bool(p.get("remote"))
-        cos = [_checkout(kind, info, kb, folders, has_remote)
-               for (j, kind, info, _), (kb, folders) in zip(jobs, results) if j == i]
+        cos = [_checkout(kind, info, kb, folders, has_remote, held)
+               for (j, kind, info, _), (kb, folders, held) in zip(jobs, results) if j == i]
         order = ["main", "worktree", "claude", "codex", "temp", "copy"]
         cos.sort(key=lambda c: (order.index(c["kind"]), -c["kb"]) if c["kind"] != "main" else (0, 0))
         out.append({"id": p["id"], "alias": amap.get(p["id"], p["id"]), "name": p.get("name") or "",
@@ -349,7 +357,8 @@ def _changed(c: dict) -> int:
 
 
 def blocker_from(c: dict):
-    """Why a checkout may hold work (measured), or None: a program in it, changed files, commits not pushed."""
+    """Why a checkout may hold work (measured), or None: a program in it, changed files, commits not pushed, ignored
+    files gc.remove_worktree would keep it for."""
     n = _changed(c)
     if c.get("active"):
         return f"a program is working in {c['name']}. Close it first."
@@ -359,6 +368,8 @@ def blocker_from(c: dict):
         k = c["unpushed"]
         return (f"{c['name']} has {_plural(k, 'commit')} that {'is' if k == 1 else 'are'} not pushed. "
                 f"Push {'it' if k == 1 else 'them'} first.")
+    if c.get("held"):
+        return f"{c['name']} stays: {c['held']}."
     return None
 
 

@@ -4,6 +4,8 @@
 
 Safety rules (checked when planning AND again right before acting):
   * never touch a checkout with uncommitted changes, untracked files, or commits not on a remote;
+  * never remove a worktree whose ignored files hold anything but dependency folders and caches a tool rebuilds
+    (REBUILT) or byte-for-byte copies of the main checkout's files: `git worktree remove` deletes ignored files;
   * never touch a checkout where any process (agent session, shell, editor, server) is working;
   * never remove main checkouts; never remove Codex-app worktrees (the app manages them);
   * only delete build output that git reports as ignored AND whose name is a known artefact;
@@ -11,6 +13,7 @@ Safety rules (checked when planning AND again right before acting):
 """
 from __future__ import annotations
 
+import filecmp
 import os
 import shutil
 import time
@@ -22,6 +25,13 @@ from .core import CFG, LOGDIR, git, gitout, human_kb, is_active, real, tilde
 ARTEFACTS = {"node_modules", ".venv", "venv", "dist", "build", "target", ".next", ".nuxt", ".angular", ".turbo",
              ".parcel-cache", ".cache", "coverage", ".pytest_cache", ".mypy_cache", ".ruff_cache", "__pycache__",
              ".gradle", ".build", "DerivedData", ".output", ".svelte-kit", "storybook-static", ".nx"}
+# What a worktree's removal may delete with it: folders a tool owns and fills again (installs, caches), and Finder's
+# metadata. Generic output names (build, dist, target, out, coverage, .cache, .output) are not here: people keep files
+# there too, and a merged worktree's ignored build/ held 3.6 GB of release evidence. Composer's vendor counts when its
+# composer.json is beside it.
+REBUILT = {"node_modules", ".venv", "venv", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache",
+           ".hypothesis", ".tox", ".nox", ".gradle", ".next", ".nuxt", ".angular", ".svelte-kit", ".turbo", ".nx",
+           ".parcel-cache", "DerivedData", ".DS_Store"}
 
 
 def _log(msg: str):
@@ -222,13 +232,54 @@ def _still_safe(path: str, branch: str = None, merged: dict = None):
     return True, ""
 
 
+def ignored_hold(main: str, path: str):
+    """The one check of a worktree's ignored files, for remove_worktree and `dev free`: the entries `git worktree
+    remove` deletes with the worktree at `path`, as git lists the ones that match an ignore pattern (a matching folder
+    whole, with its "/") -> (rebuilt, why). rebuilt: a REBUILT name, Composer's vendor, or a file with the same bytes at
+    the same place in the main checkout (what .worktreeinclude copied). why: "" when nothing else is there, else one
+    line naming the rest with their size, largest first, and how to remove the worktree on purpose (`dev branch prune`
+    shows only a failure's last line)."""
+    rc, out, _ = git(path, "status", "--ignored=matching", "--porcelain", "-z", "--untracked-files=normal", timeout=120)
+    if rc != 0:
+        return [], "git could not list its ignored files"
+    rebuilt, kept = [], []
+    for entry in out.split("\0"):
+        if not entry.startswith("!! "):
+            continue
+        rel = entry[3:]
+        full, twin = os.path.join(path, rel.rstrip("/")), os.path.join(main, rel.rstrip("/"))
+        name = os.path.basename(full)
+        composer = name == "vendor" and os.path.isfile(os.path.join(os.path.dirname(full), "composer.json"))
+        copied = os.path.isfile(full) and not os.path.islink(full) and os.path.isfile(twin) and filecmp.cmp(
+            full, twin, shallow=False)
+        if name in REBUILT or composer or copied:
+            rebuilt.append(rel)
+        else:
+            kept.append(rel)
+    if not kept:
+        return rebuilt, ""
+    sized = sorted(((core.du_kb(os.path.join(path, rel), timeout=60), rel) for rel in kept[:50]),
+                   key=lambda s: -(s[0] or 0))
+    shown = _listed([f"{rel} ({human_kb(kb)})" for kb, rel in sized] + kept[50:])
+    return rebuilt, (f"removing it would delete ignored files that are not known to be regenerable: {shown}; move "
+                     f"them out or delete them, then dev wt rm {tilde(path)}")
+
+
+def _listed(rels: list, most=5) -> str:
+    return ", ".join(rels[:most]) + (f" and {len(rels) - most} more" if len(rels) > most else "")
+
+
 def remove_worktree(main: str, path: str, branch: str = None, github: str = None, require_pr=None, log=True,
                     merged: dict = None):
     """Safe removal used by `dev wt rm`, gc, `dev branch prune` and `dev pr merge`. `merged`: {base, sha, prs} when the
-    caller's merge test found the branch merged; it is tested again here. -> (ok, message)."""
+    caller's merge test found the branch merged; it is tested again here. A worktree with ignored files no tool rebuilds
+    stays, whole: `git worktree remove` would delete them. -> (ok, message)."""
     ok, why = _still_safe(path, branch, merged)
     if not ok:
         return False, f"kept {tilde(path)}: {why}"
+    rebuilt, held = ignored_hold(main, path)
+    if held:
+        return False, f"kept {tilde(path)}: {held}"
     landed = _merged_now(path, branch, merged) if merged else None
     if require_pr is not None and github and branch:
         fresh = registry.pr_fresh(github, branch)
@@ -239,6 +290,8 @@ def remove_worktree(main: str, path: str, branch: str = None, github: str = None
     if rc != 0:
         return False, f"git worktree remove failed for {tilde(path)}: {err}"
     msg = f"removed worktree {tilde(path)} ({branch})"
+    if rebuilt:
+        msg += f"; its ignored dependencies, caches and copies went with it: {_listed(rebuilt)}"
     if branch and branch != "detached":
         if int(gitout(main, "rev-list", "--count", branch, "--not", "--remotes") or 1) == 0:
             git(main, "branch", "-D", branch)
