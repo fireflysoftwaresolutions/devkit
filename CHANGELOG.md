@@ -3,7 +3,7 @@
 All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH restarts at 0 each month); tags are
 `vYY.MM.PATCH`. Sections follow [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [26.11.17] - 2026-11-12
 
 This release lets crew members combine their lane commands with other commands on Claude Code, keeps review lanes
 to reads, the repository's tests and their own scratch files, makes agents reply in the developer's language, delivers crew messages whole, keeps the
