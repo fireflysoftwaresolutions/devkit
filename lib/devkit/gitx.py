@@ -151,6 +151,22 @@ def ctx(cwd=None):
     slug = None
     if provider == "github":
         slug = f"{owner}/{repo}" if host == "github.com" else f"{host}/{owner}/{repo}"
+        if (default == branch
+                and not core.gitout(top, "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD")
+                and not core.gitout(top, "for-each-ref", "--format=%(refname)", "refs/remotes/origin/")):
+            # An empty origin has no refs. The registry's local-branch fallback is not evidence that this
+            # branch is protected. REST retains the declared default even when defaultBranchRef is null.
+            rc, out, _ = GH(["api", f"repos/{owner}/{repo}", "--hostname", host], cwd=top, timeout=10)
+            try:
+                metadata = json.loads(out) if rc == 0 else None
+            except (ValueError, TypeError):
+                metadata = None
+            if (isinstance(metadata, dict)
+                    and str(metadata.get("full_name", "")).lower() == f"{owner}/{repo}".lower()):
+                declared = metadata.get("default_branch")
+                if (isinstance(declared, str) and declared and not declared.startswith("-")
+                        and core.git(top, "check-ref-format", f"refs/heads/{declared}")[0] == 0):
+                    default = declared
     pid = core.project_identity(main, remote)[0]
     return SimpleNamespace(top=top, main=str(main), remote=remote, has_origin=has_origin, host=host, owner=owner,
                            repo=repo, slug=slug, provider=provider, pid=pid, branch=branch, default=default)

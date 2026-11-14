@@ -218,6 +218,10 @@ Refs: PROJ-142
 - **Not on the default branch.** In a repository with an `origin`, a commit on `main` is refused with
   `dev branch new`, which takes your changes along. A branch with a non-conforming name is refused with
   `dev branch rename`.
+- **An empty GitHub origin.** When no local remote references exist, devkit reads GitHub's declared default
+  branch. A valid feature branch can receive its first commit before the remote has any commits. `main`, `master`,
+  and the declared default remain protected. Missing, invalid, or mismatched metadata keeps the conservative
+  refusal; check GitHub CLI authentication or fetch the remote default once it exists, then retry.
 - **Not in the middle of another git operation.** While git's own marks show a revert, cherry-pick, merge, rebase, or
   `git am` stopped halfway, `dev commit` refuses before it stages anything, names the operation, and says how the one
   who started it finishes it. A commit then would finish that operation for them, which matters in a checkout that
