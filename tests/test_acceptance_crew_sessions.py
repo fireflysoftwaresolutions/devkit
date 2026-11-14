@@ -201,9 +201,10 @@ class Session:
         """SessionStart, then the developer's first prompt (UserPromptSubmit), as the agent sends them."""
         self.transcript.parent.mkdir(parents=True, exist_ok=True)
         if not self.transcript.exists():
+            # This is an interactive session; exec rollouts cannot authorize typed grants or settlements.
             self.transcript.write_text(json.dumps({"timestamp": datetime.now(timezone.utc).isoformat(),
                 "type": "session_meta", "payload": {"id": self.sid, "session_id": self.sid,
-                    "source": "exec", "originator": "codex_exec", "cli_version": "0.167.0"}}) + "\n"
+                    "source": "vscode", "originator": "codex-tui", "cli_version": "0.167.0"}}) + "\n"
                 if self.agent == "codex" else "")
         out = self.hook("session-start", self.payload("SessionStart", source="startup"))
         if self.agent == "claude":  # Claude Code exports what the hook wrote to CLAUDE_ENV_FILE to every shell
