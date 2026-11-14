@@ -18,6 +18,7 @@ Run: python3 -m unittest tests.test_codex_launch -v (and with /usr/bin/python3, 
 import json
 import sys
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -39,6 +40,10 @@ def _line(rec: dict) -> str:
     return json.dumps(rec) + "\n"
 
 
+def _now():
+    return datetime.now(timezone.utc).isoformat()
+
+
 class CodexCrew(Crew):
     """A Codex tech lead's thread and its spawns, written as Codex 0.167.0 writes them."""
 
@@ -50,7 +55,7 @@ class CodexCrew(Crew):
         path = self.rollout(parent) if parent else s.transcript
         if not path.exists() or not path.read_text().strip():
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(_line({"timestamp": "2026-11-09T18:00:39.934Z", "type": "session_meta", "payload": {
+            path.write_text(_line({"timestamp": _now(), "type": "session_meta", "payload": {
                 "session_id": s.sid, "id": parent or s.sid, "cli_version": "0.167.0", "originator": "codex_exec",
                 "source": "exec"}}))
         return path
@@ -58,7 +63,7 @@ class CodexCrew(Crew):
     def spawn_call(self, s, member: str, task: str, call: str, parent: str = ""):
         """The spawn_agent call in the spawning thread's rollout: task_name in plain text, the brief encrypted."""
         with self.parent_rollout(s, parent).open("a") as fh:
-            fh.write(_line({"timestamp": "2026-11-09T18:00:55.217Z", "type": "response_item", "payload": {
+            fh.write(_line({"timestamp": _now(), "type": "response_item", "payload": {
                 "type": "function_call", "status": "completed", "id": f"fc_{call}", "name": "spawn_agent",
                 "namespace": "collaboration", "call_id": call,
                 "arguments": json.dumps({"task_name": task, "agent_type": member, "message": BRIEF})}}))
@@ -66,26 +71,31 @@ class CodexCrew(Crew):
     def spawn_started(self, s, aid: str, task: str, call: str, parent: str = ""):
         """Codex's record that the call started the agent (`SubAgentActivity`, its id the call's)."""
         with self.parent_rollout(s, parent).open("a") as fh:
-            fh.write(_line({"timestamp": "2026-11-09T18:00:55.326Z", "type": "event_msg", "payload": {
+            where = self.agent_path(s, task, parent)
+            fh.write(_line({"timestamp": _now(), "type": "event_msg", "payload": {
                 "type": "item_completed", "thread_id": parent or s.sid, "turn_id": "01a1c178-28b7-7fa1-a67c-2bd8b7433d66",
                 "item": {"type": "SubAgentActivity", "model": "gpt-6-luna", "reasoning_effort": "low", "id": call,
-                         "kind": "started", "agent_thread_id": aid, "agent_path": f"/root/{task}"}}}))
-            fh.write(_line({"timestamp": "2026-11-09T18:00:55.336Z", "type": "response_item", "payload": {
+                         "kind": "started", "agent_thread_id": aid, "agent_path": where}}}))
+            fh.write(_line({"timestamp": _now(), "type": "response_item", "payload": {
                 "type": "function_call_output", "call_id": call, "output": json.dumps({"task_name": f"/root/{task}"})}}))
 
     def agent_rollout(self, s, aid: str, member: str, task: str, parent: str = "", depth: int = 1, source=None):
         """The new agent's own rollout, which opens with its session_meta (a spawn: source.subagent.thread_spawn)."""
         path = self.rollout(aid)
         path.parent.mkdir(parents=True, exist_ok=True)
-        where = f"/root/{task}" if not parent else f"/root/{parent[-4:]}/{task}"
+        where = self.agent_path(s, task, parent)
         src = source if source is not None else {"subagent": {"thread_spawn": {
             "parent_thread_id": parent or s.sid, "depth": depth, "agent_path": where, "agent_nickname": "Halley",
             "agent_role": member}}}
-        path.write_text(_line({"timestamp": "2026-11-09T18:00:55.270Z", "type": "session_meta", "payload": {
+        path.write_text(_line({"timestamp": _now(), "type": "session_meta", "payload": {
             "session_id": s.sid, "id": aid, "forked_from_id": parent or s.sid, "parent_thread_id": parent or s.sid,
             "cwd": str(s.repo), "originator": "codex_exec", "cli_version": "0.167.0", "source": src,
             "thread_source": "subagent", "agent_role": member, "agent_path": where}}))
         return path
+
+    def agent_path(self, s, task, parent=""):
+        meta = json.loads(self.parent_rollout(s, parent).read_text().splitlines()[0])["payload"]
+        return (meta.get("agent_path") or "/root") + "/" + task
 
     def subagent_start(self, s, aid: str, member: str) -> dict:
         """SubagentStart as Codex 0.167.0 sends it: the transcript is the new agent's own rollout."""
@@ -140,6 +150,81 @@ class CodexLaunchRecord(CodexCrew):
         self.assertEqual((rec["key"], rec["state"], rec["type"], rec["parent"]),
                          (f"call_{TANK[-6:]}", "started", "tank", "main"))
 
+    def test_a_trusted_child_tool_hook_recovers_a_missed_start(self):
+        s = self.lead()
+        self.spawn_call(s, "tank", "api", "call_missed")
+        self.agent_rollout(s, TANK, "tank", "api")
+        self.spawn_started(s, TANK, "api", "call_missed")
+        s.hook("guard", s.payload("PreToolUse", agent_id=TANK, agent_type="tank", tool_use_id="call_read",
+            tool_name="Read", tool_input={"file_path": str(s.repo / "api/example.py")},
+            transcript_path=str(self.rollout(TANK))))
+        self.assertEqual(self.launch_of(s, TANK).get("key"), "call_missed")
+        self.assertEqual(self.step(s, "api")["owner"], TANK)
+        self.assertEqual(s.run_doc()["agents"][TANK]["scope"], ["api/**"])
+
+    def test_native_parent_hook_uses_task_name_instead_of_the_brief(self):
+        self.parent_hook_launch()
+
+    def test_reciprocal_proof_repairs_an_old_pending_message_label(self):
+        self.parent_hook_launch(old_label=True)
+
+    def test_reciprocal_proof_never_overwrites_a_pending_launchs_role(self):
+        s = self.lead()
+        s.hook("guard", s.payload("PreToolUse", tool_use_id="call_conflict", tool_name="spawn_agent",
+            tool_input={"agent_type": "neo", "task_name": "api", "message": "Implement the change."}))
+        self.spawn_call(s, "tank", "api", "call_conflict")
+        self.agent_rollout(s, TANK, "tank", "api")
+        self.spawn_started(s, TANK, "api", "call_conflict")
+        self.subagent_start(s, TANK, "tank")
+        self.assertEqual(self.launch_of(s, TANK), {})
+        self.assertEqual(self.step(s, "api")["owner"], "main")
+
+    def parent_hook_launch(self, old_label=False):
+        s = self.lead()
+        task = {"agent_type": "tank", "task_name": "api", "message": "Implement the requested change."}
+        if old_label:
+            task["description"] = task["message"]  # the derived label an earlier hook persisted
+        s.hook("guard", s.payload("PreToolUse", tool_use_id="call_parent", tool_name="spawn_agent", tool_input=task))
+        self.spawn_call(s, "tank", "api", "call_parent")
+        self.agent_rollout(s, TANK, "tank", "api")
+        self.spawn_started(s, TANK, "api", "call_parent")
+        self.subagent_start(s, TANK, "tank")
+        self.assertEqual(self.step(s, "api")["owner"], TANK)
+        self.assertEqual(s.run_doc()["agents"][TANK]["scope"], ["api/**"])
+        self.assertEqual(self.launch_of(s, TANK)["label"], "Tank: api")
+
+    def test_conflicting_reciprocal_task_never_takes_a_step(self):
+        s = self.lead()
+        self.spawn_call(s, "tank", "other", "call_conflict")
+        self.agent_rollout(s, TANK, "tank", "api")
+        self.spawn_started(s, TANK, "api", "call_conflict")
+        self.subagent_start(s, TANK, "tank")
+        self.assertEqual(self.launch_of(s, TANK), {})
+        self.assertEqual(self.step(s, "api")["owner"], "main")
+
+        patch = "*** Begin Patch\n*** Add File: ui/unauthorized.py\n+changed\n*** End Patch"
+        denied = s.hook("guard", s.payload("PreToolUse", agent_id=TANK, agent_type="tank", tool_use_id="bad_write",
+            tool_name="apply_patch", tool_input={"input": patch}, transcript_path=str(self.rollout(TANK))))
+        self.assertEqual((denied.get("hookSpecificOutput") or {}).get("permissionDecision"), "deny")
+        allowed = s.hook("guard", s.payload("PreToolUse", agent_id=TANK, agent_type="tank", tool_use_id="safe_read",
+            tool_name="Read", tool_input={"file_path": str(s.repo / "api/example.py")},
+            transcript_path=str(self.rollout(TANK))))
+        self.assertNotEqual((allowed.get("hookSpecificOutput") or {}).get("permissionDecision"), "deny")
+        shell = s.hook("guard", s.payload("PreToolUse", agent_id=TANK, agent_type="tank", tool_use_id="bad_shell",
+            tool_name="Bash", tool_input={"command": "printf changed > ui/unauthorized.py"},
+            transcript_path=str(self.rollout(TANK))))
+        self.assertEqual((shell.get("hookSpecificOutput") or {}).get("permissionDecision"), "deny")
+
+    def test_a_prior_runs_registered_launch_cannot_bind_the_replacement_run(self):
+        s = self.lead()
+        self.spawn(s, TANK, "tank", "api")
+        s.ok("progress", "start", "Replacement", "--plan", "api=10m [backend]", "--replace",
+             "--why", "new work generation")
+        s.ok("progress", "assign", "api", "--to", "Tank", "--scope", "api/**")
+        self.subagent_start(s, TANK, "tank")
+        self.assertEqual(self.step(s, "api")["owner"], "main")
+        self.assertNotIn(TANK, s.run_doc()["agents"])
+
     def test_a_task_name_in_snake_case_binds_the_step_whose_words_it_names(self):
         s = self.lead(plan="invoice csv=30m [backend]")
         s.ok("progress", "assign", "invoice csv", "--to", "Tank")
@@ -151,7 +236,7 @@ class CodexLaunchRecord(CodexCrew):
         self.spawn(s, TANK, "tank", "api")
         self.assertIn("1 of 2 slots in use", s.ok("crew", "next"))
 
-    def test_a_launch_binds_from_the_parents_rollout_before_its_own_is_written(self):
+    def test_a_launch_waits_for_its_own_metadata_then_a_tool_hook_binds_it(self):
         s = self.lead()
         call = "call_parent_only"
         self.spawn_call(s, "tank", "api", call)
@@ -159,15 +244,22 @@ class CodexLaunchRecord(CodexCrew):
         self.rollout(TANK).parent.mkdir(parents=True, exist_ok=True)
         self.rollout(TANK).write_text("")  # Codex has not written the agent's session_meta yet
         self.subagent_start(s, TANK, "tank")
+        self.assertEqual(self.launch_of(s, TANK), {})
+        self.assertEqual(self.step(s, "api")["owner"], "main")
+        self.agent_rollout(s, TANK, "tank", "api")
+        s.hook("guard", s.payload("PreToolUse", agent_id=TANK, agent_type="tank", tool_use_id="retry_read",
+            tool_name="Read", tool_input={"file_path": str(s.repo / "api/example.py")},
+            transcript_path=str(self.rollout(TANK))))
         self.assertEqual(self.launch_of(s, TANK)["key"], call)
         self.assertEqual(self.step(s, "api")["owner"], TANK)
 
-    def test_a_launch_takes_the_newest_unbound_spawn_of_its_agent_type_when_nothing_names_it(self):
+    def test_a_launch_never_takes_an_unbound_spawn_only_because_its_type_matches(self):
         s = self.lead()
         self.spawn(s, TRINITY, "trinity", "ui")  # an earlier spawn, already bound to its agent
         self.spawn_call(s, "tank", "api", "call_tank_newest")  # no SubAgentActivity yet, no session_meta
         self.subagent_start(s, TANK, "tank")
-        self.assertEqual(self.launch_of(s, TANK)["key"], "call_tank_newest")
+        self.assertEqual(self.launch_of(s, TANK), {})
+        self.assertEqual(self.step(s, "api")["owner"], "main")
         self.assertEqual(self.launch_of(s, TRINITY)["key"], f"call_{TRINITY[-6:]}")  # untouched
 
     def test_two_starts_at_once_with_two_spawns_of_their_type_waiting_take_neither_and_the_lead_is_told(self):
@@ -185,17 +277,21 @@ class CodexLaunchRecord(CodexCrew):
         for rid in rids:
             s._hook_result(rid)
         self.assertEqual([self.launch_of(s, aid).get("key") for aid in (TANK, TANK_2)],
-                         [f"codex-{TANK}", f"codex-{TANK_2}"])  # neither guessed: one would take the other's task
+                         [None, None])  # neither guessed: one would take the other's task
         self.assertEqual([self.step(s, name)["owner"] for name in ("api", "db")], ["main", "main"])
-        told = [m["text"] for m in s.messages() if m.get("to") == "main" and "could not tell which" in m["text"]]
+        told = [m["text"] for m in s.messages() if m.get("to") == "main" and "could not verify" in m["text"]]
         self.assertEqual(sorted(aid for aid in (TANK, TANK_2) for t in told if aid in t), sorted([TANK, TANK_2]), told)
         self.assertTrue(all("“api”" in t and "“db”" in t for t in told), told)
 
-    def test_of_two_spawns_of_its_type_waiting_a_start_takes_the_one_its_own_task_names(self):
+    def test_a_matching_task_waits_for_the_exact_native_started_result(self):
         s = self.lead(plan="api=30m [backend]; db=30m [backend]")
         self.spawn_call(s, "tank", "api", "call_tank_api")
         self.spawn_call(s, "tank", "db", "call_tank_db")
         self.agent_rollout(s, TANK, "tank", "api")  # its session_meta names its task; no SubAgentActivity yet
+        self.subagent_start(s, TANK, "tank")
+        self.assertEqual(self.launch_of(s, TANK), {})
+        self.assertEqual(self.step(s, "api")["owner"], "main")
+        self.spawn_started(s, TANK, "api", "call_tank_api")
         self.subagent_start(s, TANK, "tank")
         self.assertEqual(self.launch_of(s, TANK)["key"], "call_tank_api")
 

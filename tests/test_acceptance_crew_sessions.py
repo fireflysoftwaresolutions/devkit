@@ -25,6 +25,7 @@ import tempfile
 import threading
 import time
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -164,6 +165,7 @@ class Session:
         self.mac, self.host, self.agent, self.sid, self.repo = mac, host, agent, sid, repo
         self.calls, self.env_file = 0, mac.home / f"env-{sid}.sh"
         self.exports = {}
+        self.child_rollouts = {}
 
     # ---------------------------------------------------------------- hook events, as the agent sends them
 
@@ -178,6 +180,8 @@ class Session:
                 "transcript_path": str(self.transcript), "permission_mode": "bypassPermissions"}
         if self.agent == "codex":
             base.update(model="gpt-6.1-sol", turn_id="01a1c178-28b7-7fa1-a67c-2bd8b7433d66")
+            if fields.get("agent_id") in self.child_rollouts:
+                base["transcript_path"] = str(self.child_rollouts[fields["agent_id"]])
         return dict(base, **fields)
 
     def hook(self, event: str, payload: dict, wait=True):
@@ -197,7 +201,10 @@ class Session:
         """SessionStart, then the developer's first prompt (UserPromptSubmit), as the agent sends them."""
         self.transcript.parent.mkdir(parents=True, exist_ok=True)
         if not self.transcript.exists():
-            self.transcript.write_text("")
+            self.transcript.write_text(json.dumps({"timestamp": datetime.now(timezone.utc).isoformat(),
+                "type": "session_meta", "payload": {"id": self.sid, "session_id": self.sid,
+                    "source": "exec", "originator": "codex_exec", "cli_version": "0.167.0"}}) + "\n"
+                if self.agent == "codex" else "")
         out = self.hook("session-start", self.payload("SessionStart", source="startup"))
         if self.agent == "claude":  # Claude Code exports what the hook wrote to CLAUDE_ENV_FILE to every shell
             for ln in self.env_file.read_text().splitlines() if self.env_file.exists() else []:
@@ -281,7 +288,7 @@ class Session:
 
     def launch(self, aid: str, member: str, label: str):
         """The tech lead launches a crew member: the Agent call's PreToolUse, SubagentStart, and the call's result
-        naming the agent it started (Claude Code); Codex fires no hook for spawn_agent, only SubagentStart."""
+        naming the agent it started (Claude Code); Codex's native reciprocal records precede SubagentStart."""
         kind = f"devkit:{member}" if self.agent == "claude" else member
         if self.agent == "claude":
             tid = self._ids()
@@ -291,6 +298,27 @@ class Session:
             spec = g.get("hookSpecificOutput") or {}
             if spec.get("permissionDecision") == "deny":
                 return spec.get("permissionDecisionReason") or "denied"
+        else:
+            task, tid = label.partition(":")[2].strip().replace(" ", "_"), self._ids()
+            where = f"/root/{task}"
+            child = self.transcript.with_name(f"rollout-2026-11-09T10-00-55-{aid}.jsonl")
+            self.child_rollouts[aid] = child
+
+            def native(path, typ, payload):
+                with path.open("a") as stream:
+                    stream.write(json.dumps({"timestamp": datetime.now(timezone.utc).isoformat(),
+                                             "type": typ, "payload": payload}) + "\n")
+            native(self.transcript, "response_item", {"type": "function_call", "name": "spawn_agent",
+                "namespace": "collaboration", "call_id": tid, "arguments": json.dumps({
+                    "agent_type": kind, "task_name": task, "message": f"{label}. Do the work."})})
+            native(child, "session_meta", {"id": aid, "session_id": self.sid, "parent_thread_id": self.sid,
+                "agent_role": kind, "agent_path": where, "source": {"subagent": {"thread_spawn": {
+                    "parent_thread_id": self.sid, "depth": 1, "agent_role": kind, "agent_path": where}}}})
+            native(self.transcript, "event_msg", {"type": "item_completed", "thread_id": self.sid,
+                "item": {"type": "SubAgentActivity", "kind": "started", "id": tid,
+                         "agent_thread_id": aid, "agent_path": where}})
+            native(self.transcript, "response_item", {"type": "function_call_output", "call_id": tid,
+                "output": json.dumps({"task_name": where})})
         self.hook("subagent-start", self.payload("SubagentStart", agent_id=aid, agent_type=kind))
         if self.agent == "claude":
             self.hook("post-tool", self.payload("PostToolUse", tool_response={"agentId": aid, "status": "completed"},

@@ -808,7 +808,7 @@ def _msg(m: dict) -> dict:
 
 
 def _decision(d: dict) -> dict:
-    out = {k: d.get(k) for k in ("id", "from_name", "question", "options", "recommend", "irreversible", "state",
+    out = {k: d.get(k) for k in ("id", "from_name", "question", "options", "recommend", "irreversible", "repo", "state",
                                  "answer", "by", "overrides", "note")}
     out["time"] = _when(d.get("ts"))
     return out
@@ -1638,12 +1638,16 @@ def _ask_decision(a, me) -> int:
     if a.to:
         ui.err("a decision goes to the developer through the tech lead: drop --to")
         return 2
+    repo = getattr(a, "repo", None)
+    if repo is None and a.irreversible:
+        agent, sid = progress.current_session()
+        repo = (progress.load_run(agent, sid) or {}).get("project") or ""
     opts, rec = progress.decision_shape(" ".join(a.text), a.options or "", a.recommend or "", a.irreversible or "",
                                         a.target or "", getattr(a, "approves", "") or "",
-                                        performs=getattr(a, "performs", "") or "")
+                                        performs=getattr(a, "performs", "") or "", repo=repo)
     d = progress.crew_decision(" ".join(a.text), options=opts, recommend=rec, irreversible=a.irreversible or "",
                                from_agent=me, target=a.target or "", approves=getattr(a, "approves", "") or "",
-                               performs=getattr(a, "performs", "") or "")
+                               performs=getattr(a, "performs", "") or "", repo=getattr(a, "repo", None))
     if d["state"] == "decided":
         print(f"{ui.OK} auto mode: go ahead with {_option(d, d['answer'])} ({d['id']}, recorded; the developer can "
               "revisit it with dev crew decisions)")
@@ -1651,6 +1655,7 @@ def _ask_decision(a, me) -> int:
     print(f"{ui.WARN} {d['id']}: {d['question']}" + (f" · options {' | '.join(d['options'])}" if d["options"] else "")
           + (f" · recommends {d['recommend']}" if d["recommend"] else "")
           + (f" · irreversible: {d['irreversible']}" if d["irreversible"] else "")
+          + (f" · approval scope: {d['repo']}" if d.get("repo") else "")
           + (f" · only “{d['performs']}” opens it" if d.get("performs") else ""))
     if d.get("note"):
         print(ui.dim(f"  {d['note']}"))
@@ -1928,6 +1933,8 @@ def _messages(a, act) -> int:
         if act == "ask" and a.decision:
             return _ask_decision(a, me)
         if act == "ask":
+            if getattr(a, "repo", None) is not None:
+                raise progress.StepError("--repo requires --decision --irreversible and a literal owner/repo")
             m = progress.crew_ask(" ".join(a.text), to=a.to, from_agent=me)
             print(f"{ui.OK} {m['id']} to {who(m.get('to_name') or 'main')}: {m['text']}")
             wait = "dev watch --wait --for me" if me else "dev watch --wait"
@@ -2278,6 +2285,7 @@ def register(add):
     x.add_argument("--irreversible", help="the irreversible action it leads to: " + ", ".join(_irreversible()))
     x.add_argument("--target", help="what that action acts on (a branch, a tag, a PR number): the developer's "
                                     "answer opens that action on that target once")
+    x.add_argument("--repo", help="with --irreversible: literal owner/repo approval scope (default: startup project)")
     x.add_argument("--performs", help="with --irreversible and --options: the option that performs the action; only "
                                       "the developer's choice of it opens the action (default: the one option that "
                                       "reads yes or approve, else the recommended one)")

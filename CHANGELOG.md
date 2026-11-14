@@ -7,6 +7,21 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
 
 ### Fixed
 
+- **Codex crew.** A child tool hook can recover a missed registration when the parent launch and child metadata
+  agree. Reopened work keeps its valid owner, while reassignment revokes obsolete write scope and old launches
+  cannot acquire a new run's assignments. Missing or conflicting evidence grants no ownership; recovery still
+  requires a genuine child lifecycle or tool hook from Codex.
+- **Dashboard.** Keep month and current-day labels inside roadmap timelines at phone widths,
+  including month boundaries reached in a different timezone.
+- **Approvals.** Decisions and typed grants can name another repository with `--repo owner/repository`.
+  The displayed approval and its verified evidence retain that scope; legacy approvals keep their original
+  repository. Scope mismatches explain both repositories and leave the approval unused.
+- **Browser tools.** Opening a local tab with Claude in Chrome no longer requires an external-message grant.
+  The exact tool remains subject to write-lane controls; other external operations remain guarded.
+- **Initial commits.** An empty GitHub origin no longer makes every current feature branch look like the
+  protected default. Devkit validates GitHub's declared default; unavailable or invalid metadata remains guarded.
+- **Tests.** Continuity fixtures use recent request timestamps when their readers use the real clock, so the
+  seven-day retention policy no longer makes unrelated provider-isolation and hook tests expire.
 - **Releases.** `dev release` excludes verified GitHub Dependabot update automation from release CI, so a failed
   dependency update proposal does not block a commit whose CI passed. The API must confirm the exact run,
   repositories, commit, event, path, and bot actor; uncertain details and repository workflows still count.

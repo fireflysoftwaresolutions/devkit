@@ -344,6 +344,12 @@ apply the same rule. Change the lists with `branches.types` and `branches.forbid
 | An agent's `gh issue create`, `gh issue comment`, `gh issue edit`, or `gh api` on the issues of devkit's own repository, a `gh api repositories/<id>/issues…` route in any repository (a numeric id does not say which one), a `gh api graphql` mutation of an issue, a comment, or a reaction in any repository (a node id does not say which one either), and an MCP tool call that writes an issue or a comment there | deny, in the main session and the crew alike, whatever grants exist: "Agents do not post to devkit's bug registry directly. Use `dev bug report` or `dev bug detour`: devkit checks what leaves this machine. A comment on a pull request goes through `gh pr comment` or `dev pr comment`." (see [The bug registry](bug-registry.md)) |
 | `gh api graphql` with a query the guard cannot read: from standard input (`-F query=@-`, `--input -`), from a file it cannot open, or filled in by the shell (a substitution or a variable) | the action `unknown`, tier 2: it may be a merge or a forced ref update. Write the query out with `-f query='…'` or `-F query=@query.graphql`; if it must run as it is, the developer types `grant unknown cmd-<hash>` |
 
+### Local browser tabs
+
+`mcp__claude-in-chrome__tabs_create_mcp` opens a local browser tab. It remains a write operation for lane checks,
+but opening that tab does not require an external-message grant. This exception names the exact tool; similarly
+named tools from other servers, sending messages, uploads, and publishing retain their existing controls.
+
 ### Files and folders from the shell
 
 | Command | Decision |
@@ -741,7 +747,9 @@ grant backup acme/api
 ```
 
 A grant opens one of these commands, for that branch or project only, in the repository of the session you typed it
-in, and expires after 30 minutes. `grant backup <project>` opens one public backup or one policy change, not both.
+in, and expires after 30 minutes. To name another approval scope explicitly, append `--repo owner/repository` to
+the grant; see [Approving work in another repository](crew.md#approving-work-in-another-repository). A directory
+change does not broaden an existing grant. `grant backup <project>` opens one public backup or one policy change, not both.
 `grant developer-only <target>` with the target the refusal names (`embargo/<branch>`, `backup-public/<project>`,
 `backup-policy/<project>`, `lesson-block/<lesson>`) works too. None of them is ever pre-approved with `dev crew mode auto --approve`. A dry run,
 the help, `dev branch embargo` (the list), and `dev backup policy` (the read) need no grant.
@@ -845,6 +853,11 @@ these hold:
 In Codex anything else stays refused: `dev progress step x && rm -rf build`, `echo y | dev crew decide D1 A`,
 `dev progress step x | tee out`, `env dev crew …`, `bash -c 'dev crew …'`, and a lane call inside `$(…)`, `<(…)`,
 or `>(…)` (`wc -l <(dev crew decide D1 A)`).
+
+These routing rules describe hook-supported Codex calls. If the host did not register the native call,
+the next genuine child tool hook can recover a missed start only with matching native launch evidence. Missing
+or conflicting proof grants no step or scope. See [Codex identity failures](agents.md#codex-identity-failures);
+simplifying a command does not replace that proof or repair absent hooks.
 
 #### What read-only lanes may run
 

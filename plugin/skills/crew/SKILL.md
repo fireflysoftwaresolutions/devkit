@@ -21,6 +21,16 @@ continuation tool (`followup_task` or `send_input`) when continuing the same ste
 `--step "<exact step name>"` in its `dev progress step` completion command. After the native final report, the lead
 checks `dev progress history` to verify that this exact step is done before integrating its result.
 
+For native Codex registration failures, follow `using-devkit`: a delivered child hook can recover a missed start
+only with matching parent spawn and child metadata. Missing or conflicting proof leaves the child unbound and
+read-only until a valid hook retries. The native `task_name` selects the step; recovery can repair an older pending
+message-derived label only when the immutable launch records agree. Existing lanes recheck the current run, role,
+and recorded owner; reassignment revokes old write access even when its scope was unrestricted. A legacy lane with
+unrecoverable ownership stays read-only until explicitly assigned. Valid same-role reopenings and queued work
+remain supported. If hooks remain absent or identity unresolved, stop and report it. The parent cannot substitute
+its own completion or approval
+for a member's blocked evidence.
+
 **Name them by role.** In every message, report, and brief, write a member as `<Role> (<Name>)`, such as Backend
 engineer (Tank), or by the role alone, in the developer's language; never by the Matrix name alone. The end-of-turn
 check sends a final message or a member's report back once when its prose breaks this. Commands and code keep the ids
@@ -296,6 +306,11 @@ dev crew decide D1 "B: reject"                          # the tech lead records 
 - Change modes when the developer says so: "go ahead on your own" → `dev crew mode auto`; a request to be asked first →
   `dev crew mode guided`. Pre-approve only the irreversible actions the developer named; developer-only actions
   (an embargo lift, a public backup, a backup policy) and commands the guard cannot name are never pre-approved.
+- For another repository, put a literal `--repo owner/repository` on the irreversible decision, or have the
+  developer type `grant <action> <target> --repo owner/repository` in ordinary chat. Without it, the session's
+  original repository remains the scope; changing directories does not change an approval. Auto-mode approval
+  must match action, target, repository, expiration, and remaining uses. A mismatch consumes nothing. A global
+  GitHub API command still has a repository approval scope. Asynchronous question-widget text is not a typed grant.
 - In auto mode, the final report lists every automatic decision so the developer can review it; an override with
   `dev crew decide` is recorded next to the original.
 - Recording an answer never brings back a lane that ended: the step it blocked goes back to pending, and the resume

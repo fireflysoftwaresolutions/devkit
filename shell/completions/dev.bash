@@ -391,7 +391,7 @@ _dev_spec() {
     'crew show') o='-h --help' p='*l:crew:-::' ;;
     'crew brief') o='-h --help --scope --step --activity' v='--scope=n --step=l:steps:-:: --activity=l:activities:-::' p='l:crew:-:: *n' ;;
     'crew sync') o='-h --help --check' ;;
-    'crew ask') o='-h --help --to --decision --options --recommend --irreversible --target --performs --approves' v='--to=l:crew:-:: --options=n --recommend=n --irreversible=n --target=n --performs=n --approves=l:steps:-::' p='*n' ;;
+    'crew ask') o='-h --help --to --decision --options --recommend --irreversible --target --repo --performs --approves' v='--to=l:crew:-:: --options=n --recommend=n --irreversible=n --target=n --repo=n --performs=n --approves=l:steps:-::' p='*n' ;;
     'crew answer') o='-h --help' p='n *n' ;;
     'crew inbox') o='-h --help --all' ;;
     'crew mode') o='-h --help --approve' v='--approve=n' p='c:guided,auto' ;;

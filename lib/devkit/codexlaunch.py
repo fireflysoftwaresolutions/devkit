@@ -25,6 +25,7 @@ import re
 import time
 from datetime import datetime
 from pathlib import Path
+from datetime import datetime
 
 SPAWN_TAIL = 4_000_000  # bytes of a spawning thread's rollout read for its spawn calls, from the end
 THREAD = re.compile(r"[A-Za-z0-9_-]{1,80}")
@@ -135,110 +136,116 @@ def task_of(agent_path) -> str:
     return str(agent_path or "").rstrip("/").rsplit("/", 1)[-1] if agent_path else ""
 
 
-def spawn_calls(path) -> tuple:
-    """The spawn_agent calls in the last SPAWN_TAIL bytes of a rollout, oldest first, [{call_id, task_name,
-    agent_type}], and {call id: agent id} for the calls Codex recorded as started (SubAgentActivity)."""
+def _timestamp(record):
     try:
-        with open(path, "rb") as fh:
-            size = fh.seek(0, 2)
-            fh.seek(max(0, size - SPAWN_TAIL))
-            lines = fh.read().splitlines()
-    except (OSError, TypeError, ValueError):
+        stamp = datetime.fromisoformat(str(record.get("timestamp", "")).replace("Z", "+00:00"))
+        return stamp.timestamp() if stamp.tzinfo else 0
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def spawn_calls(path) -> tuple:
+    """Exact native calls and completed starts from this parent's bounded rollout.
+
+    This proves launch linkage only. It never authenticates a shell invocation.
+    A missing, partial or conflicting record leaves registration for a later hook.
+    """
+    from .progress import CODEX_META_MAX
+    meta = session_meta(path)
+    calls, started, seen = [], {}, set()
+    try:
+        if Path(path).stat().st_size > 64 * 1024 * 1024:
+            return [], {}
+        with open(path, "rb") as stream:
+            created = _timestamp(json.loads(stream.readline(CODEX_META_MAX)))
+            for line in stream:
+                if not line.endswith(b"\n"):
+                    return [], {}
+                if b'"spawn_agent"' not in line and b'"SubAgentActivity"' not in line:
+                    continue
+                record = json.loads(line)
+                if _timestamp(record) < created:
+                    continue  # inherited fork history belongs to the parent, not this thread
+                p = record.get("payload") or {}
+                if record.get("type") == "response_item" and p.get("type") == "function_call" and \
+                        p.get("name") == "spawn_agent" and p.get("namespace") == "collaboration":
+                    cid = p.get("call_id")
+                    if not cid or cid in seen:
+                        return [], {}
+                    seen.add(cid)
+                    args = json.loads(p.get("arguments") or "{}")
+                    if not isinstance(args, dict):
+                        return [], {}
+                    calls.append({"call_id": cid, "task_name": args.get("task_name"),
+                                  "agent_type": args.get("agent_type"), "at": _timestamp(record)})
+                item = p.get("item")
+                if record.get("type") == "event_msg" and p.get("type") == "item_completed" and \
+                        p.get("thread_id") == meta.get("id") and isinstance(item, dict) and \
+                        item.get("type") == "SubAgentActivity" and item.get("kind") == "started":
+                    started.setdefault(item.get("id"), []).append({"agent": item.get("agent_thread_id"),
+                        "path": item.get("agent_path"), "at": _timestamp(record)})
+    except (OSError, TypeError, ValueError, AttributeError):
         return [], {}
-    calls, started = [], {}
-    for ln in lines:
-        if b'"spawn_agent"' not in ln and b'"SubAgentActivity"' not in ln:
-            continue
-        try:
-            rec = json.loads(ln)
-        except ValueError:
-            continue
-        p = rec.get("payload") if isinstance(rec, dict) and isinstance(rec.get("payload"), dict) else {}
-        if p.get("type") == "function_call" and p.get("name") == "spawn_agent" and p.get("call_id"):
-            try:
-                args = json.loads(p.get("arguments") or "{}")
-            except (TypeError, ValueError):
-                args = {}
-            args = args if isinstance(args, dict) else {}
-            calls.append({"call_id": str(p["call_id"]), "task_name": str(args.get("task_name") or ""),
-                          "agent_type": str(args.get("agent_type") or "")})
-        item = p.get("item") if p.get("type") == "item_completed" else None
-        if isinstance(item, dict) and item.get("type") == "SubAgentActivity" and item.get("kind") == "started" \
-                and item.get("id") and item.get("agent_thread_id"):
-            started[str(item["id"])] = str(item["agent_thread_id"])
     return calls, started
 
 
 def rollout_of(near: Path, thread: str):
-    """The rollout of thread `thread`: in the folder of `near` (Codex files a rollout under the day its thread
-    started), else anywhere under the same sessions folder; None when there is none."""
+    """One canonical rollout for this thread; duplicates are unresolved, never newest-wins."""
+    from . import core
     if not THREAD.fullmatch(thread or ""):
         return None
-    hit = sorted(near.parent.glob(f"rollout-*-{thread}.jsonl"))
-    if hit:
-        return hit[-1]
-    root = near.parent.parent.parent  # <sessions>/<year>/<month>/<day>/rollout-….jsonl
-    hit = sorted(root.glob(f"*/*/*/rollout-*-{thread}.jsonl")) if root.name == "sessions" else []
-    return hit[-1] if hit else None
+    root = core.HOME / ".codex/sessions"
+    hits = list(root.glob(f"*/*/*/rollout-*-{thread}.jsonl"))
+    if len(hits) != 1 or hits[0].is_symlink():
+        return None
+    return hits[0]
 
 
 def look(data: dict):
-    """What the rollouts say about this Codex agent's spawn, read before record takes the session's lock (no rollout
-    is read under it) -> {spawn: {task, type, parent (an agent id, or main)}, mine: whether its own session_meta was
-    read, sources: [(spawn calls, {call id: agent id started})] of the spawning thread}, or None: Codex's own helper.
-    The agent's own session_meta comes first; the spawning thread's rollout gives the calls."""
+    """Reciprocal lineage named by a trusted child lifecycle/tool hook, without caller inference."""
     aid, sid = str(data.get("agent_id") or ""), str(data.get("session_id") or "")
-    kind = str(data.get("agent_type") or "")
     own = str(data.get("agent_transcript_path") or data.get("transcript_path") or "")
-    meta = session_meta(own) if own else {}
-    spawn = {"task": "", "type": kind, "parent": "main"}
-    mine = meta.get("id") == aid  # the agent's own rollout (SubagentStart, and SubagentStop's agent_transcript_path)
-    if mine:
-        source = thread_spawn(meta)
-        if source is False:
-            return None
-        if source:
-            parent = str(source.get("parent_thread_id") or "")
-            spawn.update(task=task_of(source.get("agent_path")), type=kind or str(source.get("agent_role") or ""),
-                         parent=parent if parent and parent != sid else "main")
-    thread = sid if spawn["parent"] == "main" else spawn["parent"]
-    paths = [Path(own)] if own and not mine else []  # a payload that names the spawning thread's rollout itself
-    found = rollout_of(Path(own), thread) if own else None
-    paths += [found] if found and found not in paths else []
-    # another thread's rollout gives no calls: a spawned agent's opens with a copy of its parent's turns
-    sources = [spawn_calls(path) for path in paths if session_meta(path).get("id") in (None, "", thread)]
-    return {"spawn": spawn, "mine": mine, "sources": sources}
+    path = rollout_of(Path(own), aid)
+    if path is None or path.resolve() != Path(own).resolve():
+        return None
+    meta = session_meta(path)
+    source = thread_spawn(meta)
+    if not isinstance(source, dict):
+        return None
+    parent_id = source.get("parent_thread_id")
+    parent = rollout_of(path, parent_id)
+    pm = session_meta(parent) if parent else {}
+    depth = (thread_spawn(pm) or {}).get("depth", 0) if isinstance(thread_spawn(pm), (dict, type(None))) else -1
+    expected = (pm.get("agent_path") or "/root") + "/" + task_of(source.get("agent_path"))
+    kind = data.get("agent_type") or ""
+    if not isinstance(depth, int) or isinstance(depth, bool) or meta.get("id") != aid or \
+            meta.get("session_id") != sid or pm.get("id") != parent_id or pm.get("session_id") != sid or \
+            meta.get("parent_thread_id") != parent_id or source.get("depth") != depth + 1 or \
+            meta.get("agent_path") != expected or source.get("agent_path") != expected or \
+            not kind or kind != meta.get("agent_role") or kind != source.get("agent_role"):
+        return None
+    calls, started = spawn_calls(parent)
+    return {"spawn": {"task": task_of(expected), "type": kind,
+                      "parent": "main" if parent_id == sid else parent_id},
+            "path": expected, "calls": calls, "started": started}
 
 
 def find(data: dict, seen: dict, launches: dict):
-    """Which spawn started this Codex agent -> {key (the spawn call's id, or codex-<agent id>), task, type, parent,
-    waiting: the task names of the spawns it could not choose between}, or None: an agent no spawn names that runs no
-    crew member. The call Codex recorded as starting this agent; else, of the calls of its agent type that started no
-    other agent and no launch record holds, the one its own task names, or the only one. When two or more remain and
-    nothing tells them apart, none: two agents of one type started at once would take the same call, or each other's
-    task. Run under the session's lock with the launch records read there, so a call another start just took is held."""
-    from . import crew
-    aid = str(data.get("agent_id") or "")
-    spawn = dict(seen["spawn"], key="", waiting=[])
-    held = {k for k, v in (launches or {}).items() if isinstance(v, dict) and v.get("agent_id") not in (None, "", aid)}
-    for calls, started in seen["sources"]:
-        call = next((c for c in calls if started.get(c["call_id"]) == aid), None)
-        if not call:
-            free = [c for c in calls if c["call_id"] not in started and c["call_id"] not in held
-                    and c["agent_type"] in ("", spawn["type"])]
-            named = [c for c in free if spawn["task"] and c["task_name"] == spawn["task"]]
-            pick = named or free
-            call = pick[0] if len(pick) == 1 else None
-            spawn["waiting"] = [c["task_name"] or c["call_id"] for c in pick] if len(pick) > 1 else spawn["waiting"]
-        if call:
-            spawn.update(key=call["call_id"], task=spawn["task"] or call["task_name"],
-                         type=spawn["type"] or call["agent_type"], waiting=[])
-            break
-    member = crew.member(spawn["type"]) if spawn["type"] else None
-    if not (seen["mine"] and spawn["task"]) and not spawn["key"] and not (member and not member.get("main")):
-        return None  # nothing names a spawn, and no crew member runs it
-    spawn["key"] = spawn["key"] or f"codex-{aid}"
-    return spawn
+    """Only an exact native call/result pair can bind a previously unknown child."""
+    aid = data.get("agent_id")
+    spawn = seen["spawn"]
+    matches = []
+    for call in seen["calls"]:
+        events = seen["started"].get(call["call_id"], [])
+        if len(events) != 1:
+            continue
+        event = events[0]
+        held = (launches or {}).get(call["call_id"]) or {}
+        if event["agent"] == aid and event["path"] == seen["path"] and \
+                call["task_name"] == spawn["task"] and (call["agent_type"] or "default") == spawn["type"] and \
+                0 < call["at"] <= event["at"] <= time.time() and held.get("agent_id") in (None, "", aid):
+            matches.append(dict(spawn, key=call["call_id"], at=call["at"], waiting=[]))
+    return matches[0] if len(matches) == 1 else None
 
 
 def label_of(spawn: dict) -> str:
@@ -273,6 +280,7 @@ def record(agent: str, data: dict, judge: bool = True):
         return None
     seen = look(data)
     if not seen:
+        _registration_pending(agent, data, sess)
         return None
     with progress._tx(agent, sid):  # the session's one lock: its launch records and its run
         sess = state.load(progress.session_path(agent, sid)) or {}
@@ -281,8 +289,30 @@ def record(agent: str, data: dict, judge: bool = True):
         launches = sess.get("launches") if isinstance(sess.get("launches"), dict) else {}
         spawn = find(data, seen, launches)
         if not spawn:
+            _registration_pending(agent, data, sess, seen["calls"])
             return None
+        if spawn["parent"] != "main" and not (sess.get("subagents") or {}).get(spawn["parent"], {}).get("launch"):
+            return None
+        run = progress.load_run(agent, sid)
+        if run and spawn["at"] < run.get("started", 0):
+            return None  # an old native launch cannot acquire a fresh run's assignment
         label = label_of(spawn)
+        prior = launches.get(spawn["key"])
+        if prior:
+            same_run = prior.get("run_started") == (run or {}).get("started") if "run_started" in prior else \
+                prior.get("ts", 0) >= (run or {}).get("started", 0)
+            if prior.get("state") != "pending" or prior.get("tool_use_id") != spawn["key"] or \
+                    (prior.get("type") or "default") != spawn["type"] or \
+                    prior.get("parent") != spawn["parent"] or prior.get("agent_id") not in (None, "", aid) or \
+                    not same_run:
+                _registration_pending(agent, data, sess, seen["calls"])
+                return None
+            if prior.get("label") != label:
+                # Earlier parent hooks used the message as a derived label. The
+                # exact native call/result can correct that label, never its
+                # immutable role, parent, child, call ID or run ownership.
+                prior["label"] = label
+                state.replace(progress.session_path(agent, sid), sess)
         call = {"session_id": sid, "tool_use_id": spawn["key"],
                 "tool_input": {"description": label, "agent_type": spawn["type"]}}
         if spawn["parent"] != "main":
@@ -294,7 +324,7 @@ def record(agent: str, data: dict, judge: bool = True):
                 run = progress.normalize(run)
                 progress.expire_stale(run)
                 why = progress.launch_verdict(agent, call, run) or ""
-        progress.note_agent_launch(agent, call)
+        progress.note_agent_launch(agent, call, now=spawn["at"])
         progress.launch_result(agent, {"session_id": sid, "tool_use_id": spawn["key"],
                                        "tool_response": {"agentId": aid}})
         if spawn["waiting"]:
@@ -305,6 +335,29 @@ def record(agent: str, data: dict, judge: bool = True):
                         f"{', '.join(spawn['waiting'])}"[:300], "unbound", project=sess.get("project") or "",
                         agent_id=aid[:16])
     return {"key": spawn["key"], "label": label, "type": spawn["type"], "parent": spawn["parent"], "why": why}
+
+
+def _registration_pending(agent, data, sess, calls=None):
+    """A failed linkage grants nothing; tell the lead once so a later hook can retry."""
+    from . import crew, progress
+    member = crew.member(data.get("agent_type") or "")
+    if not member or member.get("main"):
+        return
+    aid, sid = data["agent_id"], data["session_id"]
+    if calls is None:
+        calls, _ = spawn_calls(sess.get("transcript"))
+    names = ", ".join(f"“{c['task_name']}”" for c in calls if c.get("task_name"))
+    with progress._tx(agent, sid):
+        run = progress.load_run(agent, sid)
+        if not run or run.get("state") == "done" or any(
+                aid in m.get("text", "") and "could not verify the native launch" in m.get("text", "")
+                for m in run.get("messages", [])):
+            return
+        progress._post(run, "devkit", "main", f"devkit could not verify the native launch of Codex agent {aid}"
+                       f" ({names or 'no complete parent spawn'}). It takes no step or scope. Wait for the native "
+                       "launch records, then retry its tool call; if hooks stay missing, stop and report.",
+                       time.time(), from_name="devkit", kind="notice")
+        progress._save(run, touch_session=False)
 
 
 def _tell_unplaced(agent: str, sid: str, aid: str, spawn: dict, label: str):

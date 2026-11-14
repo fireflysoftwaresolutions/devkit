@@ -339,7 +339,7 @@ class GrantTests(EvidenceCase):
         with mock.patch("sys.stdin", io.StringIO(json.dumps(data))), contextlib.redirect_stdout(out):
             hooks.run("prompt", "claude")
         ctx = json.loads(out.getvalue())["hookSpecificOutput"]["additionalContext"]
-        self.assertIn("granted: release v26.11.4 by your prompt at", ctx)
+        self.assertIn("granted: release v26.11.4 --repo acme/api by your prompt at", ctx)
         self.assertEqual([h["covers"] for h in self.human()], ["release v26.11.4"])
         self.assertIn("release v26.11.4", pg.render_update(pg.load_run("claude", "s1"), branch="main"))
 
@@ -388,14 +388,16 @@ class GateContractTests(EvidenceCase):
 
     def test_a_preapproval_with_the_developers_grant_opens_its_uses(self):
         self.typed("grant push fix/*", m(1))
-        pg.set_mode("auto", approve="push fix/*, release v26.11.4", now=m(2))
+        pg.set_mode("auto", approve="push fix/*, release v26.11.4", now=m(2), cwd=str(self.root))
         p = pg.load_run("claude", "s1")["preapprovals"]
         self.assertEqual([(x["action"], x["target"], x["uses_left"]) for x in p], [("push", "fix/*", 10)])
         got = grant("push", "fix/parser", now=m(3))
         self.assertEqual((got["source"], got["uses_left"]), ("preapproval", 9))
         self.assertIsNone(grant("push", "feat/other", now=m(3)))
         self.assertIsNone(grant("release", "v26.11.4", now=m(3)))  # typed without its own grant
-        d = pg.crew_decision("Push the fix branch?", recommend="yes", irreversible="push", now=m(4))
+        missing = pg.crew_decision("Push the fix branch?", recommend="yes", irreversible="push", now=m(4))
+        self.assertEqual(missing["state"], "pending")
+        d = pg.crew_decision("Push the fix branch?", recommend="yes", irreversible="push", target="fix/parser", now=m(4))
         self.assertEqual((d["state"], d["by"]), ("decided", "auto"))
 
     def test_expired_preapproval_denies(self):
@@ -562,9 +564,9 @@ class DecisionAnswerGrantTests(EvidenceCase):
         self.irreversible("v26.11.5", 3, options="", recommend="")
         self.ask("Skip empty lines?", at=4)
         self.assertEqual([pg.ask_text(self.decision(f"D{n}")) for n in range(1, 5)],
-                         ["D1 · Release now? (choosing “A: release” runs release v26.11.4)",
-                          "D2 · Release now? (choosing “B: release” runs release)",
-                          "D3 · Release now? (answering “yes” runs release v26.11.5)",
+                         ["D1 · Release now? (choosing “A: release” runs release v26.11.4 --repo acme/api)",
+                          "D2 · Release now? (choosing “B: release” runs release --repo acme/api)",
+                          "D3 · Release now? (answering “yes” runs release v26.11.5 --repo acme/api)",
                           "D4 · Skip empty lines?"])
 
     def test_a_no_backs_no_preapproval_and_no_step_grant(self):
@@ -712,9 +714,11 @@ class QuestionAuditTests(EvidenceCase):
         self.release(at=1.5, target="v26.11.5")
         self.release(at=1.6, target="v26.11.6")
         q1, q2, q3 = self.printed("D1"), self.printed("D2"), self.printed("D3")
-        self.assertEqual([o["label"] for o in q1["options"]], ["A: yes (release v26.11.4) (Recommended)", "B: no"])
-        self.answer(q1, "A: yes (release v26.11.4) (Recommended)", m(2))
-        self.answer(q2, "A: yes (release v26.11.5)", m(2), labels=["A: yes (release v26.11.5)", "B: no"])
+        self.assertEqual([o["label"] for o in q1["options"]],
+                         ["A: yes (release v26.11.4 --repo acme/api) (Recommended)", "B: no"])
+        self.answer(q1, "A: yes (release v26.11.4 --repo acme/api) (Recommended)", m(2))
+        self.answer(q2, "A: yes (release v26.11.5 --repo acme/api)", m(2),
+                    labels=["A: yes (release v26.11.5 --repo acme/api)", "B: no"])
         self.answer(q3, "B: no", m(2))
         self.assertEqual([(h["covers"], h["answer"], h["match"], h["asked"]) for h in self.human()],
                          [("D1", "A: yes", "exact", "exact"), ("D2", "A: yes", "exact", "exact"),
