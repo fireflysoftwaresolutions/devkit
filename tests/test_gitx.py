@@ -2043,6 +2043,46 @@ class ReleaseTests(unittest.TestCase):
             self.assertIn("--verify-tag", call)
             self.assertIn("verify the artefact", out)
 
+    def test_python_version_padding_keeps_the_requested_release_tag(self):
+        for metadata, requested in (("26.11.8", "26.11.08"), ("26.1.8", "26.01.08"),
+                                    ("26.01.08", "26.1.8")):
+            with self.subTest(metadata=metadata, requested=requested), Sandbox() as s:
+                s.commit("chore(release): prepare Python release", {
+                    "pyproject.toml": f'[project]\nname = "widget"\nversion = "{metadata}"\n',
+                    "CHANGELOG.md": f"# Changelog\n\n## [{requested}]\n\n- Publish the widget\n"})
+                git(s.repo, "push", "-q", "origin", "main")
+                dev("ci", "--mark-passed")
+                s.gh.on(["run", "list"], [])
+                s.gh.on(["release", "create"], f"https://github.com/acme/widget/releases/tag/v{requested}\n")
+                rc, out, err = dev("release", "--version", requested, "--dry-run")
+                self.assertEqual(rc, 0, err)
+                self.assertIn(f"tag v{requested}", out)
+                self.assertEqual(git(s.repo, "tag", "--list").split(), [])
+                rc, _, err = dev("release", "--version", requested)
+                self.assertEqual(rc, 0, err)
+                self.assertEqual(git(s.origin, "tag", "--list").split(), [f"v{requested}"])
+                self.assertEqual(s.head(f"v{requested}^{{commit}}", repo=s.origin), s.head())
+                call = s.gh.called("release", "create")[0]
+                self.assertEqual(call[2], f"v{requested}")
+                self.assertEqual(call[call.index("--notes") + 1], "- Publish the widget")
+
+    def test_release_refuses_different_versions_and_non_python_padding(self):
+        cases = [("pyproject.toml", f'[project]\nversion = "{version}"\n', version)
+                 for version in ("26.11.9", "26.10.8", "25.11.8")]
+        cases += [("VERSION", "26.11.8\n", "26.11.8"),
+                  ("package.json", '{"version": "26.11.8"}\n', "26.11.8")]
+        for filename, content, version in cases:
+            with self.subTest(filename=filename, version=version), Sandbox() as s:
+                s.commit("chore(release): prepare version", {filename: content})
+                git(s.repo, "push", "-q", "origin", "main")
+                for flags in (("--dry-run",), ()):
+                    rc, _, err = dev("release", "--version", "26.11.08", *flags)
+                    self.assertEqual(rc, 2, err)
+                    self.assertIn(f"{filename} says {version}, not 26.11.08", err)
+                self.assertEqual(git(s.repo, "tag", "--list").split(), [])
+                self.assertEqual(git(s.origin, "tag", "--list").split(), [])
+                self.assertEqual(s.gh.called("release", "create"), [])
+
 
 class ReconcileTests(unittest.TestCase):
     def test_only_merges_that_reached_the_default_branch_on_origin_count(self):

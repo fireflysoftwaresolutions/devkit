@@ -3,6 +3,14 @@
 All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH restarts at 0 each month); tags are
 `vYY.MM.PATCH`. Sections follow [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Fixed
+
+- **Releases.** `dev release` accepts Python versions with equivalent numeric components despite different zero
+  padding, such as `pyproject.toml` version `26.11.8` for `--version 26.11.08`. The tag keeps the requested spelling;
+  `VERSION` and `package.json` still require an exact match.
+
 ## [26.11.17] - 2026-11-12
 
 This release lets crew members combine their lane commands with other commands on Claude Code, keeps review lanes

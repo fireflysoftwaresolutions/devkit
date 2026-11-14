@@ -4459,6 +4459,17 @@ def version_files(top) -> dict:
     return {k: v for k, v in out.items() if v != "0.0.0"}
 
 
+def _release_version_matches(filename: str, actual: str, requested: str) -> bool:
+    """Python numeric metadata may omit zero padding; other files must match literally."""
+    if actual == requested:
+        return True
+    if filename != "pyproject.toml" or not all(
+            re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", v) for v in (actual, requested)):
+        return False
+    return tuple(p.lstrip("0") or "0" for p in actual.split(".")) == tuple(
+        p.lstrip("0") or "0" for p in requested.split("."))
+
+
 def delivery_policy(top) -> dict:
     """The project's recorded delivery policy (`dev delivery`), or {}."""
     try:
@@ -4733,7 +4744,7 @@ def _release(a, c) -> int:
     tag = "v" + version
     if _ref_sha(c.top, f"refs/tags/{tag}"):
         return refuse(f"tag {tag} already exists", f"next version: {nxt}" if scheme == "calver" else None)
-    wrong = {f: v for f, v in version_files(c.top).items() if v != version}
+    wrong = {f: v for f, v in version_files(c.top).items() if not _release_version_matches(f, v, version)}
     if wrong:
         f, v = next(iter(wrong.items()))
         return refuse(f"{f} says {v}, not {version}",

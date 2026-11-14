@@ -451,6 +451,9 @@ failed jobs (`--all-jobs` for all of them).
 3. The version is `--version`, or the next CalVer version. A project with another scheme (recorded in its policy, or
    visible in its tags and version files) needs `--version X.Y.Z`. The tag must not exist yet.
 4. `VERSION`, `package.json`, and `pyproject.toml` say the same version; if not, bump them on the release branch first.
+   Python numeric versions may differ in zero padding: `pyproject.toml` version `26.11.8` matches
+   `--version 26.11.08`, and the tag stays `v26.11.08`. Each of the three numeric components must match;
+   `VERSION` and `package.json` still require the exact spelling.
 5. HEAD has local CI evidence (or `--ci-passed`), and its CI on GitHub is not failing or still running.
 6. The notes are `--notes-file`, or the version's section of `CHANGELOG.md` (or `CHANGES.md`, `HISTORY.md`), or
    GitHub's generated notes.
