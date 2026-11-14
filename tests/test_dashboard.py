@@ -1831,6 +1831,24 @@ class PageBehaviorTests(unittest.TestCase):
             self.assertLessEqual(w, 390, view)
         self.assertLess(max(out["cells"]), 3 * out["line"] + 20)                                 # words wrap whole, never letter by letter
 
+    def test_roadmap_month_labels_stay_inside_the_track_at_its_end(self):
+        # November 14 puts January 1 at the very end of the roadmap. A rightward label used to overflow the phone.
+        now = time.mktime((2026, 11, 14, 12, 0, 0, 0, 0, -1))
+        for width in (390, 1440):
+            with self.subTest(width=width):
+                out = browse(self.page, """out.width = document.documentElement.scrollWidth;
+                    out.separated = $$(".road-tl").map(el => el.getBoundingClientRect()).sort((a, b) => a.left - b.left)
+                      .every((r, i, rects) => !i || rects[i - 1].right <= r.left);
+                    out.labels = $$(".road-tl").map(el => { const r = el.getBoundingClientRect(), track = el.parentElement.getBoundingClientRect();
+                      return {text: text(el), inside: r.left >= track.left && r.right <= track.right, whole: el.scrollWidth <= el.clientWidth}; });""",
+                             width, "#/initiatives", now=now)
+                self.assertIsNone(out.get("probeError"))
+                self.assertIsNone(out.get("pageError"))
+                self.assertIn("Jan", [label["text"] for label in out["labels"]])
+                self.assertLessEqual(out["width"], width)
+                self.assertTrue(all(label["inside"] and label["whole"] for label in out["labels"]), out["labels"])
+                self.assertTrue(out["separated"], out["labels"])
+
     def test_a_run_whose_crew_reports_is_running_though_its_lead_was_quiet(self):
         # the live run of 2026-11-06: the lead's last update 47 min ago, a lane reported 3 min ago, the session not in presence
         def change(d):
