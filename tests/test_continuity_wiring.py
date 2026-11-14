@@ -95,7 +95,7 @@ class HookTests(HookCase):
 
     def test_post_compact_prints_nothing_and_the_next_prompt_names_first_what_the_summary_left_out(self):
         self.make_run(lanes=())
-        self.prompt("rename the flag in `lib/flags.py`", "d1", T0 - 300)
+        self.prompt("rename the flag in `lib/flags.py`", "d1", time.time() - 300)
         self.hook("pre-compact", self.payload("PreCompact.manual"))
         self.assertEqual(self.hook("post-compact", self.payload("PostCompact.manual",
                                                                 compact_summary=SUMMARY_WITHOUT_REQUESTS)), "")

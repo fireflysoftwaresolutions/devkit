@@ -842,7 +842,7 @@ class ComplianceReview2Tests(Base):
 
     def test_c3_an_agent_reads_another_providers_session_without_its_text_whatever_provider_it_names(self):
         # Seraph's review of 85e37de: a Claude session asked for a Codex session's brief with --provider codex
-        self.prompt("MARKERCODEX port the exporter", "x1", T0 - 100, sid="cx1", agent="codex")
+        self.prompt("MARKERCODEX port the exporter", "x1", time.time() - 100, sid="cx1", agent="codex")
         claude_main = {"caller": "main", "agent": "claude", "session": SID, "how": "env", "calls": []}
         with mock.patch.object(pg, "caller", lambda *a, **k: claude_main):
             for argv in (["--provider", "codex"], ["--provider", "openai"], []):
