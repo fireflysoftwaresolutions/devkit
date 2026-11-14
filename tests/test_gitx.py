@@ -2084,6 +2084,129 @@ class ReleaseTests(unittest.TestCase):
                 self.assertEqual(s.gh.called("release", "create"), [])
 
 
+class ReleaseAutomationTests(unittest.TestCase):
+    def prepare(self, s):
+        version = f"{YY}.{MM}.0"
+        s.commit("chore(release): prepare the widget", {
+            "VERSION": version + "\n",
+            "CHANGELOG.md": f"# Changelog\n\n## [{version}]\n\n- Publish the widget\n"})
+        git(s.repo, "push", "-q", "origin", "main")
+        dev("ci", "--mark-passed")
+        ci = {"databaseId": 749, "status": "completed", "conclusion": "success",
+              "workflowName": "CI", "workflowDatabaseId": 7, "event": "push"}
+        bot = {"databaseId": 43536834877, "status": "completed", "conclusion": "failure",
+               "workflowName": "Dependabot Updates", "event": "dynamic"}
+        detail = {"id": 43536834877, "event": "dynamic", "path": "dynamic/dependabot/dependabot-updates",
+                  "actor": {"login": "dependabot[bot]"}, "repository": {"full_name": "acme/widget"},
+                  "head_repository": {"full_name": "acme/widget"}, "head_sha": s.head()}
+        s.gh.on(["run", "list"], [ci, bot])
+        s.gh.on(["api", "repos/acme/widget/actions/runs/43536834877"], detail)
+        s.gh.on(["release", "create"], f"https://github.com/acme/widget/releases/tag/v{version}\n")
+        return version, ci, bot, detail
+
+    def assert_no_release(self, s):
+        self.assertEqual(git(s.repo, "tag", "--list").split(), [])
+        self.assertEqual(git(s.origin, "tag", "--list").split(), [])
+        self.assertEqual(s.gh.called("release", "create"), [])
+
+    def test_release_ignores_verified_update_automation_without_using_its_name(self):
+        for status in ("completed", "in_progress"):
+            with self.subTest(status=status), Sandbox() as s:
+                version, ci, bot, _ = self.prepare(s)
+                bot.update(status=status, workflowName="Renamed dependency updater")
+                s.gh.on(["run", "list"], [ci, bot])
+                rc, out, err = dev("release", "--dry-run")
+                self.assertEqual(rc, 0, err)
+                self.assertIn("remote CI: passing", out)
+                self.assert_no_release(s)
+                rc, _, err = dev("release")
+                self.assertEqual(rc, 0, err)
+                self.assertEqual(s.head(f"v{version}^{{commit}}", repo=s.origin), s.head())
+                call = s.gh.called("release", "create")[0]
+                self.assertEqual(call[2], f"v{version}")
+                self.assertEqual(call[call.index("--notes") + 1], "- Publish the widget")
+
+    def test_release_keeps_unverified_or_spoofed_update_runs(self):
+        with Sandbox() as s:
+            _, ci, bot, detail = self.prepare(s)
+            cases = [(key, {**detail, key: value}) for key, value in (
+                ("id", 123), ("id", "43536834877"), ("event", "pull_request"),
+                ("path", ".github/workflows/dependabot.yml"), ("actor", {"login": "someone"}),
+                ("repository", {"full_name": "other/widget"}),
+                ("head_repository", {"full_name": "fork/widget"}), ("head_sha", "0" * 40),
+                ("actor", []), ("repository", None), ("head_repository", "acme/widget"))]
+            cases += [("missing " + key, {k: v for k, v in detail.items() if k != key}) for key in detail]
+            cases += [("null", None), ("array", []), ("malformed JSON", "{broken")]
+            for label, response in cases:
+                with self.subTest(label=label):
+                    s.gh.on(["api", "repos/acme/widget/actions/runs/43536834877"], response)
+                    for flags in (("--dry-run",), ()):
+                        rc, _, err = dev("release", *flags)
+                        self.assertEqual(rc, 2, err)
+                        self.assertIn("CI failed", err)
+                    self.assert_no_release(s)
+            for response in ("", detail):
+                with self.subTest(api_error=response):
+                    s.gh.on(["api", "repos/acme/widget/actions/runs/43536834877"], response, rc=1,
+                            err="API unavailable")
+                    self.assertEqual(dev("release")[0], 2)
+                    self.assert_no_release(s)
+            s.gh.on(["api", "repos/acme/widget/actions/runs/43536834877"], detail)
+            for event in ("push", "pull_request", None):
+                with self.subTest(list_event=event):
+                    s.gh.on(["run", "list"], [ci, {**bot, "event": event}])
+                    self.assertEqual(dev("release")[0], 2)
+                    self.assert_no_release(s)
+            for rid in (None, 0, True, "43536834877", "../749"):
+                with self.subTest(list_id=rid):
+                    s.gh.on(["run", "list"], [ci, {**bot, "databaseId": rid}])
+                    self.assertEqual(dev("release")[0], 2)
+                    self.assert_no_release(s)
+
+    def test_verified_update_automation_cannot_replace_passing_repository_ci(self):
+        with Sandbox() as s:
+            _, ci, bot, _ = self.prepare(s)
+            for event in ("push", "pull_request", "dynamic"):
+                with self.subTest(event=event):
+                    s.gh.on(["run", "list"], [{**ci, "event": event, "conclusion": "failure",
+                                              "workflowName": "Dependabot Updates"}, bot])
+                    rc, _, err = dev("release")
+                    self.assertEqual(rc, 2, err)
+                    self.assertIn("CI failed", err)
+                    self.assert_no_release(s)
+            s.gh.on(["run", "list"], [{**ci, "status": "in_progress", "conclusion": ""}, bot])
+            rc, _, err = dev("release")
+            self.assertEqual(rc, 2, err)
+            self.assertIn("still running", err)
+            self.assert_no_release(s)
+
+    def test_a_twin_still_needs_real_passing_pr_jobs_after_excluding_the_updater(self):
+        with Sandbox() as s:
+            version, ci, bot, _ = self.prepare(s)
+            twin = s.head()
+            git(s.repo, "commit", "-q", "--allow-empty", "-m", "chore: merge the verified tree")
+            git(s.repo, "push", "-q", "origin", "main")
+            dev("ci", "--mark-passed")
+            s.gh.on(["run", "list"], [{**ci, "status": "in_progress", "conclusion": ""}],
+                    when=lambda args: s.head() in args)
+            s.gh.on(["run", "view", "749"], {"jobs": [{"name": "test", "status": "in_progress"}]})
+            s.gh.on(["run", "list"], [bot], when=lambda args: twin in args)
+            rc, _, err = dev("release")
+            self.assertEqual(rc, 2, err)
+            self.assertIn("still running", err)
+            self.assert_no_release(s)
+            s.gh.on(["run", "list"], [{**ci, "databaseId": 750, "event": "pull_request"}, bot],
+                    when=lambda args: twin in args)
+            s.gh.on(["api", "repos/acme/widget/actions/runs/750"],
+                    {"id": 750, "repository": {"id": 1}, "head_repository": {"id": 1}})
+            s.gh.on(["run", "view", "750"],
+                    {"jobs": [{"name": "test", "status": "completed", "conclusion": "success"}]})
+            rc, out, err = dev("release")
+            self.assertEqual(rc, 0, err)
+            self.assertIn(f"tree passed the pull request run on {twin[:7]}", out)
+            self.assertEqual(s.head(f"v{version}^{{commit}}", repo=s.origin), s.head())
+
+
 class ReconcileTests(unittest.TestCase):
     def test_only_merges_that_reached_the_default_branch_on_origin_count(self):
         with Sandbox() as s:

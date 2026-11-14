@@ -4513,10 +4513,38 @@ def changelog_section(top, version: str):
 
 
 def _ci_runs(c, sha):
-    """The GitHub Actions runs of commit `sha` (as `gh run list --commit` lists them), or None when gh cannot say."""
+    """Release CI for commit `sha`, excluding verified Dependabot update automation; None when gh cannot list it.
+
+    General CI status/watch still includes the updater. Pull request twins use this same release-only view, but
+    must still supply their own successful repository workflow runs and jobs in `_passed_twin`."""
     runs, _ = gh_json(["run", "list", "-R", c.slug, "--commit", sha, "--json",
                        "databaseId,status,conclusion,workflowName,workflowDatabaseId,event"], c)
-    return runs if isinstance(runs, list) else None
+    return [r for r in runs if not _dependabot_update_run(c, r, sha)] if isinstance(runs, list) else None
+
+
+def _dependabot_update_run(c, run, sha) -> bool:
+    """Only authenticated run details can establish that this is GitHub's updater, not repository CI."""
+    if not isinstance(run, dict) or run.get("event") != "dynamic":
+        return False
+    rid = run.get("databaseId")
+    if type(rid) is not int or rid <= 0:
+        return False
+    # gh_json accepts JSON on a nonzero exit for PR checks. Here a failed API request is never evidence.
+    rc, out, _ = GH(["api", f"repos/{c.slug}/actions/runs/{rid}"], cwd=c.top, timeout=60)
+    if rc != 0:
+        return False
+    try:
+        data = json.loads(out)
+    except (ValueError, TypeError):
+        return False
+    if not isinstance(data, dict) or type(data.get("id")) is not int or data["id"] != rid:
+        return False
+    actor, repo, head_repo = data.get("actor"), data.get("repository"), data.get("head_repository")
+    return (data.get("event") == "dynamic" and data.get("path") == "dynamic/dependabot/dependabot-updates"
+            and isinstance(actor, dict) and actor.get("login") == "dependabot[bot]"
+            and isinstance(repo, dict) and repo.get("full_name") == c.slug
+            and isinstance(head_repo, dict) and head_repo.get("full_name") == c.slug
+            and data.get("head_sha") == sha)
 
 
 def _run_jobs(c, run):

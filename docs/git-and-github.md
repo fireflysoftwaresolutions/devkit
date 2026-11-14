@@ -458,6 +458,15 @@ failed jobs (`--all-jobs` for all of them).
 6. The notes are `--notes-file`, or the version's section of `CHANGELOG.md` (or `CHANGES.md`, `HISTORY.md`), or
    GitHub's generated notes.
 
+The release check excludes GitHub's Dependabot update automation only when the authenticated run API confirms
+the run ID, the `dynamic` event, the `dynamic/dependabot/dependabot-updates` path, the `dependabot[bot]` actor,
+both repositories matching this repository, and the exact commit SHA. The displayed workflow name grants no
+exception. Repository CI, including workflows triggered by Dependabot pull requests, still counts. Missing,
+malformed, or unavailable run details keep the run in the check. Inspect a blocked run with
+`dev run view <id> --failed`; restore API access if needed, then retry `dev release --dry-run`.
+The updater remains visible in general CI status and watches. A matching-tree pull request still needs successful
+repository workflows and jobs to stand in for CI running on the default branch.
+
 Then it creates the annotated tag `v<version>` (signed with `--sign` or when git's `tag.gpgSign` is on), pushes it,
 and creates the GitHub release (`--draft` and `--prerelease` are passed on). It ends by asking you to download the
 published artifact, install it, and smoke-test it. `--dry-run` prints every step and the evidence without doing any of

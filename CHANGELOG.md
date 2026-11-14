@@ -7,6 +7,10 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
 
 ### Fixed
 
+- **Releases.** `dev release` excludes verified GitHub Dependabot update automation from release CI, so a failed
+  dependency update proposal does not block a commit whose CI passed. The API must confirm the exact run,
+  repositories, commit, event, path, and bot actor; uncertain details and repository workflows still count.
+  General CI status and watches continue to show the updater.
 - **Releases.** `dev release` accepts Python versions with equivalent numeric components despite different zero
   padding, such as `pyproject.toml` version `26.11.8` for `--version 26.11.08`. The tag keeps the requested spelling;
   `VERSION` and `package.json` still require an exact match.
