@@ -304,6 +304,12 @@ Release by the recorded policy (see [The delivery policy](#the-delivery-policy))
    previous tag are still open: close the shipped ones (`dev task reconcile --apply`), or give `--why "<reason>"`.
    `dev calver` gives the next CalVer version.
 
+   Python metadata may omit zero padding in the three numeric version components: `26.11.8` in `pyproject.toml`
+   matches a requested `26.11.08`. The tag retains the requested spelling; other version files still match exactly.
+   The release CI check excludes only authenticated GitHub Dependabot update automation. Repository workflows,
+   including Dependabot pull request CI, and runs whose updater identity cannot be verified still count. See
+   [Release checks](git-and-github.md#releases) for the verification rules.
+
    A failed run on the commit refuses the release. A run still in progress does not hold it when a pull request run
    already passed the same tree: `dev release` looks for a commit with HEAD's tree whose pull request run, from this
    repository and not a fork, passed every job still running or queued on HEAD (a job with the same name, in the

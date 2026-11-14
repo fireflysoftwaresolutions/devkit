@@ -23,7 +23,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_peers import CLAUDE_A, CLAUDE_B, CODEX_A, PeerCase, sender  # noqa: E402
 from test_hooks_wiring import WiringCase  # noqa: E402
-from test_progress import boundary  # noqa: E402
+from test_progress import boundary, launch  # noqa: E402
 
 from devkit import bugs, canary, core, crew, hooks, lessons, peers, work  # noqa: E402
 from devkit import progress as pg  # noqa: E402
@@ -131,6 +131,12 @@ class SpeakerStampTests(PeerHookCase):
         forms = ("dev watch --wait --timeout 9 2>&1 | tail -4", "eval 'dev watch --wait --timeout 9'",
                  "sh -c 'dev watch --wait --timeout 9'", "(dev watch --wait --timeout 9)",
                  "cd /tmp && dev session ls --json | head -20")
+        # These are admitted members' commands. An unknown native child correctly
+        # remains read-only and cannot run opaque shell wrappers such as eval.
+        self.session("codex", CODEX_A)
+        with mock.patch.dict(os.environ, {"DEVKIT_SESSION": f"codex:{CODEX_A}"}):
+            pg.start("Test the command routing", cwd=str(self.repo), plan=["routing"])
+            launch("a_mouse", "mouse", "Mouse: routing", sid=CODEX_A, agent="codex")
         for agent in ("claude", "codex"):
             root = f" DEVKIT_SESSION=codex:{CODEX_A}" if agent == "codex" else ""
             for cmd in forms:

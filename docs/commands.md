@@ -421,6 +421,13 @@ devkit's specialist agents. See [The crew](crew.md).
 | `dev crew mode [guided\|auto] [--approve "push feat/*, release v26.11.4"]` · `dev crew decide <id> "<answer>"` · `dev crew decisions [--pending] [--ask [<id>…] [--json]]` | The mode (`--approve` names each action with its target; publish and deploy never), the developer's answers (recorded by the tech lead (Morpheus) only, in the session whose run holds the decision: `dev crew decide` and `dev crew withdraw` take `D3` or your own run's `D3@<session>`, and refuse another session's), and every decision with who took it. `--ask` prints the pending decisions (or the ones named) as question tool calls, at most 4 per call and an irreversible one alone in its call, the recommended option first, `--json` for the tool's input; the tech lead may reword a reversible one. Only an answer to a question with `D<n> ·` up front (or the header `D<n>`) that picks one of its options by letter or words, or a typed `approve <id>[: <option>]`, makes the decision the developer's; `approve D3@<session>`, as `dev status` and the dashboard list another session's decision, counts only in the session it names. An irreversible one counts only in devkit's exact call: one question, its own header (`D<n>` or empty), labels only (no description, preview, or other field), its question and labels word for word (the performing option's label says what it runs, `A: yes (release v26.11.4)`) |
 | `dev crew sync [--check]` | Regenerates the Claude Code agents from `config/crew.json` |
 
+For an irreversible decision in another repository, add `--repo owner/repository` to `dev crew ask --decision`
+alongside `--irreversible` and `--target`.
+The exact question and performing option include that scope. The developer's typed equivalent is
+`grant <action> <target> --repo owner/repository`; without the qualifier, the session's original scope applies.
+See [Approving work in another repository](crew.md#approving-work-in-another-repository) for examples and mismatch
+behavior.
+
 ## Lessons
 
 Learn from mistakes: blameless lessons in the handoff repository, recalled before the work they apply to, measured by
@@ -1011,6 +1018,11 @@ The header must be a Conventional
 Commit with a known type, in the imperative mood, without a final period, and at most 72 characters. Commits on the
 default branch and on non-conforming branches are refused; AI attribution lines are removed; the guard's secret scan
 runs.
+
+For an empty GitHub origin with no remote refs, devkit can use the repository's declared default branch from
+authenticated API metadata. It checks the repository identity and validates the branch name before using it; an
+unavailable or invalid response does not replace the existing default. The current local branch alone does not
+prove which branch GitHub protects.
 
 | Option | Effect |
 | --- | --- |

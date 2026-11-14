@@ -70,6 +70,16 @@ repository administrator's right) and names the setting on other hosts, and `dev
    merge the fix back to the default branch.
 8. **Rollback:** re-deploy the previous tag. Never move or delete a published tag; publish a new version instead.
 
+For three-component numeric Python versions, the release check compares `pyproject.toml` components without zero
+padding (`26.11.8` matches `26.11.08`). Keep the requested tag spelling; `VERSION` and `package.json` still match
+exactly. Do not rename a release to work around Python's version normalization.
+
+Only GitHub's verified Dependabot updater is excluded from release CI. Repository workflows, including CI for
+Dependabot pull requests, still count; a workflow name alone proves nothing. If run details are missing or cannot
+be authenticated, restore API access and retry the release check. General CI status and watches still show the
+updater. Verification checks the run ID, updater event and path, bot actor, repository and head repository, and
+commit SHA; missing evidence never grants the exception.
+
 ## 5. Release trains (initiatives)
 
 - Record the order and the compatibility rule in the initiative's policy, for example: "consumers adopt exactly one

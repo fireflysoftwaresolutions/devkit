@@ -1457,7 +1457,8 @@ def start(goal: str, steps: int = 0, estimate: str = "", cwd: str | None = None,
 
 def _lane(run, agent_id, now, label="", kind=""):
     lane = run["agents"].setdefault(agent_id, {"label": label, "type": kind, "started": now, "finished": None,
-                                               "state": "running", "updates": [], "done": 0})
+                                               "state": "running", "updates": [], "done": 0,
+                                               "assigned_steps": []})
     if label and not lane.get("label"):
         lane["label"] = label
     return lane
@@ -1609,6 +1610,8 @@ def assign(which, label: str, cwd: str | None = None, now: float | None = None, 
         _tell_rewrites(run, s["name"], rewrites, now)
         _raci_assign(run, s, label, why, now, activity=activity, files=globs or None)
         owner = s.get("owner") or "main"
+        if owner in run.get("agents", {}):
+            _remember_step(run["agents"][owner], s)
         if owner != "main" and s.get("state") != "done" and not _label_matches(label, (run.get("agents") or {}).get(owner)
                                                                                 or {}):
             old = ((run.get("agents") or {}).get(owner) or {}).get("persona") or owner
@@ -1888,10 +1891,18 @@ def _take_step(run: dict, aid: str, s: dict, now: float):
     s.update(owner=aid, state="running", started=s.get("started") or now)
     s.pop("waits_lane", None)
     lane = run["agents"][aid]
+    _remember_step(lane, s)
     lane.pop("handed_over", None)  # Morpheus gives it a step of its own
     if s.get("scope"):
         lane["scope"] = s["scope"]
         _hand_scope(run, s, aid, now)
+
+
+def _remember_step(lane: dict, step: dict):
+    """Keep actual ownership across reopen/reassignment; launch wording is not ownership."""
+    held = lane.setdefault("assigned_steps", [])
+    if step["name"] not in held:
+        held.append(step["name"])
 
 
 def _take_waiting_step(run: dict, aid: str, now: float, sess=None):
@@ -3016,15 +3027,19 @@ def _live_preapprovals(run, now: float) -> list:
             and p.get("evidence")]
 
 
+def _matching_preapproval(run, action: str, target: str, repo: str, now: float):
+    """The live approval for this exact action and execution scope, with a target its pattern covers."""
+    if not target or action in NEVER_PREAPPROVED:
+        return None
+    return next((p for p in _live_preapprovals(run, now)
+                 if p["action"] == action and _same_repo(p.get("repo"), repo)
+                 and _target_covers(action, p["target"], target)), None)
+
+
 def unbacked_approvals(run, now: float | None = None) -> list:
     """The pre-approvals auto mode was given that have no grant of the developer behind them: they open nothing."""
     live = {f"{p['action']} {p['target']}" for p in _live_preapprovals(run, now or time.time())}
     return [x for x in (run or {}).get("approved") or [] if x not in live]
-
-
-def approved_actions(run, now: float | None = None) -> list:
-    """The irreversible actions auto mode may decide by itself: those with a live pre-approval the developer granted."""
-    return sorted({p["action"] for p in _live_preapprovals(run, now or time.time())})
 
 
 def _action_evidence(agent: str, sid: str, run: dict, action: str, target: str, now: float, any_target=False):
@@ -3034,7 +3049,7 @@ def _action_evidence(agent: str, sid: str, run: dict, action: str, target: str, 
     the action (approves_action). -> the evidence to keep
     with it, with the `target` pattern and the `repo` it covers (a step grant opens only those), or None."""
     def granted(x):
-        return x.get("channel") == "E2" and bool(x.get("expires"))
+        return x.get("channel") == "E2" and bool(x.get("expires")) and _same_repo(x.get("repo"), run.get("project"))
     got = None
     if not any_target:
         got = take_evidence(agent, sid, f"{action} {target}", now, pick=granted)
@@ -3048,7 +3063,8 @@ def _action_evidence(agent: str, sid: str, run: dict, action: str, target: str, 
         return {**{k: got.get(k) for k in ("channel", "ts", "covers", "transcript_uuid", "excerpt")},
                 "target": str(got.get("covers") or "").partition(" ")[2], "repo": got.get("repo") or ""}
     def covers(x):
-        return any_target or _norm(x["target"]) == _norm(target)
+        return _same_repo(x.get("repo", run.get("project")), run.get("project")) and (
+            any_target or _norm(x["target"]) == _norm(target))
     d = next((x for x in _decision_candidates(run, action, covers) if approves_action(x)), None)
     if not d:
         _audit_refused(run, action, target, covers, f"{agent}:{sid}")
@@ -3056,7 +3072,7 @@ def _action_evidence(agent: str, sid: str, run: dict, action: str, target: str, 
         d["used"] = now  # the caller saves the run
         return {"channel": "decision", "ts": d.get("decided"), "covers": d["id"],
                 **{k: (d.get("evidence") or {}).get(k) for k in ("transcript_uuid", "excerpt")},
-                "target": d["target"], "repo": run.get("project") or ""}
+                "target": d["target"], "repo": d.get("repo", run.get("project")) or ""}
     return None
 
 
@@ -3131,7 +3147,7 @@ def _cli_quote(text) -> str:
 
 
 def decision_shape(question: str, options="", recommend: str = "", irreversible: str = "", target: str = "",
-                   approves: str = "", performs: str = "") -> tuple:
+                   approves: str = "", performs: str = "", repo: str | None = None) -> tuple:
     """`dev crew ask --decision` in the shape the developer can be asked nicely: a question under 300 characters,
     2 to 4 options, each "<letter>: <what it means>", and a recommendation that is one of them. An irreversible
     approval asked without options (what the guard tells an agent to run) is a yes-or-no question, "A: yes | B: no",
@@ -3174,7 +3190,7 @@ def decision_shape(question: str, options="", recommend: str = "", irreversible:
         from . import audit
         act = (irreversible or "").strip().lower()
         shape = {"id": "D0", "options": opts, "recommend": letter, "irreversible": act,
-                 "target": (target or "").strip()}
+                 "target": (target or "").strip(), "repo": repo or ""}
         perf = _named_option(opts, performs, prefix=True) if act and performs else None
         if perf:
             shape["performs"] = perf
@@ -3260,7 +3276,7 @@ def ask_calls(run: dict, ids=None) -> dict:
 
 def crew_decision(question: str, options=None, recommend: str = "", irreversible: str = "", from_agent: str | None = None,
                   cwd: str | None = None, now: float | None = None, target: str = "", approves: str = "",
-                  performs: str = "") -> dict:
+                  performs: str = "", repo: str | None = None) -> dict:
     """A decision point. -> the decision record. In auto mode a reversible decision is taken at once with the
     recommendation; in guided mode, or for an irreversible action not pre-approved, it waits for the developer: the
     asking member's lane waits and its step is blocked until Morpheus records the answer (crew_decide). `target`:
@@ -3282,6 +3298,9 @@ def crew_decision(question: str, options=None, recommend: str = "", irreversible
         act = (irreversible or "").strip().lower()
         if act and act not in IRREVERSIBLE:
             raise StepError(f"unknown irreversible action “{act}”; known: {', '.join(IRREVERSIBLE)}")
+        if repo is not None and (not act or not _valid_grant_repo(repo)):
+            raise StepError("--repo goes with --irreversible and must be a literal owner/repo (no URL or wildcard)")
+        decision_repo = repo if repo is not None else run.get("project") or ""
         target = (target or "").strip()
         if target and (not act or len(target.split()) != 1):
             raise StepError("--target goes with --irreversible and names one thing: a branch, a tag, a PR number")
@@ -3306,6 +3325,8 @@ def crew_decision(question: str, options=None, recommend: str = "", irreversible
         d = {"id": _next_id(decs, "D"), "ts": round(now), "question": question.strip()[:800], "options": opts,
              "recommend": rec, "irreversible": act, "target": target, "from": from_agent or "main",
              "from_name": _name_of(run, from_agent or "main"), "state": "pending", "answer": "", "by": ""}
+        if act:
+            d["repo"] = decision_repo
         if perf:
             d["performs"] = perf  # the option whose choice opens the action (approves_action)
         if approves:  # the developer's answer approves these steps (approvals.verdicts), verified by C5 evidence
@@ -3314,7 +3335,7 @@ def crew_decision(question: str, options=None, recommend: str = "", irreversible
                 d["approves"] = approvals.decision_steps(run, approves)
             except approvals.ApprovalError as e:
                 raise StepError(str(e))
-        auto = mode_of(run) == "auto" and (not act or act in approved_actions(run, now))
+        auto = mode_of(run) == "auto" and (not act or _matching_preapproval(run, act, target, decision_repo, now))
         if auto and rec:
             d.update(state="decided", answer=rec, by="auto", decided=round(now))
         else:
@@ -3336,7 +3357,7 @@ def crew_decision(question: str, options=None, recommend: str = "", irreversible
     _audit("crew.decision", d["id"], d["question"][:300], d["state"], project=run.get("project") or "",
            by=d.get("by") or "", answer=d.get("answer") or "", irreversible=d.get("irreversible") or "",
            mode=mode_of(run), asked_by=d["from_name"], options=d.get("options") or [],
-           labels=" | ".join(ask_labels(d)), session=f"{agent}:{sid}")  # verify reruns the matcher against them
+           labels=" | ".join(ask_labels(d)), repo=d.get("repo") or "", session=f"{agent}:{sid}")
     if d["state"] == "pending":
         _notify_idle(agent, sid, d)
     return d
@@ -3397,7 +3418,7 @@ def crew_decide(decision_id: str, answer: str, cwd: str | None = None, now: floa
         d.pop("proposed", None)
         d.pop("proposed_ts", None)
         if ev:
-            d["evidence"] = {k: ev.get(k) for k in ("channel", "ts", "covers", "transcript_uuid", "excerpt")}
+            d["evidence"] = {k: ev.get(k) for k in ("channel", "ts", "covers", "transcript_uuid", "excerpt", "repo")}
             d["chosen"] = _chosen(d, ev)  # the developer's own choice; it alone opens an action (approves_action)
         if prev and prev != d["answer"]:
             d["overrides"] = prev  # the developer changed an automatic decision
@@ -3764,7 +3785,35 @@ def _names_session(prefix: str, sid: str) -> bool:
     """Does the session prefix of a qualified approve line name session `sid`? At least 8 characters of it, or all."""
     p, s = str(prefix or "").lower(), str(sid or "").lower()
     return len(p) >= min(SESSION_PREFIX, len(s)) and bool(s) and s.startswith(p)
-_GRANT_LINE = re.compile(r"(?i)^grant\s+([a-z][a-z-]*)\s+(\S+)\s*$")
+_GRANT_LINE = re.compile(r"(?i)^grant\s+([a-z][a-z-]*)\s+(\S+)(?:\s+--repo\s+(\S+))?\s*$")
+
+
+def _valid_grant_repo(repo) -> bool:
+    return isinstance(repo, str) and bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*", repo))
+
+
+def _parse_grant(line: str, default_repo: str = ""):
+    """The same action, target and repository tuple at capture, confirmation and audit."""
+    mt = _GRANT_LINE.fullmatch(line)
+    if not mt or mt.group(1).lower() not in GRANT_CLASSES or (mt.group(3) is not None and not _valid_grant_repo(mt.group(3))):
+        return None
+    return mt.group(1).lower(), mt.group(2), mt.group(3) if mt.group(3) is not None else default_repo
+
+
+def _grant_text_matches(text: str, e: dict, default_repo: str) -> bool:
+    for line in _own_lines(text):
+        grant = _parse_grant(line, default_repo)
+        match = _GRANT_LINE.fullmatch(line)
+        explicit = bool(match and match.group(3))
+        if grant and (not explicit or "repo" in e) and f"{grant[0]} {grant[1]}" == e.get("covers") \
+                and _same_repo(grant[2], e.get("repo", default_repo)):
+            return True
+    return False
+
+
+def _decision_action(d: dict) -> str:
+    runs = " ".join(f"{d.get('irreversible') or ''} {d.get('target') or ''}".split())
+    return runs + (f" --repo {d['repo']}" if d.get("repo") else "")
 _PLAIN_YES = re.compile(r"(?i)^\s*yes\s*[.!]?\s*$")
 _RELAYED = re.compile(r"^\s*(?:\[[^\]\n]{0,120}\bsent to (?:Claude|Codex)\b[^\]\n]*\]|\[SYSTEM NOTIFICATION|"
                       r"<task-notification|<system-reminder|<agent-message|<command-name>|<local-command)",
@@ -3801,7 +3850,7 @@ def ask_text(d: dict) -> str:
     act = d.get("irreversible")
     if not act:
         return text
-    runs = " ".join(f"{act} {d.get('target') or ''}".split())
+    runs = _decision_action(d)
     if d.get("options"):
         perf = performing_option(d)
         return f"{text} (choosing “{perf}” runs {runs})" if perf else text
@@ -3849,7 +3898,7 @@ def _ask_options(d: dict) -> list:
     (the Security engineer's question audit decision, rule 5)."""
     opts = d.get("options") or []
     rec, perf = _recommended(d), performing_option(d)
-    runs = " ".join(f"{d.get('irreversible') or ''} {d.get('target') or ''}".split())
+    runs = _decision_action(d)
     order = ([rec] if rec else []) + [o for o in opts if o != rec]
     return [(o, o + (f" ({runs})" if o == perf and runs else "") + (" (Recommended)" if o == rec else ""))
             for o in order]
@@ -4060,6 +4109,8 @@ def approves_action(d: dict) -> bool:
     if not (d.get("irreversible") and d.get("state") == "decided" and d.get("by") == "developer"
             and d.get("verified") is True):
         return False
+    if "repo" in d and not _same_repo(d["repo"], (d.get("evidence") or {}).get("repo")):
+        return False
     chose = d.get("chosen") if "chosen" in d else d.get("answer")
     if d.get("options"):
         want = performing_option(d)
@@ -4077,6 +4128,8 @@ def _decision_candidates(run, action: str, covers) -> list:
     """The developer's verified, unused decisions that name `action` and a target `covers(d)` accepts."""
     return [d for d in (run or {}).get("decisions") or [] if d.get("state") == "decided" and d.get("verified") is True
             and d.get("by") == "developer" and d.get("irreversible") == action and d.get("target")
+            and ("repo" not in (d.get("evidence") or {}) or
+                 _same_repo(d.get("repo", run.get("project")), d["evidence"]["repo"]))
             and not d.get("used") and covers(d)]
 
 
@@ -4198,7 +4251,7 @@ def _keep_human(agent: str, sid: str, new: list, extra=None) -> list:
         _audit("crew.evidence", e["covers"], e["excerpt"], channel=e["channel"], transcript_uuid=e["transcript_uuid"],
                session=f"{agent}:{sid}", answer=_free(said) if e.get("free") else (option_of(d, said) or said),
                options=d.get("options") or [], match=e.get("match") or "", asked=e.get("asked") or "",
-               label=e.get("label") if e.get("offered") else "")  # never the developer's own text (Other)
+               label=e.get("label") if e.get("offered") else "", repo=e.get("repo") or "")
     return kept
 
 
@@ -4317,12 +4370,13 @@ def on_human_prompt(agent: str, data: dict, now: float | None = None) -> list:
             continue  # a decision of another session's run, typed here: it is evidence only in that session
         if mt and live:
             new.append(_entry(agent, "E2", mt.group(1).upper(), ln, uuid, tp, live, now,
-                              answer=(mt.group(3) or "").strip()[:300], repo=repo, session=sid))
+                              answer=(mt.group(3) or "").strip()[:300],
+                              repo=(_decision(live, mt.group(1)) or {}).get("repo", repo), session=sid))
             continue
-        mt = _GRANT_LINE.match(ln)
-        if mt and mt.group(1).lower() in GRANT_CLASSES:
-            new.append(_entry(agent, "E2", f"{mt.group(1).lower()} {mt.group(2)}", ln, uuid, tp, live, now,
-                              expires=now + GRANT_TTL, repo=repo, session=sid))
+        grant = _parse_grant(ln, repo)
+        if grant:
+            new.append(_entry(agent, "E2", f"{grant[0]} {grant[1]}", ln, uuid, tp, live, now,
+                              expires=now + GRANT_TTL, repo=grant[2], session=sid))
     if not new and live and _PLAIN_YES.match(text):
         ids = (sess.get("last_shown") or {}).get("ids") or []
         d = _decision(live, ids[0]) if len(ids) == 1 else None
@@ -4396,7 +4450,7 @@ def on_question(agent: str, data: dict, now: float | None = None) -> list:
         new.append(_entry(agent, "E1", d["id"], f"{qt[:120]} = {label[:70]}", data.get("tool_use_id"),
                           harness_transcript(agent, sid), run, now, answer=(opt or label.strip())[:300],
                           free=opt is None, match=match, asked=asked, offered=_offered(label, offered),
-                          question=qt[:800], label=label[:300], session=sid))
+                          question=qt[:800], label=label[:300], session=sid, repo=d.get("repo", run.get("project"))))
     taken = {e["covers"] for e in new if not e.get("void")}
     notes = resp.get("annotations") if isinstance(resp.get("annotations"), dict) else {}
     for d in _awaiting(run):  # P16, P17: the developer's latest word on it too, fail closed
@@ -4556,6 +4610,12 @@ def confirmed(e: dict, sid: str = "") -> bool:
             except (ValueError, RecursionError):
                 continue
             if _codex_holds(r, e, sid) if agent == "codex" else _own_record(r, e):
+                if e.get("channel") == "E2" and " " in str(e.get("covers") or ""):
+                    text = _codex_prompt(r, sid) if agent == "codex" else _text_of(r.get("message"))
+                    sess = state.read(session_path(agent, sid)) or {}
+                    run = load_run(agent, sid) or {}
+                    if not _grant_text_matches(text or "", e, sess.get("project") or run.get("project") or ""):
+                        continue
                 return True
     except OSError:
         return False
@@ -4608,7 +4668,7 @@ def _codex_turn_prompt(r, sid: str, turn: str, since: float):
     return text if at >= since - CODEX_PROMPT_GRACE else None
 
 
-def _codex_backs(path, sid: str, turn: str, covers: str, since: float) -> bool:
+def _codex_backs(path, sid: str, turn: str, covers: str, since: float, repo: str | None = None) -> bool:
     """`dev audit verify` for a Codex E2 record: does thread `sid`'s typed prompt of `turn`, written at or after the
     record's time (_codex_turn_prompt), hold a line of its own that covers what the record names (`covers`, its
     target: `approve D<n>` for D<n>, `grant <action> <target>` for "<action> <target>"), or is it a plain "yes" for a
@@ -4633,8 +4693,12 @@ def _codex_backs(path, sid: str, turn: str, covers: str, since: float) -> bool:
                 mt = _APPROVE_LINE.match(own)
                 if mt and _norm(mt.group(1)) == want and (not mt.group(2) or _names_session(mt.group(2), sid)):
                     return True
-                mt = _GRANT_LINE.match(own)
-                if mt and _norm(f"{mt.group(1)} {mt.group(2)}") == want:
+                default = (state.read(session_path("codex", sid)) or {}).get("project") or ""
+                grant = _parse_grant(own, default)
+                mt = _GRANT_LINE.fullmatch(own)
+                explicit = bool(mt and mt.group(3))
+                if grant and _norm(f"{grant[0]} {grant[1]}") == want and (
+                        (repo is None and not explicit) or _same_repo(grant[2], repo)):
                     return True
     except OSError:
         return False
@@ -4810,7 +4874,8 @@ def _consume(agent: str, sid: str, e: dict, now: float) -> dict | None:
 
     def fn(s):
         for x in s.get("human") or []:
-            if x.get("ts") == e["ts"] and x.get("covers") == e["covers"] and x.get("used") is None:
+            if all(x.get(k) == e.get(k) for k in ("ts", "covers", "repo", "channel", "transcript_uuid")) \
+                    and x.get("used") is None:
                 x["used"] = now
                 out.update(x)
                 return None
@@ -4846,6 +4911,24 @@ def _opened(id_, source, uses_left, expires) -> dict:
     return {"id": id_, "source": source, "uses_left": uses_left, "expires": expires}
 
 
+def grant_scope_mismatch(agent: str, sid: str, action: str, target: str, repo: str, now=None) -> str:
+    """Explain a matching approval in another scope, without consuming it."""
+    now = now or time.time()
+    scopes = set()
+    for e in evidence(agent, sid, lambda e: e.get("channel") == "E2" and bool(e.get("expires")), now):
+        cls, _, pattern = str(e.get("covers") or "").partition(" ")
+        if cls == action and _target_covers(action, pattern, target) and not _same_repo(e.get("repo"), repo):
+            scopes.add(e.get("repo") or "(unknown)")
+    run = load_run(agent, sid) or {}
+    if run.get("state") != "done":
+        for d in _decision_candidates(run, action, lambda d: _target_covers(action, d["target"], target)):
+            scope = d.get("repo", run.get("project")) or ""
+            if approves_action(d) and not _same_repo(scope, repo):
+                scopes.add(scope or "(unknown)")
+    return (f"The recorded approval scope: {', '.join(sorted(scopes))}; current execution scope: {repo or '(unknown)'}. "
+            "The approval remains unused. ") if scopes else ""
+
+
 def use_grant(agent: str, sid: str, *, action: str, target: str, repo: str = "", lane: str | None = None,
               consume: bool = True, now: float | None = None):
     """What opens one irreversible action (spec C6, The Keymaker's gate) -> {id, source, uses_left, expires}, or
@@ -4879,7 +4962,7 @@ def use_grant(agent: str, sid: str, *, action: str, target: str, repo: str = "",
         return e.get("channel") == "E2" and bool(e.get("expires")) and cls == action and \
             _same_repo(e.get("repo"), repo) and _target_covers(action, pattern, target)
     for e in evidence(agent, sid, grants, now):
-        eid = f"E2:{e.get('transcript_uuid') or round(e['ts'])}:{e['covers']}"
+        eid = f"E2:{e.get('transcript_uuid') or round(e['ts'])}:{e['covers']}:{e['repo']}"
         if not consume:
             return _opened(eid, "E2", 1, e["expires"])
         got = _consume(agent, sid, e, now)
@@ -4887,20 +4970,17 @@ def use_grant(agent: str, sid: str, *, action: str, target: str, repo: str = "",
             _audit("crew.grant-used", f"{action} {target}", f"E2 grant “{got['covers']}”", channel="E2",
                    transcript_uuid=got.get("transcript_uuid") or "", session=f"{agent}:{sid}")
             return _opened(eid, "E2", 0, got["expires"])
-    if not live or not _same_repo(live.get("project"), repo):
+    if not live:
         return None
 
     def covers(d):
-        return _target_covers(action, d["target"], target)
+        return _same_repo(d.get("repo", live.get("project")), repo) and _target_covers(action, d["target"], target)
 
     def decision(r):
         return next((d for d in _decision_candidates(r, action, covers) if approves_action(d)), None)
 
     def preapproval(r):
-        if action in NEVER_PREAPPROVED:
-            return None
-        return next((p for p in _live_preapprovals(r, now) if p["action"] == action and _same_repo(p.get("repo"), repo)
-                     and _target_covers(action, p["target"], target)), None)
+        return _matching_preapproval(r, action, target, repo, now)
     for source, find in (("decision", decision), ("preapproval", preapproval)):
         hit = find(live)
         if not hit:
@@ -4937,7 +5017,8 @@ def evidence_lines(entries: list) -> str:
             continue
         how = "by your prompt" if e["channel"] == "E2" else "by your answer to the question tool"
         if e.get("expires"):
-            out.append(f"granted: {e['covers']} {how} at {_when(e['ts'])} (one use, until {_when(e['expires'])})")
+            out.append(f"granted: {e['covers']} --repo {e.get('repo') or '(unknown)'} {how} at {_when(e['ts'])} "
+                       f"(one use, until {_when(e['expires'])})")
         else:
             out.append(f"approved: {e['covers']}{': ' + e['answer'] if e.get('answer') else ''} {how} at "
                        f"{_when(e['ts'])} (record it with dev crew decide {e['covers']} \"<the answer>\")")
@@ -4967,6 +5048,8 @@ def _decision_evidence(agent: str, sid: str, run: dict, d: dict, answer: str, no
         own = sid or e.get("session") or ""
         if not e or e.get("void") or e.get("plain") or e.get("free") or (
                 e.get("channel") == "E1" and (e.get("match"), e.get("asked")) != ("exact", "exact")) \
+                or ("repo" in d and not _same_repo(d["repo"], e.get("repo"))) \
+                or (e.get("channel") == "E1" and asked_how(run, d, e.get("question")) != "exact") \
                 or not confirmed(e, sid) or (_codex_said_later(harness_transcript("codex", own), e, d, own)
                                              if e.get("agent") == "codex"
                                              else _said_later(harness_transcript("claude", own), e, d)):
@@ -5003,10 +5086,14 @@ def evidence_check(rec: dict, path, line):
     e = {"agent": agent, "channel": ev["channel"], "transcript_uuid": uuid, "transcript": str(tp)}
     if agent == "codex":  # a typed line only (no question tool): re-read from its prompt, never from the detail
         if ev["channel"] == "E2" and _codex_backs(tp, sid, uuid, str(rec.get("target") or ""),
-                                                   float(rec.get("ts") or 0)):
+                                                   float(rec.get("ts") or 0), repo=ref.get("repo")):
             return None
         return (f"evidence {ev['channel']} {uuid or '-'} for {rec.get('target')}: no message of the developer in "
                 f"{core.tilde(tp)} backs it")
+    if ev["channel"] == "E2":
+        e["covers"] = rec.get("target")
+        if "repo" in ref:
+            e["repo"] = ref["repo"]
     if not confirmed(e, sid):
         return (f"evidence {ev['channel']} {uuid or '-'} for {rec.get('target')}: no message of the developer in "
                 f"{core.tilde(tp)} backs it")
@@ -5049,6 +5136,8 @@ def _decision_from_record(did: str, ref: dict):
             d["recommend"] = o
         if o and act and base.startswith(f"{o} ({act}") and base.endswith(")"):
             d["performs"], d["target"] = o, base[len(o) + 2 + len(act):-1].strip()
+            if " --repo " in d["target"]:
+                d["target"], d["repo"] = d["target"].rsplit(" --repo ", 1)
     return d
 
 
@@ -5102,6 +5191,8 @@ def _rederive(rec: dict, tp, agent: str, sid: str):
     want = {"answer": audit._value(audit._option(said, d["options"]) if opt else _free(said), rx), "match": match,
             "label": audit.evidence_label(label, rx) if _offered(label, offered) else None, "asked": asked}
     got = {"answer": ref.get("answer"), "match": ev.get("match"), "label": ref.get("label"), "asked": ev.get("asked")}
+    if d.get("irreversible") and "repo" in d:
+        want["repo"], got["repo"] = audit._value(d["repo"], rx), ref.get("repo")
     diff = [k for k in want if (k != "asked" or asked) and _plain(want[k] or "") != _plain(got[k] or "")]
     return f"{head}: the transcript shows another {', '.join(diff)} than the record" if diff else None
 
@@ -5328,6 +5419,9 @@ def reopen(which, why: str, cwd: str | None = None, now: float | None = None, sk
             s.update(state="pending", finished=None)
             s.pop("recheck", None)  # it is redone now
             if (s.get("owner") or "main") != "main":
+                previous = run.get("agents", {}).get(s["owner"])
+                if previous is not None:
+                    _remember_step(previous, s)
                 s["owner"] = "main"  # back to Morpheus, still assigned to its member: dev crew next launches it again
             if old in DONE:
                 _recheck_dependents(run, s, now)
@@ -6323,6 +6417,14 @@ def _launches(s: dict, now: float) -> dict:
     return ls
 
 
+def _native_launch_label(agent: str, inp: dict) -> str:
+    """Codex v2 names a launch with task_name; its message is the private brief."""
+    if agent != "codex" or not isinstance(inp.get("task_name"), str) or not inp["task_name"].strip():
+        return ""
+    from . import codexlaunch
+    return codexlaunch.label_of({"task": inp["task_name"], "type": inp.get("agent_type") or "default"})
+
+
 def _note_agent_launch(agent: str, data: dict, now: float | None = None):
     """PreToolUse of a subagent launch (Claude's Agent/Task, Codex's spawn_agent), after the guard allowed it: a
     launch record keyed by the call's tool_use_id, with its description, type, caller (the launching subagent's
@@ -6335,7 +6437,7 @@ def _note_agent_launch(agent: str, data: dict, now: float | None = None):
     if s is None:
         return
     inp = data.get("tool_input") or {}
-    label = inp.get("description") or inp.get("nickname") or inp.get("name") or \
+    label = inp.get("description") or inp.get("nickname") or inp.get("name") or _native_launch_label(agent, inp) or \
         str(inp.get("message") or inp.get("prompt") or "").strip().split("\n")[0][:60]
     now = now or time.time()
     tid = str(data.get("tool_use_id") or "")
@@ -6344,6 +6446,8 @@ def _note_agent_launch(agent: str, data: dict, now: float | None = None):
     entry = {"tool_use_id": tid or None, "label": str(label)[:80],
              "type": inp.get("subagent_type") or inp.get("agent_type") or "", "parent": parent,
              "depth": launch_depth(s, None, parent), "ts": round(now, 1), "state": "pending", "agent_id": None}
+    if agent == "codex":
+        entry["run_started"] = (load_run(agent, sid) or {}).get("started")
     if tid:
         if tid in ls:
             return  # the same call recorded twice
@@ -6452,11 +6556,7 @@ def _bind_step(run: dict, aid: str, lane: dict, now: float):
                   f"stays pending and this lane runs without it. When {w} is done, link it: dev progress assign "
                   f"\"{st['name']}\" --to \"{st['label']}\"", now, from_name="devkit")
         return
-    st.update(owner=aid, state="running", started=st.get("started") or now)
-    st.pop("waits_lane", None)  # the launch that names it takes it, not the lane it was queued for
-    if st.get("scope"):
-        lane["scope"] = st["scope"]
-        _hand_scope(run, st, aid, now)
+    _take_step(run, aid, st, now)
 
 
 def _hand_scope(run: dict, st: dict, to: str, now: float):
@@ -6476,11 +6576,17 @@ def _hand_scope(run: dict, st: dict, to: str, now: float):
             continue  # it works on a step of its own
         if not any(_globs_overlap(g, h) for g in globs for h in own):
             continue
-        lane.pop("scope")
-        lane["handed_over"] = {"ts": round(now), "step": st.get("name"), "to": to[:16], "scope": own}
-        _audit("crew.scope-handed", lane.get("persona") or lane.get("label") or k[:8], f"“{st.get('name')}” and "
-               f"{', '.join(own)} went to {_name_of(run, to)}: this lane may read but not write until a step is "
-               f"assigned to it", "restricted", project=run.get("project") or "", agent_id=k[:16])
+        _revoke_lane(run, k, st, to, now)
+
+
+def _revoke_lane(run, aid, step, to, now):
+    """Losing assignment revokes write authority even when its scope was unrestricted."""
+    lane = run["agents"][aid]
+    own = lane.pop("scope", [])
+    lane["handed_over"] = {"ts": round(now), "step": step.get("name"), "to": to[:16], "scope": own}
+    _audit("crew.scope-handed", lane.get("persona") or lane.get("label") or aid[:8],
+           f"“{step.get('name')}” went to {_name_of(run, to)}: this lane may read but not write until a step is "
+           "assigned to it", "restricted", project=run.get("project") or "", agent_id=aid[:16])
 
 
 def _lane_event(run, aid, kind, tid, rec, binding, now, start, waiting, own=True, sess=None):
@@ -6492,6 +6598,28 @@ def _lane_event(run, aid, kind, tid, rec, binding, now, start, waiting, own=True
     like a launch: while none is free it stays as it was, reads only (`waits_slot`), and Morpheus is told once with
     the launch's message; each later call of the agent tries again. `sess`: the session record, held by the caller."""
     lane = run["agents"].get(aid)
+    if run.get("agent") == "codex" and rec and (
+            rec.get("run_started") != run.get("started") if "run_started" in rec else
+            (rec.get("ts") or 0) < run.get("started", 0)):
+        return  # a prior run's recorded launch cannot acquire this run's assignments
+    if lane and own and lane.get("parent", "main") == "main":
+        if "assigned_steps" not in lane:
+            held = [s for s in run.get("plan", []) if s.get("owner") == aid]
+            for step in held:
+                _remember_step(lane, step)
+            if not held and run.get("plan"):
+                _revoke_lane(run, aid, {"name": "unverified prior assignment"}, "main", now)
+                return
+        current = [s for s in run.get("plan", []) if s.get("state") not in DONE and
+                   s.get("label") and _label_matches(s["label"], lane) and
+                   (s.get("owner") == aid or aid in _queued_lanes(s) and not deps_open(run, s))]
+        obsolete = next((s for s in run.get("plan", []) if
+                         s["name"] in lane.get("assigned_steps", []) and
+                         (s.get("label") and not _label_matches(s["label"], lane) or
+                          s.get("owner", "main") not in ("main", aid))), None)
+        if obsolete and not current:
+            _revoke_lane(run, aid, obsolete, obsolete.get("owner") or "main", now)
+            return  # reassignment is authoritative before the replacement agent starts
     if lane is None:
         if not binding and not (start and waiting):
             return  # a helper of the agent (compaction, suggestions), or an agent devkit never saw launched
@@ -6575,7 +6703,8 @@ def bind(agent: str, data: dict, now: float | None = None, resume: bool = True):
         return
     run = load_run(agent, sid)
     lane = ((run.get("agents") or {}).get(aid) or {}) if isinstance(run, dict) and run.get("state") != "done" else {}
-    if lane.get("state") == "running" and lane.get("binding", "exact") in BOUND:
+    if lane.get("state") == "running" and lane.get("binding", "exact") in BOUND and \
+            lane.get("parent", "main") != "main":
         return
     f = session_path(agent, sid)
     if not lane and ((state.read(f) or {}).get("subagents") or {}).get(aid, {}).get("launch"):
@@ -7208,7 +7337,7 @@ def _launch_verdict(agent: str, data: dict, run: dict, sess: dict, now: float):
                 f"Do this part yourself, or name it in your report and the tech lead assigns it.")
     inp = data.get("tool_input") or {}
     kind = str(inp.get("subagent_type") or inp.get("agent_type") or "")
-    label = str(inp.get("description") or inp.get("nickname") or inp.get("name") or "")
+    label = str(inp.get("description") or inp.get("nickname") or inp.get("name") or _native_launch_label(agent, inp))
     cost = launch_cost(run, kind, label, parent)
     if cost <= 0:
         return None  # a scout lookup costs no slot (progress.slot_weights)

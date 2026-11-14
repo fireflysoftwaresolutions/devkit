@@ -2444,6 +2444,7 @@ _dev__crew__ask() {
     '--recommend=[the letter of the option you recommend, e.g. A]:recommend: ' \
     '--irreversible=[the irreversible action it leads to]:irreversible: ' \
     '--target=[what that action acts on]:target: ' \
+    '--repo=[with --irreversible]:repo: ' \
     '--performs=[with --irreversible and --options]:performs: ' \
     '--approves=[with --decision]:plan step: _dev_live steps -' \
     '*:text: '

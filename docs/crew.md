@@ -86,6 +86,13 @@ comes back to you with a notice, the member is told to stop and report, and it m
 one member at once, before Codex records which agent each started, take no step, and you are told. Launch in the
 order `dev crew next` shows to avoid that (see [Agents › Hooks](agents.md#hooks)).
 
+A genuine child tool hook can recover a missed Codex start only when the parent spawn call and result match the
+child's metadata, task, and role. Incomplete or conflicting proof leaves it read-only without a step or scope until
+a later valid hook retries; see [Codex identity failures](agents.md#codex-identity-failures). The native `task_name`
+selects the step. Existing lanes recheck the current run, role, and recorded owner; reassignment revokes old write
+access before the replacement starts, even when the old lane had no restricted scope. A blocked reviewer must
+record its own evidence after recovery; the parent cannot supply that approval in its place.
+
 ## Leading the crew
 
 The main session leads when work needs more than one kind of expertise. The `crew` skill is the full manual; the
@@ -678,6 +685,38 @@ now? (choosing “A: release” runs release v26.11.4)`, and the option that per
 `A: release (release v26.11.4)`. Without options, only `approve D<n>`, or an answer that reads approve or yes, opens
 it. Any other answer (`no`, another option, free text) records your decision and opens nothing; the refusal is
 audited as `crew.grant-refused` with the decision and the option you chose, never the text you typed.
+
+### Approving work in another repository
+
+A session can work in another repository without moving its approval scope. Name the intended repository when
+recording an irreversible decision:
+
+```bash
+dev crew ask --decision "Merge feat/website-pages in acme/web?" \
+  --irreversible merge --target feat/website-pages --repo acme/web \
+  --options "A: merge | B: wait" --recommend A
+```
+
+New irreversible decisions show their repository scope in both the exact question and the performing option.
+The developer can instead type a scoped grant as a normal chat message:
+
+```text
+grant merge feat/website-pages --repo acme/web
+```
+
+The qualifier is a literal `owner/repository`, not a path, URL, or wildcard. The same branch name in another
+repository is a different target. A scope mismatch names the recorded and requested scopes, leaves the approval
+unused, and gives the scoped form to use. Changing the command's working directory never rewrites an approval.
+
+In auto mode, a pre-approval must match the action, target, and repository, remain unexpired, and have a use left.
+An expired, exhausted, or mismatched approval does not authorize the action. A repository mismatch does not consume
+its remaining use. Type grants in ordinary chat; text entered in an asynchronous question widget is not recognized
+as a typed grant.
+
+Without `--repo`, grants and decisions retain the session's original repository scope. Existing saved decisions
+keep that scope too. Transcript verification, expiration, and one-use consumption still apply. For a global GitHub
+API operation, the repository is its **approval scope**, not a claim that the endpoint belongs to that repository;
+use the scope reported for the command. A scoped grant is not a repository-independent API authorization.
 
 ### How the tech lead asks you
 

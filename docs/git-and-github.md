@@ -218,6 +218,10 @@ Refs: PROJ-142
 - **Not on the default branch.** In a repository with an `origin`, a commit on `main` is refused with
   `dev branch new`, which takes your changes along. A branch with a non-conforming name is refused with
   `dev branch rename`.
+- **An empty GitHub origin.** When no local remote references exist, devkit reads GitHub's declared default
+  branch. A valid feature branch can receive its first commit before the remote has any commits. `main`, `master`,
+  and the declared default remain protected. Missing, invalid, or mismatched metadata keeps the conservative
+  refusal; check GitHub CLI authentication or fetch the remote default once it exists, then retry.
 - **Not in the middle of another git operation.** While git's own marks show a revert, cherry-pick, merge, rebase, or
   `git am` stopped halfway, `dev commit` refuses before it stages anything, names the operation, and says how the one
   who started it finishes it. A commit then would finish that operation for them, which matters in a checkout that
@@ -451,9 +455,21 @@ failed jobs (`--all-jobs` for all of them).
 3. The version is `--version`, or the next CalVer version. A project with another scheme (recorded in its policy, or
    visible in its tags and version files) needs `--version X.Y.Z`. The tag must not exist yet.
 4. `VERSION`, `package.json`, and `pyproject.toml` say the same version; if not, bump them on the release branch first.
+   Python numeric versions may differ in zero padding: `pyproject.toml` version `26.11.8` matches
+   `--version 26.11.08`, and the tag stays `v26.11.08`. Each of the three numeric components must match;
+   `VERSION` and `package.json` still require the exact spelling.
 5. HEAD has local CI evidence (or `--ci-passed`), and its CI on GitHub is not failing or still running.
 6. The notes are `--notes-file`, or the version's section of `CHANGELOG.md` (or `CHANGES.md`, `HISTORY.md`), or
    GitHub's generated notes.
+
+The release check excludes GitHub's Dependabot update automation only when the authenticated run API confirms
+the run ID, the `dynamic` event, the `dynamic/dependabot/dependabot-updates` path, the `dependabot[bot]` actor,
+both repositories matching this repository, and the exact commit SHA. The displayed workflow name grants no
+exception. Repository CI, including workflows triggered by Dependabot pull requests, still counts. Missing,
+malformed, or unavailable run details keep the run in the check. Inspect a blocked run with
+`dev run view <id> --failed`; restore API access if needed, then retry `dev release --dry-run`.
+The updater remains visible in general CI status and watches. A matching-tree pull request still needs successful
+repository workflows and jobs to stand in for CI running on the default branch.
 
 Then it creates the annotated tag `v<version>` (signed with `--sign` or when git's `tag.gpgSign` is on), pushes it,
 and creates the GitHub release (`--draft` and `--prerelease` are passed on). It ends by asking you to download the

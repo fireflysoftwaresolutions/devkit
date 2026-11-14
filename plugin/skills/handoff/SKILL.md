@@ -43,5 +43,7 @@ Every project has one note: `~/Development/.handoff/projects/<owner>/<repo>.md` 
 ## Rules
 
 - Never put secrets, tokens, customer data, or personal data in the note.
-- Keep the whole note under ~150 lines; move long material into `plans/` and link it.
+- Keep the authored text under ~150 lines; move long material into `plans/` and link it. The budget excludes
+  complete generated `dev:auto` and `dev:tasks` blocks with their exact standard start and end markers on separate
+  lines. Malformed, unclosed, or nested blocks still count. Leave generated blocks intact and shorten the prose.
 - If the note contradicts the code, the code wins: fix the note.

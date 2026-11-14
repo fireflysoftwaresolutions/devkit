@@ -249,6 +249,10 @@ step, never the words of the request, so the developer's language does not matte
   pre-approved them. Only an open decision needs the developer: one whose asking member ended and that blocks no step
   is moot, and ending the run closes the rest. `dev crew withdraw <id> --why "…"` closes a decision that no longer
   applies; it is never the developer's answer, so never use it to skip one that still matters.
+  Approval stays in the session's original repository unless the irreversible decision or typed grant names a
+  literal `--repo owner/repository`. Changing directories does not move it. Global GitHub API operations still
+  require their reported repository approval scope. Typed grants belong in ordinary chat, not an asynchronous
+  question widget; auto mode still checks the action, target, repository, expiration, and remaining uses.
 
 **The crew talks through devkit, never around it.** Every member records each finished step with `dev progress step
 "…" --check "…"` (its own lane), posts `dev progress note` while a long step runs, asks with `dev crew ask` (a
@@ -435,6 +439,11 @@ Follow the devkit `backend` skill for the detailed checklists. Always:
   event, armed the right way for each agent).
 - **Code intelligence:** use the LSP tools (TypeScript, Python, Java, PHP) to find definitions, references, and type
   errors rather than grepping when they are available.
+- **Native Codex registration:** a delivered child hook can recover a missed start only with matching native
+  launch evidence (`using-devkit` has the retry procedure). Missing or conflicting proof grants no step or scope.
+  If hooks remain absent or identity unresolved, stop and report it; never supply an identity override, edit lane
+  records, or have the parent stand in for a blocked member's completion or review. Normal shell routing is
+  unchanged; live recovery still needs verification after the developer installs the fix and restarts sessions.
 - **Design and architecture:** `domain-modeling`, `codebase-design`, `architecture`, `system-design`, `likec4-dsl`
   (C4 diagrams). `grill-with-docs` and `improve-codebase-architecture` are the developer's own slash commands
   (`/grill-with-docs`, `/improve-codebase-architecture`): a model cannot load them, so suggest them and never put

@@ -448,6 +448,7 @@ dialog.modal .md{padding:0}
 .road-tick{position:absolute;top:0;bottom:0;width:1px;background:var(--line-soft)}
 .road-today{position:absolute;top:-2px;bottom:-2px;width:1px;background:var(--ink-strong);z-index:1}
 .road-tl{position:absolute;top:2px;transform:translateX(4px);font-size:var(--fs-1);color:var(--ink-2);white-space:nowrap}
+.road-tl.r{transform:translateX(-4px)}
 .road-tl.today{color:var(--ink-strong);font-weight:600}
 .road-m{position:absolute;top:50%;width:9px;height:9px;margin:-5px 0 0 -5px;transform:rotate(45deg);background:var(--mark);border-radius:1px;z-index:2}
 .road-m.over{background:var(--alert)} .road-m.done{background:var(--ok)}
@@ -745,6 +746,7 @@ table.raci td,table.raci th[scope="row"]{height:auto;padding-top:var(--s2);paddi
   .views{order:3;flex:1 1 100%;height:40px;gap:var(--s4)}.search{order:2;flex:1 1 100%}#palbtn{display:none}.livew{margin-left:auto}
   .navmore{position:static}.navmore .menu{right:var(--s4)} .banner{padding:var(--s3) var(--s4) 0}
   .head .sub{overflow-wrap:anywhere;min-width:0}
+  .road-row{grid-template-columns:repeat(2,minmax(0,1fr))}
   table.jt thead,table.crew thead{display:none}
   table.bt thead{display:none} table.bt,table.bt tbody,table.bt tr,table.bt td,table.bt th[scope="row"]{display:block;width:100%;min-width:0;max-width:none}
   table.bt tr{display:grid;grid-template-columns:minmax(0,1fr);gap:4px;padding:var(--s3) var(--s2);border-bottom:1px solid var(--line-soft)}

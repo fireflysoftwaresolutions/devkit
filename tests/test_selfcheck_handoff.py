@@ -61,6 +61,41 @@ class HandoffNoteSize(unittest.TestCase):
             skill.write_text("- Keep the whole note under ~40 lines; move long material into `plans/`.\n")
             self.assertEqual(selfcheck.handoff_max_lines(home=d), 40)
 
+    def test_generated_blocks_do_not_use_the_authored_note_budget(self):
+        limit = selfcheck.handoff_max_lines()
+        generated = "generated task\n" * (limit + 1)
+        for kind in ("auto", "tasks"):
+            start, end = f"<!-- dev:{kind}:start -->", f"<!-- dev:{kind}:end -->"
+            with self.subTest(kind=kind, complete=True):
+                self.note(limit)
+                note = core.note_path("acme/api")
+                note.write_text(note.read_text() + f"{start}\n{generated}{end}\n")
+                self.assertEqual(list(self.rows()), ["work state"])
+            # A malformed block, a quoted example or an unrelated comment cannot
+            # hide authored material from the size warning.
+            for block in (f"{start}\n{generated}", f"{generated}{end}\n",
+                          f"{start}\n<!-- dev:other:end -->\n{generated}",
+                          f"{start}\n<!-- dev:tasks:start -->\n{generated}<!-- dev:tasks:end -->\n{end}\n",
+                          f"prefix {start}\n{generated}{end}\n",
+                          f"```markdown\n{start}\n{generated}{end}\n```\n",
+                          f"<!-- user:start -->\n{generated}<!-- user:end -->\n"):
+                with self.subTest(kind=kind, block=block.splitlines()[0]):
+                    self.note(1)
+                    note.write_text(note.read_text() + block)
+                    ok, detail, _ = self.rows()["handoff note"]
+                    self.assertFalse(ok)
+                    self.assertIn(f"{len(note.read_text().splitlines())} lines", detail)
+
+    def test_long_authored_notes_report_their_own_count(self):
+        limit = selfcheck.handoff_max_lines()
+        self.note(limit + 1)
+        note = core.note_path("acme/api")
+        note.write_text("<!-- dev:auto:start -->\nmetadata\n<!-- dev:auto:end -->\n" + note.read_text() +
+                        "<!-- dev:tasks:start -->\n" + "task\n" * limit + "<!-- dev:tasks:end -->\n")
+        ok, detail, _ = self.rows()["handoff note"]
+        self.assertFalse(ok)
+        self.assertIn(f"{limit + 1} lines of authored content", detail)
+
 
 if __name__ == "__main__":
     unittest.main()

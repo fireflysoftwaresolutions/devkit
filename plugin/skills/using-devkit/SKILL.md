@@ -19,6 +19,20 @@ this skill is the how.
 2. Pick up where the last session stopped: the first Now task, or what the user asked. `dev task` shows the board.
 3. Unsure about the portfolio? `dev overview` (add `--json` to compute with it).
 
+### Native Codex identity failures
+
+A genuine child Start or PreToolUse hook can register a child whose start was missed, using the exact parent spawn
+call and started result matched to the child's metadata, task, and role. Missing or conflicting proof grants no
+step, scope, or write authority; safe reads remain available. Devkit notifies the lead and retries at a later
+genuine hook. Wait for complete native launch records, then retry the child's tool call. The native `task_name`
+selects the step, not the brief's message. This preserves normal hook-supported shell routing; it adds no CLI
+identity inference or special wrapper syntax.
+
+If hooks remain absent or identity unresolved, stop and report the command, directory, installed version, and
+exact error. Never set identity variables, edit lane records, or run hooks manually to force admission. After the
+developer installs the fixed release from a normal terminal and restarts affected sessions, verify registration
+and lane ownership in the live host before claiming that host's issue is resolved.
+
 ### During
 
 - Start the item you work on, on its branch, before you work: `dev task start <id>` takes the lock, pushes it, and

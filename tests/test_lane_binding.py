@@ -283,6 +283,30 @@ class StepChoiceTests(LaneCase):
 
 
 class ResumeTests(LaneCase):
+    def test_reassignment_revokes_the_old_members_scope_before_any_replacement_starts(self):
+        self.reassignment("Tank: dashboard server", "server/**")
+
+    def test_a_scored_launch_match_does_not_retain_authority_after_reassignment(self):
+        self.reassignment("Tank: dashboard", "server/**")
+
+    def test_an_unscoped_lane_loses_write_authority_after_reassignment(self):
+        self.reassignment("Tank: dashboard server", "")
+
+    def reassignment(self, label, scope):
+        pg.start("Work", plan=["dashboard server"], now=self.m(0))
+        pg.assign("dashboard server", "Tank", scope=scope, now=self.m(0))
+        self.launch("toolu_tank", label)
+        self.start("a_tank")
+        self.result("toolu_tank", "a_tank", label)
+        self.stop("a_tank", at=self.m(20))
+        pg.reopen("dashboard server", "another engineer takes over", now=self.m(21))
+        pg.assign("dashboard server", "Neo", why="handoff", now=self.m(22))
+        self.start("a_tank", at=self.m(23))
+        self.assertEqual(self.step("dashboard server")["owner"], "main")
+        self.assertNotEqual(pg.lane_tools(self.run_(), "a_tank"), "all")
+        self.assertEqual(pg.lane_scope(self.run_(), "a_tank"), [])
+        self.assertIn('"permissionDecision": "deny"', self.first_tool("a_tank", tool="Edit", file_path="server/api.py"))
+
     def test_a_resumed_agent_keeps_its_own_lane_and_takes_no_queued_launch(self):
         # live, B-fxnghfz0rjj: Tank's resumed lane took Trinity's label and step, and Morpheus's next message to
         # Tank went to it as "Trinity"

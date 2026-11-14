@@ -1474,6 +1474,8 @@ def _lane_verdict(data: dict, agent: str, cmd: str, routed: bool = False, stampe
             scope, member = progress.lane_scope(run, aid), _member_folder(run, aid)
             level = progress.lane_tools(run, aid)
             base = guard.scope_base((run or {}).get("project"), cwd)
+        elif agent == "codex":
+            level = "read"  # a delivered child hook without a binding has no write authority
         # the lane's id finds its step grant for a tier-1 push or PR (spec C6, M180)
         v = guard.crew_shell_verdict(cmd, cwd, scope, member, level=level, base=base, lane=aid, session=sid,
                                      agent=agent, routed=routed, stamped=stamped)
@@ -2857,6 +2859,11 @@ def _scope_violation(agent: str, data: dict):
         if lane:
             level, layers, member = progress.lane_tools(run, aid), progress.lane_scope(run, aid), \
                 _member_folder(run, aid)
+        elif agent == "codex":
+            level = "read"
+            if tool in EDIT_TOOLS:
+                return ("devkit has not verified this Codex child's launch, so it may read but not edit. "
+                        "Retry after its native launch records arrive; if this stays, stop and report.")
         if lane and lane.get("over_limit"):  # a Codex launch over the crew's limits, told to stop (codexlaunch)
             if tool in EDIT_TOOLS:
                 return ("devkit recorded this launch over the crew's limit (Codex cannot refuse it before it starts), "
@@ -3064,6 +3071,16 @@ def _guard_in_context(agent: str, data: dict, held: dict):
     if data.get("agent_id") and not headless:  # late binding (spec D2): this call already runs with its launch's step and scope
         try:
             from . import progress
+            if agent == "codex" and data.get("session_id") and data.get("tool_use_id"):
+                # A delivered child hook identifies its caller. Native lineage
+                # can repair a missed start here; it cannot identify CLI callers
+                # on hosts that deliver neither lifecycle nor child tool hooks.
+                launch = _codex_launch(agent, data)
+                if launch:
+                    progress.on_subagent(agent, data, True)
+                    if launch.get("why"):
+                        from . import codexlaunch
+                        codexlaunch.mark_over_limit(agent, data, launch)
             progress.bind(agent, data)
         except Exception:
             _log(f"guard bind {agent}: {traceback.format_exc()[-300:]}")

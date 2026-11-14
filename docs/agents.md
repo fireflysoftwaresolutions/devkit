@@ -308,6 +308,35 @@ same checks as a Claude Code member's. Two spawns of one member at once, before 
 started, take no step, and the tech lead is told. Codex's own helpers, such as a review or a compaction, get no launch
 record.
 
+### Codex identity failures
+
+A genuine Codex SubagentStart hook can register a child, and a delivered child PreToolUse hook can recover a missed
+start. Both require unique canonical parent and child rollouts: the parent's exact spawn call and started result
+must agree with the child's metadata, task, and role. Missing, partial, or conflicting evidence leaves the child
+unbound with no step, scope, or write authority; safe reads remain available. The lead receives a notice, and a
+later genuine hook retries registration through the normal crew slot and depth checks.
+
+The native `task_name` selects the plan step, not the brief's message text. Recovery can repair an older pending
+message-derived label only after the immutable call, parent, role, child, and run agree. It does not rewrite an
+existing contradictory registration.
+
+Existing lanes are checked against the current run, role, and owner before admission. A prior run's launch cannot
+take a new run's assignment. Reassignment uses recorded prior ownership and revokes the old member's write access
+before a replacement starts, including scored or abbreviated labels and lanes without a restricted file scope.
+Legacy lanes whose ownership cannot be recovered remain read-only until explicitly assigned. Legitimate same-role
+reopenings, ad hoc work, and queued assignments remain supported.
+
+This recovery requires a delivered hook. It does not infer CLI caller identity from command text or change the
+normal [routing rules](crew.md#who-is-calling), tool matchers, or shell wrapper syntax. If registration evidence is
+still incomplete, wait for the native launch records and retry the child's tool call. If hooks remain absent or
+identity remains unresolved, stop the affected operation and report the command, directory, installed devkit
+version, and exact error. Do not edit session or lane records, run hooks manually, or have the parent submit a
+member's completion or review as its own.
+
+Source checks do not prove that a particular live host delivers these hooks. The developer first installs the
+fixed release from a normal terminal and restarts the affected sessions. Then verify child registration and lane
+ownership in that host before calling the live issue resolved.
+
 ### The session context
 
 At session start (or at the first prompt) the agent receives:

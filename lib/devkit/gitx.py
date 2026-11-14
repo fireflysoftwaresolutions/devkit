@@ -151,6 +151,22 @@ def ctx(cwd=None):
     slug = None
     if provider == "github":
         slug = f"{owner}/{repo}" if host == "github.com" else f"{host}/{owner}/{repo}"
+        if (default == branch
+                and not core.gitout(top, "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD")
+                and not core.gitout(top, "for-each-ref", "--format=%(refname)", "refs/remotes/origin/")):
+            # An empty origin has no refs. The registry's local-branch fallback is not evidence that this
+            # branch is protected. REST retains the declared default even when defaultBranchRef is null.
+            rc, out, _ = GH(["api", f"repos/{owner}/{repo}", "--hostname", host], cwd=top, timeout=10)
+            try:
+                metadata = json.loads(out) if rc == 0 else None
+            except (ValueError, TypeError):
+                metadata = None
+            if (isinstance(metadata, dict)
+                    and str(metadata.get("full_name", "")).lower() == f"{owner}/{repo}".lower()):
+                declared = metadata.get("default_branch")
+                if (isinstance(declared, str) and declared and not declared.startswith("-")
+                        and core.git(top, "check-ref-format", f"refs/heads/{declared}")[0] == 0):
+                    default = declared
     pid = core.project_identity(main, remote)[0]
     return SimpleNamespace(top=top, main=str(main), remote=remote, has_origin=has_origin, host=host, owner=owner,
                            repo=repo, slug=slug, provider=provider, pid=pid, branch=branch, default=default)
@@ -4459,6 +4475,17 @@ def version_files(top) -> dict:
     return {k: v for k, v in out.items() if v != "0.0.0"}
 
 
+def _release_version_matches(filename: str, actual: str, requested: str) -> bool:
+    """Python numeric metadata may omit zero padding; other files must match literally."""
+    if actual == requested:
+        return True
+    if filename != "pyproject.toml" or not all(
+            re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", v) for v in (actual, requested)):
+        return False
+    return tuple(p.lstrip("0") or "0" for p in actual.split(".")) == tuple(
+        p.lstrip("0") or "0" for p in requested.split("."))
+
+
 def delivery_policy(top) -> dict:
     """The project's recorded delivery policy (`dev delivery`), or {}."""
     try:
@@ -4502,10 +4529,38 @@ def changelog_section(top, version: str):
 
 
 def _ci_runs(c, sha):
-    """The GitHub Actions runs of commit `sha` (as `gh run list --commit` lists them), or None when gh cannot say."""
+    """Release CI for commit `sha`, excluding verified Dependabot update automation; None when gh cannot list it.
+
+    General CI status/watch still includes the updater. Pull request twins use this same release-only view, but
+    must still supply their own successful repository workflow runs and jobs in `_passed_twin`."""
     runs, _ = gh_json(["run", "list", "-R", c.slug, "--commit", sha, "--json",
                        "databaseId,status,conclusion,workflowName,workflowDatabaseId,event"], c)
-    return runs if isinstance(runs, list) else None
+    return [r for r in runs if not _dependabot_update_run(c, r, sha)] if isinstance(runs, list) else None
+
+
+def _dependabot_update_run(c, run, sha) -> bool:
+    """Only authenticated run details can establish that this is GitHub's updater, not repository CI."""
+    if not isinstance(run, dict) or run.get("event") != "dynamic":
+        return False
+    rid = run.get("databaseId")
+    if type(rid) is not int or rid <= 0:
+        return False
+    # gh_json accepts JSON on a nonzero exit for PR checks. Here a failed API request is never evidence.
+    rc, out, _ = GH(["api", f"repos/{c.slug}/actions/runs/{rid}"], cwd=c.top, timeout=60)
+    if rc != 0:
+        return False
+    try:
+        data = json.loads(out)
+    except (ValueError, TypeError):
+        return False
+    if not isinstance(data, dict) or type(data.get("id")) is not int or data["id"] != rid:
+        return False
+    actor, repo, head_repo = data.get("actor"), data.get("repository"), data.get("head_repository")
+    return (data.get("event") == "dynamic" and data.get("path") == "dynamic/dependabot/dependabot-updates"
+            and isinstance(actor, dict) and actor.get("login") == "dependabot[bot]"
+            and isinstance(repo, dict) and repo.get("full_name") == c.slug
+            and isinstance(head_repo, dict) and head_repo.get("full_name") == c.slug
+            and data.get("head_sha") == sha)
 
 
 def _run_jobs(c, run):
@@ -4733,7 +4788,7 @@ def _release(a, c) -> int:
     tag = "v" + version
     if _ref_sha(c.top, f"refs/tags/{tag}"):
         return refuse(f"tag {tag} already exists", f"next version: {nxt}" if scheme == "calver" else None)
-    wrong = {f: v for f, v in version_files(c.top).items() if v != version}
+    wrong = {f: v for f, v in version_files(c.top).items() if not _release_version_matches(f, v, version)}
     if wrong:
         f, v = next(iter(wrong.items()))
         return refuse(f"{f} says {v}, not {version}",

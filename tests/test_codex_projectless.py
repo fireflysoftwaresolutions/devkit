@@ -206,11 +206,12 @@ class ProjectlessSessionTests(unittest.TestCase):
 
     def test_resuming_after_a_slot_frees_clears_the_old_capacity_refusal(self):
         run = progress.start("Inspect the repository", cwd=str(self.worktree), plan=["debug"])
-        lane = {"state": "done", "binding": "exact", "launch": "call-member", "persona": "neo",
-                "type": "neo", "label": "Neo: debug", "parent": "main", "depth": 1,
-                "started": 1, "finished": 2,
-                "over_limit": {"ts": 1, "why": "1 of 1 crew slots are in use"}}
-        run["agents"]["member"] = lane
+        # A current launch has an explicit assignment history, even before it can
+        # take its first slot; an old lane without that history must stay restricted.
+        lane = progress._lane(run, "member", 1, "Neo: debug", "neo")
+        lane.update(state="done", binding="exact", launch="call-member", persona="neo",
+                    parent="main", depth=1, finished=2,
+                    over_limit={"ts": 1, "why": "1 of 1 crew slots are in use"})
         progress._lane_event(run, "member", "neo", "call-member", {}, "exact", 3,
                              False, False, own=True, sess={})
         self.assertEqual(lane["state"], "running")
