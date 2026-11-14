@@ -1106,23 +1106,51 @@ HANDOFF_MAX_LINES = 150  # when the handoff skill states no size
 
 
 def handoff_max_lines(home=None) -> int:
-    """The size the handoff skill sets for a project's note ("Keep the whole note under ~150 lines")."""
+    """The authored-content budget the handoff skill sets for a project's note."""
     m = re.search(r"under ~?(\d+) lines", _read(_home(home) / HANDOFF_SKILL))
     return int(m.group(1)) if m else HANDOFF_MAX_LINES
 
 
+def _authored_note_lines(text: str) -> int:
+    """Exclude complete standard generated blocks, never malformed blocks or fenced examples."""
+    from .registry import AUTO_START, AUTO_END, TASKS_START, TASKS_END
+    starts = {AUTO_START: AUTO_END, TASKS_START: TASKS_END}
+    markers = set(starts) | set(starts.values())
+    lines = text.splitlines()
+    pending, malformed, omitted, fence = None, False, 0, ""
+    for index, line in enumerate(lines):
+        if fence:
+            if re.fullmatch(r" {0,3}" + re.escape(fence[0]) + "{" + str(len(fence)) + r",}\s*", line):
+                fence = ""
+            continue
+        opened = re.match(r" {0,3}(`{3,}|~{3,})", line)
+        if opened:
+            fence = opened.group(1)
+            continue
+        if pending is None:
+            if line in starts:
+                pending, malformed = (index, starts[line]), False
+        elif line == pending[1]:
+            if not malformed:
+                omitted += index - pending[0] + 1
+            pending = None
+        elif line in markers:
+            malformed = True
+    return len(lines) - omitted
+
+
 def handoff_size_rows(scope: str) -> list:
-    """`dev doctor`'s warning when the project's handoff note is longer than the handoff skill allows; [] when it is
-    within it or there is no note."""
+    """Warn when authored note content exceeds the handoff skill's budget, excluding generated blocks."""
     note = core.note_path(scope)
     try:
-        n = len(note.read_text(encoding="utf-8", errors="ignore").splitlines())
+        n = _authored_note_lines(note.read_text(encoding="utf-8", errors="ignore"))
     except OSError:
         return []
     limit = handoff_max_lines()
     if n <= limit:
         return []
-    return [("Workspace", "handoff note", False, f"{scope}: {core.tilde(note)} has {n} lines, over the ~{limit} the "
+    return [("Workspace", "handoff note", False, f"{scope}: {core.tilde(note)} has {n} lines of authored content, "
+             f"over the ~{limit} the "
              "handoff skill sets", "rewrite Current state as it stands and move history and long material into "
              "plans/ (the handoff skill, /devkit:handoff)")]
 

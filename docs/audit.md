@@ -356,9 +356,11 @@ check it cannot run is no evidence of a change.
 Records written since the last publish are counted as _not yet published, so not yet anchored_. Every run is itself
 recorded as `audit.verify`, with `critical` severity when it fails. The daily job never publishes a local file over a
 published copy it no longer extends; it records `audit.publish` as blocked and critical instead. It never publishes a
-month file over 45 MB either, because GitHub refuses files over 100 MB and then every handoff push: that month's copy
+month file over 45 MiB either, because GitHub refuses files over 100 MB and then every handoff push: that month's copy
 stays as it was, the job records `audit.publish` as blocked with `warning` severity, and `dev audit stats` and
-`dev doctor` say so until devkit publishes daily segments instead of whole months, which is planned.
+`dev doctor` report the publication hold. The size hold does not delete local records: the local trail remains
+available under the normal retention policy, and `dev audit verify` checks it. Publication remains paused for the
+oversized month. Daily segments are planned, not implemented; no version update is promised to remove this hold.
 
 ## Query and export
 

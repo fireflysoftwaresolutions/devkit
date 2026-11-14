@@ -7,6 +7,9 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
 
 ### Fixed
 
+- **Diagnostics.** The handoff size check counts authored text rather than complete generated auto and Tasks
+  blocks; malformed or incomplete blocks still count. Audit publication warnings now explain the existing size
+  hold and local verification without claiming that a released version provides daily segments.
 - **Codex crew.** A child tool hook can recover a missed registration when the parent launch and child metadata
   agree. Reopened work keeps its valid owner, while reassignment revokes obsolete write scope and old launches
   cannot acquire a new run's assignments. Missing or conflicting evidence grants no ownership; recovery still

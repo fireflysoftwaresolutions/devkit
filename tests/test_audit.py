@@ -1669,7 +1669,7 @@ class CommandTests(AuditCase):
 
 class PublishLimitTests(AuditCase):
     # the 26.11.3 stopgap: GitHub refuses a file over 100 MB, and then every handoff push, so the audit job never
-    # publishes a month file over 45 MB (26.11.5 replaces whole months with daily gzipped segments)
+    # publishes a month file over 45 MB while daily segments remain planned
     MB = 1024 * 1024
 
     def month(self) -> Path:
@@ -1728,7 +1728,11 @@ class PublishLimitTests(AuditCase):
         rc, text = self.run_cmd("stats")
         self.assertEqual(rc, 0)
         self.assertIn(f"{self.month().stem} is not published: 46.0 MB here, over the 45.0 MB limit", text)
-        self.assertIn("dev update", text)
+        self.assertIn("local trail", text)
+        self.assertIn("dev audit verify", text)
+        self.assertIn("daily segments are planned", text)
+        self.assertNotIn("dev update", text)
+        self.assertNotIn("26.11.5", text)
         held = json.loads(self.run_cmd("stats", "--json")[1])["held"]
         self.assertEqual([(h["month"], h["bytes"]) for h in held], [(self.month().stem, 46 * self.MB)])
 
@@ -1740,7 +1744,11 @@ class PublishLimitTests(AuditCase):
         rows = audit.publish_checks()
         self.assertEqual([row[2] for row in rows], [False])
         self.assertIn(f"{self.month().stem} is not published: 46.0 MB here, over the 45.0 MB limit", rows[0][3])
-        self.assertIn("dev update", rows[0][4])
+        self.assertIn("local trail", rows[0][4])
+        self.assertIn("dev audit verify", rows[0][4])
+        self.assertIn("daily segments are planned", rows[0][4])
+        self.assertNotIn("dev update", rows[0][4])
+        self.assertNotIn("26.11.5", rows[0][4])
 
 
 class CliWiringTests(unittest.TestCase):
