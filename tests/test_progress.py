@@ -82,7 +82,48 @@ class TempState:
         self.tmp.cleanup()
 
 
-def launch(aid, kind, label, at=None, sid="s1"):
+def launch(aid, kind, label, at=None, sid="s1", agent="claude"):
+    if agent == "codex":
+        # Native SubagentStart names its own rollout; the parent records the exact
+        # call/result pair. Use the same registration and admission as the hook.
+        from datetime import datetime, timezone
+        from devkit import codexlaunch
+        home = pg.SESSIONS.parent
+        folder = home / ".codex/sessions/2026/11/13"
+        folder.mkdir(parents=True, exist_ok=True)
+        parent = folder / f"rollout-2026-11-13T10-00-00-{sid}.jsonl"
+        child = folder / f"rollout-2026-11-13T10-00-00-{aid}.jsonl"
+        task = label.partition(":")[2].strip() or label
+        path, call = f"/root/{task}", f"call_{aid}"
+        stamp = datetime.fromtimestamp(at or time.time(), timezone.utc).isoformat()
+
+        def line(record):
+            return json.dumps(dict(timestamp=stamp, **record)) + "\n"
+
+        if not parent.exists():
+            parent.write_text(line({"type": "session_meta", "payload": {
+                "id": sid, "session_id": sid, "source": "exec"}}))
+        with parent.open("a") as stream:
+            stream.write(line({"type": "response_item", "payload": {
+                "type": "function_call", "namespace": "collaboration", "name": "spawn_agent", "call_id": call,
+                "arguments": json.dumps({"task_name": task, "agent_type": kind, "message": "Do the assigned work."})}}))
+            stream.write(line({"type": "event_msg", "payload": {
+                "type": "item_completed", "thread_id": sid, "item": {
+                    "type": "SubAgentActivity", "id": call, "kind": "started", "agent_thread_id": aid,
+                    "agent_path": path}}}))
+            stream.write(line({"type": "response_item", "payload": {
+                "type": "function_call_output", "call_id": call, "output": json.dumps({"task_name": path})}}))
+        child.write_text(line({"type": "session_meta", "payload": {
+            "id": aid, "session_id": sid, "parent_thread_id": sid, "agent_path": path, "agent_role": kind,
+            "source": {"subagent": {"thread_spawn": {
+                "parent_thread_id": sid, "depth": 1, "agent_path": path, "agent_role": kind}}}}}))
+        data = {"session_id": sid, "agent_id": aid, "agent_type": kind, "transcript_path": str(child)}
+        with mock.patch.object(core, "HOME", home):
+            registered = codexlaunch.record(agent, data)
+            if not registered or registered.get("why"):
+                raise AssertionError(f"native test launch was not admitted: {registered}")
+            pg.on_subagent(agent, data, True, now=at)
+        return
     # Claude Code's sequence for one subagent launch: the Agent call (PreToolUse, with its tool_use_id), the agent's
     # start, and the call's result naming the agent it started (the lane binds to its launch exactly)
     pg.note_agent_launch("claude", {"session_id": sid, "tool_use_id": f"toolu_{aid}",
@@ -1691,13 +1732,17 @@ class CrewSafetyTests(unittest.TestCase):
 
     def test_review_only_members_cannot_edit_in_any_agent(self):
         from devkit import hooks
-        with TempState(), tempfile.TemporaryDirectory() as repo:
-            pg.start("Review", plan=["review"], now=time.time())
-            launch("r1", "seraph", "Seraph: review")
-            edit = {"session_id": "s1", "agent_id": "r1", "tool_name": "apply_patch", "cwd": repo,
-                    "tool_input": {"input": "*** Begin Patch\n*** Update File: src/a.py\n"}}
-            self.assertIn("review-only", hooks._scope_violation("codex", dict(edit)) or
-                          hooks._scope_violation("claude", edit))
+        for agent in ("claude", "codex"):
+            with self.subTest(agent=agent), TempState() as state, tempfile.TemporaryDirectory() as repo:
+                if agent == "codex":
+                    session = dict(json.loads(state.sess.read_text()), agent=agent)
+                    pg.session_path(agent, "s1").write_text(json.dumps(session))
+                    os.environ["DEVKIT_SESSION"] = "codex:s1"
+                pg.start("Review", plan=["review"], now=time.time())
+                launch("r1", "seraph", "Seraph: review", agent=agent)
+                edit = {"session_id": "s1", "agent_id": "r1", "tool_name": "apply_patch", "cwd": repo,
+                        "tool_input": {"input": "*** Begin Patch\n*** Update File: src/a.py\n"}}
+                self.assertIn("review-only", hooks._scope_violation(agent, edit))
 
     def test_launch_lines_are_safely_quoted(self):
         from devkit import dispatch
