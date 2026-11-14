@@ -3042,11 +3042,6 @@ def unbacked_approvals(run, now: float | None = None) -> list:
     return [x for x in (run or {}).get("approved") or [] if x not in live]
 
 
-def approved_actions(run, now: float | None = None) -> list:
-    """The irreversible actions auto mode may decide by itself: those with a live pre-approval the developer granted."""
-    return sorted({p["action"] for p in _live_preapprovals(run, now or time.time())})
-
-
 def _action_evidence(agent: str, sid: str, run: dict, action: str, target: str, now: float, any_target=False):
     """Use the developer's evidence for one action (a pre-approval's or a step grant's): their live grant of that
     action and target (any target with `any_target`), else a verified, unused decision naming the action and a
