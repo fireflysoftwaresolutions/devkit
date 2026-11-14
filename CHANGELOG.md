@@ -3,7 +3,7 @@
 All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH restarts at 0 each month); tags are
 `vYY.MM.PATCH`. Sections follow [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [26.11.18] - 2026-11-13
 
 ### Fixed
 
