@@ -20,6 +20,7 @@ import contextvars
 import filecmp
 import fnmatch
 import functools
+import glob
 import itertools
 import json
 import os
@@ -5406,12 +5407,18 @@ _CONFIG_OPTS = ("--config", "--config-file", "--rcfile", "--settings")  # the op
 
 # ---- writers that put a whole tree somewhere (spec C11)
 #
-# An archive extracted, a folder copied or a patch applied decides what lands below its destination, and the guard
-# cannot see an archive's members or the links among them. So such a writer may not write into a folder that is or
-# holds a protected root (_tree_root), nor run with an option that lets its members name any path; and a write
-# through a path an earlier command of the same line makes (a link, or what such a writer leaves there) is refused,
-# since the guard judges that path before the link exists. Run the write as its own command and the guard follows
-# the links that are there by then.
+# An archive extracted, a folder copied or moved, or a patch applied decides what lands below its destination. The
+# guard reads what it will write before it decides: a tar or zip archive's members (listed, never extracted) and a
+# copy's source tree (walked), bounded by _TREE_MAX_ENTRIES entries and _TREE_BUDGET seconds. A member that would land
+# on an agent settings file, a repository's git folder or a protected root is refused, and so is one written through
+# a link the same archive makes, a link named like an agent's settings folder, and a hard link to such a file. What
+# the guard cannot read (an archive from the command's input, a format it cannot list, one an earlier command of the
+# line may change, a listing past its bound) may not land in a project checkout or the home folder, nor in a folder
+# that is or holds a protected root (_tree_root); in a scratch folder it runs. No such writer runs with an option that
+# lets its members name any path; and a write through a path an earlier command of the same line makes (a link among
+# what such a writer leaves, or its whole destination when the guard could not read it) is refused, since the guard
+# judges that path before the link exists. Run the write as its own command and the guard follows the links that are
+# there by then.
 TREE_REASON = ("{cmd} writes a whole tree into {dest}, which {rel} {root}: devkit's state, configuration or install, an "
                "agent's settings or session transcripts, or the handoff repository. The guard cannot see which files "
                "land there (an archive's members, the links among them), so agents may not write a tree there (spec "
@@ -5420,47 +5427,174 @@ TREE_REASON = ("{cmd} writes a whole tree into {dest}, which {rel} {root}: devki
 TREE_ANYWHERE_REASON = ("{cmd} writes a tree whose files may land anywhere on this Mac ({why}), devkit's state and the "
                         "agents' settings included, and the guard cannot see where (spec C11). Extract into a folder "
                         "of your own without that option, then copy the files you need by name. " + _TAIL)
+TREE_LANDS_REASON = ("{cmd} would put {member} at {path}, {what}. An archive, a tree copy or a move may not drop one: "
+                     "the guard judges a direct write there by what it writes, and it cannot judge this one (spec "
+                     "C11). Extract or copy into your scratch folder, then copy the files you need by name and leave "
+                     "that one out; if the project needs it, write it with the Write or Edit tool. " + _TAIL)
+TREE_LINK_REASON = ("{cmd} would write {member} through {link}, so the file lands wherever that link leads, or where an "
+                    "agent reads its settings, which the guard cannot judge before the link exists (spec C11). Extract "
+                    "or copy into your scratch folder, then copy the files you need by name. " + _TAIL)
+TREE_UNREAD_REASON = ("{cmd} writes a tree into {dest}, in {where}, and the guard cannot read what lands there: {why}. "
+                      "A tree it cannot read may drop an agent settings file or a git hook there (spec C11). {fix}"
+                      + _TAIL)
+TREE_UNREAD_FIX = ("Extract or copy into your scratch folder first, then copy the files you need by name; or run the "
+                   "command that makes or changes what it reads as its own command first.")
 MADE_REASON = ("{path} is below {made}, which an earlier command of this line makes ({how}), so the guard cannot see "
                "where a write there leads: a link among what it makes may point at devkit's state or an agent's "
                "settings (spec C11). Run the write as its own command, after the one that makes the path: the guard "
                "then follows the links that are there.")
+MADE_UNKNOWN_REASON = ("{path} depends on a variable or a folder the guard cannot see, and an earlier command of this "
+                       "line makes a path ({how}) that may be a link to devkit's state or an agent's settings, so the "
+                       "guard cannot tell where this write leads (spec C11). Write the path out in full, or run the "
+                       "write as its own command, after the one that makes the path.")
+_TREE_MAX_ENTRIES = 20000  # a listing or a walk with more entries is one the guard cannot read
+_TREE_BUDGET = 1.0  # seconds a listing or a walk may take
+_MADE_UNKNOWN = str(UNKNOWN)  # what an earlier command made where the guard cannot place it (made_below)
+_GLOB_CHARS = re.compile(r"[*?\[]")
+_LINK_FOLDERS = frozenset({".claude", ".codex", ".git"})  # a link by one of these names reads a folder elsewhere
+_SETTINGS_NAMES = frozenset(n for names in _AGENT_SETTINGS.values() for n in names)
 _TARS = frozenset({"tar", "bsdtar", "gtar", "gnutar"})
 _TAR_SHORT_VALUES = frozenset("bCfFgIKLNsTVX")  # GNU tar's and bsdtar's short options that take a value
+# GNU tar's and bsdtar's long options. Both take a unique abbreviation of one (bsdtar 3.5 reads `--dir` as
+# --directory and `--abs` as --absolute-paths), so an abbreviation is read as every option of either tool it may name.
+_TAR_LONGS = frozenset("""
+    absolute-names absolute-paths acls after-date anchored append atime-preserve auto-compress b64encode backup
+    block-number block-size blocking-factor bunzip2 bzip bzip2 catenate cd check-device check-links checkpoint
+    checkpoint-action chroot clamp-mtime clear-nochange-fflags compare compress concatenate confirmation create
+    delay-directory-restore delete dereference diff directory disable-copyfile exclude exclude-backups exclude-caches
+    exclude-caches-all exclude-caches-under exclude-from exclude-ignore exclude-ignore-recursive exclude-tag
+    exclude-tag-all exclude-tag-under exclude-vcs exclude-vcs-ignores extract fast-read fflags file files-from
+    force-local format full-time get gid gname group group-map grzip gunzip gzip hard-dereference help hfsCompression
+    hole-detection ignore-case ignore-command-error ignore-failed-read ignore-zeros include incremental index-file
+    info-script insecure interactive keep-directory-symlink keep-newer-files keep-old-files label level list
+    listed-incremental lrzip lz4 lzip lzma lzop mac-metadata mode modification-time mtime multi-volume
+    new-volume-script newer newer-ctime newer-ctime-than newer-mtime newer-mtime-than newer-than no-acls no-anchored
+    no-auto-compress no-check-device no-delay-directory-restore no-fflags no-ignore-case no-ignore-command-error
+    no-mac-metadata no-null no-overwrite-dir no-quote-chars no-read-sparse no-recursion no-safe-writes no-same-owner
+    no-same-permissions no-seek no-selinux no-unquote no-verbatim-files-from no-wildcards no-wildcards-match-slash
+    no-xattr no-xattrs nodump nopreserveHFSCompression null numeric-owner occurrence old-archive older older-ctime
+    older-ctime-than older-mtime older-mtime-than older-than one-file-system one-top-level options overwrite
+    overwrite-dir owner owner-map passphrase pax-option portability posix preserve preserve-order preserve-permissions
+    quote-chars quoting-style read-full-blocks read-full-records read-sparse record-size recursion recursive-unlink
+    remove-files restrict rmt-command rsh-command safe-writes same-order same-owner same-permissions seek selinux
+    set-mtime-command set-mtime-format show-defaults show-omitted-dirs show-snapshot-field-ranges show-stored-names
+    show-transformed-names skip-old-files sort sparse sparse-version starting-file strip-components suffix tape-length
+    test-label to-command to-stdout totals touch transform uid uname uncompress ungzip unlink unlink-first unquote
+    update usage use-compress-program utc uuencode verbatim-files-from verbose verify version volno-file warning
+    wildcards wildcards-match-slash xattrs xattrs-exclude xattrs-include xform xz zstd""".split())
 _TAR_LONG_VALUES = frozenset({
     "file", "files-from", "exclude", "exclude-from", "blocking-factor", "format", "use-compress-program", "transform",
     "xform", "newer", "newer-mtime", "after-date", "label", "owner", "group", "mode", "strip-components", "to-command",
     "info-script", "new-volume-script", "starting-file", "tape-length", "volno-file", "rsh-command", "index-file",
     "checkpoint-action", "options", "include", "uid", "gid", "uname", "gname", "suffix", "record-size",
     "listed-incremental", "hole-detection", "occurrence", "mtime", "sort", "warning", "quoting-style", "quote-chars",
-    "no-quote-chars", "pax-option", "backup", "atime-preserve", "one-top-level"})
+    "no-quote-chars", "pax-option", "backup", "atime-preserve", "one-top-level", "directory", "cd", "block-size",
+    "newer-ctime", "newer-ctime-than", "newer-mtime-than", "newer-than", "older", "older-ctime", "older-ctime-than",
+    "older-mtime", "older-mtime-than", "older-than", "passphrase", "level", "group-map", "owner-map",
+    "set-mtime-command", "set-mtime-format", "xattrs-exclude", "xattrs-include", "exclude-tag", "exclude-tag-all",
+    "exclude-tag-under", "exclude-ignore", "exclude-ignore-recursive", "rmt-command", "sparse-version"})
+_TAR_MEANS = {"get": "extract", "absolute-names": "absolute", "absolute-paths": "absolute", "insecure": "absolute",
+              "cd": "directory", "to-command": "to-stdout", "xform": "transform"}
+_TAR_UNLISTED = {"transform": "it renames the members (--transform)",
+                 "one-top-level": "it extracts into a folder named after the archive (--one-top-level)",
+                 "use-compress-program": "a program it names reads the archive first (--use-compress-program)"}
 _PAX_VALUES = frozenset("bBEfGopsTUx")
 _CPIO_VALUES = frozenset("CDEFHIMORW")
+# GNU cpio's and bsdcpio's long options, read as tar's are (`--insec` is --insecure)
+_CPIO_LONGS = frozenset("""
+    absolute-filenames append b64encode block-size create dereference device-independent directory extract file
+    force-local format grzip help ignore-devno insecure io-size link list lrzip lz4 lzma lzop make-directories message
+    no-absolute-filenames no-preserve-owner nonmatching null numeric-uid-gid only-verify-crc owner pass-through
+    passphrase pattern-file preserve-modification-time preserve-owner quiet rename rename-batch-file renumber-inodes
+    reproducible reset-access-time rsh-command sparse swap swap-bytes swap-halfwords to-stdout unconditional usage
+    uuencode verbose version warning xz zstd""".split())
+_CPIO_MEANS = {"insecure": "absolute", "absolute-filenames": "absolute"}
+# GNU cp's long options (gcp; BSD cp has none), read as tar's are (`--recur` is --recursive)
+_CP_LONGS = frozenset("""
+    archive attributes-only backup copy-contents context debug dereference force help interactive keep-directory-symlink
+    link no-clobber no-dereference no-preserve no-target-directory one-file-system parents preserve recursive reflink
+    remove-destination sparse strip-trailing-slashes suffix symbolic-link target-directory update verbose
+    version""".split())
+_CP_MEANS = {"archive": "recursive"}
+_RSYNC_SHORT_VALUES = frozenset("efBTM@")
+_RSYNC_LONG_VALUES = frozenset({
+    "rsh", "rsync-path", "exclude", "include", "exclude-from", "include-from", "files-from", "filter", "temp-dir",
+    "compare-dest", "copy-dest", "link-dest", "backup-dir", "suffix", "chmod", "chown", "usermap", "groupmap",
+    "max-size", "min-size", "max-delete", "bwlimit", "log-file", "log-file-format", "out-format", "password-file",
+    "port", "sockopts", "timeout", "contimeout", "partial-dir", "iconv", "protocol", "checksum-choice",
+    "compress-choice", "compress-level", "skip-compress", "block-size", "modify-window", "write-batch", "read-batch",
+    "only-write-batch", "info", "debug", "outbuf", "remote-option", "address", "stop-after", "stop-at", "max-alloc",
+    "early-input", "checksum-seed"})
+_SCP_VALUES = frozenset("cDFiJlmoPSX")
+_SEVENZ = frozenset({"7z", "7za", "7zr", "7zz", "7zzs"})
+_LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+def _long_option(word, table, means):
+    """(the meaning of the long option `word` (`--name[=value]`) as a tool with `table` reads it: itself, or the one
+    option, or the options of one meaning, it is a unique abbreviation of; whether it takes the next word as its
+    value), or (None, the meanings it may have) when it names none or several."""
+    opt = word[2:].split("=", 1)[0]
+    names = [opt] if opt in table else [o for o in table if opt and o.startswith(opt)]
+    found = {means.get(o, o) for o in names}
+    return (found.pop(), names) if len(found) == 1 else (None, found)
+
+
+def _archive_reads(words, fmt, **more) -> dict:
+    """What an extractor reads: the archive files `words` (none: its input), listed as `fmt` ("tar" in any
+    compression Python reads, "tar-plain" uncompressed only, "zip")."""
+    return {"kind": "archive", "archives": [w for w in words if w and w != "-"],
+            "stdin": not words or any(w in ("", "-") for w in words), "fmt": fmt, **more}
+
+
+def _unlisted(why) -> dict:
+    return {"kind": "none", "why": why}
 
 
 def _tar_tree(args):
-    """(how, destination words, why it may write anywhere) of a tar that extracts, else None. The destinations are
-    its -C/--directory folders (each one after another as GNU tar reads them too), or '' for the folder it runs in;
-    -P/--absolute-names keeps the members' absolute paths and `..`. The old form's first word (`xzf a.tar -C d`)
-    gives its value letters the words that follow."""
-    extract = stdout = absolute = False
-    dirs, queue, k = [], [], 0
+    """(how, destination words, why it may write anywhere, None, what it reads) of a tar that extracts, else None. The
+    destinations are its -C/--directory folders (each one after another as GNU tar reads them too), or '' for the
+    folder it runs in; -P/--absolute-names keeps the members' absolute paths and `..`. The old form's first word
+    (`xzf a.tar -C d`) gives its value letters the words that follow. A long option is read as either tar reads its
+    abbreviation; in an extraction, one the guard cannot match to one option counts as one that may write anywhere."""
+    extract = stdout = absolute = maybe = False
+    dirs, queue, k, archive, strip, unlisted, unclear = [], [], 0, None, "", "", []
+
+    def value(letter, val):
+        nonlocal archive, unlisted
+        if letter == "C":
+            dirs.append(val)
+        elif letter == "f":
+            archive = val
+        elif letter == "s":
+            unlisted = unlisted or "it renames the members (-s)"
+        elif letter == "I":
+            unlisted = unlisted or "a program it names reads the archive first (-I)"
     while k < len(args):
         a = args[k]
         if a == "--":
             break
         if a.startswith("--"):
-            opt, eq, val = a[2:].partition("=")
-            extract = extract or opt in ("extract", "get")
-            stdout = stdout or opt == "to-stdout"
-            absolute = absolute or opt in ("absolute-names", "absolute-paths")
-            if opt == "directory":
-                if eq:
-                    dirs.append(val)
-                elif k + 1 < len(args):
-                    dirs.append(args[k + 1])
-                    k += 1
-            elif opt in _TAR_LONG_VALUES and not eq:
+            mean, names = _long_option(a, _TAR_LONGS, _TAR_MEANS)
+            if mean is None:
+                maybe = maybe or "extract" in names
+                unclear.append(a)
                 k += 1
+                continue
+            eq, val = "=" in a, a.split("=", 1)[1] if "=" in a else ""
+            if not eq and any(n in _TAR_LONG_VALUES for n in names) and mean != "one-top-level" and k + 1 < len(args):
+                val, k = args[k + 1], k + 1
+            extract = extract or mean == "extract"
+            stdout = stdout or mean == "to-stdout"
+            absolute = absolute or mean == "absolute"
+            if mean == "directory":
+                dirs.append(val)
+            elif mean == "file":
+                archive = val
+            elif mean == "strip-components":
+                strip = val
+            elif mean in _TAR_UNLISTED:
+                unlisted = unlisted or _TAR_UNLISTED[mean]
         elif (a.startswith("-") and len(a) > 1) or (k == 0 and re.fullmatch(r"[A-Za-z]+", a)):
             old, letters = not a.startswith("-"), a.lstrip("-")
             for j, c in enumerate(letters):
@@ -5472,44 +5606,52 @@ def _tar_tree(args):
                     val = letters[j + 1:]
                     if not val and k + 1 < len(args):
                         val, k = args[k + 1], k + 1
-                    if c == "C":
-                        dirs.append(val)
+                    value(c, val)
                     break
         elif queue:  # the old form: its value letters take the words that follow, in order
-            if queue.pop(0) == "C":
-                dirs.append(a)
+            value(queue.pop(0), a)
         k += 1
+    if unclear and (extract or maybe):
+        return "tar", [], f"{unclear[0]} is an option the guard cannot match to one tar option", None, None
     if not extract or stdout:
         return None
     if absolute:
-        return "tar -P", [], "it keeps the members' absolute paths and `..` (-P, --absolute-names)"
+        return "tar -P", [], "it keeps the members' absolute paths and `..` (-P, --absolute-names)", None, None
     words = []
     for d in dirs:  # GNU tar reads a relative -C from the folder of the one before it
         words += [d] + ([os.path.join(words[-1], d)] if words and not os.path.isabs(os.path.expanduser(d)) else [])
-    return "tar -x", words or [""], ""
+    if strip and not strip.isdigit():
+        unlisted = unlisted or f"--strip-components {strip} is no number"
+    reads = _unlisted(unlisted) if unlisted else \
+        _archive_reads([archive] if archive is not None else [], ("tar", "zip"), strip=int(strip or 0))
+    return "tar -x", words or [""], "", None, reads
 
 
 def _unzip_tree(args):
     """unzip: its -d folder, or the folder it runs in; None when it only lists, tests or prints (-l, -t, -v, -z, -p,
-    -c, -Z); -: keeps `..` in the members' names."""
-    dests, unsafe, k = [], False, 0
+    -c, -Z); -: keeps `..` in the members' names; -j keeps only each member's name."""
+    dests, unsafe, flat, ops, k, excluding = [], False, False, [], 0, False
     while k < len(args):
         a = args[k]
         if a.startswith("-") and len(a) > 1 and not a.startswith("--"):
+            excluding = False
             for j, c in enumerate(a[1:]):
                 if c in "ltvzpcZ":
                     return None
-                unsafe = unsafe or c == ":"
-                if c == "d":  # the rest of the word, or the next one, is the folder
+                unsafe, flat, excluding = unsafe or c == ":", flat or c == "j", excluding or c == "x"
+                if c in "dPIO":  # the rest of the word, or the next one, is its value
                     val = a[j + 2:]
                     if not val and k + 1 < len(args):
                         val, k = args[k + 1], k + 1
-                    dests.append(val)
+                    if c == "d":
+                        dests.append(val)
                     break
+        elif not excluding:
+            ops.append(a)
         k += 1
     if unsafe:
-        return "unzip -:", [], "it keeps `..` in the members' names (-:)"
-    return "unzip", dests or [""], ""
+        return "unzip -:", [], "it keeps `..` in the members' names (-:)", None, None
+    return "unzip", dests or [""], "", None, _archive_reads(ops[:1] or ["-"], ("zip",), flat=flat, suffix=".zip")
 
 
 def _getopt_letters(args, values) -> tuple:
@@ -5531,60 +5673,590 @@ def _getopt_letters(args, values) -> tuple:
     return letters, pos
 
 
+def _remote(word):
+    """None for a local path of rsync or scp; the path as this Mac reads it for one on this Mac by another name
+    (`localhost:x`, `127.0.0.1:x`, `[::1]:x`: below the home folder unless absolute); else '' (another machine)."""
+    if word.startswith("rsync://"):
+        return ""
+    m = re.match(r"^(?:[^@/:\[\]]+@)?(\[[^\]]*\]|[^/:\[\]]+):(.*)$", word, re.S)
+    if not m:
+        return None
+    host, path = m.group(1).strip("[]").casefold(), m.group(2)
+    if host not in _LOCAL_HOSTS or path.startswith(":"):  # host::module is an rsync daemon's
+        return ""
+    return path if path.startswith(("/", "~")) else os.path.join(str(HOME), path)
+
+
+def _copy_tree(name, args):
+    """cp -R, gcp -R and cp --parents: (how, [destination], '', sources, what it reads), else None."""
+    recursive = parents = follow = False
+    tdir, ops, k = None, [], 0
+    while k < len(args):
+        a = args[k]
+        if a == "--":
+            ops += args[k + 1:]
+            break
+        if a.startswith("--"):
+            mean, names = _long_option(a, _CP_LONGS, _CP_MEANS)
+            recursive, parents = recursive or mean == "recursive", parents or mean == "parents"
+            follow = follow or mean == "dereference"
+            if mean in ("target-directory", "suffix"):
+                val = a.split("=", 1)[1] if "=" in a else args[k + 1] if k + 1 < len(args) else ""
+                k += 0 if "=" in a else 1
+                tdir = val if mean == "target-directory" else tdir
+        elif a.startswith("-") and len(a) > 1:
+            for j, c in enumerate(a[1:]):
+                recursive, follow = recursive or c in "Rra", follow or c == "L"
+                if c in "tS":
+                    val = a[j + 2:]
+                    if not val and k + 1 < len(args):
+                        val, k = args[k + 1], k + 1
+                    tdir = val if c == "t" else tdir
+                    break
+        else:
+            ops.append(a)
+        k += 1
+    if not (recursive or parents) or len(ops) < (1 if tdir else 2):
+        return None
+    dest, srcs = (tdir, ops) if tdir else (ops[-1], ops[:-1])
+    return f"{name} -R" if recursive else f"{name} --parents", [dest], "", srcs, \
+        {"kind": "tree", "srcs": srcs, "style": "cp", "follow": follow, "given": parents}
+
+
+def _rsync_tree(args):
+    """Every rsync that writes on this Mac copies a tree (-r, -a, -d, -R, --files-from all recreate folders)."""
+    given = follow = False
+    ops, k = [], 0
+    while k < len(args):
+        a = args[k]
+        if a == "--":
+            ops += args[k + 1:]
+            break
+        if a.startswith("--"):
+            opt = a[2:].split("=", 1)[0]
+            if opt in ("dry-run", "list-only"):
+                return None
+            given, follow = given or opt == "relative", follow or opt in ("copy-links", "copy-dirlinks")
+            if "=" not in a and opt in _RSYNC_LONG_VALUES:
+                k += 1
+        elif a.startswith("-") and len(a) > 1:
+            for j, c in enumerate(a[1:]):
+                if c == "n":
+                    return None
+                given, follow = given or c == "R", follow or c in "Lk"
+                if c in _RSYNC_SHORT_VALUES:
+                    if j == len(a) - 2:
+                        k += 1
+                    break
+        else:
+            ops.append(a)
+        k += 1
+    if len(ops) < 2:
+        return None
+    dest = ops[-1]
+    there = _remote(dest)
+    if there == "":
+        return None  # another machine's folder
+    srcs = [s if _remote(s) is None else _remote(s) or s for s in ops[:-1]]
+    far = [s for s in ops[:-1] if _remote(s) == ""]
+    reads = {"kind": "tree", "srcs": srcs, "style": "rsync", "follow": follow, "given": given, "remote": far}
+    return "rsync", [there if there is not None else dest], "", srcs, reads
+
+
+def _scp_tree(args):
+    letters, ops = _getopt_letters(args, _SCP_VALUES)
+    if "r" not in letters or len(ops) < 2:
+        return None
+    there = _remote(ops[-1])
+    if there == "":
+        return None
+    srcs = [s if _remote(s) is None else _remote(s) or s for s in ops[:-1]]
+    far = [s for s in ops[:-1] if _remote(s) == ""]
+    return "scp -r", [there if there is not None else ops[-1]], "", srcs, \
+        {"kind": "tree", "srcs": srcs, "style": "scp", "remote": far}
+
+
+def _ditto_tree(args):
+    """ditto copies each source's contents into the destination, or extracts archives there (-x: -k zip, else
+    cpio); -c makes an archive."""
+    letters, ops, k = "", [], 0
+    while k < len(args):
+        a = args[k]
+        if a in ("--arch", "--bom", "--zlibCompressionLevel"):
+            k += 2
+            continue
+        if a.startswith("--"):
+            pass
+        elif a.startswith("-") and len(a) > 1:
+            letters += a[1:]
+        else:
+            ops.append(a)
+        k += 1
+    if "c" in letters or len(ops) < 2:
+        return None
+    if "x" in letters:
+        reads = _archive_reads(ops[:-1], ("zip",)) if "k" in letters else \
+            _unlisted("without -k, ditto -x reads a cpio archive, which the guard cannot list")
+        return "ditto -x", ops[-1:], "", None, reads
+    return "ditto", ops[-1:], "", None, {"kind": "tree", "srcs": ops[:-1], "style": "ditto"}
+
+
+def _sevenz_tree(args):
+    """7z x (members with their folders) and 7z e (names only) into -o<folder>, or the folder it runs in."""
+    if not args or args[0].casefold() not in ("x", "e"):
+        return None
+    dest, ops, unlisted, k = None, [], "", 1
+    while k < len(args):
+        a, low = args[k], args[k].casefold()
+        if a == "--":
+            ops += args[k + 1:]
+            break
+        if low.startswith("-o"):
+            dest = a[2:] or (args[k + 1] if k + 1 < len(args) else "")
+            k += 0 if a[2:] else 1
+        elif low.startswith("-spf"):
+            return "7z", [], "it keeps the members' absolute paths (-spf)", None, None
+        elif low.startswith(("-spe", "-an", "-ai", "-ax")):
+            unlisted = unlisted or f"{a} changes which members land or where"
+        elif not a.startswith("-"):
+            ops.append(a)
+        k += 1
+    how = f"7z {args[0].casefold()}"
+    reads = _unlisted(unlisted) if unlisted else \
+        _archive_reads(ops[:1] or ["-"], ("zip", "tar-plain"), flat=args[0].casefold() == "e")
+    return how, [dest or ""], "", None, reads
+
+
+def _jar_tree(args):
+    """jar x (`jar xf a.jar`, `jar -x -f a.jar`, `jar --extract --file=a.jar`) into -C/--dir, or the folder it runs
+    in; without a file it reads the archive from its input."""
+    extract, archive, dirs, queue, k = False, None, [], [], 0
+    while k < len(args):
+        a = args[k]
+        if a.startswith("--"):
+            opt, eq, val = a[2:].partition("=")
+            extract = extract or opt == "extract"
+            if opt in ("file", "dir", "manifest", "main-class", "release", "module-version", "hash-modules",
+                       "module-path"):
+                if not eq and k + 1 < len(args):
+                    val, k = args[k + 1], k + 1
+                archive = val if opt == "file" else archive
+                dirs += [val] if opt == "dir" else []
+        elif (a.startswith("-") and len(a) > 1) or (k == 0 and re.fullmatch(r"[A-Za-z0-9]+", a)):
+            old = not a.startswith("-")
+            for j, c in enumerate(a.lstrip("-")):
+                extract = extract or c == "x"
+                if c in "fmeC":
+                    if old:
+                        queue.append(c)
+                        continue
+                    val = a.lstrip("-")[j + 1:]
+                    if not val and k + 1 < len(args):
+                        val, k = args[k + 1], k + 1
+                    archive = val if c == "f" else archive
+                    dirs += [val] if c == "C" else []
+                    break
+        elif queue:
+            c = queue.pop(0)
+            archive = a if c == "f" else archive
+            dirs += [a] if c == "C" else []
+        k += 1
+    if not extract:
+        return None
+    return "jar x", dirs or [""], "", None, _archive_reads([archive] if archive else [], ("zip",))
+
+
+def _unar_tree(args):
+    """unar: into -o, or the folder it runs in; it adds a folder named after the archive when the archive has more
+    than one top item, unless -D."""
+    dest, ops, nodir, k = None, [], False, 0
+    while k < len(args):
+        a = args[k]
+        if a in ("-o", "-output-directory", "--output-directory"):
+            dest, k = (args[k + 1] if k + 1 < len(args) else ""), k + 1
+        elif a in ("-D", "-no-directory", "--no-directory"):
+            nodir = True
+        elif a in ("-p", "-password", "-e", "-encoding", "-E", "-password-encoding", "-k", "-forks"):
+            k += 1
+        elif not a.startswith("-"):
+            ops.append(a)
+        k += 1
+    if not ops:
+        return None
+    return "unar", [dest or ""], "", None, _archive_reads(ops[:1], ("zip", "tar"), wrap=not nodir)
+
+
+def _mv_tree(args):
+    """mv and gmv move whole folders: their contents are read as a copy's (_Shell.tree), destination rules aside."""
+    ops = [a for a in args if not a.startswith("-")]
+    tdir = _opt_value(args, ("-t", "--target-directory"))
+    dest, srcs = (tdir, [o for o in ops if o != tdir]) if tdir else (ops[-1] if ops else "", ops[:-1])
+    if not srcs:
+        return None
+    return "mv", [dest], "", None, {"kind": "tree", "srcs": srcs, "style": "mv"}
+
+
 def _tree_write(name, args):
-    """What a recursive writer puts on disk: (how, destination words, why its files may land anywhere or ''), a
-    destination '' being the folder it runs in; None for a command that writes no tree. git apply and
-    git checkout-index are read by _Shell.git_tree."""
+    """What a recursive writer puts on disk: (how, destination words, why its files may land anywhere or '', the
+    sources a copy names or None, what the guard reads to see what lands: an archive's members, a copy's source tree,
+    or why it cannot), a destination '' being the folder it runs in; None for a command that writes no tree. git apply
+    and git checkout-index are read by _Shell.git_tree."""
     if name in _TARS:
         return _tar_tree(args)
     if name == "unzip":
         return _unzip_tree(args)
+    if name in _SEVENZ:
+        return _sevenz_tree(args)
+    if name == "jar":
+        return _jar_tree(args)
+    if name == "unar":
+        return _unar_tree(args)
+    if name in ("mv", "gmv"):
+        return _mv_tree(args)
+    if name == "xar":
+        letters, _ = _getopt_letters(args, frozenset("fCsn"))
+        return ("xar -x", [_opt_value(args, ("-C",)) or ""], "", None,
+                _unlisted("the guard cannot list a xar archive without running xar")) if "x" in letters else None
+    if name == "aa":
+        return ("aa extract", [_opt_value(args, ("-d",)) or ""], "", None,
+                _unlisted("the guard cannot list an Apple Archive without running aa")) \
+            if args[:1] == ["extract"] else None
     if name == "pax":
         letters, pos = _getopt_letters(args, _PAX_VALUES)
         if "r" in letters and "w" in letters:  # copy mode: the operands into the last one
-            return ("pax -rw", pos[-1:], "") if pos else None
+            if not pos:
+                return None
+            reads = _unlisted("it renames what it copies (-s)") if "s" in letters else \
+                {"kind": "tree", "srcs": pos[:-1], "style": "pax", "given": True} if pos[:-1] else \
+                _unlisted("pax -rw reads the files it copies from its input")
+            return "pax -rw", pos[-1:], "", None, reads
         if "r" in letters:
-            return "pax -r", [], "pax extracts the members' absolute paths as they are"
+            return "pax -r", [], "pax extracts the members' absolute paths as they are", None, None
         return None
     if name == "cpio":
         letters, pos = _getopt_letters(args, _CPIO_VALUES)
-        longs = {a.split("=", 1)[0] for a in args if a.startswith("--")}
-        if "--insecure" in longs:
-            return "cpio --insecure", [], "it allows absolute paths, `..` and links in the members (--insecure)"
+        means, unclear, maybe = set(), [], False
+        for a in args:
+            if a.startswith("--"):
+                mean, names = _long_option(a, _CPIO_LONGS, _CPIO_MEANS)
+                means |= {mean} if mean else set()
+                unclear += [] if mean else [a]
+                maybe = maybe or (not mean and bool({"extract", "pass-through"} & names))
+        if "absolute" in means:
+            return "cpio --insecure", [], "it allows absolute paths, `..` and links in the members (--insecure)", \
+                None, None
+        moves = "i" in letters or "p" in letters or maybe or bool({"extract", "pass-through"} & means)
+        if unclear and moves:
+            return "cpio", [], f"{unclear[0]} is an option the guard cannot match to one cpio option", None, None
         folder = _opt_value(args, ("-D", "--directory"))
-        if "p" in letters or "--pass-through" in longs:
-            return ("cpio -p", pos[:1], "") if pos else None
-        if "i" in letters or "--extract" in longs:
-            return "cpio -i", [folder or ""], ""
+        if "p" in letters or "pass-through" in means:
+            return ("cpio -p", pos[:1], "", None, _unlisted("cpio -p reads the files it copies from its input")) \
+                if pos else None
+        if "i" in letters or "extract" in means:
+            return "cpio -i", [folder or ""], "", None, \
+                _unlisted("cpio reads its archive from its input, and the guard cannot list a cpio archive")
         return None
-    pos = [a for a in args if not a.startswith("-")]
-    if name == "ditto":  # it copies a folder's contents into the destination
-        letters = "".join(a[1:] for a in args if a.startswith("-") and not a.startswith("--"))
-        return None if "c" in letters or len(pos) < 2 else ("ditto", pos[-1:], "")
-    recursive = {"cp": "Rra", "gcp": "Rra", "scp": "r", "rsync": "ra"}.get(name)
-    if recursive is None or len(pos) < 2:
-        return None
-    longs = {"--recursive", "--archive"} if name in ("cp", "gcp", "rsync") else set()
-    if not any(a in longs or (a.startswith("-") and not a.startswith("--") and set(a[1:]) & set(recursive))
-               for a in args):
-        return None
-    tdir = _opt_value(args, ("-t", "--target-directory")) if name in ("cp", "gcp") else None
-    dest = tdir or pos[-1]
-    if name in ("scp", "rsync") and re.match(r"^(?:[^/]*:|rsync://)", dest):
-        return None  # another machine's folder
-    return f"{name} -R", [dest], "", [p for p in pos if p != tdir] if tdir else pos[:-1]
+    if name == "ditto":
+        return _ditto_tree(args)
+    if name in ("cp", "gcp"):
+        return _copy_tree(name, args)
+    if name == "rsync":
+        return _rsync_tree(args)
+    if name == "scp":
+        return _scp_tree(args)
+    return None
+
+
+def _tree_roots() -> list:
+    """The protected roots a recursive writer's files may not reach: devkit's state, configuration and install, the
+    agents' transcript folders, settings files and Codex home, and the handoff repository."""
+    return [*(real(r) for r in protected_roots()), *_transcript_roots(), real(core.CONFIG_FILE),
+            *(real(core.CLAUDE_HOME / n) for n in _AGENT_SETTINGS[".claude"]), real(core.CODEX_HOME),
+            real(core.HANDOFF)]
 
 
 def _tree_root(p):
-    """The protected root that `p`, a recursive writer's destination, is or holds: devkit's state, configuration and
-    install, the agents' transcript folders, settings files and Codex home, or the handoff repository; else None.
-    `/`, for a writer whose files may land anywhere, holds them all."""
+    """The protected root (_tree_roots) that `p`, a recursive writer's destination, is or holds, else None. `/`, for a
+    writer whose files may land anywhere, holds them all."""
     if p == UNKNOWN:
         return None
-    roots = [*(real(r) for r in protected_roots()), *_transcript_roots(), real(core.CONFIG_FILE),
-             *(real(core.CLAUDE_HOME / n) for n in _AGENT_SETTINGS[".claude"]), real(core.CODEX_HOME),
-             real(core.HANDOFF)]
-    return next((r for r in roots if _under_ci(r, str(p))), None)
+    return next((r for r in _tree_roots() if _under_ci(r, str(p))), None)
+
+
+_ENV_TEXT_MAX = 1 << 20  # the text of a settings or shell startup file a tree carries, read to judge its DEVKIT_* keys
+
+
+def _env_named(name) -> bool:
+    """A member or entry whose name may make it a settings or shell startup file where it lands (env_file_kind)."""
+    n = name.replace("\\", "/").rsplit("/", 1)[-1].casefold()
+    return n in _SHELL_RC or n.endswith((".toml", ".fish")) or \
+        n in ("settings.json", "settings.local.json", "managed-settings.json", "hooks.json")
+
+
+def _archive_entries(i, path, fmt, out, stop):
+    """Adds (i, name, kind, hard link target, text) for each member of the archive at `path`, read as every format of
+    `fmt` it parses as (a file both a tar and a zip archive gives both listings, as either tool may extract either);
+    kind is file, dir, sym or hard; text is a file's text when its name may make it a settings or shell startup file
+    (_env_named), None otherwise or past _ENV_TEXT_MAX. Raises when it parses as none, when the formats it parses as
+    leave part of the file unexplained (bytes other than zeros after a tar archive's end, which bsdtar reads on as
+    more members past a damaged header; bytes before a zip archive that no tar view explains, which another tool may
+    read as another format), or when it is no regular file (a pipe would block)."""
+    import stat as stat_
+    import tarfile
+    import zipfile
+    if not stat_.S_ISREG(os.stat(path).st_mode):
+        raise ValueError("no regular file")
+    zipped = tarred = False
+    zip_start = os.path.getsize(path)
+    if "zip" in fmt and zipfile.is_zipfile(path):
+        with open(path, "rb") as f:
+            at_start = f.read(4) in (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")
+        with zipfile.ZipFile(path) as zf:
+            infos = zf.infolist()
+            zipped, zip_start = True, min([x.header_offset for x in infos] + [zf.start_dir])
+            for info in infos:
+                if stop.is_set() or len(out) > _TREE_MAX_ENTRIES:
+                    return
+                mode = info.external_attr >> 16
+                kind = "sym" if stat_.S_ISLNK(mode) else "dir" if info.is_dir() else "file"
+                text = None
+                if kind == "file" and _env_named(info.filename) and info.file_size <= _ENV_TEXT_MAX:
+                    with zf.open(info) as f:
+                        text = f.read(_ENV_TEXT_MAX + 1).decode("utf-8", "replace")
+                out.append((i, info.filename, kind, None, text))
+                if "\\" in info.filename:  # unzip reads a backslash as a folder separator in some archives
+                    out.append((i, info.filename.replace("\\", "/"), kind, None, text))
+    for mode in [m for t, m in (("tar", "r:*"), ("tar-plain", "r:")) if t in fmt][:1]:
+        try:
+            tf = tarfile.open(path, mode)
+        except (tarfile.TarError, OSError, EOFError, ValueError):
+            continue
+        with tf:
+            tarred = True
+            for m in tf:
+                if stop.is_set() or len(out) > _TREE_MAX_ENTRIES:
+                    return
+                kind = "sym" if m.issym() else "hard" if m.islnk() else "dir" if m.isdir() else "file"
+                text = None
+                if m.isfile() and _env_named(m.name) and m.size <= _ENV_TEXT_MAX:
+                    f = tf.extractfile(m)
+                    text = f.read(_ENV_TEXT_MAX + 1).decode("utf-8", "replace") if f else None
+                out.append((i, m.name, kind, m.linkname if m.islnk() else None, text))
+            # where Python's reader stopped: only the end blocks' zeros may follow, up to a zip archive the same
+            # (uncompressed) file holds, whose own listing is above
+            plain = type(tf.fileobj).__name__ not in ("GzipFile", "BZ2File", "LZMAFile")
+            pos = tf.offset
+            tf.fileobj.seek(pos)
+            while not stop.is_set():
+                chunk = tf.fileobj.read(1 << 16)
+                rest = chunk.lstrip(b"\0")
+                if rest:
+                    if zipped and plain and pos + len(chunk) - len(rest) >= zip_start:
+                        break
+                    raise ValueError("data follows the end of the tar archive, which another tar may read as more "
+                                     "members")
+                if not chunk:
+                    break
+                pos += len(chunk)
+    if zipped and not at_start and not tarred:
+        raise ValueError("data comes before the zip archive, which another tool may read as another archive")
+    if not (zipped or tarred):
+        raise ValueError("not a tar or zip archive the guard can list")
+
+
+def _source_entries(i, root, follow, out, stop, through=True):
+    """Adds (i, path below `root`, kind, None, None) for `root` itself ('') and every entry below it; links are entries and
+    are not followed (but `follow`, and a root that is a link to a folder, which a copy may copy through; a move,
+    `through` False, moves the link alone). Raises when `root` does not exist."""
+    import stat as stat_
+    st = os.lstat(root)
+    if stat_.S_ISLNK(st.st_mode):
+        out.append((i, "", "sym", None, None))
+        if not (through and os.path.isdir(root)):
+            return
+    elif not stat_.S_ISDIR(st.st_mode):
+        out.append((i, "", "file", None, None))
+        return
+    else:
+        out.append((i, "", "dir", None, None))
+    stack = [("", root)]
+    while stack:
+        rel, path = stack.pop()
+        with os.scandir(path) as it:
+            for e in it:
+                if stop.is_set() or len(out) > _TREE_MAX_ENTRIES:
+                    return
+                r = f"{rel}/{e.name}" if rel else e.name
+                if e.is_symlink():
+                    out.append((i, r, "sym", None, None))
+                    if follow and e.is_dir():
+                        stack.append((r, e.path))
+                elif e.is_dir(follow_symlinks=False):
+                    out.append((i, r, "dir", None, None))
+                    stack.append((r, e.path))
+                else:
+                    out.append((i, r, "file", None, None))
+
+
+def _bounded(fill):
+    """Runs fill(out, stop) in a worker thread for at most _TREE_BUDGET seconds: (the entries, '') for a whole listing,
+    else (what it read, why it is not whole: an error, the bound, the time). A worker still running is told to stop
+    and abandoned (it only reads)."""
+    out, stop, box = [], threading.Event(), {}
+
+    def work():
+        try:
+            fill(out, stop)
+        except Exception as e:  # noqa: BLE001 (a listing that fails is one the guard cannot read)
+            box["error"] = e
+    worker = threading.Thread(target=work, name="devkit-tree-read", daemon=True)
+    worker.start()
+    worker.join(_TREE_BUDGET)
+    if worker.is_alive():
+        stop.set()
+        return list(out), f"reading it took longer than {_TREE_BUDGET:g} s"
+    if len(out) > _TREE_MAX_ENTRIES:
+        return out[:_TREE_MAX_ENTRIES], f"it holds more than {_TREE_MAX_ENTRIES:,} entries"
+    e = box.get("error")
+    if isinstance(e, FileNotFoundError):
+        return out, "it does not exist (yet)"
+    if isinstance(e, PermissionError):
+        return out, "the guard may not read it"
+    if e is not None:
+        return out, str(e) if isinstance(e, ValueError) else f"reading it failed ({type(e).__name__})"
+    return out, ""
+
+
+def _member_rels(name, strip=0, flat=False) -> list:
+    """Where below the destination a member named `name` lands: without a leading `/` or `./`, only its name when the
+    extractor keeps no folders (`flat`), and without its first `strip` parts (counting a leading `.` or not, as
+    either tar may); [] when stripping drops it."""
+    parts = [p for p in name.split("/") if p]
+    if flat:
+        parts = parts[-1:]
+    if not strip:
+        return ["/".join(p for p in parts if p != ".") or "."]
+    out = []
+    for ps in (parts, [p for p in parts if p != "."]):
+        if len(ps) > strip:
+            out.append("/".join(ps[strip:]))
+    return list(dict.fromkeys(out))
+
+
+def _landing_bad(forms, roots_cf) -> str | None:
+    """What a file landing at any of `forms` (absolute paths) would be that agents may not write by a tree: an agent
+    settings file, part of a repository's git folder, the `dev` a shell finds, or a file below a protected root."""
+    for q in forms:
+        low = q.casefold()
+        base = low.rsplit("/", 1)[-1]
+        if base in _SETTINGS_NAMES and agent_settings(q):
+            return "an agent settings file"
+        if (".git" in low or base in ("config", ".gitconfig")) and git_internal(q):
+            return "part of a repository's git folder (its config or hooks, which git runs)"
+        if any(low == r or low.startswith(r + "/") for r in roots_cf):
+            return "below devkit's state, configuration or install, an agent's settings or transcripts, or the " \
+                   "handoff repository"
+        if is_dev_command(Path(q)):
+            return "the `dev` command a shell finds"
+    return None
+
+
+def _env_landing_bad(forms, kind, text, path, name, reads) -> str:
+    """What a member or entry landing at `forms` that is a settings or shell startup file (env_file_kind) would be
+    that a tree may not write: a link there (the file read would be the one it leads to), or one whose text sets a
+    DEVKIT_* variable or DEV_ROOT, which the guard refuses in a direct write (settings_env_violation), or whose text
+    it cannot read; '' else."""
+    kind_ = env_file_kind(*forms)
+    if not kind_:
+        return ""
+    if kind == "sym":
+        return "a link at a settings or shell startup file, whose text would be the file it leads to"
+    if kind != "file":
+        return ""
+    if reads.get("kind") != "archive":
+        source = os.path.join(path, name) if name else path
+        try:
+            text = _read_small(source, _ENV_TEXT_MAX) if os.path.getsize(source) <= _ENV_TEXT_MAX else None
+        except OSError:  # gone or unreadable since the walk: cp cannot copy it either
+            text = ""
+    if text is None:
+        return "a settings or shell startup file whose text the guard cannot read in full"
+    keys = devkit_env(text, kind_ == "toml", kind_ == "shell")
+    return f"a settings or shell startup file that sets {', '.join(sorted(keys)[:3])}" if keys else ""
+
+
+def _shielded(p) -> str:
+    """Where a tree the guard cannot read may not land: 'a project checkout' (a folder with a .git at or above it),
+    'the home folder' (below it, outside the scratch folders), 'a folder the guard cannot place'; '' elsewhere."""
+    if p == UNKNOWN:
+        return "a folder the guard cannot place"
+    for top in (Path(str(p)), *Path(str(p)).parents):
+        if os.path.lexists(top / ".git"):
+            return "a project checkout"
+    return "the home folder" if _under_ci(str(p), real(HOME)) and not core.is_temp(str(p)) else ""
+
+
+_UNPLACED = "/__devkit_unplaced__/d"  # a destination the guard cannot place, for where the members land below it
+_UNPLACED_NAMES = _SETTINGS_NAMES | {".git", "config", "config.worktree", "hooks", "info", "commondir"}
+_NULL_TARGETS = frozenset({"/dev/null", "/dev/stdout", "/dev/stderr", "/dev/tty"})
+_SAFE_BEFORE = frozenset(_READERS | {"cd", "pushd", "popd", "mkdir"})  # commands that change no file a writer reads
+_PATH_WRITERS = frozenset(_COPIERS | _MOVERS | _CREATORS | _CHANGERS | {"gln"})  # write only the paths they name
+
+
+def _placements(d, src, path, name, reads) -> list:
+    """Where a recursive writer may put the member or entry `name` of `src` (as named; `path`, as read) below the
+    destination `d` (None: one the guard cannot place, read below _UNPLACED). An archive's member at its name below d
+    (after --strip-components, or only its name with -j or 7z e), also below a folder named after the archive (unar);
+    a copy's entry below d and below d/<the source's name> (cp, rsync and scp put a folder's contents there, or the
+    folder itself, by the destination and a trailing `/`), and, for pax, rsync -R and cp --parents, below d/<the source
+    as written>."""
+    base = d or _UNPLACED
+    if reads.get("kind") == "archive":
+        rels = _member_rels(name, reads.get("strip") or 0, reads.get("flat", False))
+        out = [os.path.join(base, r) for r in rels]
+        if reads.get("wrap"):
+            stem = os.path.basename(path).split(".")[0] or os.path.basename(path)
+            out += [os.path.join(base, stem, r) for r in rels]
+        return out
+    out = [os.path.join(base, name) if name else base]
+    own = os.path.basename(path.rstrip("/"))
+    if own not in ("", ".", ".."):
+        out.append(os.path.join(base, own, name) if name else os.path.join(base, own))
+    if reads.get("given"):
+        text = _path_text(src) or src
+        text = (text.split("/./", 1)[1] if "/./" in text else text).lstrip("/")
+        if text:
+            out.append(os.path.join(base, text, name) if name else os.path.join(base, text))
+    return out
+
+
+def _unplaced_bad(at) -> str:
+    """For a member below a destination the guard cannot place: what it may be when that destination is an agent's
+    settings folder or a git folder (its first part is a settings file's name, .git, config or hooks)."""
+    rel = os.path.relpath(os.path.normpath(at), _UNPLACED)
+    first = rel.split("/", 1)[0].casefold()
+    return "an agent settings file or part of a git folder, in a folder the guard cannot place" \
+        if first in _UNPLACED_NAMES else ""
+
+
+_GIT_CHECKOUTS = frozenset("checkout switch restore reset read-tree stash merge pull rebase cherry-pick revert am"
+                           .split())
+
+
+def _patch_links(gargs, cwd) -> bool:
+    """False when every patch `git apply` reads is a file the guard reads in full and none makes, renames or copies
+    a link (mode 120000, `rename to`, `copy to`); True otherwise (its input, a pattern, a file it cannot read)."""
+    ops = [a for a in gargs if not a.startswith("-")]
+    if not ops:
+        return True
+    for a in ops:
+        p = UNKNOWN if _GLOB_CHARS.search(a) else resolve(a, cwd)
+        if p == UNKNOWN or not p.is_file() or p.stat().st_size > 4 << 20:
+            return True
+        text = _read_small(p, 4 << 20)
+        if re.search(r"(?m)^(?:new file mode|new mode|index \S+) 120000\b|^(?:rename|copy) (?:to|from) ", text):
+            return True
+    return False
 
 
 def _made_paths(srcs, dest, cwd) -> list:
@@ -5615,13 +6287,20 @@ class _Shell:
         # (path, how): what earlier commands of this line make (a link, what a tree writer leaves), which a later
         # write may not go through (made_below); `making` holds the segment being walked's, until the next one
         self.made, self.making = [], []
+        # (command word, argv, redirect targets, folder) of each command before this one in the line, and in the line
+        # that runs this one (changes_before: whether one may change what a recursive writer reads)
+        self.before = []
 
     def made_below(self, t, cwd, verb):
         """(the path an earlier command of this line makes, how) that `t` lies below, or is, for a write; None. A `..`
-        after it counts from where the system follows the link, so the path before the first `..` is read too."""
+        after it counts from where the system follows the link, so the path before the first `..` is read too. Once
+        anything is made, a target the guard cannot place (a variable, a substitution, a path relative to a folder it
+        cannot place) may lie below it: (_MADE_UNKNOWN, how)."""
         text = _path_text(t) if self.made else None
-        if text is None or (not os.path.isabs(text) and (cwd is None or str(cwd) == str(UNKNOWN))):
+        if not self.made:
             return None
+        if text is None or (not os.path.isabs(text) and (cwd is None or str(cwd) == str(UNKNOWN))):
+            return _MADE_UNKNOWN, self.made[-1][1]
         full = text if os.path.isabs(text) else os.path.join(_c_path(cwd), text)
         parts = full.split(os.sep)
         head = _normal(os.sep.join(parts[:parts.index("..")]) or os.sep, cwd) if ".." in parts else UNKNOWN
@@ -5640,6 +6319,8 @@ class _Shell:
         file, when the command shows them (None: it does not). `settings`, `mode`: how the agent settings rule reads
         `t` and how the write opens it (settings_write). `made` False: a program that only reads `t` (a check)."""
         hit = self.made_below(t, cwd, verb) if made else None
+        if hit and hit[0] == _MADE_UNKNOWN:
+            return deny(MADE_UNKNOWN_REASON.format(path=_code(t), how=_code(hit[1])), key="made-unknown")
         if hit:
             return deny(MADE_REASON.format(path=_code(t), made=_code(tilde(hit[0])), how=_code(hit[1])),
                         key="made-path")
@@ -5673,40 +6354,239 @@ class _Shell:
                 return v
         return None
 
-    def tree(self, how, words, anywhere, cwd, srcs=None):
-        """A recursive writer (`how`): refused when its files may land anywhere (`anywhere`, why) or when a
-        destination (`words`, '' for the folder it runs in) is or holds a protected root (_tree_root), or is one by
-        the rules of any write; otherwise what it writes is made by this command (made_below): its destinations, or,
-        for a copy of `srcs`, where each source lands (its contents into the destination when it ends in `/`)."""
+    def tree(self, how, words, anywhere, cwd, srcs=None, reads=None, made=True):
+        """A recursive writer (`how`): refused when its files may land anywhere (`anywhere`, why); when what it writes
+        (`reads`, read by tree_read: an archive's members, a copy's source tree) would land on an agent settings file,
+        a repository's git folder or a protected root, or goes through a link it makes (tree_lands); when the guard
+        cannot read what it writes and a destination (`words`, '' for the folder it runs in) is in a project checkout
+        or the home folder (tree_unread), or is or holds a protected root (_tree_root); and by the rules of any write
+        on a destination. A move (`reads` style mv) is judged by what it moves alone: copy() judges its destination.
+        Otherwise what it writes is made by this command (made_below): the links among what the guard read, or, when
+        it read nothing, its destinations or, for a copy of `srcs`, where each source lands (its contents into the
+        destination when it ends in `/`). `made` False: it makes no link (a patch that makes none)."""
         if anywhere:
             return deny(TREE_ANYWHERE_REASON.format(cmd=_code(how), why=anywhere), key="tree-anywhere")
-        for w in words:
-            for p in (resolve(w or ".", cwd), _normal(w or ".", cwd)):
+        moving = bool(reads) and reads.get("style") == "mv"
+        entries, why = self.tree_read(reads, cwd) if reads else ([], "")
+        listed = bool(reads) and not why
+        for w in [] if moving else words:
+            for p in [] if listed else (resolve(w or ".", cwd), _normal(w or ".", cwd)):
                 root = _tree_root(p)
                 if root:
                     rel = "is" if str(p).casefold() == root.casefold() else "holds"
                     return deny(TREE_REASON.format(cmd=_code(how), dest=_code(tilde(p)), rel=rel,
                                                    root=_code(tilde(root))), key="tree-dest")
-            v = self.target(w or ".", cwd, holds=True)
+            v = self.target(w or ".", cwd, holds=not listed)
             if v:
                 return v
+        links = []
+        if entries:
+            v, links, late = self.tree_lands(how, words, cwd, entries, reads)
+            if v:
+                return v
+            why, listed = why or late, listed and not late
+        if why:
+            v = self.tree_unread(how, words, cwd, why, reads)
+            if v:
+                return v
+        if moving or not made:
+            return None
+        if listed:
+            self.making += [(q, how) for q in links]
+            return None
         if srcs:
             whole = [s for s in srcs if s.endswith(("/", "/."))]
             named = [s for s in srcs if s not in whole]
             words = (list(words) if whole else []) + \
                 [p for w in words for p in (_made_paths(named, w, cwd) if named else [])]
-        self.making += [(str(q), how) for q in (_normal(w or ".", cwd) for w in words) if q != UNKNOWN]
+        self.making += [(str(q) if q != UNKNOWN else _MADE_UNKNOWN, how) for q in (_normal(w or ".", cwd) for w in words)]
         return None
 
-    def git_tree(self, argv, cwd):
+    def tree_read(self, reads, cwd):
+        """(entries, why) of what a recursive writer writes: (the source or archive as named, its path, the member's
+        name or the path below the source, kind, hard link target) for each archive member or source tree entry,
+        bounded (_bounded); `why` says why the guard could not read it whole, '' when it could."""
+        if reads.get("kind") == "none":
+            return [], reads["why"]
+        if reads.get("kind") == "archive":
+            if reads.get("stdin"):
+                return [], "the archive comes from the command's input, which the guard does not read"
+            paths, names = [], list(reads["archives"])
+            for w in names:
+                p = UNKNOWN if _GLOB_CHARS.search(w) else resolve(w, cwd)
+                if p == UNKNOWN:
+                    return [], f"{_code(w)} depends on a variable, a substitution or a pattern"
+                if reads.get("suffix") and not p.exists() and Path(str(p) + reads["suffix"]).is_file():
+                    p = Path(str(p) + reads["suffix"])  # unzip x opens x.zip
+                paths.append(str(p))
+            fmt = reads["fmt"]
+
+            def one(i, p, out, stop):
+                _archive_entries(i, p, fmt, out, stop)
+        else:
+            if reads.get("remote"):
+                return [], f"{_code(reads['remote'][0])} is on another machine"
+            paths, names = [], []
+            for w in reads["srcs"]:
+                text = _path_text(w)
+                if text is not None and not os.path.isabs(text):
+                    text = None if cwd is None or str(cwd) == str(UNKNOWN) else os.path.join(_c_path(cwd), text)
+                if text is None:
+                    return [], f"{_code(w)} depends on a variable, a substitution or a folder the guard cannot place"
+                found = sorted(glob.glob(text)) if _GLOB_CHARS.search(text) else []
+                for f in found or [text]:  # a pattern that matches nothing stays as written, as the shell leaves it
+                    paths.append(f)
+                    names.append(f if found else w)
+            follow, through = reads.get("follow", False), reads.get("style") != "mv"
+
+            def one(i, p, out, stop):
+                _source_entries(i, p, follow, out, stop, through)
+        changed = self.changes_before(paths)
+        if changed:
+            return [], f"an earlier command of this line ({_code(changed)}) may change {_code(names[0])}"
+        at = [0]
+
+        def fill(out, stop):
+            for i, p in enumerate(paths):
+                at[0] = i
+                one(i, p, out, stop)
+        entries, why = _bounded(fill)
+        return [(names[i], paths[i], n, kind, link, text) for i, n, kind, link, text in entries], \
+            why and f"{_code(names[at[0]])}: {why}"
+
+    def changes_before(self, paths) -> str:
+        """The first command before this one in the line that may change what is at `paths` (an archive a writer
+        reads, a source tree): one that writes there or below (a redirect, a copy, a move, a link), or holds a
+        folder of it, or whose words the guard cannot place; any program not known to write only the paths it names
+        (curl, a build, an interpreter); a substitution, which runs a command. '' for none."""
+        mine = {s.casefold() for p in paths for s in (p, real(p))}
+
+        def relates(w, cwd):
+            if _GLOB_CHARS.search(w) or "$(" in w or "`" in w:
+                return True
+            for q in (resolve(w, cwd), _normal(w, cwd)):
+                if q == UNKNOWN:
+                    return True
+                s = str(q).casefold()
+                if any(s == r or r.startswith(s + "/") or s.startswith(r + "/") for r in mine):
+                    return True
+            return False
+        for name, argv, redirs, cwd in self.before:
+            said = " ".join(argv)[:60]
+            if any(relates(t, cwd) for t in redirs if t not in _NULL_TARGETS and not t.startswith("&")):
+                return said
+            if any("$(" in a or "`" in a or "<(" in a or ">(" in a for a in argv):
+                return said
+            if name in _SAFE_BEFORE:
+                continue
+            if name not in _PATH_WRITERS or any(relates(a, cwd) for a in argv[1:] if a and not a.startswith("-")):
+                return said
+        return ""
+
+    def tree_lands(self, how, words, cwd, entries, reads):
+        """(a deny, the landing paths of the links it makes, why it could not judge them all in time): a member or entry that would land on an agent settings
+        file, a repository's git folder, the `dev` a shell finds or below a protected root (_landing_bad), at every
+        place the writer may put it (_placements); one written below a link the same archive makes; a link named
+        .claude, .codex or .git; a hard link to a file a tree may not write."""
+        roots_cf = [r.casefold() for r in _tree_roots()]
+        dests = []
+        for w in words:
+            d = _lexical(w or ".", cwd)
+            dests.append(None if d == UNKNOWN else str(d))
+        cache, links, landed = {}, {}, []
+
+        def forms(path):
+            n = os.path.normpath(path)
+            head, tail = os.path.split(n)
+            if head not in cache:
+                cache[head] = real(head)
+            return list(dict.fromkeys((path, n, os.path.join(cache[head], tail))))
+        deadline = time.monotonic() + 2 * _TREE_BUDGET
+        for src, path, name, kind, link, text in entries:
+            if time.monotonic() > deadline:
+                return None, list(links.values()), f"judging where it lands took longer than {2 * _TREE_BUDGET:g} s"
+            member = name if reads.get("kind") == "archive" else os.path.join(src, name) if name else src
+            for d in dests:
+                for at in _placements(d, src, path, name, reads):
+                    fs, n = forms(at), os.path.normpath(at)
+                    bad = _landing_bad(fs, roots_cf) or (d is None and _unplaced_bad(at)) or \
+                        (_env_named(name or path) and _env_landing_bad(fs, kind, text, path, name, reads))
+                    if bad:
+                        return deny(TREE_LANDS_REASON.format(cmd=_code(how), member=_code(member),
+                                                             path=_code(tilde(n)), what=bad), key="lands"), [], ""
+                    if kind == "sym":
+                        if os.path.basename(n).casefold() in _LINK_FOLDERS:
+                            return deny(TREE_LINK_REASON.format(
+                                cmd=_code(how), member=_code(member), link=f"a link named {_code(os.path.basename(n))}",
+                                why="an agent reads its settings, or git its configuration and hooks, through a folder "
+                                    "by that name, wherever the link leads"), key="link-folder"), [], ""
+                        links.setdefault(n.casefold(), n)
+                    landed.append((member, n, d))
+                    if kind == "hard" and link and d is not None:
+                        for rel in _member_rels(link, reads.get("strip") or 0):
+                            hard = _landing_bad(forms(os.path.join(d, rel)), roots_cf)
+                            if hard:
+                                return deny(TREE_LINK_REASON.format(
+                                    cmd=_code(how), member=_code(member),
+                                    link=f"a hard link to {_code(rel)}, {hard}",
+                                    why="a later write to it changes that file, which the guard would not see"),
+                                    key="hard-link"), [], ""
+        for member, n, d in landed if links and reads.get("kind") == "archive" else ():
+            up = os.path.dirname(n)
+            while d and up.casefold() != d.casefold() and len(up) > len(d):
+                if up.casefold() in links:
+                    return deny(TREE_LINK_REASON.format(
+                        cmd=_code(how), member=_code(member), link=f"{_code(tilde(links[up.casefold()]))}, a link the "
+                                                                  f"same archive makes",
+                        why="the file lands wherever that link leads, which the guard cannot see before it exists"),
+                        key="below-link"), [], ""
+                up = os.path.dirname(up)
+        return None, list(links.values()), ""
+
+    def tree_unread(self, how, words, cwd, why, reads):
+        """A deny when the guard could not read what a recursive writer writes (`why`) and a destination is in a
+        project checkout or the home folder, or a folder it cannot place (_shielded). A move it could not read is
+        refused only when what it moves lands as, or in, a folder named .claude, .codex or .git: any other source
+        lands as it is, as a move of what the line made before (a build's output) does, unless it lands in a checkout's
+        top or the home folder, where a folder moved by its own name may be one."""
+        for w in words:
+            p = resolve(w or ".", cwd)
+            if reads.get("style") == "mv":
+                n = _normal(w or ".", cwd)
+                names = None if n == UNKNOWN else {x.casefold() for x in Path(str(n)).parts} | \
+                    {os.path.basename(s.rstrip("/")).casefold() for s in reads.get("srcs") or ()}
+                # a folder moved into a checkout's top or the home folder may be .claude or .codex by its own name
+                top = n != UNKNOWN and (os.path.lexists(os.path.join(str(n), ".git")) or
+                                        str(n).casefold() == real(HOME).casefold())
+                if names is not None and not names & _LINK_FOLDERS and not top:
+                    continue
+                where = "a project checkout's top or the home folder" if top else \
+                    "a folder an agent or git reads its settings from" if names else "a folder the guard cannot place"
+            else:
+                where = _shielded(p)
+                if not where:
+                    continue
+            return deny(TREE_UNREAD_REASON.format(cmd=_code(how), dest=_code(tilde(p) if p != UNKNOWN else w or "."),
+                                                  where=where, why=why, fix=TREE_UNREAD_FIX))
+        return None
+
+    def git_tree(self, argv, cwd, names=frozenset()):
         """git apply and git checkout-index write files below the work tree, or a folder they name (--directory,
         --prefix), links among them: judged as any recursive writer. `git apply --unsafe-paths` may write
-        anywhere; a check (--check, --stat, --numstat, --summary) or an index-only apply (--cached) writes no file."""
+        anywhere; a check (--check, --stat, --numstat, --summary) or an index-only apply (--cached) writes no file; a
+        patch the guard reads that makes, renames or copies no link makes no path a later write may not go through.
+        A command that writes a commit's or the index's files (checkout, restore, switch, reset, …) into another work
+        tree than its repository's own (--work-tree, GIT_WORK_TREE) writes a tree the guard does not list."""
         cdir, sub, gargs = _git_split(argv)
         gcwd = str(resolve(cdir, cwd)) if cdir else cwd
-        if sub not in ("apply", "checkout-index") or not gcwd or gcwd == str(UNKNOWN):
+        if not gcwd or gcwd == str(UNKNOWN):
+            return None
+        if sub in _GIT_CHECKOUTS:
+            return self.git_work_tree(argv, sub, gcwd, names)
+        if sub not in ("apply", "checkout-index"):
             return None
         top = str(_git_folder(gcwd, "--show-toplevel") or gcwd)
+        made = True
         if sub == "apply":
             if ({"--check", "--stat", "--numstat", "--summary"} & set(gargs) and "--apply" not in gargs) or \
                     ("--cached" in gargs and "--index" not in gargs):
@@ -5716,11 +6596,41 @@ class _Shell:
                                                                  "(--unsafe-paths)", gcwd)
             folder = _opt_value(gargs, ("--directory",))
             words = [top] + ([str(resolve(folder, top))] if folder else [])
+            made = _patch_links(gargs, gcwd)
         else:
             prefix = _opt_value(gargs, ("--prefix",))
             base = None if prefix is None else prefix if prefix.endswith("/") else os.path.dirname(prefix)
             words = [top] if base is None else [str(resolve(base or ".", top))]
-        return self.tree(f"git {sub}", [w for w in words if w != str(UNKNOWN)], "", gcwd)
+        return self.tree(f"git {sub}", [w for w in words if w != str(UNKNOWN)], "", gcwd, made=made)
+
+    def git_work_tree(self, argv, sub, gcwd, names):
+        """git checkout, restore, switch, reset and the like with a work tree of their own (--work-tree, or
+        GIT_WORK_TREE set in the line), other than the one the repository has: a tree written there, which the guard
+        does not list (it does not run git to read a commit's files)."""
+        tree, gdir, i = None, None, 1
+        while i < len(argv):  # git's own options, before the subcommand
+            a = argv[i]
+            if a in ("--work-tree", "--git-dir") and i + 1 < len(argv):
+                tree, gdir = (argv[i + 1], gdir) if a == "--work-tree" else (tree, argv[i + 1])
+                i += 2
+                continue
+            if a.startswith(("--work-tree=", "--git-dir=")):
+                val = a.split("=", 1)[1]
+                tree, gdir = (val, gdir) if a.startswith("--work-tree=") else (tree, val)
+            elif a in ("-C", "-c", "--config-env", "--namespace") and i + 1 < len(argv):
+                i += 1
+            elif not a.startswith("-"):
+                break
+            i += 1
+        if tree is None and "GIT_WORK_TREE" in names:
+            tree = "$GIT_WORK_TREE"  # exported earlier: a value the guard does not follow
+        if tree is None:
+            return None
+        top, wt = _git_folder(gcwd, "--show-toplevel"), resolve(tree, gcwd)
+        if gdir is None and top and wt != UNKNOWN and str(wt).casefold() == real(str(top)).casefold():
+            return None  # the repository's own work tree, as git finds it without the option
+        return self.tree(f"git {sub} --work-tree", [tree], "", gcwd, reads=_unlisted(
+            "it writes a commit's or the index's files there, and the guard does not run git to list them"))
 
     def settings_write(self, t, cwd, text, settings="all", mode="truncate"):
         """A write to an agent settings file (agent_settings: by the path as written, as the system resolves it, or
@@ -5827,6 +6737,10 @@ class _Shell:
                 cwd = str(core.HOME) if len(argv) == 1 else cwd if argv[1] == "-" else str(resolve(argv[1], cwd))
                 continue
             self.exported |= _exports(name, argv[1:])
+            if name == "git":  # GIT_DIR and GIT_WORK_TREE set for this command choose its repository and work tree
+                pre = dict(a.split("=", 1) for a in prefix if re.match(r"^GIT_(?:DIR|WORK_TREE)=", a))
+                argv = [argv[0], *(f"--{'git-dir' if k == 'GIT_DIR' else 'work-tree'}={v}" for k, v in pre.items()),
+                        *argv[1:]]
             heredocs, run = self.bodies, _unwrap(list(argv))
             if osegs and run and _INTERP.match(os.path.basename(run[0])):
                 with _skipped_reads():  # read as the gate reads it (_fed_program): its program joins the heredocs
@@ -5840,6 +6754,7 @@ class _Shell:
                 self.bodies = heredocs
             if v:
                 return v
+            self.before.append((name, list(argv), list(redirs) + [t for t, _ in clobber], cwd))
         self.made, self.making = self.made + self.making, []
         # what `<(…)`, `>(…)` and the `$(…)` and backticks inside a word run, from the folder the command starts in
         # and the one it ends in (the tokenizer leaves their words in the command around them; it splits only a bare
@@ -5866,6 +6781,7 @@ class _Shell:
         inner.note_mentions = inner.note_mentions or self.note_mentions
         inner.code = self.code  # a shell line in a program's code is still that program's text
         inner.made = list(self.made)  # what the commands before it made
+        inner.before = list(self.before)  # and the commands themselves
         return inner
 
     def nested(self, text, cwd, same_shell=False, names=(), typed=True, code=""):
@@ -6014,8 +6930,8 @@ class _Shell:
             return self.find(args, cwd)
         tree = _tree_write(name, args)  # an archive extracted, a folder copied: before the rules of each write
         if tree:
-            how, words, anywhere, *srcs = tree
-            v = self.tree(how, words, anywhere, cwd, *srcs)
+            how, words, anywhere, srcs, reads = tree
+            v = self.tree(how, words, anywhere, cwd, srcs, reads)
             if v:
                 return v
         if _INTERP.match(name):
@@ -6036,7 +6952,7 @@ class _Shell:
             links = [os.path.join(tdir, os.path.basename(s.rstrip("/"))) for s in pos if s != tdir] if tdir else \
                 [os.path.basename(pos[0].rstrip("/"))] if len(pos) == 1 else _made_paths(pos[:-1], pos[-1], cwd) \
                 if pos else []
-            self.making += [(str(q), "ln") for q in (_normal(p, cwd) for p in links) if q != UNKNOWN]
+            self.making += [(str(q) if q != UNKNOWN else _MADE_UNKNOWN, "ln") for q in (_normal(p, cwd) for p in links)]
         if name in _CHANGERS:
             return self.targets(_candidates(args), cwd, "change or delete", holds=True)
         if name == "dd":  # its input, when no operand but bs= and status= changes what it writes
@@ -6055,7 +6971,7 @@ class _Shell:
         if name in _READERS:
             return None
         if name == "git":
-            v = self.git_handoff(argv, cwd) or self.git_tree(argv, cwd)
+            v = self.git_handoff(argv, cwd) or self.git_tree(argv, cwd, set(names) | self.exported)
             if v:
                 return v
         # anything else (editors, sqlite3, git, curl, tar, …) may write the paths it is given; a git command that
@@ -6215,9 +7131,16 @@ class _Shell:
                                                                 if new.get(k) != now.get(k))))
         moved = [s for s in srcs if self.made and any(  # a link this line made, moved or copied on: made there too
             q != UNKNOWN and _under_ci(str(q), m) for q in (_normal(s, cwd),) for m, _ in self.made)]
+        # a link that is there now, moved or copied as a link (cp -P, -d), is a link at its new place too: the guard
+        # judges a write there before the move; a source it cannot place may be one
+        keeps = name in _MOVERS or (name in ("cp", "gcp") and any(
+            a in ("--no-dereference", "-P", "-d") or (re.fullmatch(r"-[A-Za-z]+", a) and set(a[1:]) & set("Pd"))
+            for a in args))
+        moved += [s for s in srcs if keeps and s not in moved and (
+            _lexical(s, cwd) == UNKNOWN or os.path.islink(_c_path(_lexical(s, cwd))))]
         for d in dests if moved else ():
-            self.making += [(str(q), name) for q in (_normal(p, cwd) for p in _made_paths(moved, d, cwd))
-                            if q != UNKNOWN]
+            self.making += [(str(q) if q != UNKNOWN else _MADE_UNKNOWN, name)
+                            for q in (_normal(p, cwd) for p in _made_paths(moved, d, cwd))]
         return None
 
     def xargs(self, args, cwd):
@@ -12621,6 +13544,7 @@ def _push_actions(args, cwd, srcs=None) -> list:
     srcs += (["--branches"] if longs & {"--mirror", "--all", "--branches"} else []) + \
         (["--tags"] if longs & {"--mirror", "--tags", "--follow-tags"} else [])
     current, default = _branch(cwd), _default_branch(cwd)
+    remote = repo_opt or (pos[0] if pos else _push_remote(cwd, current))
     if not refspecs:
         if out and "--follow-tags" not in longs:
             return out
@@ -12632,6 +13556,16 @@ def _push_actions(args, cwd, srcs=None) -> list:
         deleting = delete or bool(colon and not src)
         if not deleting:
             srcs.append(current if src in ("HEAD", "@", "") else src)
+        if not colon and not deleting:  # no destination: the configuration may name one (H3)
+            sent = _configured_push(cwd, remote, current if src in ("HEAD", "@", "") else src, current)
+            if sent == ["*"]:
+                out.append(("push-destructive", "all-branches"))
+                continue
+            for other in sent[1:]:
+                out.append(("push-destructive" if _protected_branch(re.sub(r"^refs/heads/", "", other), default)
+                            or force or plus else "push", re.sub(r"^refs/(?:heads|tags)/", "", other)))
+            if sent:
+                colon, dst = ":", sent[0]
         dst = dst if colon else src
         if dst in ("HEAD", "@", ""):
             dst = current
@@ -12647,6 +13581,47 @@ def _push_actions(args, cwd, srcs=None) -> list:
         else:
             out.append(("push", name))
     return out
+
+
+def _push_remote(cwd, branch) -> str:
+    """The remote a `git push` that names none sends to: branch.<branch>.pushRemote, remote.pushDefault,
+    branch.<branch>.remote, else origin."""
+    for key in (f"branch.{branch}.pushRemote", "remote.pushDefault", f"branch.{branch}.remote"):
+        name = core.gitout(cwd, "config", "--get", key).strip() if cwd and branch else ""
+        if name:
+            return name
+    return "origin"
+
+
+def _configured_push(cwd, remote, branch, current) -> list:
+    """Where git's configuration sends a push of `branch` that names no destination (H3): the destinations of the
+    remote.<remote>.push refspecs that match it (`*` patterns too; HEAD matches the current branch), or, with
+    push.default upstream (or tracking), the ref branch.<branch>.merge names; ["*"] for push.default matching, which
+    pushes every branch both sides have; [] when the configuration names none (the branch's own name)."""
+    if not cwd or not branch or str(cwd) == str(UNKNOWN):
+        return []
+    ref, out = f"refs/heads/{branch}", []
+    rules = core.gitout(cwd, "config", "--get-all", f"remote.{remote}.push").splitlines() \
+        if re.fullmatch(r"[\w.-]+", remote or "") else []
+    for rule in (r.strip().lstrip("+") for r in rules):
+        src, colon, dst = rule.partition(":")
+        dst = dst if colon else src
+        if src.startswith("^") or not src:
+            continue
+        if "*" in src:
+            pre, _, post = src.partition("*")
+            name = ref if src.startswith("refs/") else branch
+            if name.startswith(pre) and name.endswith(post) and len(name) >= len(pre) + len(post):
+                out.append(dst.replace("*", name[len(pre):len(name) - len(post)], 1))
+        elif src in (ref, branch) or (src in ("HEAD", "@") and branch == current):
+            out.append(dst)
+    if out:
+        return out
+    mode = core.gitout(cwd, "config", "--get", "push.default").strip().casefold()
+    if mode in ("upstream", "tracking"):
+        merge = core.gitout(cwd, "config", "--get", f"branch.{branch}.merge").strip()
+        return [merge] if merge else []
+    return ["*"] if mode == "matching" else []
 
 
 _GIT_BUILTIN = frozenset(
@@ -12798,16 +13773,18 @@ def _retarget_reason(a) -> str:
 
 
 def _retarget_key(key, section=False) -> bool:
-    """True when a git configuration key (or, with `section`, a section) decides where git or gh sends: remote.*,
-    url.* (insteadOf, pushInsteadOf), branch.<name>.remote and .pushRemote (any branch section), and include.* and
-    includeIf.*, which can bring in any of them; also a key the shell fills in when it runs."""
+    """True when a git configuration key (or, with `section`, a section) decides where git or gh sends, or which
+    branch a push lands on: remote.* (a remote's push refspecs too), url.* (insteadOf, pushInsteadOf),
+    branch.<name>.remote, .pushRemote and .merge (any branch section), push.default (upstream sends a branch to its
+    .merge), and include.* and includeIf.*, which can bring in any of them; also a key the shell fills in when it
+    runs."""
     k = str(key or "").strip().casefold()
     if _dynamic_name(k):
         return True
     parts = k.split(".")
-    if parts[0] in ("remote", "url", "include", "includeif"):
+    if parts[0] in ("remote", "url", "include", "includeif") or (parts[0] == "push" and (section or k == "push.default")):
         return True
-    return parts[0] == "branch" and (section or parts[-1] in ("remote", "pushremote"))
+    return parts[0] == "branch" and (section or parts[-1] in ("remote", "pushremote", "merge"))
 
 
 def _git_config_retargets(args) -> bool:
@@ -12921,7 +13898,12 @@ def _gh_actions(args, cwd) -> list:
     if not url and repo.count("/") == 1 and host != "github.com":
         repo = host + "/" + repo
     acts = _gh_classify(group, sub, rest, pos, sel, rflag or url, repo, cwd)
-    named = rflag or url or group in ("api", "gist") or (group == "repo" and (sub == "create" or sel))
+    # gh api fills {owner}, {repo} and {branch} (in the endpoint, and :owner and :repo there) from the repository it
+    # picks for the checkout, as any other command does, so a default there decides it too (M3)
+    filled = group == "api" and bool(re.search(r"\{(?:owner|repo|branch)\}", " ".join(rest)) or
+                                      re.search(r"(?:^|/):(?:owner|repo)(?:/|$)", sel))
+    named = rflag or url or (group == "api" and not filled) or group == "gist" or \
+        (group == "repo" and (sub == "create" or sel))
     problem = "" if named or not acts else _gh_base_problem(cwd, repo)
     if not problem:
         return acts

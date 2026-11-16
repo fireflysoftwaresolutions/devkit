@@ -900,6 +900,11 @@
       "what": "The guard refused a shell write below a path that an earlier command of the same line makes: a link made with `ln -s`, or a folder an archive or a tree copy fills. The guard judges the path before that command runs, so it cannot see where a link made there leads; run as its own command, the write is judged by the links that are there.",
       "reproduce": "In a throwaway repository, ask an agent to run `tar -xf links.tar -C out && echo x >> out/notes/a.txt`."
     },
+    "target:made-unknown": {
+      "title": "Guard refuses a write to an unplaced path after the command makes a link",
+      "what": "The guard refused a shell write whose path depends on a variable, a substitution or a folder it cannot place, after an earlier command of the same line made a link or an extraction it could not read. The path may lead through what that command made, to devkit's state or an agent's settings.",
+      "reproduce": "In a throwaway repository, ask an agent to run `ln -s ~/notes \"$D/L\" && echo x > \"$D/L/x\"`."
+    },
     "target:scratch": {
       "title": "Guard refuses a crew member write outside its own scratch folder",
       "what": "The guard refused a crew member's shell command that writes or deletes in the session scratchpad outside the member's own folder, `scratchpad/<member>/`.",
@@ -919,6 +924,31 @@
       "title": "Guard refuses a tree written into a folder that holds protected files",
       "what": "The guard refused an archive extraction, a recursive copy or a patch whose destination is or holds devkit's state, configuration or install, an agent's settings or session transcripts, or the handoff repository, such as `tar -xf x.tar -C ~` or `cp -R d ~/.claude/`. The guard cannot see which files such a writer leaves there.",
       "reproduce": "Ask an agent to run `tar -xf backup.tar -C ~/.claude`."
+    },
+    "tree_lands:below-link": {
+      "title": "Guard refuses an archive member written through a link the same archive makes",
+      "what": "The guard refused an extraction whose archive holds a symbolic link and a member below it, such as `cfg -> .claude` and then `cfg/settings.local.json`. The member lands wherever the link leads, which the guard cannot judge before the link exists.",
+      "reproduce": "In a throwaway repository, ask an agent to extract a tar archive that holds a link `cfg` and a file `cfg/notes.md`."
+    },
+    "tree_lands:hard-link": {
+      "title": "Guard refuses an archive with a hard link to an agent settings or git file",
+      "what": "The guard refused an extraction whose archive holds a hard link to an agent settings file, a repository's git configuration or hooks, or a protected file. A later write to the link changes that file, which the guard would not see.",
+      "reproduce": "In a throwaway repository, ask an agent to extract a tar archive that holds a hard link `notes.json` to `.claude/settings.json`."
+    },
+    "tree_lands:lands": {
+      "title": "Guard refuses an archive or copy whose files land on agent settings or git files",
+      "what": "The guard listed an archive's members, or walked a copied or moved folder, and one would land on an agent settings file (`.claude/settings.json`, `settings.local.json`, `.codex/config.toml`, `hooks.json`), a repository's git configuration or hooks, or below devkit's state, configuration or install, a transcript folder or the handoff repository.",
+      "reproduce": "In a throwaway repository, ask an agent to run `tar -xf drop.tar` with an archive that holds `.claude/settings.local.json`."
+    },
+    "tree_lands:link-folder": {
+      "title": "Guard refuses an archive or copy that makes a .claude .codex or .git link",
+      "what": "The guard refused an extraction, copy or move that would make a symbolic link named `.claude`, `.codex` or `.git`. An agent reads its settings, and git its configuration and hooks, through a folder by that name, wherever the link leads.",
+      "reproduce": "In a throwaway repository, ask an agent to extract a tar archive that holds a link `.claude` to another folder."
+    },
+    "tree_unread": {
+      "title": "Guard refuses a tree it cannot read written into a project or the home folder",
+      "what": "The guard refused an extraction or a recursive copy whose contents it could not read: an archive from the command's input, a format it cannot list (cpio, 7z, xar, Apple Archive), a file an earlier command of the line may change, a source on another machine, or a listing past 20,000 entries or 1 second. Such a tree may not land in a project checkout or the home folder; in a scratch folder it runs.",
+      "reproduce": "In a throwaway repository, ask an agent to run `curl -sLo x.tgz https://example.com/x.tgz && tar -xzf x.tgz`."
     },
     "webfetch_verdict": {
       "title": "Guard refuses a web fetch of a URL that carries a secret",

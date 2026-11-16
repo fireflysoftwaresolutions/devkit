@@ -177,11 +177,16 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
 - **Guard.** An archive extraction or recursive copy (`tar -C`, `unzip -d`, `ditto`, `cp -R`, `rsync -r`, `git
   apply`, and others) whose destination is or contains a protected folder (devkit's state, the agent transcripts,
   `~/.claude` settings, `~/.codex`, the handoff repository) is refused, and so is a write through a path an
-  earlier part of the same command created. devkit reads the repository `gh` acts on as `gh` does: the last
+  earlier part of the same command created. The guard lists an archive's members and walks a copied tree before it
+  decides, refuses one that would land an agent settings file, a `.git` hook or config, or a shell startup file
+  that sets devkit's variables, and refuses contents it cannot read when they would land in a project or the home
+  folder (extract into a scratch folder, or run the download or build as its own command first). Long options of
+  `tar`, `cpio` and `cp` are read as the tools read their abbreviations. devkit reads the repository `gh` acts on
+  as `gh` does: the last
   `-R` in any spelling, a pull request or issue URL, and the default repository; automatic policy covers it only
   when every repository `gh` could pick is the one devkit classified. Changing a remote, a `url.*` rewrite or a
   branch's upstream in the same command as a push, pull request, merge or release is refused: run them as two
-  commands. A grant counts only from the prompt the developer typed, as the agent's harness delivers it; a
+  commands, and a push with no destination is judged by `remote.<name>.push` and `push.default`. A grant counts only from the prompt the developer typed, as the agent's harness delivers it; a
   transcript line confirms it and never grants by itself. A session another agent session started, or a
   headless run devkit cannot check, gets no automatic policy (`DEVKIT_PREAPPROVE` still works for a headless
   run you start in a terminal).

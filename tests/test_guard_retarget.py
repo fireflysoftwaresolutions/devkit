@@ -87,5 +87,37 @@ class RetargetAndDeliver(WorkspaceScopeCase):
         self.assertIsNotNone(self.verdict("git --config-env user.name=HOME push --force origin main", self.other))
 
 
+class ConfiguredPushDestination(WorkspaceScopeCase):
+    """A push that names no destination branch lands where git's configuration sends it: a remote.<name>.push
+    refspec, or, with push.default upstream, the branch branch.<name>.merge names. The guard judges that branch."""
+
+    def acts(self, cmd):
+        from devkit import guard
+        return [(a["action"], a["target"]) for a in guard.irreversible_actions(cmd, self.other)]
+
+    def test_a_push_refspec_in_the_configuration_sends_the_branch_to_main(self):
+        self.git(self.other, "config", "remote.origin.push", "refs/heads/feat/x:refs/heads/main")
+        self.assertEqual(self.acts("git push"), [("push-destructive", "main")])
+        self.assertEqual(self.acts("git push origin feat/x"), [("push-destructive", "main")])
+        self.assertEqual(self.acts("git push origin feat/x:feat/x"), [("push", "feat/x")])
+
+    def test_push_default_upstream_sends_the_branch_to_its_upstream(self):
+        self.git(self.other, "config", "push.default", "upstream")
+        self.git(self.other, "config", "branch.feat/x.merge", "refs/heads/main")
+        self.assertEqual(self.acts("git push"), [("push-destructive", "main")])
+        self.assertEqual(self.acts("git push origin feat/x"), [("push-destructive", "main")])
+        self.git(self.other, "config", "push.default", "simple")  # simple pushes to the same name or refuses
+        self.assertEqual(self.acts("git push"), [("push", "feat/x")])
+
+    def test_a_change_of_push_default_or_upstream_with_a_push_is_a_retarget(self):
+        for k, cmd in enumerate(("git config push.default upstream && git push",
+                                 "git config branch.feat/x.merge refs/heads/main && git push",
+                                 "git config set push.default upstream; git push origin feat/x"), 2):
+            with self.subTest(cmd=cmd):
+                denied = self.verdict(cmd, self.other, k)
+                self.assertIsNotNone(denied)
+                self.assertIn("separate commands", denied[1])
+
+
 if __name__ == "__main__":
     unittest.main()

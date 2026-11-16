@@ -638,6 +638,9 @@ class DeveloperOnlyFunctionsInAProgram(unittest.TestCase):
 
     def test_each_developer_only_function_is_refused_with_its_command_and_grant_line(self):
         for code, line in (("from devkit import bugs; bugs.set_consent('on', 'ana-dev')", "grant bug-share"),
+                           ("from devkit import bugs; bugs.record_consent_asked()", "grant bug-share"),
+                           ("from devkit import setup; setup.offer_bug_consent()", "grant bug-share"),
+                           ("from devkit.setup import offer_bug_consent as ask; ask(print)", "grant bug-share"),
                            ("from devkit import bugs; bugs.approve('7')", "grant bug-send"),
                            ("from devkit import bugs; bugs.drop('7')", "grant bug-drop"),
                            ("from devkit import bugs; bugs.confirm('42', 'd1')", "grant bug-confirm"),
