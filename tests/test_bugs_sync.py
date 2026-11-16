@@ -1253,6 +1253,25 @@ class FreeTextDeliveryTests(StateCase):
         bugs.flush(client, now=NOW + 60)
         self.assertEqual([_sent(b)["title"] for _, b in client.created if _sent(b).get("title")], [TITLE])
 
+    def test_a_security_report_with_the_title_of_a_queued_public_one_still_goes_to_private_reporting(self):
+        bugs.set_consent("on", "ana")
+        public = bugs.file_report(title=TITLE, session="s1")
+        private = bugs.file_report(title=TITLE, session="s2", security=True)
+        self.assertEqual((private["duplicate"], private["security"]), (False, True))
+        self.assertNotEqual(private["id"], public["id"])
+        client = FakeClient()
+        bugs.flush(client, now=NOW + 60)
+        titled = [[_sent(b)["title"] for _, b in sent if _sent(b).get("title")]
+                  for sent in (client.created, client.private)]
+        self.assertEqual(titled, [[TITLE], [TITLE]])  # one public issue and one private report, besides the automatic
+
+    def test_after_sharing_is_turned_off_no_item_asks_for_consent_to_the_new_text(self):
+        bugs.set_consent("on", "ana")
+        marked = self.report()
+        bugs.set_consent("off", "ana")
+        self.assertEqual([(i["id"], i["consent"]) for i in bugs.pending()], [(marked, False)])
+        self.assertNotIn("consent", bugs.status_line(NOW)["text"])
+
     def test_a_copied_outbox_file_is_sent_once(self):
         bugs.set_consent("on", "ana")
         sent = self.report()
@@ -1473,6 +1492,33 @@ class SendLimitTests(StateCase):
         client = FakeClient()
         self.assertEqual(bugs.flush(client, now=NOW)["sent"], 0)
         self.assertEqual(bugs.flush(client, now=NOW + 3601)["sent"], 1)
+
+    def test_a_send_counts_from_when_it_went_out_not_from_when_its_pass_started(self):
+        bugs.set_consent("on", "ana")
+        for n in range(11):
+            _agent_report(n)
+        start = _noon(NOW)
+        clock = [start]
+
+        class Slow(FakeClient):
+            def create_issue(self, title, body):
+                clock[0] = start + 3600  # the pass's first send takes an hour
+                return super().create_issue(title, body)
+        with mock.patch.object(bugs.time, "time", lambda: clock[0]):  # as `dev bug sync` runs it: the clock goes on
+            self.assertEqual(bugs.flush(Slow())["sent"], 10)
+        client = FakeClient()
+        self.assertEqual(bugs.flush(client, now=start + DAY + 60)["sent"], 0)  # 24 hours after the pass started
+        self.assertEqual(bugs.flush(client, now=start + 3600 + DAY + 1)["sent"], 1)
+
+    def test_a_limit_record_that_cannot_be_read_counts_as_a_full_limit_for_24_hours(self):
+        bugs.set_consent("on", "ana")
+        _agent_report(1)
+        record = bugs.BUGS / bugs.CAP_STATE
+        record.write_text('{"sent": [')  # a write cut short
+        record.chmod(0o600)
+        client = FakeClient()
+        self.assertEqual(bugs.flush(client, now=NOW)["sent"], 0)
+        self.assertEqual(bugs.flush(client, now=NOW + DAY + 1)["sent"], 1)
 
     def test_security_reports_count_and_votes_and_automatic_metadata_reports_do_not(self):
         bugs.set_consent("on", "ana")

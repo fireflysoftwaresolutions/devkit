@@ -146,8 +146,10 @@ devkit builds each report from fields it produces itself. A report is never a co
   send the limit allows, oldest first: once the oldest of the last 10 went out more than 24 hours ago. `dev bug sync`,
   `dev bug pending`, and `dev status` say how many wait. Votes, items you approved with `dev bug send`, and automatic
   reports do not count.
-- **One issue per title.** A report whose title, cleaned and in any case or spacing, matches one already queued adds
-  nothing: `dev bug report` names the queued one, and nothing new is recorded or sent.
+- **No duplicate reports.** A report that would be sent the same way (a public issue or a private report) as one
+  already queued adds nothing: `dev bug report` names the queued one, and nothing new is recorded or sent. A report
+  with only a title matches on its title, cleaned and in any case or spacing; any other report matches on its bug
+  and its title, so a report about another bug with the same title still goes.
 - **Votes** carry only the fingerprint, the version, the impact, and the time window of their batch.
 
 ### Review held items
@@ -316,7 +318,7 @@ destination cannot override private or uncertain classification. See
 | `dev bug` or `dev bug ls [--open\|--fixed\|--kind KIND\|--mine\|--local]` | The bugs in the cache, ranked, with votes, impact, detour status, and fix version | Anyone |
 | `dev bug show <number\|fingerprint>` | One bug: versions, votes, detours with their trust, related lessons | Anyone |
 | `dev bug search <words\|fingerprint>` | Finds bugs by generated title or fingerprint | Anyone |
-| `dev bug report [fingerprint] [--title "…"] [--guard [refusal id]] [--security]` | Files a bug, or votes on a known one, and starts the send at once when it goes without review. A report whose title is already queued adds nothing. `--guard` with no id takes this session's last refusal | Anyone |
+| `dev bug report [fingerprint] [--title "…"] [--guard [refusal id]] [--security]` | Files a bug, or votes on a known one, and starts the send at once when it goes without review. A report that duplicates a queued one (same title and sending, and the same bug unless it has only a title) adds nothing. `--guard` with no id takes this session's last refusal | Anyone |
 | `dev bug detour <fingerprint> --hint "…"\|--dev "…"\|--text "…"` | Records a detour of one to five steps, after the evidence check. A `--dev` step may start with `dev` | Anyone |
 | `dev bug top [--task]` | Hotfix recommendations | Anyone |
 | `dev bug sync` | Refreshes the cache and sends what waits in the outbox | Anyone |

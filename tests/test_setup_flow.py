@@ -1924,6 +1924,25 @@ class BugConsentTests(unittest.TestCase):
         self.assertEqual((rc, asked, bugs.consent_outdated()), (0, [], True), out)
         self.assertIn("`dev bug share reports`", out)
 
+    def test_ctrl_d_at_the_question_declines_and_dev_update_finishes(self):
+        def ctrl_d(prompt=""):
+            print(prompt, end="")
+            raise EOFError
+
+        class Terminal(io.StringIO):
+            def isatty(self):
+                return True
+        step = setup.install_bug_consent
+        with installing() as _, mock.patch.object(setup, "install_bug_consent", step), \
+                mock.patch.object(core, "set_by_developer", lambda *a, **k: True), \
+                mock.patch("builtins.input", ctrl_d), mock.patch("sys.stdin", Terminal()), \
+                mock.patch("sys.stdout", io.StringIO()) as out:
+            rc = setup.run_install(as_pinned=True, assume_yes=True)
+        text = ui.ANSI_RE.sub("", out.getvalue())
+        self.assertEqual(rc, 0, text)
+        self.assertIn("`dev bug share reports`", text.split("Agree to it?")[1])  # how to agree later
+        self.assertEqual((bugs.consent_asked(), bugs.consent_outdated()), (bugs.CONSENT_VERSION, True))
+
 
 class SavedUnknownKeyTests(unittest.TestCase):
     """A key devkit does not read, saved by another version and left as it was, never stops `dev install` (the

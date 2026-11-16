@@ -493,7 +493,10 @@ class LineModeTests(unittest.TestCase):
         # the wizard runs `dev install` with no terminal, so it asks the question itself once the plan is applied
         with tempfile.TemporaryDirectory() as d, mock.patch.object(bugs, "BUGS", Path(d) / "bugs"):
             bugs._write_json(bugs.BUGS / "consent.json", {"login": "ada", "share": "on", "ts": 1})  # an older text
-            self.assertEqual(line_mode()[0], 0)  # --yes: every default, and no answer for the developer
+            with mock.patch.object(_Stdin, "isatty", lambda self: True):  # --yes in the developer's terminal
+                rc, _, out, _ = line_mode(typed=lambda prompt: "y" if "Agree" in prompt else "")
+            self.assertEqual(rc, 0)  # every default, and no answer for the developer
+            self.assertNotIn("Agree", out)
             self.assertTrue(bugs.consent_outdated())
             rc, _, out, _ = line_mode(yes=False, typed=lambda prompt: "y" if "Agree" in prompt else "")
             self.assertEqual(rc, 0)

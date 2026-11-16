@@ -46,7 +46,8 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
   waits for you only when that channel refuses it. Filing a report starts a background send instead of waiting
   for the hourly sync. At most 10 reports in an agent's own words, security ones included, go out in any 24
   hours; the rest go with the next send the limit allows, oldest first, and `dev bug pending` says how many wait.
-  A report whose title matches one already queued adds nothing. Sending without review needs your consent to the
+  A report that duplicates a queued one adds nothing, and a security report never merges into a public one.
+  Sending without review needs your consent to the
   new text: `dev update` asks once in your terminal (`dev bug share on` gives it too), and until then such
   reports wait. Reports queued before this version still wait for `dev bug send`; `dev bug share off` stops all
   of it.

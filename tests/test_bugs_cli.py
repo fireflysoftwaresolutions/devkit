@@ -197,6 +197,19 @@ class ReportTests(BugCLI):
         self.assertEqual([it["payload"]["refusal_id"] for it in self.outbox()], ["check_git:force-push"])
         self.assertEqual([o["refusal_id"] for o in bugs.occurrences()], ["check_git:force-push"])
 
+    def test_reports_of_different_bugs_with_one_title_all_stay_queued(self):
+        # two refusals and a command that misbehaves, named alike: three bugs, so no report drops another
+        bugs.note_refusal("s1", "check_git:force-push", "git")
+        bugs.note_refusal("s1", "check_rm:git-dir", "rm")
+        title = "the guard stops a plain git status in a fresh clone"
+        for argv in (("--guard", "check_git:force-push"), ("--guard", "check_rm:git-dir"), ()):
+            rc, out = self.dev("report", *argv, "--title", title)
+            self.assertEqual(rc, 0, out)
+        self.assertEqual([(it["payload"]["kind"], it["payload"]["refusal_id"], it["payload"]["title"])
+                          for it in self.outbox()],
+                         [("guard", "check_git:force-push", title), ("guard", "check_rm:git-dir", title),
+                          ("command", "", title)])
+
     def test_report_guard_refuses_text_that_is_no_refusal_of_the_guard(self):
         # an agent's own text as the id would become a public issue title under the developer's account, even when
         # a line written by hand into the ledger names it

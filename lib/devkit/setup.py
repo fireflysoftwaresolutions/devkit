@@ -2728,8 +2728,8 @@ def offer_bug_consent(say=None) -> str:
     agent's own words wait on this Mac. `dev install`'s step (so `dev update`) and `dev setup` call it. Only the
     developer answers it, in their terminal (no agent, a terminal on stdin, not quiet, not a scheduled job), and no
     caller can answer for them: an agent's session, or a run with no terminal, only says how to agree later, and
-    `--yes` answers nothing. `say(text)` (default: print). -> "agreed", "declined", "asked before", "no terminal", or
-    "" when the consent is not outdated."""
+    `--yes` answers nothing. `say(text)` (default: print). -> "agreed", "declined" (Ctrl+D too), "asked before", "no
+    terminal", or "" when the consent is not outdated."""
     from . import bugs
     c = bugs.consent()
     if not bugs.consent_outdated(c):
@@ -2746,7 +2746,11 @@ def offer_bug_consent(say=None) -> str:
         f"earlier text. This is the current one:\n\n"
         + "\n".join("    " + line for line in textwrap.wrap(bugs.consent_text(c["login"]), 100))
         + (f"\n\n  {waiting} item{'s wait' if waiting != 1 else ' waits'} for it." if waiting else ""))
-    answer = input("  Agree to it? [y/N] ")
+    try:
+        answer = input("  Agree to it? [y/N] ")
+    except EOFError:  # Ctrl+D: no, and `dev update` goes on
+        answer = ""
+        say("")
     bugs.record_consent_asked()
     if (answer or "").strip().lower() not in ("y", "yes"):
         say(later)

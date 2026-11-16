@@ -2283,8 +2283,9 @@ def _without_review(item: dict) -> bool:
 
 def _awaits_consent(item: dict) -> bool:
     """True for a marked item that nothing else holds (no `held` flag, no problem) and that waits only for the
-    developer's consent to the current text: `dev bug share on` sends it."""
-    return not (item.get("held") or item.get("problem")) and _marked(item) and not consent_current()
+    developer's consent to the current text, while they share under an older one (consent_outdated): `dev bug share
+    on` sends it. With sharing off, it waits for their review like any other item, and nothing asks them to share."""
+    return not (item.get("held") or item.get("problem")) and _marked(item) and consent_outdated()
 
 
 def _needs_review(item: dict) -> bool:
@@ -2315,11 +2316,16 @@ def _counted(item: dict) -> bool:
         and _without_review(item)
 
 
-def _cap_state() -> dict:
+def _cap_state(now: float) -> dict:
     """The limit's record on this Mac: {"sent": the UTC times (seconds since the epoch) of the last AUTO_CAP counted
     sends (_counted), oldest first; "waiting_from": the oldest item the limit kept back since it last let one go, 0
-    for none}. A record that does not read as one counts nothing; an entry that is no number is left out."""
-    kept = _bounded_json(BUGS / CAP_STATE, 1024)
+    for none}. No record counts nothing. A record that is there but does not read as one (cut short, not owner-only,
+    a link, too large, or no list of times) counts as a full limit from `now`: AUTO_CAP sends at `now`, which the
+    next write keeps for AUTO_WINDOW. An entry that is no number is left out."""
+    path = BUGS / CAP_STATE
+    kept = _bounded_json(path, 1024)
+    if os.path.lexists(path) and not (isinstance(kept, dict) and isinstance(kept.get("sent", []), list)):
+        return {"sent": [now] * AUTO_CAP, "waiting_from": 0}
     kept = kept if isinstance(kept, dict) else {}
     sent, waiting = kept.get("sent"), kept.get("waiting_from")
     sent = sorted(t for t in sent if _is_ts(t))[-AUTO_CAP:] if isinstance(sent, list) else []
@@ -2346,7 +2352,7 @@ def waiting_for_limit(now: float = None) -> int:
     """How many queued items the limit keeps for a later send: those that count against it (_counted), past what it
     allows now."""
     now = time.time() if now is None else now
-    left = _cap_left(_cap_state(), now)
+    left = _cap_left(_cap_state(now), now)
     queued = sum(1 for it in map(_load_item, map(str, _item_ids())) if it and not _needs_review(it) and _counted(it))
     return max(0, queued - left)
 
@@ -2366,16 +2372,24 @@ def _title_key(title) -> str:
     return " ".join(str(title).split()).casefold() if isinstance(title, str) else ""
 
 
-def _queued_title(title):
-    """The queued report whose title is `title` (_title_key), or None: one issue per title, not one per filing."""
-    key = _title_key(title)
-    if not key:
+def _report_key(item: dict):
+    """What a queued report must share with `item` to be the same report, or None when no queued item can be (not a
+    report, or no title): the way it goes (_security: a public issue or private vulnerability reporting) and its title
+    (_title_key), and its fingerprint too, except for a command that misbehaves without an error (kind `command`,
+    filed with a title only and so a new fingerprint each time): two refusals or failures named alike are two bugs."""
+    p = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+    title = _title_key(p.get("title"))
+    if p.get("type") != "report" or not title:
         return None
-    for it in map(_load_item, map(str, _item_ids())):
-        p = it.get("payload") if it and isinstance(it.get("payload"), dict) else {}
-        if p.get("type") == "report" and _title_key(p.get("title")) == key:
-            return it
-    return None
+    return _security(item), title, None if p.get("kind") == "command" else p.get("fingerprint")
+
+
+def _queued_report(item: dict):
+    """The queued report that `item` repeats (_report_key), or None: one issue per bug, not one per filing."""
+    key = _report_key(item)
+    if key is None:
+        return None
+    return next((it for it in map(_load_item, map(str, _item_ids())) if it and _report_key(it) == key), None)
 
 
 def queue(item: dict) -> str:
@@ -2384,8 +2398,8 @@ def queue(item: dict) -> str:
 
 
 def _enqueue(item: dict) -> tuple:
-    """Put an item in the outbox -> (its id, whether it is new). A report whose title is one already queued is dropped,
-    and the id is that one's (_queued_title). While bugs.sync is on and the developer shares (_covered), free text and
+    """Put an item in the outbox -> (its id, whether it is new). A report that repeats one already queued is dropped,
+    and the id is that one's (_queued_report). While bugs.sync is on and the developer shares (_covered), free text and
     security items are marked to go out without review (_review_binding), and go once the developer's consent is to
     the current text (_without_review): the free text was scrubbed when it was filed and the sender re-checks it, and
     a security item goes only to private vulnerability reporting. Otherwise they are held for the developer. A vote
@@ -2411,7 +2425,7 @@ def _enqueue(item: dict) -> tuple:
     box = _outbox()
     box.mkdir(parents=True, exist_ok=True)
     with core.file_lock(box / ".seq", LOCK_WAIT) as got:  # busy: _create still keeps every id unique
-        same = _queued_title(payload.get("title")) if payload.get("type") == "report" else None
+        same = _queued_report(record)
         if same is not None:
             return same["id"], False
         seq = core.read_json(box / ".seq", 0)
@@ -3029,9 +3043,10 @@ SEND_SPACING = 60  # seconds between two background starts at least; what a fili
 def _send_soon(item) -> bool:
     """Start the send of an item just filed when it goes out without review now: not held, due (a vote waits its
     delay), and covered by bugs.sync and the developer's consent (_automatic). -> whether a send started."""
-    if not isinstance(item, dict) or item.get("held") or float(item.get("not_before") or 0) > time.time():
+    now = time.time()
+    if not isinstance(item, dict) or item.get("held") or float(item.get("not_before") or 0) > now:
         return False
-    if _counted(item) and not _cap_left(_cap_state(), time.time()):
+    if _counted(item) and not _cap_left(_cap_state(now), now):
         return False  # the limit keeps it for a later send: a send now would leave it queued
     return _automatic(item.get("payload") or {}) and _start_send()
 
@@ -3072,8 +3087,8 @@ def _start_send() -> bool:
 
 def flush(client=None, now: float = None) -> dict:
     """Send what the outboxes hold: the automatic reports (_flush_automatic), then the legacy items (_flush_legacy).
-    -> counts {"sent", "held", "failed", "skipped"} and "error". Nothing is sent while `bugs.sync` is false."""
-    now = time.time() if now is None else now
+    -> counts {"sent", "held", "failed", "skipped"} and "error". Nothing is sent while `bugs.sync` is false. With no
+    `now`, the legacy items read the clock as they go (_flush_legacy), after the automatic reports took their time."""
     if not sending_on():
         return {"sent": 0, "held": 0, "failed": 0, "skipped": 0, "error": SENDING_OFF}
     try:
@@ -3081,7 +3096,7 @@ def flush(client=None, now: float = None) -> dict:
     except OSError:
         pass  # optional detail; its absence never stops the safe minimal report
     with core.Lock("bugs-automatic-flush", wait=0) as locked:
-        automatic = _flush_automatic(client, now) if locked else {}
+        automatic = _flush_automatic(client, time.time() if now is None else now) if locked else {}
     examined = automatic.get("examined", 0)
     legacy = _flush_legacy(client, now, limit=max(0, 50 - examined), scan_limit=max(0, 250 - examined))
     return {**legacy, **{k: legacy.get(k, 0) + automatic[k] for k in automatic}}
@@ -3095,8 +3110,10 @@ def _flush_legacy(client=None, now: float = None, *, limit: int = 50, scan_limit
     item needs the approval is read from what it holds (_needs_review), and an item that fails the re-check is held
     with its problem. Items in an agent's own words that go without review (_counted) are sent at most AUTO_CAP in any
     24 hours on this Mac (_cap_left); the rest stay queued, are skipped, and go with the next send the limit allows,
-    oldest first."""
-    now = time.time() if now is None else now
+    oldest first. A counted send is checked against the limit and recorded at the clock's time when it goes out
+    (sent_at), so a long pass never dates a send at its start; a `now` the caller gives (a test's) stands still."""
+    sent_at = time.time if now is None else (lambda: now)
+    now = sent_at()
     counts = {"sent": 0, "held": 0, "failed": 0, "skipped": 0}
     if limit <= 0 or scan_limit <= 0:
         return counts
@@ -3110,7 +3127,7 @@ def _flush_legacy(client=None, now: float = None, *, limit: int = 50, scan_limit
         cursor = cursor if isinstance(cursor, dict) else {}
         offset = cursor.get("offset", 0)
         offset = offset if type(offset) is int and 0 <= offset < 2 ** 63 else 0
-        cap = _cap_state()
+        cap = _cap_state(now)
         if cap["waiting_from"] and _cap_left(cap, now):  # the limit lets one go again: the oldest it kept back first
             offset = min(offset, cap["waiting_from"] - 1)
             cap["waiting_from"] = 0
@@ -3186,7 +3203,7 @@ def _flush_legacy(client=None, now: float = None, *, limit: int = 50, scan_limit
                 counts["skipped"] += 1
                 continue
             counted = _counted(item)
-            if counted and not _cap_left(cap, now):  # it stays queued for the next send the limit allows
+            if counted and not _cap_left(cap, sent_at()):  # it stays queued for the next send the limit allows
                 if not cap["waiting_from"] or int(item["id"]) < cap["waiting_from"]:
                     cap["waiting_from"] = int(item["id"])
                     _write_json(BUGS / CAP_STATE, cap)
@@ -3210,7 +3227,7 @@ def _flush_legacy(client=None, now: float = None, *, limit: int = 50, scan_limit
                 _remove_item(item)
                 counts["sent"] += 1
                 if counted:
-                    _cap_sent(cap, now)
+                    _cap_sent(cap, sent_at())
             elif p["type"] == "vote":
                 if c["share"] == "reports":
                     counts["skipped"] += 1
@@ -3229,7 +3246,7 @@ def _flush_legacy(client=None, now: float = None, *, limit: int = 50, scan_limit
                 _remove_item(item)
                 counts["sent"] += 1
                 if counted:  # counted when sent: a failed or skipped send counts nothing
-                    _cap_sent(cap, now)
+                    _cap_sent(cap, sent_at())
         _send_votes(client, votes, cache, now, counts)
     return counts
 
@@ -4095,8 +4112,9 @@ def file_report(fp: str = "", *, title: str = "", refusal_id=None, security: boo
     the session's last one); `title`: a command that misbehaves without an error (free text, scrubbed here). A report
     of a security failure, or with `security`, goes only to private vulnerability reporting. While bugs.sync and the
     developer's consent to the current text cover it, the item goes out without review and the send starts at once
-    (_send_soon); otherwise it waits for the developer. A report whose title is one already queued adds nothing: the
-    result is that report's, with `duplicate` (_queued_title). -> _filed's dict; ValueError says what to name instead,
+    (_send_soon); otherwise it waits for the developer. A report that repeats one already queued, the same way and
+    with its title (and its fingerprint, unless it has only a title), adds nothing: the result is that report's, with
+    `duplicate` (_queued_report). -> _filed's dict; ValueError says what to name instead,
     and then nothing is recorded or queued."""
     occ = None
     if refusal_id is not None:
@@ -4120,9 +4138,11 @@ def file_report(fp: str = "", *, title: str = "", refusal_id=None, security: boo
         if not _fits(fp, _FP_RE):
             raise ValueError("a fingerprint is 12 lowercase hex characters (`dev bug ls --local` lists them)")
         occ = (occurrences(fp) or [None])[-1]
-    elif title:
-        same = _queued_title(scrub_text(title, deny_words())[0][:MAX_TEXT])
-        if same is not None:  # one issue per title: nothing recorded, so no automatic report opens another
+    elif title:  # routed as the queue will route it: the flag, or the text as filed and as cleaned (_security)
+        text = scrub_text(title, deny_words())[0][:MAX_TEXT]
+        same = _queued_report({"payload": {"type": "report", "kind": "command", "title": text},
+                               "security": security or is_security({}, title)})
+        if same is not None:  # one issue per bug: nothing recorded, so no automatic report opens another
             return _filed(same, duplicate=True, sending=False)
         fp = _hex(6)  # a misbehavior without an error has nothing to hash: its own new bug
         occ = record_occurrence("command", fp, session=session, security=security, text=title)
@@ -4154,7 +4174,7 @@ def file_report(fp: str = "", *, title: str = "", refusal_id=None, security: boo
 
 def _filed(item: dict, *, duplicate: bool, sending: bool) -> dict:
     """What file_report says of the queued item: {"id", "fingerprint", "type", "held", "security", "consent",
-    "sending", "duplicate"}; `duplicate` when the filing added nothing to a report with its title already queued."""
+    "sending", "duplicate"}; `duplicate` when the filing added nothing to a report already queued that it repeats."""
     p = item.get("payload") if isinstance(item.get("payload"), dict) else {}
     return {"id": item.get("id"), "fingerprint": p.get("fingerprint"), "type": p.get("type"),
             "held": bool(item.get("held")), "security": bool(item.get("security")), "consent": _awaits_consent(item),
