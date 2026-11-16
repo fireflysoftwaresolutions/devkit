@@ -26,6 +26,8 @@ Calibration: finished runs record estimate vs actual, so the next estimate is co
 """
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import copy
 import hashlib
 import json
@@ -3357,7 +3359,9 @@ def mode_shown(run) -> tuple:
 def mode_context(run, snapshot=None) -> tuple:
     """Resolve fresh policy: the configuration (auto by default), unless the live run records an explicit choice
     (mode_source run: `dev crew mode` or `dev progress start --mode`). A run recorded without an origin (26.11.18 and
-    earlier) or with the legacy one kept the configuration of its day, not a choice, so it follows the configuration."""
+    earlier) kept the configuration of its day, not a choice, so it follows the configuration; unless it holds
+    `approved`, which only `dev crew mode` wrote then: that mode was the developer's explicit choice and stays. A run
+    with the legacy origin follows the configuration."""
     cfg, errors = core.config_snapshot() if snapshot is None else snapshot
     if errors:
         raise StepError("invalid policy configuration; run dev config validate or dev config edit")
@@ -3365,8 +3369,8 @@ def mode_context(run, snapshot=None) -> tuple:
     source = run.get("mode_source")
     if source not in (None, "config", "run", "legacy"):
         raise StepError("invalid mode origin; use dev crew mode inherit")
-    if source == "run":
-        mode = run.get("mode")
+    if source == "run" or (source is None and "approved" in run):
+        mode, source = run.get("mode"), "run"
     else:
         mode, source = (cfg.get("work") or {}).get("mode", "auto"), "config"
     if mode not in ("auto", "guided"):
@@ -4760,7 +4764,7 @@ def on_human_prompt(agent: str, data: dict, now: float | None = None) -> list:
     if agent == "codex" and not uuid:
         return []
     tp, new = harness_transcript(agent, sid), []
-    if agent == "claude" and uuid and tp and _opened_otherwise(tp, uuid, text):
+    if agent == "claude" and midturn_of(sess, uuid):
         # Claude Code runs this hook for a message typed while the session works too, with the running turn's
         # prompt_id, and writes the message as a queued_command attachment: that attachment is its evidence
         # (capture_typed), never this hook's id, so nothing is recorded or refused as a replay here.
@@ -4783,28 +4787,14 @@ def on_human_prompt(agent: str, data: dict, now: float | None = None) -> list:
     return new
 
 
-def _opened_otherwise(path: str, prompt_id: str, text: str) -> bool:
-    """Does Claude Code transcript `path` open turn `prompt_id` with a prompt that does not hold `text`? Then a prompt
-    hook with that id and text is a message typed during the turn, not the turn's own prompt. The opening record is
-    the earliest prompt record with that id, origin human, outside any sidechain. False when there is none yet (the
-    hook of a new prompt may run before its record is written) or the file cannot be read."""
-    opening = None
-    try:
-        for ln in _lines_back(path, json.dumps(prompt_id).encode()):
-            try:
-                r = json.loads(ln)
-            except (ValueError, RecursionError):
-                continue
-            if isinstance(r, dict) and r.get("type") == "user" and not r.get("isSidechain") \
-                    and r.get("promptId") == prompt_id and (r.get("origin") or {}).get("kind") == "human" \
-                    and not r.get("toolUseResult"):
-                opening = r
-    except OSError:
-        return False
-    if opening is None:
-        return False
-    said = _norm(_text_of(opening.get("message")))
-    return not all(_norm(ln) in said for ln in _own_lines(text) if ln.strip())
+def midturn_of(sess, prompt_id) -> bool:
+    """Is a UserPromptSubmit with `prompt_id` a message typed while the session's turn runs? Claude Code runs the hook
+    for such a message with the running turn's prompt_id. The session record keeps the id of the prompt that opened
+    the running turn (`turn_prompt`, which the prompt hook writes after this is read) and the turn's start
+    (`turn_started`, which Stop clears when the turn ends). False on any doubt: no id, no turn running, another id.
+    The prompt hook (hooks._midturn_prompt) and the evidence reader (on_human_prompt) both decide by this."""
+    return bool(prompt_id) and isinstance(sess, dict) and bool(sess.get("turn_started")) \
+        and sess.get("turn_prompt") == str(prompt_id)
 
 
 TYPED_SCAN = 16 << 20  # bytes of a transcript one capture reads at most; older lines are past any grant's 30 minutes
@@ -5678,46 +5668,111 @@ def operation_account(action, repo, *, cache=None, transport=None):
     return result
 
 
-def _first_record(agent: str, sid: str, sess: dict) -> dict:
+FIRST_RECORD_READS = 400  # session records _first_record reads at most; past it, it cannot say
+FIRST_RECORD_SLACK = 60.0  # seconds: a record superseded into another is written after that one started
+
+
+def _first_record(agent: str, sid: str, sess: dict):
     """The record of the session that began this conversation: `sess`, or, when Claude Code gave the conversation a
     new session id (a compaction), the earliest record superseded into it (superseded_by, hooks._claim_process),
-    followed back through each id. devkit's own state, which agents cannot write."""
-    before = {}
+    followed back through each id. devkit's own state, which agents cannot write. A record is superseded after its
+    successor started, so each step back reads only the records last written since that successor started, and at
+    most FIRST_RECORD_READS of them: None when the trace needs more (automatic policy then asks for the grant)."""
     try:
-        files = list(SESSIONS.glob(f"{agent}-*.json"))
+        files = []
+        for g in SESSIONS.glob(f"{agent}-*.json"):
+            try:
+                files.append((g.stat().st_mtime, g))
+            except OSError:
+                continue
     except OSError:
         files = []
-    for g in files:
-        r = core.read_json(g, {}) or {}
-        if isinstance(r, dict) and r.get("agent") == agent and r.get("session") and r.get("superseded_by"):
-            before.setdefault(str(r["superseded_by"]), []).append(r)
+
     def started(r) -> float:
         return float(r["started"]) if isinstance(r.get("started"), (int, float)) else 0.0
 
+    before, read = {}, set()
     first, at, seen = sess, sid, {sid}
-    while before.get(at):
+    while True:
+        since = started(first) - FIRST_RECORD_SLACK
+        for mtime, g in files:
+            if g in read or mtime < since:
+                continue
+            if len(read) >= FIRST_RECORD_READS:
+                return None
+            read.add(g)
+            r = core.read_json(g, {}) or {}
+            if isinstance(r, dict) and r.get("agent") == agent and r.get("session") and r.get("superseded_by"):
+                before.setdefault(str(r["superseded_by"]), []).append(r)
+        if not before.get(at):
+            return first
         r = min(before[at], key=started)
         if r["session"] in seen:
-            break
+            return first
         seen.add(r["session"])
         first, at = r, r["session"]
-    return first
 
 
-def _in_workspace_at_start(agent: str, sid: str, sess: dict, repo: str, checkout) -> bool:
-    """Was the workspace checkout of `repo` there when this conversation began? Yes when the list SessionStart
-    recorded (workspace_checkouts, registry.workspace_baseline) names it with the inode its git folder still has;
-    a record without the list (an older devkit, or a list too long to take) compares the git folder's creation time
-    with the session's start instead, and a time that is missing or cannot be read counts as new. A checkout the
+_VERDICT_MEMO = contextvars.ContextVar("devkit_verdict_memo", default=None)
+
+
+@contextlib.contextmanager
+def one_verdict():
+    """One guard verdict: inside it, authorization_decision asks the workspace about each repository once (two git
+    processes and the session records), and the gate and use_grants judge by the same answer. Outside it nothing is
+    kept, so the next verdict reads the workspace again."""
+    token = _VERDICT_MEMO.set({})
+    try:
+        yield
+    finally:
+        _VERDICT_MEMO.reset(token)
+
+
+def _not_at_start(agent: str, sid: str, sess: dict, repo: str, checkout) -> str:
+    """Why the workspace checkout of `repo` does not count as there when this conversation began, or "" when it
+    does: the list SessionStart recorded (workspace_checkouts, registry.workspace_baseline) names it with the inode
+    its git folder still has. "untraced": the conversation's first record cannot be found (_first_record); "no-list":
+    that record holds no list in its shape (an older devkit); "partial": the list stopped before it (too long or too
+    slow to read); "unlisted": the list does not name it; "replaced": it names another git folder. A checkout the
     session cloned, moved or replaced therefore needs the developer's typed grant."""
     from . import registry
     first = _first_record(agent, sid, sess)
+    if first is None:
+        return "untraced"
     listed = first.get("workspace_checkouts")
-    if isinstance(listed, dict):
-        have = registry.git_folder_identity(checkout)
-        return bool(have) and listed.get(str(repo).strip().lower()) == have
-    began, born = first.get("started"), registry.git_folder_born(checkout)
-    return isinstance(began, (int, float)) and began > 0 and born is not None and born < began
+    if not (isinstance(listed, dict) and isinstance(listed.get("projects"), dict)
+            and isinstance(listed.get("partial"), bool)):
+        return "no-list"
+    known = listed["projects"].get(str(repo).strip().lower())
+    if known is None:
+        return "partial" if listed["partial"] else "unlisted"
+    have = registry.git_folder_identity(checkout)
+    return "" if have and known == have else "replaced"
+
+
+def _workspace_answer(agent: str, sid: str, sess: dict, repo: str) -> tuple:
+    """(the workspace checkout of `repo` or None, why it was not there at the session's start or ""), kept for the
+    rest of the verdict when one_verdict is open."""
+    memo = _VERDICT_MEMO.get()
+    key = (agent, sid, str(repo).strip().lower())
+    if memo is not None and key in memo:
+        return memo[key]
+    from .registry import workspace_checkout
+    checkout = workspace_checkout(repo)
+    answer = (checkout, _not_at_start(agent, sid, sess, repo, checkout) if checkout is not None else "")
+    if memo is not None:
+        memo[key] = answer
+    return answer
+
+
+_NOT_AT_START = {
+    "unlisted": "",
+    "replaced": " (the list names another git folder at that place: the checkout was replaced or moved since)",
+    "partial": " (the list devkit read at the session's start stopped before it: it was too long or too slow to read)",
+    "no-list": " (this session's record holds no project list from its start: the session started under an older "
+               "devkit)",
+    "untraced": " (devkit could not trace this conversation's first session record, which holds that list)",
+}
 
 
 def authorization_decision(agent, sid, *, action, target, repo, lane=None, now=None, classified_repo=False,
@@ -5770,14 +5825,13 @@ def authorization_decision(agent, sid, *, action, target, repo, lane=None, now=N
     # Automatic policy also covers the main session's routine operations, and a program the guard cannot classify
     # (unknown), in another project of the developer's workspace: checked out at its own place in the dev root with
     # an origin that names exactly that repository (registry.workspace_checkout), and there when the session started
-    # (_in_workspace_at_start), so a repository the session clones, moves or replaces is not one. Members, guided
-    # mode and the developer's own decision classes are unchanged.
-    outside_workspace = arrived = ""
+    # (_not_at_start: on devkit's project list as the session started), so a repository the session clones, moves
+    # or replaces is not one. Members, guided mode and the developer's own decision classes are unchanged.
+    outside_workspace = arrived = late = ""
     if not allowed and not lane and mode == "auto" and not human_only \
             and (action in POLICY_ACTIONS or action == "unknown"):
-        from .registry import workspace_checkout
-        checkout = workspace_checkout(repo)
-        allowed = checkout is not None and _in_workspace_at_start(agent, sid, sess, repo, checkout)
+        checkout, late = _workspace_answer(agent, sid, sess, repo)
+        allowed = checkout is not None and not late
         outside_workspace = "" if checkout is not None else "outside"
         arrived = core.tilde(checkout) if checkout is not None and not allowed else ""
     if (mode == "guided" or human_only) and not lane and not allowed:
@@ -5826,9 +5880,9 @@ def authorization_decision(agent, sid, *, action, target, repo, lane=None, now=N
     if (outside_workspace or arrived) and decision["outcome"] == "deny" \
             and decision["reason"].startswith("Unresolved or disallowed scope"):
         decision = dict(decision, reason=(
-            f"The target repository's checkout, {arrived}, was cloned or moved into your workspace during this "
-            "session (it was not there, with this git folder, when the session started), so automatic policy does "
-            "not cover it: a repository the session brought in needs the developer's typed grant." if arrived else
+            f"The target repository's checkout, {arrived}, was not in devkit's project list when this session "
+            f"started{_NOT_AT_START.get(late, '')}, so automatic policy does not cover it: the developer's typed "
+            "grant opens it." if arrived else
             "The target repository is not this session's project and not a project of your workspace (a checkout at "
             f"its own place in {core.tilde(core.DEV)} whose origin is exactly that repository), so automatic policy "
             "does not cover it."))

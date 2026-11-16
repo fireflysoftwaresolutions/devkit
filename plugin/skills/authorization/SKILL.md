@@ -11,7 +11,8 @@ replaces human confirmation for supported operations; it does not supply identit
 ## Resolve the mode
 
 1. An explicit run mode wins: one chosen with `dev crew mode` or `dev progress start --mode` (origin `run`). A run
-   recorded without an origin (26.11.18 and earlier) follows the configuration like any other.
+   recorded without an origin (26.11.18 and earlier) keeps its mode as an explicit choice when it holds `approved`,
+   which only `dev crew mode` wrote; otherwise it follows the configuration like any other.
 2. Otherwise read saved `work.mode` for each operation; its default is `auto`.
 3. Invalid configuration refuses automatic authority. Repair it through the supported configuration workflow.
 
@@ -58,8 +59,9 @@ assert a provider identity.
   the session's project and the projects of the workspace (`registry.workspace_checkout`): a folder elsewhere, a
   checkout at another place, a linked folder, an origin that is a local path or also pushes somewhere else is no
   workspace project. Nor is a checkout the session brought in, because SessionStart lists the workspace's git
-  folders (`workspace_checkouts`, by inode, so a clone, a move to a new folder, or a replacement is not on it),
-  and a record without the list compares the git folder's creation time with the session's start. Never clone,
+  folders (`workspace_checkouts`, by inode, so a clone, a move to a new folder, or a replacement is not on it).
+  Only the list counts: a project past a partial list (too long or too slow to read), a record without the list,
+  or a conversation whose first record cannot be traced needs the developer's grant. Never clone,
   move, or re-point a checkout to get policy coverage. Any other repository, and every repository in guided,
   needs the developer's grant naming it with `--repo`. Global API writes and remote tools must resolve their
   repository, account, or resource.

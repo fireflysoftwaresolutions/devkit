@@ -27,8 +27,9 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
   in either mode, and the refusal names the exact line to type: a repository outside your workspace, and the
   decisions that are yours (listed under Security). Typed grants, `grant unknown cmd-…` included, work in both
   modes. Crew members still route these operations to the tech lead. Guided mode remains available with
-  `dev crew mode guided`; a run recorded before this version follows the configuration, so it works in automatic
-  mode unless you choose guided again, and `dev crew mode inherit` makes a run follow configuration changes.
+  `dev crew mode guided`; a run recorded before this version follows the configuration (automatic by default)
+  unless you chose its mode with `dev crew mode`, and `dev crew mode inherit` makes a run follow configuration
+  changes.
   Identity, ownership, scope, prohibitions,
   verification, and host permissions still apply. A program run outside any repository acts for the session's
   project, or, in a session with no project, on this Mac, so policy covers it and the grant line its refusal
@@ -46,6 +47,11 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
   for the hourly sync. At most 10 reports in an agent's own words go out a day; the rest go with the next day's
   send, oldest first, and `dev bug pending` says how many wait. Reports queued before this version still wait
   for `dev bug send`. Consent you gave earlier covers this; `dev bug share off` stops it.
+- **One reply per turn.** When a reply misses a presentation rule (the status block, a crew member's role, the
+  Progress line, the reply language), devkit records it and reminds the agent at your next message instead of
+  sending the reply back, so you never read the same reply twice. A turn sent back for missing work (skills,
+  tests, waits) ends with an instruction to write only what is new. A message you type while the session works
+  no longer restarts the turn.
 - **Install exit codes.** `dev install` exits with `3` when only optional parts failed (packages, Docker, the docs
   tools, the background jobs): devkit works, the install is recorded, and `dev doctor` names what is left.
 - **Documentation.** Summaries and command references distinguish automatic policy from guided confirmation,

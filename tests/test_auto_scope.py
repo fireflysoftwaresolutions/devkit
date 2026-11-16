@@ -163,26 +163,37 @@ class WorkspaceCheckoutTests(WorkspaceScopeCase):
 class WorkspaceBaselineTests(WorkspaceScopeCase):
     """registry.workspace_baseline: the git folder of each listed project at its own place, as the session starts."""
 
+    def identity(self, path):
+        st = os.lstat(Path(path) / ".git")
+        return [st.st_dev, st.st_ino]
+
     def test_each_listed_project_at_its_place_with_the_identity_of_its_git_folder(self):
         linked = self.dev / "acme" / "linked"
         linked.mkdir(parents=True)
         os.symlink(Path(self.other) / ".git", linked / ".git")
         self.listed(OWN, OTHER, "acme/missing", "acme/linked", "../escape", "_local/devkit")
-        found = registry.workspace_baseline()
-        expected = {}
-        for pid, path in ((OWN, self.own), (OTHER, self.other)):
-            st = os.lstat(Path(path) / ".git")
-            expected[pid] = [st.st_dev, st.st_ino]
-        self.assertEqual(found, expected)
+        self.assertEqual(registry.workspace_baseline(), {
+            "projects": {OWN: self.identity(self.own), OTHER: self.identity(self.other)}, "partial": False})
 
-    def test_no_list_when_the_saved_list_is_missing_unreadable_or_too_long(self):
+    def test_a_missing_or_unreadable_list_is_an_empty_partial_one(self):
         (self.root / "handoff" / "registry.json").unlink()
-        self.assertIsNone(registry.workspace_baseline())
-        (self.root / "handoff" / "registry.json").write_text("{not json")
-        self.assertIsNone(registry.workspace_baseline())
-        self.listed(OWN, OTHER)
+        self.assertEqual(registry.workspace_baseline(), {"projects": {}, "partial": True})
+        for text in ("{not json", '{"projects": "acme/api"}', "[]"):
+            with self.subTest(text=text):
+                (self.root / "handoff" / "registry.json").write_text(text)
+                self.assertEqual(registry.workspace_baseline(), {"projects": {}, "partial": True})
+
+    def test_a_list_past_its_size_keeps_the_projects_it_read_and_says_it_is_partial(self):
         with mock.patch.object(registry, "WORKSPACE_LIST_MAX", 1):
-            self.assertIsNone(registry.workspace_baseline())
+            self.assertEqual(registry.workspace_baseline(),
+                             {"projects": {OWN: self.identity(self.own)}, "partial": True})
+
+    def test_a_list_past_its_time_keeps_the_projects_it_read_and_says_it_is_partial(self):
+        import itertools
+        clock = itertools.chain([0.0, 0.0], itertools.repeat(1000.0))  # the time runs out after the first project
+        with mock.patch.object(registry.time, "monotonic", side_effect=lambda: next(clock)):
+            found = registry.workspace_baseline()
+        self.assertEqual(found, {"projects": {OWN: self.identity(self.own)}, "partial": True})
 
 
 class WorkspaceAuthorizationTests(WorkspaceScopeCase):
@@ -269,10 +280,10 @@ class WorkspaceArrivalTests(WorkspaceScopeCase):
 
     _m = staticmethod(WorkspaceAuthorizationTests._m)
 
-    def assert_arrived(self, cwd, repo, cmd="git push origin feat/x", grant="push feat/x"):
-        denied = self.verdict(cmd, cwd)
+    def assert_arrived(self, cwd, repo, cmd="git push origin feat/x", grant="push feat/x", at=2):
+        denied = self.verdict(cmd, cwd, at)
         self.assertIsNotNone(denied, f"{cmd} in {cwd}")
-        self.assertIn("cloned or moved into your workspace during this session", denied[1])
+        self.assertIn("was not in devkit's project list when this session started", denied[1])
         self.assertIn(f"grant {grant} --repo {repo}", denied[1])
         self.assertEqual(self.records()[-1]["ref"]["result"], "deny")
         return denied
@@ -307,15 +318,26 @@ class WorkspaceArrivalTests(WorkspaceScopeCase):
         self.checkout(self.dev / OTHER, f"git@github.com:{OTHER}.git")
         self.assert_arrived(self.other, OTHER)
 
-    def test_a_session_record_without_the_list_falls_back_to_the_creation_time(self):
-        born = os.lstat(Path(self.other) / ".git").st_birthtime
-        self.session(workspace_checkouts=None, started=born + 60)
-        self.assertIsNone(self.verdict("git push origin feat/x", self.other))
-        self.session(started=born - 60)
-        self.assert_arrived(self.other, OTHER)
-        self.session(started=born + 60)
-        with mock.patch.object(registry, "git_folder_born", return_value=None):  # a platform that does not say
-            self.assert_arrived(self.other, OTHER)
+    def test_a_session_record_without_the_list_needs_the_grant(self):
+        # an older devkit wrote no list, or one that did not say whether it was whole: the creation time of a git
+        # folder can be set back, so nothing else tells a checkout from before the session
+        ident = os.lstat(Path(self.other) / ".git")
+        for listed in (None, {OTHER: [ident.st_dev, ident.st_ino]}, {"projects": "all"}):
+            with self.subTest(listed=listed):
+                self.session(workspace_checkouts=listed)
+                denied = self.assert_arrived(self.other, OTHER)
+                self.assertIn("holds no project list from its start", denied[1])
+
+    def test_a_project_the_partial_list_did_not_reach_needs_the_grant(self):
+        self.listed(OTHER, OWN)
+        with mock.patch.object(registry, "WORKSPACE_LIST_MAX", 1):
+            self.session(workspace_checkouts=registry.workspace_baseline())
+        self.assertIsNone(self.verdict("git push origin feat/x", self.other), "the part it read is covered")
+        self.listed(OWN, OTHER)
+        with mock.patch.object(registry, "WORKSPACE_LIST_MAX", 1):
+            self.session(workspace_checkouts=registry.workspace_baseline())
+        denied = self.assert_arrived(self.other, OTHER, at=3)
+        self.assertIn("stopped before it", denied[1])
 
     def test_a_new_session_id_after_a_compaction_keeps_the_first_list(self):
         first = json.loads(self.fixture.state.sess.read_text())
@@ -345,7 +367,7 @@ class WorkspaceArrivalTests(WorkspaceScopeCase):
         target = guard.irreversible_actions(cmd, self.other)[0]["target"]
         new = self.checkout(self.dev / NEW, f"git@github.com:{NEW}.git")
         outside = self.checkout(self.root / "elsewhere" / "svc", "https://github.com/acme/outside.git")
-        for k, (cwd, why) in enumerate(((new, "cloned or moved into your workspace during this session"),
+        for k, (cwd, why) in enumerate(((new, "was not in devkit's project list when this session started"),
                                         (outside, "not a project of your workspace"))):
             with self.subTest(cwd=cwd):
                 denied = self.verdict(cmd, cwd, 2 + 3 * k)
@@ -362,6 +384,91 @@ class WorkspaceArrivalTests(WorkspaceScopeCase):
         self.config = {"work": {"mode": "auto"}}
         why = guard._member_gate(cmd, self.other, "tank", "a_tank", "claude", "s1", None, self._m(2))
         self.assertIsNotNone(why, "a member routes it to the tech lead")
+
+
+class WorkspaceDecisionCostTests(WorkspaceScopeCase):
+    """One guard verdict asks the workspace about a repository once; tracing a conversation's first session record
+    reads only the records written since it began, and refuses when it cannot finish."""
+
+    def count(self, name):
+        calls = []
+        real = getattr(registry, name)
+        patch = mock.patch.object(registry, name, side_effect=lambda *a: calls.append(a) or real(*a))
+        patch.start()
+        self.addCleanup(patch.stop)
+        return calls
+
+    def test_one_verdict_reads_the_checkout_of_a_repository_once(self):
+        checks = self.count("workspace_checkout")
+        self.assertIsNone(self.verdict("git push origin feat/x", self.other))
+        self.assertEqual(len(checks), 1, "authorization_decision runs in the gate and twice in use_grants")
+        self.assertIsNone(self.verdict("git push origin feat/x", self.other, 3))
+        self.assertEqual(len(checks), 2, "the next verdict reads it again")
+
+    def test_a_change_between_verdicts_counts_at_the_next_one(self):
+        self.assertIsNone(self.verdict("git push origin feat/x", self.other))
+        self.git(self.other, "remote", "set-url", "origin", "https://github.com/attacker/x.git")
+        self.assertIsNotNone(self.verdict("git push origin feat/x", self.other, 3))
+
+    def records_since(self, began, stale=40):
+        """`stale` other records last written before the session began, and their paths."""
+        paths = []
+        for k in range(stale):
+            path = pg.session_path("claude", f"old{k}")
+            path.write_text(json.dumps({"agent": "claude", "session": f"old{k}", "started": began - 7200,
+                                        "superseded_by": f"old{k + 1}"}))
+            os.utime(path, (began - 3600, began - 3600))
+            paths.append(str(path))
+        return paths
+
+    def test_the_first_record_is_traced_through_records_written_since_the_session_began(self):
+        first = json.loads(self.fixture.state.sess.read_text())
+        stale = self.records_since(first["started"])
+        self.session("s0", started=first["started"] - 600, superseded_by="s1", project=OWN,
+                     workspace_checkouts={"projects": {}, "partial": False})
+        read = []
+        real = core.read_json
+        with mock.patch.object(core, "read_json", side_effect=lambda p, *a: read.append(str(p)) or real(p, *a)):
+            found = pg._first_record("claude", "s1", first)
+        self.assertEqual(found["session"], "s0")
+        self.assertEqual([p for p in read if p in stale], [], "records last written before the session are not read")
+
+    def test_a_trace_past_its_bound_refuses_with_the_reason(self):
+        first = json.loads(self.fixture.state.sess.read_text())
+        for k in range(3):
+            self.session(f"busy{k}", started=first["started"])
+        with mock.patch.object(pg, "FIRST_RECORD_READS", 2):
+            self.assertIsNone(pg._first_record("claude", "s1", first))
+            denied = self.verdict("git push origin feat/x", self.other)
+        self.assertIsNotNone(denied)
+        self.assertIn("could not trace this conversation's first session record", denied[1])
+        self.assertIn(f"grant push feat/x --repo {OTHER}", denied[1])
+
+
+class UnknownGrantLineTests(unittest.TestCase):
+    """The grant line a refusal of a program the guard cannot classify names, for each kind of repository."""
+
+    ODD = "gitlab.com/a/b/c/d/e/f/g"  # deeper than a typed --repo may name
+
+    def reason(self, kind, repo):
+        why = {"unread": ("unread", "/tmp/big.sh"), "built": ("built", "getattr"),
+               "unsure": ("unsure", "a GraphQL query"), "opaque": None}[kind]
+        return guard._main_reason({"action": "unknown", "why": why, "words": "x", "target": "x-1", "repo": repo,
+                                   "tier": 2})
+
+    def test_a_repository_a_typed_line_cannot_name_says_where_to_type_it(self):
+        for kind in ("unread", "built", "unsure", "opaque"):
+            with self.subTest(kind=kind):
+                why = self.reason(kind, self.ODD)
+                self.assertIn("`grant unknown x-1`", why)
+                self.assertIn(f"{self.ODD} is neither: type the line in a session started in {self.ODD}", why)
+
+    def test_a_named_repository_or_this_mac_needs_no_such_note(self):
+        for kind in ("unread", "opaque"):
+            with self.subTest(kind=kind):
+                self.assertIn("`grant unknown x-1 --repo acme/api`", self.reason(kind, "acme/api"))
+                self.assertNotIn("is neither", self.reason(kind, "acme/api"))
+                self.assertNotIn("is neither", self.reason(kind, pg.LOCAL_SCOPE))
 
 
 if __name__ == "__main__":

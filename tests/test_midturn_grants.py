@@ -322,10 +322,24 @@ class CodexMidTurnGrantTests(CodexCase):
 class MidTurnPromptHookTests(MidTurnCase):
     # Claude Code runs UserPromptSubmit for a message typed while the session works too, with the running turn's
     # prompt_id and before it writes the message's attachment (seen live on 2026-11-16: the hook 0.4 s after the
-    # attachment's time). The turn's opening record holds another text, so the hook records nothing for it and
-    # refuses nothing as a replay: the attachment is the message's evidence.
-    def mid_turn_hook(self, text, at):
-        return pg.on_human_prompt("claude", {"session_id": "s1", "prompt": text, "prompt_id": f"prompt-{self.n:03d}",
+    # attachment's time). The session record tells it from a new prompt: the prompt hook keeps the id of the prompt
+    # that opened the running turn (turn_prompt) until Stop ends the turn (turn_started). The hook records nothing for
+    # such a message and refuses nothing as a replay: the attachment is the message's evidence.
+    def opened(self, text, at, written=True):
+        """The developer's prompt opens a turn: the evidence hook reads it, then the prompt hook starts the turn's
+        clock and keeps its id, in that order (hooks.prompt)."""
+        got = self.typed(text, at, written=written)
+        rec = json.loads(self.state.sess.read_text())
+        self.state.sess.write_text(json.dumps(dict(rec, turn_started=at, turn_prompt=f"prompt-{self.n:03d}")))
+        return got
+
+    def ended(self):
+        rec = json.loads(self.state.sess.read_text())
+        self.state.sess.write_text(json.dumps(dict(rec, turn_started=None)))
+
+    def mid_turn_hook(self, text, at, pid=None):
+        return pg.on_human_prompt("claude", {"session_id": "s1", "prompt": text,
+                                             "prompt_id": pid or f"prompt-{self.n:03d}",
                                              "transcript_path": str(self.transcript)}, now=at)
 
     def refusals(self):
@@ -335,7 +349,7 @@ class MidTurnPromptHookTests(MidTurnCase):
         pg.crew_decision("Release 26.11.4 now?", options="yes | no", recommend="yes", irreversible="release",
                          target="v26.11.4", now=m(1))
         self.shown("D1 waits for you.", m(2))
-        self.typed("Run the release checks first.", m(2.5))  # the prompt that opens the turn
+        self.opened("Run the release checks first.", m(2.5))
         self.assertEqual(self.mid_turn_hook("approve D1", m(3)), [])
         self.queued("approve D1", m(3))
         self.assertTrue(pg.crew_decide("D1", "yes", now=m(4))["verified"])
@@ -345,18 +359,44 @@ class MidTurnPromptHookTests(MidTurnCase):
         self.assertEqual(self.refusals(), [])
 
     def test_a_grant_typed_mid_turn_after_a_granting_prompt_is_no_replay(self):
-        self.typed("grant merge 12", m(1))  # the turn's prompt is evidence of its own
+        self.opened("grant merge 12", m(1))  # the turn's prompt is evidence of its own
         self.assertEqual(self.mid_turn_hook("grant release v26.11.4", m(2)), [])
         self.queued("grant release v26.11.4", m(2))
         self.assertIsNotNone(self.use(m(3)))
         self.assertEqual(self.refusals(), [])
         self.assertEqual(sorted(e["covers"] for e in self.human()), ["merge 12", "release v26.11.4"])
 
-    def test_the_prompt_hook_run_twice_for_its_own_prompt_is_still_a_replay(self):
-        self.typed("grant release v26.11.4", m(1))
+    def test_the_session_record_tells_a_mid_turn_message_before_the_transcript_holds_the_turn(self):
+        # the hook may run before Claude Code writes the turn's own record: the transcript cannot tell, the record can
+        self.opened("Run the release checks first.", m(1), written=False)
+        self.assertEqual(self.mid_turn_hook("grant release v26.11.4", m(2)), [])
+        self.assertEqual(self.refusals(), [])
+        self.queued("grant release v26.11.4", m(2))
+        self.assertIsNotNone(self.use(m(3)))
+
+    def test_the_prompt_hook_run_twice_for_its_own_prompt_records_it_once(self):
+        self.opened("grant release v26.11.4", m(1))
         self.assertEqual(self.mid_turn_hook("grant release v26.11.4", m(1.1)), [])
-        self.assertEqual(len(self.refusals()), 1)
         self.assertEqual(len(self.human()), 1)
+        self.assertIsNotNone(self.use(m(2)))
+        self.assertIsNone(self.use(m(3)), "one use")
+
+    def test_an_earlier_turns_prompt_id_is_a_replay(self):
+        self.opened("grant merge 12", m(1))
+        first = f"prompt-{self.n:03d}"
+        self.ended()
+        self.assertEqual(self.mid_turn_hook("grant release v26.11.4", m(2), pid=first), [])
+        self.assertEqual(len(self.refusals()), 1, "no turn runs: the id is a replay")
+        self.opened("Next, the docs.", m(3))
+        self.assertEqual(self.mid_turn_hook("grant release v26.11.4", m(4), pid=first), [])
+        self.assertEqual(len(self.refusals()), 2, "another turn runs: the id is a replay")
+        self.assertIsNone(self.use(m(5), consume=False))
+
+    def test_the_hook_never_reads_the_transcript_to_tell_the_turn(self):
+        self.opened("Run the release checks first.", m(1))
+        with mock.patch.object(pg, "_lines_back", side_effect=AssertionError("read the transcript backwards")), \
+                mock.patch.object(pg, "capture_typed", return_value=[]):
+            self.assertEqual(self.mid_turn_hook("grant release v26.11.4", m(2)), [])
 
 
 class MidTurnBlockMessageTests(MidTurnCase):

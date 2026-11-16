@@ -89,10 +89,12 @@ your workspace. A project of your workspace is a checkout at its own place in `~
 `host/path` on another git host) whose origin names exactly that repository in every fetch and push URL, and that
 was there when the session started. SessionStart records the projects of devkit's project list (`registry.json`)
 with the identity of each one's git folder; a checkout the session clones, moves to a new folder, or replaces is
-not on that list, so it needs your typed grant, and the refusal says it was cloned or moved into your workspace
-during this session. A session recorded without the list (an older devkit, or a list too long to read quickly)
-compares the git folder's creation time with the session's start instead, and a time it cannot read counts as
-new. After a compaction gives the conversation a new session id, the conversation's first record decides. When
+not on that list, so it needs your typed grant, and the refusal says it was not in devkit's project list when the
+session started. Only the list counts. When the list is too long or too slow to read at the start (more than 5,000
+projects, or half a second), the session keeps the part it read, and a project past it needs your grant. A session
+recorded without the list (one started under an older devkit) needs your grant for every project but its own.
+After a compaction gives the conversation a new session id, the conversation's first record decides; when devkit
+cannot trace that record, the grant is needed too. When
 policy cannot authorize an operation, for example one in a repository outside your workspace, a typed grant from
 you still authorizes it, exactly as in guided mode, and the refusal says why and names the line to type. The audit record of an operation in another project names both: `ref.repo` is the repository acted
 on and `ref.origin_repo` the session's project. See [Unknown commands in auto and guided](#unknown-commands-in-auto-and-guided)

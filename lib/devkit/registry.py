@@ -115,7 +115,7 @@ def discover():
 
 
 _PID_PART = re.compile(r"[a-z0-9][a-z0-9._-]*\Z")
-WORKSPACE_LIST_MAX = 5000  # projects workspace_baseline reads at most; past it, it gives no list
+WORKSPACE_LIST_MAX = 5000  # projects workspace_baseline reads at most; past it, its list is partial
 WORKSPACE_LIST_SECONDS = 0.5  # and the time it may take at session start
 
 
@@ -138,41 +138,33 @@ def git_folder_identity(path):
     return [st.st_dev, st.st_ino] if stat.S_ISDIR(st.st_mode) else None
 
 
-def git_folder_born(path):
-    """When the git folder of the checkout at `path` was created (st_birthtime, macOS and BSD), or None when the
-    platform or the file system does not say or it cannot be read."""
-    try:
-        born = getattr(os.lstat(Path(path) / ".git"), "st_birthtime", None)
-    except (OSError, ValueError):
-        return None
-    return float(born) if isinstance(born, (int, float)) and born > 0 else None
-
-
 def workspace_baseline():
-    """{project id: [device, inode] of its git folder} for each project of devkit's saved list (the handoff's
-    registry.json) checked out at its own place below the dev root, as SessionStart records it on the session
-    record: the projects that were in the workspace when the session started. A checkout cloned, moved or replaced
-    later has no entry, or another inode; a creation time can be set back, an inode cannot be chosen. Reads the list
-    and one lstat per project, runs no git. None, never an exception, when the list is missing or unreadable or holds
-    more than WORKSPACE_LIST_MAX projects or takes longer than WORKSPACE_LIST_SECONDS: then automatic policy falls
-    back to the git folder's creation time."""
+    """The projects of devkit's saved list (the handoff's registry.json) checked out at their own place below the dev
+    root, as SessionStart records them on the session record (workspace_checkouts): {"projects": {project id:
+    [device, inode] of its git folder}, "partial": bool}. A checkout cloned, moved or replaced later has no entry,
+    or another inode; a creation time can be set back, an inode cannot be chosen. Reads the list and one lstat per
+    project, runs no git. Never raises. "partial" is true when the list is missing or unreadable, holds more than
+    WORKSPACE_LIST_MAX projects (the first ones are read), or takes longer than WORKSPACE_LIST_SECONDS (what was
+    read by then is kept): automatic policy covers only the projects listed, so the rest need the typed grant."""
+    found, partial = {}, True
     try:
         deadline = time.monotonic() + WORKSPACE_LIST_SECONDS
         projects = (json.loads((core.HANDOFF / "registry.json").read_text()) or {}).get("projects")
-        if not isinstance(projects, list) or len(projects) > WORKSPACE_LIST_MAX:
-            return None
-        found = {}
-        for p in projects:
+        if not isinstance(projects, list):
+            return {"projects": found, "partial": True}
+        partial = len(projects) > WORKSPACE_LIST_MAX
+        for p in projects[:WORKSPACE_LIST_MAX]:
             if time.monotonic() > deadline:
-                return None
+                partial = True
+                break
             pid = str((p or {}).get("id") or "").strip().lower() if isinstance(p, dict) else ""
             path = _own_place(pid)
             ident = git_folder_identity(path) if path is not None and core.real(path) == str(path) else None
             if ident:
                 found[pid] = ident
-        return found
     except Exception:
-        return None
+        partial = True
+    return {"projects": found, "partial": partial}
 
 
 def workspace_checkout(repo):
