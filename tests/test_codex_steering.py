@@ -64,7 +64,7 @@ class CodexSteeringTests(CodexCase):
         self.assertNotIn(text, continuity.brief("claude", "s1", provider="claude", caller=("claude", "s1")))
         self.assertIn(text, continuity.brief("claude", "s1"))
 
-    def test_only_own_human_steering_updates_continuity_and_its_grant_line_counts_once(self):
+    def test_only_own_human_steering_updates_continuity_and_grants_nothing_without_its_prompt_hook(self):
         turn = "01a1c1a0-0001-7000-8000-000000000001"  # a Codex turn id, as the rollout writes it
         self.rollout.typed("old request", "old", T0 - 2)
         for kind in ("agent_said", "tool_output", "injected", "agents_md"):
@@ -79,11 +79,9 @@ class CodexSteeringTests(CodexCase):
         self.assertEqual(pg.note_midturn("codex", self.data), [])
         session = state.read(pg.session_path("codex", SID))
         self.assertEqual(session["request_ts"], T0 + 4)
-        [entry] = session["human"]  # the steering message's grant line, with the prompt hook's scope and expiry
-        self.assertEqual((entry["covers"], entry["repo"], entry["expires"]),
-                         ("release v26.11.9", "acme/api", T0 + 4 + pg.GRANT_TTL))
-        self.assertIsNotNone(self.grant(T0 + 5))
-        self.assertIsNone(self.grant(T0 + 6, consume=False))
+        # the latest request, yet no grant: a rollout record only confirms a prompt hook's delivery
+        self.assertEqual(session.get("human") or [], [])
+        self.assertIsNone(self.grant(T0 + 5, consume=False))
         self.assertEqual([p["text"] for p in self.prompts()], [found[0]["text"]])
         self.assertTrue(self.prompts()[0]["pending"])
         # The established Claude queued-command parser keeps its contract.

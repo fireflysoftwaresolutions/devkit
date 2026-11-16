@@ -354,6 +354,18 @@ class GrantTests(EvidenceCase):
             self.assertIsNone(grant("release", "v26.11.5", now=m(2)))
         self.assertIsNone(grant("release", "v26.11.4", now=m(2)))
 
+    def test_a_nested_session_counts_no_pre_approval_its_launcher_set(self):
+        # the launcher of a nested session is another agent session: its DEVKIT_PREAPPROVE is no developer's word
+        rec = json.loads(self.state.sess.read_text())
+        self.state.sess.write_text(json.dumps(dict(rec, surface="claude -p", pid=91500)))
+        (pg.SESSIONS / "claude-outer.json").write_text(json.dumps({"agent": "claude", "session": "outer",
+                                                                   "pid": 91001}))
+        with mock.patch.dict(os.environ, {"DEVKIT_PREAPPROVE": "release v26.11.4"}):
+            with mock.patch.object(pg, "_parents_of", lambda pid: ([4242, 1], {})):
+                self.assertEqual(grant("release", "v26.11.4", now=m(2))["source"], "preapproval")  # a terminal's
+            with mock.patch.object(pg, "_parents_of", lambda pid: ([91001, 1], {})):
+                self.assertIsNone(grant("release", "v26.11.4", now=m(2)))
+
 
 class GateContractTests(EvidenceCase):
     # what The Keymaker's C6 tiers call (progress.use_grant): which grant opens one irreversible action

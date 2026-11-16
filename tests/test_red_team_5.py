@@ -66,21 +66,24 @@ class CodexRecordShapeTests(CodexCase):
         self.typed(LINE, T0 + 60)
         self.assertIsNotNone(self.grant(T0 + 65))
 
-    def test_a_forged_event_opens_nothing_and_another_turns_usermessage_counts_once_as_its_own(self):
+    def test_a_forged_event_opens_nothing_and_neither_does_another_turns_usermessage_alone(self):
         # a prompt event of one turn that the rollout never holds opens nothing, and its entry stays unconfirmed; a
-        # message the developer typed in another turn (steering, which runs no prompt hook) is their own grant: it
-        # counts once, for 30 minutes from when they typed it, and never confirms the forged event
+        # UserMessage of another turn with no prompt hook delivery opens nothing either (a rollout record only
+        # confirms a delivery), and never confirms the forged event
         turn, entries = self.prompt(LINE, T0)
         [forged] = entries
         self.assertIsNone(self.grant(T0 + 1, consume=False))
         self.assertFalse(pg.confirmed(forged, SID))
         other = "01a1c1ab-0002-7000-8000-000000000002"
         self.rollout.typed(LINE, other, T0 + 0.3)
-        opened = self.grant(T0 + 5)
+        self.assertIsNone(self.grant(T0 + 5, consume=False))
+        self.assertFalse(pg.confirmed(forged, SID))
+        self.prompt(LINE, T0 + 6, turn=other)  # that turn's own hook: now the record confirms a delivery
+        self.rollout.typed(LINE, other, T0 + 6.3)
+        opened = self.grant(T0 + 7)
         self.assertIn(other, opened["id"])
         self.assertNotIn(turn, opened["id"])
-        self.assertAlmostEqual(opened["expires"], T0 + 0.3 + pg.GRANT_TTL, places=3)
-        self.assertIsNone(self.grant(T0 + 6, consume=False))
+        self.assertIsNone(self.grant(T0 + 8, consume=False))
         self.assertFalse(pg.confirmed(forged, SID))
 
 

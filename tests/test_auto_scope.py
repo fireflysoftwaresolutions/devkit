@@ -445,6 +445,55 @@ class WorkspaceDecisionCostTests(WorkspaceScopeCase):
         self.assertIn(f"grant push feat/x --repo {OTHER}", denied[1])
 
 
+class NestedSessionTests(WorkspaceScopeCase):
+    """A session another agent session started (nested: its agent process runs below that session's) gets no
+    automatic policy, in its own project or any other; neither does a headless run whose process devkit could not
+    check. A headless run the developer starts in a terminal, with its process recorded, keeps automatic policy."""
+
+    OUTER_PID, INNER_PID = 91001, 91500
+
+    def below(self, parents):
+        # the process chain above the session's agent process, as ps would show it
+        p = mock.patch.object(pg, "_parents_of", lambda pid: (parents if pid == self.INNER_PID else [], {}))
+        p.start()
+        self.addCleanup(p.stop)
+
+    def outer_session(self):
+        path = pg.session_path("claude", "outer")
+        path.write_text(json.dumps({"agent": "claude", "session": "outer", "pid": self.OUTER_PID,
+                                    "started": time.time() - 600}))
+
+    def test_a_nested_session_gets_no_automatic_policy_in_its_own_project(self):
+        self.outer_session()
+        self.below([self.OUTER_PID, 1])
+        self.session(surface="claude -p", pid=self.INNER_PID)
+        denied = self.verdict("git push origin feat/x", self.own)
+        self.assertIsNotNone(denied)
+        self.assertIn("another agent session started this session", denied[1])
+        self.assertEqual(self.records()[-1]["ref"]["result"], "deny")
+
+    def test_a_nested_session_with_an_interactive_surface_gets_none_either(self):
+        # Claude Code keeps an inherited claude-desktop entrypoint for `claude -p`: the process chain decides
+        self.outer_session()
+        self.below([self.OUTER_PID, 1])
+        self.session(surface="claude-desktop", pid=self.INNER_PID)
+        self.assertIsNotNone(self.verdict("git push origin feat/x", self.other))
+
+    def test_a_headless_run_whose_process_devkit_could_not_check_gets_none(self):
+        self.session(surface="claude -p")  # no pid recorded
+        denied = self.verdict("git push origin feat/x", self.own)
+        self.assertIsNotNone(denied)
+        self.assertIn("could not check the process", denied[1])
+        self.assertIn("DEVKIT_PREAPPROVE", denied[1])
+
+    def test_a_headless_run_started_in_a_terminal_keeps_automatic_policy(self):
+        self.outer_session()  # another session runs, but not above this one
+        self.below([4242, 1])
+        self.session(surface="claude -p", pid=self.INNER_PID)
+        self.assertIsNone(self.verdict("git push origin feat/x", self.own))
+        self.assertEqual(self.records()[-1]["ref"]["source"], "policy-auto")
+
+
 class UnknownGrantLineTests(unittest.TestCase):
     """The grant line a refusal of a program the guard cannot classify names, for each kind of repository."""
 

@@ -4535,6 +4535,33 @@ def headless(sess: dict) -> bool:
         or nested(sess)
 
 
+def policy_blocked(sess: dict) -> str:
+    """Why automatic policy cannot act for this session, or "" when it may. "nested": another agent session started
+    it (nested: its agent process runs below that session's), so its requests are that session's and only the
+    developer's typed grant opens an irreversible action. "unverified": a headless run (HEADLESS_SURFACES or
+    DEVKIT_HEADLESS) with no recorded process, so devkit cannot tell it from a nested one; DEVKIT_PREAPPROVE, set by
+    whoever starts the run, still opens what it names. Fails closed: a doubt is never automatic policy."""
+    if nested(sess):
+        return "nested"
+    pid = (sess or {}).get("pid")
+    if (str((sess or {}).get("surface") or "") in HEADLESS_SURFACES or os.environ.get("DEVKIT_HEADLESS") == "1") \
+            and not (isinstance(pid, int) and not isinstance(pid, bool) and pid > 1):
+        return "unverified"
+    return ""
+
+
+_POLICY_BLOCKED = {
+    "nested": ("Automatic policy does not cover this session: another agent session started this session (its "
+               "process runs below that session's), so it cannot authorize irreversible actions for itself. Run the "
+               "operation from the session the developer works in, where their typed grant opens it, or have the "
+               "developer start this run in a terminal."),
+    "unverified": ("Automatic policy does not cover this headless run: devkit could not check the process it runs "
+                   "in, so it cannot tell it from a session another agent started. A run the developer starts in a "
+                   "terminal opens what DEVKIT_PREAPPROVE names (DEVKIT_PREAPPROVE=\"push feat/*\"); otherwise the "
+                   "developer's typed grant, in the session they work in, opens it."),
+}
+
+
 def preapproved(cls: str, target: str) -> bool:
     """A headless session's pre-approval: `DEVKIT_PREAPPROVE="release v26.11.4, push feat/*"` in the hook
     environment, set by whoever launched the session; `dev` commands never read it (spec C5)."""
@@ -4634,8 +4661,7 @@ def _keep_human(agent: str, sid: str, new: list, extra=None) -> list:
         _audit("crew.evidence", e["covers"], e["excerpt"], channel=e["channel"], transcript_uuid=e["transcript_uuid"],
                session=f"{agent}:{sid}", answer=_free(said) if e.get("free") else (option_of(d, said) or said),
                options=d.get("options") or [], match=e.get("match") or "", asked=e.get("asked") or "",
-               label=e.get("label") if e.get("offered") else "", repo=e.get("repo") or "",
-               kind=CAPTURED_KIND if e.get("captured") else "")
+               label=e.get("label") if e.get("offered") else "", repo=e.get("repo") or "")
     return kept
 
 
@@ -4721,7 +4747,7 @@ def _refuse_forged(agent: str, sid: str, named, what: str):
 def _typed_entries(agent: str, sid: str, text: str, uuid: str, tp: str, live, repo: str, at: float) -> list:
     """The E2 entries of the lines the developer typed in one message, typed at `at`: `approve D<n>[: <option>]`
     while a run is live, and `grant <action> <target> [--repo <owner/repo>]` in `repo` by default, usable for
-    GRANT_TTL from `at`. A prompt (on_human_prompt) and a message typed while the session worked (capture_typed)
+    GRANT_TTL from `at`. A prompt (on_human_prompt) and a message typed while the session worked (_midturn_entries)
     read them alike."""
     new = []
     for ln in _own_lines(text):
@@ -4764,11 +4790,11 @@ def on_human_prompt(agent: str, data: dict, now: float | None = None) -> list:
     if agent == "codex" and not uuid:
         return []
     tp, new = harness_transcript(agent, sid), []
-    if agent == "claude" and midturn_of(sess, uuid):
+    if agent == "claude" and midturn_of(sess, native_id):
         # Claude Code runs this hook for a message typed while the session works too, with the running turn's
-        # prompt_id, and writes the message as a queued_command attachment: that attachment is its evidence
-        # (capture_typed), never this hook's id, so nothing is recorded or refused as a replay here.
-        return capture_typed(agent, sid, now)
+        # prompt_id. This delivery is the message's source; the queued_command attachment Claude Code writes for it
+        # only confirms it (_own_record), as a prompt record confirms a prompt.
+        return _midturn_entries(agent, sid, sess, text, native_id, tp, live, now)
     seen = _seen_ids(sess)
     if uuid and (uuid in seen or (agent == "codex" and native_id in seen)):
         # Legacy bare-turn evidence stays one-use too; its original full prompt was not retained.
@@ -4782,24 +4808,34 @@ def on_human_prompt(agent: str, data: dict, now: float | None = None) -> list:
         if d and d.get("state") == "pending" and not d.get("irreversible"):
             new.append(_entry(agent, "E2", d["id"], text.strip(), uuid, tp, live, now, answer="", plain=True,
                               repo=repo, session=sid))
+    if agent == "claude":
+        for e in new:  # tells this prompt delivered again mid-turn (_midturn_entries) from a new message
+            e["prompt_digest"] = _typed_digest(text)
     if new or (tp and sess.get("transcript") != tp):
         new = _keep_human(agent, sid, new, {"transcript": tp} if tp else None)
     return new
 
 
+def prompt_turn_id(data: dict) -> str:
+    """The native id a UserPromptSubmit payload names its turn by: Claude Code's prompt_id, Codex's turn_id (Codex
+    sends no prompt id). The raw id, never the text-bound composite on_human_prompt records for Codex."""
+    data = data if isinstance(data, dict) else {}
+    return str(data.get("prompt_id") or data.get("turn_id") or "")
+
+
 def midturn_of(sess, prompt_id) -> bool:
-    """Is a UserPromptSubmit with `prompt_id` a message typed while the session's turn runs? Claude Code runs the hook
-    for such a message with the running turn's prompt_id. The session record keeps the id of the prompt that opened
-    the running turn (`turn_prompt`, which the prompt hook writes after this is read) and the turn's start
-    (`turn_started`, which Stop clears when the turn ends). False on any doubt: no id, no turn running, another id.
-    The prompt hook (hooks._midturn_prompt) and the evidence reader (on_human_prompt) both decide by this."""
+    """Is a UserPromptSubmit with native turn id `prompt_id` (prompt_turn_id) a message typed while the session's turn
+    runs? Claude Code runs the hook for such a message with the running turn's prompt_id, Codex for a steering message
+    with the running turn's turn_id. The session record keeps the native id of the prompt that opened the running turn
+    (`turn_prompt`, which the prompt hook writes after this is read) and the turn's start (`turn_started`, which Stop
+    clears when the turn ends). False on any doubt: no id, no turn running, another id. The prompt hook
+    (hooks._midturn_prompt) and the evidence reader (on_human_prompt) both decide by this."""
     return bool(prompt_id) and isinstance(sess, dict) and bool(sess.get("turn_started")) \
         and sess.get("turn_prompt") == str(prompt_id)
 
 
-TYPED_SCAN = 16 << 20  # bytes of a transcript one capture reads at most; older lines are past any grant's 30 minutes
-TYPED_SCAN_STEP = 1 << 20  # bytes a read that finds nothing may pass before it saves its cursor
-CAPTURED_KIND = "typed-midturn"  # ref.kind of a crew.evidence record capture_typed read from the transcript
+MIDTURN_GRACE = 60.0  # seconds a mid-turn message's attachment time may lie from its prompt hook's (0.4 s seen live)
+CAPTURED_KIND = "typed-midturn"  # ref.kind of a crew.evidence record the former transcript reader made, alone
 
 
 def _iso_ts(value):
@@ -4810,155 +4846,34 @@ def _iso_ts(value):
         return None
 
 
-def _typed_messages(agent: str, path: str, sid: str, cursor: dict) -> tuple:
-    """The messages the developer typed in session `sid`'s own transcript `path` after `cursor` -> ([(evidence id,
-    text, time typed)], the cursor to keep). Claude Code: the main session's messages typed while it worked
-    (_queued_human), with their queued id. Codex: the thread's typed prompts (_codex_prompt), steering included, with
-    the id the prompt hook gives them (_codex_prompt_id), so one message is one piece of evidence whichever reads it
-    first. Reads at most TYPED_SCAN bytes: from the cursor's offset when the file is the one it names (device and
-    inode) and is no shorter, else the last TYPED_SCAN bytes from a whole line; a line still being written waits."""
-    try:
-        with open(path, "rb") as fh:
-            st = os.fstat(fh.fileno())
-            ident = [st.st_dev, st.st_ino]
-            start = cursor.get("offset") if cursor.get("file") == ident else None
-            partial = False
-            if not isinstance(start, int) or not 0 <= start <= st.st_size or st.st_size - start > TYPED_SCAN:
-                start = max(0, st.st_size - TYPED_SCAN)
-                if start:
-                    fh.seek(start - 1)
-                    partial = fh.read(1) != b"\n"
-            fh.seek(start)
-            data = fh.read(st.st_size - start)
-    except OSError:
-        return [], cursor
-    if partial:  # a read that starts mid-line starts at the next whole line
-        cut = data.find(b"\n")
-        data, start = (data[cut + 1:], start + cut + 1) if cut >= 0 else (b"", start + len(data))
-    end = data.rfind(b"\n")
-    if end < 0:
-        return [], {"file": ident, "offset": start}
-    marker = b'"UserMessage"' if agent == "codex" else b'"queued_command"'
-    out = []
-    for raw in data[:end + 1].splitlines():
-        if marker not in raw:
-            continue
-        try:
-            r = json.loads(raw)
-            if agent == "codex":
-                text = _codex_prompt(r, sid)
-                uid = _codex_prompt_id(str(r["payload"].get("turn_id") or ""), text) if text else ""
-                ts = _iso_ts(r.get("timestamp"))
-            else:
-                text = _queued_human(r, sid)
-                a = r.get("attachment") if text is not None else {}
-                uid = _queued_id(a.get("source_uuid"), a.get("delivery_id"), text) if text is not None else ""
-                ts = _iso_ts(a.get("timestamp") or r.get("timestamp")) if uid else None
-        except (ValueError, RecursionError, TypeError, AttributeError, KeyError):
-            continue
-        if uid and ts is not None and text.strip() and not _RELAYED.search(text):
-            out.append((uid, text, ts))
-    return out, {"file": ident, "offset": start + end + 1}
+_SYSTEM_REMINDER = re.compile(r"<system-reminder>.*?</system-reminder>", re.DOTALL)
 
 
-def capture_typed(agent: str, sid: str, now: float | None = None) -> list:
-    """The grant and approve lines the developer typed while the session worked -> the entries recorded. Claude Code
-    runs UserPromptSubmit for such a message under the running turn's prompt_id, which names the turn's own prompt,
-    not the message (on_human_prompt leaves it here), and Codex may run none for a steering message; so the evidence
-    reads (evidence, the decisions'), the prompt hook and the main session's tool hooks (note_midturn) read the
-    session's own transcript for them (_typed_transcript, from the session id alone: never a subagent's, another
-    session's, or a `codex exec` run's). Each line becomes the entry the prompt hook would record (_typed_entries), timed when the developer
-    typed it (never later than now), so a grant lasts GRANT_TTL from then; a message typed before the session started
-    or longer than GRANT_TTL ago records nothing. A message counts once: its id (_queued_id, or the Codex prompt id)
-    joins the session's ids, and a Claude message delivered again under another delivery id is the same message, so
-    a transcript read again, rewritten or rotated grants nothing new. Headless sessions record nothing."""
-    now = now or time.time()
-    sid = str(sid or "")
-    if agent not in ("claude", "codex") or not _SESSION_ID.fullmatch(sid):
+def _typed_digest(text) -> str:
+    """The digest one typed message has in its prompt hook's text and in its transcript attachment alike: the system
+    reminders a harness adds left out, whitespace and case folded (_norm)."""
+    return hashlib.sha256(_norm(_SYSTEM_REMINDER.sub(" ", str(text or ""))).encode("utf-8")).hexdigest()
+
+
+def _midturn_entries(agent: str, sid: str, sess: dict, text: str, turn: str, tp: str, live, now: float) -> list:
+    """The E2 entries of a message the developer typed while Claude Code's turn `turn` ran, from its prompt hook
+    delivery (on_human_prompt), the message's only source: recorded at the hook's time under
+    midturn:<turn>:<_typed_digest of the text>, and confirmed by the queued_command attachment Claude Code writes for
+    it (_own_record: this session's main transcript, the same text, within MIDTURN_GRACE of the hook). A line in the
+    transcript with no such delivery grants nothing. One message counts once, and the turn's own prompt delivered
+    again (the text of the entries recorded under the turn's id) records nothing; neither is audited as a replay."""
+    if not re.fullmatch(_QUEUED_PART, str(turn or "")):
         return []
-    f = session_path(agent, sid)
-    sess = state.read(f)
-    if not sess or headless(sess):
+    digest = _typed_digest(text)
+    uid = f"midturn:{turn}:{digest}"
+    if uid in _seen_ids(sess) or any(isinstance(h, dict) and h.get("transcript_uuid") == turn
+                                     and h.get("prompt_digest") == digest for h in sess.get("human") or []):
         return []
-    path = _typed_transcript(agent, sid, sess)
-    if not path:
-        return []
-    if agent == "codex":
-        meta = _codex_meta(path, sid) or {}
-        if not meta or meta.get("originator") == "codex_exec" or meta.get("source") == "exec":
-            return []  # a `codex exec` run: nobody at the keyboard
-    try:
-        st = os.stat(path)
-    except OSError:
-        return []
-    cur = sess.get("typed_scan") if isinstance(sess.get("typed_scan"), dict) else {}
-    if cur.get("file") == [st.st_dev, st.st_ino] and cur.get("offset") == st.st_size:
-        return []  # nothing written since the last read
-    kept = []
-    try:
-        with state.hold(f):
-            sess = state.read(f) or {}
-            cur = sess.get("typed_scan") if isinstance(sess.get("typed_scan"), dict) else {}
-            found, cursor = _typed_messages(agent, path, sid, cur)
-            if cursor == cur and not found:
-                return []
-            run = load_run(agent, sid)
-            live = run if run and run.get("goal") and run.get("state") != "done" else None
-            repo = sess.get("project") or (live or {}).get("project") or ""
-            seen = _seen_ids(sess)
-            sources = {_queued_parts(x)[0] for x in seen} - {""}
-            try:
-                started = float(sess.get("started") or 0)
-            except (TypeError, ValueError):
-                started = now  # a record that cannot say when the session started takes nothing from before now
-            new = []
-            for uid, text, ts in found:
-                source = _queued_parts(uid)[0]
-                turn = _codex_prompt_parts(uid)[0] if agent == "codex" else ""
-                at = min(ts, now)
-                if uid in seen or (source and source in sources) or (turn and turn in seen) \
-                        or ts < started or at + GRANT_TTL < now:
-                    continue
-                entries = [dict(x, captured=True) for x in _typed_entries(agent, sid, text, uid, path, live, repo, at)]
-                if entries:
-                    new.extend(entries)
-                    seen.add(uid)
-                    sources.add(source)
-            extra = {"typed_scan": cursor, "typed_transcript": path}
-            if new:
-                kept = _keep_human(agent, sid, new, extra)
-            elif _cursor_moved(cur, cursor) or sess.get("typed_transcript") != path:
-                # a read that recorded nothing saves its cursor only now and then: the next read starts at most
-                # TYPED_SCAN_STEP bytes earlier, and a tool call costs no session write
-                state.update(f, lambda s: s.update(extra), create=False)
-    except state.StateBusy:
-        return []  # audited by state; the next read finds them
-    return kept
-
-
-def _cursor_moved(old: dict, new: dict) -> bool:
-    """Does a transcript cursor need saving: another file, none saved, or TYPED_SCAN_STEP bytes or more past it?"""
-    before, after = old.get("offset"), new.get("offset")
-    return old.get("file") != new.get("file") or not isinstance(before, int) or not isinstance(after, int) \
-        or after < before or after - before >= TYPED_SCAN_STEP
-
-
-def _typed_transcript(agent: str, sid: str, sess: dict) -> str:
-    """The session's own transcript for capture_typed: the path harness_transcript found before (kept on the session
-    record as typed_transcript, never a path a hook event names) while it still has the shape and place of the
-    session's own and is a plain file, else harness_transcript anew. Spares a search of every project folder on each
-    tool call."""
-    kept = str((sess or {}).get("typed_transcript") or "")
-    if kept:
-        p = Path(kept)
-        if agent == "claude":
-            shaped = p.name == f"{sid}.jsonl" and p.parent.parent == core.CLAUDE_HOME / "projects"
-        else:
-            shaped = p.name.startswith("rollout-") and p.name.endswith(f"-{sid}.jsonl") and any(
-                core.is_under(p, h) for h in (core.CODEX_HOME / "sessions", core.CODEX_HOME / "archived_sessions"))
-        if shaped and p.is_absolute() and not p.is_symlink() and p.is_file():
-            return kept
-    return harness_transcript(agent, sid)
+    repo = sess.get("project") or (live or {}).get("project") or ""
+    new = _typed_entries(agent, sid, text, uid, tp, live, repo, now)
+    if new or (tp and sess.get("transcript") != tp):
+        new = _keep_human(agent, sid, new, {"transcript": tp} if tp else None)
+    return new
 
 
 def on_question(agent: str, data: dict, now: float | None = None) -> list:
@@ -5137,24 +5052,31 @@ def _text_of(msg) -> str:
 # A message the developer typed while the session worked. Claude Code runs UserPromptSubmit for it with the running
 # turn's prompt_id, which identifies the turn's opening prompt and not this message, and writes the message to the
 # session's main transcript as an attachment record, {type: attachment, attachment: {type:
-# queued_command, prompt, commandMode: prompt, origin: {kind: human}, source_uuid, delivery_id, timestamp}}. Its
-# evidence id binds the message's two ids and the digest of its whole text: queued:<source>:<delivery>:<sha256>.
+# queued_command, prompt, commandMode: prompt, origin: {kind: human}, source_uuid, delivery_id, timestamp}}. The
+# hook's delivery is its evidence, under midturn:<turn's prompt_id>:<_typed_digest of the text> (_midturn_entries);
+# the attachment only confirms it. A queued:<source>:<delivery>:<sha256> id is the attachment's own, which the former
+# transcript reader recorded from the attachment alone: such an entry is no longer evidence (_live).
 _QUEUED_PART = r"[0-9A-Za-z][0-9A-Za-z_-]{7,79}"
 _QUEUED_ID = re.compile(rf"queued:({_QUEUED_PART}):({_QUEUED_PART}):([0-9a-f]{{64}})")
-
-
-def _queued_id(source, delivery, text: str) -> str:
-    """The evidence id of one typed message: '' when either id is missing or not a plain id."""
-    if not (isinstance(source, str) and re.fullmatch(_QUEUED_PART, source)
-            and isinstance(delivery, str) and re.fullmatch(_QUEUED_PART, delivery)):
-        return ""
-    return f"queued:{source}:{delivery}:{hashlib.sha256(text.encode('utf-8')).hexdigest()}"
+_MIDTURN_ID = re.compile(rf"midturn:({_QUEUED_PART}):([0-9a-f]{{64}})")
 
 
 def _queued_parts(uid) -> tuple:
     """(source_uuid, delivery_id, text digest) of a queued evidence id; ('', '', '') for any other id."""
     mt = _QUEUED_ID.fullmatch(str(uid or ""))
     return mt.groups() if mt else ("", "", "")
+
+
+def _midturn_digest(uid) -> str:
+    """The text digest of a mid-turn evidence id (_midturn_entries); '' for any other id."""
+    mt = _MIDTURN_ID.fullmatch(str(uid or ""))
+    return mt.group(2) if mt else ""
+
+
+def _attachment_ts(r):
+    """The time of a queued_command attachment record: the attachment's own, else the record's."""
+    a = r.get("attachment") if isinstance(r, dict) and isinstance(r.get("attachment"), dict) else {}
+    return _iso_ts(a.get("timestamp") or (r or {}).get("timestamp"))
 
 
 def _queued_human(r, sid: str = ""):
@@ -5191,16 +5113,31 @@ def _holds_line(text: str, excerpt) -> bool:
 
 
 def _search_key(e: dict) -> str:
-    """The id an evidence entry's own transcript record holds: a queued message's source_uuid, else the entry's id."""
+    """The text an evidence entry's own transcript record holds: a queued message's source_uuid, the attachment type
+    for a mid-turn message (its record holds no id of the hook's), else the entry's id."""
+    if _midturn_digest(e.get("transcript_uuid")):
+        return "queued_command"
     return _queued_parts(e.get("transcript_uuid"))[0] or str(e.get("transcript_uuid") or "")
 
 
 def _own_record(r, e: dict) -> bool:
     """Is transcript record `r` evidence entry `e`'s own, the developer's act, outside any subagent? E2: a prompt
-    record with its prompt id, origin human, holding the line, or the message typed while the session worked that
-    its queued id names, with that exact text (_queued_human). E1: the question tool's result for its tool_use_id
-    with that answer, from a call that offered its label when it names an option."""
+    record with its prompt id, origin human, holding the line; for a message typed while the session worked
+    (_midturn_entries), its queued_command attachment in this session (_queued_human) with the same text
+    (_typed_digest), timed within MIDTURN_GRACE of the hook's delivery; or, for an entry the former reader made, the
+    attachment its queued id names, with that exact text. E1: the question tool's result for its tool_use_id with
+    that answer, from a call that offered its label when it names an option."""
     uuid = str(e.get("transcript_uuid") or "")
+    mid = _midturn_digest(uuid)
+    if mid:
+        text = _queued_human(r, str(e.get("session") or ""))
+        at = _attachment_ts(r) if text is not None else None
+        try:
+            hooked = float(e.get("ts"))
+        except (TypeError, ValueError):
+            return False
+        return e.get("channel") == "E2" and at is not None and abs(at - hooked) <= MIDTURN_GRACE \
+            and _typed_digest(text) == mid and (not e.get("excerpt") or _holds_line(text, e["excerpt"]))
     source, delivery, digest = _queued_parts(uuid)
     if source:
         text = _queued_human(r, str(e.get("session") or ""))
@@ -5245,7 +5182,7 @@ def confirmed(e: dict, sid: str = "") -> bool:
     search_id = _codex_prompt_parts(uuid)[0] if agent == "codex" else _search_key(e)
     if not search_id:
         return False
-    if agent == "claude" and _queued_parts(uuid)[0]:
+    if agent == "claude" and (_queued_parts(uuid)[0] or _midturn_digest(uuid)):
         e = dict(e, session=sid)  # the attachment must be this session's own record
     try:
         for ln in _lines_back(path, json.dumps(search_id).encode()):
@@ -5499,7 +5436,10 @@ def _said_later(path, e: dict, d: dict) -> bool:
 
 
 def _live(e: dict, now: float, run=None) -> bool:
-    if e.get("used") is not None or (e.get("expires") and now > e["expires"]):
+    """Is evidence entry `e` unused, unexpired and of `run`? Never an entry the former transcript reader recorded
+    from a transcript or rollout line alone (`captured`, or a queued id): only a hook's delivery is a source."""
+    if e.get("used") is not None or (e.get("expires") and now > e["expires"]) or e.get("captured") \
+            or _queued_parts(e.get("transcript_uuid"))[0]:
         return False
     return run is None or (e.get("run") == run.get("started") and run.get("state") != "done")
 
@@ -5508,7 +5448,6 @@ def evidence(agent: str, sid: str, pick, now: float | None = None, run=None) -> 
     """The session's live, unused entries that `pick(entry)` accepts and the transcript confirms, oldest first. A
     void entry is never evidence."""
     now = now or time.time()
-    capture_typed(agent, sid, now)  # a line typed while the session worked counts before anyone decides
     sess = state.read(session_path(agent, sid)) or {}
     if headless(sess):
         return []
@@ -5788,9 +5727,10 @@ def authorization_decision(agent, sid, *, action, target, repo, lane=None, now=N
     Repository expansion requires the guard's separately verified scope adapter.
     """
     from . import authorization
-    human_only = human_only or action in HUMAN_ONLY_ACTIONS
     snapshot = core.config_snapshot()
     sess = state.read(session_path(agent, sid)) or {}
+    blocked = policy_blocked(sess)  # a nested session, or a headless run devkit cannot tell from one: human only
+    human_only = human_only or action in HUMAN_ONLY_ACTIONS or bool(blocked)
     run = load_run(agent, sid)
     live = run if run and run.get("goal") and run.get("state") != "done" else None
     try:
@@ -5886,6 +5826,8 @@ def authorization_decision(agent, sid, *, action, target, repo, lane=None, now=N
             "The target repository is not this session's project and not a project of your workspace (a checkout at "
             f"its own place in {core.tilde(core.DEV)} whose origin is exactly that repository), so automatic policy "
             "does not cover it."))
+    if blocked and mode == "auto" and decision["outcome"] != "allow":
+        decision = dict(decision, reason=_POLICY_BLOCKED[blocked])
     return dict(decision, mode=mode, mode_source=origin, caller=caller_facts, account=account,
                 principal_kind=facts.get("kind") or "local", origin_repo=sess.get("project") or "")
 
@@ -6028,7 +5970,9 @@ def use_grant(agent: str, sid: str, *, action: str, target: str, repo: str = "",
             return None  # the grant covers its evidence's target in its repository only (M277)
         return _opened(f"step:{s['name']}", "step", None, None)
     if headless(sess):
-        return _opened("DEVKIT_PREAPPROVE", "preapproval", None, None) if preapproved(action, target) else None
+        # a nested session's launcher is another agent session: its DEVKIT_PREAPPROVE is no developer's word
+        return _opened("DEVKIT_PREAPPROVE", "preapproval", None, None) \
+            if preapproved(action, target) and not nested(sess) else None
 
     def grants(e):
         cls, _, pattern = str(e.get("covers") or "").partition(" ")
@@ -6116,7 +6060,6 @@ def _decision_evidence(agent: str, sid: str, run: dict, d: dict, answer: str, no
     def ours(e):
         return _norm(e.get("covers")) == _norm(d["id"]) and d.get("shown") is not None and e["ts"] >= d["shown"]
     if d.get("irreversible"):
-        capture_typed(agent, sid, now)
         sess = state.read(session_path(agent, sid)) or {}
         mine = [] if headless(sess) else [x for x in sess.get("human") or [] if _live(x, now, run) and ours(x)]
         e = mine[-1] if mine else {}
@@ -6160,9 +6103,9 @@ def evidence_check(rec: dict, path, line):
                                  f"transcript is gone, so no message of the developer backs it")
     e = {"agent": agent, "channel": ev["channel"], "transcript_uuid": uuid, "transcript": str(tp)}
     if agent == "codex":  # a typed line only (no question tool): re-read from its prompt, never from the detail
-        # A prompt id that binds the whole text names one message of one turn: the rollout reader (capture_typed,
-        # whose records say so in ref.kind) may record it up to GRANT_TTL after it was typed, so its record may come
-        # that much before this one. The prompt hook records a prompt as it is typed, so its window stays as it was.
+        # A prompt id that binds the whole text names one message of one turn: the former rollout reader (whose
+        # records say so in ref.kind) recorded it up to GRANT_TTL after it was typed, so its record may come that
+        # much before this one. The prompt hook records a prompt as it is typed, so its window stays as it was.
         captured = ref.get("kind") == CAPTURED_KIND and bool(_codex_prompt_parts(uuid)[1])
         since = float(rec.get("ts") or 0) - (GRANT_TTL if captured else 0)
         if ev["channel"] == "E2" and _codex_backs(tp, sid, uuid, str(rec.get("target") or ""), since,
@@ -6174,6 +6117,8 @@ def evidence_check(rec: dict, path, line):
         e["covers"] = rec.get("target")
         if "repo" in ref:
             e["repo"] = ref["repo"]
+        if _midturn_digest(uuid):
+            e["ts"] = rec.get("ts")  # the hook's time, which the attachment's must be close to
     if not confirmed(e, sid):
         return (f"evidence {ev['channel']} {uuid or '-'} for {rec.get('target')}: no message of the developer in "
                 f"{core.tilde(tp)} backs it")
@@ -8216,9 +8161,8 @@ def note_midturn(agent: str, data: dict) -> list:
     """The main session's hooks (PreToolUse of a launch, PostToolUse): the messages the developer typed mid-turn
     since the last hook (midturn_requests, from the offset the session record keeps, read and moved under its lock so
     each is counted once) become the developer's latest request: `request_ts`, which is_latest_request reads, and a
-    prompt of the turn in continuity. -> the messages found"""
-    if not data.get("agent_id"):
-        capture_typed(agent, data.get("session_id") or "")  # their grant lines too, from the session's own transcript
+    prompt of the turn in continuity. A message read here is never a grant or an approval: only its prompt hook's
+    delivery is (on_human_prompt). -> the messages found"""
     if agent == "codex":
         return _note_codex_midturn(data)
     if data.get("agent_id") or agent != "claude":

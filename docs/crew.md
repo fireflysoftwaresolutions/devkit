@@ -63,7 +63,7 @@ language, and the crew's briefs, reports, and records stay in American English (
 progress update, messages, decisions, refusals, briefs) and calls the main session the tech lead. Agents write them
 the same way, or by the role alone, in any language. A member's report whose prose names a member without the role
 is sent back once (`canary.roles`). A tech lead's final message is never sent back for it: the developer has already
-read the reply, so the miss is recorded and reminded at the next prompt (`canary.remind`). Commands and code keep
+read the reply, so the miss is recorded and reminded at your next development prompt (`canary.remind`). Commands and code keep
 the ids (`--to tank`).
 
 `dev crew` prints the roster and who is working now; `dev crew show <name>` shows one member in full.
@@ -906,7 +906,7 @@ dashboard and the handoff read, and devkit's audit trail (`dev audit`), publishe
 | `guard.deny` with `rule: crew-scope` | an edit outside a member's files |
 | `canary.crew-miss`, `crew.unreported`, `crew.gate` | a member's report without its status block, a member that stopped without `dev progress step`, or a crew gate finding |
 | `stop.block`, `canary.crew-roles` | a final message sent back for more work, with the rule, or a member's report that names crew members without their role |
-| `canary.remind` | a presentation rule a final message missed (`roles` for names without their role), recorded and reminded at the next prompt instead of sending the reply back |
+| `canary.remind` | a presentation rule a final message missed (`roles` for names without their role), never a send-back of its own: recorded when your next development prompt reminds it, blocked when it joined a send-back for other work (`dev canary` lists it as added to a send-back) |
 
 ```bash
 dev audit --action crew        # how the crew coordinated

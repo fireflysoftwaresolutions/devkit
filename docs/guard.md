@@ -304,6 +304,7 @@ If devkit really should be off somewhere, change devkit's own configuration (see
 | A branch name that breaks the [naming rule](#branch-names), in `git checkout -b`, `git switch -c`, `git branch <name>`, `git branch -m`, `git worktree add -b`, or `git push` | deny, with the rename command |
 | `git push --force`, `-f`, combined short flags with `f`, `+refspec` | deny → `--force-with-lease` |
 | `git push --force-with-lease` to `main` or `master` | deny |
+| A command that changes where git or gh sends, together with a push, a pull request, a merge, a release, or a `gh` write: `git remote add`, `set-url`, `rename`, `remove`, `set-branches`, or `set-head`; a `git config` write (either syntax, `--edit`, or a section) of `remote.*`, `url.*`, `branch.<name>.remote`, `branch.<name>.pushRemote`, `include.*`, or `includeIf.*`; `git -c` or `--config-env` of those keys (`--config-env NAME=VAR` as two words included); a `GIT_CONFIG_*` variable set for git, gh, or `dev`; `git branch -u`, `--set-upstream-to`, `--track`, `-m`, or `-c`; `checkout` or `switch --track`; `gh repo set-default` (not `--view`) | deny, in every mode and whatever grant exists, for the main session and crew members (`_main_gate:mixed-retarget`): the push would be judged before the change sends it elsewhere. Run them as separate commands |
 | `dev branch prune --apply` without `--local` or `--offline`; `dev gc --apply`, `dev sync --scheduled`, or jobs that perform remote cleanup | Tier 2: members cannot run them. Auto requires exact operation scope and policy; guided requires an exact scoped grant such as `grant push-destructive origin:merged-branches`. Local-only listing/cleanup does not delete on origin |
 | The third `git push` of the same branch within 60 minutes | deny unless prefixed `DEVKIT_LOCAL_CI_PASSED=1` |
 | `git clean` with `-x` or `-X` | deny (it deletes `.env`, local config and caches) |
@@ -359,6 +360,7 @@ apply the same rule. Change the lists with `branches.types` and `branches.forbid
 | `gh pr create --head <branch>` with a branch that breaks the naming rule | deny |
 | `gh pr …`, `gh issue …`, `gh release …`, `gh api …` containing AI attribution | deny |
 | `gh config set pager …` (or a key the guard cannot read) | deny: gh runs its pager as a command for every later read |
+| The repository a `gh` command acts on | read as gh reads it: the last `-R` wins, in every form (`-R o/r`, `-Ro/r`, `-R=o/r`, `--repo o/r`, `--repo=o/r`, `R` ending a short cluster such as `-sR o/r`, before the command group, between group and subcommand, or after it); a value of another option (`--subject -Rx`) is that option's. A pull request or issue URL argument names its own repository, whatever `-R` says. With neither, automatic policy covers the command only when every repository gh may pick is the classified one: the checkout's GitHub remotes, `remote.<name>.gh-resolved` (`gh repo set-default`), and `GH_REPO`; otherwise the refusal says so, and your typed grant opens it |
 | An agent's `gh issue create`, `gh issue comment`, `gh issue edit`, or `gh api` on the issues of devkit's own repository, a `gh api repositories/<id>/issues…` route in any repository (a numeric id does not say which one), a `gh api graphql` mutation of an issue, a comment, or a reaction in any repository (a node id does not say which one either), and an MCP tool call that writes an issue or a comment there | deny, in the main session and the crew alike, whatever grants exist: "Agents do not post to devkit's bug registry directly. Use `dev bug report` or `dev bug detour`: devkit checks what leaves this machine. A comment on a pull request goes through `gh pr comment` or `dev pr comment`." (see [The bug registry](bug-registry.md)) |
 | `gh api graphql` with a query the guard cannot read: from standard input (`-F query=@-`, `--input -`), from a file it cannot open, or filled in by the shell (a substitution or a variable) | the action `unknown`, tier 2: it may be a merge or a forced ref update. Write the query out with `-f query='…'` or `-F query=@query.graphql`; if it must run as it is, the developer types `grant unknown cmd-<hash>` |
 
@@ -431,6 +433,9 @@ three folders readable and writable by your account only (`0700`) every time it 
 | `dev impeccable` whose `--target` or `--file` leads, from the folder the shell is in after `cd`, `pushd`, or `env -C`, outside the workspace, into the handoff repository, or outside a write lane's step scope | ask in the main session, as for any write outside the workspace; deny in a write lane. `dev impeccable` itself also refuses an agent's call run outside a project checkout of the workspace, or whose path values (the ones the preceding row lists) lead out of that checkout through a symbolic link or `..` |
 | `dev hook <event>`, in any shell form (a pipe, `sudo`, `bash -c`, `eval`, `find -exec`, `python3 bin/dev`) | deny, for every session: only the harness runs a hook, when its event fires. A hook event typed through a shell could forge your prompt or answer |
 | A write, move, or delete of a Claude Code transcript (`~/.claude/projects/**/*.jsonl`, a subagent's too) or a Codex session file (`~/.codex/sessions`, `archived_sessions`), with a file tool, a patch, or the shell | deny: devkit reads your approvals from them. Claude Code's memory files stay writable |
+| A recursive writer whose destination is or holds a protected root: `tar`, `bsdtar`, or `gtar -x` (its `-C` or `--directory` folders, else the folder it runs in), `unzip` (`-d`, else the working folder), `ditto`, `cp -R`, `-r`, or `-a`, `rsync -r` or `-a`, `scp -r`, `pax -rw`, `cpio -i` (or `-D`) and `-p`, `git apply` (the work tree, `--directory`), and `git checkout-index` (`--prefix`, else the work tree). The protected roots are devkit's state, configuration, and install, the transcript folders (`~/.claude/projects`, Codex's `sessions` and `archived_sessions`), `~/.claude/settings.json` and `settings.local.json`, `~/.codex`, the handoff repository, and any folder that holds the `dev` a shell finds | deny: an archive or a tree copy can write any file below its destination. For example, `tar -xf x.tar -C ~`, `cp -R d ~/.claude/`, and `rsync -a d/ ~/Development/` are refused |
+| `tar -P` or `--absolute-names`, `unzip -:`, `cpio --insecure`, `pax -r` (pax keeps absolute paths), and `git apply --unsafe-paths` | deny, wherever they extract: their members may name any path |
+| A write, move, or delete below a path an earlier command of the same line makes: an `ln -s` link, an extraction or tree-copy destination (for a copy, where each source lands), or such a path moved or copied on | deny, for example `tar -xf links.tar -C S && echo x >> S/st/file`. Run the write as its own command; the guard then follows the links that are there |
 | A program an agent runs (inline, from its input or a pipe, or a script outside the workspace) that loads a devkit module and reaches a function that records or uses your prompts, answers, and grants, or `devkit.state`'s writers | deny, for every session. The guard also reads the agent's own files the program loads (`sys.path` plus `import`, `python -m`, `runpy`, `exec(open(…).read())`, `SourceFileLoader`), three levels deep, and refuses code the program decodes and runs at run time. A repository's own scripts and tests are not judged by this rule |
 | A program calls internal functions behind managed policy operations | deny: use the supported `dev` command, which authenticates the caller and records policy or guided evidence; direct internal calls do not inherit that authority |
 
@@ -719,6 +724,17 @@ These stay refused in auto: a write to devkit's bug registry, a developer's own 
 explicit prohibition (a decision you refused, an embargo, a transport the guard cannot attest), invalid
 configuration, and a caller that is not the authenticated current main session.
 
+Automatic policy also never acts for a session that devkit cannot tell from one another agent started, in its own
+project or any other:
+
+| Session | Automatic policy | What opens an irreversible action |
+| --- | --- | --- |
+| Nested: another agent session started it (its agent process runs below that session's), whatever surface it reports | None | Nothing it can supply itself: it has no keyboard, and its launcher's `DEVKIT_PREAPPROVE` does not count. Run the operation from the session you work in, where your typed grant opens it, or start the run yourself in a terminal |
+| Headless (`claude -p`, the SDK, `codex exec`) with no recorded process, so devkit cannot check what started it. Codex records carry no process, so every `codex exec` run is one | None | `DEVKIT_PREAPPROVE`, set by whoever starts the run, for the actions it names |
+| Headless and started in a terminal: devkit recorded its process, and no agent session started it | As for any session | `DEVKIT_PREAPPROVE`, or automatic policy |
+
+The refusal says which case applies and names the way out.
+
 In guided, and in auto when policy cannot authorize the command (another repository, for example), type the line the
 refusal offers on a line of its own in the chat, as a new prompt or while the session works:
 
@@ -767,6 +783,8 @@ validated outbox; sensitive and legacy held payloads remain held. The commands b
 
 A program that imports devkit and calls the functions behind these commands is refused too, with the command and
 its grant line (see [devkit's own state, configuration, and install](#devkits-own-state-configuration-and-install)).
+That includes `setup.offer_bug_consent` and `bugs.record_consent_asked`, which are refused like `bugs.set_consent`:
+the setting is yours, through `dev bug share` and `grant bug-share <setting>`.
 
 A push from inside a repository's git folder (`<repo>/.git`, `<repo>/.git/worktrees/<name>`), or one that
 `env -C <dir>` or `sudo -D <dir>` runs in another folder, is judged as the project of that folder, so
@@ -809,14 +827,16 @@ confirmation. Existing saved decision evidence remains readable, with its origin
 Restart Codex sessions after updating so one installed version handles each session's approval evidence.
 
 A grant or `approve D<n>` line you type while the session works counts as one typed in a new prompt: the same
-default repository, one use, and 30 minutes from the moment you typed it. Claude Code runs its prompt hook for such a
-message with the running turn's id, which names the turn's own prompt, so devkit reads the message from the session's
-own transcript instead, where Claude Code writes it with ids of its own; in Codex it is a message of the running turn
-in the thread's own rollout. A message made of blocks (a pasted image) counts by its typed text. Devkit reads it there before the guard decides, so you need not wait for the turn to end. Only
-your own message in the session's main transcript counts: never a crew member's transcript, another session's, a
-task notification, tool output, or the question widget, and never a message typed before the session started or more
-than 30 minutes ago. Each message counts once, even when the transcript is read again or rewritten. A plain `yes`
-typed while the session works approves nothing; type `approve D<n>` instead.
+default repository, one use, and 30 minutes from the moment devkit's prompt hook received it, so you need not wait
+for the turn to end. Claude Code and Codex both run the prompt hook for such a message, with the running turn's id
+(Claude Code's `prompt_id`, Codex's `turn_id`). That delivery is the message's only source. The transcript only
+confirms it: in Claude Code, the `queued_command` record it writes for the message in the session's main transcript,
+with the same text, within 60 seconds of the hook; in Codex, the running turn's `UserMessage` in the thread's own
+rollout. A line in the transcript or the rollout with no prompt hook delivery grants nothing, so a line written into
+those files by anything but the harness opens no action. A message made of blocks (a pasted image) counts by its
+typed text. Never a crew member's transcript, another session's, a task notification, tool output, or the question
+widget confirms one. Each message counts once, even when the hook runs twice or the transcript is read again or
+rewritten. A plain `yes` typed while the session works approves nothing; type `approve D<n>` instead.
 
 ### Lesson rules
 
