@@ -188,9 +188,12 @@ class CodexGrantTests(CodexCase):
         _, forged = self.prompt(wrapped, T0 + 2, turn=turn)
         self.assertEqual(len(forged), 1)
         self.assertIsNone(self.grant(T0 + 2.1))
-        self.rollout.typed(f"A different prompt.\n{LINE}", turn, T0 + 2.3)
-        self.assertIsNone(self.grant(T0 + 2.4))
         record = audit.records(1, "crew.evidence")[-1]
+        different = f"A different prompt.\n{LINE}"
+        self.rollout.typed(different, turn, T0 + 2.3)  # a message the developer typed in the turn: its own grant
+        opened = self.grant(T0 + 2.4)
+        self.assertIn(hashlib.sha256(different.encode()).hexdigest(), opened["id"])
+        self.assertIsNone(self.grant(T0 + 2.45))  # the forged event's entry is still backed by nothing
         self.assertIn("no message of the developer", pg.evidence_check(record, None, 0) or "")
 
         self.rollout.typed(wrapped, turn, T0 + 2.5)

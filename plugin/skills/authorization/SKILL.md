@@ -30,7 +30,9 @@ configuration again. Members cannot change the mode. Do not switch to auto to ev
 For example, `dev pr merge 12` in the session's own repository runs in auto with no grant. The same merge in
 `acme/web` from a session started in `acme/api` is refused with the line `grant merge 12 --repo acme/web`; once the
 developer types it, the merge runs once. In guided, `grant release v26.11.4` in ordinary chat authorizes that target
-only under its evidence constraints.
+only under its evidence constraints. A line the developer types while the session works counts the same way: devkit
+reads it from the session's own transcript before the guard decides. Do not wait for the turn to end, and do not ask
+the developer to type it again because it arrived mid-turn.
 
 Do not attribute a recommendation to the developer. Policy receipts have no fabricated expiration/use count;
 recheck mode and scope at consumption. Legacy `--approve` hints do not authorize an operation.

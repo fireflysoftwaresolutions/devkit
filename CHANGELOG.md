@@ -29,6 +29,8 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
   verification, and host permissions still apply. A program run outside any repository acts for the session's
   project, or, in a session with no project, on this Mac, so policy covers it and the grant line its refusal
   names works. `--repo` also takes `host/path` for a repository on another git host (`gitlab.com/group/api`).
+  A grant or `approve` line you type while the session is working counts like one typed on its own, in Claude Code
+  and Codex: once, for 30 minutes from when you typed it, checked before the guard decides.
 - **Backups.** When you run `dev backup` in your terminal for a project whose policy is `ask`, it asks you in both
   modes. An agent's backup never asks: in auto it backs up a private or internal repository, while a public
   repository's branches go only with your typed `grant backup <project>` and `dev backup --public`.

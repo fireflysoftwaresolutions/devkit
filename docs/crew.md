@@ -342,8 +342,8 @@ Each session's crew has a number of slots, and a launch that does not fit is ref
 - **The reserve.** `progress.reserve` (1) keeps a slot for what you ask while the crew works: plan steps queued in an
   earlier turn do not take it, and a launch for your request in the current turn does (`crew.reserve`). A message
   you type while the tech lead works counts as your latest request too. Claude Code runs no prompt hook for it, so
-  devkit reads it from the transcript at the next tool call. It moves the request clock only, never counts as an
-  approval or a grant.
+  devkit reads it from the transcript at the next tool call. A `grant` or `approve D<n>` line in it counts exactly
+  as in a prompt (one use, 30 minutes from when you typed it); the rest of the message only moves the request clock.
 - **The order.** `dev crew next` lists the ready steps in the order to launch them: the longest critical path first,
   then your latest request, then the oldest. It records that order, and a launch out of it needs
   `dev crew next --first "<step>" --why "…"`.
@@ -766,7 +766,8 @@ receipt has no human grant expiration or use counter, and does not survive a swi
 `--approve` option remains a compatibility hint; it neither grants authority nor is required for auto.
 
 In either mode, an expired, exhausted, or mismatched grant does not authorize an action. A repository mismatch
-consumes nothing. Type grants in ordinary chat; an asynchronous question widget is not a typed-grant channel.
+consumes nothing. Type grants in ordinary chat, as a new prompt or while the session works; an asynchronous
+question widget is not a typed-grant channel.
 
 Without `--repo`, grants and decisions retain the session's original repository scope. Existing saved decisions
 keep that scope too. Guided evidence retains transcript verification, expiration, and one-use consumption.

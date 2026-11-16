@@ -7621,7 +7621,8 @@ def protected_bash(cmd: str, cwd):
 
 _EVIDENCE_FNS = frozenset({"on_human_prompt", "on_question", "on_prompt", "confirmed", "use_grant", "take_evidence",
                            "evidence", "_keep_human", "_consume", "crew_decide", "_action_evidence",
-                           "_decision_evidence", "_live_grants", "_grant_lookup"})
+                           "_decision_evidence", "_live_grants", "_grant_lookup",
+                           "capture_typed", "_typed_entries"})  # lines typed while the session worked
 _EVIDENCE_COMMON = frozenset({"confirmed", "evidence"})  # common words: they count only on a devkit module
 _STATE_WRITERS = frozenset({"update", "replace", "patch", "remove", "_write"})  # devkit.state's, on that module only
 # The developer's own decisions behind `dev bug send|drop|confirm|share`, `dev lesson release` and `dev lesson prevent

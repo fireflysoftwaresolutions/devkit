@@ -4711,6 +4711,28 @@ def _refuse_forged(agent: str, sid: str, named, what: str):
            f"not the session's own: its evidence counts for nothing (B1)", "refused", session=f"{agent}:{sid}"[:60])
 
 
+def _typed_entries(agent: str, sid: str, text: str, uuid: str, tp: str, live, repo: str, at: float) -> list:
+    """The E2 entries of the lines the developer typed in one message, typed at `at`: `approve D<n>[: <option>]`
+    while a run is live, and `grant <action> <target> [--repo <owner/repo>]` in `repo` by default, usable for
+    GRANT_TTL from `at`. A prompt (on_human_prompt) and a message typed while the session worked (capture_typed)
+    read them alike."""
+    new = []
+    for ln in _own_lines(text):
+        mt = _APPROVE_LINE.match(ln)
+        if mt and mt.group(2) and not _names_session(mt.group(2), sid):
+            continue  # a decision of another session's run, typed here: it is evidence only in that session
+        if mt and live:
+            new.append(_entry(agent, "E2", mt.group(1).upper(), ln, uuid, tp, live, at,
+                              answer=(mt.group(3) or "").strip()[:300],
+                              repo=(_decision(live, mt.group(1)) or {}).get("repo", repo), session=sid))
+            continue
+        grant = _parse_grant(ln, repo)
+        if grant:
+            new.append(_entry(agent, "E2", f"{grant[0]} {grant[1]}", ln, uuid, tp, live, at,
+                              expires=at + GRANT_TTL, repo=grant[2], session=sid))
+    return new
+
+
 def on_human_prompt(agent: str, data: dict, now: float | None = None) -> list:
     """UserPromptSubmit: the E2 lines of the developer's prompt -> the entries recorded. A line of its own, outside
     code blocks and quotes: `approve D<n>[: <option>]` or `grant <action> <target>`; a plain "yes" covers the one
@@ -4741,19 +4763,7 @@ def on_human_prompt(agent: str, data: dict, now: float | None = None) -> list:
         _refuse_replay(agent, sid, str(uuid), "a prompt")
         return []
     repo = sess.get("project") or (live or {}).get("project") or ""  # a grant holds in this repository only
-    for ln in _own_lines(text):
-        mt = _APPROVE_LINE.match(ln)
-        if mt and mt.group(2) and not _names_session(mt.group(2), sid):
-            continue  # a decision of another session's run, typed here: it is evidence only in that session
-        if mt and live:
-            new.append(_entry(agent, "E2", mt.group(1).upper(), ln, uuid, tp, live, now,
-                              answer=(mt.group(3) or "").strip()[:300],
-                              repo=(_decision(live, mt.group(1)) or {}).get("repo", repo), session=sid))
-            continue
-        grant = _parse_grant(ln, repo)
-        if grant:
-            new.append(_entry(agent, "E2", f"{grant[0]} {grant[1]}", ln, uuid, tp, live, now,
-                              expires=now + GRANT_TTL, repo=grant[2], session=sid))
+    new = _typed_entries(agent, sid, text, uuid, tp, live, repo, now)
     if not new and live and _PLAIN_YES.match(text):
         ids = (sess.get("last_shown") or {}).get("ids") or []
         d = _decision(live, ids[0]) if len(ids) == 1 else None
@@ -4763,6 +4773,139 @@ def on_human_prompt(agent: str, data: dict, now: float | None = None) -> list:
     if new or (tp and sess.get("transcript") != tp):
         new = _keep_human(agent, sid, new, {"transcript": tp} if tp else None)
     return new
+
+
+TYPED_SCAN = 16 << 20  # bytes of a transcript one capture reads at most; older lines are past any grant's 30 minutes
+
+
+def _iso_ts(value):
+    import datetime as dt
+    try:
+        return dt.datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _typed_messages(agent: str, path: str, sid: str, cursor: dict) -> tuple:
+    """The messages the developer typed in session `sid`'s own transcript `path` after `cursor` -> ([(evidence id,
+    text, time typed)], the cursor to keep). Claude Code: the main session's messages typed while it worked
+    (_queued_human), with their queued id. Codex: the thread's typed prompts (_codex_prompt), steering included, with
+    the id the prompt hook gives them (_codex_prompt_id), so one message is one piece of evidence whichever reads it
+    first. Reads at most TYPED_SCAN bytes: from the cursor's offset when the file is the one it names (device and
+    inode) and is no shorter, else the last TYPED_SCAN bytes from a whole line; a line still being written waits."""
+    try:
+        with open(path, "rb") as fh:
+            st = os.fstat(fh.fileno())
+            ident = [st.st_dev, st.st_ino]
+            start = cursor.get("offset") if cursor.get("file") == ident else None
+            partial = False
+            if not isinstance(start, int) or not 0 <= start <= st.st_size or st.st_size - start > TYPED_SCAN:
+                start = max(0, st.st_size - TYPED_SCAN)
+                if start:
+                    fh.seek(start - 1)
+                    partial = fh.read(1) != b"\n"
+            fh.seek(start)
+            data = fh.read(st.st_size - start)
+    except OSError:
+        return [], cursor
+    if partial:  # a read that starts mid-line starts at the next whole line
+        cut = data.find(b"\n")
+        data, start = (data[cut + 1:], start + cut + 1) if cut >= 0 else (b"", start + len(data))
+    end = data.rfind(b"\n")
+    if end < 0:
+        return [], {"file": ident, "offset": start}
+    marker = b'"UserMessage"' if agent == "codex" else b'"queued_command"'
+    out = []
+    for raw in data[:end + 1].splitlines():
+        if marker not in raw:
+            continue
+        try:
+            r = json.loads(raw)
+            if agent == "codex":
+                text = _codex_prompt(r, sid)
+                uid = _codex_prompt_id(str(r["payload"].get("turn_id") or ""), text) if text else ""
+                ts = _iso_ts(r.get("timestamp"))
+            else:
+                text = _queued_human(r, sid)
+                a = r.get("attachment") if text is not None else {}
+                uid = _queued_id(a.get("source_uuid"), a.get("delivery_id"), text) if text is not None else ""
+                ts = _iso_ts(a.get("timestamp") or r.get("timestamp")) if uid else None
+        except (ValueError, RecursionError, TypeError, AttributeError, KeyError):
+            continue
+        if uid and ts is not None and text.strip() and not _RELAYED.search(text):
+            out.append((uid, text, ts))
+    return out, {"file": ident, "offset": start + end + 1}
+
+
+def capture_typed(agent: str, sid: str, now: float | None = None) -> list:
+    """The grant and approve lines the developer typed while the session worked -> the entries recorded. Claude Code
+    runs no UserPromptSubmit for such a message, and Codex may not for a steering message, so the evidence reads
+    (evidence, the decisions') and the main session's tool hooks (note_midturn) read the session's own transcript
+    for them (harness_transcript, from the session id alone: never a subagent's, another session's, or a `codex
+    exec` run's). Each line becomes the entry the prompt hook would record (_typed_entries), timed when the developer
+    typed it (never later than now), so a grant lasts GRANT_TTL from then; a message typed before the session started
+    or longer than GRANT_TTL ago records nothing. A message counts once: its id (_queued_id, or the Codex prompt id)
+    joins the session's ids, and a Claude message delivered again under another delivery id is the same message, so
+    a transcript read again, rewritten or rotated grants nothing new. Headless sessions record nothing."""
+    now = now or time.time()
+    sid = str(sid or "")
+    if agent not in ("claude", "codex") or not _SESSION_ID.fullmatch(sid):
+        return []
+    f = session_path(agent, sid)
+    sess = state.read(f)
+    if not sess or headless(sess):
+        return []
+    path = harness_transcript(agent, sid)
+    if not path:
+        return []
+    if agent == "codex":
+        meta = _codex_meta(path, sid) or {}
+        if not meta or meta.get("originator") == "codex_exec" or meta.get("source") == "exec":
+            return []  # a `codex exec` run: nobody at the keyboard
+    try:
+        st = os.stat(path)
+    except OSError:
+        return []
+    cur = sess.get("typed_scan") if isinstance(sess.get("typed_scan"), dict) else {}
+    if cur.get("file") == [st.st_dev, st.st_ino] and cur.get("offset") == st.st_size:
+        return []  # nothing written since the last read
+    kept = []
+    try:
+        with state.hold(f):
+            sess = state.read(f) or {}
+            cur = sess.get("typed_scan") if isinstance(sess.get("typed_scan"), dict) else {}
+            found, cursor = _typed_messages(agent, path, sid, cur)
+            if cursor == cur and not found:
+                return []
+            run = load_run(agent, sid)
+            live = run if run and run.get("goal") and run.get("state") != "done" else None
+            repo = sess.get("project") or (live or {}).get("project") or ""
+            seen = _seen_ids(sess)
+            sources = {_queued_parts(x)[0] for x in seen} - {""}
+            try:
+                started = float(sess.get("started") or 0)
+            except (TypeError, ValueError):
+                started = now  # a record that cannot say when the session started takes nothing from before now
+            new = []
+            for uid, text, ts in found:
+                source = _queued_parts(uid)[0]
+                turn = _codex_prompt_parts(uid)[0] if agent == "codex" else ""
+                at = min(ts, now)
+                if uid in seen or (source and source in sources) or (turn and turn in seen) \
+                        or ts < started or at + GRANT_TTL < now:
+                    continue
+                entries = _typed_entries(agent, sid, text, uid, path, live, repo, at)
+                if entries:
+                    new.extend(entries)
+                    seen.add(uid)
+                    sources.add(source)
+            if new:
+                kept = _keep_human(agent, sid, new, {"typed_scan": cursor})
+            else:
+                state.update(f, lambda s: s.update(typed_scan=cursor), create=False)
+    except state.StateBusy:
+        return []  # audited by state; the next read finds them
+    return kept
 
 
 def on_question(agent: str, data: dict, now: float | None = None) -> list:
@@ -4938,13 +5081,75 @@ def _text_of(msg) -> str:
     return "\n".join(b.get("text") or "" for b in c or [] if isinstance(b, dict) and b.get("type") == "text")
 
 
+# A message the developer typed while the session worked. Claude Code runs no UserPromptSubmit for it: it writes the
+# message to the session's main transcript as an attachment record, {type: attachment, attachment: {type:
+# queued_command, prompt, commandMode: prompt, origin: {kind: human}, source_uuid, delivery_id, timestamp}}. Its
+# evidence id binds the message's two ids and the digest of its whole text: queued:<source>:<delivery>:<sha256>.
+_QUEUED_PART = r"[0-9A-Za-z][0-9A-Za-z_-]{7,79}"
+_QUEUED_ID = re.compile(rf"queued:({_QUEUED_PART}):({_QUEUED_PART}):([0-9a-f]{{64}})")
+
+
+def _queued_id(source, delivery, text: str) -> str:
+    """The evidence id of one typed message: '' when either id is missing or not a plain id."""
+    if not (isinstance(source, str) and re.fullmatch(_QUEUED_PART, source)
+            and isinstance(delivery, str) and re.fullmatch(_QUEUED_PART, delivery)):
+        return ""
+    return f"queued:{source}:{delivery}:{hashlib.sha256(text.encode('utf-8')).hexdigest()}"
+
+
+def _queued_parts(uid) -> tuple:
+    """(source_uuid, delivery_id, text digest) of a queued evidence id; ('', '', '') for any other id."""
+    mt = _QUEUED_ID.fullmatch(str(uid or ""))
+    return mt.groups() if mt else ("", "", "")
+
+
+def _queued_human(r, sid: str = ""):
+    """The text of Claude Code transcript record `r` when it is a message the developer typed while the main session
+    worked: an attachment outside any sidechain, of type queued_command, commandMode prompt, origin human, that no
+    harness relayed (task notifications, system reminders, comments sent to Claude), of session `sid` when the record
+    names one. None for any other record."""
+    if not isinstance(r, dict) or r.get("type") != "attachment" or r.get("isSidechain"):
+        return None
+    a = r.get("attachment")
+    if not isinstance(a, dict) or a.get("type") != "queued_command" or a.get("commandMode") != "prompt" \
+            or not isinstance(a.get("origin"), dict) or a["origin"].get("kind") != "human" \
+            or a.get("humanTurn", True) is not True:
+        return None
+    if sid and r.get("sessionId") not in (None, sid):
+        return None
+    text = a.get("prompt")
+    if not isinstance(text, str) or not text.strip() or _RELAYED.search(text):
+        return None
+    return text
+
+
+def _holds_line(text: str, excerpt) -> bool:
+    """Does `text` hold `excerpt` as a line of its own (_own_lines)? An excerpt _entry cut at 200 characters matches
+    the start of its line."""
+    want, cut = _norm(excerpt), len(str(excerpt or "")) >= 200
+    return bool(want) and any(_norm(ln) == want or (cut and _norm(ln).startswith(want)) for ln in _own_lines(text))
+
+
+def _search_key(e: dict) -> str:
+    """The id an evidence entry's own transcript record holds: a queued message's source_uuid, else the entry's id."""
+    return _queued_parts(e.get("transcript_uuid"))[0] or str(e.get("transcript_uuid") or "")
+
+
 def _own_record(r, e: dict) -> bool:
     """Is transcript record `r` evidence entry `e`'s own, the developer's act, outside any subagent? E2: a prompt
-    record with its prompt id, origin human, holding the line. E1: the question tool's result for its tool_use_id
+    record with its prompt id, origin human, holding the line, or the message typed while the session worked that
+    its queued id names, with that exact text (_queued_human). E1: the question tool's result for its tool_use_id
     with that answer, from a call that offered its label when it names an option."""
+    uuid = str(e.get("transcript_uuid") or "")
+    source, delivery, digest = _queued_parts(uuid)
+    if source:
+        text = _queued_human(r, str(e.get("session") or ""))
+        a = r.get("attachment") if text is not None else {}
+        return e.get("channel") == "E2" and text is not None and a.get("source_uuid") == source \
+            and a.get("delivery_id") == delivery and hashlib.sha256(text.encode("utf-8")).hexdigest() == digest \
+            and (not e.get("excerpt") or _holds_line(text, e["excerpt"]))
     if not isinstance(r, dict) or r.get("type") != "user" or r.get("isSidechain"):
         return False
-    uuid = str(e.get("transcript_uuid") or "")
     if e.get("channel") == "E2":
         return r.get("promptId") == uuid and (r.get("origin") or {}).get("kind") == "human" and \
             (not e.get("excerpt") or _norm(e["excerpt"]) in _norm(_text_of(r.get("message"))))
@@ -4977,9 +5182,11 @@ def confirmed(e: dict, sid: str = "") -> bool:
         meta = _codex_meta(path, sid) or {}
         if not meta or meta.get("originator") == "codex_exec" or meta.get("source") == "exec":
             return False  # a `codex exec` run: nobody at the keyboard (HEADLESS_SURFACES), whatever its record says
-    search_id = _codex_prompt_parts(uuid)[0] if agent == "codex" else uuid
+    search_id = _codex_prompt_parts(uuid)[0] if agent == "codex" else _search_key(e)
     if not search_id:
         return False
+    if agent == "claude" and _queued_parts(uuid)[0]:
+        e = dict(e, session=sid)  # the attachment must be this session's own record
     try:
         for ln in _lines_back(path, json.dumps(search_id).encode()):
             try:
@@ -4988,7 +5195,8 @@ def confirmed(e: dict, sid: str = "") -> bool:
                 continue
             if _codex_holds(r, e, sid) if agent == "codex" else _own_record(r, e):
                 if e.get("channel") == "E2" and " " in str(e.get("covers") or ""):
-                    text = _codex_prompt(r, sid) if agent == "codex" else _text_of(r.get("message"))
+                    text = _codex_prompt(r, sid) if agent == "codex" else \
+                        (_queued_human(r, sid) or _text_of(r.get("message")))
                     sess = state.read(session_path(agent, sid)) or {}
                     run = load_run(agent, sid) or {}
                     if not _grant_text_matches(text or "", e, sess.get("project") or run.get("project") or ""):
@@ -5145,11 +5353,13 @@ def _word_on(d: dict, r: dict) -> bool:
         notes = res.get("annotations") if isinstance(res.get("annotations"), dict) else {}
         if any(isinstance(q, dict) and _speaks_of(d, q, answers, notes) for q in res["questions"]):
             return True
-    if r.get("isSidechain") or (r.get("origin") if isinstance(r.get("origin"), dict) else {}).get("kind") != "human":
-        return False
-    msg = r.get("message") if isinstance(r.get("message"), dict) else {}
+    typed = _queued_human(r)  # a message typed while the session worked is a word too
+    if typed is None:
+        if r.get("isSidechain") or (r.get("origin") if isinstance(r.get("origin"), dict) else {}).get("kind") != "human":
+            return False
+        typed = _text_of(r.get("message") if isinstance(r.get("message"), dict) else {})
     return any(mt and mt.group(1).upper() == d["id"].upper()
-               for mt in map(_APPROVE_LINE.match, _own_lines(_text_of(msg))))
+               for mt in map(_APPROVE_LINE.match, _own_lines(typed)))
 
 
 def _member_results(path, since: str):
@@ -5202,7 +5412,7 @@ def _said_later(path, e: dict, d: dict) -> bool:
     drops the void it cannot write while the session's lock is busy). A word on it (_word_on) after e's own record
     (_own_record) in the main transcript, or after that record's time in a crew member's. True too when e's record
     is not there or the transcript cannot be read: then nothing tells what came after it."""
-    key = json.dumps(str(e.get("transcript_uuid") or "")).encode()
+    key = json.dumps(_search_key(e)).encode()
     try:
         last = next(_lines_back(path, b""), b"")  # b"" when the file ends with a newline
         if last and (b'"type":"user"' in last or b'"type": "user"' in last):
@@ -5216,7 +5426,7 @@ def _said_later(path, e: dict, d: dict) -> bool:
                 if b"toolUseResult" in ln:  # a result after e's record that cannot be read may be the answer
                     return True
                 continue
-            if not isinstance(r, dict) or r.get("type") != "user":
+            if not isinstance(r, dict) or (r.get("type") != "user" and _queued_human(r) is None):
                 continue
             if key in ln and _own_record(r, e):
                 since = r.get("timestamp") if isinstance(r.get("timestamp"), str) else ""
@@ -5238,6 +5448,7 @@ def evidence(agent: str, sid: str, pick, now: float | None = None, run=None) -> 
     """The session's live, unused entries that `pick(entry)` accepts and the transcript confirms, oldest first. A
     void entry is never evidence."""
     now = now or time.time()
+    capture_typed(agent, sid, now)  # a line typed while the session worked counts before anyone decides
     sess = state.read(session_path(agent, sid)) or {}
     if headless(sess):
         return []
@@ -5717,6 +5928,7 @@ def _decision_evidence(agent: str, sid: str, run: dict, d: dict, answer: str, no
     def ours(e):
         return _norm(e.get("covers")) == _norm(d["id"]) and d.get("shown") is not None and e["ts"] >= d["shown"]
     if d.get("irreversible"):
+        capture_typed(agent, sid, now)
         sess = state.read(session_path(agent, sid)) or {}
         mine = [] if headless(sess) else [x for x in sess.get("human") or [] if _live(x, now, run) and ours(x)]
         e = mine[-1] if mine else {}
@@ -5760,8 +5972,11 @@ def evidence_check(rec: dict, path, line):
                                  f"transcript is gone, so no message of the developer backs it")
     e = {"agent": agent, "channel": ev["channel"], "transcript_uuid": uuid, "transcript": str(tp)}
     if agent == "codex":  # a typed line only (no question tool): re-read from its prompt, never from the detail
-        if ev["channel"] == "E2" and _codex_backs(tp, sid, uuid, str(rec.get("target") or ""),
-                                                   float(rec.get("ts") or 0), repo=ref.get("repo")):
+        # A prompt id that binds the whole text names one message of one turn: the rollout reader may record it
+        # up to GRANT_TTL after it was typed (capture_typed), so its record may come that much before this one
+        since = float(rec.get("ts") or 0) - (GRANT_TTL if _codex_prompt_parts(uuid)[1] else 0)
+        if ev["channel"] == "E2" and _codex_backs(tp, sid, uuid, str(rec.get("target") or ""), since,
+                                                   repo=ref.get("repo")):
             return None
         return (f"evidence {ev['channel']} {uuid or '-'} for {rec.get('target')}: no message of the developer in "
                 f"{core.tilde(tp)} backs it")
@@ -7806,6 +8021,8 @@ def note_midturn(agent: str, data: dict) -> list:
     since the last hook (midturn_requests, from the offset the session record keeps, read and moved under its lock so
     each is counted once) become the developer's latest request: `request_ts`, which is_latest_request reads, and a
     prompt of the turn in continuity. -> the messages found"""
+    if not data.get("agent_id"):
+        capture_typed(agent, data.get("session_id") or "")  # their grant lines too, from the session's own transcript
     if agent == "codex":
         return _note_codex_midturn(data)
     if data.get("agent_id") or agent != "claude":

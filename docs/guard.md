@@ -707,7 +707,7 @@ explicit prohibition (a decision you refused, an embargo, a transport the guard 
 configuration, and a caller that is not the authenticated current main session.
 
 In guided, and in auto when policy cannot authorize the command (another repository, for example), type the line the
-refusal offers on its own in the chat:
+refusal offers on a line of its own in the chat, as a new prompt or while the session works:
 
 ```text
 grant unknown cmd-<hash>
@@ -770,7 +770,7 @@ exact commands. A command that names one of them and that the guard cannot parse
 a push or a `pr create` the guard cannot parse in a project with an embargo or a note devkit cannot read. Everything
 else keeps the audit week.
 
-In either mode, type the grant line on its own in your prompt, for example:
+In either mode, type the grant line on a line of its own, in a new prompt or while the session works, for example:
 
 ```text
 grant embargo fix/token-leak
@@ -792,6 +792,15 @@ turn remains protected against reuse. Claude continues to identify prompts by it
 Decisions sent to another session use the same complete-message identity, including while waiting for transcript
 confirmation. Existing saved decision evidence remains readable, with its original provenance checks.
 Restart Codex sessions after updating so one installed version handles each session's approval evidence.
+
+A grant or `approve D<n>` line you type while the session works counts as one typed in a new prompt: the same
+default repository, one use, and 30 minutes from the moment you typed it. Claude Code runs no prompt hook for such a
+message and writes it to the session's own transcript instead; in Codex it is a message of the running turn in the
+thread's own rollout. Devkit reads it there before the guard decides, so you need not wait for the turn to end. Only
+your own message in the session's main transcript counts: never a crew member's transcript, another session's, a
+task notification, tool output, or the question widget, and never a message typed before the session started or more
+than 30 minutes ago. Each message counts once, even when the transcript is read again or rewritten. A plain `yes`
+typed while the session works approves nothing; type `approve D<n>` instead.
 
 ### Lesson rules
 
